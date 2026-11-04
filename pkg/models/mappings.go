@@ -215,6 +215,13 @@ type Mapping struct {
 	// after the last test) is the scope's, at the place its recording holds
 	// it (DeriveWindowMappings). Omitted when empty; a reader that predates it
 	// ignores the key.
+	//
+	// keploy mock (record and replay) keeps it plainer: record lists here
+	// every call made outside every test's window after the first test began,
+	// with its claim's key and no place, and a reader may move a test's call
+	// here. Replay serves each from the set's start, in a test's window or
+	// between tests, at most once, and requires none of them
+	// (ScopeTableReq.Worker).
 	Worker []MockEntry `json:"worker,omitempty" yaml:"worker,omitempty" bson:"worker,omitempty"`
 	// Source is the keploy command that wrote the file's test entries, when
 	// it is not keploy record: MappingSourceKeployTest. A writer that names
@@ -351,6 +358,23 @@ type MappedTestCase struct {
 	// given-api §3). Written and read only under the proven switch; empty in
 	// recordings made without it.
 	Given []GivenValue `json:"given,omitempty" yaml:"given,omitempty" bson:"given,omitempty"`
+	// Key is the key of the claim the test ran under in its recording: the
+	// test process's (POST /agent/instance). A reader who moves one of the
+	// test's calls to the set's worker: list gives the moved entry this key,
+	// so a replay serves it while that process holds the run (MockEntry.Key).
+	// Written and read only under the proven switch; empty in recordings
+	// made before keploy kept it, in those made without the switch, and for
+	// a test run under no claim.
+	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
+	// Seed is the seed the test's browser drew its random numbers from in
+	// its recording (models.ScopeWindow.Seed): each replay's begin is
+	// answered it, so the replay's pages draw what the recording's drew. It
+	// is the entry's, not derived from the test's name: an entry renamed
+	// keeps it, and a record of the test draws a new one. Written and read
+	// only under the proven switch; empty in recordings made before keploy
+	// kept it, in those made with seeding off, and for a test whose harness
+	// drives no browser.
+	Seed string `json:"seed,omitempty" yaml:"seed,omitempty" bson:"seed,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -372,6 +396,8 @@ type writtenTestFormat struct {
 	At                  time.Time    `json:"at,omitzero" yaml:"at,omitempty"`
 	Real                []string     `json:"real,omitempty" yaml:"real,omitempty"`
 	Given               []GivenValue `json:"given,omitempty" yaml:"given,omitempty"`
+	Key                 string       `json:"key,omitempty" yaml:"key,omitempty"`
+	Seed                string       `json:"seed,omitempty" yaml:"seed,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -386,11 +412,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Key: tc.Key, Seed: tc.Seed}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Key: tc.Key, Seed: tc.Seed})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -479,6 +505,75 @@ func recordedGivenJSON(data []byte) ([]GivenValue, error) {
 		return nil, fmt.Errorf(errRecordedGiven, err)
 	}
 	return g.Given, nil
+
+}
+
+// errRecordedKey is a test entry whose key: is not a string.
+const errRecordedKey = "a test's claim key (key) is not a string: %w"
+
+// recordedKeyYAML is a test entry's key: under the proven switch. One that
+// is not a string is an error, never a reason to read the entry without it:
+// an edit that moves the test's call to worker: would lose the key its
+// replay serves it under. With the switch off key: is not read.
+func recordedKeyYAML(node *yaml.Node) (string, error) {
+	if !provenswitch.On() || !nodeHasField(node, "key") {
+		return "", nil
+	}
+	var k struct {
+		Key string `yaml:"key"`
+	}
+	if err := node.Decode(&k); err != nil {
+		return "", fmt.Errorf(errRecordedKey, err)
+	}
+	return k.Key, nil
+}
+
+// recordedKeyJSON is recordedKeyYAML for a JSON entry.
+func recordedKeyJSON(data []byte) (string, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "key") {
+		return "", nil
+	}
+	var k struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(data, &k); err != nil {
+		return "", fmt.Errorf(errRecordedKey, err)
+	}
+	return k.Key, nil
+}
+
+// errRecordedSeed is a test entry whose seed: is not a string.
+const errRecordedSeed = "a test's browser seed (seed) is not a string: %w"
+
+// recordedSeedYAML is a test entry's seed: under the proven switch. One that
+// is not a string is an error, never a reason to read the entry without it:
+// its replay would draw other numbers than its recording. With the switch
+// off seed: is not read.
+func recordedSeedYAML(node *yaml.Node) (string, error) {
+	if !provenswitch.On() || !nodeHasField(node, "seed") {
+		return "", nil
+	}
+	var k struct {
+		Seed string `yaml:"seed"`
+	}
+	if err := node.Decode(&k); err != nil {
+		return "", fmt.Errorf(errRecordedSeed, err)
+	}
+	return k.Seed, nil
+}
+
+// recordedSeedJSON is recordedSeedYAML for a JSON entry.
+func recordedSeedJSON(data []byte) (string, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "seed") {
+		return "", nil
+	}
+	var k struct {
+		Seed string `json:"seed"`
+	}
+	if err := json.Unmarshal(data, &k); err != nil {
+		return "", fmt.Errorf(errRecordedSeed, err)
+	}
+	return k.Seed, nil
 }
 
 // recordedBeginJSON is recordedBeginYAML for a JSON entry.
@@ -526,10 +621,18 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	key, err := recordedKeyYAML(node)
+	if err != nil {
+		return err
+	}
+	seed, err := recordedSeedYAML(node)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given = at, rl, gv
+	tc.At, tc.Real, tc.Given, tc.Key, tc.Seed = at, rl, gv, key, seed
 	return nil
 }
 
@@ -617,10 +720,18 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	key, err := recordedKeyJSON(data)
+	if err != nil {
+		return err
+	}
+	seed, err := recordedSeedJSON(data)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given = at, rl, gv
+	tc.At, tc.Real, tc.Given, tc.Key, tc.Seed = at, rl, gv, key, seed
 	return nil
 }
 

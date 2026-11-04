@@ -125,33 +125,58 @@ func (h *heldScope) Spent(mk *models.Mock) bool {
 }
 
 // MockSpent implements integrations.StagingGenerations' spent read: the
-// manager's, and every recording h hides (Spent's, by name).
+// view's h reads in (readView), as the manager's is the view in force's, and
+// every recording h hides (Spent's, by name). Its reads drop what that view
+// spent, never what another view did.
 func (h *heldScope) MockSpent(name string) bool {
-	return h.hidesName(name) || h.MockManager.MockSpent(name)
+	if h.hidesName(name) {
+		return true
+	}
+	v := h.readView()
+	return v != nil && v.spentNow(name)
 }
 
 // The consume doors refuse what h hides, the call's decision asked first for
 // a background recording (refuses); any other consume is the held round's
-// (roundScope).
+// (roundScope), and one it refuses is settled (settled).
 
 func (h *heldScope) DeleteFilteredMock(mock models.Mock) bool {
-	return !h.refuses(&mock) && h.roundScope.DeleteFilteredMock(mock)
+	return !h.refuses(&mock) && h.settled(h.roundScope.DeleteFilteredMock(mock))
 }
 
 func (h *heldScope) DeleteUnFilteredMock(mock models.Mock) bool {
-	return !h.refuses(&mock) && h.roundScope.DeleteUnFilteredMock(mock)
+	return !h.refuses(&mock) && h.settled(h.roundScope.DeleteUnFilteredMock(mock))
 }
 
 func (h *heldScope) DeleteStartupMock(mock models.Mock) bool {
-	return !h.refuses(&mock) && h.roundScope.DeleteStartupMock(mock)
+	return !h.refuses(&mock) && h.settled(h.roundScope.DeleteStartupMock(mock))
 }
 
 func (h *heldScope) UpdateUnFilteredMock(old, new *models.Mock) bool {
-	return !h.refuses(old) && h.roundScope.UpdateUnFilteredMock(old, new)
+	return !h.refuses(old) && h.settled(h.roundScope.UpdateUnFilteredMock(old, new))
 }
 
 func (h *heldScope) MarkMockAsUsed(mock models.Mock) bool {
-	return !h.refuses(&mock) && h.roundScope.MarkMockAsUsed(mock)
+	return !h.refuses(&mock) && h.settled(h.roundScope.MarkMockAsUsed(mock))
+}
+
+// settled is ok, a consume door's answer, after h took a refusal into its
+// reads: once a consume the view in force settles is refused while h reads in
+// another view (readIn: a test's begin or end installed the view in force
+// after the call's read), h reads, walks and spends in the view in force
+// from then on (heldScope.readView). A parser
+// takes a refused consume for a recording another call took, and reads
+// again: read in the view the call was read in, the recording the view in
+// force refused was offered again, and refused again, without end (the
+// Generic parser's matcher spun on a test's own exchange once the test ended
+// under the call). Read in the view in force, the call reads what any call
+// made now reads: that recording is not offered, and the call is answered
+// by another or misses, as a call read after the begin or end is.
+func (h *heldScope) settled(ok bool) bool {
+	if !ok && h.elsewhere() {
+		h.g.readIn = nil
+	}
+	return ok
 }
 
 // OnConsume is a test seam: f, when not nil, runs on a consuming call's

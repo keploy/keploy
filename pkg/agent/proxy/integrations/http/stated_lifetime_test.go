@@ -124,4 +124,10 @@ type statedDb struct {
 
 func (d statedDb) StatesLifetimes(kind models.Kind) bool { return d.states && kind == models.HTTP }
 
+// AnsweredRedacting forwards the db's (integrations.AnsweredRedactingReader),
+// as the proxy's mock manager tells both.
+func (d statedDb) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
+	return integrations.AnsweredRedacting(d.MockMemDb, kind)
+}
+
 func ptrTo[T any](v T) *T { return &v }

@@ -30,6 +30,10 @@ set -uo pipefail
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# http_mocks_only: the recording is the app's calls to the counter, at an IP
+# address, so its Http mocks and nothing else.
+# shellcheck source=../../mock-kinds.sh
+source "$SRC/../../mock-kinds.sh" || exit 1
 APP=8097
 DEP=9097
 FAIL=0
@@ -139,8 +143,8 @@ DEP_PID=""
 own
 mapfile -t TICKS < <(tick_tests)
 [ "${#TICKS[@]}" -eq 8 ] || { echo "::error::recorded ${#TICKS[@]} GET /tick test cases, want 8"; exit 1; }
-RECORDED=$(grep -c '^kind: Http' keploy/test-set-0/mocks.yaml)
-[ "$RECORDED" -eq 8 ] || { echo "::error::recorded $RECORDED mocks of GET /next, want 8"; exit 1; }
+RECORDED=$(http_mocks_only keploy/test-set-0/mocks.yaml 8) ||
+    { echo "::error::want the 8 calls to GET /next recorded as 8 Http mocks and no other, got $RECORDED"; exit 1; }
 if [ "${STRIP_LIFETIMES:-}" = true ]; then
     yq -i 'del(.spec.metadata.lifetime)' keploy/test-set-0/mocks.yaml
 fi
@@ -160,15 +164,18 @@ run_test prune.log --remove-unused-mocks --debug
 echo "the pruning run:"; results | sed 's/^/  /'
 t6=$(basename "$T6" .yaml)
 [ "$(results | awk -F'\t' -v t="$t6" '$1 == t {print $2}')" = FAILED ] || fail "test 6 ($t6) did not fail in the pruning run: nothing was pruned for it"
-KEPT=$(grep -c '^kind: Http' keploy/test-set-0/mocks.yaml)
-echo "mocks after the prune: $KEPT of 8"
 case "$STATES" in
 0)
-    [ "$KEPT" -eq 8 ] || fail "the prune kept $KEPT of the 8 recordings of the reusable sequence, want all 8"
+    KEPT=$(http_mocks_only keploy/test-set-0/mocks.yaml 8) ||
+        fail "want all 8 recordings of the reusable sequence kept, and no other mock, got $KEPT"
     grep -qE '"keptAsDependency": ?1\b' prune.log || fail "the prune did not keep the failed test's recording as a member of its sequence"
     ;;
-*) [ "$KEPT" -eq 7 ] || fail "the prune kept $KEPT of the 8 per-test recordings, want 7: did it run?" ;;
+*)
+    KEPT=$(http_mocks_only keploy/test-set-0/mocks.yaml 7) ||
+        fail "want 7 of the 8 per-test recordings kept, and no other mock (did the prune run?), got $KEPT"
+    ;;
 esac
+echo "mocks after the prune: $KEPT"
 
 # 2. Test 6 back; every later test is answered with its own recording.
 cp t6.orig "$T6"

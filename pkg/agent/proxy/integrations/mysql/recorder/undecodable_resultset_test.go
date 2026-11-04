@@ -36,7 +36,7 @@ const undecodableStmtID = uint32(5)
 // columnPayload is a column definition's payload, without its header.
 func columnPayload(t *testing.T, col *mysql.ColumnDefinition41) []byte {
 	t.Helper()
-	b, err := rowscols.EncodeColumn(context.Background(), zap.NewNop(), col)
+	b, err := rowscols.EncodeColumn(context.Background(), zap.NewNop(), col, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

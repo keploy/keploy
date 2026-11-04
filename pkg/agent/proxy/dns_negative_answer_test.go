@@ -115,8 +115,9 @@ func assertNotReported(t *testing.T, p *Proxy, why string) {
 // A Kubernetes resolver walks its search list (ndots:5 by default), so a name
 // like appdb.ns.svc.cluster.local is first tried as
 // appdb.ns.svc.cluster.local.ns.svc.cluster.local. Those probes NXDOMAIN by
-// design, and the record side deliberately does not store non-Success rcodes,
-// so there is no mock for them and never can be.
+// design. A recording that asked one holds its NXDOMAIN; one that reaches the
+// forward has no mock because the probe was not asked while recording, or its
+// recording holds no NXDOMAIN answers.
 //
 // Reporting that absence as a mock miss fails the test case over a name that
 // legitimately does not exist, and tells the user to "re-record to capture DNS

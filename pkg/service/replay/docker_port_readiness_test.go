@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 )
 
 func TestDockerPublishedHostPort(t *testing.T) {
@@ -67,20 +68,23 @@ func TestWaitForAppReady_DockerPortGate_ReadyPort(t *testing.T) {
 // A docker-run app whose host port never listens must still return true (proceed
 // anyway, matching the historical fixed-delay behavior — the gate never blocks
 // forever and never weakens the run) after the bounded ceiling.
-func TestWaitForAppReady_DockerPortGate_DeadPortProceeds(t *testing.T) {
+func TestWaitForAppReady_DockerPortGate_DeadPortWaitsUntilTheAppExits(t *testing.T) {
 	// A port nothing is listening on, held so no other socket takes it.
 	_, port, _ := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 
 	cfg := &config.Config{Command: "docker run -p " + port + ":" + port + " img"}
 	cfg.Test.Delay = 0
-	cfg.Test.HealthPollTimeout = 1 * time.Second // tiny ceiling for the test
+	cfg.Test.HealthPollTimeout = 200 * time.Millisecond // no ceiling on the accept
 
+	// The app's exit cancels its run's context: only that ends the wait.
+	ctx, cancel := context.WithTimeout(pkg.EndsWithApp(context.Background()), 1500*time.Millisecond)
+	defer cancel()
 	start := time.Now()
-	if !waitForAppReady(context.Background(), zap.NewNop(), cfg, httpProbeTarget{}) {
-		t.Fatal("waitForAppReady should proceed (return true) after the ceiling on a dead port")
+	if waitForAppReady(ctx, zap.NewNop(), cfg, httpProbeTarget{}) {
+		t.Fatal("waitForAppReady fired at a port that never accepted")
 	}
-	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
-		t.Fatalf("should have waited ~the ceiling before proceeding, took only %v", elapsed)
+	if elapsed := time.Since(start); elapsed < 1400*time.Millisecond {
+		t.Fatalf("the wait ended after %v, before the app exited", elapsed)
 	}
 }
 

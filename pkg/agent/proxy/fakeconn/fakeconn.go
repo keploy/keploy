@@ -17,7 +17,10 @@ var ErrFakeConnNoWrite = errors.New("fakeconn: Write is not permitted; parsers m
 // ErrClosed is returned by Read/ReadChunk after Close, once the reader has
 // taken every chunk already on the channel, while the producer has not ended
 // the stream (closed its channel). A stream its producer ended reads io.EOF,
-// Close or not. io.EOF says only that: the producer ended the stream, not that
+// Close or not. The relay never ends a stream whose reader was closed before
+// its end (its tee leaves the channel open), so a reader the session closed
+// reads ErrClosed after what it was handed, however far behind its capture it
+// gets there. io.EOF says only that: the producer ended the stream, not that
 // every chunk the connection carried reached the channel. A producer that ends
 // a stream before the connection's end (it gave up on its consumer, or the
 // capture lost a chunk) says so itself, apart from the stream.
@@ -863,8 +866,8 @@ func (f *FakeConn) LastReadTime() time.Time {
 // LastWrittenTime returns the WrittenAt timestamp of the most recently
 // delivered Chunk, or the zero time if no Chunk has been delivered or
 // no chunk carried a non-zero WrittenAt. Parsers that need response-
-// side semantics (time the relay handed the byte off to the real peer)
-// should prefer this over LastReadTime for consistency with other V2
+// side semantics (time the relay began handing the bytes to the real
+// peer, Chunk.WrittenAt) should prefer this over LastReadTime for consistency with other V2
 // recorders that anchor ResTimestampMock to chunk.WrittenAt.
 func (f *FakeConn) LastWrittenTime() time.Time {
 	n := f.lastWrittenNano.Load()
@@ -901,8 +904,10 @@ func (f *FakeConn) Close() error {
 // session's abort, as its parser is retired; by the proxy's dispatcher once
 // the parser has returned; or by the relay at its teardown, once its tees'
 // drains have returned (a parser behind its capture may still be reading what
-// the channel holds then). The relay's tee selects on this while delivering:
-// a consumer that is merely slow must never cost a recorded chunk, so
+// the channel holds then). The relay's tee reads it as it ends the stream,
+// and leaves open a stream closed before its end, so its reader reads
+// ErrClosed there. It selects on it while delivering, too: a consumer that is
+// merely slow must never cost a recorded chunk, so
 // delivery blocks, and this is the only signal that says the consumer is
 // genuinely gone rather than behind. At the relay's teardown no tee selects
 // on it any more.

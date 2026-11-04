@@ -343,11 +343,14 @@ type SequenceView struct {
 	// window was open, at its place in the gap it was made in, and an idle
 	// answer wherever it was recorded), so its request's sequence is walked
 	// on Between over every reached recording of it, by placement, with no
-	// window: one sequence for the set wherever its calls land.
+	// window: one sequence across the test windows wherever its calls land
+	// in them.
 	Worker func(*models.Mock) bool
-	// Between is, with Worker, the stateful cursor the calls between tests
-	// advance (the last pool view's), which a worker-scope call in a test
-	// reads and advances too.
+	// Between is, with Worker, the worker scope's stateful cursor in the
+	// test windows: one sequence across the windows of the staging. The
+	// calls between tests never advance it (they walk the last pool view's
+	// cursor), so a window's answers never depend on how many calls landed
+	// between tests.
 	Between MockCursor
 }
 
@@ -478,6 +481,33 @@ type AnsweredFinder interface {
 	FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (AnsweredCall, bool)
 }
 
+// AnsweredRedactingReader is an optional MockMemDb extension: of the test set
+// staged now at least (a store may keep earlier sets' too), every per-test
+// recording of kind that answered a call and holds a pattern (Mock.Noise: the obfuscator redacted something in it), its
+// request and patterns kept, and whether the store kept every one (it keeps
+// them under a bound). An answered per-test recording is in no read after it
+// answers, while a call that repeats it carries again the secret it
+// redacted: a parser redacts a miss's report and its logs by these
+// recordings' places too, and by every place when the store did not keep
+// them all. For a miss's diagnosis and logs only: never served. A
+// MockMemDb wrapper forwards it; one that does not is read as a store that
+// did not keep them all (AnsweredRedacting).
+type AnsweredRedactingReader interface {
+	AnsweredRedacting(kind models.Kind) (mocks []*models.Mock, complete bool)
+}
+
+// AnsweredRedacting is db's AnsweredRedacting (AnsweredRedactingReader):
+// none, and not complete, for a store without it (nil included), whose
+// answered recordings cannot be known, so a miss and its logs are redacted
+// by every place. A wrapper that does not forward it hides the store's
+// list and so leaks nothing by the omission (fail closed by construction).
+func AnsweredRedacting(db MockMemDb, kind models.Kind) ([]*models.Mock, bool) {
+	if r, ok := db.(AnsweredRedactingReader); ok {
+		return r.AnsweredRedacting(kind)
+	}
+	return nil, false
+}
+
 // AnsweredCall is what AnsweredFinder found: the recording, and when it
 // answered at this replay.
 type AnsweredCall struct {
@@ -560,6 +590,9 @@ type CallRound struct {
 	// every is whether the read held every recording as its own because
 	// its store could not tell which are the call's (HoldingEvery).
 	every bool
+	// ahead is whether the read found the learn tracker had begun a test
+	// the store had not opened (WithTrackerAhead).
+	ahead bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -617,6 +650,20 @@ func (c CallRound) InWorkerView(shows bool) CallRound {
 	c.worker = c.worker || shows
 	return c
 }
+
+// WithTrackerAhead is c, of a read that found the learn tracker had begun a
+// test the store had not opened when ahead is true
+// (RoundSnapshot.TrackerAhead): the call is decided in the test the store
+// opens next, so a store held to it (RoundHolder) reads the view in force,
+// not the one the read was made in.
+func (c CallRound) WithTrackerAhead(ahead bool) CallRound {
+	c.ahead = c.ahead || ahead
+	return c
+}
+
+// TrackerAhead reports whether c's read found the learn tracker ahead of the
+// store (WithTrackerAhead).
+func (c CallRound) TrackerAhead() bool { return c.ahead }
 
 // ShowsWorker reports whether c's read found a test's view that showed the
 // worker scope (WithSequence, InWorkerView).

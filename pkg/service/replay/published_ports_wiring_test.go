@@ -112,7 +112,7 @@ func TestTheReadinessGateProbesWhereTheTestsGo(t *testing.T) {
 func TestTheResetReSendGateProbesWhereTheTestGoes(t *testing.T) {
 	app := newPublishedApp(t)
 	r := &Replayer{logger: zap.NewNop(), config: replayConfig(), instrumentation: app.instrumentation()}
-	r.waitForResetResendReady(context.Background(), app.httpTest(), "test-set-0")
+	r.waitForResetResendReady(context.Background(), app.httpTest(), "test-set-0", new(bool))
 	app.reachedSince(t, 0, "the re-send gate")
 }
 

@@ -152,6 +152,60 @@ type ScopeReq struct {
 	// A Go test sends neither; its instance's key is the path.
 	File    string `json:"file,omitempty"`
 	Project string `json:"project,omitempty"`
+	// Random says how the test's browser drew its random numbers
+	// (ScopeRandomSeeded or ScopeRandomOwn), from a harness that drives one
+	// (@keploy/playwright). Sent with /agent/scope/begin, it is what the
+	// harness means to do; sent with /agent/scope/end, what it did, which
+	// replaces the begin's. Optional: without it keploy knows nothing of the
+	// test's randomness.
+	Random string `json:"random,omitempty"`
+	// Seed, sent with /agent/scope/begin, is a seed the harness drew afresh
+	// for the test's browser (NormalizeScopeSeed). It asks keploy for the
+	// seed to draw from (ScopeBeginResp.Seed): a record keeps the begin's,
+	// and a replay answers the one the test's recording kept instead.
+	Seed string `json:"seed,omitempty"`
+}
+
+// How a test's browser drew its random numbers (ScopeReq.Random):
+// ScopeRandomSeeded from the seed keploy answered its begin with
+// (ScopeBeginResp.Seed), the same in its recording and every replay, so a
+// call that still varies is drawn where the seeding does not reach (a
+// server, a worker); ScopeRandomOwn from the browser's own, as its harness
+// was told not to seed them or keploy gave it no seed.
+const (
+	ScopeRandomSeeded = "seeded"
+	ScopeRandomOwn    = "own"
+)
+
+// maxScopeSeed bounds a seed's length: a seed is a number, which a harness
+// sends as hex, and a longer one is no seed keploy keeps.
+const maxScopeSeed = 64
+
+// NormalizeScopeSeed is a begin's seed in lower case when it is 8 to
+// maxScopeSeed hex digits, and "" for anything else: keploy keeps and
+// answers no seed it cannot write back as it was sent.
+func NormalizeScopeSeed(s string) string {
+	v := strings.ToLower(strings.TrimSpace(s))
+	if len(v) < 8 || len(v) > maxScopeSeed {
+		return ""
+	}
+	for _, c := range v {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
+	}
+	return v
+}
+
+// NormalizeScopeRandom is ScopeRandomSeeded or ScopeRandomOwn for a begin or
+// an end that says one of them, in any case, and "" for anything else: a
+// word keploy does not know says nothing of the test's randomness.
+func NormalizeScopeRandom(s string) string {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case ScopeRandomSeeded, ScopeRandomOwn:
+		return v
+	}
+	return ""
 }
 
 // The verdicts a harness reports in ScopeReq.Outcome, and the two the agent
@@ -206,6 +260,14 @@ type ScopeBeginResp struct {
 	Status string `json:"status"`
 	Action string `json:"action,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Seed is the seed the test's browser draws its random numbers from,
+	// answered to a begin that sent one (ScopeReq.Seed): in a record, the
+	// begin's own, or the one the test's first attempt in the record drew
+	// (a retry draws the same numbers); in a replay, the one its recording
+	// kept (MappedTestCase.Seed). "" when there is none: the test was
+	// recorded with seeding off or before keploy kept seeds, and its
+	// browser draws its own.
+	Seed string `json:"seed,omitempty"`
 }
 
 // ScopeActionSkip is the ScopeBeginResp.Action telling a harness to skip.
@@ -285,6 +347,14 @@ type ScopeWindow struct {
 	// fails, whatever the test's harness did with the refusal and whatever
 	// its runner exits. "" when keploy refused nothing.
 	BeginRefused string `json:"beginRefused,omitempty"`
+	// Random is how the test's browser drew its random numbers, as its end
+	// said, else its begin (ScopeReq.Random, normalized); "" when neither
+	// said.
+	Random string `json:"random,omitempty"`
+	// Seed is the seed keploy answered the test's begin with
+	// (ScopeBeginResp.Seed); "" when it answered none. A record writes it
+	// into the test's mapping (MappedTestCase.Seed).
+	Seed string `json:"seed,omitempty"`
 	// Evidence is, under the proven wire, what keploy saw that failed the
 	// test at its end in a replay; nil when nothing did.
 	Evidence *ScopeEvidence `json:"evidence,omitempty"`
@@ -343,6 +413,15 @@ type ScopeTableReq struct {
 	// bound with the recorded value of its variable, so the learn step and
 	// the replay pair the two. Absent when no test gave any.
 	Given map[string][]GivenValue `json:"given,omitempty"`
+	// Worker is, under the proven switch, each key's worker scope as keploy
+	// mock replay reads the set's mappings.yaml (Mapping.Worker): the names
+	// of the key's pool slice that worker: lists. Unlike the rest of the
+	// slice, which answers only while no test is open, they answer whether a
+	// test is open or not, after the open test's own, each at most one
+	// request in the staging, and no test is required to make them. A name
+	// no slice of its key holds is not served. Absent from an older CLI:
+	// worker: entries then answer between tests only, as the pool's.
+	Worker map[string][]string `json:"worker,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
@@ -356,6 +435,10 @@ type TestBeginsReq struct {
 	// a test runs on the real clock, not at its recorded begin (design v14
 	// §3.4, F3). Absent when no test lists any.
 	Real map[string][]string `json:"real,omitempty"`
+	// Seeds is, by test, the seed its recording kept for its browser's
+	// random numbers (MappedTestCase.Seed): a begin that asks for one is
+	// answered it (ScopeBeginResp.Seed). Absent when no test kept one.
+	Seeds map[string]string `json:"seeds,omitempty"`
 }
 
 type SetTable struct {
@@ -585,6 +668,13 @@ type TestRequest struct {
 	// kind it reads no request of, a body kept apart from the test case),
 	// "" when it could. A request keploy could not read has no parts.
 	Unread string `json:"unread,omitempty"`
+	// RecordedAt is when the test case's request reached the application
+	// in its recording, the instant keploy test's begin moves the app's
+	// clock to: where the test began in its recording, which the learn step
+	// reads its calls' windows from too (learn.Tracker.GiveRequest).
+	// Zero where the recording holds none, or from a keploy older than its
+	// agent: the windows then start at each call's previous call alone.
+	RecordedAt time.Time `json:"recordedAt,omitzero"`
 }
 
 // TestRequestPart is one part of a test case's request, as recorded and as

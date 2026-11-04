@@ -880,9 +880,11 @@ type AppClockRunSetter interface {
 // integrations.PoolMembership. owners is, of the same table, the key of the
 // test process whose tests list each mock ("" where no one key is known),
 // which bounds each process's teardown, the calls it makes after its own last
-// test.
+// test. tests is the table itself (test ID -> the mocks it lists), which
+// tells the run of a test's recording on no clock, and so the clock it
+// bounds the teardown of.
 type PoolNamesSetter interface {
-	SetPoolNames(names []string, owners map[string]string) error
+	SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error
 }
 
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
@@ -1041,7 +1043,9 @@ type AppConnEnd struct {
 // read. ok is false where it holds nothing for the connection: one whose end
 // came before the application released it (a shutdown(2), or the proxy's end
 // first), a record the kernel's LRU evicted, or hooks that make no such
-// record.
+// record. A client's end the proxy reads where its DestInfo is not a
+// ConnEndInfo records no fault: nothing tells the application's giving up
+// from its process's exit.
 type ConnEndInfo interface {
 	TakeAppConnEnd(app netip.AddrPort) (end AppConnEnd, ok bool)
 }

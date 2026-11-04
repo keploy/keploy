@@ -590,14 +590,15 @@ drain:
 // can explain.
 //
 // The capture numbers decide it where they order the two (the relay's
-// always do). A response's WrittenAt is stamped once the relay's write of
-// it to the application returns, and the application can act on the bytes
-// before that: the write wakes it, and the forwarder may get its CPU back
-// only after the application has sent its next request and the other
-// forwarder has read it. A comparison of the two stamps then puts that
-// request before the response that unblocked it, the split does not
-// happen, and the two commands land in one mock that replay cannot match
-// (go-redis's CLIENT SETINFO and PING, CI's mock-mismatch-streaming lane).
+// always do). The times decide only for a producer that does not number its
+// two directions apart, and they are right only where a response's stamp is
+// no later than the application could act on it, as the relay's WrittenAt
+// is (taken before its write). A stamp taken once the write returns can be
+// later than that: the write wakes the application, which can send its
+// next request before the forwarder gets its CPU back. A comparison of the
+// two stamps then puts that request before the response that unblocked it,
+// the split does not happen, and the two commands land in one mock that
+// replay cannot match (go-redis's CLIENT SETINFO and PING).
 //
 // It also splits off a pipelined request the relay read only after the
 // response had reached it, though the client sent the request before it
@@ -666,7 +667,8 @@ func order(x, y stamp) (first, known bool) {
 // first send once stop has closed. The supervisor.Session's ctx is observed
 // indirectly: when the ctx is cancelled the relay ends the FakeConn streams
 // and closes them, which surfaces here as EOF (ErrClosed when the session's
-// abort closes them while the relay still captures). A panic of the main
+// abort closed a stream before its end, however late the reader gets to
+// it: relay's tee.endStream). A panic of the main
 // loop aborts the session too, and closes stop, and nothing drains events
 // after it, so every send to out, the end-of-stream error's included,
 // selects on stop: a reader waiting on a read with nothing queued reads the

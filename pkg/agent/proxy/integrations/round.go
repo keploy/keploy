@@ -593,6 +593,20 @@ func (s RoundSnapshot) SameRecordedTestWindow(a, b time.Time) (same, known bool)
 	return i >= 0 && i == s.windows.IndexOf(b), true
 }
 
+// RecordedWindowIndex implements RecordedWindowIndex over the staging's
+// recorded test windows, as the store's own does (MockManager's): a learn
+// step that reads the round in one snapshot tells by it which gap between
+// two recorded tests (the app's start-up, before the first, is one) a
+// recording made outside every test lies in.
+func (s RoundSnapshot) RecordedWindowIndex(t time.Time) (index int, known bool) {
+	if s.windows.Len() == 0 {
+		return -1, false
+	}
+	return s.windows.CurrentIndex(t), true
+}
+
+var _ RecordedWindowIndex = RoundSnapshot{}
+
 // InPool is the store's PoolMembership (the replay's scope table) at the
 // snapshot.
 func (s RoundSnapshot) InPool(m *models.Mock) (pool, known bool) {

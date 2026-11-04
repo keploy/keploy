@@ -30,34 +30,49 @@ import (
 // It is never recorded: the field that holds it is unexported, so YAML, JSON,
 // gob and BSON skip it. A copy of a mock shares the cache with the original,
 // since both point at the same result set.
+//
+// The bytes of an answer depend on the framing of the connection it is sent
+// on (MetadataFraming), so the cache holds the framing its payload was
+// encoded for, and serves it only to a connection of that framing. A serve
+// on another framing encodes its own bytes, uncached: one replay's
+// connections share one framing.
 type EncodedPayload struct {
-	p atomic.Pointer[[]byte]
+	p atomic.Pointer[encodedPayload]
 }
 
-// Load returns the cached payload, or nil when none is cached. The slice is
-// shared by every serve of the answer: never write to it.
-func (c *EncodedPayload) Load() []byte {
-	if b := c.p.Load(); b != nil {
-		return *b
+// encodedPayload is a cached payload and the framing it was encoded for.
+type encodedPayload struct {
+	b       []byte
+	framing MetadataFraming
+}
+
+// Load returns the payload cached for framing, or nil when none is. The
+// slice is shared by every serve of the answer: never write to it.
+func (c *EncodedPayload) Load(framing MetadataFraming) []byte {
+	if e := c.p.Load(); e != nil && e.framing == framing {
+		return e.b
 	}
 	return nil
 }
 
-// Store caches b unless a payload is cached already, and returns the cached
-// payload: b, or the one another serve stored first. A nil b is not cached,
-// nor is a b larger than the whole budget (Store still returns it).
-func (c *EncodedPayload) Store(b []byte) []byte {
+// Store caches b, encoded for framing, unless a payload is cached already,
+// and returns the payload to serve: the one cached for framing (b, or the
+// one another serve stored first), else b. A nil b is not cached, nor is a b
+// larger than the whole budget (Store still returns it).
+func (c *EncodedPayload) Store(framing MetadataFraming, b []byte) []byte {
 	if b == nil {
 		return nil
 	}
-	if !c.p.CompareAndSwap(nil, &b) {
-		if cur := c.p.Load(); cur != nil {
-			return *cur
+	e := &encodedPayload{b: b, framing: framing}
+	if !c.p.CompareAndSwap(nil, e) {
+		if cur := c.p.Load(); cur != nil && cur.framing == framing {
+			return cur.b
 		}
-		// Evicted since the swap failed: serve this encode uncached.
+		// Evicted since the swap failed, or cached for another framing:
+		// serve this encode uncached.
 		return b
 	}
-	wireCache.admit(c, &b)
+	wireCache.admit(c, e)
 	return b
 }
 
@@ -107,15 +122,15 @@ type wireBudget struct {
 
 var wireCache = wireBudget{budget: WireCacheBudget}
 
-// admit counts the payload *b, which c has just cached, against the budget,
+// admit counts the payload e, which c has just cached, against the budget,
 // evicting the payloads cached longest ago until it fits. A payload the budget
 // cannot hold at all is taken out of c again and evicts nothing.
-func (w *wireBudget) admit(c *EncodedPayload, b *[]byte) {
-	cost := int64(cap(*b)) + WireEntryCost
+func (w *wireBudget) admit(c *EncodedPayload, e *encodedPayload) {
+	cost := int64(cap(e.b)) + WireEntryCost
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if cost > w.budget {
-		c.p.CompareAndSwap(b, nil)
+		c.p.CompareAndSwap(e, nil)
 		return
 	}
 	w.evictTo(w.budget - cost)

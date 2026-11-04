@@ -124,6 +124,30 @@ type Known interface {
 	Excused(leaf Leaf) (excused, typed bool)
 }
 
+// PairKnown is a Known that reads a leaf's recorded and live values
+// together. keploy.yml's value patterns need both: a pattern-guarded entry
+// excuses a leaf only when the recorded and the live value each match it, so
+// a live value outside the pattern is a change, and a leaf one side lacks is
+// excused only by an entry with no patterns. A Known without it is asked of
+// the recorded leaf, or of the live one when the recording lacks it.
+type PairKnown interface {
+	// ExcusedPair is Excused for the leaf at one path as the recording
+	// holds it (rec, when inRec) and the request does (live, when inLive).
+	ExcusedPair(rec, live Leaf, inRec, inLive bool) (excused, typed bool)
+}
+
+// ExcusedLeaf is what known excuses of the leaf rec and live hold at one
+// path: by both values when known reads them together (PairKnown).
+func ExcusedLeaf(known Known, rec, live Leaf, inRec, inLive bool) (bool, bool) {
+	if pk, ok := known.(PairKnown); ok {
+		return pk.ExcusedPair(rec, live, inRec, inLive)
+	}
+	if !inRec {
+		return known.Excused(live)
+	}
+	return known.Excused(rec)
+}
+
 // None excuses nothing.
 var None Known = none{}
 
@@ -237,11 +261,7 @@ const (
 func leafChange(p string, live, rec Shape, known Known) (c leafDiff, l, r Leaf) {
 	r, inRec := rec.Leaves[p]
 	l, inLive := live.Leaves[p]
-	ref := r
-	if !inRec {
-		ref = l
-	}
-	excused, typed := known.Excused(ref)
+	excused, typed := ExcusedLeaf(known, r, l, inRec, inLive)
 	switch {
 	case !inRec || !inLive:
 		if excused && !typed {

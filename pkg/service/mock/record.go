@@ -492,9 +492,13 @@ func (m *mockService) Record(ctx context.Context) error {
 	// the agent died) promotes nothing, and "the recording is saved" would
 	// not be true of it.
 	sayUnconfirmed := func() {
-		if unconfirmed {
+		switch unconfirmed {
+		case tailStreamClosed:
 			m.logger.Warn(composeTailUnconfirmed, zap.String("mock-set", name), zap.Int("mocks", mockCount),
 				zap.String("next_step", composeTailUnconfirmedNext))
+		case tailQuiet:
+			m.logger.Warn(quietTailUnconfirmed, zap.String("mock-set", name), zap.Int("mocks", mockCount),
+				zap.Duration("quiet_for", mockDrainQuiet), zap.String("next_step", quietTailUnconfirmedNext))
 		}
 	}
 	// 8a's count, read while the recording's stream is still open: an agent
@@ -529,7 +533,15 @@ func (m *mockService) Record(ctx context.Context) error {
 			streams = append(streams, roundStream{kind: models.TestCaseStream, done: capture.done})
 		}
 		strict := agentHolds && startedAgent(m.instrumentation)
-		lost = m.endRound(round, func() bool { return strict }, streams, recordDrainWords)
+		var refused error
+		lost, refused = m.endRound(round, func() bool { return strict }, streams, recordDrainWords)
+		if refused != nil {
+			// The agent answered, and did not take the request: its streams
+			// are ended here, as before markers. A mock still on its way is
+			// lost, and the recording is still saved: a loss at record time
+			// does not fail the recording, the replay of it judges it.
+			m.logger.Warn(endRefused, zap.Error(refused), zap.String("next_step", recordDrainWords.endedHere))
+		}
 	}
 	stopCapture()
 	// 8''. The capture has stopped: its consumers write what the agent handed
@@ -895,12 +907,20 @@ func (m *mockService) Record(ctx context.Context) error {
 				stampBegins(byCase, windows)
 				stampReal(byCase, windows)
 				stampGiven(byCase, windows)
+				stampSeeds(byCase, windows)
+				stampKeys(byCase, windows, m.claims)
 			}
 			if len(starts) > 0 {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
 				m.upsertBoots(persistCtx, name, plan.boots)
 			} else {
-				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, withoutRetries(recorded, retries), m.claims), suites)
+				startup := startupMocks(windows, withoutRetries(recorded, retries), m.claims)
+				var worker []models.MockEntry
+				if provenswitch.On() {
+					startup, worker = setScopeMocks(windows, withoutRetries(recorded, retries), m.claims)
+				}
+				m.upsertCases(persistCtx, name, byCase, startup, suites)
+				m.upsertWorker(persistCtx, name, worker)
 			}
 		}
 	}
@@ -1126,6 +1146,23 @@ func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[s
 		return
 	}
 	m.logger.Info("wrote per-flow test cases", zap.Int("flows", len(byCase)), zap.String("mock-set", name))
+}
+
+// upsertWorker writes the set's worker scope (mappings.yaml worker:): the
+// calls the app made outside every test's window once the first test had
+// begun (setScopeMocks). Without one nothing is written.
+func (m *mockService) upsertWorker(ctx context.Context, name string, worker []models.MockEntry) {
+	if len(worker) == 0 {
+		return
+	}
+	mapper, ok := m.mappingDB.(WorkerMapper)
+	if !ok {
+		m.logger.Warn("the mapping store cannot list the calls made between or after the tests (worker:), so mappings.yaml lists them nowhere; replay still serves them to any test, and never requires them", zap.String("mock-set", name))
+		return
+	}
+	if err := mapper.UpsertWorker(ctx, name, worker); err != nil {
+		m.logger.Warn("failed to list the calls made between or after the tests in mappings.yaml (worker:); replay still serves them to any test, and never requires them", zap.String("mock-set", name), zap.Error(err))
+	}
 }
 
 func (m *mockService) upsertBoots(ctx context.Context, name string, boots []models.BootSpec) {
@@ -1369,6 +1406,47 @@ func stampGiven(byCase map[string]models.MappedTestCase, windows []models.ScopeW
 	}
 }
 
+// stampSeeds writes into each test's mapping the seed its browser drew its
+// random numbers from in this recording (models.ScopeWindow.Seed): each
+// replay's begin is answered it. Every attempt of a test in one record draws
+// from one seed (beginSeed); of a name with more than one window the
+// earliest's with a seed is kept, as its begin is (stampBegins).
+func stampSeeds(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	first := map[string]time.Time{}
+	for _, w := range windows {
+		if w.Seed == "" {
+			continue
+		}
+		if at, ok := first[w.Name]; ok && !w.Start.Before(at) {
+			continue
+		}
+		first[w.Name] = w.Start
+		tc := byCase[w.Name]
+		tc.Seed = w.Seed
+		byCase[w.Name] = tc
+	}
+}
+
+// stampKeys writes into each test's mapping the key of the claim it began
+// under: its test process's. A reader who moves one of the test's calls to
+// worker: (a call that is the app's own work, a token's first use) gives the
+// moved entry this key, so its replay serves it while that process holds
+// the run; without it keploy could not name the key in a set whose test
+// processes have several. A test begun under no claim gets none.
+func stampKeys(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow, claims []models.ScopeWindow) {
+	for _, w := range windows {
+		key := claimKeyAt(claims, w.Start)
+		if w.Start.IsZero() || key == "" || key == models.PoolKeyNone {
+			continue
+		}
+		tc := byCase[w.Name]
+		if tc.Key == "" {
+			tc.Key = key
+		}
+		byCase[w.Name] = tc
+	}
+}
+
 func flowOf(windows []models.ScopeWindow, test string) string {
 	flow := test
 	for _, w := range windows {
@@ -1377,6 +1455,67 @@ func flowOf(windows []models.ScopeWindow, test string) string {
 		}
 	}
 	return flow
+}
+
+// setScopeMocks is startupMocks under the proven switch, split as the set
+// scope of mappings.yaml lists it: keploy decides no call's owner, so a
+// call is a test's only when a test's window holds it, and every other one
+// is the set's. startup: is what a test process did before its own first
+// test began, and the protocol-phase and app-start calls; worker: is every
+// other call outside every window, made between or after its tests, in
+// recorded order. Each keeps the key of the claim it was made under, and a
+// call is split by the first window of that key (firstWindowByKey): a run
+// of several test binaries starts each one's start-up afresh, so a later
+// binary's init or TestMain call, made after an earlier binary's tests, is
+// still its start-up. A call made under no claim keeps the run's first
+// window, and so does a set recorded without claims. A key no test began
+// under never reached a test: all its calls are startup:'s. A replay serves
+// both to any test and requires neither; a reader who finds one of a test's
+// own calls is the app's moves it from the test's list to worker:
+// (models.Mapping). Without a window every call is startup:'s, as
+// startupMocks has it.
+func setScopeMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) (startup, worker []models.MockEntry) {
+	first, byKey := firstWindowByKey(windows, claims)
+	for _, mk := range mocks {
+		if !mk.boot && !mk.protocol && containing(windows, mk.ts) != "" {
+			continue
+		}
+		key := claimKeyAt(claims, mk.ts)
+		e := models.MockEntry{Name: mk.name, Kind: mk.kind, Key: key}
+		start := first
+		if key != "" {
+			start = byKey[key] // zero: no test began under key
+		}
+		if mk.boot || mk.protocol || start.IsZero() || mk.ts.Before(start) {
+			startup = append(startup, e)
+			continue
+		}
+		worker = append(worker, e)
+	}
+	return startup, worker
+}
+
+// firstWindowByKey is when the run's first test began (first), and when the
+// first test begun under each claim key did (byKey): a window's key is the
+// claim made at or before it began, as stampKeys gives it.
+func firstWindowByKey(windows, claims []models.ScopeWindow) (first time.Time, byKey map[string]time.Time) {
+	byKey = make(map[string]time.Time)
+	for _, w := range windows {
+		if w.Start.IsZero() {
+			continue
+		}
+		if first.IsZero() || w.Start.Before(first) {
+			first = w.Start
+		}
+		key := claimKeyAt(claims, w.Start)
+		if key == "" {
+			continue
+		}
+		if at, ok := byKey[key]; !ok || w.Start.Before(at) {
+			byKey[key] = w.Start
+		}
+	}
+	return first, byKey
 }
 
 func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) []models.MockEntry {
@@ -1417,7 +1556,7 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 // reads the streams to the agent's markers (endRound), so that mock is read;
 // with any other agent, a stream ended once this returns loses it unseen
 // (models.BacklogClear), which the quiet before the drain asks has almost
-// always let through.
+// always let through, and the drain is unconfirmed (tailQuiet).
 // It is bounded by progress, not by a deadline: an agent still handing over a
 // backlog is waited for however long that takes, and so is one the user
 // interrupted (Ctrl+C stops the recording, not the handing over of what was
@@ -1434,10 +1573,17 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 // the user ends so did not get what the agent still held: it is lost (said
 // with words.gaveUp).
 //
-// unconfirmed is true when it ended because an agent that does not hold its
-// stream for the drain (docker compose stops it with the project) closed it:
-// nothing then says the caller has all it captured, nor that it does not.
-func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64, words drainWords, round *roundEnd) (lost, unconfirmed bool) {
+// unconfirmed says why a drain that lost nothing still cannot say the caller
+// has every mock the agent captured before the run ended (tailConfirmed when
+// it can): an agent that does not hold its stream for the drain (docker
+// compose stops it with the project) closed it (tailStreamClosed), or the
+// drain ended on the stream's quiet with no word from the agent that ends it
+// (tailQuiet): an agent that cannot say what it still holds, or that said it
+// holds nothing more but cannot end its stream after what it already sent
+// (roundEnd.endsByMarkers). Quiet is then all the drain had to go by, and a
+// mock the agent was slower than that to hand over is not in the recording:
+// the caller says so once it has saved it, never in silence.
+func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64, words drainWords, round *roundEnd) (lost bool, unconfirmed unconfirmedTail) {
 	quiet := time.NewTimer(mockDrainQuiet)
 	defer quiet.Stop()
 	notice := utils.NewStopNowNotice(mockDrainNotice)
@@ -1464,17 +1610,17 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				// stream as it gives the drain up: the user's stop.
 				select {
 				case <-utils.StopNow():
-					return m.stoppedNow(words), false
+					return m.stoppedNow(words), tailConfirmed
 				default:
-					return m.agentEndedDrain(&looks, arrived() == lookedAt), false
+					return m.agentEndedDrain(&looks, arrived() == lookedAt), tailConfirmed
 				}
 			}
 			// The agent gave no word that it had handed over all it had:
 			// its stream just closed. What this caller saves cannot be
 			// confirmed whole: the caller says so if it saves it.
-			return false, true
+			return false, tailStreamClosed
 		case <-utils.StopNow():
-			return m.stoppedNow(words), false
+			return m.stoppedNow(words), tailConfirmed
 		case <-notices.C:
 			msg := words.saving
 			if notice.Next() {
@@ -1507,10 +1653,37 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				quiet.Reset(mockDrainQuiet)
 				continue
 			}
-			return gaveUp, false
+			if gaveUp {
+				return true, tailConfirmed
+			}
+			// The agent said it holds nothing more and ends its streams on
+			// request: the caller reads them to its markers (endRound), every
+			// mock it put on them read. Any other end came on the stream's
+			// quiet alone.
+			if !round.endsByMarkers() {
+				return false, tailQuiet
+			}
+			return false, tailConfirmed
 		}
 	}
 }
+
+// unconfirmedTail is why a drain that lost nothing cannot confirm its caller
+// has every mock the agent captured before the run ended
+// (drainTrailingMocks).
+type unconfirmedTail int
+
+const (
+	// tailConfirmed: nothing says a mock is missing, or the drain was lost
+	// (and its caller saves nothing).
+	tailConfirmed unconfirmedTail = iota
+	// tailStreamClosed: an agent that does not hold its stream for the drain
+	// (docker compose stops it with the project) closed it.
+	tailStreamClosed
+	// tailQuiet: the drain ended on the stream's quiet, with no word from
+	// the agent that ends it.
+	tailQuiet
+)
 
 // drainWords is how drainTrailingMocks speaks to its caller's user: of what
 // it is still doing, and of what ending it at a second interrupt costs.
@@ -1576,6 +1749,41 @@ const (
 	composeTailUnconfirmed     = "the keploy agent closed its mock stream as docker compose stopped it with the project, without saying it had handed over every mock it captured: keploy cannot confirm this recording holds them all"
 	composeTailUnconfirmedNext = "the recording is saved; replay the set to check it: under --on-miss fail (the default) a call it is missing fails the replay. Or record the test command natively (keploy mock record -c \"<test command>\"), where keploy confirms it"
 )
+
+// quietTailUnconfirmed, with its next step, is said at WARN once keploy mock
+// record has saved a recording whose drain ended on the stream's quiet
+// (tailQuiet): the agent could not say what it still held, or could not end
+// its stream after what it had sent, so a mock it handed over later than the
+// quiet lasted is not in the recording, and nothing says whether there was
+// one.
+const (
+	quietTailUnconfirmed     = "the keploy agent could not confirm it had handed over every mock it captured before the run ended (it cannot say what it still holds, or cannot end its mock stream after what it sent), so keploy stopped reading the stream once it had gone quiet: keploy cannot confirm this recording holds them all"
+	quietTailUnconfirmedNext = "the recording is saved; replay the set to check it: under --on-miss fail (the default) a call it is missing fails the replay. Or run a keploy agent of this keploy's version, which says when it has handed over every mock it captured"
+)
+
+// quietRequestsUnconfirmed, with its next step, is said at ERROR when keploy
+// mock replay's request drain ended on the stream's quiet (tailQuiet): the
+// agent could not say what it still held, or could not end its request
+// stream after what it had sent, so a request it handed over later than the
+// quiet lasted is not in what the run compares, and would read as one the
+// app never made. Replay is the judge: such a run is not judged, and fails
+// as keploy's (requestsUnconfirmed).
+const (
+	quietRequestsUnconfirmed     = "replay failed: the keploy agent could not confirm it had handed over every request it captured before the run ended (it cannot say what it still holds, or cannot end its request stream after what it sent), so keploy stopped reading the stream once it had gone quiet: this run is not judged, since a request it handed over later would read as one the app never made"
+	quietRequestsUnconfirmedNext = "run a keploy agent of this keploy's version, which says when it has handed over every request it captured, then replay again"
+)
+
+// endRefused is said when the agent answered the request to end a round's
+// streams but did not take it (endRound's refused): the streams are ended
+// here, as before markers, and a frame still on its way is lost. keploy mock
+// record says it at WARN and saves the recording; keploy mock replay fails
+// the run as keploy's (replayEndRefused).
+const endRefused = "the keploy agent did not take the request to end its streams; ending them here, and what was still on its way is lost"
+
+// requestsUnconfirmed is why such a run is short of the requests the agent
+// captured (Replay's requestsShort): it names the agent's missing word and
+// the quiet keploy went by instead.
+var requestsUnconfirmed = "keploy could not confirm it read every request the app served: its agent gave no word that it had handed them all over, and keploy stopped reading after " + mockDrainQuiet.String() + " of quiet"
 
 // replayDrainWords are keploy mock replay's: it collects the requests the
 // agent captured, for the run's report. A run short of them is not judged
@@ -1685,8 +1893,8 @@ type backlogReader interface {
 // the stream has been quiet for mockDrainQuiet, so the drain waits at least
 // that times this on a backlog that does not move, well past the agent's own
 // hang bound (a parser that holds work and makes no progress is retired,
-// which is progress here).
-const mockDrainStallLooks = 180
+// which is progress here). A var only so a row can shorten it.
+var mockDrainStallLooks = 180
 
 // holdForBacklog decides, for the trailing drain once the stream has gone
 // quiet, whether it goes on waiting for what the agent still holds from

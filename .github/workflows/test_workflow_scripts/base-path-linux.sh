@@ -42,7 +42,11 @@
 #      --must-pass: the first test's pass is kept, no test fails, none is
 #      deleted, nothing is logged as an ERROR, exit 0. Every test after the
 #      stop was started, failed at once and reported FAILED, and --must-pass
-#      deleted the whole test set.
+#      deleted the whole test set;
+#   9. the run stopped by SIGINT, SIGTERM or SIGHUP as its FIRST test waits
+#      for an answer, so that no test has a verdict: the report is
+#      USER_ABORT with none passed or failed, the run says it tested nothing,
+#      and it exits 130, 143 or 129. It exited 0, as a run that passed does.
 #
 # It uses ports 18911 and 18912 on 127.0.0.1 and 127.0.0.2, and refuses to
 # start while something else listens on one.
@@ -84,13 +88,14 @@ socketserver.ThreadingTCPServer.allow_reuse_address = True
 with socketserver.ThreadingTCPServer(("127.0.0.1", PORT), H) as s: s.serve_forever()
 PY
 
-# The app. argv: BIND PORT DEP_PORT [bug|hold]. With "bug" an order costs one
-# more than its items, the regression leg 3 replays against. With "hold" it
-# takes the request for order 1, says so in the file app.holding, and never
-# answers it, for leg 8. It answers only a request that asks for it by its own
-# address, as an app behind a front that routes by name is only reached under
-# its name; /echo/ answers with the request target as it came over the wire;
-# /events streams three lines.
+# The app. argv: BIND PORT DEP_PORT [bug|hold|hold-first]. With "bug" an order
+# costs one more than its items, the regression leg 3 replays against. With
+# "hold" it takes the request for order 1, says so in the file app.holding,
+# and never answers it, for leg 8. With "hold-first" it does the same with the
+# health check, the first test, for leg 9. It answers only a request that
+# asks for it by its own address, as an app behind a front that routes by name
+# is only reached under its name; /echo/ answers with the request target as it
+# came over the wire; /events streams three lines.
 cat > app.py <<'PY'
 import http.server, json, socketserver, sys, time, urllib.request
 BIND, PORT, DEP = sys.argv[1], int(sys.argv[2]), "http://127.0.0.1:%s" % sys.argv[3]
@@ -120,6 +125,7 @@ class H(http.server.BaseHTTPRequestHandler):
         while True: time.sleep(60)
     def do_GET(self):
         if self.misdirected(): return
+        if self.path == "/health" and MODE == "hold-first": return self.hold()
         if self.path == "/health": return self.send(200, {"ok": True})
         if self.path == "/orders/1" and MODE == "hold": return self.hold()
         if self.path == "/orders/1": return self.send(200, {"id": 1, "item": "widget", "price": price("widget")})
@@ -190,8 +196,8 @@ start_dep() { # start_dep PORT
   serve dep.log 127.0.0.1 "$1" python3 dep.py "$1"
 }
 
-# up BIND PORT DEP_PORT [bug|hold]: the dependency, and the app in front of it,
-# as a user runs them before pointing keploy at the app.
+# up BIND PORT DEP_PORT [bug|hold|hold-first]: the dependency, and the app in
+# front of it, as a user runs them before pointing keploy at the app.
 up() {
   start_dep "$3" || return 1
   serve app.log "$1" "$2" python3 app.py "$@"
@@ -382,6 +388,52 @@ if [ "$FAIL" -ne "$BEFORE" ]; then
 else
   echo "ok: stopped"
 fi
+
+echo "== 9. the run is stopped as its first test waits for its answer =="
+# The tests run in the order they were recorded, so the health check is the
+# first, and the app holds it: no test has a verdict when the signal comes.
+# The exit code alone would not tell a stop keploy handled from a death by the
+# signal, which timeout hands on as 128+N too; the report and the warning do.
+up 127.0.0.1 "$APP_PORT" "$DEP_PORT" hold-first || exit 1
+for stop in INT:130 TERM:143 HUP:129; do
+  sig=${stop%%:*}
+  want=${stop##*:}
+  name=first-$sig
+  # The run before this one (leg 8's, at first) wrote test-run-$RUN.
+  RUN=$((RUN + 1))
+  rm -f app.holding
+  timeout -k 30 120 "$REPLAY_BIN" test --base-path "http://127.0.0.1:$APP_PORT" --test-sets test-set-0 \
+    --api-timeout 100 --generateGithubActions=false --disable-tele > "$name.log" 2>&1 </dev/null &
+  KEPLOY=$!
+  # Until the app holds the first test, or keploy has ended without asking
+  # for it; timeout ends keploy if neither comes.
+  until [ -e app.holding ] || ! kill -0 "$KEPLOY" 2>/dev/null; do
+    sleep 0.2
+  done
+  BEFORE=$FAIL
+  if [ -e app.holding ]; then
+    # To keploy itself, as in leg 8.
+    pkill -"$sig" -P "$KEPLOY" || fail "$name: keploy had ended before its SIG$sig"
+  else
+    fail "$name: the app was never asked for the first test"
+  fi
+  wait "$KEPLOY"
+  rc=$?
+  sed -i 's/\x1b\[[0-9;]*m//g' "$name.log"
+  [ "$rc" -eq "$want" ] || fail "$name: exit code $rc, want $want: the run was stopped before any test got a verdict"
+  got=$(report_of "$RUN" 2>/dev/null)
+  [ "$got" = "USER_ABORT 0 0" ] || fail "$name: the report says '$got' (status, passed, failed), want 'USER_ABORT 0 0'"
+  said "$name" 1 'the run was stopped before any test got a verdict, so it tested nothing'
+  grep -q 'Now executing streaming tests' "$name.log" && fail "$name: the run went on to its streamed test"
+  grep -q 'WARNING: DATA RACE' "$name.log" && fail "$name: data race"
+  grep -q 'ERROR' "$name.log" && fail "$name: a stop logged an ERROR: $(grep -m1 'ERROR' "$name.log")"
+  if [ "$FAIL" -ne "$BEFORE" ]; then
+    tail -40 "$name.log"
+  else
+    echo "ok: $name, exit $rc"
+  fi
+done
+down
 
 if [ "$FAIL" -ne 0 ]; then
   echo "BASE PATH E2E: FAILED; its output is kept in $WORK"

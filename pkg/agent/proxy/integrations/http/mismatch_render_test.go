@@ -1,6 +1,7 @@
 package http
 
 import (
+	"mime/multipart"
 	"strings"
 	"testing"
 
@@ -87,7 +88,7 @@ func TestRedactBody_JSON(t *testing.T) {
 	  "items": ["` + jwtSecret + `", "ok-value"],
 	  "trace_id": "` + benignUUID + `"
 	}`
-	out := redactBody(body, "application/json", nc)
+	out := redactBody(body, "application/json", redactedPlaces{values: nc})
 
 	mustNotContain(t, out, "hunter2", "keyword key (password)")
 	mustNotContain(t, out, "sess-deadbeef", "noise-value on non-keyword key (session)")
@@ -102,7 +103,7 @@ func TestRedactBody_JSON(t *testing.T) {
 func TestRedactBody_FormURLEncoded(t *testing.T) {
 	nc := util.NewNoiseChecker(nil)
 	body := "api_key=supersecretvalue123&token=" + ghToken + "&order=42"
-	out := redactBody(body, "application/x-www-form-urlencoded", nc)
+	out := redactBody(body, "application/x-www-form-urlencoded", redactedPlaces{values: nc})
 	mustNotContain(t, out, "supersecretvalue123", "form keyword key (api_key)")
 	mustNotContain(t, out, ghToken, "form value-shape backstop (token)")
 	mustContain(t, out, "order=42", "benign form param retained")
@@ -114,14 +115,14 @@ func TestRedactBody_OpaqueXML(t *testing.T) {
 	// embedded credential while leaving the surrounding structure readable.
 	body := `<soap:Header><wsse:Password>plaintextpw</wsse:Password>` +
 		`<Authorization>Bearer ` + jwtSecret + `</Authorization></soap:Header>`
-	out := redactBody(body, "text/xml", nc)
+	out := redactBody(body, "text/xml", redactedPlaces{values: nc})
 	mustNotContain(t, out, jwtSecret, "opaque-body bearer/JWT scrub")
 	mustContain(t, out, "<soap:Header>", "surrounding XML structure retained")
 }
 
 func TestRedactQuery(t *testing.T) {
 	nc := util.NewNoiseChecker(nil)
-	out := redactQuery("access_token="+jwtSecret+"&trace="+benignUUID+"&q=hello", nc)
+	out := redactQuery("access_token="+jwtSecret+"&trace="+benignUUID+"&q=hello", nc, func(string) bool { return false })
 	mustNotContain(t, out, jwtSecret, "query keyword key + value-shape")
 	mustContain(t, out, benignUUID, "benign query param retained")
 	mustContain(t, out, "q=hello", "benign query param retained")
@@ -136,7 +137,7 @@ func TestRenderRequestPreview_RedactsEverywhere(t *testing.T) {
 		"X-Request-Id":  benignUUID, // benign, must remain
 	}
 	body := `{"password":"hunter2","trace_id":"` + benignUUID + `"}`
-	out := renderRequestPreview("POST", "/pay", "api_key="+ghToken+"&id="+benignUUID, header, body, nil)
+	out := renderRequestPreview("POST", "/pay", "api_key="+ghToken+"&id="+benignUUID, header, body, redactedPlaces{})
 
 	mustNotContain(t, out, jwtSecret, "header secret (keyword + non-keyword key)")
 	mustNotContain(t, out, "hunter2", "body keyword key")
@@ -152,7 +153,7 @@ func TestRedactFieldDiffs(t *testing.T) {
 		{Path: "body.assertion", Expected: jwtSecret, Actual: "x"},                   // value-shape backstop
 		{Path: "body.qty", Expected: "2", Actual: "5"},                               // benign -> must remain
 	}
-	redactFieldDiffs(diffs, nc)
+	redactFieldDiffs(diffs, redactedPlacesOf(nil, nc), "")
 	if diffs[0].Expected != valueRedacted || diffs[0].Actual != valueRedacted {
 		t.Errorf("keyword path not redacted: %+v", diffs[0])
 	}
@@ -164,5 +165,63 @@ func TestRedactFieldDiffs(t *testing.T) {
 	}
 	if diffs[3].Expected != "2" || diffs[3].Actual != "5" {
 		t.Errorf("benign qty diff should remain visible: %+v", diffs[3])
+	}
+}
+
+// A multipart body that does not read as one is redacted whole only where
+// the recording redacted a field of it: else it is shown as an opaque body.
+func TestRedactBody_MultipartThatDoesNotRead(t *testing.T) {
+	const ct = "multipart/form-data; boundary=b"
+	body := "--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nplain words"
+	if out := redactBody(body, ct, redactedPlaces{fields: map[string]bool{"assertion": true}}); out != valueRedacted {
+		t.Errorf("at a recording that redacted a field: %q, want it redacted whole", out)
+	}
+	if out := redactBody(body, ct, redactedPlaces{}); out != body {
+		t.Errorf("at a recording that redacted none: %q, want the body as sent", out)
+	}
+	// A whole body whose quoted-printable part does not decode.
+	badPart := "--b\r\nContent-Disposition: form-data; name=\"note\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nplain \x01 words\r\n--b--\r\n"
+	if out := redactBody(badPart, ct, redactedPlaces{fields: map[string]bool{"assertion": true}}); out != valueRedacted {
+		t.Errorf("a part that does not read, at a recording that redacted a field: %q, want it redacted whole", out)
+	}
+	// A content type that names no boundary, before a body that reads as
+	// one with an empty boundary.
+	noBoundary := "--\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nplain words\r\n----\r\n"
+	if out := redactBody(noBoundary, "multipart/form-data", redactedPlaces{fields: map[string]bool{"assertion": true}}); out != valueRedacted {
+		t.Errorf("a content type with no boundary, at a recording that redacted a field: %q, want it redacted whole", out)
+	}
+	// A boundary longer than RFC 2046 allows (70 characters).
+	long := strings.Repeat("b", 71)
+	longBody := "--" + long + "\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nplain words\r\n--" + long + "--\r\n"
+	if out := redactBody(longBody, "multipart/form-data; boundary="+long, redactedPlaces{fields: map[string]bool{"assertion": true}}); out != valueRedacted {
+		t.Errorf("a boundary over 70 characters, at a recording that redacted a field: %q, want it redacted whole", out)
+	}
+}
+
+// A multipart body is redacted field by field the way the other bodies are:
+// a field with a sensitive name, a value that matches one of the mock's
+// patterns and a credential-shaped value are each redacted, wherever the
+// recording put them; the other fields show.
+func TestRedactBody_MultipartRedactsEachSecretField(t *testing.T) {
+	const ghToken = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"
+	var b strings.Builder
+	w := multipart.NewWriter(&b)
+	for _, f := range [][2]string{{"password", "hunter2-pw"}, {"note", "tok-123456"}, {"ref", ghToken}, {"x", "bravo2"}} {
+		if err := w.WriteField(f[0], f[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	places := redactedPlaces{values: util.NewNoiseChecker([]string{`^tok-[0-9]{6}$`}), fields: map[string]bool{}}
+	out := redactBody(b.String(), w.FormDataContentType(), places)
+	for _, secret := range []string{"hunter2-pw", "tok-123456", ghToken} {
+		if strings.Contains(out, secret) {
+			t.Errorf("the rendered body carries %q:\n%s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "bravo2") || strings.Count(out, valueRedacted) != 3 {
+		t.Errorf("want the three secret fields redacted and the rest shown:\n%s", out)
 	}
 }

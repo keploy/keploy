@@ -52,6 +52,9 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# http_mocks_only: the recording is the app's calls to its dependency, by kind.
+# shellcheck source=mock-kinds.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mock-kinds.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -277,17 +280,26 @@ sudo pkill -INT -f "^$RECORD_BIN record -c bash app\.sh" || fail "record: found 
 wait "$KP"
 echo "record: keploy exited $?"
 
-# mocks <file>: how many mocks it holds; 0 for a file that is not there.
+# mocks <file>: how many mocks it holds, of any kind; 0 for a file that is not
+# there. A mock's own `kind:` starts its line, as mock-kinds.sh counts them.
 mocks() {
   local n
-  n=$(sudo grep -c '^name: mock-' "$1" 2>/dev/null)
+  n=$(sudo grep -c '^kind:' "$1" 2>/dev/null)
   echo "${n:-0}"
 }
 REC=$(mocks keploy/test-set-0/mocks.yaml)
 TESTS=$(sudo sh -c 'ls keploy/test-set-0/tests 2>/dev/null | wc -l')
-echo "recorded $TESTS tests and $REC mocks"
-if [ "$TESTS" != "$N" ] || [ "$REC" -lt "$N" ]; then
-  echo "FAIL: recorded $TESTS tests and $REC mocks, want $N tests and at least $N mocks (one dependency call a test)"
+# One Http mock a test, its one call to the dependency, and no other mock:
+# the app and fetch.py call it at 127.0.0.1, and the app serves with
+# socketserver.TCPServer, which looks up no name, so the record makes no DNS
+# query on any runner; and nothing fills the PID map while it records, so it
+# loses no call. So REC, the count the checks below compare with, is N too.
+KINDS=$(http_mocks_only <(sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null) "$N")
+KINDS_OK=$?
+KINDS=${KINDS#*: }
+echo "recorded $TESTS tests and $REC mocks: $KINDS"
+if [ "$TESTS" != "$N" ] || [ "$KINDS_OK" -ne 0 ]; then
+  echo "FAIL: recorded $TESTS tests and $KINDS; want $N tests and $N Http mocks and no other (one dependency call a test)"
   tail -n 40 record.log
   exit 1
 fi

@@ -230,6 +230,13 @@ func TestAStagingGenerationIndexIsTheReadUnderRandomChanges(t *testing.T) {
 			}
 			mk := shown[rng.Intn(len(shown))]
 			consume = !mk.IsProtocolPhase() && mm.exactView() != nil
+			if v := mm.exactView(); consume && v.test == "" && v.isWorker(mk.Name) && !v.usedBetween(mk.Name) {
+				// The first call between tests to consume one of the
+				// worker scope's spends nothing, and moves it after the
+				// rest in the reads between tests (gapOrder): the
+				// generation moves, so an index is built again.
+				consume = false
+			}
 			var ok bool
 			switch rng.Intn(3) {
 			case 0:
@@ -266,4 +273,80 @@ func TestAStagingGenerationIndexIsTheReadUnderRandomChanges(t *testing.T) {
 		t.Fatalf("the per-test index was built %d times over %d consumes: the generation follows consumes", b, consumes)
 	}
 	t.Logf("%d steps, %d consumes (%d refused), per-test index built %d times", steps, consumes, refused, caches["per-test"].builds)
+}
+
+// A worker: recording's first answer between tests moves the staging
+// generations through a door that keeps it, as through a delete door: the
+// reads between tests now hand it out after the rest (gapOrder), so a
+// parser that builds its index only when the staging generation moves
+// (integrations.StagingGenerations) builds it again and its next poll takes
+// w-1. Had the revisions moved alone, it would read its old index and
+// answer w-0 to every poll between tests.
+func TestAWorkerRecordingsFirstAnswerBetweenTestsThroughAKeepingDoorMovesTheStagingGenerations(t *testing.T) {
+	polls := []*models.Mock{httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll"), httpCall("w-2", 3*time.Second, "/poll")}
+	byName := map[string]*models.Mock{}
+	for _, mk := range polls {
+		byName[mk.Name] = mk
+	}
+	mm := stagedManager(t, nil, polls)
+	mm.ServeExactWorker([]string{"w-0", "w-1", "w-2"})
+	mm.ServeExactPool("k", nil)
+	c := &genCache{read: mm.GetSessionScopedMocks}
+	var got []string
+	for i := 0; i < 4; i++ {
+		answer := "a miss"
+		if names := c.lookup(t, mm); len(names) > 0 {
+			answer = names[0]
+			if !mm.MarkMockAsUsed(*byName[answer]) {
+				answer = "a miss"
+			}
+		}
+		got = append(got, answer)
+	}
+	if want := []string{"w-0", "w-1", "w-2", "w-2"}; !slices.Equal(got, want) {
+		t.Errorf("four polls between tests, through an index keyed on the staging generation, were answered %v; want %v", got, want)
+	}
+}
+
+// A call between tests that read a worker: recording before a new staging
+// landed is refused when it consumes it, through each door, though the new
+// staging stages a recording of the same name (mock names repeat across
+// test sets): the recording the call read is not the staging's own (kind or
+// recorded times differ), so the parser reads again and is answered the new
+// one. Served, the call would be answered the old set's response.
+func TestACallBetweenTestsThatReadARecordingBeforeANewStagingIsRefusedItsNamesake(t *testing.T) {
+	for _, door := range []struct {
+		name    string
+		consume func(*MockManager, models.Mock) bool
+	}{
+		{"keeping door", (*MockManager).MarkMockAsUsed},
+		{"delete door", (*MockManager).DeleteFilteredMock},
+	} {
+		t.Run(door.name, func(t *testing.T) {
+			old := httpCall("mock-1", time.Second, "/poll")
+			mm := stagedManager(t, nil, []*models.Mock{old})
+			mm.ServeExactWorker([]string{"mock-1"})
+			mm.ServeExactPool("k", nil)
+			read, _ := mm.GetSessionScopedMocks()
+			if names := exactNames(read); !slices.Equal(names, []string{"mock-1"}) {
+				t.Fatalf("precondition: the gap reads %v; want [mock-1]", names)
+			}
+			held := *read[0]
+
+			next := httpCall("mock-1", 5*time.Second, "/poll")
+			mm.SetMocksWithWindow(nil, []*models.Mock{next}, models.BaseTime, time.Now())
+			mm.ServeExactWorker([]string{"mock-1"})
+			mm.ServeExactPool("k", nil)
+			if door.consume(mm, held) {
+				t.Fatalf("the old staging's mock-1, read before the new staging landed, was served between tests")
+			}
+			again, _ := mm.GetSessionScopedMocks()
+			if len(again) != 1 || !again[0].Spec.ReqTimestampMock.Equal(next.Spec.ReqTimestampMock) {
+				t.Fatalf("the read after the refusal gave %v; want the new staging's mock-1", exactNames(again))
+			}
+			if !door.consume(mm, *again[0]) {
+				t.Fatalf("the new staging's mock-1 was refused between tests")
+			}
+		})
+	}
 }

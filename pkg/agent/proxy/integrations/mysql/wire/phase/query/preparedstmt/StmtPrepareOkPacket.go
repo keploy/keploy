@@ -54,7 +54,7 @@ func DecodePrepareOk(_ context.Context, _ *zap.Logger, data []byte, capabilities
 	return response, nil
 }
 
-func EncodePrepareOk(ctx context.Context, logger *zap.Logger, packet *mysql.StmtPrepareOkPacket, capabilities uint32) ([]byte, error) {
+func EncodePrepareOk(ctx context.Context, logger *zap.Logger, packet *mysql.StmtPrepareOkPacket, capabilities uint32, framing mysql.MetadataFraming) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
 	// Encode the Prepare OK packet
@@ -68,7 +68,7 @@ func EncodePrepareOk(ctx context.Context, logger *zap.Logger, packet *mysql.Stmt
 
 	// Encode parameter definitions if present
 	for _, paramDef := range packet.ParamDefs {
-		paramBytes, err := rowscols.EncodeColumn(ctx, logger, paramDef)
+		paramBytes, err := rowscols.EncodeColumn(ctx, logger, paramDef, framing)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode parameter definition: %w", err)
 		}
@@ -86,7 +86,7 @@ func EncodePrepareOk(ctx context.Context, logger *zap.Logger, packet *mysql.Stmt
 
 	// Encode column definitions if present
 	for _, columnDef := range packet.ColumnDefs {
-		columnBytes, err := rowscols.EncodeColumn(ctx, logger, columnDef)
+		columnBytes, err := rowscols.EncodeColumn(ctx, logger, columnDef, framing)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode column definition: %w", err)
 		}

@@ -23,6 +23,7 @@ import (
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -99,7 +100,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			utils.LogError(logger, err, "V2 HTTP record: initial request read failed")
 			return err
 		}
-		reqTs := firstChunk.ReadAt
+		reqTs, reqClock := firstChunk.ReadAt, firstChunk.ReadClock
 		finalReq := append([]byte(nil), firstChunk.Bytes...)
 
 		// Complete the request: read more chunks until headers + body
@@ -173,6 +174,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 						Req:              finalReq,
 						ReqTimestampMock: reqTs,
 						ResTimestampMock: reqTs,
+						ReqClock:         reqClock,
 						Fault:            fault,
 					}, destPort, reqTs)
 				}
@@ -284,6 +286,22 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// Build and emit the mock. Identical shape to the legacy path.
 		var fault *models.Fault
 		if streamEnded {
+			if reason, ok := partAnswerLeftOut(sess); ok {
+				// The client's end came first, partway through the response,
+				// and records no fault: the response is not known to be
+				// whole, and no fault is known to record it with. Recorded
+				// as far as it came, a call cut short would be served a
+				// complete-looking shorter response at replay.
+				if mark, ok := sess.TakeMockIncomplete(); ok {
+					reason = mark + ": " + reason
+				}
+				logger.Debug("V2 HTTP record: the client's end came partway through the response, and records no fault; the exchange is left out")
+				sess.ReportLeftOut(&models.Mock{
+					Kind: models.HTTP,
+					Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+				}, reason)
+				return nil
+			}
 			fault = partAnswerFault(sess)
 		}
 		mock, err := h.buildHTTPMock(&FinalHTTP{
@@ -291,6 +309,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			Resp:             finalResp,
 			ReqTimestampMock: reqTs,
 			ResTimestampMock: resTs,
+			ReqClock:         reqClock,
 			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
 			Fault:            fault,
 		}, destPort, sess.ClientConnID, sess.Opts)
@@ -347,7 +366,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 //     read after the recording's stop began (keploy stops the application),
 //     or the client's end as its process exited (the command's own exit
 //     included). The close of a call it had in flight is the stop's, not its
-//     client's timeout.
+//     client's timeout. So is a client's end the hooks cannot tell from its
+//     process's exit (the macOS and Windows hooks): no fault is recorded on
+//     an end nothing says was the application's giving up. One partway
+//     through the answer is left out (partAnswerLeftOut).
 func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.Fault {
 	if !errors.Is(err, io.EOF) {
 		return nil
@@ -374,14 +396,42 @@ func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.F
 	return &models.Fault{Kind: models.FaultEOF, Observed: "the upstream closed the connection with no answer"}
 }
 
+// partAnswerLeftOut reports the reason an exchange is left out for whose
+// response stream ended before the response did (recordV2's streamEnded), when
+// the connection's first end was the client's and records no fault
+// (Session.FirstEndNoFault): the recording's stop, the client's process's own
+// exit, or an end the hooks cannot judge. Its response is not known to be
+// whole: its framing had not ended, or its body is framed by the upstream's
+// close, which had not come. And no fault is known to record it with. ok is
+// false for any other end, and for a stream that ended at a capture hole
+// (Session.EndedAtHole), as in partAnswerFault.
+func partAnswerLeftOut(sess *supervisor.Session) (reason string, ok bool) {
+	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
+		return "", false
+	}
+	if first, ok := sess.FirstPeerEnded(); !ok || first != fakeconn.FromClient {
+		return "", false
+	}
+	switch sess.FirstEndNoFault() {
+	case supervisor.EndAtStop:
+		return supervisor.LeftOutPartwayAtStop, true
+	case supervisor.EndAtExit:
+		return supervisor.LeftOutPartwayAtExit, true
+	case supervisor.EndUnjudged:
+		return supervisor.LeftOutPartwayUnjudged, true
+	}
+	return "", false
+}
+
 // partAnswerFault is the fault a call ends in whose response stream ended
 // before the response did, as the relay saw the connection end, or nil: the
 // destination reset the connection (FaultReset after the head) or closed it
 // (FaultTruncate), or the client closed first, the upstream silent, and gave
 // up on the rest (FaultTimeout after the head). Where the client closed while
-// the destination still sent (Session.EndedWhereClientStopped) the exchange is
-// left out before this is asked. An end that was the application's stop
-// (Session.EndFollowedStop) records no fault, as in noAnswerFault.
+// the destination still sent (Session.EndedWhereClientStopped), or its end came
+// first and records no fault (partAnswerLeftOut), the exchange is left out
+// before this is asked. The upstream's end read once the recording's stop had
+// begun (Session.EndFollowedStop) records no fault, as in noAnswerFault.
 // buildHTTPMock records the fault only when the response is in fact
 // unfinished (FinalHTTP.Fault).
 func partAnswerFault(sess *supervisor.Session) *models.Fault {
@@ -1020,6 +1070,20 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			LifetimeDerived: true,
 		},
 	}
+	// Under the proven switch, the clock the request's stamp is on
+	// (FinalHTTP.ReqClock), as keploy/integrations' Mongo v2 recorder names
+	// its own: so a set that holds recordings of two record runs (a partial
+	// record keeps the tests it did not record anew) orders this call only
+	// against its own run's recordings (the replay's teardown bound). A
+	// stamp the producer did not take names none, and the mock gets no
+	// clock: an untrusted stamp never routes. Without the switch nothing is
+	// written. The origin is the mock's own: the agent adds the process that
+	// made the call to it, keeping its clock (starts.Registry.StampOrigin).
+	if provenswitch.On() {
+		if id := fakeconn.ClockID(m.ReqClock); id != "" {
+			mock.Origin = &models.Origin{Clock: id}
+		}
+	}
 	// recordOne dedup, committed only now that a mock is actually being emitted.
 	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
 		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
@@ -1048,6 +1112,7 @@ func (h *HTTP) buildFaultAfterHead(m *FinalHTTP, req *http.Request, resp *http.R
 		Req:              m.Req,
 		ReqTimestampMock: m.ReqTimestampMock,
 		ResTimestampMock: m.ResTimestampMock,
+		ReqClock:         m.ReqClock,
 		Fault:            &models.Fault{Kind: models.FaultEOF},
 	}, destPort, connID, opts)
 	if mock == nil || err != nil {

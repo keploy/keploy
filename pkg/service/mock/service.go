@@ -127,9 +127,10 @@ type ScopeGatePusher interface {
 
 // TestBeginsPusher is an optional Instrumentation extension: under the proven
 // switch Replay hands the agent when each test of the recording began, so the
-// agent moves the run's clock per test (design v14 §3.4).
+// agent moves the run's clock per test (design v14 §3.4), and the seed each
+// test's recording kept for its browser's random numbers.
 type TestBeginsPusher interface {
-	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) error
+	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string) error
 }
 
 type SetPusher interface {
@@ -139,10 +140,11 @@ type SetPusher interface {
 // ProvenTablePusher is the Instrumentation extension a replay under the
 // proven switch needs: it hands the agent the per-test table and each key's
 // pool slice (models.ScopeTableReq.Pool) in one request, with the recorded
-// window of every test of the set (models.ScopeTableReq.Windows) and the
-// values each test gave when it was recorded (models.ScopeTableReq.Given).
+// window of every test of the set (models.ScopeTableReq.Windows), each
+// key's worker scope (models.ScopeTableReq.Worker) and the values each test
+// gave when it was recorded (models.ScopeTableReq.Given).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error
+	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error
 }
 
 type MappingReader interface {
@@ -191,6 +193,12 @@ type MappingDB interface {
 // CaseMapper is an optional MappingDB extension: Record writes which test cases each flow produced through it.
 type CaseMapper interface {
 	UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error
+}
+
+// WorkerMapper writes a set's worker scope (models.Mapping.Worker) whole,
+// keeping every other section of its mappings.
+type WorkerMapper interface {
+	UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error
 }
 
 type BootMapper interface {

@@ -67,6 +67,7 @@ set +e
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock-kinds.sh"
 
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
 APP_PORT=8000
@@ -232,13 +233,18 @@ KEPLOY_CFG
         tail -100 "record_logs_${format}.txt"
         return 1
     fi
-    local logins mocks mapped
+    local logins mocks mocks_rc mapped
     logins=$(grep -l "url: http://127.0.0.1:${APP_PORT}/login" keploy/test-set-0/tests/*.yaml 2>/dev/null | wc -l)
-    mocks=$(grep -c '^kind:' keploy/test-set-0/mocks.yaml 2>/dev/null)
+    # One Http mock a /login call: its upstream call. DNS mocks besides them
+    # are the runner's, not the app's calls: app.py's HTTPServer looks up the
+    # host's own name at start, which reaches DNS on a runner whose
+    # /etc/hosts lacks it (mock-kinds.sh).
+    mocks=$(http_mocks_are keploy/test-set-0/mocks.yaml "$n")
+    mocks_rc=$?
     mapped=$(grep -cE '^[[:space:]]*- id: test-' keploy/test-set-0/mappings.yaml 2>/dev/null)
-    echo "busy --sync recording: $logins /login test cases, $mocks mocks, $mapped tests mapped, of $n calls"
-    if [ "$logins" -ne "$n" ] || [ "$mocks" -ne "$n" ] || [ "$mapped" -ne "$n" ]; then
-        echo "::error::a busy --sync recording lost test cases, mocks or mappings: $logins test cases, $mocks mocks, $mapped mapped, of $n calls ($format)"
+    echo "busy --sync recording: $logins /login test cases, $mapped tests mapped, of $n calls; $mocks"
+    if [ "$logins" -ne "$n" ] || [ "$mocks_rc" -ne 0 ] || [ "$mapped" -ne "$n" ]; then
+        echo "::error::a busy --sync recording lost test cases, mocks or mappings: $logins test cases, $mapped mapped, of $n calls; $mocks, want $n Http and no kind but Http and DNS ($format)"
         tail -60 "record_logs_${format}.txt"
         return 1
     fi

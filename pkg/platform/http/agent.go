@@ -2250,6 +2250,12 @@ func boundedAgentRead[T any](ctx context.Context, what string, read func(context
 	}
 }
 
+// RunsAppProcess says that Run runs the application's command as a process
+// of its own (pkg/client/app) and returns when it exits: replay waits for
+// the application with no time limit, as its exit ends the wait
+// (replay.AppProcessRunner).
+func (a *AgentClient) RunsAppProcess() bool { return true }
+
 func (a *AgentClient) Run(ctx context.Context, opts models.RunOptions) (ret models.AppError) {
 	// The agent's container this run is to create, under docker compose: a
 	// release that waits for it ends once the run is over without it
@@ -2872,11 +2878,12 @@ func (a *AgentClient) stopAgent() {
 		a.logger.Debug("Stopping keploy agent", zap.Int("pid", pid))
 	}
 
-	// The PTY is never closed here: closing it hangs the agent up, and a
-	// hung-up agent dies where it stands. The agent's stop goroutine ends it
-	// (stopPTYAgent) -- SIGTERM to sudo, which also ends sudo at its password
-	// prompt -- and the PTY is closed once it has exited (PTYHandle.Wait). The
-	// terminal is the user's again at once, though.
+	// The PTY is never closed here: closing it would hang the agent up (a
+	// stop, or nothing once it is stopping: cli.Agent) and leave what it
+	// still writes unread. The agent's stop goroutine ends it (stopPTYAgent) --
+	// SIGTERM to sudo, which also ends sudo at its password prompt -- and the
+	// PTY is closed once it has exited (PTYHandle.Wait). The terminal is the
+	// user's again at once, though.
 	if a.agentPTY != nil {
 		a.agentPTY.RestoreTerminal()
 	}
@@ -3256,6 +3263,15 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	// A container that exits ends the wait through docker run's own exit
 	// (exited), which says why: the watch is not asked.
 	judged := watchStart(agentCtx, a.logger, read, running, nil, isDockerCmd, false)
+	// The wait ends only once its watch has, and so once the watch's look,
+	// and the engine command that look runs, have been ended and waited
+	// for, unless keploy may not signal that command (runEngine): the
+	// watch's channel closes then.
+	defer func(watch <-chan startJudgment) {
+		cancel()
+		for range watch {
+		}
+	}(judged)
 
 	for {
 		select {
@@ -3298,7 +3314,13 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 			default:
 			}
 			return context.Cause(ctx)
-		case j := <-judged:
+		case j, ok := <-judged:
+			if !ok {
+				// The watch ended with agentCtx, so with ctx: the
+				// case above says how.
+				judged = nil
+				continue
+			}
 			switch j.verdict {
 			case bootFailed:
 				// The agent says its start has failed, as a retry would: it
@@ -3528,7 +3550,29 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	opts.AgentPort = agentPort
 	opts.ProxyPort = proxyPort
 	opts.DnsPort = dnsPort
-	opts.AgentURI = fmt.Sprintf("http://localhost:%d/agent", agentPort)
+	// localhost, UNLESS the caller pinned the agent to an address.
+	//
+	// Loopback is right whenever keploy runs OUTSIDE the docker daemon it
+	// drives -- a laptop, where the agent publishes its port to the host, and
+	// where on macOS and Windows a container address is not routable from the
+	// host at all. It is NOT right for a caller that shares the daemon's
+	// network namespace: the Kubernetes replay Pod runs the driver and dockerd
+	// as containers of one Pod, so it reaches the agent by container address
+	// and needs no published port. That matters because a compose network
+	// marked `internal` -- which is how the replayed app is denied egress --
+	// makes docker silently drop port publication altogether (measured: the
+	// mapping is simply absent and every connection to loopback is refused).
+	//
+	// Only the HOST is taken from the caller. The port is this function's to
+	// choose (EnsureAvailablePorts may move it), so a caller that pinned one
+	// would be describing an agent that does not exist.
+	if host := kdocker.PresetAgentIP(a.conf); host != "" {
+		opts.AgentURI = fmt.Sprintf("http://%s:%d/agent", host, agentPort)
+		a.logger.Info("addressing the agent by its pinned container address, not loopback",
+			zap.String("agentURI", opts.AgentURI))
+	} else {
+		opts.AgentURI = fmt.Sprintf("http://localhost:%d/agent", agentPort)
+	}
 
 	// Update the ports in the configuration
 	a.conf.Agent.AgentPort = agentPort
@@ -4049,17 +4093,65 @@ func stopAgentContainerFor(logger *zap.Logger, run *agentRun, name string) {
 	}
 }
 
+// killEngineCommand is how a container engine command whose context has
+// ended is killed (agentUtils.KillOwnProcessGroup). A variable for tests.
+var killEngineCommand = agentUtils.KillOwnProcessGroup
+
 // containerEngineCommand is the container engine's CLI running args under
 // ctx, as name (the engine's CLI, or sudo). It runs in a process group of its
-// own, so a terminal's Ctrl+C does not interrupt it.
-func containerEngineCommand(ctx context.Context, name string, argv ...string) *exec.Cmd {
-	c := exec.CommandContext(ctx, name, argv...)
+// own, so a terminal's Ctrl+C does not interrupt it. unsignalled is closed
+// once ctx has ended and the kill has found that keploy may not signal the
+// command (runEngine).
+func containerEngineCommand(ctx context.Context, name string, argv ...string) (c *exec.Cmd, unsignalled <-chan struct{}) {
+	c = exec.CommandContext(ctx, name, argv...)
 	agentUtils.SetOwnProcessGroup(c)
-	// Once ctx is cancelled the process is killed -- but under sudo that is
-	// sudo, and the root engine client it ran keeps the output pipe open until
-	// it exits by itself. Do not wait for that pipe.
+	refused := make(chan struct{})
+	// Once ctx is cancelled the command is killed, with every process of it
+	// still in its group: a CLI that does part of its work in a child
+	// process ends with it, and so does the wait for its output, which that
+	// child holds open too. Under sudo that kills sudo; the root engine
+	// client it ran, which keploy may not signal, keeps the output pipe open
+	// until it exits by itself. Do not wait for that pipe. Under a sudo
+	// that makes itself root in full (before 1.9.4, so that the user who
+	// ran it cannot kill it), keploy may not signal sudo either. exec calls
+	// Cancel once.
+	c.Cancel = func() error {
+		err := killEngineCommand(c)
+		if errors.Is(err, os.ErrPermission) {
+			close(refused)
+		}
+		return err
+	}
 	c.WaitDelay = time.Second
-	return c
+	return c, refused
+}
+
+// runEngine runs c (containerEngineCommand), and returns what output takes
+// from it once it has ended. The one exception is a command keploy may not
+// signal (unsignalled), which no kill of keploy's can end: once its context
+// has ended, its run returns at once, with that context's cause, and the
+// command is left to end by itself, waited for off the caller's goroutine.
+func runEngine(ctx context.Context, c *exec.Cmd, unsignalled <-chan struct{}, output func(*exec.Cmd) ([]byte, error)) ([]byte, error) {
+	type result struct {
+		out []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := output(c)
+		done <- result{out, err}
+	}()
+	select {
+	case r := <-done:
+		return r.out, r.err
+	case <-unsignalled:
+		select {
+		case r := <-done:
+			return r.out, r.err
+		default:
+		}
+		return nil, fmt.Errorf("%w: keploy may not signal `%s` to end it, and leaves it to end by itself", context.Cause(ctx), strings.Join(c.Args, " "))
+	}
 }
 
 // engineCLI runs the container engine's CLI for one stop of an agent's
@@ -4081,13 +4173,17 @@ const (
 
 func newEngineCLI(logger *zap.Logger) *engineCLI { return &engineCLI{logger: logger} }
 
-// run runs the engine's CLI with args under ctx (containerEngineCommand), and
-// returns what output takes from it.
+// run runs the engine's CLI with args under ctx (containerEngineCommand,
+// runEngine), and returns what output takes from it.
 func (e *engineCLI) run(ctx context.Context, output func(*exec.Cmd) ([]byte, error), args ...string) ([]byte, error) {
 	cli := engine.Active().CLI
-	direct := func() ([]byte, error) { return output(containerEngineCommand(ctx, cli, args...)) }
+	direct := func() ([]byte, error) {
+		c, unsignalled := containerEngineCommand(ctx, cli, args...)
+		return runEngine(ctx, c, unsignalled, output)
+	}
 	sudo := func() ([]byte, error) {
-		return output(containerEngineCommand(ctx, "sudo", append([]string{"-n", cli}, args...)...))
+		c, unsignalled := containerEngineCommand(ctx, "sudo", append([]string{"-n", cli}, args...)...)
+		return runEngine(ctx, c, unsignalled, output)
 	}
 	switch e.mode.Load() {
 	case engineDirect:
@@ -4135,7 +4231,11 @@ func (e *engineCLI) ask(args ...string) ([]byte, error) {
 	defer release()
 	out, err := e.combined(ctx, args...)
 	if err != nil && ctx.Err() != nil {
-		err = fmt.Errorf("%w: %v", context.Cause(ctx), err)
+		if cause := context.Cause(ctx); !errors.Is(err, cause) {
+			// runEngine's error for a command keploy may not signal
+			// already wraps the cause.
+			err = fmt.Errorf("%w: %v", cause, err)
+		}
 		e.logger.Warn("The container engine's daemon did not answer keploy's `"+strings.Join(args, " ")+"` within keploy's bound: keploy goes on without its answer, and the keploy agent's container may still run",
 			zap.Duration("bound", daemonAnswerStall), zap.Error(err))
 	}
@@ -4702,7 +4802,15 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 	parent := ctx
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	if gone := a.watchAgent(ctx, true); gone != nil {
+	if gone, over := a.watchAgent(ctx, true); gone != nil {
+		// The release ends only once its watch has, and so once the
+		// watch's look, and the engine command that look runs, have been
+		// ended and waited for, unless keploy may not signal that command
+		// (watchStart, runEngine).
+		defer func() {
+			cancel(nil)
+			<-over
+		}()
 		go func() {
 			select {
 			case err := <-gone:
@@ -5007,18 +5115,20 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // windows are the recorded window of every test of the set
 // (models.ScopeTableReq.Windows), and given the values each test gave when
 // it was recorded (models.ScopeTableReq.Given), sent with them: the agent
-// installs both before it serves the pool.
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) (retErr error) {
+// installs both before it serves the pool. worker is each key's worker scope
+// (models.ScopeTableReq.Worker): names of its pool slice served in a test's
+// window too.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p, w, g := maps.Clone(table), maps.Clone(pool), slices.Clone(windows), maps.Clone(given)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, w, g) })
+			t, p, wk, w, g := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), slices.Clone(windows), maps.Clone(given)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, w, g) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Windows: windows, Given: given})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, Windows: windows, Given: given})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
@@ -5043,18 +5153,21 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[strin
 }
 
 // PushTestBegins hands the agent when each test of the replayed recording
-// began, so it moves the run's clock per test (models.TestBeginsReq). They
-// are given again to a restarted agent, like the scope table. An agent that
-// cannot take them is an error: the tests would run on another clock than
-// their recording's.
-func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) (retErr error) {
+// began, so it moves the run's clock per test, and the seed each test's
+// recording kept for its browser (models.TestBeginsReq). They are given again
+// to a restarted agent, like the scope table. An agent that cannot take them
+// is an error: the tests would run on another clock, or their browsers on
+// other numbers, than their recording's.
+func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded, recordedReal := maps.Clone(begins), maps.Clone(real)
-			a.session().record(stepTestBegins, func(c context.Context) error { return a.PushTestBegins(c, recorded, recordedReal) })
+			recorded, recordedReal, recordedSeeds := maps.Clone(begins), maps.Clone(real), maps.Clone(seeds)
+			a.session().record(stepTestBegins, func(c context.Context) error {
+				return a.PushTestBegins(c, recorded, recordedReal, recordedSeeds)
+			})
 		}
 	}()
-	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real})
+	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real, Seeds: seeds})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests' recorded begins: %w", err)
 	}

@@ -351,7 +351,8 @@ func TestAnotherTestsMockNeverAnswers(t *testing.T) {
 }
 
 // Between tests the key's pool slice answers, as often as asked; no test's
-// mock answers there, and inside a test no data-plane pool mock answers.
+// mock answers there, and inside a test no data-plane pool mock answers. A
+// call between tests that nothing answers is charged to no test.
 func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/health", "ok", t0), pingMock("mock-2", "/a", "a", t0.Add(time.Second))},
@@ -372,7 +373,51 @@ func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	for _, m := range ev.Misses {
 		kinds = append(kinds, m.Kind)
 	}
-	require.ElementsMatch(t, []string{models.MissOutsideTest, models.MissInTest}, kinds, "the miss between tests is charged to the next test")
+	require.Equal(t, []string{models.MissInTest}, kinds, "a miss between tests is charged to no test, not to the next one")
+}
+
+// A worker: mock of the claiming key's (one keploy mock record listed as made
+// between the tests, or one a reader moved out of a test's list, such as a
+// token's first-use read) answers in a test's window too, after the test's
+// own, each at most once in the set's windows, and between tests as the pool
+// does, and no test is required to make it. Another key's worker scope answers none of this
+// key's calls. Before, a test that made it missed: inside a test only its
+// own mocks answer, and a worker: entry was served as the pool, between
+// tests only.
+func TestAWorkerMockAnswersInAnyTestOnceAndIsRequiredOfNone(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
+		pingMock("mock-1", "/a", "a", t0),
+		pingMock("mock-2", "/token", "first-use", t0.Add(time.Second)),
+		pingMock("mock-3", "/token", "again", t0.Add(2*time.Second)),
+		pingMock("mock-4", "/never", "unused", t0.Add(3*time.Second)),
+		pingMock("mock-5", "/other", "other key", t0.Add(4*time.Second)),
+	}))
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {}, "o::TestC": {}}))
+	require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-2", "mock-3", "mock-4"}, "p": {"mock-5"}}))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-2", "mock-3", "mock-4"}, "p": {"mock-5"}}))
+	claimSelf(t, a)
+	got, e := runTest(t, a, p, "TestA", "/a", "/token")
+	require.Equal(t, []string{"200 a", "200 first-use"}, got, "a worker: mock answers in a test's window, in recorded order")
+	require.Empty(t, e.Action, e.Reason)
+	// Between tests the calls walk their own sequence, from its first
+	// recording, whatever the windows answered (main walked one sequence
+	// for both, so this call's answer moved with the windows' calls).
+	code, body := p.call(t, "/token")
+	require.Equal(t, "200 first-use", fmt.Sprintf("%d %s", code, body), "and between tests, on the calls between tests' own sequence")
+	_, e = runTest(t, a, p, "TestB")
+	require.Empty(t, e.Action, "a worker: mock no call answered (mock-4) is required of no test: %s", e.Reason)
+	// The windows' sequence goes on after TestA's mock-2, whatever the call
+	// between tests answered: mock-3 answers TestC's first /token, and is
+	// then spent for the set's windows, as mock-2 was in TestA's.
+	got, e = runTest(t, a, p, "TestC", "/token", "/token", "/other")
+	require.Equal(t, "200 again", got[0], "a worker: mock no window spent answers a test's call")
+	require.True(t, strings.HasPrefix(got[1], "502"), "a worker: mock answers at most once in the set's windows: %s", got[1])
+	require.True(t, strings.HasPrefix(got[2], "502"), "another key's worker scope answered: %s", got[2])
+	require.Equal(t, models.ScopeActionFail, e.Action)
 }
 
 // sqsEmpty is the answer enterprise SQS's parser writes for a ReceiveMessage
@@ -908,9 +953,9 @@ func (p *inFlightProxy) ServeExactPool(key string, names []string) error {
 }
 
 // A test's call that lands as its end stops serving it misses, fails the
-// test, and is said to be made as the test ended, not before it began; a
-// call made between tests is still said to precede the next test (round-3
-// review).
+// test, and is said to be made as the test ended, not before it began
+// (round-3 review); a call made between tests is charged to no test, and
+// fails neither test.
 func TestACallLandingAsTheTestEndsIsSaidToBeMadeThen(t *testing.T) {
 	a, rp := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second)), pingMock("mock-3", "/c", "c", t0.Add(2*time.Second))},
@@ -933,8 +978,16 @@ func TestACallLandingAsTheTestEndsIsSaidToBeMadeThen(t *testing.T) {
 	require.Equal(t, 502, code)
 	got, e := runTest(t, a, p.servingProxy, "TestB", "/c")
 	require.Equal(t, []string{"200 c"}, got)
-	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "GET /zzz to 127.0.0.1:18093, made before this one began, had no recorded answer")
+	require.Empty(t, e.Action, e.Reason)
+	all, err := a.GetMockErrors(ctx)
+	require.NoError(t, err)
+	charged := map[string]string{}
+	for _, m := range all {
+		charged[m.ActualSummary] = m.ChargedTo
+	}
+	require.Equal(t, "o::TestA", charged["GET /b"], "the call landing as TestA ended is TestA's")
+	require.Contains(t, charged, "GET /zzz", "the call between tests is the run's miss")
+	require.Empty(t, charged["GET /zzz"], "the call between tests is charged to no test")
 }
 
 // lateProxy holds a miss between its report being built and its filing
@@ -1273,7 +1326,8 @@ func TestThePoolIsServedWhenTheCallsInFlightCannotBeRead(t *testing.T) {
 }
 
 // keploy test with a worker scope: a worker mock answers from its place in
-// the set's run on, in a test case or between them, once in the set; a test
+// the set's run on, in a test case once in the set's test cases, and between
+// them as the pool does (this parser's door keeps it: every call); a test
 // case begun reaches the worker mocks placed after it, and no earlier one.
 // The worker mocks are staged with the pool, by name, and are not the
 // pool's.
@@ -1310,8 +1364,8 @@ func TestKeployTestServesTheWorkerScopeFromItsPlaces(t *testing.T) {
 	code, body := p.call(t, "/late")
 	require.Equal(t, 200, code, "a worker mock placed after a begun test case does not answer between test cases")
 	require.Equal(t, "late", body)
-	code, _ = p.call(t, "/late")
-	require.Equal(t, 502, code, "a worker mock answered twice in the set")
+	code, body = p.call(t, "/late")
+	require.Equal(t, "200 late", fmt.Sprintf("%d %s", code, body), "between test cases a worker mock is served as the pool's: again")
 	code, _ = p.call(t, "/own")
 	require.Equal(t, 502, code, "a test case's mock answered between test cases")
 }

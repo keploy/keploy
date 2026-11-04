@@ -36,16 +36,34 @@ import (
 //     protocol-phase mocks. Its stateful cursors are the key's own.
 //   - Whether a test is open or not, the set's worker-scope mocks its run
 //     has reached the place of answer (ServeExactWorker,
-//     models.Mapping.Worker): no test owns them. In a test they come after
-//     the test's own. Each answers at most one request in the staging,
-//     consumed through a delete door as a data-plane recording is outside
-//     every test (decision 31): no begin or end brings it back.
+//     models.Mapping.Worker): no test owns them. The test windows and the
+//     calls between tests read them apart, each on its own spends and its
+//     own stateful cursor, so neither's count moves what the other is
+//     answered. In a test they come after the test's own, and each answers
+//     at most one request in the windows of the staging, through whichever
+//     door a parser consumes it, walked by placement on the windows' cursor
+//     (windowsCursor) whatever the calls between tests spent or walked.
+//     Outside every test each answers again, of any lifetime, through any
+//     door, whatever a test's window spent: a call between tests spends
+//     none, and orders the next ones' reads alone (gapOrder), so a parser
+//     that takes the first recording it reads walks a request's recordings
+//     by placement and stays on its last, as HTTP's cursor saturates. A
+//     call the app makes more often between tests when replay is slower (a
+//     poller, a retry, a heartbeat) is then answered every time, and no
+//     test window's answers depend on how many such calls came before it.
+//     One rule for every lifetime and protocol: a
+//     worker: recording answers at most once inside the test windows, and
+//     again outside every window. Under the background rules
+//     (exact_background.go) one of the pool's is spent through a door that
+//     keeps it too, and the worker scope, staged apart from the pool, is
+//     not.
 //
 // A data-plane recording a parser consumes through a delete door while no
 // test is open (a call before the first test or between tests) is consumed
 // for the staging, not for the view (founder decision 31): no begin or end
-// brings it back, and the next staging (stagingEpoch) does. The manager
-// gives no last answer to repeat: which recordings are one call's sequence
+// brings it back, and the next staging (stagingEpoch) does. The worker
+// scope's alone answers again, above. The manager gives a pool recording no
+// last answer to repeat: which recordings are one call's sequence
 // is the parser's to know (its matching), so a parser that has one
 // saturates itself (HTTP's stateful cursor; SQS answers a drained
 // ReceiveMessage with its empty answer), and an exhausted call of any other
@@ -282,6 +300,10 @@ type exactState struct {
 	// one key is known: what bounds each test process's teardown
 	// (teardownAfter). nil until a replay sent one.
 	poolOwners atomic.Pointer[map[string]string]
+	// poolTests is, of the same scope table, the mocks each test lists and
+	// the tests that list each mock (SetPoolTests): what tells the run of a
+	// test's recording on no clock (teardownBy). nil until a replay sent one.
+	poolTests atomic.Pointer[poolTests]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
 	// cached for one staging generation of the trees (StagingGeneration: an
 	// exact serve does not move it), one scope table, one recording's times
@@ -611,6 +633,25 @@ type outsideState struct {
 	staged map[string]*models.Mock
 	// spent holds the names consumed: the first consume of one wins.
 	spent sync.Map
+	// inTests holds the names of the worker scope's recordings consumed in
+	// a test's window: each answers at most one call in the windows of the
+	// staging. The windows read it alone for the worker scope (spent does
+	// not hide one there), and a view with no test open does not read it:
+	// outside every test the worker scope is served by the pool slice's
+	// rule (exactView.spentOutside).
+	inTests sync.Map
+	// between holds the names of the worker scope's recordings a call read
+	// with no test open consumed, through any door, and betweenN counts
+	// them. It hides none: outside every window a worker: recording answers
+	// again, whatever door consumes it, so a gap's answers never run out
+	// because the app called more often between tests than it recorded. It
+	// orders the calls between tests' reads only (gapOrder): the recordings
+	// no gap call consumed yet first, then the consumed ones, the latest
+	// placed first, so a parser that takes the first recording it reads
+	// walks a request's recordings by placement and then stays on its last.
+	// The windows never read it (inTests is theirs).
+	between  sync.Map
+	betweenN atomic.Int64
 	// unstaged holds the names of the recordings a door named that staged
 	// does not hold, once each is said (MockManager.servedAsNamed).
 	unstaged sync.Map
@@ -624,6 +665,17 @@ func (o *outsideAnswers) hidden(name string, epoch uint64) bool {
 		return false
 	}
 	_, spent := st.spent.Load(name)
+	return spent
+}
+
+// hiddenInTests reports whether name, one of the worker scope's, answered a
+// call in a test's window in the staging epoch is (outsideState.inTests).
+func (o *outsideAnswers) hiddenInTests(name string, epoch uint64) bool {
+	st := o.cur.Load()
+	if st == nil || st.epoch != epoch {
+		return false
+	}
+	_, spent := st.inTests.Load(name)
 	return spent
 }
 
@@ -678,6 +730,10 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 	if st := m.exact.outside.cur.Load(); st != nil {
 		for _, n := range names {
 			st.spent.Delete(n)
+			st.inTests.Delete(n)
+			if _, was := st.between.LoadAndDelete(n); was {
+				st.betweenN.Add(-1)
+			}
 		}
 	}
 	m.restoreLocked(names)
@@ -704,7 +760,13 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 // one that is not the staging's own (read before the staging landed, under
 // a name the staging stages too or none it stages) and any consume while a
 // staging lands: the parser reads again. It takes no tree lock.
-func (m *MockManager) consumeOutside(mk *models.Mock) exactVerdict {
+//
+// inTest is a consume of one of the worker scope's in a test's window
+// (spendsInTests): it is spent for the windows of the staging alone
+// (outsideState.inTests), whatever the calls outside every test consumed, so
+// no window's answer depends on how many calls landed between tests. A
+// worker-scope consume between tests never comes here (consumeBetween).
+func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict {
 	st := m.exact.outside.cur.Load()
 	if st == nil || st.epoch != m.stagingEpoch.Load() {
 		return exactRefused
@@ -714,10 +776,129 @@ func (m *MockManager) consumeOutside(mk *models.Mock) exactVerdict {
 		!staged.Spec.ResTimestampMock.Equal(mk.Spec.ResTimestampMock) {
 		return exactRefused
 	}
+	if inTest {
+		if _, taken := st.inTests.LoadOrStore(mk.Name, true); taken {
+			return exactRefused
+		}
+		return exactServed
+	}
 	if _, taken := st.spent.LoadOrStore(mk.Name, true); taken {
 		return exactRefused
 	}
 	return exactServed
+}
+
+// consumeBetween settles a consume of mk, one of the worker scope's, whose
+// call was read with no test open (spendsBetween), through any door, once
+// prepareOutside has run: served while mk is the staging's own, refused
+// otherwise, as consumeOutside refuses. It is never spent: it is noted in
+// outsideState.between, which orders the calls between tests' reads alone,
+// and answers the next call outside every window again. first reports the
+// first such consume of mk in the staging: the reads between tests hand it
+// out after the rest from then on, so the caller moves the staging
+// generations (bumpGapOrder). It takes no tree lock.
+func (m *MockManager) consumeBetween(mk *models.Mock) (verdict exactVerdict, first bool) {
+	st := m.exact.outside.cur.Load()
+	if st == nil || st.epoch != m.stagingEpoch.Load() {
+		return exactRefused, false
+	}
+	staged := st.staged[mk.Name]
+	if staged == nil || staged.Kind != mk.Kind || !staged.Spec.ReqTimestampMock.Equal(mk.Spec.ReqTimestampMock) ||
+		!staged.Spec.ResTimestampMock.Equal(mk.Spec.ResTimestampMock) {
+		return exactRefused, false
+	}
+	if _, was := st.between.LoadOrStore(mk.Name, true); !was {
+		st.betweenN.Add(1)
+		return exactServed, true
+	}
+	return exactServed, false
+}
+
+// bumpBetween moves the revisions for a consume between tests of one of the
+// worker scope's recordings of kind through a door that keeps it, and the
+// staging generations too for its first in the staging (first,
+// bumpGapOrder).
+func (m *MockManager) bumpBetween(kind models.Kind, first bool) {
+	if first {
+		m.bumpGapOrder(kind)
+		return
+	}
+	m.bumpConsumed(kind)
+}
+
+// consumedBetween reports whether name, one of the worker scope's, answered
+// a call read with no test open in the staging epoch is
+// (outsideState.between).
+func (o *outsideAnswers) consumedBetween(name string, epoch uint64) bool {
+	st := o.cur.Load()
+	if st == nil || st.epoch != epoch || st.betweenN.Load() == 0 {
+		return false
+	}
+	_, ok := st.between.Load(name)
+	return ok
+}
+
+// anyBetween reports whether a call read with no test open consumed any of
+// the worker scope's recordings in the staging epoch is.
+func (o *outsideAnswers) anyBetween(epoch uint64) bool {
+	st := o.cur.Load()
+	return st != nil && st.epoch == epoch && st.betweenN.Load() > 0
+}
+
+// gapOrder is in as a read with no test open hands it out: when a call
+// between tests consumed one of the worker scope's recordings in in
+// (outsideState.between), those move after the rest, the latest placed
+// first (the worker scope's order, workerOrder, under the background rules;
+// recorded order otherwise), and the rest keep their order. A parser that
+// takes the first recording of a request it reads, and consumes it through
+// a door that evicts, so walks the request's recordings between tests by
+// placement, then answers on its last again, as HTTP's cursor saturates on
+// a request's last answer. in itself in a test's view and when nothing was
+// consumed between tests.
+func (v *exactView) gapOrder(in []*models.Mock) []*models.Mock {
+	if v.test != "" || v.outside == nil || len(in) < 2 {
+		return in
+	}
+	e := v.epoch.Load()
+	if !v.outside.anyBetween(e) {
+		return in
+	}
+	var rest, used []*models.Mock
+	for _, mk := range in {
+		if mk != nil && v.isWorker(mk.Name) && v.outside.consumedBetween(mk.Name, e) {
+			used = append(used, mk)
+			continue
+		}
+		rest = append(rest, mk)
+	}
+	if len(used) == 0 {
+		return in
+	}
+	sort.SliceStable(used, func(i, j int) bool {
+		if v.workerOrder != nil {
+			return v.workerOrder[used[i].Name] > v.workerOrder[used[j].Name]
+		}
+		return used[i].Spec.ReqTimestampMock.After(used[j].Spec.ReqTimestampMock)
+	})
+	return append(rest, used...)
+}
+
+// spendsInTests reports whether a consume of mk settled in v spends it for
+// the windows of the staging only: mk is one of the worker scope's, not
+// protocol-phase, and the consume is a window's (windowed: its call was read
+// in a test's view, roundGuard.windowed). Outside every test the worker
+// scope answers again (spendsBetween, consumeBetween).
+func (v *exactView) spendsInTests(mk *models.Mock, windowed bool) bool {
+	return windowed && v.isWorker(mk.Name) && !mk.IsProtocolPhase()
+}
+
+// spendsBetween reports whether a consume of mk settled in v is one of the
+// calls' between tests of the worker scope: mk is one of the worker scope's,
+// not protocol-phase, and its call was read with no test open, whatever view
+// is in force as it settles (roundGuard.windowed). Such a consume spends
+// nothing (consumeBetween): it orders the gap's next reads alone.
+func (v *exactView) spendsBetween(mk *models.Mock, windowed bool) bool {
+	return !windowed && v.isWorker(mk.Name) && !mk.IsProtocolPhase()
 }
 
 // exactView returns the view exact serving shows, nil when it is off.
@@ -801,7 +982,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// held, and the call's miss names none made elsewhere.
 		c = c.HoldingEvery()
 	}
-	return c
+	return c.WithTrackerAhead(ahead)
 }
 
 // endedName is the test of v, the view the store ended while the learn
@@ -1532,6 +1713,30 @@ func (m *MockManager) SetPoolOwners(owners map[string]string) {
 	m.exact.poolOwners.Store(&cp)
 }
 
+// SetPoolTests installs, of the replay's scope table, the mocks each test
+// lists (test ID -> names; keploy mock replay under the proven switch). It
+// tells the teardown bound (teardownBy) the run of a test's recording on no
+// clock: the run that recorded the test, whose clock its other recordings
+// are on. The agent installs it with the owners, before the pool names.
+func (m *MockManager) SetPoolTests(table map[string][]string) {
+	t := &poolTests{lists: make(map[string][]string, len(table)), of: map[string][]string{}}
+	for id, names := range table {
+		t.lists[id] = append([]string(nil), names...)
+		for _, n := range names {
+			t.of[n] = append(t.of[n], id)
+		}
+	}
+	m.exact.poolTests.Store(t)
+}
+
+// poolTests is a scope table as the teardown bound reads it
+// (SetPoolTests): the names each test lists (lists) and the tests that list
+// each name (of).
+type poolTests struct {
+	lists map[string][]string
+	of    map[string][]string
+}
+
 // InPool reports whether mk is the pool's by the scope table SetPoolNames
 // installed (integrations.PoolMembership); known is false until one was. A
 // mock is named once in a recording, and the table is the running
@@ -2234,10 +2439,17 @@ func ownedKeysOf(ix *integrations.MockIndex, mk *models.Mock) []string {
 // mocks are read from the view itself (unanswered), never from the staged
 // trees.
 func (v *exactView) shows(mk *models.Mock) bool {
+	return v.showsTo(mk, v.test != "")
+}
+
+// showsTo is shows to a call read in a test's view (windowed) or between
+// tests, whatever view is in force (roundGuard.windowed): the worker scope's
+// spends it reads are that read's (spentOutsideIn).
+func (v *exactView) showsTo(mk *models.Mock, windowed bool) bool {
 	if mk == nil {
 		return false
 	}
-	return v.unspentNow(mk) && v.showsStatic(mk)
+	return !v.spentIn(mk.Name) && !v.spentOutsideIn(mk.Name, windowed) && v.showsStatic(mk)
 }
 
 // inBackgroundPool reports whether mk, consumed in an open test, is one of
@@ -2261,10 +2473,31 @@ func (v *exactView) isWorker(name string) bool {
 	return ok
 }
 
-// spentOutside reports whether name, a data-plane recording, was consumed
-// outside every test in the current staging (outsideAnswers).
+// spentOutside reports whether name, a data-plane recording, was spent for
+// the staging in the current staging (outsideAnswers): consumed outside
+// every test; or, in a test's view, one of the worker scope's a test's
+// window consumed (outsideState.inTests). The two never mix for the worker
+// scope: a test's view reads only what the windows spent of it, so a call
+// between tests never hides one from a window, and a view with no test
+// open shows the worker scope whatever a window or a call between tests
+// consumed: outside every window it answers again (consumeBetween).
 func (v *exactView) spentOutside(name string) bool {
-	return v.outside != nil && v.outside.hidden(name, v.epoch.Load())
+	return v.spentOutsideIn(name, v.test != "")
+}
+
+// spentOutsideIn is spentOutside read for a call read in a test's view
+// (windowed) or between tests, whatever view is in force
+// (roundGuard.windowed): it differs from spentOutside for the worker scope
+// alone.
+func (v *exactView) spentOutsideIn(name string, windowed bool) bool {
+	if v.outside == nil {
+		return false
+	}
+	e := v.epoch.Load()
+	if windowed && v.isWorker(name) {
+		return v.outside.hiddenInTests(name, e)
+	}
+	return v.outside.hidden(name, e)
 }
 
 var _ integrations.StagingGenerations = (*MockManager)(nil)
@@ -2321,14 +2554,14 @@ func (v *exactView) keepWith(in []*models.Mock, show func(*models.Mock) bool) []
 	viewNarrowed.Add(uint64(len(in)))
 	out := make([]*models.Mock, 0, len(in))
 	if v.bg != nil {
-		return v.backgroundOrder(out, in, show)
+		return v.gapOrder(v.backgroundOrder(out, in, show))
 	}
 	for _, mk := range in {
 		if show(mk) {
 			out = append(out, v.learned(mk))
 		}
 	}
-	return out
+	return v.gapOrder(out)
 }
 
 // backgroundOrder appends to out what the view shows of in, in the
@@ -2366,7 +2599,9 @@ func (v *exactView) backgroundOrder(out, in []*models.Mock, show func(*models.Mo
 // mocks of kind (between tests, the next test's ahead), then what the view
 // shows of the per-test tree's values (staged) and of teardown.
 //
-// teardown is the set's teardown recordings (MockManager.teardown), which the
+// teardown is what the read takes of the startup tree (perTestFromStartup):
+// in a test's window the worker scope's recordings (windowWorker); between
+// tests the set's teardown recordings (MockManager.teardown), which the
 // callers (exactPerTest, the round snapshot) pass only while no test is open
 // after the first test fired (afterTests). The staging files every per-test
 // recording in the startup tree alone, so a call recorded after the set's
@@ -2488,19 +2723,25 @@ func (m *MockManager) teardown(key string, startup []*models.Mock) []*models.Moc
 // that clock and on none; a recording on another clock is no bound of it.
 // So a newer run's test, though recorded later, never moves an older run's
 // call after its own last test (a Go mongo-driver's endSessions) out of the
-// teardown, and that call is answered. A recording on no clock ("", an
-// untrusted stamp) is bounded by every recording, whatever its clock, as
-// before, and bounds every one: an untrusted time widens the bound, failing
-// closed. One record run stamps its recordings on one clock (the proxy's, or
-// proxyless capture's ktime, which has no relay) or on none, so the bound of
-// a set recorded in one run is the whole set's, as it was. Its limits: a
-// clock none of whose tests' recordings remain (every test of that run was
-// recorded anew) tells no teardown of it, and its call after the last test
-// misses (fail closed); and where the test recorded anew was its run's last,
-// that run's pool calls made between its previous test and it are after
+// teardown, and that call is answered. keploy's HTTP recorder and
+// keploy/integrations' Mongo v2 recorder name the clock of each call's stamp.
+// A recording on no clock ("", an untrusted stamp: one whose parser names
+// none, or one recorded before its parser named one) is bounded by every
+// recording, whatever its clock, as before. One a test lists bounds the
+// clock of the run that recorded that test, the clock its other recordings
+// are on (runClocks), and no other: a partial record's calls on no clock in
+// the tests it recorded anew never hide the older run's teardown. Any other
+// bounds every clock: an untrusted time of no known run widens the bound,
+// failing closed. Each of a run's recordings is on that run's one clock (the
+// proxy's, or proxyless capture's ktime, which has no relay) or on none, so
+// the bound of a set recorded in one run is the whole set's, as it was. Its
+// limits: a clock none of whose tests' recordings remain (every test of that
+// run was recorded anew) tells no teardown of it, and its call after the last
+// test misses (fail closed); and where the test recorded anew was its run's
+// last, that run's pool calls made between its previous test and it are after
 // every recording left on its clock, so they are its teardown too. keploy
-// test's staging (the recorded windows alone) reads no clock: it never
-// stages two record runs' recordings as one set.
+// test's staging (the recorded windows alone) reads no clock: it never stages
+// two record runs' recordings as one set.
 func (m *MockManager) teardownAfter(key, clock string) func(time.Time) bool {
 	on := m.teardownBy(key)
 	if on == nil {
@@ -2531,6 +2772,7 @@ func (m *MockManager) teardownBy(key string) func(clock string) func(time.Time) 
 		return nil
 	}
 	owners := m.exact.poolOwners.Load()
+	tests := m.exact.poolTests.Load()
 	// The generation first, then the trees (the revision's sample-read-install
 	// idiom): a bound read from trees a staging swaps meanwhile is cached
 	// under a generation that is already old. The staging generation, not
@@ -2540,10 +2782,11 @@ func (m *MockManager) teardownBy(key string) func(clock string) func(time.Time) 
 	// again.
 	rev := m.StagingGeneration()
 	times := m.exact.times.Load()
-	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool && c.owners == owners && c.times == times && c.key == key {
+	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool && c.owners == owners && c.tests == tests && c.times == times && c.key == key {
 		return c.on()
 	}
-	b := &teardownBound{rev: rev, pool: pool, owners: owners, times: times, key: key}
+	b := &teardownBound{rev: rev, pool: pool, owners: owners, tests: tests, times: times, key: key}
+	runs := newRunClocks(tests)
 	// bounds reports whether a recording named name bounds key's process.
 	bounds := func(name string, protocolPhase bool) bool {
 		if _, inPool := (*pool)[name]; inPool || protocolPhase {
@@ -2559,18 +2802,26 @@ func (m *MockManager) teardownBy(key string) func(clock string) func(time.Time) 
 	m.treesMu.RLock()
 	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
 	m.treesMu.RUnlock()
+	// visit moves the bound by one recording: a test's recording on no
+	// clock once every recording's clock is read (runClocks).
+	visit := func(name string, place time.Time, protocolPhase bool, clock string) {
+		runs.note(name, clock)
+		if !bounds(name, protocolPhase) {
+			return
+		}
+		if clock == "" && runs.hold(name, place) {
+			return
+		}
+		b.add(clock, place)
+	}
 	for _, tree := range trees {
 		for _, mk := range m.treeValues(tree, "") {
-			if bounds(mk.Name, mk.IsProtocolPhase()) {
-				b.add(mockClock(mk), models.PlaceOf(mk))
-			}
+			visit(mk.Name, models.PlaceOf(mk), mk.IsProtocolPhase(), mockClock(mk))
 		}
 	}
 	if times != nil && times.src != nil {
 		err := times.src(func(name string, place time.Time, protocolPhase bool, clock string) bool {
-			if bounds(name, protocolPhase) {
-				b.add(clock, place)
-			}
+			visit(name, place, protocolPhase, clock)
 			return true
 		})
 		if err != nil {
@@ -2580,8 +2831,114 @@ func (m *MockManager) teardownBy(key string) func(clock string) func(time.Time) 
 			return nil
 		}
 	}
+	runs.addTo(b)
 	m.exact.teardownLast.Store(b)
 	return b.on()
+}
+
+// runClocks tells, under keploy mock replay, the run of a test's recording
+// on no clock (teardownBy), from the scope table (SetPoolTests): a test is
+// recorded by one record run, and each of a run's recordings is on that
+// run's one clock or on none, so a test's recording on no clock is of the
+// run whose clock the same test's other recordings are on. It bounds that
+// clock, not every one: a partial record's recordings on no clock of the
+// tests it recorded anew (a call whose parser names no clock) never move
+// the teardown of the older run whose tests it kept. A recording on no
+// clock that no test lists, or that a test lists whose recordings are on no
+// clock, bounds every clock (fail closed), and one whose tests' recordings
+// are on several clocks bounds each of them. nil, with no scope table, holds
+// none: every recording on no clock bounds every clock.
+type runClocks struct {
+	tests *poolTests
+	// clockOf is the clock of each recording a test lists that is on one.
+	clockOf map[string]string
+	// held are the bounding recordings on no clock a test lists, in the
+	// order read, bounded once every clock is read (addTo).
+	held []heldPlace
+}
+
+// heldPlace is a recording on no clock that runClocks holds: its name and
+// its place (models.PlaceOf).
+type heldPlace struct {
+	name  string
+	place time.Time
+}
+
+// newRunClocks is the run reading of tests, nil for none.
+func newRunClocks(tests *poolTests) *runClocks {
+	if tests == nil {
+		return nil
+	}
+	return &runClocks{tests: tests, clockOf: map[string]string{}}
+}
+
+// note notes the clock of the recording named name, where a test lists it.
+func (r *runClocks) note(name, clock string) {
+	if r == nil || clock == "" || !r.listed(name) {
+		return
+	}
+	r.clockOf[name] = clock
+}
+
+// listed reports whether a test lists the recording named name.
+func (r *runClocks) listed(name string) bool {
+	return r != nil && len(r.tests.of[name]) > 0
+}
+
+// hold keeps a test's recording on no clock until every clock is read,
+// and reports whether it did: false for one no test lists.
+func (r *runClocks) hold(name string, place time.Time) bool {
+	if r == nil || !r.listed(name) {
+		return false
+	}
+	r.held = append(r.held, heldPlace{name: name, place: place})
+	return true
+}
+
+// addTo moves b by every held recording: on the clocks of its tests' runs
+// (clocksOf), or on no clock where they name none.
+func (r *runClocks) addTo(b *teardownBound) {
+	if r == nil {
+		return
+	}
+	byTest := map[string][]string{}
+	for _, h := range r.held {
+		clocks := r.clocksOf(h.name, byTest)
+		if len(clocks) == 0 {
+			b.add("", h.place)
+			continue
+		}
+		for _, c := range clocks {
+			b.add(c, h.place)
+		}
+	}
+}
+
+// clocksOf is the clocks of every test that lists the recording named name:
+// of each, the clocks of the recordings it lists; nil when one of them lists
+// none on a clock, whose run is then not known. byTest caches each test's.
+func (r *runClocks) clocksOf(name string, byTest map[string][]string) []string {
+	var out []string
+	for _, id := range r.tests.of[name] {
+		cs, ok := byTest[id]
+		if !ok {
+			for _, n := range r.tests.lists[id] {
+				if c := r.clockOf[n]; c != "" && !slices.Contains(cs, c) {
+					cs = append(cs, c)
+				}
+			}
+			byTest[id] = cs
+		}
+		if len(cs) == 0 {
+			return nil
+		}
+		for _, c := range cs {
+			if !slices.Contains(out, c) {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
 }
 
 // teardownBound is teardownAfter's bound for keploy mock replay: the latest
@@ -2598,6 +2955,7 @@ type teardownBound struct {
 	rev       uint64
 	pool      *map[string]struct{}
 	owners    *map[string]string
+	tests     *poolTests
 	times     *recordingTimes
 	key       string
 	last      time.Time
@@ -2651,19 +3009,78 @@ func (b *teardownBound) after(clock string) func(time.Time) bool {
 }
 
 // exactPerTest is v's per-test read of staged, of kind (exactView.perTest),
-// with the set's teardown recordings of kind when the read takes them.
+// with the startup tree's recordings of kind the read takes (exactFromStartup).
 func (m *MockManager) exactPerTest(v *exactView, kind models.Kind, staged []*models.Mock) []*models.Mock {
-	return v.perTest(kind, staged, m.exactTeardown(v, kind))
+	return v.perTest(kind, staged, m.exactFromStartup(v, kind))
 }
 
-// exactTeardown is the set's teardown recordings of kind v's per-test read
-// takes (exactView.afterTests), nil when it takes none.
-func (m *MockManager) exactTeardown(v *exactView, kind models.Kind) []*models.Mock {
-	if !v.afterTests(m.exact.fired.Load()) {
+// exactFromStartup is what v's per-test read of kind takes of the startup
+// tree (perTestFromStartup), nil when it takes none.
+func (m *MockManager) exactFromStartup(v *exactView, kind models.Kind) []*models.Mock {
+	fired := m.exact.fired.Load()
+	if v.test == "" && !v.afterTests(fired) {
 		return nil
 	}
 	// What the view shows of the startup tier: perTest keeps only those.
-	return m.teardown(v.poolKey, v.shownOf(m.startupTree(), kind))
+	return m.perTestFromStartup(v, v.shownOf(m.startupTree(), kind), fired)
+}
+
+// perTestFromStartup is what a per-test read in v takes of startup (what v
+// shows of the startup tree) after the per-test tier: in a test's window the
+// worker scope's data-plane recordings (windowWorker); between tests, once
+// the first test fired (fired), the set's teardown (teardown), then the rest
+// of the worker scope's; else nothing.
+// Every per-test read (exactPerTest, the round snapshot, SharedMocks) takes
+// it through here, so they read one set.
+func (m *MockManager) perTestFromStartup(v *exactView, startup []*models.Mock, fired bool) []*models.Mock {
+	if v.test != "" {
+		return v.windowWorker(startup)
+	}
+	if !v.afterTests(fired) {
+		return nil
+	}
+	// The worker scope too: a parser that reads per-test-lifetime
+	// recordings through its per-test reads alone once a test fired (Mongo)
+	// would else answer a worker: one between tests only until the first
+	// test fired. Each once, the teardown's first.
+	td := m.teardown(v.poolKey, startup)
+	w := v.windowWorker(startup)
+	if len(w) == 0 {
+		return td
+	}
+	if len(td) == 0 {
+		return w
+	}
+	seen := make(map[*models.Mock]struct{}, len(td))
+	for _, mk := range td {
+		seen[mk] = struct{}{}
+	}
+	out := append(make([]*models.Mock, 0, len(td)+len(w)), td...)
+	for _, mk := range w {
+		if _, dup := seen[mk]; !dup {
+			out = append(out, mk)
+		}
+	}
+	return out
+}
+
+// windowWorker is, of startup, the worker scope's recordings that are not
+// protocol-phase: a test's per-test read takes them, so a worker: recording
+// answers in a test's window whatever tier a parser reads it from. The
+// staging files a per-test-lifetime recording in the startup tree alone, and
+// a parser that serves only session-lifetime recordings from its session
+// tier (Postgres) reads per-test-lifetime ones from its per-test tier only:
+// without this, a recording a mapping edit moved to worker: answered no call
+// in any window. Each answers at most one call in the windows of the staging
+// (spendsInTests), whichever read offered it.
+func (v *exactView) windowWorker(startup []*models.Mock) []*models.Mock {
+	var out []*models.Mock
+	for _, mk := range startup {
+		if mk != nil && v.isWorker(mk.Name) && !mk.IsProtocolPhase() {
+			out = append(out, mk)
+		}
+	}
+	return out
 }
 
 // rangeExactPerTest calls fn with each mock of exactPerTest(v, kind, staged
@@ -2675,7 +3092,7 @@ func (m *MockManager) rangeExactPerTest(v *exactView, kind models.Kind, tree *Tr
 	if !v.rangeUnanswered(kind, false, fn) {
 		return
 	}
-	for _, mk := range v.keepPerTest(v.shownOf(tree, kind), m.exactTeardown(v, kind)) {
+	for _, mk := range v.keepPerTest(v.shownOf(tree, kind), m.exactFromStartup(v, kind)) {
 		if !fn(mk) {
 			return
 		}
@@ -2713,7 +3130,7 @@ func (v *exactView) reusableWith(kind models.Kind, out []*models.Mock, show func
 				all = append(all, mk)
 			}
 		}
-		return v.backgroundOrder(out, all, show)
+		return v.gapOrder(v.backgroundOrder(out, all, show))
 	}
 	for _, list := range staged {
 		for _, mk := range v.keepWith(list, show) {
@@ -2724,7 +3141,7 @@ func (v *exactView) reusableWith(kind models.Kind, out []*models.Mock, show func
 			out = append(out, mk)
 		}
 	}
-	return out
+	return v.gapOrder(out)
 }
 
 // exactVerdict is how exact serving settles a consume a parser reports.
@@ -2748,8 +3165,10 @@ const (
 // DeleteStartupMock): a staged mock the view shows is then spent, and the
 // staged trees keep it. A data-plane recording consumed with no test open is
 // spent for the staging (consumeOutside); any other, until the view changes.
-// One of the worker scope's, and under the background rules one of the
-// pool's, is spent for the staging through a door that does not evict too.
+// One of the worker scope's consumed in a test's window is spent for the
+// windows of the staging, and under the background rules one of the pool's
+// is spent for the staging in a test or between tests, through a door that
+// does not evict too.
 //
 // A consume that finds its view closed (a begin or an end replacing it) is no
 // refusal: it waits until the replacing view is installed and the revisions
@@ -2807,7 +3226,7 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 		(*f)(mk.Name)
 	}
 	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
-		if v != nil && mk != nil && (evicts || v.isWorker(mk.Name) || v.spendsAsPool(mk)) {
+		if v != nil && mk != nil && (evicts || v.spendsInTests(mk, g.windowed(v)) || v.spendsBetween(mk, g.windowed(v)) || v.spendsAsPool(mk)) {
 			if _, own := v.index[mk.Name]; !own {
 				// What a spend reads (consumeOutside), and the staged
 				// recording its take names (stagedRecording), before the
@@ -2829,7 +3248,7 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 			// lock past it would leave every consume, snapshot and boundary
 			// after it waiting for good, with no error.
 			defer m.exact.round.mu.Unlock()
-			verdict, wait, after := m.exactConsumeIn(v, mk, evicts)
+			verdict, wait, after := m.exactConsumeIn(v, mk, evicts, g)
 			// One the view passes is its tier's to take, in this step: a
 			// tier that refuses it refuses the consume.
 			if wait == nil && verdict == exactPass && tier != nil && !tier() {
@@ -2878,12 +3297,14 @@ func settleInForce[T any](m *MockManager, refused T, settle func(v *exactView) (
 }
 
 // exactConsumeIn is exactConsume settled against v, holding the round lock:
-// what it takes is written to the staging's take log in the same step.
+// what it takes is written to the staging's take log in the same step. g,
+// when not nil, is the consume's guard: a worker-scope recording is read and
+// spent for the view g's call was read in (roundGuard.windowed).
 // wait, when not nil, says v is closed: nothing was settled, and the consume
 // is to be settled again once wait is closed. after, when not nil, is what
 // the consume tells the replay and the parsers' indexes, to run once the
 // round lock is let go.
-func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool) (exactVerdict, <-chan struct{}, func()) {
+func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool, g *roundGuard) (exactVerdict, <-chan struct{}, func()) {
 	if v == nil || mk == nil {
 		return exactPass, nil, nil
 	}
@@ -2929,28 +3350,68 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 			return exactServed, nil, func() { m.noteExactServed(owned, mk) }
 		}
 	}
-	if !v.shows(mk) {
+	windowed := g.windowed(v)
+	if !v.showsTo(mk, windowed) {
 		return exactRefused, nil, nil
 	}
-	// One of the worker scope's answers at most one request in the staging,
-	// as a test's own mock does in its test, through whichever door a parser
-	// consumes it: a parser that keeps a session mock it serves (HTTP's
-	// MarkMockAsUsed) spends it too. So does one of the pool's under the
-	// background rules, in a test or between tests: a parser that consumes
-	// only through a door that never evicts (MarkMockAsUsed: enterprise
-	// Redis and Aerospike; UpdateUnFilteredMock: keploy's Generic) would
-	// else have one pool recording answer every identical call of the set.
-	worker := v.isWorker(mk.Name) && !mk.IsProtocolPhase()
+	// In a test's window one of the worker scope's answers at most one
+	// request in the windows of the staging, as a test's own mock does in
+	// its test, through whichever door a parser consumes it: a parser that
+	// keeps a session mock it serves (HTTP's MarkMockAsUsed) spends it too.
+	// Outside every test it answers again (above). One of the pool's under the background
+	// rules answers at most one request in the staging, in a test or between
+	// tests, through any door: a parser that consumes only through a door
+	// that never evicts (MarkMockAsUsed: enterprise Redis and Aerospike;
+	// UpdateUnFilteredMock: keploy's Generic) would else have one pool
+	// recording answer every identical call of the set. That spend is the
+	// pool's alone: the replay stages the worker scope apart from the pool
+	// (models.ExactServing.Worker), so a call the app makes more often
+	// between tests when replay is slower never spends a worker: recording
+	// a later test's window needs.
+	// Outside every window one of the worker scope's answers again, through
+	// any door (consumeBetween): a call read with no test open spends
+	// nothing, whatever view is in force as it settles, and only orders the
+	// next gap reads (gapOrder). A door that keeps the recording passes to
+	// its tier as before; a delete door's is served without leaving the
+	// tree. Either way the revisions move, so a parser that indexes what it
+	// read (Postgres's pool index) reads it again for the next call.
+	if v.spendsBetween(mk, windowed) {
+		v.mu.Lock()
+		if wait := v.closedWait(); wait != nil {
+			v.mu.Unlock()
+			return exactRefused, wait, nil
+		}
+		verdict, first := m.consumeBetween(mk)
+		v.mu.Unlock()
+		if verdict != exactServed {
+			return verdict, nil, nil
+		}
+		if !evicts {
+			return exactPass, nil, func() { m.bumpBetween(mk.Kind, first) }
+		}
+		return exactServed, nil, func() {
+			m.noteExactSpent(mk)
+			if first {
+				m.bumpGapOrder(mk.Kind)
+			}
+		}
+	}
+	worker := v.spendsInTests(mk, windowed)
 	if !evicts && !worker && !v.spendsAsPool(mk) {
 		return exactPass, nil, nil
 	}
 	// A data-plane recording consumed through a delete door with no test
-	// open, and one of the worker scope's whether a test is open or not, is
-	// spent for the staging: it answers at most one request in the set. So
-	// is one of the pool's a test consumes under the background rules,
-	// through any door: the background is the set's, whoever's call it
-	// answers.
-	if (v.test == "" || worker || v.inBackgroundPool(mk)) && !mk.IsProtocolPhase() {
+	// open is spent for the staging: it answers at most one request in the
+	// set. So is one of the pool's under the background rules, in a test or
+	// between tests, through any door: the background is the set's, whoever's
+	// call it answers. One of the worker scope's a test consumes is spent for
+	// the windows of the staging (consumeOutside's inTest). Which of the two
+	// a worker-scope consume is follows the view its call was read in
+	// (windowed), not the one in force as it settles: a call read between
+	// tests whose commit lands after the next test opened is still one of
+	// the calls between tests (spendsBetween), and a test's call that
+	// commits after its end is still the window's.
+	if (v.test == "" || worker || v.spendsBetween(mk, windowed) || v.inBackgroundPool(mk)) && !mk.IsProtocolPhase() {
 		// The view's closed check and the spend are one step: no begin or
 		// end lands between them.
 		v.mu.Lock()
@@ -2958,7 +3419,7 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 			v.mu.Unlock()
 			return exactRefused, wait, nil
 		}
-		verdict := m.consumeOutside(mk)
+		verdict := m.consumeOutside(mk, worker)
 		v.mu.Unlock()
 		if verdict != exactServed {
 			return verdict, nil, nil
@@ -3196,14 +3657,17 @@ func (m *MockManager) SequenceView() (integrations.SequenceView, bool) {
 
 // sequenceViewOf is the sequence view of v (SequenceView), the view in force
 // now or the one a call was read in (MarkCallRound). In a test that shows
-// worker-scope mocks it tells them (Worker) with the cursor the calls between
-// tests advance (Between), so a worker-scope request is one sequence for the
-// set wherever its calls land: the worker scope belongs to no test.
+// worker-scope mocks it tells them (Worker) with the windows' cursor
+// (Between: windowsCursor), so a worker-scope request is one sequence across
+// the test windows wherever its calls land in them: the worker scope belongs
+// to no test. The calls between tests walk their own cursor (the pool
+// view's), so a window's answers never depend on how many calls landed
+// between tests.
 func (m *MockManager) sequenceViewOf(v *exactView) integrations.SequenceView {
 	sv := integrations.SequenceView{Cursor: viewCursor{m: m, v: v}, Test: v.test, Start: v.winStart, End: v.winEnd}
 	if v.test != "" && len(v.worker) > 0 {
 		sv.Worker = func(mk *models.Mock) bool { return mk != nil && !mk.IsProtocolPhase() && v.isWorker(mk.Name) }
-		sv.Between = backgroundCursor{m: m}
+		sv.Between = windowsCursor{m: m}
 	}
 	return sv
 }
