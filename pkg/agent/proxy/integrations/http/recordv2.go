@@ -219,7 +219,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// stream ended with the connection (EndedWithConnection) it is the
 		// client that stopped reading and closed, and the response is
 		// recorded as the client had it (FinalHTTP.RespReadInPart).
-		streamEnded := false
+		streamEnded, readClosed := false, false
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// Legacy encodeHTTP treats EOF after some bytes as
@@ -230,6 +230,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				// ended the stream (its tee gave up on a consumer) marked the
 				// mock incomplete for them.
 				streamEnded = errors.Is(err, io.EOF)
+				readClosed = !streamEnded
 				if !gotLastWritten.IsZero() {
 					resTs = gotLastWritten
 				}
@@ -304,7 +305,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			}
 			fault = partAnswerFault(sess)
 		}
-		if fault == nil && bodyEndsAtClose(finalResp, requestMethod(finalReq)) && !closeEnded(sess, streamEnded) {
+		method := requestMethod(finalReq)
+		status, endsAtClose := responseFraming(finalResp, method)
+		if fault == nil && endsAtClose && !closeEnded(sess, streamEnded) {
 			// The body ends at the upstream's close, and its read did not
 			// end there (closeEnded): it is not known to be whole, and no
 			// fault is known to record it with. Recorded as far as it
@@ -330,6 +333,26 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
 			Fault:            fault,
 		}, destPort, sess.ClientConnID, sess.Opts)
+		if err != nil && readClosed {
+			// The session closed the response's stream under its read (the
+			// supervisor's abort, once the parser's context has ended or the
+			// parser is retired) before the response's end came, as its
+			// Content-Length, its chunked framing or its head's end sets it:
+			// what was read of it does not parse whole because the read was
+			// cut there, which is no decode error. It is not known to be
+			// whole, and no fault is known to record it with. The streams are
+			// closed: nothing more of the connection can be read.
+			reason := supervisor.LeftOutReadAborted
+			if mark, ok := sess.TakeMockIncomplete(); ok {
+				reason = mark + ": " + reason
+			}
+			logger.Debug("V2 HTTP record: the response's read was closed before its end; the exchange is left out", zap.Error(err))
+			sess.ReportLeftOut(&models.Mock{
+				Kind: models.HTTP,
+				Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+			}, reason)
+			return nil
+		}
 		if err != nil {
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to build mock")
@@ -355,6 +378,13 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			// Nothing recorded for this exchange (a passthrough), so a mark
 			// set during it must not leave out the next exchange's mock.
 			sess.MarkMockComplete()
+		}
+		if tunnelFollows(method, status) {
+			// The connection is a tunnel from here (RFC 9110 9.3.6), whose
+			// bytes are no HTTP/1 exchange: there is nothing more of it for
+			// this parser to record.
+			logger.Debug("V2 HTTP record: a CONNECT was answered with a tunnel; the connection's recording ends at its head")
+			return nil
 		}
 	}
 }
@@ -468,29 +498,42 @@ func partAnswerFault(sess *supervisor.Session) *models.Fault {
 	return &models.Fault{Kind: models.FaultTruncate, Observed: "the upstream closed the connection partway through the answer"}
 }
 
-// bodyEndsAtClose reports whether resp, a response as readResponseV2 read it to
-// the request of method, has a body framed by the upstream's close: its final
-// head has come, it has a body by rule, and the head names neither a
-// Content-Length nor a chunked Transfer-Encoding, as readResponseV2 frames it.
-// A head readResponseV2 found no end of (messageHead: one whose lines end in a
-// bare LF, read to the stream's end) is framed as buildHTTPMock parses it
-// (parseFinalResponse, closeDelimited).
-func bodyEndsAtClose(resp []byte, method string) bool {
+// responseFraming is the status of resp's final response, a response as
+// readResponseV2 read it to the request of method, and whether its body ends at
+// the upstream's close (endsAtClose): its final head has come, it has a body
+// (not one with none by rule, nor a 101 Switching Protocols or a CONNECT's 2xx,
+// which end at their head: what follows is another protocol, or the tunnel),
+// and the head names neither a Content-Length nor a chunked Transfer-Encoding,
+// as readResponseV2 frames it. A head readResponseV2 found no end of
+// (messageHead: one whose lines end in a bare LF, read to the stream's end) is
+// framed as buildHTTPMock parses it (parseFinalResponse, closeDelimited), and a
+// response that does not parse has status 0.
+func responseFraming(resp []byte, method string) (status int, endsAtClose bool) {
 	head, _, status, ok := messageHead(resp, true)
 	if !ok {
 		parsed, _, err := parseFinalResponse(&FinalHTTP{Resp: resp}, &http.Request{Method: method})
-		return err == nil && closeDelimited(parsed, method)
+		if err != nil {
+			return 0, false
+		}
+		return parsed.StatusCode, closeDelimited(parsed, method)
 	}
-	if responseHasNoBody(method, status) {
-		return false
+	if responseHasNoBody(method, status) || status == http.StatusSwitchingProtocols || tunnelFollows(method, status) {
+		return status, false
 	}
 	contentLength, transferEncoding := parseHeaders(head)
-	return contentLength == "" && !strings.Contains(strings.ToLower(transferEncoding), "chunked")
+	return status, contentLength == "" && !strings.Contains(strings.ToLower(transferEncoding), "chunked")
+}
+
+// tunnelFollows reports whether a response of status to a request of method
+// opens a tunnel: a CONNECT's 2xx, after whose head the connection carries
+// the tunnel's bytes (RFC 9110 9.3.6), not its body (RFC 9112 6.3).
+func tunnelFollows(method string, status int) bool {
+	return method == http.MethodConnect && status/100 == 2
 }
 
 // closeEnded reports whether a response's read, which ended at the stream's
 // end where streamEnded (io.EOF) and else at its reader's close, ended at the
-// upstream's close, the one end of a body framed by it (bodyEndsAtClose): the
+// upstream's close, the one end of a body framed by it (responseFraming): the
 // stream ran out, not at a capture hole (Session.EndedAtHole), and the
 // upstream's side had ended with its FIN (Session.PeerEnded), which the relay
 // marks before it ends the stream; not with its reset, nor with no end of its
@@ -690,7 +733,7 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 	// 2. Parse the final response's headers for body framing. The answer to
 	// a HEAD, a 204 and a 304 have no body whatever the headers say.
 	head, bodyStart, status, _ := messageHead(*finalResp, true)
-	if responseHasNoBody(reqMethod, status) {
+	if responseHasNoBody(reqMethod, status) || tunnelFollows(reqMethod, status) {
 		return lastWr, nil
 	}
 	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
@@ -859,6 +902,13 @@ func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
 // final one's status line) is an error wrapping io.ErrUnexpectedEOF, as a
 // response cut short is.
 func parseFinalResponse(m *FinalHTTP, req *http.Request) (resp *http.Response, cut bool, err error) {
+	defer func() {
+		// net/http reads a CONNECT's 2xx as a response whose body ends at
+		// the close: what follows its head is the tunnel's bytes.
+		if err == nil && tunnelFollows(req.Method, resp.StatusCode) {
+			resp.Body, resp.ContentLength = http.NoBody, 0
+		}
+	}()
 	rd := bytes.NewReader(m.Resp)
 	br := bufio.NewReader(rd)
 	interim, final := 0, 0 // final: where the response after the interims begins
@@ -1025,7 +1075,9 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		// A response with no body by rule (to a HEAD, a 1xx, 204 or 304)
 		// keeps the Content-Length it was sent with: a HEAD's is the size of
 		// the body a GET gets (an S3 client's Stat), not its own 0.
-		if !responseHasNoBody(req.Method, respParsed.StatusCode) {
+		// Nor is one set on a CONNECT's 2xx, whose head opens a tunnel
+		// (RFC 9110 9.3.6: it carries no Content-Length).
+		if !responseHasNoBody(req.Method, respParsed.StatusCode) && !tunnelFollows(req.Method, respParsed.StatusCode) {
 			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
 		}
 	}

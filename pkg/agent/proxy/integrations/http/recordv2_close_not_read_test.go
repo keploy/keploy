@@ -3,12 +3,14 @@
 package http
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -50,8 +52,8 @@ func leftOutReasons(logs *observer.ObservedLogs) []string {
 	return reasons
 }
 
-// wantLeftOutUnread checks that the exchange was left out for want, with
-// nothing recorded, nothing logged at ERROR, and recordV2 returning nil.
+// wantLeftOutUnread checks that the exchange, whose response's end was not
+// read, was left out for want, with nothing recorded, nothing logged at ERROR, and recordV2 returning nil.
 func wantLeftOutUnread(t *testing.T, name string, logs *observer.ObservedLogs, mocks []*models.Mock, err error, want string) {
 	t.Helper()
 	if err != nil {
@@ -62,7 +64,7 @@ func wantLeftOutUnread(t *testing.T, name string, logs *observer.ObservedLogs, m
 		if m.Spec.HTTPResp != nil {
 			body = m.Spec.HTTPResp.Body
 		}
-		t.Errorf("%s: recorded a mock with body %q and fault %v; want none: the body ends at the upstream's close, which was not read",
+		t.Errorf("%s: recorded a mock with body %q and fault %v; want none: the response's end was not read",
 			name, body, m.Spec.Fault)
 	}
 	if got := leftOutReasons(logs); len(got) != 1 || got[0] != want {
@@ -323,6 +325,280 @@ func drainMocks(mocks chan *models.Mock) []*models.Mock {
 			got = append(got, m)
 		default:
 			return got
+		}
+	}
+}
+
+// recordUnit records one exchange of req and resp on a session whose streams
+// end with no side's end marked, after prep sets the session up, and returns
+// what it recorded, what was left out and what recordV2 returned.
+func recordUnit(t *testing.T, req, resp string, prep func(*supervisor.Session)) ([]*models.Mock, *observer.ObservedLogs, error) {
+	t.Helper()
+	supervisor.ResetLeftOutWarningsForTest()
+	core, logs := observer.New(zapcore.DebugLevel)
+	sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
+	sess.Logger = zap.New(core)
+	at := time.Unix(1_700_007_000, 0)
+	sendReq([]byte(req), at, at)
+	sendResp([]byte(resp), at, at)
+	if prep != nil {
+		prep(sess)
+	}
+	closeReq()
+	closeResp()
+	err := (&HTTP{Logger: zap.New(core)}).recordV2(t.Context(), sess)
+	return drainMocks(mocks), logs, err
+}
+
+// wantRecordedWhole checks that one mock was recorded, of status and body,
+// with nothing left out, nothing logged at ERROR, and recordV2 returning nil.
+func wantRecordedWhole(t *testing.T, name string, logs *observer.ObservedLogs, mocks []*models.Mock, err error, status int, body string) {
+	t.Helper()
+	if err != nil || len(mocks) != 1 || mocks[0].Spec.HTTPResp == nil ||
+		mocks[0].Spec.HTTPResp.StatusCode != status || mocks[0].Spec.HTTPResp.Body != body || mocks[0].Spec.Fault != nil {
+		t.Errorf("%s: recorded %d mocks (%+v), recordV2 = %v; want one of status %d, body %q, no fault", name, len(mocks), mocks, err, status, body)
+	}
+	if got := leftOutReasons(logs); len(got) != 0 {
+		t.Errorf("%s: left out for %q; want nothing left out", name, got)
+	}
+	for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+		t.Errorf("%s: logged at ERROR: %s", name, e.Message)
+	}
+}
+
+const (
+	upgradeReq  = "GET /ws HTTP/1.1\r\nHost: ws.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+	upgradeHead = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
+	wsFrame     = "\x81\x05hello"
+)
+
+// A 101 Switching Protocols ends at its head (RFC 9112 6.3), and what follows
+// it is another protocol, not its body: its mock does not depend on how the
+// upgraded connection ends. Each way the stream ends short of the upstream's
+// close records it, as a whole close-delimited body is not.
+func TestRecordV2_ASwitchingProtocolsHeadIsWholeHoweverTheUpgradedStreamEnds(t *testing.T) {
+	for name, prep := range map[string]func(*supervisor.Session){
+		"no side's end":           nil,
+		"a capture hole":          func(s *supervisor.Session) { s.MarkEndedAtHole(fakeconn.FromDest, "test hole") },
+		"observe-only, cut":       func(s *supervisor.Session) { s.Opts.SkipTLSMITM = true },
+		"the upstream's reset":    func(s *supervisor.Session) { s.MarkPeerEndedBy(fakeconn.FromDest, true, supervisor.EndAtStop) },
+		"observe-only, conn ends": func(s *supervisor.Session) { s.Opts.SkipTLSMITM = true; s.MarkEndedWithConnection(fakeconn.FromDest) },
+	} {
+		mocks, logs, err := recordUnit(t, upgradeReq, upgradeHead+wsFrame, prep)
+		wantRecordedWhole(t, name, logs, mocks, err, 101, "")
+	}
+}
+
+// The same through the relay on real sockets: the recording stops while the
+// upgraded connection is open, and the relay ends the streams with neither
+// side's end read.
+func TestRecordV2_ASwitchingProtocolsHeadIsWholeAtTheRelaysStop(t *testing.T) {
+	supervisor.ResetLeftOutWarningsForTest()
+	c := newRelayedConn(t)
+	c.start(t)
+	write(t, c.app, c.src, upgradeReq)
+	relayed(t, c.dest, upgradeReq)
+	write(t, c.dest, c.dst, upgradeHead+wsFrame)
+	relayed(t, c.app, upgradeHead+wsFrame)
+	c.stopBegun.Store(true)
+	c.stopRelay()
+	<-c.relayDone
+	mocks, err := c.finish(t)
+	wantRecordedWhole(t, "the relay's stop", c.logs, mocks, err, 101, "")
+}
+
+// A close-delimited body the recording's stop cut through the relay, with the
+// connection open: the relay ends the stream with no side's end, which is not
+// the upstream's close.
+func TestRecordV2_ACloseDelimitedBodyAtTheRelaysStopIsLeftOut(t *testing.T) {
+	supervisor.ResetLeftOutWarningsForTest()
+	c := newRelayedConn(t)
+	c.start(t)
+	write(t, c.app, c.src, reportReq)
+	relayed(t, c.dest, reportReq)
+	write(t, c.dest, c.dst, reportHead+firstHalf)
+	relayed(t, c.app, reportHead+firstHalf)
+	awaitParserWaits(t, c.sess.DestStream, len(reportHead+firstHalf))
+	c.stopBegun.Store(true)
+	c.stopRelay()
+	<-c.relayDone
+	mocks, err := c.finish(t)
+	if p := c.sess.PeerEnded(fakeconn.FromDest); p != supervisor.PeerOpen {
+		t.Fatalf("the upstream's end is %v; want none: the relay stopped with the connection open", p)
+	}
+	wantLeftOutUnread(t, "the relay's stop", c.logs, mocks, err, supervisor.LeftOutCloseNotRead)
+}
+
+// The upstream's close is asked of the upstream's side: its reset once the
+// stop had begun, then the client's FIN, ends no close-delimited body.
+func TestRecordV2_ACloseDelimitedBodyEndsOnlyAtTheUpstreamsOwnClose(t *testing.T) {
+	mocks, logs, err := recordUnit(t, reportReq, reportHead+firstHalf, func(s *supervisor.Session) {
+		s.MarkPeerEndedBy(fakeconn.FromDest, true, supervisor.EndAtStop)
+		s.MarkPeerEnded(fakeconn.FromClient, false)
+	})
+	wantLeftOutUnread(t, "reset, then the client's FIN", logs, mocks, err, supervisor.LeftOutCloseNotRead)
+}
+
+// The answer to a HEAD has no body whatever its head says (RFC 9112 6.3), so
+// one with neither a Content-Length nor a chunked Transfer-Encoding is whole at
+// its head, whatever its line endings, however its stream ends.
+func TestRecordV2_TheAnswerToAHEADWithNoFramingIsWholeAtItsHead(t *testing.T) {
+	for name, resp := range map[string]string{
+		"CRLF lines":    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+		"bare-LF lines": "HTTP/1.1 200 OK\nContent-Type: text/plain\nConnection: close\n\n",
+	} {
+		mocks, logs, err := recordUnit(t, "HEAD /report HTTP/1.1\r\nHost: reports.example\r\n\r\n", resp, nil)
+		wantRecordedWhole(t, name, logs, mocks, err, 200, "")
+	}
+}
+
+const connectReq = "CONNECT api.example:443 HTTP/1.1\r\nHost: api.example:443\r\n\r\n"
+
+// A CONNECT's 2xx opens a tunnel after its head (RFC 9110 9.3.6): it has no
+// body (RFC 9112 6.3), and what follows is the tunnel's bytes, no HTTP/1
+// exchange. Its mock is its head, recorded as the head comes, and the
+// connection's recording ends there, while the tunnel carries on. A CONNECT
+// refused (its 407) is an answer like any other, with its body, and the client
+// may ask again on the connection.
+func TestRecordV2_AConnectsTunnelIsNoBodyAndNoExchange(t *testing.T) {
+	for _, refusedFirst := range []bool{false, true} {
+		name := "tunnel"
+		if refusedFirst {
+			name = "refused, then a tunnel"
+		}
+		supervisor.ResetLeftOutWarningsForTest()
+		core, logs := observer.New(zapcore.DebugLevel)
+		sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
+		t.Cleanup(func() { closeReq(); closeResp() })
+		sess.Logger = zap.New(core)
+		at := time.Unix(1_700_007_300, 0)
+		if refusedFirst {
+			sendReq([]byte(connectReq), at, at)
+			sendResp([]byte("HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 4\r\n\r\nauth"), at, at)
+		}
+		sendReq([]byte(connectReq), at, at)
+		// The tunnel's first bytes come with the head; inside it, a plain
+		// HTTP/1 call, which is the tunnel's, not this connection's.
+		sendResp([]byte("HTTP/1.1 200 Connection Established\r\n\r\n\x16\x03\x01tunnel"), at, at)
+		sendReq([]byte("GET /inside HTTP/1.1\r\nHost: api.example\r\n\r\n"), at, at)
+		sendResp([]byte("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\ninside"), at, at)
+		done := make(chan error, 1)
+		go func() { done <- (&HTTP{Logger: zap.New(core)}).recordV2(t.Context(), sess) }()
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: recordV2 did not return within 10s of the tunnel's head with the connection open", name)
+		}
+		got := drainMocks(mocks)
+		want := []int{200}
+		if refusedFirst {
+			want = []int{407, 200}
+		}
+		if err != nil || len(got) != len(want) {
+			t.Fatalf("%s: recorded %d mocks, recordV2 = %v; want %d and nil", name, len(got), err, len(want))
+		}
+		for i, m := range got {
+			if m.Spec.HTTPResp == nil || m.Spec.HTTPResp.StatusCode != want[i] {
+				t.Fatalf("%s: mock %d is %+v; want status %d", name, i, m.Spec.HTTPResp, want[i])
+			}
+		}
+		if refusedFirst && got[0].Spec.HTTPResp.Body != "auth" {
+			t.Errorf("%s: the 407's body is %q; want %q", name, got[0].Spec.HTTPResp.Body, "auth")
+		}
+		tunnel := got[len(got)-1].Spec.HTTPResp
+		if tunnel.Body != "" {
+			t.Errorf("%s: the tunnel's head was recorded with body %q; want none: those are the tunnel's bytes", name, tunnel.Body)
+		}
+		if cl, ok := tunnel.Header["Content-Length"]; ok {
+			t.Errorf("%s: the tunnel's head was recorded with Content-Length %q, which it was not sent and must not carry", name, cl)
+		}
+		if r := leftOutReasons(logs); len(r) != 0 {
+			t.Errorf("%s: left out for %q; want nothing left out", name, r)
+		}
+		for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+			t.Errorf("%s: logged at ERROR: %s", name, e.Message)
+		}
+	}
+}
+
+// The parser's context ends, then the supervisor's abort closes its streams
+// under it, with no side's end and the recording not stopping, partway
+// through a response framed by its Content-Length, its chunks or its head:
+// what was read is not the response, and the cut is keploy's own, not a decode
+// error. The exchange is left out, and said so (LeftOutReadAborted), with
+// nothing logged at ERROR. What was read whole by then is recorded: a 101's
+// head, and a bare-LF head's response, which readResponseV2 reads to the
+// stream's end, once whole.
+func TestRecordV2_AResponseReadTheAbortClosedIsLeftOutUnlessWhole(t *testing.T) {
+	for _, tc := range []struct {
+		name, req, resp string
+		marked          bool
+		whole           int // the status recorded, 0 for none
+		body            string
+	}{
+		{name: "Content-Length body", req: reportReq, resp: "HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\n" + firstHalf},
+		{name: "chunked, between chunks", req: reportReq, resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"},
+		{name: "chunked, in a chunk", req: reportReq, resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n20\r\nhello"},
+		{name: "head", req: reportReq, resp: "HTTP/1.1 200 OK\r\nContent-Le"},
+		{name: "head, marked", req: reportReq, resp: "HTTP/1.1 200 OK\r\nContent-Le", marked: true},
+		{name: "101", req: upgradeReq, resp: upgradeHead + wsFrame, whole: 101},
+		{name: "bare-LF head, whole", req: reportReq, resp: "HTTP/1.1 200 OK\nContent-Length: 5\n\nhello", whole: 200, body: "hello"},
+	} {
+		supervisor.ResetLeftOutWarningsForTest()
+		core, logs := observer.New(zapcore.DebugLevel)
+		sess, sendReq, _, sendResp, _, mocks := newTestSession(t)
+		sess.Logger = zap.New(core)
+		at := time.Unix(1_700_007_400, 0)
+		sendReq([]byte(tc.req), at, at)
+		sendResp([]byte(tc.resp), at, at)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- (&HTTP{Logger: zap.New(core)}).recordV2(ctx, sess) }()
+		awaitParserWaits(t, sess.DestStream, len(tc.resp))
+		if tc.marked {
+			sess.MarkMockIncomplete("test mark")
+		}
+		cancel()
+		_ = sess.DestStream.Close()
+		_ = sess.ClientStream.Close()
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: recordV2 did not return within 10s of its streams' close", tc.name)
+		}
+		if tc.whole != 0 {
+			// Recorded, the parser goes on to the next request and returns
+			// at its context's end.
+			if errors.Is(err, context.Canceled) {
+				err = nil
+			}
+			wantRecordedWhole(t, tc.name, logs, drainMocks(mocks), err, tc.whole, tc.body)
+			continue
+		}
+		want := supervisor.LeftOutReadAborted
+		if tc.marked {
+			want = "test mark: " + want
+		}
+		wantLeftOutUnread(t, tc.name, logs, drainMocks(mocks), err, want)
+	}
+}
+
+// A response read to its stream's end, not to a close of keploy's own, that
+// does not parse is the upstream's malformed answer: a decode error, said at
+// ERROR, as before.
+func TestRecordV2_AMalformedResponseReadToItsStreamsEndIsADecodeError(t *testing.T) {
+	mocks, logs, err := recordUnit(t, reportReq, "HTTP/1.1 200 OK\nContent-Type text/plain\n\nbody", nil)
+	if err == nil || len(mocks) != 0 {
+		t.Errorf("recorded %d mocks, recordV2 = %v; want none and the decode error", len(mocks), err)
+	}
+	if got := logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessage("V2 HTTP record: failed to build mock").Len(); got != 1 {
+		t.Errorf("logged the decode error at ERROR %d times; want once", got)
+	}
+	for _, r := range leftOutReasons(logs) {
+		if r == supervisor.LeftOutReadAborted {
+			t.Errorf("left out for %q; want the decode error: keploy did not close the read", r)
 		}
 	}
 }

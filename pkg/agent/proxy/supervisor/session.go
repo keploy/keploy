@@ -1434,8 +1434,21 @@ const (
 // when its read of a side fails otherwise, as at a TLS record cut short), or
 // at the upstream's reset once the recording's stop had begun, which is not
 // the close that ends such a body. Recorded as far as it came, replay would
-// serve a complete-looking shorter response.
-const LeftOutCloseNotRead = "the response's body ends at the upstream's close, and its read ended before that close"
+// serve a complete-looking shorter response. The text before its colon is its
+// cause, of class leftOutCloseNotRead.
+const LeftOutCloseNotRead = leftOutCloseNotReadCause + ": the response's body ends at that close, and its read ended before it"
+
+// leftOutCloseNotReadCause is LeftOutCloseNotRead's cause (leftOutCause).
+const leftOutCloseNotReadCause = "the upstream's close was not read"
+
+// LeftOutReadAborted is the reason an HTTP/1 recorder leaves an exchange out
+// whose response's stream the session closed under its read (the supervisor's
+// abort, once the parser's context has ended or the parser is retired) before
+// the response's end, as its Content-Length, its chunked framing or its head's
+// end sets it, came: what was read does not parse whole because the read was
+// cut there, which is no decode error, and it is not known to be whole.
+const LeftOutReadAborted = "the response's read was aborted partway through it: keploy closed the connection's capture " +
+	"before the response's end came"
 
 // maxLeftOutCause is the longest cause leftOutCause keeps of a reason.
 const maxLeftOutCause = 64
@@ -1492,6 +1505,9 @@ const (
 	// leftOutClientClosed is an exchange whose client closed the connection
 	// partway through the response (LeftOutClientClosedPartway).
 	leftOutClientClosed = "client_closed"
+	// leftOutCloseNotRead is an exchange whose response's body ends at the
+	// upstream's close, which its read did not reach (LeftOutCloseNotRead).
+	leftOutCloseNotRead = "close_not_read"
 	leftOutOther        = "other"
 )
 
@@ -1505,6 +1521,8 @@ func leftOutClass(cause string) string {
 		return leftOutReset
 	case LeftOutClientClosedPartway:
 		return leftOutClientClosed
+	case leftOutCloseNotReadCause:
+		return leftOutCloseNotRead
 	}
 	return leftOutOther
 }
@@ -1560,6 +1578,12 @@ func leftOutNextStep(class string, spanned bool) string {
 			"recording's stop closed it, with the call in flight), so there is no whole exchange to " +
 			"record, and a replay cannot reproduce the cut; the capture lost nothing. If the call timed out, raise the " +
 			"app's timeout for it and re-record"
+	case leftOutCloseNotRead:
+		return next + "reason=the upstream's close was not read: the response has no Content-Length and is not chunked, " +
+			"so only the upstream's close ends its body, and its read ended before that close (the recording stopped, " +
+			"the upstream reset the connection, or keploy's read of it broke or was aborted), so the body is not known " +
+			"to be whole and the exchange was left out to keep the recording true. No setting changes this: an " +
+			"exchange whose upstream closes the connection after the whole body is recorded"
 	}
 	return next + "Re-run with --debug to see each mock left out and why it could not be recorded"
 }

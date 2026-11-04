@@ -11,8 +11,12 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // An observe-only capture (a DaemonSet's, Opts.SkipTLSMITM) carries only the
@@ -314,6 +318,7 @@ func TestRecordV2_WholeResponsesAreRecordedAlike(t *testing.T) {
 		"content-length":                       "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
 		"content-length, bare-LF header lines": "HTTP/1.1 200 OK\r\nContent-Length: 5\nContent-Type: text/plain\n\nhello",
 		"chunked":                              "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+		"chunked, capitalised":                 "HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
 		"no content":                           "HTTP/1.1 204 No Content\r\n\r\n",
 	} {
 		read, err := recordOne(t, clientClosed, []byte(resp))
@@ -399,11 +404,15 @@ func TestRecordV2_ObserveOnly_CloseDelimitedGzipBodyReadInPart(t *testing.T) {
 
 // Only a stream that ran out ended where its capture did. One whose reader was
 // closed under it (fakeconn.ErrClosed: an abort, with chunks possibly still on
-// their way) is not read in part, even where the capture had marked the end.
+// their way) is not read in part, even where the capture had marked the end:
+// the close cut the read, and the exchange is left out for it
+// (LeftOutReadAborted), as no decode error.
 func TestRecordV2_ObserveOnly_ClosedReaderIsNotReadInPart(t *testing.T) {
 	t.Parallel()
-	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	core, logs := observer.New(zapcore.DebugLevel)
+	h := &HTTP{Logger: zap.New(core)}
 	sess, sendReq, closeReq, sendResp, _, mocks := newTestSession(t)
+	sess.Logger = zap.New(core)
 	sess.Opts.SkipTLSMITM = true
 	sess.MarkEndedWithConnection(fakeconn.FromDest)
 	at := time.Unix(1_700_005_000, 0)
@@ -423,8 +432,8 @@ func TestRecordV2_ObserveOnly_ClosedReaderIsNotReadInPart(t *testing.T) {
 	_ = sess.DestStream.Close() // its reader is closed; its chunk channel is not
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Error("recordV2 returned nil for a response whose reader was closed under it; want the parse error")
+		if err != nil {
+			t.Errorf("recordV2 = %v for a response whose reader was closed under it; want nil: the close cut the read, which is no decode error", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("recordV2 did not exit within 2s")
@@ -433,6 +442,18 @@ func TestRecordV2_ObserveOnly_ClosedReaderIsNotReadInPart(t *testing.T) {
 	case m := <-mocks:
 		t.Errorf("mock emitted for a response whose reader was closed under it: %+v", m.Spec.HTTPResp)
 	default:
+	}
+	var reasons []any // at WARN, or at DEBUG past its cause's WARN limit
+	for _, e := range logs.All() {
+		if e.Message == supervisor.LeftOutWarnMsg || e.Message == supervisor.LeftOutDebugMsg {
+			reasons = append(reasons, e.ContextMap()["reason"])
+		}
+	}
+	if len(reasons) != 1 || reasons[0] != supervisor.LeftOutReadAborted {
+		t.Errorf("left out for %v; want once for %q", reasons, supervisor.LeftOutReadAborted)
+	}
+	if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
+		t.Errorf("logged %d lines at ERROR; want none", n)
 	}
 }
 
