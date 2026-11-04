@@ -5,6 +5,8 @@
 # build-windows-release.sh probe amd64 OUTPUT      - build a control that imports
 #                                                    libwinpthread-1.dll, as
 #                                                    v3.6.216 did
+# build-windows-release.sh extldflags              - print the C link flags the
+#                                                    other modes link with
 #
 # The one recipe for the windows release binary (release.yml's build-windows)
 # and for the PR lane that builds it the release way
@@ -37,10 +39,19 @@
 #
 # Env: KEPLOY_LLVM_MINGW (the llvm-mingw to link with: llvm-mingw-toolchain.sh's
 # DIR/llvm-mingw); for `binary`, VERSION, SERVER_URL and GITHUB_APP_CLIENT_ID,
-# as the release sets them.
+# as the release sets them (set -u refuses a run with one unset, before
+# go build; GITHUB_APP_CLIENT_ID may be empty, as on a fork).
 set -eu
 
-usage() { echo "usage: build-windows-release.sh binary amd64 OUTPUT DSN | pgtest amd64 OUTPUT | probe amd64 OUTPUT" >&2; exit 2; }
+usage() { echo "usage: build-windows-release.sh binary amd64 OUTPUT DSN | pgtest amd64 OUTPUT | probe amd64 OUTPUT | extldflags" >&2; exit 2; }
+# The C link flags (the Why above). check-windows-release-binary.tests.sh
+# links its passing rows with them, so a change to them is checked there too.
+EXTLDFLAGS='-static -Wl,--stack,2097152'
+if [ "${1:-}" = extldflags ]; then
+  [ $# -eq 1 ] || usage
+  printf '%s\n' "$EXTLDFLAGS"
+  exit 0
+fi
 [ $# -ge 3 ] || usage
 mode="$1"; arch="$2"; out="$3"
 case "$arch" in
@@ -56,7 +67,7 @@ cc="$tc/bin/$target-clang"
 
 export CGO_ENABLED=1 GOOS=windows GOARCH="$arch"
 export CC="$cc" CXX="$tc/bin/$target-clang++"
-static="-linkmode=external -extldflags '-static -Wl,--stack,2097152'"
+static="-linkmode=external -extldflags '$EXTLDFLAGS'"
 # The parser's tests: the classifier and extractor the Postgres v3 matcher
 # runs on every query, over pg_query_go's Parse, Normalize and Fingerprint.
 PG_PKG=github.com/keploy/integrations/pkg/postgres/shared/match
@@ -65,7 +76,6 @@ case "$mode" in
   binary)
     [ $# -eq 4 ] || usage
     dsn="$4"
-    : "${VERSION:?}" "${SERVER_URL:?}" "${GITHUB_APP_CLIENT_ID?}"
     echo "build-windows-release: windows/$arch with CC=$cc ($("$cc" --version | head -n 1)), static"
     go build \
       -tags=viper_bind_struct \
@@ -82,7 +92,9 @@ case "$mode" in
   pgtest)
     [ $# -eq 3 ] || usage
     echo "build-windows-release: $PG_PKG's tests for windows/$arch, linked as the release is"
-    go test -c -ldflags="$static" -o "$out" "$PG_PKG"
+    # Stripped as the release is (-s -w), so the binary check holds it to
+    # the same rules.
+    go test -c -ldflags="-s -w $static" -o "$out" "$PG_PKG"
     sh "$here/check-windows-release-binary.sh" "$out"
     ;;
   probe)

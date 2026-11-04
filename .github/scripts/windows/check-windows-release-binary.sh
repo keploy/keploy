@@ -41,6 +41,8 @@ dlls="$(printf '%s\n' "$imports" | sed -n 's/^ *Name: *\(.*\.[dD][lL][lL]\) *$/\
 [ -n "$dlls" ] || die "imports no DLL at all: the import table was not read"
 bad=""
 for d in $dlls; do
+  # DLL names are ASCII.
+  # shellcheck disable=SC2018,SC2019
   case "$(printf '%s' "$d" | tr 'A-Z' 'a-z')" in
     kernel32.dll|api-ms-win-crt-*-l1-1-0.dll) ;;
     *) bad="$bad $d" ;;
@@ -58,4 +60,5 @@ stack="$(printf '%s\n' "$headers" | sed -n 's/^ *SizeOfStackReserve: *//p' | hea
 case "$stack" in ''|*[!0-9]*) die "its stack reserve cannot be read (SizeOfStackReserve: '$stack')" ;; esac
 [ "$stack" -ge 2097152 ] || die "has a $stack-byte stack reserve, under the 2 MiB pin (-Wl,--stack,2097152)"
 
+# shellcheck disable=SC2086 # a word a DLL
 echo "check-windows-release-binary: $bin imports only$(printf ' %s' $dlls), no gcc runtime, stripped, stack reserve $stack"

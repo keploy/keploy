@@ -11,6 +11,7 @@ set -eu
 : "${KEPLOY_LLVM_MINGW:?KEPLOY_LLVM_MINGW must name the pinned llvm-mingw (.github/scripts/windows/llvm-mingw-toolchain.sh)}"
 here="$(cd "$(dirname "$0")" && pwd)"
 check="$here/check-windows-release-binary.sh"
+recipe="$here/build-windows-release.sh"
 tc="$KEPLOY_LLVM_MINGW"
 if command -v cygpath >/dev/null 2>&1; then tc="$(cygpath -m "$tc")"; fi
 work="$(mktemp -d)"
@@ -22,11 +23,16 @@ printf '%s\n' '#include <pthread.h>' '#include <stdio.h>' \
 
 amd() { t="$1"; shift; "$tc/bin/x86_64-w64-mingw32-clang" -O1 -o "$work/$t.exe" "$@"; }
 
-# As the release links: static, stripped, 2 MiB stack.
-amd ok "$work/hello.c" -static -s -Wl,--stack,2097152
-# The C side calls into the thread library, linked statically: still only
-# Windows' DLLs.
-amd okthread "$work/thread.c" -static -s -Wl,--stack,2097152 -lwinpthread
+# The C link flags the release links with (build-windows-release.sh's own),
+# so the passing rows fail if those flags stop giving a binary that passes.
+extld="$(sh "$recipe" extldflags)" || { echo "FAIL extldflags: build-windows-release.sh extldflags exited $?" >&2; exit 1; }
+# As the release links, stripped (go build's -s).
+# shellcheck disable=SC2086 # the flags are words
+amd ok "$work/hello.c" -s $extld
+# The C side calls into the thread library: with the release's flags it is
+# linked statically, still only Windows' DLLs.
+# shellcheck disable=SC2086
+amd okthread "$work/thread.c" -s $extld -lwinpthread
 # libwinpthread-1.dll imported, as v3.6.216 did.
 amd dll "$work/thread.c" -s -Wl,--stack,2097152 -lwinpthread
 # A gcc-compiled object's ident, as libgcc's carry.
@@ -50,7 +56,7 @@ cat > "$work/stub/bin/llvm-readobj" <<'EOF'
 #!/bin/sh
 case "$1" in
   --file-headers) echo "  Machine: IMAGE_FILE_MACHINE_AMD64"; [ -n "${STUB_SYMS:-}" ] && echo "  SymbolCount: 0"; [ -n "${STUB_STACK:-}" ] && echo "  SizeOfStackReserve: $STUB_STACK"; exit 0 ;;
-  --coff-imports) [ -n "${STUB_DLL:-}" ] && printf 'Import {\n  Name: %s\n}\n' "$STUB_DLL"; exit 0 ;;
+  --coff-imports) [ -n "${STUB_IMPORTS_FAIL:-}" ] && exit 1; for d in ${STUB_DLL:-}; do printf 'Import {\n  Name: %s\n}\n' "$d"; done; exit 0 ;;
 esac
 exit 1
 EOF
@@ -88,7 +94,25 @@ expect ok 1 "its stack reserve cannot be read (SizeOfStackReserve: '')" KEPLOY_L
 expect ok 1 "its stack reserve cannot be read (SizeOfStackReserve: '2M')" KEPLOY_LLVM_MINGW="$work/stub" STUB_DLL=kernel32.DLL STUB_SYMS=1 STUB_STACK=2M
 expect ok 0 "imports only kernel32.DLL" KEPLOY_LLVM_MINGW="$work/stub" STUB_DLL=kernel32.DLL STUB_SYMS=1 STUB_STACK=2097152
 expect ok 1 "imports DLLs Windows does not ship: api-ms-win-crt-runtime-l1-1-0.dll.bak.dll" KEPLOY_LLVM_MINGW="$work/stub" STUB_DLL=api-ms-win-crt-runtime-l1-1-0.dll.bak.dll STUB_SYMS=1 STUB_STACK=2097152
+expect ok 1 "llvm-readobj cannot read its import table" KEPLOY_LLVM_MINGW="$work/stub" STUB_IMPORTS_FAIL=1
+# Each DLL named once, sorted: the import and delay-import tables can both
+# name one.
+expect ok 0 "imports only KERNEL32.dll api-ms-win-crt-heap-l1-1-0.dll, no gcc runtime" KEPLOY_LLVM_MINGW="$work/stub" STUB_DLL="api-ms-win-crt-heap-l1-1-0.dll KERNEL32.dll KERNEL32.dll" STUB_SYMS=1 STUB_STACK=2097152
+# Only the Universal CRT's api sets at version l1-1-0, as Windows 10 has them.
+expect ok 1 "imports DLLs Windows does not ship: api-ms-win-core-synch-l1-1-0.dll" KEPLOY_LLVM_MINGW="$work/stub" STUB_DLL="KERNEL32.dll api-ms-win-core-synch-l1-1-0.dll" STUB_SYMS=1 STUB_STACK=2097152
+expect ok 1 "imports DLLs Windows does not ship: api-ms-win-crt-runtime-l1-2-0.dll" KEPLOY_LLVM_MINGW="$work/stub" STUB_DLL="KERNEL32.dll api-ms-win-crt-runtime-l1-2-0.dll" STUB_SYMS=1 STUB_STACK=2097152
 expect missing 2 "no such file"
+
+# usage: exactly one BINARY.
+for args in "" "$work/ok.exe $work/ok.exe"; do
+  rc=0
+  # shellcheck disable=SC2086 # the arguments are words
+  out="$(sh "$check" $args 2>&1)" || rc=$?
+  case "$rc:$out" in
+    "2:usage: check-windows-release-binary.sh BINARY") echo "ok   usage ($args): $out" ;;
+    *) echo "FAIL usage ($args): exit $rc: $out"; fails=$((fails + 1)) ;;
+  esac
+done
 
 if [ "$fails" -ne 0 ]; then
   echo "check-windows-release-binary.tests: $fails FAILED" >&2

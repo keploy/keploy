@@ -16,8 +16,8 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - '.github/workflows/release-windows-static.yml'
-      - '.github/scripts/windows/llvm-mingw-toolchain.sh'
-      - '.github/scripts/windows/build-windows-release.sh'
+      - '.github/scripts/windows/llvm-mingw-toolchain*'
+      - '.github/scripts/windows/build-windows-release*'
       - '.github/scripts/windows/check-windows-release-*'
       - '.github/actions/setup-private-parsers/**'
       - 'goreleaser.yaml'
@@ -28,8 +28,8 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - '.github/workflows/release-windows-static.yml'
-      - '.github/scripts/windows/llvm-mingw-toolchain.sh'
-      - '.github/scripts/windows/build-windows-release.sh'
+      - '.github/scripts/windows/llvm-mingw-toolchain*'
+      - '.github/scripts/windows/build-windows-release*'
       - '.github/scripts/windows/check-windows-release-*'
       - '.github/actions/setup-private-parsers/**'
       - 'goreleaser.yaml'
@@ -75,9 +75,17 @@ jobs:
           sh .github/scripts/windows/llvm-mingw-toolchain.sh "$GITHUB_WORKSPACE/.llvm-mingw"
           echo "KEPLOY_LLVM_MINGW=$GITHUB_WORKSPACE/.llvm-mingw/llvm-mingw" >> "$GITHUB_ENV"
 
-      - name: Check the binary check refuses what it must
+      - name: Check the scripts refuse what they must
         shell: bash
-        run: sh .github/scripts/windows/check-windows-release-binary.tests.sh
+        run: |
+          set -euxo pipefail
+          sh .github/scripts/windows/llvm-mingw-toolchain.tests.sh
+          sh .github/scripts/windows/build-windows-release.tests.sh
+          sh .github/scripts/windows/check-windows-release-binary.tests.sh
+
+      - name: Check the start check fails what it must
+        shell: pwsh
+        run: ./.github/scripts/windows/check-windows-release-start.tests.ps1
 
       - name: Build keploy the release way
         shell: bash

@@ -1,4 +1,4 @@
-# check-windows-release-start.ps1 -Binary KEPLOY -PgTest PGTEST -Probe PROBE
+# check-windows-release-start.ps1 -Binary KEPLOY -PgTest PGTEST -Probe PROBE [-TimeoutSeconds N]
 #
 # Starts the windows release binary the way it starts on a machine without
 # MinGW, before it is published.
@@ -19,10 +19,14 @@
 #   * PGTEST, the Postgres parser's own tests (libpg_query, the C code that
 #     turned cgo on) built by `build-windows-release.sh pgtest`, so linked as
 #     the release is, pass: a real parse path.
+#
+# A program that has not exited after TimeoutSeconds (300) is killed, and the
+# check fails, naming it. check-windows-release-start.tests.ps1 holds its rows.
 param(
     [Parameter(Mandatory = $true)][string]$Binary,
     [Parameter(Mandatory = $true)][string]$PgTest,
-    [Parameter(Mandatory = $true)][string]$Probe
+    [Parameter(Mandatory = $true)][string]$Probe,
+    [int]$TimeoutSeconds = 300
 )
 $ErrorActionPreference = 'Stop'
 
@@ -50,12 +54,13 @@ function Start-Clean([string]$Exe, [string[]]$Arguments) {
         $p = [System.Diagnostics.Process]::Start($psi)
         $out = $p.StandardOutput.ReadToEndAsync()
         $err = $p.StandardError.ReadToEndAsync()
-        if (-not $p.WaitForExit(300000)) {
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
             $p.Kill($true)
-            throw "check-windows-release-start: $Exe did not exit within 300 s"
+            [void]$p.WaitForExit(10000)
+            return [pscustomobject]@{ TimedOut = $true; Code = 0; Output = '' }
         }
         $p.WaitForExit()
-        return [pscustomobject]@{ Code = [int32]$p.ExitCode; Output = ($out.Result + $err.Result) }
+        return [pscustomobject]@{ TimedOut = $false; Code = [int32]$p.ExitCode; Output = ($out.Result + $err.Result) }
     } finally {
         Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -68,7 +73,9 @@ $failed = @()
 Write-Host "check-windows-release-start: PATH for every start: $cleanPath"
 
 $r = Start-Clean $Probe @()
-if ($r.Code -ne $DllNotFound) {
+if ($r.TimedOut) {
+    $failed += "the probe did not exit within $TimeoutSeconds s"
+} elseif ($r.Code -ne $DllNotFound) {
     $failed += "the probe, which imports libwinpthread-1.dll, exited $($r.Code) ($(Hex $r.Code)), not STATUS_DLL_NOT_FOUND: this machine finds that DLL with no MinGW on the PATH, so a start here proves nothing"
 } else {
     Write-Host "probe (imports libwinpthread-1.dll): refused, STATUS_DLL_NOT_FOUND, as v3.6.216 was"
@@ -76,7 +83,9 @@ if ($r.Code -ne $DllNotFound) {
 
 $r = Start-Clean $Binary @('--version')
 Write-Host (Tail $r.Output 3)
-if ($r.Code -eq $DllNotFound) {
+if ($r.TimedOut) {
+    $failed += "$Binary --version did not exit within $TimeoutSeconds s"
+} elseif ($r.Code -eq $DllNotFound) {
     $failed += "$Binary --version: STATUS_DLL_NOT_FOUND, it imports a DLL Windows does not ship (check-windows-release-binary.sh names it)"
 } elseif ($r.Code -ne 0) {
     $failed += "$Binary --version exited $($r.Code) ($(Hex $r.Code))"
@@ -88,7 +97,9 @@ if ($r.Code -eq $DllNotFound) {
 
 $r = Start-Clean $PgTest @('-test.count=1')
 Write-Host (Tail $r.Output 3)
-if ($r.Code -ne 0) {
+if ($r.TimedOut) {
+    $failed += "the Postgres parser tests did not exit within $TimeoutSeconds s"
+} elseif ($r.Code -ne 0) {
     $failed += "the Postgres parser tests exited $($r.Code) ($(Hex $r.Code)):`n$(Tail $r.Output 40)"
 } else {
     Write-Host "the Postgres parser tests: ok"
