@@ -72,10 +72,12 @@ type evPlace struct {
 	// between tests (Raw.BeforeTheTest); or an exchange F served only
 	// before it (Earlier.beforeTest). No whole word is set aside there (a
 	// founder ruling, 2026-11-02); a piece of a longer value still is, as
-	// chance. A request an older test's call left the run
-	// (Earlier.ofEarlierTest) is none: a short word there is chance.
-	outsideTest string
-	scope       string
+	// chance. lateCall: why a request an older test's call left the run
+	// (Earlier.ofEarlierTest) may be a late call's: a whole word there is
+	// set aside only where the value that lacks it took no word of another
+	// place (lateCallTook), as main's olderTook reads it.
+	outsideTest, lateCall string
+	scope                 string
 	// leaf: an earlier exchange's leaf, which names its place (FromAt).
 	leaf  Leaf
 	at    time.Time
@@ -205,7 +207,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
 				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, startUp: startUp, otherTest: other, scope: scope,
-				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: earlierOutsideTest(e),
+				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: earlierOutsideTest(e), lateCall: earlierLateCall(e),
 				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
 			})
 			// What the application got in an answer it got at the answer's
@@ -279,6 +281,15 @@ func rawOutsideTest(r Raw) string {
 func earlierOutsideTest(e Earlier) string {
 	if e.beforeTest {
 		return beforeTestWhy
+	}
+	return ""
+}
+
+// earlierLateCall is evPlace.lateCall of e: the place an earlier test's
+// call left the run, which the application sent in an older test.
+func earlierLateCall(e Earlier) string {
+	if e.ofEarlierTest() {
+		return "the application sent " + e.Mock + "'s request only in an older test than the call's: the call may be a late call of that test, by an application that fell behind, so each value may be a copy of a word its run picked from what both runs gave"
 	}
 	return ""
 }

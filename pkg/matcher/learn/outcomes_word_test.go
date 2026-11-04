@@ -1361,3 +1361,75 @@ func TestOutcomeAConflictComesBeforeAPlaceServedOnlyBeforeTheTest(t *testing.T) 
 		oRefused(t, "a 48-bit word whole at a place served only in an older test ("+strconv.FormatBool(x.InAnOlderTest())+") or before the test", d, RefusalConflict, "mock-a")
 	}
 }
+
+// A request an older test's call left the run (Earlier.ofEarlierTest), as
+// main's late-call rule reads it (olderTook): a word held there where F
+// gave another text is set aside only where the value that lacks that word
+// holds no word of another place a run gave the application before the
+// call. Where it does ("82" at record and "7" in F beside a request that
+// held 7 in both runs and a later answer of 82), the call may be a late
+// call of that older test, so each value may be a copy of a word its run
+// picked from what both runs gave: refused as unknown, naming the place,
+// the other place and why. Main refuses each
+// (late_call_older_serve_test.go). Where the recorded value took no such
+// word ("slot 83"), or no other place stands beside the request, the word
+// is set aside, as main learns it, and the value is fresh.
+func TestOutcomeAnOlderTestsRequestSetsNoWordAsideWhereTheOtherValueTookAWord(t *testing.T) {
+	b := eAnswer("mock-b", 200*time.Millisecond, "82").ServedAs(2).ServedAsRecorded()
+	ran := Earlier{Mock: "mock-r", At: eRecAt.Add(-300 * time.Millisecond), Run: true,
+		Payload: Raw{mock: "mock-r", at: eRecAt.Add(-300 * time.Millisecond), answered: eRecAt.Add(-299 * time.Millisecond), ordered: true}.ServedAs(1),
+		Seen:    []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Type: String, Value: "7 n1"}, Live: "7 n2", Place: "body.slot"}}}
+	ranMoved := ran
+	ranMoved.Seen = []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Type: String, Value: "7 n1"}, Live: "5 n2", Place: "body.slot"}}
+	// F gave 82 where the recording gave 90: the later answer holds F's
+	// word only in F's view.
+	bLive := eAnswer("mock-b", 200*time.Millisecond, "90").ServedAs(2).ServedLive(eAnswer("mock-b", 200*time.Millisecond, "82"))
+	// Another older test's request: the recording sent 82 there and F 90.
+	ran2 := ran
+	ran2.Mock, ran2.At = "mock-r2", eRecAt.Add(-250*time.Millisecond)
+	ran2.Payload = Raw{mock: "mock-r2", at: ran2.At, answered: eRecAt.Add(-249 * time.Millisecond), ordered: true}.ServedAs(2)
+	ran2.Seen = []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Type: String, Value: "82 n1"}, Live: "90 n2", Place: "body.slot"}}
+	const sent = "sent mock-r's request only in an older test than the call's"
+	for _, tc := range []struct {
+		what, rec, live string
+		e               []Earlier
+		raw, set        []Raw
+		by              string
+	}{
+		{"an older test's call's request", "slot 82", "slot 7", []Earlier{ran}, []Raw{b}, nil, "mock-b"},
+		{"an older test's call's request, the recording's call late", "slot 7", "slot 82", []Earlier{ran}, []Raw{b}, nil, "mock-b"},
+		{"an older test's call's request, moved in F, the recording's call late", "slot 7", "slot 82", []Earlier{ranMoved}, []Raw{b}, nil, "mock-b"},
+		{"an older test's call's request, the later answer F changed to 82", "slot 7", "slot 82", []Earlier{ran}, []Raw{bLive}, nil, "mock-b"},
+		{"an older test's call's request, the later answer read once for the set", "slot 82", "slot 7", []Earlier{ran}, nil, []Raw{b}, "mock-b"},
+		{"an older test's call's request, the later answer F changed to 82 read once for the set", "slot 7", "slot 82", []Earlier{ran}, nil, []Raw{bLive}, "mock-b"},
+		{"an older test's call's request, beside another whose recording sent 82", "slot 82", "slot 7", []Earlier{ran, ran2}, nil, nil, "mock-r2 body.slot"},
+	} {
+		r, f := strings.Fields(tc.rec), strings.Fields(tc.live)
+		in := costF(tc.rec, tc.live, tc.e, tc.raw, nil)
+		if tc.set != nil {
+			in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(tc.set[0])}, nil }
+		}
+		d := oWord(t, Decide(in), r[1], f[1])
+		oRefused(t, tc.what, d, RefusalUnknown, "mock-r body.slot")
+		// The value that lacks the request's word holds 82, in each case.
+		for _, w := range []string{sent, `"82" stands in ` + tc.by} {
+			if d.Refusal != nil && !strings.Contains(d.Refusal.Why, w) {
+				t.Errorf("%s: refused %q; want it to say %q", tc.what, d.Refusal.Why, w)
+			}
+		}
+	}
+	costFresh(t, "the recorded value took no word", oWord(t, Decide(costF("slot 83", "slot 7", []Earlier{ran}, []Raw{b}, nil)), "83", "7"))
+	costFresh(t, "no other place beside the request", oWord(t, Decide(costF("slot 82", "slot 7", []Earlier{ran}, nil, nil)), "82", "7"))
+	costFresh(t, "the later answer recorded after the call", oWord(t, Decide(costF("slot 82", "slot 7", []Earlier{ran}, []Raw{eAnswer("mock-b", -200*time.Millisecond, "82").ServedAs(2).ServedAsRecorded()}, nil)), "82", "7"))
+	ownWord := ran
+	ownWord.Seen = []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Type: String, Value: "7 82 n1"}, Live: "7 5 n2", Place: "body.slot"}}
+	costFresh(t, "the request held F's word only at record, and no other place", oWord(t, Decide(costF("slot 7", "slot 82", []Earlier{ownWord}, nil, nil)), "7", "82"))
+	// A piece of a longer value stays chance there, as at an older test's
+	// answer: a UUID's 4-hex group the request held at record, beside a
+	// later answer that gave F's group in both runs.
+	ranU := ran
+	ranU.Seen = []Seen{{Side: Request, Leaf: Leaf{Path: "body.id", Type: String, Value: "bb7ed9ee-670e-48d1-982f-b54b2b73982f"}, Live: "0c1d2e3f-4a5b-6c7d-8e9f-a0b1c2d3e4f5", Place: "body.id"}}
+	bU := eAnswer("mock-b", 200*time.Millisecond, "dddd").ServedAs(2).ServedAsRecorded()
+	costFresh(t, "a UUID's 4-hex piece at the request, F's piece in a later answer", oWord(t, Decide(costF("1111aaaa-2222-3333-48d1-444455556666", "9999cccc-7777-8888-dddd-000011112222", []Earlier{ranU}, []Raw{bU}, nil)), "48d1", "dddd"))
+	costFresh(t, "the call's own test's request", oWord(t, Decide(costF("slot 82", "slot 7", []Earlier{{Mock: ran.Mock, At: ran.At, Payload: ran.Payload, Seen: ran.Seen}}, []Raw{b}, nil)), "82", "7"))
+}

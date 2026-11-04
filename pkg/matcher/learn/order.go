@@ -545,6 +545,10 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 				outside = append(outside, p)
 			}
 		case evDisproven:
+			took := ""
+			if p.lateCall != "" && !piece {
+				took = dc.lateCallTook(ps, i, w)
+			}
 			switch {
 			case p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, text):
 				conflict = append(conflict, p)
@@ -556,6 +560,9 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 				// is still set aside as chance: the ruling covers whole
 				// words.
 				p.why = p.outsideTest
+				unknown = append(unknown, p)
+			case took != "":
+				p.why = took
 				unknown = append(unknown, p)
 			default:
 				aside = append(aside, p)
@@ -640,6 +647,34 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule+"; bound at its first call"+answeredAt(echo, rec), names(append(aside, unserved...)))
 	d.Echo = echo
 	return d
+}
+
+// lateCallTook is why ps[i], a request an older test's call left the run
+// (evPlace.lateCall) that disproves w, excuses no word: the value that lacks
+// the word it holds (the recorded value where round F's text there holds
+// F's word, else F's) holds a word that another place a run gave the
+// application before the call holds, in either run's text there (fail
+// closed), as main's late-call rule reads it (olderTook); "" where no other
+// place does, and the word is set aside.
+func (dc *decider) lateCallTook(ps []evPlace, i int, w readWord) string {
+	p, lacks := ps[i], w.Rec
+	if !evHolds(p.t.live, w.Live) {
+		lacks = w.Live
+	}
+	stands := func(name string) string {
+		return strconv.Quote(lacks) + " stands in " + name + ", which a run gave the application before the call, and the value that lacks the word " + p.name + " holds holds it; " + p.lateCall
+	}
+	for j, q := range ps {
+		if j != i && q.state != stateNotBefore && (evHolds(q.t.rec, lacks) || evHolds(q.t.live, lacks)) {
+			return stands(q.name)
+		}
+	}
+	for _, g := range dc.outside().words {
+		if listsHold(g.answerLists, lacks) || listsHold(g.view, lacks) {
+			return stands(g.mock)
+		}
+	}
+	return ""
 }
 
 // olderTestWhy and beforeTestWhy are why a word held at a place F gave the
