@@ -4,13 +4,16 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unsafe"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	// vitesslog must load before any vitess code logs: see that package.
 	_ "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"vitess.io/vitess/go/vt/sqlparser"
@@ -518,6 +521,64 @@ func poolPlaces(pool []*models.Mock) redactedPlaces {
 		p = p.or(placesOf(m))
 	}
 	return p
+}
+
+// answeredPlaces are the places of the recordings that answered a call of
+// the open test of db, the store a command is matched in: a recording that
+// answered is in no later read of the pool (the store takes a test's
+// recording out of it once it answers), so a call made once more than
+// recorded (a retry) would find in the pool no recording that redacted its
+// secret. Served exactly, they are the places of the open test's recordings
+// the store lists as answered (integrations.ExactConsumedReader); otherwise
+// those answered noted in the test's window (answeredInWindow).
+func answeredPlaces(db integrations.MockMemDb) redactedPlaces {
+	p := answeredInWindow.of(db)
+	if er, ok := db.(integrations.ExactConsumedReader); ok {
+		p = p.or(poolPlaces(er.ConsumedTestMocks()))
+	}
+	return p
+}
+
+// answeredInWindow keeps the places of the recordings a store took out of
+// its pool as they answered, by the start of the store's open test window
+// (CurrentTestWindow): a window of another start, the next test's, starts
+// it again. A window whose end alone moved is the same test's, and keeps
+// them. It keeps their union, not the recordings, so it holds no more than
+// the places a test's recordings name, however many answered. Under exact
+// serving the store lists them itself, and no window is open (every test's
+// would be one).
+var answeredInWindow windowPlaces
+
+type windowPlaces struct {
+	mu     sync.Mutex
+	start  time.Time
+	places redactedPlaces
+}
+
+// add folds p into the places of db's open test window.
+func (w *windowPlaces) add(db integrations.WindowAware, p redactedPlaces) {
+	if !p.redactsAny() {
+		return
+	}
+	start, _ := db.CurrentTestWindow()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !start.Equal(w.start) {
+		w.start, w.places = start, redactedPlaces{}
+	}
+	w.places = w.places.or(p)
+}
+
+// of is the places kept for db's open test window; none when no recording
+// answered in it.
+func (w *windowPlaces) of(db integrations.WindowAware) redactedPlaces {
+	start, _ := db.CurrentTestWindow()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !start.Equal(w.start) {
+		return redactedPlaces{}
+	}
+	return w.places
 }
 
 // everyPlace redacts a live command whole: its statement, every bound
