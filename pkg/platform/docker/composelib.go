@@ -89,7 +89,7 @@ func (c composeLogConsumer) line(w io.Writer, containerName, message string) {
 }
 
 func (c composeLogConsumer) Status(container, msg string) {
-	fmt.Fprintf(c.out, "%s  %s\n", container, msg)
+	_, _ = fmt.Fprintf(c.out, "%s  %s\n", container, msg)
 }
 
 // NewComposeAPIClient builds the Engine API client NewComposeRunner drives the
