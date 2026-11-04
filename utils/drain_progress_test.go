@@ -89,3 +89,43 @@ func TestDrainErrGroupProgressGivesUpOnAStall(t *testing.T) {
 		t.Fatalf("given up at a look that read %v of the drain's stall, in %d looks: want no earlier than the bound, %v", stalled, looks, bound)
 	}
 }
+
+// The exported drain says it gave up, with no error, on a group that makes no
+// progress: the row above reaches the give-up through the unexported seam it
+// reads the drain's stall from, and this one through DrainErrGroupProgress
+// itself. Its hang guard reads the process clock the drain measures on, from
+// the drain's first call of progress, as its wait starts: that comes after
+// the drain's meter started, and the clock only moves forward, so the guard
+// never reads more stall than the drain has. It ends the group, as the row
+// above does, only once the drain is hangRun into its stall with no verdict.
+func TestDrainErrGroupProgressSaysItGaveUpOnAStall(t *testing.T) {
+	const bound = 100 * time.Millisecond
+	const hangRun = bound + 5*time.Second // the row above's, for its reasons
+	var g errgroup.Group
+	block := make(chan struct{})
+	var once sync.Once
+	end := func() { once.Do(func() { close(block) }) }
+	defer end()
+	g.Go(func() error { <-block; return nil })
+	clk := stall.ProcessClock() // held by the drain's meter while it waits
+	var from, seen time.Duration
+	looks, overdue := 0, false
+	progress := func() uint64 {
+		if looks++; looks == 1 {
+			from = clk.Runnable()
+		}
+		seen = clk.Runnable() - from
+		if seen >= hangRun && !overdue {
+			overdue = true
+			end()
+		}
+		return 0
+	}
+	err, timedOut := DrainErrGroupProgress(zap.NewNop(), "t", &g, bound, progress)
+	switch {
+	case overdue:
+		t.Fatalf("no give-up after %v of the process clock since the drain's wait started, in %d looks: want one at about the bound, %v", seen, looks, bound)
+	case err != nil || !timedOut:
+		t.Fatalf("(%v, timedOut=%v) for a group that made no progress, after %d looks: want (nil, true)", err, timedOut, looks)
+	}
+}

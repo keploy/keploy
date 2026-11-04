@@ -605,6 +605,9 @@ func TestMeter_AConsumerHeldOffSinceBeforeItsStallWasDueHoldsItsVerdict(t *testi
 	look, reads := overloadLooks(overload(heldByTheHost), 100*time.Millisecond)
 	wasDue := false
 	for n := 1; reads() < 41; n++ {
+		if n > mostSamples {
+			t.Fatalf("read the threads %d times in %d looks, want 41: a read a heldEvery (%v) at least", reads(), mostSamples, heldEvery)
+		}
 		expired, due := look()
 		if expired {
 			t.Fatalf("judged at look %d (read %d), while the consumer's CPU is the host's", n, reads())

@@ -75,11 +75,23 @@ func handRun(s *sampler) *sampling {
 // sampleByHand samples s as its run would (handRun).
 func sampleByHand(s *sampler) { s.sample(handRun(s)) }
 
+// mostSamples is more samples by hand than any row here takes until what it
+// waits for moves (the most is 2000: 2 s at a tenth of a CPU). A row that
+// samples until then stops at it and fails, so a sampler that no longer
+// counts fails that row by assertion, not the package at go test's timeout.
+const mostSamples = 10_000
+
 // samplesUntil samples s after each step of wall and cpu until it has
-// accrued grace, and says how many samples that took.
-func samplesUntil(s *sampler, src *fakeSource, grace, wall, cpu time.Duration) int {
+// accrued grace, and says how many samples that took. Past mostSamples it
+// fails t.
+func samplesUntil(t *testing.T, s *sampler, src *fakeSource, grace, wall, cpu time.Duration) int {
+	t.Helper()
 	n := 0
 	for time.Duration(s.ran.Load()) < grace {
+		if n == mostSamples {
+			t.Fatalf("accrued %v of %v in %d samples, %v of wall and %v of CPU each",
+				time.Duration(s.ran.Load()), grace, n, wall, cpu)
+		}
 		src.wall, src.cpu = src.wall.Add(wall), src.cpu+cpu
 		sampleByHand(s)
 		n++
@@ -91,7 +103,7 @@ func samplesUntil(s *sampler, src *fakeSource, grace, wall, cpu time.Duration) i
 // stall that is real is not waited on for longer than its wall time.
 func TestSampler_OnTimeSamplesCountWallTime(t *testing.T) {
 	s, src := newFakeSampler(0)
-	if n := samplesUntil(s, src, 2*time.Second, Tick, 0); n != 200 {
+	if n := samplesUntil(t, s, src, 2*time.Second, Tick, 0); n != 200 {
 		t.Fatalf("accrued 2 s after %d on-time samples, want 200 (2 s of 10 ms)", n)
 	}
 }
@@ -104,6 +116,9 @@ func TestSampler_OnTimeSamplesPayForTheTimeAThreadWaited(t *testing.T) {
 	m := NewMeter(heldClock{s}, 2*time.Second)
 	n := 0
 	for !m.Expired() {
+		if n == mostSamples {
+			t.Fatalf("2 s not expired after %d on-time samples, a thread waiting 3/4 of them, at %v of stall", n, m.Stalled())
+		}
 		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
 		src.held += Tick * 3 / 4
 		sampleByHand(s)
@@ -466,7 +481,10 @@ func TestSampler_AQuietStretchOwesNoMoreThanItsLastTwoReads(t *testing.T) {
 		sampleByHand(s)
 	}
 	src.held = time.Hour
-	for n := src.heldN; src.heldN == n; {
+	for n, was := 0, src.heldN; src.heldN == was; n++ {
+		if n == mostSamples {
+			t.Fatalf("no read of the threads in %d on-time samples, want one a heldEvery (%v)", n, heldEvery)
+		}
 		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/10
 		sampleByHand(s)
 	}
@@ -510,7 +528,7 @@ func TestSampler_VerdictsReadTheThreadsOncePerSample(t *testing.T) {
 // A read looks at every thread of the process, so it comes once a heldEvery.
 func TestSampler_ReadsTheThreadsOncePerHeldEvery(t *testing.T) {
 	s, src := newFakeSampler(0)
-	if n := samplesUntil(s, src, 5*heldEvery, Tick, 0); n != int(5*heldEvery/Tick) {
+	if n := samplesUntil(t, s, src, 5*heldEvery, Tick, 0); n != int(5*heldEvery/Tick) {
 		t.Fatalf("accrued %v after %d samples, with no thread waiting", 5*heldEvery, n)
 	}
 	if src.heldN != 5 {
@@ -886,7 +904,7 @@ func TestSampler_LateSamplesCountOnlyWhatTheProcessRan(t *testing.T) {
 	// A tenth of a CPU in CFS's 100 ms periods: 10 ms run, 90 ms throttled,
 	// so each 10 ms sample comes 100 ms later having used 10 ms of CPU.
 	s, src := newFakeSampler(0)
-	if n := samplesUntil(s, src, 2*time.Second, 100*time.Millisecond, 10*time.Millisecond); n != 200 {
+	if n := samplesUntil(t, s, src, 2*time.Second, 100*time.Millisecond, 10*time.Millisecond); n != 200 {
 		t.Fatalf("accrued 2 s after %d throttled samples (%v of wall time), want 200: 2 s of what the process ran",
 			n, time.Duration(n)*100*time.Millisecond)
 	}
@@ -939,14 +957,14 @@ func TestSampler_ASampleUpToTwoTicksAfterTheLastIsOnTime(t *testing.T) {
 // time while another is throttled.
 func TestSampler_ACPULimitScalesTheTime(t *testing.T) {
 	s, src := newFakeSampler(0.1)
-	if n := samplesUntil(s, src, 2*time.Second, Tick, 0); n != 2000 {
+	if n := samplesUntil(t, s, src, 2*time.Second, Tick, 0); n != 2000 {
 		t.Fatalf("accrued 2 s after %d on-time samples (%v of wall time) at a tenth of a CPU, want 2000 (20 s)",
 			n, time.Duration(n)*Tick)
 	}
 	// A limit of a CPU or more leaves it at wall time: what a stall waits on
 	// runs on one CPU.
 	s, src = newFakeSampler(4)
-	if n := samplesUntil(s, src, 100*time.Millisecond, Tick, 0); n != 10 {
+	if n := samplesUntil(t, s, src, 100*time.Millisecond, Tick, 0); n != 10 {
 		t.Fatalf("at a 4-CPU limit 100 ms took %d samples, want 10", n)
 	}
 }
@@ -1228,6 +1246,21 @@ func (f *readHeldSource) heldOff() (time.Duration, uint64) {
 	return d, n
 }
 
+// readEntered waits until the verdict's read of the threads is in flight
+// (src.entered), and fails t if the verdict, which sends on ended or closes
+// it as it returns, returned without one. A verdict reads the threads only
+// once a sample has come since the last read (sampler.owed), and a meter's
+// only once the stall is due (Meter.Expired), so a sampler that turns its
+// samples away fails the row here by assertion, not at go test's timeout.
+func readEntered[T any](t *testing.T, src *readHeldSource, ended <-chan T) {
+	t.Helper()
+	select {
+	case <-src.entered:
+	case v := <-ended:
+		t.Fatalf("the verdict returned (%v) without reading the threads", v)
+	}
+}
+
 // lockFree says whether s's lock is free; a read of the threads in flight
 // must not hold it.
 func lockFree(s *sampler) bool {
@@ -1282,7 +1315,7 @@ func TestMeter_ASampleDoesNotWaitForAVerdictsRead(t *testing.T) {
 	src.held, src.block = grace, true
 	look := make(chan bool)
 	go func() { look <- m.Expired() }()
-	<-src.entered
+	readEntered(t, src, look)
 	sampled := make(chan struct{})
 	if lockFree(s) {
 		go func() {
@@ -1343,7 +1376,7 @@ func TestSampler_AVerdictWaitsForTheReadInFlight(t *testing.T) {
 	src.held, src.block = 10*Tick, true
 	first := make(chan time.Duration, 1)
 	go func() { owed, _, _ := s.owed(); first <- owed }()
-	<-src.entered
+	readEntered(t, src, first)
 	if !lockFree(s) {
 		close(src.release)
 		<-first
@@ -1384,7 +1417,7 @@ func TestSampler_ARestartWaitsForTheReadInFlight(t *testing.T) {
 	src.block = true
 	read := make(chan struct{})
 	go func() { defer close(read); s.owed() }()
-	<-src.entered
+	readEntered(t, src, read)
 	if !lockFree(s) {
 		close(src.release)
 		<-read
@@ -1422,7 +1455,7 @@ func TestSampler_AReadSetsItsWaitAgainstOnTimeSamplesTakenWhileInFlight(t *testi
 	src.held, src.block = 5*Tick, true
 	got := make(chan time.Duration, 1)
 	go func() { owed, _, _ := s.owed(); got <- owed }()
-	<-src.entered
+	readEntered(t, src, got)
 	for range 4 {
 		onTime()
 	}
@@ -1446,7 +1479,7 @@ func TestSampler_ALateSamplesCountWhileAReadIsInFlightIsLeftForTheNextRead(t *te
 	src.block = true
 	got := make(chan time.Duration, 1)
 	go func() { owed, _, _ := s.owed(); got <- owed }()
-	<-src.entered
+	readEntered(t, src, got)
 	src.wall, src.cpu = src.wall.Add(10*Tick), src.cpu+3*Tick
 	sampleByHand(s) // late: 100 ms, 30 ms of CPU
 	close(src.release)
