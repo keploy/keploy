@@ -50,7 +50,9 @@ for d in $dlls; do
 done
 [ -z "$bad" ] || die "imports DLLs Windows does not ship:$bad (linked against a MinGW or LLVM runtime DLL; build it with build-windows-release.sh)"
 
-n="$(LC_ALL=C grep -a -c 'GCC: (' "$bin" || true)"
+# Each ident, not each line holding one: a binary's idents can share a line
+# (v3.6.216's 81 do).
+n="$(LC_ALL=C grep -a -o 'GCC: (' "$bin" | wc -l | tr -d ' ')"
 [ "$n" -eq 0 ] || die "carries objects compiled by gcc ($n 'GCC: (' idents): gcc's runtime (libgcc) is linked"
 
 syms="$(printf '%s\n' "$headers" | sed -n 's/^ *SymbolCount: *//p' | head -n 1)"

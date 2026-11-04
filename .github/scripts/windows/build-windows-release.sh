@@ -70,6 +70,12 @@ export CC="$cc" CXX="$tc/bin/$target-clang++"
 static="-linkmode=external -extldflags '$EXTLDFLAGS'"
 # The parser's tests: the classifier and extractor the Postgres v3 matcher
 # runs on every query, over pg_query_go's Parse, Normalize and Fingerprint.
+# check-windows-release-start.ps1 runs the whole package's tests, from an
+# empty directory, with no -test.run: a name filter would pass with no test
+# run once the tests it names are renamed. So a test in this package that
+# cannot pass there (one that reads testdata, or does not run on windows)
+# stops the windows release, and the PR lane before it, until it is fixed
+# or this names another package.
 PG_PKG=github.com/keploy/integrations/pkg/postgres/shared/match
 
 case "$mode" in

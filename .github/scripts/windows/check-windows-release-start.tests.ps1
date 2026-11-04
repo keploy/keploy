@@ -2,7 +2,10 @@
 # passes a release-shaped set of programs and fails, naming why, for each way
 # one can be wrong: a probe that starts, a binary that needs a DLL Windows does
 # not ship, exits non-zero, prints no version or hangs, and a parser test run
-# that fails. A program that hangs is killed: none is left running.
+# that fails. A program that hangs is killed with the programs it started:
+# none is left running, and the check leaves no directory behind. A
+# libwinpthread-1.dll on the PATH the check itself runs with does not reach
+# the programs it starts.
 #
 # Windows only. Builds small C programs with llvm-mingw (KEPLOY_LLVM_MINGW, as
 # llvm-mingw-toolchain.sh stages it): each is linked -static, so it needs only
@@ -24,31 +27,45 @@ function Build([string]$Name, [string]$Source, [string[]]$Flags) {
 }
 
 $failures = 0
-# The hang.exe copies still running. The check kills a program that does not
-# exit in time; Windows tears a killed process down after TerminateProcess
-# returns, so this waits up to 10 s for the count to reach 0.
+$hangNames = @('hang', 'hangtree')
+# The hang.exe and hangtree.exe copies still running. The check kills a
+# program that does not exit in time, with the programs it started; Windows
+# tears a killed process down after TerminateProcess returns, so this waits
+# up to 10 s for the count to reach 0.
 function HangLeft {
     $deadline = (Get-Date).AddSeconds(10)
     while ($true) {
-        $n = @(Get-Process -Name hang -ErrorAction SilentlyContinue).Count
+        $n = @(Get-Process -Name $hangNames -ErrorAction SilentlyContinue).Count
         if ($n -eq 0 -or (Get-Date) -gt $deadline) { return $n }
         Start-Sleep -Milliseconds 200
     }
 }
+# The directories the check makes for its starts (keploy-start-<32 hex>).
+function StartDirs {
+    @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Directory -Filter 'keploy-start-*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^keploy-start-[0-9a-f]{32}$' } | ForEach-Object { $_.FullName })
+}
 # Row NAME RC WANT ARGS: run the check with ARGS, want exit RC and WANT in
-# what it printed, and no hang.exe left running after it.
+# what it printed, no hang.exe or hangtree.exe left running after it, and
+# no directory of its left behind.
 function Row([string]$Name, [int]$WantRc, [string]$Want, [string[]]$CheckArgs) {
+    $before = StartDirs
     $out = (& pwsh -NoLogo -NoProfile -File $check @CheckArgs 2>&1 | Out-String)
     $rc = $LASTEXITCODE
     $hung = HangLeft
-    # Stopped here, so one row's leftover does not fail the rows after it.
-    if ($hung -ne 0) { Get-Process -Name hang -ErrorAction SilentlyContinue | Stop-Process -Force }
+    $left = @(StartDirs | Where-Object { $before -notcontains $_ })
+    # Stopped and removed here, so one row's leftover does not fail the rows
+    # after it.
+    if ($hung -ne 0) { Get-Process -Name $hangNames -ErrorAction SilentlyContinue | Stop-Process -Force }
+    foreach ($d in $left) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
     if ($rc -ne $WantRc) {
         Write-Host "FAIL ${Name}: exit $rc, want ${WantRc}:`n$out"; $script:failures++
     } elseif (-not $out.Contains($Want)) {
         Write-Host "FAIL ${Name}: printed:`n$out`nwant '$Want'"; $script:failures++
     } elseif ($hung -ne 0) {
-        Write-Host "FAIL ${Name}: $hung hang.exe still running after the check returned"; $script:failures++
+        Write-Host "FAIL ${Name}: $hung hang.exe or hangtree.exe still running after the check returned"; $script:failures++
+    } elseif ($left.Count -ne 0) {
+        Write-Host "FAIL ${Name}: the check left $($left -join ', ')"; $script:failures++
     } else {
         Write-Host "ok   ${Name}: $Want"
     }
@@ -61,6 +78,21 @@ try {
     Build 'pass' "int main(void) { return 0; }" $static
     Build 'exit3' "int main(void) { return 3; }" $static
     Build 'hang' "#include <windows.h>`nint main(void) { Sleep(INFINITE); return 0; }" $static
+    # Starts hang.exe (by its full path: the check runs a copy of this alone
+    # in an empty directory), then hangs too: killing this program alone
+    # leaves hang.exe running.
+    $hangTree = @'
+#include <windows.h>
+int main(void) {
+    STARTUPINFOA si = { sizeof si };
+    PROCESS_INFORMATION pi;
+    char cmd[] = "\"HANG_EXE\"";
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) return 9;
+    Sleep(INFINITE);
+    return 0;
+}
+'@
+    Build 'hangtree' ($hangTree.Replace('HANG_EXE', (Join-Path $work 'hang.exe').Replace('\', '\\'))) $static
     # Not -static: the thread library comes from libwinpthread-1.dll.
     Build 'probe' "#include <pthread.h>`n#include <stdio.h>`nint main(void) { printf(`"probe %lu\n`", (unsigned long)pthread_self()); return 0; }" @('-lwinpthread')
     # The release binary's name has no .exe on some paths; the check names
@@ -87,8 +119,19 @@ try {
     Row 'pgtest-fails' 1 'the Postgres parser tests exited 3 (0x00000003)' @('-Binary', (& $w 'version.exe'), '-PgTest', (& $w 'exit3.exe'), '-Probe', (& $w 'probe.exe'))
     Row 'pgtest-needs-dll' 1 'the Postgres parser tests exited -1073741515 (0xC0000135)' @('-Binary', (& $w 'version.exe'), '-PgTest', (& $w 'probe.exe'), '-Probe', (& $w 'probe.exe'))
     Row 'binary-hangs' 1 'hang.exe --version did not exit within 5 s' @('-Binary', (& $w 'hang.exe'), '-PgTest', (& $w 'pass.exe'), '-Probe', (& $w 'probe.exe'), '-TimeoutSeconds', '5')
+    Row 'binary-hangs-with-child' 1 'hangtree.exe --version did not exit within 5 s' @('-Binary', (& $w 'hangtree.exe'), '-PgTest', (& $w 'pass.exe'), '-Probe', (& $w 'probe.exe'), '-TimeoutSeconds', '5')
     Row 'probe-hangs' 1 'the probe did not exit within 5 s' @('-Binary', (& $w 'version.exe'), '-PgTest', (& $w 'pass.exe'), '-Probe', (& $w 'hang.exe'), '-TimeoutSeconds', '5')
     Row 'pgtest-hangs' 1 'the Postgres parser tests did not exit within 5 s' @('-Binary', (& $w 'version.exe'), '-PgTest', (& $w 'hang.exe'), '-Probe', (& $w 'probe.exe'), '-TimeoutSeconds', '5')
+
+    # libwinpthread-1.dll on the PATH the check runs with: the check sets
+    # each program's PATH itself, so the probe is still refused.
+    $runnerPath = $env:PATH
+    $env:PATH = "$beside;$runnerPath"
+    try {
+        Row 'dll-on-path' 0 'the windows release binary starts' $good
+    } finally {
+        $env:PATH = $runnerPath
+    }
 
     # Not a row: whether this runner finds libwinpthread-1.dll on its own
     # PATH, which is what makes all-good's refused probe show the PATH was
@@ -101,7 +144,7 @@ try {
         Write-Host "note: the probe with this runner's own PATH did not exit within 60 s"
     }
 } finally {
-    Get-Process -Name hang -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process -Name $hangNames -ErrorAction SilentlyContinue | Stop-Process -Force
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 

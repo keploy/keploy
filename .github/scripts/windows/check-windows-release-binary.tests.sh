@@ -38,6 +38,14 @@ amd dll "$work/thread.c" -s -Wl,--stack,2097152 -lwinpthread
 # A gcc-compiled object's ident, as libgcc's carry.
 cp "$work/ok.exe" "$work/gcc.exe"
 printf 'GCC: (x86_64-posix-seh-rev1, Built by MinGW-Builds project) 15.2.0\n' >> "$work/gcc.exe"
+# winlibs' gcc (the one the self-hosted windows runners carry) spells its
+# ident another way.
+cp "$work/ok.exe" "$work/gccwinlibs.exe"
+printf 'GCC: (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r3) 14.2.0\n' >> "$work/gccwinlibs.exe"
+# Idents counted one by one, not by line: three on one line, NUL-separated as
+# a binary's .rdata holds them.
+cp "$work/ok.exe" "$work/gcc3.exe"
+printf 'GCC: (x86_64-posix-seh-rev1, Built by MinGW-Builds project) 15.2.0\000GCC: (x86_64-posix-seh-rev1, Built by MinGW-Builds project) 15.2.0\000GCC: (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r3) 14.2.0\n' >> "$work/gcc3.exe"
 # Not stripped.
 amd syms "$work/hello.c" -static -Wl,--stack,2097152
 # lld's own 1 MiB stack reserve, and one byte under the pin.
@@ -82,6 +90,8 @@ expect ok 0 "imports only KERNEL32.dll api-ms-win-crt-"
 expect okthread 0 "no gcc runtime, stripped, stack reserve 2097152"
 expect dll 1 "imports DLLs Windows does not ship: libwinpthread-1.dll"
 expect gcc 1 "carries objects compiled by gcc (1 'GCC: (' idents)"
+expect gccwinlibs 1 "carries objects compiled by gcc (1 'GCC: (' idents)"
+expect gcc3 1 "carries objects compiled by gcc (3 'GCC: (' idents)"
 expect syms 1 "is not stripped (SymbolCount: "
 expect stack1m 1 "has a 1048576-byte stack reserve, under the 2 MiB pin"
 expect stackunder 1 "has a 2097151-byte stack reserve, under the 2 MiB pin"

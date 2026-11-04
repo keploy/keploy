@@ -104,3 +104,19 @@ jobs:
       - name: Start it with only Windows' own DLLs
         shell: pwsh
         run: ./.github/scripts/windows/check-windows-release-start.ps1 -Binary out/keploy_windows_amd64.exe -PgTest out/pgparse.test.exe -Probe out/probe.exe
+
+      # The bug as it shipped: v3.6.216's windows binary, the last one linked
+      # by the runner's gcc, pinned by its digest, as the probe. The check
+      # passes only if this machine refuses it (STATUS_DLL_NOT_FOUND, for
+      # libwinpthread-1.dll) and starts the binary built above.
+      - name: Fetch v3.6.216's windows binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --silent --show-error --fail --location --retry 5 --retry-all-errors \
+            -o out/keploy_v3.6.216.exe https://github.com/keploy/keploy/releases/download/v3.6.216/keploy_windows_amd64
+          echo "95ffb0c515f3af5284ccd35909d7fe36984b7bd861eff4e23295ee0488d73ba1  out/keploy_v3.6.216.exe" | sha256sum -c -
+
+      - name: Start it beside v3.6.216, which must be refused
+        shell: pwsh
+        run: ./.github/scripts/windows/check-windows-release-start.ps1 -Binary out/keploy_windows_amd64.exe -PgTest out/pgparse.test.exe -Probe out/keploy_v3.6.216.exe
