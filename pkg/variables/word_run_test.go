@@ -12,8 +12,17 @@ import (
 
 // uuidBinds is the bindings one call makes at each word of id, a UUID at
 // place body.<field> from word first on (a bare id: 0; "APP:"+id: 1), as
-// variables prefix0..prefix4, its runs filled (WordRuns).
+// variables prefix0..prefix4, its runs filled (WordRuns) in a mock that
+// holds the recorded UUID whole at another place (the api-server's ids, each
+// also sent whole in a field of its own).
 func uuidBinds(t *testing.T, prefix, field, live, recorded string, first int) []Binding {
+	t.Helper()
+	return uuidBindsHeld(t, heldAt(recorded), prefix, field, live, recorded, first)
+}
+
+// uuidBindsHeld is uuidBinds in a mock that holds whole elsewhere what
+// elsewhere says.
+func uuidBindsHeld(t *testing.T, elsewhere func(string) bool, prefix, field, live, recorded string, first int) []Binding {
 	t.Helper()
 	lw, rw := wordsOf(live), wordsOf(recorded)
 	if len(lw) != len(rw) {
@@ -25,7 +34,7 @@ func uuidBinds(t *testing.T, prefix, field, live, recorded string, first int) []
 	}
 	ws := make([]WordBind, len(lw))
 	for i := range lw {
-		ws[i] = WordBind{Text: "body." + field, Word: first + i, Live: lw[i], Recorded: rw[i], RecordedText: text, Elsewhere: heldNowhere}
+		ws[i] = WordBind{Text: "body." + field, Word: first + i, Live: lw[i], Recorded: rw[i], RecordedText: text, Elsewhere: elsewhere}
 	}
 	runs := WordRuns(ws)
 	out := make([]Binding, len(lw))
@@ -36,7 +45,7 @@ func uuidBinds(t *testing.T, prefix, field, live, recorded string, first int) []
 }
 
 // heldNowhere is a mock that holds no stretch of a run whole elsewhere: each
-// run is one value.
+// word is its own value (main's word by word check).
 func heldNowhere(string) bool { return false }
 
 // heldAt is a mock that holds each of values whole at another place.
@@ -66,7 +75,7 @@ func TestWordRuns_ConsecutiveWordsOfOneTextAreOneRun(t *testing.T) {
 		{Text: "body.code", Word: -1, Live: "whole", Recorded: "WHOLE"}, {Text: "body.what", Word: 5, Live: "e", Recorded: "E"}, {Text: "header.X-Id|b64", Word: 1, Live: "y", Recorded: "Y"}, {Text: "header.X-Id", Word: 0, Live: "x", Recorded: "X"},
 	}
 	for i := range ws {
-		ws[i].RecordedText, ws[i].Elsewhere = recorded[ws[i].Text], heldNowhere
+		ws[i].RecordedText, ws[i].Elsewhere = recorded[ws[i].Text], heldAt("A B C")
 	}
 	runs := WordRuns(ws)
 	want := []Run{{"a-b-c", "A-B-C", 2}, {"a-b-c", "A-B-C", 0}, {"z", "Z", 0}, {"a-b-c", "A-B-C", 1}, {}, {"e", "E", 0}, {"y", "Y", 0}, {"x", "X", 0}}
@@ -77,10 +86,13 @@ func TestWordRuns_ConsecutiveWordsOfOneTextAreOneRun(t *testing.T) {
 	}
 }
 
-// The api-server's shape: two fresh v4 UUIDs, each bound word by word, whose
-// version groups (12 random bits) are equal. Drawn from a fixed seed, every
-// such pair binds, in one call or two, bare or after "APP:"; one UUID sent
-// where two were recorded never does.
+// The api-server's shape: two fresh v4 UUIDs, each bound word by word and
+// each held whole at another place of its mock, whose version groups (12
+// random bits) are equal. Drawn from a fixed seed, every such pair binds, in
+// one call or two, bare or after "APP:"; one UUID sent where two were
+// recorded never does. In mocks that hold no part of them whole elsewhere
+// the pair shows no value, so each word is checked alone, and the group
+// equal by chance is refused, as main refuses it.
 func TestTable_AGroupTwoFreshUUIDsShareByChanceBinds(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	rng := rand.New(rand.NewSource(20261103))
@@ -109,6 +121,11 @@ func TestTable_AGroupTwoFreshUUIDsShareByChanceBinds(t *testing.T) {
 			copied.BindAll(copied.Gen(), a)
 			if _, with, _, ok := copied.BindAll(copied.Gen(), uuidBinds(t, "su", "key", liveA, recB, first)); ok || with.Name == "" {
 				t.Fatalf("pair %d (first word %d): %s sent where %s and %s were recorded bound", n, first, liveA, recA, recB)
+			}
+			var bare Table
+			bare.BindAll(bare.Gen(), uuidBindsHeld(t, heldNowhere, "ev", "id", liveA, recA, 0))
+			if _, with, _, ok := bare.BindAll(bare.Gen(), uuidBindsHeld(t, heldNowhere, "su", "key", liveB, recB, first)); ok || with.Name == "" {
+				t.Fatalf("pair %d (first word %d): %s beside %s, neither held whole elsewhere, bound; main refuses the group %s", n, first, liveB, liveA, group)
 			}
 		}
 	}
@@ -202,8 +219,11 @@ func textBindsHeld(t *testing.T, elsewhere func(string) bool, texts ...[4]string
 
 // Two values bound word by word and set apart only by punctuation are one
 // run ("<A>/<B>"). One UUID sent where two were recorded stays refused there:
-// beside another place, in one call or two, and twice in one text. Two fresh
-// UUIDs side by side, whose groups are equal by chance, still bind.
+// beside another place, in one call or two, and twice in one text, whether
+// the mocks hold each UUID whole elsewhere or nothing. Two fresh UUIDs side
+// by side, whose groups are equal by chance, still bind where the mocks hold
+// each UUID whole elsewhere, and are refused, as main refuses them, where
+// they hold no part of either text.
 func TestTable_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const (
@@ -217,77 +237,101 @@ func TestTable_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *
 		liveP = "11112222-3333-4444-8555-666677778888"
 		liveQ = "9999aaaa-bbbb-4ccc-9ddd-eeeeffff0000"
 	)
-	refused := func(t *testing.T, calls ...[]Binding) {
-		t.Helper()
-		var tb Table
-		for i, call := range calls {
-			bad, with, _, ok := tb.BindAll(tb.Gen(), call)
-			if i < len(calls)-1 {
-				if !ok {
-					t.Fatalf("call %d did not bind: %+v beside %+v", i, bad, with)
+	check := func(t *testing.T, held func(string) bool, uuids bool) {
+		bindText := func(texts ...[4]string) []Binding { return textBindsHeld(t, held, texts...) }
+		refused := func(t *testing.T, calls ...[]Binding) {
+			t.Helper()
+			var tb Table
+			for i, call := range calls {
+				bad, with, _, ok := tb.BindAll(tb.Gen(), call)
+				if i < len(calls)-1 {
+					if !ok {
+						t.Fatalf("call %d did not bind: %+v beside %+v", i, bad, with)
+					}
+					continue
 				}
-				continue
+				if ok || with.Name == "" {
+					t.Fatalf("one value where two were recorded bound (bad %+v, beside %+v)", bad, with)
+				}
 			}
-			if ok || with.Name == "" {
-				t.Fatalf("one value where two were recorded bound (bad %+v, beside %+v)", bad, with)
+		}
+		t.Run("beside another place, in one call", func(t *testing.T) {
+			refused(t, bindText([4]string{"body.key", "k", liveX + "/" + liveY, recA + "/" + recB}, [4]string{"body.c", "c", liveX, recC}))
+		})
+		t.Run("beside another place, the run's own UUID second", func(t *testing.T) {
+			refused(t, bindText([4]string{"body.key", "k", liveY + "/" + liveX, recB + "/" + recA}, [4]string{"body.c", "c", liveX, recC}))
+		})
+		t.Run("across two calls", func(t *testing.T) {
+			refused(t, bindText([4]string{"body.key", "k", liveX + "/" + liveY, recA + "/" + recB}), bindText([4]string{"body.c", "c", liveX, recC}))
+		})
+		t.Run("across two calls, the long run second", func(t *testing.T) {
+			refused(t, bindText([4]string{"body.c", "c", liveX, recC}), bindText([4]string{"body.key", "k", liveX + "/" + liveY, recA + "/" + recB}))
+		})
+		t.Run("twice in one text", func(t *testing.T) {
+			refused(t, bindText([4]string{"body.key", "k", liveX + "/" + liveX, recA + "/" + recB}))
+		})
+		// One UUID at two places where two were recorded, each beside another
+		// bound UUID that differs live: the rest of the shared UUID is copied.
+		t.Run("first in each text, beside different seconds, in one call", func(t *testing.T) {
+			refused(t, bindText([4]string{"body.k1", "k", liveX + "/" + liveY, recA + "/" + recB}, [4]string{"body.k2", "c", liveX + "/" + liveZ, recC + "/" + recD}))
+		})
+		t.Run("first in each text, beside different seconds, in two calls", func(t *testing.T) {
+			refused(t, bindText([4]string{"body.k1", "k", liveX + "/" + liveY, recA + "/" + recB}), bindText([4]string{"body.k2", "c", liveX + "/" + liveZ, recC + "/" + recD}))
+		})
+		t.Run("second in each text, beside different firsts, in one call", func(t *testing.T) {
+			refused(t, bindText([4]string{"body.k1", "k", liveP + "/" + liveX, recB + "/" + recA}, [4]string{"body.k2", "c", liveQ + "/" + liveX, recD + "/" + recC}))
+		})
+		t.Run("second in each text, beside different firsts, in two calls", func(t *testing.T) {
+			refused(t, bindText([4]string{"body.k1", "k", liveP + "/" + liveX, recB + "/" + recA}), bindText([4]string{"body.k2", "c", liveQ + "/" + liveX, recD + "/" + recC}))
+		})
+		t.Run("both halves equal", func(t *testing.T) {
+			refused(t, bindText([4]string{"body.k1", "k", liveX + "/" + liveY, recA + "/" + recB}, [4]string{"body.k2", "c", liveX + "/" + liveY, recC + "/" + recD}))
+		})
+		chance := func() []Binding {
+			return bindText([4]string{"body.key", "k", liveX + "/" + liveY, recA + "/" + recB}, [4]string{"body.c", "c", liveZ, recC})
+		}
+		if !uuids {
+			// No part of either text is held whole elsewhere: each word is
+			// its own value, and the group equal by chance is refused, as
+			// main refuses it.
+			t.Run("two fresh UUIDs side by side, a group equal by chance, are refused", func(t *testing.T) {
+				var tb Table
+				if _, with, _, ok := tb.BindAll(tb.Gen(), chance()); ok || with.Name == "" {
+					t.Fatalf("%s/%s beside %s, no part held elsewhere, bound; main refuses one live word of two recorded", liveX, liveY, liveZ)
+				}
+			})
+			return
+		}
+		t.Run("two fresh UUIDs side by side, a group equal by chance, bind", func(t *testing.T) {
+			var tb Table
+			if bad, with, _, ok := tb.BindAll(tb.Gen(), chance()); !ok {
+				t.Fatalf("%s/%s beside %s (group 41a3 equal by chance) did not bind: %+v beside %+v", liveX, liveY, liveZ, bad, with)
 			}
-		}
+		})
+		t.Run("switch off: the group equal by chance is refused, as main", func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "")
+			var tb Table
+			if _, with, _, ok := tb.BindAll(tb.Gen(), chance()); ok || with.Name == "" {
+				t.Fatalf("with the switch off, %s/%s beside %s bound; main refuses one live word of two recorded", liveX, liveY, liveZ)
+			}
+		})
 	}
-	t.Run("beside another place, in one call", func(t *testing.T) {
-		refused(t, textBinds(t, [4]string{"body.key", "k", liveX + "/" + liveY, recA + "/" + recB}, [4]string{"body.c", "c", liveX, recC}))
-	})
-	t.Run("beside another place, the run's own UUID second", func(t *testing.T) {
-		refused(t, textBinds(t, [4]string{"body.key", "k", liveY + "/" + liveX, recB + "/" + recA}, [4]string{"body.c", "c", liveX, recC}))
-	})
-	t.Run("across two calls", func(t *testing.T) {
-		refused(t, textBinds(t, [4]string{"body.key", "k", liveX + "/" + liveY, recA + "/" + recB}), textBinds(t, [4]string{"body.c", "c", liveX, recC}))
-	})
-	t.Run("across two calls, the long run second", func(t *testing.T) {
-		refused(t, textBinds(t, [4]string{"body.c", "c", liveX, recC}), textBinds(t, [4]string{"body.key", "k", liveX + "/" + liveY, recA + "/" + recB}))
-	})
-	t.Run("twice in one text", func(t *testing.T) {
-		refused(t, textBinds(t, [4]string{"body.key", "k", liveX + "/" + liveX, recA + "/" + recB}))
-	})
-	// One UUID at two places where two were recorded, each beside another
-	// bound UUID that differs live: the rest of the shared UUID is copied.
-	t.Run("first in each text, beside different seconds, in one call", func(t *testing.T) {
-		refused(t, textBinds(t, [4]string{"body.k1", "k", liveX + "/" + liveY, recA + "/" + recB}, [4]string{"body.k2", "c", liveX + "/" + liveZ, recC + "/" + recD}))
-	})
-	t.Run("first in each text, beside different seconds, in two calls", func(t *testing.T) {
-		refused(t, textBinds(t, [4]string{"body.k1", "k", liveX + "/" + liveY, recA + "/" + recB}), textBinds(t, [4]string{"body.k2", "c", liveX + "/" + liveZ, recC + "/" + recD}))
-	})
-	t.Run("second in each text, beside different firsts, in one call", func(t *testing.T) {
-		refused(t, textBinds(t, [4]string{"body.k1", "k", liveP + "/" + liveX, recB + "/" + recA}, [4]string{"body.k2", "c", liveQ + "/" + liveX, recD + "/" + recC}))
-	})
-	t.Run("second in each text, beside different firsts, in two calls", func(t *testing.T) {
-		refused(t, textBinds(t, [4]string{"body.k1", "k", liveP + "/" + liveX, recB + "/" + recA}), textBinds(t, [4]string{"body.k2", "c", liveQ + "/" + liveX, recD + "/" + recC}))
-	})
-	t.Run("both halves equal", func(t *testing.T) {
-		refused(t, textBinds(t, [4]string{"body.k1", "k", liveX + "/" + liveY, recA + "/" + recB}, [4]string{"body.k2", "c", liveX + "/" + liveY, recC + "/" + recD}))
-	})
-	chance := func() []Binding {
-		return textBinds(t, [4]string{"body.key", "k", liveX + "/" + liveY, recA + "/" + recB}, [4]string{"body.c", "c", liveZ, recC})
+	for _, m := range []struct {
+		name  string
+		held  func(string) bool
+		uuids bool
+	}{
+		{"each UUID held whole elsewhere", heldAt(recA, recB, recC, recD), true},
+		{"nothing held elsewhere", heldNowhere, false},
+	} {
+		t.Run(m.name, func(t *testing.T) { check(t, m.held, m.uuids) })
 	}
-	t.Run("two fresh UUIDs side by side, a group equal by chance, bind", func(t *testing.T) {
-		var tb Table
-		if bad, with, _, ok := tb.BindAll(tb.Gen(), chance()); !ok {
-			t.Fatalf("%s/%s beside %s (group 41a3 equal by chance) did not bind: %+v beside %+v", liveX, liveY, liveZ, bad, with)
-		}
-	})
-	t.Run("switch off: the group equal by chance is refused, as main", func(t *testing.T) {
-		t.Setenv(provenswitch.Env, "")
-		var tb Table
-		if _, with, _, ok := tb.BindAll(tb.Gen(), chance()); ok || with.Name == "" {
-			t.Fatalf("with the switch off, %s/%s beside %s bound; main refuses one live word of two recorded", liveX, liveY, liveZ)
-		}
-	})
 }
 
 // A run's value spans: the shortest stretch around a word that its mock
 // holds whole elsewhere and that holds no shorter such stretch, else the
-// words no such stretch covers. With no
-// evidence, or a recorded text that does not hold the run's words, a word is
-// its own span.
+// words no such stretch covers. With no stretch held, no evidence, or a
+// recorded text that does not hold the run's words, a word is its own span.
 func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 	const cid, app = "c9bf9e57-1685-4c89-bafb-ff5af830be8a", "6f9619ff-8b86-4011-b42d-00c04fc964ff"
 	runs := func(recorded string, elsewhere func(string) bool) []Run {
@@ -304,7 +348,10 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 		elsewhere      func(string) bool
 		want           []string
 	}{
-		{"nothing held elsewhere: the run whole", cid + "/3", heldNowhere, []string{"c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@0", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@1", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@2", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@3", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@4", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@5"}},
+		// No part of the text held whole elsewhere shows no value: each word
+		// is its own (main's word by word check).
+		{"nothing held elsewhere: each word alone", cid + "/3", heldNowhere, []string{"c9bf9e57@0", "1685@0", "4c89@0", "bafb@0", "ff5af830be8a@0", "3@0"}},
+		{"the text whole held elsewhere: the run whole", cid + "/3", heldAt(cid + "/3"), []string{"c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@0", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@1", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@2", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@3", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@4", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@5"}},
 		{"the cid held elsewhere: the word beside it alone", cid + "/3", heldAt(cid), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", "3@0"}},
 		{"the cid held elsewhere: the appId's words", cid + "/" + app, heldAt(cid), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", app + "@0", app + "@1", app + "@2", app + "@3", app + "@4"}},
 		// The whole held beside the appId is two values: the cid's words are
@@ -319,7 +366,7 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 		{"the whole held beside the cid before two words", cid + "/x/y", heldAt(cid, cid+"/x/y"), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", "x-y@0", "x-y@1"}},
 		{"no evidence: each word alone", "ab/3", nil, []string{"ab@0", "3@0"}},
 		{"the cid held elsewhere: the word before it alone", "3/" + cid, heldAt(cid), []string{"3@0", cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4"}},
-		{"a run longer than spans are read in: each word alone", strings.Repeat("ab/", maxSpanRun) + "3", heldNowhere, []string{"ab@0", "ab@0"}},
+		{"a run longer than spans are read in: each word alone", strings.Repeat("ab/", maxSpanRun) + "3", heldAt("3"), []string{"ab@0", "ab@0"}},
 	}
 	for _, c := range cases {
 		var got []Run
@@ -342,9 +389,9 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 	}
 	// A text whose words differ from the run's ("zz/3"), or that ends before
 	// the run does, at its first word ("3") or after a first word it holds
-	// ("ab"): each word alone.
+	// ("ab"): each word alone, though its mock holds the text whole elsewhere.
 	for _, text := range []string{"zz/3", "3", "ab"} {
-		ws := []WordBind{{Text: "body.key", Word: 0, Live: "x", Recorded: "ab", RecordedText: text, Elsewhere: heldNowhere}, {Text: "body.key", Word: 1, Live: "7", Recorded: "3", RecordedText: text, Elsewhere: heldNowhere}}
+		ws := []WordBind{{Text: "body.key", Word: 0, Live: "x", Recorded: "ab", RecordedText: text, Elsewhere: heldAt(text)}, {Text: "body.key", Word: 1, Live: "7", Recorded: "3", RecordedText: text, Elsewhere: heldAt(text)}}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -362,7 +409,8 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 // two values were recorded ("<P>/7" and "<Q>/7" where "<B>/3" and "<D>/5"
 // were), and each mock holds its UUID whole elsewhere (a cid field): the
 // UUIDs are other values, so "7" is its own value and refused, as main
-// refuses it, in one call or two, and when only one of the mocks shows it.
+// refuses it, in one call or two, when only one of the mocks shows it, and
+// when neither holds any part of its text whole elsewhere.
 // Two appIds beside cids held elsewhere, a group of the appIds equal by
 // chance, still bind.
 func TestTable_OneWordBesideAnotherHeldValueIsItsOwnValue(t *testing.T) {
@@ -399,6 +447,8 @@ func TestTable_OneWordBesideAnotherHeldValueIsItsOwnValue(t *testing.T) {
 		{"both mocks hold their UUID", heldAt(recB), heldAt(recD)},
 		{"only the first", heldAt(recB), heldNowhere},
 		{"only the second", heldNowhere, heldAt(recD)},
+		// The bare probe: no part of either text held whole elsewhere.
+		{"neither mock holds any part of its text", heldNowhere, heldNowhere},
 		// The whole text held too ("<B>/3" in a field of its own beside
 		// "<B>") is two values, never one: "3" stays its own.
 		{"both mocks hold their UUID and their whole text", heldAt(recB, recB+"/3"), heldAt(recD, recD+"/5")},

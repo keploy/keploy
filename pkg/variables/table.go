@@ -379,7 +379,9 @@ func collides(inForce map[string]Binding, beside []Binding, b Binding, earlier [
 // value are read: a neighbour that is another value (its mock holds it whole
 // elsewhere) says nothing of the shared word, so "<P>/7" and "<Q>/7", where
 // "<B>/3" and "<D>/5" were recorded and the mocks hold "<B>" and "<D>"
-// whole, leave "7" its own value, refused as main refuses it. A pair equal live
+// whole, leave "7" its own value, refused as main refuses it. A run its mock
+// holds no part of whole elsewhere shows no value at all: each of its words
+// is its own, checked word by word as main checks it. A pair equal live
 // that was two words when recorded is a copy: the application sent more than
 // the one word where the recording had two values, whole ("<X>" where "<A>"
 // and "<C>" were recorded) or beside another ("<X>" inside "<X>/<Y>", or
@@ -477,13 +479,14 @@ const maxSpanRun = 64
 // around its word whose recorded text its mock holds whole elsewhere (a cid
 // or an appId sent whole in another field) and that holds no shorter such
 // stretch (a stretch that holds one, "<B>/3" sent whole beside "<B>", is two
-// values); failing one, the words around it that no such stretch covers ("<cid>/<appId>" with the cid held whole
-// elsewhere leaves the appId's words; a text no stretch of which is held
-// elsewhere is one value, the run whole). A stretch held elsewhere is
-// another value, so a word beside it is never read with it: "<B>/3" whose
-// mock holds "<B>" whole leaves "3" its own span. A binding of a value whole
-// has none, and one whose recorded text does not hold the recorded words
-// where the run says, or that has no Elsewhere, has its own word alone.
+// values); failing one, the words around it that no such stretch covers
+// ("<cid>/<appId>" with the cid held whole elsewhere leaves the appId's
+// words). A stretch held elsewhere is another value, so a word beside it is
+// never read with it: "<B>/3" whose mock holds "<B>" whole leaves "3" its
+// own span. A binding of a value whole has none, and one whose run its mock
+// holds no stretch of whole elsewhere (no evidence of any value: main's word
+// by word check), whose recorded text does not hold the recorded words where
+// the run says, or that has no Elsewhere, has its own word alone.
 func WordRuns(ws []WordBind) []Run {
 	runs := make([]Run, len(ws))
 	byText := map[string][]int{}
@@ -549,11 +552,13 @@ func spanOf(ws []WordBind, run []int, at int) (from, to int) {
 	}
 	covered := make([]bool, n)
 	from, to = -1, -1
+	held := false
 	for a := range run {
 		for b := a; b < n; b++ {
 			if !value[a*n+b] {
 				continue
 			}
+			held = true
 			for c := a; c <= b; c++ {
 				covered[c] = true
 			}
@@ -564,6 +569,11 @@ func spanOf(ws []WordBind, run []int, at int) (from, to int) {
 	}
 	if from >= 0 {
 		return from, to
+	}
+	// A run its mock holds no stretch of whole elsewhere shows no value:
+	// each word is its own (main's word by word check).
+	if !held {
+		return at, at
 	}
 	from, to = at, at
 	for from > 0 && !covered[from-1] {
