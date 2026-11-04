@@ -1139,9 +1139,12 @@ func (o Order) Spans(ms []*models.Mock) [][2]int {
 // adapter told of, or one keploy cannot tell from another set's. F's view of
 // r is then one no adapter stated, and a word a value holds now that may
 // stand there is refused (Raw.viewUnstated: fail closed). A Raw with a view
-// already stated (ServedLive, ServedChanged) keeps it. Every adapter's learn
-// step reads the recordings F served through it, so a statement one adapter
-// made holds for every other's call.
+// already stated (ServedLive, ServedChanged) keeps it, except where every
+// serve of m the read saw came after the call reached keploy
+// (Raw.servedAfter): r then carries no view F stated of it changed, as of
+// that arrival, whenever it was stated. Every adapter's learn step reads the
+// recordings F served through it, so a statement one adapter made holds for
+// every other's call.
 //
 // Where F made every serve of m the read saw in an older test of the set
 // (olderTestLocked), r is also marked so (Raw.ServedInAnOlderTest): F gave
@@ -1175,8 +1178,19 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 		r = r.ServedBeforeTheTest()
 	}
 	r.servedAfter = after
+	return statedView(m, r, unstated && ok, recorded, unread, loads).asOfArrival()
+}
+
+// statedView is r, a recording of m F served whose view no adapter stated
+// yet, with the view the statements of F's serves of m give it (ServedView),
+// where every serve was told (told): as recorded where each was told so;
+// the one view they gave (ServedLive); each view where they gave more than
+// one, the recording counted where one was told as recorded
+// (ServedChanged); a view that could not be kept or read standing for any
+// text (ServedChanged with none). Untold, r is returned as it is.
+func statedView(m *models.Mock, r Raw, told, recorded, unread bool, loads []func() (*models.Mock, error)) Raw {
 	switch {
-	case !unstated, !ok:
+	case !told:
 		return r
 	case unread:
 		return r.ServedChanged()
