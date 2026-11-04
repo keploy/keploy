@@ -225,3 +225,34 @@ func TestTwoViewsOfARecordingServedAloftWhenTheCallArrivedGaveItNothing(t *testi
 		}
 	}
 }
+
+// A serve told as recorded keeps that statement as of the call's arrival,
+// even where every serve the read saw came after it (servedAfter): what it
+// gave the application is the recording itself, which holds no word the
+// recorded text does not. Flyway's execution_time, recorded as 50 beside the
+// history table's VARCHAR(50) and bound 7 in F, is then still no copy of it
+// (a copy moves with its source) and is learned as varying, naming the
+// reading set aside, with the serve claimed after the call arrived. Read
+// with no view, the place would stay the value's source, and the call would
+// be refused for a value it never copied (FALSE RED).
+func TestASourceToldAsRecordedAndServedAfterTheCallArrivedStaysAsRecorded(t *testing.T) {
+	before := eRecAt.Add(-150 * time.Millisecond)
+	m := &models.Mock{Name: "mock-5"}
+	tr := NewTracker()
+	tr.Begin()
+	time.Sleep(2 * time.Millisecond)
+	arrival := time.Now()
+	time.Sleep(2 * time.Millisecond)
+	tr.ServedMock(m)
+	tr.ServedMockAsRecorded(m)
+	o := tr.Placed().Order.ArrivedAt(arrival)
+	first, last := o.Of(m)
+	x := o.ServedView(m, eHistory(before, 0, false).ServedIn(first, last))
+	if !x.AsRecorded() {
+		t.Fatalf("the serve told as recorded, claimed after the call arrived, is read as %+v; want as recorded", x)
+	}
+	got := classifyF(t, "50", "7", nil, append(eStartup(), x), nil)
+	if got.Kind != KindNoise || !strings.Contains(got.Why, "which record's full round sent and gave the application as recorded, byte for byte, while the value changed") {
+		t.Errorf("FALSE RED: 50 beside VARCHAR(50) F served as recorded after the call arrived, 7 in F: %s (%q); want noise naming mock-5", got.Kind, got.Why)
+	}
+}
