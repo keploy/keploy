@@ -725,9 +725,19 @@ func poolPlaces(pool []*models.Mock) redactedPlaces {
 // recorded (a retry) would find in the pool no recording that redacted its
 // secret. Served exactly, they are the places of the open test's recordings
 // the store lists as answered (integrations.ExactConsumedReader); otherwise
-// those answered noted in the test's window (answeredNote).
-func answeredPlaces(db integrations.MockMemDb) redactedPlaces {
-	p := answeredNote(db).of(db)
+// those answered noted in the test's window (answeredNote). start is the
+// start of the window the command was matched in (CurrentTestWindow, read
+// as its match begins, before its pool): without exact serving, when the
+// store tells another window once the places are read, the replay moved
+// on while the command was matched, the note may hold another test's
+// places or none of its own, and the command is redacted whole
+// (everyPlace). Under exact serving no window is told (both reads are
+// zero), and the store's list is read as it is then.
+func answeredPlaces(db integrations.MockMemDb, start time.Time) redactedPlaces {
+	p, ok := answeredNote(db).of(db, start)
+	if !ok {
+		return everyPlace
+	}
 	if er, ok := db.(integrations.ExactConsumedReader); ok {
 		p = p.or(poolPlaces(er.ConsumedTestMocks()))
 	}
@@ -775,6 +785,15 @@ func answeredNote(db integrations.MockMemDb) *windowPlaces {
 var unkeptAnswered windowPlaces
 
 type windowPlaces struct {
+	// mu guards the note, and the store's window it is told by is read
+	// under it (add, of, released): each takes the note and the window the
+	// store tells at one instant, while no other add, read or release of
+	// the note runs. An answer of a test that takes mu only after the store
+	// moved on to the next test reads the next test's window and adds to
+	// its note: it cannot begin the note again over that test's answers.
+	// The store's window lock is taken under mu, never mu under it, and a
+	// read of the window takes no lock a staging holds as it runs a release
+	// (it holds the manager's swap lock).
 	mu sync.Mutex
 	// held is set while a note is kept: from the first answer that adds to
 	// it until its store lets it go (released).
@@ -791,8 +810,8 @@ func (w *windowPlaces) add(db integrations.MockMemDb, p redactedPlaces) {
 	if !p.redactsAny() {
 		return
 	}
-	start, _ := db.CurrentTestWindow()
 	w.mu.Lock()
+	start, _ := db.CurrentTestWindow()
 	begun := !w.held || !start.Equal(w.start)
 	if begun {
 		w.gen++
@@ -806,16 +825,20 @@ func (w *windowPlaces) add(db integrations.MockMemDb, p redactedPlaces) {
 	}
 }
 
-// of is the places kept for db's open test window; none when no recording
-// answered in it.
-func (w *windowPlaces) of(db integrations.WindowAware) redactedPlaces {
-	start, _ := db.CurrentTestWindow()
+// of is the places kept for db's open test window, that of start; none
+// when no recording answered in it. ok is false when db's open window is
+// not that of start.
+func (w *windowPlaces) of(db integrations.WindowAware, start time.Time) (p redactedPlaces, ok bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !start.Equal(w.start) {
-		return redactedPlaces{}
+	now, _ := db.CurrentTestWindow()
+	if !now.Equal(start) {
+		return redactedPlaces{}, false
 	}
-	return w.places
+	if !now.Equal(w.start) {
+		return redactedPlaces{}, true
+	}
+	return w.places, true
 }
 
 // letGoWith asks db to let go of the note gen, begun in its window of start,
@@ -837,14 +860,14 @@ func (w *windowPlaces) letGoWith(db integrations.MockMemDb, gen uint64, start ti
 // ask is let go of when the next note of the store begins, and redacts more
 // until then, never less.
 func (w *windowPlaces) released(db integrations.MockMemDb, gen uint64, start time.Time, asked bool) {
-	now, _ := db.CurrentTestWindow()
-	gone := !now.Equal(start)
 	w.mu.Lock()
 	if w.gen != gen {
 		// Another note was begun since.
 		w.mu.Unlock()
 		return
 	}
+	now, _ := db.CurrentTestWindow()
+	gone := !now.Equal(start)
 	if gone {
 		w.held, w.places = false, redactedPlaces{}
 	}

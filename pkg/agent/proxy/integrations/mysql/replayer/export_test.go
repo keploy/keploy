@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -336,6 +337,35 @@ func ForgetAnsweredForTest() {
 	unkeptAnswered.mu.Lock()
 	defer unkeptAnswered.mu.Unlock()
 	unkeptAnswered.held, unkeptAnswered.places = false, redactedPlaces{}
+}
+
+// AnswerForTest notes the places m redacted as answered in db's open test
+// window, as an answer does before it takes m out of db's pool
+// (updateMock).
+func AnswerForTest(db integrations.MockMemDb, m *models.Mock) {
+	answeredNote(db).add(db, placesOf(m))
+}
+
+// AnsweredShownForTest is the live statement sql as a command matched in
+// the window of start is shown by the places of the recordings that
+// answered there (answeredPlaces): redacted whole when db tells another
+// window.
+func AnsweredShownForTest(db integrations.MockMemDb, start time.Time, sql string) string {
+	return answeredPlaces(db, start).liveStatement(sql)
+}
+
+// AnsweredSlotForTest is the slot a store keeps its answered note in.
+func AnsweredSlotForTest() any { return answeredKey{} }
+
+// AnsweredNoteFreeForTest reports whether db's answered note is free: no
+// add, read or release holds it.
+func AnsweredNoteFreeForTest(db integrations.MockMemDb) bool {
+	w := answeredNote(db)
+	if !w.mu.TryLock() {
+		return false
+	}
+	w.mu.Unlock()
+	return true
 }
 
 // ForgetPlacesForTest drops every recording's places kept (placesKept), so

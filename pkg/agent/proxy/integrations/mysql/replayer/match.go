@@ -1143,7 +1143,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if pool == nil && loadPool() != nil {
 			return everyPlace
 		}
-		answered := answeredPlaces(mockDb)
+		answered := answeredPlaces(mockDb, winStart)
 		if integrations.UnheldWhy(mockDb) != "" || opts.restaged != nil && opts.restaged() {
 			return everyPlace
 		}
@@ -3717,12 +3717,17 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 	if len(detectedNoise) > 0 {
 		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
 	}
+	// Once taken out it is in no later read of the pool: a miss of the
+	// test redacts what it redacted all the same (answeredPlaces). It is
+	// noted before it is taken out, so a miss whose pool read no longer
+	// holds it reads it in the note. When it is not taken out, it is still
+	// in the pool, or another call took it out and noted it too, or it was
+	// read from a pool a staging has since replaced: it is then noted in
+	// the window the store tells now, which redacts more, never less.
+	if !integrations.ExactServing(mockDb) {
+		answeredNote(mockDb).add(mockDb, placesOf(matchedMock))
+	}
 	if mockDb.DeleteFilteredMock(deleteMock) {
-		// It is in no later read of the pool: a miss of the test redacts
-		// what it redacted all the same (answeredPlaces).
-		if !integrations.ExactServing(mockDb) {
-			answeredNote(mockDb).add(mockDb, placesOf(matchedMock))
-		}
 		return true
 	}
 	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) || usedOrRefused() {
