@@ -61,7 +61,7 @@ func learnedLine(l learnedWord) string {
 		b.WriteString(", learned from round F's call in " + l.From + ", for learning only")
 	}
 	b.WriteString(placesPart(l.Places))
-	b.WriteString(". Undo: ")
+	b.WriteString(undoMark)
 	sep := ""
 	for _, e := range onceEach([]Edit{noiseEdit(l.Mock, cmp.Or(l.Noise, l.Field)), {Kind: EditReRecord}}) {
 		b.WriteString(sep + EditWords(e))
@@ -70,6 +70,10 @@ func learnedLine(l learnedWord) string {
 	b.WriteString(".")
 	return b.String()
 }
+
+// undoMark begins the part of a learned word's line that says how to undo
+// it: what learning read stands before it.
+const undoMark = ". Undo: "
 
 // A secret's values never print. Where a line's field, or a place it names,
 // names a secret by keploy's one rule for a name (secretname.Name, the rule

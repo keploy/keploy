@@ -251,6 +251,11 @@ type Decision struct {
 	// the decision set aside because they were asked at or before the
 	// call and answered after it: R's word there decided nothing.
 	AnsweredAfter []Place
+	// Of is the one value a word made anew (OutcomeFresh) is a word of, as
+	// recorded (models.MockVariable.Of): a token whose words learning read
+	// as made anew together (valueForms, keepWholeForms). "" where learning
+	// reads none: the word is its own value at replay, as main reads it.
+	Of string
 }
 
 // Decide is every changed word of in, decided (see above).

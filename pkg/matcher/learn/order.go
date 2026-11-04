@@ -29,10 +29,14 @@ func init() { decideBy = decideOrder }
 // decided with every earlier place in scope, or the call's own order.
 func decideOrder(in Input) []Decision {
 	if in.Mode == ModeElsewhere {
+		// Its guard keeps only clock reads (every other word refused, or
+		// dropped as declared noise): no word there is made anew, so none
+		// names a value.
 		ds, fields := decideBoth(in, true)
 		return elsewhere(in, ds, fields)
 	}
-	ds, _ := decideBoth(in, false)
+	ds, fields := decideBoth(in, false)
+	keepWholeForms(ds, fields)
 	return ds
 }
 
@@ -344,7 +348,8 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 	}
 	var out []Decision
 	done := map[*instantWord]bool{}
-	for _, w := range rd.Words {
+	forms := dc.valueForms(rd)
+	for k, w := range rd.Words {
 		switch {
 		case w.Instant != nil:
 			if done[w.Instant] {
@@ -355,10 +360,188 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 		case w.RecIdx < 0 || w.LiveIdx < 0:
 			return append(out, dc.unpaired(path, bare, rec, live, rd)), true
 		default:
-			out = append(out, dc.word(path, bare, rec, live, rd.Rec, w, pieceOfAnId(rd, w)))
+			d := dc.word(path, bare, rec, live, rd.Rec, w, pieceOfAnId(rd, w))
+			d.Of = forms[k]
+			out = append(out, d)
 		}
 	}
 	return out, false
+}
+
+// valueForms names, for each changed word of rd (by its index in rd.Words),
+// the one value learning reads it as a word of, as recorded: the whole
+// idByte token around it (main's id token: word bytes, '-' and '_') in both
+// runs, where two or more changed words, paired by position, stand inside
+// it around the same separators in both runs; where it carries chanceBits
+// or more in each run, so its words standing together are no chance; and
+// where the call sends none of its words apart from it (sentApart). Such a
+// value is one the application made anew whole, as a UUID: its words
+// changed together and stand only together. A word of any other token is
+// named none, and is its own value at replay, as main reads it. That every
+// word of the token, in R, is one made anew in this call (none kept inside
+// it, "ORD-<id>"; none a part of an instant, which is decided whole) is
+// keepWholeForms', which counts them; equal separators leave F's token no
+// word R's lacks.
+func (dc *decider) valueForms(rd textReading) map[int]string {
+	type span struct{ r, l [2]int }
+	groups := map[span][]int{}
+	var order []span
+	for k, w := range rd.Words {
+		i := slices.IndexFunc(w.Tokens, func(t wholeToken) bool { return t.Kind == tokenID })
+		if i < 0 {
+			continue
+		}
+		at := span{w.Tokens[i].RecAt, w.Tokens[i].LiveAt}
+		if _, ok := groups[at]; !ok {
+			order = append(order, at)
+		}
+		groups[at] = append(groups[at], k)
+	}
+	var out map[int]string
+	for _, at := range order {
+		ks := groups[at]
+		sr, sf := rd.Rec[at.r[0]:at.r[1]], rd.Live[at.l[0]:at.l[1]]
+		if len(ks) < 2 || between(rd.Rec, rd.RecWords, at.r) != between(rd.Live, rd.LiveWords, at.l) ||
+			wordBits(sr) < chanceBits || wordBits(sf) < chanceBits || dc.sentApart(sr, sf) {
+			continue
+		}
+		if out == nil {
+			out = map[int]string{}
+		}
+		for _, k := range ks {
+			out[k] = sr
+		}
+	}
+	return out
+}
+
+// between is the text of s inside at outside its words, each word marked
+// by a NUL: two tokens whose betweens are equal hold their words around
+// the same separators.
+func between(s string, words [][2]int, at [2]int) string {
+	var b strings.Builder
+	from := at[0]
+	for _, w := range words {
+		if at[0] <= w[0] && w[1] <= at[1] {
+			b.WriteString(s[from:w[0]] + "\x00")
+			from = w[1]
+		}
+	}
+	b.WriteString(s[from:at[1]])
+	return b.String()
+}
+
+// sentApart reports whether the call sends a word of a value apart from
+// it in either run: a leaf of its request (R's text sr in R, F's sf in F)
+// or of its answer (sr; a typed instant is no text) that holds one of the
+// value's words, as written or case-folded, in any reading or declared
+// form, anywhere but inside a whole idByte token equal to the value. A
+// place before the call is the word's own decision: a word one shows in
+// both runs is bound to it, not made anew.
+func (dc *decider) sentApart(sr, sf string) bool {
+	apart := func(v, s string) bool {
+		t := dc.x.text(cutToken(v, s))
+		for _, w := range wordsOfText(s) {
+			if evHolds(t, w) || evHolds(t, strings.ToLower(w)) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, run := range []struct {
+		leaves map[string]Leaf
+		s      string
+	}{{dc.in.Rec.Leaves, sr}, {dc.in.Live.Leaves, sf}} {
+		for _, l := range run.leaves {
+			if apart(l.Value, run.s) {
+				return true
+			}
+		}
+	}
+	return slices.ContainsFunc(dc.in.Resp, func(a Leaf) bool { return a.Type != Instant && apart(a.Value, sr) })
+}
+
+// wordsOfText are s's words, as the reader cuts them (variables.Words),
+// each once.
+func wordsOfText(s string) []string {
+	var out []string
+	for _, w := range variables.Words(s) {
+		if !slices.Contains(out, s[w[0]:w[1]]) {
+			out = append(out, s[w[0]:w[1]])
+		}
+	}
+	return out
+}
+
+// cutToken is v with each whole idByte token equal to s (no idByte right
+// before or after it) cut to a space, which no word or token continues.
+func cutToken(v, s string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(v, s)
+		if i < 0 {
+			b.WriteString(v)
+			return b.String()
+		}
+		end := i + len(s)
+		if (i == 0 || !idByte(v[i-1])) && (end == len(v) || !idByte(v[end])) {
+			b.WriteString(v[:i] + " ")
+		} else {
+			b.WriteString(v[:i+1])
+			end = i + 1
+		}
+		v = v[end:]
+	}
+}
+
+// formSays is the clause a learned word's line gains when learning reads it
+// as a word of one value (Decision.Of): the value, as recorded, masked
+// where its field names a secret.
+func formSays(field, of string) string {
+	q := strconv.Quote(of)
+	if secretAt(field, nil) {
+		q = masked
+	}
+	return "; a word of one value, " + q + ", the whole token around it in both runs: its words changed together, each made anew in this call, and the call sends none of them apart from it"
+}
+
+// keepWholeForms keeps a word's value (Decision.Of) only where every word of
+// that value is still made anew in this call once the call is decided
+// (other uses, two readings, a recording keploy could not read, the
+// elsewhere guard), one decision per word, and says so in each one's line.
+// Else none of them names it, and each is its own value at replay, as main
+// reads it: never a part of a value named one. One value's words stand in
+// one field: a later place of the call that holds them is a use of the
+// first (oneValue), so it is no word made anew.
+func keepWholeForms(ds []Decision, fields []string) {
+	type form struct {
+		at    []int
+		whole bool
+	}
+	forms := map[string]*form{}
+	for i, d := range ds {
+		if d.Of == "" {
+			continue
+		}
+		f := forms[d.Of]
+		if f == nil {
+			f = &form{whole: true}
+			forms[d.Of] = f
+		}
+		f.at = append(f.at, i)
+		f.whole = f.whole && d.Outcome == OutcomeFresh && strings.Contains(d.Line, undoMark)
+	}
+	for of, f := range forms {
+		keep := f.whole && len(f.at) == len(variables.Words(of))
+		for _, i := range f.at {
+			if !keep {
+				ds[i].Of = ""
+				continue
+			}
+			at := strings.LastIndex(ds[i].Line, undoMark)
+			ds[i].Line = ds[i].Line[:at] + formSays(fields[i], of) + ds[i].Line[at:]
+		}
+	}
 }
 
 // tokenBits is the fewest bits (wordBits) the changed part of a URL-safe
