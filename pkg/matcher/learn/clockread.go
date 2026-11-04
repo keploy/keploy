@@ -889,6 +889,43 @@ func learnedAs(path string, o models.ClockOffset) string {
 	return path + " was learned as " + o.String() + ", " + read
 }
 
+// ClockReadAbsent is why a replay refuses a call that carries no value at
+// path, a place the learn step learned as o, a read of the application's
+// clock (models.MockSpec.Clocks): the read is not in the call at all, so it
+// says so, not how a value there fails the check (a text too short, no
+// instant), which would name a value the call never sent.
+func ClockReadAbsent(path string, o models.ClockOffset) string {
+	return learnedAs(path, o) + ", and this call carries no value at " + path + ": it changed"
+}
+
+// ReadsAsClockRead reports whether live, the leaf a replay's call carries at
+// a place the learn step learned as o, a read of the application's clock,
+// is a value of the form that read is written in, whatever instant it
+// names: of a word read, the word o names, every byte beside it the
+// recorded text's (wordIn); read whole as an instant, or as a time of day
+// at a place learned as one (clockReadOf, timeOfDayOf); in o's layout where
+// the learn step saw one (any, where it saw more than one: LayoutApart). A
+// stale instant is one: whether it holds in the call's span is
+// CheckClockRead's. A value of no such form ("me" where an instant was) is
+// no read of any clock.
+func ReadsAsClockRead(o models.ClockOffset, live Leaf) bool {
+	if !o.Word.IsZero() {
+		word, why := wordIn(o.Word, live)
+		if why != "" {
+			return false
+		}
+		live = word
+	}
+	if models.LayoutTimeOfDay(o.Layout) {
+		_, _, lay, ok := timeOfDayOf(live)
+		return ok && lay == o.Layout
+	}
+	if _, _, _, ok := clockReadOf(live); !ok {
+		return false
+	}
+	return o.Layout == "" || o.Layout == models.LayoutApart || leafLayout(live) == o.Layout
+}
+
 // wordIn is the word of live, the leaf a replay's call carries at a place
 // the learn step learned a read of the clock at that is one word of a
 // longer text, w (models.ClockOffset.Word): live's text with the recorded
