@@ -21,7 +21,7 @@ set -uo pipefail
 # sends it to keploy.
 set -m
 # shellcheck source=../sudo_env.sh
-source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+source "$(dirname "${BASH_SOURCE[0]}")/../sudo_env.sh" || exit 1
 
 BIN="${RECORD_BIN:-keploy}"
 BIN="$(command -v "$BIN" || echo "$BIN")"

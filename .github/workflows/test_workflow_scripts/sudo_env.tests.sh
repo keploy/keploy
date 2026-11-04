@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for sudo_env.sh's SUDO_ENV and verify_ran. Run by
-# linux-ci-scripts.yml, or locally (it needs only bash and grep, and leaves
+# sudo-env-scripts.yml, or locally (it needs only bash and grep, and leaves
 # nothing behind):
 #
 #   bash .github/workflows/test_workflow_scripts/sudo_env.tests.sh
@@ -8,7 +8,9 @@
 # SUDO_ENV names each of its switches (KEPLOY_EXACT_VIEW_VERIFY,
 # KEPLOY_PG_V3_LOG_BIND_VALUES) with its value while it is set, an empty value
 # included, and nothing while it is unset, and every KEPLOY_ variable a
-# workflow's env: block sets is one of them or one keploy does not read.
+# workflow's env: block sets is one of them or one keploy does not read. Every
+# script that sources sudo_env.sh does so by its own path, never through the
+# workspace, so it loads where a workflow checks keploy out at a path.
 # verify_ran passes a run under the proven switch whose log holds the agent's
 # verify line, and fails one whose log lacks it or does not exist, saying so; a
 # run without the switch, or with KEPLOY_EXACT_VIEW_VERIFY other than 1, passes
@@ -94,8 +96,86 @@ unnamed_is workflows "$here/.." ""
 mkdir -p "$tmp/wf"
 printf 'env:\n  KEPLOY_EXACT_VIEW_VERIFY: 1\njobs:\n  a:\n    env:\n      KEPLOY_TEST_X: 1\n    steps:\n      - env:\n          KEPLOY_BIN: k\n          KEPLOY_PG_V3_LOG_BIND_VALUES: "1"\n' > "$tmp/wf/known.yml"
 unnamed_is known-names "$tmp/wf" ""
+printf 'jobs:\n  a:\n    env:\n      KEPLOY_NEW_YML: 1\n' > "$tmp/wf/new-yml.yml"
+unnamed_is new-switch-yml "$tmp/wf" "new-yml.yml sets KEPLOY_NEW_YML"
 printf 'jobs:\n  a:\n    steps:\n      - env:\n          KEPLOY_NEW_SWITCH: 1\n        run: echo "KEPLOY_IN_RUN: 1"\n' > "$tmp/wf/new.yaml"
-unnamed_is new-switch "$tmp/wf" "new.yaml sets KEPLOY_NEW_SWITCH"
+unnamed_is new-switch-yaml "$tmp/wf" "new-yml.yml sets KEPLOY_NEW_YML|new.yaml sets KEPLOY_NEW_SWITCH"
+
+# A script sources sudo_env.sh by its own path, never through the workspace:
+# sampling-test.yml and keploy-performance-test.yml check keploy out at
+# `path: keploy`, where $GITHUB_WORKSPACE/.github does not exist.
+# sourced_from_workspace DIR: each line of a script under DIR that sources
+# sudo_env.sh through $GITHUB_WORKSPACE or a path from the workspace (one that
+# names .github/), as "FILE:LINE".
+sourced_from_workspace() {
+  local f n line
+  grep -rnE --include='*.sh' '^[^#]*(source|\.)[[:space:]].*sudo_env\.sh' "$1" |
+    while IFS=: read -r f n line; do
+      case $line in *GITHUB_WORKSPACE* | *.github/*) echo "${f#"$1"/}:$n" ;; esac
+    done
+}
+# from_workspace_is NAME DIR WANT: sourced_from_workspace DIR, its lines joined
+# by "|", is WANT.
+from_workspace_is() {
+  local got
+  cases=$((cases + 1))
+  got=$(sourced_from_workspace "$2" | sort | paste -sd'|')
+  if [ "$got" != "$3" ]; then
+    echo "FAIL $1: scripts that source sudo_env.sh through the workspace, not by their own path: '$got', want '$3'"
+    fails=$((fails + 1))
+  fi
+}
+from_workspace_is scripts "$here/../.." ""
+mkdir -p "$tmp/src/a"
+name=sudo_env
+printf '# source "$GITHUB_WORKSPACE/%s.sh" in a comment\nsource "$(dirname "${BASH_SOURCE[0]}")/../%s.sh" || exit 1\n' "$name" "$name" > "$tmp/src/a/own.sh"
+printf 'set -e\nsource "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/%s.sh" || exit 1\n' "$name" > "$tmp/src/a/ws.sh"
+printf '. ./.github/workflows/test_workflow_scripts/%s.sh\n' "$name" > "$tmp/src/rel.sh"
+printf 'source "$GITHUB_WORKSPACE/scripts/%s.sh"\n' "$name" > "$tmp/src/ws-only.sh"
+from_workspace_is workspace-forms "$tmp/src" "a/ws.sh:2|rel.sh:1|ws-only.sh:1"
+
+# The same scripts in GitHub's layout for `path: keploy`: the repository under
+# $GITHUB_WORKSPACE/keploy and nothing at the workspace root.
+# path_checkout DIR: lays out, in that layout, each script under DIR that
+# sources sudo_env.sh by its own directory, holding only that source line;
+# runs it by its path and sources it, from the workspace root; and prints each
+# that did not load sudo_env.sh, as "FILE(bash)" or "FILE(source)", or
+# "no script" when DIR has none.
+path_checkout() {
+  local ws lay f line rel how got laid=0
+  ws=$(mktemp -d "$tmp/ws.XXXXXX")
+  lay="$ws/keploy/.github/workflows/test_workflow_scripts"
+  mkdir -p "$lay"
+  cp "$here/sudo_env.sh" "$lay/"
+  while IFS=: read -r f _ line; do
+    rel=${f#"$1"/}
+    mkdir -p "$lay/$(dirname "$rel")"
+    printf '%s\ndeclare -F verify_ran >/dev/null && echo loaded\n' "$line" > "$lay/$rel"
+    laid=$((laid + 1))
+    for how in bash source; do
+      got=$(cd "$ws" && env "${unset_switches[@]}" GITHUB_WORKSPACE="$ws" bash -c '"$1" "$2"' _ "$how" "keploy/.github/workflows/test_workflow_scripts/$rel" 2>&1)
+      grep -qx loaded <<<"$got" || echo "$rel($how)"
+    done
+  done < <(grep -rnE --include='*.sh' '^[[:space:]]*source "\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)/[./]*sudo_env\.sh"' "$1")
+  [ "$laid" -gt 0 ] || echo "no script"
+}
+# path_checkout_is NAME DIR WANT: path_checkout DIR, its lines joined by "|",
+# is WANT.
+path_checkout_is() {
+  local got
+  cases=$((cases + 1))
+  got=$(path_checkout "$2" | sort | paste -sd'|')
+  if [ "$got" != "$3" ]; then
+    echo "FAIL $1: scripts that did not load sudo_env.sh with keploy checked out at a path: '$got', want '$3'"
+    fails=$((fails + 1))
+  fi
+}
+path_checkout_is path-checkout "$here" ""
+mkdir -p "$tmp/pc/golang/x" "$tmp/none"
+printf 'source "$(dirname "${BASH_SOURCE[0]}")/../../%s.sh" || exit 1\n' "$name" > "$tmp/pc/golang/x/own.sh"
+printf 'source "$(dirname "${BASH_SOURCE[0]}")/../%s.sh" || exit 1\n' "$name" > "$tmp/pc/golang/x/short.sh"
+path_checkout_is path-checkout-depth "$tmp/pc" "golang/x/short.sh(bash)|golang/x/short.sh(source)"
+path_checkout_is path-checkout-none "$tmp/none" "no script"
 
 LINE="2026-11-05T00:00:00Z INFO Keploy(agent): the exact view's verify mode is on in this agent: each read it keeps is recomputed"
 printf 'start\n%s\nend\n' "$LINE" > "$tmp/with.log"

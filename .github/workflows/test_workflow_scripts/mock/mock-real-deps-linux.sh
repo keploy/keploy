@@ -28,7 +28,7 @@ set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 # shellcheck source=../sudo_env.sh
-source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+source "$(dirname "${BASH_SOURCE[0]}")/../sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 if ! python3 -c "import pytest, yaml" 2>/dev/null; then

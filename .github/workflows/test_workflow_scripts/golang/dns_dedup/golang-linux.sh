@@ -3,7 +3,7 @@
 # names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
 # switches a workflow sets for keploy, each only while it is set.
 # shellcheck source=../../sudo_env.sh
-source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
 
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
