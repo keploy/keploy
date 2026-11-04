@@ -26,7 +26,11 @@ import (
 // consumer's insert after the polls was refused in record's full round, and
 // its test never ran there. A word of the first serve's request, which the
 // one view holds, is still refused naming the recording; one only a later
-// serve's request carried is the application's own, not what F gave it.
+// serve's request carried is the application's own, not what F gave it. A
+// recording whose answer the agent parked on disk (strict mock windows: its
+// answer read back only where a rule reads it, withResponse) is one view the
+// same: the key names the recorded answer, never the answer the parked
+// recording holds in memory (none), which names a view keploy cannot read.
 func TestASignedPollServedManyTimesIsOneViewOfItsRecording(t *testing.T) {
 	const (
 		polls      = 64
@@ -50,17 +54,28 @@ func TestASignedPollServedManyTimesIsOneViewOfItsRecording(t *testing.T) {
 	}
 	const body = `{"MaxNumberOfMessages":10,"QueueUrl":"http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/q"}`
 	for _, tc := range []struct {
-		name string
-		ref  string // the later call's body.ref in F (recorded "7")
-		why  string // "" learns; else a part of the refusal
+		name   string
+		ref    string // the later call's body.ref in F (recorded "7")
+		why    string // "" learns; else a part of the refusal
+		parked bool   // the poll's answer parked on disk, apart from it
 	}{
-		{"a value no answer F gave holds", "wvq", ""},
-		{"a value the first serve's request carried", invocation(0), "as record's full round gave it"},
-		{"a value only a later serve's request carried", invocation(40), ""},
+		{"a value no answer F gave holds", "wvq", "", false},
+		{"a value the first serve's request carried", invocation(0), "as record's full round gave it", false},
+		{"a value only a later serve's request carried", invocation(40), "", false},
+		{"a value no answer F gave holds, the answer parked on disk", "wvq", "", true},
+		{"a value the first serve's request carried, the answer parked on disk", invocation(0), "as record's full round gave it", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
 			poll := learnRecorded("mock-2", time.Second, "POST", "/000000000000/q/", body, signed(-1), `{}`)
+			if tc.parked {
+				answer := *poll.Spec.HTTPResp
+				poll.Spec.HTTPResp = nil
+				poll.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+					a := answer
+					return &a, nil, nil
+				})
+			}
 			call := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/messages", `{"ref":"7"}`, nil, `{}`)
 			tr := learn.NewTracker()
 			ctx := learn.WithTracker(context.Background(), tr)
@@ -69,6 +84,9 @@ func TestASignedPollServedManyTimesIsOneViewOfItsRecording(t *testing.T) {
 				reportPairing(ctx, live("POST", "/000000000000/q/", body, signed(i)), poll, integrations.AnsweredCall{}, false)
 			}
 			tr.End()
+			if tc.parked && (poll.Spec.HTTPResp != nil || !poll.HasSpilledResponse()) {
+				t.Fatal("serving the poll read its parked answer into the recording; want it read back only on a copy")
+			}
 			tr.Begin()
 			got, miss, err := h.learnMatch(ctx, live("POST", "/v1/messages", `{"ref":"`+tc.ref+`"}`, nil), &learnDb{perTest: []*models.Mock{call}}, n, opts)
 			if err != nil {
