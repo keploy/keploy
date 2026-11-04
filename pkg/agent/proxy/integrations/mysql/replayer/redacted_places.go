@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 
@@ -301,11 +302,24 @@ type sqlLiteralsRead struct {
 	ok   bool
 }
 
+// bytes is about what l holds beside the statement it was read from: its
+// literals' values and headers, as read and as written.
+func (l sqlLiterals) bytes() int {
+	n := int(unsafe.Sizeof(""))*cap(l.parsed) + int(unsafe.Sizeof(sqlToken{}))*cap(l.tokens)
+	for _, v := range l.parsed {
+		n += len(v)
+	}
+	for _, t := range l.tokens {
+		n += len(t.val)
+	}
+	return n
+}
+
 // sqlLiteralsCache memoizes readSQLLiterals per SQL text, as
-// queryShapeCache does extractQueryShape: a pool's places are read for
-// every command a debug line or a miss shows, and each redacted recording
-// is read once, not once per command. Its values are shared: read them,
-// never change them.
+// queryShapeCache does extractQueryShape, and keeps what memoKeeps keeps: a
+// pool's places are read for every command a debug line or a miss shows,
+// and each redacted recording the cache keeps is read once, not once per
+// command. Its values are shared: read them, never change them.
 var sqlLiteralsCache = func() *lru.TwoQueueCache[string, sqlLiteralsRead] {
 	c, err := lru.New2Q[string, sqlLiteralsRead](queryShapeCacheSize)
 	if err != nil {
@@ -324,7 +338,9 @@ func readSQLLiterals(sql string) (sqlLiterals, bool) {
 		return v.lits, v.ok
 	}
 	lits, ok := scanSQLLiterals(sql, sqlKinds)
-	sqlLiteralsCache.Add(sql, sqlLiteralsRead{lits: lits, ok: ok})
+	if memoKeeps(sql, lits.bytes()) {
+		sqlLiteralsCache.Add(sql, sqlLiteralsRead{lits: lits, ok: ok})
+	}
 	return lits, ok
 }
 
@@ -510,17 +526,48 @@ func poolPlaces(pool []*models.Mock) redactedPlaces {
 var everyPlace = redactedPlaces{statement: true, whole: true, everyParam: true, data: true}
 
 // logPlaces reads the places a log line shows the live statement by
-// (poolPlaces), once per command.
-type logPlaces func() redactedPlaces
+// (poolPlaces), once per command, and shows each text of the statement by
+// them once too. A command's lines show its statement for each candidate
+// they compare it with, as written or as its identity (sqlStatementIdentity),
+// and a statement the caches do not keep (memoKeeps) would be read again for
+// each line. The texts a command's lines show are its own: a few at most.
+type logPlaces struct {
+	read func() redactedPlaces
+	// held are the places read, once read.
+	held *redactedPlaces
+	// shown is each text live showed, by the text.
+	shown map[string]string
+}
+
+// places are the places r reads, read once; every place when there is no
+// r.
+func (r *logPlaces) places() redactedPlaces {
+	if r == nil {
+		return everyPlace
+	}
+	if r.held == nil {
+		p := r.read()
+		r.held = &p
+	}
+	return *r.held
+}
 
 // live is the live statement sql as a log line shows it: by the places r
 // reads, or whole redacted when there is no r. No statement reads none.
-func (r logPlaces) live(sql string) string {
+func (r *logPlaces) live(sql string) string {
 	if sql == "" {
 		return sql
 	}
 	if r == nil {
 		return everyPlace.liveStatement(sql)
 	}
-	return r().liveStatement(sql)
+	shown, ok := r.shown[sql]
+	if !ok {
+		shown = r.places().liveStatement(sql)
+		if r.shown == nil {
+			r.shown = map[string]string{}
+		}
+		r.shown[sql] = shown
+	}
+	return shown
 }

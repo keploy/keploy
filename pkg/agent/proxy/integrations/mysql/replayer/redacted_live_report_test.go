@@ -509,7 +509,7 @@ func TestMySQLLogsAnExecuteMatchedOnItsValuesAloneByThePoolsPlaces(t *testing.T)
 	id := mysql.Parameter{Type: uint16(mysql.FieldTypeLong), Value: int32(7)}
 	ok, _, _ := matchStmtExecuteLive(zap.New(core), executeOf(executePacket(1, id)), executeOf(executePacket(1, id)), "",
 		newLiveExecStatement(keyed(liveSecret, "globex")), 1, "mock-execute", util.NewNoiseChecker(nil),
-		logPlaces(func() redactedPlaces { return poolPlaces(pool) }))
+		&logPlaces{read: func() redactedPlaces { return poolPlaces(pool) }})
 	if !ok {
 		t.Fatal("the EXECUTE was not matched on its values alone")
 	}
