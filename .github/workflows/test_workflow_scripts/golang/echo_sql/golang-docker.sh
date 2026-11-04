@@ -2,6 +2,8 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+# test_run_count, and keploy_exited: names a keploy command that exited non-zero.
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-exit-helpers.sh"
 
 # Build Docker Image
 docker_build_retry docker compose build
@@ -123,7 +125,9 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt"
+rc=0
+runs_before="$(test_run_count)"
+$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt" || rc=$?
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
@@ -135,6 +139,10 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "${test_container}.txt"
     exit 1
+fi
+
+if [ "$rc" -ne 0 ]; then
+    keploy_exited "$rc" "keploy test" "${test_container}.txt" "$runs_before"
 fi
 
 all_passed=true
@@ -167,7 +175,9 @@ else
 fi
 
 if json_pass_supported; then
-    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}_json.txt"
+    rc=0
+    runs_before="$(test_run_count)"
+    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}_json.txt" || rc=$?
     if grep "ERROR" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
@@ -175,6 +185,9 @@ if json_pass_supported; then
     if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        keploy_exited "$rc" "keploy test --storage-format json" "${test_container}_json.txt" "$runs_before"
     fi
     if ! json_scan_reports; then
         cat "${test_container}_json.txt"
@@ -204,7 +217,7 @@ echo "===== --keep-app-alive regression run ====="
 # otherwise and the new run won't be a clean lifecycle test.
 docker compose down -v --remove-orphans >/dev/null 2>&1 || true
 
-prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+prev_report_count=$(test_run_count)
 
 # Reuse the baseline's container name. --containerName in docker-compose
 # mode must match a SERVICE name in docker-compose.yml (it isn't a
@@ -213,14 +226,14 @@ prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
 # found in any of the provided docker-compose files" error before the
 # replay even starts.
 ka_log="echoApp_keep_app_alive.txt"
+replay_status=0
 $REPLAY_BIN test -c "docker compose up" \
     --containerName "$test_container" \
     --apiTimeout 60 \
     --delay 15 \
     --keep-app-alive \
     --test-sets test-set-0 \
-    --generate-github-actions=false &> "$ka_log"
-replay_status=$?
+    --generate-github-actions=false &> "$ka_log" || replay_status=$?
 
 if [ "$replay_status" -ne 0 ]; then
     echo "::error::--keep-app-alive replay failed with exit code ${replay_status}"
@@ -234,7 +247,7 @@ if grep "WARNING: DATA RACE" "$ka_log"; then
     exit 1
 fi
 
-new_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+new_report_count=$(test_run_count)
 if [ "$new_report_count" -le "$prev_report_count" ]; then
     echo "::error::--keep-app-alive replay did not produce a new test-run-* directory (prev=${prev_report_count}, new=${new_report_count}). Most likely the binary rejected the --keep-app-alive flag."
     cat "$ka_log"

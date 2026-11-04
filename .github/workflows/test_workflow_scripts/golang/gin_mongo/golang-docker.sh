@@ -3,6 +3,8 @@
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
+# test_run_count, and keploy_exited: names a keploy command that exited non-zero.
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-exit-helpers.sh"
 
 # Start mongo before starting keploy.
 docker network create keploy-network
@@ -27,45 +29,6 @@ docker logs mongoDb &
 # Start keploy in record mode.
 docker_build_retry docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
-
-# The number of test runs keploy test has written under ./keploy/reports.
-test_run_count() {
-    ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l
-}
-
-# The step runs this script under `bash -e`, so a keploy command that exited
-# non-zero ended the step at that line, before the checks below it could print
-# its log: the step failed with no line saying what had failed. Each keploy
-# command's exit status is taken instead, and keploy_exited names a non-zero
-# one, with the test-set reports of the test run it wrote and the command's log.
-#
-# keploy_exited RC WHAT LOG [RUNS_BEFORE]: RUNS_BEFORE is test_run_count taken
-# before a keploy test. Only a test run past that count, the one the command
-# wrote, has its reports printed, so a replay that wrote no test run prints no
-# earlier run's reports. keploy record, which runs before any keploy test and
-# writes no test run, gives none.
-keploy_exited() {
-    local rc=$1 what=$2 log=$3 runs_before=${4:-0} run f
-    echo "::error::${what} exited ${rc}; the test-set reports and its log (${log}) follow"
-    if [ "$(test_run_count)" -gt "$runs_before" ]; then
-        run="$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1 || true)"
-        for f in "$run"/test-set-*-report.yaml "$run"/test-set-*-report.json; do
-            [ -f "$f" ] || continue
-            case "$f" in
-            *.json)
-                echo "$f: $(jq -r '.status' "$f" 2>/dev/null || echo '<unreadable>')"
-                jq -r '.tests[]? | select(.status == "FAILED") | "  failed: " + .testCaseID' "$f" 2>/dev/null || true
-                ;;
-            *)
-                echo "$f: $(grep -m 1 'status:' "$f" | awk '{print $2}')"
-                awk '/^ +status: FAILED/ {f = 1} f && /test_case_id:/ {print "  failed: " $2; f = 0}' "$f"
-                ;;
-            esac
-        done
-    fi
-    cat "$log"
-    exit "$rc"
-}
 
 container_kill() {
     # pid=$(pgrep -f "keploy record")
