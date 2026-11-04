@@ -1374,7 +1374,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 				inputMediaTypes = parseMediaTypes(strings.Join(inputCTValues, ","))
 				inputMediaTypesRead = true
 			}
-			if len(mockMediaTypes) == 0 || len(inputMediaTypes) == 0 || !mediaTypesOverlap(mockMediaTypes, inputMediaTypes) {
+			if mediaTypesRefused(mockMediaTypes, inputMediaTypes) {
 				if ce := h.Logger.Check(zap.DebugLevel, "The content type of mock and request aren't the same"); ce != nil {
 					ce.Write(zap.String("mock name", mock.Name),
 						zap.Strings("input media types", inputMediaTypes),
@@ -1743,6 +1743,32 @@ func parseMediaTypes(raw string) []string {
 			continue
 		}
 		out = append(out, mt)
+	}
+	return out
+}
+
+// mediaTypesRefused reports whether the schema phase refuses a recording for
+// a call by the media types their Content-Types name (rec, live): the two
+// share none (a side that names none that parses shares none).
+func mediaTypesRefused(rec, live []string) bool {
+	return !mediaTypesOverlap(rec, live)
+}
+
+// schemaTypeDiffs are the differences in Content-Type and body type the
+// schema phase refuses a recording on (SchemaMatch), which no keploy.yml noise
+// changes: a Content-Type both sides send whose media types the phase
+// refuses, and a body whose type (pkg.GuessContentType, as MatchBodyType
+// reads it) is another.
+func (h *HTTP) schemaTypeDiffs(rec *models.HTTPReq, live http.Header, liveBody []byte) []models.MockFieldDiff {
+	var out []models.MockFieldDiff
+	liveCT := live.Values("Content-Type")
+	if recCT := rec.Header["Content-Type"]; recCT != "" && len(liveCT) > 0 &&
+		mediaTypesRefused(parseMediaTypes(recCT), parseMediaTypes(strings.Join(liveCT, ","))) {
+		out = append(out, models.MockFieldDiff{Path: "header.Content-Type", Kind: models.DiffKindValueChanged, Expected: recCT, Actual: strings.Join(liveCT, ",")})
+	}
+	if !h.MatchBodyType(rec.Body, liveBody) {
+		out = append(out, models.MockFieldDiff{Path: "body", Kind: models.DiffKindTypeChanged,
+			Expected: string(pkg.GuessContentType([]byte(rec.Body))), Actual: string(pkg.GuessContentType(liveBody))})
 	}
 	return out
 }
@@ -2557,6 +2583,17 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	}
 	fieldDiffs = append(fieldDiffs, mismatch.QueryParamDiffs(recordedQuery, diffReq.URL.Query())...)
 	fieldDiffs = append(fieldDiffs, mismatch.HeaderKeyDiffs(mockReq.Header, diffReq.Header, headerNoise)...)
+	// Without the proven switch the schema phase also refuses a recording on
+	// its Content-Type's media type and its body's type, whatever keploy.yml's
+	// noise says: the miss names them, and the hint offers no noise for them.
+	// (Under the switch the strict comparison reads both, noise aware.)
+	var schemaTyped []string
+	if !provenswitch.On() {
+		for _, d := range h.schemaTypeDiffs(mockReq, diffReq.Header, diffBody) {
+			fieldDiffs = append(fieldDiffs, d)
+			schemaTyped = append(schemaTyped, d.Path)
+		}
+	}
 
 	// Body diffs: JSON bodies get field-level diffs excluding everything the
 	// matcher itself ignores (learned req_body_noise + user body noise). The
@@ -2592,6 +2629,9 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closestMock.Name, fieldDiffs).
+		WithGuarded(guardedPaths(guarded)...).
+		WithoutNoise(schemaTyped...).
+		WithoutNoise(payloadHashPaths()...).
 		// Whole-request renders for the CLI side-by-side diff. Mock.Noise is
 		// passed so obfuscated values stay redacted on both sides.
 		WithRenderedRequests(
