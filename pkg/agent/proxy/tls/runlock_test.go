@@ -2,6 +2,7 @@ package tls
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -202,9 +203,9 @@ func TestRunLockWaitsForAFileHeldByAnother(t *testing.T) {
 	const warn = "keploy could not take this run's lock (its lock file stayed held by another process, or could not be locked)"
 
 	// Each row's bound: generous where the run must take its lock (a slow
-	// runner only makes it wait longer), short where it must give up, and an
-	// hour where it must not wait at all, so that a regression there hangs the
-	// test instead of passing it.
+	// runner only makes it wait longer), and short where it must give up.
+	// Where the run must not wait at all, the bound is 30 s, so a wait there
+	// ends with the bound's error, which fails the row.
 	t.Run("the holder lets go", func(t *testing.T) {
 		other := lockOwnFileElsewhere(t, "0a1b2c")
 		runLockWait = 30 * time.Second
@@ -223,9 +224,13 @@ func TestRunLockWaitsForAFileHeldByAnother(t *testing.T) {
 		lockOwnFileElsewhere(t, "0a1b2c")
 		runLockWarned.Store(false) // a failure above must not show up here
 		runLockWait = 50 * time.Millisecond
+		// The row's own bound: a wait with no bound of its own ends when this
+		// context does, with no warning, which fails the row.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		core, logs := observer.New(zapcore.WarnLevel)
 		start := time.Now()
-		holdRunLock(context.Background(), zap.New(core), "0a1b2c")
+		holdRunLock(ctx, zap.New(core), "0a1b2c")
 		if waited := time.Since(start); waited < runLockWait {
 			t.Fatalf("the run gave up after %s, before its bound %s", waited, runLockWait)
 		}
@@ -240,9 +245,18 @@ func TestRunLockWaitsForAFileHeldByAnother(t *testing.T) {
 	t.Run("the run's context has ended", func(t *testing.T) {
 		lockOwnFileElsewhere(t, "0a1b2c")
 		runLockWarned.Store(false)
-		runLockWait = time.Hour
+		runLockWait = 30 * time.Second
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
+		// The wait itself ends with the context's error, not the bound's.
+		own, err := os.OpenFile(ownLockFile("0a1b2c"), os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = own.Close() }()
+		if err := waitForLock(ctx, own); !errors.Is(err, context.Canceled) {
+			t.Fatalf("the wait of a stopping run ended with %v, want the context's error", err)
+		}
 		core, logs := observer.New(zapcore.WarnLevel)
 		holdRunLock(ctx, zap.New(core), "0a1b2c")
 		if runLock.f != nil || logs.Len() != 0 {
@@ -252,9 +266,9 @@ func TestRunLockWaitsForAFileHeldByAnother(t *testing.T) {
 }
 
 // A try that fails for another reason than the lock being held ends the wait
-// at once, with that error (here, a closed file). The bound is an hour: the
-// wait must not go on at all, so a regression hangs the test instead of
-// passing it.
+// at once, with that error (here, a closed file). The run's bound is an hour
+// and the row's context ends after 30 s: a wait that went on ends with the
+// context's error instead, which fails the row.
 func TestRunLockWaitEndsOnALockError(t *testing.T) {
 	useRunsDir(t)
 	oldWait := runLockWait
@@ -265,7 +279,13 @@ func TestRunLockWaitEndsOnALockError(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = f.Close()
-	if err := waitForLock(context.Background(), f); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err = waitForLock(ctx, f)
+	if err == nil {
 		t.Fatal("a closed file was locked")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("the wait went on after the lock error, until its context ended (%v)", err)
 	}
 }

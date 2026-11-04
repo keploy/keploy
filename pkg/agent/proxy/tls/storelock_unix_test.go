@@ -258,9 +258,12 @@ func TestTwoRunsImportsIntoOneKeystoreBothStay(t *testing.T) {
 
 // The store lock's file is root's alone on Linux (0600): a user who could open
 // it could hold it, and keep every run's change of a trust store waiting.
+// The change's bound is 30 s: a lock never taken ends it with that error.
 func TestStoreLockFileIsItsOwnersAlone(t *testing.T) {
 	useRunsDir(t)
-	if err := withStoreLock(context.Background(), zap.NewNop(), func() error { return nil }); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := withStoreLock(ctx, zap.NewNop(), func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(filepath.Join(caRunsDir, storeLockName))

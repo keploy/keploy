@@ -26,7 +26,7 @@ func probeStoreLock(dir string) {
 		fmt.Println("nofile")
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	locked, err := tryLockFile(f)
 	switch {
 	case err != nil:
@@ -93,7 +93,7 @@ func storeLockHeldHere(t *testing.T) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	locked, err := tryLockFile(f)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +133,9 @@ func TestStoreLockHeldWhileTheChangeRuns(t *testing.T) {
 			t.Fatalf("change %d: error %v, store lock held while it ran %v; want nil, true", i+1, err, held)
 		}
 	}
-	if err := withStoreLock(context.Background(), zap.NewNop(), func() error { return io.EOF }); !errors.Is(err, io.EOF) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := withStoreLock(ctx, zap.NewNop(), func() error { return io.EOF }); !errors.Is(err, io.EOF) {
 		t.Fatalf("withStoreLock returned %v, not the change's own error", err)
 	}
 }
