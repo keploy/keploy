@@ -223,8 +223,12 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		st, why := earlierState(in, e)
 		startUp, other, scope := inScope(in, e.Mock, e.StartUp, e.ofEarlierTest())
 		// A place the test the call trails left the run is the call's own
-		// (Input.Trails); bound there, a value is the run's variable.
-		trailed := other && e.ofEarlierTest() && in.trails(e.Mock)
+		// (Input.Trails), and so is one that test was served in its own
+		// window where the call lands in it too (the application answered
+		// the test before its clean-up ran, but the round ran it sooner):
+		// bound there, a value is the run's variable, so a replay binds it
+		// in whichever window the call lands.
+		trailed := in.trails(e.Mock) && !startUp && (other && e.ofEarlierTest() || !other && in.Test == in.Trails.Test)
 		if trailed {
 			other = false
 		}

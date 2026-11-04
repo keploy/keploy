@@ -115,3 +115,45 @@ func TestATrailReadsMappingsPlaceOfTheExchange(t *testing.T) {
 	in.Trails, in.Scope = trail, scope(ScopeTest("test-1"))
 	oRefused(t, "the trailed test's recording served in the call's test", oWord(t, Decide(in), r, f), RefusalAnotherScope, "mock-0", r)
 }
+
+// A trailing call the round made inside the trailed test's own window (the
+// application ran its clean-up before the test's last answer, sooner than
+// it did at record) reads the place the test was served there as its own,
+// as every call of the test does, and binds the id there as the run's
+// variable, never the test's own: a replay where the call lands after the
+// test ended binds it as well. The test's own place of a recording its
+// list does not hold stays the test's own variable, and a trailing call
+// landing in another test's window gets the run's variable only from a
+// place the trailed test left the run (TestATrailReadsOnlyTheRunsPlacesAsTheTrailedTests).
+func TestATrailingCallInItsTestsOwnWindowBindsTheRunsVariable(t *testing.T) {
+	const r, f = "rAHcEraS7Qx1", "Zq81Lm0XpVb4"
+	in := oInput("body.user", r, f, oSent(r, f), nil)
+	in.Test, in.Trails = "test-1", Trail{Test: "test-1", Mocks: []string{"mock-0"}}
+	d := oWord(t, Decide(in), r, f)
+	if d.Outcome != OutcomeValue || d.From.Mock != "mock-0" || !d.From.Run || d.From.InStartUp || !strings.Contains(d.Line, "sent in test-1, which this call trails") {
+		t.Fatalf("the trailing call in test-1's own window: %s, from %+v; want a value bound at mock-0 as the run's variable, naming the trail", oDescribe([]Decision{d}), d.From)
+	}
+	in.Trails = Trail{Test: "test-1", Mocks: []string{"mock-7"}}
+	if d := oWord(t, Decide(in), r, f); d.Outcome != OutcomeValue || d.From.Run || strings.Contains(d.Line, "trails") {
+		t.Fatalf("a place the trailed test's list does not hold: %s, from %+v; want the test's own variable", oDescribe([]Decision{d}), d.From)
+	}
+	in.Trails = Trail{}
+	if d := oWord(t, Decide(in), r, f); d.Outcome != OutcomeValue || d.From.Run || strings.Contains(d.Line, "trails") {
+		t.Fatalf("no trail: %s, from %+v; want the test's own variable", oDescribe([]Decision{d}), d.From)
+	}
+	// A start-up's place stays the start-up's, and one mappings.yaml lists
+	// in another test stays refused as that test's, in the trailed test's
+	// own window too.
+	trail := Trail{Test: "test-1", Mocks: []string{"mock-0"}}
+	startUp := oSent(r, f)
+	startUp[0].Own, startUp[0].Run, startUp[0].StartUp, startUp[0].At = false, true, true, oAt.Add(-time.Minute)
+	in = oInput("body.user", r, f, startUp, nil)
+	in.Test, in.Trails = "test-1", trail
+	if d := oWord(t, Decide(in), r, f); d.Outcome != OutcomeValue || !d.From.InStartUp || strings.Contains(d.Line, "trails") {
+		t.Fatalf("the start-up's exchange in test-1's window: %s, from %+v; want the start-up's variable, naming no trail", oDescribe([]Decision{d}), d.From)
+	}
+	in = oInput("body.user", r, f, oSent(r, f), nil)
+	in.Test, in.Trails = "test-1", trail
+	in.Scope = func(string) Scope { return ScopeTest("test-0") }
+	oRefused(t, "an exchange mappings.yaml lists in test-0, in test-1's window", oWord(t, Decide(in), r, f), RefusalAnotherScope, "mock-0", r)
+}
