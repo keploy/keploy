@@ -3,6 +3,7 @@ package proxy
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strconv"
 	"testing"
@@ -128,6 +129,17 @@ func TestARepeatedReadIsAnsweredOnceMoreAndExcusedOnceFewer(t *testing.T) {
 		{name: "email", method: "POST", path: "/api/method/frappe.client.get_list", body: listBody, read: "form-script", answers: []string{formScript}, recorded: 8, sends: 9},
 		{name: "unmade", method: "POST", path: "/api/method/frappe.client.get_list", body: listBody, read: "form-script", answers: []string{formScript}, recorded: 4, sends: 3},
 		{name: "get", method: "GET", path: "/api/resource/CRM%20Deal", read: "deals", answers: []string{`{"data":[]}`}, recorded: 2, sends: 3},
+		// the proof is the recordings, whatever the method
+		{name: "put", method: "PUT", path: "/api/doc", body: `{"x":1}`, read: "doc", answers: []string{`{"ok":true}`}, recorded: 2, sends: 3},
+		{name: "delete-fewer", method: "DELETE", path: "/api/doc/1", read: "del", answers: []string{`{}`}, recorded: 2, sends: 1},
+		// answers a second apart: their Date, and a cookie's Expires date
+		// beside its Max-Age, are written from the time they answered
+		{name: "dated", method: "POST", path: "/api/method/get_onboarding_status", read: "dated", answers: []string{onboarding}, recorded: 3, sends: 4,
+			edit: func(i int, mk *models.Mock) {
+				at := time.Date(2026, 11, 3, 20, 45, 17+i, 0, time.UTC)
+				mk.Spec.HTTPResp.Header["Date"] = at.Format(http.TimeFormat)
+				mk.Spec.HTTPResp.Header["Set-Cookie"] = "sid=e7b5; Expires=" + at.Add(170*time.Hour).Format(http.TimeFormat) + "; Max-Age=612000; HttpOnly; Path=/; SameSite=Lax"
+			}},
 	})
 }
 
@@ -144,24 +156,29 @@ func TestARepeatedReadIsAnsweredOnlyOnceMoreAndExcusedOnlyOnceFewer(t *testing.T
 
 // What the founder's rule does not allow stays as exact serving decides it,
 // even when the mapping names it a repeated read: a read recorded once, a
-// read whose recordings answered differently, a write by its method, and a
-// repeat the mapping does not name.
+// read whose recordings answered differently, and a repeat the mapping does
+// not name.
 func TestWhatIsNotARepeatedReadKeepsItsExactCount(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	repeatRun(t, []repeatCase{
 		{name: "once", method: "GET", path: "/api/once", read: "once", answers: []string{`{}`}, recorded: 1, sends: 2, missed: []int{1}},
 		{name: "two-answers-more", method: "GET", path: "/api/count", read: "count", answers: []string{`{"n":1}`, `{"n":2}`}, recorded: 2, sends: 3, missed: []int{2}},
 		{name: "two-answers-fewer", method: "GET", path: "/api/count2", read: "count2", answers: []string{`{"n":1}`, `{"n":2}`}, recorded: 2, sends: 1, unmade: []int{1}},
-		{name: "put", method: "PUT", path: "/api/doc", body: `{"x":1}`, read: "doc", answers: []string{`{"ok":true}`}, recorded: 2, sends: 3, missed: []int{2}},
-		{name: "delete-fewer", method: "DELETE", path: "/api/doc/1", read: "del", answers: []string{`{}`}, recorded: 2, sends: 1, unmade: []int{1}},
 		{name: "unnamed-more", method: "POST", path: "/api/method/create", body: `{"y":1}`, answers: []string{`{"name":"x"}`}, recorded: 2, sends: 3, missed: []int{2}},
 		{name: "unnamed-fewer", method: "GET", path: "/api/unnamed", answers: []string{`{}`}, recorded: 2, sends: 1, unmade: []int{1}},
-		{name: "patch", method: "PATCH", path: "/api/doc/2", body: `{"z":1}`, read: "patch", answers: []string{`{}`}, recorded: 2, sends: 3, missed: []int{2}},
 		{name: "status", method: "GET", path: "/api/status", read: "st", answers: []string{`{}`}, recorded: 2, sends: 3, missed: []int{2},
 			edit: func(i int, mk *models.Mock) {
 				if i == 1 {
 					mk.Spec.HTTPResp.StatusCode = 503
 				}
+			}},
+		// a header of the answer that differs is another answer
+		{name: "etag", method: "GET", path: "/api/etag", read: "etag", answers: []string{`{}`}, recorded: 2, sends: 3, missed: []int{2},
+			edit: func(i int, mk *models.Mock) { mk.Spec.HTTPResp.Header["ETag"] = []string{`"a"`, `"b"`}[i] }},
+		// a cookie's Expires date with no Max-Age is what a client keeps it by
+		{name: "expires", method: "GET", path: "/api/exp", read: "exp", answers: []string{`{}`}, recorded: 2, sends: 1, unmade: []int{1},
+			edit: func(i int, mk *models.Mock) {
+				mk.Spec.HTTPResp.Header["Set-Cookie"] = "sid=1; Expires=" + time.Date(2026, 11, 10, 0, 0, i, 0, time.UTC).Format(http.TimeFormat) + "; Path=/"
 			}},
 		{name: "binary", method: "GET", path: "/api/bin", read: "bin", answers: []string{``}, recorded: 2, sends: 3, missed: []int{2},
 			edit: func(i int, mk *models.Mock) { mk.Spec.HTTPResp.Binary = []string{"AAE=", "AAI="}[i] }},

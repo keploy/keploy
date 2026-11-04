@@ -1,11 +1,8 @@
 package proxy
 
 import (
-	"net/http"
-	"strconv"
-	"strings"
-
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -29,10 +26,9 @@ import (
 //
 // The mapping decides which recordings are one read; exact serving honours a
 // named read only when it holds at least two of the test's own recordings,
-// all HTTP, of one method, URL and body, none of them a write by its method
-// (PUT, PATCH, DELETE), each with one status, body and binary body, none
-// streamed or with its body left out (repeatReads). Any other named read is
-// served as if it were not named.
+// every one of one call with one answer by the proof the namer uses too
+// (httpint.RepeatReadOf), whatever their method (repeatReads). Any other named
+// read is served as if it were not named.
 
 // repeatReads is the repeated reads of v's test that exact serving honours
 // (exactView.repeats): by name, the positions of each one's recordings among
@@ -59,23 +55,16 @@ func (v *exactView) repeatReads() map[string][]int {
 	return named
 }
 
-// oneRead reports whether the recordings at positions at are one HTTP read
-// with one answer: one method, URL and body, the method not a write, and one
-// status, body and binary body, none streamed or with its body left out, and
-// none whose answer kept apart cannot be read back.
+// oneRead reports whether the recordings at positions at are one read with
+// one answer: one call and one answer by httpint.RepeatReadOf, each one a
+// recording it can prove that of.
 func (v *exactView) oneRead(at []int) bool {
 	var first, firstAnswer string
 	for k, i := range at {
-		mk := v.owned[i].ShallowCopy()
-		if err := mk.HydrateResponse(); err != nil {
+		call, answer, ok := httpint.RepeatReadOf(v.owned[i])
+		if !ok {
 			return false
 		}
-		q, a := mk.Spec.HTTPReq, mk.Spec.HTTPResp
-		if mk.Kind != models.HTTP || q == nil || a == nil || isWriteMethod(string(q.Method)) || a.BodySkipped || len(a.StreamBody) > 0 {
-			return false
-		}
-		call := strings.Join([]string{string(q.Method), q.URL, q.Body}, "\x00")
-		answer := strings.Join([]string{strconv.Itoa(a.StatusCode), a.Body, a.Binary}, "\x00")
 		if k == 0 {
 			first, firstAnswer = call, answer
 			continue
@@ -85,16 +74,6 @@ func (v *exactView) oneRead(at []int) bool {
 		}
 	}
 	return true
-}
-
-// isWriteMethod reports whether an HTTP method writes by its definition
-// (RFC 9110): no rule makes a PUT, PATCH or DELETE a read.
-func isWriteMethod(method string) bool {
-	switch method {
-	case http.MethodPut, http.MethodPatch, http.MethodDelete:
-		return true
-	}
-	return false
 }
 
 // AnswerRepeatRead implements integrations.RepeatReadAnswerer for the test
