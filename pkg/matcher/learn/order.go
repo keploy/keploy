@@ -2248,7 +2248,7 @@ func (dc *decider) answerHoldsWord(w string) string {
 	}
 	for _, v := range vs {
 		i, ok := ai.first[v]
-		if !ok && ai.cands != nil && !ai.cands[v] {
+		if !ok && ai.cands != nil && !ai.cands[v] && aWord(v) {
 			ai.scans++
 			i, ok = dc.answerScan(v, ai.past)
 		}
@@ -2266,17 +2266,22 @@ func (dc *decider) answerHoldsWord(w string) string {
 // recorded answer but an instant, in every reading and declared form (as
 // holdsWord reads a text), mapped to the first leaf that holds it (its
 // index in Resp). It is built once per call, at the first word that asks,
-// in one pass over each answer text, each leaf's words counted on the
-// reader's budget (claim). From the leaf past on, where they pass the
-// budget, it maps only the call's own words (cands); a word asked that is
-// none of them is answered by a scan of those leaves (scans). reads counts
-// the answer texts read, asks the words asked: what keeps a call's work
-// linear in its words.
+// in one pass over each answer text, its words counted on the reader's
+// budget (claim) at most answerClaimBytes at a time. From the leaf past
+// on, where they pass the budget, it maps only the call's own words
+// (cands); a word asked that is none of them is answered by a scan of
+// those leaves (scans). reads counts the answer texts read, asks the words
+// asked, dropped the words mapped and let go at the claim that failed:
+// what keeps a call's work linear in its words and its answer.
 type answerWords struct {
-	first                    map[string]int
-	cands                    map[string]bool
-	past, reads, asks, scans int
+	first                             map[string]int
+	cands                             map[string]bool
+	past, reads, asks, scans, dropped int
 }
+
+// answerClaimBytes is the most of an answer text's words answerIndex maps
+// before it claims them, so a text past the budget is never mapped whole.
+const answerClaimBytes = 64 << 10
 
 // answerIndex is the call's answer index, built at its first ask.
 func (dc *decider) answerIndex() *answerWords {
@@ -2293,34 +2298,48 @@ func (dc *decider) answerIndex() *answerWords {
 		var added []string
 		n := int64(0)
 		formWords(a.Value, func(w string) {
-			if _, ok := ai.first[w]; !ok && (ai.cands == nil || ai.cands[w]) {
-				ai.first[w] = i
-				added = append(added, w)
-				n += wordBytes + int64(len(w))
+			if _, ok := ai.first[w]; ok || ai.cands != nil && !ai.cands[w] {
+				return
 			}
-		})
-		if ai.cands == nil && !dc.x.claim(n) {
-			ai.cands, ai.past = dc.callWords(), i
-			for _, w := range added {
-				if !ai.cands[w] {
-					delete(ai.first, w)
+			ai.first[w] = i
+			if ai.cands == nil {
+				added = append(added, w)
+				if n += wordBytes + int64(len(w)); n >= answerClaimBytes {
+					ai.settle(dc, i, added, n)
+					added, n = added[:0], 0
 				}
 			}
-		}
+		})
+		ai.settle(dc, i, added, n)
 	}
 	return ai
 }
 
-// callWords are the words of the call's changed request leaves as recorded,
-// each whole too, in every reading and declared form, in their case and
-// folded: the words answerHoldsWord is asked.
+// settle claims the n bytes of the words added at leaf i since the last
+// claim. Where the claim fails it lets go of those that are none of the
+// call's words (callWords) and maps only the call's words from leaf i on.
+func (ai *answerWords) settle(dc *decider, i int, added []string, n int64) {
+	if ai.cands != nil || n == 0 || dc.x.claim(n) {
+		return
+	}
+	ai.cands, ai.past = dc.callWords(), i
+	for _, w := range added {
+		if !ai.cands[w] {
+			delete(ai.first, w)
+			ai.dropped++
+		}
+	}
+}
+
+// callWords are the words of the call's changed request leaves as
+// recorded, in every reading and declared form (textForms folds the case of
+// each form it decodes): the words answerHoldsWord is asked. A word asked
+// that is none of them (a word of a deeper decode) costs a scan past the
+// budget, never a wrong answer.
 func (dc *decider) callWords() map[string]bool {
 	c := map[string]bool{}
-	add := func(w string) { c[w], c[strings.ToLower(w)] = true, true }
 	for _, p := range dc.in.Drift {
-		v := dc.in.Rec.Leaves[p].Value
-		add(v)
-		formWords(v, add)
+		formWords(dc.in.Rec.Leaves[p].Value, func(w string) { c[w] = true })
 	}
 	return c
 }
@@ -2337,17 +2356,36 @@ func (dc *decider) answerScan(w string, from int) (int, bool) {
 }
 
 // formWords calls f with each word of s in every declared form and reading
-// (textForms, readings), as rawTokens reads them, keeping none.
+// (textForms, readings), as rawTokens reads them, keeping none: each
+// stretch of bytes the reading says continue a word, read in place.
 func formWords(s string, f func(string)) {
 	for _, form := range textForms(s) {
 		for _, word := range readings {
-			for _, seg := range segmentsBy(form, word) {
-				if seg.word {
-					f(seg.text)
+			for i := 0; i < len(form); i++ {
+				if !word(form[i]) {
+					continue
 				}
+				j := i + 1
+				for j < len(form) && word(form[j]) {
+					j++
+				}
+				f(form[i:j])
+				i = j
 			}
 		}
 	}
+}
+
+// aWord reports whether w can be a word of a text in some reading: idByte,
+// the widest, continues each of its bytes (heldBy). No text holds any other
+// w, so answerHoldsWord never scans for one.
+func aWord(w string) bool {
+	for i := 0; i < len(w); i++ {
+		if !idByte(w[i]) {
+			return false
+		}
+	}
+	return w != ""
 }
 
 // unanswerable refuses a word whose answer places (echo, unnamed: as
