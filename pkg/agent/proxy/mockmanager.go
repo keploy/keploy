@@ -1547,6 +1547,39 @@ func (o mockOwner) own(in []*models.Mock) []*models.Mock {
 	return out
 }
 
+// firstRecordedStartLocked is the start of the current set's first recorded
+// test as far as the manager knows it: the earlier of the start-up cutoff
+// (SeedStartupCutoff, or the earliest window staged) and the first recorded
+// test window seeded (SeedRecordedWindows). Zero when it knows neither: an
+// off-switch mock replay seeds none. The caller holds swapMu, after a set
+// boundary's staging installed what was parked for the set.
+func (m *MockManager) firstRecordedStartLocked() time.Time {
+	first := m.firstWindowStart
+	if tw := m.testWindows.Load(); tw.Len() > 0 {
+		if s := tw.Window(0).Start; first.IsZero() || s.Before(first) {
+			first = s
+		}
+	}
+	return first
+}
+
+// bootPlaced reports whether the start-up tier a models.BaseTime staging
+// builds, which serves before any test and between tests, serves mk without
+// exact serving. Every mock but one placed at its answer
+// (models.IsAnswerPlaced) is served; that one only when its answer came
+// before the set's first recorded test began (cutoff): answered in a test, it
+// carries what that test produced, and a window that holds its answer serves
+// it (pkg.StageInWindow). With no cutoff known (zero, before every place)
+// nothing tells a start-up answer from a test's, and it is held (fail
+// closed): its parser holds the call until a window holds a recording that
+// answers it.
+func bootPlaced(mk *models.Mock, cutoff time.Time) bool {
+	if !models.IsAnswerPlaced(mk) {
+		return true
+	}
+	return models.PlaceOf(mk).Before(cutoff)
+}
+
 // setMocksWithWindowLocked is SetMocksWithWindow without the window-change
 // signal. The caller holds swapMu and owns the mocks (mockOwner).
 //
@@ -1586,6 +1619,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// GetSessionMocks returns startup+session so pre-wave-2 parsers
 	// don't notice the split.
 	var startupInit []*models.Mock
+	// startupHeld is what the startup tier this staging builds stores but
+	// does not serve without exact serving (TreeDb.held).
+	startupHeld := map[*models.Mock]struct{}{}
 
 	// Runner/Replayer's initial SetMocksWithWindow call fires with
 	// start=models.BaseTime before any test runs — to stage mocks for
@@ -1691,17 +1727,26 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// re-partitions, session mocks revert to being session-tier-only
 		// in the startup tree (which rebuilds from the real-window
 		// firstStart cutoff, not from the unfiltered input).
-		for _, mk := range filtered {
-			if mk == nil {
-				continue
+		//
+		// A mock placed at its answer (models.IsAnswerPlaced) that is not
+		// placed before the set's first recorded test (bootPlaced) is stored
+		// there as every other, and held (TreeDb.held): what the tier serves
+		// without exact serving leaves it out, since it would answer the call
+		// now with what a later test produced, and its parser holds the call
+		// until a window holds the answer. Exact serving shows it where its
+		// view places it, and every reader of the staged set (the teardown
+		// bound, the views, HasUnservedRecording) still finds it.
+		cutoff := m.firstRecordedStartLocked()
+		for _, list := range [][]*models.Mock{filtered, unfiltered} {
+			for _, mk := range list {
+				if mk == nil {
+					continue
+				}
+				startupInit = append(startupInit, mk)
+				if !bootPlaced(mk, cutoff) {
+					startupHeld[mk] = struct{}{}
+				}
 			}
-			startupInit = append(startupInit, mk)
-		}
-		for _, mk := range unfiltered {
-			if mk == nil {
-				continue
-			}
-			startupInit = append(startupInit, mk)
 		}
 	}
 	m.noteStatedLifetimes(filtered, unfiltered, explicitStartup)
@@ -1816,6 +1861,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	}
 	newStartup := NewTreeDb(customComparator)
 	newStartup.bootBuilt = !m.testFiredThisSet && !m.scopeFiredThisSet
+	newStartup.hold(startupHeld)
 	newStartupKeys := make(map[*models.Mock]models.TestModeInfo, len(startupInit)+len(explicitStartup))
 	// H4 round-2: use a TIER-LOCAL TestModeInfo copy as the startup tree
 	// key rather than mutating mk.TestModeInfo.ID in place. The same
@@ -2687,7 +2733,9 @@ func (m *MockManager) NewVariableSet() {
 // currently only in-tree caller) consult this pool to serve
 // app-bootstrap traffic — Flyway migrations, ORM metadata boot,
 // HikariCP/JDBC pool warm-up queries. Pool is rebuilt by every
-// SetMocksWithWindow call using the latest firstWindowStart.
+// SetMocksWithWindow call using the latest firstWindowStart. Without exact
+// serving it leaves out what the tree holds and does not serve
+// (TreeDb.serves).
 func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 	return m.getStartupMocksIn(m.exactView())
 }
@@ -2706,7 +2754,7 @@ func (m *MockManager) getStartupMocksIn(v *exactView) ([]*models.Mock, error) {
 	}
 	results := make([]*models.Mock, 0, 32)
 	tree.rangeValues(func(v interface{}) bool {
-		if mock, ok := v.(*models.Mock); ok && mock != nil {
+		if mock, ok := v.(*models.Mock); ok && mock != nil && tree.serves(mock) {
 			results = append(results, mock)
 		}
 		return true
@@ -2745,7 +2793,7 @@ func (m *MockManager) getStartupMocksByKindIn(v *exactView, kind models.Kind) ([
 	}
 	results := make([]*models.Mock, 0, 16)
 	tree.rangeValues(func(v interface{}) bool {
-		if mock, ok := v.(*models.Mock); ok && mock != nil && mock.Kind == kind {
+		if mock, ok := v.(*models.Mock); ok && mock != nil && mock.Kind == kind && tree.serves(mock) {
 			results = append(results, mock)
 		}
 		return true
@@ -3281,7 +3329,8 @@ func (m *MockManager) SessionMockHitCounts() map[string]uint64 {
 // match, across all tiers (unfiltered, filtered, startup, carry-over). It
 // reads the live trees on every call — no caching — so it stays correct as
 // the mock set is replaced between test-sets. Without exact serving it
-// returns on the first match and allocates nothing. A nil per-kind tree means
+// returns on the first match a tree serves (TreeDb.serves) and allocates
+// nothing. A nil per-kind tree means
 // no such mocks were set.
 //
 // Under exact serving (KEPLOY_PROVEN) it answers from what the open view
@@ -3325,6 +3374,9 @@ func (m *MockManager) HasMocksByKind(kind models.Kind, match func(*models.Mock) 
 			if match(mock) {
 				if v != nil {
 					matched = append(matched, mock)
+					return true
+				}
+				if !tree.serves(mock) {
 					return true
 				}
 				found = true
