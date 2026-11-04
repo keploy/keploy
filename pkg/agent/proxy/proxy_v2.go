@@ -287,10 +287,6 @@ func (p *Proxy) recordViaSupervisor(
 		// judges a call the client closed partway by the client's own end
 		// then, as when the client's end is read first.
 		ClientEndedBeforeDest: svSess.MarkClientEndedBeforeDest,
-		// The client's stack took what the destination sent after the
-		// client's FIN: it only half-closed, and still read, so the HTTP
-		// recorder judges its call by the destination's end.
-		ClientReadAfterFIN: svSess.MarkClientReadAfterFIN,
 		// How each side ended its side of the connection, and which ended
 		// first: a call the destination never answered is recorded with
 		// the fault it gave (its reset or its close), or as the client's

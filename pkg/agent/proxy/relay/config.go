@@ -541,23 +541,6 @@ type Config struct {
 	// not block. Nil is safe: no look is taken.
 	ClientEndedBeforeDest func()
 
-	// ClientReadAfterFIN, when set, is told once, on the goroutine that
-	// waits for the client's answer (client_took.go), when the client's
-	// stack took a destination chunk written once the client's FIN was in
-	// the proxy's socket: it acknowledged a byte of the chunk, which a
-	// client that closed its socket never does (its stack resets on such
-	// bytes). The client only half-closed (shutdown(SHUT_WR): an
-	// EOF-delimited request, Node's socket.end(data)) and still reads: its
-	// FIN ended what it sends, not what it reads. The proxy wires it to
-	// supervisor.Session.MarkClientReadAfterFIN, so the HTTP recorder judges
-	// such a call by the destination's end, as for a client that kept its
-	// side open, unless the client stopped taking the stream after
-	// (ClientStopped). A client to which nothing was sent after its FIN
-	// gives no such word: nothing tells a closed client from a half-closed
-	// one then. It is told before that chunk goes on the stream, and must
-	// not block. Nil is safe.
-	ClientReadAfterFIN func()
-
 	// PeerEnded, when set, is told once per direction, as that direction's
 	// read finds its peer ended its side: a FIN (reset false) or a reset
 	// (reset true; the read failed with ECONNRESET). It is told on that

@@ -89,12 +89,6 @@ import (
 //     the connection reset, ended it before the destination's end reached
 //     it, whichever forwarder read its end first
 //     (Config.ClientEndedBeforeDest).
-//   - A chunk set aside that the client's stack took says the client still
-//     reads after its FIN: it only half-closed (Config.ClientReadAfterFIN,
-//     told once, as the first such chunk is teed). A FIN with nothing sent
-//     after it says neither: a closed client and a half-closed one answer
-//     the destination's FIN alike, so only a chunk sent after the FIN tells
-//     them apart.
 //
 // The bytes are forwarded either way: only what the parser is given changes.
 //
@@ -427,8 +421,7 @@ func (r *Relay) resolve(ctx context.Context, t *tee, seq *atomic.Uint64, done ch
 
 // settle carries out what the look l says of the chunks set aside, oldest
 // first (chunkVerdict): each one taken, or that no answer can be had for, is
-// teed, in order, and the first one taken tells Config.ClientReadAfterFIN
-// once; a refused one is refused with every chunk behind it, and
+// teed, in order; a refused one is refused with every chunk behind it, and
 // counted, and the relay says once that the destination's stream ended where
 // the client stopped (Config.ClientStopped); the first one the client has not
 // answered for yet stops it. The forwarder's incomplete-mock mark is set once
@@ -442,8 +435,7 @@ func (r *Relay) settle(t *tee, seq *atomic.Uint64, l clientLook, last bool) (dec
 	defer r.verdictMu.Unlock()
 	for ; len(r.awaitingFrom) > 0; decided = true {
 		c, _ := t.firstAwaiting()
-		v := chunkVerdict(l, r.awaitingFrom[0], last)
-		switch v {
+		switch chunkVerdict(l, r.awaitingFrom[0], last) {
 		case verdictNone:
 			return decided, false
 		case verdictRefused:
@@ -457,15 +449,6 @@ func (r *Relay) settle(t *tee, seq *atomic.Uint64, l clientLook, last bool) (dec
 				r.cfg.ClientStopped()
 			}
 			return true, true
-		}
-		if v == verdictTaken && !r.readAfterFIN {
-			// The client's stack took bytes written once its FIN was in: it
-			// half-closed, and still reads. Told before the chunk goes on
-			// the stream, so a parser that reaches the end knows.
-			r.readAfterFIN = true
-			if r.cfg.ClientReadAfterFIN != nil {
-				r.cfg.ClientReadAfterFIN()
-			}
 		}
 		c.SeqNo = seq.Add(1)
 		if r.cfg.beforeTee != nil {

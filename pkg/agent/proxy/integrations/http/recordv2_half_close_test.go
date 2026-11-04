@@ -10,31 +10,30 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
 // Through the relay, as the proxy records on Linux: an app that half-closes
-// (shutdown(SHUT_WR): it sends its request, then its FIN, and goes on
-// reading, as Node's socket.end(data) or Python's sock.shutdown(SHUT_WR) do)
-// ends its side before the upstream's end, but it has not stopped reading.
-// Its stack takes what the upstream sends after its FIN (the relay sets each
-// such chunk aside until the app's stack answers for it, client_took.go), and
-// the app reads the answer to the upstream's end. The call is the upstream's
-// to judge, as for an app that kept its side open: an answer the upstream's
-// close frames is whole, one it cut short of its framing is its truncate, and
-// its reset is its reset. Before, the app's FIN came before the upstream's
-// end, so the app's end judged the call: its whole answer was recorded as one
-// it stopped reading (stopped_reading), which replay serves without its end
-// and holds, and the app, reading to the end it had at record, waits on it
-// until its own timeout.
+// (shutdown(SHUT_WR): it sends its request, then its FIN, as Node's
+// socket.end(data) or Python's sock.shutdown(SHUT_WR) do) ends its side before
+// the upstream's end, and is judged by that end, whatever it does after. Its
+// FIN is the last thing its socket says: a later close() of a socket whose FIN
+// is out sends nothing, and the hooks keep no record of that release (they
+// record only the release of a socket that had not shut down). So an app that
+// read on to the upstream's end and one that took part of the answer and then
+// gave up, exited or was stopped look the same to keploy whenever the upstream
+// sends nothing after that close. Both are recorded as far as they read
+// (stopped_reading), which replay serves without its end and holds: the app
+// that gave up sees what it saw, and the app that read on waits on the held
+// answer until its own timeout, so its test fails rather than passing on an
+// end it may never have had. Only bytes the upstream sends after the app's
+// close tell the two apart (its closed socket resets on them).
 
-// halfClosedAppReadsTheAnswer runs one call through c: the app sends a
+// halfClosedAppTakes runs the start of one call through c: the app sends a
 // request and shuts its sending side down; once the relay has read its FIN,
-// the upstream sends sent and ends its side (a reset where reset is set, else
-// its close), and the app reads everything to that end. It returns what
-// recordV2 recorded, after checking the relay gave no word that the app
-// stopped taking the stream.
-func halfClosedAppReadsTheAnswer(t *testing.T, c *relayedConn, appFirst bool, sent string, reset bool) []*models.Mock {
+// the upstream sends sent, and the app reads it.
+func halfClosedAppTakes(t *testing.T, c *relayedConn, appFirst bool, sent string) {
 	t.Helper()
 	appRead := orderEnds(c, appFirst)
 	c.start(t)
@@ -52,24 +51,30 @@ func halfClosedAppReadsTheAnswer(t *testing.T, c *relayedConn, appFirst bool, se
 		t.Fatal(err)
 	}
 	relayed(t, c.app, sent)
+}
+
+// upstreamEndsAfter ends the upstream's side, a reset where reset is set, else
+// its close.
+func upstreamEndsAfter(t *testing.T, c *relayedConn, reset bool) {
+	t.Helper()
 	if reset {
 		resetConn(t, c.dest)
 	} else if err := c.dest.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_ = c.app.SetReadDeadline(time.Now().Add(10 * time.Second))
-	n, err := c.app.Read(make([]byte, 1))
-	if n != 0 || !reset && !errors.Is(err, io.EOF) || reset && !errors.Is(err, syscall.ECONNRESET) {
-		t.Fatalf("the half-closed app read %d byte(s), %v, after the answer; want the upstream's end (io.EOF for a close, ECONNRESET for a reset)", n, err)
-	}
-	mocks := c.end(t)
-	if c.sess.EndedWhereClientStopped() {
-		t.Fatal("the relay said the app stopped taking the stream, though it read all the upstream sent")
-	}
-	return mocks
 }
 
-func TestRecordV2_ThroughTheRelayAHalfClosedAppThatReadToTheUpstreamsEndIsJudgedByTheUpstream(t *testing.T) {
+// wantHeldOnce checks a half-closed app's call recorded the same mock in both
+// read orders: the one call, as far as the app read it.
+func wantHeldOnce(t *testing.T, mocks []*models.Mock, shapeBody string, sent sentAs) {
+	t.Helper()
+	if len(mocks) != 1 {
+		t.Fatalf("recorded %d mocks, want the one call, as far as the half-closed app read it", len(mocks))
+	}
+	wantStoppedReading(t, mocks[0], shapeBody, sent)
+}
+
+func TestRecordV2_ThroughTheRelayAHalfClosedAppThatReadToTheUpstreamsEndIsHeld(t *testing.T) {
 	for _, shape := range partAnswers {
 		for _, up := range upstreamEnds {
 			for _, proven := range []string{"", "1"} {
@@ -77,27 +82,105 @@ func TestRecordV2_ThroughTheRelayAHalfClosedAppThatReadToTheUpstreamsEndIsJudged
 					t.Run(shape.name+"/"+up.name+"/"+order.name+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
 						t.Setenv("KEPLOY_PROVEN", proven)
 						c := newRelayedConn(t)
-						mocks := halfClosedAppReadsTheAnswer(t, c, order.appFirst, shape.read, up.reset)
-						if len(mocks) != 1 {
-							t.Fatalf("recorded %d mocks, want the one call", len(mocks))
+						halfClosedAppTakes(t, c, order.appFirst, shape.read)
+						upstreamEndsAfter(t, c, up.reset)
+						_ = c.app.SetReadDeadline(time.Now().Add(10 * time.Second))
+						n, err := c.app.Read(make([]byte, 1))
+						if n != 0 || !up.reset && !errors.Is(err, io.EOF) || up.reset && !errors.Is(err, syscall.ECONNRESET) {
+							t.Fatalf("the half-closed app read %d byte(s), %v, after the answer; want the upstream's end (io.EOF for a close, ECONNRESET for a reset)", n, err)
 						}
-						f := mocks[0].Spec.Fault
-						switch {
-						case up.reset:
-							if f == nil || f.Kind != models.FaultReset {
-								t.Fatalf("recorded fault %+v, want the upstream's reset", f)
+						mocks := c.end(t)
+						if c.sess.EndedWhereClientStopped() {
+							t.Fatal("the relay said the app stopped taking the stream, though it read all the upstream sent")
+						}
+						wantHeldOnce(t, mocks, shape.body, shape.sent)
+					})
+				}
+			}
+		}
+	}
+}
+
+// A half-closed app that took part of the answer and then closed (it gave up,
+// or its process exited), the upstream then sending nothing more before it
+// closes or resets, is judged by its own end, the FIN it sent first, in both
+// orders the relay can read the two ends in. Its process's exit after that
+// FIN reads as the FIN: the hooks keep no record of the release of a socket
+// that had shut down (they write one only for a socket still established),
+// so the proxy's peerEndMarker finds none at the FIN and marks an end that
+// may be a fault, as for an app that gave up.
+func TestRecordV2_ThroughTheRelayAHalfClosedAppThatTookPartThenClosedIsHeld(t *testing.T) {
+	for _, shape := range partAnswers {
+		for _, up := range upstreamEnds {
+			for _, end := range []struct {
+				name   string
+				client supervisor.NoFaultEnd
+			}{
+				{"it gave up", supervisor.EndMayBeFault},
+				{"its process exited", supervisor.EndMayBeFault},
+			} {
+				for _, proven := range []string{"", "1"} {
+					t.Run(shape.name+"/"+up.name+"/"+end.name+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
+						t.Setenv("KEPLOY_PROVEN", proven)
+						for _, order := range ownEndOrders {
+							c := newRelayedConn(t)
+							halfClosedAppTakes(t, c, order.appFirst, shape.read)
+							c.clientEnd.Store(uint32(end.client))
+							if err := c.app.Close(); err != nil {
+								t.Fatal(err)
 							}
-						case shape.sent == sentByClose:
-							if f != nil || mocks[0].Spec.HTTPResp.Body != shape.body {
-								t.Fatalf("recorded fault %+v and body %q, want the whole answer the upstream's close framed, %q, with no fault: the half-closed app read it to that close", f, mocks[0].Spec.HTTPResp.Body, shape.body)
+							upstreamEndsAfter(t, c, up.reset)
+							mocks := c.end(t)
+							if !c.sess.ClientEndedBeforeDest() {
+								t.Fatalf("%s: the relay's look as it read the upstream's end did not find the app's FIN in", order.name)
 							}
-						default:
-							if f == nil || f.Kind != models.FaultTruncate {
-								t.Fatalf("recorded fault %+v, want the upstream's truncate: the half-closed app read to the upstream's close", f)
-							}
+							wantHeldOnce(t, mocks, shape.body, shape.sent)
 						}
 					})
 				}
+			}
+		}
+	}
+}
+
+// A half-closed app the recording's stop closed once it had taken part of the
+// answer, the upstream then closing, resetting, or the relay ending as the
+// stop cancels it, is judged by its own end too: its FIN was read before the
+// stop began, so it is not the stop's (EndAtStop), and the call is recorded
+// as far as the app read it. The app's FIN is marked as the relay read it,
+// before the stop: a half-closed app's FIN is read as it sends it, long before
+// the stop.
+func TestRecordV2_ThroughTheRelayAHalfClosedAppTheRecordingsStopClosedIsHeld(t *testing.T) {
+	for _, shape := range partAnswers {
+		for _, how := range []string{"the upstream closes", "the upstream resets", "the relay is stopped"} {
+			for _, proven := range []string{"", "1"} {
+				t.Run(shape.name+"/"+how+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
+					t.Setenv("KEPLOY_PROVEN", proven)
+					c := newRelayedConn(t)
+					halfClosedAppTakes(t, c, true, shape.read)
+					c.stopBegun.Store(true)
+					if err := c.app.Close(); err != nil {
+						t.Fatal(err)
+					}
+					switch how {
+					case "the upstream closes":
+						upstreamEndsAfter(t, c, false)
+					case "the upstream resets":
+						upstreamEndsAfter(t, c, true)
+					default:
+						c.stopRelay()
+						select {
+						case <-c.relayDone:
+						case <-time.After(10 * time.Second):
+							t.Fatal("the relay did not end within 10s of its stop")
+						}
+					}
+					mocks := c.end(t)
+					if got := c.sess.ClientEndNoFault(); got != supervisor.EndMayBeFault {
+						t.Fatalf("the app's end was marked %d, want %d: its FIN was read before the stop began", got, supervisor.EndMayBeFault)
+					}
+					wantHeldOnce(t, mocks, shape.body, shape.sent)
+				})
 			}
 		}
 	}
@@ -135,10 +218,7 @@ func TestRecordV2_ThroughTheRelayAHalfClosedAppThatClosedPartwayStoppedReading(t
 				if !c.sess.EndedWhereClientStopped() {
 					t.Fatal("the relay did not say the app stopped taking the stream, though its closed socket refused the rest")
 				}
-				if len(mocks) != 1 {
-					t.Fatalf("recorded %d mocks, want the one call, as far as the app read it", len(mocks))
-				}
-				wantStoppedReading(t, mocks[0], shape.body, shape.sent)
+				wantHeldOnce(t, mocks, shape.body, shape.sent)
 			})
 		}
 	}

@@ -424,28 +424,6 @@ func (s *Session) ClientEndedBeforeDest() bool {
 	return s != nil && s.peerEnds.Load()&clientEndedBeforeDestBit != 0
 }
 
-// MarkClientReadAfterFIN says the client's stack took bytes the destination
-// sent once the client's FIN was in (relay.Config.ClientReadAfterFIN): the
-// client only half-closed (shutdown(SHUT_WR)), and still read. Its FIN ended
-// what it sends, not what it reads, so its end does not judge the call: the
-// destination's does, unless the destination's stream ended where the client
-// stopped taking it (MarkEndedWhereClientStopped). The caller calls it before
-// the stream ends, so a parser that reaches the end sees it. Nil-safe.
-func (s *Session) MarkClientReadAfterFIN() {
-	if s == nil {
-		return
-	}
-	s.peerEnds.Or(clientReadAfterFINBit)
-}
-
-// ClientReadAfterFIN reports whether the client's stack took bytes the
-// destination sent after the client's FIN (MarkClientReadAfterFIN). False
-// where the relay cannot look at the client's socket (off Linux), and where
-// nothing was sent after the FIN. Nil-safe.
-func (s *Session) ClientReadAfterFIN() bool {
-	return s != nil && s.peerEnds.Load()&clientReadAfterFINBit != 0
-}
-
 // StreamedBefore reports whether every chunk of dir captured before the chunk
 // numbered seq (fakeconn.Chunk.CapturedBefore), a number its producer gave on
 // this connection, has gone on dir's stream, or never will (Order): end is then
@@ -501,10 +479,6 @@ const endedWhereClientStoppedBit = 1 << (peerEndFirstShift + 4)
 // clientEndedBeforeDestBit, in peerEnds, after endedWhereClientStoppedBit:
 // ClientEndedBeforeDest.
 const clientEndedBeforeDestBit = 1 << (peerEndFirstShift + 5)
-
-// clientReadAfterFINBit, in peerEnds, after clientEndedBeforeDestBit:
-// ClientReadAfterFIN.
-const clientReadAfterFINBit = 1 << (peerEndFirstShift + 6)
 
 // EndFollowedStop reports whether the first end of the connection
 // (FirstPeerEnded) was the application's stop, which records no fault
