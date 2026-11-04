@@ -204,10 +204,13 @@ func TestNoStagingLandsBetweenAClaimsOwnerCheckAndItsKeep(t *testing.T) {
 		go func() { stage3(); close(staged) }()
 	}
 	mm.ClaimForRepeats(*pool[0])
-	<-staged
+	// The hook runs inside the claim, on this goroutine, so the count is
+	// final here; staged closes only after the hook ran, so a claim that
+	// skipped its hook fails now instead of waiting for it.
 	if decided != 1 {
 		t.Fatalf("the claim of test-2's own recording reached its keep %d times, want once", decided)
 	}
+	<-staged
 	if landedInside {
 		t.Errorf("test-3's staging landed between the claim's owner check and its keep")
 	}
