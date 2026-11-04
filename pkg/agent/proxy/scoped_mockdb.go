@@ -1537,3 +1537,15 @@ func (s *scopedMockDb) StatesLifetimes(kind models.Kind) bool {
 func (s *scopedMockDb) WhenRestaged(slot any, release func()) {
 	integrations.WhenRestaged(s.MockMemDb, slot, release)
 }
+
+// IsClosed implements integrations.Closer: the store's, so a parser that
+// was told a release through the view can tell the store's Close from a
+// staging.
+func (s *scopedMockDb) IsClosed() bool {
+	return integrations.IsClosed(s.MockMemDb)
+}
+
+var (
+	_ integrations.Restaged = (*scopedMockDb)(nil)
+	_ integrations.Closer   = (*scopedMockDb)(nil)
+)

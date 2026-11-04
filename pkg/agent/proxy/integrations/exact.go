@@ -253,3 +253,19 @@ func WhenRestaged(db MockMemDb, slot any, release func()) bool {
 	r.WhenRestaged(slot, release)
 	return true
 }
+
+// Closer is a store that tells whether it closed. A parser that keeps a
+// store a release ran for (Restaged) asks it whether that release was the
+// store's Close, after which the store stages no more and the parser lets
+// go of it. A store that tells its Close (Restaged) tells IsClosed too, and
+// so does every view that forwards its WhenRestaged.
+type Closer interface {
+	IsClosed() bool
+}
+
+// IsClosed reports whether db closed (Closer), and false where db does not
+// tell: a parser then keeps db, as though it were open.
+func IsClosed(db any) bool {
+	c, ok := db.(Closer)
+	return ok && c.IsClosed()
+}

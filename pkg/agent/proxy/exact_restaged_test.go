@@ -106,3 +106,49 @@ func TestAParsersReleaseRunsOnceTheStagingMovedTheGenerations(t *testing.T) {
 		t.Fatalf("the release saw %+v, not the staging's final generations %+v", atRelease, after)
 	}
 }
+
+// Every store and view a parser can be handed that tells when it lets its
+// recordings go (integrations.Restaged) tells whether it closed
+// (integrations.Closer), so the parser tells a release run by the Close from
+// one run by a staging by asking, never by when it ran: the manager, a
+// worker's view of it, and the store a call is held to.
+func TestAReleaseIsToldWhetherItIsTheStoresClose(t *testing.T) {
+	now := time.Now()
+	stage := func(mm *MockManager) {
+		mm.SetMocksWithWindow(nil, []*models.Mock{r3Mock("mock-0", now, "GET", "/a", "", "{}")}, models.BaseTime, now.Add(time.Hour))
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	stage(mm)
+	held, _ := mm.HoldToRound(mm.MarkCallRound())
+	if _, ok := held.(*heldScope); !ok {
+		t.Fatalf("precondition: the call is not held to its staging (%T)", held)
+	}
+	views := map[string]integrations.MockMemDb{
+		"the manager":                   mm,
+		"a worker's view":               &scopedMockDb{MockMemDb: mm},
+		"a held call's store":           held,
+		"a view of a held call's store": &scopedMockDb{MockMemDb: held},
+	}
+	saw := map[string][]bool{}
+	ask := func() {
+		for name, db := range views {
+			if _, ok := db.(integrations.Closer); !ok {
+				t.Fatalf("%s (%T) tells its Close but not whether it closed", name, db)
+			}
+			integrations.WhenRestaged(db, name, func() { saw[name] = append(saw[name], integrations.IsClosed(db)) })
+		}
+	}
+	ask()
+	stage(mm)
+	ask()
+	mm.Close()
+	ask()
+	for name := range views {
+		if got := saw[name]; len(got) != 3 || got[0] || !got[1] || !got[2] {
+			t.Errorf("%s: closed as told at a staging, at Close, after Close: %v, want [false true true]", name, got)
+		}
+	}
+	if integrations.IsClosed(struct{ integrations.MockMemDb }{mm}) {
+		t.Error("a store that does not tell whether it closed is taken as closed")
+	}
+}
