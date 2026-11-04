@@ -12,8 +12,10 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestComposeUpSemanticsAgreeWithTheInjectedFlags is the parity guard between
@@ -254,6 +256,75 @@ func TestRunComposeInProcessTearsDownOnCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("runComposeInProcess did not return after the teardown")
+	}
+}
+
+// TestACancelledInProcessRunStopsTheAppAsTheSwitchSays pins which teardown a
+// cancelled in-process run takes. Under the proven switch keploy stops the app
+// itself (StopComposeApp): it looks for the app's container through the
+// compose project on its agent's container, and says so when it cannot find
+// it. With the switch off the app gets its grace (composeAppGrace): keploy
+// reads the app's container until it has exited and asks for no stop. Both
+// end in the same down, so a run that took the wrong one is seen only here.
+func TestACancelledInProcessRunStopsTheAppAsTheSwitchSays(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		proven string
+		stops  bool
+	}{
+		{name: "under the switch keploy stops the app itself", proven: "1", stops: true},
+		{name: "with the switch off the app gets its grace", proven: "", stops: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, tc.proven)
+			blockUntilCancel := make(chan struct{})
+			stack := &fakeComposeStack{upBlocksUntil: blockUntilCancel}
+			exited := container.InspectResponse{
+				ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited"}},
+			}
+			// Every container has exited, and none carries a label.
+			d := &inspectRecorder{inspects: map[string]container.InspectResponse{"user-app": exited, "keploy-v3": exited}}
+			core, logs := observer.New(zap.WarnLevel)
+			a := &App{
+				logger:          zap.New(core),
+				docker:          d,
+				composeContent:  []byte("services: {}"),
+				cmd:             "docker compose -f - up",
+				container:       "user-app",
+				composeService:  "app",
+				keployContainer: "keploy-v3",
+				newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			downs := 0
+			done := make(chan utils.CmdError, 1)
+			go func() {
+				done <- a.runComposeInProcess(ctx, func() {
+					downs++
+					close(blockUntilCancel)
+				})
+			}()
+			cancel()
+
+			select {
+			case <-done:
+			case <-time.After(graceBudget + 10*time.Second):
+				t.Fatal("runComposeInProcess did not return after the run was cancelled")
+			}
+			if downs != 1 {
+				t.Fatalf("the stack was brought down %d times, want once", downs)
+			}
+			const cannotStop = "keploy could not stop the application's container before taking its compose stack down"
+			warned := logs.FilterMessage(cannotStop).Len() == 1
+			if asked := d.askedAbout(a.keployContainer); asked != tc.stops || warned != tc.stops {
+				t.Fatalf("keploy looked for the app's container through its agent's project: %v, and warned %q: %v; "+
+					"want both %v (the switch %q)", asked, cannotStop, warned, tc.stops, tc.proven)
+			}
+			if !tc.stops && !d.askedAbout(a.container) {
+				t.Fatalf("with the switch off keploy never read the app's container %q for its grace (inspected %v)", a.container, d.asked)
+			}
+		})
 	}
 }
 
