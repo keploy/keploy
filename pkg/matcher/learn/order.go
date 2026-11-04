@@ -707,25 +707,35 @@ const (
 )
 
 // inDecodedForm is why no word of a leaf may be learned fresh, and the place
-// that says so: an earlier place holds a word of 32 bits
-// or more in each run, and only the decoded forms of the leaf's texts hold
-// it. That is an id carried inside an encoding the reader opens no step for
-// (base64 wrapped between other text, base32, 0x hex, a signed message):
-// keploy reads such forms at a place but binds no word in them, so the
-// words of the encoded text would go unchecked at their first call. A place
-// that may hold them in round F (evidenceAt) refuses as well: one rule
-// across forms. It binds nothing.
+// that says so: a word of 32 bits or more that only the decoded forms of
+// one run's text hold, and no form of the other run's, stands at a place
+// keploy reads for the call, in either run's text there or a view of what
+// round F served there. That is an id carried inside an encoding the reader
+// opens no step for (base64 wrapped between other text, base32, 0x hex, a
+// signed message, a quoted-printable escape): keploy binds no word in such
+// a form, so it can check no copy of the place, and the words of the
+// encoded text would go unchecked at their first call. Main refuses such a
+// value wherever the place held the word, recorded or in round F, and
+// whatever the place gave in the other run (unaccounted: it did not drift
+// with the value), or binds it where the value followed the place. A place
+// that holds the word only in the other run's text, which main reads only
+// for a recording's payload, refuses too: one rule across places. The forms
+// are the value's in the call's window, as main reads them
+// (valueDrift.recTok and liveTok): a run that is a read of the clock there
+// is not decoded. It binds nothing.
 func (dc *decider) inDecodedForm(rds []textReading) (string, *evPlace) {
 	for _, rd := range rds {
-		rs, fs := decodedOnly(dc.in.Drifts, rd.Rec, rd.Live), decodedOnly(dc.in.Drifts, rd.Live, rd.Rec)
-		for _, p := range dc.ps {
-			for _, r := range rs {
-				if !evHolds(p.t.rec, r) {
-					continue
-				}
-				for _, f := range fs {
-					if ev, read := evidenceAt(placedFor(p, r), r, f, false); read && (ev == evShown || ev == evUnknown) {
-						return p.name + " held " + strconv.Quote(r) + " and " + strconv.Quote(f) + " may be round F's there: this value carries it in a decoded form, where keploy binds no word", &p
+		v := dc.dr.ofIn(rd.Rec, rd.Live, dc.in.Window, dc.in.At)
+		for side, ws := range [2][]string{decodedOnly(v.recTok, v.liveTok, rd.Rec), decodedOnly(v.liveTok, v.recTok, rd.Live)} {
+			which := "the recorded value"
+			if side == 1 {
+				which = "round F's value"
+			}
+			for _, w := range ws {
+				held := func(t *readerText) bool { return evHolds(t, w) }
+				for _, p := range dc.ps {
+					if held(p.t.rec) || held(p.t.live) || slices.ContainsFunc(p.t.views, held) {
+						return p.name + " held " + strconv.Quote(w) + ", which only " + which + " carries, in a decoded form, where keploy binds no word: keploy cannot tell whether it came from there", &p
 					}
 				}
 			}
@@ -734,15 +744,16 @@ func (dc *decider) inDecodedForm(rds []textReading) (string, *evPlace) {
 	return "", nil
 }
 
-// decodedOnly are the words of 32 bits or more that s's declared forms hold
-// and s does not, in any case, in no form of other, sorted so a word as it
-// stands comes before its lower-cased form.
-func decodedOnly(dc *DriftCache, s, other string) []string {
+// decodedOnly are the words of 32 bits or more that own, the words of a
+// run's text in every declared form by reading, holds and the text s as
+// written does not, in any case, nor other (the other run's), sorted so a
+// word as it stands comes before its lower-cased form.
+func decodedOnly(own, other []map[string]bool, s string) []string {
 	var out []string
-	plain, others := tokensOfForms([]string{strings.ToLower(s)}), dc.rawTokens(other)
-	for i, set := range dc.rawTokens(s) {
+	plain := tokensOfForms([]string{strings.ToLower(s)})
+	for i, set := range own {
 		for w := range set {
-			if wordBits(w) >= 32 && !plain[i][strings.ToLower(w)] && !others[i][w] {
+			if wordBits(w) >= 32 && !plain[i][strings.ToLower(w)] && !other[i][w] {
 				out = append(out, w)
 			}
 		}
