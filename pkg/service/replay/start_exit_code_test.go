@@ -76,19 +76,39 @@ func TestStartThatRunsNoTestExitsNonZero(t *testing.T) {
 	}
 }
 
-// The other half: a run the USER stopped is still not a failure. The fix above
-// must read the context Start was handed, not stop reading contexts: a Ctrl+C
-// that lands while the test sets are being listed makes that read fail with the
-// cancellation, and that has to keep exiting 0.
-func TestStartInterruptedBeforeAnyTestExitsZero(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	interrupt := func(ctx context.Context) ([]string, error) {
-		cancel()
-		return nil, ctx.Err()
-	}
-	if got := startExitCode(t, ctx, interrupt); got != 0 {
-		t.Fatalf("an interrupted run exited %d, want 0", got)
+// The other half: a run its user stopped is no failure of keploy's. The fix
+// above must read the context Start was handed, not stop reading contexts: a
+// Ctrl+C that lands while the test sets are being listed makes that read fail
+// with the cancellation, and the run does not exit 1 for it. It tested
+// nothing, so it does not pass either: it exits 128+N for the signal (SIGHUP
+// 129, SIGINT 130, SIGTERM 143), with the proven switch off too. It exited 0.
+// A cancel that is no signal's (a caller cancelling the run's context itself)
+// arms nothing.
+func TestStartInterruptedBeforeAnyTestExits128PlusN(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		signal int
+		want   int
+	}{
+		{"SIGHUP", 1, 129},
+		{"SIGINT", 2, 130},
+		{"SIGTERM", 15, 143},
+		{"a cancel that is no signal's", 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setSwitch(t, false)
+			t.Cleanup(utils.SetInterruptSignalForTest(0))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			interrupt := func(ctx context.Context) ([]string, error) {
+				utils.SetInterruptSignalForTest(c.signal)
+				cancel()
+				return nil, ctx.Err()
+			}
+			if got := startExitCode(t, ctx, interrupt); got != c.want {
+				t.Fatalf("a run stopped while its test sets were listed exited %d, want %d", got, c.want)
+			}
+		})
 	}
 }
 

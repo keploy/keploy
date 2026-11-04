@@ -1436,12 +1436,14 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				// the top of Start records them.
 				//
 				// It stays a nil return. With the proven switch off a run
-				// interrupted with nothing wrong yet still exits 0 --
-				// cancelled is not failed, and that is the contract the rest
-				// of the CLI is built on (the enterprise binary reads its own
-				// `interrupted` reason for the same distinction). Under the
-				// switch a run stopped before its verdict has none, and
-				// exits 128+N (armStoppedRunExitCode).
+				// interrupted with nothing wrong yet, once a test got its
+				// verdict, still exits 0 -- cancelled is not failed, and that
+				// is the contract the rest of the CLI is built on (the
+				// enterprise binary reads its own `interrupted` reason for
+				// the same distinction). A run stopped before any test got a
+				// verdict tested nothing, and exits 128+N, and under the
+				// switch so does any run stopped before its verdict
+				// (armStoppedRunExitCode).
 				return nil
 			case models.TestSetStatusFailed:
 				testSetResult = false
@@ -1843,11 +1845,15 @@ func armRunExitCode(runErr error, testRunResult bool, failedTests int) {
 // testRunResult and the failed count carry that, nor a test that got no
 // verdict (stoppedAfterNoVerdict). A DEADLINE, on the root or below it, is a
 // different thing and still counts: only the root being cancelled is a user
-// saying stop. Under the proven switch a stop before the verdict is never 0
-// (armStoppedRunExitCode).
+// saying stop. A stop before any test got a verdict is never 0, nor, under
+// the proven switch, a stop before the run's verdict (armStoppedRunExitCode).
 func (r *Replayer) armStartExitCode(stopped bool, err error, testRunResult, verdictReached bool) {
 	r.completeTestReportMu.RLock()
 	failed := r.totalTestFailed
+	// judged counts the tests that got a verdict, as the run's own "verified
+	// nothing" rule counts them: a set its user stopped adds the tests it
+	// judged before the stop to the totals too.
+	judged := r.totalTestPassed + r.totalTestFailed + r.totalTestObsolete
 	r.completeTestReportMu.RUnlock()
 	runErr := err
 	if stopped {
@@ -1857,22 +1863,30 @@ func (r *Replayer) armStartExitCode(stopped bool, err error, testRunResult, verd
 		}
 	}
 	armRunExitCode(runErr, testRunResult, failed)
-	armStoppedRunExitCode(r.logger, stopped && !verdictReached)
+	armStoppedRunExitCode(r.logger, stopped && !verdictReached, judged == 0)
 }
 
-// armStoppedRunExitCode records, under the proven switch, a run its user's
-// signal stopped before it had its verdict (stoppedBeforeVerdict): it exits
-// 128+N for the signal NewCtx's handler took (SIGINT 130, SIGHUP 129,
-// SIGTERM 143; utils.InterruptExitCode), never 0, whatever the tests it
-// reached showed, as a `keploy mock replay` stopped before keploy judged it
-// does (keploy#4700). A test that got no verdict before the stop, and a set
-// whose tests all passed so far, are no pass of the suite (OBS-ctrlc). A
-// code armed first is kept (a failure the run reached: 1), and a stop that
-// is no signal's (a caller cancelling the run's context itself) arms
-// nothing. With the switch off a stopped run with nothing wrong exits 0, the
-// CLI's contract.
-func armStoppedRunExitCode(logger *zap.Logger, stoppedBeforeVerdict bool) {
-	if !stoppedBeforeVerdict || !provenswitch.On() || utils.ErrCode != 0 {
+// armStoppedRunExitCode records a run its user's signal stopped before it
+// had its verdict (stoppedBeforeVerdict) and before any of its tests got one
+// (nothingJudged): it exits 128+N for the signal NewCtx's handler took
+// (SIGINT 130, SIGHUP 129, SIGTERM 143; utils.InterruptExitCode), never 0,
+// whatever the switch. Nothing was tested, so nothing passed: a stop during
+// --delay, or anywhere else before the first test's verdict, exited 0 with
+// the switch off. Under the proven switch a run stopped before its verdict exits
+// 128+N whatever the tests it reached showed, as a `keploy mock replay`
+// stopped before keploy judged it does (keploy#4700). A test that got no
+// verdict before the stop, and a set whose tests all passed so far, are no
+// pass of the suite (OBS-ctrlc). A code armed first is kept (a failure the
+// run reached: 1), and a stop that is no signal's (a caller cancelling the
+// run's context itself) arms nothing. With the switch off a run stopped
+// with nothing wrong, once a test got its verdict, exits 0, the CLI's
+// contract.
+func armStoppedRunExitCode(logger *zap.Logger, stoppedBeforeVerdict, nothingJudged bool) {
+	if !stoppedBeforeVerdict || utils.ErrCode != 0 {
+		return
+	}
+	on := provenswitch.On()
+	if !on && !nothingJudged {
 		return
 	}
 	code := utils.InterruptExitCode()
@@ -1880,7 +1894,13 @@ func armStoppedRunExitCode(logger *zap.Logger, stoppedBeforeVerdict bool) {
 		return
 	}
 	utils.SetExitCodeOnce(code)
-	logger.Warn("the run was stopped before keploy judged it, so it has no verdict and does not pass ("+provenswitch.Env+"=1)",
+	if on {
+		logger.Warn("the run was stopped before keploy judged it, so it has no verdict and does not pass ("+provenswitch.Env+"=1)",
+			zap.Int("exit_code", code),
+			zap.String("next_step", "run keploy test again and let it finish"))
+		return
+	}
+	logger.Warn("the run was stopped before any test got a verdict, so it tested nothing and does not pass",
 		zap.Int("exit_code", code),
 		zap.String("next_step", "run keploy test again and let it finish"))
 }
