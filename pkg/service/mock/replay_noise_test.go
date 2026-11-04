@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -53,8 +54,9 @@ var switchName = map[bool]string{false: "switch off/", true: "switch on/"}
 // browser's Referer, the page it was on) is then neither compared nor
 // required to be present when a call is matched to its mock. The set's own
 // test-sets entry joins the global one or stands alone, another set's does
-// not, a bucket other than header is handed without one, and a keploy.yml
-// that declares none hands none. With and without the proven
+// not, a bucket other than header is handed without one, the url bucket
+// reaches the HTTP request matcher (a query bucket, which no matcher reads,
+// is not handed), and a keploy.yml that declares none hands none. With and without the proven
 // switch: the hand-off does not depend on it. A bucket handed with no entries
 // is the same to the matchers as one not handed, so the rows compare the
 // buckets that have entries.
@@ -93,6 +95,15 @@ func TestMockReplayHandsTheAgentKeployYmlRequestNoise(t *testing.T) {
 				want:   map[string]map[string][]string{"requestbody": {"nonce": {}}},
 			},
 			{
+				// The HTTP request matcher reads URL-path and query-value
+				// noise from the url bucket; no matcher reads a query
+				// bucket, so it is not handed.
+				name:   "global url noise and the set's own, and a query bucket",
+				global: map[string]map[string][]string{"url": {"/users/[0-9]+": {}}, "query": {"page": {}}},
+				sets:   map[string]map[string]map[string][]string{"set": {"url": {"/orders/[a-f0-9-]+": {}}}},
+				want:   map[string]map[string][]string{"url": {"/users/[0-9]+": {}, "/orders/[a-f0-9-]+": {}}},
+			},
+			{
 				name: "only another set's noise",
 				sets: map[string]map[string]map[string][]string{"other": {"header": {"X-Other": {}}}},
 				want: map[string]map[string][]string{},
@@ -103,10 +114,13 @@ func TestMockReplayHandsTheAgentKeployYmlRequestNoise(t *testing.T) {
 			},
 		} {
 			t.Run(switchName[sw]+c.name, func(t *testing.T) {
-				got := mockServingOptions(t, sw, func(cfg *config.Config) {
+				opts := mockServingOptions(t, sw, func(cfg *config.Config) {
 					cfg.Test.GlobalNoise.Global = c.global
 					cfg.Test.GlobalNoise.Testsets = c.sets
-				}).NoiseConfig
+				})
+				got := opts.NoiseConfig
+				// The HTTP request matcher reads the URL noise it was handed.
+				require.ElementsMatch(t, keysOf(c.want["url"]), http.NewRequestNoise(zap.NewNop(), opts).URL, "URL noise the HTTP matcher does not read")
 				withEntries := map[string]map[string][]string{}
 				for bucket, fields := range got {
 					if len(fields) > 0 {
@@ -148,4 +162,12 @@ func TestMockReplayHandsTheAgentKeployYmlMatchingSettings(t *testing.T) {
 			})
 		}
 	}
+}
+
+func keysOf(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
