@@ -10,8 +10,8 @@ import (
 //
 // Exact serving answers each of an open test's own recordings at most once:
 // a call one more than the test recorded misses (models.MissExtraCall), and
-// a recording the test did not make is charged to it at its end. A test's
-// mapping may name a repeated read (models.MappedTestCase.RepeatReads,
+// a recording the test did not make is charged to it at its end. A replay
+// may name a test's repeated read (models.ScopeTableReq.RepeatReads,
 // models.TestModeInfo.RepeatRead on each of its recordings): the test
 // recorded that read at least twice, every time with one answer. An app
 // makes such a read a number of times that follows how fast the earlier

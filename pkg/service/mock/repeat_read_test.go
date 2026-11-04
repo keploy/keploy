@@ -1,10 +1,17 @@
 package mock
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 // keploy alone names no read; a registered namer names them from each test's
@@ -86,4 +93,37 @@ func TestARegisteredNamerNamesEachTestsRepeatedReads(t *testing.T) {
 		}()
 		defer RegisterRepeatReadNamer(nil)()
 	}()
+}
+
+// A replay under the switch hands the agent the reads the registered namer
+// names, in the same push as the table (pushProvenTable ->
+// namedRepeatReads): without them the agent serves each such read its exact
+// count.
+func TestAReplayPushesTheNamedRepeatedReadsWithTheTable(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	mdb := mapdb.New(zap.NewNop(), keployDir, "")
+	ctx := context.Background()
+	require.NoError(t, mdb.UpsertBatch(ctx, "set", map[string][]models.MockEntry{"orders::TestPlace": {{Name: "mock-0"}, {Name: "mock-1"}}, "orders::TestNone": nil}))
+	require.NoError(t, mdb.UpsertCases(ctx, "set", map[string]models.MappedTestCase{
+		"orders::TestPlace": {At: runnerT0}, "orders::TestNone": {At: runnerT0},
+	}, nil, nil))
+	read := models.RepeatRead{Name: "GET /api/onboarding", Mocks: []string{"mock-0", "mock-1"}}
+	var gotSet string
+	defer RegisterRepeatReadNamer(func(set string, _ map[string][]*models.Mock) map[string][]models.RepeatRead {
+		gotSet = set
+		return map[string][]models.RepeatRead{"orders::TestPlace": {read}}
+	})()
+	rinstr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	rcfg := instrConfig(rinstr, utils.Native, "go test -p 1 -json ./...")
+	rcfg.Path, rcfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), rinstr, named("mock-0", "mock-1"), mdb, nil, nil, rcfg).Replay(ctx))
+	require.Equal(t, "set", gotSet)
+	require.Equal(t, []string{"mock-0", "mock-1"}, rinstr.table["orders::TestPlace"])
+	require.Equal(t, map[string][]models.RepeatRead{"orders::TestPlace": {read}}, rinstr.repeats, "the replay pushes each test's named repeated reads")
 }

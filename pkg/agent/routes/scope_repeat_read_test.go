@@ -2,6 +2,7 @@ package routes
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,9 +21,13 @@ type repeatTableSvc struct {
 	poolSvc
 	reads map[string][]models.RepeatRead
 	set   bool
+	err   error
 }
 
 func (s *repeatTableSvc) SetScopeRepeatReads(_ context.Context, r map[string][]models.RepeatRead) error {
+	if s.err != nil {
+		return s.err
+	}
 	s.reads, s.set = r, true
 	return nil
 }
@@ -48,6 +53,11 @@ func TestScopeTableCarriesEachTestsRepeatedReads(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.True(t, svc.set)
 	require.Empty(t, svc.reads, "a push without repeated reads clears the last push's")
+
+	// An agent that fails to install them refuses the table.
+	rec = post(&Agent{logger: zap.NewNop(), svc: &repeatTableSvc{err: errors.New("no room for the repeated reads")}}, body)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Contains(t, rec.Body.String(), "no room for the repeated reads")
 
 	rec = post(&Agent{logger: zap.NewNop(), svc: &poolSvc{}}, body)
 	require.Equal(t, http.StatusNotImplemented, rec.Code)
