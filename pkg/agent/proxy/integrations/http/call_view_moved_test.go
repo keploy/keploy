@@ -15,12 +15,15 @@ import (
 )
 
 // movedGateDb is gateDb, holding each call to itself, whose call's view
-// moved (integrations.CallViewTeller): since it was held (moved), or inside
-// its read of the test's answered recordings (inList), so that only a
-// question asked after the list is read sees it.
+// moved (integrations.CallViewTeller): since it was held (moved), inside its
+// read of the test's answered recordings (inList), or inside its second read
+// of them (inDiag: the answered diagnosis's, after the extra-call count
+// read the list in one view), so that only a question asked after that read
+// sees it. reads counts the reads of the list.
 type movedGateDb struct {
 	gateDb
-	moved, inList bool
+	moved, inList, inDiag bool
+	reads                 int
 }
 
 func (d *movedGateDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
@@ -28,7 +31,8 @@ func (d *movedGateDb) HoldToRound(integrations.CallRound) (integrations.MockMemD
 }
 
 func (d *movedGateDb) ConsumedTestMocks() []*models.Mock {
-	if d.inList {
+	d.reads++
+	if d.inList || (d.inDiag && d.reads == 2) {
 		d.moved = true
 	}
 	return d.consumed
@@ -54,8 +58,10 @@ func (d *movedPairingDb) CallViewMoved() bool               { return d.moved }
 // one call more than recorded, it is diagnosed against none of the answered
 // recordings, no recording made elsewhere and no repeat note are named for
 // it, and in record's full round it pairs with no other test's recording: it
-// misses plainly. With no move, the same store tells each. Before, the
-// answered list was read whatever view it was of.
+// misses plainly. With no move, the same store tells each. A changed call
+// whose view moved only inside the answered diagnosis's read of the list,
+// after the extra-call count read it in one view, is not diagnosed against
+// it either. Before, the answered list was read whatever view it was of.
 func TestAnHTTPCallWhoseViewMovedIsToldNoVerdictOfTheAnsweredList(t *testing.T) {
 	const addr, host = "127.0.0.1:8099", "localhost:8099"
 	const path = "/sap/A_BusinessPartner/$count?$filter=x"
@@ -70,14 +76,26 @@ func TestAnHTTPCallWhoseViewMovedIsToldNoVerdictOfTheAnsweredList(t *testing.T) 
 	elsewhere := onHost("mock-w", path, host)
 	elsewhere.Spec.HTTPReq.Header["X-Request-Id"] = "live-9"
 	for _, mv := range []struct {
-		name          string
-		moved, inList bool
+		name                  string
+		moved, inList, inDiag bool
 	}{
 		{name: "not moved"},
 		{name: "moved since the hold", moved: true},
 		{name: "moved inside the read of the answered list", inList: true},
+		{name: "moved inside the answered diagnosis's read of the list", inDiag: true},
 	} {
 		t.Run(mv.name, func(t *testing.T) {
+			if mv.inDiag {
+				d := &movedGateDb{gateDb: gateDb{earlierDb: alone, consumed: []*models.Mock{changed}}, inDiag: true}
+				r := missReport(t, d, addr, host, path, models.OutgoingOptions{})
+				if d.reads < 2 || !d.moved {
+					t.Fatalf("the store's list was read %d times (moved %v); want the extra-call count's read and the diagnosis's", d.reads, d.moved)
+				}
+				if r.ClosestMock == "mock-c" {
+					t.Errorf("a changed call whose view moved inside the diagnosis's read is diagnosed against the test's answered mock-c; want it diagnosed against none of the list")
+				}
+				return
+			}
 			told := !mv.moved && !mv.inList
 			db := func(g gateDb) *movedGateDb { return &movedGateDb{gateDb: g, moved: mv.moved, inList: mv.inList} }
 			r := missReport(t, db(gateDb{earlierDb: alone, consumed: []*models.Mock{own}}), addr, host, path, models.OutgoingOptions{})
