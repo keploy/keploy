@@ -273,6 +273,18 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot take the values the tests gave when they were recorded", http.StatusNotImplemented)
 			return
 		}
+		// Each test's repeated reads: none clears a previous set's. An
+		// agent that cannot take them says so when the replay names any:
+		// it would serve each such read its exact count.
+		if s, ok := a.svc.(scopeRepeatReadsSetter); ok {
+			if err := s.SetScopeRepeatReads(r.Context(), req.RepeatReads); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.RepeatReads) > 0 {
+			http.Error(w, "this keploy agent cannot answer a test's repeated read once more", http.StatusNotImplemented)
+			return
+		}
 	}
 	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
 		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
@@ -323,6 +335,12 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
+}
+
+// scopeRepeatReadsSetter installs each test's repeated reads
+// (models.ScopeTableReq.RepeatReads).
+type scopeRepeatReadsSetter interface {
+	SetScopeRepeatReads(ctx context.Context, reads map[string][]models.RepeatRead) error
 }
 
 // scopeGivenSetter installs the values each test gave when it was recorded

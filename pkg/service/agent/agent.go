@@ -198,6 +198,7 @@ type Agent struct {
 	testReal     map[string][]string            // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
 	testSeeds    map[string]string              // replay: test name -> the seed its recording kept for its browser (SetTestSeeds)
 	testGiven    map[string][]models.GivenValue // replay, proven switch: test ID -> the values it gave when recorded; replaced with the scope table (SetScopeGiven)
+	testRepeats  map[string][]models.RepeatRead // replay, proven switch: test ID -> its repeated reads; replaced with the scope table (SetScopeRepeatReads)
 	testPool     []string                       // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
 	testWorker   []models.MockEntry             // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
 	testReached  map[string]bool                // keploy test, proven switch: the set's test cases the run has reached since its staging, begun or passed over (exact_proven.go reachTest)

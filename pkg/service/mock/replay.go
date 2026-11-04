@@ -1313,7 +1313,8 @@ func recordedGivens(mp *models.Mapping) map[string][]models.GivenValue {
 // read, or that names a mock the recording does not have, refuses, and so
 // does an agent that refuses the table: nothing is served from a whole pool
 // instead. The values each test gave when it was recorded go in the same
-// request.
+// request, and so do the repeated reads the registered namer names
+// (namedRepeatReads).
 func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
@@ -1369,11 +1370,12 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
 	worker := workerSlices(mp, pool)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp)); err != nil {
+	repeats := namedRepeatReads(name, table, loaded)
+	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp), repeats); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.Int("tests with a repeated read", len(repeats)), zap.String("mock-set", name))
 	return nil
 }
 
