@@ -79,7 +79,8 @@ func recordedClock(t *testing.T, recAt time.Time, f clockRun, live string) (*mod
 // call's span on the application's clock is answered by the recording,
 // though its text differs there; one whose literal lies outside it, or
 // whose span keploy cannot tell, is refused, and the miss names the
-// literal. The other literals are still compared, and without the switch
+// literal (and says keploy cannot tell the clock at the call where it
+// cannot tell the span). The other literals are still compared, and without the switch
 // the literal is compared as before it. The scan that starts in the open
 // test's window and the one over the whole pool give the same answer.
 func TestALiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
@@ -97,11 +98,13 @@ func TestALiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
 		// noWhy: refused at a literal that is no read of the clock, the
 		// miss gives no reason of one.
 		noWhy bool
+		// says is what the miss's reason says, beside the literal.
+		says string
 	}{
 		{name: "a read in the call's span", proven: true, sql: strings.Replace(clockSQL, "%s", later.read().Format(literalForm), 1), served: true},
 		{name: "the recorded value, no read of this run", proven: true, sql: strings.Replace(clockSQL, "%s", recAt.Add(-1300*time.Microsecond).Format(literalForm), 1), mention: "body.query.literals.1"},
 		{name: "a read an hour before the span", proven: true, sql: strings.Replace(clockSQL, "%s", later.read().Add(-time.Hour).Format(literalForm), 1), mention: "body.query.literals.1"},
-		{name: "a read in the span, no span known", proven: true, noSpan: true, sql: strings.Replace(clockSQL, "%s", later.read().Format(literalForm), 1), mention: "body.query.literals.1"},
+		{name: "a read in the span, no span known", proven: true, noSpan: true, sql: strings.Replace(clockSQL, "%s", later.read().Format(literalForm), 1), mention: "body.query.literals.1", says: "keploy cannot tell the application's clock at this call"},
 		{name: "a read in the span, another literal changed", proven: true, sql: strings.Replace(strings.Replace(clockSQL, "%s", later.read().Format(literalForm), 1), "a@x.io", "b@x.io", 1), mention: "body.query.literals.0", noWhy: true},
 		{name: "a read in the span, the switch off", proven: false, sql: strings.Replace(clockSQL, "%s", later.read().Format(literalForm), 1)},
 	}
@@ -133,6 +136,9 @@ func TestALiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
 				}
 				if tc.noWhy && !strings.Contains(miss, " why: nextSteps:") {
 					t.Fatalf("the miss (%s) gives a reason; want none", miss)
+				}
+				if tc.says != "" && !strings.Contains(miss, tc.says) {
+					t.Fatalf("the miss (%s) does not say %q", miss, tc.says)
 				}
 			})
 		}
@@ -522,6 +528,64 @@ func TestARefusedLiteralOfRecordsFullRoundIsARequestThatChanged(t *testing.T) {
 			}
 			if !strings.Contains(rep.NextSteps, tc.says) || !strings.Contains(rep.NextSteps, "("+models.MissRequestChanged+")") {
 				t.Fatalf("the miss's next steps (%q) do not give the refusal's reason %q and name %s", rep.NextSteps, tc.says, models.MissRequestChanged)
+			}
+		})
+	}
+}
+
+// Replay stamps each command as it reads it, and that arrival ends the
+// span a literal learned as a read of the application's clock is checked
+// in: through Replay, a statement whose literal is a read made before the
+// command reached keploy is answered, and one whose literal is a read a
+// minute after it is refused, the miss naming the literal, though both lie
+// after the run's previous call.
+func TestReplayChecksALearnedLiteralUpToTheCommandsArrival(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	recAt := diffBase.Add(time.Millisecond)
+	for _, tc := range []struct {
+		name   string
+		read   func(f clockRun) time.Time
+		served bool
+	}{
+		{name: "a read before the command arrived", read: clockRun.read, served: true},
+		{name: "a read a minute after the command arrived", read: func(clockRun) time.Time { return time.Now().UTC().Add(time.Minute) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The run's test began a second ago, its previous call 970ms
+			// ago: Replay reads the command as it arrives, after both.
+			f := newClockRun(time.Now().UTC().Add(-time.Second))
+			m, o := recordedClock(t, recAt, f, f.read().Format(literalForm))
+			m.Spec.Clocks = map[string]models.ClockOffset{"body.query.literals.1": o}
+			m.Spec.MySQLResponses = []mysql.Response{{PacketBundle: mysql.PacketBundle{
+				Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 7, SequenceID: 1}, Type: mysql.StatusToString(mysql.OK)},
+				Message: &mysql.OKPacket{Header: mysql.OK, StatusFlags: 2},
+			}}}
+			mm := stageOwn(t, []*models.Mock{replayer.NativeHandshakeForTest(), m}, []*models.Mock{m}, true)
+			ctx, _ := poolConn("c1")
+			ctx = learn.WithTracker(ctx, f.tr)
+			cmd := append([]byte{mysql.COM_QUERY}, strings.Replace(clockSQL, "%s", tc.read(f).Format(literalForm), 1)...)
+			if tc.served {
+				replies, _ := replayer.ReplayCommandsInForTest(t, ctx, mm, models.OutgoingOptions{}, cmd, cmd)
+				if len(replies[0]) == 0 || replies[0][0] != mysql.OK {
+					t.Fatalf("the client read % x; want the recording's OK", replies[0])
+				}
+				return
+			}
+			_, done := replayer.ReplayCommandsInForTest(t, ctx, mm, models.OutgoingOptions{}, cmd)
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the command was answered; want a miss that ends the connection")
+			}
+			var r interface {
+				MismatchReport() *models.MockMismatchReport
+			}
+			if !errors.Is(err, models.ErrNoMockMatched) || !errors.As(err, &r) || r.MismatchReport() == nil {
+				t.Fatalf("Replay returned %v; want a miss carrying a mismatch report", err)
+			}
+			if rep := r.MismatchReport(); !strings.Contains(rep.Diff, "body.query.literals.1 was learned as") || rep.ClosestMock != "mock-note" {
+				t.Fatalf("the miss names %q, diff %q; want mock-note, refused at body.query.literals.1 as a read of the clock", rep.ClosestMock, rep.Diff)
 			}
 		})
 	}
