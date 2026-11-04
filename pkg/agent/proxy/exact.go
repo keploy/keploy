@@ -84,6 +84,21 @@ import (
 // test mock answering) bumps the revisions, so a parser that keeps an index
 // of what it read reads again.
 
+// poolSlice is the names of a pool view's pool slice, as a test's view that
+// shows its declared session calls reads them (exactView.declared). Each pool
+// view's is its own, so two test views share one only when no pool view came
+// between them (sharedIdent).
+type poolSlice struct{ names map[string]struct{} }
+
+// has reports whether name is one of the slice's.
+func (p *poolSlice) has(name string) bool {
+	if p == nil {
+		return false
+	}
+	_, ok := p.names[name]
+	return ok
+}
+
 // exactView is what exact serving shows. It is replaced, never changed,
 // except for which of its test mocks have answered and what its open test
 // was served (mu).
@@ -116,6 +131,12 @@ type exactView struct {
 	inFlight map[string]bool
 	// pool is, while no test is open, the names of the pool slice served.
 	pool map[string]struct{}
+	// declared is, on a test view installed while keploy.yaml declares
+	// session calls (models.SessionCallsDeclared), the pool slice of the
+	// pool view before it: its recordings a declared session call covers
+	// (models.Mock.DeclaredSessionCall), recorded outside every test, are
+	// shown in the test too (sharesRest). nil otherwise.
+	declared *poolSlice
 	// worker is the set's worker-scope mocks the run has reached the place
 	// of, by name, as ServeExactWorker last said when the view was
 	// installed: shown whether a test is open or not.
@@ -370,6 +391,10 @@ type exactState struct {
 	// are the background's (BackgroundCursor) and, in a test, the worker
 	// scope's (SequenceView.Between).
 	poolCursor atomic.Pointer[string]
+	// lastPool is the pool slice of the pool view installed last (its
+	// pool): a test's view installed while keploy.yaml declares session
+	// calls shows those of them it holds (exactView.declared).
+	lastPool atomic.Pointer[poolSlice]
 	// pairs says the session pairs (SetPairing); claimed, the recordings a
 	// pairing claimed in the current staging; ofKind, where the pairing
 	// reads recordings of a kind the trees do not hold.
@@ -1935,6 +1960,9 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	if v.test == "" {
 		key := v.poolKey
 		m.exact.poolCursor.Store(&key)
+		m.exact.lastPool.Store(&poolSlice{names: v.pool})
+	} else if models.SessionCallsDeclared() {
+		v.declared = m.exact.lastPool.Load()
 	}
 	w := m.exact.worker.Load()
 	if w != nil {
@@ -2590,9 +2618,11 @@ func (v *exactView) inBackgroundPool(mk *models.Mock) bool {
 // spendsAsPool reports whether mk is one of the pool's data-plane recordings
 // under the background rules, in a test or between tests: one answers at
 // most one call in the staging, through whichever door a parser consumes it
-// (exactConsumeIn). An async lane's recording keeps today's rules.
+// (exactConsumeIn). An async lane's recording keeps today's rules, and so
+// does one keploy.yaml's sessionCalls declare served to every test
+// (models.Mock.DeclaredSessionCall): spent once, it would answer one test.
 func (v *exactView) spendsAsPool(mk *models.Mock) bool {
-	return v.bg.inPool(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync()
+	return v.bg.inPool(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync() && !mk.DeclaredSessionCall()
 }
 
 // isWorker reports whether name is one of the set's worker-scope mocks the

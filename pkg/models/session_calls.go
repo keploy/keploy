@@ -80,6 +80,9 @@ func sessionCallHostMatches(rule, host string) bool {
 
 var sessionCalls atomic.Pointer[[]SessionCallRule]
 
+// sessionCallsOn is whether the rules SetSessionCalls installed last are any.
+var sessionCallsOn atomic.Bool
+
 // SetSessionCalls installs the process's declared session calls (keploy.yaml
 // sessionCalls), which DeriveLifetime applies to every HTTP and HTTP/2 mock
 // it derives per-test from then on. The keploy CLI installs them from its
@@ -88,7 +91,27 @@ var sessionCalls atomic.Pointer[[]SessionCallRule]
 func SetSessionCalls(rules []SessionCallRule) {
 	cp := append([]SessionCallRule(nil), rules...)
 	sessionCalls.Store(&cp)
+	sessionCallsOn.Store(len(cp) > 0)
 	mockRulesChanged()
+}
+
+// SessionCallsDeclared reports whether the process declares any session call
+// (SetSessionCalls).
+func SessionCallsDeclared() bool { return sessionCallsOn.Load() }
+
+// DeclaredSessionCall reports whether m is session only because the process
+// declares it so (SetSessionCalls, keploy.yaml sessionCalls): an HTTP or
+// HTTP/2 call its recorder stated per-test that a declared session call
+// covers. DeriveLifetime gives such a mock LifetimeSession, but it stays a
+// data-plane recording (IsProtocolPhase reads the stated lifetime): under the
+// proven switch a test is served it from a recording made outside every test
+// (exactView.sharesRest).
+func (m *Mock) DeclaredSessionCall() bool {
+	if m == nil {
+		return false
+	}
+	lt, ok := statedLifetime(m)
+	return ok && lt == LifetimePerTest && declaredSessionCall(m)
 }
 
 // declaredSessionCall reports whether m is an HTTP or HTTP/2 call a declared

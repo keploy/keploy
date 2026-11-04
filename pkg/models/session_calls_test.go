@@ -95,3 +95,48 @@ func TestSessionCallRuleProblem(t *testing.T) {
 		}
 	}
 }
+
+// DeclaredSessionCall is whether a mock is session only because keploy.yaml
+// declares it so: a stated per-test HTTP call a declared session call covers.
+// A stated session call is session by its recorder, an unstated one keeps the
+// older rules, and with no declared calls none is. SessionCallsDeclared
+// follows the rules installed last.
+func TestDeclaredSessionCallIsTheStatedPerTestCallARuleCovers(t *testing.T) {
+	t.Cleanup(func() { SetSessionCalls(nil) })
+	SetSessionCalls(nil)
+	if SessionCallsDeclared() {
+		t.Fatal("no rules installed, but session calls are declared")
+	}
+	SetSessionCalls([]SessionCallRule{{Host: "127.0.0.1", Method: "GET", PathPrefix: "/echo/rates"}})
+	if !SessionCallsDeclared() {
+		t.Fatal("a rule is installed, but no session call is declared")
+	}
+	stated := func(lifetime string) *Mock {
+		m := statedHTTP("GET", "/echo/rates", "127.0.0.1:9000")
+		if lifetime == "" {
+			delete(m.Spec.Metadata, MetadataLifetimeKey)
+		} else {
+			m.Spec.Metadata[MetadataLifetimeKey] = lifetime
+		}
+		return m
+	}
+	for _, tc := range []struct {
+		name string
+		mock *Mock
+		want bool
+	}{
+		{"a stated per-test call the rule covers", stated(MetadataLifetimePerTest), true},
+		{"a stated session call", stated(MetadataLifetimeSession), false},
+		{"a call recorded before lifetimes were stated", stated(""), false},
+		{"a call the rule does not cover", statedHTTP("GET", "/echo/quote", "127.0.0.1:9000"), false},
+		{"no mock", nil, false},
+	} {
+		if got := tc.mock.DeclaredSessionCall(); got != tc.want {
+			t.Errorf("%s: DeclaredSessionCall = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	SetSessionCalls(nil)
+	if SessionCallsDeclared() || stated(MetadataLifetimePerTest).DeclaredSessionCall() {
+		t.Fatal("the rules were removed, but a session call is still declared")
+	}
+}

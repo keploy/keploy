@@ -12,7 +12,8 @@ import (
 // sharedIdent is what a test's view shows of the trees beyond the
 // protocol-phase recordings, and how it hands each out: the reached worker
 // scope (its names and order), the background rules (the pool it shows in a
-// test), and the kept learning each recording is handed out with
+// test), the pool slice whose declared session calls it shows in a test
+// (exactView.declared), and the kept learning each recording is handed out with
 // (exactView.learned). Two test views with the same ident show the same of
 // the same trees (exactView.showsStatic). A staging changes the trees, and
 // the copies learned hands out are per staging epoch, but a staging moves the
@@ -23,16 +24,17 @@ import (
 // (ownShared): two views that own different recordings of the pool or the
 // worker scope show different shared parts.
 type sharedIdent struct {
-	worker *reachedWorker
-	bg     *backgroundState
-	kept   *keptLoad
-	own    string
+	worker   *reachedWorker
+	bg       *backgroundState
+	declared *poolSlice
+	kept     *keptLoad
+	own      string
 }
 
 // sharedIdentOf is v's ident now; w is the reached worker scope it was
 // installed with.
 func sharedIdentOf(v *exactView, w *reachedWorker) sharedIdent {
-	id := sharedIdent{worker: w, bg: v.bg, own: v.ownShared()}
+	id := sharedIdent{worker: w, bg: v.bg, declared: v.declared, own: v.ownShared()}
 	if v.kept != nil {
 		id.kept = v.kept.cur.Load()
 	}
