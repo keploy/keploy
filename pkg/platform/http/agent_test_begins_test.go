@@ -36,15 +36,15 @@ func TestAgentClient_PushTestBegins(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
 
-	if err := a.PushTestBegins(ctx, map[string]time.Time{"pkg::TestA": at}, nil); err != nil {
+	if err := a.PushTestBegins(ctx, map[string]time.Time{"pkg::TestA": at}, nil, map[string]string{"pkg::TestA": "0123456789abcdef"}); err != nil {
 		t.Fatal(err)
 	}
-	if !got.Begins["pkg::TestA"].Equal(at) {
+	if !got.Begins["pkg::TestA"].Equal(at) || got.Seeds["pkg::TestA"] != "0123456789abcdef" {
 		t.Fatalf("the agent got %+v", got)
 	}
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
 		status = s
-		err := a.PushTestBegins(ctx, nil, nil)
+		err := a.PushTestBegins(ctx, nil, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "did not take") {
 			t.Fatalf("status %d: want an error, got %v", s, err)
 		}
@@ -71,10 +71,12 @@ func TestRestartedAgentGetsTheTestBeginsAgain(t *testing.T) {
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	at := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
 	begins := map[string]time.Time{"pkg::TestA": at}
-	if err := a.PushTestBegins(context.Background(), begins, nil); err != nil {
+	seeds := map[string]string{"pkg::TestA": "0123456789abcdef"}
+	if err := a.PushTestBegins(context.Background(), begins, nil, seeds); err != nil {
 		t.Fatal(err)
 	}
 	delete(begins, "pkg::TestA")
+	delete(seeds, "pkg::TestA")
 	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +85,7 @@ func TestRestartedAgentGetsTheTestBeginsAgain(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("the agent got the begins %d times, want 2", len(got))
 	}
-	if !got[1].Begins["pkg::TestA"].Equal(at) {
+	if !got[1].Begins["pkg::TestA"].Equal(at) || got[1].Seeds["pkg::TestA"] != "0123456789abcdef" {
 		t.Fatalf("the restarted agent got %+v", got[1])
 	}
 }

@@ -18,6 +18,12 @@ type testBeginsSetter interface {
 	SetTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) error
 }
 
+// testSeedsSetter takes, by test, the seed its recording kept for its
+// browser's random numbers (models.TestBeginsReq.Seeds).
+type testSeedsSetter interface {
+	SetTestSeeds(ctx context.Context, seeds map[string]string)
+}
+
 // HandleTestBegins installs when each test of the replayed recording began
 // (models.TestBeginsReq). A service that cannot take them, or a build that
 // freezes the run's clock but cannot move it per test (agent.ErrNoTestClock),
@@ -47,6 +53,14 @@ func (a *Agent) HandleTestBegins(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this keploy agent cannot move the clock per test", http.StatusNotImplemented)
 		return
 	}
+	// The seeds come with the begins: a service that cannot keep them,
+	// given some, would run the tests' browsers on other numbers than their
+	// recordings', and takes neither.
+	ss, _ := s.(testSeedsSetter)
+	if ss == nil && len(req.Seeds) > 0 {
+		http.Error(w, "this keploy agent cannot give a test's browser the seed its recording kept", http.StatusNotImplemented)
+		return
+	}
 	if err := s.SetTestBegins(r.Context(), req.Begins, req.Real); err != nil {
 		code := http.StatusInternalServerError
 		if errors.Is(err, agent.ErrNoTestClock) || errors.Is(err, agent.ErrNoRealTestClock) {
@@ -54,6 +68,9 @@ func (a *Agent) HandleTestBegins(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, err.Error(), code)
 		return
+	}
+	if ss != nil {
+		ss.SetTestSeeds(r.Context(), req.Seeds)
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
