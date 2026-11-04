@@ -19,17 +19,35 @@ import (
 )
 
 // deleteRecDB is the harness's test DB, recording the test cases --must-pass
-// deletes from a set.
+// deletes from a set, and taking them out of it, so the set's next run
+// leaves them out as one read back from disk does.
 type deleteRecDB struct {
 	*prTestDB
 	mu      sync.Mutex
 	deleted []string
 }
 
+func (f *deleteRecDB) GetTestCases(context.Context, string) ([]*models.TestCase, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*models.TestCase(nil), f.cases...), nil
+}
+
 func (f *deleteRecDB) DeleteTests(_ context.Context, _ string, ids []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, ids...)
+	gone := map[string]bool{}
+	for _, id := range ids {
+		gone[id] = true
+	}
+	kept := f.cases[:0:0]
+	for _, tc := range f.cases {
+		if !gone[tc.Name] {
+			kept = append(kept, tc)
+		}
+	}
+	f.cases = kept
 	return nil
 }
 
@@ -110,9 +128,15 @@ func startRetried(t *testing.T, h *prRun) {
 // Its report is the latest attempt's, PASSED where that one ran clean, and
 // the halt fails the run (exit 1). The run said no flaky line for it, so its
 // report and its summary said PASSED, alone, for a run that exited 1. Now a
-// flaky line names the attempt that halted and how, and the set is in the
-// run's list of flaky sets: either order. A set that halts on both attempts,
-// or on neither, is not flaky for a halt.
+// flaky line names the attempt that halted and how, either order, and the
+// run's closing lines list the set as flaky for a halt, apart from the sets
+// the user is sent to --must-pass for: --must-pass removes no test case for a
+// halted attempt. A set that halts on both attempts, or on neither, is not
+// flaky for a halt.
+// haltFlakyListLine is the run's closing line listing the sets flaky for a
+// halt.
+const haltFlakyListLine = "testsets flaky for an application halt detected"
+
 func TestASetItsAppHaltedOnOneAttemptOnlyIsFlaky(t *testing.T) {
 	const haltLine = "the testset is flaky: its application halted on one attempt"
 	for _, c := range []struct {
@@ -178,9 +202,16 @@ func TestASetItsAppHaltedOnOneAttemptOnlyIsFlaky(t *testing.T) {
 				t.Errorf("exit code %d, want %d", utils.ErrCode, c.wantCode)
 			}
 			flaky := logs.FilterMessageSnippet(haltLine).All()
+			haltListed := logs.FilterMessageSnippet(haltFlakyListLine).All()
+			if mustPassListed := logs.FilterMessageSnippet("flaky testsets detected").All(); len(mustPassListed) != 0 {
+				t.Errorf("the run sends the user to --must-pass for %v, a set flaky only for a halt, for which it removes no test case", mustPassListed[0].ContextMap()["testSets"])
+			}
 			if c.haltedAt == 0 {
 				if len(flaky) != 0 {
 					t.Errorf("%d lines say the set is flaky for a halt, want none", len(flaky))
+				}
+				if len(haltListed) != 0 {
+					t.Errorf("the run lists %v as flaky for a halt, want none", haltListed[0].ContextMap()["testSets"])
 				}
 				return
 			}
@@ -194,9 +225,8 @@ func TestASetItsAppHaltedOnOneAttemptOnlyIsFlaky(t *testing.T) {
 			if want := "the application exited during test-set test-set-0 with exit code 1: app stopped"; f["halt"] != want {
 				t.Errorf("the flaky line names the halt %q, want %q", f["halt"], want)
 			}
-			listed := logs.FilterMessageSnippet("flaky testsets detected").All()
-			if len(listed) != 1 || fmt.Sprint(listed[0].ContextMap()["testSets"]) != "[test-set-0]" {
-				t.Errorf("the run's list of flaky sets is %v, want test-set-0 in it", listed)
+			if len(haltListed) != 1 || fmt.Sprint(haltListed[0].ContextMap()["testSets"]) != "[test-set-0]" {
+				t.Errorf("the run's list of sets flaky for a halt is %v, want test-set-0 in it", haltListed)
 			}
 		})
 	}
@@ -241,6 +271,58 @@ func TestMustPassRemovesNoTestForAnAttemptTheAppHalted(t *testing.T) {
 			}
 			if utils.ErrCode != 1 {
 				t.Errorf("exit code %d, want 1", utils.ErrCode)
+			}
+		})
+	}
+}
+
+// --must-pass skips its deletions only on the attempt its application halted,
+// not on every attempt after a halt: a test that fails for what it checks on
+// a later attempt is still deleted. Attempt 1 halts (test-2's send exits the
+// application) and removes nothing; attempt 2 runs to a verdict with test-3
+// answered wrongly, so test-3, and only it, is deleted; the set then runs
+// clean without it. The halt still fails the run, and its line is said once,
+// naming attempt 1.
+func TestMustPassStillDeletesAFailingTestAfterAHaltedAttempt(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch %v", on), func(t *testing.T) {
+			setSwitch(t, on)
+			h, logs := composeRetried(t, 3)
+			h.replayer.config.Test.MustPass = true
+			h.replayer.config.Test.MaxFailAttempts = 5
+			db := &deleteRecDB{prTestDB: h.replayer.testDB.(*prTestDB)}
+			h.replayer.testDB = db
+			var once sync.Once
+			h.replayer.instrumentation = &haltOnceInstr{prInstr: h.instr, again: func() {}}
+			h.replayer.hookImpl = crashOnceHooks{prHooks: prHooks{wrongBody: map[string]bool{"test-3": true}},
+				name: "test-2", done: new(atomic.Bool),
+				crash: func() { once.Do(func() { close(h.instr.appStopped) }) }}
+			startRetried(t, h)
+			if ran := setsRan(logs); len(ran) < 3 {
+				t.Fatalf("the run ran %v, the case needs test-set-0 run after the halted attempt and again after the deletion", ran)
+			}
+			stops := logs.FilterMessage("stopping Keploy").All()
+			if len(stops) != 1 || !strings.Contains(fmt.Sprint(stops[0].ContextMap()["reason"]), "the application exited during test-set test-set-0") {
+				t.Fatalf("the run stops with %v, the case needs an attempt halted by the application's exit", stops)
+			}
+			kept := logs.FilterMessageSnippet("--must-pass removes no test case for an attempt the application halted").All()
+			if len(kept) != 1 || kept[0].ContextMap()["attempt"] != int64(1) {
+				t.Errorf("%d lines say --must-pass removed nothing for the halted attempt (%v), want 1 naming attempt 1", len(kept), kept)
+			}
+			db.mu.Lock()
+			deleted := fmt.Sprint(db.deleted)
+			db.mu.Unlock()
+			if deleted != "[test-3]" {
+				t.Errorf("--must-pass deleted %s from the set, want [test-3]: it failed for what it checks on the attempt after the halted one", deleted)
+			}
+			h.report.mu.Lock()
+			rep := h.report.report
+			h.report.mu.Unlock()
+			if rep == nil || rep.Status != string(models.TestSetStatusPassed) {
+				t.Errorf("the set's latest report is %+v, want PASSED once test-3 is deleted", rep)
+			}
+			if utils.ErrCode != 1 {
+				t.Errorf("exit code %d, want 1: the halt fails the run", utils.ErrCode)
 			}
 		})
 	}

@@ -1250,6 +1250,11 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	setStopAt := map[string]int{}
 	r.afterTestRunCalled = false
 	var flakyTestSets []string
+	// haltFlakyTestSets are the sets flaky for a halt: their application
+	// halted on one attempt and ran to a verdict on another. They are listed
+	// apart from flakyTestSets, whose closing line sends the user to
+	// --must-pass: --must-pass removes no test case for a halted attempt.
+	var haltFlakyTestSets []string
 	var testSets []string
 	runDomainSet := telemetry.NewDomainSet()
 	r.runDomainSet = runDomainSet
@@ -1496,7 +1501,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 						zap.Int("haltedAttempt", halt.n), zap.String("haltedStatus", string(halt.status)), zap.String("halt", halt.why),
 						zap.Int("verdictAttempt", ran.n), zap.String("verdictStatus", string(ran.status)),
 						zap.String("next_step", "see why the application exited on the halted attempt (its logs in that attempt's output), then run the test-set again"))
-					flakyTestSets = append(flakyTestSets, testSet)
+					haltFlakyTestSets = append(haltFlakyTestSets, testSet)
 					break
 				}
 				// checking if there is no mismatch in failed testcases across max retries
@@ -1625,6 +1630,11 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	if len(flakyTestSets) > 0 {
 		r.logger.Info("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
+	}
+	if len(haltFlakyTestSets) > 0 {
+		r.logger.Info("testsets flaky for an application halt detected: --must-pass removes no test case for a halted attempt",
+			zap.Strings("testSets", haltFlakyTestSets),
+			zap.String("next_step", "see why the application exited on each set's halted attempt (its logs in that attempt's output), then run those test-sets again"))
 	}
 
 	testRunStatus := "fail"
