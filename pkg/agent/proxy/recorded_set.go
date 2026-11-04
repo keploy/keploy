@@ -14,7 +14,7 @@ import (
 // trees of a set it keeps resident may hold only the open test's window.
 //
 // The trees and the source are read together under swapMu, as one staging
-// installed them (installRecordedOfKindLocked): the agent hands a set's
+// installed them (installRecordedSourcesLocked): the agent hands a set's
 // source before it stages that set, so a read between the two still ranges
 // the set staged, never its trees with the next set's on-disk recordings.
 func (m *MockManager) RangeRecordedSet(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) (bool, error) {

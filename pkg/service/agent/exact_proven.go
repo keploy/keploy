@@ -155,7 +155,8 @@ func showWorker(es coreAgent.ExactServer, names []string) error {
 // recordings at once (a replay of a long recording held them all for its
 // whole session). With no recorded window (a CLI that sends none) the
 // staging reads the whole window, as before. The reads of the recordings
-// the trees then do not hold go to the on-disk store (readUnstagedFromDisk).
+// the trees then do not hold go to the on-disk store (handKeyedSource before
+// the staging, readUnstagedFromDisk after it).
 func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	if _, stored := a.clientMocks.Load(uint64(0)); !stored {
 		// Nothing to stage yet: the CLI stores the recording before it
@@ -175,6 +176,9 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 		StrictMockWindow:       true,
 		ExactStaging:           true,
 		FirstRecordedTestStart: first,
+	}
+	if err := a.handKeyedSource(); err != nil {
+		return false, err
 	}
 	if err := a.stageMocks(ctx, params, names, nil); err != nil {
 		return false, fmt.Errorf("stage the recording's mocks: %w", err)
@@ -229,30 +233,38 @@ func covers(staged map[string]bool, pool map[string][]string) bool {
 	return true
 }
 
-// readUnstagedFromDisk points the proxy's reads of the staged set's
+// handKeyedSource points the proxy's reads by key of the staged set's
 // recordings its trees do not hold (a test's own are staged only as it
-// opens) at the on-disk store: a miss on a call that is the recording of a
-// test not begun yet (a worker's call made early) is told from it; the learn
-// step's earlier places of a pool recording are every recording made before
-// it, a test's own on disk too; record's full round pairs with the
-// recordings of tests not begun yet; and under keploy mock replay a test
-// process's teardown (the calls after its own last test) is bounded by its
-// tests' recordings, which no staging reads. A set kept all resident sets
-// none: its trees hold every recording.
-func (a *Agent) readUnstagedFromDisk() error {
+// opens) at the on-disk store, before the staging, which installs it with
+// the trees it builds, as stageMocks hands the source of a kind: a miss on a
+// call that is the recording of a test not begun yet (a worker's call made
+// early) is told from it, and the learn step's pairing under request keys
+// pairs with the recordings of tests not begun yet. A read by key between
+// the handing and the staging reads the set staged, never its trees with
+// this set's on-disk recordings. A set kept all resident hands none: its
+// trees hold every recording.
+func (a *Agent) handKeyedSource() error {
 	if rs, ok := a.Proxy.(coreAgent.RecordingSourceSetter); ok {
 		if err := rs.SetRecordingSource(a.diskRecordingSource()); err != nil {
 			return fmt.Errorf("set the test set's recording source: %w", err)
 		}
 	}
+	return nil
+}
+
+// readUnstagedFromDisk points the proxy's other reads of the staged set's
+// recordings its trees do not hold at the on-disk store, after the staging:
+// the learn step's earlier places of a pool recording are every recording
+// made before it, a test's own on disk too; and under keploy mock replay a
+// test process's teardown (the calls after its own last test) is bounded by
+// its tests' recordings, which no staging reads. The source of a kind
+// (record's full round's pairing) is handed before the staging
+// (stageMocks), and the keyed one too (handKeyedSource). A set kept all
+// resident sets none: its trees hold every recording.
+func (a *Agent) readUnstagedFromDisk() error {
 	if rb, ok := a.Proxy.(coreAgent.RecordedBeforeSetter); ok {
 		if err := rb.SetRecordedBefore(a.diskRecordedBefore()); err != nil {
 			return fmt.Errorf("set the test set's recordings before an instant: %w", err)
-		}
-	}
-	if rk, ok := a.Proxy.(coreAgent.RecordedOfKindSetter); ok {
-		if err := rk.SetRecordedOfKind(a.diskRecordedOfKind()); err != nil {
-			return fmt.Errorf("set the test set's recordings of a kind: %w", err)
 		}
 	}
 	if rt, ok := a.Proxy.(coreAgent.RecordingTimesSetter); ok {
@@ -517,11 +529,15 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		//
 		// The set's worker scope (models.Mapping.Worker) is staged by name
 		// with the pool: its mocks answer from their places on.
+		// A test's own are staged only as it opens: what reads them before
+		// reads the on-disk store, by key from the source handed before the
+		// staging, which installs it with the trees it builds.
+		if err := a.handKeyedSource(); err != nil {
+			return err
+		}
 		if err := a.stageMocks(ctx, staging, append(append([]string(nil), ex.Pool...), entryNames(ex.Worker)...), nil); err != nil {
 			return fmt.Errorf("stage the test set's mocks: %w", err)
 		}
-		// A test's own are staged only as it opens: what reads them before
-		// reads the on-disk store.
 		if err := a.readUnstagedFromDisk(); err != nil {
 			return err
 		}

@@ -764,7 +764,8 @@ type RecordingTimesSetter interface {
 // none. SetRecordingSource sets where (src visits the on-disk mocks of a kind
 // indexed under any of keys, models.RequestKeys, in recorded order, decoding
 // one only as visit loads it; nil for none). For diagnosis only: nothing it
-// reads is served.
+// reads is served. The agent sets it before it stages a set: the staging
+// installs it with the trees it builds.
 type RecordingSourceSetter interface {
 	SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error
 }

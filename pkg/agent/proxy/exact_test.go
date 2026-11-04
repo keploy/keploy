@@ -2962,7 +2962,7 @@ func TestFindStagedNotOwnedByKeysReadsTheRecordingSource(t *testing.T) {
 	own := httpCall("t1-own", 2*time.Second, "/delete")
 	mm := stagedManager(t, nil, []*models.Mock{pool})
 	var asked, decoded []string
-	mm.SetRecordingSource(func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
+	handKeyedAndStage(mm, func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
 		asked = append(asked, string(kind)+" "+strings.Join(keys, ","))
 		if kind != models.HTTP || len(keys) != 1 || keys[0] != "DELETE /delete" {
 			return nil

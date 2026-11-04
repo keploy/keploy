@@ -1164,28 +1164,43 @@ func (m *MockManager) findNotOwned(kind models.Kind, call integrations.CallRound
 // (FindStagedNotOwnedByKeys): what it reads is never served.
 type RecordingSource func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error
 
-// recordingSource is the manager's RecordingSource for the current staging.
+// recordingSource is the manager's RecordingSource: src as the agent handed
+// it (SetRecordingSource), and staged as the last staging installed it with
+// its trees (installRecordedSourcesLocked), which every reader reads. mu is a
+// leaf, taken under swapMu by the staging and by the pairing
+// (pairableUnderKeys).
 type recordingSource struct {
-	mu  sync.Mutex
-	src RecordingSource
+	mu     sync.Mutex
+	src    RecordingSource
+	staged RecordingSource
 }
 
-// SetRecordingSource sets where a miss's diagnosis reads the staged set's
-// recordings the trees do not hold (FindStagedNotOwnedByKeys); nil for none,
-// when every one is in the trees. The agent sets it as it stages a set.
+// SetRecordingSource sets where the reads of the staged set's recordings
+// the trees do not hold by key read them (a miss's diagnosis,
+// FindStagedNotOwnedByKeys and RangeStagedRecordings, and the learn step's
+// pairing under request keys, pairableUnderKeys); nil for none, when every
+// one is in the trees. The agent sets it before it stages a set, and the
+// staging installs it with the trees it builds: until then the reads read
+// the set staged.
 func (m *MockManager) SetRecordingSource(src RecordingSource) {
 	m.exact.recorded.mu.Lock()
 	defer m.exact.recorded.mu.Unlock()
 	m.exact.recorded.src = src
 }
 
-// rangeRecorded visits what the recording source holds of kind under keys
-// (RecordingSource): decoded only as visit loads it, kept by nobody; nothing
-// when there is no source, or it fails.
-func (m *MockManager) rangeRecorded(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) {
+// stagedRecordingSource is the RecordingSource the last staging installed
+// (installRecordedSourcesLocked), nil for none.
+func (m *MockManager) stagedRecordingSource() RecordingSource {
 	m.exact.recorded.mu.Lock()
-	src := m.exact.recorded.src
-	m.exact.recorded.mu.Unlock()
+	defer m.exact.recorded.mu.Unlock()
+	return m.exact.recorded.staged
+}
+
+// rangeRecorded visits what the recording source the staging installed holds
+// of kind under keys (RecordingSource): decoded only as visit loads it, kept
+// by nobody; nothing when there is no source, or it fails.
+func (m *MockManager) rangeRecorded(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) {
+	src := m.stagedRecordingSource()
 	if src == nil {
 		return
 	}
@@ -1355,9 +1370,9 @@ var _ integrations.StagedReader = (*MockManager)(nil)
 
 // RangeStagedRecordings implements integrations.StagedRecordingReader: the
 // recordings of kind the trees hold (StagedMocks, of kind), then those of
-// kind the agent keeps on disk under any of keys (SetRecordingSource), each
-// decoded only once the trees showed no recording of its name. No keys
-// visits the trees alone. Nothing visited is handed out, and no name is
+// kind the agent keeps on disk under any of keys (SetRecordingSource, as the
+// staging installed it), each decoded only once the trees showed no
+// recording of its name. No keys visits the trees alone. Nothing visited is handed out, and no name is
 // claimed (FindStagedNotOwned's naming is the miss's): a call that is
 // exactly a recording is told so however many calls are.
 func (m *MockManager) RangeStagedRecordings(kind models.Kind, keys []string, visit func(*models.Mock) bool) error {
@@ -1379,9 +1394,7 @@ func (m *MockManager) RangeStagedRecordings(kind models.Kind, keys []string, vis
 	if len(keys) == 0 {
 		return nil
 	}
-	m.exact.recorded.mu.Lock()
-	src := m.exact.recorded.src
-	m.exact.recorded.mu.Unlock()
+	src := m.stagedRecordingSource()
 	if src == nil {
 		return nil
 	}

@@ -33,6 +33,9 @@ import (
 //	swapMu  →  exact.ofKind.mu  (the staging installs the set-as-recorded
 //	                          source, RangeRecordedSet and the pairing read
 //	                          it with the trees; a LEAF, also taken bare)
+//	swapMu  →  exact.recorded.mu  (the staging installs the keyed on-disk
+//	                          source, the pairing under keys reads it with
+//	                          the trees; a LEAF, also taken bare)
 //	hitMu   →  treesMu  →  connMu  →  TreeDb.mu
 //	                         (bumpHitCount's slow path; rebuildHitIndex takes
 //	                          hitMu as a LEAF — never acquire treesMu from
@@ -713,7 +716,12 @@ func (m *MockManager) ResetForReplaySession() {
 	// does, today's serve.
 	m.exact.bg.Store(nil)
 	m.exact.poolCursor.Store(nil)
-	m.SetRecordingSource(nil)
+	// The keyed source as installed goes too (installRecordedSourcesLocked):
+	// the reads by key read that one, and until the next staging they read
+	// none of the trees' set kept on disk.
+	m.exact.recorded.mu.Lock()
+	m.exact.recorded.src, m.exact.recorded.staged = nil, nil
+	m.exact.recorded.mu.Unlock()
 	m.SetRecordedBefore(nil)
 	m.SetRecordedOfKind(nil)
 	// Nor its scope table's pool names (SetPoolNames), owners
@@ -1556,8 +1564,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// recordings of a request advance their cursor within that test alone.
 	m.resetPerTestCursors()
 	// The set's recordings as recorded are the trees this staging builds and
-	// the source the agent handed before it.
-	m.installRecordedOfKindLocked()
+	// the sources the agent handed before it.
+	m.installRecordedSourcesLocked()
 	// Track the earliest window-start we've ever seen on this manager.
 	// Used below to distinguish startup-init mocks (recorded before
 	// any test fired) from stale previous-test mocks. Once set, only
@@ -3408,7 +3416,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&mocks)
-	m.installRecordedOfKindLocked()
+	m.installRecordedSourcesLocked()
 	m.stampSet(mocks)
 	m.publishFiltered(m.buildTier(mocks, true), true)
 }
@@ -3533,7 +3541,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&mocks)
-	m.installRecordedOfKindLocked()
+	m.installRecordedSourcesLocked()
 	m.stampSet(mocks)
 	m.publishUnfiltered(m.buildTier(mocks, false), true)
 }

@@ -53,11 +53,7 @@ func (m *MockManager) LearnElsewhereCandidates(kind models.Kind, keys []string) 
 	if len(keys) == 0 || !models.HasRequestKeys(kind) {
 		return m.pairableOfKind(m.learningElsewhere, kind)
 	}
-	v, epoch := m.learningElsewhere()
-	if v == nil {
-		return nil
-	}
-	return m.pairableUnderKeys(v, epoch, kind, keys)
+	return m.pairableUnderKeys(m.learningElsewhere, kind, keys)
 }
 
 // LearnElsewhere implements integrations.LearnElsewhere. One pairing per

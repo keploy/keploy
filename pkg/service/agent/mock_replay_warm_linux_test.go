@@ -187,3 +187,39 @@ func TestAKeployTestSetIsReadForTheLearnStepAsItIsStaged(t *testing.T) {
 	stage()
 	readOnce(next)
 }
+
+// sourceWireProxy is the wire's proxy (wireProxy) that takes the set's keyed
+// on-disk source (coreAgent.RecordingSourceSetter), as keploy's proxy does:
+// it counts the stagings (SetMocks) made before each handing.
+type sourceWireProxy struct {
+	*wireProxy
+	handed []int
+}
+
+func (p *sourceWireProxy) SetRecordingSource(func(models.Kind, []string, func(string, func() (*models.Mock, error)) bool) error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.handed = append(p.handed, p.staged)
+	return nil
+}
+
+// keploy mock's replay of record's full round hands the proxy its set's keyed
+// on-disk source before it stages the set (handKeyedSource), as it hands the
+// source of a kind: the staging installs it with the trees it builds, so a
+// read by key between the two (the learn step's pairing under request keys,
+// a miss's diagnosis) reads the set staged, never its trees with this set's
+// on-disk recordings.
+func TestAMockReplaySetsKeyedSourceIsHandedBeforeItsStaging(t *testing.T) {
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &sourceWireProxy{wireProxy: wp}
+	a.Proxy = p
+	m := httpMock("mock-0", "GET", "http://h/rows/0")
+	m.Spec.ReqTimestampMock = t0
+	storeMocks(a, m)
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-0"}}
+	require.NoError(t, a.SetScopePool(context.Background(), map[string][]string{"o": {"mock-0"}}))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Equal(t, 1, p.staged, "the set is staged once")
+	require.Equal(t, []int{0}, p.handed, "the keyed source is handed once, before the set's staging")
+}

@@ -270,8 +270,10 @@ type workerExactProxy struct {
 	exactProxy
 	workers [][]string
 	// source is the recording source the staging set
-	// (coreAgent.RecordingSourceSetter).
-	source func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error
+	// (coreAgent.RecordingSourceSetter), and sourcedAt the stagings
+	// (SetMocksWithWindow) made before each handing of it.
+	source    func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error
+	sourcedAt []int
 	// before is the reader of the recordings before an instant the staging
 	// set (coreAgent.RecordedBeforeSetter).
 	before func(t time.Time, visit func(*models.Mock) bool) error
@@ -289,6 +291,7 @@ func (p *workerExactProxy) ServeExactWorker(names []string) error {
 
 func (p *workerExactProxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
 	p.source = src
+	p.sourcedAt = append(p.sourcedAt, len(p.windowed))
 	return nil
 }
 
@@ -332,9 +335,13 @@ func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
 	}
 	// A miss's diagnosis reads the on-disk store through the source the
 	// staging set: the test's own recording, staged only as it opens, is
-	// there before it.
+	// there before it. The source is handed before the staging, which
+	// installs it with the trees it builds.
 	if p.source == nil {
 		t.Fatal("the staging set no recording source over the on-disk store")
+	}
+	if want := []int{0}; !reflect.DeepEqual(p.sourcedAt, want) {
+		t.Fatalf("the recording source was handed after %v stagings; want once, before the set's staging (%v)", p.sourcedAt, want)
 	}
 	var onDisk []string
 	found := false

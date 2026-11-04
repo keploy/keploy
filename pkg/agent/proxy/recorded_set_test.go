@@ -297,19 +297,36 @@ func TestRangesInterleavedWithStagingsEachSeeOneSet(t *testing.T) {
 
 // handAndStage hands mm src as the agent hands a set's on-disk source, before
 // a staging, and stages the per-test tier again, empty in the sets that use
-// it: the staging installs what was handed (installRecordedOfKindLocked),
+// it: the staging installs what was handed (installRecordedSourcesLocked),
 // the trees left as they were.
 func handAndStage(mm *MockManager, src func(models.Kind, func(string, func() (*models.Mock, error)) bool) error) {
 	mm.SetRecordedOfKind(src)
 	mm.SetFilteredMocks(nil)
 }
 
+// handKeyedAndStage is handAndStage of the keyed on-disk source
+// (SetRecordingSource), which the agent hands before a staging too.
+func handKeyedAndStage(mm *MockManager, src RecordingSource) {
+	mm.SetRecordingSource(src)
+	mm.SetFilteredMocks(nil)
+}
+
+// keyedSetSource is a keyed on-disk source (RecordingSource) that files each
+// of names under every key.
+func keyedSetSource(names ...string) RecordingSource {
+	of := setSource(names...)
+	return func(kind models.Kind, _ []string, visit func(string, func() (*models.Mock, error)) bool) error {
+		return of(kind, visit)
+	}
+}
+
 // pairingSet is a manager that pairs (record's full round under the proven
 // switch, a set served by the background rules) in a set staged as the agent
 // stages one: its on-disk source handed, then its mocks staged, then its
 // background named and its test T1 open. stageSet stages set after set: each
-// holds its test's own recording (set-own), another test's (set-tree) and
-// one the agent keeps on disk (set-disk).
+// holds its test's own recording (set-own), another test's (set-tree), one
+// the agent keeps on disk (set-disk) and one it keeps on disk by key
+// (set-keyed).
 func pairingSet(t *testing.T) (*MockManager, func(set string)) {
 	t.Helper()
 	t.Setenv(provenswitch.Env, "1")
@@ -320,6 +337,7 @@ func pairingSet(t *testing.T) (*MockManager, func(set string)) {
 		own := httpCall(set+"-own", 0, "/"+set+"-own")
 		mm.StageExactBackground(models.RecordedWithS12Routing)
 		mm.SetRecordedOfKind(setSource(set + "-disk"))
+		mm.SetRecordingSource(keyedSetSource(set + "-keyed"))
 		mm.SetMocksWithWindow(nil, []*models.Mock{own, httpCall(set+"-tree", time.Second, "/"+set)}, models.BaseTime, time.Now())
 		mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
 		mm.ServeExactTest("T1", []*models.Mock{own})
@@ -383,16 +401,27 @@ func TestAPairingBeforeTheNextSetIsStagedPairsWithTheSetStaged(t *testing.T) {
 // with set b's, staged after its view was read. The view is read here while
 // the agent stages set b, as far as the lock lets it.
 func TestAPairingReadsItsViewAndTheSetStagedUnderOneStagingLock(t *testing.T) {
+	t.Cleanup(models.RegisterRequestKeys(models.HTTP, func(*models.Mock) []string { return []string{"k"} }))
 	mm, stageSet := pairingSet(t)
 	stageSet("a")
+	ofKind := func(in func() (*exactView, uint64)) []*models.Mock { return mm.pairableOfKind(in, models.HTTP) }
+	underKeys := func(in func() (*exactView, uint64)) []*models.Mock {
+		return mm.pairableUnderKeys(in, models.HTTP, []string{"k"})
+	}
 	for _, read := range []struct {
 		name string
 		in   func() (*exactView, uint64)
-	}{{"pairing", mm.pairing}, {"learn step", mm.learningElsewhere}} {
+		pair func(func() (*exactView, uint64)) []*models.Mock
+		want []string
+	}{
+		{"pairing", mm.pairing, ofKind, []string{"a-tree", "a-disk"}},
+		{"learn step", mm.learningElsewhere, ofKind, []string{"a-tree", "a-disk"}},
+		{"learn step under keys", mm.learningElsewhere, underKeys, []string{"a-tree", "a-keyed"}},
+	} {
 		var underLock bool
-		got := exactNames(mm.pairableOfKind(func() (*exactView, uint64) {
+		got := exactNames(read.pair(func() (*exactView, uint64) {
 			v, epoch := read.in()
-			// The agent hands set b's source and stages it now, unless
+			// The agent hands set b's sources and stages it now, unless
 			// the staging lock is held: then it waits for the read.
 			if mm.swapMu.TryLock() {
 				mm.swapMu.Unlock()
@@ -401,9 +430,67 @@ func TestAPairingReadsItsViewAndTheSetStagedUnderOneStagingLock(t *testing.T) {
 				underLock = true
 			}
 			return v, epoch
-		}, models.HTTP))
-		if !underLock || !reflect.DeepEqual(got, []string{"a-tree", "a-disk"}) {
-			t.Fatalf("%s: the view was read under the staging lock: %v; it paired with %v; want set a's", read.name, underLock, got)
+		}))
+		if !underLock || !reflect.DeepEqual(got, read.want) {
+			t.Fatalf("%s: the view was read under the staging lock: %v; it paired with %v; want set a's %v", read.name, underLock, got, read.want)
 		}
 	}
+}
+
+// readsByKey is what each read by key of the set's recordings kept on disk
+// gives of the HTTP recordings filed under the key k: the learn step's
+// candidates (LearnElsewhereCandidates, the trees' then the disk's), the
+// staged recordings (RangeStagedRecordings, sorted) and a miss's diagnosis
+// (rangeRecorded, the disk's alone).
+func readsByKey(t *testing.T, mm *MockManager) map[string][]string {
+	t.Helper()
+	var staged, diagnosed []string
+	if err := mm.RangeStagedRecordings(models.HTTP, []string{"k"}, func(mk *models.Mock) bool {
+		staged = append(staged, mk.Name)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(staged)
+	mm.rangeRecorded(models.HTTP, []string{"k"}, func(name string, _ func() (*models.Mock, error)) bool {
+		diagnosed = append(diagnosed, name)
+		return true
+	})
+	return map[string][]string{
+		"LearnElsewhereCandidates": exactNames(mm.LearnElsewhereCandidates(models.HTTP, []string{"k"})),
+		"RangeStagedRecordings":    staged,
+		"rangeRecorded":            diagnosed,
+	}
+}
+
+// The agent hands the next set's keyed on-disk source before it stages that
+// set (Agent.handKeyedSource), as it hands the source of a kind. A read by
+// key between the two, the learn step's pairing under request keys or a
+// miss's, reads the set staged, its trees and its keyed source, never its
+// trees with the next set's on-disk recordings: the staging installs that
+// source with the trees it builds.
+func TestAReadByKeyBeforeTheNextSetIsStagedReadsTheSetStaged(t *testing.T) {
+	t.Cleanup(models.RegisterRequestKeys(models.HTTP, func(*models.Mock) []string { return []string{"k"} }))
+	mm, stageSet := pairingSet(t)
+	setOf := func(set string) map[string][]string {
+		return map[string][]string{
+			"LearnElsewhereCandidates": {set + "-tree", set + "-keyed"},
+			"RangeStagedRecordings":    {set + "-keyed", set + "-own", set + "-tree"},
+			"rangeRecorded":            {set + "-keyed"},
+		}
+	}
+	check := func(when string, want map[string][]string) {
+		t.Helper()
+		for read, got := range readsByKey(t, mm) {
+			if !reflect.DeepEqual(got, want[read]) {
+				t.Fatalf("%s: %s read %v; want %v", when, read, got, want[read])
+			}
+		}
+	}
+	stageSet("a")
+	check("set a staged", setOf("a"))
+	mm.SetRecordingSource(keyedSetSource("b-keyed"))
+	check("set b's keyed source handed, set a still staged", setOf("a"))
+	stageSet("b")
+	check("set b staged", setOf("b"))
 }

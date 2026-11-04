@@ -2141,10 +2141,12 @@ func elsewhereOrders(t *testing.T, routed bool, trees func(pool, own1, own2 *mod
 		{TestCase: "test-1", Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
 		{TestCase: "test-2", Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
 	})
-	mm.SetMocksWithWindow(trees(pool, own1, own2), nil, models.BaseTime, now.Add(time.Hour))
+	// The agent hands the keyed source before the staging, which installs
+	// it with the trees it builds.
 	if src != nil {
 		mm.SetRecordingSource(src(own2))
 	}
+	mm.SetMocksWithWindow(trees(pool, own1, own2), nil, models.BaseTime, now.Add(time.Hour))
 	if routed {
 		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-pool"}, nil)
 	}
@@ -2445,7 +2447,6 @@ func TestAScopedViewRangesTheStoresStagedRecordings(t *testing.T) {
 	own1 := r3Mock("mock-own1", now.Add(time.Second), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
 	own2 := r3Mock("mock-own2", now.Add(2*time.Second), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
 	mm := NewMockManager(nil, nil, zap.NewNop())
-	mm.SetMocksWithWindow([]*models.Mock{pool, own1}, nil, models.BaseTime, now.Add(time.Hour))
 	var fail error
 	mm.SetRecordingSource(func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
 		if kind == models.HTTP && len(keys) > 0 {
@@ -2453,6 +2454,7 @@ func TestAScopedViewRangesTheStoresStagedRecordings(t *testing.T) {
 		}
 		return nil
 	})
+	mm.SetMocksWithWindow([]*models.Mock{pool, own1}, nil, models.BaseTime, now.Add(time.Hour))
 	visit := func(db integrations.MockMemDb) (string, error) {
 		r, ok := db.(integrations.StagedRecordingReader)
 		if !ok {
