@@ -458,6 +458,31 @@ func TestAMaskedSegmentThatIsAnotherOwnSegmentInTheCallIsComparedAsRecorded(t *t
 	}
 }
 
+// The same from the recording's side: under a pattern that joins more of
+// the recording's segments than the call's, the recording's masked
+// segments 1 and 2 ("c" and "d") are its own segments 5 and 6, while the
+// call's are its own segments 2 and 3, the places read as sent. So a call
+// of /v1/u/<now>/<now> is another route, though its instants are in their
+// window: the recorded "c" and "d" are no clock read and are compared as
+// recorded. A call the pattern joins as it did the recording masks to the
+// recording's segments and is answered.
+func TestAMaskedSegmentThatIsAnotherOwnSegmentInTheRecordingIsComparedAsRecorded(t *testing.T) {
+	const pat = `v1/u(/[0-9T:-]+Z/[0-9T:-]+Z/y)?`
+	for _, c := range []struct {
+		call     string
+		answered bool
+	}{
+		{"/v1/u/" + urlNoiseNow + "/" + urlNoiseNow, false},
+		{"/v1/u/" + urlNoiseNow + "/" + urlNoiseNow + "/y/c/d", true},
+	} {
+		m := recorded("mock-r", "/v1/u/"+urlNoiseT1+"/"+urlNoiseT2+"/y/c/d", urlNoiseJSON, `{}`)
+		m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": {Res: time.Second}, "url.path.3": {Res: time.Second}}
+		if got := urlNoiseServed(t, c.call, []string{pat}, m); (got != nil) != c.answered {
+			t.Errorf("%s: answered %v; want %v", c.call, got != nil, c.answered)
+		}
+	}
+}
+
 // Places learned under `v1/u` (url.path.1 and url.path.3): the masked
 // segment 2, "x", is the path's own segment 3, a learned place but one the
 // clock check reads in the masked path, not there. A call that puts an
