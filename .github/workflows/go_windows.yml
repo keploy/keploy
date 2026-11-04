@@ -137,10 +137,19 @@ jobs:
       # (a closed handle) ends the wait at once. And the rows of
       # storelock_test.go: a change holds the store lock while it runs and
       # gives it up after; it waits while another handle holds it, says so
-      # once, and runs once that handle lets go; it does not run once its
-      # context has ended; a lock error ends the wait at once; with no
-      # directory, no file, or a failing try it runs without the lock and
-      # warns once; the store lock is no run's. Only these rows of
+      # once per interval, each line and step naming the file, and runs once
+      # that handle lets go; a holder that never lets go ends it at its bound
+      # with an error that names the file; it does not run once its context
+      # has ended; a lock error ends the wait at once; with no directory, no
+      # file, or a failing try it runs without the lock and warns once; the
+      # store lock is no run's; its interval is under the CLI's bound for a
+      # start that takes no step; a wait is a step in the start's progress
+      # report (utils.ReportBootProgress: the boot reporter's first run here);
+      # once one CA install's wait ends at the bound, its changes after that
+      # try once, until one gets the lock; waits that get the lock spend none
+      # of the install's bound.
+      # (The held lock's next step, a text these rows check too, is
+      # logged only on Linux.) Only these rows of
       # ./pkg/agent/proxy/tls/ run here: the package's other tests are
       # Unix-only or have not been shown to pass on Windows. They were added
       # with the code, which no Windows host was at hand to run, so this job

@@ -264,6 +264,11 @@ func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPI
 		return err
 	}
 
+	// The install's changes of the trust stores, the legacy sweep's among them,
+	// share one bound for the store lock: once a wait ends at it, the changes
+	// after it try the lock once, until one gets it (withStoreLockBudget).
+	ctx = withStoreLockBudget(ctx)
+
 	// Best-effort: remove the retired static CA this host may still trust from
 	// older runs or the "bake it into the image" recipe. Runs before this run's
 	// CA is installed so the trust-store refresh does not race our new anchor.
@@ -877,6 +882,11 @@ func recordNativeInstall(n *nativeInstall) {
 // filename for the duration of the run (removed at teardown; crashed-run copies
 // are inert because the key died with the process and are swept at next start).
 func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, store caStore, appPID int, javaHomeOverride string) error {
+	// Its changes of the trust stores go under one budget for the store lock:
+	// once a wait ends at storeLockWait, the changes after it try once, until
+	// one gets it (withStoreLockBudget; SetupCAForApp's, when it has given
+	// one).
+	ctx = withStoreLockBudget(ctx)
 	// Resolve the target JDK's java.home once, up front. Order:
 	//   1. --ca-java-home CLI override wins (opts.Agent.CAJavaHome).
 	//   2. /proc/<appPID>/environ JAVA_HOME, then /proc/<appPID>/exe.
