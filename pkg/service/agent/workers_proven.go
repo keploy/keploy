@@ -242,6 +242,9 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 		// Live before the kernel can stamp a connection with it, so none
 		// of the worker's calls is read as an ended worker's.
 		starts.Default.InstanceBegan(v)
+		// me.pid is a positive pid_t (the connection's holder is read as
+		// one, and ClaimInstance refuses a caller <= 0), so its u32 TGID
+		// is exact.
 		err := stamper.SetInstance(uint32(me.pid), v)
 		if errors.Is(err, coreAgent.ErrInstanceHeld) {
 			starts.Default.InstanceEnded(v)
