@@ -181,11 +181,11 @@ func (m *MockManager) LearnEnded() bool {
 
 var _ integrations.LearnEnder = (*MockManager)(nil)
 
-// SetRecordedOfKind sets where the pairing reads the staged set's recordings
-// of a kind the trees do not hold (the agent's on-disk store of per-test
-// mocks: DiskMocks.RangeKind, which decodes one only as visit loads it); nil
-// for none, when every one is in the trees. The agent sets it as it stages a
-// set.
+// SetRecordedOfKind sets where the pairing, and HasUnservedRecording, read
+// the staged set's recordings of a kind the trees do not hold (the agent's
+// on-disk store of per-test mocks: DiskMocks.RangeKind, which decodes one
+// only as visit loads it); nil for none, when every one is in the trees. The
+// agent sets it at every staging, under either switch.
 func (m *MockManager) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) {
 	m.exact.ofKind.mu.Lock()
 	defer m.exact.ofKind.mu.Unlock()

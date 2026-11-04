@@ -2104,6 +2104,7 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 	if err != nil {
 		return err
 	}
+	a.readKindFromDisk()
 
 	// Atomically update mocks AND the active test window when the proxy
 	// supports the WindowedProxy extension. Otherwise fall back to the
