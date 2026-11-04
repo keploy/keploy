@@ -300,15 +300,26 @@ func TestLearnMatchAPatternOnAHeaderOnKeploysOwnListDeclaresNothing(t *testing.T
 }
 
 // A value an earlier call sent in a header the comparison excuses, whether
-// keploy.yml declares it (X-Order) or keploy's own list of headers that
-// change every run names it (X-Request-Id), is a place a later call's
-// value flowed from: the later call that carries it is paired, and its
-// answer holds this run's value. The earlier call names that header once.
+// keploy.yml declares it (X-Order), keploy's own list of headers that
+// change every run names it (X-Request-Id), or keploy.yml gives a header on
+// that list a pattern its values match, is a place a later call's value
+// flowed from: the later call that carries it is paired, and its answer
+// holds this run's value. The earlier call names that header once.
 func TestLearnMatchFollowsAValueSentInAnExcusedHeader(t *testing.T) {
 	h, _, _ := learnOn(t)
-	opts := models.OutgoingOptions{Learn: true, NoiseConfig: map[string]map[string][]string{"header": {"X-Order": {}}}}
-	n := h.newLearnNoise(opts, nil, nil)
-	for _, header := range []string{"X-Order", "X-Request-Id"} {
+	for _, row := range []struct {
+		header string
+		noise  map[string][]string
+	}{
+		{"X-Order", map[string][]string{"X-Order": {}}},
+		{"X-Request-Id", map[string][]string{"X-Order": {}}},
+		// On keploy's own list with a pattern: a leaf the pattern bounds,
+		// so the shape names it, and withExcused does not again.
+		{"X-Request-Id", map[string][]string{"X-Request-Id": {"^o-"}}},
+	} {
+		header := row.header
+		opts := models.OutgoingOptions{Learn: true, NoiseConfig: map[string]map[string][]string{"header": row.noise}}
+		n := h.newLearnNoise(opts, nil, nil)
 		tr := learn.NewTracker()
 		tr.Begin()
 		db := &learnDb{perTest: []*models.Mock{
