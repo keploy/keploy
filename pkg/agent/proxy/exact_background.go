@@ -233,6 +233,13 @@ type stagedSet struct {
 	// call whose first read saw the new epoch (CallRound.Epoch) reads its
 	// set only once epoch is the call's (findNotOwned).
 	epoch uint64
+	// seq tells the publish apart: each publish takes the next one
+	// (publishStagedLocked), and a copy that changes none of the set's trees
+	// or times keeps it (dropStagedKeyedAndBefore). It is what keploy mock
+	// replay's cached teardown bound is keyed by (teardownBound), so the
+	// cache keeps no pointer to a set: a set a staging replaced goes with
+	// its trees, whether or not a teardown was read since.
+	seq uint64
 }
 
 // trees are s's trees: per-test, session, startup.
@@ -251,7 +258,7 @@ func (m *MockManager) stagedNow() *stagedSet {
 // its staging put every tree in place, before it moves any generation: a
 // reader that read the new generation reads the new set.
 func (m *MockManager) publishStagedLocked() {
-	s := &stagedSet{times: m.exact.times.Load(), epoch: m.stagingEpoch.Load()}
+	s := &stagedSet{times: m.exact.times.Load(), epoch: m.stagingEpoch.Load(), seq: m.exact.setSeq.Add(1)}
 	m.treesMu.RLock()
 	s.filtered, s.unfiltered, s.startup, s.filteredByKind = m.filtered, m.unfiltered, m.startup, m.filteredByKind
 	m.treesMu.RUnlock()

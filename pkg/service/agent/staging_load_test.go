@@ -3,9 +3,11 @@ package agent
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,17 +282,72 @@ type workerExactProxy struct {
 	// times (coreAgent.RecordingTimesSetter).
 	before            func(t time.Time, visit func(*models.Mock) bool) error
 	beforeAt, timesAt []int
+	// events is, in order, each pool view installed (poolViewEvent), each
+	// handing of a source ("source", "before", "times", "of-kind") and each
+	// staging ("stage").
+	events []string
+}
+
+// poolViewEvent is a pool view's install as an event log says it: "pool"
+// and the names it shows.
+func poolViewEvent(names []string) string {
+	return strings.TrimSpace("pool " + strings.Join(names, ","))
+}
+
+// emptyPoolViewFirst checks an event log (workerExactProxy.events) of one
+// set's staging: before it hands any of the set's sources or stages it, the
+// agent installs the empty pool view, and no other view until the staging,
+// so no read of the new set's sources or trees reads them through the
+// previous set's view, whose names are another set's (names are unique only
+// within a set).
+func emptyPoolViewFirst(events []string) error {
+	empty := -1
+	for i, e := range events {
+		switch {
+		case e == "pool":
+			empty = i
+		case strings.HasPrefix(e, "pool "):
+			if empty >= 0 {
+				return fmt.Errorf("the pool view %q was installed after the empty pool view and before the staging: %v", e, events)
+			}
+		default:
+			if empty < 0 {
+				return fmt.Errorf("%q came before any empty pool view: %v", e, events)
+			}
+			if e == "stage" {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("no staging: %v", events)
 }
 
 func (p *workerExactProxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
 	p.before = src
 	p.beforeAt = append(p.beforeAt, len(p.windowed))
+	p.events = append(p.events, "before")
 	return nil
 }
 
 func (p *workerExactProxy) SetRecordingTimes(func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error {
 	p.timesAt = append(p.timesAt, len(p.windowed))
+	p.events = append(p.events, "times")
 	return nil
+}
+
+func (p *workerExactProxy) SetRecordedOfKind(func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.events = append(p.events, "of-kind")
+	return nil
+}
+
+func (p *workerExactProxy) ServeExactPool(key string, names []string) error {
+	p.events = append(p.events, poolViewEvent(names))
+	return p.exactProxy.ServeExactPool(key, names)
+}
+
+func (p *workerExactProxy) SetMocksWithWindow(ctx context.Context, f, u []*models.Mock, start, end time.Time) error {
+	p.events = append(p.events, "stage")
+	return p.exactProxy.SetMocksWithWindow(ctx, f, u, start, end)
 }
 
 func (p *workerExactProxy) ServeExactWorker(names []string) error {
@@ -301,6 +358,7 @@ func (p *workerExactProxy) ServeExactWorker(names []string) error {
 func (p *workerExactProxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
 	p.source = src
 	p.sourcedAt = append(p.sourcedAt, len(p.windowed))
+	p.events = append(p.events, "source")
 	return nil
 }
 
@@ -341,6 +399,11 @@ func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
 	}
 	if want := [][]string{{}, {"w-delete"}}; !reflect.DeepEqual(p.workers, want) {
 		t.Fatalf("the proxy was told the worker scopes %v; want %v: none before the staging, then the one placed at the set's start", p.workers, want)
+	}
+	// The empty pool view is in force before the set's sources are handed
+	// and its trees staged: no read of them goes through another set's view.
+	if err := emptyPoolViewFirst(p.events); err != nil {
+		t.Fatal(err)
 	}
 	// A miss's diagnosis reads the on-disk store through the source the
 	// staging set: the test's own recording, staged only as it opens, is

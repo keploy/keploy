@@ -41,8 +41,21 @@ func liveHeap() uint64 {
 // recordings between tests, so both indexes are built. After each staging, before any call, the live heap
 // holds one set: under 1.5 sets above where the run began, whatever the
 // number of sets. It holds two sets where the indexes keep the last set's
-// recordings: run it on a box.
+// recordings: run it on a box. Under keploy mock replay's pool names
+// (SetPoolNames, as the agent hands them before each set's staging), the
+// calls between tests read the set's teardown bound, which is cached
+// (teardownBound): the cache keeps nothing of a set the next staging
+// replaced, though the replay session's reset drops the pool's names and so
+// every teardown read until the next set's first.
 func TestASetsHTTPRecordingsGoWhenTheNextSetIsStaged(t *testing.T) {
+	for _, pooled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pool names %v", pooled), func(t *testing.T) {
+			setsHTTPRecordingsGo(t, pooled)
+		})
+	}
+}
+
+func setsHTTPRecordingsGo(t *testing.T, pooled bool) {
 	const sets, pieces, piece = 10, 16, 8 << 20
 	const setSize = pieces * piece
 	t.Setenv(provenswitch.Env, "1")
@@ -80,6 +93,9 @@ func TestASetsHTTPRecordingsGoWhenTheNextSetIsStaged(t *testing.T) {
 		start := now.Add(time.Second)
 		own := r3Mock("mock-own", start.Add(100*time.Millisecond), "GET", "/own", "", fmt.Sprintf(`{"own":%d}`, k))
 		mm.ResetForReplaySession()
+		if pooled {
+			mm.SetPoolNames(names)
+		}
 		mm.SeedRecordedWindows([]models.TestWindow{{Start: start, End: start.Add(900 * time.Millisecond)}})
 		mm.SetMocksWithWindow([]*models.Mock{own}, session, models.BaseTime, now.Add(time.Hour))
 		mm.ServeExactBackground(models.RecordedWithS12Routing, names, nil)
@@ -103,6 +119,9 @@ func TestASetsHTTPRecordingsGoWhenTheNextSetIsStaged(t *testing.T) {
 			if code, body := send(fmt.Sprintf("/between/%d", i)); code != http.StatusOK || body != fmt.Sprintf(`{"between":"%d-%d"}`, k, i) {
 				t.Fatalf("set %d: pool call %d between tests got %d %s", k, i, code, body)
 			}
+		}
+		if pooled && mm.exact.teardownLast.Load() == nil {
+			t.Fatalf("set %d: precondition: the calls between tests read no teardown bound under the pool's names", k)
 		}
 	}
 	if misses, _ := p.GetMockErrors(context.Background()); len(misses) != 0 {

@@ -21,7 +21,10 @@ import (
 // and only the set read tells the two apart. A set's staging starts the set
 // (models.BaseTime): its per-test recordings are filed in the startup tier;
 // windowed, it is a staging in the set, of a test's window, which files them
-// in the per-test tier and moves no staging epoch.
+// in the per-test tier and moves no staging epoch. Set b alone has a
+// recording of a kind set a has none of (b-kind, models.GENERIC), which the
+// views name too: a read of that kind over set a reads no tree of the live
+// trees, where set b's is already in place as set b is staged.
 func exactRaceSet(t *testing.T, windowed bool, serve func(mm *MockManager)) (mm *MockManager, stage func(set string)) {
 	t.Helper()
 	t.Setenv(provenswitch.Env, "1")
@@ -34,8 +37,14 @@ func exactRaceSet(t *testing.T, windowed bool, serve func(mm *MockManager)) (mm 
 	stage = func(set string) {
 		hs := exactMock(set+"-hs", 3*time.Second, models.LifetimePerTest)
 		hs.Spec.Metadata = map[string]string{"type": "config"}
+		perTest := []*models.Mock{exactMock(set+"-pt", 2*time.Second, models.LifetimePerTest), exactMock(set+"-else", 4*time.Second, models.LifetimePerTest), hs}
+		if set == "b" {
+			kind := exactMock("b-kind", 2*time.Second, models.LifetimePerTest)
+			kind.Kind = models.GENERIC
+			perTest = append(perTest, kind)
+		}
 		mm.SetMocksWithWindow(
-			[]*models.Mock{exactMock(set+"-pt", 2*time.Second, models.LifetimePerTest), exactMock(set+"-else", 4*time.Second, models.LifetimePerTest), hs},
+			perTest,
 			[]*models.Mock{exactMock(set+"-pool", time.Second, models.LifetimeSession)},
 			start, end)
 		serve(mm)
@@ -55,8 +64,9 @@ func raceNames(ms []*models.Mock, err error) string {
 
 // exactReads is what each exact read that takes no staging lock gives in the
 // view in force: the per-test getters (GetFilteredMocks,
-// GetFilteredMocksByKind, RangePerTestMocksInWindow), the background readers
-// (Background, KindBackground) and SharedMocks.
+// GetFilteredMocksByKind, of HTTP and of the kind only set b has,
+// RangePerTestMocksInWindow), the background readers (Background,
+// KindBackground) and SharedMocks.
 func exactReads(mm *MockManager) string {
 	var ranged []*models.Mock
 	err := mm.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
@@ -65,8 +75,8 @@ func exactReads(mm *MockManager) string {
 	})
 	unused, spent := mm.KindBackground(models.HTTP)
 	pt, se, ok := mm.SharedMocks()
-	return fmt.Sprintf("per-test %s; by kind %s; ranged %s; background %s; by kind %s spent %s; shared %v: %s / %s",
-		raceNames(mm.GetFilteredMocks()), raceNames(mm.GetFilteredMocksByKind(models.HTTP)), raceNames(ranged, err),
+	return fmt.Sprintf("per-test %s; by kind %s; of b's kind %s; ranged %s; background %s; by kind %s spent %s; shared %v: %s / %s",
+		raceNames(mm.GetFilteredMocks()), raceNames(mm.GetFilteredMocksByKind(models.HTTP)), raceNames(mm.GetFilteredMocksByKind(models.GENERIC)), raceNames(ranged, err),
 		raceNames(mm.Background(models.HTTP), nil), raceNames(unused, nil), raceNames(spent, nil), ok, raceNames(pt, nil), raceNames(se, nil))
 }
 
@@ -95,8 +105,8 @@ var raceViews = []struct {
 	{"pool", false, racePoolView},
 	{"test", false, raceTestView},
 	{"worker", false, func(mm *MockManager) {
-		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"a-pool", "b-pool"}, []string{"a-pt", "b-pt"})
-		mm.ServeExactWorker([]string{"a-pt", "b-pt"})
+		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"a-pool", "b-pool"}, []string{"a-pt", "b-pt", "b-kind"})
+		mm.ServeExactWorker([]string{"a-pt", "b-pt", "b-kind"})
 		mm.ServeExactTest("T", nil)
 	}},
 	{"staging", false, func(mm *MockManager) {
@@ -107,7 +117,7 @@ var raceViews = []struct {
 	{"test, staged in a window", true, raceTestView},
 }
 
-var raceBackground = []string{"a-pt", "a-pool", "b-pt", "b-pool"}
+var raceBackground = []string{"a-pt", "a-pool", "b-pt", "b-kind", "b-pool"}
 
 func racePoolView(mm *MockManager) {
 	mm.ServeExactBackground(models.RecordedWithS12Routing, raceBackground, nil)
@@ -152,7 +162,7 @@ func TestALockFreeExactReadRacingTheNextSetsStagingReadsOneSet(t *testing.T) {
 			}
 			if view.name == "staging" {
 				// What a read between a set's publish and its pool view sees.
-				if want := "per-test ; by kind ; ranged ; background ; by kind  spent ; shared false:  / "; setOf["a"] != want || setOf["b"] != want {
+				if want := "per-test ; by kind ; of b's kind ; ranged ; background ; by kind  spent ; shared false:  / "; setOf["a"] != want || setOf["b"] != want {
 					t.Errorf("the staging's empty pool view read %s over set a, %s over set b; want %s: no recording of either set", setOf["a"], setOf["b"], want)
 				}
 			} else if setOf["a"] == setOf["b"] {
@@ -160,6 +170,9 @@ func TestALockFreeExactReadRacingTheNextSetsStagingReadsOneSet(t *testing.T) {
 			}
 			if missOf["a"] == missOf["b"] {
 				t.Fatalf("the misses of sets a and b read alike (%s): the row tells neither", missOf["a"])
+			}
+			if view.windowed && !strings.Contains(setOf["b"], "of b's kind b-kind;") {
+				t.Fatalf("set b's per-test tier read none of its kind set a has none of (%s): the row tells no read of that kind", setOf["b"])
 			}
 			mm, stage := exactRaceSet(t, view.windowed, view.serve)
 			stage("a")

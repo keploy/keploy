@@ -199,6 +199,29 @@ type sourceWireProxy struct {
 	handed, before, times []int
 	// fail names the setter that fails ("source", "before" or "times").
 	fail string
+	// events is the log workerExactProxy.events is, of this proxy.
+	events []string
+}
+
+func (p *sourceWireProxy) SetRecordedOfKind(func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.events = append(p.events, "of-kind")
+	return nil
+}
+
+func (p *sourceWireProxy) ServeExactPool(key string, names []string) error {
+	p.mu.Lock()
+	p.events = append(p.events, poolViewEvent(names))
+	p.mu.Unlock()
+	return p.wireProxy.ServeExactPool(key, names)
+}
+
+func (p *sourceWireProxy) SetMocks(ctx context.Context, f, u []*models.Mock) error {
+	p.mu.Lock()
+	p.events = append(p.events, "stage")
+	p.mu.Unlock()
+	return p.wireProxy.SetMocks(ctx, f, u)
 }
 
 // errHanding is the error a sourceWireProxy's failing setter returns.
@@ -216,6 +239,7 @@ func (p *sourceWireProxy) SetRecordingSource(func(models.Kind, []string, func(st
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.handed = append(p.handed, p.staged)
+	p.events = append(p.events, "source")
 	return p.handingErr("source")
 }
 
@@ -223,6 +247,7 @@ func (p *sourceWireProxy) SetRecordedBefore(func(t time.Time, visit func(*models
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.before = append(p.before, p.staged)
+	p.events = append(p.events, "before")
 	return p.handingErr("before")
 }
 
@@ -230,6 +255,7 @@ func (p *sourceWireProxy) SetRecordingTimes(func(visit func(name string, place t
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.times = append(p.times, p.staged)
+	p.events = append(p.events, "times")
 	return p.handingErr("times")
 }
 
@@ -255,6 +281,9 @@ func TestAMockReplaySetsOnDiskSourcesAreHandedBeforeItsStaging(t *testing.T) {
 	require.Equal(t, []int{0}, p.handed, "the keyed source is handed once, before the set's staging")
 	require.Equal(t, []int{0}, p.before, "the recordings before an instant are handed once, before the set's staging")
 	require.Equal(t, []int{0}, p.times, "the recordings' times are handed once, before the set's staging")
+	// The empty pool view is in force before the set's sources are handed
+	// and its trees staged: no read of them goes through another set's view.
+	require.NoError(t, emptyPoolViewFirst(p.events))
 }
 
 // A handing the proxy refuses fails the set's staging before it stages

@@ -306,8 +306,11 @@ type exactState struct {
 	poolTests atomic.Pointer[poolTests]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
 	// cached for one staging generation of the trees (StagingGeneration: an
-	// exact serve does not move it), one scope table, one recording's times
-	// and one key.
+	// exact serve does not move it), one scope table, one publish of the
+	// set (stagedSet.seq) and one key. It holds no pointer to the set, so
+	// nothing is kept of a set the next staging replaced: the replay
+	// session's reset drops the pool's names, and with them every teardown
+	// read that would have replaced it.
 	teardownLast atomic.Pointer[teardownBound]
 	// times is where the teardown bound reads the times of the set's
 	// recordings the trees do not hold (SetRecordingTimes), as the agent
@@ -321,6 +324,8 @@ type exactState struct {
 	// (publishStagedLocked).
 	set       atomic.Pointer[stagedSet]
 	onPublish func(published bool)
+	// setSeq is the last publish's stagedSet.seq, moved under swapMu.
+	setSeq atomic.Uint64
 	// fired: a test has begun since exact serving was turned on. It is what
 	// tells a tier-routing parser (Postgres v3) "between tests" from
 	// "before the first test".
@@ -2830,10 +2835,10 @@ func (m *MockManager) teardownBy(s *stagedSet, key string) func(clock string) fu
 	// between the two is the set staged's, never its trees with the next
 	// set's recordings.
 	times := s.times
-	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool && c.owners == owners && c.tests == tests && c.set == s && c.key == key {
+	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool && c.owners == owners && c.tests == tests && c.seq == s.seq && c.key == key {
 		return c.on()
 	}
-	b := &teardownBound{rev: rev, pool: pool, owners: owners, tests: tests, set: s, key: key}
+	b := &teardownBound{rev: rev, pool: pool, owners: owners, tests: tests, seq: s.seq, key: key}
 	runs := newRunClocks(tests)
 	// bounds reports whether a recording named name bounds key's process.
 	bounds := func(name string, protocolPhase bool) bool {
@@ -2992,8 +2997,10 @@ func (r *runClocks) clocksOf(name string, byTest map[string][]string) []string {
 // pool that bound key's process, of every clock (last), of those on no clock
 // (unclocked) and of those on each clock (clocks), as the trees stood at
 // generation rev (MockManager.StagingGeneration) under the scope table pool
-// and owners, of the set as one staging left it (set: its trees, with its
-// recordings on disk read from the times published with them): the
+// and owners, of the set as one staging left it (seq, the set's publish:
+// its trees, with its recordings on disk read from the times published with
+// them, stagedSet.seq; never the set itself, which the bound would keep
+// after the next staging replaced it): the
 // per-test reads after the tests read it once per staging generation, not
 // every recording at every read. An exact serve moves Revision but
 // not the staging generation: exact serving hides what it serves rather
@@ -3003,7 +3010,7 @@ type teardownBound struct {
 	pool      *map[string]struct{}
 	owners    *map[string]string
 	tests     *poolTests
-	set       *stagedSet
+	seq       uint64
 	key       string
 	last      time.Time
 	unclocked time.Time
@@ -3092,6 +3099,9 @@ func (m *MockManager) perTestFromStartup(v *exactView, s *stagedSet, startup []*
 	// recordings through its per-test reads alone once a test fired (Mongo)
 	// would else answer a worker: one between tests only until the first
 	// test fired. Each once, the teardown's first.
+	// s, never a fresh load: the bound reads the trees and times of the
+	// set startup came from, by construction, since the caller loaded the
+	// set once (stagedNow) and threads it through every read it pairs.
 	td := m.teardown(s, v.poolKey, startup)
 	w := v.windowWorker(startup)
 	if len(w) == 0 {
