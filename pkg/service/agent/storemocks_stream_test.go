@@ -6,7 +6,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"math"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -361,6 +364,47 @@ func TestStoreMocksStream_HugeCountHeaderIsBounded(t *testing.T) {
 	}
 	if got := loadStorage(t, a); got != prior {
 		t.Fatal("prior snapshot replaced by a failed ingest")
+	}
+}
+
+// Each mock is numbered by its place in the set in a uint32
+// (models.TestModeInfo.LoadSeq). A header counting more mocks than that holds
+// is refused before any mock is read, so no two mocks of a set share a place
+// (a wrapped number would put a late mock among the first), and the prior set
+// stays. A set of exactly that many is numbered: its last mock's place is the
+// most a uint32 holds (this body carries none, so it fails at its first mock).
+func TestStoreMocksStream_ASetTooLargeToNumberIsRefused(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("an int counts no more than a uint32 does here: such a header is a negative count")
+	}
+	const tooLarge = "a mock's place in the set counts at most 4294967295"
+	half := int(uint64(math.MaxUint32)/2 + 1)
+	for _, c := range []struct {
+		filtered, unfiltered int
+		refused              bool
+	}{
+		{half, half, true},      // one past the most a uint32 counts
+		{half, half - 1, false}, // exactly that many
+	} {
+		RegisterHooks(&captureHook{})
+		a := newTestAgent()
+		prior := &ClientMockStorage{filtered: []*models.Mock{mkMock("prior", models.HTTP, time.Time{})}}
+		a.clientMocks.Store(uint64(0), prior)
+		var buf bytes.Buffer
+		if err := gob.NewEncoder(&buf).Encode(models.MockStreamHeader{FilteredCount: c.filtered, UnfilteredCount: c.unfiltered}); err != nil {
+			t.Fatalf("encode header: %v", err)
+		}
+		header, dec := readHeaderAndDecoder(t, buf.Bytes())
+		err := a.StoreMocksStream(context.Background(), header, dec)
+		if err == nil {
+			t.Fatalf("a set of %d mocks with none in the body was accepted", c.filtered+c.unfiltered)
+		}
+		if got := strings.Contains(err.Error(), tooLarge); got != c.refused {
+			t.Fatalf("a set of %d mocks: err %v; refused as too large to number %v, want %v", c.filtered+c.unfiltered, err, got, c.refused)
+		}
+		if got := loadStorage(t, a); got != prior {
+			t.Fatal("prior snapshot replaced by a failed ingest")
+		}
 	}
 }
 

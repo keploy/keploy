@@ -57,7 +57,7 @@ func mockRuntimeOnlyFields(t *testing.T) []taggedRuntimeOnly {
 		"SourcePID", "StartRef",
 		"TestModeInfo.Lifetime", "TestModeInfo.LifetimeDerived", "TestModeInfo.Consume",
 		"TestModeInfo.IsStartup", "TestModeInfo.ServedIn", "TestModeInfo.StagedSet",
-		"TestModeInfo.Concurrent", "TestModeInfo.RepeatRead",
+		"TestModeInfo.Concurrent", "TestModeInfo.RepeatRead", "TestModeInfo.LoadSeq",
 	} {
 		if !have[name] {
 			t.Fatalf("the walk found no %s among %v", name, fields)

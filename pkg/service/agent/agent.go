@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -1389,6 +1390,12 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	if header.FilteredCount < 0 || header.UnfilteredCount < 0 || total < 0 {
 		return fmt.Errorf("storemocks stream: invalid counts (filtered=%d unfiltered=%d)", header.FilteredCount, header.UnfilteredCount)
 	}
+	// Each mock is numbered by its place in the set (a uint32,
+	// models.TestModeInfo.LoadSeq), so a set too large to number is refused
+	// before any mock is read: no two of its mocks share a place.
+	if uint64(total) > math.MaxUint32 {
+		return fmt.Errorf("storemocks stream: a set of %d mocks: a mock's place in the set counts at most %d", total, uint64(math.MaxUint32))
+	}
 	// Pre-size from the header counts, but cap the capacity: the counts are
 	// client-provided, so an inflated header must not force a huge upfront
 	// allocation. A larger real count just grows via append; a lying count
@@ -1454,6 +1461,9 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			return failStream(fmt.Errorf("storemocks stream: decode mock %d/%d: %w", i+1, total, err))
 		}
 		mock := &m
+		// Its place in the set as sent, kept whichever tier holds it below
+		// (models.TestModeInfo.LoadSeq).
+		mock.TestModeInfo.LoadSeq = uint32(i + 1)
 		mock.DeriveLifetime()
 		mocknoise.MaterializeCorrelations(a.logger, mock)
 		if proven {
