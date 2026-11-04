@@ -158,11 +158,21 @@ type recording struct {
 
 func startRecording(t *testing.T, plan []fakeconn.Chunk, viaSyncMock bool) *recording {
 	t.Helper()
+	return startRecordingUnder(t, plan, viaSyncMock, true)
+}
+
+// startRecordingUnder is startRecording, with the session told the capture
+// order only when withOrder is set: without it the session has no
+// Session.Order, as a producer that cannot say its order.
+func startRecordingUnder(t *testing.T, plan []fakeconn.Chunk, viaSyncMock, withOrder bool) *recording {
+	t.Helper()
 	clientCh, destCh := make(chan fakeconn.Chunk, len(plan)), make(chan fakeconn.Chunk, len(plan))
 	sess, mocks := newV2Session(t, clientCh, destCh)
 	sess.Logger = zap.NewNop()
 	order := newCaptureOrder(plan)
-	sess.Order = order.StreamedBefore
+	if withOrder {
+		sess.Order = order.StreamedBefore
+	}
 	mgr := syncMock.New(nil)
 	sess.Mgr = mgr
 	sess.Orphans = &syncMock.Spans{}
@@ -359,8 +369,9 @@ func TestV2_TheMergeWaitsForAChunkOnItsStreamItsReaderHasNotHandedOn(t *testing.
 // chunk numbered before it will never reach its stream (refused), the second
 // exchange's mock is recorded with the streams still open, and so is one whose
 // chunks have no number (a producer that does not number them, merged as
-// read). A mock recorded late lands in the window of a test that did not make
-// its call.
+// read), and one recorded on a session with no capture order (Session.Order
+// unset: merged as read). A mock recorded late lands in the window of a test
+// that did not make its call.
 func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 	for _, viaSyncMock := range []bool{true, false} {
 		t.Run(fmt.Sprint("refused/viaSyncMock=", viaSyncMock), func(t *testing.T) {
@@ -393,6 +404,20 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded with the streams open (recorded %q by the end)", pairsOf(got.recorded))
+			}
+		})
+		t.Run(fmt.Sprint("no capture order/viaSyncMock=", viaSyncMock), func(t *testing.T) {
+			reqs, resps := exchangeChunks(2)
+			plan := []fakeconn.Chunk{reqs[0], resps[0], reqs[1], resps[1]}
+			r := startRecordingUnder(t, plan, viaSyncMock, false)
+			for i := range reqs {
+				r.put(reqs[i])
+				r.put(resps[i])
+			}
+			ok := r.recorded("req1|resp1", 5*time.Second)
+			got := r.end()
+			if !ok {
+				t.Fatalf("req1's mock was not recorded with the streams open, on a session that cannot say its capture order (recorded %q by the end)", pairsOf(got.recorded))
 			}
 		})
 	}
