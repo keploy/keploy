@@ -216,3 +216,105 @@ func TestRun_AtTheStopAbortsOnceBothStreamsAreReadToTheirEndOrTheDeadlinePasses(
 		})
 	}
 }
+
+// TestRun_AParserThatHangsAfterTheStopIsAbortedAsHung pins that the stop's wait
+// still honours the hang watchdog: a parser that, after the stop, holds a
+// request awaiting its answer and makes no progress is aborted as hung, even
+// with neither of its streams ended and no deadline to the stop. A wait that
+// left the watchdog out held the connection until the agent's end.
+func TestRun_AParserThatHangsAfterTheStopIsAbortedAsHung(t *testing.T) {
+	t.Parallel()
+	client, dest := newBehindProducer(), newBehindProducer() // never ended
+
+	seen := make(chan struct{})
+	aborted := make(chan struct{})
+	var abortOnce sync.Once
+	s := New(Config{
+		Logger:     zap.New(cancelSeenCore{Core: zapcore.NewNopCore(), once: &sync.Once{}, seen: seen}),
+		HangBudget: 50 * time.Millisecond,
+	})
+	s.SessionOnAbort = func() {
+		abortOnce.Do(func() { close(aborted) })
+		_ = client.fc.Close()
+		_ = dest.fc.Close()
+	}
+	sess := &Session{ClientStream: client.fc, DestStream: dest.fc}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unpark := make(chan struct{})
+	defer close(unpark)
+	resc := make(chan Result, 1)
+	go func() {
+		resc <- s.Run(ctx, func(context.Context, *Session) error {
+			cancel()
+			// The supervisor has taken the stop: from here only its stop's
+			// wait can see the hang.
+			<-seen
+			s.MarkPendingWork() // a request awaits its answer, and none comes
+			<-unpark
+			return nil
+		}, sess)
+	}()
+
+	var res Result
+	select {
+	case res = <-resc:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Run did not abort a parser that hung after the stop")
+	}
+	if res.Status != StatusHung || !res.FallthroughToPassthrough {
+		t.Fatalf("result %+v, want hung and retired", res)
+	}
+	select {
+	case <-aborted:
+	default:
+		t.Fatal("Run returned on the hang without aborting the parser")
+	}
+}
+
+// TestRun_AtTheStopASessionWithoutBothStreamsWaitsForItsParser pins that a
+// session with only one stream has nothing to say its parser read both to
+// their end: the stop's wait ends on the parser's return, and the supervisor
+// asks nothing of the stream the session lacks.
+func TestRun_AtTheStopASessionWithoutBothStreamsWaitsForItsParser(t *testing.T) {
+	t.Parallel()
+	client := newBehindProducer()
+	go client.run([]string{"one"})
+
+	aborted := make(chan struct{})
+	var abortOnce sync.Once
+	s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour})
+	s.SessionOnAbort = func() {
+		abortOnce.Do(func() { close(aborted) })
+		_ = client.fc.Close()
+	}
+	sess := &Session{ClientStream: client.fc}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var read int
+	res, panicked := func() (res Result, panicked any) {
+		defer func() { panicked = recover() }()
+		return s.Run(ctx, func(context.Context, *Session) error {
+			cancel()
+			for {
+				if _, err := sess.ClientStream.ReadChunk(); err != nil {
+					return nil
+				}
+				read++
+			}
+		}, sess), nil
+	}()
+	if panicked != nil {
+		t.Fatalf("Run panicked at the stop for a session without a server stream: %v", panicked)
+	}
+	if read != 1 || res.Status != StatusCanceled || res.FallthroughToPassthrough {
+		t.Fatalf("read %d, result %+v: want the one exchange read and canceled, not retired", read, res)
+	}
+	select {
+	case <-aborted:
+		t.Fatal("the supervisor aborted a parser that returned on its own")
+	default:
+	}
+}

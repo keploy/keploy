@@ -5,6 +5,7 @@ package http
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -185,6 +186,45 @@ func TestRecordV2_BehindAtTheStopLeavesOutTheExchangeTheStopCut(t *testing.T) {
 			}
 			if spans := c.spans.all(); len(spans) != 1 {
 				t.Fatalf("recorded %d span(s) %v, want the cut exchange's", len(spans), spans)
+			}
+		})
+	}
+}
+
+// TestRecordV2_BehindAtTheStopRecordsAFaultCapturedBeforeIt pins that a call
+// whose upstream closed with no answer before the stop, read by a parser
+// behind its capture after the stop, is recorded with its fault, as before the
+// stop: the mock goes to the shutdown emit, which the stop does not refuse. An
+// emit that took the live path was refused once the context had ended, and the
+// call was lost.
+func TestRecordV2_BehindAtTheStopRecordsAFaultCapturedBeforeIt(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+			c := newRelayedConn(t)
+			c.startRelay(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			c.sess.Ctx = ctx
+			c.sess.RecordingDone = ctx.Done()
+			c.mgr.SetOutputChannel(c.mocks)
+			c.sess.RouteMocksViaSyncMock = true
+			write(t, c.app, c.src, faultReq)
+			relayed(t, c.dest, faultReq)
+			_ = c.dest.Close()
+			// The application reads the upstream's close: the relay has
+			// captured it, before the stop.
+			if got, rerr := appRead(t, c.app); got != "" || rerr != io.EOF {
+				t.Fatalf("the application read %q, %v; want nothing, then EOF, as the upstream gave", got, rerr)
+			}
+			cancel()
+			c.stopRelay()
+			go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, c.sess) }()
+			mocks, err := collectBehind(t, c)
+			mocks = awaitBehindMocks(c, mocks, 1)
+			wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultEOF})
+			if got := behindLeftOut(c); len(got) != 0 {
+				t.Fatalf("left out %q, want nothing: the call was captured whole, with its fault", got)
 			}
 		})
 	}

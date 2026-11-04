@@ -1048,8 +1048,13 @@ func TestReadToEndClosesAsTheReaderReadsTheStreamsEnd(t *testing.T) {
 			}
 			if tc.end {
 				// The end reads the same again, and is told once.
-				if _, err := f.ReadChunk(); !errors.Is(err, io.EOF) {
-					t.Fatalf("second read at the end: %v, want io.EOF", err)
+				panicked, err := func() (panicked any, err error) {
+					defer func() { panicked = recover() }()
+					_, err = f.ReadChunk()
+					return nil, err
+				}()
+				if panicked != nil || !errors.Is(err, io.EOF) {
+					t.Fatalf("second read at the end: %v (panic %v), want io.EOF", err, panicked)
 				}
 			}
 		})

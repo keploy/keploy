@@ -345,7 +345,26 @@ func TestRecordV2_AtARecordingStopReportsTheExchangeItCut(t *testing.T) {
 		blocked  func(sess *supervisor.Session) *fakeconn.FakeConn
 		wake     func(l *leftOutSession)
 		reported bool
+		// fails: recordV2 returns the read's own error, with nothing
+		// captured to report.
+		fails bool
 	}{
+		{
+			name:    "its request's first read fails",
+			feed:    func(*leftOutSession) {},
+			blocked: func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.ClientStream },
+			wake:    func(l *leftOutSession) { _ = l.sess.ClientStream.SetReadDeadline(time.Now().Add(-time.Second)) },
+			fails:   true,
+		},
+		{
+			name: "its request's body read fails",
+			feed: func(l *leftOutSession) {
+				l.sendReq([]byte("POST /x HTTP/1.1\r\nHost: ex\r\nContent-Length: 10\r\n\r\nab"), reqAt, reqAt)
+			},
+			blocked:  func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.ClientStream },
+			wake:     func(l *leftOutSession) { _ = l.sess.ClientStream.SetReadDeadline(time.Now().Add(-time.Second)) },
+			reported: true,
+		},
 		{
 			name: "its request's body is still to come",
 			feed: func(l *leftOutSession) {
@@ -375,6 +394,16 @@ func TestRecordV2_AtARecordingStopReportsTheExchangeItCut(t *testing.T) {
 			},
 			blocked:  func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.DestStream },
 			wake:     func(l *leftOutSession) { l.sendResp([]byte("cd"), respAt, respAt); l.closeResp() },
+			reported: true,
+		},
+		{
+			name: "its response's body read fails",
+			feed: func(l *leftOutSession) {
+				l.sendReq(canonicalRequest, reqAt, reqAt)
+				l.sendResp([]byte("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nab"), respAt, respAt)
+			},
+			blocked:  func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.DestStream },
+			wake:     func(l *leftOutSession) { _ = l.sess.DestStream.SetReadDeadline(time.Now().Add(-time.Second)) },
 			reported: true,
 		},
 	} {
@@ -413,6 +442,13 @@ func TestRecordV2_AtARecordingStopReportsTheExchangeItCut(t *testing.T) {
 				t.Fatalf("recordV2 returned %v: it returned on the context's end, not its stream's", err)
 			}
 			r := l.done(err)
+			if tc.fails {
+				if !errors.Is(err, fakeconn.ErrDeadlineExceeded) {
+					t.Fatalf("recordV2 returned %v, want the read's own error", err)
+				}
+				r.nothingReported(t)
+				return
+			}
 			if !tc.reported {
 				if err != nil {
 					t.Fatalf("recordV2 returned %v, want nil", err)
