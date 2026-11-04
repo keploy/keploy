@@ -576,3 +576,52 @@ func TestAStoreSeedsTheProxyWithThePortsItsRecordingReached(t *testing.T) {
 		t.Fatal("a store with no on-disk store kept the previous store's ports")
 	}
 }
+
+// ofKindProxy is a recordingProxy that takes the set's recordings of a kind
+// (coreAgent.RecordedOfKindSetter).
+type ofKindProxy struct {
+	*recordingProxy
+	src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+	set int
+}
+
+func (p *ofKindProxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.src, p.set = src, p.set+1
+	return nil
+}
+
+// With the switch off, each staging hands the proxy the on-disk store's
+// recordings of a kind (integrations.RecordedSetRanger): a test's call reads
+// its own window, and the source still ranges the whole set, those of the
+// other tests and of the startup band included.
+func TestEveryStagingHandsTheProxyTheSetAsRecorded(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "0")
+	a, rp, _ := stagingStore(t)
+	p := &ofKindProxy{recordingProxy: rp}
+	a.Proxy = p
+	for _, params := range []models.MockFilterParams{
+		{AfterTime: models.BaseTime, BeforeTime: stageT0.Add(2 * time.Hour), FirstRecordedTestStart: stageT0, StrictMockWindow: true},
+		{AfterTime: stageT0, BeforeTime: stageT0.Add(2 * time.Second), StrictMockWindow: true},
+	} {
+		before := p.set
+		if err := a.UpdateMockParams(context.Background(), params); err != nil {
+			t.Fatal(err)
+		}
+		if p.set != before+1 || p.src == nil {
+			t.Fatalf("staging from %s set the source %d times (nil: %v); want once, the on-disk store's", params.AfterTime, p.set-before, p.src == nil)
+		}
+	}
+	if got, want := sortedNames(p.windowed[1][0]), []string{"boot-auth", "boot-config", "test-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the test's call staged %v; want %v", got, want)
+	}
+	var names []string
+	if err := p.src(models.HTTP, func(name string, _ func() (*models.Mock, error)) bool {
+		names = append(names, name)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sortedNames(names), []string{"boot-auth", "boot-config", "poll-later", "test-a", "test-b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the source ranged %v; want the whole set %v", got, want)
+	}
+}

@@ -74,7 +74,7 @@ type DiskMocks struct {
 
 	// byKind names, by kind, every mock on disk, in the order Add took them
 	// (RangeKind), each name once under the kind it was last added as
-	// (kindOf); kept under the proven switch only.
+	// (kindOf), in either switch mode.
 	byKind map[models.Kind][]string
 	kindOf map[string]models.Kind
 
@@ -252,19 +252,18 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		placeTsNano: placeNano(models.PlaceOf(m)), off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
-	// Record's full round pairs by kind (RangeKind), under the proven
-	// switch: every replay under the switch keeps the index (a name per
-	// on-disk mock), so that one can; none without the switch.
-	if provenswitch.On() {
-		if d.byKind == nil {
-			d.byKind, d.kindOf = make(map[models.Kind][]string), make(map[string]models.Kind)
-		}
-		// A mock added again under its name is listed once; added as another
-		// kind, it is that kind's (RangeKind skips the stale listing).
-		if prev, again := d.kindOf[m.Name]; !again || prev != m.Kind {
-			d.byKind[m.Kind] = append(d.byKind[m.Kind], m.Name)
-			d.kindOf[m.Name] = m.Kind
-		}
+	// Read by kind (RangeKind) in either switch mode: record's full round
+	// pairs by it under the switch, and a parser reads the staged set as
+	// recorded by it (integrations.RecordedSetRanger) in both. The index is
+	// a name per on-disk mock, the name's bytes shared with byName's key.
+	if d.byKind == nil {
+		d.byKind, d.kindOf = make(map[models.Kind][]string), make(map[string]models.Kind)
+	}
+	// A mock added again under its name is listed once; added as another
+	// kind, it is that kind's (RangeKind skips the stale listing).
+	if prev, again := d.kindOf[m.Name]; !again || prev != m.Kind {
+		d.byKind[m.Kind] = append(d.byKind[m.Kind], m.Name)
+		d.kindOf[m.Name] = m.Kind
 	}
 	// The teardown bound reads which are protocol-phase (RangeTimes), under
 	// the proven switch only.
@@ -802,7 +801,8 @@ func (d *DiskMocks) RangeKeys(kind models.Kind, keys []string, visit func(name s
 // mock of kind, once each, until visit returns false: its name, and load,
 // which decodes it. Only what visit loads is decoded. What record's full
 // round's pairing reads of the recordings of a test not begun yet
-// (MockManager.PairingCandidates's source).
+// (MockManager.PairingCandidates's source), and a parser of the staged set
+// as recorded (MockManager.RangeRecordedSet).
 func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error {
 	type candidate struct {
 		name string

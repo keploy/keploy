@@ -2087,6 +2087,15 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 	if err != nil {
 		return err
 	}
+	// The set's recordings as recorded, beside what the staging shows
+	// (integrations.RecordedSetRanger), in either switch mode: the on-disk
+	// store's, nil for a set kept resident. Set before the staging, so no
+	// read of it finds the last set's.
+	if rk, ok := a.Proxy.(coreAgent.RecordedOfKindSetter); ok {
+		if err := rk.SetRecordedOfKind(a.diskRecordedOfKind()); err != nil {
+			return fmt.Errorf("set the test set's recordings of a kind: %w", err)
+		}
+	}
 
 	// Atomically update mocks AND the active test window when the proxy
 	// supports the WindowedProxy extension. Otherwise fall back to the
