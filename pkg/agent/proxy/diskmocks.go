@@ -74,7 +74,8 @@ type DiskMocks struct {
 
 	// byKind names, by kind, every mock on disk, in the order Add took them
 	// (RangeKind), each name once under the kind it was last added as
-	// (kindOf); kept under the proven switch only.
+	// (kindOf); kept under the proven switch, and in either switch mode for
+	// a kind placed at its answer (models.AnswerPlacedKind).
 	byKind map[models.Kind][]string
 	kindOf map[string]models.Kind
 
@@ -256,7 +257,9 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	// switch: every replay under the switch keeps the index (a name per
 	// on-disk mock), so that one can. Without the switch it lists only the
 	// kinds whose parser holds a call while the set still holds an unserved
-	// recording of it (models.AnswerPlacedKind), which reads them by kind.
+	// recording of it (models.AnswerPlacedKind), which reads them by kind,
+	// as does a parser of the staged set as recorded
+	// (integrations.RecordedSetRanger).
 	if provenswitch.On() || models.AnswerPlacedKind(m.Kind) {
 		if d.byKind == nil {
 			d.byKind, d.kindOf = make(map[models.Kind][]string), make(map[string]models.Kind)
@@ -804,7 +807,8 @@ func (d *DiskMocks) RangeKeys(kind models.Kind, keys []string, visit func(name s
 // mock of kind, once each, until visit returns false: its name, and load,
 // which decodes it. Only what visit loads is decoded. What record's full
 // round's pairing reads of the recordings of a test not begun yet
-// (MockManager.PairingCandidates's source).
+// (MockManager.PairingCandidates's source), and a parser of the staged set
+// as recorded (MockManager.RangeRecordedSet).
 func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error {
 	type candidate struct {
 		name string
