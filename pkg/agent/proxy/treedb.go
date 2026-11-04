@@ -53,6 +53,30 @@ type TreeDb struct {
 	// (MockManager.carryTaken). Set before the tree is published, read-only
 	// after.
 	bootBuilt bool
+	// held is what a startup tier stores but does not serve without exact
+	// serving (MockManager.bootPlaced): a call placed at its answer and
+	// answered in a test. Every read of the staged set finds it, and exact
+	// serving shows it where its view places it. Nil for every other tree.
+	// Set before the tree is published; a swap (swapValue) replaces the set
+	// with one that holds the new copy too.
+	held atomic.Pointer[map[*models.Mock]struct{}]
+}
+
+// hold sets what the tree stores but does not serve without exact serving
+// (held). Called before the tree is published.
+func (db *TreeDb) hold(set map[*models.Mock]struct{}) {
+	db.held.Store(&set)
+}
+
+// serves reports whether the tree serves mk without exact serving: every mock
+// it stores but the held ones (held).
+func (db *TreeDb) serves(mk *models.Mock) bool {
+	h := db.held.Load()
+	if h == nil {
+		return true
+	}
+	_, held := (*h)[mk]
+	return !held
 }
 
 func NewTreeDb(comparator func(a, b interface{}) int) *TreeDb {
@@ -183,6 +207,18 @@ func (db *TreeDb) swapValue(key models.TestModeInfo, old, newObj *models.Mock) b
 	}
 	db.storedLocked()
 	db.rbt.Put(key, newObj)
+	// A held mock's copy is held too. The old one stays held: a walk that
+	// read it before the swap may still ask.
+	if h := db.held.Load(); h != nil {
+		if _, was := (*h)[old]; was {
+			next := make(map[*models.Mock]struct{}, len(*h)+1)
+			for mk := range *h {
+				next[mk] = struct{}{}
+			}
+			next[newObj] = struct{}{}
+			db.held.Store(&next)
+		}
+	}
 	return true
 }
 

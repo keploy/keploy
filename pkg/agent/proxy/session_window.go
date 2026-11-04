@@ -228,7 +228,11 @@ func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key s
 // rangeSessionMocksWithKeyIn is RangeSessionMocksWithKey read in v: the view in force, or the view a call held to
 // its mark was read in (heldScope.readView); nil with exact serving off.
 func (m *MockManager) rangeSessionMocksWithKeyIn(v *exactView, ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
-	walk := func(db *TreeDb, fn func(*models.Mock) bool) { db.rangeKeyed(ix, key, fn) }
+	// Without exact serving a tree's walk passes over what it holds and does
+	// not serve (TreeDb.serves), as GetStartupMocks does.
+	walk := func(db *TreeDb, fn func(*models.Mock) bool) {
+		db.rangeKeyed(ix, key, func(mk *models.Mock) bool { return !db.serves(mk) || fn(mk) })
+	}
 	if v != nil {
 		// What GetSessionMocks shows under exact serving: the open test's
 		// unanswered mocks first, then the staged ones the view shows,
