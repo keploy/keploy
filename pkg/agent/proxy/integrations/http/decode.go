@@ -367,7 +367,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// any of them or between two, is a move to all of them
 					// (integrations.CallViewMoved), and none of their
 					// verdicts joins a read of one view with a read of the
-					// next.
+					// next. A call whose view moved after its learn step
+					// decided it still reads the shared scopes (the pool,
+					// the worker scope, the start-up) in the view in
+					// force, but the hold never answers it from another
+					// test's own recordings: it misses, plainly.
 					db, restaged = integrations.HoldToRound(mockDb, call)
 				}
 				if !ok && err == nil && (lmiss == nil || !lmiss.moved) {
@@ -609,6 +613,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					if a, ok := repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n); ok {
 						markRepeat(report, a)
 					}
+				}
+				if why := integrations.CallViewGoneWhy(db); why != "" && report != nil {
+					// The call's view went after the call was decided, so
+					// the miss read nothing and names no recording: it
+					// says which test the replay ended or began. Asked
+					// after every read of the miss, so a move during them
+					// is told too.
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-

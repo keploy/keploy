@@ -576,7 +576,14 @@ func (s *scopedMockDb) AnswerRepeatRead(matched []*models.Mock) (integrations.Re
 // tells none.
 func (s *scopedMockDb) CallViewMoved() bool { return integrations.CallViewMoved(s.MockMemDb) }
 
-var _ integrations.CallViewTeller = (*scopedMockDb)(nil)
+// CallViewGoneWhy forwards the held store's answer
+// (integrations.CallViewGoneTeller).
+func (s *scopedMockDb) CallViewGoneWhy() string { return integrations.CallViewGoneWhy(s.MockMemDb) }
+
+var (
+	_ integrations.CallViewTeller     = (*scopedMockDb)(nil)
+	_ integrations.CallViewGoneTeller = (*scopedMockDb)(nil)
+)
 
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it

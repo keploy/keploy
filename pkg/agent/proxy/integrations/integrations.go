@@ -502,6 +502,26 @@ func DiagnoseInCallView(db MockMemDb) MockMemDb {
 	return db
 }
 
+// CallViewGoneTeller is an optional capability of the store
+// DiagnoseInCallView returned. CallViewGoneWhy says why a call's miss names
+// no recording once a test's begin or end replaced the view the call was
+// decided in (a call marked from a round snapshot, whose miss that store
+// then reads nothing for): the test the replay ended or began. "" while
+// that view is in force, and for any other call. Every MockMemDb wrapper
+// that forwards CallViewDiagnoser must forward it.
+type CallViewGoneTeller interface {
+	CallViewGoneWhy() string
+}
+
+// CallViewGoneWhy is db's CallViewGoneTeller answer: "" for a store that
+// tells none.
+func CallViewGoneWhy(db MockMemDb) string {
+	if t, ok := db.(CallViewGoneTeller); ok {
+		return t.CallViewGoneWhy()
+	}
+	return ""
+}
+
 // CallViewMoved is db's CallViewTeller answer: false for a store that tells
 // none (one that holds no call to a view).
 func CallViewMoved(db MockMemDb) bool {

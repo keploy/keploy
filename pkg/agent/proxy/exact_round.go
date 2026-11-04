@@ -1060,7 +1060,40 @@ func (h *heldScope) DiagnoseInCallView() integrations.MockMemDb {
 	return h
 }
 
-var _ integrations.CallViewDiagnoser = (*heldScope)(nil)
+// CallViewGoneWhy implements integrations.CallViewGoneTeller: once h reads
+// nothing for its call's miss because a test's begin or end replaced the
+// view its round snapshot read (viewGone), which test the replay ended or
+// began, and that the miss therefore names no recording; "" otherwise.
+func (h *heldScope) CallViewGoneWhy() string {
+	if !h.viewGone() {
+		return ""
+	}
+	// heldIn is a round snapshot's view (diagnosing: snapped), never nil.
+	was, now := h.heldIn.test, h.exactView().testName()
+	where, what := "between tests", "served another view of its recordings between tests"
+	switch {
+	case was != "" && now != "":
+		where, what = "in "+was, "ended "+was+" and began "+now
+	case was != "":
+		where, what = "in "+was, "ended "+was
+	case now != "":
+		what = "began " + now
+	}
+	return "keploy record's full round decided this request " + where + ", and the replay " + what + " before keploy diagnosed its miss, so no recording is named for it: keploy reads nothing of a view a test's begin or end replaced."
+}
+
+// testName is v's open test, "" for none or no v.
+func (v *exactView) testName() string {
+	if v == nil {
+		return ""
+	}
+	return v.test
+}
+
+var (
+	_ integrations.CallViewDiagnoser  = (*heldScope)(nil)
+	_ integrations.CallViewGoneTeller = (*heldScope)(nil)
+)
 
 // SequenceView implements integrations.SequenceViewer: the sequence view of
 // the view h's call was read in, so a call read in one view and walked after
