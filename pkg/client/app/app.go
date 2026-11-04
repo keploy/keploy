@@ -921,8 +921,10 @@ func (a *App) ComposeDown() {
 			a.logger.Debug("compose down finished with error (may be expected if containers already removed, or keploy cut a down that made no progress)",
 				zap.Error(err))
 		}
-	// Reached only where the library is not linked (darwin): same teardown,
-	// through `docker compose -f -` with the generated document on stdin.
+	// Reached whenever no in-process runner is registered (every keploy build;
+	// enterprise's on darwin, on windows and without composelib on linux):
+	// same teardown, through `docker compose -f -` with the generated document
+	// on stdin.
 	case len(a.composeContent) > 0:
 		a.logger.Debug("Running docker compose down using in-memory compose content")
 		args := []string{"-f", "-"}
@@ -1666,8 +1668,9 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 
 	var args []string
 	switch {
-	// Reached only where the library is not linked (darwin): the generated
-	// document goes to `docker compose -f -` on stdin, exactly as before.
+	// Reached whenever no in-process runner is registered (every keploy build;
+	// enterprise's on darwin, on windows and without composelib on linux): the
+	// generated document goes to `docker compose -f -` on stdin.
 	case len(a.composeContent) > 0:
 		args = []string{"-f", "-"}
 		args = append(args, a.composeProjectArgs(a.composeDownProject(ctx))...)
@@ -1830,7 +1833,8 @@ func (a *App) composeServiceStatesOf(ctx context.Context, project string) []comp
 
 	var args []string
 	switch {
-	// Reached only where the library is not linked (darwin).
+	// Reached whenever no in-process runner is registered (every keploy build;
+	// enterprise's on darwin, on windows and without composelib on linux).
 	case len(a.composeContent) > 0:
 		args = []string{"-f", "-"}
 		args = append(args, a.composeProjectArgs(project)...)
@@ -2650,7 +2654,7 @@ func exitCodeFromErr(err error) int {
 
 // composeCommand is a compose subcommand (args: what follows `docker compose`)
 // run through the active engine's compose command, for the teardown and probes
-// that run where the compose library is not linked.
+// that run where no in-process runner is registered.
 func composeCommand(ctx context.Context, args ...string) *exec.Cmd {
 	compose := engine.Active().Compose
 	return exec.CommandContext(ctx, compose[0], append(append([]string{}, compose[1:]...), args...)...)
