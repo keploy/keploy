@@ -185,7 +185,9 @@ var _ integrations.LearnEnder = (*MockManager)(nil)
 // the staged set's recordings of a kind the trees do not hold (the agent's
 // on-disk store of per-test mocks: DiskMocks.RangeKind, which decodes one
 // only as visit loads it); nil for none, when every one is in the trees. The
-// agent sets it at every staging, under either switch.
+// agent sets it at every staging, under either switch, before the staging,
+// which installs it as the source of the set as recorded (RangeRecordedSet)
+// with its trees.
 func (m *MockManager) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) {
 	m.exact.ofKind.mu.Lock()
 	defer m.exact.ofKind.mu.Unlock()
@@ -193,10 +195,25 @@ func (m *MockManager) SetRecordedOfKind(src func(kind models.Kind, visit func(na
 }
 
 // recordedOfKindSource is where the pairing reads recordings of a kind the
-// trees do not hold (SetRecordedOfKind).
+// trees do not hold (SetRecordedOfKind): src as the agent handed it, and
+// staged as the last staging installed it (installRecordedOfKindLocked).
+// mu is a leaf, taken under swapMu by the staging and by RangeRecordedSet.
 type recordedOfKindSource struct {
-	mu  sync.Mutex
-	src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+	mu     sync.Mutex
+	src    func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+	staged func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+}
+
+// installRecordedOfKindLocked makes the source the agent handed last
+// (SetRecordedOfKind) the staging's, holding swapMu, which the staging holds
+// as it changes the trees and moves the staging epoch: a reader of the set
+// as recorded that takes swapMu (RangeRecordedSet) reads one staging's trees
+// and source, never one set's trees with the next set's source, which the
+// agent hands before it stages that set.
+func (m *MockManager) installRecordedOfKindLocked() {
+	m.exact.ofKind.mu.Lock()
+	m.exact.ofKind.staged = m.exact.ofKind.src
+	m.exact.ofKind.mu.Unlock()
 }
 
 // stagedOfKind is the staged trees' recordings of kind (per-test, session,
