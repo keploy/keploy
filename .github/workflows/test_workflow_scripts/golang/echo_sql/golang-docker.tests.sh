@@ -17,13 +17,16 @@
 #   setting it never ends the step at a count of test runs taken before there
 #   is one.
 # keploy record of iteration 2, then of the first json iteration, fails
-#   The script has to exit with the record's code, naming that record (the
-#   json one as json), print its log, and not say the iteration was recorded;
-#   under pipefail too, where the pipeline's status is the record's.
+#   The script has to exit with the record's code, in one line naming that
+#   record (the json one as json), its code and its own log file, and not say
+#   the iteration was recorded; under pipefail too, where the pipeline's
+#   status is the record's. The record's log is streamed through tee, so its
+#   lines are in the output either way: the named file is what pins the log.
 # keploy record exits 2 with an ERROR, a DATA RACE or a "running WITHOUT
 # authentication" line in its log
-#   The log's checks run first: the script has to exit 1 with that check's
-#   message, and name no record exit.
+#   The log's checks run first: the script has to log the record's exit of 2,
+#   then exit 1 with that check's message, and raise no ::error:: line for the
+#   record.
 # keploy test (the first replay or the json one) exits non-zero with an ERROR
 # or a DATA RACE line in its log
 #   Those checks run first: the script has to exit 1 with the line and the
@@ -101,7 +104,7 @@ expect json-replay-race-line 1 \
 for code in 1 2; do
     run_case "record-fails-$code" FAKE_RECORD_RC_2="$code"
     expect "record-fails-$code" "$code" \
-        "::error::keploy record (iteration 2) exited $code" \
+        "::error::keploy record (iteration 2) exited $code; the test-set reports and its log (echoApp.txt) follow" \
         "fake keploy record 2 log" \
         -- "Recorded test case and mocks for iteration 2" "test-run-"
 done
@@ -109,25 +112,27 @@ done
 for code in 1 6; do
     run_case "json-record-fails-$code" FAKE_JSON=1 FAKE_RECORD_RC_3="$code"
     expect "json-record-fails-$code" "$code" \
-        "::error::keploy record (iteration 1, json) exited $code" \
+        "::error::keploy record (iteration 1, json) exited $code; the test-set reports and its log (echoApp_json.txt) follow" \
         "fake keploy record 3 log" \
         -- "Recorded test case and mocks for iteration 1 (json)" "test-run-"
 done
 
 LANE_SHELL_OPTS="-e -o pipefail" run_case record-fails-pipefail FAKE_RECORD_RC_2=3
 expect record-fails-pipefail 3 \
-    "::error::keploy record (iteration 2) exited 3" \
+    "::error::keploy record (iteration 2) exited 3; the test-set reports and its log (echoApp.txt) follow" \
     "fake keploy record 2 log" \
     -- "Recorded test case and mocks for iteration 2" "test-run-"
 
 run_case record-error-line FAKE_RECORD_RC_2=2 FAKE_RECORD_SAYS_2="ERROR fake keploy record error"
 expect record-error-line 1 \
+    "keploy record (iteration 2) exited 2" \
     "Error found in pipeline..." \
     "fake keploy record 2 log" \
     -- "::error::keploy record" "Recorded test case and mocks for iteration 2"
 
 run_case record-race-line FAKE_RECORD_RC_2=2 FAKE_RECORD_SAYS_2="WARNING: DATA RACE in fake keploy record"
 expect record-race-line 1 \
+    "keploy record (iteration 2) exited 2" \
     "Race condition detected in recording, stopping pipeline..." \
     "fake keploy record 2 log" \
     -- "::error::keploy record" "Recorded test case and mocks for iteration 2"
@@ -135,6 +140,7 @@ expect record-race-line 1 \
 run_case record-noauth-line FAKE_RECORD_RC_2=2 \
     FAKE_RECORD_SAYS_2="agent running WITHOUT authentication"
 expect record-noauth-line 1 \
+    "keploy record (iteration 2) exited 2" \
     "The agent came up with no control-plane token; the compose token handoff is broken." \
     "fake keploy record 2 log" \
     -- "::error::keploy record" "Recorded test case and mocks for iteration 2"
