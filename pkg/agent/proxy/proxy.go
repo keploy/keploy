@@ -2052,7 +2052,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// traffic and surfacing the error to readiness probes is a better
 	// signal to operators than hard-aborting the agent here.
 	// Use the PID-aware SetupCAForApp so the Java truststore import
-	// (installJavaCAForHome) targets the JDK the instrumented app is
+	// (resolveJavaKeystore) targets the JDK the instrumented app is
 	// actually running with. On non-Java workloads / shared-volume
 	// mode / appPID==0 these extra args are harmless — SetupCAForApp
 	// falls back to the legacy PATH-keytool behaviour. See

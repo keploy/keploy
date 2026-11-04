@@ -120,7 +120,8 @@ func installNSSCA(ctx context.Context, logger *zap.Logger, dir, certPath, alias 
 
 // sweepNSSLeftovers removes from the database the CAs of earlier keploy runs
 // a crash left there (their keys died with those runs, so they are inert),
-// and nothing else.
+// and nothing else; a keploy run going on at the same time on this host loses
+// its CA too.
 func sweepNSSLeftovers(ctx context.Context, logger *zap.Logger, certutil, db, alias string) {
 	out, err := exec.CommandContext(ctx, certutil, "-L", "-d", db).Output()
 	if err != nil {

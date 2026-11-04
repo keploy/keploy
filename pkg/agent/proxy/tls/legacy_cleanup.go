@@ -197,8 +197,7 @@ func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 	}
 	if jh := os.Getenv("JAVA_HOME"); jh != "" {
 		kt := filepath.Join(jh, "bin", exe)
-		cc := filepath.Join(jh, "lib", "security", "cacerts")
-		if fileExists(kt) && fileExists(cc) {
+		if cc, ok := jdkCacerts(jh); ok && fileExists(kt) {
 			return kt, cc, true
 		}
 	}
@@ -206,10 +205,10 @@ func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
-	// Derive JAVA_HOME from <home>/bin/keytool -> <home>/lib/security/cacerts.
-	home := filepath.Dir(filepath.Dir(kt))
-	cc := filepath.Join(home, "lib", "security", "cacerts")
-	if !fileExists(cc) {
+	// Derive JAVA_HOME from <home>/bin/keytool, then its cacerts (jdkCacerts:
+	// JDK 8 keeps it under jre/).
+	cc, ok := jdkCacerts(filepath.Dir(filepath.Dir(kt)))
+	if !ok {
 		return "", "", false
 	}
 	return kt, cc, true
