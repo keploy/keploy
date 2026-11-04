@@ -21,13 +21,19 @@ name: Mock Mode Regression (Linux)
 # scopes and asserts each is served only its own scope's mocks. Another replays a stateful
 # dependency (one request recorded several times) and asserts record order,
 # per worker and per scope, and, with consume-once mocks, that a mock a test
-# consumed is not served again after that test's end (on the worker's pid). Another runs more short-lived processes than the
-# agent's PID map holds between two calls and asserts both are recorded, then
-# replayed without reaching the dependency. Another records, under the
-# proven switch, three containers of one image, configured apart, on random
-# published ports and asserts each call's mock names its container by its
-# key (repository, port and configuration's fingerprint), the same again with
-# new containers on new ports, and for one test alone.
+# consumed is not served again after that test's end (on the worker's pid).
+# Another, without the switch, records a pipeline of identical MySQL
+# commands sent in one write while a call on another connection, asked
+# before it, is answered after it, then replays with MySQL down and
+# consume-once mocks and asserts the commands are answered with their
+# recordings in the order they were recorded.
+# Another runs more short-lived processes than the agent's PID map holds
+# between two calls and asserts both are recorded, then replayed without
+# reaching the dependency. Another records, under the proven switch, three
+# containers of one image, configured apart, on random published ports and
+# asserts each call's mock names its container by its key (repository, port
+# and configuration's fingerprint), the same again with new containers on new
+# ports, and for one test alone.
 # Another holds more LIVE processes than the agent's PID map holds while a
 # call is made, and asserts record keeps nothing and replay fails, both saying
 # the agent could not track a process (and the pid_map_overflow job runs the

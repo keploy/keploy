@@ -108,6 +108,45 @@ func TestEveryReadOfTheDiskStoreKeepsTheRecordedOrderOfMocksThatShareATime(t *te
 	}
 	all := func(*models.Mock) bool { return true }
 	odd := func(m *models.Mock) bool { return m.Spec.Metadata["half"] == "odd" }
+	// The rules a case reads under: each sets one and returns its undo.
+	keyedByHalf := func() func() {
+		return models.RegisterRequestKeys(models.HTTP, func(m *models.Mock) []string { return []string{m.Spec.Metadata["half"]} })
+	}
+	proven := func() func() {
+		provenswitch.Pin(true)
+		return provenswitch.Unpin
+	}
+	// oddAtAnswer places half of each burst at its answer, a millisecond
+	// after its request, which sorts them after the burst's other half: a
+	// read by place and one by request time differ in every burst.
+	oddAtAnswer := func() func() { return models.RegisterAnswerPlaced(models.HTTP, odd) }
+	// with combines rules into one, which sets each in turn and returns
+	// their undo, the last first.
+	with := func(rules ...func() func()) func() func() {
+		return func() func() {
+			undo := make([]func(), len(rules))
+			for i, rule := range rules {
+				undo[i] = rule()
+			}
+			return func() {
+				for i := len(undo) - 1; i >= 0; i-- {
+					undo[i]()
+				}
+			}
+		}
+	}
+	// The keyed walk gathers each key's mocks in turn: a burst's odd ones
+	// before its even ones.
+	keyed := func(s *DiskMocks) ([]string, error) {
+		return walk(s, func(visit func(string, func() (*models.Mock, error)) bool) error {
+			return s.RangeKeys(models.HTTP, []string{"odd", "even"}, visit)
+		})
+	}
+	byKind := func(s *DiskMocks) ([]string, error) {
+		return walk(s, func(visit func(string, func() (*models.Mock, error)) bool) error {
+			return s.RangeKind(models.HTTP, visit)
+		})
+	}
 	for _, tc := range []struct {
 		name string
 		// register sets the rules the case reads under and returns their undo.
@@ -161,7 +200,7 @@ func TestEveryReadOfTheDiskStoreKeepsTheRecordedOrderOfMocksThatShareATime(t *te
 			// Half of each burst is placed at its answer, which the index
 			// sorts after the other half; the walk is by request time.
 			name: "recorded before, half placed at their answer", at: requestTime,
-			register: func() func() { return models.RegisterAnswerPlaced(models.HTTP, odd) },
+			register: oddAtAnswer,
 			read: func(s *DiskMocks) ([]string, error) {
 				var out []string
 				err := s.RangeRecordedBefore(time.Unix(1000, 0), func(m *models.Mock) bool {
@@ -171,30 +210,17 @@ func TestEveryReadOfTheDiskStoreKeepsTheRecordedOrderOfMocksThatShareATime(t *te
 				return out, err
 			},
 		},
+		{name: "keyed", at: requestTime, register: keyedByHalf, read: keyed},
+		{name: "by kind", at: requestTime, register: proven, read: byKind},
 		{
-			// The walk gathers each key's mocks in turn: a burst's odd ones
-			// before its even ones.
-			name: "keyed", at: requestTime,
-			register: func() func() {
-				return models.RegisterRequestKeys(models.HTTP, func(m *models.Mock) []string { return []string{m.Spec.Metadata["half"]} })
-			},
-			read: func(s *DiskMocks) ([]string, error) {
-				return walk(s, func(visit func(string, func() (*models.Mock, error)) bool) error {
-					return s.RangeKeys(models.HTTP, []string{"odd", "even"}, visit)
-				})
-			},
+			// This row and the next: the keyed and by-kind walks read by
+			// request time, mocks placed at their answer included.
+			name: "keyed, half placed at their answer", at: requestTime,
+			register: with(keyedByHalf, oddAtAnswer), read: keyed,
 		},
 		{
-			name: "by kind", at: requestTime,
-			register: func() func() {
-				provenswitch.Pin(true)
-				return provenswitch.Unpin
-			},
-			read: func(s *DiskMocks) ([]string, error) {
-				return walk(s, func(visit func(string, func() (*models.Mock, error)) bool) error {
-					return s.RangeKind(models.HTTP, visit)
-				})
-			},
+			name: "by kind, half placed at their answer", at: requestTime,
+			register: with(proven, oddAtAnswer), read: byKind,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -258,57 +284,82 @@ func TestTheDiskStoreKeepsTheRecordedOrderOfTiedMocksAddedAfterARead(t *testing.
 
 // The statement and destination catalogs keep, of the mocks of one
 // statement or destination that share a time, the one the file holds first,
-// and list what they keep by time, the ones of one time in the file's order.
+// and list what they keep by request time, the ones of one time in the
+// file's order: with every mock placed at its request, and with the odd
+// statements' and destinations' mocks placed at their answer, a millisecond
+// after it, which a list by place would put after the even ones.
 func TestTheDiskStoreCatalogsKeepTheFirstRecordedOfMocksThatShareATime(t *testing.T) {
-	s, err := NewDiskMocks(zap.NewNop())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-	var wantStatements, wantDestinations []string
-	for i := 0; i < 20; i++ {
-		// Statement i's first recording, then a later one of it at the same
-		// time, all twenty statements at one time.
-		first := pgStatementMock(fmt.Sprintf("stmt%02d-first", i), fmt.Sprintf("h%02d", i), 100)
-		again := pgStatementMock(fmt.Sprintf("stmt%02d-again", i), fmt.Sprintf("h%02d", i), 100)
-		wantStatements = append(wantStatements, first.Name)
-		for _, m := range []*models.Mock{first, again} {
-			if err := s.Add(m); err != nil {
+	for _, tc := range []struct {
+		name     string
+		atAnswer bool
+	}{{"placed at their request", false}, {"half placed at their answer", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			// odd names the odd statements' and destinations' mocks.
+			odd := map[string]bool{}
+			for i := 1; i < 20; i += 2 {
+				for _, name := range []string{"stmt%02d-first", "stmt%02d-again", "dest%02d-first", "dest%02d-again"} {
+					odd[fmt.Sprintf(name, i)] = true
+				}
+			}
+			if tc.atAnswer {
+				placed := func(m *models.Mock) bool { return odd[m.Name] }
+				t.Cleanup(models.RegisterAnswerPlaced(models.PostgresV3, placed))
+				t.Cleanup(models.RegisterAnswerPlaced(models.MySQL, placed))
+			}
+			s, err := NewDiskMocks(zap.NewNop())
+			if err != nil {
 				t.Fatal(err)
 			}
-		}
-	}
-	for i := 0; i < 20; i++ {
-		first := perTestMockAt(fmt.Sprintf("dest%02d-first", i), 50)
-		again := perTestMockAt(fmt.Sprintf("dest%02d-again", i), 50)
-		for _, m := range []*models.Mock{first, again} {
-			m.Kind = models.MySQL
-			m.Spec.Metadata = map[string]string{"destAddr": fmt.Sprintf("10.0.0.%d:3306", i+1)}
-		}
-		wantDestinations = append(wantDestinations, first.Name)
-		for _, m := range []*models.Mock{first, again} {
-			if err := s.Add(m); err != nil {
+			t.Cleanup(func() { _ = s.Close() })
+			add := func(ms ...*models.Mock) {
+				for _, m := range ms {
+					if tc.atAnswer && odd[m.Name] != models.IsAnswerPlaced(m) {
+						t.Fatalf("%s placed at its answer: %v; want %v", m.Name, models.IsAnswerPlaced(m), odd[m.Name])
+					}
+					if err := s.Add(m); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			var wantStatements, wantDestinations []string
+			for i := 0; i < 20; i++ {
+				// Statement i's first recording, then a later one of it at
+				// the same time, all twenty statements at one time.
+				first := pgStatementMock(fmt.Sprintf("stmt%02d-first", i), fmt.Sprintf("h%02d", i), 100)
+				again := pgStatementMock(fmt.Sprintf("stmt%02d-again", i), fmt.Sprintf("h%02d", i), 100)
+				wantStatements = append(wantStatements, first.Name)
+				add(first, again)
+			}
+			for i := 0; i < 20; i++ {
+				first := perTestMockAt(fmt.Sprintf("dest%02d-first", i), 50)
+				again := perTestMockAt(fmt.Sprintf("dest%02d-again", i), 50)
+				for _, m := range []*models.Mock{first, again} {
+					m.Kind = models.MySQL
+					m.Spec.Metadata = map[string]string{"destAddr": fmt.Sprintf("10.0.0.%d:3306", i+1)}
+					m.TestModeInfo.LifetimeDerived = true
+				}
+				wantDestinations = append(wantDestinations, first.Name)
+				add(first, again)
+			}
+			s.Finalize()
+			statements, err := s.LoadStatements()
+			if err != nil {
 				t.Fatal(err)
 			}
-		}
+			sameOrder(t, "statement catalog", mockNames(statements), wantStatements)
+			destinations, err := s.LoadDestinations()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, m := range destinations {
+				if m.Kind == models.MySQL {
+					got = append(got, m.Name)
+				}
+			}
+			sameOrder(t, "destination catalog", got, wantDestinations)
+		})
 	}
-	s.Finalize()
-	statements, err := s.LoadStatements()
-	if err != nil {
-		t.Fatal(err)
-	}
-	sameOrder(t, "statement catalog", mockNames(statements), wantStatements)
-	destinations, err := s.LoadDestinations()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	for _, m := range destinations {
-		if m.Kind == models.MySQL {
-			got = append(got, m.Name)
-		}
-	}
-	sameOrder(t, "destination catalog", got, wantDestinations)
 }
 
 // A mock added again under its name is read as its last add, which the

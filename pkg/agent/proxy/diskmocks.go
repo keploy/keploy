@@ -33,15 +33,16 @@ type DiskMocks struct {
 	closed   bool
 
 	// carry indexes the carry-over entries (models.IsCarryOver at Add: a
-	// RegisterCarryOver kind's, a StagingRelease need's), sorted with
-	// entries, so the lookahead load reads only them. Empty while nothing is
-	// registered.
+	// RegisterCarryOver kind's, a StagingRelease need's), sorted by request
+	// time when Finalize sorts entries, so the lookahead load reads only
+	// them. Empty while nothing is registered.
 	carry []diskEntry
 
 	// staged indexes the entries a models.StagingWithStartup need declares
-	// (models.IsStagedAtStaging at Add), sorted with entries, so the set's
-	// staging call reads only them beside the startup band (LoadStaged).
-	// Empty while no kind declares one.
+	// (models.IsStagedAtStaging at Add), sorted by request time when
+	// Finalize sorts entries, so the set's staging call reads only them
+	// beside the startup band (LoadStaged). Empty while no kind declares
+	// one.
 	staged []diskEntry
 
 	// placed indexes the entries placed at their answer (models.IsAnswerPlaced
@@ -377,8 +378,12 @@ func (d *DiskMocks) bytesAt(off int64, n int) ([]byte, error) {
 // Finalize sorts the index and the answer-placed one by place
 // (models.PlaceOf: the request timestamp, or the answer's for a mock placed
 // at its answer) for binary search, and the carry-over and staged indexes by
-// request timestamp, the mocks of one time in the order they were added
-// (sortRecorded). Idempotent.
+// request timestamp, which their loads search by, the mocks of one time in
+// the order they were added (sortRecorded). A carry-over or staged mock is
+// never placed at its answer (models.IsAnswerPlaced, held so by
+// models.TestPlaceOfIsTheAnswerForAMockPlacedAtItsAnswer), so its place is
+// its request time, and a sort of those two by place would order them
+// alike. Idempotent.
 func (d *DiskMocks) Finalize() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
