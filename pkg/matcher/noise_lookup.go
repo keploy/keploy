@@ -57,16 +57,39 @@ func (l NoiseLookup) Patterns(path string) ([]string, bool) {
 	return pats, ok
 }
 
-// Entry is Patterns with the key of the entry that names the leaf at path,
-// as the noise configuration writes it: a hint names the entry to edit,
-// which may name the leaf by its last field alone ("qty" for "order.qty")
-// or name the array it is an element of ("ids" for "ids[]").
+// Entry is Patterns with the entry that names the leaf at path, named by
+// the run of whole fields of path it matches (wholeFieldsRun), so in path's
+// own case: the noise configuration's keys are read without case, and
+// keploy.yml's arrive lowercased (viper lowercases map keys), so the key an
+// entry is held by would name, for "requestId", a key keploy.yml does not
+// spell so. A hint names the entry to edit, which may name the leaf by its
+// last field alone ("qty" for "order.qty") or name the array it is an
+// element of ("ids" for "ids[]").
 func (l NoiseLookup) Entry(path string) (key string, patterns []string, ok bool) {
 	e, noisy := l.idx.entryWholeFields(strings.ToLower(path))
 	if !noisy {
 		return "", []string{}, false
 	}
-	return e.key, regexpTexts(e.regexps), true
+	return wholeFieldsRun(path, e.keyLower), regexpTexts(e.regexps), true
+}
+
+// wholeFieldsRun is the first run of whole fields of path that entry,
+// lowercase, names (namesWholeFields), as path writes it. Lowercasing maps
+// each rune alone, and no rune to or from ".", "[" or "]", so a run
+// namesWholeFields finds in the lowercased path is one here; were there
+// none, "" would name the entry by the path (mismatch.PatternMiss.Entry).
+func wholeFieldsRun(path, entry string) string {
+	for i := 0; i < len(path); i++ {
+		if i > 0 && path[i-1] != '.' {
+			continue
+		}
+		for end := i + 1; end <= len(path); end++ {
+			if (end == len(path) || path[end] == '.' || strings.HasPrefix(path[end:], "[]")) && strings.ToLower(path[i:end]) == entry {
+				return path[i:end]
+			}
+		}
+	}
+	return ""
 }
 
 // matchWholeFields is match with entries naming whole fields (namesWholeFields):

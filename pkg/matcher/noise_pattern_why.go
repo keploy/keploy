@@ -16,11 +16,22 @@ import (
 // value by its kind and length, never its text, since a value a noise
 // pattern guards may be a secret.
 func PatternWhy(field string, patterns []string, side, shape string) string {
+	return fmt.Sprintf("keploy.yml's noise lets %s vary only within %s; the %s value (%s) is outside it, so it is compared", field, quotedList(patterns), side, shape)
+}
+
+// PatternBothWhy is PatternWhy where the live and the recorded value are
+// both outside the patterns: it names both, each by its shape.
+func PatternBothWhy(field string, patterns []string, live, recorded string) string {
+	return fmt.Sprintf("keploy.yml's noise lets %s vary only within %s; the live value (%s) and the recorded value (%s) are outside it, so it is compared", field, quotedList(patterns), live, recorded)
+}
+
+// quotedList is patterns, each quoted, comma-joined.
+func quotedList(patterns []string) string {
 	quoted := make([]string, len(patterns))
 	for i, p := range patterns {
 		quoted[i] = strconv.Quote(p)
 	}
-	return fmt.Sprintf("keploy.yml's noise lets %s vary only within %s; the %s value (%s) is outside it, so it is compared", field, strings.Join(quoted, ", "), side, shape)
+	return strings.Join(quoted, ", ")
 }
 
 // StringShape names a string by its length in bytes, and NumberShape a

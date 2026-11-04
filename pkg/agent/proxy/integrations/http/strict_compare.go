@@ -272,14 +272,15 @@ type strictField struct {
 }
 
 // patternRefusal is why keploy.yml's noise, which lets a field vary only
-// within patterns, refused it: the values of each side outside them, each
-// by its shape (valueShape), live and recorded, at least one of them.
+// within patterns, refused it: the values of each side outside them, by
+// their shapes (valueShape), live and recorded, at least one of them.
 type patternRefusal struct {
-	// entry is the key of keploy.yml's entry that holds patterns, "" where
-	// it is the field's own name (a header's).
+	// entry names keploy.yml's entry that holds patterns by the run of the
+	// field's path it matches (matcher.NoiseLookup.Entry), "" where it is
+	// the field's own name (a header's).
 	entry          string
 	patterns       []string
-	live, recorded []string
+	live, recorded mismatch.ValueShapes
 	// container: a side's value is an array or an object, which no pattern
 	// matches.
 	container bool
@@ -288,7 +289,7 @@ type patternRefusal struct {
 // bodyRefusal is the patternRefusal of keploy.yml's request-body entry that
 // names the field at risk, whose values live and recorded outside its
 // patterns are of those shapes; nil where no entry names it.
-func (k strictKnown) bodyRefusal(risk string, live, recorded []string) *patternRefusal {
+func (k strictKnown) bodyRefusal(risk string, live, recorded mismatch.ValueShapes) *patternRefusal {
 	entry, pats, ok := k.n.body.Entry(risk)
 	if !ok {
 		return nil
@@ -296,29 +297,33 @@ func (k strictKnown) bodyRefusal(risk string, live, recorded []string) *patternR
 	return &patternRefusal{entry: entry, patterns: pats, live: live, recorded: recorded}
 }
 
-// refuse gives f the reason it is compared, naming the field as name
-// (matcher.PatternWhy, by the live side's first value outside the patterns,
-// else the recorded side's), and the facts of it the miss's hint names; a
-// nil p, no refusal by patterns, leaves f as it is.
+// refuse gives f the reason it is compared, naming the field as name and
+// the first value outside the patterns of each side that has one
+// (matcher.PatternWhy, matcher.PatternBothWhy), and the facts of it the
+// miss's hint names; a nil p, no refusal by patterns, leaves f as it is.
 func (p *patternRefusal) refuse(f *strictField, name string) {
 	if p == nil {
 		return
 	}
-	side := "recorded"
-	if len(p.live) > 0 {
-		side = "live"
+	live, recorded := p.live.Shapes(), p.recorded.Shapes()
+	switch {
+	case len(live) > 0 && len(recorded) > 0:
+		f.why = matcher.PatternBothWhy(name, p.patterns, live[0], recorded[0])
+	case len(live) > 0:
+		f.why = matcher.PatternWhy(name, p.patterns, "live", live[0])
+	default:
+		f.why = matcher.PatternWhy(name, p.patterns, "recorded", slices.Concat(recorded, []string{""})[0])
 	}
-	f.why = matcher.PatternWhy(name, p.patterns, side, slices.Concat(p.live, p.recorded, []string{""})[0])
 	f.pattern = &mismatch.PatternMiss{Path: f.diff.Path, Entry: p.entry, Patterns: p.patterns, Live: p.live, Recorded: p.recorded, Container: p.container}
 }
 
-// outside is the shapes held when out, none otherwise: one side's values a
+// outside is a value of shape when out, none otherwise: one side's value a
 // pattern refused.
-func outside(out bool, shapes ...string) []string {
+func outside(out bool, shape string) mismatch.ValueShapes {
 	if !out {
-		return nil
+		return mismatch.ValueShapes{}
 	}
-	return shapes
+	return mismatch.ShapesOf(shape)
 }
 
 // field is a strictField whose name holds no value (a fixed part, a header).
@@ -1088,7 +1093,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 		// unless its recorded and its live value each match one; why says
 		// which side is outside them, by its length.
 		pats, guarded := k.n.headerPats[name]
-		refuse := func(f *strictField, live, recorded []string) {
+		refuse := func(f *strictField, live, recorded mismatch.ValueShapes) {
 			if guarded {
 				(&patternRefusal{patterns: patternStrings(pats), live: live, recorded: recorded}).refuse(f, path)
 			}
@@ -1096,12 +1101,12 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 		switch {
 		case !inLive:
 			f := field(models.MockFieldDiff{Path: path, Kind: models.DiffKindMissingInLive, Expected: rv})
-			refuse(&f, []string{valueShape(nil, false)}, nil)
+			refuse(&f, mismatch.ShapesOf(valueShape(nil, false)), mismatch.ValueShapes{})
 			out = append(out, f)
 			continue
 		case !inRec:
 			f := field(models.MockFieldDiff{Path: path, Kind: models.DiffKindMissingInMock, Actual: strings.Join(lvs, ",")})
-			refuse(&f, nil, []string{valueShape(nil, false)})
+			refuse(&f, mismatch.ValueShapes{}, mismatch.ShapesOf(valueShape(nil, false)))
 			out = append(out, f)
 			continue
 		}
@@ -1318,22 +1323,22 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 // multipart field key, which both bodies hold, with the values rec and live:
 // an entry with patterns does only when each value of each side matches one
 // (an entry with none is read before). refusal is, where such an entry does
-// not, why it is compared: every value of each side outside them.
+// not, why it is compared: the values of each side outside them, by shape (mismatch.ValueShapes).
 func (k strictKnown) fieldCovers(key string, rec, live []string) (covered bool, refusal *patternRefusal) {
 	if _, _, ok := k.n.body.Entry(key); !ok {
 		return false, nil
 	}
-	refused := func(values []string) []string {
-		var out []string
+	refused := func(values []string) mismatch.ValueShapes {
+		var out mismatch.ValueShapes
 		for _, v := range values {
 			if !k.n.body.Covers(key, v, true) {
-				out = append(out, valueShape(v, true))
+				out.Add(valueShape(v, true))
 			}
 		}
 		return out
 	}
 	liveOut, recOut := refused(live), refused(rec)
-	if len(liveOut) == 0 && len(recOut) == 0 {
+	if liveOut.Len() == 0 && recOut.Len() == 0 {
 		return true, nil
 	}
 	return false, k.bodyRefusal(key, liveOut, recOut)
@@ -1581,11 +1586,11 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 func (k strictKnown) oneSided(risk, shape string, kind models.MockFieldDiffKind, absent string, held interface{}) strictField {
 	f := shaped("body."+risk, shape, kind, "", "")
 	// Reached only when no entry with no patterns names the field.
-	missing := []string{valueShape(held, false)}
+	missing := mismatch.ShapesOf(valueShape(held, false))
 	if absent == "live" {
-		k.bodyRefusal(risk, missing, nil).refuse(&f, shape)
+		k.bodyRefusal(risk, missing, mismatch.ValueShapes{}).refuse(&f, shape)
 	} else {
-		k.bodyRefusal(risk, nil, missing).refuse(&f, shape)
+		k.bodyRefusal(risk, mismatch.ValueShapes{}, missing).refuse(&f, shape)
 	}
 	return f
 }

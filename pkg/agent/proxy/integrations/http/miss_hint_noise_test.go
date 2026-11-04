@@ -138,6 +138,30 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 	for i := 0; i < 24; i++ {
 		recordedMissing = append(recordedMissing, fmt.Sprintf("x-r%02d", i), "")
 	}
+	// many is n values, each of(i).
+	many := func(n int, of func(i int) string) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = of(i)
+		}
+		return out
+	}
+	// jsonIDs is a JSON body whose array ids holds values, and form one
+	// whose key code does.
+	jsonIDs := func(values []string) string { return `{"ids":[` + strings.Join(values, ",") + `]}` }
+	form := func(values []string) string { return "code=" + strings.Join(values, "&code=") }
+	// 3000 numbers from 10, 37 apart: 3 of 2 characters, 24 of 3 and 243
+	// of 4 before the rest, of 5 and 6; and 3000 form values z0 to z2999:
+	// 10 of 2 bytes, 90 of 3 and 900 of 4 before 2000 of 5.
+	liveIDs := many(3000, func(i int) string { return strconv.Itoa(10 + 37*i) })
+	liveCodes := many(3000, func(i int) string { return "z" + strconv.Itoa(i) })
+	digits := many(3000, func(i int) string { return strconv.Itoa(i % 10) })
+	codes := many(3000, func(i int) string { return "c" + strconv.Itoa(i%10) })
+	// camel is keploy.yml's request-body noise as keploy reads it: viper
+	// lowercases its keys, so an entry written requestId arrives requestid.
+	camel := func(key, pattern string) map[string]map[string][]string {
+		return map[string]map[string][]string{"requestbody": {strings.ToLower(key): {pattern}}}
+	}
 	for _, c := range []struct {
 		name            string
 		on, noAuto      bool
@@ -154,6 +178,9 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 		// it guards with patterns, which the user reads off the call to
 		// widen them (remedyOf).
 		values map[string]map[string][]string
+		// maxHint, when set, bounds the hint's bytes: however many values
+		// miss, it names a few shapes a side and counts the rest.
+		maxHint int
 	}{
 		{name: "a recorded header missing and one only the call carries, switch off", recHdr: hdr("Referer", "http://localhost/app"), liveHdr: hdr("X-New", "1"), recBody: json, live: json,
 			diffs: []models.MockFieldDiff{{Path: "header.Referer", Kind: models.DiffKindMissingInLive}, {Path: "header.X-New", Kind: models.DiffKindMissingInMock}},
@@ -346,6 +373,54 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 			hint:   "Only values drifted (body.a, body.b). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody with root-relative keys (e.g. requestbody: {b: []}) and widen the patterns of keploy.yml's test.globalNoise requestbody entries for a (\"^x$\") so one matches the live value (a string of 2 bytes); otherwise " + rerecord + ".",
 			fix:    map[string]map[string][]string{"requestbody": {"a": {`^x$`, `^yy$`}, "b": {}}},
 			values: map[string]map[string][]string{"a": {"live": {"yy"}}}},
+		// The hint names the entry by the run of fields of the path it
+		// matches, in the API's case: keploy.yml's keys arrive lowercased,
+		// and a hint naming requestid names a key keploy.yml does not hold.
+		{name: "a camelCase body field keploy.yml guards with patterns, switch off", cfg: camel("requestId", `^r-\d$`),
+			recHdr: hdr("Content-Type", "application/json"), liveHdr: hdr("Content-Type", "application/json"), recBody: `{"requestId":"r-1"}`, live: `{"requestId":"evil"}`,
+			diffs:  []models.MockFieldDiff{{Path: "body.requestId", Kind: models.DiffKindValueChanged}},
+			hint:   "Only values drifted (body.requestId). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for requestId (\"^r-\\\\d$\") so one matches the live value (a string of 4 bytes); otherwise " + rerecord + ".",
+			fix:    map[string]map[string][]string{"requestbody": {"requestId": {`^r-\d$`, `^evil$`}}},
+			values: map[string]map[string][]string{"requestId": {"live": {"evil"}}}},
+		{name: "a camelCase body field keploy.yml guards with patterns, switch on", on: true, cfg: camel("requestId", `^r-\d$`),
+			recHdr: hdr("Content-Type", "application/json"), liveHdr: hdr("Content-Type", "application/json"), recBody: `{"requestId":"r-1"}`, live: `{"requestId":"evil"}`,
+			diffs:  []models.MockFieldDiff{{Path: "body.requestId", Kind: models.DiffKindValueChanged}},
+			hint:   "Only values drifted (body.requestId). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for requestId (\"^r-\\\\d$\") so one matches the live value (a string of 4 bytes); otherwise " + rerecord + ".",
+			fix:    map[string]map[string][]string{"requestbody": {"requestId": {`^r-\d$`, `^evil$`}}},
+			values: map[string]map[string][]string{"requestId": {"live": {"evil"}}}},
+		{name: "a camelCase form key keploy.yml guards with patterns, switch on", on: true, cfg: camel("authCode", `^a\d$`),
+			recHdr: hdr("Content-Type", "application/x-www-form-urlencoded"), liveHdr: hdr("Content-Type", "application/x-www-form-urlencoded"), recBody: "authCode=a1", live: "authCode=zz9",
+			diffs:  []models.MockFieldDiff{{Path: "body.authCode", Kind: models.DiffKindValueChanged}},
+			hint:   "Only values drifted (body.authCode). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for authCode (\"^a\\\\d$\") so one matches the live value (a string of 3 bytes); otherwise " + rerecord + ".",
+			fix:    map[string]map[string][]string{"requestbody": {"authCode": {`^a\d$`, `^zz9$`}}},
+			values: map[string]map[string][]string{"authCode": {"live": {"zz9"}}}},
+		{name: "a nested camelCase body field an entry names by its last name, switch on", on: true, cfg: camel("itemQty", `^\d{3}$`),
+			recHdr: hdr("Content-Type", "application/json"), liveHdr: hdr("Content-Type", "application/json"), recBody: `{"order":{"itemQty":123}}`, live: `{"order":{"itemQty":1234}}`,
+			diffs:  []models.MockFieldDiff{{Path: "body.order.itemQty", Kind: models.DiffKindValueChanged}},
+			hint:   "Only values drifted (body.order.itemQty). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for itemQty (\"^\\\\d{3}$\") so one matches the live value (a number of 4 characters); otherwise " + rerecord + ".",
+			fix:    map[string]map[string][]string{"requestbody": {"itemQty": {`^\d{3}$`, `^\d{4}$`}}},
+			values: map[string]map[string][]string{"itemQty": {"live": {"1234"}}}},
+		// However many values miss, the hint names each distinct shape of a
+		// side once, the first three, and counts the values past them: it
+		// stays small, and the remedy it names still serves.
+		{name: "a guarded array with 3000 elements outside its patterns, switch off", cfg: map[string]map[string][]string{"requestbody": {"ids": {`^\d$`}}},
+			recHdr: hdr("Content-Type", "application/json"), liveHdr: hdr("Content-Type", "application/json"), recBody: jsonIDs(digits), live: jsonIDs(liveIDs),
+			diffs:   []models.MockFieldDiff{{Path: "body.ids[]", Kind: models.DiffKindValueChanged}},
+			hint:    "Only values drifted (body.ids[]). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for ids (\"^\\\\d$\") so they match the live values (a number of 2 characters, a number of 3 characters, a number of 4 characters and 2730 more); otherwise " + rerecord + ".",
+			values:  map[string]map[string][]string{"ids": {"live": liveIDs}},
+			maxHint: 600},
+		{name: "a guarded form key with 3000 values outside its patterns, switch off", cfg: map[string]map[string][]string{"requestbody": {"code": {`^c\d$`}}},
+			recHdr: hdr("Content-Type", "application/x-www-form-urlencoded"), liveHdr: hdr("Content-Type", "application/x-www-form-urlencoded"), recBody: form(codes), live: form(liveCodes),
+			diffs:   []models.MockFieldDiff{{Path: "body.code", Kind: models.DiffKindValueChanged}},
+			hint:    "Only values drifted (body.code). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for code (\"^c\\\\d$\") so they match the live values (a string of 2 bytes, a string of 3 bytes, a string of 4 bytes and 2000 more); otherwise " + rerecord + ".",
+			values:  map[string]map[string][]string{"code": {"live": liveCodes}},
+			maxHint: 600},
+		{name: "a guarded form key with 3000 values outside its patterns, switch on", on: true, cfg: map[string]map[string][]string{"requestbody": {"code": {`^c\d$`}}},
+			recHdr: hdr("Content-Type", "application/x-www-form-urlencoded"), liveHdr: hdr("Content-Type", "application/x-www-form-urlencoded"), recBody: form(codes), live: form(liveCodes),
+			diffs:   []models.MockFieldDiff{{Path: "body.code", Kind: models.DiffKindValueChanged}},
+			hint:    "Only values drifted (body.code). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for code (\"^c\\\\d$\") so they match the live values (a string of 2 bytes, a string of 3 bytes, a string of 4 bytes and 2000 more); otherwise " + rerecord + ".",
+			values:  map[string]map[string][]string{"code": {"live": liveCodes}},
+			maxHint: 600},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			rec := func() *models.Mock { return recorded("m", "/x", c.recHdr, c.recBody) }
@@ -370,6 +445,9 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 			}
 			if r.NextSteps != c.hint {
 				t.Errorf("hint:\n got  %q\n want %q", r.NextSteps, c.hint)
+			}
+			if c.maxHint > 0 && len(r.NextSteps) > c.maxHint {
+				t.Errorf("the hint is %d bytes; want at most %d", len(r.NextSteps), c.maxHint)
 			}
 			if c.fix != nil {
 				if served, r := missWith(t, c.on, c.noAuto, c.fix, rec(), c.liveHdr, c.live); !served {
@@ -398,7 +476,9 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 // whether the hint offers any: each field it says to add, with no patterns,
 // and each entry whose patterns it says to widen with the patterns it quotes
 // and, for each side it says they are to match, one matching exactly each
-// of that side's values (values: entry, side, values).
+// of that side's values (values: entry, side, values). A keploy.yml edit
+// the hint names that remedyOf cannot read fails the row, so a hint never
+// passes the rule by offering noise in words the rule does not replay.
 func remedyOf(t *testing.T, hint string, cfg map[string]map[string][]string, values map[string]map[string][]string) (map[string]map[string][]string, bool) {
 	t.Helper()
 	out := map[string]map[string][]string{}
@@ -418,16 +498,30 @@ func remedyOf(t *testing.T, hint string, cfg map[string]map[string][]string, val
 		}
 		out[bucket][key] = pats
 	}
-	offered := false
-	// Only the fields to add are given by example.
-	for _, m := range regexp.MustCompile(`\(e\.g\. (\w+): \{([^}]*)\}\)`).FindAllStringSubmatch(hint, -1) {
-		for _, key := range strings.Split(m[2], ", ") {
-			set(m[1], strings.TrimSuffix(key, ": []"), []string{})
-			offered = true
+	// unread is hint less each part of it remedyOf reads.
+	unread := []byte(hint)
+	read := func(from, to int) {
+		for i := from; i < to; i++ {
+			unread[i] = ' '
 		}
 	}
+	offered := false
+	// Only the fields to add are given by example, under the bucket the
+	// sentence names.
+	add := regexp.MustCompile(`(?:add|and) the [^()]*? under test\.globalNoise\.global\.(\w+)(?: with root-relative keys)? \(e\.g\. (\w+): \{([^}]*)\}\)`)
+	for _, m := range add.FindAllStringSubmatchIndex(hint, -1) {
+		bucket, example := hint[m[2]:m[3]], hint[m[4]:m[5]]
+		if bucket != example {
+			t.Fatalf("hint %q adds under test.globalNoise.global.%s by an example of %s", hint, bucket, example)
+		}
+		for _, key := range strings.Split(hint[m[6]:m[7]], ", ") {
+			set(bucket, strings.TrimSuffix(key, ": []"), []string{})
+			offered = true
+		}
+		read(m[0], m[1])
+	}
 	widen := regexp.MustCompile(`widen the patterns of keploy\.yml's test\.globalNoise (\w+) entries for `)
-	item := regexp.MustCompile(`(\S+) \(((?:"(?:[^"\\]|\\.)*"(?:, )?)+)\) so (?:one matches|they match) (the (?:live|recorded) values? \([^)]*\)(?: and the (?:live|recorded) values? \([^)]*\))?)`)
+	item := regexp.MustCompile(`^(\S+) \(((?:"(?:[^"\\]|\\.)*"(?:, )?)+)\) so (?:one matches|they match) (the (?:live|recorded) values? \([^)]*\)(?: and the (?:live|recorded) values? \([^)]*\))?)`)
 	quoted := regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
 	starts := widen.FindAllStringSubmatchIndex(hint, -1)
 	for i, at := range starts {
@@ -435,12 +529,21 @@ func remedyOf(t *testing.T, hint string, cfg map[string]map[string][]string, val
 		if i+1 < len(starts) {
 			end = starts[i+1][0]
 		}
-		bucket, segment := hint[at[2]:at[3]], hint[at[1]:end]
-		items := item.FindAllStringSubmatch(segment, -1)
-		if len(items) == 0 {
-			t.Fatalf("hint %q says to widen patterns it does not name", hint)
-		}
-		for _, it := range items {
+		bucket := hint[at[2]:at[3]]
+		read(at[0], at[1])
+		// The entries, joined by " and for ", from the sentence's start.
+		for pos, first := at[1], true; ; first = false {
+			if !first {
+				if !strings.HasPrefix(hint[pos:end], " and for ") {
+					break
+				}
+				read(pos, pos+len(" and for "))
+				pos += len(" and for ")
+			}
+			it := item.FindStringSubmatch(hint[pos:end])
+			if it == nil {
+				t.Fatalf("hint %q says to widen patterns it does not name, at %q", hint, hint[pos:end])
+			}
 			key := it[1]
 			var pats []string
 			for _, q := range quoted.FindAllString(it[2], -1) {
@@ -464,7 +567,12 @@ func remedyOf(t *testing.T, hint string, cfg map[string]map[string][]string, val
 			}
 			set(bucket, key, pats)
 			offered = true
+			read(pos, pos+len(it[0]))
+			pos += len(it[0])
 		}
+	}
+	if loc := regexp.MustCompile(`(?i)\bwiden\b|\badd\b|test\.globalNoise|keploy\.yml's test`).FindIndex(unread); loc != nil {
+		t.Fatalf("hint %q names a keploy.yml edit remedyOf does not read, at %q", hint, hint[loc[0]:])
 	}
 	return out, offered
 }
@@ -608,13 +716,15 @@ func TestTheHintOffersNoAuthorizationNoise(t *testing.T) {
 // The fields a strict miss names as keploy.yml's patterns refused are those
 // a pattern refused, each with its entry, its patterns and the shapes of
 // each side's values outside them; not a refused read of the application's
-// clock, which has a reason too. The reason names the live side's first
-// value outside them, else the recorded side's.
+// clock, which has a reason too. The reason names the first value outside
+// them of each side that has one.
 func TestTheHintsNoiseFactsOfAStrictMiss(t *testing.T) {
 	both := field(models.MockFieldDiff{Path: "header.x-id", Kind: models.DiffKindValueChanged})
-	(&patternRefusal{patterns: []string{`^a-\d$`}, live: []string{"a string of 4 bytes"}, recorded: []string{"a string of 6 bytes"}}).refuse(&both, "header.x-id")
+	(&patternRefusal{patterns: []string{`^a-\d$`}, live: mismatch.ShapesOf("a string of 4 bytes"), recorded: mismatch.ShapesOf("a string of 6 bytes")}).refuse(&both, "header.x-id")
+	liveOnly := field(models.MockFieldDiff{Path: "body.qty", Kind: models.DiffKindValueChanged})
+	(&patternRefusal{patterns: []string{"^1$"}, live: mismatch.ShapesOf("a number of 2 characters", "a number of 3 characters")}).refuse(&liveOnly, "body.qty")
 	recordedOnly := field(models.MockFieldDiff{Path: "body.order.items", Kind: models.DiffKindValueChanged})
-	(&patternRefusal{entry: "items", patterns: []string{`^1$`}, recorded: []string{"an array"}, container: true}).refuse(&recordedOnly, "body.order.items")
+	(&patternRefusal{entry: "items", patterns: []string{`^1$`}, recorded: mismatch.ShapesOf("an array"), container: true}).refuse(&recordedOnly, "body.order.items")
 	fields := []strictField{
 		both,
 		{diff: models.MockFieldDiff{Path: "body.since"}, why: "body.since was learned as a read of the application's clock", clock: true},
@@ -622,8 +732,8 @@ func TestTheHintsNoiseFactsOfAStrictMiss(t *testing.T) {
 		recordedOnly,
 	}
 	want := []mismatch.PatternMiss{
-		{Path: "header.x-id", Patterns: []string{`^a-\d$`}, Live: []string{"a string of 4 bytes"}, Recorded: []string{"a string of 6 bytes"}},
-		{Path: "body.order.items", Entry: "items", Patterns: []string{`^1$`}, Recorded: []string{"an array"}, Container: true},
+		{Path: "header.x-id", Patterns: []string{`^a-\d$`}, Live: mismatch.ShapesOf("a string of 4 bytes"), Recorded: mismatch.ShapesOf("a string of 6 bytes")},
+		{Path: "body.order.items", Entry: "items", Patterns: []string{`^1$`}, Recorded: mismatch.ShapesOf("an array"), Container: true},
 	}
 	if got := patternMisses(fields); !reflect.DeepEqual(got, want) {
 		t.Errorf("pattern misses %+v; want %+v", got, want)
@@ -632,7 +742,8 @@ func TestTheHintsNoiseFactsOfAStrictMiss(t *testing.T) {
 		f    strictField
 		want string
 	}{
-		{both, "keploy.yml's noise lets header.x-id vary only within \"^a-\\\\d$\"; the live value (a string of 4 bytes) is outside it, so it is compared"},
+		{both, "keploy.yml's noise lets header.x-id vary only within \"^a-\\\\d$\"; the live value (a string of 4 bytes) and the recorded value (a string of 6 bytes) are outside it, so it is compared"},
+		{liveOnly, "keploy.yml's noise lets body.qty vary only within \"^1$\"; the live value (a number of 2 characters) is outside it, so it is compared"},
 		{recordedOnly, "keploy.yml's noise lets body.order.items vary only within \"^1$\"; the recorded value (an array) is outside it, so it is compared"},
 	} {
 		if c.f.why != c.want {

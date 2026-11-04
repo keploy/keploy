@@ -80,11 +80,23 @@ type Builder struct {
 // fields that its field diffs do not carry.
 type noiseFacts struct {
 	// guarded: fields keploy.yml's noise declares with patterns that a
-	// side's value is outside of.
-	guarded []PatternMiss
+	// side's value is outside of, each once, in the order first named,
+	// every naming of it folded in (WithPatternMisses); guardedAt indexes
+	// them by field (fieldKey).
+	guarded   []PatternMiss
+	guardedAt map[string]int
 	// unreachable: fields no keploy.yml noise is offered for, each by its
 	// report path.
 	unreachable []string
+}
+
+// miss is the PatternMiss of the field at path, and whether there is one.
+func (n noiseFacts) miss(path string) (PatternMiss, bool) {
+	i, ok := n.guardedAt[fieldKey(path)]
+	if !ok {
+		return PatternMiss{}, false
+	}
+	return n.guarded[i], true
 }
 
 // PatternMiss is a field of a miss that keploy.yml's noise lets vary only
@@ -94,24 +106,104 @@ type PatternMiss struct {
 	// Path is the field's report path, as its diff names it ("body.qty",
 	// "header.x-request-id").
 	Path string
-	// Entry is the key of keploy.yml's entry that holds the patterns, as
-	// keploy.yml writes it, where it is not the field's own root-relative
-	// key: an entry may name a field by its last name alone ("qty" for
-	// "body.order.qty") or name the array it is an element of ("ids" for
-	// "body.ids[]"). "" names the entry by Path.
+	// Entry is keploy.yml's entry that holds the patterns, named by the run
+	// of whole fields of Path it matches, so in the API's own case
+	// ("requestId" for "body.requestId", "qty" for "body.order.qty", "ids"
+	// for "body.ids[]"): keploy reads keploy.yml's keys without case, and
+	// lowercased, so the key it holds would name a key keploy.yml does not
+	// spell so. "" names the entry by Path.
 	Entry string
 	// Patterns are the entry's patterns, as keploy.yml writes them.
 	Patterns []string
-	// Live and Recorded name each value of that side that no pattern
-	// matches, by its kind and length, never its text (matcher.StringShape,
-	// matcher.NumberShape): a value a noise pattern guards may be a secret.
-	// Both name a value where neither side's is in the patterns: widened
-	// to match one side's alone, they would leave the call a miss.
-	Live, Recorded []string
+	// Live and Recorded name the values of that side that no pattern
+	// matches, by shape (ValueShapes). Both name values where neither
+	// side's is in the patterns: widened to match one side's alone, they
+	// would leave the call a miss.
+	Live, Recorded ValueShapes
 	// Container: a side's value is an array or an object. A pattern
 	// matches a single value, never a container, so no widening of the
 	// patterns makes the call match: the hint offers recording again.
 	Container bool
+}
+
+// maxNamedShapes is how many distinct shapes of one side's values a hint
+// names at most; it counts the values past them.
+const maxNamedShapes = 3
+
+// ValueShapes names values of one side of a field that no pattern matches,
+// each by its kind and length (matcher.StringShape, matcher.NumberShape),
+// never its text: a value a noise pattern guards may be a secret. It is
+// bounded by construction: it holds each distinct shape once, the first
+// maxNamedShapes of them, each with how many values have it, and counts
+// the values past them, so the hint that names it stays small however many
+// values miss. The zero value names none.
+type ValueShapes struct {
+	shapes [maxNamedShapes]string
+	counts [maxNamedShapes]int
+	// named: shapes[:named] are named, each with counts[i] values.
+	named int
+	// more: values counted past the named shapes' (Add, merge).
+	more int
+}
+
+// ShapesOf is the ValueShapes of one value of each of shapes.
+func ShapesOf(shapes ...string) ValueShapes {
+	var s ValueShapes
+	for _, shape := range shapes {
+		s.Add(shape)
+	}
+	return s
+}
+
+// Add names one more value, of shape.
+func (s *ValueShapes) Add(shape string) { s.add(shape, 1) }
+
+// add names n more values, of shape.
+func (s *ValueShapes) add(shape string, n int) {
+	for i := 0; i < s.named; i++ {
+		if s.shapes[i] == shape {
+			s.counts[i] += n
+			return
+		}
+	}
+	if s.named < maxNamedShapes {
+		s.shapes[s.named], s.counts[s.named] = shape, n
+		s.named++
+		return
+	}
+	s.more += n
+}
+
+// merge names o's values too.
+func (s *ValueShapes) merge(o ValueShapes) {
+	for i := 0; i < o.named; i++ {
+		s.add(o.shapes[i], o.counts[i])
+	}
+	s.more += o.more
+}
+
+// Len is how many values s names.
+func (s ValueShapes) Len() int {
+	n := s.more
+	for i := 0; i < s.named; i++ {
+		n += s.counts[i]
+	}
+	return n
+}
+
+// Shapes are the distinct shapes s names, in the order first named: at
+// most maxNamedShapes.
+func (s ValueShapes) Shapes() []string { return slices.Clone(s.shapes[:s.named]) }
+
+// String is how a hint names s's values: each named shape once, then how
+// many values there are past them ("a string of 4 bytes, a string of 5
+// bytes and 2 more").
+func (s ValueShapes) String() string {
+	out := strings.Join(s.shapes[:s.named], ", ")
+	if s.more > 0 {
+		out += " and " + strconv.Itoa(s.more) + " more"
+	}
+	return out
 }
 
 // NewReport starts a report for one missed call. actualSummary should be the
@@ -235,7 +327,7 @@ func (b *Builder) WithClosest(mockName string, diffs []models.MockFieldDiff) *Bu
 // entry. A parser that can say uses WithPatternMisses.
 func (b *Builder) WithGuarded(paths ...string) *Builder {
 	for _, p := range paths {
-		b.noise.guarded = append(b.noise.guarded, PatternMiss{Path: p})
+		b.WithPatternMisses(PatternMiss{Path: p})
 	}
 	return b
 }
@@ -246,10 +338,26 @@ func (b *Builder) WithGuarded(paths ...string) *Builder {
 // The hint names the entry, the patterns and those values' shapes, and
 // tells the user to widen the patterns to match each: an entry emptied to
 // a list with no patterns would stop the field being compared at all. A
-// field named more than once (an array's elements share a path) is to
-// match the values of every naming.
+// field named more than once (an array's elements share a path) is held
+// once, under its first naming's entry and patterns, and is to match the
+// values of every naming: the facts the builder holds, and the hint, stay
+// as small as ValueShapes keeps each side, however many namings there are.
 func (b *Builder) WithPatternMisses(misses ...PatternMiss) *Builder {
-	b.noise.guarded = append(b.noise.guarded, misses...)
+	for _, m := range misses {
+		k := fieldKey(m.Path)
+		if i, seen := b.noise.guardedAt[k]; seen {
+			had := &b.noise.guarded[i]
+			had.Live.merge(m.Live)
+			had.Recorded.merge(m.Recorded)
+			had.Container = had.Container || m.Container
+			continue
+		}
+		if b.noise.guardedAt == nil {
+			b.noise.guardedAt = map[string]int{}
+		}
+		b.noise.guardedAt[k] = len(b.noise.guarded)
+		b.noise.guarded = append(b.noise.guarded, m)
+	}
 	return b
 }
 
@@ -599,7 +707,7 @@ func carriedHeader(d models.MockFieldDiff) bool {
 func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) (string, bool) {
 	isHTTP := protocol == ProtocolHTTP
 	bodyKey := requestBodyNoiseKey(protocol)
-	unreachable, guarded := fieldSet(n.unreachable), patternMisses(n.guarded)
+	unreachable := fieldSet(n.unreachable)
 	type bucket struct {
 		add     []string
 		added   map[string]bool
@@ -625,7 +733,7 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 		default:
 			return "", false
 		}
-		g, isGuarded := guarded[fieldKey(d.Path)]
+		g, isGuarded := n.miss(d.Path)
 		if isGuarded && (d.Kind != models.DiffKindValueChanged || g.Container) {
 			return "", false
 		}
@@ -635,8 +743,8 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 				b.added[key], b.add = true, append(b.add, key)
 			}
 		case folded[fieldKey(d.Path)]:
-			// patternMisses holds every value of the field: a field the
-			// diffs name twice (an array's elements) is folded in once.
+			// The facts hold every value of the field: a field the diffs
+			// name twice (an array's elements) is folded in once.
 		default:
 			folded[fieldKey(d.Path)] = true
 			if g.Entry != "" {
@@ -645,16 +753,23 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 			if w := b.widened[key]; w != nil {
 				// Another field the same entry guards: its patterns are to
 				// match that field's values too.
-				w.Live, w.Recorded = append(w.Live, g.Live...), append(w.Recorded, g.Recorded...)
+				w.Live.merge(g.Live)
+				w.Recorded.merge(g.Recorded)
 				continue
 			}
 			w := g
-			w.Live, w.Recorded = slices.Clone(g.Live), slices.Clone(g.Recorded)
 			b.widened[key], b.widen = &w, append(b.widen, &w)
 		}
 	}
 	var add, remedy []string
-	if len(body.add) > 0 {
+	switch {
+	case len(body.add) == 0:
+	case bodyKey == "body":
+		// Pulsar's matcher reads its message payload's noise from the
+		// bucket keploy test excuses HTTP response-body fields by: say so,
+		// as a field added there is no longer asserted in a response.
+		add = append(add, fmt.Sprintf("the message payload fields under test.globalNoise.global.body with root-relative keys (e.g. body: {%s: []}), the bucket that also stops keploy test asserting those fields in HTTP response bodies", strings.Join(body.add, ": [], ")))
+	default:
 		add = append(add, fmt.Sprintf("the request-body fields under test.globalNoise.global.%[1]s with root-relative keys (e.g. %[1]s: {%[2]s: []})", bodyKey, strings.Join(body.add, ": [], ")))
 	}
 	if len(header.add) > 0 {
@@ -680,28 +795,11 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 	return strings.Join(remedy, " and "), len(remedy) > 0
 }
 
-// patternMisses is misses by their fields (fieldKey), each field's values
-// of every naming of it under its first naming's entry and patterns.
-func patternMisses(misses []PatternMiss) map[string]PatternMiss {
-	out := make(map[string]PatternMiss, len(misses))
-	for _, g := range misses {
-		k := fieldKey(g.Path)
-		if had, seen := out[k]; seen {
-			had.Live = append(slices.Clone(had.Live), g.Live...)
-			had.Recorded = append(slices.Clone(had.Recorded), g.Recorded...)
-			had.Container = had.Container || g.Container
-			g = had
-		}
-		out[k] = g
-	}
-	return out
-}
-
 // widenRemedy is how the hint names the entry whose patterns g says miss
 // values, and the values they are to match: the entry (a header's by its
-// lowercased name, as the HTTP matcher reads it), its patterns and each
-// value's shape where the parser named them (WithPatternMisses), else both
-// values (WithGuarded).
+// lowercased name, as the HTTP matcher reads it), its patterns and the
+// shapes of each side's values (ValueShapes, so a few) where the parser
+// named them (WithPatternMisses), else both values (WithGuarded).
 func widenRemedy(g *PatternMiss, header bool) string {
 	key := g.Entry
 	if key == "" {
@@ -710,46 +808,49 @@ func widenRemedy(g *PatternMiss, header bool) string {
 			key = strings.ToLower(strings.TrimPrefix(g.Path, "header."))
 		}
 	}
-	if len(g.Patterns) == 0 || len(g.Live)+len(g.Recorded) == 0 {
+	values := g.Live.Len() + g.Recorded.Len()
+	if len(g.Patterns) == 0 || values == 0 {
 		return key + " so they match the recorded and the live value"
-	}
-	quoted := make([]string, len(g.Patterns))
-	for i, p := range g.Patterns {
-		quoted[i] = strconv.Quote(p)
 	}
 	var sides []string
 	for _, side := range []struct {
 		name   string
-		shapes []string
+		shapes ValueShapes
 	}{{"live", g.Live}, {"recorded", g.Recorded}} {
-		switch len(side.shapes) {
+		switch side.shapes.Len() {
 		case 0:
 		case 1:
-			sides = append(sides, fmt.Sprintf("the %s value (%s)", side.name, side.shapes[0]))
+			sides = append(sides, fmt.Sprintf("the %s value (%s)", side.name, side.shapes))
 		default:
-			sides = append(sides, fmt.Sprintf("the %s values (%s)", side.name, strings.Join(side.shapes, ", ")))
+			sides = append(sides, fmt.Sprintf("the %s values (%s)", side.name, side.shapes))
 		}
 	}
 	verb := "one matches"
-	if len(g.Live)+len(g.Recorded) > 1 {
+	if values > 1 {
 		verb = "they match"
 	}
-	return fmt.Sprintf("%s (%s) so %s %s", key, strings.Join(quoted, ", "), verb, strings.Join(sides, " and "))
+	return fmt.Sprintf("%s (%s) so %s %s", key, quotedPatterns(g.Patterns), verb, strings.Join(sides, " and "))
+}
+
+// quotedPatterns is patterns as a hint names them, each quoted.
+func quotedPatterns(patterns []string) string {
+	quoted := make([]string, len(patterns))
+	for i, p := range patterns {
+		quoted[i] = strconv.Quote(p)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // containerMisses are, of diffs, the fields keploy.yml's noise guards with
-// patterns whose value on a side is an array or an object, each named with
-// its patterns, for the hint to say why it offers no noise for them.
+// patterns whose value on a side is an array or an object, each once, named
+// with its patterns, for the hint to say why it offers no noise for them.
 func containerMisses(diffs []models.MockFieldDiff, n noiseFacts) []string {
-	guarded := patternMisses(n.guarded)
 	var out []string
+	named := map[string]bool{}
 	for _, d := range diffs {
-		if g := guarded[fieldKey(d.Path)]; g.Container && len(g.Patterns) > 0 {
-			quoted := make([]string, len(g.Patterns))
-			for i, p := range g.Patterns {
-				quoted[i] = strconv.Quote(p)
-			}
-			out = append(out, fmt.Sprintf("%s vary only within %s", d.Path, strings.Join(quoted, ", ")))
+		if g, _ := n.miss(d.Path); g.Container && len(g.Patterns) > 0 && !named[fieldKey(d.Path)] {
+			named[fieldKey(d.Path)] = true
+			out = append(out, fmt.Sprintf("%s vary only within %s", d.Path, quotedPatterns(g.Patterns)))
 		}
 	}
 	return out
