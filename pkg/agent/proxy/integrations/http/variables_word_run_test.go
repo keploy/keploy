@@ -333,3 +333,97 @@ func TestVariables_OneAppIdBesideTwoDifferentCidsIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// The marker's shape with each UUID also sent whole (a cid or appId field):
+// that stretch of the marker is a value of its own. A one-word value beside
+// a different cid at each mock, where two values were recorded ("<P>/7" and
+// "<Q>/7" where "<B>/3" and "<D>/5" were), is its own value and refused, as
+// main refuses it; two appIds beside their cids, a group equal by chance,
+// bind; one appId beside two cids, where two were recorded, is refused.
+func TestVariables_AWordBesideAUUIDTheMockSendsWholeIsItsOwnValue(t *testing.T) {
+	const (
+		recA  = "6f9619ff-8b86-4011-b42d-00c04fc964ff"
+		recB  = "c9bf9e57-1685-4c89-bafb-ff5af830be8a"
+		recC  = "1e2d3c4b-5a69-4788-9766-554433221100"
+		recD  = "aabbccdd-eeff-4a11-9b22-334455667788"
+		liveX = "7d444840-9dc0-41a3-a15b-5b4c7a3f9e21"
+		liveW = "e3b0c442-98fc-41a3-8d2e-1c5a4e9b7f30"
+		liveP = "11112222-3333-4444-8555-666677778888"
+		liveQ = "9999aaaa-bbbb-4ccc-9ddd-eeeeffff0000"
+	)
+	// marker is a mock whose body sends cid whole and "<cid>/<tail>" bound
+	// word by word, tail whole too when it is a UUID.
+	marker := func(name, p, kind, rc, tail string) *models.Mock {
+		v := uuidWordBinds(p+"c", rc, "body.id", 0)
+		v[p+"cid"] = bindV(rc, "body.cid")
+		body := `{"cid":"` + rc + `","id":"` + rc + `/` + tail + `","kind":"` + kind + `"}`
+		tw := splitWords(tail)
+		for i, w := range tw {
+			v[p+"a"+strconv.Itoa(i)] = bindV(w, "body.id#"+strconv.Itoa(5+i))
+		}
+		if len(tw) > 1 {
+			v[p+"app"] = bindV(tail, "body.app")
+			body = `{"app":"` + tail + `","cid":"` + rc + `","id":"` + rc + `/` + tail + `","kind":"` + kind + `"}`
+		}
+		return varMock(name, "POST", "http://store/markers", body, 201, `{}`, v)
+	}
+	live := func(cid, tail, kind string) string {
+		if len(splitWords(tail)) > 1 {
+			return `{"app":"` + tail + `","cid":"` + cid + `","id":"` + cid + `/` + tail + `","kind":"` + kind + `"}`
+		}
+		return `{"cid":"` + cid + `","id":"` + cid + `/` + tail + `","kind":"` + kind + `"}`
+	}
+	for _, c := range []struct {
+		name, proven, rec1, rec2, live1, live2, refusedAt string
+	}{
+		{"one word beside a different cid, two recorded", "1", "3", "5", "7", "7", "ta0"},
+		{"switch off: no variable is checked, as main", "", "3", "5", "7", "7", ""},
+		{"two fresh appIds beside their cids, a group equal by chance", "1", recA, recC, liveX, liveW, ""},
+		{"one appId beside two cids, two recorded", "1", recA, recC, liveX, liveX, "ta0"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, c.proven)
+			h := newHTTP()
+			db := &varDb{perTest: []*models.Mock{at(marker("mock-1", "o", "one", recB, c.rec1), 1), at(marker("mock-2", "t", "two", recD, c.rec2), 2)}}
+			if ok, _, diag := matchVar(t, h, db, liveReq("POST", "/markers", live(liveP, c.live1, "one"))); !ok {
+				t.Fatalf("the first marker was not answered: %+v", diag)
+			}
+			ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/markers", live(liveQ, c.live2, "two")))
+			if c.refusedAt == "" {
+				if !ok || stub.Name != "mock-2" {
+					t.Fatalf("%s/%s should be answered by mock-2: ok=%v stub=%v diag=%+v", liveQ, c.live2, ok, stub, diag)
+				}
+				return
+			}
+			if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != c.refusedAt {
+				t.Fatalf("refused at %s, want %s: %q", p.name, c.refusedAt, p.why)
+			}
+		})
+	}
+}
+
+// The same with the cid sent whole in the URL's path: refused.
+func TestVariables_AWordBesideAUUIDThePathSendsWholeIsItsOwnValue(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const (
+		recB  = "c9bf9e57-1685-4c89-bafb-ff5af830be8a"
+		recD  = "aabbccdd-eeff-4a11-9b22-334455667788"
+		liveP = "11112222-3333-4444-8555-666677778888"
+		liveQ = "9999aaaa-bbbb-4ccc-9ddd-eeeeffff0000"
+	)
+	mock := func(name, p, rc, tail string) *models.Mock {
+		v := uuidWordBinds(p+"c", rc, "body.id", 0)
+		v[p+"cid"] = bindV(rc, "url.path[1]")
+		v[p+"a0"] = bindV(tail, "body.id#5")
+		return varMock(name, "POST", "http://store/markers/"+rc, `{"id":"`+rc+`/`+tail+`"}`, 201, `{}`, v)
+	}
+	h := newHTTP()
+	db := &varDb{perTest: []*models.Mock{at(mock("mock-1", "o", recB, "3"), 1), at(mock("mock-2", "t", recD, "5"), 2)}}
+	if ok, _, diag := matchVar(t, h, db, liveReq("POST", "/markers/"+liveP, `{"id":"`+liveP+`/7"}`)); !ok {
+		t.Fatalf("the first marker was not answered: %+v", diag)
+	}
+	ok, _, diag := matchVar(t, h, db, liveReq("POST", "/markers/"+liveQ, `{"id":"`+liveQ+`/7"}`))
+	if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != "ta0" {
+		t.Fatalf("refused at %s, want ta0: %q", p.name, p.why)
+	}
+}
