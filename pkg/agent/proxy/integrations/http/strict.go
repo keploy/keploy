@@ -593,6 +593,8 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKe
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closest.Name, diffs).
+		WithGuarded(guardedPaths(diag.differs)...).
+		WithoutNoise(payloadHashPaths()...).
 		WithRenderedRequests(
 			renderMockRequest(closest.Spec.HTTPReq, closest.Noise),
 			renderLiveRequest(request, liveBody, closest.Noise),
@@ -602,6 +604,33 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKe
 		r.FieldReasons = reasonsOf(diag.differs)
 	}
 	return r
+}
+
+// guardedPaths are the report paths of fields keploy.yml's noise guards with
+// patterns that a side's value is outside of: those with a reason that is no
+// refused read of the application's clock (strictField.why).
+func guardedPaths(fields []strictField) []string {
+	var out []string
+	for _, f := range fields {
+		if f.why != "" && !f.clock {
+			out = append(out, f.diff.Path)
+		}
+	}
+	return out
+}
+
+// payloadHashPaths are the report paths of the headers that carry a hash of
+// the request's body (models.PayloadHashHeaders), for the hint to offer no
+// keploy.yml noise for. Under the proven switch each is compared with the body
+// the client sent (samePayloadHash); declaring it noise would stop that
+// comparison for every recording. One keploy.yml serves both modes, so
+// neither offers it.
+func payloadHashPaths() []string {
+	out := make([]string, len(models.PayloadHashHeaders))
+	for i, h := range models.PayloadHashHeaders {
+		out[i] = "header." + h
+	}
+	return out
 }
 
 // reasonsOf are, of fields, those refused for a reason of their own (a

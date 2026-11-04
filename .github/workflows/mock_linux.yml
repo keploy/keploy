@@ -294,6 +294,18 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-config-guard-linux.sh"
 
+      # keploy.yml's request noise reaches `keploy mock replay`: calls
+      # recorded with a Referer, replayed with none, are served their mocks
+      # when keploy.yml declares Referer noise, and miss when it declares
+      # none; the miss's hint then names the Referer under
+      # test.globalNoise.global.header. Without the switch only: this build
+      # refuses a replay under it.
+      - name: Run mock-mode header-noise e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-header-noise-linux.sh"
+
       # `keploy mock record` on a terminal that hangs up -- SIGHUP, then the
       # terminal closed, with and without a gap between the two -- must stop
       # as it does on SIGTERM: by itself, with SIGTERM's exit code, leaving
