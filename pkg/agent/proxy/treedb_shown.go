@@ -172,8 +172,13 @@ func (v *exactView) showsStaticRest(mk *models.Mock) bool {
 // sharesRest is what the view shows of a mock that is not protocol-phase, its
 // own apart: one of the reached worker scope; in a test, one of the pool
 // under the background rules, or one a declared session call names
-// (declaredInPool); between tests, one of the pool slice served.
+// (declaredInPool); between tests, one of the pool slice served. It never
+// shows a recording the open test's derived mocks replace
+// (exactView.sourcesReplaced).
 func (v *exactView) sharesRest(mk *models.Mock) bool {
+	if _, gone := v.sourcesReplaced[mk.Name]; gone {
+		return false
+	}
 	if v.isWorker(mk.Name) {
 		return true
 	}
