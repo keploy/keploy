@@ -1683,7 +1683,19 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	if c.rm != nil && c.lm != nil {
 		// The reading goes first: a wide window also holds a look-back as a
 		// plain read, and learned plain it fails nearly every replay.
-		if off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone); !inWindow && cutWhy == "" && dc.in.Window.holdsRead(*c.rm, *c.lm, zone) {
+		off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone)
+		if off.Since == models.SinceTestBegin {
+			// A read plus an offset is read in its call's own window
+			// alone, as main's learn step reads it: the reading found
+			// this one only from its test's begin, where an offset fitted
+			// to a window as wide as the test's span passes a time to live
+			// changed by up to that span (concurrent_window_test.go). From the
+			// begin only a plain read is taken (step 7).
+			own := *dc.in.Window
+			own.Rec.Began, own.F.Began = time.Time{}, time.Time{}
+			off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, &own, zone)
+		}
+		if !inWindow && cutWhy == "" && dc.in.Window.holdsRead(*c.rm, *c.lm, zone) {
 			off, cutWhy, inWindow = models.ClockOffset{Res: max(c.rm.res, c.lm.res)}, "", true
 		} else if inWindow {
 			switch g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res), dc.in.Window); {
@@ -1746,24 +1758,21 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		return dc.copied(path, at, n, c, sameText, copiedWhy)
 	}
 
-	// 7. Since begin (client tests): a read the window from each run's
-	// test begin to the call holds, plain or plus an offset (a time to live
-	// added to a read the application made earlier in its test, before its
-	// call's window), checked from the test's begin where the reading takes
-	// it (clockSinceBegin) and the guards of step 5 keep it. A look-back is
-	// never checked from the begin, whichever reading is registered: it
-	// would pass one the application shortened, or dropped, within the
-	// test's span. A reading or guard that declines it leaves step 8 as it
+	// 7. Since begin (client tests): a plain read the window from each
+	// run's test begin to the call holds (a read the application made
+	// earlier in its test, before its call's window), checked from the
+	// test's begin where the reading takes it (clockSinceBegin) and the
+	// guards of step 5 keep it. Never a read plus an offset, whichever
+	// reading is registered: fitted to a window as wide as the test's span,
+	// it would pass a look-back or a time to live the application changed,
+	// or dropped, within that span, so main's learn step takes only a plain
+	// read there. A reading or guard that declines it leaves step 8 as it
 	// was.
 	if dc.dr.clientTests && c.rm != nil && c.lm != nil && cutWhy == "" {
-		if wb := dc.in.Window.sinceBegin(); wb != nil {
+		if wb := dc.in.Window.sinceBegin(); wb != nil && wb.holdsRead(*c.rm, *c.lm, zone) {
 			enc := max(c.rm.res, c.lm.res)
-			off, ok := models.ClockOffset{Res: enc}, wb.holdsRead(*c.rm, *c.lm, zone)
-			if !ok {
-				off, _, ok = clockInWindow(path, c.ri, c.li, wb, zone)
-				ok = ok && off.Min > 0
-			}
-			if ln, sok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &off}); ok && sok && ln.Offset != nil {
+			off := models.ClockOffset{Res: enc}
+			if ln, sok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &off}); sok && ln.Offset != nil {
 				switch g, uncompared := dc.offsetGuard(path, *ln.Offset, enc, wb); {
 				case uncompared:
 					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
@@ -1781,12 +1790,18 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// 8. The test's own value (client tests): no earlier place holds it in
 	// either run, its answer does not echo it, its cut is not ambiguous,
 	// and, where the runs know their test's begin, it was made before it.
-	late := ""
+	// An instant its protocol types (a BSON date) in a call that carries
+	// the application's clock is never one: main's learn step binds a
+	// test's own value only in a text (the harness's "[E2E] app-<UnixNano>"),
+	// and learns a typed instant there only as a read of that clock.
+	late, typed := "", false
 	if dc.dr.clientTests && len(hs) == 0 && cutWhy == "" && dc.instantEchoed(c) == "" {
-		if late = madeSinceBegin(dc.in.Window, dc.in.RecBegan, c, zone); late == "" {
-			d := dc.learned(path, at, n, r, l, OutcomeFresh, "the test's own value: no place before the call holds it; bound at its first call"+answeredAt(c.echo, c.rec), nil)
-			d.Echo = c.echo
-			return d
+		if typed = !c.text && dc.in.Window != nil; !typed {
+			if late = madeSinceBegin(dc.in.Window, dc.in.RecBegan, c, zone); late == "" {
+				d := dc.learned(path, at, n, r, l, OutcomeFresh, "the test's own value: no place before the call holds it; bound at its first call"+answeredAt(c.echo, c.rec), nil)
+				d.Echo = c.echo
+				return d
+			}
 		}
 	}
 	why := "a time its call's window does not hold in both runs, that no answer gave and no request of this scope sent"
@@ -1799,6 +1814,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	}
 	if late != "" {
 		why += "; nor the test's own value, made before it began: " + late
+	}
+	if typed {
+		why += "; nor the test's own value: its protocol types it as one instant, which in a call that carries the application's clock keploy learns only as a read of that clock"
 	}
 	// The places whose recorded text held the recorded value and that are
 	// no source in round F are named with why (main named the recording
