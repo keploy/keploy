@@ -52,6 +52,12 @@ const (
 	mergedQueueLen = 16
 )
 
+// testHookBeforeMerge runs on the parser's goroutine once the stream readers
+// have started and before the merge does. It does nothing outside a test: a
+// row sets it to start the merge only once a reader has queued an event, so
+// the merge's first look finds events of both directions ready.
+var testHookBeforeMerge = func() {}
+
 // encodeGenericV2 implements the V2 record path for the generic parser.
 // It drains the two FakeConn streams concurrently and pairs chunks into
 // mocks with the same shape the legacy encodeGeneric path produces so
@@ -142,6 +148,7 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 	defer close(stop)
 	go readStream(sess.ClientStream, fakeconn.FromClient, clientEvents, stop)
 	go readStream(sess.DestStream, fakeconn.FromDest, destEvents, stop)
+	testHookBeforeMerge()
 	go mergeByCapture(first, [2]<-chan chunkEvent{clientEvents, destEvents}, events, sess.StreamedBefore, stop)
 
 	return pairChunkEvents(events, sess, logger)
