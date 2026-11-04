@@ -590,3 +590,60 @@ func TestReplayChecksALearnedLiteralUpToTheCommandsArrival(t *testing.T) {
 		})
 	}
 }
+
+// A read of the application's clock learned as one word of a longer
+// literal (models.ClockOffset.Word: a LIKE pattern '%<now>%', a name
+// 'note-<now>', a text '<now> (cache)') is checked as that word alone, and
+// the bytes around it are still compared: a later replay whose word is a
+// read in its call's span and whose fixed bytes are the recorded ones is
+// answered; one whose fixed bytes changed, or whose word is a read an hour
+// before the span, is refused, the miss naming the literal.
+func TestAWordOfALiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const wordSQL = "SELECT name FROM tabNote WHERE owner = 'a@x.io' AND subject LIKE '%s'"
+	recAt := diffBase.Add(time.Millisecond)
+	f := newClockRun(time.Now().UTC().Add(-time.Minute))
+	_, read := recordedClock(t, recAt, f, f.read().Format(literalForm))
+	later := newClockRun(time.Now().UTC())
+	recLit := recAt.Add(-1300 * time.Microsecond).Format(literalForm)
+	in, early := later.read().Format(literalForm), later.read().Add(-time.Hour).Format(literalForm)
+	// changedBefore and changedAfter are the bytes around the word of a
+	// replay whose fixed bytes changed.
+	for _, w := range []struct{ name, before, after, changedBefore, changedAfter string }{
+		{"a LIKE pattern", "%", "%", "%", "_"},
+		{"a name", "note-", "", "memo-", ""},
+		{"a text", "", " (cache)", "", " (stale)"},
+	} {
+		recText := w.before + recLit + w.after
+		o := read
+		o.Word = models.ClockWordOf(recText, len(w.before), len(recText)-len(w.after))
+		if !o.Word.Valid() {
+			t.Fatalf("%s: the word %+v is no place of %q", w.name, o.Word, recText)
+		}
+		for _, tc := range []struct {
+			name, live string
+			served     bool
+		}{
+			{"the word read in the call's span", w.before + in + w.after, true},
+			{"the fixed bytes changed", w.changedBefore + in + w.changedAfter, false},
+			{"the word read an hour before the span", w.before + early + w.after, false},
+		} {
+			t.Run(w.name+", "+tc.name, func(t *testing.T) {
+				m := diffMock("mock-note", "c1", []mysql.Request{queryReq(strings.Replace(wordSQL, "%s", recText, 1))}, recAt, models.LifetimePerTest, "mocks")
+				m.Spec.Clocks = map[string]models.ClockOffset{"body.query.literals.1": o}
+				mm := stageOwn(t, []*models.Mock{m}, []*models.Mock{m}, true)
+				_, dctx := poolConn("c1")
+				_, ok, miss, err := replayer.MatchCommandForTest(later.ctx(false), zap.NewNop(), queryReq(strings.Replace(wordSQL, "%s", tc.live, 1)), mm, dctx, nil, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ok != tc.served {
+					t.Fatalf("served %v (miss %s); want %v", ok, miss, tc.served)
+				}
+				if !tc.served && (!strings.Contains(miss, "body.query.literals.1 was learned as") || !strings.Contains(miss, "matchPhase:strict_noise_reject")) {
+					t.Fatalf("the miss (%s) does not name body.query.literals.1, refused as a read of the clock by strict comparison", miss)
+				}
+			})
+		}
+	}
+}

@@ -382,6 +382,17 @@ func (w *Window) fromTestBegin() *Window {
 	return &Window{Rec: from(w.Rec), F: from(w.F), offsets: w.offsets}
 }
 
+// ClockWordIn is clockWordIn for a protocol's own learn step (the MySQL
+// replayer's LiteralLearner) that learns a value whose one changed word is a
+// read of the clock: the word recorded (rw) and seen (lw), and the text
+// before and after it, the same in both runs; ok false otherwise. The
+// caller reads the word alone (ClassifyIn) and, where that is a read of the
+// clock, records where it stands (models.ClockWordOf), so a replay checks
+// the word as the clock and compares the rest (CheckClockRead).
+func ClockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok bool) {
+	return clockWordIn(rec, live, w)
+}
+
 // clockWordIn finds the one instant that changed in a text, recorded as rec
 // and seen in record's full round as live, read in w in both runs: the word
 // rw of rec and lw of live, found as clockAt finds them (the first layout
