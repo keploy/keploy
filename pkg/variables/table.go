@@ -370,21 +370,36 @@ func collides(inForce map[string]Binding, beside []Binding, b Binding, earlier [
 // adapter that checks a call before it binds asks the same (http's
 // holdVariables).
 //
-// Two bindings at words of values (each with its WordRun) share one live
-// value as two variables only when their runs are one live run and were two
-// recorded ones: the application sent one value where the recording had
-// two. A word of two runs that differ live is equal by chance (a group of
-// two fresh UUIDs), and two words of one run, recorded and live, are words
-// of one value: neither is refused. A word binding beside a binding of a
-// value whole is checked as two values whole.
+// Two bindings at words of values (each with its WordRun) are set side by
+// side at the word they share, each run at its own word (WordRunAt). Where a
+// word both runs hold there differs live, the shared word is equal by chance
+// (a group of two fresh UUIDs, or two groups of one): neither is refused.
+// Where every such word is equal, the application sent one value where the
+// recording had two, whole ("<X>" where "<A>" and "<C>" were recorded) or
+// beside another ("<X>" inside "<X>/<Y>", or "<X>/<X>" where "<A>/<B>" was
+// recorded), and it is refused. A word binding beside a binding of a value
+// whole is checked as two values whole.
 func TwoValues(held, b Binding) bool {
 	if held.Given || held.Name == b.Name || held.Value != b.Value || held.Recorded == b.Recorded || models.ReadInOneSecond(held.Clock, b.Clock) {
 		return false
 	}
 	if held.WordRun != "" && b.WordRun != "" {
-		return held.WordRun == b.WordRun && held.RecordedWordRun != b.RecordedWordRun
+		return !runsDifferLive(held, b)
 	}
 	return true
+}
+
+// runsDifferLive reports whether, set side by side at the word they share
+// (held's WordRunAt beside b's), a word both runs hold differs live.
+func runsDifferLive(held, b Binding) bool {
+	hw, bw := strings.Split(held.WordRun, wordRunSep), strings.Split(b.WordRun, wordRunSep)
+	shift := b.WordRunAt - held.WordRunAt
+	for i, w := range hw {
+		if j := i + shift; j >= 0 && j < len(bw) && bw[j] != w {
+			return true
+		}
+	}
+	return false
 }
 
 // wordRunSep joins the words of a run: no word holds it (Words).
@@ -393,20 +408,33 @@ const wordRunSep = "-"
 // WordBind is a binding one call makes at a word of a value: Text names the
 // text that holds the word (its place and decode steps, as the adapter writes
 // a place: one name for one text), Word is the word's index in it (Words; -1
-// for a value whole), and Live and Recorded are the word.
+// for a value whole), and Live is the word, live.
 type WordBind struct {
-	Text           string
-	Word           int
-	Live, Recorded string
+	Text string
+	Word int
+	Live string
 }
 
-// WordRuns is, for each binding one call makes (ws[i]), its run, live and
-// recorded (Binding.WordRun): the words the call binds at consecutive words
-// of the same text, its own among them, in word order, joined. A binding of
-// a value whole has none. Words the call binds apart, with a word between
-// them it does not bind, are two runs.
-func WordRuns(ws []WordBind) (liveRun, recordedRun []string) {
-	liveRun, recordedRun = make([]string, len(ws)), make([]string, len(ws))
+// Run is one binding's word run (Binding.WordRun): its words, live, joined,
+// and At, the index of the binding's own word among them. A binding of a
+// value whole has the zero Run.
+type Run struct {
+	Live string
+	At   int
+}
+
+// On is b with r as its run.
+func (r Run) On(b Binding) Binding {
+	b.WordRun, b.WordRunAt = r.Live, r.At
+	return b
+}
+
+// WordRuns is, for each binding one call makes (ws[i]), its run: the words
+// the call binds at consecutive words of the same text, its own among them,
+// in word order. A binding of a value whole has none. Words the call binds
+// apart, with a word between them it does not bind, are two runs.
+func WordRuns(ws []WordBind) []Run {
+	runs := make([]Run, len(ws))
 	byText := map[string][]int{}
 	var texts []string
 	for i, w := range ws {
@@ -426,18 +454,18 @@ func WordRuns(ws []WordBind) (liveRun, recordedRun []string) {
 			for hi < len(idx) && ws[idx[hi]].Word == ws[idx[hi-1]].Word+1 {
 				hi++
 			}
-			lw, rw := make([]string, 0, hi-lo), make([]string, 0, hi-lo)
+			words := make([]string, 0, hi-lo)
 			for _, i := range idx[lo:hi] {
-				lw, rw = append(lw, ws[i].Live), append(rw, ws[i].Recorded)
+				words = append(words, ws[i].Live)
 			}
-			l, r := strings.Join(lw, wordRunSep), strings.Join(rw, wordRunSep)
-			for _, i := range idx[lo:hi] {
-				liveRun[i], recordedRun[i] = l, r
+			live := strings.Join(words, wordRunSep)
+			for at, i := range idx[lo:hi] {
+				runs[i] = Run{Live: live, At: at}
 			}
 			lo = hi
 		}
 	}
-	return liveRun, recordedRun
+	return runs
 }
 
 // Start begins a new scope (as Reset) with the values its test case gave

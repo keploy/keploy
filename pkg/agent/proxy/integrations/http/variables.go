@@ -1015,14 +1015,14 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			others = append(others, b)
 		}
 		for _, b := range others {
-			if variables.TwoValues(b, variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Clock: d.clock, WordRun: runOf[d.name][0], RecordedWordRun: runOf[d.name][1]}) {
+			if variables.TwoValues(b, runOf[d.name].On(variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Clock: d.clock})) {
 				return nil, (&varProblem{
 					mock: m.Name, name: d.name, place: d.bind.raw, expected: "a value other than variable " + b.Name + "'s", actual: v.value,
 					next: fmt.Sprintf("the application sent %s's value where it sent %s's when the test was recorded: fix the application, or re-record the test if that is intended", b.Name, d.name),
 				}).say("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, said{v.value, d.bind.place}, b.Name, b.Mock, b.Place)
 			}
 		}
-		taken[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw, Clock: d.clock, WordRun: runOf[d.name][0], RecordedWordRun: runOf[d.name][1]}
+		taken[d.name] = runOf[d.name].On(variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw, Clock: d.clock})
 	}
 	for _, d := range decls {
 		if b, ok := taken[d.name]; ok {
@@ -1032,11 +1032,11 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 	return hit, nil
 }
 
-// wordRunsOf is, by name, the live and recorded run (variables.WordRuns) of
-// each variable decls bind at a word of a value of the call: the words m
-// declares bound at consecutive words of that text (one place, one decode),
-// an echo's apart (it is the call's own, never bound in the table).
-func wordRunsOf(decls []varDecl, liveAt map[string]held) map[string][2]string {
+// wordRunsOf is, by name, the run (variables.WordRuns) of each variable
+// decls bind at a word of a value of the call: the words m declares bound at
+// consecutive words of that text (one place, one decode), an echo's apart
+// (it is the call's own, never bound in the table).
+func wordRunsOf(decls []varDecl, liveAt map[string]held) map[string]variables.Run {
 	var names []string
 	var ws []variables.WordBind
 	for _, d := range decls {
@@ -1046,16 +1046,14 @@ func wordRunsOf(decls []varDecl, liveAt map[string]held) map[string][2]string {
 		at := d.bind.at
 		names = append(names, d.name)
 		ws = append(ws, variables.WordBind{
-			Text:     variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}.String(),
-			Word:     at.Word,
-			Live:     liveAt[d.bind.key()].value,
-			Recorded: d.recorded,
+			Text: variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}.String(),
+			Word: at.Word,
+			Live: liveAt[d.bind.key()].value,
 		})
 	}
-	out := make(map[string][2]string, len(names))
-	lr, rr := variables.WordRuns(ws)
-	for i, name := range names {
-		out[name] = [2]string{lr[i], rr[i]}
+	out := make(map[string]variables.Run, len(names))
+	for i, r := range variables.WordRuns(ws) {
+		out[names[i]] = r
 	}
 	return out
 }
