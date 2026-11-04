@@ -62,6 +62,8 @@ type repeatCase struct {
 	missed, unmade []int
 	// edit, when set, changes recording i before it is staged.
 	edit func(i int, mk *models.Mock)
+	// sent, when set, is the body of each send (by index) in place of body.
+	sent []string
 }
 
 // repeatRun records every case into one set, one test each, serves the set
@@ -105,7 +107,11 @@ func repeatRunLogged(t *testing.T, logger *zap.Logger, cases []repeatCase) {
 		set = append(set, mapping...)
 		sends := make([]string, c.sends)
 		for i := range sends {
-			sends[i] = readCall(c.method, c.path, c.body)
+			body := c.body
+			if c.sent != nil {
+				body = c.sent[i]
+			}
+			sends[i] = readCall(c.method, c.path, body)
 		}
 		tests = append(tests, corsTest{name: c.name, mapping: mapping, sends: sends})
 	}
@@ -157,25 +163,36 @@ func TestARepeatedReadIsAnsweredOnceMoreAndExcusedOnceFewer(t *testing.T) {
 }
 
 // A replay says each read it answers once more as it answers it: one line
-// naming the test and the read as the replay named it, for a read sent once
+// naming the test, the read as the replay named it and how many times the
+// test recorded it, for a read sent once
 // more and for one sent twice more (whose second call more misses, unsaid).
 // A read sent as often as recorded, or once fewer, says none.
 func TestAReplaySaysEachReadItAnswersOnceMoreAsItAnswersIt(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	core, logs := observer.New(zap.InfoLevel)
-	const a, b = "GET /api/a, answered once more: recorded 2 times with one answer", "GET /api/b, answered once more: recorded 2 times with one answer"
+	const a, b, c = "GET /api/a, answered once more: recorded 2 times with one answer", "GET /api/b, answered once more: recorded 2 times with one answer", "POST /api/c, answered once more: recorded 2 times with one answer"
 	repeatRunLogged(t, zap.New(core), []repeatCase{
 		{name: "more", method: "GET", path: "/api/a", read: a, answers: []string{`{"a":1}`}, recorded: 2, sends: 3},
 		{name: "exact", method: "GET", path: "/api/a", read: a, answers: []string{`{"a":1}`}, recorded: 2, sends: 2},
 		{name: "fewer", method: "GET", path: "/api/b", read: b, answers: []string{`{"b":1}`}, recorded: 3, sends: 2},
 		{name: "twice-more", method: "GET", path: "/api/b", read: b, answers: []string{`{"b":1}`}, recorded: 2, sends: 4, missed: []int{3}},
+		// the first recording learned q as noise, the second did not: the
+		// call one more matches the first alone, and the line still says
+		// the read was recorded twice
+		{name: "learned", method: "POST", path: "/api/c", body: `{"q":"a"}`, read: c, answers: []string{`{"c":1}`}, recorded: 2, sends: 3,
+			sent: []string{`{"q":"a"}`, `{"q":"a"}`, `{"q":"b"}`},
+			edit: func(i int, mk *models.Mock) {
+				if i == 0 {
+					mk.Spec.ReqBodyNoise = map[string][]string{"body.q": {}}
+				}
+			}},
 	})
 	var said []string
 	for _, e := range logs.FilterMessageSnippet("answered a repeated read once more").All() {
 		f := e.ContextMap()
-		said = append(said, fmt.Sprintf("%v: %v (%v)", f["test"], f["read"], f["mock"]))
+		said = append(said, fmt.Sprintf("%v: %v (%v, recorded %v)", f["test"], f["read"], f["mock"], f["recorded"]))
 	}
-	want := []string{"more: " + a + " (more-1)", "twice-more: " + b + " (twice-more-1)"}
+	want := []string{"more: " + a + " (more-1, recorded 2)", "twice-more: " + b + " (twice-more-1, recorded 2)", "learned: " + c + " (learned-1, recorded 2)"}
 	if !reflect.DeepEqual(said, want) {
 		t.Fatalf("the replay said %q; want %q", said, want)
 	}

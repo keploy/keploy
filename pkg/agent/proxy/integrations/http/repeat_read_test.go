@@ -110,6 +110,12 @@ func TestRepeatReadOfComparesWhatTheMatcherAndTheResponseCompare(t *testing.T) {
 	if ca != cb {
 		t.Error("two recordings that both learned Accept as noise are two calls")
 	}
+	// Learned as noise, a header's value is excused, not whether it was
+	// sent: a recording that lacks it is another call.
+	cn, _, _ := RepeatReadOf(repeatReadMock(func(m *models.Mock) { learn(m, "accept"); delete(m.Spec.HTTPReq.Header, "Accept") }), frappeNoise)
+	if ca == cn {
+		t.Error("a recording that sent Accept and one that did not, both having learned it as noise, are one call")
+	}
 }
 
 // The proof excuses only what the matcher excuses under the set's noise:

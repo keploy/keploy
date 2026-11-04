@@ -127,20 +127,23 @@ func TestAReplayPushesTheNamedRepeatedReadsWithTheTable(t *testing.T) {
 	rcfg.Path, rcfg.Mock.OnMiss = keployDir, "fail"
 	// The set's own keploy.yml entry names Referer noise: the namer proves
 	// reads under it, as the agent matches the set's calls.
+	// The run turns the static list off: the namer compares Traceparent.
 	rcfg.Test.GlobalNoise.Testsets = config.TestsetNoise{"set": {"header": {"Referer": {}}}}
+	rcfg.Test.DisableAutoHeaderNoise = true
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
 	require.NoError(t, New(zap.NewNop(), rinstr, named("mock-0", "mock-1"), mdb, nil, nil, rcfg).Replay(ctx))
 	require.Equal(t, "set", gotSet)
-	fromPage := func(page string) string {
+	callWith := func(header, value string) string {
 		call, _, ok := httpint.RepeatReadOf(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
-			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://crm.test/api/onboarding", Header: map[string]string{"Referer": page}},
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://crm.test/api/onboarding", Header: map[string]string{header: value}},
 			HTTPResp: &models.HTTPResp{StatusCode: 200, Body: "{}"},
 		}}, gotNoise)
 		require.True(t, ok)
 		return call
 	}
-	require.Equal(t, fromPage("/a"), fromPage("/b"), "the namer was not handed the set's header noise")
+	require.Equal(t, callWith("Referer", "/a"), callWith("Referer", "/b"), "the namer was not handed the set's header noise")
+	require.NotEqual(t, callWith("Traceparent", "00-a"), callWith("Traceparent", "00-b"), "the namer was handed the static list test.disableAutoHeaderNoise turns off")
 	require.Equal(t, []string{"mock-0", "mock-1"}, rinstr.table["orders::TestPlace"])
 	require.Equal(t, map[string][]models.RepeatRead{"orders::TestPlace": {read}}, rinstr.repeats, "the replay pushes each test's named repeated reads")
 }

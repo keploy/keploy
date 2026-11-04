@@ -50,9 +50,11 @@ func NewRepeatReadNoise(opts models.OutgoingOptions) RepeatReadNoise {
 // and static list). Of a header the matcher excuses within keploy.yml's
 // patterns, a recorded value that matches one is kept as matching, not by
 // its bytes; of one the recording learned as noise (header.<name>), that it
-// was learned. Two recordings are one call only when they agree on each:
-// the matcher then takes a call for either one exactly when it takes it for
-// the other. A header the matcher reads more loosely than by its bytes
+// was learned. Two recordings are one call only when they agree on each, so
+// the matcher excuses the same headers of a call for either one. A field of
+// the URL or body learned as noise on one of them only does not part them:
+// their bytes are one, and a call one more is answered when the matcher takes
+// it for any of them. A header the matcher reads more loosely than by its bytes
 // (Content-Type, User-Agent, a SigV4 Authorization, a value the obfuscator
 // redacted) is compared by its bytes here, which is narrower, never wider.
 //
