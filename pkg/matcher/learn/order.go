@@ -671,6 +671,11 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 	if no != nil {
 		return *no
 	}
+	if len(echo) == 0 {
+		if a := dc.answerHoldsWord(w.Rec); a != "" {
+			return dc.cannotCheck(path, at, n, w.Rec, w.Live, "a word of it comes back in the answer at "+a+", which keploy cannot answer with this run's value")
+		}
+	}
 	rule := "no place before the call shows it"
 	if len(aside) > 0 {
 		p := aside[0]
@@ -2176,11 +2181,13 @@ func (dc *decider) instantEchoed(c changedInstant) string {
 // objects that is rec whole (a lookup answered under its id), a place
 // keploy cannot name: refused. Every other answer text that
 // holds the word, longer or shorter (a count, a date whose minute it is),
-// is served as recorded: a word that short may stand there by chance, and
-// a test that reads it goes red at replay, never green by a rewrite. One
-// rule for a Value and a fresh word; withWhole: a fresh word's whole value
-// too (a Value's is the adapter's echo, as main answers it). unnamed is the
-// path of the first such leaf keploy cannot name to the adapter.
+// is never rewritten: a word that short may stand there by chance, and a
+// rewrite could make a test pass on an answer the dependency never gave. A
+// fresh word such a text holds where nothing reads it back is refused
+// (answerHoldsWord), as main refuses it. One rule for a Value and a fresh
+// word; withWhole: a fresh word's whole value too (a Value's is the
+// adapter's echo, as main answers it). unnamed is the path of the first
+// such leaf keploy cannot name to the adapter.
 func (dc *decider) readBack(path string, at variables.Address, w readWord, rec string, withWhole bool) (echo []variables.Address, unnamed string) {
 	r := dc.in.Rec.Leaves[path]
 	if at.Word < 0 || len(at.Steps) > 0 || w.Rec == rec && !withWhole {
@@ -2200,6 +2207,29 @@ func (dc *decider) readBack(path string, at variables.Address, w readWord, rec s
 		}
 	}
 	return echo, unnamed
+}
+
+// answerHoldsWord is the first leaf of the call's recorded answer that
+// holds w, a changed word's recorded text, as a word in any reading and
+// declared form, in its case or folded; "" where none does. A leaf its
+// protocol types as one instant has no words, as main reads it (echoedPart).
+// A word made anew that the answer holds where nothing reads the request
+// back may be the dependency's echo of it inside a longer value (an id in
+// a GraphQL argument, an OData filter, a header the answer counts): served
+// as recorded, the application would get the recorded word back, so the
+// word is refused, never learned fresh.
+func (dc *decider) answerHoldsWord(w string) string {
+	folded := strings.ToLower(w)
+	for _, a := range dc.in.Resp {
+		if a.Type == Instant {
+			continue
+		}
+		t := dc.x.text(a.Value)
+		if evHolds(t, w) || folded != w && evHolds(t, folded) {
+			return a.Path
+		}
+	}
+	return ""
 }
 
 // unanswerable refuses a word whose answer places (echo, unnamed: as

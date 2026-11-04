@@ -559,32 +559,47 @@ func TestOutcomeAnAdaptersStepsOpenAFieldBeforeItsWordsAreRead(t *testing.T) {
 // A changed word with no source is fresh, and the call's own answer is
 // rewritten with this run's word only where an answer field holds the
 // request's whole recorded text, at the same word: the rule a read-back
-// follows. Every other answer text that holds the word ("batch-14" sent,
-// "seen 14 times" or a date whose minute is 14 answered; "14" sent, the
-// same count answered) is served as recorded: a word that short may stand
-// there by chance, and a test that reads it goes red, never green by a
-// rewrite (main refuses the first: instants_test.go:838). The line names
-// only the places rewritten.
+// follows. The line names only the places rewritten. An answer text that
+// holds the word inside a longer or shorter value ("batch-14" sent, "seen
+// 14 times" or a date whose minute is 14 answered; "14" sent, the same
+// count answered; "t-r-1" sent in a header, an answer of 1), in its case or
+// folded, is never rewritten: a word that short may stand there by chance.
+// Where nothing reads the request back, the word is refused, never learned
+// fresh with that answer served as recorded: it may be the dependency's
+// echo, and the application would get the recorded word back. Main refuses
+// each such word (instants_test.go:838; http shared_noise_test.go's
+// keploy.yml header). An answer's leaf its protocol types as one instant has
+// no words, as main reads it.
 func TestOutcomeAFreshWordIsAnsweredOnlyWhereItsAnswerHoldsTheRequestsTextWhole(t *testing.T) {
-	call := func(rec, live string, resp ...Leaf) Decision {
-		in := oInput("body.batch", rec, live, nil, nil)
+	call := func(path, rec, live, r, f string, resp ...Leaf) Decision {
+		in := oInput(path, rec, live, nil, nil)
 		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
 		in.Resp = resp
-		return oWord(t, Decide(in), "14", "15")
+		return oWord(t, Decide(in), r, f)
 	}
 	for _, c := range []struct {
-		name, rec, live string
-		resp            []Leaf
-		echo            string
+		name, path, rec, live, r, f string
+		resp                        []Leaf
+		echo, refused               string
 	}{
-		{"a count holding a word of the request", "batch-14", "batch-15", []Leaf{oText("body.at", "seen 14 times")}, ""},
-		{"a date whose minute is a word of the request", "batch-14", "batch-15", []Leaf{oText("body.at", "Thu, 22 Oct 2026 11:14:16 GMT")}, ""},
-		{"a count holding the whole request", "14", "15", []Leaf{oText("body.at", "seen 14 times")}, ""},
-		{"the request's text read back whole", "batch-14", "batch-15",
-			[]Leaf{oText("body.at", "seen 14 times"), oText("body.batch", "batch-14")}, "body.batch#1"},
-		{"the whole request read back whole", "14", "15", []Leaf{oText("body.at", "seen 14 times"), oText("body.n", "14")}, "body.n#0"},
+		{"a count holding a word of the request", "body.batch", "batch-14", "batch-15", "14", "15", []Leaf{oText("body.at", "seen 14 times")}, "", "body.at"},
+		{"a date whose minute is a word of the request", "body.batch", "batch-14", "batch-15", "14", "15", []Leaf{oText("body.at", "Thu, 22 Oct 2026 11:14:16 GMT")}, "", "body.at"},
+		{"a count holding the whole request", "body.batch", "14", "15", "14", "15", []Leaf{oText("body.at", "seen 14 times")}, "", "body.at"},
+		{"a header's word answered as a number", "header.x-trace", "t-r-1", "t-r-9", "1", "9",
+			[]Leaf{{Path: "body.ok", Noise: "body.ok", Type: Number, Value: "1"}}, "", "body.ok"},
+		{"an answer holding the word in another case", "body.batch", "batch-AB12", "batch-CD34", "AB12", "CD34", []Leaf{oText("body.ref", "ref ab12 seen")}, "", "body.ref"},
+		{"an instant its protocol types whose minute is a word of the request", "body.batch", "batch-14", "batch-15", "14", "15",
+			[]Leaf{{Path: "body.at", Noise: "body.at", Type: Instant, Value: "2026-10-22T11:14:16Z"}}, "", ""},
+		{"an answer holding no word of the request", "body.batch", "batch-14", "batch-15", "14", "15", []Leaf{oText("body.at", "seen 15 times")}, "", ""},
+		{"the request's text read back whole", "body.batch", "batch-14", "batch-15", "14", "15",
+			[]Leaf{oText("body.at", "seen 14 times"), oText("body.batch", "batch-14")}, "body.batch#1", ""},
+		{"the whole request read back whole", "body.batch", "14", "15", "14", "15", []Leaf{oText("body.at", "seen 14 times"), oText("body.n", "14")}, "body.n#0", ""},
 	} {
-		d := call(c.rec, c.live, c.resp...)
+		d := call(c.path, c.rec, c.live, c.r, c.f, c.resp...)
+		if c.refused != "" {
+			oRefused(t, c.name, d, RefusalCannotCheck, "comes back in the answer at "+c.refused+",")
+			continue
+		}
 		var echo []string
 		for _, a := range d.Echo {
 			echo = append(echo, a.String())
@@ -603,8 +618,9 @@ func TestOutcomeAFreshWordIsAnsweredOnlyWhereItsAnswerHoldsTheRequestsTextWhole(
 // request back, as a field holding it whole does; keploy cannot name a key
 // to the adapter, so the word is refused, never learned fresh with that
 // key served as recorded (main refuses it: http learn_test.go:2367). A key
-// that only holds the request inside a longer text is served as recorded,
-// as such a field is.
+// that only holds the request inside a longer text is never rewritten, and
+// nothing reads the request back, so the word is refused there too, as at
+// such a field (main refuses it).
 func TestOutcomeAnAnswerKeyThatIsTheRequestsWholeTextIsRefused(t *testing.T) {
 	call := func(keys string) Decision {
 		in := oInput("body.id", "A7K29QXM", "Zq81Lm0X", nil, nil)
@@ -613,9 +629,7 @@ func TestOutcomeAnAnswerKeyThatIsTheRequestsWholeTextIsRefused(t *testing.T) {
 		return oWord(t, Decide(in), "A7K29QXM", "Zq81Lm0X")
 	}
 	oRefused(t, "an answer key that is the request's whole text", call("A7K29QXM\nok"), RefusalCannotCheck, "body{keys}")
-	if d := call("A7K29QXM-meta\nok"); d.Outcome != OutcomeFresh || len(d.Echo) > 0 {
-		t.Errorf("an answer key holding the request inside a longer text: %s, echo %v; want fresh, served as recorded", oDescribe([]Decision{d}), d.Echo)
-	}
+	oRefused(t, "an answer key holding the request inside a longer text", call("A7K29QXM-meta\nok"), RefusalCannotCheck, "comes back in the answer at body{keys},")
 }
 
 // A request's number sent as text (Mongo's {"$numberInt":"3"}) that the
