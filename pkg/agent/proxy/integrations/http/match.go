@@ -2696,7 +2696,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closestMock.Name, fieldDiffs).
-		WithGuarded(guardedPaths(guarded)...).
+		WithPatternMisses(patternMisses(guarded)...).
 		WithoutNoise(schemaTyped...).
 		WithoutNoise(payloadHashPaths()...).
 		// Whole-request renders for the CLI side-by-side diff. Mock.Noise is

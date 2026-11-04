@@ -25,6 +25,7 @@ import (
 	"net"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -46,6 +47,8 @@ const (
 	ProtocolRedis    = "Redis"
 	ProtocolGeneric  = "Generic"
 	ProtocolDNS      = "DNS"
+	ProtocolHBase    = "HBase"
+	ProtocolPulsar   = "Pulsar"
 )
 
 // maxFieldDiffValueLen bounds recorded/live values embedded in reports so a
@@ -74,13 +77,32 @@ type Builder struct {
 }
 
 // noiseFacts is what a parser knows of keploy.yml's noise for a report's
-// fields that its field diffs do not carry, each a field's report path.
+// fields that its field diffs do not carry.
 type noiseFacts struct {
 	// guarded: fields keploy.yml's noise declares with patterns that a
 	// side's value is outside of.
-	guarded []string
-	// unreachable: fields no keploy.yml noise is offered for.
+	guarded []PatternMiss
+	// unreachable: fields no keploy.yml noise is offered for, each by its
+	// report path.
 	unreachable []string
+}
+
+// PatternMiss is a field of a miss that keploy.yml's noise lets vary only
+// within patterns, and that the matcher compared because a side's value is
+// outside all of them.
+type PatternMiss struct {
+	// Path is the field's report path, as its diff names it ("body.qty",
+	// "header.x-request-id").
+	Path string
+	// Patterns are the entry's patterns, as keploy.yml writes them.
+	Patterns []string
+	// Side is the side whose value no pattern matches: "live" or
+	// "recorded".
+	Side string
+	// Value names that value by its kind and length, never its text
+	// (matcher.StringShape, matcher.NumberShape): a value a noise pattern
+	// guards may be a secret.
+	Value string
 }
 
 // NewReport starts a report for one missed call. actualSummary should be the
@@ -198,10 +220,25 @@ func (b *Builder) WithClosest(mockName string, diffs []models.MockFieldDiff) *Bu
 
 // WithGuarded names the fields of the diffs that keploy.yml's noise already
 // declares with patterns, a side's value outside them (a header by its name
-// in any case). The hint tells the user to change those entries to empty
-// lists, rather than to add them.
+// in any case), when the parser cannot say which patterns and which side:
+// the hint tells the user to widen the entry's patterns so they match the
+// recorded and the live value, never to add the field or to empty its
+// entry. A parser that can say uses WithPatternMisses.
 func (b *Builder) WithGuarded(paths ...string) *Builder {
-	b.noise.guarded = append(b.noise.guarded, paths...)
+	for _, p := range paths {
+		b.noise.guarded = append(b.noise.guarded, PatternMiss{Path: p})
+	}
+	return b
+}
+
+// WithPatternMisses names the fields of the diffs that keploy.yml's noise
+// already declares with patterns, each with those patterns and the side
+// whose value is outside them (a header by its name in any case). The hint
+// names the patterns and that value's shape, and tells the user to widen
+// them to match it: an entry emptied to a list with no patterns would stop
+// the field being compared at all.
+func (b *Builder) WithPatternMisses(misses ...PatternMiss) *Builder {
+	b.noise.guarded = append(b.noise.guarded, misses...)
 	return b
 }
 
@@ -409,6 +446,11 @@ func defaultNextSteps(r *models.MockMismatchReport, all []models.MockFieldDiff, 
 		if noiseOK {
 			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), %s; otherwise %s.", drifted, noise, rerecordRemedy(r))
 		}
+		if unread := unreadFields(r.Protocol, named); len(unread) > 0 {
+			// Say why no noise is offered where the protocol's matcher
+			// reads none: an entry the user adds there would change nothing.
+			return fmt.Sprintf("Only values drifted (%s). keploy's %s mock matcher reads no keploy.yml noise for %s. If the change is expected, %s.", drifted, r.Protocol, strings.Join(unread, ", "), rerecordRemedy(r))
+		}
 		return fmt.Sprintf("Only values drifted (%s). If the change is expected, %s.", drifted, rerecordRemedy(r))
 	case noiseOK:
 		// Not only value drift, and still in the noise's reach: an HTTP call
@@ -507,9 +549,10 @@ func carriedHeader(d models.MockFieldDiff) bool {
 // matchingNoise is the keploy.yml noise that makes a call that differs in
 // diffs match, as the remedy the hint names (its verb included) by the
 // bucket the matcher reads for each field, and whether there is any.
-//   - A request-body field's value drift is named under requestbody by its
-//     root-relative key: the "body." prefix is the report's, and a request
-//     is never matched with the response body bucket.
+//   - A request-body field's value drift is named under the bucket the
+//     protocol's matcher reads for it (requestBodyNoiseKey) by its
+//     root-relative key: the "body." prefix is the report's. A protocol
+//     whose matcher reads none for it is offered no noise.
 //   - On HTTP, a header whose value drifted, that was recorded and the call
 //     does not carry, or that the call carries and its recording does not
 //     (a cause only under the proven switch: causes), is named under header
@@ -522,24 +565,35 @@ func carriedHeader(d models.MockFieldDiff) bool {
 //     (models.FieldShape writes it otherwise): the miss's sanitizer would
 //     not shape it in the noise's example, and a name that holds a value
 //     differs call by call.
-//   - Elsewhere, a value drift outside the request body is named as
-//     test.globalNoise when no request-body field drifted.
+//   - Outside HTTP, nothing but a request-body field is in a bucket's
+//     reach: no other protocol's matcher reads keploy.yml's noise for any
+//     other field but gRPC's and HTTP/2's for their headers, and neither
+//     reports a header's diff.
 //
 // A field the parser named WithoutNoise is in no bucket's reach. A field it
-// named WithGuarded is already declared with patterns, so its entry is to be
-// changed to an empty list rather than added. A call with any field out of
-// every bucket's reach is offered no noise: noise would leave that field's
-// difference, so recording again is the only remedy that makes the call
-// match.
+// named WithGuarded or WithPatternMisses is already declared with patterns,
+// so its patterns are to be widened to match the value outside them
+// (widenRemedy), never the field added or its entry emptied: an entry with
+// no patterns would stop the field being compared at all. A pattern matches
+// no absent value, so such a field missing on a side is in no bucket's
+// reach. A call with any field out of every bucket's reach is offered no
+// noise: noise would leave that field's difference, so recording again is
+// the only remedy that makes the call match.
 func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) (string, bool) {
 	isHTTP := protocol == ProtocolHTTP
-	unreachable, guarded := fieldSet(n.unreachable), fieldSet(n.guarded)
+	bodyKey := requestBodyNoiseKey(protocol)
+	unreachable := fieldSet(n.unreachable)
+	guarded := make(map[string]PatternMiss, len(n.guarded))
+	for _, g := range n.guarded {
+		if _, seen := guarded[fieldKey(g.Path)]; !seen {
+			guarded[fieldKey(g.Path)] = g
+		}
+	}
 	type bucket struct {
-		add, change []string
-		named       map[string]bool
+		add, widen []string
+		named      map[string]bool
 	}
 	body, header := bucket{named: map[string]bool{}}, bucket{named: map[string]bool{}}
-	other := false
 	for _, d := range diffs {
 		if unreachable[fieldKey(d.Path)] {
 			return "", false
@@ -548,30 +602,31 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 		key, isBody := strings.CutPrefix(d.Path, "body.")
 		var b *bucket
 		switch {
-		case isBody && d.Kind == models.DiffKindValueChanged:
+		case isBody && bodyKey != "" && d.Kind == models.DiffKindValueChanged:
 			b = &body
 		case isHTTP && isHeader && !authorizationHeader(name) && models.FieldShape(d.Path) == d.Path &&
 			(d.Kind == models.DiffKindValueChanged || d.Kind == models.DiffKindMissingInLive || d.Kind == models.DiffKindMissingInMock):
 			key, b = strings.ToLower(name), &header
-		case !isHTTP && d.Kind == models.DiffKindValueChanged:
-			other = true
-			continue
 		default:
+			return "", false
+		}
+		g, isGuarded := guarded[fieldKey(d.Path)]
+		if isGuarded && d.Kind != models.DiffKindValueChanged {
 			return "", false
 		}
 		if b.named[key] {
 			continue
 		}
 		b.named[key] = true
-		if guarded[fieldKey(d.Path)] {
-			b.change = append(b.change, key)
+		if isGuarded {
+			b.widen = append(b.widen, widenRemedy(key, g))
 		} else {
 			b.add = append(b.add, key)
 		}
 	}
 	var add, remedy []string
 	if len(body.add) > 0 {
-		add = append(add, fmt.Sprintf("the request-body fields under test.globalNoise.global.requestbody with root-relative keys (e.g. requestbody: {%s: []})", strings.Join(body.add, ": [], ")))
+		add = append(add, fmt.Sprintf("the request-body fields under test.globalNoise.global.%[1]s with root-relative keys (e.g. %[1]s: {%[2]s: []})", bodyKey, strings.Join(body.add, ": [], ")))
 	}
 	if len(header.add) > 0 {
 		add = append(add, fmt.Sprintf("the headers under test.globalNoise.global.header (e.g. header: {%s: []})", strings.Join(header.add, ": [], ")))
@@ -579,16 +634,63 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 	if len(add) > 0 {
 		remedy = append(remedy, "add "+strings.Join(add, " and "))
 	}
-	if len(body.change) > 0 {
-		remedy = append(remedy, fmt.Sprintf("change the request-body fields' entries under test.globalNoise.global.requestbody to empty lists (e.g. requestbody: {%s: []})", strings.Join(body.change, ": [], ")))
+	if len(body.widen) > 0 {
+		remedy = append(remedy, fmt.Sprintf("widen the patterns of keploy.yml's test.globalNoise %s entries for %s", bodyKey, strings.Join(body.widen, " and for ")))
 	}
-	if len(header.change) > 0 {
-		remedy = append(remedy, fmt.Sprintf("change the headers' entries under test.globalNoise.global.header to empty lists (e.g. header: {%s: []})", strings.Join(header.change, ": [], ")))
-	}
-	if len(remedy) == 0 && other {
-		remedy = append(remedy, "add them to the matching noise (test.globalNoise)")
+	if len(header.widen) > 0 {
+		remedy = append(remedy, "widen the patterns of keploy.yml's test.globalNoise header entries for "+strings.Join(header.widen, " and for "))
 	}
 	return strings.Join(remedy, " and "), len(remedy) > 0
+}
+
+// widenRemedy is how the hint names the entry for key whose patterns g
+// says miss a side's value, and the value they are to match: the patterns
+// and that value's shape where the parser named them (WithPatternMisses),
+// else both values (WithGuarded).
+func widenRemedy(key string, g PatternMiss) string {
+	if len(g.Patterns) == 0 || g.Side == "" || g.Value == "" {
+		return key + " so they match the recorded and the live value"
+	}
+	quoted := make([]string, len(g.Patterns))
+	for i, p := range g.Patterns {
+		quoted[i] = strconv.Quote(p)
+	}
+	return fmt.Sprintf("%s (%s) so one matches the %s value (%s)", key, strings.Join(quoted, ", "), g.Side, g.Value)
+}
+
+// requestBodyNoiseKey is the keploy.yml test.globalNoise bucket a
+// protocol's mock matcher reads for a request-body field, "" for a protocol
+// whose matcher reads none: requestbody for the HTTP, MySQL, MongoDB and
+// HBase matchers, and body for Pulsar's message payload. No other
+// protocol's matcher reads keploy.yml's noise for a body field.
+func requestBodyNoiseKey(protocol string) string {
+	switch protocol {
+	case ProtocolHTTP, ProtocolMySQL, ProtocolMongo, ProtocolHBase:
+		return "requestbody"
+	case ProtocolPulsar:
+		return "body"
+	}
+	return ""
+}
+
+// unreadFields are the paths of diffs, of a call of protocol, that its mock
+// matcher reads no keploy.yml noise for (matchingNoise): outside HTTP, the
+// request body or a field of it where requestBodyNoiseKey is "", and any
+// field that is neither of those nor a header. A header is not named:
+// gRPC's and HTTP/2's matchers read header noise.
+func unreadFields(protocol string, diffs []models.MockFieldDiff) []string {
+	if protocol == "" || protocol == ProtocolHTTP {
+		return nil
+	}
+	bodyRead := requestBodyNoiseKey(protocol) != ""
+	var out []string
+	for _, d := range diffs {
+		isBody := d.Path == "body" || strings.HasPrefix(d.Path, "body.")
+		if !strings.HasPrefix(d.Path, "header.") && !(isBody && bodyRead) {
+			out = append(out, d.Path)
+		}
+	}
+	return out
 }
 
 // authorizationHeader reports whether a header's report name (its path less
