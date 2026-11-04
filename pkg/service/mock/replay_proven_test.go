@@ -830,6 +830,40 @@ func TestTheReplayPushesACallMovedOutOfAKeyedTestUnderItsKey(t *testing.T) {
 	require.Contains(t, instr.pool["b"], "mock-1")
 }
 
+// Under the switch the replay hands the agent, with the worker scope, the
+// test each of its recordings trails (mappings' worker: trails:): only a
+// name the scope serves, and only a test of the set. A trail on a worker:
+// name a test lists, or naming a test the set does not have, trails none.
+func TestTheReplayPushesTheTestEachWorkerRecordingTrails(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\n    - id: o::TestB\n      dir: o\n      mocks:\n        - name: mock-1\nworker:\n    - name: mock-3\n      trails: o::TestA\n    - name: mock-2\n      trails: o::TestGone\n    - name: mock-0\n      trails: o::TestB\n    - name: mock-4\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-1", "mock-2", "mock-3", "mock-4"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, map[string][]string{models.PoolKeyNone: {"mock-3", "mock-2", "mock-4"}}, instr.worker)
+	require.Equal(t, map[string]string{"mock-3": "o::TestA"}, instr.trails,
+		"mock-2's trail names no test of the set, mock-0 is TestA's own, mock-4 trails none")
+}
+
+// workerTrails reads a trail only off an entry that names one: a set whose
+// table holds a test with an empty ID trails none to it.
+func TestWorkerTrailsReadsOnlyAnEntryThatNamesATest(t *testing.T) {
+	mp := &models.Mapping{Worker: []models.MockEntry{{Name: "mock-1"}, {Name: "mock-2", Trails: "o::TestA"}, {Name: "mock-3", Trails: "o::TestA"}}}
+	worker := map[string][]string{models.PoolKeyNone: {"mock-1", "mock-2", "mock-3"}}
+	require.Equal(t, map[string]string{"mock-2": "o::TestA", "mock-3": "o::TestA"}, workerTrails(mp, worker, map[string][]string{"": {}, "o::TestA": {}}))
+	require.Nil(t, workerTrails(mp, worker, map[string][]string{"o::TestB": {}}), "a trail naming no test of the set trails none")
+	require.Nil(t, workerTrails(nil, worker, map[string][]string{"o::TestA": {}}))
+}
+
 // Under the switch the replay hands the agent, with the table, the recorded
 // window of every test of the set from its mappings (keploy test's staging
 // sends them from its test cases): the learn step then reads another test's

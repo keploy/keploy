@@ -432,6 +432,13 @@ type ScopeTableReq struct {
 	// no slice of its key holds is not served. Absent from an older CLI:
 	// worker: entries then answer between tests only, as the pool's.
 	Worker map[string][]string `json:"worker,omitempty"`
+	// Trails is, under the proven switch, the test each worker-scope
+	// recording trails (MockEntry.Trails), by the recording's name: only
+	// names Worker holds, each naming a test of Mappings. The learn step
+	// reads the places that test's own list left the run as such a call's
+	// own (learn.Trail). Absent when no entry trails a test, and from an
+	// older CLI: every call then reads only its own test's places.
+	Trails map[string]string `json:"trails,omitempty"`
 	// RepeatReads is, under the proven switch, each test's repeated reads
 	// by test ID, as whatever names them for the replay named them
 	// (mock.RegisterRepeatReadNamer): recordings of one read the test made

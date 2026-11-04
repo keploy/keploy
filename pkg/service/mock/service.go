@@ -143,13 +143,14 @@ type SetPusher interface {
 // window of every test of the set (models.ScopeTableReq.Windows), each
 // key's worker scope (models.ScopeTableReq.Worker), the names of it that
 // are the reads of tests the replay's gate skips, each with the skipped test
-// that lists it (models.ScopeTableReq.SkippedReads), the values each test
+// that lists it (models.ScopeTableReq.SkippedReads), the test each worker
+// recording trails (models.ScopeTableReq.Trails), the values each test
 // gave when it was recorded (models.ScopeTableReq.Given), each test's
 // repeated reads (models.ScopeTableReq.RepeatReads) and the names of each
 // test's list keploy's judging marked served, not required
 // (models.ScopeTableReq.NotRequired).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error
+	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error
 }
 
 type MappingReader interface {

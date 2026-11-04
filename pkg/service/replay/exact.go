@@ -498,7 +498,7 @@ func returnStaleMoves(mappings map[string][]models.MockEntry, worker []models.Mo
 			continue
 		}
 		// Back as recorded: no place, no line, no move.
-		e.Place, e.Reason, e.Owner, e.Drift = "", "", "", false
+		e.Place, e.Reason, e.Owner, e.Drift, e.Trails = "", "", "", false, ""
 		outMappings[owner] = insertByRecordedTime(outMappings[owner], e)
 	}
 	return outMappings, outWorker, returned

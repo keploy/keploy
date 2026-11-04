@@ -1326,7 +1326,8 @@ func (m *mockService) matchNoise(name string) models.OutgoingOptions {
 // test lists is the pool's: under the key it was recorded with (mappings'
 // startup: or worker:), else models.PoolKeyNone. Those worker: lists are
 // each key's worker scope too, which answers in a test's window as well,
-// each at most once, and is required of no test. A mapping that cannot be
+// each at most once, and is required of no test; with the test each of them
+// trails (workerTrails). A mapping that cannot be
 // read, or that names a mock the recording does not have, refuses, and so
 // does an agent that refuses the table: nothing is served from a whole pool
 // instead. The values each test gave when it was recorded go in the same
@@ -1400,7 +1401,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, windows, recordedGivens(mp), repeats, notRequired(mappings, table)); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -1789,6 +1790,33 @@ func readOnly(mk *models.Mock) bool {
 		return true
 	}
 	return false
+}
+
+// workerTrails is, by name, the test each recording of the worker scope
+// trails (models.MockEntry.Trails): only a name worker serves, and only a
+// test of table, the set's; a trail naming any other test trails none. nil
+// when no entry trails one.
+func workerTrails(mp *models.Mapping, worker map[string][]string, table map[string][]string) map[string]string {
+	if mp == nil {
+		return nil
+	}
+	served := map[string]bool{}
+	for _, names := range worker {
+		for _, n := range names {
+			served[n] = true
+		}
+	}
+	var out map[string]string
+	for _, e := range mp.Worker {
+		if _, ok := table[e.Trails]; e.Trails == "" || !ok || !served[e.Name] {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[e.Name] = e.Trails
+	}
+	return out
 }
 
 // countNames is how many names slices hold.

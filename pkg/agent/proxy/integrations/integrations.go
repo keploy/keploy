@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
@@ -1504,6 +1505,26 @@ func InPool(db MockMemDb, m *models.Mock) (pool, known bool) {
 		return false, false
 	}
 	return p.InPool(m)
+}
+
+// TrailedTests is an optional MockMemDb capability under the proven switch:
+// the test a worker-scope recording trails (models.MockEntry.Trails), with
+// the recordings of that test's own list, by keploy mock replay's scope
+// table (models.ScopeTableReq.Trails and Mappings). A learn step reads the
+// call that recording answers with it (learn.Input.Trails). The zero Trail
+// where the recording trails no test, and from a store that cannot tell.
+type TrailedTests interface {
+	TrailOf(mock string) learn.Trail
+}
+
+// TrailOf is the test the recording named mock trails by db
+// (TrailedTests); the zero Trail for a db that cannot tell.
+func TrailOf(db MockMemDb, mock string) learn.Trail {
+	t, ok := db.(TrailedTests)
+	if !ok {
+		return learn.Trail{}
+	}
+	return t.TrailOf(mock)
 }
 
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of

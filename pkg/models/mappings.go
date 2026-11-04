@@ -85,6 +85,20 @@ type MockEntry struct {
 	// Owner running beside it, as judging kept it. Read and kept by each
 	// rewrite, whatever the switch.
 	Drift bool `json:"drift,omitempty" yaml:"drift,omitempty" bson:"drift,omitempty"`
+	// Trails is, on a worker-scope entry record's judging moved out of a
+	// test's list (MappingDb.MoveToWorker, under the proven switch), the ID
+	// of the earlier test whose call the entry trails: the application
+	// made it for that test once it had answered it (a clean-up it runs in
+	// the background, such as deleting what the test made), so its request
+	// carries a value that test's own call sent. Judging writes it only on
+	// proof, and the entry's Reason says which proof held. Under the switch
+	// keploy mock replay tells the agent (models.ScopeTableReq.Trails), and
+	// the learn step reads the places that test's own list left the run as
+	// the call's own (learn.Trail): only that test's, every other test's
+	// stays outside the call's scope. Empty on every other entry, and an
+	// entry given back to its Owner drops it. Read and kept by each rewrite,
+	// whatever the switch.
+	Trails string `json:"trails,omitempty" yaml:"trails,omitempty" bson:"trails,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy's
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's

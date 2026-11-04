@@ -338,6 +338,18 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// The test each worker recording trails, with the worker scope.
+		// Every table says it, an empty one too. An agent that cannot learn
+		// by it refuses a table that has one: the CLI judges the calls on it.
+		if ts, ok := a.svc.(scopeTrailsSetter); ok {
+			if err := ts.SetScopeTrails(r.Context(), req.Trails); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Trails) > 0 {
+			http.Error(w, "this keploy agent cannot learn a worker: call that trails an earlier test", http.StatusNotImplemented)
+			return
+		}
 		// The recordings keploy's judging marked served, not required, by test, before
 		// the pool is served. Every table says it, an empty one too: a set
 		// never keeps the previous set's. An agent that cannot take them
@@ -388,6 +400,12 @@ type scopeWorkerSetter interface {
 // (models.ScopeTableReq.SkippedReads, proven wire).
 type scopeSkippedReadsSetter interface {
 	SetScopeSkippedReads(ctx context.Context, reads map[string]string) error
+}
+
+// scopeTrailsSetter installs the test each worker-scope recording trails
+// for a replay (models.ScopeTableReq.Trails, proven wire).
+type scopeTrailsSetter interface {
+	SetScopeTrails(ctx context.Context, trails map[string]string) error
 }
 
 // scopeNotRequiredSetter installs, by test, the recordings keploy's judging

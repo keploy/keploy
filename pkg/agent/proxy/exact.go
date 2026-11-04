@@ -321,6 +321,10 @@ type exactState struct {
 	// the tests that list each mock (SetPoolTests): what tells the run of a
 	// test's recording on no clock (teardownBy). nil until a replay sent one.
 	poolTests atomic.Pointer[poolTests]
+	// poolTrails is, of the same scope table, the test each worker-scope
+	// recording trails (SetPoolTrails): what the learn step reads such a
+	// call's scope by (TrailOf). nil until a replay sent one.
+	poolTrails atomic.Pointer[map[string]string]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
 	// cached for one staging generation of the trees (StagingGeneration: an
 	// exact serve does not move it), one scope table, one recording's times
@@ -1748,6 +1752,41 @@ func (m *MockManager) SetPoolTests(table map[string][]string) {
 		}
 	}
 	m.exact.poolTests.Store(t)
+}
+
+// SetPoolTrails installs, of the replay's scope table, the test each
+// worker-scope recording trails (models.ScopeTableReq.Trails: recording name
+// -> test ID; keploy mock replay under the proven switch). The learn step
+// reads it through TrailOf. The agent installs it with the scope table's
+// tests (SetPoolTests); none leaves the set none, never the previous set's.
+func (m *MockManager) SetPoolTrails(trails map[string]string) {
+	cp := make(map[string]string, len(trails))
+	for n, test := range trails {
+		if n != "" {
+			cp[n] = test
+		}
+	}
+	m.exact.poolTrails.Store(&cp)
+}
+
+var _ integrations.TrailedTests = (*MockManager)(nil)
+
+// TrailOf implements integrations.TrailedTests: the test the recording
+// named mock trails (SetPoolTrails) and the mocks that test lists in the
+// same scope table (SetPoolTests). The zero Trail for a recording that
+// trails no test, for a test the table does not list, and until a replay
+// sent both: such a call reads only its own test's places.
+func (m *MockManager) TrailOf(mock string) learn.Trail {
+	trails, tests := m.exact.poolTrails.Load(), m.exact.poolTests.Load()
+	if trails == nil || tests == nil {
+		return learn.Trail{}
+	}
+	test := (*trails)[mock]
+	names, ok := tests.lists[test]
+	if test == "" || !ok {
+		return learn.Trail{}
+	}
+	return learn.Trail{Test: test, Mocks: append([]string(nil), names...)}
 }
 
 // poolTests is a scope table as the teardown bound reads it
