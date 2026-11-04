@@ -36,9 +36,16 @@ import (
 // clock's sampler still wakes on time and the clock runs near wall time:
 // there, work on a stage's own thread reads as progress while it waits to
 // run, and so does the work a stage waits for on another goroutine, a stage
-// of its own.) And the agent counts its beats without progress itself
-// (BootProgress.Quiet), as it saw each of them: the CLI, which reads only the
-// latest report, cannot tell how the beats between two of its reads went.
+// of its own. Waiting to run is the thread's, for a CPU: a stage's goroutine
+// that waits for the Go scheduler instead, preempted or readied and not yet
+// run, has its thread parked in a futex, and a beat that sees only that finds
+// the stage making no progress. A beat is a hundred of the scheduler's 10 ms
+// time slices, so that wait spans one only where the agent's own goroutines
+// keep the scheduler from the stage that long, and the next beat at which it
+// runs starts the count over.) And the agent counts its beats without
+// progress itself (BootProgress.Quiet), as it saw each of them: the CLI,
+// which reads only the latest report, cannot tell how the beats between two
+// of its reads went.
 
 // BootProgress is what an agent reports of its start.
 type BootProgress struct {
