@@ -141,11 +141,11 @@ func exitedApp() *inspectRecorder {
 // inside the 5 s grace): the reads had 2 s budgets, every slow answer was cut,
 // and the app that had exited at once was given the whole grace.
 //
-// Driven through composeAppGrace itself. It used to be driven through
-// composeGraceThenDown, the in-process compose library's wrapper, which also
-// counted the down that followed; the library is gone and the shell-out calls
-// composeAppGrace directly (app.go, cmdCancel's compose branch), so the down
-// is no longer this grace's to make.
+// Driven through composeAppGrace itself, which is what the SHELL-OUT calls
+// (app.go, cmdCancel's compose branch): the down that follows is not this
+// grace's to make. The library path wraps it in composeGraceThenDown, which
+// does also count that down -- a different shape, and not what this row is
+// about.
 func TestTheComposeGraceEndsOnTheDaemonsSlowAnswer(t *testing.T) {
 	core, logs := observer.New(zap.DebugLevel)
 	d := &slowDaemon{Client: exitedApp(), latency: 2200 * time.Millisecond}

@@ -390,7 +390,15 @@ func TestComposeDownSweepsAfterAFailedDown(t *testing.T) {
 // than written to disk. `docker compose -f -` with nothing on stdin fails with
 // "empty compose file", the sweep logs at Debug and returns nothing, and the
 // whole fix is silently a no-op on that path.
+//
+// This is the SHELL-OUT's stdin, so it pins composeLibrarySupported off: with
+// the library linked the sweep reads the runner's Ps instead and there is no
+// child to pipe to. TestSweepUsesTheComposeLibraryForInMemoryProjects
+// (compose_project_sweep_library_test.go) is the library half.
 func TestSweepSendsTheComposeYAMLOnStdinForInMemoryProjects(t *testing.T) {
+	was := composeLibrarySupported
+	composeLibrarySupported = false
+	t.Cleanup(func() { composeLibrarySupported = was })
 	ps := `{"ID":"id-app","Service":"app","State":"exited"}` + "\n"
 	argvLog := stubDockerCLI(t, ps, 1)
 	a := &App{
@@ -694,4 +702,48 @@ func TestSetComposeSourceKeepsTheServiceListWithTheSource(t *testing.T) {
 		t.Fatal("the injected keploy-agent service is not in the set; the service list was captured " +
 			"before ModifyComposeForAgent")
 	}
+}
+
+// fakeComposeStack is a composeStack that answers from canned data, so the
+// in-memory compose path keeps unit coverage without a docker daemon.
+type fakeComposeStack struct {
+	ps       []docker.ServiceState
+	psCalls  int
+	downCall int
+	upErr    error
+	// upBlocksUntil, when non-nil, makes Up block until it is closed or the
+	// context ends — the shape a foreground `up` has.
+	upBlocksUntil chan struct{}
+}
+
+func (f *fakeComposeStack) ProjectName() string { return "fake" }
+
+func (f *fakeComposeStack) Up(ctx context.Context, _ docker.ComposeUpOptions, _, _ io.Writer) error {
+	if f.upBlocksUntil != nil {
+		select {
+		case <-f.upBlocksUntil:
+		case <-ctx.Done():
+		}
+	}
+	return f.upErr
+}
+
+func (f *fakeComposeStack) Down(context.Context, time.Duration) error {
+	f.downCall++
+	return nil
+}
+
+func (f *fakeComposeStack) Ps(context.Context) ([]docker.ServiceState, error) {
+	f.psCalls++
+	return f.ps, nil
+}
+
+func (f *fakeComposeStack) ContainerIDsForService(_ context.Context, service string) ([]string, error) {
+	var ids []string
+	for _, s := range f.ps {
+		if s.Service == service {
+			ids = append(ids, s.ID)
+		}
+	}
+	return ids, nil
 }

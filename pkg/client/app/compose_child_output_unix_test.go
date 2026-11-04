@@ -21,6 +21,9 @@ import (
 // row fresh tails.
 func shellOutPath(t *testing.T) {
 	t.Helper()
+	was := composeLibrarySupported
+	composeLibrarySupported = false
+	t.Cleanup(func() { composeLibrarySupported = was })
 	docker.ForgetAppOutput()
 	t.Cleanup(docker.ForgetAppOutput)
 	unsetEnvVars(t, "COMPOSE_ENV_FILES", "COMPOSE_DISABLE_ENV_FILE")

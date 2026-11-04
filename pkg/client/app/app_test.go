@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -674,36 +673,33 @@ func childStackOf(t *testing.T, project string) *docker.ComposeChildOutput {
 	return out
 }
 
-// unsetEnvVars removes keys for one row and restores them after, which
-// t.Setenv alone cannot do: it can only set a key to "", and compose tells an
-// unset variable apart from an empty one.
-//
-// It lived in compose_library_test.go, which went with the library; the
-// compose-child output rows still need it to drive the project-name
-// precedence with nothing inherited from the runner's environment.
-func unsetEnvVars(t *testing.T, keys ...string) {
-	t.Helper()
-	for _, k := range keys {
-		t.Setenv(k, "")
-		if err := os.Unsetenv(k); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
 // noDaemon is a docker client every call to panics on: its interface is nil.
 type noDaemon struct{ docker.Client }
 
 // ownStack gives each row fresh tails, for the rows about keploy's OWN compose
-// stack.
+// stack on the SHELL-OUT path, where the tails come from the compose child
+// (composeChildTee). It pins composeLibrarySupported OFF, so these rows take
+// the shell-out whether or not the build sets -tags composelib.
 //
-// It used to also force composeLibrarySupported on, so the row took the
-// in-process library's decisions whatever the build tags were. The library is
-// gone and the shell-out is the only path, so there is nothing left to force:
-// what these rows assert -- recentAppLogs reading the attach tail rather than
-// asking the daemon -- is now what every build does.
+// libraryPath is the counterpart that pins it ON. Between them the two paths
+// are both covered in a single build, which is what lets OSS CI's plain run
+// and its composelib run assert the same set.
 func ownStack(t *testing.T) {
 	t.Helper()
+	was := composeLibrarySupported
+	composeLibrarySupported = false
+	t.Cleanup(func() { composeLibrarySupported = was })
+	docker.ForgetAppOutput()
+	t.Cleanup(docker.ForgetAppOutput)
+}
+
+// libraryPath has recentAppLogs take the library path's decisions in this
+// build, -tags composelib or not, and gives each row fresh tails.
+func libraryPath(t *testing.T) {
+	t.Helper()
+	was := composeLibrarySupported
+	composeLibrarySupported = true
+	t.Cleanup(func() { composeLibrarySupported = was })
 	docker.ForgetAppOutput()
 	t.Cleanup(docker.ForgetAppOutput)
 }
@@ -738,6 +734,43 @@ func TestRecentAppLogsReadsTheAttachTailForKeploysOwnStack(t *testing.T) {
 		t.Fatalf("with no stack built, recentAppLogs = %q; want nothing", got)
 	}
 	a.composeChildOut.Store(stack)
+	if got, want := a.recentAppLogs(context.Background()), "listening on :8080\npanic: DB_PASSWORD=***"; got != want {
+		t.Fatalf("recentAppLogs = %q, want %q", got, want)
+	}
+
+	a.composeService = ""
+	a.container = "app-1"
+	if got, want := a.RecentLogs(context.Background()), "listening on :8080\npanic: DB_PASSWORD=***"; got != want {
+		t.Fatalf("with no compose service: recentAppLogs = %q, want the tail of the named container, %q", got, want)
+	}
+}
+
+// The same question on the LIBRARY path: recentAppLogs reads the app service's
+// tail in the RUNNER's project, which the library knows without asking the
+// daemon (composeOutputProject's library branch). libraryPath forces
+// composeLibrarySupported on, so this runs in the untagged build too — without
+// it the branch would go uncovered on every PR that does not set the tag.
+func TestRecentAppLogsReadsTheAttachTailOnTheLibraryPath(t *testing.T) {
+	libraryPath(t)
+	stack := &fakeComposeStack{}
+	docker.RecordAppOutput(stack.ProjectName(), "db-1", "db", "db line")
+	docker.RecordAppOutput(stack.ProjectName(), "app-1", "app", "listening on :8080")
+	docker.RecordAppOutput(stack.ProjectName(), "app-1", "app", "panic: DB_PASSWORD=***")
+	docker.RecordAppOutput("another-project", "app-1", "app", "another project's app")
+	docker.RecordAppOutput("", "app-1", "app", "a tail of no project")
+
+	a := &App{
+		logger:         zap.NewNop(),
+		kind:           utils.DockerCompose,
+		composeContent: []byte("services: {app: {image: app}}"),
+		composeService: "app",
+		container:      "app",
+		docker:         noDaemon{},
+	}
+	if got := a.recentAppLogs(context.Background()); got != "" {
+		t.Fatalf("with no stack built, recentAppLogs = %q; want nothing", got)
+	}
+	a.composeRunnerVal = stack
 	if got, want := a.recentAppLogs(context.Background()), "listening on :8080\npanic: DB_PASSWORD=***"; got != want {
 		t.Fatalf("recentAppLogs = %q, want %q", got, want)
 	}

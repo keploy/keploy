@@ -10,9 +10,9 @@ import (
 //
 // Ported from apptail_test.go's TestServiceOfReadsComposeNamesBackwards, which
 // asked the same question of the compose-go project the in-process library
-// loaded. The library is gone; the question is not, because compose still
-// prints `<container> | line` and the tail still has to say which service that
-// is.
+// loads. This file's loader answers it for the shell-out's child output -- a
+// separate reader, because compose still prints `<container> | line` and the
+// tail still has to say which service that is.
 //
 // The cases that matter are the ambiguous ones. "app-1" is BOTH the default
 // name of service "app" replica 1 and a service in its own right, and an
