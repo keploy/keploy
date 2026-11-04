@@ -553,7 +553,9 @@ func TestV2_TheMergeWaitsForAChunkOnItsStreamItsReaderHasNotHandedOn(t *testing.
 			r.order.accept(reqs[2], int64(len(reqs[2].Bytes)))
 			r.put(resps[1])
 			r.put(resps[2])
-			time.Sleep(100 * time.Millisecond) // room for a merge that does not wait to hand the answers on
+			r.awaitWaiting(0)
+			r.awaitWaiting(1)
+			r.awaitMergeWaits()
 			r.push(reqs[1])
 			r.push(reqs[2])
 			got := r.end()
@@ -568,15 +570,38 @@ func TestV2_TheMergeWaitsForAChunkOnItsStreamItsReaderHasNotHandedOn(t *testing.
 }
 
 // An answer goes on as soon as nothing captured before it can still come, not
-// at the next request or the connection's end: once the relay says the client
-// chunk numbered before it will never reach its stream (refused), the second
-// exchange's mock is recorded with the streams still open, and so is one whose
-// chunks have no number (a producer that does not number them, merged as
-// read), and one recorded on a session with no capture order (Session.Order
-// unset: merged as read). A mock recorded late lands in the window of a test
-// that did not make its call.
+// at the next request or the connection's end: the connection's first
+// exchange is recorded once its answer is on its stream; once the relay says
+// the client chunk numbered before it will never reach its stream (refused),
+// the second exchange's mock is recorded with the streams still open; and so
+// is one whose chunks have no number (a producer that does not number them,
+// merged as read), and one recorded on a session with no capture order
+// (Session.Order unset: merged as read). A mock recorded late lands in the
+// window of a test that did not make its call.
 func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 	for _, viaSyncMock := range []bool{true, false} {
+		// The connection's first exchange: the merge knows the client's
+		// reader is through the first chunk (its through), so the answer
+		// waits on nothing, and the mock is recorded before the next
+		// request. Were that not known, the answer would wait for the
+		// client's next chunk (seconds away on a pooled connection) or its
+		// end.
+		t.Run(fmt.Sprint("first exchange/viaSyncMock=", viaSyncMock), func(t *testing.T) {
+			reqs, resps := exchangeChunks(2)
+			r := startRecording(t, []fakeconn.Chunk{reqs[0], resps[0], reqs[1], resps[1]}, viaSyncMock)
+			r.put(reqs[0])
+			r.put(resps[0])
+			ok := r.recorded("req0|resp0", 5*time.Second)
+			r.put(reqs[1])
+			r.put(resps[1])
+			got := r.end()
+			if !ok {
+				t.Fatalf("req0's mock was not recorded before the next request, its answer on its stream (recorded %q by the end)", pairsOf(got.recorded))
+			}
+			if p := pairsOf(got.recorded); strings.Join(p, " ") != "req0|resp0 req1|resp1" || got.leftOut != 0 {
+				t.Fatalf("recorded %q and left out %d; want both exchanges", p, got.leftOut)
+			}
+		})
 		t.Run(fmt.Sprint("refused/viaSyncMock=", viaSyncMock), func(t *testing.T) {
 			reqs, resps := exchangeChunks(2)
 			refused := fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("refused"), ConnSeq: 4}

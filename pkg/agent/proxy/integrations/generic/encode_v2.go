@@ -204,6 +204,7 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	if sess != nil && sess.Ctx != nil {
 		ctx = sess.Ctx
 	}
+	// emit hands on the exchanges a preambleHold held (handOn).
 	emit := func(m *models.Mock) { emitV2(sess, logger, m) }
 	// leaveOutTail reports answer chunks the parser does not record as left
 	// out: chunks the server sent after the first chunk of an answer, which
@@ -214,9 +215,14 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// dropped with nothing left out or said, and a test case over an answer
 	// cut to its first chunk was saved as if it were whole.
 	//
-	// Chunks after an exchange left out (flushMock) are the rest of it,
-	// counted and spanned with it already: reported again, they would count
-	// a mock twice, and span time its test cases need not span.
+	// Chunks after an exchange left out are the rest of it, counted and
+	// spanned with it already: reported again, they would count a mock
+	// twice, and span time its test cases need not span. That holds for an
+	// exchange flushMock leaves out (the capture's incomplete flag) and for
+	// one the session leaves out as flushMock hands it on (emitV2: refused,
+	// or the channel full, at the stop). A held exchange (preambleHold) the
+	// session leaves out as the hold hands it on is counted apart from its
+	// tail: counted once more, its span only wider (fail-closed).
 	var flushedLeftOut bool
 	leaveOutTail := func(n int, from, to time.Time) {
 		if n == 0 || flushedLeftOut {
@@ -332,8 +338,9 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		}
 		// The loop goes on after the recording's stop, to the streams' end,
 		// and so does what it records: emitV2 hands every exchange read
-		// whole to the session, or leaves it out with its reason.
-		emit(mock)
+		// whole to the session, or leaves it out with its reason, and then
+		// its tail is the rest of it.
+		flushedLeftOut = emitV2(sess, logger, mock)
 		reset()
 		return "", false
 	}
@@ -746,18 +753,19 @@ const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange r
 // it. Before, every exchange recorded after the stop was refused, with a
 // Debug line only. A mock refused all the same (the context ended between
 // this check and EmitMock's own) is left out with its reason, counted and
-// spanned, never dropped with nothing said.
-func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) {
-	if c := sess.Ctx; c != nil && c.Err() != nil {
-		_ = sess.EmitMockOnShutdown(m)
-		return
-	}
-	if err := sess.EmitMock(m); err != nil {
+// spanned, never dropped with nothing said. It returns whether m was left
+// out, by the session (EmitMockOutcome) or here.
+func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) (leftOut bool) {
+	atStop := sess.Ctx != nil && sess.Ctx.Err() != nil
+	leftOut, err := sess.EmitMockOutcome(m, atStop)
+	if err != nil {
 		if logger != nil {
 			logger.Debug("generic v2: the session refused a mock as its context ended", zap.Error(err))
 		}
 		sess.ReportLeftOut(m, leftOutRefusedAtStop)
+		return true
 	}
+	return leftOut
 }
 
 // readStream pumps Chunks from one FakeConn onto its direction's events, out,

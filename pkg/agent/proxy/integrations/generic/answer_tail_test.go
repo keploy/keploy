@@ -2,6 +2,7 @@ package generic
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -296,6 +297,105 @@ func TestV2_TheTailOfTheAnswerBeforeASplitIsLeftOut(t *testing.T) {
 	}
 	if over, _ := spans.Overlaps(tail.Add(time.Millisecond), tail.Add(time.Hour)); over {
 		t.Fatal("the span is wider than the tail")
+	}
+}
+
+// The tail of the answer before a split, reaching the parser after the
+// request the split carried forward, is left out from when the relay read it,
+// not from when its write returned: the relay stamps a write's return as late
+// as its goroutine runs, so under load it can fall after the test that waited
+// on the chunk has ended, and that test would be saved as whole.
+func TestV2_TheTailOfTheAnswerBeforeASplitSpansFromItsRead(t *testing.T) {
+	t.Parallel()
+
+	read := time.Unix(1003, 0)
+	written := read.Add(500 * time.Millisecond)
+	tail := destChunk("hello-tail", 3, written)
+	tail.readAt = read
+	spans := &syncMock.Spans{}
+	got, counted := pairCounted(t, spans, false, []chunkEvent{
+		clientChunk("HELLO", 1, time.Unix(1000, 0)),
+		clientChunk("PING", 4, time.Unix(1004, 0)),
+		destChunk("hello-reply", 2, time.Unix(1002, 0)),
+		tail,
+		destChunk("pong", 5, time.Unix(1005, 0)),
+	})
+	if len(got) != 2 || counted != 1 {
+		t.Fatalf("recorded %d mock(s) and left out %d, want both exchanges and the tail", len(got), counted)
+	}
+	if over, _ := spans.Overlaps(read, read); !over {
+		t.Fatal("a test case over the tail's read is not left out: the span starts at its write")
+	}
+	if over, _ := spans.Overlaps(written, written); !over {
+		t.Fatal("a test case over the tail's write is not left out")
+	}
+}
+
+// endsAsHandedOver is an ended context that reads as live (Err nil) until
+// ended is set: set as the session is handed a mock (Session.OnMockRecorded),
+// the context ends between emitV2's look at it and EmitMock's own, and the
+// session refuses the mock.
+type endsAsHandedOver struct {
+	context.Context
+	ended atomic.Bool
+}
+
+func (c *endsAsHandedOver) Err() error {
+	if !c.ended.Load() {
+		return nil
+	}
+	return c.Context.Err()
+}
+
+// An exchange the session leaves out as the parser hands it on at the stop
+// (the channel full, or the mock refused as the context ends) is counted once,
+// over its own span: the answer chunks after it are the rest of it. Before,
+// its tail was counted as a second mock left out.
+func TestV2_AnExchangeLeftOutAsItIsHandedOnIsCountedOnceWithItsTail(t *testing.T) {
+	for _, c := range []struct {
+		name                 string
+		refused, viaSyncMock bool
+	}{
+		{name: "channel full at the stop"},
+		{name: "refused at the stop", refused: true},
+		{name: "refused at the stop/viaSyncMock", refused: true, viaSyncMock: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ended, cancel := context.WithCancel(context.Background())
+			cancel()
+			mgr := syncMock.New(nil)
+			spans := &syncMock.Spans{}
+			logger := zaptest.NewLogger(t)
+			// No room and no reader: a mock the session hands on would be
+			// counted as left out at the stop, and wait on nothing before it.
+			sess := &supervisor.Session{Mocks: make(chan *models.Mock), Logger: logger, Ctx: ended,
+				ClientConnID: "test-client-conn", Mgr: mgr, Orphans: spans, RouteMocksViaSyncMock: c.viaSyncMock}
+			if c.refused {
+				live := &endsAsHandedOver{Context: ended}
+				sess.Ctx = live
+				sess.OnMockRecorded = func(*models.Mock) { live.ended.Store(true) }
+			}
+			asked := time.Unix(1000, 0)
+			evs := []chunkEvent{
+				clientChunk("q0", 1, asked),
+				destChunk("r0", 2, time.Unix(1001, 0)),
+				destChunk("r0-tail", 3, time.Unix(1002, 0)),
+			}
+			events := make(chan chunkEvent, len(evs))
+			for _, ev := range evs {
+				events <- ev
+			}
+			close(events)
+			if err := pairChunkEvents(events, sess, logger); err != nil {
+				t.Fatalf("pairChunkEvents returned error: %v", err)
+			}
+			if n := mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("the manager counts %d mock(s) left out, want the exchange once, its tail with it", n)
+			}
+			if over, _ := spans.Overlaps(asked, asked); !over {
+				t.Fatal("a test case over the exchange is not left out")
+			}
+		})
 	}
 }
 

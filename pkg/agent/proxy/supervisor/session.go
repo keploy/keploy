@@ -936,8 +936,13 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 // matches the defensive shape of RecordSession call sites. A nil m is
 // a programming error and treated as a no-op returning nil.
 func (s *Session) EmitMock(m *models.Mock) error {
-	return s.emitMockCore(m, false)
+	_, err := s.emitMockCore(m, false)
+	return err
 }
+
+// LeftOutChannelFullAtStop is the reason EmitMockOnShutdown leaves out a
+// mock that found the session's channel (Session.Mocks) full.
+const LeftOutChannelFullAtStop = "the recording stopped with the session's mock channel full as this mock was handed over"
 
 // EmitMockOnShutdown is the shutdown-time variant of EmitMock used by
 // parsers that have just reconstructed an in-flight invocation from
@@ -965,12 +970,21 @@ func (s *Session) EmitMock(m *models.Mock) error {
 // All other invariants (incomplete-mock gate, ClientConnID
 // propagation, ReqTimestampMock monotonicity, OnMockRecorded hook
 // chain, OnPendingCleared) match EmitMock byte-for-byte.
-// LeftOutChannelFullAtStop is the reason EmitMockOnShutdown leaves out a
-// mock that found the session's channel (Session.Mocks) full.
-const LeftOutChannelFullAtStop = "the recording stopped with the session's mock channel full as this mock was handed over"
-
 func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
-	return s.emitMockCore(m, true)
+	_, err := s.emitMockCore(m, true)
+	return err
+}
+
+// EmitMockOutcome is EmitMock, or EmitMockOnShutdown when shutdown is set,
+// saying also whether the session left m out (ReportLeftOut) instead of
+// handing it on: for the capture's incomplete flag (LeaveOutIfIncomplete), or
+// at shutdown for a full channel (LeftOutChannelFullAtStop). A mock refused
+// (err set) is neither handed on nor left out: what to do with it is the
+// caller's. A parser that reports the rest of an exchange as left out unless
+// the exchange itself was left out asks this, so it counts the exchange
+// once.
+func (s *Session) EmitMockOutcome(m *models.Mock, shutdown bool) (leftOut bool, err error) {
+	return s.emitMockCore(m, shutdown)
 }
 
 // MockHeld tells the session its parser holds a mock it made instead of
@@ -984,9 +998,9 @@ func (s *Session) MockHeld() {
 	}
 }
 
-func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
+func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	if s == nil || m == nil {
-		return nil
+		return false, nil
 	}
 	if s.LeaveOutIfIncomplete(m) {
 		// Left out, and the flag reset, so the next mock in this cycle
@@ -999,7 +1013,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		// would make the hang watchdog fire once the connection goes
 		// idle, a spurious abort after a benign drop (memory pressure,
 		// chunk gate, short write).
-		return nil
+		return true, nil
 	}
 
 	// Propagate the session's ClientConnID onto the mock when the
@@ -1074,7 +1088,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		if !shutdown {
 			if ctx := s.Ctx; ctx != nil {
 				if err := ctx.Err(); err != nil {
-					return err
+					return false, err
 				}
 			}
 		}
@@ -1082,14 +1096,14 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}
-		return nil
+		return false, nil
 	}
 
 	if s.Mocks == nil {
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}
-		return nil
+		return false, nil
 	}
 	ctx := s.Ctx
 	if ctx == nil {
@@ -1099,7 +1113,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}
-		return nil
+		return false, nil
 	}
 	if shutdown {
 		// Non-blocking send: at shutdown the consumer is also
@@ -1115,17 +1129,18 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 			}
 		default:
 			s.ReportLeftOut(m, LeftOutChannelFullAtStop)
+			return true, nil
 		}
-		return nil
+		return false, nil
 	}
 	select {
 	case s.Mocks <- m:
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}
-		return nil
+		return false, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 }
 
