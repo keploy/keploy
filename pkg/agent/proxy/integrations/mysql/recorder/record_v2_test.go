@@ -40,6 +40,14 @@ func postTLSCtxWithStore(store *models.TLSHandshakeStore) context.Context {
 // caller-controlled patience (the late-stash test needs >6s).
 func collectPostTLSMocks(t *testing.T, h *v2Harness, ctx context.Context, want int, patience time.Duration) []*models.Mock {
 	t.Helper()
+	return collectPostTLSMocksSeen(t, h, ctx, want, patience, nil)
+}
+
+// collectPostTLSMocksSeen is collectPostTLSMocks that also calls seen (when
+// non-nil) on each mock as it is received, in order, so a test can check what
+// had already happened when that mock arrived.
+func collectPostTLSMocksSeen(t *testing.T, h *v2Harness, ctx context.Context, want int, patience time.Duration, seen func(i int, m *models.Mock)) []*models.Mock {
+	t.Helper()
 	done := make(chan error, 1)
 	go func() {
 		cctx, cancel := context.WithTimeout(ctx, patience)
@@ -52,6 +60,9 @@ func collectPostTLSMocks(t *testing.T, h *v2Harness, ctx context.Context, want i
 		case m, ok := <-h.mocks:
 			if !ok {
 				t.Fatalf("mocks channel closed early (got %d, want %d)", len(got), want)
+			}
+			if seen != nil {
+				seen(len(got), m)
 			}
 			got = append(got, m)
 			if len(got) == want {
@@ -69,10 +80,18 @@ func collectPostTLSMocks(t *testing.T, h *v2Harness, ctx context.Context, want i
 
 // TestRecordV2_PostTLS_LateStash_StillRecords is the permanent regression test
 // for the 5s cliff: the raw leg's greeting+SSLRequest push lands 6s after the
-// decrypted stream started — past the old PopWait(5s)+fallback(2s) budget that
-// aborted the connection ("no greeting in store" → ECONNREFUSED on the
+// recorder began waiting for it — past the old PopWait(5s)+fallback(2s) budget
+// that aborted the connection ("no greeting in store" → ECONNREFUSED on the
 // fabricated dial → command phase never reached). With the ctx/TTL-bounded
 // wait, lateness within the store TTL must yield a complete recording.
+//
+// The row orders its events, not its clock readings: the push waits for the
+// recorder to block on the queue (postTLSStashWaitHookKey), then lateBy more,
+// and each mock must arrive after the push began. Timing the push from the
+// test's start instead, as the row once did, counted lateness the recorder
+// never waited (a slow start reached the wait late) and judged a mock that came
+// after the push early whenever the test goroutine was descheduled between
+// starting the push timer and reading its own start time.
 //
 // Deliberately not parallel: it must observe the DEFAULT stash-wait bound
 // (other tests in this file shorten it via t.Setenv).
@@ -93,11 +112,29 @@ func TestRecordV2_PostTLS_LateStash_StillRecords(t *testing.T) {
 	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base.Add(20*time.Millisecond))
 	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
 
-	// Raw leg: the stash arrives 6 seconds late — after the old cliff.
+	// Raw leg: the stash arrives 6 seconds after the recorder began waiting
+	// for it — after the old cliff. Nothing is pushed until the recorder is
+	// blocked on the queue, so a recorder that never waits gets no stash and
+	// records nothing.
 	store := models.NewTLSHandshakeStore()
 	const lateBy = 6 * time.Second
+	waiting := make(chan struct{})
+	var waitOnce sync.Once
+	ctx := context.WithValue(postTLSCtxWithStore(store), postTLSStashWaitHookKey{},
+		func() { waitOnce.Do(func() { close(waiting) }) })
+	// pushing closes before the Push, so every mock built from the pushed
+	// entry is received after it is closed.
+	pushing := make(chan struct{})
+	stop := make(chan struct{})
+	defer close(stop)
 	go func() {
+		select {
+		case <-waiting:
+		case <-stop:
+			return
+		}
 		time.Sleep(lateBy)
+		close(pushing)
 		store.Push(models.HandshakeStoreKey("", 3306), models.TLSHandshakeEntry{
 			RespPackets:  [][]byte{handshakeBuf},
 			ReqPackets:   [][]byte{sslReq},
@@ -105,11 +142,13 @@ func TestRecordV2_PostTLS_LateStash_StillRecords(t *testing.T) {
 		})
 	}()
 
-	start := time.Now()
-	got := collectPostTLSMocks(t, h, postTLSCtxWithStore(store), 2, 25*time.Second)
-	if elapsed := time.Since(start); elapsed < lateBy {
-		t.Fatalf("mocks arrived after %v — before the stash was even pushed at %v; the test is not exercising the late path", elapsed, lateBy)
-	}
+	got := collectPostTLSMocksSeen(t, h, ctx, 2, 25*time.Second, func(i int, m *models.Mock) {
+		select {
+		case <-pushing:
+		default:
+			t.Fatalf("mock %d (%q) arrived before the stash was pushed; the test is not exercising the late path", i, m.Name)
+		}
+	})
 
 	cfg := got[0]
 	if cfg.Name != "config" {
