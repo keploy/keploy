@@ -382,8 +382,8 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		if tunnelFollows(method, status) {
 			// The connection is a tunnel from here (RFC 9110 9.3.6), whose
 			// bytes are no HTTP/1 exchange: there is nothing more of it for
-			// this parser to record.
-			logger.Debug("V2 HTTP record: a CONNECT was answered with a tunnel; the connection's recording ends at its head")
+			// this parser to record, and that is said (ReportTunnel).
+			sess.ReportTunnel(requestTarget(finalReq))
 			return nil
 		}
 	}
@@ -529,6 +529,16 @@ func responseFraming(resp []byte, method string) (status int, endsAtClose bool) 
 // the tunnel's bytes (RFC 9110 9.3.6), not its body (RFC 9112 6.3).
 func tunnelFollows(method string, status int) bool {
 	return method == http.MethodConnect && status/100 == 2
+}
+
+// requestTarget is req's request-target, between its request line's first
+// and second space: a CONNECT's is the tunnel's host and port (RFC 9112
+// 3.2.3).
+func requestTarget(req []byte) string {
+	line, _, _ := bytes.Cut(req[emptyLinesBefore(req):], []byte("\n"))
+	_, rest, _ := strings.Cut(strings.TrimSpace(string(line)), " ")
+	target, _, _ := strings.Cut(rest, " ")
+	return target
 }
 
 // closeEnded reports whether a response's read, which ended at the stream's

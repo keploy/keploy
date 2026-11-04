@@ -1121,6 +1121,8 @@ func TestTheLeftOutWarnPromisesOnlyWhatHolds(t *testing.T) {
 		{"short_write", "--debug"},
 		{"http decode error: response read failed: invalid content-length", "--debug"},
 		{LeftOutCloseNotRead, "No setting changes this"},
+		{LeftOutCloseNotRead, "in an observe-only capture, the capture's stream ended without the connection's end marked on it"},
+		{LeftOutCloseNotRead, "an observe-only capture only where it marks the connection's end"},
 	} {
 		next := leftOutNextStep(leftOutClass(leftOutCause(tc.reason)), true)
 		for _, want := range []string{"traffic is unaffected", "not saved yet", "are left out of the recording",
