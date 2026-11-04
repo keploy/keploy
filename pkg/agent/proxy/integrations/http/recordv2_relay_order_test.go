@@ -149,7 +149,7 @@ func (c *relayedConn) startRelay(t *testing.T) {
 			return
 		}
 		c.endHook(dir, func() { mark(dir, reset) })
-	}, ClientEndedBeforeDest: c.sess.MarkClientEndedBeforeDest}, src, dst)
+	}, ClientEndedBeforeDest: c.sess.MarkClientEndedBeforeDest, ClientReadAfterFIN: c.sess.MarkClientReadAfterFIN}, src, dst)
 	c.sess.ClientStream, c.sess.DestStream = r.ClientStream(), r.DestStream()
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopRelay = cancel

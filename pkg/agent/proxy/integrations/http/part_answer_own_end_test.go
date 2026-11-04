@@ -124,3 +124,47 @@ func TestRecordV2Faults_TheUpstreamsEndJudgesWhereTheClientsDoesNot(t *testing.T
 		})
 	}
 }
+
+// A client whose stack took what the upstream sent after its FIN
+// (Session.ClientReadAfterFIN) only half-closed, and still read: its FIN came
+// first, and was in before the upstream's end reached it, but the upstream's
+// end judges the call, whichever end was marked first, unless the relay ended the stream where the client stopped taking it after
+// (Session.EndedWhereClientStopped): then the client's own end does.
+func TestRecordV2Faults_AHalfClosedClientThatReadAfterItsFINIsJudgedByTheUpstream(t *testing.T) {
+	halfClosed := func(s *supervisor.Session) {
+		s.MarkPeerEndedBy(fakeconn.FromClient, false, supervisor.EndMayBeFault)
+		s.MarkClientReadAfterFIN()
+		s.MarkClientEndedBeforeDest()
+	}
+	for _, tc := range []struct {
+		name string
+		mark func(*supervisor.Session)
+		want endsJudged
+	}{
+		{"then the upstream's close", func(s *supervisor.Session) {
+			halfClosed(s)
+			s.MarkPeerEndedBy(fakeconn.FromDest, false, supervisor.EndMayBeFault)
+		}, endsJudged{part: models.FaultTruncate, noneOf: models.FaultEOF}},
+		{"then the upstream's reset", func(s *supervisor.Session) {
+			halfClosed(s)
+			s.MarkPeerEndedBy(fakeconn.FromDest, true, supervisor.EndMayBeFault)
+		}, endsJudged{part: models.FaultReset, noneOf: models.FaultReset}},
+		{"the upstream's close read first", func(s *supervisor.Session) {
+			s.MarkPeerEndedBy(fakeconn.FromDest, false, supervisor.EndMayBeFault)
+			halfClosed(s)
+		}, endsJudged{part: models.FaultTruncate, noneOf: models.FaultEOF}},
+		{"then it stopped taking the stream", func(s *supervisor.Session) {
+			halfClosed(s)
+			s.MarkEndedWhereClientStopped()
+			s.MarkPeerEndedBy(fakeconn.FromDest, false, supervisor.EndMayBeFault)
+		}, endsJudged{part: models.FaultStoppedReading, noneOf: models.FaultTimeout}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &supervisor.Session{}
+			tc.mark(s)
+			if got := judge(s); got != tc.want {
+				t.Errorf("judged %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}

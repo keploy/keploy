@@ -28,7 +28,9 @@ type destEndProbe struct {
 	carried []byte
 	stopped bool
 	before  bool
-	ended   chan struct{}
+	// readAfter: the session says the client read after its FIN.
+	readAfter bool
+	ended     chan struct{}
 }
 
 func (p *destEndProbe) IsV2() bool { return true }
@@ -41,6 +43,7 @@ func (p *destEndProbe) RecordOutgoing(ctx context.Context, s *integrations.Recor
 			p.mu.Lock()
 			p.stopped = s.V2.EndedWhereClientStopped()
 			p.before = s.V2.ClientEndedBeforeDest()
+			p.readAfter = s.V2.ClientReadAfterFIN()
 			p.mu.Unlock()
 			close(p.ended)
 			<-ctx.Done()
@@ -217,6 +220,91 @@ func TestRecordViaSupervisor_TheSessionSaysTheClientEndedBeforeTheDestinationsEn
 			if probe.stopped {
 				t.Fatal("the session says the client stopped taking the stream, though the destination sent nothing after the client's FIN")
 			}
+			if probe.readAfter {
+				t.Fatal("the session says the client read after its FIN, though the destination sent nothing after it")
+			}
 		})
+	}
+}
+
+// What the proxy hands the relay as it records a connection: the relay's word
+// that the client's stack took what the destination sent after the client's
+// FIN is wired to the session (relay.Config.ClientReadAfterFIN, wired to
+// Session.MarkClientReadAfterFIN), which the HTTP recorder reads to judge a
+// half-closed client's call by the destination's end. A client that shuts its
+// sending side down and reads the answer to its end is said to read after its
+// FIN, and not to have stopped taking the stream.
+func TestRecordViaSupervisor_TheSessionSaysAHalfClosedClientReadAfterItsFIN(t *testing.T) {
+	t.Parallel()
+	pair := func() (net.Conn, net.Conn) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = ln.Close() }()
+		got := make(chan net.Conn, 1)
+		go func() { c, _ := ln.Accept(); got <- c }()
+		d, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := <-got
+		if a == nil {
+			t.Fatal("accept failed")
+		}
+		t.Cleanup(func() { _ = d.Close(); _ = a.Close() })
+		return d, a
+	}
+	clientApp, rawSrc := pair()
+	dstConn, destSvc := pair()
+	srcConn := &util.Conn{Conn: rawSrc, Reader: rawSrc, Logger: zap.NewNop()}
+	p := &Proxy{recordBufferCap: 64 * 1024, recordBufferQueueSize: 64, recordBufferStallGrace: 2 * time.Second}
+	probe := &destEndProbe{ended: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), probe, "test",
+			make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2, models.OutgoingOptions{})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	const request, answer = "a request", "the answer"
+	if _, err := clientApp.Write([]byte(request)); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientApp.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = destSvc.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if got, err := io.ReadAll(destSvc); err != nil || string(got) != request {
+		t.Fatalf("the destination read %q, %v, to the client's FIN; want %q", got, err, request)
+	}
+	if _, err := destSvc.Write([]byte(answer)); err != nil {
+		t.Fatal(err)
+	}
+	_ = destSvc.Close()
+	_ = clientApp.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if got, err := io.ReadAll(clientApp); err != nil || string(got) != answer {
+		t.Fatalf("the half-closed client read %q, %v, to the destination's FIN; want %q", got, err, answer)
+	}
+	_ = clientApp.Close()
+	select {
+	case <-probe.ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the parser's destination stream did not end")
+	}
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	if !probe.readAfter {
+		t.Fatal("the session does not say the half-closed client read after its FIN")
+	}
+	if probe.stopped {
+		t.Fatal("the session says the client stopped taking the stream, though it read the answer to its end")
+	}
+	if string(probe.carried) != answer {
+		t.Fatalf("the parser was given %q, want the answer %q", probe.carried, answer)
 	}
 }

@@ -100,8 +100,12 @@ type tookHarness struct {
 	t     *tee
 	seq   atomic.Uint64
 	stops atomic.Int32
-	mu    sync.Mutex
-	marks []string
+	// reads counts Config.ClientReadAfterFIN; readsAtTee is what it was as
+	// each chunk set aside went to be teed (Config.beforeTee).
+	reads      atomic.Int32
+	readsAtTee []int32
+	mu         sync.Mutex
+	marks      []string
 	// carried is what the relay told of the chunks it handed the tee
 	// (Config.OnCarried), and pushing what the capture watermark found as
 	// each push began (oldestUnconsumed, from the tee's memCheck hook,
@@ -132,7 +136,13 @@ func newTookHarness(script ...clientLook) *tookHarness {
 		h.mu.Unlock()
 	}
 	h.r = &Relay{client: h.sock, lastLook: make(chan struct{}), cfg: Config{
-		ClientStopped: func() { h.stops.Add(1) },
+		ClientStopped:      func() { h.stops.Add(1) },
+		ClientReadAfterFIN: func() { h.reads.Add(1) },
+		beforeTee: func(fakeconn.Direction) {
+			h.mu.Lock()
+			h.readsAtTee = append(h.readsAtTee, h.reads.Load())
+			h.mu.Unlock()
+		},
 		OnMarkMockIncomplete: func(reason string) {
 			h.mu.Lock()
 			h.marks = append(h.marks, reason)
@@ -633,5 +643,67 @@ func TestTheForwardersLooksForTheFINTakeItsLock(t *testing.T) {
 	}
 	if n := s.unlocked.Load(); n != 0 {
 		t.Fatalf("%d of the forwarders' looks ran without finMu", n)
+	}
+}
+
+// A chunk set aside that the client's stack took says the client read after
+// its FIN (Config.ClientReadAfterFIN): told once, however many such chunks it
+// takes, and before the first of them is teed, so a parser that reads it
+// knows. A chunk teed with no answer from the client (by the relay's end, the
+// recording's stop, or a socket that cannot say), or refused, says nothing
+// of it, and neither does a chunk teed at once, written before the FIN was
+// found.
+func TestAChunkTakenAfterTheFINSaysTheClientReadAfterIt(t *testing.T) {
+	bg := context.Background()
+	t.Run("taken: told once, before the first is teed", func(t *testing.T) {
+		h := newTookHarness(finned(100), finned(100), finned(101))
+		h.write(bg, "first", "")
+		h.settled(t)
+		h.sock.set(finned(110))
+		h.write(bg, "later", "")
+		h.settled(t)
+		h.mu.Lock()
+		atTee := append([]int32(nil), h.readsAtTee...)
+		h.mu.Unlock()
+		if q := h.queued(); !equal(q, []string{"first", "later"}) || h.reads.Load() != 1 || len(atTee) != 2 || atTee[0] != 1 {
+			t.Fatalf("queued %q, told %d time(s), told %v as each was teed; want both teed, told once, before the first", q, h.reads.Load(), atTee)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, h *tookHarness)
+	}{
+		{"no answer by the relay's end", func(t *testing.T, h *tookHarness) {
+			h.write(bg, "one", "")
+			close(h.r.lastLook)
+		}},
+		{"no answer by the recording's stop", func(t *testing.T, h *tookHarness) {
+			ctx, cancel := context.WithCancel(bg)
+			h.write(ctx, "one", "")
+			cancel()
+		}},
+		{"the socket cannot say", func(t *testing.T, h *tookHarness) {
+			h.sock.set(finned(0), unknown)
+			h.write(bg, "one", "")
+		}},
+		{"refused", func(t *testing.T, h *tookHarness) {
+			h.sock.set(finned(0), closed(0))
+			h.write(bg, "one", "")
+		}},
+		{"written before the FIN was found", func(t *testing.T, h *tookHarness) {
+			h.sock.set(open(0), finned(5))
+			if f := h.write(bg, "one", ""); f != fateTee {
+				t.Fatalf("a chunk written before the FIN was found: fate %d, want teed at once", f)
+			}
+		}},
+	} {
+		t.Run(tc.name+": not told", func(t *testing.T) {
+			h := newTookHarness(finned(0))
+			tc.run(t, h)
+			h.settled(t)
+			if h.reads.Load() != 0 {
+				t.Fatalf("told %d time(s) that the client read after its FIN, want never", h.reads.Load())
+			}
+		})
 	}
 }

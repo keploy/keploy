@@ -411,11 +411,14 @@ func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.F
 // what the destination still sent (Session.EndedWhereClientStopped), or its
 // look at the client's socket as it read the destination's end found the
 // client's side ended (Session.ClientEndedBeforeDest), or it read the
-// client's end first. Which end the relay read first is the scheduler's,
-// never the app's: an upstream that closes once its last bytes are sent
-// (keep-alives off), or that closes on its own with nothing after the
-// client's FIN, closes as the client does, and its forwarder can read that
-// close first. A client that closed only once it had the destination's end
+// client's end first. A client whose stack took what the destination sent
+// after its FIN (Session.ClientReadAfterFIN) only half-closed: it still read,
+// so its FIN did not end its reading, and the destination's end judges the
+// call, unless the relay ended the stream where it stopped taking it after.
+// Which end the relay read first is the scheduler's, never the app's: an
+// upstream that closes once its last bytes are sent (keep-alives off), or
+// that closes on its own with nothing after the client's FIN, closes as the
+// client does, and its forwarder can read that close first. A client that closed only once it had the destination's end
 // (its read of a cut answer ended) is judged by the destination's end. A
 // client's end the relay never read (it ended the read itself) leaves the
 // call to the end it did read, as before.
@@ -423,7 +426,13 @@ func clientEndJudges(sess *supervisor.Session) bool {
 	if sess.PeerEnded(fakeconn.FromClient) == supervisor.PeerOpen {
 		return false
 	}
-	if sess.EndedWhereClientStopped() || sess.ClientEndedBeforeDest() {
+	if sess.EndedWhereClientStopped() {
+		return true
+	}
+	if sess.ClientReadAfterFIN() {
+		return false
+	}
+	if sess.ClientEndedBeforeDest() {
 		return true
 	}
 	first, _ := sess.FirstPeerEnded()

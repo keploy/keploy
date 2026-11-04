@@ -134,11 +134,13 @@ type Relay struct {
 	// bytes had been written to the client's socket before it. resolverDone
 	// is non-nil while a resolve waits for the client's answer, closed once
 	// no chunk is set aside; awaitingMark is the forwarder's incomplete-mock
-	// mark for the last chunk set aside.
+	// mark for the last chunk set aside. readAfterFIN: the client's stack
+	// took a chunk set aside (Config.ClientReadAfterFIN was told).
 	verdictMu    sync.Mutex
 	awaitingFrom []uint64
 	resolverDone chan struct{}
 	awaitingMark string
+	readAfterFIN bool
 	// lastLook is closed by run once both forwarders have returned and a
 	// waiting resolve has had HalfCloseGrace more (awaitClientVerdict): the
 	// next look at the client's socket is the last.
