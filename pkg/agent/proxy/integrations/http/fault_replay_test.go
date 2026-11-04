@@ -286,75 +286,92 @@ func okHead(body string, header map[string]string) *models.HTTPResp {
 
 // A delay holds the whole answer for its duration, then serves it, and the
 // connection stays for the next call; the run's end stops the hold and serves
-// nothing.
+// nothing. That is so for a matched mock and for an async lane's recorded
+// delivery: the two places decodeHTTP enacts a mock's fault.
 //
-// Both are timed from the answer-fault hook's ask, which replay makes just
-// before it holds the matched mock's answer (the hook's nil leaves the mock
-// its own delay). The hold starts after the ask, and a timer fires no sooner
-// than its duration, so the answer comes no sooner than the delay after it,
-// with no margin. A stamp read once the call was handed to decodeHTTP could
-// fall after the hold had started, on a starved scheduler, and read the hold
-// short. The run ends after the ask, so it ends during the hold, not before
-// the call is matched.
+// The first half is timed from the answer-fault hook's ask, which replay
+// makes just before it holds the answer (the hook's nil leaves the mock its
+// own delay). The hold starts after the ask, and a timer fires no sooner than
+// its duration, so the answer comes no sooner than the delay after it, with no
+// margin. A stamp read once the call was handed to decodeHTTP could fall after
+// the hold had started, on a starved scheduler, and read the hold short. The
+// second half is not timed: it ends the run once the hook was asked, so the
+// run ends as the hold starts or during it, never before the answer is chosen.
 func TestReplayFault_ADelayHoldsTheWholeAnswerBoundedByTheRun(t *testing.T) {
 	const delay = 50 * time.Millisecond
-	answer := func() *models.HTTPResp { return okHead(`{"ok":true}`, map[string]string{"Content-Length": "11"}) }
-	holding := func() (*HTTP, <-chan time.Time) {
-		asked := make(chan time.Time, 1)
-		h := &HTTP{Logger: zap.NewNop()}
-		h.SetAnswerFault(func(context.Context, *models.Mock) *models.Fault {
+	for _, tc := range []struct {
+		name string
+		// serves sets h to serve m at the row's place, and returns the mocks
+		// decodeHTTP's matcher is given.
+		serves func(h *HTTP, m *models.Mock) []*models.Mock
+	}{
+		{"a matched mock", func(_ *HTTP, m *models.Mock) []*models.Mock { return []*models.Mock{m} }},
+		{"an async lane's delivery", func(h *HTTP, m *models.Mock) []*models.Mock {
+			asyncDelivery(h, m)
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// holding is replay set to serve an answer held for d, with an
+			// answer-fault hook that stamps its ask and returns nil.
+			holding := func(d time.Duration) (*HTTP, []*models.Mock, <-chan time.Time) {
+				asked := make(chan time.Time, 1)
+				h := &HTTP{Logger: zap.NewNop()}
+				h.SetAnswerFault(func(context.Context, *models.Mock) *models.Fault {
+					select {
+					case asked <- time.Now():
+					default:
+					}
+					return nil
+				})
+				m := faultMock(&models.Fault{Kind: models.FaultDelay, Delay: d}, okHead(`{"ok":true}`, map[string]string{"Content-Length": "11"}))
+				return h, tc.serves(h, m), asked
+			}
+			askedAt := func(asked <-chan time.Time) time.Time {
+				t.Helper()
+				select {
+				case at := <-asked:
+					return at
+				case <-time.After(10 * time.Second): // turns a hang into a failure
+					t.Fatal("replay did not ask the answer-fault hook for the delayed call within 10s")
+					return time.Time{}
+				}
+			}
+
+			h, mocks, asked := holding(delay)
+			app, returned := replaying(t, h, mocks...)
+			got := readUntil(app, `{"ok":true}`, 10*time.Second)
+			if !strings.HasPrefix(got, "HTTP/1.1 200 OK\r\n") || !strings.HasSuffix(got, `{"ok":true}`) {
+				t.Fatalf("the delayed call was answered %q, want its whole answer", got)
+			}
+			if held := time.Since(askedAt(asked)); held < delay {
+				t.Errorf("the answer came after %s, before its delay of %s", held, delay)
+			}
 			select {
-			case asked <- time.Now():
+			case err := <-returned:
+				t.Fatalf("decodeHTTP returned %v after a delayed answer; want the connection kept for the next call", err)
 			default:
 			}
-			return nil
+
+			h, mocks, asked = holding(time.Hour)
+			app, proxy := loopback(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			done := make(chan error, 1)
+			go func() {
+				done <- h.decodeHTTP(ctx, []byte(faultReq), proxy, nil,
+					&mockMemDb{mocks: mocks, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+				_ = proxy.Close()
+			}()
+			askedAt(asked)
+			cancel()
+			if err := awaitReturn(t, done); err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("decodeHTTP = %v at the run's end during a delay", err)
+			}
+			if s := seenAt(t, app); s.got != "" {
+				t.Errorf("the run ended during a delay and the application read %q; want nothing", s.got)
+			}
 		})
-		return h, asked
-	}
-	askedAt := func(asked <-chan time.Time) time.Time {
-		t.Helper()
-		select {
-		case at := <-asked:
-			return at
-		case <-time.After(10 * time.Second): // turns a hang into a failure
-			t.Fatal("replay did not ask the answer-fault hook for the delayed call within 10s")
-			return time.Time{}
-		}
-	}
-
-	h, asked := holding()
-	app, returned := replaying(t, h, faultMock(&models.Fault{Kind: models.FaultDelay, Delay: delay}, answer()))
-	got := readUntil(app, `{"ok":true}`, 10*time.Second)
-	if !strings.HasPrefix(got, "HTTP/1.1 200 OK\r\n") || !strings.HasSuffix(got, `{"ok":true}`) {
-		t.Fatalf("the delayed call was answered %q, want its whole answer", got)
-	}
-	if held := time.Since(askedAt(asked)); held < delay {
-		t.Errorf("the answer came after %s, before its delay of %s", held, delay)
-	}
-	select {
-	case err := <-returned:
-		t.Fatalf("decodeHTTP returned %v after a delayed answer; want the connection kept for the next call", err)
-	default:
-	}
-
-	h, asked = holding()
-	app, proxy := loopback(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	done := make(chan error, 1)
-	go func() {
-		done <- h.decodeHTTP(ctx, []byte(faultReq), proxy, nil,
-			&mockMemDb{mocks: []*models.Mock{faultMock(&models.Fault{Kind: models.FaultDelay, Delay: time.Hour}, answer())},
-				updateUnFilteredReturn: true}, models.OutgoingOptions{})
-		_ = proxy.Close()
-	}()
-	askedAt(asked)
-	cancel()
-	if err := awaitReturn(t, done); err != nil && !errors.Is(err, context.Canceled) {
-		t.Errorf("decodeHTTP = %v at the run's end during a delay", err)
-	}
-	if s := seenAt(t, app); s.got != "" {
-		t.Errorf("the run ended during a delay and the application read %q; want nothing", s.got)
 	}
 }
 
@@ -483,17 +500,23 @@ func TestReplayFault_APassThroughCallIsNotServedAFault(t *testing.T) {
 	}
 }
 
-// An async lane's recorded delivery whose call ended in a fault gets the
-// fault, as the matched call's does: never its head served as an answer.
-func TestReplayFault_AnAsyncDeliveryGetsItsFault(t *testing.T) {
-	m := faultMock(&models.Fault{Kind: models.FaultEOF}, nil)
+// asyncDelivery sets h to serve m as an async lane's recorded delivery to
+// faultReq: the lane's engine, not the mock matcher, decides what it is
+// served.
+func asyncDelivery(h *HTTP, m *models.Mock) {
 	m.Spec.Async = &models.AsyncMeta{Lane: "charge", Seq: 1}
-	h := &HTTP{Logger: zap.NewNop()}
 	engine := async.NewEngine(zap.NewNop(),
 		[]models.AsyncLane{{Name: "charge", Type: "http", Match: map[string]string{"pathRegex": "^/charge$"}}},
 		map[string]async.AsyncParser{"http": h})
 	engine.Load([]*models.Mock{m})
 	h.SetAsyncEngine(engine)
+}
+
+// An async lane's recorded delivery whose call ended in a fault gets the
+// fault, as the matched call's does: never its head served as an answer.
+func TestReplayFault_AnAsyncDeliveryGetsItsFault(t *testing.T) {
+	h := &HTTP{Logger: zap.NewNop()}
+	asyncDelivery(h, faultMock(&models.Fault{Kind: models.FaultEOF}, nil))
 	app, returned := replaying(t, h)
 	if s := seenAt(t, app); s != (seen{"", "eof"}) {
 		t.Errorf("the application saw %+v of an async delivery that ended in a close; want nothing, then EOF", s)
