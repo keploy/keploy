@@ -175,17 +175,7 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	if sess != nil && sess.Ctx != nil {
 		ctx = sess.Ctx
 	}
-	emit := func(m *models.Mock) {
-		// An ended session's context would discard an ordinary emit of what
-		// the recorder held until it ended.
-		send := sess.EmitMock
-		if ctx.Err() != nil {
-			send = sess.EmitMockOnShutdown
-		}
-		if err := send(m); err != nil && logger != nil {
-			logger.Debug("generic v2: EmitMock returned error", zap.Error(err))
-		}
-	}
+	emit := func(m *models.Mock) { emitV2(sess, logger, m) }
 	// hold is the connection's first exchange, and those after it, while the
 	// test that owns its request may own the whole connection (preambleHold).
 	// lastAt is the connection's latest chunk time.
@@ -283,14 +273,10 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 				return "", false
 			}
 		}
-		// EmitMock runs sess.OnMockRecorded before sending on sess.Mocks
-		// and short-circuits if the incomplete flag is set. Any error
-		// from EmitMock (ctx cancellation mid-send) is logged but does
-		// not stop the loop — the ctx will close the streams shortly
-		// after and the top-level for-loop will exit on EOF / ErrClosed.
-		if err := sess.EmitMock(mock); err != nil && logger != nil {
-			logger.Debug("generic v2: EmitMock returned error", zap.Error(err))
-		}
+		// The loop goes on after the recording's stop, to the streams' end,
+		// and so does what it records: emitV2 hands every exchange read
+		// whole to the session, or leaves it out with its reason.
+		emit(mock)
 		reset()
 		return "", false
 	}
@@ -660,6 +646,31 @@ func order(x, y stamp) (first, known bool) {
 		return false, false
 	}
 	return x.at.Before(y.at), true
+}
+
+// leftOutRefusedAtStop is the reason emitV2 leaves out a mock the session
+// refused as its context ended.
+const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange read whole was handed over"
+
+// emitV2 hands the session m, the mock of an exchange read whole, whether or
+// not the session's context (Session.Ctx) has ended: EmitMock refuses every
+// mock once it has, so a mock handed over after the recording's stop, by a
+// parser behind its capture, goes through EmitMockOnShutdown, which records
+// it. Before, every exchange recorded after the stop was refused, with a
+// Debug line only. A mock refused all the same (the context ended between
+// this check and EmitMock's own) is left out with its reason, counted and
+// spanned, never dropped with nothing said.
+func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) {
+	if c := sess.Ctx; c != nil && c.Err() != nil {
+		_ = sess.EmitMockOnShutdown(m)
+		return
+	}
+	if err := sess.EmitMock(m); err != nil {
+		if logger != nil {
+			logger.Debug("generic v2: the session refused a mock as its context ended", zap.Error(err))
+		}
+		sess.ReportLeftOut(m, leftOutRefusedAtStop)
+	}
 }
 
 // readStream pumps Chunks from one FakeConn onto the shared events
