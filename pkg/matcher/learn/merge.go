@@ -169,7 +169,9 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 // bind place from either, every use and answer place of both, and an echo
 // only when both say so (a call another uses the value of is not its echo).
 // A clock read and a learned value (Of) go with their bind, and hold for one
-// both bind only when both say so (models.MergeVariables).
+// both bind only when both say so (models.MergeVariables). The why stays:
+// a's, else b's, so a variable bound at another recording keeps the line
+// saying why it is one.
 func MergeVariable(a, b models.MockVariable) models.MockVariable {
 	if a.Recorded == "" {
 		a.Recorded, a.Echo = b.Recorded, b.Echo
@@ -188,6 +190,9 @@ func MergeVariable(a, b models.MockVariable) models.MockVariable {
 	}
 	a.Use = unionSorted(a.Use, b.Use)
 	a.Answer = unionSorted(a.Answer, b.Answer)
+	if a.Why == "" {
+		a.Why = b.Why
+	}
 	return a
 }
 
