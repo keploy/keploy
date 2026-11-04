@@ -136,6 +136,36 @@ func TestAnAnswersKeyNamesEveryPartOfIt(t *testing.T) {
 			t.Errorf("an answer with another %s keyed as the first: two answers, one view", name)
 		}
 	}
+	// A stream chunk's fields are keyed one by one, each key and value with
+	// its length: fields whose text runs into the next one's, or a space
+	// moved from a key into its value, are other answers.
+	chunks := func(fields ...models.HTTPStreamDataField) *models.HTTPResp {
+		r := base()
+		r.StreamBody = []models.HTTPStreamChunk{{TS: time.Unix(1, 0), Data: fields}}
+		return r
+	}
+	pairs := [][2]*models.HTTPResp{
+		{chunks(models.HTTPStreamDataField{Key: "data", Value: `"x} {id 1"`}), chunks(models.HTTPStreamDataField{Key: "data", Value: `"x`}, models.HTTPStreamDataField{Key: "id", Value: `1"`})},
+		{chunks(models.HTTPStreamDataField{Key: "data", Value: "x} {id 1"}), chunks(models.HTTPStreamDataField{Key: "data", Value: "x"}, models.HTTPStreamDataField{Key: "id", Value: "1"})},
+		{chunks(models.HTTPStreamDataField{Key: "a b", Value: "c"}), chunks(models.HTTPStreamDataField{Key: "a", Value: "b c"})},
+		{chunks(models.HTTPStreamDataField{Key: "ab", Value: ""}), chunks(models.HTTPStreamDataField{Key: "a", Value: "b"})},
+	}
+	// Each chunk's fields are counted: a field moved into the next chunk,
+	// whose key reads as a time, is another answer.
+	moved := func(a, b models.HTTPStreamChunk) *models.HTTPResp {
+		r := base()
+		r.StreamBody = []models.HTTPStreamChunk{a, b}
+		return r
+	}
+	pairs = append(pairs, [2]*models.HTTPResp{
+		moved(models.HTTPStreamChunk{TS: time.Unix(0, 1), Data: []models.HTTPStreamDataField{{Key: "5", Value: "x"}}}, models.HTTPStreamChunk{TS: time.Unix(0, 7)}),
+		moved(models.HTTPStreamChunk{TS: time.Unix(0, 1)}, models.HTTPStreamChunk{TS: time.Unix(0, 5), Data: []models.HTTPStreamDataField{{Key: "x", Value: "7"}}}),
+	})
+	for _, pair := range pairs {
+		if answerKey(pair[0]) == answerKey(pair[1]) {
+			t.Errorf("stream chunks %#v and %#v keyed as one answer: two answers, one view", pair[0].StreamBody, pair[1].StreamBody)
+		}
+	}
 	if answerKey(nil) != "" {
 		t.Errorf("no answer keyed %q; want none", answerKey(nil))
 	}

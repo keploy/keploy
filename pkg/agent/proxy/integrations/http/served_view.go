@@ -2,7 +2,6 @@ package http
 
 import (
 	"crypto/sha256"
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,12 +84,14 @@ func servedView(m *models.Mock, in *req, av answerView, given *models.HTTPResp) 
 }
 
 // answerKey names the answer r among the answers F gave of one recording
-// (servedView): a hash of what answerAsRecorded compares of two answers,
-// its status, protocol version, headers in name order, body and how its
-// body was kept, each with its length, so no two answers that differ in any
-// of them share it; a hash, it never is recordedAnswerKey. "" for no answer: a
-// view keploy cannot name, which a later call reads as one it could not
-// read (fail closed).
+// (servedView): a hash of what answerAsRecorded compares of two answers:
+// its status, protocol version, headers in name order, body, how its body
+// was kept, and its stream chunks, each chunk's time and its fields' keys
+// and values in order. Each of them is hashed with its length and each list
+// with its count, so no two answers that differ in any of them share it; a
+// hash, it never is recordedAnswerKey. "" for no answer: a view keploy
+// cannot name, which a later call reads as one it could not read (fail
+// closed).
 func answerKey(r *models.HTTPResp) string {
 	if r == nil {
 		return ""
@@ -119,7 +120,12 @@ func answerKey(r *models.HTTPResp) string {
 	put(strconv.FormatBool(r.BodySkipped) + "." + strconv.FormatInt(r.BodySize, 10))
 	put(strconv.Itoa(len(r.StreamBody)))
 	for _, c := range r.StreamBody {
-		put(fmt.Sprintf("%d %v", c.TS.UnixNano(), c.Data))
+		put(strconv.FormatInt(c.TS.UnixNano(), 10))
+		put(strconv.Itoa(len(c.Data)))
+		for _, f := range c.Data {
+			put(f.Key)
+			put(f.Value)
+		}
 	}
 	return string(h.Sum(nil))
 }
