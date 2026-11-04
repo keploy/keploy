@@ -45,6 +45,13 @@ if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
   echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
   exit 1
 fi
+# http_mocks_are: what a record kept is the app's three calls, as Http mocks,
+# and DNS mocks only where the runner's resolver answers a lookup.
+# shellcheck source=../mock-kinds.sh
+if ! source "$MOCK_DIR/../mock-kinds.sh" || ! declare -F http_mocks_are >/dev/null; then
+  echo "FAIL: could not load mock-kinds.sh from $MOCK_DIR/.."
+  exit 1
+fi
 if ! half off; then
   echo "FAIL: MOCK_LANE_SWITCH=$LANE_SWITCH: this lane has only a half without the switch; run it with off or both"
   exit 1
@@ -118,10 +125,9 @@ run_case() {
   rc=${PIPESTATUS[0]}
   stop_dep
   [ "$rc" -eq 0 ] || { echo "FAIL: $LABEL: record exited $rc, want 0"; FAIL=1; return; }
-  mocks=$(grep -c '^kind: Http' keploy/hn/mocks.yaml 2>/dev/null); mocks=${mocks:-0}
+  mocks=$(http_mocks_are keploy/hn/mocks.yaml 3) || { echo "FAIL: $LABEL: expected 3 Http mocks and no other kind but DNS: $mocks"; FAIL=1; return; }
   referers=$(grep -ciF "referer: $PAGE" keploy/hn/mocks.yaml 2>/dev/null); referers=${referers:-0}
-  echo "recorded: $mocks http mocks, $referers with the Referer"
-  [ "$mocks" -eq 3 ] || { echo "FAIL: $LABEL: expected 3 http mocks, got $mocks"; FAIL=1; return; }
+  echo "recorded: $mocks; $referers with the Referer"
   [ "$referers" -eq 3 ] || { echo "FAIL: $LABEL: expected the Referer in 3 mocks, got $referers"; FAIL=1; return; }
 
   echo "== replay, the dependency stopped, no Referer sent =="

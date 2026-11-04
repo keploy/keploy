@@ -593,6 +593,8 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKe
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closest.Name, diffs).
+		WithGuarded(guardedPaths(diag.differs)...).
+		WithoutNoise(signedAuthorization(closest)...).
 		WithRenderedRequests(
 			renderMockRequest(closest.Spec.HTTPReq, closest.Noise),
 			renderLiveRequest(request, liveBody, closest.Noise),
@@ -602,6 +604,35 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKe
 		r.FieldReasons = reasonsOf(diag.differs)
 	}
 	return r
+}
+
+// guardedPaths are the report paths of fields keploy.yml's noise guards with
+// patterns that a side's value is outside of: those with a reason that is no
+// refused read of the application's clock (strictField.why).
+func guardedPaths(fields []strictField) []string {
+	var out []string
+	for _, f := range fields {
+		if f.why != "" && !f.clock {
+			out = append(out, f.diff.Path)
+		}
+	}
+	return out
+}
+
+// signedAuthorization is the report path of m's recorded Authorization when
+// it is an AWS SigV4 one, for the hint to offer no keploy.yml noise for:
+// under the proven switch its parts are compared so that only its signature
+// may differ (strict_sigv4.go), and declaring the header noise would stop
+// that for every call. One keploy.yml serves both modes, so neither offers it.
+func signedAuthorization(m *models.Mock) []string {
+	for k, v := range m.Spec.HTTPReq.Header {
+		if strings.EqualFold(k, "authorization") {
+			if _, ok := parseSigV4Authorization(v); ok {
+				return []string{"header." + k}
+			}
+		}
+	}
+	return nil
 }
 
 // reasonsOf are, of fields, those refused for a reason of their own (a

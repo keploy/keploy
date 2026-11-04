@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Every report shape whose hint tells the user to record again.
@@ -143,13 +144,17 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 		expected = "If the change is expected, "
 	)
 	// want is the hint with %[1]s for the way to record again; structural
-	// cases want the structure-change hint.
+	// cases want the structure-change hint. on, when set, is the hint under
+	// the proven switch (want and structural are then the switch-off ones).
+	// guarded and unreachable are what the parser names WithGuarded and
+	// WithoutNoise.
 	cases := []struct {
-		name       string
-		protocol   string
-		diffs      []models.MockFieldDiff
-		want       string
-		structural bool
+		name                 string
+		protocol             string
+		diffs                []models.MockFieldDiff
+		guarded, unreachable []string
+		want, on             string
+		structural           bool
 	}{
 		{name: "a header and a body field", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.referer"), drift("body.qty")},
 			want: "Only values drifted (header.referer, body.qty). " + dynamic + bodyQty + " and " + referer + "; otherwise %[1]s."},
@@ -184,7 +189,38 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 		{name: "a missing header beside drifted values", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Referer"), drift("body.qty"), drift("header.x-request-id")},
 			want: "Recorded headers are missing from this call (header.Referer) and values drifted (body.qty, header.x-request-id). If these are optional or dynamic (timestamps, ids, tokens), add " + bodyQty + " and the headers under test.globalNoise.global.header (e.g. header: {referer: [], x-request-id: []}); otherwise %[1]s."},
 		{name: "a missing header beside a path drift", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Referer"), drift("path")}, structural: true},
-		{name: "a header only the call carries", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{added("header.X-New")}, structural: true},
+		// Without the switch the HTTP matcher lets a call carry headers its
+		// recording does not, so such a header is no cause and no remedy;
+		// under the switch every header is compared, and noise reaches it.
+		{name: "a header only the call carries", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{added("header.X-New")}, structural: true,
+			on: "This call carries headers its recording does not (header.X-New). If they are optional, add the headers under test.globalNoise.global.header (e.g. header: {x-new: []}); otherwise %[1]s."},
+		{name: "a recorded header missing and one only the call carries", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Referer"), added("header.X-New")},
+			want: "Recorded headers are missing from this call (header.Referer). If they are optional, add " + referer + "; otherwise %[1]s.",
+			on:   "Recorded headers are missing from this call (header.Referer) and it carries headers its recording does not (header.X-New). If they are optional, add the headers under test.globalNoise.global.header (e.g. header: {referer: [], x-new: []}); otherwise %[1]s."},
+		{name: "a header only the call carries beside a drifted value", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{added("header.X-New"), drift("body.qty")},
+			want: "Only values drifted (body.qty). " + dynamic + bodyQty + "; otherwise %[1]s.",
+			on:   "This call carries headers its recording does not (header.X-New) and values drifted (body.qty). If these are optional or dynamic (timestamps, ids, tokens), add " + bodyQty + " and the headers under test.globalNoise.global.header (e.g. header: {x-new: []}); otherwise %[1]s."},
+		{name: "headers missing, carried and drifted", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Referer"), added("header.X-New"), drift("header.x-request-id")},
+			want: "Recorded headers are missing from this call (header.Referer) and values drifted (header.x-request-id). If these are optional or dynamic (timestamps, ids, tokens), add the headers under test.globalNoise.global.header (e.g. header: {referer: [], x-request-id: []}); otherwise %[1]s.",
+			on:   "Recorded headers are missing from this call (header.Referer), it carries headers its recording does not (header.X-New) and values drifted (header.x-request-id). If these are optional or dynamic (timestamps, ids, tokens), add the headers under test.globalNoise.global.header (e.g. header: {referer: [], x-new: [], x-request-id: []}); otherwise %[1]s."},
+		{name: "a body field only the call carries", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{added("body.new"), drift("body.qty")}, structural: true},
+		{name: "a header only the call carries outside HTTP", protocol: ProtocolGeneric, diffs: []models.MockFieldDiff{added("header.X-New"), drift("payload")}, structural: true},
+		// A field the parser names WithoutNoise (a recorded SigV4
+		// Authorization, a Content-Type the schema phase refuses) is in no
+		// bucket's reach, in any case of its name.
+		{name: "a missing field offered no noise", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Authorization")}, unreachable: []string{"header.authorization"}, structural: true},
+		{name: "a drifted field offered no noise", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.Authorization")}, unreachable: []string{"header.authorization"},
+			want: "Only values drifted (header.Authorization). " + expected + "%[1]s."},
+		{name: "a field offered no noise beside one in reach", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.Content-Type"), drift("body.qty")}, unreachable: []string{"header.Content-Type"},
+			want: "Only values drifted (header.Content-Type, body.qty). " + expected + "%[1]s."},
+		// A field keploy.yml already declares with patterns has its entry
+		// changed, not added.
+		{name: "a guarded header missing", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Referer")}, guarded: []string{"header.referer"},
+			want: "Recorded headers are missing from this call (header.Referer). If they are optional, change the headers' entries under test.globalNoise.global.header to empty lists (e.g. header: {referer: []}); otherwise %[1]s."},
+		{name: "guarded and new fields together", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.referer"), drift("header.x-request-id"), drift("body.qty"), drift("body.id")}, guarded: []string{"header.Referer", "body.qty"},
+			want: "Only values drifted (header.referer, header.x-request-id, body.qty, body.id). " + dynamic + "the request-body fields under test.globalNoise.global.requestbody with root-relative keys (e.g. requestbody: {id: []}) and the headers under test.globalNoise.global.header (e.g. header: {x-request-id: []}) and change the request-body fields' entries under test.globalNoise.global.requestbody to empty lists (e.g. requestbody: {qty: []}) and change the headers' entries under test.globalNoise.global.header to empty lists (e.g. header: {referer: []}); otherwise %[1]s."},
+		{name: "a body field's key keeps its case", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.qty")}, guarded: []string{"body.QTY"},
+			want: "Only values drifted (body.qty). " + dynamic + bodyQty + "; otherwise %[1]s."},
 		{name: "a missing body field", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("body.qty")}, structural: true},
 		{name: "a missing header outside HTTP", protocol: ProtocolGeneric, diffs: []models.MockFieldDiff{missing("header.Referer")}, structural: true},
 		// A miss that names no field has nothing for noise to reach.
@@ -204,17 +240,23 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 		false: "Request structure changed since recording. Re-record the test set with 'keploy record', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping.",
 		true:  "Request structure changed since recording. Re-record the mock set with 'keploy mock record'.",
 	}
-	for _, mock := range []bool{false, true} {
-		SetMockMode(mock)
-		t.Cleanup(func() { SetMockMode(false) })
-		for _, c := range cases {
-			r := NewReport(c.protocol, "GET /a").WithClosest("mock-1", c.diffs).Build()
-			want := fmt.Sprintf(c.want, rerecord(mock, c.protocol))
-			if c.structural {
-				want = structure[mock]
-			}
-			if r.NextSteps != want {
-				t.Errorf("%s (mock mode %v):\n got  %q\n want %q", c.name, mock, r.NextSteps, want)
+	for _, on := range []bool{false, true} {
+		t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[on])
+		for _, mock := range []bool{false, true} {
+			SetMockMode(mock)
+			t.Cleanup(func() { SetMockMode(false) })
+			for _, c := range cases {
+				r := NewReport(c.protocol, "GET /a").WithClosest("mock-1", c.diffs).WithGuarded(c.guarded...).WithoutNoise(c.unreachable...).Build()
+				want := fmt.Sprintf(c.want, rerecord(mock, c.protocol))
+				switch {
+				case on && c.on != "":
+					want = fmt.Sprintf(c.on, rerecord(mock, c.protocol))
+				case c.structural:
+					want = structure[mock]
+				}
+				if r.NextSteps != want {
+					t.Errorf("%s (switch %v, mock mode %v):\n got  %q\n want %q", c.name, on, mock, r.NextSteps, want)
+				}
 			}
 		}
 	}
