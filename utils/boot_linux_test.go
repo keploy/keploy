@@ -221,6 +221,14 @@ func TestAWedgedStartIsStillGivenUp(t *testing.T) {
 // sleeps throughout, which is no progress. So the proxy begins one there
 // (pkg/agent/proxy: the listener's start). Begun, the work's progress is the start's; and work that
 // wedges there still stops the start.
+//
+// The first two rows beat by events, not on the process's clock: each beat
+// comes once the worker has run since the beat before, so its look follows
+// work the last look could not have seen. On the process's clock a beat of
+// 10 ms is the Go scheduler's own time slice, and under load the worker's
+// goroutine, runnable, can wait out a whole beat for the scheduler with its
+// thread parked (S, futex_wait_queue): no progress the kernel shows, and
+// none of the stage's at that beat (workProbe).
 func TestAStageWaitingForAnotherGoroutineCountsItsWorkAsAStageOfItsOwn(t *testing.T) {
 	const beat = 10 * time.Millisecond
 	// awaited is the waiting stage, and a worker that spins until the test
@@ -249,32 +257,58 @@ func TestAStageWaitingForAnotherGoroutineCountsItsWorkAsAStageOfItsOwn(t *testin
 		t.Cleanup(func() { close(quit); <-done })
 		return spun
 	}
+	// workedBeat has the agent run one more beat on clk once the worker has
+	// made progress since the last beat's look, and returns that beat's
+	// report: the look follows work of the worker's it has not seen yet.
+	workedBeat := func(t *testing.T, clk *stall.ManualClock, path string, spun *atomic.Uint64) BootProgress {
+		t.Helper()
+		awaitPending(t, clk) // the last beat's look is done
+		n := spun.Load()
+		deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+		for spun.Load() == n {
+			if time.Now().After(deadline) {
+				t.Fatal("the worker made no progress")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		clk.Advance(BootBeat)
+		b := uint64(clk.Runnable() / BootBeat)
+		return awaitBootReport(t, path, func(p BootProgress) bool { return p.Beat == b })
+	}
+	// started has the reporter beat on a clock the test drives, and returns
+	// once it has taken its first look: a stage begun after it is first
+	// looked at by the first beat, whose look at it is progress (a probe's
+	// first answer).
+	started := func(t *testing.T) (*stall.ManualClock, string) {
+		t.Helper()
+		clk := manualBootClock(t)
+		path := startBootReport(t, BootBeat)
+		awaitPending(t, clk)
+		return clk, path
+	}
 
 	t.Run("not a stage of its own: the wait is no progress", func(t *testing.T) {
-		path := startBootReport(t, beat)
+		clk, path := started(t)
 		spun := awaited(t, nil)
-		// Its first beat without progress, and then the count: the worker
-		// made progress between them.
-		awaitBootReport(t, path, func(p BootProgress) bool { return p.Quiet >= 1 })
-		before := spun.Load()
-		awaitBootReport(t, path, func(p BootProgress) bool { return p.Quiet >= TeardownStallChecks })
-		if spun.Load() == before {
-			t.Fatal("the worker made no progress while the start was counted as making none")
+		// Every beat after the stage's first look counts one more without
+		// progress, the worker making progress across each, up to the count.
+		for q := uint64(0); q <= TeardownStallChecks; q++ {
+			if p := workedBeat(t, clk, path, spun); p.Quiet != q {
+				t.Fatalf("report %+v: want %d beats without progress, the worker's progress no progress of the start", p, q)
+			}
 		}
 	})
 
 	t.Run("a stage of its own: its progress is the start's", func(t *testing.T) {
-		path := startBootReport(t, beat)
-		awaited(t, func() func() { return BeginBootWork("the proxy listener's start") })
-		// From the first beat that finds both stages begun, every beat finds
-		// the worker's making progress.
-		p := awaitBootReport(t, path, func(q BootProgress) bool { return len(q.Stages) == 2 })
-		first := p.Beat
-		for p.Beat < first+3*TeardownStallChecks {
-			if p.Quiet != 0 {
+		clk, path := started(t)
+		spun := awaited(t, func() func() { return BeginBootWork("the proxy listener's start") })
+		awaitBootReport(t, path, func(q BootProgress) bool { return q.Seq == 2 }) // both stages begun
+		// Every beat finds the worker's stage making progress.
+		for i := 0; i < 3*TeardownStallChecks; i++ {
+			p := workedBeat(t, clk, path, spun)
+			if p.Quiet != 0 || !p.Busy || len(p.Stages) != 2 || p.Stages[0].Name != "the proxy listener's start" || !p.Stages[0].Progressing {
 				t.Fatalf("report %+v: a beat of the worker's progress was counted as one without", p)
 			}
-			p = awaitBootReport(t, path, func(q BootProgress) bool { return q.Beat > p.Beat })
 		}
 	})
 
