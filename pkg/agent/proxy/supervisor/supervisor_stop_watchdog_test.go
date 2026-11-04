@@ -106,7 +106,7 @@ func TestRun_AtTheStopTheWatchdogMeasuresTheParsersReads(t *testing.T) {
 	t.Parallel()
 	const budget = 40 * time.Millisecond
 	clk := &stall.ManualClock{}
-	clientCh, client := capturedStream(fakeconn.FromClient, 5)
+	clientCh, _ := capturedStream(fakeconn.FromClient, 5)
 	clientCh = func() chan fakeconn.Chunk { // room for one more request
 		c := make(chan fakeconn.Chunk, 6)
 		for len(clientCh) > 0 {
@@ -114,7 +114,7 @@ func TestRun_AtTheStopTheWatchdogMeasuresTheParsersReads(t *testing.T) {
 		}
 		return c
 	}()
-	client = fakeconn.New(clientCh, nil, nil)
+	client := fakeconn.New(clientCh, nil, nil)
 	_, dest := capturedStream(fakeconn.FromDest, 2)
 	logger, seen := stopSeenLogger()
 	s := New(Config{Logger: logger, HangBudget: budget, Clock: clk})
