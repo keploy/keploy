@@ -1224,6 +1224,11 @@ func PrepareMockNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.
 	//   - "requestbody": DEDICATED HTTP request-body matching noise — kept
 	//               separate from "body" so response-assertion noise can't
 	//               silently soften request matching (see http/decode.go).
+	//   - "url":    HTTP URL-path and query-value noise: regexes that mask
+	//               the part of a path or query value that changes per run
+	//               (NewRequestNoise in http/decode.go, MatchURLPath and
+	//               QueryParamsMatch). The agent's request matching is its
+	//               only reader.
 	mockNoiseConfig := map[string]map[string][]string{}
 	if headerNoise, ok := noiseConfig["header"]; ok {
 		mockNoiseConfig["header"] = headerNoise
@@ -1233,6 +1238,9 @@ func PrepareMockNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.
 	}
 	if reqBodyNoise, ok := noiseConfig["requestbody"]; ok {
 		mockNoiseConfig["requestbody"] = reqBodyNoise
+	}
+	if urlNoise, ok := noiseConfig["url"]; ok {
+		mockNoiseConfig["url"] = urlNoise
 	}
 
 	return mockNoiseConfig

@@ -513,12 +513,14 @@ func carriedHeader(d models.MockFieldDiff) bool {
 //   - On HTTP, a header whose value drifted, that was recorded and the call
 //     does not carry, or that the call carries and its recording does not
 //     (a cause only under the proven switch: causes), is named under header
-//     by its lowercased name, once. Nothing else is in a bucket's reach
-//     there. url noise is never handed to the matcher, so a path, query,
-//     method, host or container drift has no noise remedy. Nor does an
-//     Authorization of any scheme, or a part of a SigV4 one
-//     ("header.authorization.region"): authorizationHeader. Nor does a
-//     dotted header name with a part that may be a value
+//     by its lowercased name, once. Nothing else is offered there. A
+//     method, host or container drift has no noise remedy. A path or query
+//     drift has none named here: the url bucket the matcher reads holds
+//     regexes of the part of a path or query value that changes, which a
+//     field diff does not say, so it is offered only recording again. No
+//     noise is offered for an Authorization of any scheme, or a part of a
+//     SigV4 one ("header.authorization.region"): authorizationHeader. Nor
+//     for a dotted header name with a part that may be a value
 //     (models.FieldShape writes it otherwise): the miss's sanitizer would
 //     not shape it in the noise's example, and a name that holds a value
 //     differs call by call.
