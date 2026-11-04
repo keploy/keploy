@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -172,6 +175,56 @@ func TestARealNameCheckAfterItsWorkerEndedIsTheOpenTestsNamingIt(t *testing.T) {
 	}
 }
 
+// The same holds mid-relay: a connection keploy dialed, and whose first
+// request it sent to the real server while its worker lived, then whose next
+// request a name check refuses after that worker ended, gives its
+// capture_incomplete to the test open then (worker b's), naming the ended
+// worker. Who the connection is from is decided as keploy ends it, not once
+// for the relay at its dial.
+func TestANameCheckRefusedMidRelayAfterItsWorkerEndedIsTheOpenTests(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	firstRead := make(chan struct{})
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		br := bufio.NewReader(c)
+		var got strings.Builder
+		for {
+			line, err := br.ReadString('\n')
+			got.WriteString(line)
+			if err != nil {
+				return
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		close(firstRead)
+		rest, _ := io.ReadAll(br)
+		_, _ = c.Write([]byte("real:" + got.String() + string(rest)))
+	}()
+	dst := ln.Addr().String()
+	_, portText, _ := net.SplitHostPort(dst)
+	named := "api.test:" + portText
+	p := realProxy(t, []string{named}, map[string]string{"api.test": "127.0.0.1", "web.test": "127.0.0.1"})
+	a, b := agent.InstanceValue(201, 1), agent.InstanceValue(202, 0)
+	from := survivorFrom(t, p, a, b)
+	app, accepted := realConnPair(t)
+	done := serveRealFrom(p, accepted, dst, from)
+	_, err = app.Write([]byte("GET / HTTP/1.1\r\nHost: api.test\r\n\r\n"))
+	require.NoError(t, err)
+	awaitEvent(t, firstRead, "the first request reaching the real server")
+	endWorkerA(t, p, a)
+	sendAndRead(t, app, "GET / HTTP/1.1\r\nHost: web.test\r\n\r\n")
+	require.True(t, (<-done).handled)
+	requireIncompleteOfEndedWorker(t, p, a, b, "web.test", "refused mid-relay, after the end")
+}
+
 // requireIncompleteOfEndedWorker ends worker b's test and requires that it
 // was charged one capture_incomplete, saying why (with want) and naming the
 // process 4242 of ended worker a, and that the run holds none of it.
@@ -246,4 +299,36 @@ func TestAnH2UseAfterItsWorkersInstanceEndedNotesNoRowOfThatWorker(t *testing.T)
 	require.Equal(t, []models.RealUse{{Dest: named, Conns: 1}}, end.Uses, "its own connection's use, with no h2 note")
 	require.Len(t, end.Unattributed, 1)
 	requireCountedAsEndedWorkers(t, p, a, b, 1, "the h2c connection's bytes")
+}
+
+// The same holds mid-relay: an h2c connection keploy dialed while worker a
+// lived, whose preface keploy reads only after a's instance ended (a's test
+// still open), puts no h2 note on a's row. The note is decided as keploy
+// reads the preface, not once for the relay at its dial.
+func TestAnH2PrefaceReadAfterItsWorkersInstanceEndedMidRelayNotesNoRowOfThatWorker(t *testing.T) {
+	dst := realServer(t)
+	_, portText, _ := net.SplitHostPort(dst)
+	named := "api.test:" + portText
+	p := realProxy(t, []string{named}, map[string]string{"api.test": "127.0.0.1"})
+	p.real.Load().book.Answered("api.test", []netip.Addr{netip.MustParseAddr("127.0.0.1")})
+	a, b := agent.InstanceValue(211, 1), agent.InstanceValue(212, 0)
+	from := survivorFrom(t, p, a, b)
+	app, accepted := realConnPair(t)
+	done := serveRealFrom(p, accepted, dst, from)
+	sendAndRead(t, app, "GET / HTTP/1.1\r\nHost: api.test\r\n\r\n")
+	require.True(t, (<-done).handled)
+
+	// The relay reads its client only once it has dialed the real server
+	// and noted the dial (Relay.forward runs after Dialed), so a's instance
+	// ends after the dial and before keploy reads the preface.
+	app, accepted = realConnPair(t)
+	reading := &readSignal{Conn: accepted, started: make(chan struct{})}
+	done = serveRealFrom(p, reading, dst, from)
+	awaitEvent(t, reading.started, "the relay reading the h2c connection's client")
+	starts.Default.InstanceEnded(a)
+	preface := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+	require.Equal(t, "real:"+preface, sendAndRead(t, app, preface))
+	require.True(t, (<-done).handled)
+	end := p.realTracker.EndTestOf(a)
+	require.Equal(t, []models.RealUse{{Dest: named, Conns: 1}}, end.Uses, "its own connection's use, with no h2 note")
 }

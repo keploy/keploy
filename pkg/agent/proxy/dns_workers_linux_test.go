@@ -90,3 +90,36 @@ func TestADNSMissWhileTestWorkersAreServedIsACallKeployCannotAttribute(t *testin
 		}
 	}
 }
+
+// Workers stay served from the first worker served until the run's manager
+// is replaced, even once every served worker has stopped
+// (StopServingInstance deletes only that worker's manager). A DNS miss then
+// is still counted as a call keploy cannot attribute, charged to the next
+// test, and never filed in the run's misses window, which no worker's test
+// reads.
+func TestADNSMissAfterEveryServedWorkerStoppedIsStillUnattributed(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50197"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartErrorDrain(ctx)
+	servedWorker(t, p, 1)
+	if err := p.StopServingInstance(1); err != nil {
+		t.Fatal(err)
+	}
+	p.ContinueTestErrorCapture()
+	q := dns.Question{Name: "missing.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	var n uint64
+	for _, l := range p.CaptureLosses() {
+		if l.Kind == models.CaptureLossUnattributed {
+			n = l.Count
+		}
+	}
+	if n != 1 {
+		t.Fatalf("a DNS miss after every served worker stopped counted %d calls keploy cannot attribute, want 1", n)
+	}
+	if got := readCalls(t, "the run", p); len(got) != 0 {
+		t.Fatalf("the run's window read %v, which no worker's test reads", got)
+	}
+}
