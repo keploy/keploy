@@ -766,11 +766,57 @@ func TestOutcomeACallsAnswerIsReadOncePerCallForItsFreshWords(t *testing.T) {
 		if past := ai.past < len(resp); past != (c.budget > 0) {
 			t.Errorf("%s: the index went past the budget at leaf %d of %d; want past it %v", c.what, ai.past, len(resp), c.budget > 0)
 		}
+		for k := range ai.first {
+			if !aWord(k) {
+				t.Fatalf("%s: the answer index maps %q, which is no word in any reading", c.what, k)
+			}
+		}
+		for _, v := range []string{"row " + word(0, 3), ""} {
+			if got := dc.answerHoldsWord(v); got != "" || ai.scans != 0 {
+				t.Errorf("%s: %q, no word, which no answer holds as one: %q, %d scans; want none, no scan", c.what, v, got, ai.scans)
+			}
+		}
 		if got := dc.answerHoldsWord("row"); got != "body.rows.0" || ai.scans != map[bool]int{true: 1, false: 0}[c.budget > 0] {
 			t.Errorf("%s: a word none of the call's, held from the first answer leaf: %q, %d scans; want body.rows.0, scanned past the budget only", c.what, got, ai.scans)
 		}
 		if got := dc.answerHoldsWord("2026"); got != "" {
 			t.Errorf("%s: a word only the answer's typed instant holds: %q; want none", c.what, got)
+		}
+		x.release()
+	}
+}
+
+// An answer text past the reader's budget is never mapped whole: its words
+// are claimed at most answerClaimBytes at a time, so the claim that fails
+// lets go of one batch of them, not of the text's every word, and from
+// there the index maps only the call's own words, the one at the text's
+// end among them (refused there, as when the text fits).
+func TestOutcomeAnAnswerTextPastTheBudgetIsNeverMappedWhole(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const n = 6000
+	var sb strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&sb, "row R%05dW ok\n", i)
+	}
+	sb.WriteString("seen Q1Z0000X once")
+	for _, budget := range []int64{0, 1} {
+		readerBudget = budget
+		in := oInput("body.id", "id-Q1Z0000X", "id-Q2Z0000X", nil, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		in.Resp = []Leaf{oText("body.rows", sb.String())}
+		x := newReaderIndex(in.Drifts)
+		dc := newDecider(in, false, x)
+		ds, _ := dc.decide()
+		oRefused(t, fmt.Sprintf("budget %d, the word the text's end holds", budget), oWord(t, ds, "Q1Z0000X", "Q2Z0000X"), RefusalCannotCheck, "comes back in the answer at body.rows,")
+		ai := dc.answer
+		if ai == nil || ai.reads != 1 || ai.scans != 0 {
+			t.Fatalf("budget %d: the answer index %+v; want the text read once, no scan", budget, ai)
+		}
+		if most := answerClaimBytes / wordBytes; budget > 0 && (ai.past != 0 || ai.dropped == 0 || ai.dropped > most) {
+			t.Errorf("budget %d: past the budget at leaf %d, %d words let go; want leaf 0, at most %d (one claim's)", budget, ai.past, ai.dropped, most)
+		}
+		if budget == 0 && (ai.past != 1 || ai.dropped != 0 || len(ai.first) < 2*n) {
+			t.Errorf("budget %d: past %d, %d let go, %d words mapped; want the text mapped whole within the budget", budget, ai.past, ai.dropped, len(ai.first))
 		}
 		x.release()
 	}
