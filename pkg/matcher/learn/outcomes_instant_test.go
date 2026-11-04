@@ -3132,7 +3132,9 @@ func TestOutcomeAPercentEncodedSecondHoldsOnlyTheTimeItOpensTo(t *testing.T) {
 	// read. So too where a later time of that hour ends where the reach
 	// that escapes are read in around the hour ends (escapeReach): the
 	// reach cuts that time to the hour, an instant of the encoded hour's
-	// own text at another place, and the encoded hour still opens.
+	// own text at another place, and the encoded hour still opens. Where
+	// the reach cuts it in one run alone, round F's hour as written holds
+	// no more of the call's second than the recorded one does: no pick.
 	edge := func(x time.Time, cut bool) *models.Mock {
 		m := answer(x)
 		hour := x.UTC().Format("2006-01-02T15")
@@ -3143,11 +3145,11 @@ func TestOutcomeAPercentEncodedSecondHoldsOnlyTheTimeItOpensTo(t *testing.T) {
 		m.Spec.HTTPResp.Body = `{"next":"/v1/events?since=` + pct(x) + `","pad":"` + strings.Repeat("x", pad) + `","later":"` + hour + `:59:59Z"}`
 		return m
 	}
-	for _, cut := range []bool{false, true} {
+	for _, cut := range [][2]bool{{false, false}, {true, true}, {false, true}, {true, false}} {
 		r10, f10 := rAt.Add(-10*time.Second), fAt.Add(-10*time.Second)
 		d = oWord(t, Decide(iCall("body.cmd.query.dirtyAt.$lte.$numberLong", Number, sec(rAt), sec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
-			[]Raw{RawOf(edge(r10, cut), true).ServedAs(1).ServedLive(RawOf(edge(f10, cut), true))})), sec(rAt), sec(fAt))
-		iClock(t, fmt.Sprintf("the call's second beside a percent-encoded time ten seconds before it, a later time of its hour cut to the hour at the reach's end: %v", cut), d)
+			[]Raw{RawOf(edge(r10, cut[0]), true).ServedAs(1).ServedLive(RawOf(edge(f10, cut[1]), true))})), sec(rAt), sec(fAt))
+		iClock(t, fmt.Sprintf("the call's second beside a percent-encoded time ten seconds before it, a later time of its hour cut to the hour at the reach's end (recorded, round F): %v", cut), d)
 	}
 	// A time the answer writes at a cut finer than a millisecond, its
 	// zone percent-encoded after it ("09:00:23.654321%2B05:30", a link's
