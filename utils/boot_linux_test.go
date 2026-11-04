@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -154,32 +157,114 @@ func TestAStarvedStartIsNotChargedBeatsItCouldNotRun(t *testing.T) {
 }
 
 // wedgedWork is a goroutine's work that never finishes: its thread asleep in a
-// read nothing will ever answer, as a bind or a kernel call that never returns.
-// It runs fn first, on the goroutine, and is let go when the test ends.
-func wedgedWork(t *testing.T, fn func() (end func())) {
+// read that only wake answers, standing in for a bind or a kernel call that
+// never returns. It runs fn first, on the goroutine, and returns once the
+// thread's syscall file names the read (asleepInRead). Nothing has written to
+// the pipe yet, so the thread sleeps in it: from then on a look at the thread
+// finds it has not run since, until wake has it answer one read and sleep in
+// the next. It is let go when the test ends.
+func wedgedWork(t *testing.T, fn func() (end func())) (wake func()) {
 	t.Helper()
 	var fds [2]int
 	if err := syscall.Pipe(fds[:]); err != nil { // blocking: the read sleeps in the kernel
 		t.Fatal(err)
 	}
-	begun, ended := make(chan struct{}), make(chan struct{})
+	var answered atomic.Uint64 // the reads that returned a byte
+	tids, ended := make(chan int, 1), make(chan struct{})
 	go func() {
 		defer close(ended)
+		// The reads are on the thread fn's stage watches, whatever fn does.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
 		end := fn()
-		close(begun)
+		tids <- syscall.Gettid()
 		var b [1]byte
-		_, _ = syscall.Read(fds[0], b[:])
+		for {
+			n, err := syscall.Read(fds[0], b[:])
+			if err == syscall.EINTR {
+				continue
+			}
+			if n <= 0 {
+				break // the pipe's write end is closed: the test is over
+			}
+			answered.Add(1)
+		}
 		if end != nil {
 			end()
 		}
 	}()
-	<-begun
 	t.Cleanup(func() {
-		_, _ = syscall.Write(fds[1], []byte{0})
+		_ = syscall.Close(fds[1])
 		<-ended
 		_ = syscall.Close(fds[0])
-		_ = syscall.Close(fds[1])
 	})
+	tid := <-tids
+	// asleep returns once the thread sleeps in the read after the n-th
+	// answered: one that began after that read returned.
+	asleep := func(n uint64) {
+		t.Helper()
+		deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+		for answered.Load() != n || !asleepInRead(t, tid) {
+			if time.Now().After(deadline) {
+				t.Fatalf("the wedged work's thread %d never slept in its read", tid)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	asleep(0)
+	return func() {
+		t.Helper()
+		n := answered.Load()
+		if _, err := syscall.Write(fds[1], []byte{0}); err != nil {
+			t.Fatal(err)
+		}
+		asleep(n + 1)
+	}
+}
+
+// asleepInRead reports whether thread tid of this process is in a read(2), as
+// its syscall file (proc(5)) says. The kernel names the system call there only
+// for a thread it finds off its CPU and off its run queue; one that runs, or is
+// queued to run, reads "running". A named read alone does not show the thread
+// asleep. A thread being woken (TASK_WAKING) can be found off its CPU and its
+// run queue before it runs, and still names the read it is woken from. And a
+// thread may run as soon as the kernel has looked. So asleep also checks the
+// count of answered reads: the read it accepts began after the last answered
+// one returned. The kernel lets a thread of the same process read the file.
+func asleepInRead(t *testing.T, tid int) bool {
+	t.Helper()
+	b, err := os.ReadFile("/proc/self/task/" + strconv.Itoa(tid) + "/syscall")
+	if err != nil {
+		t.Fatalf("the kernel does not say what thread %d is doing: %v", tid, err)
+	}
+	f := strings.Fields(string(b))
+	return len(f) > 0 && f[0] == strconv.Itoa(syscall.SYS_READ)
+}
+
+// startManualBootReport runs the reporter on a clock the test drives, at beats
+// of BootBeat, and returns once it has taken its first look: a stage begun
+// after it is first looked at by the first beat, whose look at it is progress
+// (a probe's first answer).
+func startManualBootReport(t *testing.T) (*stall.ManualClock, string) {
+	t.Helper()
+	clk := manualBootClock(t)
+	path := startBootReport(t, BootBeat)
+	awaitPending(t, clk)
+	return clk, path
+}
+
+// manualBootBeats has the agent run n more beats on clk at once, once the
+// reporter's last look is done and before (nil: nothing) has returned, and
+// returns the report of the one look the reporter takes for them.
+func manualBootBeats(t *testing.T, clk *stall.ManualClock, path string, n int, before func()) BootProgress {
+	t.Helper()
+	awaitPending(t, clk) // the last beat's look is done
+	if before != nil {
+		before()
+	}
+	clk.Advance(time.Duration(n) * BootBeat)
+	b := uint64(clk.Runnable() / BootBeat)
+	return awaitBootReport(t, path, func(p BootProgress) bool { return p.Beat == b })
 }
 
 // startBootReport runs the reporter for the test, at beats of beat of this
@@ -215,6 +300,43 @@ func TestAWedgedStartIsStillGivenUp(t *testing.T) {
 	t.Logf("the wedged stage as reported: %+v", p.Stages[0])
 }
 
+// A beat at which a stage of the start makes progress starts the count of
+// beats without progress over: the CLI gives a start up after
+// TeardownStallChecks beats in a row at which none of its stages did, not
+// after that many in all. And several beats the agent runs between two looks
+// at a stage that made none each count. The stage's thread sleeps in its read,
+// woken once between two beats and back asleep before that beat looks: each
+// look after the first, but that beat's, finds it has not run since the last.
+func TestABeatOfProgressStartsTheCountOver(t *testing.T) {
+	clk, path := startManualBootReport(t)
+	wake := wedgedWork(t, func() func() { return BeginBootWork("the proxy's start") })
+	quiet := func(want uint64, p BootProgress) {
+		t.Helper()
+		if p.Quiet != want || p.Busy || len(p.Stages) != 1 || p.Stages[0].Progressing {
+			t.Fatalf("report %+v: want %d beats without progress, the stage's thread asleep since the last look", p, want)
+		}
+	}
+	progress := func(p BootProgress) {
+		t.Helper()
+		if p.Quiet != 0 || !p.Busy || len(p.Stages) != 1 || !p.Stages[0].Progressing {
+			t.Fatalf("report %+v: a beat at which the stage made progress did not start the count over", p)
+		}
+	}
+	progress(manualBootBeats(t, clk, path, 1, nil)) // the first look
+	for q := uint64(1); q < TeardownStallChecks; q++ {
+		quiet(q, manualBootBeats(t, clk, path, 1, nil))
+	}
+	progress(manualBootBeats(t, clk, path, 1, wake)) // one short of the count, the stage runs
+	for q := uint64(1); q <= TeardownStallChecks-3; q++ {
+		quiet(q, manualBootBeats(t, clk, path, 1, nil))
+	}
+	p := manualBootBeats(t, clk, path, 3, nil) // three beats, one look
+	quiet(TeardownStallChecks, p)
+	if want := uint64(1 + TeardownStallChecks + TeardownStallChecks); p.Beat != want {
+		t.Fatalf("report %+v: want beat %d", p, want)
+	}
+}
+
 // A stage of the start that waits for work another goroutine does for it --
 // StartProxy waiting on its listener's start -- sees that work only as a
 // stage of its own, begun on that goroutine: the waiting stage's own thread
@@ -224,7 +346,9 @@ func TestAWedgedStartIsStillGivenUp(t *testing.T) {
 //
 // The first two rows beat by events, not on the process's clock: each beat
 // comes once the worker has run since the beat before, so its look follows
-// work the last look could not have seen. On the process's clock a beat of
+// work the last look could not have seen, and the waiting stage's thread
+// sleeps in its read before the first beat looks at it (wedgedWork), so no
+// look after the first finds it has run. On the process's clock a beat of
 // 10 ms is the Go scheduler's own time slice, and under load the worker's
 // goroutine, runnable, can wait out a whole beat for the scheduler with its
 // thread parked (S, futex_wait_queue): no progress the kernel shows, and
@@ -262,36 +386,24 @@ func TestAStageWaitingForAnotherGoroutineCountsItsWorkAsAStageOfItsOwn(t *testin
 	// report: the look follows work of the worker's it has not seen yet.
 	workedBeat := func(t *testing.T, clk *stall.ManualClock, path string, spun *atomic.Uint64) BootProgress {
 		t.Helper()
-		awaitPending(t, clk) // the last beat's look is done
-		n := spun.Load()
-		deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
-		for spun.Load() == n {
-			if time.Now().After(deadline) {
-				t.Fatal("the worker made no progress")
+		return manualBootBeats(t, clk, path, 1, func() {
+			n := spun.Load()
+			deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+			for spun.Load() == n {
+				if time.Now().After(deadline) {
+					t.Fatal("the worker made no progress")
+				}
+				time.Sleep(time.Millisecond)
 			}
-			time.Sleep(time.Millisecond)
-		}
-		clk.Advance(BootBeat)
-		b := uint64(clk.Runnable() / BootBeat)
-		return awaitBootReport(t, path, func(p BootProgress) bool { return p.Beat == b })
-	}
-	// started has the reporter beat on a clock the test drives, and returns
-	// once it has taken its first look: a stage begun after it is first
-	// looked at by the first beat, whose look at it is progress (a probe's
-	// first answer).
-	started := func(t *testing.T) (*stall.ManualClock, string) {
-		t.Helper()
-		clk := manualBootClock(t)
-		path := startBootReport(t, BootBeat)
-		awaitPending(t, clk)
-		return clk, path
+		})
 	}
 
 	t.Run("not a stage of its own: the wait is no progress", func(t *testing.T) {
-		clk, path := started(t)
+		clk, path := startManualBootReport(t)
 		spun := awaited(t, nil)
 		// Every beat after the stage's first look counts one more without
-		// progress, the worker making progress across each, up to the count.
+		// progress, the worker making progress across each, up to the count:
+		// the stage's thread sleeps in its read throughout.
 		for q := uint64(0); q <= TeardownStallChecks; q++ {
 			if p := workedBeat(t, clk, path, spun); p.Quiet != q {
 				t.Fatalf("report %+v: want %d beats without progress, the worker's progress no progress of the start", p, q)
@@ -300,7 +412,7 @@ func TestAStageWaitingForAnotherGoroutineCountsItsWorkAsAStageOfItsOwn(t *testin
 	})
 
 	t.Run("a stage of its own: its progress is the start's", func(t *testing.T) {
-		clk, path := started(t)
+		clk, path := startManualBootReport(t)
 		spun := awaited(t, func() func() { return BeginBootWork("the proxy listener's start") })
 		awaitBootReport(t, path, func(q BootProgress) bool { return q.Seq == 2 }) // both stages begun
 		// Every beat finds the worker's stage making progress.
