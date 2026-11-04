@@ -12,6 +12,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -457,5 +459,22 @@ func TestInsertTestCase_WritesFilePartCarriedInTheTestCase(t *testing.T) {
 				t.Fatalf("the stored test case carries the file bytes:\n%s", raw)
 			}
 		})
+	}
+}
+
+func TestATestCaseFileSaysWhatItIs(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ts := NewWithNaming(zap.NewNop(), t.TempDir(), NamingDescriptive)
+	tc := httpTC("GET", "http://api.test/users")
+	tc.Name = "get-users-1"
+	if err := ts.InsertTestCase(t.Context(), tc, "test-set-0", false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(ts.TcsPath, "test-set-0", "tests", "get-users-1.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(raw), utils.FileHead(utils.TestCaseAbout)) {
+		t.Fatalf("the test case file does not start with keploy's line and what the file is:\n%s", raw)
 	}
 }

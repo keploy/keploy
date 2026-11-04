@@ -1071,7 +1071,7 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 		// comment, because every later InsertMock sees a file that exists.
 		// Write it before the encode.
 		if isFileEmpty {
-			if version := utils.GetVersionAsComment(); version != "" {
+			if version := utils.FileHead(utils.MocksAbout); version != "" {
 				if _, err := writer.WriteString(version); err != nil {
 					return fmt.Errorf("failed to write version comment: %w", err)
 				}

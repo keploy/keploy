@@ -85,7 +85,7 @@ func TestARewriteKeepsWhatAHandEditAdded(t *testing.T) {
 			must(t, err)
 			got := string(raw)
 			for _, want := range []string{
-				utils.GetVersionAsComment() + "# Notes: TestB's mock-1 was moved back by hand, see the README.\n",
+				utils.FileHead(utils.MappingsAbout) + "# Notes: TestB's mock-1 was moved back by hand, see the README.\n",
 				"reviewed_by: agent\n",
 				"ticket: JIRA-123\n",
 				"note: keep this one\n",
@@ -326,5 +326,23 @@ func TestBothMockListsIsATypedRefusalNamingTheTest(t *testing.T) {
 				t.Fatalf("the refusal's words changed: %v", err)
 			}
 		})
+	}
+}
+
+func TestAMappingFileSaysWhatItIsOnce(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := t.TempDir()
+	db := NewWithFormat(zap.NewNop(), dir, "mappings", yaml.FormatYAML)
+	for _, id := range []string{"o::TestA", "o::TestB"} {
+		must(t, db.Insert(context.Background(), &models.Mapping{TestSetID: "s", TestCases: []models.MappedTestCase{{ID: id, Mocks: []models.MockEntry{{Name: "mock-0", Kind: "Http"}}}}}))
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "s", "mappings.yaml"))
+	must(t, err)
+	got := string(raw)
+	if !strings.HasPrefix(got, utils.FileHead(utils.MappingsAbout)) {
+		t.Fatalf("the file does not start with keploy's line and what the file is:\n%s", got)
+	}
+	if n := strings.Count(got, utils.MappingsAbout); n != 1 {
+		t.Fatalf("the file says what it is %d times, want once:\n%s", n, got)
 	}
 }

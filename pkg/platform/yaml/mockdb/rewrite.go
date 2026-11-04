@@ -322,7 +322,7 @@ func (rw *mockFileRewriter) open() error {
 		rw.jsonEnc = json.NewEncoder(rw.w)
 		return nil
 	}
-	if version := utils.GetVersionAsComment(); version != "" {
+	if version := utils.FileHead(utils.MocksAbout); version != "" {
 		if _, err := rw.w.WriteString(version); err != nil {
 			return err
 		}

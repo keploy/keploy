@@ -120,7 +120,7 @@ func encodeYAMLOver(mapping *models.Mapping, old []byte, renames map[string]stri
 	case len(head) > 0:
 		data = append(head, data...)
 	case h == headerAlways || h == headerOnNew && old == nil:
-		data = append([]byte(utils.GetVersionAsComment()), data...)
+		data = append([]byte(utils.FileHead(utils.MappingsAbout)), data...)
 	}
 	unkept.Comments = droppedComments(old, data)
 	return data, unkept, nil
@@ -131,6 +131,10 @@ func encodeYAMLOver(mapping *models.Mapping, old []byte, renames map[string]stri
 // nil when data starts with no comment. A document marker (---) or a
 // directive (%YAML) before them is skipped: the writer writes neither.
 func commentHead(data []byte) []byte {
+	about := map[string]bool{}
+	for _, l := range strings.Split(strings.TrimSuffix(utils.MappingsAbout, "\n"), "\n") {
+		about[l] = true
+	}
 	var head bytes.Buffer
 	blanks := 0
 	for _, line := range strings.SplitAfter(string(data), "\n") {
@@ -150,7 +154,10 @@ func commentHead(data []byte) []byte {
 		}
 		blanks = 0
 		if strings.HasPrefix(t, versionLine) {
-			head.WriteString(utils.GetVersionAsComment())
+			head.WriteString(utils.FileHead(utils.MappingsAbout))
+			continue
+		}
+		if about[strings.TrimRight(line, "\r\n")] {
 			continue
 		}
 		head.WriteString(strings.TrimRight(line, "\r\n") + "\n")
