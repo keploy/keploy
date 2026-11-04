@@ -3,10 +3,12 @@
 package relay
 
 import (
+	"crypto/tls"
 	"errors"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -126,6 +128,111 @@ func TestADestinationsResetInItsSocketAsTheClientsFINIsForwardedIsReadAndTold(t 
 		if got[i] != want[i] {
 			t.Fatalf("told %q, want %q", got, want)
 		}
+	}
+}
+
+// gatedDest is heldDest whose reads are held only once gate is set: the TLS
+// handshake reads through it first.
+type gatedDest struct {
+	heldDest
+	gate atomic.Bool
+}
+
+func (d *gatedDest) Read(p []byte) (int, error) {
+	if d.gate.Load() {
+		<-d.release
+	}
+	return d.TCPConn.Read(p)
+}
+
+// Over TLS the relay's half-close of the destination is a close_notify
+// alert, written, not a shutdown(2): met by the destination's reset in its
+// socket, that write fails with the reset itself (or EPIPE), never ENOTCONN,
+// and takes the reset out of the socket, so a read after it finds only its
+// end, an EOF. The relay keeps the teardown there: the destination's end is
+// left untold rather than told as a close. Draining as for a plain socket
+// whose connection is over would read that EOF and tell the reset as the
+// destination's close.
+func TestOverTLSADestinationsResetMetAsTheClientsFINIsForwardedIsNotToldAsAClose(t *testing.T) {
+	app, proxyClient := loopbackPair(t)
+	proxyServer, server := loopbackPair(t)
+	t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
+	dest := &gatedDest{heldDest: heldDest{TCPConn: proxyServer.(*net.TCPConn), release: make(chan struct{}), nudged: make(chan struct{})}}
+	// TLS 1.2: no ticket follows the handshake, so nothing is left unread in
+	// the destination's socket but its end.
+	cert := selfSignedCert(t)
+	tlsServer := tls.Server(server, &tls.Config{Certificates: []tls.Certificate{cert}, MaxVersion: tls.VersionTLS12})
+	tlsDest := tls.Client(dest, &tls.Config{InsecureSkipVerify: true, MaxVersion: tls.VersionTLS12}) //nolint:gosec // a test's self-signed peer
+	handshook := make(chan error, 1)
+	go func() { handshook <- tlsServer.Handshake() }()
+	if err := tlsDest.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-handshook; err != nil {
+		t.Fatal(err)
+	}
+	dest.gate.Store(true)
+	drains := make(chan struct{})
+	var drainOnce sync.Once
+	core, _ := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
+		if strings.Contains(e.Message, "draining the opposite direction") {
+			drainOnce.Do(func() { close(drains) })
+		}
+		return nil
+	}))
+	ends := newEndsTold()
+	cfg := ends.config()
+	cfg.Logger = logger
+	clientEndRead, destEnded := make(chan struct{}), make(chan struct{})
+	told := cfg.PeerEnded
+	cfg.PeerEnded = func(dir fakeconn.Direction, reset bool) {
+		told(dir, reset)
+		if dir != fakeconn.FromClient {
+			return
+		}
+		close(clientEndRead)
+		select {
+		case <-destEnded:
+		case <-time.After(10 * time.Second):
+		}
+	}
+	done := runRelay(t, New(cfg, &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, connseq.NewUpstream(tlsDest)))
+	go func() {
+		select {
+		case <-dest.nudged:
+		case <-drains:
+		case <-done:
+		}
+		close(dest.release)
+	}()
+	req := "GET / HTTP/1.1\r\n\r\n"
+	if _, err := app.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+	readN(t, tlsServer, len(req))
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-clientEndRead:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the relay did not read the client's FIN within 10s")
+	}
+	if err := server.(*net.TCPConn).SetLinger(0); err != nil {
+		t.Fatal(err)
+	}
+	_ = server.Close()
+	awaitTCPState(t, proxyServer, unix.BPF_TCP_CLOSE, "the destination's reset")
+	close(destEnded)
+	awaitDone(t, done, "the relay did not end")
+	select {
+	case <-drains:
+		t.Fatal("the relay drained after a close_notify that met the destination's reset, want the teardown")
+	default:
+	}
+	if got := ends.all(); len(got) != 1 || got[0] != "the client's end" {
+		t.Fatalf("told %q, want only the client's end: the destination's reset, taken by the failed close_notify, is never told as its close", got)
 	}
 }
 

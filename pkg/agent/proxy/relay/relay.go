@@ -1450,25 +1450,20 @@ type closeWriter interface {
 	CloseWrite() error
 }
 
-// halfCloseWrite forwards a FIN on c — telling the peer "no more data
-// from this side" while leaving the peer free to keep sending. Reports
-// whether the half-close actually happened; false means the caller must
-// fall back to tearing the connection down.
+// errNoHalfClose is closeWrite's error for a conn that cannot half-close.
+var errNoHalfClose = errors.New("relay: the connection cannot half-close")
+
+// closeWrite forwards a FIN on c — telling the peer "no more data from
+// this side" while leaving the peer free to keep sending. Its error is the
+// CloseWrite's own, or errNoHalfClose where c cannot half-close; a non-nil
+// error means the half-close did not happen, and the caller falls back to
+// tearing the connection down.
 //
 // Unwrapping matters: the relay is handed conns that may be wrapped for
 // safety or accounting, and a wrapper that forwards Read/Write but not
 // CloseWrite would silently cost every connection its half-close. Any
 // wrapper exposing NetConn() (the convention *tls.Conn established) is
 // followed to the conn underneath.
-func halfCloseWrite(c *net.Conn) bool {
-	return closeWrite(c) == nil
-}
-
-// errNoHalfClose is closeWrite's error for a conn that cannot half-close.
-var errNoHalfClose = errors.New("relay: the connection cannot half-close")
-
-// closeWrite is halfCloseWrite's half-close, with its error: the
-// CloseWrite's own, or errNoHalfClose where c cannot half-close.
 func closeWrite(c *net.Conn) error {
 	if c == nil || *c == nil {
 		return errNoHalfClose

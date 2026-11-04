@@ -185,8 +185,8 @@ type clientLook struct {
 // client's forwarder looks as it reads the client's end, and the destination's
 // forwarder before it writes and as it reads the destination's end, until one
 // of them finds the client's FIN (one at a time: Relay.finMu); the goroutine
-// that waits for the client's answer (resolve) looks after that. No two looks run at once. written is the
-// destination's forwarder's alone, before each chunk it writes once the FIN
+// that waits for the client's answer (resolve) looks after that. No two looks
+// run at once. written is the destination's forwarder's alone, before each chunk it writes once the FIN
 // was found, and may run while resolve looks.
 type clientSocket interface {
 	look() clientLook
