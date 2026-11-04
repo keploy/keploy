@@ -2153,6 +2153,9 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 	if err != nil {
 		return err
 	}
+	// Handed before the staging, which installs it with the trees it builds,
+	// so a read of the set as recorded (integrations.RecordedSetRanger)
+	// ranges one staging's trees and source, the last set's until then.
 	a.readKindFromDisk()
 
 	// Atomically update mocks AND the active test window when the proxy
