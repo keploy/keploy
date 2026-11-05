@@ -12,7 +12,8 @@
 # script that sources sudo_env.sh does so by its own path, never through the
 # workspace, so it loads where a workflow checks keploy out at a path; a script
 # that copies a script's functions into a file to run them there checks that
-# the copy loads sudo_env.sh, unless the script it copies from loads none.
+# the copy loads sudo_env.sh, unless the script it copies from loads none. No
+# script or workflow runs keploy through `sudo -E` without SUDO_ENV.
 # verify_ran passes a run under the proven switch whose log holds the agent's
 # verify line, and fails one whose log lacks it or does not exist, saying so; a
 # run without the switch, or with KEPLOY_EXACT_VIEW_VERIFY other than 1, passes
@@ -135,6 +136,83 @@ printf 'set -e\nsource "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_s
 printf '. ./.github/workflows/test_workflow_scripts/%s.sh\n' "$name" > "$tmp/src/rel.sh"
 printf 'source "$GITHUB_WORKSPACE/scripts/%s.sh"\n' "$name" > "$tmp/src/ws-only.sh"
 from_workspace_is workspace-forms "$tmp/src" "a/ws.sh:2|rel.sh:1|ws-only.sh:1"
+
+# No script or workflow runs keploy through `sudo -E` (or a --preserve-env
+# with no list) without SUDO_ENV: sudo-rs ignores -E, so such a run gets none
+# of the switches its workflow sets. A script written from an older one's
+# `sudo -E` line then fails this job instead of passing without them.
+# sudo_e_keploy DIR: each command in a script or workflow under DIR (its
+# continued lines joined, comments left out) whose sudo takes -E, alone or
+# among its other one-letter options, or a bare --preserve-env, and runs keploy
+# (a keploy word, or a variable whose name ends in BIN, before the command's
+# end at ; & | or a closing parenthesis), without naming SUDO_ENV, as
+# "FILE:LINE" of the command's first line. A sudo inside a quoted command
+# keploy is handed (`-c "sudo -E docker run ..."`) runs no keploy, and passes.
+# Limits: an option with an argument before -E (`sudo -u root -E`) ends the
+# options read, and a $( ) inside the sudo'd command ends it early.
+sudo_e_keploy() {
+  local f
+  grep -rlE --include='*.sh' --include='*.yml' --include='*.yaml' 'sudo' "$1" | sort |
+    while IFS= read -r f; do
+      awk -v file="${f#"$1"/}" -v q="'" '
+        BEGIN { kw = "(^|[[:space:]\"" q "/])keploy([[:space:]\"" q "]|$)" }
+        {
+          if (cmd == "") start = FNR
+          l = $0
+          if (l ~ /\\$/) { cmd = cmd substr(l, 1, length(l) - 1) " "; next }
+          code = cmd l
+          cmd = ""
+          if (code ~ /^[[:space:]]*#/) next
+          sub(/[[:space:]]#.*/, "", code)
+          rest = code
+          while (match(rest, /(^|[^[:alnum:]_.-])sudo[[:space:]]/)) {
+            rest = substr(rest, RSTART + RLENGTH)
+            seg = rest
+            if (match(seg, /[;&|)]/)) seg = substr(seg, 1, RSTART - 1)
+            n = split(seg, w, /[[:space:]]+/)
+            e = 0
+            for (k = 1; k <= n; k++) {
+              if (w[k] == "") continue
+              if (w[k] !~ /^-/) break
+              if (w[k] == "--preserve-env" || w[k] ~ /^-[[:alpha:]]*E[[:alpha:]]*$/) e = 1
+            }
+            if (e && seg !~ /SUDO_ENV/ && (seg ~ kw || seg ~ /[$][{]?[[:alnum:]_]*BIN/)) {
+              print file ":" start
+              break
+            }
+          }
+        }' "$f"
+    done
+}
+# sudo_e_is NAME DIR WANT: sudo_e_keploy DIR, its lines joined by "|", is WANT.
+sudo_e_is() {
+  local got
+  cases=$((cases + 1))
+  got=$(sudo_e_keploy "$2" | sort | paste -sd'|')
+  if [ "$got" != "$3" ]; then
+    echo "FAIL $1: commands that run keploy under sudo with -E and without SUDO_ENV (sudo-rs ignores -E): '$got', want '$3'"
+    fails=$((fails + 1))
+  fi
+}
+sudo_e_is scripts "$here/../.." ""
+mkdir -p "$tmp/se"
+# Each fixture's -E is a printf argument, so no line here runs keploy through
+# sudo -E.
+# The line a script written from an older one carried, continued.
+printf 'cd x\nsudo %s env PATH="$PATH" \\\n  "$RECORD_BIN" record -c "docker compose up" > log 2>&1 &\n' -E > "$tmp/se/tmpl.sh"
+# What the podman refusal test hands keploy: no keploy under that sudo.
+printf 'refused x record -c "sudo %s podman run --name app img"\nout=$(timeout 60 "$BIN" test -c "sudo %s docker run --name app img" --disable-tele 2>&1 </dev/null)\n' -E -E > "$tmp/se/quoted.sh"
+printf 'sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c x\nsudo %s env "${SUDO_ENV[@]}" keploy test -c x\n' -E > "$tmp/se/named.sh"
+printf 'out=$(sudo %s keploy test -c "./app")\n' -nE > "$tmp/se/bundled.sh"
+# Two on one line: the line once.
+printf 'sudo %s keploy test -c ./app; sudo %s keploy report\n' -E -E > "$tmp/se/twice.sh"
+# A list sudo keeps (sudo-rs honours one) names its variables.
+printf 'sudo %s "$BIN" test -c ./app\nsudo %s "$BIN" mock record\n' --preserve-env=GOCOVERDIR --preserve-env > "$tmp/se/preserve.sh"
+printf '# sudo %s keploy record\ntrue # sudo %s keploy record\n' -E -E > "$tmp/se/comment.sh"
+printf 'jobs:\n  a:\n    steps:\n      - run: sudo  %s /usr/local/bin/keploy test -c ./app\n' -E > "$tmp/se/wf.yml"
+printf 'sudo %s apt-get install -y jq\nsudo %s docker compose down && keploy record -c x\nsudo "$REPLAY_BIN" test -c "grep %s ok out.txt"\nfakesudo %s keploy record\nsudo %s rm -rf keploy/reports\nsudo %s rm -rf /root/.keploy\n' -E -E -E -E -E -E > "$tmp/se/other.sh"
+printf 'sudo %s keploy record\n' -E > "$tmp/se/notes.txt"
+sudo_e_is sudo-e-forms "$tmp/se" "bundled.sh:1|preserve.sh:2|tmpl.sh:2|twice.sh:1|wf.yml:4"
 
 # The same scripts in GitHub's layout for `path: keploy`: the repository under
 # $GITHUB_WORKSPACE/keploy and nothing at the workspace root.

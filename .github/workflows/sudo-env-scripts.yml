@@ -5,7 +5,8 @@ name: Sudo env scripts
 # each only while it is set: sudo-rs ignores -E); a check that every KEPLOY_
 # variable a workflow's env: block sets is one of those switches or one keploy
 # does not read; a check that every script sources sudo_env.sh by its own
-# path, so it loads where a workflow checks keploy out at a path; and
+# path, so it loads where a workflow checks keploy out at a path; a check
+# that no script or workflow runs keploy through sudo -E without SUDO_ENV; and
 # verify_ran, which fails a run under the proven switch whose agent never said
 # its exact view's verify mode is on. hang_guard.tests.sh: the hang guard a
 # script bounds a run with, whose exit code is the run's own on GNU and uutils
@@ -31,7 +32,7 @@ permissions:
 
 jobs:
   sudo-env:
-    # Forty-three cases on files the script writes; about a second.
+    # Forty-five cases on files the script writes; about a second.
     timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
