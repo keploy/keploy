@@ -1863,6 +1863,26 @@ type SetEndFiler interface {
 	AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool)
 }
 
+// RunPlacer is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
+// MockManager implements it) for a parser that holds the write of an answer
+// it has matched until the replay's run reaches the answer's recorded place
+// (models.RegisterAnswerRelease): where the run is among the set's recorded
+// test windows, moved only by the events the replayer drives (a window opens,
+// a test ends, the set ends), never back within a set.
+//
+//   - RunPlace is the place now. Its Staging changes when a new set is
+//     staged: a hold taken under an earlier one is over. Its SetEnd is set at
+//     the set's end and once the store is closed.
+//   - RunPlaceChanged returns a channel closed at the next change of the
+//     place. Take it BEFORE reading RunPlace; each change hands out a fresh
+//     channel.
+//
+// A MockMemDb without it holds nothing: write at once.
+type RunPlacer interface {
+	RunPlace() models.RunPlace
+	RunPlaceChanged() <-chan struct{}
+}
+
 // CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
 // agent's MockManager implements it) for a parser whose kind registered a
 // carry-over predicate (models.RegisterCarryOver). It returns, in recorded

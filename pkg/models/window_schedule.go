@@ -92,8 +92,18 @@ func (s *WindowSchedule) Len() int {
 // when the schedule holds none (a case with no request time opens none). A
 // name recorded twice gives its first window in Start order.
 func (s *WindowSchedule) Of(testCase string) (TestWindow, bool) {
-	if s.Len() == 0 || testCase == "" {
+	i, ok := s.IndexOfTest(testCase)
+	if !ok {
 		return TestWindow{}, false
+	}
+	return s.windows[i], true
+}
+
+// IndexOfTest is the index, in Start order (Window), of the window Of returns
+// for testCase; false where Of finds none.
+func (s *WindowSchedule) IndexOfTest(testCase string) (int, bool) {
+	if s.Len() == 0 || testCase == "" {
+		return 0, false
 	}
 	s.byTestOnce.Do(func() {
 		s.byTest = make(map[string]int, len(s.windows))
@@ -104,10 +114,7 @@ func (s *WindowSchedule) Of(testCase string) (TestWindow, bool) {
 		}
 	})
 	i, ok := s.byTest[testCase]
-	if !ok {
-		return TestWindow{}, false
-	}
-	return s.windows[i], true
+	return i, ok
 }
 
 // After reports whether t is later than every window's End: recorded after
