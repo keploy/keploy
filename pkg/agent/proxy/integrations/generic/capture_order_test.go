@@ -1,6 +1,7 @@
 package generic
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -176,7 +177,10 @@ func startRecordingUnder(t *testing.T, plan []fakeconn.Chunk, viaSyncMock, withO
 		sess.Order = order.StreamedBefore
 	}
 	mgr := syncMock.New(nil)
+	// The recording's manager, as production's session has it: its Mgr and
+	// its context's (stop).
 	sess.Mgr = mgr
+	sess.Ctx = syncMock.NewContext(context.Background(), mgr)
 	sess.Orphans = &syncMock.Spans{}
 	if viaSyncMock {
 		mgr.SetOutputChannel(mocks)
@@ -243,6 +247,14 @@ func (r *recording) recorded(pair string, within time.Duration) bool {
 			return false
 		}
 	}
+}
+
+// stop begins the recording's stop, as its ask of what is pending does: the
+// parser hands on the exchange it holds for the rest of its answer with the
+// answer it has read (pairChunkEvents' holdAnswer), so the exchange is
+// recorded with the streams open once its answer has reached the parser.
+func (r *recording) stop() {
+	r.mgr.BacklogBefore(time.Now())
 }
 
 // endStream ends stream i (0 the client's, 1 the dest's), as the relay ends
@@ -424,9 +436,11 @@ func TestV2_AStreamsEndEndsTheMergesWaitOnIt(t *testing.T) {
 // read, has taken everything they sent and waits on both, so the client's
 // reader hands its end straight to it, and that reader has ended before the
 // answer goes on its stream. So the answer is the merge's one head, and the
-// end is not one beside it. Were the end not looked at, the merge would wait
-// on the order for good: the exchange not recorded, and the parser not
-// returning at the streams' end.
+// end is not one beside it. The parser holds the exchange for the rest of its
+// answer (holdAnswer), so the recording's stop shows the answer reached it:
+// the exchange is recorded with the dest's stream open. Were the end not
+// looked at, the merge would wait on the order for good: the exchange not
+// recorded, and the parser not returning at the streams' end.
 func TestV2_AnAnswerTakenAfterTheClientsEndWaitsOnNoClientChunk(t *testing.T) {
 	reqs, resps := exchangeChunks(2)
 	lost := fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("lost"), ConnSeq: 4}
@@ -444,10 +458,11 @@ func TestV2_AnAnswerTakenAfterTheClientsEndWaitsOnNoClientChunk(t *testing.T) {
 			r.endStream(0)
 			r.awaitReaders(1)
 			r.put(resps[1])
+			r.stop()
 			ok := r.recorded("req1|resp1", 5*time.Second)
 			got := r.end()
 			if !ok {
-				t.Fatalf("req1's mock was not recorded with the dest's stream open, its answer taken after the client's end (recorded %q by the end)", pairsOf(got.recorded))
+				t.Fatalf("req1's mock was not recorded at the stop with the dest's stream open, its answer taken after the client's end (recorded %q by the end)", pairsOf(got.recorded))
 			}
 			if !got.returned {
 				t.Fatal("the parser did not return once both streams ended")
@@ -569,15 +584,19 @@ func TestV2_TheMergeWaitsForAChunkOnItsStreamItsReaderHasNotHandedOn(t *testing.
 	}
 }
 
-// An answer goes on as soon as nothing captured before it can still come, not
-// at the next request or the connection's end: the connection's first
-// exchange is recorded once its answer is on its stream; once the relay says
-// the client chunk numbered before it will never reach its stream (refused),
-// the second exchange's mock is recorded with the streams still open; and so
-// is one whose chunks have no number (a producer that does not number them,
-// merged as read), and one recorded on a session with no capture order
-// (Session.Order unset: merged as read). A mock recorded late lands in the
-// window of a test that did not make its call.
+// An answer goes on to the parser as soon as nothing captured before it can
+// still come, not at the next request or the connection's end. The parser
+// holds the exchange for the rest of its answer (holdAnswer), and the
+// recording's stop hands it on with the answer read, so each case asks the
+// stop with the streams open: the connection's first exchange is recorded
+// once its answer is on its stream, before the next request; once the relay
+// says the client chunk numbered before it will never reach its stream
+// (refused), the second exchange's mock is recorded with the streams still
+// open; and so is one whose chunks have no number (a producer that does not
+// number them, merged as read), and one recorded on a session with no capture
+// order (Session.Order unset: merged as read). An answer the merge kept back
+// is one the parser has not read: the stop cannot hand its exchange on, and
+// waits on the parser.
 func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 	for _, viaSyncMock := range []bool{true, false} {
 		// The connection's first exchange: the merge knows the client's
@@ -591,12 +610,13 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			r := startRecording(t, []fakeconn.Chunk{reqs[0], resps[0], reqs[1], resps[1]}, viaSyncMock)
 			r.put(reqs[0])
 			r.put(resps[0])
+			r.stop()
 			ok := r.recorded("req0|resp0", 5*time.Second)
 			r.put(reqs[1])
 			r.put(resps[1])
 			got := r.end()
 			if !ok {
-				t.Fatalf("req0's mock was not recorded before the next request, its answer on its stream (recorded %q by the end)", pairsOf(got.recorded))
+				t.Fatalf("req0's mock was not recorded at the stop before the next request, its answer on its stream (recorded %q by the end)", pairsOf(got.recorded))
 			}
 			if p := pairsOf(got.recorded); strings.Join(p, " ") != "req0|resp0 req1|resp1" || got.leftOut != 0 {
 				t.Fatalf("recorded %q and left out %d; want both exchanges", p, got.leftOut)
@@ -612,10 +632,11 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			r.put(reqs[1])
 			r.put(resps[1])
 			r.order.accept(refused, 0)
+			r.stop()
 			ok := r.recorded("req1|resp1", 5*time.Second)
 			got := r.end()
 			if !ok {
-				t.Fatalf("req1's mock was not recorded with the streams open, once nothing captured before its answer could come (recorded %q by the end)", pairsOf(got.recorded))
+				t.Fatalf("req1's mock was not recorded at the stop with the streams open, once nothing captured before its answer could come (recorded %q by the end)", pairsOf(got.recorded))
 			}
 		})
 		t.Run(fmt.Sprint("unnumbered/viaSyncMock=", viaSyncMock), func(t *testing.T) {
@@ -628,10 +649,11 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 				r.put(reqs[i])
 				r.put(resps[i])
 			}
+			r.stop()
 			ok := r.recorded("req1|resp1", 5*time.Second)
 			got := r.end()
 			if !ok {
-				t.Fatalf("req1's mock was not recorded with the streams open (recorded %q by the end)", pairsOf(got.recorded))
+				t.Fatalf("req1's mock was not recorded at the stop with the streams open (recorded %q by the end)", pairsOf(got.recorded))
 			}
 		})
 		t.Run(fmt.Sprint("no capture order/viaSyncMock=", viaSyncMock), func(t *testing.T) {
@@ -642,10 +664,11 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 				r.put(reqs[i])
 				r.put(resps[i])
 			}
+			r.stop()
 			ok := r.recorded("req1|resp1", 5*time.Second)
 			got := r.end()
 			if !ok {
-				t.Fatalf("req1's mock was not recorded with the streams open, on a session that cannot say its capture order (recorded %q by the end)", pairsOf(got.recorded))
+				t.Fatalf("req1's mock was not recorded at the stop with the streams open, on a session that cannot say its capture order (recorded %q by the end)", pairsOf(got.recorded))
 			}
 		})
 	}

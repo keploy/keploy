@@ -1334,3 +1334,41 @@ func TestAResetStreamIsLeftOutWithItsOwnNextStep(t *testing.T) {
 		t.Errorf("the WARN's next_step is %v, want the reset's", got)
 	}
 }
+
+// ReportLeftOutPart spans a part of an exchange already reported left out by
+// ReportLeftOut's rule (its own times; ending where it starts when its end
+// is before its start; none with no start), and counts and logs nothing:
+// the exchange was counted and logged once already. Nil-safe.
+func TestAPartOfAnExchangeLeftOutIsSpannedOnly(t *testing.T) {
+	(*Session)(nil).ReportLeftOutPart(time.Now(), time.Now())
+	core, logs := observer.New(zapcore.DebugLevel)
+	spans := &rawSpans{}
+	mgr := syncMock.New(nil)
+	s := &Session{Orphans: spans, Mgr: mgr, Logger: zap.New(core), Mocks: make(chan *models.Mock, 1), Ctx: context.Background()}
+	at := time.Now().Add(-time.Minute)
+	none := [2]time.Time{}
+	for _, tc := range []struct {
+		name       string
+		start, end time.Time
+		span       [2]time.Time
+	}{
+		{"untimed", time.Time{}, at, none},
+		{"ended-before-it-began", at, at.Add(-time.Second), [2]time.Time{at, at}},
+		{"timed", at, at.Add(time.Second), [2]time.Time{at, at.Add(time.Second)}},
+	} {
+		spans.got = nil
+		s.ReportLeftOutPart(tc.start, tc.end)
+		switch {
+		case tc.span == none && len(spans.got) != 0:
+			t.Fatalf("%s: spanned over %v, want no span: the part has no start", tc.name, spans.got)
+		case tc.span != none && (len(spans.got) != 1 || !spans.got[0][0].Equal(tc.span[0]) || !spans.got[0][1].Equal(tc.span[1])):
+			t.Fatalf("%s: spanned over %v, want [%v, %v]", tc.name, spans.got, tc.span[0], tc.span[1])
+		}
+	}
+	if n := mgr.MocksLeftOut(); n != 0 {
+		t.Fatalf("counted %d for parts of an exchange counted already, want 0", n)
+	}
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("logged %d lines for parts of an exchange logged already, want none", n)
+	}
+}

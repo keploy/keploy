@@ -116,8 +116,9 @@ const (
 
 // checkReadersEndAfterAPanicOfTheMainLoop runs encodeGenericV2 under a
 // supervisor over a session whose streams hold one exchange, and whose
-// mock (recorded as the reply reaches the loop) panics in the main loop
-// (Session.OnMockRecorded runs in EmitMock): for fillClient and fillBoth,
+// exchange, held as the reply reaches the loop, panics in the main loop (the
+// hold clears the session's pending work: Session.MockHeld runs
+// OnPendingCleared, once here): for fillClient and fillBoth,
 // once the fill has been sent, every queue on its way is full and the
 // readers it fills are parked on their sends; for fillAfterTheLoop, once the client's reader waits on a read, the
 // fill then sent by the abort. The abort Closes both FakeConns, as the
@@ -148,7 +149,14 @@ func checkReadersEndAfterAPanicOfTheMainLoop(t *testing.T, fill readersFill) {
 	}
 	var created string           // set by the parser's goroutine, before it starts any
 	var clientLeft, destLeft int // what the streams hold as the loop panics
-	sess.OnMockRecorded = func(*models.Mock) {
+	panicked := false
+	sess.OnPendingCleared = func() {
+		// The exchange left out as the loop leaves clears the pending work
+		// too: by then the loop has panicked.
+		if panicked {
+			return
+		}
+		panicked = true
 		// The main loop runs this, and drains nothing more. Every goroutine
 		// encodeGenericV2 started is alive here: no reader has ended, since
 		// both streams are open, and the merge waits for both readers.

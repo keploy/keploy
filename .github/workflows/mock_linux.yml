@@ -69,7 +69,11 @@ name: Mock Mode Regression (Linux)
 # every packet to keploy's proxy 1 s, and asserts the call is judged in its
 # own test: never in the next one, never not at all. The same job replays a
 # publish the app makes after it answered a test (P101), and asserts it is
-# judged in the test it was made in, failing the set and keploy test.
+# judged in the test it was made in, failing the set and keploy test. The same
+# job records a Generic dependency that answers in more than one chunk, on a
+# pooled connection whose last exchange only the recording's stop ends, and
+# asserts every test case is kept, each answer is recorded whole, and the
+# replay passes with the dependency down.
 # Another replays an app whose dependency call carries its clock read as a
 # date and an hour of no zone, under the proven switch, and asserts the read
 # is checked at its cut in the app's own zone, failing the set when it is
@@ -815,6 +819,23 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/fire-and-forget/proven-after-answer-linux.sh"
+
+      # A Generic dependency (a TCP protocol keploy has no parser for) that
+      # answers in more than one chunk: a header and a body written apart,
+      # and an answer over a 32 KiB relay read, on one pooled connection
+      # whose last exchange only the recording's stop ends (the dependency
+      # keeps its side open after the app's FIN, and the relay keeps the
+      # half-closed connection open past the stop). keploy record must exit
+      # 0, keep every test case and record each answer whole, and keploy
+      # test must pass them with the dependency down, the proven switch off
+      # and on. In this job for its record_replay_build binary and its room.
+      - name: Run generic answer-in-parts e2e
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/generic_answer_parts/generic-answer-parts-linux.sh"
 
   # The hooks' side of a full PID map, against keploy's own BPF object on the
   # runner's kernel: live processes fill target_namespace_pids (loaded small,
