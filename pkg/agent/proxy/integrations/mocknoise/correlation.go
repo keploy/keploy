@@ -25,9 +25,14 @@ import (
 // there is no matched candidate to diff against; the recording is the only
 // reliable source. It is deliberately conservative (see appRandomClass): a
 // false positive would wildcard a field that must match exactly and collapse
-// distinct calls. Scope (v1): JSON request + response BODIES; headers, URL
-// query and non-JSON bodies are a documented follow-up.
+// distinct calls. Scope: JSON request and response BODIES of an HTTP mock,
+// and the values a Mongo write's answer echoes (mongoCorrelations). An HTTP
+// mock's headers, URL query and non-JSON bodies are not read: a value there
+// is matched as recorded.
 func CorrelationsFromMock(m *models.Mock) []models.FieldCorrelation {
+	if m != nil && m.Kind == models.Mongo {
+		return mongoCorrelations(m)
+	}
 	if m == nil || m.Spec.HTTPReq == nil || m.Spec.HTTPResp == nil {
 		return nil
 	}
