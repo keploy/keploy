@@ -42,15 +42,15 @@ func heldCall(mm *proxyPkg.MockManager, path string) <-chan string {
 	app, agentEnd := net.Pipe()
 	go func() {
 		_ = httpparser.New(zap.NewNop()).MockOutgoing(context.Background(), agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
-		agentEnd.Close()
+		_ = agentEnd.Close()
 	}()
 	go func() {
-		defer app.Close()
+		defer func() { _ = app.Close() }()
 		got := ""
 		if _, err := app.Write([]byte("GET " + path + " HTTP/1.1\r\nHost: api\r\n\r\n")); err == nil {
 			if resp, err := http.ReadResponse(bufio.NewReader(app), nil); err == nil {
 				body, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
 					got = string(body)
 				}
