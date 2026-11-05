@@ -53,7 +53,7 @@ type heldPiece struct {
 // part of it is due already.
 func (h *HTTP) heldAnswerOf(stub *models.Mock, call *http.Request, db integrations.MockMemDb, repeat bool) (*heldAnswer, error) {
 	release, ok := models.AnswerReleaseOf(models.HTTP)
-	if !ok || repeat || stub == nil || stub.Spec.HTTPResp == nil {
+	if !ok || repeat || stub.Spec.HTTPResp == nil {
 		return nil, nil
 	}
 	if stub.TestModeInfo.Lifetime != models.LifetimePerTest {

@@ -153,8 +153,9 @@ func marksOnFrames(resp HTTPResp, chunks []HTTPStreamChunk) ([]HTTPStreamChunk, 
 		}
 		out.Writes = append(out.Writes, w)
 	}
+	// Each chunk wrote one, so out.Writes holds at least one.
 	end := HTTPAnswerWrite{Offset: pieces[len(pieces)-1], TS: marks.End()}
-	if n := len(out.Writes); n == 0 || !out.Writes[n-1].TS.Equal(end.TS) {
+	if !out.Writes[len(out.Writes)-1].TS.Equal(end.TS) {
 		out.Writes = append(out.Writes, end)
 	}
 	return chunks, out
