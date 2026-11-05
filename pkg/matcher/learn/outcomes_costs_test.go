@@ -2380,9 +2380,11 @@ func TestOutcomeCostTheListsIndexHoldsNoMoreThanItCountsAfterChurn(t *testing.T)
 					want, gone = want-gone, 0
 				}
 			}
-			if n := c.keep * c.words; c.shared {
+			n := c.keep * c.words
+			if c.shared {
 				n = c.words
-			} else if len(fs.post) != n || len(fs.lists) != c.keep {
+			}
+			if len(fs.post) != n || len(fs.lists) != c.keep {
 				t.Errorf("%s: the index holds %d words of %d lists; want the live lists' %d of %d", c.name, len(fs.post), len(fs.lists), n, c.keep)
 			}
 			for k := range c.keep {
