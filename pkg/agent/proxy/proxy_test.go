@@ -802,6 +802,14 @@ func TestReplayOffersH2OnlyToTheHostTheClientHelloNames(t *testing.T) {
 	const ip = "10.0.0.9"
 	vault := h2MockForTest("vault", "vault.example.com:443")
 	queue := h1MockForTest("queue", "queue.example.com", "/send")
+	// A client sending through a forward proxy records an absolute URL and
+	// may send no Host header.
+	queueByURL := h1MockForTest("queue", "", "https://queue.example.com/send")
+	queueByURL.Spec.HTTPReq.Header = map[string]string{}
+	// Recorded headers are a plain map: the key is spelt as the recorder
+	// wrote it.
+	queueLowerKey := h1MockForTest("queue", "", "/send")
+	queueLowerKey.Spec.HTTPReq.Header = map[string]string{"host": "queue.example.com"}
 	for _, tc := range []struct {
 		name     string
 		recorded []*models.Mock
@@ -814,6 +822,11 @@ func TestReplayOffersH2OnlyToTheHostTheClientHelloNames(t *testing.T) {
 		{name: "the recorded host differs only in case", recorded: []*models.Mock{vault, queue}, sni: "VAULT.example.com", wantALPN: "h2"},
 		{name: "the host recorded speaking HTTP/1.1 differs only in case", recorded: []*models.Mock{vault, queue}, sni: "QUEUE.example.com", wantALPN: "http/1.1"},
 		{name: "the host spoke HTTP/1.1 at this port, its Host naming the port", recorded: []*models.Mock{vault, h1MockForTest("queue", "queue.example.com:443", "/send")}, sni: "queue.example.com", wantALPN: "http/1.1"},
+		{name: "the Host recorded speaking HTTP/1.1 has a trailing dot", recorded: []*models.Mock{vault, h1MockForTest("queue", "queue.example.com.", "/send")}, sni: "queue.example.com", wantALPN: "http/1.1"},
+		{name: "the host spoke HTTP/1.1 through a forward proxy, its URL naming it", recorded: []*models.Mock{vault, queueByURL}, sni: "queue.example.com", wantALPN: "http/1.1"},
+		{name: "the host spoke HTTP/1.1, its Host header key in lower case", recorded: []*models.Mock{vault, queueLowerKey}, sni: "queue.example.com", wantALPN: "http/1.1"},
+		// The connection's IP was recorded speaking HTTP/2, at another port.
+		{name: "the host spoke HTTP/1.1 and the connection's IP spoke HTTP/2 at another port", recorded: []*models.Mock{vault, h2MockForTest("ip", ip+":8443"), queue}, sni: "queue.example.com", wantALPN: "http/1.1"},
 		{name: "the host spoke plain HTTP", recorded: []*models.Mock{vault, h1MockForTest("queue", "queue.example.com", "http://queue.example.com/send")}, sni: "queue.example.com", wantALPN: "h2"},
 		// The requests carry a virtual host (the recorded :authority) behind
 		// the balancer the client names: the SNI names no recorded host.
@@ -827,6 +840,7 @@ func TestReplayOffersH2OnlyToTheHostTheClientHelloNames(t *testing.T) {
 		{name: "the recorded authority is the connection's IP and the host also spoke HTTP/1.1", recorded: []*models.Mock{h2MockForTest("vault", ip+":443"), h1MockForTest("vault-h1", "vault.example.com", "/v1")}, sni: "vault.example.com", wantALPN: "h2"},
 		{name: "the host spoke HTTP/1.1 at a port its recording does not say", recorded: []*models.Mock{h2MockForTest("vault", "vault.example.com:8443"), queue}, dst: ip + ":8443", sni: "queue.example.com", wantALPN: "http/1.1"},
 		{name: "the host spoke HTTP/1.1 at another port", recorded: []*models.Mock{vault, h1MockForTest("queue", "queue.example.com:8443", "/send")}, sni: "queue.example.com", wantALPN: "h2"},
+		{name: "the host spoke HTTP/1.1 at :443 and the connection is to :8443", recorded: []*models.Mock{h2MockForTest("vault", "vault.example.com:8443"), h1MockForTest("queue", "queue.example.com:443", "/send")}, dst: ip + ":8443", sni: "queue.example.com", wantALPN: "h2"},
 		// A client that dialled an IP literal sends no SNI: the port decides.
 		{name: "no SNI, a destination recorded speaking HTTP/2 on this port", recorded: []*models.Mock{vault, queue}, wantALPN: "h2"},
 		{name: "no SNI, the only destination recorded speaking HTTP/2 is on another port", recorded: []*models.Mock{vault}, dst: ip + ":8443", wantALPN: "http/1.1"},
@@ -882,6 +896,75 @@ func TestReplayOffersH2ByThePortBeforeTheMockManager(t *testing.T) {
 	}
 	_ = client.Close()
 	_ = awaitEvent(t, done, "handleConnection returning after the client left")
+}
+
+// From a set's first test on, the mocks the test serves decide the offer, as
+// a replay stages them: a test's own calls, per test. A host recorded
+// speaking HTTP/2 in another test and HTTP/1.1 in this one is offered
+// http/1.1 here, as the port decided before when this test serves no HTTP/2
+// mock: its HTTP/1.1 calls are the ones served.
+func TestReplayOffersH2ByTheMocksTheTestServes(t *testing.T) {
+	const ip = "10.0.0.9"
+	t0 := time.Date(2025, 3, 1, 12, 0, 0, 0, time.UTC)
+	inTest := func(mk *models.Mock, at time.Time) *models.Mock {
+		mk.Spec.ReqTimestampMock = at
+		mk.Spec.ResTimestampMock = at.Add(time.Millisecond)
+		mk.TestModeInfo.Lifetime = models.LifetimePerTest
+		return mk
+	}
+	for _, tc := range []struct {
+		name     string
+		recorded func() (served, other []*models.Mock)
+		sni      string
+		wantALPN string
+	}{
+		{name: "a host recorded speaking HTTP/1.1 in this test beside one recorded speaking HTTP/2", sni: "queue.example.com", wantALPN: "http/1.1"},
+		{name: "the host recorded speaking HTTP/2 in this test", sni: "vault.example.com", wantALPN: "h2"},
+		{name: "a host the recording does not name", sni: "lb.example.com", wantALPN: "h2"},
+		{
+			name: "a host recorded speaking HTTP/2 in another test and HTTP/1.1 in this one",
+			recorded: func() (served, other []*models.Mock) {
+				return []*models.Mock{inTest(h1MockForTest("queue", "queue.example.com", "/send"), t0)},
+					[]*models.Mock{inTest(h2MockForTest("queue-h2", "queue.example.com:443"), t0.Add(-time.Minute))}
+			},
+			sni:      "queue.example.com",
+			wantALPN: "http/1.1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := []*models.Mock{
+				inTest(h2MockForTest("vault", "vault.example.com:443"), t0),
+				inTest(h1MockForTest("queue", "queue.example.com", "/send"), t0),
+			}
+			var other []*models.Mock
+			if tc.recorded != nil {
+				served, other = tc.recorded()
+			}
+			p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: ipv4Dest(t, ip+":443")}, mysqlPorts: newMysqlPortRegistry()}
+			p.setSession(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: models.OutgoingOptions{Mocking: true, DisableMysqlAutoDetect: true}})
+			p.SeedRecordedDestinations(append(append([]*models.Mock{}, served...), other...))
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SetMocksWithWindow(served, nil, t0.Add(-time.Second), t0.Add(time.Second))
+			p.mockManager = mm
+			if !mm.HasFirstTestFired() {
+				t.Fatal("the test's window is staged but its first test has not fired")
+			}
+
+			app, src := acceptedConn(t)
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			client := leafCheckingClient(app, tc.sni, tc.sni)
+			if err := client.Handshake(); err != nil {
+				t.Fatalf("client handshake with %q: %v", tc.sni, err)
+			}
+			if got := client.ConnectionState().NegotiatedProtocol; got != tc.wantALPN {
+				t.Fatalf("negotiated %q, want %q", got, tc.wantALPN)
+			}
+			_ = client.Close()
+			_ = awaitEvent(t, done, "handleConnection returning after the client left")
+		})
+	}
 }
 
 // A client that made a CONNECT request named its destination there, so the h2
