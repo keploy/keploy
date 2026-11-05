@@ -474,7 +474,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 }
 
 // answeredAfter are the recordings whose answer holds r that the
-// answer-time rule set aside, so r there decided nothing (evidenceAt,
+// answer-time rule set aside, so r there decided nothing (evidenceOf,
 // setEvidence): each asked at or before the call's own instant and
 // answered after it. An exchange's place names its leaf, a recording's its
 // answer whole. One asked after the call is after it by its request too,
@@ -520,8 +520,13 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 	// checks the bound value, so a wrong bind goes red.
 	moved := make([]string, len(ps))
 	shown := false
+	// held: what each place's texts hold of the word, asked once here and
+	// read again below, where orderUnknown and swapUnknown may have changed
+	// a place's state but no text.
+	held := make([]evHeld, len(ps))
 	for i, p := range ps {
-		ev, _ := evidenceAt(p, w.Rec, w.Live, piece)
+		held[i] = heldAt(p, w.Rec, w.Live)
+		ev, _ := evidenceOf(p, held[i], w.Rec, w.Live, piece)
 		if ev == evNone {
 			continue
 		}
@@ -534,13 +539,13 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 	if !shown {
 		orderUnknown(dc.in, ps, cand)
 	}
-	swapUnknown(dc.in, ps, w)
+	swapUnknown(dc.in, ps, w, held)
 	// aside: places that held R's word where F's did not follow, too
 	// little to be a conflict; a fresh word's line names them. unserved:
 	// recordings round F never served, which say nothing of a piece.
 	var src, outside, conflict, unknown, aside, unserved []evPlace
 	for i, p := range ps {
-		ev, read := evidenceAt(p, w.Rec, w.Live, piece)
+		ev, read := evidenceOf(p, held[i], w.Rec, w.Live, piece)
 		if floor && ev == evUnknown && p.fUnstated && !p.fGave {
 			unserved = append(unserved, p)
 			continue
@@ -1748,7 +1753,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// F may have given its moment at an answer whose view keploy cannot tell,
 	// and no source above names it: the value may be a copy of that answer,
 	// so no later step may read it as the clock or a coarse copy. Unknown,
-	// as the word rule reads the same place (evidenceAt).
+	// as the word rule reads the same place (evidenceOf).
 	if len(untold) > 0 {
 		p := untold[0]
 		return dc.refuse(path, at, n, r, l, RefusalUnknown,

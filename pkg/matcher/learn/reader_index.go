@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -404,31 +405,47 @@ func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
 // heldIn reports whether one of a text's declared forms (textForms) holds w
 // as a word in any of the readings rs.
 func heldIn(forms []string, w string, rs ...int) bool {
-	return slices.ContainsFunc(forms, func(f string) bool {
-		return slices.ContainsFunc(rs, func(r int) bool { return heldBy(f, w, readings[r]) })
-	})
+	return slices.ContainsFunc(forms, func(f string) bool { return heldBy(f, w, rs...) })
 }
 
-// heldBy reports whether w is a word of s as word reads it (tokensBy(s,
-// word)[w]) without reading s's other words: w stands in s, every byte of
-// it continues a word, and no byte that does stands right before or after.
-func heldBy(s, w string, word func(byte) bool) bool {
+// heldScans counts the scans heldBy makes of a text for a word, for the
+// rows that bound a call's work.
+var heldScans atomic.Int64
+
+// heldBy reports whether w is a word of s in any of the readings rs as each
+// reads it (tokensBy(s, readings[r])[w]) without reading s's other words: w
+// stands in s, every byte of it continues a word, and no byte that does
+// stands right before or after. One scan finds each place w stands in s for
+// every reading.
+func heldBy(s, w string, rs ...int) bool {
 	if w == "" {
 		return false
 	}
-	for i := 0; i < len(w); i++ {
-		if !word(w[i]) {
-			return false
+	by := make([]func(byte) bool, 0, 3)
+next:
+	for _, r := range rs {
+		word := readings[r]
+		for i := 0; i < len(w); i++ {
+			if !word(w[i]) {
+				continue next
+			}
 		}
+		by = append(by, word)
 	}
+	if len(by) == 0 {
+		return false
+	}
+	heldScans.Add(1)
 	for off := 0; off <= len(s)-len(w); {
 		i := strings.Index(s[off:], w)
 		if i < 0 {
 			return false
 		}
 		i += off
-		if (i == 0 || !word(s[i-1])) && (i+len(w) == len(s) || !word(s[i+len(w)])) {
-			return true
+		for _, word := range by {
+			if (i == 0 || !word(s[i-1])) && (i+len(w) == len(s) || !word(s[i+len(w)])) {
+				return true
+			}
 		}
 		off = i + 1
 	}
