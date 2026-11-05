@@ -1005,6 +1005,16 @@ func (a *Agent) letProxyPortsMove() {
 }
 
 func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	// keploy test's read of what was consumed after a set's last test, with
+	// the proven switch off, which reads no misses there: every answer held
+	// for a later place of the set is due (coreAgent.RunSetEnder). It files
+	// nothing: no parser holds a call for a set whose client reads no set's
+	// end (models.OutgoingOptions.ReadsSetEnds).
+	if models.SetEndRead(ctx) {
+		if e, ok := a.Proxy.(coreAgent.RunSetEnder); ok {
+			e.EndRunSet()
+		}
+	}
 	return a.Proxy.GetConsumedMocks(ctx)
 }
 
@@ -1017,6 +1027,13 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		if e, ok := a.Proxy.(coreAgent.RunSetEnder); ok {
 			e.EndRunSet()
 		}
+	}
+	// keploy test's read of a test's end: every answer held for the gap
+	// after that test is due (reachRunTest), before the settle below, as at
+	// the set's end, and as under exact serving the pool's view moves the
+	// place before this read.
+	if test, ok := models.TestEndRead(ctx); ok {
+		a.reachRunTest(test, false)
 	}
 	// Under the proven switch a replay's read of its misses waits, as a
 	// test's end does, until every call the application made is in the
