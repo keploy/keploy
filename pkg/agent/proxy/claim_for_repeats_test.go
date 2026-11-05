@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -286,4 +287,96 @@ func TestNoStagingLandsFromAClaimsOwnerReadToItsKeep(t *testing.T) {
 		}
 		claim(t, mm, pool, &reads, &keeps, &inside, staged)
 	})
+}
+
+// No set boundary (the next set's staging) lands from a claim's set check, at
+// the point that read the set generation, through its keep: the claim holds
+// the staging's lock over all of it, so a copy of the previous set's pool read
+// before the next set's staging keeps nothing for the new set. The claim runs
+// a test hook as its set check returns (testHookSetRead) and just before the
+// keep (testHookKeep). At the set check's read the row starts the next set's
+// staging. When the lock is free there, the staging lands there. When the
+// claim holds it, the staging queues on it and must not have taken it by the
+// keep: a queued writer lets no new reader in before it, so a claim that lets
+// go of the lock after its set check, even to take it again, lets the staging
+// in before its keep. At the keep the row also checks that the copy kept is of
+// the store's set. A claim that decides the set before it takes the lock keeps
+// the earlier set's copy's name in the new set until the store refuses to mark
+// it used, and a request beside it then reads the new set's same-named
+// recording as kept, and is not served it. The staging then drops what the
+// claim kept, so the new set's recording is free to be kept for its test. The
+// row is decided by the lock, not by timing.
+func TestNoSetBoundaryLandsFromAClaimsSetCheckToItsKeep(t *testing.T) {
+	mm, pool := claimRig(t, statedPoll("poll", `{"id":"a"}`, 2010, 2050))
+	// The next set's staging, as the agent starts one.
+	nextSet := func() {
+		mm.ResetForReplaySession()
+		mm.ArmSetFence()
+		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		mm.SetMocksWithWindow([]*models.Mock{statedPoll("poll", `{"id":"a"}`, 2010, 2050)}, nil, winStart(2), winEnd(2))
+	}
+	set := pool[0].TestModeInfo.StagedSet
+	if set == 0 || set != mm.setGen.Load() {
+		t.Fatalf("test-2's recording is of set %d, the store's set is %d: want it stamped with the store's set", set, mm.setGen.Load())
+	}
+	sets, keeps := 0, 0
+	var inside []string
+	var landed atomic.Bool
+	staged := make(chan struct{})
+	mm.testHookSetRead = func() {
+		sets++
+		if sets > 1 {
+			return
+		}
+		if mm.swapMu.TryLock() {
+			mm.swapMu.Unlock()
+			inside = append(inside, "the lock was free at the set check's read")
+			nextSet()
+			close(staged)
+			return
+		}
+		go func() {
+			mm.swapMu.Lock()
+			landed.Store(true)
+			mm.swapMu.Unlock()
+			nextSet()
+			close(staged)
+		}()
+		// Wait for the staging to queue on the lock (a reader is refused
+		// from then on) or to have taken it.
+		for !landed.Load() && mm.swapMu.TryRLock() {
+			mm.swapMu.RUnlock()
+			runtime.Gosched()
+		}
+	}
+	mm.testHookKeep = func() {
+		keeps++
+		if keeps > 1 {
+			return
+		}
+		if landed.Load() {
+			inside = append(inside, "the staging queued at the set check's read took the lock before the keep")
+		}
+		if now := mm.setGen.Load(); now != set {
+			inside = append(inside, fmt.Sprintf("the claim kept set %d's copy in set %d", set, now))
+		}
+	}
+	// The hooks run inside the claim, on this goroutine, so their counts are
+	// final when it returns; staged closes only after the set hook ran, so a
+	// claim that skips its hooks fails at once instead of waiting.
+	mm.ClaimForRepeats(*pool[0])
+	if sets != 1 || keeps != 1 {
+		t.Fatalf("the claim of test-2's own recording ran its set check's read %d times and reached its keep %d times, want once each", sets, keeps)
+	}
+	<-staged
+	if len(inside) != 0 {
+		t.Errorf("the next set's staging could land inside the claim: %v", inside)
+	}
+	if mm.KeptForRepeats() != nil {
+		t.Fatalf("the next set is staged with the previous set's recording kept: its same-named recording would answer only repeats")
+	}
+	fresh, err := mm.GetPerTestMocksInWindow()
+	if err != nil || len(fresh) != 1 || !mm.ClaimForRepeats(*fresh[0]) {
+		t.Fatalf("the new set's pool %v (%v): its recording's claim was refused, want it kept for its test", fresh, err)
+	}
 }
