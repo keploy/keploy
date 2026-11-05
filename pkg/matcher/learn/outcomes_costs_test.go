@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"math/rand/v2"
 	"reflect"
 	"runtime"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 	"weak"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -2859,6 +2861,83 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 		heldAgainstCounted(t, fmt.Sprintf("reader index, %d texts of %d words (%d bytes in all; past 32 KiB: %v)", texts, words, size, long), h1-liveHeap(), counted)
 		runtime.KeepAlive(x)
 	}
+	// One kind of answer at a time, on texts made so that it holds the most
+	// of what the index keeps: an answer counted below what it holds shows
+	// here, not hidden by the others' counts. Every third shape's texts pass
+	// 32 KiB (whole pages).
+	kinds := []struct {
+		name string
+		part func(i, j int) string
+		ask  func(h *readerText, i int)
+		kept func(e *readerEntry) bool
+	}{
+		{"instants", func(i, j int) string {
+			return fmt.Sprintf("2026-%02d-%02dT%02d:%02d:%02dZ ", 1+j%12, 1+i%28, j%24, j/24%60, i%60)
+		}, func(h *readerText, _ int) { h.spansOf() }, func(e *readerEntry) bool { return e.spans.ok }},
+		{"other forms", func(i, j int) string { return fmt.Sprintf("ord-%d%%20x%%2Fcart_%d ", i, j) },
+			func(h *readerText, _ int) { h.holdsWord("cart_0") }, func(e *readerEntry) bool { return e.forms.ok }},
+		{"base64 runs", func(i, j int) string {
+			return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("tok-%d-%d", i, j))) + " "
+		}, func(h *readerText, i int) {
+			h.holdsToken(tokenB64, base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("tok-%d-0", i))))
+		}, func(e *readerEntry) bool { return e.runs.ok }},
+		{"moments", func(i, j int) string {
+			return fmt.Sprintf(`"t%d":"2026-%02d-%02dT%02d:%02d:%02d.%03dZ",`, j, 1+j%12, 1+i%28, j%24, j/24%60, i%60, j%1000)
+		}, func(h *readerText, _ int) {
+			// A moment the text holds, read by an index of its own: this
+			// one is asked of its moments alone.
+			if sp, _ := newReaderIndex(nil).text(h.text).spansOf(); len(sp) > 0 {
+				h.holdsMoment(sp[0].moment())
+			}
+		}, func(e *readerEntry) bool { return e.formSpans.ok }},
+		{"field view", func(i, j int) string { return fmt.Sprintf(`"k%d":"v%dx%d",`, j, i, j) },
+			func(h *readerText, _ int) { h.fieldsWith("v0x0") }, func(e *readerEntry) bool { return e.fields.ok }},
+		{"suffix array", func(i, j int) string { return randomWord(r, i, j, 6+r.IntN(30)) + " " },
+			func(h *readerText, _ int) {
+				for q := range containsScans + 1 {
+					h.contains(strconv.Itoa(q))
+				}
+			}, func(e *readerEntry) bool { return e.subs.ok }},
+	}
+	for _, k := range kinds {
+		for shape := range 3 {
+			texts, parts := 1+r.IntN(120), 1+r.IntN(200)
+			switch shape {
+			case 0:
+				texts, parts = 1, 1
+			case 2:
+				texts, parts = 1+r.IntN(3), 1500+r.IntN(2000)
+			}
+			in := make([]string, texts)
+			for i := range in {
+				var b strings.Builder
+				b.WriteString("{")
+				for j := range parts {
+					b.WriteString(k.part(i, j))
+				}
+				b.WriteString(`"end":0}`)
+				// Its own bytes, not the builder's larger buffer.
+				in[i] = strings.Clone(b.String())
+			}
+			x := newReaderIndex(nil)
+			for i := range in {
+				h := x.text(in[i])
+				k.ask(h, i)
+				if h.e == nil || h.e.past || !k.kept(h.e) {
+					t.Fatalf("reader index, %s, shape %d: text %d kept no answer within a 1 GiB budget", k.name, shape, i)
+				}
+			}
+			counted, size := x.used, 0
+			for _, s := range in {
+				size += len(s)
+			}
+			in = nil
+			h1 := liveHeap()
+			x.release()
+			heldAgainstCounted(t, fmt.Sprintf("reader index, %s alone, %d texts of %d parts (%d bytes in all)", k.name, texts, parts, size), h1-liveHeap(), counted)
+			runtime.KeepAlive(x)
+		}
+	}
 }
 
 // allocBytes is what the runtime holds for each object of a size, with
@@ -2913,3 +2992,126 @@ func TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds(t *testing.T) {
 // allocSink keeps the garbage TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds
 // makes on the heap.
 var allocSink []byte
+
+// Each text a call's index reads takes an entry, counted when it is made,
+// as the runtime allocates its parts: the entry itself, its hash's list of
+// entries (one pointer, 8 bytes; at twice its length past one, as append
+// grows it), and for a hash the index holds no entry of yet its slot in the
+// index's map (92 bytes: a 32-byte slot at a table's least fill) and, for
+// the index's first, the map's first group (288 bytes). The same text read
+// again takes none. A text whose entry does not fit shares the index's one
+// past entry, which keeps nothing and is counted nowhere.
+func TestOutcomeCostAReaderEntryCountsWhatItHolds(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	readerBudget = 1 << 30
+	entry := allocBytes(unsafe.Sizeof(readerEntry{}), true)
+	x := newReaderIndex(nil)
+	read := func(x *readerIndex, s string) (*readerEntry, int64) {
+		u, h := x.used, x.text(s)
+		if _, _, ok := h.read(); !ok || h.e == nil {
+			t.Fatalf("%q: read %v, entry %v; want read, with an entry", s, ok, h.e != nil)
+		}
+		return h.e, x.used - u
+	}
+	first, n := read(x, "the first text")
+	if want := entry + 8 + 92 + 288; n != want || first.past {
+		t.Errorf("the index's first entry counts %d bytes (past: %v); want %d: the entry, its list, its slot and the map's first group", n, first.past, want)
+	}
+	if _, n := read(x, "another text"); n != entry+8+92 {
+		t.Errorf("a second entry counts %d bytes; want %d: the entry, its list and its slot", n, entry+8+92)
+	}
+	if e, n := read(x, "the first text"); n != 0 || e != first {
+		t.Errorf("the first text read again counts %d bytes (its entry: %v); want none, its entry", n, e == first)
+	}
+	// Two texts of one hash: the second's list holds two pointers (16
+	// bytes), a third's four (32), and neither takes a slot.
+	for k, want := range []int64{entry + 16, entry + 32} {
+		s := fmt.Sprintf("a text of a taken hash, %d", k)
+		h := maphash.String(x.seed, s)
+		for range k + 1 {
+			x.texts[h] = append(x.texts[h], &readerEntry{n: len(s) + 1})
+		}
+		if _, n := read(x, s); n != want {
+			t.Errorf("an entry beside %d of its hash counts %d bytes; want %d", k+1, n, want)
+		}
+	}
+	for _, c := range []struct {
+		budget int64
+		past   bool
+	}{{entry + 8 + 92 + 288 - 1, true}, {entry + 8 + 92 + 288, false}} {
+		readerBudget = c.budget
+		y := newReaderIndex(nil)
+		e, n := read(y, "a text")
+		if e.past != c.past || (n == 0) != c.past {
+			t.Errorf("budget %d: the entry is past it %v and counts %d bytes; want past %v", c.budget, e.past, n, c.past)
+		}
+		if other, _ := read(y, "a second text"); !other.past || c.past && (other != e || y.used != 0) {
+			t.Errorf("budget %d: a second text's entry is past it %v (shared: %v), %d bytes kept; want the index's one past entry, nothing counted for it", c.budget, other.past, other == e, y.used)
+		}
+	}
+}
+
+// The map sizes every budgeted structure counts its maps by (mapBytes:
+// a header, the first group, and each entry at the most a slot costs at a
+// table's least fill), pinned: 16-, 24-, 32- and 40-byte slots cost 44,
+// 64, 92 and 110 bytes, their groups 144, 208, 288 and 352. A map of each
+// slot size built by inserts of n entries holds no more heap than that
+// counts, measured after a collection: the least of three measures, as
+// another allocation in a measure's window adds to it alone.
+func TestOutcomeCostAMapHoldsNoMoreThanMapBytesCounts(t *testing.T) {
+	for _, c := range []struct {
+		slot         uintptr
+		slotB, group int64
+	}{{16, 44, 144}, {24, 64, 208}, {32, 92, 288}, {40, 110, 352}} {
+		if got, group := mapSlotBytes(c.slot, true), mapGroupBytes(c.slot, true); got != c.slotB || group != c.group {
+			t.Errorf("a %d-byte slot costs %d bytes, its group %d; want %d and %d", c.slot, got, group, c.slotB, c.group)
+		}
+	}
+	if mapBytes(0, 40, true) != 48 || mapBytes(1, 40, true) != 48+352+110 {
+		t.Errorf("an empty map counts %d bytes, one of one entry %d; want 48 and %d", mapBytes(0, 40, true), mapBytes(1, 40, true), 48+352+110)
+	}
+	const most = 3000
+	strs := make([]string, most)
+	for i := range strs {
+		strs[i] = fmt.Sprintf("key-%d", i)
+	}
+	ints := make([]uint64, most)
+	for i := range ints {
+		ints[i] = uint64(i)*2654435761 + 1
+	}
+	for _, n := range []int{1, 8, 9, 14, 15, 28, 29, 56, 57, 112, 113, 224, 225, 448, 449, 896, 897, 1500, most} {
+		for _, m := range []struct {
+			name string
+			slot uintptr
+			held int64
+		}{
+			{"map[uint64]*int", slotOf[uint64, *int](), mapHeld[uint64, *int](ints[:n])},
+			{"map[string]*int", slotOf[string, *int](), mapHeld[string, *int](strs[:n])},
+			{"map[uint64][]*int", slotOf[uint64, []*int](), mapHeld[uint64, []*int](ints[:n])},
+			{"map[string][]int32", slotOf[string, []int32](), mapHeld[string, []int32](strs[:n])},
+		} {
+			counted := mapBytes(n, m.slot, true)
+			t.Logf("%s of %d entries: holds %d bytes, counts %d (held/counted %.3f)", m.name, n, m.held, counted, float64(m.held)/float64(counted))
+			if m.held > counted {
+				t.Errorf("%s of %d entries holds %d bytes of heap; mapBytes counts %d", m.name, n, m.held, counted)
+			}
+		}
+	}
+}
+
+// mapHeld is the heap a map built by inserts of keys holds, the least of
+// three measures.
+func mapHeld[K comparable, V any](keys []K) int64 {
+	least := int64(1 << 62)
+	for range 3 {
+		h0 := liveHeap()
+		m := map[K]V{}
+		var v V
+		for _, k := range keys {
+			m[k] = v
+		}
+		least = min(least, liveHeap()-h0)
+		runtime.KeepAlive(m)
+	}
+	return least
+}
