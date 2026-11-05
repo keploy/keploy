@@ -609,8 +609,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// during them is told too, and then the miss carries
 				// nothing any of them read (viewless): no closest
 				// recording, no diff, no recording made elsewhere and no
-				// repeat note, whichever view a read was of. A learn
-				// step's moved miss tells the move itself.
+				// repeat note, whichever view a read was of. Its learn
+				// step's reason is told by its kind alone, since its text
+				// names what that step read of the view (learnMiss.explain).
+				// A learn step's moved miss tells the move itself.
 				gone := ""
 				if report != nil {
 					gone = integrations.CallViewGoneWhy(db)
@@ -622,7 +624,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)
 				} else if lmiss != nil {
-					lmiss.explain(report)
+					lmiss.explain(report, gone != "")
 				}
 				if staged {
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedNote)

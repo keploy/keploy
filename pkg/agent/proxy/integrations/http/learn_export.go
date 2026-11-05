@@ -29,13 +29,14 @@ func (m *LearnMiss) Closest() *models.Mock {
 }
 
 // Explain writes the learn step's reason onto the miss's report, as the HTTP
-// parser's miss carries it: its code, for judging, and what differed, for
-// the person who reads it. Neither holds a value.
+// parser's miss of a call whose view stayed carries it: its code, for
+// judging, and what differed, for the person who reads it. Neither holds a
+// value.
 func (m *LearnMiss) Explain(r *models.MockMismatchReport) {
 	if m == nil || m.m == nil {
 		return
 	}
-	m.m.explain(r)
+	m.m.explain(r, false)
 }
 
 // LearnHold is how the learn step may learn a leaf of another parser's call

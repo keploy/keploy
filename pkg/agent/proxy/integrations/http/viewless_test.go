@@ -1,9 +1,11 @@
 package http
 
 import (
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -38,5 +40,39 @@ func TestAViewlessMissKeepsNothingItReadOfARecording(t *testing.T) {
 	}
 	if r.ActualSummary != "GET /orders" || r.ReceivedReq != "GET /orders?page=2" || r.MatchPhase != models.MatchPhaseExhausted || r.CandidateCount != 2 {
 		t.Errorf("the viewless miss lost the call's own summary %q, rendering %q, phase %q or count %d", r.ActualSummary, r.ReceivedReq, r.MatchPhase, r.CandidateCount)
+	}
+}
+
+// The learn step's reason on a miss whose view went before it was diagnosed
+// is told by its kind alone: its code (request_changed, for judging) and
+// the code's sentence, never its text, which names the test's mock-own1
+// the learn step read in that view, nor its next step, which speaks of that
+// recording. A miss whose view stayed keeps both, and a moved learn miss
+// keeps telling the move, which names no recording.
+func TestAViewlessMissTellsItsLearnReasonByItsKindAlone(t *testing.T) {
+	const why = "keploy cannot tell which recordings of the test set came before mock-own1, which has no recorded time, so it cannot tell whether what changed came from one"
+	plain := func() *models.MockMismatchReport {
+		return mismatch.NewReport(mismatch.ProtocolHTTP, "POST /orders").
+			WithDestination("deps.example").
+			WithPhase(models.MatchPhaseExhausted, 2).Build()
+	}
+	miss := &learnMiss{res: learn.Result{Outcome: learn.Miss, Index: -1, Reason: models.MissRequestChanged, Why: why}, steps: placeSteps}
+	stayed := plain()
+	miss.explain(stayed, false)
+	if !strings.Contains(stayed.NextSteps, why) || !strings.Contains(stayed.NextSteps, placeSteps) {
+		t.Fatalf("precondition: the miss whose view stayed reads %q; want the reason %q and its next step", stayed.NextSteps, why)
+	}
+	gone := plain()
+	base := gone.NextSteps
+	miss.explain(gone, true)
+	const kind = "keploy's learn step missed this request. The request changed since it was recorded in a way keploy does not learn (request_changed)."
+	if want := strings.TrimSpace(kind + " " + base); gone.Reason != models.MissRequestChanged || gone.NextSteps != want {
+		t.Errorf("the viewless miss's learn reason reads code %q, next steps %q; want %q and %q", gone.Reason, gone.NextSteps, models.MissRequestChanged, want)
+	}
+	moved := &learnMiss{res: learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request in test-1, and the replay ended test-1 before keploy could answer it"}, moved: true}
+	r := plain()
+	moved.explain(r, true)
+	if !strings.HasPrefix(r.NextSteps, moved.res.Why+": keploy learns nothing of a call in a round it was not made in") || r.Reason != "" {
+		t.Errorf("a moved learn miss on a viewless report reads code %q, next steps %q; want the move told, with no code", r.Reason, r.NextSteps)
 	}
 }

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -170,6 +171,154 @@ func TestAFullRoundMissWhoseViewMovesAfterItsDecisionNamesNoRecording(t *testing
 				t.Errorf("a test-1 miss whose view moved %s names %q (rendered %q, diff %q, fields %+v, next steps %q); want no recording", c.at, m.ClosestMock, m.ClosestMockReq, m.Diff, m.FieldDiffs, m.NextSteps)
 			case !strings.Contains(m.NextSteps, why) || strings.Count(m.NextSteps, "keploy record's full round") != 1:
 				t.Errorf("the moved miss's next steps read %q; want them to say once %q", m.NextSteps, why)
+			}
+		})
+	}
+}
+
+// A full-round miss of a call made elsewhere whose view moves after the
+// call was decided names no recording either. In test-2, which recorded no
+// call, a call that is exactly test-1's mock-own1 misses naming it: as made
+// elsewhere for a late call of test-1, and with a repeat note for a repeat
+// of a call mock-own1 answered in test-1. Once the replay ends test-2 (or
+// ends it and begins test-3) before the miss's report, in its lookup of a
+// recording made elsewhere, or after that lookup found mock-own1 (in the
+// repeat note's lookup), the miss names no recording and notes no repeat:
+// whatever the miss read of the view goes with it, a lookup that found its
+// recording too.
+func TestAMovedMissOfACallMadeElsewhereNamesNoRecording(t *testing.T) {
+	type tc struct{ call, at, move string }
+	var cases []tc
+	for _, call := range []string{"a late call of test-1", "a repeat of a call test-1 answered"} {
+		cases = append(cases, tc{call, "before the report", "never"})
+		for _, at := range []string{"before the report", "not-owned", "repeat"} {
+			for _, move := range []string{"the test ends", "the next test begins"} {
+				cases = append(cases, tc{call, at, move})
+			}
+		}
+	}
+	for _, c := range cases {
+		t.Run(c.call+"/"+c.at+"/"+c.move, func(t *testing.T) {
+			p, mm := elsewhereOrders(t, false, func(pool, own1, own2 *models.Mock) []*models.Mock { return []*models.Mock{pool, own1, own2} }, nil)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+			repeat := c.call == "a repeat of a call test-1 answered"
+			if repeat {
+				if code, got := r3SendVia(t, context.Background(), httpint.New(zap.NewNop()), p, mm, opts, roundPost(`{"item":"pear"}`)); code != http.StatusOK || got != `{"order":1}` {
+					t.Fatalf("precondition: test-1's call was answered %d %s; want mock-own1's", code, got)
+				}
+			}
+			mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			p.EndTestErrorCapture()
+			mm.ServeExactTest("test-2", nil)
+			p.ContinueTestErrorCapture()
+			if _, err := p.GetMockErrors(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			move := func() {
+				if c.move == "never" {
+					return
+				}
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				p.EndTestErrorCapture()
+				if c.move == "the next test begins" {
+					mm.ServeExactTest("test-3", nil)
+					p.ContinueTestErrorCapture()
+				}
+			}
+			lg, db := zap.NewNop(), &lookupHook{MockManager: mm, at: c.at, move: move}
+			if c.at == "before the report" {
+				lg = onDebugLine("after matching the http request", move)
+			}
+			code, got := r3SendVia(t, context.Background(), httpint.New(lg), p, db, opts, roundPost(`{"item":"pear"}`))
+			if code == http.StatusOK {
+				t.Fatalf("answered %d %s", code, got)
+			}
+			if c.at != "before the report" && !db.ran.Load() {
+				t.Fatalf("precondition: the miss's %s lookup never ran", c.at)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 {
+				t.Fatalf("misses %+v; want 1", misses)
+			}
+			m := misses[0]
+			why := map[string]string{
+				"the test ends":        "decided this request in test-2, and the replay ended test-2 before keploy diagnosed its miss, so no recording is named for it",
+				"the next test begins": "decided this request in test-2, and the replay ended test-2 and began test-3 before keploy diagnosed its miss, so no recording is named for it",
+			}[c.move]
+			switch {
+			case c.move == "never":
+				if m.ClosestMock != "mock-own1" || m.NotOwned == repeat || (m.Repeat != nil) != repeat || strings.Contains(m.NextSteps, "no recording is named") {
+					t.Errorf("the unmoved miss names %q (made elsewhere %v, repeat %+v, next steps %q); want test-1's mock-own1, made elsewhere for the late call and noted as a repeat for the other, and no word of a move", m.ClosestMock, m.NotOwned, m.Repeat, m.NextSteps)
+				}
+			case m.ClosestMock != "" || m.ClosestMockReq != "" || m.NotOwned || m.Repeat != nil || m.Diff != "" || len(m.FieldDiffs) > 0:
+				t.Errorf("a test-2 miss whose view moved %s names %q (made elsewhere %v, repeat %+v, rendered %q, diff %q, fields %+v, next steps %q); want no recording", c.at, m.ClosestMock, m.NotOwned, m.Repeat, m.ClosestMockReq, m.Diff, m.FieldDiffs, m.NextSteps)
+			case strings.Contains(m.NextSteps, "mock-") || strings.Contains(m.NextSteps, "that recording's"):
+				t.Errorf("the moved miss's next steps read %q; want no recording named or spoken of", m.NextSteps)
+			case !strings.Contains(m.NextSteps, why) || strings.Count(m.NextSteps, "keploy record's full round") != 1:
+				t.Errorf("the moved miss's next steps read %q; want them to say once %q", m.NextSteps, why)
+			}
+		})
+	}
+}
+
+// A moved full-round miss gives its learn step's reason by its kind alone.
+// Between tests, a call keploy cannot tell from test-2's mock-own2, a
+// recording it cannot read back from disk, misses with the learn step's
+// reason, which names mock-own2 and the pool's mock-pool it would pair the
+// call with, and the next step for keploy failing to read its recordings.
+// Once the replay begins test-2 before the miss's report, or in its lookup
+// of a recording made elsewhere, the miss names neither and keeps no next
+// step of that reason: both are what the learn step read of the pool's
+// view, which went. Before, the reason and its names stayed beside the
+// sentence saying no recording is named.
+func TestAMovedMissTellsItsLearnReasonByItsKindAlone(t *testing.T) {
+	const why = "keploy cannot read every recording of the test set (read the recording mock-own2 kept on disk: disk mocks: short read)"
+	const unread = "keploy failing to read its own recordings"
+	const gone = "decided this request between tests, and the replay began test-2 before keploy diagnosed its miss, so no recording is named for it"
+	for _, at := range []string{"never", "before the report", "not-owned"} {
+		t.Run(at, func(t *testing.T) {
+			p, mm := elsewhereOrders(t, false, func(pool, own1, own2 *models.Mock) []*models.Mock { return []*models.Mock{pool, own1} },
+				func(own2 *models.Mock) RecordingSource {
+					return keyedSource(func(*models.Mock) (*models.Mock, error) { return nil, errors.New("disk mocks: short read") }, own2)
+				})
+			elsewhereBetween(t, p, mm, "mock-own1")
+			move := func() {
+				mm.ServeExactTest("test-2", nil)
+				p.ContinueTestErrorCapture()
+			}
+			lg, db := zap.NewNop(), &lookupHook{MockManager: mm, at: at, move: move}
+			if at == "before the report" {
+				lg = onDebugLine("after matching the http request", move)
+			}
+			code, got := r3SendVia(t, context.Background(), httpint.New(lg), p, db, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(`{"item":"fig"}`))
+			if code == http.StatusOK {
+				t.Fatalf("answered %d %s", code, got)
+			}
+			if at == "not-owned" && !db.ran.Load() {
+				t.Fatalf("precondition: the miss's %s lookup never ran", at)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 {
+				t.Fatalf("misses %+v; want 1", misses)
+			}
+			m := misses[0]
+			switch {
+			case at == "never":
+				if !strings.Contains(m.NextSteps, why) || !strings.Contains(m.NextSteps, unread) || strings.Contains(m.NextSteps, "no recording is named") {
+					t.Errorf("the unmoved miss reads %q; want the learn step's reason %q, its next step, and no word of a move", m.NextSteps, why)
+				}
+			case m.ClosestMock != "" || strings.Contains(m.NextSteps, "mock-") || strings.Contains(m.NextSteps, unread):
+				t.Errorf("a miss whose view moved %s names %q, next steps %q; want no recording named and no next step of the learn step's reason", at, m.ClosestMock, m.NextSteps)
+			case !strings.HasPrefix(m.NextSteps, "keploy's learn step missed this request.") || strings.Count(m.NextSteps, gone) != 1:
+				t.Errorf("the moved miss's next steps read %q; want the learn step's miss told by its kind, and %q once", m.NextSteps, gone)
 			}
 		})
 	}
