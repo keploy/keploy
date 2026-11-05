@@ -967,6 +967,40 @@ func TestReplayOffersH2ByTheMocksTheTestServes(t *testing.T) {
 	}
 }
 
+// The offer reads the served Http mocks on every handshake whose SNI names a
+// host not recorded speaking HTTP/2. A mock recorded calling another host is
+// read for its host only: its URL is not parsed, and a Host with no port
+// allocates nothing.
+func TestReplayReadsOnlyTheHostOfAnHttpMockForAnotherHost(t *testing.T) {
+	var mocks []*models.Mock
+	for i := 0; i < 400; i++ {
+		host := fmt.Sprintf("other-%d.example.com", i)
+		if i%2 == 1 {
+			host += ":443"
+		}
+		mocks = append(mocks, h1MockForTest(fmt.Sprintf("other-%d", i), host, "https://"+host+"/send?n=1"))
+	}
+	p := replayProxyTo(t, "10.0.0.9:443", models.OutgoingOptions{}, mocks...)
+	if p.replayTargetHasHTTPMock("queue.example.com", 443) {
+		t.Fatal("no mock names queue.example.com, yet it was found")
+	}
+	allocs := testing.AllocsPerRun(20, func() { p.replayTargetHasHTTPMock("queue.example.com", 443) })
+	if allocs >= float64(len(mocks))/4 {
+		t.Fatalf("asking about one host among %d Http mocks for other hosts made %.0f allocations, want none per mock", len(mocks), allocs)
+	}
+}
+
+// An Http mock that recorded no destination (no Host header, a path-only URL)
+// names no host. Its empty destination must not match a CONNECT request's
+// host ".", which is empty once its trailing dot is ignored.
+func TestReplayHttpMockWithNoDestinationNamesNoHost(t *testing.T) {
+	mk := h1MockForTest("no-destination", "", "/send")
+	mk.Spec.HTTPReq.Header = map[string]string{}
+	if httpMockCalled(mk, ".", 443) {
+		t.Fatal(`an Http mock with no recorded destination was taken as calling "."`)
+	}
+}
+
 // A client that made a CONNECT request named its destination there, so the h2
 // offer goes by the CONNECT host, not by the name its ClientHello asks for: a
 // client can ask for another name (a TLS server-name override) while its

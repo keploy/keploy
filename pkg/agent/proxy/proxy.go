@@ -1894,39 +1894,62 @@ func (p *Proxy) replayOffersH2(connectHost, serverName string, dstIP net.IP, por
 }
 
 // replayTargetHasHTTPMock reports whether an Http (HTTP/1.x) mock was
-// recorded for host on port: its Host names host (sameHostName), at port or
-// at a port the recording does not say (httpMockDestination). It reads what
-// the manager serves now (HasMocksByKind), so before the set's first test a
-// host whose HTTP/1.x calls were all recorded inside tests is not yet known.
+// recorded for host on port (httpMockCalled). It reads what the manager
+// serves now (HasMocksByKind), so before the set's first test a host whose
+// HTTP/1.x calls were all recorded inside tests is not yet known.
 func (p *Proxy) replayTargetHasHTTPMock(host string, port uint32) bool {
 	m := p.getMockManager()
 	if m == nil {
 		return false
 	}
 	return m.HasMocksByKind(models.HTTP, func(mk *models.Mock) bool {
-		h, pt := httpMockDestination(mk)
-		return sameHostName(h, host) && (pt == 0 || int64(pt) == int64(port))
+		return httpMockCalled(mk, host, port)
 	})
 }
 
-// httpMockDestination is the host an Http mock was recorded calling
-// (models.Mock.RecordedDestination) and its port when the recording says it:
-// the Host's own port, else the default port of the URL's scheme; 0 when it
-// says neither (a Host with no port and a path-only URL, as an HTTP/1.1
-// client sends them).
-func httpMockDestination(mk *models.Mock) (string, int) {
+// httpMockCalled reports whether an Http mock was recorded calling host: its
+// recorded destination (models.Mock.RecordedDestination) names host
+// (sameHostName), at port or at a port the recording does not say
+// (httpMockPort). It is asked of every Http mock served, on every handshake
+// that names a host not recorded speaking HTTP/2, so it compares the host
+// first and parses the mock's URL for its scheme only for a mock that names
+// host. (RecordedDestination parses the URL for the host of a mock that has
+// no Host header, as a forward proxy's client may record.)
+func httpMockCalled(mk *models.Mock, host string, port uint32) bool {
 	authority, ok := mk.RecordedDestination()
-	if !ok {
-		return "", 0
+	if !ok || !sameHostName(authorityHost(authority), host) {
+		return false
 	}
+	pt := httpMockPort(authority, mk.Spec.HTTPReq.URL)
+	return pt == 0 || int64(pt) == int64(port)
+}
+
+// authorityHost is the host an authority (host, host:port, [ipv6]:port)
+// names. One with no ':' is all host, and is read with no allocation:
+// net.SplitHostPort allocates the error it returns for an authority with no
+// port, which is how an HTTP/1.1 client sends the Host of a default port.
+func authorityHost(authority string) string {
+	if !strings.Contains(authority, ":") {
+		return authority
+	}
+	h, _ := hostPortFromAuthority(authority, "")
+	return h
+}
+
+// httpMockPort is the port an Http mock recorded calling authority (its
+// recorded destination) at rawURL says it called: the authority's own port,
+// else the default port of the URL's scheme; 0 when it says neither (a Host
+// with no port and a path-only URL, as an HTTP/1.1 client sends them).
+func httpMockPort(authority, rawURL string) int {
 	scheme := ""
-	if u, err := url.Parse(mk.Spec.HTTPReq.URL); err == nil {
+	if u, err := url.Parse(rawURL); err == nil {
 		scheme = u.Scheme
 	}
 	if _, _, err := net.SplitHostPort(authority); err != nil && scheme == "" {
-		return authority, 0
+		return 0
 	}
-	return hostPortFromAuthority(authority, scheme)
+	_, pt := hostPortFromAuthority(authority, scheme)
+	return pt
 }
 
 // sameHostName reports whether two hosts are one name: equal but for case and
