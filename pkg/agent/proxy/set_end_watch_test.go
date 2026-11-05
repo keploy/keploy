@@ -3,6 +3,8 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,6 +59,7 @@ func TestMockManager_SetEndFilingThatHasNotReturnedIsNamedAtEachBeat(t *testing.
 	read, cancelRead := context.WithCancel(context.Background())
 	defer cancelRead()
 	filed := make(chan error, 1)
+	began := time.Now()
 	go func() { filed <- m.FileAtSetEnd(read) }()
 
 	waitForSetEnd(t, "two beats of a registration that has not returned", func() bool { return len(filingWarnings(logs)) >= 2 })
@@ -77,10 +80,14 @@ func TestMockManager_SetEndFilingThatHasNotReturnedIsNamedAtEachBeat(t *testing.
 	case <-time.After(20 * time.Second):
 		t.Fatal("the read did not return once its registrations had")
 	}
+	took := time.Since(began)
 	if err == nil {
 		t.Fatal("a read whose context ended while a registration ran was vouched for")
 	}
 	ws := filingWarnings(logs)
+	if most := int(took / beat); len(ws) > most {
+		t.Fatalf("%d warnings in a read of %s, at most one a beat (%s) is %d", len(ws), took, beat, most)
+	}
 	time.Sleep(5 * beat)
 	if after := filingWarnings(logs); len(after) != len(ws) {
 		t.Fatalf("%d warnings followed the registration's return: %v", len(after)-len(ws), after[len(ws):])
@@ -128,5 +135,72 @@ func TestMockManager_SetEndFilingThatReturnsIsNotWarnedOf(t *testing.T) {
 	}
 	if got := logs.Len(); got != 0 {
 		t.Fatalf("a registration that returned at once was warned of: %v", logs.AllUntimed())
+	}
+}
+
+// heldWarnCore is an observer core whose writes of a set-end filing warning
+// (one with a beats field) wait for hold to close; the first to start closes
+// writing. Others are written at once.
+type heldWarnCore struct {
+	zapcore.Core
+	writing, hold chan struct{}
+	started       sync.Once
+}
+
+func (c *heldWarnCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if c.Enabled(e.Level) {
+		return ce.AddCore(e, c)
+	}
+	return ce
+}
+
+func (c *heldWarnCore) Write(e zapcore.Entry, fields []zapcore.Field) error {
+	if slices.ContainsFunc(fields, func(f zapcore.Field) bool { return f.Key == "beats" }) {
+		c.started.Do(func() { close(c.writing) })
+		<-c.hold
+	}
+	return c.Core.Write(e, fields)
+}
+
+// A read returns only once the watch of each registration it ran has
+// ended: while a warning of one is still being written, the read that ran
+// it waits, so no warning follows its return.
+func TestMockManager_SetEndFilingWatchEndsBeforeTheReadReturns(t *testing.T) {
+	was := setEndFilingBeat
+	setEndFilingBeat = time.Millisecond
+	t.Cleanup(func() { setEndFilingBeat = was })
+	obs, logs := observer.New(zapcore.WarnLevel)
+	core := &heldWarnCore{Core: obs, writing: make(chan struct{}), hold: make(chan struct{})}
+	var release sync.Once
+	releaseWrites := func() { release.Do(func() { close(core.hold) }) }
+	t.Cleanup(releaseWrites)
+	m := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.New(core))
+	t.Cleanup(m.Close)
+	m.SetReadsSetEnds(true)
+	mustRegisterKind(t, m, models.REDIS, func(context.Context) { <-core.writing })
+
+	filed := make(chan error, 1)
+	go func() { filed <- m.FileAtSetEnd(context.Background()) }()
+	select {
+	case err := <-filed:
+		t.Fatalf("the read returned (%v) while a warning of a registration it ran was still being written", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	releaseWrites()
+	select {
+	case err := <-filed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the read did not return once the warning was written")
+	}
+	n := len(filingWarnings(logs))
+	if n == 0 {
+		t.Fatal("the warning held while the registration returned was not written")
+	}
+	time.Sleep(20 * setEndFilingBeat)
+	if after := len(filingWarnings(logs)); after != n {
+		t.Fatalf("%d warnings followed the read's return", after-n)
 	}
 }

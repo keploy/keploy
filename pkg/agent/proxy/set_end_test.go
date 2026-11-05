@@ -159,6 +159,19 @@ func TestScopedMockDb_HandsOnTheWrappedSetEndFiler(t *testing.T) {
 		t.Fatal("a cancelled scoped registration ran")
 	}
 
+	// It hands on the kind it is handed: the run's read names that parser.
+	named := setEndManager(t)
+	kinds := []models.Kind{models.REDIS, models.MySQL}
+	for _, kind := range kinds {
+		mustRegisterKind(t, &scopedMockDb{MockMemDb: named}, kind, func(context.Context) { panic("parser bug") })
+	}
+	err := named.FileAtSetEnd(context.Background())
+	for _, kind := range kinds {
+		if err == nil || !strings.Contains(err.Error(), string(kind)+": parser bug") {
+			t.Fatalf("a %s registration made through a scoped store panicked: FileAtSetEnd said %v, want an error naming %s", kind, err, kind)
+		}
+	}
+
 	worker := setEndManager(t)
 	worker.notAtSetEnd.Store(true)
 	if _, ok := (&scopedMockDb{MockMemDb: worker}).AtSetEnd(models.KAFKA, func(context.Context) {}); ok {
