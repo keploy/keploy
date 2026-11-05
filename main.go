@@ -60,7 +60,9 @@ func main() {
 	utils.DeclareTeardownSteps()
 	start(ctx)
 	// An agent has detached everything by now: what is left is the exit
-	// (utils.MarkDetachDone).
+	// (utils.MarkDetachDone). Its report is the agent's last, and nothing
+	// after it is watched, so nothing may come between the two, and
+	// os.Exit's argument calls nothing (TestMainReportsItsTeardownSteps).
 	utils.MarkDetachDone()
 	os.Exit(utils.ErrCode)
 }

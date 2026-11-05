@@ -87,12 +87,19 @@ func TestWritesKeployFolder(t *testing.T) {
 }
 
 // main says its agent records the steps of its whole teardown before the
-// command runs, and that the detach is done once the command has returned and
-// before the process exits (utils.DeclareTeardownSteps, utils.MarkDetachDone):
-// the CLI that stops an agent kills it for want of progress only when it says
-// the first, and once it has stopped detaching only when it says the second.
+// command runs, and that the detach is done once the command has returned,
+// right before the process exits (utils.DeclareTeardownSteps,
+// utils.MarkDetachDone): the CLI that stops an agent kills it for want of
+// progress only when it says the first. The second is the agent's last
+// report, so nothing after it is watched: a statement main ran between it and
+// os.Exit, or a call in os.Exit's argument, that hung -- a log sync on a
+// blocked pipe, a flush -- would never be forced, only waited for until it
+// ends or Ctrl+C is pressed. So nothing may come between them, os.Exit's
+// argument calls nothing and receives from no channel, and only the Go
+// runtime's own exit goes unwatched.
 func TestMainReportsItsTeardownSteps(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +139,22 @@ func TestMainReportsItsTeardownSteps(t *testing.T) {
 	if declare < 0 || declare > start {
 		t.Errorf("main does not call utils.DeclareTeardownSteps before start (at %d, start at %d)", declare, start)
 	}
-	if done < 0 || done < start || done > exit {
-		t.Errorf("main does not call utils.MarkDetachDone after start and before os.Exit (at %d, start %d, exit %d)", done, start, exit)
+	if done < 0 || done < start || done != exit-1 {
+		t.Errorf("main does not call utils.MarkDetachDone after start and as the statement right before os.Exit (at %d, start %d, exit %d)", done, start, exit)
+	}
+	for _, arg := range body[exit].(*ast.ExprStmt).X.(*ast.CallExpr).Args {
+		ast.Inspect(arg, func(n ast.Node) bool {
+			switch e := n.(type) {
+			case *ast.CallExpr:
+				t.Errorf("%s: os.Exit's argument in main makes a call, which runs after utils.MarkDetachDone's last report, unwatched", fset.Position(e.Pos()))
+				return false
+			case *ast.UnaryExpr:
+				if e.Op == token.ARROW {
+					t.Errorf("%s: os.Exit's argument in main receives from a channel, which can wait after utils.MarkDetachDone's last report, unwatched", fset.Position(e.Pos()))
+					return false
+				}
+			}
+			return true
+		})
 	}
 }

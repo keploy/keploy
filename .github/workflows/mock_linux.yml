@@ -655,9 +655,10 @@ jobs:
   # keploy's own CLI flags on a native run: --pass-through-ports (both
   # spellings) and keploy.yml's bypassRules in keploy record and keploy test,
   # and --disable-tele (no telemetry or crash-report lookup, in the CLI and in
-  # the agent it starts). Its own job: the proven strict-HTTP job above is
-  # near its timeout. The disable-tele leg builds this checkout with a crash
-  # tag, so Go comes from keploy's go.mod.
+  # the agent it starts); and a clean stop of the agent, which forces
+  # nothing. Its own job: the proven strict-HTTP job above is near its
+  # timeout, as is mock-mode's. The disable-tele leg builds this checkout
+  # with a crash tag, so Go comes from keploy's go.mod.
   cli_flags_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
@@ -678,6 +679,21 @@ jobs:
         uses: ./.github/actions/download-binary
         with:
           src: build
+
+      # A clean stop of the keploy agent forces nothing: record ended by
+      # --record-timer and by Ctrl+C, and the replay, must each watch the
+      # agent's teardown and never log "Stopping the keploy agent by force".
+      # The race build (this job's binary) spends a second on its way out,
+      # after the agent has reported everything detached, and most stops of
+      # it were forced there with a WARN. The script says why. First, so no
+      # other leg's agent has run on the host before it.
+      - name: Run agent clean-stop e2e (no force line on a clean stop)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/agent-clean-stop-linux.sh"
 
       # keploy record and keploy test take --pass-through-ports (both
       # spellings) beside keploy.yml's record.passThroughPorts telemetry
