@@ -89,8 +89,8 @@ func TestRun_StopsAndAbortsBeforeItLogsWhy(t *testing.T) {
 		{
 			name:   "a panic as the recording stops",
 			cancel: true,
-			// It panics once the supervisor has taken the cancel, within its
-			// grace for the parser's return (but see graceRanOut below).
+			// It panics once the supervisor has taken the cancel, while the
+			// supervisor waits for its return.
 			fn: func(ev *stopEvents) ParserFunc {
 				return func(context.Context, *Session) error {
 					<-ev.cancelSeen
@@ -137,22 +137,6 @@ func TestRun_StopsAndAbortsBeforeItLogsWhy(t *testing.T) {
 				t.Fatalf("status %s: the parser was not retired", res.Status)
 			}
 			got := ev.get()
-			if tc.cancel && res.Status == StatusCanceled {
-				// graceRanOut: on a starved runner the parser can take longer
-				// than the supervisor's grace to panic after the cancel. Then
-				// it is aborted while still running, and its panic, later, is
-				// reported by no one: the abort comes first all the same.
-				if len(got) == 0 || got[0] != "abort" {
-					t.Fatalf("events %v, want the abort first when the grace runs out", got)
-				}
-				for _, e := range got {
-					if e == "report" {
-						t.Fatalf("events %v: a panic after the grace ran out was reported", got)
-					}
-				}
-				t.Logf("the grace ran out before the parser panicked: events %v", got)
-				return
-			}
 			if tc.hang && len(got) > len(tc.want) {
 				got = got[:len(tc.want)]
 			}

@@ -191,10 +191,11 @@ func TestV2_PipelinedRequestsStayInOneExchange(t *testing.T) {
 }
 
 // A response split across chunks keeps its legacy shape: the head chunk
-// is the mock's response and the tail chunks are dropped. The next
-// request was read after every one of them, so nothing here looks like a
-// late push and the split rule must stay out of it.
-func TestV2_MultiChunkResponseStillDropsItsTail(t *testing.T) {
+// is the mock's response, and the tail chunks are not in it (they are left
+// out with their span: answer_tail_test.go). The next request was read
+// after every one of them, so nothing here looks like a late push and the
+// split rule must stay out of it.
+func TestV2_MultiChunkResponseRecordsItsHeadChunk(t *testing.T) {
 	t.Parallel()
 
 	got := runPairing(t, []chunkEvent{
@@ -459,7 +460,8 @@ func TestV2_UnorderedRequestDoesNotAdoptAHeldResponse(t *testing.T) {
 // records an answer that request never got, and nothing downstream
 // catches it — generic mocks are session-scoped, so replay's window
 // filter takes them before it would compare their timestamps. Wire
-// order drops the tail as an orphan; so does this.
+// order leaves the tail out as an orphan; so does this
+// (TestV2_TheTailOfTheAnswerBeforeASplitIsLeftOut).
 func TestV2_CarriedHalfDoesNotPairWithAnOlderTail(t *testing.T) {
 	t.Parallel()
 
