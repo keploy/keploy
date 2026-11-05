@@ -1404,6 +1404,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
+	m.skippedReadOf = moved
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.Int("tests with a repeated read", len(repeats)), zap.String("mock-set", name))
 	return nil
 }
@@ -2542,6 +2543,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// owns names that test, as keploy test's replay does (markRecordedIn):
 	// judging lists it as the root of the test's entry.
 	named, orderDependent := withRecordedIn(counts.tests, m.mockOwners, detail.windows)
+	withSkippedTest(counts.tests, m.skippedReadOf)
 	if len(named) > 0 {
 		m.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under evidence.misses.recorded_in in "+TestsReceiptFile,
 			zap.String("mock-set", m.setName()),
@@ -2733,6 +2735,35 @@ func withRecordedIn(tests []TestReceipt, owners map[string][]string, windows []m
 		}
 	}
 	return named, orderDependent
+}
+
+// withSkippedTest names, on each miss of tests' evidence that is one call
+// past a read of a test this replay's gate skips (models.RepeatNote
+// .SkippedRead), that test (RepeatNote.SkippedTest), from skippedOf: each
+// read keploy mock replay moved to the worker scope, with its test
+// (skippedReads). The test whose window holds the recording is the skipped
+// one, which the per-test table the replay pushed no longer lists it under,
+// so the miss names no RecordedIn: without this, judging could not say
+// which test the call is one past. The note is the receipt's own copy; the
+// windows' is never written; any other note is left as it is.
+func withSkippedTest(tests []TestReceipt, skippedOf map[string]string) {
+	if len(skippedOf) == 0 {
+		return
+	}
+	for i := range tests {
+		ev := tests[i].Evidence
+		if ev == nil {
+			continue
+		}
+		for j := range ev.Misses {
+			c := &ev.Misses[j]
+			if c.Repeat == nil || !c.Repeat.SkippedRead {
+				continue
+			}
+			c.Repeat = c.Repeat.Clone()
+			c.Repeat.SkippedTest = skippedOf[c.Repeat.Mock]
+		}
+	}
 }
 
 // withBegan puts on each test's line when its latest run began: its latest

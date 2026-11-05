@@ -76,6 +76,74 @@ func TestASkippedTestsReadAnswersWhicheverTestMakesIt(t *testing.T) {
 	require.Empty(t, instr2.skippedReads, "a replay that skips no test names no skipped read")
 }
 
+// A call one past a skipped test's read (the agent's note: SkippedRead)
+// names, on the replay's receipt, the skipped test the read was moved from
+// (RepeatNote.SkippedTest), so judging can say which test the call is one
+// more than: the per-test table the replay pushed no longer lists the read
+// under that test, so the miss names no RecordedIn. A note whose read the
+// replay did not move names none, nor does any note when the replay skips
+// no test. The agent's windows are read, never written.
+func TestTheReceiptNamesTheSkippedTestACallPastItsReadIsOneMoreThan(t *testing.T) {
+	for _, skips := range []bool{true, false} {
+		t.Run(map[bool]string{true: "the gate skips TestCRUD", false: "the gate skips none"}[skips], func(t *testing.T) {
+			provenOn(t)
+			RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+				if !skips {
+					return nil, nil, nil
+				}
+				return map[string]string{"o::TestCRUD": "flaky: flipped"}, nil, nil
+			})
+			t.Cleanup(func() { RegisterScopeSkipSource(nil) })
+			repo := t.TempDir()
+			t.Chdir(repo)
+			keployDir := filepath.Join(repo, "keploy")
+			require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestCRUD\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-pat\n        - name: mock-put\n    - id: o::TestList\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-own\n"), 0o644))
+			instr := &gatedInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})}
+			instr.consumedMocks = []models.MockState{{Name: "mock-own"}, {Name: "mock-pat"}}
+			misses := []models.UnmatchedCall{
+				{Protocol: "HTTP", ActualSummary: "GET /v1/secret/data/pat", Destination: "openbao:8200", ClosestMock: "mock-pat", Repeat: &models.RepeatNote{Mock: "mock-pat", SkippedRead: true}},
+				{Protocol: "HTTP", ActualSummary: "GET /v1/secret/data/own", Destination: "openbao:8200", ClosestMock: "mock-own", Repeat: &models.RepeatNote{Mock: "mock-own", SkippedRead: true}},
+				{Protocol: "HTTP", ActualSummary: "GET /v1/secret/data/repeat", Destination: "openbao:8200", ClosestMock: "mock-pat", Repeat: &models.RepeatNote{Mock: "mock-pat", Test: "o::TestList"}},
+				{Protocol: "HTTP", ActualSummary: "GET /v1/secret/data/none", Destination: "openbao:8200", ClosestMock: "mock-pat"},
+			}
+			instr.windows = []models.ScopeWindow{
+				{Name: "o::TestList", Outcome: models.ScopeOutcomeFailed, Evidence: &models.ScopeEvidence{Misses: misses}},
+			}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			db := namedMockDB{mocks: []*models.Mock{httpMock("mock-pat", "GET"), httpMock("mock-put", "PUT"), httpMock("mock-own", "GET")}}
+			_ = New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+			tests, err := ReadTestsReceipt(keployDir, "set")
+			require.NoError(t, err)
+			require.NotNil(t, tests, "the replay writes what each test did")
+			got := map[string]string{}
+			for _, tr := range tests.Tests {
+				if tr.Evidence == nil {
+					continue
+				}
+				for _, c := range tr.Evidence.Misses {
+					named := "no note"
+					if c.Repeat != nil {
+						named = c.Repeat.SkippedTest
+					}
+					got[tr.Name+" "+c.ActualSummary] = named
+				}
+			}
+			// The repeat of a test's own recording of the moved read is no
+			// call past a skipped read: it names no skipped test.
+			want := map[string]string{"o::TestList GET /v1/secret/data/pat": "", "o::TestList GET /v1/secret/data/own": "", "o::TestList GET /v1/secret/data/repeat": "", "o::TestList GET /v1/secret/data/none": "no note"}
+			if skips {
+				want["o::TestList GET /v1/secret/data/pat"] = "o::TestCRUD"
+			}
+			require.Equal(t, want, got, "only a call past a read the replay moved from a skipped test names that test")
+			require.Empty(t, misses[0].Repeat.SkippedTest, "the agent's window is read, never written")
+		})
+	}
+}
+
 // A read two skipped tests list moves to worker: under each one's key and
 // is named with the first of them by name, whichever order the table is
 // read in: the name a test's extra-call line gives it never moves from run

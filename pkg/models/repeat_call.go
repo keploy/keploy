@@ -94,6 +94,13 @@ type RepeatNote struct {
 	// stays the miss of the test it was made in, which the skipped test's
 	// read would otherwise answer more often than it was recorded.
 	SkippedRead bool `json:"skipped_read,omitempty" yaml:"skipped_read,omitempty"`
+	// SkippedTest is, on a SkippedRead note, the skipped test whose read
+	// Mock is: the one keploy mock replay moved it to the worker scope from
+	// (the first by name when two skipped tests list it). Judging names it
+	// in the line of the test that made the call, which is one call more
+	// than that test recorded. Empty while it is not known: the agent knows
+	// the recording, and the replay names the test at the end of the set.
+	SkippedTest string `json:"skipped_test,omitempty" yaml:"skipped_test,omitempty"`
 }
 
 // The scopes of the set's background a note's recording can be of
