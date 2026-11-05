@@ -367,3 +367,35 @@ func TestDechunkedAtReadsOnlyFramingItCan(t *testing.T) {
 		})
 	}
 }
+
+// A chunk the wire ends with, before its CRLF, is read whole.
+func TestDechunkedAtReadsAChunkTheWireEndsWith(t *testing.T) {
+	decoded, data, ok := dechunkedAt([]byte("3\r\nabc"), []int{6})
+	if !ok || string(data) != "abc" || fmt.Sprint(decoded) != "[3]" {
+		t.Fatalf("dechunkedAt = %v, %q, %v; want [3], %q, true", decoded, data, ok, "abc")
+	}
+}
+
+// decodedAt is, at each cut of a compressed body, what a client decoding as
+// it reads had of it; a body its decoder refuses before the last cut does
+// not decode, and does not panic.
+func TestDecodedAtReadsEachCut(t *testing.T) {
+	call := func(enc string, data []byte, ends []int) (out []int, ok bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("decodedAt(%s, %d bytes, %v) panicked: %v", enc, len(data), ends, r)
+			}
+		}()
+		return decodedAt(enc, data, ends)
+	}
+	for _, enc := range []string{"gzip", "br"} {
+		z := compressedPieces(t, enc, []string{"hello\n", "world\n"})
+		data := []byte(z[0] + z[1])
+		if out, ok := call(enc, data, []int{len(z[0]), len(data), len(data)}); !ok || fmt.Sprint(out) != "[6 12 12]" {
+			t.Errorf("%s: decodedAt = %v, %v; want [6 12 12], true", enc, out, ok)
+		}
+	}
+	if out, ok := call("gzip", []byte("not a gzip body"), []int{10, 12, 15}); ok {
+		t.Errorf("a body that is not gzip: decodedAt = %v, true; want false", out)
+	}
+}

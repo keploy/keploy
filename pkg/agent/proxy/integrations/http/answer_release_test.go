@@ -559,3 +559,83 @@ func TestHeldAnswer_ANoBodyAnswerIsWrittenWhole(t *testing.T) {
 		})
 	}
 }
+
+// An answer whose head and every part are already due when it is called is
+// not held: it is served as before, whole.
+func TestHeldAnswer_AnAnswerDueAtItsCallIsNotHeld(t *testing.T) {
+	registerStandIn(t)
+	h := &HTTP{Logger: zap.NewNop()}
+	db := newPlacedDb()
+	db.reach(models.RunOpen(2))
+	if a, err := h.heldAnswerOf(sseMock(t, releaseAt(25), releaseAt(45), ""), releaseRequest(t, releaseCall), db, false); err != nil || a != nil {
+		t.Fatalf("every part due at the call: held %v, %v; want it served as before", a, err)
+	}
+}
+
+// A held answer written in parts has the recorded head: each recorded header
+// once, no Content-Length, and one Transfer-Encoding, though the recording
+// kept one of its own.
+func TestHeldAnswer_APartedAnswersHeadIsTheRecordedHead(t *testing.T) {
+	h := &HTTP{Logger: zap.NewNop()}
+	m := sseMock(t, releaseAt(25), releaseAt(45), "")
+	m.Spec.HTTPResp.Header["Content-Length"] = "24"
+	m.Spec.HTTPResp.Header["Transfer-Encoding"] = "chunked"
+	m.Spec.HTTPResp.Header["X-Trace"] = "abc"
+	a, err := h.planHeld(m, releaseRequest(t, releaseCall))
+	if err != nil || a == nil || !a.chunked {
+		t.Fatalf("planHeld = %v, %v; want it written in parts", a, err)
+	}
+	head := string(a.head)
+	for _, line := range []string{"Content-Type: text/event-stream\r\n", "X-Trace: abc\r\n", "Transfer-Encoding: chunked\r\n"} {
+		if n := strings.Count(head, line); n != 1 {
+			t.Errorf("head %q holds %q %d times, want once", head, line, n)
+		}
+	}
+	if strings.Contains(strings.ToLower(head), "content-length") {
+		t.Errorf("head %q of an answer written in parts carries a Content-Length", head)
+	}
+}
+
+// The head goes out before any part, though a hand-edited recording places it
+// after its first part.
+func TestHeldAnswer_TheHeadGoesOutBeforeAnyPart(t *testing.T) {
+	registerStandIn(t)
+	m := sseMock(t, releaseAt(25), releaseAt(45), "")
+	m.Spec.HTTPResp.Marks.Head = releaseAt(25)
+	db := newPlacedDb(m)
+	app, _ := serveHeld(t, db, nil)
+	if got := readFor(app, quiet); got != "" {
+		t.Fatalf("written before the head's place: %q", got)
+	}
+	db.reach(models.RunOpen(1))
+	if got := readUntil(app, "data:b\n\n", 5*time.Second); !strings.HasPrefix(got, "HTTP/1.1 200") || !strings.Contains(got, "data:b\n\n") {
+		t.Fatalf("at the head's place: %q, want the head, then the parts due", got)
+	}
+}
+
+// Once a held answer is written, its connection answers the application's
+// next call.
+func TestHeldAnswer_ItsConnectionAnswersTheNextCall(t *testing.T) {
+	registerStandIn(t)
+	h := &HTTP{Logger: zap.NewNop()}
+	const nextCall = "GET /next HTTP/1.1\r\nHost: api.example\r\n\r\n"
+	next, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(nextCall), Resp: []byte("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nnext"),
+		ReqTimestampMock: releaseAt(6), ResTimestampMock: releaseAt(6)}, 80, "c", models.OutgoingOptions{})
+	if err != nil || next == nil {
+		t.Fatalf("buildHTTPMock = (%v, %v)", next, err)
+	}
+	next.Name = "next"
+	next.TestModeInfo.Lifetime = models.LifetimePerTest
+	db := newPlacedDb(singleAnswer(t, releaseAt(45)), next)
+	app, _ := serveHeld(t, db, nil)
+	db.reach(models.RunOpen(2))
+	if got := readUntil(app, `{"state":"done"}`, 5*time.Second); !strings.HasSuffix(got, `{"state":"done"}`) {
+		t.Fatalf("the held answer: %q", got)
+	}
+	if _, err := app.Write([]byte(nextCall)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUntil(app, "next", 5*time.Second); !strings.HasPrefix(got, "HTTP/1.1 200") || !strings.HasSuffix(got, "next") {
+		t.Fatalf("the next call's answer: %q", got)
+	}
+}
