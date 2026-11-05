@@ -611,6 +611,14 @@ type UnmatchedCall struct {
 	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
 	// a recording the test does not own.
 	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`
+	// Background mirrors MockMismatchReport.Background, under either switch:
+	// the call is the same request as one of the set's background recordings
+	// (mappings.yaml worker: or startup:), apart from noise and clock reads,
+	// made once more than any was left to answer. It is listed with the
+	// test's misses, and counts against no test (CountsAgainstTest): the
+	// application's background work made it, so it fails no test and no set,
+	// and holds back no noise learning.
+	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
 	// RecordedIn names, under the proven switch, the other test of the set
 	// that owns the recording a NotOwned call is (ClosestMock): the call is
 	// likely one that test recorded, such as a later exchange of a connection
