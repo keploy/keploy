@@ -1461,16 +1461,16 @@ func (oh *outsideHeld) asked(state bool, in ...map[int32]heldRoles) []int32 {
 // (postRuns) for its places (dc.ps): by a text's id there, the places
 // whose recorded text (rec) or round F's (live) it is, and the places a
 // word's check always reads (always). A word's check reads only the places
-// whose recorded text may hold R's word or a whole token around it, or
-// whose round F's text may hold F's word, and the places always read: any
-// other holds neither word, so it shows nothing of it (evidenceOf: evNone)
-// and no token around it (tokenShown), as the filter of its texts would
-// tell (ruledOut), with no lookup per place. Read always: a place whose
-// texts the postings do not hold (a text shorter than filterTextMin, one
-// keploy could not read, one past the set's budget, a call in no set), and
-// one a word may show at without its texts holding it: F's side unstated
-// (its views and fMay decide), a body that declares no media type
-// (gluedAt), a given (glued inside the word).
+// whose recorded text may hold R's word, as one that holds a whole token
+// around it does (asked), or whose round F's text may hold F's word, and
+// the places always read: any other holds neither word, so it shows
+// nothing of it (evidenceOf: evNone) and no token around it (tokenShown),
+// as the filter of its texts would tell (ruledOut), with no lookup per
+// place. Read always: a place whose texts the postings do not hold (a text
+// shorter than filterTextMin, one keploy could not read, one past the
+// set's budget, a call in no set), and one a word may show at without its
+// texts holding it: F's side unstated (its views and fMay decide), a body
+// that declares no media type (gluedAt), a given (glued inside the word).
 type placeIndex struct {
 	rec, live map[int32][]int32
 	always    []int32
@@ -1504,20 +1504,18 @@ func (dc *decider) places() *placeIndex {
 }
 
 // asked reports, by place, whether a check of w reads it (placeIndex); nil
-// where it reads every place: R's word, F's word or a whole token around
-// R's has no run of letters and digits the postings can name. A token of
-// base64 is named by its runs that stand between two of its other bytes
-// alone: one at its end may run on into an instant's digits in a text
-// (eachB64Run), so it may be no whole run there.
+// where it reads every place: R's word or F's has no run of letters and
+// digits the postings can name. A place that shows a whole token around
+// R's word (tokenShown) is among those the postings name for R's word:
+// each of the word's runs is a whole run of the token (recAsked), and a
+// text that holds a token of either kind holds each of its runs whole
+// (holdsToken; an instant never starts or ends glued to a letter or digit,
+// so a base64 run cut at one's bound ends a run of letters and digits
+// there too).
 func (pi *placeIndex) asked(n int, w readWord) []bool {
 	ask := make([]bool, n)
-	if !pi.mark(ask, pi.rec, runsOf(w.Rec, false)) || !pi.mark(ask, pi.live, runsOf(w.Live, false)) {
+	if !pi.mark(ask, pi.rec, runsOf(w.Rec)) || !pi.mark(ask, pi.live, runsOf(w.Live)) {
 		return nil
-	}
-	for _, t := range w.Tokens {
-		if !pi.mark(ask, pi.rec, runsOf(t.Rec, t.Kind == tokenB64)) {
-			return nil
-		}
 	}
 	for _, i := range pi.always {
 		ask[i] = true
@@ -1533,7 +1531,7 @@ func (pi *placeIndex) asked(n int, w readWord) []bool {
 // before or after r.
 func (pi *placeIndex) recAsked(n int, r string) []bool {
 	ask := make([]bool, n)
-	if !pi.mark(ask, pi.rec, runsOf(r, false)) {
+	if !pi.mark(ask, pi.rec, runsOf(r)) {
 		return nil
 	}
 	for _, i := range pi.always {
@@ -1555,9 +1553,8 @@ func (pi *placeIndex) mark(ask []bool, side map[int32][]int32, runs []string) bo
 	return ok
 }
 
-// runsOf is s's runs of letters and digits, as eachWord cuts them; inner:
-// only those with a byte of s on both sides.
-func runsOf(s string, inner bool) []string {
+// runsOf is s's runs of letters and digits, as eachWord cuts them.
+func runsOf(s string) []string {
 	var runs []string
 	for i := 0; i < len(s); {
 		if !isWord(s[i]) {
@@ -1568,9 +1565,7 @@ func runsOf(s string, inner bool) []string {
 		for j < len(s) && isWord(s[j]) {
 			j++
 		}
-		if !inner || i > 0 && j < len(s) {
-			runs = append(runs, s[i:j])
-		}
+		runs = append(runs, s[i:j])
 		i = j
 	}
 	return runs

@@ -1309,8 +1309,8 @@ func TestOutcomeCostAViewThatHoldsOnlyFsWordIsReadAtAnyLength(t *testing.T) {
 
 // The set's postings name a word's texts by every run of it: a text that
 // holds each of its runs, never one that lacks any. A word of no letter or
-// digit has no run to name, and every text may hold it. A base64 token is
-// named by its runs between two of its other bytes alone.
+// digit has no run to name, and every text may hold it. A word's runs are
+// all its runs of letters and digits, those at its ends too.
 func TestOutcomeCostThePostingsNameTheTextsThatHoldEveryRunOfAWord(t *testing.T) {
 	fs := &setFilters{runs: map[string][]int32{"ids": {0, 1, 2, 3}, "a1b2": {1, 3}, "ref": {0, 3}, "x": {2}}}
 	for _, c := range []struct {
@@ -1332,19 +1332,17 @@ func TestOutcomeCostThePostingsNameTheTextsThatHoldEveryRunOfAWord(t *testing.T)
 		}
 	}
 	for _, c := range []struct {
-		s     string
-		inner bool
-		want  []string
+		s    string
+		want []string
 	}{
-		{"ab-12_cd", false, []string{"ab", "12", "cd"}},
-		{"ab+12/cd==", true, []string{"12", "cd"}},
-		{"+ab/cd", true, []string{"ab"}},
-		{"QUJDREVG", true, nil},
-		{"QUJDREVG", false, []string{"QUJDREVG"}},
-		{"日本", false, nil},
+		{"ab-12_cd", []string{"ab", "12", "cd"}},
+		{"ab+12/cd==", []string{"ab", "12", "cd"}},
+		{"+ab/cd", []string{"ab", "cd"}},
+		{"QUJDREVG", []string{"QUJDREVG"}},
+		{"日本", nil},
 	} {
-		if got := runsOf(c.s, c.inner); !slices.Equal(got, c.want) {
-			t.Errorf("runs of %q (inner %v): %q; want %q", c.s, c.inner, got, c.want)
+		if got := runsOf(c.s); !slices.Equal(got, c.want) {
+			t.Errorf("runs of %q: %q; want %q", c.s, got, c.want)
 		}
 	}
 }
@@ -2211,6 +2209,88 @@ func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
 		if held > counted {
 			t.Errorf("%s: the postings hold %d bytes of heap and count %d on the budget: want no more held than counted", c.name, held, counted)
 		}
+	}
+}
+
+// A short word inside a base64 token ("17" of "QUJD+17"), the whole token
+// shown at one earlier place in both runs (tokenShown), is read at that
+// place alone: a word's check reads the places the set's postings name for
+// R's word or F's, and a text that holds a whole token around R's word
+// holds each of the word's runs whole, so the postings name it for the
+// word. The token, whose runs all stand at its ends, names no place more,
+// and the check never reads every place for it.
+func TestOutcomeCostAWholeTokenAroundAWordIsReadWhereThePostingsNameTheWord(t *testing.T) {
+	seen := strings.Repeat("s", 300)
+	text := func(i int, tok string) string {
+		if i == 7 {
+			return `{"tok":"` + tok + `","seen":"` + seen + `"}`
+		}
+		return fmt.Sprintf(`{"note":"Item %c","seen":"%s"}`, 'a'+i, seen)
+	}
+	a := placeAsks.Load()
+	ds := costInSet(func(dc *DriftCache) Input {
+		return costCall(dc, "body.ref", "QUJD+17", "QUJD+42", eRecAt, nil, costServed(dc, 16,
+			func(i int) string { return text(i, "QUJD+17") }, func(i int) string { return text(i, "QUJD+42") }), nil, nil)
+	})
+	reads := placeAsks.Load() - a
+	t.Logf("decided %s and %s; places read %d", oDescribe(ds[0]), oDescribe(ds[1]), reads)
+	for i := range ds {
+		d := oWord(t, ds[i], "17", "42")
+		if d.Outcome != OutcomeValue || d.From.Mock != "mock-7" {
+			t.Errorf("test %d decided %s; want 17 bound at mock-7, which shows the whole token QUJD+17 in R and QUJD+42 in F", i, oDescribe(ds[i]))
+		}
+	}
+	if reads != 2 {
+		t.Errorf("the two tests read %d places; want 2, the one place a test whose texts hold the word's runs", reads)
+	}
+}
+
+// Every token the reader cuts, of either kind, is held by each text that
+// holds it whole (holdsToken) with each of its runs of letters and digits
+// whole there: runs the set's postings post of that text (eachWord). So a
+// place that shows a whole token around R's word, each of whose runs is a
+// run of the token, is one the postings name for the word (placeIndex):
+// an instant never starts or ends glued to a letter or digit, so a base64
+// token cut at an instant's bound ends its run there too.
+func TestOutcomeCostEveryRunOfAHeldTokenIsPostedWhole(t *testing.T) {
+	texts := []string{
+		"QUJD+REVG", "QUJD+REVG+2026-10-31T10:50:13Z", "at 2026-10-31T10:50:13Z+QUJD+REVG", "QUJD+REVG2026-10-31T10:50:13Z",
+		"2026-10-31T10:50:13ZQUJD+REVG", "x=QUJD-REVG 2026-10-31T10:50:13Z", "QUJD+REVG Mon, 02 Jan 2006 15:04:05 GMT",
+		"Fri Oct 31 10:50:13 2026QUJD+REVG", "id 0190a2b3-c4d5-7abc-8def-0123456789ab", "0190a2b3-c4d5-7abcQUJD",
+		"tok=ab+cd/ef==", "x=abc+/def==;y", "Order+17", "v1.17.3 cart_42", "ab-cd_ef 1730371813", "QUJD+17\"", "QUJD+1710:50:13",
+	}
+	runs := func(s string) map[string]bool {
+		m := map[string]bool{}
+		eachWord(s, func(r string) { m[r] = true })
+		return m
+	}
+	held := 0
+	for _, a := range texts {
+		sp := tokenSpans(a, instantSpans(a))
+		for _, k := range []tokenKind{tokenID, tokenB64} {
+			spans := sp.id
+			if k == tokenB64 {
+				spans = sp.b64
+			}
+			for _, at := range spans {
+				tok := a[at[0]:at[1]]
+				for _, b := range texts {
+					if h, _ := newReaderIndex(nil).text(b).holdsToken(k, tok); !h {
+						continue
+					}
+					held++
+					in := runs(b)
+					for _, r := range runsOf(tok) {
+						if !in[r] {
+							t.Errorf("%q holds the token %q (kind %d) of %q, but not its run %q whole: its postings would not name it", b, tok, k, a, r)
+						}
+					}
+				}
+			}
+		}
+	}
+	if held < len(texts) {
+		t.Errorf("%d texts held a token; want each at least its own", held)
 	}
 }
 
