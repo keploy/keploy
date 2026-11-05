@@ -983,9 +983,10 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	// wrote in more than one write: replay writes each part at its place. A
 	// whole answer the upstream ended in a fault after it is recorded with
 	// no fault, and is placed as any whole answer; one its client read in
-	// part has no place for the rest it did not read.
+	// part (the only answer cut short that is recorded) has no place for the
+	// rest it did not read.
 	var marks *models.HTTPAnswerMarks
-	if fault == nil && !cut && !m.RespReadInPart {
+	if fault == nil && !m.RespReadInPart {
 		marks = answerMarks(m.Resp, m.RespWrites, req.Method, respParsed.Header.Get("Content-Encoding"), len(respBody))
 	}
 
