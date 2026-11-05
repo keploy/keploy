@@ -448,12 +448,15 @@ func (t *readerText) ruledOut(w string) bool {
 var filterLookups atomic.Int64
 
 // setFilters are the filters a set keeps of its recordings' words
-// (setFilter), by recording (Raw.id). builds counts the filters built, for
-// the rows.
+// (setFilter), by recording (Raw.id), and the words of other tests'
+// recordings handed to its calls (outsideWords), by recording. builds and
+// wordsBuilds count the filters and the words read, for the rows.
 type setFilters struct {
-	mu     sync.Mutex
-	of     map[string]*filterEntry
-	builds int
+	mu          sync.Mutex
+	of          map[string]*filterEntry
+	builds      int
+	words       map[string][]*wordsEntry
+	wordsBuilds int
 }
 
 // filterEntry is one recording's filter, built once for the set (once):
@@ -476,7 +479,7 @@ func filtersOf(s *setDerived) *setFilters {
 	if v, ok := setsFilters.Load(k); ok {
 		return v.(*setFilters)
 	}
-	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}})
+	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, words: map[string][]*wordsEntry{}})
 	if !loaded {
 		runtime.AddCleanup(s, func(k weak.Pointer[setDerived]) { setsFilters.Delete(k) }, k)
 	}
