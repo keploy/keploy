@@ -1273,7 +1273,9 @@ type capturedMock struct {
 	end  time.Time
 	boot bool
 	// protocol: protocol-phase under the proven switch (models.Mock.IsProtocolPhase),
-	// so in no test's mapping and in the pool.
+	// or, under either, an answer the client never read
+	// (models.Mock.IsUndelivered), which no replay serves: so in no test's
+	// mapping and in the pool.
 	protocol bool
 	start    string
 	ref      string
@@ -1292,7 +1294,9 @@ func capturedOf(mk *models.Mock) capturedMock {
 	typ := mk.Spec.Metadata["type"]
 	// Under the proven switch a protocol-phase mock is the pool's, never
 	// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
-	protocol := provenswitch.On() && mk.IsProtocolPhase()
+	// So is an answer the client never read, under either switch: no test
+	// makes the call it recorded.
+	protocol := provenswitch.On() && mk.IsProtocolPhase() || mk.IsUndelivered()
 	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef}
 }
 
@@ -1446,7 +1450,8 @@ func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []un
 }
 
 // dataPlane is the captured mocks less the protocol-phase ones (none
-// without the proven switch): only data-plane mocks go in a test's mapping.
+// without the proven switch) and the answers the client never read
+// (capturedMock.protocol): only data-plane mocks go in a test's mapping.
 func dataPlane(mocks []capturedMock) []capturedMock {
 	out := mocks[:0:0]
 	for _, mk := range mocks {

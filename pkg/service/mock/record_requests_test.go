@@ -1214,3 +1214,27 @@ func TestAMappingListsDataPlaneMocksOnly(t *testing.T) {
 	require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0"}, {Name: "mock-1"}, {Name: "mock-2"}}}, correlateScopes(windows, dataPlane(mocks)))
 	require.Empty(t, startupMocks(windows, mocks, nil))
 }
+
+// An answer the client never read (models.Mock.IsUndelivered), made inside a
+// test, is in no test's mapping under either switch: no replay serves it, so
+// no test makes the call it recorded. It goes to the pool (startup:), which
+// requires none, while the answer the client read beside it is the test's.
+func TestAMappingListsNoAnswerTheClientNeverRead(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{{Name: "o::TestA", Start: at(0), End: at(100)}}
+	mock := func(name string, ms int, unread bool) *models.Mock {
+		m := &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"type": "HTTP_CLIENT"}, ReqTimestampMock: at(ms)}}
+		if unread {
+			m.Spec.Metadata[models.MetadataUndeliveredKey] = models.MetadataUndelivered
+		}
+		return m
+	}
+	for _, on := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, on)
+			mocks := []capturedMock{capturedOf(mock("mock-0", 10, false)), capturedOf(mock("mock-1", 20, true))}
+			require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0", Kind: "Http"}}}, correlateScopes(windows, dataPlane(mocks)))
+			require.Equal(t, []models.MockEntry{{Name: "mock-1", Kind: "Http"}}, startupMocks(windows, mocks, nil))
+		})
+	}
+}
