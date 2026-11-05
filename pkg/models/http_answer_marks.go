@@ -200,19 +200,16 @@ func legacyFramePieces(chunks []HTTPStreamChunk, kind streamBodyKind) ([]int, bo
 }
 
 // legacyFrame is chunk as streamChunksToLegacyBody writes it, without the
-// separator between frames; ok is false for one it leaves out.
+// separator between frames; ok is false for one it leaves out. A line is its
+// raw field, which every chunk a fresh body splits into has
+// (splitStreamBody): a chunk without one is no frame here, so the pieces do
+// not end at the body's end, and the answer keeps no marks (written at once).
 func legacyFrame(chunk HTTPStreamChunk, kind streamBodyKind) (string, bool) {
 	if kind == streamBodyKindSSE {
 		frame := streamChunksToLegacyBody([]HTTPStreamChunk{chunk}, kind)
 		return frame, frame != ""
 	}
-	if raw, ok := chunk.ValueByKey("raw"); ok {
-		return raw, true
-	}
-	if len(chunk.Data) > 0 {
-		return chunk.Data[0].Value, true
-	}
-	return "", false
+	return chunk.ValueByKey("raw")
 }
 
 // lineEnd is the end of the line that starts at start in body, and the end of

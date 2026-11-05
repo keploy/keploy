@@ -306,6 +306,24 @@ func TestLegacyFramePiecesEndAfterEachFrame(t *testing.T) {
 	}
 }
 
+// Chunks none of which is a frame (an SSE frame with no field written, a line
+// with no raw field) have no pieces, though the body they read back as is
+// empty or one line: the answer keeps no marks.
+func TestLegacyFramePiecesOfNoFrameAreNone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		chunks []HTTPStreamChunk
+		kind   streamBodyKind
+	}{
+		{"an SSE frame with no field", []HTTPStreamChunk{{Data: []HTTPStreamDataField{{Key: " ", Value: "a"}}}}, streamBodyKindSSE},
+		{"a line with no raw field", []HTTPStreamChunk{{Data: []HTTPStreamDataField{{Key: "line", Value: "a"}}}}, streamBodyKindRaw},
+	} {
+		if got, ok := legacyFramePieces(tc.chunks, tc.kind); ok || got != nil {
+			t.Errorf("%s: pieces %v (%v), want none", tc.name, got, ok)
+		}
+	}
+}
+
 // A frame ends after the blank line that ends it, read with CR, LF or CRLF
 // line ends; a blank line with no frame before it ends none.
 func TestSSEFrameEndsAreTheFramesTheParserKeeps(t *testing.T) {
