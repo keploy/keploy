@@ -208,3 +208,73 @@ func TestRunPlace_WindowsSeededForThePlaceAlone(t *testing.T) {
 		t.Fatalf("the place reads %d windows, want the recorded 2", got)
 	}
 }
+
+// A parser that found nothing due waits idle until the place's next change,
+// and that change ends the wait's idle mark before the call that makes it
+// returns: a read that settles the application's calls right after it (the
+// set's end read) finds the connection busy until its parser has written
+// the part it made due. Each move ends the marks of the waits on it: a
+// test's window opening, a test's end, the set's end, a new staging, new
+// windows and the close. A move to where the place is already ends none. A
+// wait on a channel the place has since changed marks nothing: the parser
+// reads the place again.
+func TestRunPlace_AChangeEndsItsWaitsIdleMarksBeforeItReturns(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		move func(mm *MockManager)
+		ends bool
+	}{
+		{"a window opens", func(mm *MockManager) { mm.SetMocksWithWindow(nil, nil, placeAt(20), placeAt(30)) }, true},
+		{"a test ends", func(mm *MockManager) { mm.EndRunTest("test-1") }, true},
+		{"the set ends", func(mm *MockManager) { mm.EndRunSet() }, true},
+		{"a new staging", func(mm *MockManager) { mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now()) }, true},
+		{"new windows", func(mm *MockManager) { mm.SeedRunPlaceWindows(placeWindows()) }, true},
+		{"the close", func(mm *MockManager) { mm.Close() }, true},
+		{"the window that is open opens", func(mm *MockManager) { mm.SetMocksWithWindow(nil, nil, placeAt(0), placeAt(10)) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SeedRecordedWindows(placeWindows())
+			mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+			mm.SetMocksWithWindow(nil, nil, placeAt(0), placeAt(10))
+			marked, released := 0, 0
+			mark := func() func() {
+				marked++
+				return func() { released++ }
+			}
+			ch := mm.RunPlaceChanged()
+			release, ok := mm.IdleUntilRunPlaceChanges(ch, mark)
+			if !ok || marked != 1 || released != 0 {
+				t.Fatalf("a wait on the place now: ok %v, marked %d, released %d", ok, marked, released)
+			}
+			tc.move(mm)
+			if want := map[bool]int{true: 1, false: 0}[tc.ends]; released != want {
+				t.Fatalf("released %d times when the move returned, want %d", released, want)
+			}
+			release()
+			release()
+			if released != 1 {
+				t.Fatalf("released %d times, want once", released)
+			}
+			if !tc.ends {
+				return
+			}
+			if _, ok := mm.IdleUntilRunPlaceChanges(ch, mark); ok || marked != 1 {
+				t.Fatalf("a wait on a channel the place has changed since: ok %v, marked %d", ok, marked)
+			}
+		})
+	}
+}
+
+// The proxy ends the set on the run's manager (Proxy.EndRunSet).
+func TestRunPlace_TheProxyEndsTheRunsSet(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	p := &Proxy{mockManager: mm}
+	p.EndRunSet()
+	if !mm.RunPlace().SetEnd {
+		t.Fatal("the run's manager is not at the set's end")
+	}
+	(&Proxy{}).EndRunSet() // no manager: nothing to end
+}

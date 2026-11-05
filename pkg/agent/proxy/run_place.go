@@ -28,6 +28,9 @@ type runPlace struct {
 	// (models.TestWindow.Tests), those of them that have ended: its end is
 	// reached once each has.
 	ended map[int]map[string]bool
+	// atChange are the idle marks' releases of the parsers that wait for the
+	// next change (IdleUntilRunPlaceChanges): the change runs them.
+	atChange []func()
 }
 
 // RunPlace is the run's place now (integrations.RunPlacer): the anchor it
@@ -57,20 +60,51 @@ func (m *MockManager) RunPlaceChanged() <-chan struct{} {
 	return m.place.sig
 }
 
-// signalRunPlaceLocked wakes every RunPlaceChanged waiter. place.mu held.
-func (m *MockManager) signalRunPlaceLocked() {
+// signalRunPlaceLocked wakes every RunPlaceChanged waiter, and hands back
+// the idle marks' releases of those that wait (IdleUntilRunPlaceChanges),
+// for the caller to run once it has released place.mu, before it returns.
+// place.mu held.
+func (m *MockManager) signalRunPlaceLocked() (release []func()) {
 	if m.place.sig != nil {
 		close(m.place.sig)
 		m.place.sig = nil
 	}
+	release, m.place.atChange = m.place.atChange, nil
+	return release
+}
+
+// runAll runs each of fs.
+func runAll(fs []func()) {
+	for _, f := range fs {
+		f()
+	}
 }
 
 // signalRunPlace wakes every RunPlaceChanged waiter: at Close, which they
-// read as the set's end.
+// read as the set's end, and when the windows the place is among change.
 func (m *MockManager) signalRunPlace() {
 	m.place.mu.Lock()
-	m.signalRunPlaceLocked()
+	release := m.signalRunPlaceLocked()
 	m.place.mu.Unlock()
+	runAll(release)
+}
+
+// IdleUntilRunPlaceChanges marks a parser's wait for the next change of the
+// place (integrations.RunPlacer): mark runs, under place.mu, only while
+// changed is the channel RunPlaceChanged hands out now, and its release
+// runs at the next change, before the call that makes it returns. Once the
+// place has changed, ok is false and nothing is marked.
+func (m *MockManager) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (func(), bool) {
+	m.place.mu.Lock()
+	defer m.place.mu.Unlock()
+	if changed == nil || changed != m.place.sig {
+		return func() {}, false
+	}
+	var once sync.Once
+	unmark := mark()
+	release := func() { once.Do(unmark) }
+	m.place.atChange = append(m.place.atChange, release)
+	return release, true
 }
 
 // beginRunPlace begins the place of a set the replay stages (a
@@ -78,15 +112,18 @@ func (m *MockManager) signalRunPlace() {
 // hold taken under the set before is over.
 func (m *MockManager) beginRunPlace() {
 	m.place.mu.Lock()
-	defer m.place.mu.Unlock()
 	m.place.gen++
 	m.place.reached, m.place.setEnd, m.place.ended = 0, false, nil
-	m.signalRunPlaceLocked()
+	release := m.signalRunPlaceLocked()
+	m.place.mu.Unlock()
+	runAll(release)
 }
 
 // reachRunPlace moves the run's place to anchor, unless it is there or past
 // it already, and to the set's end with setEnd.
 func (m *MockManager) reachRunPlace(anchor int, setEnd bool) {
+	var release []func()
+	defer func() { runAll(release) }()
 	m.place.mu.Lock()
 	defer m.place.mu.Unlock()
 	moved := false
@@ -99,7 +136,7 @@ func (m *MockManager) reachRunPlace(anchor int, setEnd bool) {
 		moved = true
 	}
 	if moved {
-		m.signalRunPlaceLocked()
+		release = m.signalRunPlaceLocked()
 	}
 }
 
@@ -204,5 +241,9 @@ func (m *MockManager) ReachRunTest(test string, open bool) { m.reachTest(test, o
 func (m *MockManager) EndRunTest(test string) { m.reachTest(test, false) }
 
 // EndRunSet notes that the replay has reached the staged set's end: every
-// held answer is due.
+// held answer is due. keploy test's read of the set's end (Proxy.EndRunSet)
+// makes it before that read settles the application's calls: a connection
+// whose answer waited is busy from then until its parser has written it, so
+// the read settles the calls the written answer makes, and takes their
+// misses.
 func (m *MockManager) EndRunSet() { m.reachRunPlace(0, true) }

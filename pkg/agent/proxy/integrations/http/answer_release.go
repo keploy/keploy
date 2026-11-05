@@ -274,16 +274,15 @@ func encodeParts(encoding, body string, writes []models.HTTPAnswerWrite) (parts 
 // head once headAt is, then each piece, one chunk each, then the last chunk.
 // While it waits, the connection is marked idle (integrations.MarkIdle): a
 // test's end and begin do not wait for a hold, as the application has its
-// call's answer coming. Every part is due once the set ends, the set's
-// staging changes, or the store closes. A write that fails (the application
-// closed its connection) drops the rest and returns the error.
+// call's answer coming. The mark lasts until the place's next change, which
+// releases it before the change's call returns
+// (integrations.RunPlacer.IdleUntilRunPlaceChanges): a read that settles the
+// application's calls right after it (the set's end read) waits for the
+// part it made due and for what the application does with it. Every part is
+// due once the set ends, the set's staging changes, or the store closes. A
+// write that fails (the application closed its connection) drops the rest
+// and returns the error.
 func (h *HTTP) writeHeld(ctx context.Context, conn net.Conn, a *heldAnswer) error {
-	var idle func()
-	defer func() {
-		if idle != nil {
-			idle()
-		}
-	}()
 	headDone, next := false, 0
 	for {
 		changed := a.placer.RunPlaceChanged()
@@ -303,10 +302,6 @@ func (h *HTTP) writeHeld(ctx context.Context, conn net.Conn, a *heldAnswer) erro
 			}
 		}
 		if len(out) > 0 {
-			if idle != nil {
-				idle()
-				idle = nil
-			}
 			if _, err := conn.Write(out); err != nil {
 				return err
 			}
@@ -314,13 +309,18 @@ func (h *HTTP) writeHeld(ctx context.Context, conn net.Conn, a *heldAnswer) erro
 		if headDone && next == len(a.pieces) {
 			return nil
 		}
-		if idle == nil {
-			idle = integrations.MarkIdle(ctx)
+		idle, ok := a.placer.IdleUntilRunPlaceChanges(changed, func() func() { return integrations.MarkIdle(ctx) })
+		if !ok {
+			// The place changed since it was read: read it again.
+			continue
 		}
 		select {
 		case <-changed:
 		case <-ctx.Done():
-			return ctx.Err()
+		}
+		idle()
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 	}
 }

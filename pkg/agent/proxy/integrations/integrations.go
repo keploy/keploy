@@ -1876,11 +1876,24 @@ type SetEndFiler interface {
 //   - RunPlaceChanged returns a channel closed at the next change of the
 //     place. Take it BEFORE reading RunPlace; each change hands out a fresh
 //     channel.
+//   - IdleUntilRunPlaceChanges is how a parser that found nothing due waits:
+//     it runs mark (the connection's MarkIdle) only if the place has not
+//     changed since changed (RunPlaceChanged) was handed out, under the
+//     place's lock, and the release mark returns runs at the next change,
+//     on the goroutine that makes it, before the call that made it returns.
+//     ok is false, and mark does not run, once the place has changed: read
+//     it again. So a read that settles the application's calls right after
+//     a change (the set's end read) never finds the connection idle on a
+//     part that change made due: until its parser has written that part,
+//     or found nothing due and marked it idle again, it is busy. release
+//     is the mark's release, for a wait that ends otherwise (the
+//     connection's context); a release runs at most once.
 //
 // A MockMemDb without it holds nothing: write at once.
 type RunPlacer interface {
 	RunPlace() models.RunPlace
 	RunPlaceChanged() <-chan struct{}
+	IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (release func(), ok bool)
 }
 
 // CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
