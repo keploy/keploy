@@ -181,7 +181,10 @@ func TestReapEndedRunDirs_AKilledRunsDirectoryGoesAtTheNextStart(t *testing.T) {
 			println("SetupCaCertEnv:", err.Error())
 			os.Exit(2)
 		}
-		os.Stdout.WriteString("dir=" + filepath.Dir(os.Getenv("NODE_EXTRA_CA_CERTS")) + "\n")
+		if _, err := os.Stdout.WriteString("dir=" + filepath.Dir(os.Getenv("NODE_EXTRA_CA_CERTS")) + "\n"); err != nil {
+			println("write the run's directory:", err.Error())
+			os.Exit(4)
+		}
 		time.Sleep(2 * time.Minute)
 		os.Exit(3)
 	}
