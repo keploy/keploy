@@ -1627,9 +1627,18 @@ func TestSetupCaCertEnv_WholeStoreVariablesNameTheRootsPlusKeploysCA(t *testing.
 			t.Setenv(envSSLCertFile, tc.certFile)
 			t.Setenv(envSSLCertDir, "")
 			t.Setenv(EnvJavaToolOptions, "")
-			if err := SetupCaCertEnv(context.Background(), zap.NewNop(), testCACertPEM()); err != nil {
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			if err := SetupCaCertEnv(ctx, zap.NewNop(), testCACertPEM()); err != nil {
 				t.Fatal(err)
 			}
+			// The run ends with the row: its lock file closed, its directory gone.
+			dir := filepath.Dir(os.Getenv("NODE_EXTRA_CA_CERTS"))
+			run := liveRunOf(t, dir)
+			t.Cleanup(func() {
+				cancel()
+				waitRunGone(t, run)
+			})
 			want := mergeCABundle(tc.roots, testCACertPEM())
 			for _, v := range []string{envSSLCertFile, "REQUESTS_CA_BUNDLE", "CARGO_HTTP_CAINFO"} {
 				t.Run(v, func(t *testing.T) {

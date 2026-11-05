@@ -3,6 +3,7 @@
 package tls
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // setOwnProcessGroup makes cmd start in a process group of its own, so that
@@ -72,5 +75,49 @@ func TestOwnedByThisUser(t *testing.T) {
 	}
 	if ownedByThisUser(filepath.Join(t.TempDir(), "missing")) {
 		t.Fatal("a missing path is this user's")
+	}
+}
+
+// A run's directory and files keep their modes whatever the process's umask:
+// the app may run as another user (under sudo) and must read them. keploy's
+// main sets umask 0, so only a restrictive umask shows a mode left to it.
+func TestSetupCaCertEnv_ModesHoldUnderARestrictiveUmask(t *testing.T) {
+	isolateCertEnv(t)
+	tmp := useTempDir(t)
+	withSystemSearch(t, nil, nil)
+	t.Setenv(EnvJavaToolOptions, "")
+	old := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(old) })
+	control := filepath.Join(t.TempDir(), "control")
+	if err := os.WriteFile(control, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(control); err != nil {
+		t.Fatal(err)
+	} else if st.Mode().Perm() != 0o600 {
+		t.Fatalf("control: umask 077 did not apply: a 0644 file was made %v", st.Mode().Perm())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := SetupCaCertEnv(ctx, zap.NewNop(), testCACertPEM()); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(os.Getenv("NODE_EXTRA_CA_CERTS"))
+	run := liveRunOf(t, dir)
+	t.Cleanup(func() {
+		cancel()
+		waitRunGone(t, run)
+	})
+	if dirs := runDirsIn(t, tmp); len(dirs) != 1 || dirs[0] != dir {
+		t.Fatalf("the temp directory holds %q; want this run's one, %q", dirs, dir)
+	}
+	for p, want := range map[string]os.FileMode{dir: 0o755, os.Getenv(envSSLCertFile): 0o644, os.Getenv("NODE_EXTRA_CA_CERTS"): 0o644} {
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := st.Mode().Perm(); got != want {
+			t.Errorf("%s: mode %v under umask 077; want %v", p, got, want)
+		}
 	}
 }
