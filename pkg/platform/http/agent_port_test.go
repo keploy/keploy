@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"go.uber.org/zap"
@@ -17,6 +18,14 @@ import (
 // a host's (utils.GetAvailablePort): by every kind of command Setup starts an
 // agent for.
 func TestSetupPicksADockerAgentsPortAsAContainersPort(t *testing.T) {
+	// The pickers Setup uses in production, before this test replaces them:
+	// a swapped or host-wide picker here would undo the container rule.
+	if reflect.ValueOf(containerPort).Pointer() != reflect.ValueOf(utils.GetAvailableContainerPort).Pointer() {
+		t.Fatal("containerPort is not utils.GetAvailableContainerPort")
+	}
+	if reflect.ValueOf(hostPort).Pointer() != reflect.ValueOf(utils.GetAvailablePort).Pointer() {
+		t.Fatal("hostPort is not utils.GetAvailablePort")
+	}
 	defer func(h, c func() (uint32, error)) { hostPort, containerPort = h, c }(hostPort, containerPort)
 	stop := errors.New("stop at the agent's port")
 	var picked []string
