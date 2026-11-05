@@ -58,7 +58,9 @@ func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // on to a later call (an insert's createdAt that a read returns), so
 // dropping either check lets a wrong value pass. The Mongo replay checks
 // both; the HTTP replay refuses such a place (it cannot hold one value to
-// both yet), which fails closed.
+// both yet), which fails closed. A variable another mock binds at it
+// merges onto its own as bindOnto merges it: a later use leaves the learned
+// value (Of) its word is a word of.
 func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
 	var added []string
 	if !provenswitch.On() {
@@ -93,7 +95,7 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			v, ok := st.Variables[n]
 			if b, isBind := binds[n]; isBind {
 				if ok {
-					v = MergeVariable(v, b)
+					v = bindOnto(v, b)
 				} else {
 					v = b
 				}
@@ -104,8 +106,10 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 				continue
 			}
 			next := v
-			if had {
+			if had && ok {
 				next = MergeVariable(cur, v)
+			} else if had {
+				next = bindOnto(cur, v)
 			}
 			added = append(added, variableAdded(n, cur, next)...)
 			vars[n] = next
@@ -194,6 +198,22 @@ func MergeVariable(a, b models.MockVariable) models.MockVariable {
 		a.Why = b.Why
 	}
 	return a
+}
+
+// bindOnto is MergeVariable of a, the variable as this mock's own call
+// learned it (or as its recording carries it), and b, the bind another
+// call declares at this mock (MockState.Binds): where b names the very bind
+// a does and no learned value, a's value (Of) stands. Only the call that
+// made the word reads what it is a word of (Decision.Of); a later call that
+// uses it names where it is bound, nothing more, so its declaration is no
+// declaration naming none. Two binds, or a value b names, merge as
+// MergeVariable merges them.
+func bindOnto(a, b models.MockVariable) models.MockVariable {
+	m := MergeVariable(a, b)
+	if b.Of == "" && b.Bind != "" && b.Bind == a.Bind {
+		m.Of = a.Of
+	}
+	return m
 }
 
 func unionSorted(a, b []string) []string {
