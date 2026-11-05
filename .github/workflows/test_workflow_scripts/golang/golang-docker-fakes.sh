@@ -39,6 +39,10 @@ make_fakes() {
 #!/usr/bin/env bash
 # `docker exec NAME mongosh ... --eval 'db.adminCommand({ ping: 1 }).ok'` is
 # start_mongo's ping: it answers 1. Every other docker command succeeds.
+# No lane sends docker's output into a file: a docker command whose output
+# is one has the lane's own, which a step gives as a pipe (run_case's
+# header), and says so, for expect to fail the case on.
+if [ -f /dev/stdout ]; then echo "fake docker: the lane's output is a file, not a pipe"; fi
 case "${1:-}" in
 exec) echo 1 ;;
 esac
@@ -149,6 +153,16 @@ EOF
 # case's settings in its environment; leaves its output in $out, its exit in
 # $rc. The case's LANE_SHELL_OPTS (default "-e", the step's own) are the
 # options of the bash that sources the lane script.
+#
+# The lane's output reaches $out through a pipe, as a workflow step's reaches
+# the runner, never as the file itself. A lane prints a keploy log with cat
+# while its background send_request still prints, and cat (GNU coreutils 9,
+# uutils too) copies a file into a regular file without write(2), moving the
+# file offset the two share without the lock write(2) takes: each overwrote
+# the other's line (the record-fails cases lost the log's line). A pipe takes
+# each write whole, and $out has one writer, the cat below, which ends only
+# when the last writer, a background send_request too, has closed the pipe:
+# expect reads all the lane printed.
 run_case() {
     local name="$1" dir
     shift
@@ -157,19 +171,20 @@ run_case() {
     ln -s "$repo/.github" "$dir/ws/.github"
     make_fakes "$dir"
     out="$dir/out.txt"
-    rc=0
     (
         cd "$dir/ws/samples-go/$LANE_APP" &&
             env "$@" PATH="$dir/bin:$PATH" HOME="$dir/home" GITHUB_WORKSPACE="$dir/ws" \
                 FAKE_DIR="$dir/counters" RECORD_BIN="$dir/bin/keploy" REPLAY_BIN="$dir/bin/keploy" \
                 LANE_SCRIPT="$LANE_SCRIPT" \
                 bash "$fakes_here/../hang_guard.sh" 60 bash ${LANE_SHELL_OPTS:--e} -c 'source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/$LANE_SCRIPT"'
-    ) >"$out" 2>&1 || rc=$?
+    ) 2>&1 | cat >"$out"
+    rc=${PIPESTATUS[0]}
 }
 
 # expect CASE WANT_RC LINE... [-- NOT_LINE...]: the case's exit is WANT_RC,
-# its output has each LINE and no NOT_LINE (fixed strings), and no error bash
-# raised in the lane script or a script it sources ("<script>: line N: ...").
+# its output has each LINE and no NOT_LINE (fixed strings), no error bash
+# raised in the lane script or a script it sources ("<script>: line N: ..."),
+# and no fake docker's line that the lane's output was a file.
 expect() {
     local name="$1" want_rc="$2" line bad=0 refute=0
     shift 2
@@ -179,6 +194,10 @@ expect() {
     fi
     if grep -E -- "\.sh: line [0-9]+: " "$out"; then
         echo "FAIL $name: bash raised an error in the lane script"
+        bad=1
+    fi
+    if grep -qF -- "the lane's output is a file, not a pipe" "$out"; then
+        echo "FAIL $name: the lane's output is a file, not a pipe as a step's"
         bad=1
     fi
     for line in "$@"; do
