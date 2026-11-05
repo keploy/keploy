@@ -509,3 +509,53 @@ func TestHeldAnswer_TheCallsProtocolDecidesChunking(t *testing.T) {
 		}
 	})
 }
+
+// A mock with no recorded answer is never held: heldAnswerOf leaves its serve
+// as before, and does not panic.
+func TestHeldAnswer_AMockWithNoAnswerIsNotHeld(t *testing.T) {
+	registerStandIn(t)
+	h := &HTTP{Logger: zap.NewNop()}
+	m := singleAnswer(t, releaseAt(45))
+	m.Spec.HTTPResp = nil
+	a, err := func() (a *heldAnswer, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("heldAnswerOf panicked on a mock with no answer: %v", r)
+			}
+		}()
+		return h.heldAnswerOf(m, releaseRequest(t, releaseCall), newPlacedDb(), false)
+	}()
+	if err != nil || a != nil {
+		t.Fatalf("held %v, %v; want nil, nil", a, err)
+	}
+}
+
+// An answer with no body by rule (to a HEAD, a 204) is never chunked, whatever
+// marks it carries: it is written whole, with its recorded head, at its last
+// mark.
+func TestHeldAnswer_ANoBodyAnswerIsWrittenWhole(t *testing.T) {
+	h := &HTTP{Logger: zap.NewNop()}
+	for _, tc := range []struct {
+		name   string
+		method models.Method
+		status int
+	}{
+		{"to a HEAD", http.MethodHead, http.StatusOK},
+		{"a 204", http.MethodGet, http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := singleAnswer(t, releaseAt(45))
+			m.Spec.HTTPReq.Method = tc.method
+			m.Spec.HTTPResp.StatusCode = tc.status
+			m.Spec.HTTPResp.Body = ""
+			m.Spec.HTTPResp.Marks = &models.HTTPAnswerMarks{Head: releaseAt(5), Writes: []models.HTTPAnswerWrite{{Offset: 0, TS: releaseAt(45)}}}
+			a, err := h.planHeld(m, releaseRequest(t, releaseCall))
+			if err != nil || a == nil {
+				t.Fatalf("planHeld = %v, %v; want the answer held whole", a, err)
+			}
+			if a.chunked || len(a.pieces) != 0 || !a.headAt.Equal(releaseAt(45)) || bytes.Contains(bytes.ToLower(a.head), []byte("transfer-encoding")) {
+				t.Fatalf("held chunked %v, %d pieces, at %v, head %q; want it whole at %v", a.chunked, len(a.pieces), a.headAt, a.head, releaseAt(45))
+			}
+		})
+	}
+}

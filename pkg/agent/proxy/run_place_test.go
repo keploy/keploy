@@ -82,7 +82,15 @@ func TestRunPlace_FollowsTheExactViews(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	mm.SeedRecordedWindows(placeWindows())
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
-	mm.ServeExactPool("k", nil)
+	// The set's first pool view comes with no view in force before it.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("the set's first pool view panicked: %v", r)
+			}
+		}()
+		mm.ServeExactPool("k", nil)
+	}()
 	if got := mm.RunPlace().Reached; got != 0 {
 		t.Fatalf("the set's start's pool moved the place to %d", got)
 	}
