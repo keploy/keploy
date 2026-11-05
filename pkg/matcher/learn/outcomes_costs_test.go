@@ -1423,6 +1423,87 @@ func TestOutcomeCostAListTheSetLetsGoLeavesItsIndex(t *testing.T) {
 	runtime.KeepAlive(l2)
 }
 
+// outsideAs hands mock-x to a call (costOutsideRole).
+type outsideAs func(dc *DriftCache, m *models.Mock, view func(string) Raw) Raw
+
+// costOutsideRole decides costCall's word ("ids a1b2c3d4" to "ids
+// f0e9d8c7") over n other tests' recordings, each served changed with a
+// view holding neither word, and, where x is not nil, one more, mock-x,
+// recorded holding neither and served as x serves it (view reads a body as
+// F's view of it): handed to the call as another test's recording, or,
+// where given, among the recordings the set gave earlier (Input.Given).
+// The verdict.
+func costOutsideRole(n int, x outsideAs, given bool) string {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	raw := make([]Raw, 0, n+1)
+	var set []GivenPlaces
+	for i := range n {
+		name, url, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), eRecAt.Add(-time.Duration(n-i+1)*time.Second)
+		m, v := getAnswer(name, url, fmt.Sprintf(`{"note":"Item %d"}`, i), at), getAnswer(name, url, fmt.Sprintf(`{"note":"Item %d","seen":"yes"}`, i), at)
+		raw = append(raw, dc.LazyRawOf(m, true, nil).ServedAs(i+1).ServedLive(RawOf(v, true)).OfAnotherTest())
+	}
+	if x != nil {
+		at := eRecAt.Add(-time.Second / 2)
+		m := getAnswer("mock-x", "http://api/items/x", `{"note":"Kept"}`, at)
+		view := func(b string) Raw { return RawOf(getAnswer("mock-x", "http://api/items/x", b, at), true) }
+		if r := x(dc, m, view); given {
+			set = append(set, PlacesOf(r))
+		} else {
+			raw = append(raw, r.OfAnotherTest())
+		}
+	}
+	in := costCall(dc, "body.ids", "ids a1b2c3d4", "ids f0e9d8c7", eRecAt, nil, raw, nil, nil)
+	in.Given = func() ([]GivenPlaces, error) { return set, nil }
+	return oDescribe(Decide(in))
+}
+
+// What the set's index finds of another test's recording counts by the
+// role of the list that holds the word: R's word counts only where its own
+// answer holds it, never where only a view F gave holds it; F's word in
+// any one of several views F's serves gave leaves the word unknown; and a
+// recording F served with no view stated is unknown whatever its lists
+// hold, as is one F served changed with a view keploy could not read, so
+// the index never drops either for holding neither word.
+func TestOutcomeCostAnOutsideRecordingCountsByTheRoleOfTheListHoldingTheWord(t *testing.T) {
+	const n = 10
+	alone := costOutsideRole(n, nil, false)
+	if !strings.Contains(alone, " fresh]") {
+		t.Fatalf("over %d recordings holding neither word the call decides %s; want fresh", n, alone)
+	}
+	for _, c := range []struct {
+		name, want string
+		x          outsideAs
+	}{
+		{"F's view alone holds R's word", alone, func(dc *DriftCache, m *models.Mock, view func(string) Raw) Raw {
+			return dc.LazyRawOf(m, true, nil).ServedAs(n + 1).ServedLive(view(`{"note":"Kept","ref":"a1b2c3d4"}`))
+		}},
+		{"one of F's two views alone holds R's word", alone, func(dc *DriftCache, m *models.Mock, view func(string) Raw) Raw {
+			return dc.LazyRawOf(m, true, nil).ServedIn(n+1, n+2).ServedChanged(view(`{"note":"Kept","ref":"a1b2c3d4"}`), view(`{"note":"Kept","seen":"yes"}`))
+		}},
+		{"one of F's two views holds F's word", "refused unknown: keploy cannot tell what round F gave at mock-x before this call", func(dc *DriftCache, m *models.Mock, view func(string) Raw) Raw {
+			return dc.LazyRawOf(m, true, nil).ServedIn(n+1, n+2).ServedChanged(view(`{"note":"Kept","ref":"f0e9d8c7"}`), view(`{"note":"Kept","seen":"yes"}`))
+		}},
+		{"served with no view stated, holding neither word", "refused unknown: keploy cannot tell what round F gave at mock-x before this call", func(dc *DriftCache, m *models.Mock, _ func(string) Raw) Raw {
+			return dc.LazyRawOf(m, true, nil).ServedAs(n + 1)
+		}},
+		{"served changed with a view keploy could not read, holding neither word", "refused unknown: keploy cannot tell what round F gave at mock-x before this call", func(dc *DriftCache, m *models.Mock, _ func(string) Raw) Raw {
+			return dc.LazyRawOf(m, true, nil).ServedAs(n + 1).ServedChanged()
+		}},
+	} {
+		for _, given := range []bool{false, true} {
+			got := costOutsideRole(n, c.x, given)
+			t.Logf("%s, given earlier in the set %v: %s", c.name, given, got)
+			if !strings.Contains(got, c.want) {
+				t.Errorf("%s, given earlier in the set %v: the call decides %s; want %q", c.name, given, got, c.want)
+			}
+		}
+	}
+}
+
 // The words a set keeps of another test's recording are the words wordsOf
 // reads of it as each call hands it: its own serves and test in that call,
 // and one entry for each way F served it and each view F gave, which a
