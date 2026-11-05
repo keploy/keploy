@@ -2012,3 +2012,42 @@ func TestOutcomeCostAWordsCheckCopiesOnlyThePlacesItReads(t *testing.T) {
 		}
 	}
 }
+
+// Where round F gave the candidates' answers in another order than the
+// recording did, a word's check marks the candidates' places unknown
+// (orderUnknown): it copies and places those, and the places the set's
+// postings name for its words, not every place of the call. The verdict
+// stays: refused as unknown, naming the candidates.
+func TestOutcomeCostServeOrderCopiesOnlyTheCandidatesPlaces(t *testing.T) {
+	const path = "bind.$8"
+	rows := func(v string) []models.PostgresV3Cells { return []models.PostgresV3Cells{{{Value: v}}} }
+	var copies [2]int64
+	for k, n := range []int{100, 1000} {
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		dc := tr.Drifts()
+		raw := []Raw{
+			dc.LazyRawOf(oPgMock("mock-a", 300*time.Millisecond, "SELECT next_slot FROM mock-a", rows("7"), "SELECT 1"), true, nil).ServedAs(2).ServedAsRecorded(),
+			dc.LazyRawOf(oPgMock("mock-b", 200*time.Millisecond, "SELECT next_slot FROM mock-b", rows("82"), "SELECT 1"), true, nil).ServedAs(1).ServedAsRecorded(),
+		}
+		for i := range n {
+			name := fmt.Sprintf("mock-row-%04d", i)
+			m := oPgMock(name, 400*time.Millisecond+time.Duration(i)*time.Microsecond, "SELECT next_slot FROM "+name, rows("none"), "SELECT 1")
+			raw = append(raw, dc.LazyRawOf(m, true, nil).ServedAs(3+i).ServedAsRecorded())
+		}
+		c, a := placeCopies.Load(), placeAsks.Load()
+		d := oWord(t, Decide(costCall(dc, path, "slot 82", "slot 7", oAt, nil, raw, nil, nil)), "82", "7")
+		copies[k] = placeCopies.Load() - c
+		asks := placeAsks.Load() - a
+		tr.End()
+		t.Logf("%d other recordings: %s; places read %d, copied %d", n, oDescribe([]Decision{d}), asks, copies[k])
+		oRefused(t, fmt.Sprintf("over %d other recordings", n), d, "unknown", "mock-a", "mock-b")
+		if copies[k] != asks {
+			t.Errorf("over %d other recordings the check copied and placed %d places; want the %d it read, the candidates among them", n, copies[k], asks)
+		}
+	}
+	if copies[0] != copies[1] {
+		t.Errorf("the check copied %v places beside 100 and 1000 other recordings; want as many beside both", copies)
+	}
+}
