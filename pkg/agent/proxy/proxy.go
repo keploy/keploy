@@ -127,6 +127,9 @@ type Proxy struct {
 	// portMover, set before StartProxy (SetPortMover), lets the proxy and its
 	// DNS server move off a taken port, and is told where they listen.
 	portMover func(proxyPort, dnsPort uint32) error
+	// agentPort is the port the agent's server binds once the proxy has
+	// started (--port): a move never takes it (bindOrMove).
+	agentPort uint32
 
 	// learnTracker keeps what record's full round served in the running
 	// test, for the learn step (package matcher/learn): a test begins
@@ -1071,6 +1074,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		logger:                    logger,
 		learnTracker:              learn.NewTracker(),
 		Port:                      opts.ProxyPort,
+		agentPort:                 opts.Agent.AgentPort,
 		IncomingProxyPort:         opts.IncomingProxyPort,
 		DNSPort:                   opts.DNSPort, // default: 26789
 		synchronous:               opts.Agent.Synchronous,

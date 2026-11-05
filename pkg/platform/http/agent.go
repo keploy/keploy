@@ -3504,6 +3504,25 @@ func withAppRunSettings(opts models.SetupOptions, ports, networks, hosts []strin
 	return opts
 }
 
+// hostPort and containerPort pick a free port for a server on the host
+// (utils.GetAvailablePort) and in a container, published as itself
+// (utils.GetAvailableContainerPort).
+var hostPort, containerPort = utils.GetAvailablePort, utils.GetAvailableContainerPort
+
+// agentPortFor picks the port a new agent's server listens on. A Docker
+// agent's is in its container's network namespace, which the app joins, and
+// is published on the host as itself: it is picked above the container's
+// ephemeral range too, where Docker's embedded DNS resolver holds a TCP and a
+// UDP port before the agent starts. The agent cannot move its server off a
+// taken port, as it moves its proxy's: the CLI reaches it through the
+// publish, and the agent's start would fail.
+func agentPortFor(docker bool) (uint32, error) {
+	if docker {
+		return containerPort()
+	}
+	return hostPort()
+}
+
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
@@ -3513,7 +3532,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// container.
 	a.forgetAgentContainer()
 
-	agentPort, err := utils.GetAvailablePort()
+	agentPort, err := agentPortFor(isDockerCmd)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to find available port for agent")
 		return err
