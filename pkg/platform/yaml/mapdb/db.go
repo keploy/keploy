@@ -158,8 +158,8 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	// whatever the switch; what acts on one checks the switch itself
 	// (models.MappedTestCase.At). A set keploy mock record wrote under the
 	// switch and keploy rewrote without it keeps every such field. What a hand
-	// edit added (its comments, a person's own fields) is kept only under the
-	// switch, by design (encodeOver).
+	// edit added (its comments, a person's own fields) is kept too, whatever
+	// the switch (encodeOver).
 	keepEntries(newMapping, existingConfig.TestCases, mapping.TestCases)
 	if len(mapping.Suites) == 0 {
 		newMapping.Suites = existingConfig.Suites

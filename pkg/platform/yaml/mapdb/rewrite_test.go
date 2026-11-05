@@ -47,11 +47,12 @@ tests:
 // edit added that keploy does not know -- a field at the top, on a test
 // entry, on a mock entry -- the comment at the file's head, its version line
 // brought up to date, and a comment on a key keploy writes (the one above a
-// test entry): nothing is dropped, so keploy says nothing. Under the proven
-// switch, as T2's sets are written.
+// test entry): nothing is dropped, so keploy says nothing. Whatever the
+// proven switch: keploy record's writers (the batches, the worker scope, the
+// judging's moves and shares), keploy test's whole-file Insert and keploy
+// mock record's.
 func TestARewriteKeepsWhatAHandEditAdded(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	for name, write := range map[string]func(*MappingDb) error{
+	writers := map[string]func(*MappingDb) error{
 		"UpsertBatch": func(db *MappingDb) error {
 			return db.UpsertBatch(context.Background(), "s", map[string][]models.MockEntry{"o::TestC": {{Name: "mock-2", Kind: "Http"}}})
 		},
@@ -73,43 +74,59 @@ func TestARewriteKeepsWhatAHandEditAdded(t *testing.T) {
 		"Insert of an edited test": func(db *MappingDb) error {
 			return db.Insert(context.Background(), &models.Mapping{TestSetID: "s", TestCases: []models.MappedTestCase{{ID: "o::TestA", Mocks: []models.MockEntry{{Name: "mock-0", Kind: "Http"}}}}})
 		},
+	}
+	for name, write := range fileWriters() {
+		if _, ok := writers[name]; !ok {
+			writers[name] = write
+		}
+	}
+	for _, sw := range []string{"", "1"} {
+		for name, write := range writers {
+			t.Run("switch="+sw+"/"+name, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, sw)
+				keepsHandEdits(t, write)
+			})
+		}
+	}
+}
+
+// keepsHandEdits checks that write, over the handEdited file, keeps what
+// its hand edit added, and says nothing.
+func keepsHandEdits(t *testing.T, write func(*MappingDb) error) {
+	t.Helper()
+	dir := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(dir, "s"), 0o755))
+	must(t, os.WriteFile(filepath.Join(dir, "s", "mappings.yaml"), []byte(handEdited), 0o644))
+	core, logs := observer.New(zapcore.WarnLevel)
+	db := NewWithFormat(zap.New(core), dir, "mappings", yaml.FormatYAML)
+	must(t, write(db))
+	raw, err := os.ReadFile(filepath.Join(dir, "s", "mappings.yaml"))
+	must(t, err)
+	got := string(raw)
+	for _, want := range []string{
+		utils.GetVersionAsComment() + "# Notes: TestB's mock-1 was moved back by hand, see the README.\n",
+		"reviewed_by: agent\n",
+		"ticket: JIRA-123\n",
+		"note: keep this one\n",
+		"# TestB keeps its mock while the payments API migrates\n",
 	} {
-		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			must(t, os.MkdirAll(filepath.Join(dir, "s"), 0o755))
-			must(t, os.WriteFile(filepath.Join(dir, "s", "mappings.yaml"), []byte(handEdited), 0o644))
-			core, logs := observer.New(zapcore.WarnLevel)
-			db := NewWithFormat(zap.New(core), dir, "mappings", yaml.FormatYAML)
-			must(t, write(db))
-			raw, err := os.ReadFile(filepath.Join(dir, "s", "mappings.yaml"))
-			must(t, err)
-			got := string(raw)
-			for _, want := range []string{
-				utils.GetVersionAsComment() + "# Notes: TestB's mock-1 was moved back by hand, see the README.\n",
-				"reviewed_by: agent\n",
-				"ticket: JIRA-123\n",
-				"note: keep this one\n",
-				"# TestB keeps its mock while the payments API migrates\n",
-			} {
-				if !strings.Contains(got, want) {
-					t.Errorf("the rewrite lost %q:\n%s", want, got)
-				}
-			}
-			if !strings.HasPrefix(got, utils.GetVersionAsComment()) {
-				t.Errorf("the rewrite does not start with the current version line:\n%s", got)
-			}
-			if strings.Contains(got, "(0.0.1)") {
-				t.Errorf("the rewrite kept the old version line:\n%s", got)
-			}
-			if len(logs.All()) != 0 {
-				t.Errorf("keploy kept everything, yet logged %v", logs.All())
-			}
-			back, err := db.GetMapping(context.Background(), "s")
-			must(t, err)
-			if len(back.TestCases) < 2 {
-				t.Fatalf("read back %+v", back)
-			}
-		})
+		if !strings.Contains(got, want) {
+			t.Errorf("the rewrite lost %q:\n%s", want, got)
+		}
+	}
+	if !strings.HasPrefix(got, utils.GetVersionAsComment()) {
+		t.Errorf("the rewrite does not start with the current version line:\n%s", got)
+	}
+	if strings.Contains(got, "(0.0.1)") {
+		t.Errorf("the rewrite kept the old version line:\n%s", got)
+	}
+	if len(logs.All()) != 0 {
+		t.Errorf("keploy kept everything, yet logged %v", logs.All())
+	}
+	back, err := db.GetMapping(context.Background(), "s")
+	must(t, err)
+	if len(back.TestCases) < 2 {
+		t.Fatalf("read back %+v", back)
 	}
 }
 
