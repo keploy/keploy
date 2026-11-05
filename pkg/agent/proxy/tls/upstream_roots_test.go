@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"iter"
 	"math/big"
 	"os"
@@ -737,12 +738,108 @@ func TestLoadUpstreamRootCAs_FileBackedPoolWithoutABundleFile_UsesTheEmbeddedRoo
 		requireDistrusted(t, verr)
 	})
 
-	t.Run("an agent with a CA bundle file keeps Go's pool", func(t *testing.T) {
+	t.Run("file-backed: a bundle that is the NSS list keeps its constraints", func(t *testing.T) {
+		// The bundle holds the NSS roots but does not start with keploy's
+		// rendering of them (SSL_CERT_FILE naming a copy in another order).
+		stubConstrainedNSSRoot(t, ca, func([]*x509.Certificate) error { return errDistrusted })
+		stubFileBackedPool(t, true)
+		stubSystemCABundle(t, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Raw}), "/roots/nss.pem")
+		pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+		if err != nil || pool == nil {
+			t.Fatalf("pool=%v err=%v", pool, err)
+		}
+		_, verr := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "upstream.example"})
+		requireDistrusted(t, verr)
+	})
+
+	t.Run("an agent with a CA bundle file uses that bundle's roots", func(t *testing.T) {
+		distro := makeSelfSignedPEM(t, "distro-root")
 		stubSystemCertPool(t, poolWith(t, corp), nil)
 		stubFileBackedPool(t, true)
-		stubSystemCABundle(t, corp, "/etc/ssl/certs/ca-certificates.crt")
-		if pool, err := LoadUpstreamRootCAs(zap.NewNop(), ""); err != nil || pool != nil {
-			t.Fatalf("expected nil (Go's default); pool=%v err=%v", pool, err)
+		stubSystemCABundle(t, distro, "/etc/ssl/certs/ca-certificates.crt")
+		pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+		if err != nil || pool == nil {
+			t.Fatalf("expected the bundle's roots; pool=%v err=%v", pool, err)
+		}
+		if !pool.Equal(poolWith(t, distro)) {
+			t.Fatal("the pool is not the bundle's roots")
 		}
 	})
+}
+
+// On Linux keploy's upstream verification uses the roots keploy's loader
+// reads for the apps' bundle, not Go's pool, which differs wherever the loader
+// departs from crypto/x509. SSL_CERT_FILE names a missing file and SSL_CERT_DIR
+// a corporate CA on a Debian host: Go reads no bundle file once SSL_CERT_FILE
+// is set, so its pool holds the corporate CA alone, while the apps' bundle is
+// the Debian roots plus the corporate CA. An empty first bundle path does the
+// same: Go stops there, the loader goes on to the next. With
+// record.upstreamTls.verify on, keploy must trust what the apps trust, and a
+// configured upstreamTls.caCert is added to it.
+//
+// FAILS BEFORE THE FIX: Go's corporate-only pool was taken as "system" (nil),
+// so keploy rejected every public upstream while the apps trusted them, and
+// each such connection fell through to passthrough, its mock dropped.
+func TestLoadUpstreamRootCAs_Linux_UsesTheLoadersRootsNotGosPool(t *testing.T) {
+	ca, caKey := newTestCA(t, "debian-public-root")
+	leaf := newTestLeaf(t, ca, caKey, "upstream.example")
+	debianRoot := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Raw})
+	corp := makeSelfSignedPEM(t, "corp-root")
+	extra := makeSelfSignedPEM(t, "upstream-tls-ca-cert")
+	base := t.TempDir()
+	corpDir := filepath.Join(base, "corp")
+	if err := os.MkdirAll(corpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writePEMFile(t, corpDir, "corp.pem", corp)
+	debian := writePEMFile(t, base, "ca-certificates.crt", debianRoot)
+	empty := filepath.Join(base, "empty.crt")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	extraPath := writePEMFile(t, base, "upstream-ca.pem", extra)
+
+	for _, tc := range []struct {
+		name     string
+		certFile string
+		paths    []string
+	}{
+		{"SSL_CERT_FILE missing, SSL_CERT_DIR a corporate CA", filepath.Join(base, "missing.pem"), []string{debian}},
+		{"an empty first bundle path, SSL_CERT_DIR a corporate CA", "", []string{empty, debian}},
+	} {
+		for _, caCert := range []string{"", extraPath} {
+			t.Run(fmt.Sprintf("%s/caCert=%q", tc.name, filepath.Base(caCert)), func(t *testing.T) {
+				isolateCertEnv(t)
+				// Go's pool here, as crypto/x509 builds it: the corporate CA alone.
+				stubSystemCertPool(t, poolWith(t, corp), nil)
+				stubFileBackedPool(t, true)
+				withSystemSearch(t, tc.paths, nil)
+				t.Setenv(envSSLCertFile, tc.certFile)
+				t.Setenv(envSSLCertDir, corpDir)
+
+				core, logs := observer.New(zap.DebugLevel)
+				pool, err := LoadUpstreamRootCAs(zap.New(core), caCert)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if pool == nil {
+					t.Fatal("got nil, i.e. Go's pool: the corporate CA alone")
+				}
+				// The normal Linux path: it says which roots it uses, and does
+				// not claim the platform pool was unavailable.
+				if caCert == "" && logs.FilterMessageSnippet("trust bundle keploy gives the apps").Len() != 1 {
+					t.Fatalf("expected one line naming the apps' trust bundle; got %v", logs.All())
+				}
+				if _, verr := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "upstream.example"}); verr != nil {
+					t.Fatalf("a public upstream the apps trust does not verify: %v", verr)
+				}
+				if !verifiesAgainst(t, corp, pool) {
+					t.Error("the corporate CA is not in the pool")
+				}
+				if caCert != "" && !verifiesAgainst(t, extra, pool) {
+					t.Error("record.upstreamTls.caCert is not in the pool")
+				}
+			})
+		}
+	}
 }

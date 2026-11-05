@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/cloudflare/cfssl/csr"
@@ -283,8 +285,11 @@ func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPI
 	return setupNativeForApp(ctx, logger, ca, store, appPID, javaHomeOverride)
 }
 
-// SetupCaCertEnv extracts the run CA's public certificate to a temp file and
-// points the language-runtime trust env vars at it (client side, native mode).
+// SetupCaCertEnv extracts the run CA's public certificate to a temp file, and
+// writes beside it a bundle of that certificate and the roots keploy's loader
+// reads, and points the language-runtime trust env vars at them (client side,
+// native mode): NODE_EXTRA_CA_CERTS at the certificate, the variables that
+// replace a runtime's whole trust store at the bundle.
 //
 // certPEM is the PUBLIC certificate of the running agent's CA, fetched from the
 // agent over the control-plane API (the client no longer carries its own copy of
@@ -301,7 +306,20 @@ func SetupCaCertEnv(logger *zap.Logger, certPEM []byte) error {
 		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
 		return err
 	}
-	if err := SetEnvForPath(logger, tempPath); err != nil {
+	// Python (requests), OpenSSL and curl, and Cargo read their variable as the
+	// WHOLE trust store, so pointed at the lone keploy CA an app could trust no
+	// endpoint keploy does not intercept, and lost the operator's corporate CA.
+	// They get one bundle of the roots keploy's loader reads (the operator's
+	// SSL_CERT_FILE and SSL_CERT_DIR, the system bundle, or the Mozilla roots
+	// built into keploy) plus keploy's CA, as in docker and k8s. Node adds
+	// NODE_EXTRA_CA_CERTS to its own roots, so it gets keploy's CA alone.
+	systemBundle, _ := loadSystemCABundleFn(logger)
+	bundlePath, err := writeAppCABundle(mergeCABundle(systemBundle, certPEM), certPEM)
+	if err != nil {
+		utils.LogError(logger, err, "Failed to write the app's CA bundle to the tmp folder")
+		return err
+	}
+	if err := setEnvForSharedVolume(logger, bundlePath, tempPath); err != nil {
 		return err
 	}
 	// Java: point the JVM at a merged truststore via JAVA_TOOL_OPTIONS instead of
@@ -449,7 +467,8 @@ func SetEnvForPath(logger *zap.Logger, path string) error {
 }
 
 // setEnvForSharedVolume wires the language-runtime trust-store env vars for the
-// docker/k8s shared-volume install path.
+// docker/k8s shared-volume install path, and for the app the native-mode
+// client starts (SetupCaCertEnv).
 //
 // Most runtimes (Python/requests, OpenSSL/libcurl, Cargo) treat their
 // respective env var as a FULL REPLACEMENT for the default trust store —
@@ -598,11 +617,18 @@ func operatorCertEnv() certEnv {
 // startup logs and in the merged-bundle source field.
 const systemCABundleSourceEmbedded = "<embedded:mozilla-roots.pem>"
 
-// corporateCAHint is how an operator adds a CA of their own to the bundle the
-// apps trust. It is a hint, not a fix: a missing system bundle needs none.
-const corporateCAHint = "to trust a corporate CA as well, mount it into the keploy agent container and " +
-	"set SSL_CERT_DIR to its directory (added to these roots), or set SSL_CERT_FILE to a complete PEM " +
-	"bundle that holds the public roots too (it replaces them)"
+// corporateCAHint is how an operator adds a CA of their own. It is a hint, not
+// a fix: a missing system bundle needs none. It is logged only where no CA
+// bundle file was found, and names the one setting every part of keploy reads
+// the same way: SSL_CERT_FILE takes the place of the built-in roots in the
+// apps' bundle and in keploy's upstream verification (the loader), and in
+// keploy's own TLS (crypto/x509, which then uses no fallback roots). A
+// directory in SSL_CERT_DIR is not offered: with no bundle file, crypto/x509
+// trusts only that directory's certificates, so keploy's own calls (to the
+// keploy API, say) would lose the public roots the apps keep.
+const corporateCAHint = "to trust a corporate CA as well, mount a PEM bundle holding both the public roots and " +
+	"the corporate CA into the keploy agent container and set SSL_CERT_FILE to it: the apps and keploy's " +
+	"own connections then trust that bundle in place of these built-in roots"
 
 // loadSystemCABundle returns trust-anchor PEM bytes for merging with the
 // Keploy MITM CA into the shared-volume bundle (and the native Java
@@ -796,17 +822,38 @@ func readCertDirs(dirList string, have []byte) ([]byte, []string, int, int) {
 	return out.Bytes(), used, total, keployTotal
 }
 
+// maxCertFile bounds what keploy reads from one trust-store file, as the
+// enterprise agent's trust-root setup bounds it. The loader reads every file in
+// SSL_CERT_DIR and in the default certificate directories, and one large stray
+// file there must not be read into memory whole; a full CA bundle is a few
+// hundred KB.
+const maxCertFile = 16 << 20
+
 // readRegularFile reads path, links followed, refusing anything that is not a
-// regular file: a FIFO would block the read forever.
+// regular file of at most maxCertFile bytes. It opens without blocking and
+// checks the file it opened: a FIFO, even one swapped in for a file, would
+// block the open or the read forever.
 func readRegularFile(path string) ([]byte, error) {
-	st, err := os.Stat(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }() // read-only
+	st, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !st.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	return os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(f, maxCertFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxCertFile {
+		return nil, fmt.Errorf("%s is larger than %d bytes, more than a trust-store file holds", path, maxCertFile)
+	}
+	return data, nil
 }
 
 // appendTrustedCerts PEM-encodes into out every certificate in data that is
@@ -1303,6 +1350,40 @@ func extractCertToTemp(certPEM []byte) (string, error) {
 	}
 
 	return tempFile.Name(), nil
+}
+
+// writeAppCABundle writes bundle, the trust bundle SetupCaCertEnv gives the app
+// (with keploy's CA certPEM in it), to the temp directory and returns its path.
+//
+// The name is fixed per user and per keploy CA, not random, so runs do not each
+// leave a copy of the roots (a few hundred KB) behind: a later run with the same
+// CA rewrites the file, with the roots as they are then. A run with another CA
+// writes another file, so concurrent runs never hand an app a bundle without its
+// own CA. The uid keeps a root-owned file from a `sudo keploy` run from blocking
+// the user's runs, as for the Java truststore. The file is replaced by a rename,
+// so an app reading it sees the old bundle or the new one, never part of one.
+// Mode 0644: the bundle holds public certificates only.
+func writeAppCABundle(bundle, certPEM []byte) (string, error) {
+	sum := sha256.Sum256(certPEM)
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("keploy-ca-bundle-%d-%x.crt", os.Geteuid(), sum[:8]))
+	f, err := os.CreateTemp(os.TempDir(), ".keploy-ca-bundle-*")
+	if err != nil {
+		return "", err
+	}
+	tmp := f.Name()
+	_, werr := f.Write(bundle)
+	err = errors.Join(werr, f.Close())
+	if err == nil {
+		err = os.Chmod(tmp, 0o644)
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return path, nil
 }
 
 // generateTrustStore creates a JKS file from every CERTIFICATE PEM block

@@ -257,8 +257,16 @@ func TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_IsQuiet(t *testing.T)
 	if len(entries) != 1 {
 		t.Fatalf("expected one Debug entry naming the embedded roots; got %v", logs.All())
 	}
-	if hint, _ := entries[0].ContextMap()["corporate_ca"].(string); !strings.Contains(hint, "SSL_CERT_FILE") || !strings.Contains(hint, "SSL_CERT_DIR") {
-		t.Fatalf("the corporate_ca hint must point at SSL_CERT_FILE / SSL_CERT_DIR; got %q", hint)
+	// The hint names SSL_CERT_FILE with a bundle that holds the public roots:
+	// it is read the same way by the apps' bundle and by keploy's own TLS.
+	// SSL_CERT_DIR is not: with no bundle file, keploy's own TLS would trust
+	// that directory alone.
+	hint, _ := entries[0].ContextMap()["corporate_ca"].(string)
+	if !strings.Contains(hint, "SSL_CERT_FILE") || !strings.Contains(hint, "public roots") {
+		t.Fatalf("the corporate_ca hint must point at SSL_CERT_FILE and a bundle holding the public roots; got %q", hint)
+	}
+	if strings.Contains(hint, "SSL_CERT_DIR") {
+		t.Fatalf("the corporate_ca hint must not offer SSL_CERT_DIR, which keploy's own TLS does not add to the built-in roots; got %q", hint)
 	}
 }
 
@@ -1246,8 +1254,16 @@ func TestSetEnvForPath_KeepsTheProcessesOwnRoots(t *testing.T) {
 		t.Skip("crypto/x509 does not read SSL_CERT_FILE on " + runtime.GOOS)
 	}
 	path := writePEMFile(t, t.TempDir(), "keploy-ca.crt", testCACertPEM())
-	cmd := exec.Command(os.Args[0], "-test.run=^TestSetEnvForPath_KeepsTheProcessesOwnRoots$", "-test.count=1")
+	// The child is bounded by a timeout, and its whole process group is killed
+	// on a timeout and when the test ends, however it ends.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSetEnvForPath_KeepsTheProcessesOwnRoots$", "-test.count=1")
 	cmd.Env = append(os.Environ(), envPrimeChild+"="+path, envSSLCertFile+"=", envSSLCertDir+"=")
+	setOwnProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	cmd.WaitDelay = 10 * time.Second
+	t.Cleanup(func() { _ = killProcessGroup(cmd) })
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("child: %v\n%s", err, out)
@@ -1528,5 +1544,179 @@ func TestSystemCABundleSearchPaths_CoverGosLinuxFiles(t *testing.T) {
 			t.Fatalf("systemCABundleSearchPaths has %s out of crypto/x509's order", p)
 		}
 		last = i
+	}
+}
+
+// A trust-store file is read only up to maxCertFile bytes: the loader reads
+// every file in SSL_CERT_DIR and the default certificate directories, and a
+// large stray file there must not be read into memory whole. A file of exactly
+// the cap is read; one byte more is refused, and its certificates are left out
+// of the bundle while the directory's other files still count.
+func TestReadRegularFile_CapsTheSize(t *testing.T) {
+	isolateCertEnv(t)
+	withSystemSearch(t, nil, nil)
+	dir := t.TempDir()
+	padded := func(name string, size int, cert []byte) string {
+		t.Helper()
+		data := append(append([]byte(nil), cert...), bytes.Repeat([]byte("\n"), size-len(cert))...)
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	atCap := makeSelfSignedPEM(t, "at-the-cap-root")
+	overCap := makeSelfSignedPEM(t, "over-the-cap-root")
+	corp := makeSelfSignedPEM(t, "corp-root")
+	atPath := padded("at-cap.pem", maxCertFile, atCap)
+	overPath := padded("over-cap.pem", maxCertFile+1, overCap)
+	writePEMFile(t, dir, "corp.pem", corp)
+
+	if data, err := readRegularFile(atPath); err != nil || len(data) != maxCertFile {
+		t.Fatalf("a file of exactly %d bytes: got %d bytes, err %v; want it read whole", maxCertFile, len(data), err)
+	}
+	if data, err := readRegularFile(overPath); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("a file of %d bytes: got %d bytes, err %v; want it refused", maxCertFile+1, len(data), err)
+	}
+
+	t.Setenv(envSSLCertFile, "")
+	t.Setenv(envSSLCertDir, dir)
+	data, _ := loadSystemCABundle(zap.NewNop())
+	want := mergeCABundle(embeddedFallbackRoots, concat(atCap, corp))
+	if !bytes.Equal(data, want) {
+		t.Fatalf("the bundle holds %d certificates; want the built-in roots, the at-the-cap root and the corporate root (%d), and not the over-the-cap one",
+			pemCertCount(data), pemCertCount(want))
+	}
+}
+
+// In native mode the client starts the app with the trust variables keploy
+// sets. Python (requests), OpenSSL and curl, and Cargo read theirs as the whole
+// trust store, so each must name one bundle of the roots keploy's loader reads
+// plus keploy's CA: the operator's SSL_CERT_FILE, the system bundle, or with
+// neither the built-in roots. Node adds NODE_EXTRA_CA_CERTS to its own roots,
+// so it names keploy's CA alone.
+//
+// FAILS BEFORE THE FIX: all four named the lone keploy CA, so Python, curl and
+// Rust apps trusted no endpoint keploy does not intercept, nor the operator's
+// corporate CA.
+func TestSetupCaCertEnv_WholeStoreVariablesNameTheRootsPlusKeploysCA(t *testing.T) {
+	isolateCertEnv(t)
+	tmp := t.TempDir()
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(k, tmp)
+	}
+	base := t.TempDir()
+	corp := makeSelfSignedPEM(t, "corp-root")
+	distro := makeSelfSignedPEM(t, "distro-root")
+	corpFile := writePEMFile(t, base, "corp.pem", corp)
+	distroBundle := writePEMFile(t, base, "ca-certificates.crt", distro)
+
+	for _, tc := range []struct {
+		name     string
+		certFile string
+		paths    []string
+		roots    []byte
+	}{
+		{"the operator's SSL_CERT_FILE", corpFile, []string{distroBundle}, corp},
+		{"the system bundle", "", []string{distroBundle}, distro},
+		{"no bundle file: the built-in roots", "", nil, embeddedFallbackRoots},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateCertEnv(t)
+			withSystemSearch(t, tc.paths, nil)
+			t.Setenv(envSSLCertFile, tc.certFile)
+			t.Setenv(envSSLCertDir, "")
+			t.Setenv(EnvJavaToolOptions, "")
+			if err := SetupCaCertEnv(zap.NewNop(), testCACertPEM()); err != nil {
+				t.Fatal(err)
+			}
+			want := mergeCABundle(tc.roots, testCACertPEM())
+			for _, v := range []string{envSSLCertFile, "REQUESTS_CA_BUNDLE", "CARGO_HTTP_CAINFO"} {
+				t.Run(v, func(t *testing.T) {
+					got, err := os.ReadFile(os.Getenv(v))
+					if err != nil {
+						t.Fatalf("%s=%q: %v", v, os.Getenv(v), err)
+					}
+					if !bytes.Equal(got, want) {
+						t.Fatalf("%s names %d certificates; want the roots then keploy's CA (%d)", v, pemCertCount(got), pemCertCount(want))
+					}
+				})
+			}
+			t.Run("NODE_EXTRA_CA_CERTS", func(t *testing.T) {
+				got, err := os.ReadFile(os.Getenv("NODE_EXTRA_CA_CERTS"))
+				if err != nil || !bytes.Equal(got, testCACertPEM()) {
+					t.Fatalf("NODE_EXTRA_CA_CERTS must name keploy's CA alone; got %d certificates (%v)", pemCertCount(got), err)
+				}
+			})
+			t.Run(EnvJavaToolOptions, func(t *testing.T) {
+				// Java's truststore holds the same roots plus keploy's CA.
+				var store string
+				for _, f := range strings.Fields(os.Getenv(EnvJavaToolOptions)) {
+					if v, ok := strings.CutPrefix(f, "-Djavax.net.ssl.trustStore="); ok {
+						store = v
+					}
+				}
+				if store == "" {
+					t.Fatalf("%s names no truststore: %q", EnvJavaToolOptions, os.Getenv(EnvJavaToolOptions))
+				}
+				f, err := os.Open(store)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = f.Close() }()
+				ks := keystore.New()
+				if err := ks.Load(f, []byte("changeit")); err != nil {
+					t.Fatal(err)
+				}
+				if n := len(ks.Aliases()); n != pemCertCount(want) {
+					t.Fatalf("the truststore holds %d entries; want the roots then keploy's CA (%d)", n, pemCertCount(want))
+				}
+			})
+		})
+	}
+}
+
+// The app's bundle has one path per user and keploy CA: a later run with the
+// same CA rewrites it, with the roots as they are then, rather than leave
+// another copy of the roots behind; a run with another CA gets its own file.
+func TestWriteAppCABundle_OnePathPerCA(t *testing.T) {
+	tmp := t.TempDir()
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(k, tmp)
+	}
+	caA, caB := makeSelfSignedPEM(t, "ca-a"), makeSelfSignedPEM(t, "ca-b")
+	first, err := writeAppCABundle(concat(makeSelfSignedPEM(t, "old-root"), caA), caA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer := concat(makeSelfSignedPEM(t, "new-root"), caA)
+	again, err := writeAppCABundle(newer, caA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != first {
+		t.Fatalf("the same CA got a new path: %q, then %q", first, again)
+	}
+	if got, _ := os.ReadFile(again); !bytes.Equal(got, newer) {
+		t.Fatal("the rewrite did not replace the bundle")
+	}
+	other, err := writeAppCABundle(caB, caB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == first {
+		t.Fatal("another CA shares the first CA's bundle path")
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("the temp directory holds %d entries; want the two bundles and no leftover temporary file", len(entries))
+	}
+	if runtime.GOOS != "windows" {
+		if st, err := os.Stat(first); err != nil || st.Mode().Perm() != 0o644 {
+			t.Fatalf("mode %v (%v); want 0644 so the app can read it", st.Mode().Perm(), err)
+		}
 	}
 }
