@@ -30,6 +30,12 @@
 # names must be loaded (.github/actions/download-image).
 set -uo pipefail
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
+
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
@@ -197,7 +203,7 @@ leg() {
   shift 3
   sudo rm -rf keploy
   : > "$log"
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP" \
     --proxy-port "$pp" --dns-port "$dp" --disable-tele --disable-ansi --generate-github-actions=false > "$log" 2>&1 &
   pid=$!
   made=0 warm=0
@@ -237,7 +243,7 @@ leg() {
   fi
 
   sudo rm -rf keploy/reports
-  sudo -E env PATH="$PATH" "$RECORD_BIN" test -c "docker compose up" --container-name "$APP" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" test -c "docker compose up" --container-name "$APP" \
     --proxy-port "$pp" --dns-port "$dp" --delay 5 --disable-tele --disable-ansi > "$tlog" 2>&1
   rc=$?
   cleanup

@@ -91,6 +91,13 @@
 # runs it with the PR `build` binary for both, and again recording with the
 # released `latest`: the recording format did not change, and a set recorded
 # by a released keploy is what an upgrading user templatizes.
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
@@ -221,7 +228,7 @@ REPORT() { echo "$(newest_run)/test-set-0-report.yaml"; }
 set_status() { grep -m1 '^status:' "$(REPORT)" 2>/dev/null | awk '{print $2}'; }
 # replay runs keploy test; RC is its exit code.
 replay() { # $1: log name, $2: arguments for the app, $3: extra keploy flag
-  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "python3 app.py $APP${2:+ $2}" --delay 6 \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "python3 app.py $APP${2:+ $2}" --delay 6 \
     --generateGithubActions=false --disable-tele ${3:-} >"$1.log" 2>&1 </dev/null
   RC=$?
   stop_keploy "$REPLAY_BIN"; own
@@ -231,7 +238,7 @@ expect_rc() { [ "$RC" = "$1" ] || fail "$2: keploy exited $RC, want $1"; }
 # tool runs a keploy subcommand; RC is its exit code.
 tool() { # $1: log name, then the keploy subcommand and its flags
   local log="$1"; shift
-  sudo -E env PATH="$PATH" "$REPLAY_BIN" "$@" --disable-tele >"$log.log" 2>&1 </dev/null
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" "$@" --disable-tele >"$log.log" 2>&1 </dev/null
   RC=$?
   own
 }
@@ -252,7 +259,7 @@ if listening "$APP"; then echo "port $APP is in use"; exit 1; fi
 trap 'stop_keploy "$RECORD_BIN" >/dev/null 2>&1' EXIT
 
 echo "== 1. record: create, read back, look the order up, log in, call with both cookies =="
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "python3 app.py $APP" --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "python3 app.py $APP" --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 wait_for_port "$APP" 360 || { echo "FAIL: the app did not start under keploy record"; tail -30 record.log; exit 1; }
 # The first request goes as soon as the app listens: a request keploy does
 # not record then is a keploy bug to report, not a wait to add.

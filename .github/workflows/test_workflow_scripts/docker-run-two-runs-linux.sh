@@ -32,6 +32,13 @@
 # for that name. Every wait is for a line in a log or a file, and ends with a
 # failure when the process that would write it has ended. The script stops
 # only the processes it started. Port: 8443 (the HTTPS server).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
+
 set -uo pipefail
 RECORD_BIN="${RECORD_BIN:-keploy}"
 IMG=ghcr.io/keploy/keploy:v3-dev
@@ -133,7 +140,7 @@ sleep infinity & wait'
 # run NAME: start run NAME's keploy record in the background ($! is its
 # sudo's pid).
 run() {
-    (cd "$WORK/run$1" && exec sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record \
+    (cd "$WORK/run$1" && exec sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record \
         -c "docker run --rm --name two-runs-app-$1 -v $WORK/sync:/sync -e NAME=$1 --entrypoint /bin/sh $IMG -c '$APP'" \
         --container-name "two-runs-app-$1" --path "$WORK/run$1" --disable-tele --generateGithubActions=false --debug \
         >"$WORK/run$1.log" 2>&1 </dev/null) &

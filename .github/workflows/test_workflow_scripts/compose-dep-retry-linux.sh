@@ -45,6 +45,10 @@ set -uo pipefail
 # their kind whole (an Http2 or HttpFault mock is not one).
 # shellcheck source=mock-kinds.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mock-kinds.sh" || exit 1
+# shellcheck source=sudo_env.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sudo_env.sh" || exit 1
+# shellcheck source=hang_guard.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hang_guard.sh" || exit 1
 
 RECORD_BIN="$(command -v "${RECORD_BIN:-keploy}" || echo "${RECORD_BIN:-keploy}")"
 REPLAY_BIN="$(command -v "${REPLAY_BIN:-$RECORD_BIN}" || echo "${REPLAY_BIN:-$RECORD_BIN}")"
@@ -152,13 +156,19 @@ record() {
   cleanup
   sudo rm -rf keploy
   # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN="${KEPLOY_PROVEN:-}" timeout -k 10 180 "$RECORD_BIN" record -c "$cmd" --container-name retryapp \
-    --record-timer 60s --disable-tele > "$name.log" 2>&1 &
-  local pid=$!
+  hang_start -k 10 180 sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="${KEPLOY_PROVEN:-}" "$RECORD_BIN" record -c "$cmd" --container-name retryapp \
+    --record-timer 60s --disable-tele > "$name.log" 2>&1
+  local pid=$HANG_PID
   requests "$pid"
-  wait "$pid"
+  hang_wait "$pid"
   rc=$?
   [ "$rc" -eq 0 ] || fail "$name: keploy record exited $rc"
+  # keploy record exits 0 on the guard's TERM too, so a record still
+  # running at 180 s is told by the guard, not by its code.
+  [ "$HANG_FIRED" = 0 ] || fail "$name: keploy record still ran after 180 s; the hang guard ended it"
+  # The commands that attach to the app alone print none of the agent's
+  # lines: its debug log holds them.
+  verify_ran "${KEPLOY_PROVEN:-}" "$name.log" keploy/agent-debug.log || FAIL=$((FAIL + 1))
   if ! how=$(retried "$name"); then
     fail "$name: the dependency crash was not retried"
     tail -60 "$name.log"
@@ -185,7 +195,7 @@ setup_again recreated || fail "recreated: the agent compose recreated was not se
 cleanup
 before=$FAIL
 # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-sudo -E env PATH="$PATH" timeout -k 10 300 "$REPLAY_BIN" test -c "docker compose up --always-recreate-deps app" \
+bounded -k 10 300 sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "docker compose up --always-recreate-deps app" \
   --container-name retryapp --delay 10 --disable-tele > replay.log 2>&1
 rc=$?
 [ "$rc" -eq 0 ] || fail "replay: keploy test exited $rc"
@@ -221,10 +231,11 @@ fi
 cleanup
 before=$FAIL
 # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 timeout -k 10 300 "$REPLAY_BIN" test -c "docker compose up --always-recreate-deps app" \
+bounded -k 10 300 sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "docker compose up --always-recreate-deps app" \
   --container-name retryapp --delay 10 --disable-tele > replay-proven.log 2>&1
 rc=$?
 [ "$rc" -eq 0 ] || fail "replay-proven: keploy test exited $rc"
+verify_ran 1 replay-proven.log keploy/agent-debug.log || FAIL=$((FAIL + 1))
 how=$(retried replay-proven) || fail "replay-proven: the dependency crash was not retried"
 setup_again replay-proven || fail "replay-proven: the agent compose recreated was not set up again"
 summary=$(sed -E 's/\x1b\[[0-9;]*m//g' replay-proven.log | { grep -E 'Total test (passed|failed):' || true; } | tr -s ' \t' ' ' | tr '\n' ' ')

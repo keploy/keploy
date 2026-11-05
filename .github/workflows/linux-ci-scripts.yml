@@ -17,8 +17,12 @@ name: Linux CI scripts
 # that lacks a test case, as a failed request or keploy dropping one leaves it,
 # has to end with its log printed, not hold the lane until its job is
 # cancelled; and one that has them all has to pass, its test cases written as
-# the requests are answered or as keploy record stops. await() has to wait for
-# a log keploy makes after it begins, and fail once keploy exits with none.
+# the requests are answered or as keploy record stops. Under the verify switch,
+# with sudo resetting the environment as both sudos do, one whose agent says
+# verify mode is on has to pass and one whose agent never says it has to fail.
+# The functions run from a copy, which loads sudo_env.sh by the lane's own
+# directory, as the lane does. await() has to wait for a log keploy makes after
+# it begins, and fail once keploy exits with none.
 #
 # And keploy-installer.tests.sh: keploy.sh, served as https://keploy.io/install.sh,
 # on its default route (the hand-off to https://keploy.io/ent/install.sh) and
@@ -74,6 +78,8 @@ on:
       - '.github/workflows/test_workflow_scripts/docker-build-retry.sh'
       - '.github/workflows/test_workflow_scripts/mongo-ci.sh'
       - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
+      - '.github/workflows/test_workflow_scripts/sudo_env.sh'
+      - '.github/workflows/test_workflow_scripts/hang_guard.sh'
       - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
@@ -98,6 +104,8 @@ on:
       - '.github/workflows/test_workflow_scripts/docker-build-retry.sh'
       - '.github/workflows/test_workflow_scripts/mongo-ci.sh'
       - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
+      - '.github/workflows/test_workflow_scripts/sudo_env.sh'
+      - '.github/workflows/test_workflow_scripts/hang_guard.sh'
       - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
 
@@ -204,15 +212,15 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/free-port.tests.sh
 
   compose-proven-setend:
-    # Six cases (four of record(), two of await()), a few seconds; each
-    # bounds the hang it tests for at 60 s, so all six hanging take 6 min,
+    # Eight cases (six of record(), two of await()), a few seconds; each
+    # bounds the hang it tests for at 60 s, so all eight hanging take 8 min,
     # and the logs the script prints at its end still show.
-    timeout-minutes: 8
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test compose-proven-setend-linux.sh (a recording's test cases counted once keploy record has stopped; await on a log made late or never)
+      - name: Test compose-proven-setend-linux.sh (a recording's test cases counted once keploy record has stopped; a recording under the verify switch whose agent never said verify mode is on fails; await on a log made late or never)
         run: bash .github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh
 
   installer:

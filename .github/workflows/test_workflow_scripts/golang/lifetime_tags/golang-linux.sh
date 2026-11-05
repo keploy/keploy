@@ -142,6 +142,13 @@
 # the app's ports, the test files keploy writes. Ports: 8096 (app), 9096 (auth
 # service), 3306 (MySQL). Env: RECORD_BIN, REPLAY_BIN; MYSQL_IMAGE (default
 # mysql:8.0).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 # docker_pull_retry: a registry hiccup is retried and named, not taken for a
@@ -262,6 +269,19 @@ send() {
     [ "$code" = "$3" ] || fail "$1 $2 answered $code while recording, want $3"
 }
 
+# named_env: NAMED_ENV is what keploy and the app read from this script's
+# environment, as NAME=value, for `sudo env`: every SHOP_* a case exported,
+# and KEPLOY_STRICT_MOCK_WINDOW when a case set it. sudo hands its command
+# only the variables it names (sudo-rs, Ubuntu 26.04's sudo, ignores -E).
+named_env() {
+    local v
+    NAMED_ENV=()
+    for v in $(compgen -e SHOP_) KEPLOY_STRICT_MOCK_WINDOW; do
+        [ -n "${!v+x}" ] && NAMED_ENV+=("$v=${!v}")
+    done
+    return 0
+}
+
 TESTS=4
 # record [proven]: keploy record of the four requests; proven records under
 # the proven switch with --sync (KEPLOY_PROVEN=1), which maps each test to the
@@ -272,7 +292,8 @@ record() {
     rm -rf keploy keploy.yml
     start_mysql
     start_upstream
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" ${proven:+KEPLOY_PROVEN=1} "$RECORD_BIN" record -c "./shop" "${flags[@]}" \
+    named_env
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "${NAMED_ENV[@]}" ${proven:+KEPLOY_PROVEN=1} "$RECORD_BIN" record -c "./shop" "${flags[@]}" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -340,7 +361,8 @@ replay() {
         fi
     } >keploy.yml
     before="$(newest_run)"
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "${switch[@]}" "$REPLAY_BIN" test -c "./shop" --delay 1 --health-path /healthz \
+    named_env
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "${NAMED_ENV[@]}" "${switch[@]}" "$REPLAY_BIN" test -c "./shop" --delay 1 --health-path /healthz \
         --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
     own

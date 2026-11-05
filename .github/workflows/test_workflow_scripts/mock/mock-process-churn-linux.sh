@@ -31,6 +31,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 # This lane's directory: lane_switch.sh.
@@ -103,8 +105,9 @@ answered() {
 
 if half on; then
 echo "== record under the proven switch: one call, $CHURN short-lived processes, another call =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "bash churn.sh" --name churn-proven --disable-tele > rec-proven.log 2>&1
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "bash churn.sh" --name churn-proven --disable-tele > rec-proven.log 2>&1
 rc=$?
+verify_ran 1 rec-proven.log || FAIL=1
 [ "$rc" = 0 ] || fail "record under the switch: keploy exited $rc, want 0"
 answered rec-proven.log "record under the switch"
 for p in before-churn after-churn; do
@@ -114,7 +117,7 @@ done
 
 : > dep.log
 echo "== replay under the proven switch: refused by this build, nothing run =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" mock replay -c "bash churn.sh" --name churn-proven --disable-tele > rep-proven.log 2>&1
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" mock replay -c "bash churn.sh" --name churn-proven --disable-tele > rep-proven.log 2>&1
 rc=$?
 [ "$rc" = 1 ] || fail "replay under the switch: keploy exited $rc, want this build's refusal (1)"
 grep -q "needs a keploy build that judges each test" rep-proven.log ||
@@ -126,7 +129,7 @@ fi
 
 if half off; then
 echo "== record without the switch: the same =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "bash churn.sh" --name churn --disable-tele > rec.log 2>&1
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "bash churn.sh" --name churn --disable-tele > rec.log 2>&1
 rc=$?
 [ "$rc" = 0 ] || fail "record: keploy exited $rc, want 0"
 answered rec.log record
@@ -137,7 +140,7 @@ done
 
 : > dep.log
 echo "== replay without the switch: the same command, the dependency up and logging =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "bash churn.sh" --name churn --disable-tele > rep.log 2>&1
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "bash churn.sh" --name churn --disable-tele > rep.log 2>&1
 rc=$?
 [ "$rc" = 0 ] || fail "replay: keploy exited $rc, want 0"
 answered rep.log replay
