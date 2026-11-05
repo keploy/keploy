@@ -129,7 +129,9 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 // recorded with it, as they were pushed: without the windows its learn step
 // would read every earlier recording of the set as the paired one's place
 // again, and without the givens every given of the replay would bind with no
-// recorded value, and nothing would say so.
+// recorded value, and nothing would say so. Without its not-required marks
+// the restarted agent would charge each test for a marked call it did not
+// make.
 func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -149,17 +151,19 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	windows := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}
 	given := map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}}
 	repeats := map[string][]models.RepeatRead{"o::TestA": {{Name: "onboarding", Mocks: []string{"mock-3", "mock-3"}}}}
-	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, map[string][]string{"o": {"mock-1"}}, windows, given, repeats, nil); err != nil {
+	notRequired := map[string][]string{"o::TestA": {"mock-3"}}
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, map[string][]string{"o": {"mock-1"}}, windows, given, repeats, notRequired); err != nil {
 		t.Fatal(err)
 	}
 	windows[0].TestCase = "o::Changed" // the caller's slice is its own
 	given["o::TestA"] = nil            // and so is its map
 	repeats["o::TestA"] = nil          // and its repeated reads
+	notRequired["o::TestA"] = nil      // and its marks
 	if err := a.session().reapply(context.Background(), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
-	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}],"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]},"worker":{"o":["mock-1"]},"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-3"]}]}}`
+	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}],"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]},"worker":{"o":["mock-1"]},"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-3"]}]},"notRequired":{"o::TestA":["mock-3"]}}`
 	if !slices.Equal(bodies, []string{want, want}) {
-		t.Fatalf("posted %q, want the table, its windows, its givens and its worker scope twice: %q", bodies, want)
+		t.Fatalf("posted %q, want the table, its windows, its givens, its worker scope and its not-required marks twice: %q", bodies, want)
 	}
 }
