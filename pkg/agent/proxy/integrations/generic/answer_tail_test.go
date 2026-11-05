@@ -399,6 +399,117 @@ func TestV2_AnExchangeLeftOutAsItIsHandedOnIsCountedOnceWithItsTail(t *testing.T
 	}
 }
 
+// pairLeavingOutTheFirst runs evs through the exchange state machine with the
+// first exchange it records left out: for the capture's incomplete flag as it
+// is flushed (holed), or else at the stop, as it is handed on to a channel that
+// is full, the channel then emptied for the exchanges after it. It returns the
+// mocks recorded, the reason of each mock left out, and the manager's count of
+// mocks left out.
+func pairLeavingOutTheFirst(t *testing.T, spans *syncMock.Spans, holed bool, evs []chunkEvent) ([]*models.Mock, []string, int64) {
+	t.Helper()
+	events := make(chan chunkEvent, len(evs))
+	for _, ev := range evs {
+		events <- ev
+	}
+	close(events)
+	mocks := make(chan *models.Mock, len(evs))
+	core, logs := observer.New(zapcore.DebugLevel)
+	mgr := syncMock.New(nil)
+	sess := &supervisor.Session{Mocks: mocks, Logger: zap.New(core), Ctx: context.Background(),
+		ClientConnID: "test-client-conn", Mgr: mgr, Orphans: spans}
+	if holed {
+		sess.MarkMockIncomplete("memory_pressure")
+	} else {
+		ended, cancel := context.WithCancel(context.Background())
+		cancel()
+		sess.Ctx = ended
+		for len(mocks) < cap(mocks) {
+			mocks <- &models.Mock{Name: "placeholder"}
+		}
+		// The session calls the hook as it hands a mock on, before it sends
+		// it: the first finds the channel full, the second an empty one.
+		handed := 0
+		sess.OnMockRecorded = func(*models.Mock) {
+			if handed++; handed == 2 {
+				for len(mocks) > 0 {
+					<-mocks
+				}
+			}
+		}
+	}
+	if err := pairChunkEvents(events, sess, zap.New(core)); err != nil {
+		t.Fatalf("pairChunkEvents returned error: %v", err)
+	}
+	close(mocks)
+	var reasons []string
+	for _, e := range logs.All() {
+		if e.Message == supervisor.LeftOutWarnMsg || e.Message == supervisor.LeftOutDebugMsg {
+			reason, _ := e.ContextMap()["reason"].(string)
+			reasons = append(reasons, reason)
+		}
+	}
+	return drainMocks(mocks), reasons, mgr.MocksLeftOut()
+}
+
+// An exchange left out before the tail of its answer reaches the parser is
+// counted once, with its tail, for an answer teed ahead of its request and for
+// the answer before a split, whose tail comes after the request the split
+// carried forward: the tail is the rest of the exchange left out. Counted
+// again, one exchange would count as two mocks left out. The exchange is left
+// out as it is flushed (the capture's incomplete flag) or as it is handed on
+// at the stop (the channel full). A split whose flush is holed leaves out the
+// half it carries too (TestV2_TheHalfASplitCarriesOutOfAHoledExchangeIsReported),
+// so only the full channel leaves out the exchange before a split and records
+// the next.
+func TestV2_TheTailOfAnExchangeLeftOutIsCountedWithIt(t *testing.T) {
+	asked := time.Unix(1000, 0)
+	answerAhead := []chunkEvent{
+		destChunk("head", 2, time.Unix(1001, 0)),
+		destChunk("tail", 3, time.Unix(1002, 0)),
+		clientChunk("GET big\r\n", 1, asked),
+		clientChunk("GET small\r\n", 4, time.Unix(1003, 0)),
+		destChunk("+OK\r\n", 5, time.Unix(1004, 0)),
+	}
+	split := []chunkEvent{
+		clientChunk("HELLO", 1, asked),
+		clientChunk("PING", 4, time.Unix(1004, 0)),
+		destChunk("hello-reply", 2, time.Unix(1002, 0)),
+		destChunk("hello-tail", 3, time.Unix(1003, 0)),
+		destChunk("pong", 5, time.Unix(1005, 0)),
+	}
+	for _, c := range []struct {
+		name            string
+		holed           bool
+		evs             []chunkEvent
+		reason          string
+		wantReq, wantRe string
+	}{
+		{"answer teed ahead/holed", true, answerAhead, "memory_pressure", "GET small\r\n", "+OK\r\n"},
+		{"answer teed ahead/channel full at the stop", false, answerAhead, supervisor.LeftOutChannelFullAtStop,
+			"GET small\r\n", "+OK\r\n"},
+		{"split/channel full at the stop", false, split, supervisor.LeftOutChannelFullAtStop, "PING", "pong"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			spans := &syncMock.Spans{}
+			got, reasons, counted := pairLeavingOutTheFirst(t, spans, c.holed, c.evs)
+			if len(got) != 1 {
+				t.Fatalf("recorded %d mock(s), want the second exchange alone", len(got))
+			}
+			assertExchange(t, got[0], []string{c.wantReq}, []string{c.wantRe})
+			if counted != 1 || len(reasons) != 1 || reasons[0] != c.reason {
+				t.Fatalf("left out %q (the manager counts %d), want the first exchange once, for %q, its tail with it",
+					reasons, counted, c.reason)
+			}
+			if closed, open := spans.Counts(); closed != 1 || open != 0 {
+				t.Fatalf("the spans hold (closed=%d, open=%d), want the exchange's alone", closed, open)
+			}
+			if over, _ := spans.Overlaps(asked, asked); !over {
+				t.Fatal("a test case over the exchange left out is not left out")
+			}
+		})
+	}
+}
+
 // Chunks after an exchange left out are the rest of it, reported with it. The
 // next exchange the parser records is its own: the tail of its answer is left
 // out, as on any connection.

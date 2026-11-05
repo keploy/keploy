@@ -725,9 +725,11 @@ func TestEmitMockOnShutdownLeavesOutAMockTheFullChannelCannotTake(t *testing.T) 
 
 // EmitMockOutcome says whether the session left the mock out instead of
 // handing it on: for the capture's incomplete flag, on either path, and at
-// shutdown for a channel that is full. A mock handed on is not left out, and
-// one refused (the context ended, not at shutdown) is neither handed on nor
-// left out. The manager counts only the mocks it says it left out.
+// shutdown for a channel that is full. A mock handed on is not left out, nor
+// is one a session with no context sends, nor one a session with no channel
+// takes, and one refused (the context ended, not at shutdown) is neither
+// handed on nor left out. The manager counts only the mocks it says it left
+// out.
 // Not parallel: the WARN limit is process-wide.
 func TestEmitMockOutcomeSaysWhetherTheSessionLeftTheMockOut(t *testing.T) {
 	ended, cancel := context.WithCancel(context.Background())
@@ -737,11 +739,16 @@ func TestEmitMockOutcomeSaysWhetherTheSessionLeftTheMockOut(t *testing.T) {
 		shutdown   bool
 		incomplete bool
 		room       int
+		noChannel  bool
 		ctx        context.Context
 		leftOut    bool
 		refused    bool
 	}{
 		{name: "handed on", room: 1, ctx: context.Background()},
+		{name: "handed on with no context", room: 1},
+		{name: "handed on with no context at shutdown", shutdown: true, room: 1},
+		{name: "no channel", noChannel: true, ctx: context.Background()},
+		{name: "no channel at shutdown", shutdown: true, noChannel: true, ctx: ended},
 		{name: "handed on at shutdown", shutdown: true, room: 1, ctx: ended},
 		{name: "incomplete", incomplete: true, room: 1, ctx: context.Background(), leftOut: true},
 		{name: "incomplete at shutdown", shutdown: true, incomplete: true, room: 1, ctx: ended, leftOut: true},
@@ -752,6 +759,9 @@ func TestEmitMockOutcomeSaysWhetherTheSessionLeftTheMockOut(t *testing.T) {
 			mgr := syncMock.New(nil)
 			s := &Session{Mgr: mgr, Orphans: &rawSpans{}, Mocks: make(chan *models.Mock, c.room), Logger: zap.NewNop(),
 				Ctx: c.ctx, ClientConnID: "outcome-conn"}
+			if c.noChannel {
+				s.Mocks = nil
+			}
 			if c.incomplete {
 				s.MarkMockIncomplete("memory_pressure")
 			}
@@ -769,7 +779,7 @@ func TestEmitMockOutcomeSaysWhetherTheSessionLeftTheMockOut(t *testing.T) {
 			if n := mgr.MocksLeftOut(); n != want {
 				t.Fatalf("the manager counts %d mock(s) left out, want %d", n, want)
 			}
-			if handed := len(s.Mocks) == 1; handed != (!c.leftOut && !c.refused) {
+			if handed := len(s.Mocks) == 1; handed != (!c.leftOut && !c.refused && !c.noChannel) {
 				t.Fatalf("the channel holds %d mock(s), want it only if the mock was handed on", len(s.Mocks))
 			}
 		})
