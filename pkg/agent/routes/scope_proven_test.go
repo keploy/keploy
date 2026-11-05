@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -21,32 +22,45 @@ import (
 // answers what the test sets.
 type wireSvc struct {
 	agent.Service
-	claimKey    string
-	claimCaller int
-	begun       []models.ScopeReq
-	ended       []models.ScopeReq
-	skips       map[string]string
-	needs       map[string][]models.ScopeNeed
-	report      string
-	beginResp   models.ScopeBeginResp
-	beginErr    *models.ScopeError
-	endResp     models.ScopeEndResp
-	endErr      *models.ScopeError
-	oldBegun    string
+	claimKey     string
+	claimCaller  int
+	claimWorkers int
+	// beginCaller and endCaller are the caller readers the last begin's and
+	// end's contexts carried (coreAgent.CallerOf).
+	beginCaller, endCaller func() (int, error)
+	// readBegin: the begin reads its caller while it is served, into
+	// beginPID.
+	readBegin bool
+	beginPID  int
+	begun     []models.ScopeReq
+	ended     []models.ScopeReq
+	skips     map[string]string
+	needs     map[string][]models.ScopeNeed
+	report    string
+	beginResp models.ScopeBeginResp
+	beginErr  *models.ScopeError
+	endResp   models.ScopeEndResp
+	endErr    *models.ScopeError
+	oldBegun  string
 }
 
 func (s *wireSvc) ClaimInstance(_ context.Context, req models.InstanceReq, caller int) (models.InstanceResp, *models.ScopeError) {
-	s.claimKey, s.claimCaller = req.Key, caller
+	s.claimKey, s.claimCaller, s.claimWorkers = req.Key, caller, req.Workers
 	return models.InstanceResp{V: 1, Instance: models.InstanceRun}, nil
 }
 
-func (s *wireSvc) ProvenBegin(_ context.Context, req models.ScopeReq) (models.ScopeBeginResp, *models.ScopeError) {
+func (s *wireSvc) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.ScopeBeginResp, *models.ScopeError) {
 	s.begun = append(s.begun, req)
+	s.beginCaller = coreAgent.CallerOf(ctx)
+	if s.readBegin && s.beginCaller != nil {
+		s.beginPID, _ = s.beginCaller()
+	}
 	return s.beginResp, s.beginErr
 }
 
-func (s *wireSvc) ProvenEnd(_ context.Context, req models.ScopeReq) (models.ScopeEndResp, *models.ScopeError) {
+func (s *wireSvc) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.ScopeEndResp, *models.ScopeError) {
 	s.ended = append(s.ended, req)
+	s.endCaller = coreAgent.CallerOf(ctx)
 	return s.endResp, s.endErr
 }
 
@@ -114,6 +128,26 @@ func TestBeginAndEndAnswerWithTheVersion(t *testing.T) {
 	var e models.ScopeEndResp
 	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil || rec.Code != http.StatusOK || e != svc.endResp {
 		t.Fatalf("end: %d %s (%v)", rec.Code, rec.Body.String(), err)
+	}
+}
+
+// A begin and an end give the service their caller, read from the
+// connection only when the service asks (a run of more than one test
+// worker); the request's own connection is what is read.
+func TestBeginAndEndGiveTheServiceTheirCaller(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	svc := &wireSvc{beginResp: models.ScopeBeginResp{V: 1, Status: "ok"}, endResp: models.ScopeEndResp{V: 1, Status: "ok"}}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	call(t, a.HandleScopeBegin, `{"name":"TestA","canSkip":true}`)
+	call(t, a.HandleScopeEnd, `{"name":"TestA","outcome":"passed"}`)
+	for what, read := range map[string]func() (int, error){"begin": svc.beginCaller, "end": svc.endCaller} {
+		if read == nil {
+			t.Fatalf("the %s's context carries no caller reader", what)
+		}
+		// A recorded request has no connection, so the reader fails.
+		if pid, err := read(); err == nil {
+			t.Fatalf("the %s's caller was read as %d from a request without a connection", what, pid)
+		}
 	}
 }
 

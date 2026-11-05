@@ -1092,7 +1092,7 @@ func (p *Proxy) probeMysqlReplay(
 	if len(recorded) == 0 || opts.DisableMysqlEndpointDrift {
 		return &mysqlProbe{SrcConn: srcConn, Reason: "no-mysql-mock-for-port"}, nil
 	}
-	return p.replayUnrecordedPort(ctx, srcConn, dstAddr, port, recorded, logger)
+	return p.replayUnrecordedPort(ctx, srcConn, dstAddr, port, recorded, opts, logger)
 }
 
 // replayUnrecordedPort judges a replay connection to a port the recording
@@ -1117,13 +1117,16 @@ func (p *Proxy) probeMysqlReplay(
 // nothing, it waited to be greeted, and its miss names the port to list
 // (unlistedEndpointMiss); a warning says it once per endpoint, also when the
 // run ends with the client silent (hintUnlistedEndpoint). No verdict here is
-// cached for the port: each connection is judged by what it reaches.
+// cached for the port: each connection is judged by what it reaches. The miss
+// is the connection's process's, of its test worker (opts.SrcPid,
+// opts.SrcInstance), so only that worker's test reads it.
 func (p *Proxy) replayUnrecordedPort(
 	ctx context.Context,
 	srcConn net.Conn,
 	dstAddr string,
 	port uint32,
 	recorded []uint32,
+	opts models.OutgoingOptions,
 	logger *zap.Logger,
 ) (*mysqlProbe, error) {
 	var host netip.Addr
@@ -1181,7 +1184,7 @@ func (p *Proxy) replayUnrecordedPort(
 		return &mysqlProbe{SrcConn: replayConn(srcConn, read, logger), Reason: "client-spoke-first"}, nil
 	case err != nil && !isTimeout(err):
 		// It waited to be greeted and gave up: a call no mock answered.
-		p.sendMockNotFoundError(unlistedEndpointMiss(dstAddr, recorded, p.unlistedNextStep(dstAddr, host, port)))
+		p.sendMockNotFoundErrorFrom(unlistedEndpointMiss(dstAddr, recorded, p.unlistedNextStep(dstAddr, host, port)), opts.SrcPid, opts.SrcInstance, nil)
 		p.hintUnlistedEndpoint(logger, dstAddr, host, port, recorded, "its client closed it without sending anything")
 		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
 	case cancelled:

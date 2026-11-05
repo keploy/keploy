@@ -46,10 +46,99 @@ services:
     depends_on:
       ca-writer:
         condition: service_completed_successfully
+      ca-writer-nobundle:
+        condition: service_completed_successfully
+      ca-writer-certdir:
+        condition: service_completed_successfully
+      ca-writer-certfile:
+        condition: service_completed_successfully
+      corp-server:
+        condition: service_started
     entrypoint: [""]
     command: ["sleep", "600"]
     volumes:
       - ca-shared:/shared:ro
+      - ca-nobundle:/shared-nobundle:ro
+      - ca-certdir:/shared-certdir:ro
+      - ca-certfile:/shared-certfile:ro
+
+  # --- Trust-store sources other than the image's CA bundle -----------------
+  #
+  # corp-pki writes a private "corporate" PKI (a CA, and a leaf it signed for
+  # corp-server) to the corp volume; corp-server serves HTTPS with that leaf.
+  # The three writers below build the merged bundle the way an agent would:
+  #
+  #   ca-writer-nobundle  /etc/ssl/certs is an empty volume (the k8s sidecar's
+  #                       shape; an image that ships no CA bundle): the merged
+  #                       bundle must still hold public roots — keploy's
+  #                       built-in Mozilla list — and the writer must log
+  #                       nothing at WARN or above.
+  #   ca-writer-certdir   the same, plus SSL_CERT_DIR naming the corporate CA's
+  #                       directory: public roots AND the corporate CA.
+  #   ca-writer-certfile  the image's CA bundle, with SSL_CERT_FILE naming the
+  #                       corporate CA: the operator's bundle is honoured.
+  corp-pki:
+    image: kpl-ca-merge:local
+    container_name: kpl-ca-merge-corp-pki
+    command: ["gen-corp", "/corp"]
+    volumes:
+      - corp:/corp
+    restart: "no"
+
+  corp-server:
+    image: kpl-ca-merge:local
+    container_name: kpl-ca-merge-corp-server
+    command: ["serve-corp", "/corp"]
+    depends_on:
+      corp-pki:
+        condition: service_completed_successfully
+    volumes:
+      - corp:/corp:ro
+
+  ca-writer-nobundle:
+    image: kpl-ca-merge:local
+    container_name: kpl-ca-merge-writer-nobundle
+    environment:
+      - EXPORT_PATH=/shared-nobundle
+    tmpfs:
+      - /etc/ssl/certs
+    volumes:
+      - ca-nobundle:/shared-nobundle
+    restart: "no"
+
+  ca-writer-certdir:
+    image: kpl-ca-merge:local
+    container_name: kpl-ca-merge-writer-certdir
+    depends_on:
+      corp-pki:
+        condition: service_completed_successfully
+    environment:
+      - EXPORT_PATH=/shared-certdir
+      - SSL_CERT_DIR=/corp/ca
+    tmpfs:
+      - /etc/ssl/certs
+    volumes:
+      - corp:/corp:ro
+      - ca-certdir:/shared-certdir
+    restart: "no"
+
+  ca-writer-certfile:
+    image: kpl-ca-merge:local
+    container_name: kpl-ca-merge-writer-certfile
+    depends_on:
+      corp-pki:
+        condition: service_completed_successfully
+    environment:
+      - EXPORT_PATH=/shared-certfile
+      - SSL_CERT_FILE=/corp/ca/corp-ca.pem
+    volumes:
+      - corp:/corp:ro
+      - ca-certfile:/shared-certfile
+    restart: "no"
 
 volumes:
   ca-shared:
+  ca-nobundle:
+  ca-certdir:
+  ca-certfile:
+  corp:

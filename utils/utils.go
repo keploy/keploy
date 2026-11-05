@@ -1431,8 +1431,43 @@ func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
 // Its probe listeners are plain TCP, never Go's default MPTCP: for as long as
 // one is open it listens on every interface.
 func GetAvailablePort() (uint32, error) {
-	if _, ephemeralHi, known := ephemeralPortRange(); known && ephemeralHi < 65535 {
-		lo := ephemeralHi + 1
+	return availablePortAbove(hostEphemeralRange, 0)
+}
+
+// hostEphemeralRange reads the host's ephemeral port range for
+// GetAvailablePort and GetAvailableContainerPort (ephemeralPortRange).
+var hostEphemeralRange = ephemeralPortRange
+
+// containerEphemeralHi is the top of a container's ephemeral port range: the
+// kernel gives each new network namespace Linux's default range, 32768-60999,
+// whatever the host's is.
+const containerEphemeralHi = defaultEphemeralHi
+
+// GetAvailableContainerPort is GetAvailablePort for a port a container
+// listens on that the host publishes as itself (127.0.0.1:P:P), as a Docker
+// agent's: free on the host, and above the container's own ephemeral range
+// too. On a user-defined network, as every compose stack's is, Docker's
+// embedded DNS resolver listens in the container's namespace, on 127.0.0.11,
+// on a TCP and a UDP port the kernel drew from that range before the
+// container's process ran. A port the CLI found free on the host could be one
+// of them, and the process in the container then cannot bind it, nor move off
+// it: the CLI reaches it through the publish. A host whose range ends below
+// 60999, or reaches 65535, or is unknown (macOS, Windows), would otherwise
+// hand out ports inside it.
+func GetAvailableContainerPort() (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, containerEphemeralHi)
+}
+
+// availablePortAbove is GetAvailablePort with the host's ephemeral range read
+// by ephemeral (ephemeralPortRange's signature), whose candidates are above
+// floor too.
+func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32) (uint32, error) {
+	top := floor
+	if _, ephemeralHi, known := ephemeral(); known && ephemeralHi < 65535 && ephemeralHi > top {
+		top = ephemeralHi
+	}
+	if top > 0 {
+		lo := top + 1
 		span := 65536 - lo // inclusive of 65535
 		// A random start, not a scan from the bottom. Scanning upward returns
 		// the LOWEST free port every time, so two keploy processes started
@@ -1459,9 +1494,11 @@ func GetAvailablePort() (uint32, error) {
 	}
 
 	// Either the platform's ephemeral range is unknown, or every port above it
-	// is taken, or the range reaches 65535 leaving no space. Fall back to the
-	// OS assignment rather than failing: a port that may race is strictly
-	// better than no port at all, and this is the historical behaviour.
+	// is taken, or the range reaches 65535 leaving no space (with no floor).
+	// Fall back to the OS assignment rather than failing: a port that may race
+	// is strictly better than no port at all, and this is the historical
+	// behaviour. A container's port that then meets one of the resolver's
+	// fails the agent's start at its bind, as no port at all would.
 	listener, err := plaintcp.Listen(context.Background(), "tcp", ":0")
 	if err != nil {
 		return 0, fmt.Errorf("failed to find available port: %w", err)

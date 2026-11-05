@@ -3251,7 +3251,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	case isDockerCmd:
 		// The container this Setup named: what its looks see is noted on
 		// the client's entry of it.
-		read, running = containerBootLook(a.logger, a.containerNamed(opts.KeployContainer))
+		read, running = containerBootLook(a.logger, a.containerAPI(), a.containerNamed(opts.KeployContainer))
 	case run != nil:
 		read = readBootFile(run.bootReport)
 		if run.bootPrompt {
@@ -3517,6 +3517,25 @@ func withAppRunSettings(opts models.SetupOptions, ports, networks, hosts []strin
 	return opts
 }
 
+// hostPort and containerPort pick a free port for a server on the host
+// (utils.GetAvailablePort) and in a container, published as itself
+// (utils.GetAvailableContainerPort).
+var hostPort, containerPort = utils.GetAvailablePort, utils.GetAvailableContainerPort
+
+// agentPortFor picks the port a new agent's server listens on. A Docker
+// agent's is in its container's network namespace, which the app joins, and
+// is published on the host as itself: it is picked above the container's
+// ephemeral range too, where Docker's embedded DNS resolver holds a TCP and a
+// UDP port before the agent starts. The agent cannot move its server off a
+// taken port, as it moves its proxy's: the CLI reaches it through the
+// publish, and the agent's start would fail.
+func agentPortFor(docker bool) (uint32, error) {
+	if docker {
+		return containerPort()
+	}
+	return hostPort()
+}
+
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
@@ -3526,7 +3545,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// container.
 	a.forgetAgentContainer()
 
-	agentPort, err := utils.GetAvailablePort()
+	agentPort, err := agentPortFor(isDockerCmd)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to find available port for agent")
 		return err
@@ -3733,7 +3752,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// token-authenticated control-plane API rather than carrying an embedded copy
 	// of a shared CA. In docker-run, compose and k8s the shared /tmp/keploy-tls
 	// volume delivers trust to the app container instead, and this call would only
-	// leak an unused host temp file — so it is skipped there.
+	// write host files no app reads — so it is skipped there. The files are
+	// removed when ctx, the run, ends.
 	if !isDockerCmd && opts.CommandType != string(utils.DockerCompose) {
 		certPEM, caErr := a.fetchAgentCA(ctx)
 		if caErr != nil {
@@ -3743,7 +3763,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		// TODO : Proxy or TLS should not be imported in the agent
 		// This is done because to set env variable for TLS
-		if err = ptls.SetupCaCertEnv(a.logger, certPEM); err != nil {
+		if err = ptls.SetupCaCertEnv(ctx, a.logger, certPEM); err != nil {
 			utils.LogError(a.logger, err, "failed to set TLS environment")
 			return err
 		}
@@ -5117,18 +5137,19 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // it was recorded (models.ScopeTableReq.Given), sent with them: the agent
 // installs both before it serves the pool. worker is each key's worker scope
 // (models.ScopeTableReq.Worker): names of its pool slice served in a test's
-// window too.
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) (retErr error) {
+// window too. repeats are each test's repeated reads
+// (models.ScopeTableReq.RepeatReads).
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p, wk, w, g := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), slices.Clone(windows), maps.Clone(given)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, w, g) })
+			t, p, wk, w, g, r := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, w, g, r) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, Windows: windows, Given: given})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, Windows: windows, Given: given, RepeatReads: repeats})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

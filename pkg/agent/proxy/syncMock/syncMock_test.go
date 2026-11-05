@@ -2256,6 +2256,32 @@ func TestAddMockStampsTheAddressItsConnectionReached(t *testing.T) {
 	}
 }
 
+// Under the proven switch every mock a parser hands over carries the keploy
+// instance (a test worker's) its connection was stamped with, read while
+// that connection is still open; without the switch it carries none.
+func TestAddMockStampsItsConnectionsWorkerInstance(t *testing.T) {
+	const conn = "add-mock-instance"
+	starts.Default.InstanceBegan(3)
+	starts.Default.NoteOriginIn(conn, 4242, 3)
+	t.Cleanup(func() { starts.Default.ForgetOrigin(conn); starts.Default.InstanceEnded(3) })
+	for _, on := range []bool{true, false} {
+		want := uint32(0)
+		if on {
+			t.Setenv("KEPLOY_PROVEN", "1")
+			want = 3
+		} else {
+			t.Setenv("KEPLOY_PROVEN", "")
+		}
+		mgr := New(zap.NewNop())
+		ch := make(chan *models.Mock, 1)
+		mgr.SetOutputChannel(ch)
+		mgr.AddMock(&models.Mock{Kind: models.HTTP, ConnectionID: conn})
+		if got := (<-ch).Instance; got != want {
+			t.Fatalf("proven=%v: the mock's instance = %d, want %d", on, got, want)
+		}
+	}
+}
+
 // A mock reusable only by its recorder's statement (a MySQL SET stated
 // session, tagged "mocks") is attributed as a per-test mock is: a kept test's
 // window owns it (named as its mocks are), and a duplicate's window prunes it

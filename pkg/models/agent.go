@@ -339,6 +339,11 @@ type ScopeWindow struct {
 	Ready   time.Time `json:"ready,omitzero"`
 	Ref     string    `json:"ref,omitempty"`
 	Worker  uint32    `json:"worker,omitempty"`
+	// Instance is, under the proven wire, the keploy instance of the test
+	// worker whose test this window is (InstanceReq.Workers): only its
+	// calls (models.Mock.Instance) are this window's. 0 in a run of one
+	// worker, whose calls carry none.
+	Instance uint32 `json:"instance,omitempty"`
 	// Outcome is the verdict the test's harness reported when it ended the
 	// scope (ScopeReq.Outcome); "" when it reported none.
 	Outcome string `json:"outcome,omitempty"`
@@ -372,6 +377,10 @@ type ScopeWindow struct {
 	// while no test is open belongs to the pool slice of that key (design
 	// v14 §5.2).
 	Claim string `json:"claim,omitempty"`
+	// Workers is, on a test worker's claim, how many test workers its
+	// process declared the run's framework runs at once
+	// (InstanceReq.Workers); 0 on a single test process's claim.
+	Workers int `json:"workers,omitempty"`
 	// Refused, under the proven wire, makes this no test's window but a
 	// refusal keploy made at Start (RunRefusal).
 	Refused *RunRefusal `json:"refused,omitempty"`
@@ -422,6 +431,23 @@ type ScopeTableReq struct {
 	// no slice of its key holds is not served. Absent from an older CLI:
 	// worker: entries then answer between tests only, as the pool's.
 	Worker map[string][]string `json:"worker,omitempty"`
+	// RepeatReads is, under the proven switch, each test's repeated reads
+	// by test ID, as whatever names them for the replay named them
+	// (mock.RegisterRepeatReadNamer): recordings of one read the test made
+	// at least twice, every time with one answer. Exact serving answers
+	// such a read once more than recorded, and does not charge one of its
+	// recordings left unmade, when the recordings prove it
+	// (TestModeInfo.RepeatRead). Absent when no test has one: every test
+	// is then served its exact count.
+	RepeatReads map[string][]RepeatRead `json:"repeatReads,omitempty"`
+}
+
+// RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its
+// name, which keploy says when it answers it once more, and the names of the
+// test's own recordings of it, in recorded order.
+type RepeatRead struct {
+	Name  string   `json:"name"`
+	Mocks []string `json:"mocks"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy

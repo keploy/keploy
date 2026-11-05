@@ -324,32 +324,61 @@ func TestRecordV2_ReportsNothingWhenTheServersStreamEndsWithoutAResponse(t *test
 }
 
 // A recording's stop cancels the parser's context, and the streams end or
-// fail after it: nothing the parser was in the middle of is reported, though
-// the relay had marked the connection. Each subtest blocks the parser where
-// it reads, with nothing for it (Waiting), then stops the recording, then
-// hands it what ends its read.
-func TestRecordV2_ReportsNothingAtARecordingStop(t *testing.T) {
+// fail after it: the parser reads on to their end or failure, as before the
+// stop, and reports the exchange the stop cut where it had captured part of an
+// answer, under the relay's mark: its request was captured, and a test case
+// over it is left out rather than saved without its mock. A call cut before
+// any answer, its request's body still to come or its answer not begun, is
+// reported as before the stop: a request cut short as nothing (the call did
+// not complete), an answer that never began as noAnswerFault says. The parser
+// returned on the context's end instead, between two reads, and lost what its
+// capture held with nothing reporting it. Each subtest blocks the parser where
+// it reads, with nothing for it (Waiting), then stops the recording, then ends
+// or fails its read: the relay's teardown, which the recording's stop begins,
+// ends its streams (closeReq, closeResp).
+func TestRecordV2_AtARecordingStopReportsTheExchangeItCut(t *testing.T) {
 	reqAt := time.Unix(1_700_009_500, 0)
 	respAt := reqAt.Add(5 * time.Millisecond)
 	for _, tc := range []struct {
-		name    string
-		feed    func(l *leftOutSession)
-		blocked func(sess *supervisor.Session) *fakeconn.FakeConn
-		wake    func(l *leftOutSession)
+		name     string
+		feed     func(l *leftOutSession)
+		blocked  func(sess *supervisor.Session) *fakeconn.FakeConn
+		wake     func(l *leftOutSession)
+		reported bool
+		// fails: recordV2 returns the read's own error, with nothing
+		// captured to report.
+		fails bool
 	}{
+		{
+			name:    "its request's first read fails",
+			feed:    func(*leftOutSession) {},
+			blocked: func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.ClientStream },
+			wake:    func(l *leftOutSession) { _ = l.sess.ClientStream.SetReadDeadline(time.Now().Add(-time.Second)) },
+			fails:   true,
+		},
+		{
+			name: "its request's body read fails",
+			feed: func(l *leftOutSession) {
+				l.sendReq([]byte("POST /x HTTP/1.1\r\nHost: ex\r\nContent-Length: 10\r\n\r\nab"), reqAt, reqAt)
+			},
+			blocked:  func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.ClientStream },
+			wake:     func(l *leftOutSession) { _ = l.sess.ClientStream.SetReadDeadline(time.Now().Add(-time.Second)) },
+			reported: true,
+		},
 		{
 			name: "its request's body is still to come",
 			feed: func(l *leftOutSession) {
 				l.sendReq([]byte("POST /x HTTP/1.1\r\nHost: ex\r\nContent-Length: 10\r\n\r\nab"), reqAt, reqAt)
 			},
 			blocked: func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.ClientStream },
-			wake:    func(l *leftOutSession) { l.sendReq([]byte("cd"), reqAt, reqAt) },
+			wake:    func(l *leftOutSession) { l.sendReq([]byte("cd"), reqAt, reqAt); l.closeReq() },
 		},
 		{
-			name:    "its response's first read fails",
-			feed:    func(l *leftOutSession) { l.sendReq(canonicalRequest, reqAt, reqAt) },
-			blocked: func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.DestStream },
-			wake:    func(l *leftOutSession) { _ = l.sess.DestStream.SetReadDeadline(time.Now().Add(-time.Second)) },
+			name:     "its response's first read fails",
+			feed:     func(l *leftOutSession) { l.sendReq(canonicalRequest, reqAt, reqAt) },
+			blocked:  func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.DestStream },
+			wake:     func(l *leftOutSession) { _ = l.sess.DestStream.SetReadDeadline(time.Now().Add(-time.Second)) },
+			reported: true,
 		},
 		{
 			name:    "the server's stream ends before its response",
@@ -363,8 +392,19 @@ func TestRecordV2_ReportsNothingAtARecordingStop(t *testing.T) {
 				l.sendReq(canonicalRequest, reqAt, reqAt)
 				l.sendResp([]byte("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nab"), respAt, respAt)
 			},
-			blocked: func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.DestStream },
-			wake:    func(l *leftOutSession) { l.sendResp([]byte("cd"), respAt, respAt) },
+			blocked:  func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.DestStream },
+			wake:     func(l *leftOutSession) { l.sendResp([]byte("cd"), respAt, respAt); l.closeResp() },
+			reported: true,
+		},
+		{
+			name: "its response's body read fails",
+			feed: func(l *leftOutSession) {
+				l.sendReq(canonicalRequest, reqAt, reqAt)
+				l.sendResp([]byte("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nab"), respAt, respAt)
+			},
+			blocked:  func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.DestStream },
+			wake:     func(l *leftOutSession) { _ = l.sess.DestStream.SetReadDeadline(time.Now().Add(-time.Second)) },
+			reported: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -396,12 +436,42 @@ func TestRecordV2_ReportsNothingAtARecordingStop(t *testing.T) {
 			select {
 			case err = <-done:
 			case <-time.After(10 * time.Second):
-				t.Fatal("recordV2 did not return after the stop")
+				t.Fatal("recordV2 did not return after its stream's end")
 			}
-			if err != nil && !errors.Is(err, context.Canceled) {
-				t.Fatalf("recordV2 returned %v, want nil or the stop's context.Canceled", err)
+			if errors.Is(err, context.Canceled) {
+				t.Fatalf("recordV2 returned %v: it returned on the context's end, not its stream's", err)
 			}
-			l.done(err).nothingReported(t)
+			r := l.done(err)
+			if tc.fails {
+				if !errors.Is(err, fakeconn.ErrDeadlineExceeded) {
+					t.Fatalf("recordV2 returned %v, want the read's own error", err)
+				}
+				r.nothingReported(t)
+				return
+			}
+			if !tc.reported {
+				if err != nil {
+					t.Fatalf("recordV2 returned %v, want nil", err)
+				}
+				r.nothingReported(t)
+				return
+			}
+			if r.mocks != 0 {
+				t.Fatalf("%d mocks recorded, want none: the stop cut the exchange", r.mocks)
+			}
+			if c, _ := r.spans.Counts(); c != 1 {
+				t.Fatalf("the spans hold %d closed, want the cut exchange's", c)
+			}
+			if n := r.mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("the manager counts %d mocks left out, want the cut exchange", n)
+			}
+			w := r.warned()
+			if len(w) != 1 {
+				t.Fatalf("%d left-out WARNs, want the cut exchange's", len(w))
+			}
+			if reason, _ := w[0].ContextMap()["reason"].(string); !strings.HasPrefix(reason, "per_conn_cap: ") {
+				t.Fatalf("left out for %q, want it under the relay's mark", reason)
+			}
 		})
 	}
 }

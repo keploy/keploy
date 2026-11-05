@@ -21,6 +21,14 @@
 #   at its bind, every time: both must move their DNS servers, naming that
 #   process, and their apps' DNS must still reach their own moved servers.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+# shellcheck source=../../hang_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../hang_guard.sh" || exit 1
+
 set -uo pipefail
 set +e
 
@@ -33,8 +41,8 @@ upstream_pid=""
 holder_pid=""
 record_pids=()
 cleanup() {
-    # timeout(1) stops its keploy (SIGINT, then SIGKILL 30s on) when it
-    # ends; a run still going here is stopped through its timeout.
+    # The hang guard stops its keploy (SIGINT, then SIGKILL 30s on) when it
+    # ends; a run still going here is stopped through its sudo.
     for p in "${record_pids[@]}"; do
         sudo kill -INT "$p" 2>/dev/null
     done
@@ -74,11 +82,13 @@ round() {
     record_pids=()
     for run in A B; do
         if [ "$run" = A ]; then tag=runa app_port=8081; else tag=runb app_port=8082; fi
-        (cd "$run" && exec timeout -s INT -k 30 120 sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+        cd "$run" || exit 1
+        hang_start -s INT -k 30 120 sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record \
             -c "python3 $dir/app.py $tag $app_port 127.0.0.1 $UPSTREAM_PORT" \
             --path "$dir/$run" --record-timer 40s --generateGithubActions=false \
-            > "$dir/record_logs_${run}_$name.txt" 2>&1) &
-        record_pids+=($!)
+            > "$dir/record_logs_${run}_$name.txt" 2>&1
+        record_pids+=("$HANG_PID")
+        cd - >/dev/null || exit 1
     done
 
     ready=0
@@ -104,7 +114,7 @@ round() {
         echo "::error::round $name: the two apps did not both answer under keploy record"
         fail=1
     fi
-    for p in "${record_pids[@]}"; do wait "$p"; done
+    for p in "${record_pids[@]}"; do hang_wait "$p"; done
     record_pids=()
 
     local logs=("record_logs_A_$name.txt" "record_logs_B_$name.txt") log

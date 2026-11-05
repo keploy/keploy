@@ -57,6 +57,12 @@ func sendForMiss(t *testing.T, db integrations.MockMemDb, opts models.OutgoingOp
 // row can end a request whose matcher would read without end.
 func sendForMissIn(t *testing.T, parent context.Context, db integrations.MockMemDb, opts models.OutgoingOptions, tracker *learn.Tracker, request string) *models.MockMismatchReport {
 	t.Helper()
+	return sendForMissLogged(t, parent, zap.NewNop(), db, opts, tracker, request)
+}
+
+// sendForMissLogged is sendForMissIn with the integration logging to logger.
+func sendForMissLogged(t *testing.T, parent context.Context, logger *zap.Logger, db integrations.MockMemDb, opts models.OutgoingOptions, tracker *learn.Tracker, request string) *models.MockMismatchReport {
+	t.Helper()
 	var reported atomic.Value
 	ctx := models.WithMockMismatchReporter(parent, func(err error) { reported.Store(err) })
 	if tracker != nil {
@@ -66,7 +72,7 @@ func sendForMissIn(t *testing.T, parent context.Context, db integrations.MockMem
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, db, opts)
+		_ = httpint.New(logger).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, db, opts)
 		_ = agentEnd.Close()
 	}()
 	t.Cleanup(func() { _ = app.Close(); <-done })

@@ -229,6 +229,24 @@ func TestProcStartTime(t *testing.T) {
 	}
 }
 
+// A test process whose main thread exited while another thread of it runs
+// (a Go program that execs from a thread other than its main one) reads Z
+// and is live: its start time is read, and a test that holds the run's
+// clock in it has not lost its worker. Once every thread of it has exited it
+// is gone, reaped or not: the rule a test worker's claim keeps (procStart).
+func TestATestProcessIsLiveUntilEveryThreadOfItHasExited(t *testing.T) {
+	c, exitMain := startMainThreadExits(t)
+	pid := c.Process.Pid
+	start := procStartTime(pid)
+	require.NotEmpty(t, start)
+	exitMain()
+	require.Equal(t, start, procStartTime(pid), "a process whose main thread exited while another thread of it runs is live")
+	require.False(t, workerGone(pid, start), "a process whose main thread exited while another thread of it runs is not gone")
+	exitAll(t, c)
+	require.Empty(t, procStartTime(pid), "a process every thread of which has exited, not reaped, is not live")
+	require.True(t, workerGone(pid, start), "a process every thread of which has exited, not reaped, is gone")
+}
+
 // Under the proven switch the single-worker wire opens and closes each test
 // (ProvenBegin, ProvenEnd), with no pid: its begin moves the run's clock to
 // the test's recorded begin, and its end moves it back. A test still open

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
@@ -78,13 +79,17 @@ type Supervisor struct {
 
 	// Activity bookkeeping. lastProgress holds the clock's runnable
 	// time (ns) at the latest BumpActivity call. pending toggles
-	// whether the watchdog is armed.
+	// whether the watchdog is armed, until the stop: from then on the
+	// watchdog measures stop instead (stopWatch).
 	clk stall.Clock
 	// holdClk holds the process clock (stall.Hold) while the watchdog has
 	// pending work to measure; nil for a Config's Clock.
 	holdClk      func() (release func())
 	lastProgress atomic.Int64
 	pending      atomic.Bool
+	// stop is set as Run's stop wait begins (watchTheStop): the parser's
+	// streams, which still hold what the relay captured for it.
+	stop atomic.Pointer[stopWatch]
 
 	// Abort path: hung is closed by the watchdog when the activity
 	// budget is exceeded while pending work is outstanding.
@@ -115,6 +120,14 @@ type Supervisor struct {
 	// this case; tests in supervisor_test.go demonstrate the bound
 	// we can and cannot guarantee.
 	SessionOnAbort func()
+
+	// StopDeadline, when set before Run, is closed once the stop's own
+	// overall deadline has passed. After the outer ctx ends (the recording's
+	// stop) Run waits for its parser to return, to read both its streams to
+	// their end, or to hang, and aborts it on none of those before this is
+	// closed. nil: the stop has no deadline of its own here (the process's
+	// end bounds it).
+	StopDeadline <-chan struct{}
 
 	// suspended, once set, permanently disarms the hang watchdog for
 	// this connection (see SuspendWatchdog). Panic and mem-cap
@@ -177,8 +190,9 @@ func (s *Supervisor) BumpActivity() {
 }
 
 // MarkPendingWork indicates an in-flight request is awaiting a
-// response. The watchdog only fires while pending. Calling it when
-// already pending is harmless.
+// response. Until the stop, the watchdog only fires while pending; from
+// the stop on it measures what the parser still has to read instead
+// (watchTheStop). Calling it when already pending is harmless.
 func (s *Supervisor) MarkPendingWork() {
 	// Bump so the hang budget starts fresh at the moment the request
 	// actually arrived, not from Supervisor construction.
@@ -305,74 +319,126 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		return s.classifyReturn(ctx, r.panicked, r.panicVal, r.stack, r.err)
 
 	case <-s.hungCh:
-		// Abort first: the parser is retired from here, and the abort
-		// stops its capture (SessionOnAbort). It goes on running, and the
-		// abort closes its streams under it before its context is
-		// cancelled below: retire its session first, so that nothing it
-		// hands over from here, cut where its streams were closed, is
-		// recorded (Session.retire).
-		sess.retire(leftOutParserHung)
-		s.fireOnAbort()
-		// Debug-level: hang abort is a designed control-flow path —
-		// the dispatcher's FallthroughToPassthrough handling picks it
-		// up and the relay keeps forwarding bytes. Operators who want
-		// to tune behaviour have explicit knobs (see next_step).
-		s.cfg.Logger.Debug("parser hang detected; aborting",
-			zap.Duration("hang_budget", s.cfg.HangBudget),
-			zap.String("next_step", "raise supervisor.Config.HangBudget for slow-but-legitimate workloads (long LLM replies, pg_sleep), or set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough)"),
-		)
-		runCancel()
-		return Result{
-			Status:                   StatusHung,
-			Err:                      fmt.Errorf("supervisor: parser hung beyond %s", s.cfg.HangBudget),
-			FallthroughToPassthrough: true,
-		}
+		return s.hung(sess, runCancel)
 
 	case <-ctx.Done():
 		s.cfg.Logger.Debug("supervisor: outer ctx cancelled")
 		runCancel()
-		// Give the parser a short chance to return cleanly; if it
-		// does we surface that. Otherwise we classify as canceled.
-		select {
-		case r := <-done:
-			if r.panicked {
-				s.fireOnAbort()
-				if s.cfg.PanicReporter != nil {
-					s.reportPanic(r.panicVal, r.stack)
-				}
-				return Result{
-					Status:                   StatusPanicked,
-					Err:                      wrapPanic(r.panicVal),
-					FallthroughToPassthrough: true,
-				}
+		// The stop. A parser behind its capture still holds what the relay
+		// captured for it before the stop, and the relay's teardown ends its
+		// streams once it has handed all of that on: the parser reads it
+		// (it ends on its streams' end, not on its context's) and returns.
+		// So the supervisor waits for an event, never for a time: a grace
+		// measured on the wall clock decides nothing on a starved agent,
+		// where the parser is not run within it, and aborting it then cut
+		// short what it had not read yet. It aborts the parser only once
+		// that costs nothing captured, or once the stop's own deadline says
+		// the wait is over:
+		//   - the parser has read both its streams to their end
+		//     (fakeconn.FakeConn.ReadToEnd): whatever it still waits on,
+		//     nothing of the capture is left for it to read;
+		//   - the stop's overall deadline passed (StopDeadline): what the
+		//     parser has not read by then is left out, with its span, as
+		//     everything a retired parser never read is;
+		//   - it hangs (the watchdog, on the time it could run): the hang
+		//     path, as before the stop. From the stop, a hang is judged by
+		//     what the parser still has to read (watchTheStop), not by the
+		//     pending flag a recorded mock clears: a parser that records a
+		//     mock and then stalls with captured bytes unread is hung, and
+		//     is retired, never waited on silently.
+		// The abort fires SessionOnAbort, whose closes unblock a parser
+		// parked in a read of a stream the relay has not ended: the
+		// goroutine does not leak, and the relay's tees do not stay armed.
+		ends := streamEnds(sess)
+		s.watchTheStop(sess)
+	wait:
+		for {
+			var end <-chan struct{}
+			if len(ends) > 0 {
+				end = ends[0]
 			}
-			// Clean parser exit on outer-cancel: no blocked reads to
-			// unstick, so we intentionally skip fireOnAbort. The
-			// FakeConns will be GC'd on the normal return path.
-			return Result{Status: StatusCanceled, Err: r.err}
-		case <-time.After(50 * time.Millisecond):
-			// Parser did NOT return within the grace window. Most
-			// likely it is parked in FakeConn.Read/ReadChunk, which
-			// do not observe ctx — they only unblock on Close. Fire
-			// SessionOnAbort now so the dispatcher's abort callback
-			// (closes both FakeConns, pauses relay tees) runs and
-			// the parser goroutine can exit. Without this, the
-			// goroutine leaks for the life of the process and the
-			// relay tees stay armed, so every subsequent chunk on
-			// this connection falls through the channel-full drop
-			// path logging at Debug.
-			//
-			// FallthroughToPassthrough is set so the outer caller
-			// knows this connection should route raw; consistent
-			// with the hang / panic paths above.
-			s.fireOnAbort()
-			return Result{
-				Status:                   StatusCanceled,
-				Err:                      ctx.Err(),
-				FallthroughToPassthrough: true,
+			select {
+			case r := <-done:
+				if r.panicked {
+					s.fireOnAbort()
+					if s.cfg.PanicReporter != nil {
+						s.reportPanic(r.panicVal, r.stack)
+					}
+					return Result{
+						Status:                   StatusPanicked,
+						Err:                      wrapPanic(r.panicVal),
+						FallthroughToPassthrough: true,
+					}
+				}
+				// Clean parser exit on outer-cancel: no blocked reads to
+				// unstick, so we intentionally skip fireOnAbort. The
+				// FakeConns will be GC'd on the normal return path.
+				return Result{Status: StatusCanceled, Err: r.err}
+			case <-s.hungCh:
+				return s.hung(sess, runCancel)
+			case <-end:
+				if ends = ends[1:]; len(ends) == 0 {
+					break wait
+				}
+			case <-s.StopDeadline:
+				break wait
 			}
 		}
+		// FallthroughToPassthrough is set so the outer caller knows this
+		// connection should route raw; consistent with the hang / panic
+		// paths above.
+		s.fireOnAbort()
+		return Result{
+			Status:                   StatusCanceled,
+			Err:                      ctx.Err(),
+			FallthroughToPassthrough: true,
+		}
 	}
+}
+
+// hung retires a parser the watchdog found hung, and aborts it.
+func (s *Supervisor) hung(sess *Session, runCancel context.CancelFunc) Result {
+	// Abort first: the parser is retired from here, and the abort
+	// stops its capture (SessionOnAbort). It goes on running, and the
+	// abort closes its streams under it before its context is
+	// cancelled below: retire its session first, so that nothing it
+	// hands over from here, cut where its streams were closed, is
+	// recorded (Session.retire).
+	sess.retire(leftOutParserHung)
+	s.fireOnAbort()
+	// Debug-level: hang abort is a designed control-flow path —
+	// the dispatcher's FallthroughToPassthrough handling picks it
+	// up and the relay keeps forwarding bytes. Operators who want
+	// to tune behaviour have explicit knobs (see next_step).
+	s.cfg.Logger.Debug("parser hang detected; aborting",
+		zap.Duration("hang_budget", s.cfg.HangBudget),
+		zap.String("next_step", "raise supervisor.Config.HangBudget for slow-but-legitimate workloads (long LLM replies, pg_sleep), or set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough)"),
+	)
+	runCancel()
+	return Result{
+		Status:                   StatusHung,
+		Err:                      fmt.Errorf("supervisor: parser hung beyond %s", s.cfg.HangBudget),
+		FallthroughToPassthrough: true,
+	}
+}
+
+// streamEnds is what says sess's parser has read both its streams to their
+// end (fakeconn.FakeConn.ReadToEnd), nil for a session without both: then
+// nothing says so.
+func streamEnds(sess *Session) []<-chan struct{} {
+	var ends []<-chan struct{}
+	for _, f := range bothStreams(sess) {
+		ends = append(ends, f.ReadToEnd())
+	}
+	return ends
+}
+
+// bothStreams is sess's two streams, nil for a session without both.
+func bothStreams(sess *Session) []*fakeconn.FakeConn {
+	if sess == nil || sess.ClientStream == nil || sess.DestStream == nil {
+		return nil
+	}
+	return []*fakeconn.FakeConn{sess.ClientStream, sess.DestStream}
 }
 
 // classifyReturn maps a parser's return (panic or error or nil) plus
@@ -465,9 +531,12 @@ func (s *Supervisor) Close() {
 
 // hangExceeded reports whether the no-progress budget has been exceeded, in
 // the time the process could run since the latest activity, given the current
-// pending/suspended state. It is the single decision the watchdog makes on
-// each tick.
+// pending/suspended state, or, from the stop on, since the parser last read
+// (stopWatch.hung). It is the single decision the watchdog makes on each tick.
 func (s *Supervisor) hangExceeded() bool {
+	if w := s.stop.Load(); w != nil {
+		return w.hung(s.clk.Runnable(), s.cfg.HangBudget)
+	}
 	if !s.pending.Load() {
 		return false
 	}
@@ -481,7 +550,8 @@ func (s *Supervisor) hangExceeded() bool {
 
 // watchdogLoop looks at the activity clock every tick of wall time (a
 // quarter of the budget). Closes hungCh when the budget is exceeded while
-// pending work is outstanding. A timer re-armed after each look: how late it
+// pending work is outstanding, or, from the stop on, while bytes captured
+// for the parser are unread (armed). A timer re-armed after each look: how late it
 // fires does not matter, the clock says how long the process could run.
 //
 // The process clock is sampled only while held, so the loop holds it only
@@ -504,7 +574,7 @@ func (s *Supervisor) watchdogLoop() {
 	}
 	for {
 		if s.holdClk != nil {
-			switch armed := s.pending.Load() && !s.suspended.Load(); {
+			switch armed := s.armed(); {
 			case armed && release == nil:
 				release = s.holdClk()
 			case !armed && release != nil:
@@ -524,6 +594,105 @@ func (s *Supervisor) watchdogLoop() {
 			}
 		}
 	}
+}
+
+// armed reports whether the watchdog has work to measure: before the stop, a
+// request pending (MarkPendingWork) on a connection whose watchdog is not
+// suspended; from the stop on, bytes captured for the parser that it has not
+// read (stopWatch.unread).
+func (s *Supervisor) armed() bool {
+	if w := s.stop.Load(); w != nil {
+		return w.unread()
+	}
+	return s.pending.Load() && !s.suspended.Load()
+}
+
+// watchTheStop turns the watchdog, as Run's stop wait begins, from the pending
+// flag to what sess's parser still has to read of its streams. The pending
+// flag says a request awaits its answer, and a recorded mock clears it: after
+// the stop nothing more arrives, and what is left is what the relay captured
+// before it. A parser that records a mock and then stalls outside a read, its
+// streams holding captured bytes it has not read, is hung all the same: the
+// watchdog fires once it has not read for its budget of the time it could
+// run, and Run retires it (hung), so that what it never read is left out and
+// reported, not waited on for as long as it stalls. The relay's activity
+// (BumpActivity) is no progress of the parser's, and counts for nothing from
+// the stop. The parser's budget is measured from the stop: the time the
+// process could run before it says nothing of the parser's reads after it.
+// A suspended watchdog (SuspendWatchdog) is armed again: its parser
+// waits in a read for an answer the network holds, and a parser blocked in a
+// read is not hung (stopWatch.hung). A session without both streams keeps the
+// pending flag: nothing says what its parser still has to read.
+func (s *Supervisor) watchTheStop(sess *Session) {
+	streams := bothStreams(sess)
+	if len(streams) == 0 {
+		return
+	}
+	w := &stopWatch{streams: streams, since: s.clk.Runnable()}
+	w.read, w.waits, _ = w.mark()
+	s.stop.Store(w)
+}
+
+// stopWatch is what the watchdog measures from the stop on (watchTheStop).
+type stopWatch struct {
+	streams []*fakeconn.FakeConn
+
+	mu sync.Mutex
+	// read and waits are the parser's reads at the latest look (mark), and
+	// since the clock's runnable time when they last moved, or when the
+	// parser was last seen blocked in a read.
+	read  int64
+	waits uint64
+	since time.Duration
+}
+
+// unread reports whether some stream holds what the parser has not read: it
+// has not read it to the end its producer gave it (fakeconn.FakeConn.ReadToEnd).
+// The relay ends a stream only once it has handed on every chunk it captured
+// for it.
+func (w *stopWatch) unread() bool {
+	for _, f := range w.streams {
+		select {
+		case <-f.ReadToEnd():
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// mark is how far the parser has read its streams (fakeconn.FakeConn.Consumed),
+// how many times it has blocked in a read of one, and whether it is blocked in
+// one now (fakeconn.FakeConn.Waiting).
+func (w *stopWatch) mark() (read int64, waits uint64, waiting bool) {
+	for _, f := range w.streams {
+		read += f.Consumed()
+		wt, n := f.Waiting()
+		waits += n
+		waiting = waiting || wt
+	}
+	return read, waits, waiting
+}
+
+// hung reports whether the parser, with bytes captured for it unread, has not
+// read for more than budget of the clock's runnable time, now. Its reads
+// moving, or its blocking in a read, is progress: a parser blocked in a read
+// has read all it was handed of that stream, and waits on the relay, not on
+// itself (the relay ends the stream once it has handed on what it captured).
+// A parser reading a long capture slowly is never hung, however long it
+// takes.
+func (w *stopWatch) hung(now, budget time.Duration) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.unread() {
+		return false
+	}
+	read, waits, waiting := w.mark()
+	if waiting || read != w.read || waits != w.waits {
+		w.read, w.waits, w.since = read, waits, now
+		return false
+	}
+	return now-w.since > budget
 }
 
 // holdProcessClock holds the process clock (stall.Hold); tests count it.

@@ -51,3 +51,14 @@ func TestNameRecordedInNamesTheFirstOtherOwner(t *testing.T) {
 		})
 	}
 }
+
+// A miss's sanitized copy keeps the test that recorded it and whether it is
+// order-dependent: both name tests, no value, and a receipt that writes the
+// copy must still say why the test failed.
+func TestASanitizedMissKeepsWhereItWasRecordedAndThatItIsOrderDependent(t *testing.T) {
+	c := UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /token", NotOwned: true, ClosestMock: "mock-0", RecordedIn: "o::TestA", OrderDependent: true}
+	s := c.Sanitized()
+	if s.RecordedIn != "o::TestA" || !s.OrderDependent || !s.NotOwned {
+		t.Fatalf("the sanitized miss lost where it was recorded or that it is order-dependent: %+v", s)
+	}
+}

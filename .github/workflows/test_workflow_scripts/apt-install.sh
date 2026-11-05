@@ -240,9 +240,13 @@ esac
 
 if [ "$(id -u)" -eq 0 ]; then
   as_root() { "$@"; }
+  root_cmd=()
 else
   as_root() { sudo "$@"; }
+  root_cmd=(sudo)
 fi
+# shellcheck source=hang_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/hang_guard.sh" || exit 1
 
 mirror_list=/etc/apt/ubuntu-mirrors.txt
 # Groups: 1 = what precedes the URI, 4 = what follows it. What precedes it is
@@ -517,8 +521,9 @@ human() {
 }
 
 # apt_for <seconds> <apt-get argument ...>: apt-get, stopped after that long
-# (exit 124). Under a second counts as stopped already: to timeout(1), 0 means
-# no limit at all.
+# (exit 124). Under a second counts as stopped already. The limit is
+# hang_guard.sh's, so 124 says it fired on GNU and uutils coreutils alike, not
+# timeout(1)'s exit code (which differs between them).
 #
 # apt is stopped wherever it is, and that can be in the middle of a line: it
 # prints "Reading package lists..." and "Building dependency tree..." when it
@@ -533,8 +538,12 @@ apt_for() {
   local seconds="$1" rc=0
   shift
   [ "$seconds" -ge 1 ] || return 124
-  as_root env DEBIAN_FRONTEND=noninteractive timeout "$seconds" apt-get "${apt_opts[@]}" "$@" || rc=$?
-  if [ "$rc" -eq 124 ]; then echo; fi
+  hang_start -q "$seconds" "${root_cmd[@]}" env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" "$@"
+  hang_wait "$HANG_PID" || rc=$?
+  if [ "$HANG_FIRED" = 1 ]; then
+    rc=124
+    echo
+  fi
   return "$rc"
 }
 

@@ -12,7 +12,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,7 +32,7 @@ import (
 // whose recorded value, or form segment ("key=value"), matches one of the
 // mock's patterns (Mock.Noise): a JSON string or number field, and a JSON
 // string, or a multipart field's data, that holds a value a pattern names
-// anywhere (holdsPattern).
+// anywhere (util.NoiseChecker.IsNoisyWithin).
 //
 // The live call's value at such a place is the secret the recording hid, and
 // it matches none of those patterns: they are anchored on the placeholder the
@@ -377,7 +376,6 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 			}
 		}
 	}
-	within := anchorFreeOf(noise)
 	if p.noisy(r.Body) {
 		p.body = true
 		return p
@@ -403,7 +401,7 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 		for _, part := range parts {
 			// A part's data is not read for fields: one that holds a
 			// redacted value anywhere is redacted whole.
-			if p.noisy(string(part.data)) || holds(within, string(part.data)) {
+			if p.noisy(string(part.data)) || p.values.IsNoisyWithin(string(part.data)) {
 				p.addField(part.name)
 			}
 		}
@@ -413,10 +411,10 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 			// Not read for fields (XML, SOAP, text): a body that holds a
 			// value one of the mock's patterns names, at a place that
 			// cannot be found, is redacted whole.
-			p.body = holds(within, r.Body)
+			p.body = p.values.IsNoisyWithin(r.Body)
 			return p
 		}
-		p.collectJSON(v, "", within)
+		p.collectJSON(v, "")
 		// A redacted string at the root has no name of its own: the body
 		// is redacted whole (a redacted number at the root is the whole
 		// body, which the patterns name above).
@@ -460,88 +458,6 @@ func fieldKeys(name string) []string {
 	return strings.FieldsFunc(name, func(r rune) bool { return r == '.' || r == '[' || r == ']' })
 }
 
-// holdsPattern reports whether text holds a value one of the patterns
-// names, read anywhere in it: each pattern with its anchors (a leading "^",
-// a trailing unquoted "$") dropped, as the obfuscator anchors the value it
-// wrote on the value alone.
-func holdsPattern(patterns []string, text string) bool {
-	return holds(anchorFreeOf(patterns), text)
-}
-
-// holds reports whether text holds a match of one of the anchor-free
-// patterns within (anchorFreeOf).
-func holds(within []*regexp.Regexp, text string) bool {
-	for _, re := range within {
-		if re.MatchString(text) {
-			return true
-		}
-	}
-	return false
-}
-
-// anchorFreeOf is each of patterns with its anchors dropped, compiled
-// (anchorFree); a pattern that holds nothing else, or whose anchor-free
-// form does not compile, is left out.
-func anchorFreeOf(patterns []string) []*regexp.Regexp {
-	var out []*regexp.Regexp
-	for _, pat := range patterns {
-		if re := anchorFree(pat); re != nil {
-			out = append(out, re)
-		}
-	}
-	return out
-}
-
-// anchorFree is pat with its anchors dropped, compiled once a pattern, nil
-// when nothing else is left or it does not compile. The cache is bounded
-// as util's pattern cache is: a full one is emptied.
-func anchorFree(pat string) *regexp.Regexp {
-	anchorFreeMu.RLock()
-	re, ok := anchorFreeCache[pat]
-	anchorFreeMu.RUnlock()
-	if ok {
-		return re
-	}
-	inner := strings.TrimPrefix(pat, "^")
-	if strings.HasSuffix(inner, "$") && !quoted(inner, len(inner)-1) {
-		inner = inner[:len(inner)-1]
-	}
-	re = nil
-	if inner != "" {
-		anchorFreeCompiles.Add(1)
-		if c, err := regexp.Compile(inner); err == nil {
-			re = c
-		}
-	}
-	anchorFreeMu.Lock()
-	if len(anchorFreeCache) >= maxAnchorFree {
-		anchorFreeCache = map[string]*regexp.Regexp{}
-	}
-	anchorFreeCache[pat] = re
-	anchorFreeMu.Unlock()
-	return re
-}
-
-const maxAnchorFree = 1024
-
-var (
-	anchorFreeMu    sync.RWMutex
-	anchorFreeCache = map[string]*regexp.Regexp{}
-	// anchorFreeCompiles counts the patterns compiled (anchorFree): one a
-	// pattern, however many strings are read with it.
-	anchorFreeCompiles atomic.Int64
-)
-
-// quoted reports whether the byte at i of a pattern is quoted: an odd count
-// of backslashes is before it.
-func quoted(pat string, i int) bool {
-	n := 0
-	for j := i - 1; j >= 0 && pat[j] == '\\'; j-- {
-		n++
-	}
-	return n%2 == 1
-}
-
 // noisy reports whether v matches one of the mock's patterns.
 func (p redactedPlaces) noisy(v string) bool {
 	return v != "" && p.values != nil && p.values.IsNoisy(v)
@@ -569,8 +485,9 @@ func decodeJSONNumbers(body string) (interface{}, error) {
 // its place and anchors a pattern on that number's literal. It redacts a
 // string that holds a URL in the URL's structure (a query value, a path
 // segment), anchoring a pattern on that part alone, so a string that holds
-// a value a pattern names anywhere (holdsPattern) is redacted whole.
-func (p redactedPlaces) collectJSON(v interface{}, path string, within []*regexp.Regexp) {
+// a value a pattern names anywhere (util.NoiseChecker.IsNoisyWithin) is
+// redacted whole.
+func (p redactedPlaces) collectJSON(v interface{}, path string) {
 	switch t := v.(type) {
 	case map[string]interface{}:
 		for k, child := range t {
@@ -578,14 +495,14 @@ func (p redactedPlaces) collectJSON(v interface{}, path string, within []*regexp
 			if path != "" {
 				cp = path + "." + k
 			}
-			p.collectJSON(child, cp, within)
+			p.collectJSON(child, cp)
 		}
 	case []interface{}:
 		for _, child := range t {
-			p.collectJSON(child, jsonElemPath(path), within)
+			p.collectJSON(child, jsonElemPath(path))
 		}
 	case string:
-		if p.noisy(t) || holds(within, t) {
+		if p.noisy(t) || p.values.IsNoisyWithin(t) {
 			p.addField(path)
 		}
 	case json.Number:

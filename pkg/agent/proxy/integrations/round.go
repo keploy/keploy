@@ -279,6 +279,7 @@ type RoundSnapshot struct {
 	winEnd    time.Time
 	viewGen   uint64
 	endedOwn  map[string]struct{}
+	view      any
 }
 
 // RoundParts is what a store fills a RoundSnapshot's unexported answers
@@ -303,6 +304,10 @@ type RoundParts struct {
 	// EndedOwn are, by name, the recordings the view of the test the store
 	// ended (RoundSnapshot.Ended) held as its own; nil when Ended is "".
 	EndedOwn map[string]struct{}
+	// View is the store's own token of the view in force at the snapshot,
+	// which a call's mark of it carries (CallRound.InStoreView); nil for a
+	// store that holds no call to a view.
+	View any
 }
 
 // WithParts is s answering from p (a store's, read with s).
@@ -313,6 +318,7 @@ func (s RoundSnapshot) WithParts(p RoundParts) RoundSnapshot {
 	s.winStart, s.winEnd = p.WindowStart, p.WindowEnd
 	s.viewGen = p.ViewGen
 	s.endedOwn = p.EndedOwn
+	s.view = p.View
 	return s
 }
 
@@ -470,21 +476,25 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 // pool's call (PoolsCall) among them, and a lookup that named one made elsewhere would let
 // record's judging bake a test's own recording into the worker scope. It
 // names none, and pairs none, which only fails closed.
+//
+// Each carries the store's token of the view the snapshot read
+// (RoundParts.View, CallRound.InStoreView): a store held to the call is held
+// to that view, never to one installed after the snapshot.
 func (s RoundSnapshot) CallRound() CallRound {
 	if s.SetUnstaged() {
-		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(true).InView(false, s.Background)
+		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(true).InView(false, s.Background).InStoreView(s.view)
 	}
 	// A test's view with a worker scope shows it the worker scope, as the
 	// store's MarkCallRound says (its sequence view's Worker).
 	worker := s.Test != "" && len(s.worker) > 0
 	if s.TrackerAhead() {
-		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker)
+		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).InStoreView(s.view)
 	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {
 		_, own := ended[name]
 		return own || owners[name] != OwnerNone
-	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker)
+	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).InStoreView(s.view)
 }
 
 // HoldsEvery holds every recording as a call's own (NewCallRound): the mark

@@ -382,7 +382,11 @@ type MockManager struct {
 	// session) that seeds none has none there, not the previous one's: a
 	// keploy test session's windows would otherwise decide whose a later
 	// keploy mock replay's recordings are, over its scope table.
-	testWindows       atomic.Pointer[models.WindowSchedule]
+	testWindows atomic.Pointer[models.WindowSchedule]
+	// repeatNoise is the header noise the session's matcher compares the
+	// set's calls with, which proves a test's repeated reads
+	// (SetRepeatReadNoise); nil, none, until the session sets it.
+	repeatNoise       atomic.Pointer[repeatReadNoise]
 	testWindowsSeeded *models.WindowSchedule
 	windowsSeeded     *models.WindowSchedule
 
@@ -479,6 +483,10 @@ type MockManager struct {
 	// stored generation (bumpRevisionAll) and at Close.
 	restagedMu sync.Mutex
 	restaged   map[any]func()
+
+	// parserKept is what the parsers keep with the manager, by slot
+	// (integrations.ParserKeep): it goes with the manager.
+	parserKept sync.Map
 
 	// noConnMocks is a negative cache for GetConnectionMocks's
 	// fallback scan. A connID that returned zero connection-scoped
@@ -2889,6 +2897,10 @@ func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
 // repeated identical prepared-statement reads (e.g. login's username lookup,
 // register's read-back of a freshly-generated id) so each consumes the row
 // recorded at that position rather than a stale earlier-test row.
+//
+// It takes windowMu alone, for read, and never swapMu: the MySQL replayer
+// reads it under a lock of its own, also from a release a staging runs
+// while it holds swapMu (WhenRestaged), so swapMu here would deadlock.
 func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
 	// Under exact serving no recorded time narrows what a test is served:
 	// its mapping does.

@@ -253,3 +253,31 @@ func WhenRestaged(db MockMemDb, slot any, release func()) bool {
 	r.WhenRestaged(slot, release)
 	return true
 }
+
+// ParserKeep is a store that keeps a parser's data with itself (Keep): the
+// data is that store's alone and goes with it. No other store reads it, a
+// connection of the store still reads it once the store is closed (reads
+// stay legal after Close), and it is collected with the store. It lives as
+// long as the store, through every staging and replay session of it: a
+// parser lets go of what it keeps itself (WhenRestaged tells it when).
+//
+// A slot is a comparable value of a type the parser does not export, so no
+// two parsers share one. A view over a store that hands the parser the
+// store's recordings forwards Keep; over a view that does not, the parser
+// keeps its data where it would for a store that keeps nothing.
+type ParserKeep interface {
+	// Keep returns the value kept for slot, made by mk when slot holds
+	// none: one value a slot (two first calls at once may both run mk, and
+	// one value is kept). False where the store keeps nothing.
+	Keep(slot any, mk func() any) (any, bool)
+}
+
+// Keep returns the value db keeps for slot (ParserKeep), made by mk when slot
+// holds none, and false where db keeps nothing.
+func Keep(db MockMemDb, slot any, mk func() any) (any, bool) {
+	k, ok := db.(ParserKeep)
+	if !ok {
+		return nil, false
+	}
+	return k.Keep(slot, mk)
+}

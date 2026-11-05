@@ -74,7 +74,10 @@ const orphanFINBudget = stall.HangBudget
 // A wait that ends first (ctx's end, or an answer of unknown) leaves each
 // connection it had not seen reached marked with the test whose end it is
 // (agent.EndOf) and what it waited for (pairedConn.cutShort): bytes written
-// before it that are lost later are that test's, not the one open then.
+// before it that are lost later are that test's, not the one open then. The
+// end of a test worker's test (agent.EndWorkerOf) marks only that worker's
+// connections: another worker's bytes are its own open test's, and a loss of
+// them is charged there as it is counted.
 func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) (err error) {
 	if len(pending) == 0 {
 		return nil
@@ -84,9 +87,10 @@ func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) (err
 		if err == nil {
 			return
 		}
+		test, worker := agent.EndOf(ctx), agent.EndWorkerOf(ctx)
 		for _, t := range all {
-			if !t.done {
-				t.pc.cutShort(agent.EndOf(ctx), t.want)
+			if !t.done && (worker == 0 || t.pc.instance == worker) {
+				t.pc.cutShort(test, t.want)
 			}
 		}
 	}()

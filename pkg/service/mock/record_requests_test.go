@@ -363,15 +363,15 @@ func TestMockRecordListsCallsOutsideEveryWindowAsTheSets(t *testing.T) {
 	}
 }
 
-func TestClaimKeyAt(t *testing.T) {
+func TestClaimKeyOf(t *testing.T) {
 	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
 	claims := []models.ScopeWindow{{Claim: "a", Start: at(0)}, {Claim: "b", Start: at(10)}}
-	require.Equal(t, "", claimKeyAt(claims, at(-1)))
-	require.Equal(t, "a", claimKeyAt(claims, at(0)), "a call at the claim's own instant is its")
-	require.Equal(t, "a", claimKeyAt(claims, at(9)))
-	require.Equal(t, "b", claimKeyAt(claims, at(10)))
-	require.Equal(t, "b", claimKeyAt(claims, at(1000)), "until the next claim")
-	require.Equal(t, "", claimKeyAt(nil, at(5)))
+	require.Equal(t, "", claimKeyOf(claims, 0, at(-1)))
+	require.Equal(t, "a", claimKeyOf(claims, 0, at(0)), "a call at the claim's own instant is its")
+	require.Equal(t, "a", claimKeyOf(claims, 0, at(9)))
+	require.Equal(t, "b", claimKeyOf(claims, 0, at(10)))
+	require.Equal(t, "b", claimKeyOf(claims, 0, at(1000)), "until the next claim")
+	require.Equal(t, "", claimKeyOf(nil, 0, at(5)))
 }
 
 func stepsMarks() []models.ScopeWindow {

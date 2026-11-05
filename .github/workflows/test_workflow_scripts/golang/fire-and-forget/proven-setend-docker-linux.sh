@@ -28,6 +28,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -139,7 +141,7 @@ starve_docker || { echo "::error::could not starve the Docker daemon of CPU"; ex
 echo "starved: $STARVED"
 
 echo "== 1. recording, Docker starved =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "docker run --rm --name $NAME $STARVED_APP -p $APP:$APP $IMAGE" --container-name "$NAME" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "docker run --rm --name $NAME $STARVED_APP -p $APP:$APP $IMAGE" --container-name "$NAME" \
     --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 # The port is the agent's (keploy moves -p to it), so it accepts before the
@@ -151,6 +153,7 @@ done
 wait_tests 1 "$REC_PID" || fail "keploy record wrote $(test_files) test cases, want 1"
 stop_pid "$REC_PID"
 own
+verify_ran 1 record.log || FAIL=$((FAIL + 1))
 grep -q "shutdown worked" record.log || fail "1: the app's shutdown did not run to its end under keploy record"
 grep -q "so keploy killed it" record.log && fail "1: keploy record's stop killed the starved app: $(grep -m1 'so keploy killed it' record.log)"
 grep -q "recordStopKilled" keploy/test-set-0/config.yaml 2>/dev/null && fail "1: the recording is marked cut: $(grep recordStopKilled keploy/test-set-0/config.yaml)"
@@ -161,9 +164,10 @@ replay() {
     local name=$1 before
     shift
     before="$(newest_run)"
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "docker run --rm --name $NAME $* -p $APP:$APP $IMAGE" --container-name "$NAME" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "docker run --rm --name $NAME $* -p $APP:$APP $IMAGE" --container-name "$NAME" \
         --delay 2 --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
+    verify_ran 1 "$name.log" || FAIL=$((FAIL + 1))
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
         fail "$name: keploy test wrote no report (exit $RC)"

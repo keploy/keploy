@@ -49,8 +49,9 @@ import (
 // paired with it, and NextRequest says which of them it reports: it ends
 // with Session.EndExchanges, however it ends, so they are reported though it
 // never reads the server's stream past them. It exits
-// cleanly on either stream reaching EOF or Close,
-// on ctx cancellation, or on a malformed-HTTP decode error (the error is
+// cleanly on either stream reaching EOF or Close, not on ctx cancellation
+// (at the recording's stop it reads on to its streams' end, and records what
+// its capture holds whole), or on a malformed-HTTP decode error (the error is
 // returned, and the supervisor falls through to passthrough). An exchange
 // it stops on and cannot record (a request or response that does not
 // decode, a mock that cannot be built) is reported first, as every parser
@@ -78,11 +79,18 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 	// (noAnswerFault).
 	exchanges := 0
 
+	// The loop does not end on the context's end. The recording's stop ends
+	// it (and the supervisor's abort, which closes the streams), and a
+	// parser behind its capture then still holds what the relay captured
+	// before the stop: every exchange whole in it is recorded, and the one
+	// the stop cut is ended by its stream as anywhere else. The streams end
+	// the loop: the relay ends them at its teardown, which the recording's
+	// stop begins, once it has handed on what it captured (io.EOF), and the
+	// abort closes them (fakeconn.ErrClosed once what they hold is read), so
+	// no read waits on the network once the context has ended. A loop that
+	// returned on the context's end lost those exchanges with nothing
+	// recording, leaving out or reporting them.
 	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
 		// --- Request side ---------------------------------------------
 		//
 		// First chunk's ReadAt is the request arrival timestamp. We grab
@@ -93,9 +101,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				logger.Debug("V2 HTTP record: client stream ended at start of request", zap.Error(err))
 				return nil
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
 			}
 			utils.LogError(logger, err, "V2 HTTP record: initial request read failed")
 			return err
@@ -109,13 +114,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// over-read past the end of one request into the start of the
 		// next pipelined request. This is essential for HTTP/1.1
 		// keepalive correctness.
-		if err := h.readRequestV2(ctx, sess.ClientStream, &finalReq); err != nil {
+		if err := h.readRequestV2(sess.ClientStream, &finalReq); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				logger.Debug("V2 HTTP record: client stream closed mid-request", zap.Error(err))
 				return nil
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
 			}
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: request read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to read full request")
@@ -190,9 +192,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				logger.Debug("V2 HTTP record: dest stream ended before response", zap.Error(err))
 				return nil
 			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: initial response read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: initial response read failed")
 			return err
@@ -200,7 +199,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		finalResp := append([]byte(nil), firstRespChunk.Bytes...)
 		resTs := firstRespChunk.WrittenAt
 
-		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, requestMethod(finalReq))
+		gotLastWritten, err := h.readResponseV2(sess.DestStream, &finalResp, requestMethod(finalReq))
 		// The stream ended before readResponseV2 found the response's end.
 		// Where keploy relays the connection it has read all the server sent,
 		// so that is the server's doing, unless the relay ended the stream
@@ -234,9 +233,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 					resTs = gotLastWritten
 				}
 			} else {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
 				sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: response read failed: "+err.Error())
 				utils.LogError(logger, err, "V2 HTTP record: failed to read full response")
 				return err
@@ -331,9 +327,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			// (on another goroutine, meanwhile): that mark is the
 			// next exchange's, whose mock would then be recorded with
 			// nothing reporting it.
-			if emitErr := sess.EmitMock(mock); emitErr != nil {
-				return emitErr
-			}
+			emitV2(sess, logger, mock)
 		} else {
 			// Nothing recorded for this exchange (a passthrough), so a mark
 			// set during it must not leave out the next exchange's mock.
@@ -467,7 +461,31 @@ func (h *HTTP) recordFault(ctx context.Context, sess *supervisor.Session, logger
 	}
 	noteFaultRecorded(logger, mock)
 	integrations.CallServed(ctx)
-	return sess.EmitMock(mock)
+	emitV2(sess, logger, mock)
+	return nil
+}
+
+// leftOutRefusedAtStop is the reason emitV2 leaves out a mock the session
+// refused as its context ended.
+const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange read whole was handed over"
+
+// emitV2 hands the session m, the mock of an exchange recordV2 read whole,
+// whether or not the session's context (Session.Ctx) has ended: EmitMock
+// while it lasts, EmitMockOnShutdown once it has ended, as at the recording's
+// stop, where EmitMock refuses every mock. A mock EmitMock refuses all the
+// same, as the context ends between the check and its own, is left out and
+// said so (leftOutRefusedAtStop), not dropped: EmitMock refuses a mock only
+// for its context's end, after which the recording goes on with
+// EmitMockOnShutdown.
+func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) {
+	if c := sess.Ctx; c != nil && c.Err() != nil {
+		_ = sess.EmitMockOnShutdown(m)
+		return
+	}
+	if err := sess.EmitMock(m); err != nil {
+		logger.Debug("V2 HTTP record: the session refused a mock as its context ended", zap.Error(err))
+		sess.ReportLeftOut(m, leftOutRefusedAtStop)
+	}
 }
 
 // faultNoted makes noteFaultRecorded's note once per process.
@@ -520,15 +538,12 @@ func nextRequestV2(sess *supervisor.Session) (fakeconn.Chunk, error) {
 //
 // Returns io.EOF if stream closes before the body is fully consumed.
 // Returns a decode error for malformed Content-Length / body framing.
-func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, finalReq *[]byte) error {
+func (h *HTTP) readRequestV2(stream *fakeconn.FakeConn, finalReq *[]byte) error {
 	// 1. Complete headers: complete when messageHead finds the header section,
 	// not at the first "\r\n\r\n", which can be empty lines in front of the
 	// request line. Those are dropped (dropEmptyLinesBeforeRequest).
 	head, bodyStart, _, ok := messageHead(*finalReq, false)
 	for ; !ok; head, bodyStart, _, ok = messageHead(*finalReq, false) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		chunk, err := stream.ReadChunk()
 		if err != nil {
 			return err
@@ -546,9 +561,6 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 		}
 		remaining := contentLength - (len(*finalReq) - bodyStart)
 		for remaining > 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
 			chunk, err := stream.ReadChunk()
 			if err != nil {
 				return err
@@ -572,9 +584,6 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 			}
 			if done {
 				return nil
-			}
-			if err := ctx.Err(); err != nil {
-				return err
 			}
 			chunk, err := stream.ReadChunk()
 			if err != nil {
@@ -605,16 +614,13 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 // Returns (lastWrittenAt, err). err may be io.EOF for the legitimate
 // "server closed after sending a full response" case; the caller
 // decides whether to emit a mock.
-func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string) (time.Time, error) {
+func (h *HTTP) readResponseV2(stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string) (time.Time, error) {
 	var lastWr time.Time
 
 	// 1. Complete headers: the final response's, past any interim 1xx.
 	for {
 		if _, _, _, ok := messageHead(*finalResp, true); ok {
 			break
-		}
-		if err := ctx.Err(); err != nil {
-			return lastWr, err
 		}
 		chunk, err := stream.ReadChunk()
 		if err != nil {
@@ -641,9 +647,6 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		}
 		remaining := contentLength - (len(*finalResp) - bodyStart)
 		for remaining > 0 {
-			if err := ctx.Err(); err != nil {
-				return lastWr, err
-			}
 			chunk, err := stream.ReadChunk()
 			if err != nil {
 				return lastWr, err
@@ -670,9 +673,6 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 			if done {
 				return lastWr, nil
 			}
-			if err := ctx.Err(); err != nil {
-				return lastWr, err
-			}
 			chunk, err := stream.ReadChunk()
 			if err != nil {
 				return lastWr, err
@@ -688,9 +688,6 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 	// permits this for HTTP/1.0 and for responses with "Connection:
 	// close"). The loop relies on the stream eventually closing.
 	for {
-		if err := ctx.Err(); err != nil {
-			return lastWr, err
-		}
 		chunk, err := stream.ReadChunk()
 		if err != nil {
 			return lastWr, err

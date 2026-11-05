@@ -407,8 +407,8 @@ in_ubuntu() {
   local rc=0 image="$1" log="$2" script="$3"
   shift 3
   docker run --rm --network "$net" --add-host "azure.archive.ubuntu.com:$stub_ip" \
-    --add-host "thirdparty.test:$stub_ip" "$@" -v "$helper:/h/apt-install.sh:ro" "$image" \
-    timeout 300 bash -c "exec 2>&1; $script" >"$log" || rc=$?
+    --add-host "thirdparty.test:$stub_ip" "$@" -v "$helper:/h/apt-install.sh:ro" -v "$here/hang_guard.sh:/h/hang_guard.sh:ro" "$image" \
+    bash /h/hang_guard.sh 300 bash -c "exec 2>&1; $script" >"$log" || rc=$?
   echo "$rc"
 }
 
@@ -591,7 +591,7 @@ rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
   fault slow-debs "$case-control"
   opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120"
   rc=0
-  timeout 45 apt-get $opts -y install jq || rc=$?
+  bash /h/hang_guard.sh 45 apt-get $opts -y install jq || rc=$?
   # apt alone leaves its last line as it was when it was stopped.
   echo
   echo "exit $rc"
@@ -600,7 +600,7 @@ rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
 [ "$rc" = 0 ] || fail "ubuntu:22.04: the slow-mirror case exited $rc"
 section "$log" control >"$work/slow-control"
 deb='jammy(-updates|-security)?/main amd64 (jq|libjq1|libonig5) '
-expect "$work/slow-control" "control: apt alone runs into the time limit" '^exit 124$'
+expect "$work/slow-control" "control: apt alone runs into the time limit" 'hang guard: still running after 45s'
 expect "$work/slow-control" "control: having asked azure" "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu $deb"
 absent "$work/slow-control" "control: with no failed fetch to act on" '^(Ign|Err):'
 absent "$work/slow-control" "control: and no other mirror in its output" '^Get:[0-9]+ http://(archive|security)\.ubuntu\.com/'
@@ -805,12 +805,12 @@ rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
   fault slow-lists "$case-control"
   opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120"
   rc=0
-  timeout 45 apt-get $opts -y update || rc=$?
+  bash /h/hang_guard.sh 45 apt-get $opts -y update || rc=$?
   echo
   echo "exit $rc"'"$past_slow_lists" "${fallbacks_to_stub[@]}")"
 [ "$rc" = 0 ] || fail "ubuntu:22.04: the slow-lists case exited $rc"
 section "$log" control >"$work/lists-control"
-expect "$work/lists-control" "control: apt alone runs into the time limit on the update" '^exit 124$'
+expect "$work/lists-control" "control: apt alone runs into the time limit on the update" 'hang guard: still running after 45s'
 expect "$work/lists-control" "control: having asked azure for the lists" \
   "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu jammy InRelease"
 absent "$work/lists-control" "control: with no failed fetch to act on" '^(Ign|Err):'
@@ -1480,7 +1480,7 @@ for image in ubuntu:22.04 ubuntu:24.04; do
   log="$work/rewrite-${image#ubuntu:}.log"
   started=$failures
   echo "--- rewrite ($image, no network, apt-get shimmed)"
-  docker run --rm --network none -v "$helper:/h/apt-install.sh:ro" "$image" \
+  docker run --rm --network none -v "$helper:/h/apt-install.sh:ro" -v "$here/hang_guard.sh:/h/hang_guard.sh:ro" "$image" \
     bash -c "exec 2>&1; $rewrite_script" >"$log" || fail "$image: rewrite case exited $?"
   if diff -u "$work/rewrite.want" <(sed -n '/^--- sources.list$/,/^--- end$/p' "$log"); then
     echo "ok: $image: exactly the archive and security URIs are rewritten, and apt reads exactly the Ubuntu entries"

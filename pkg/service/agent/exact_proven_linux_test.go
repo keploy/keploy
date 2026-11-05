@@ -90,7 +90,7 @@ func (p *servingProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, e
 }
 
 // noteMiss files a miss the matcher reported, as the proxy does
-// (sendMockNotFoundError, GetMockErrors): by the view served when it is
+// (sendMockNotFoundErrorFrom, GetMockErrors): by the view served when it is
 // filed, an extra call as its matcher found it, with the fields its report
 // says differ, and stamped with when its report was built.
 func (p *servingProxy) noteMiss(err error) {

@@ -428,6 +428,128 @@ type ExactConsumedReader interface {
 	ConsumedTestMocks() []*models.Mock
 }
 
+// RepeatReadAnswerer is an optional MockMemDb extension of a store that
+// serves each test its own mocks exactly (ExactConsumedReader). A call one
+// more than the open test recorded misses (models.MissExtraCall), except a
+// repeated read its mapping names (models.TestModeInfo.RepeatRead): the test
+// recorded that read at least twice, every time with one answer.
+// AnswerRepeatRead is given the open test's answered recordings the call
+// matches, as the matcher judges it. It answers the call again
+// (RepeatReadAnswer) when every one of them is a recording of one repeated
+// read of the test, every recording of that read has answered, and the read
+// has not been answered once more in this test yet. It answers each repeated
+// read at most once more per test; ok is false otherwise.
+type RepeatReadAnswerer interface {
+	AnswerRepeatRead(matched []*models.Mock) (answer RepeatReadAnswer, ok bool)
+}
+
+// RepeatReadAnswer is a repeated read answered once more than its test
+// recorded it (RepeatReadAnswerer), as the answer's log line names it: the
+// recording it is answered with, the ID of the test, and how many times the
+// test recorded the read.
+type RepeatReadAnswer struct {
+	Mock     *models.Mock
+	Test     string
+	Recorded int
+}
+
+// AnswerRepeatRead is db's answer to a call one more than the open test
+// recorded (RepeatReadAnswerer); ok is false from a store that has none.
+func AnswerRepeatRead(db MockMemDb, matched []*models.Mock) (RepeatReadAnswer, bool) {
+	r, ok := db.(RepeatReadAnswerer)
+	if !ok || len(matched) == 0 {
+		return RepeatReadAnswer{}, false
+	}
+	return r.AnswerRepeatRead(matched)
+}
+
+// CallViewTeller is an optional capability of a store HoldToRound returned
+// under exact serving. CallViewMoved reports whether the view the store reads
+// its call in may not be the one it read it in before: true when the call
+// reads the view in force (one decided in the test the store opens next,
+// CallRound.TrackerAhead, or one whose consume the view in force refused)
+// and that view is not the one the call was read in (its mark's, or the one
+// in force as it was held). A call that still reads the view it was read in
+// reads there only, and is not moved. A parser that joins two reads of one
+// call, as a miss report that hides the live call by the places its pool's
+// recordings redacted and those of the test's answered ones
+// (ExactConsumedReader) does, asks after its last read and, on true, cannot
+// tell the two reads were of one view: such a report redacts the call whole.
+// Every MockMemDb wrapper that forwards ExactConsumedReader must forward it.
+type CallViewTeller interface {
+	CallViewMoved() bool
+}
+
+// CallViewDiagnoser is an optional capability of a store HoldToRound
+// returned under exact serving. DiagnoseInCallView returns the store a
+// parser reads its call's miss through: for a call marked from a round
+// snapshot (record's full round), which reads in the view in force, one
+// that reads only in the view the snapshot read, and nothing once a test's
+// begin or end replaced it, so the miss names, and diffs the call against,
+// no recording of another test's view or the pool's. A held store is one
+// call's, and may be told in place. Every MockMemDb wrapper that forwards
+// RoundHolder must forward it.
+type CallViewDiagnoser interface {
+	DiagnoseInCallView() MockMemDb
+}
+
+// DiagnoseInCallView is db's CallViewDiagnoser answer: db itself for a store
+// that has none.
+func DiagnoseInCallView(db MockMemDb) MockMemDb {
+	if d, ok := db.(CallViewDiagnoser); ok {
+		return d.DiagnoseInCallView()
+	}
+	return db
+}
+
+// CallViewGoneTeller is an optional capability of the store
+// DiagnoseInCallView returned. CallViewGoneWhy says why a call's miss names
+// no recording once a test's begin or end replaced the view the call was
+// decided in (a call marked from a round snapshot, whose miss that store
+// then reads nothing for): the test the replay ended or began. "" while
+// that view is in force, and for any other call. Every MockMemDb wrapper
+// that forwards CallViewDiagnoser must forward it.
+type CallViewGoneTeller interface {
+	CallViewGoneWhy() string
+}
+
+// CallViewGoneWhy is db's CallViewGoneTeller answer: "" for a store that
+// tells none.
+func CallViewGoneWhy(db MockMemDb) string {
+	if t, ok := db.(CallViewGoneTeller); ok {
+		return t.CallViewGoneWhy()
+	}
+	return ""
+}
+
+// CallViewMoved is db's CallViewTeller answer: false for a store that tells
+// none (one that holds no call to a view).
+func CallViewMoved(db MockMemDb) bool {
+	t, ok := db.(CallViewTeller)
+	return ok && t.CallViewMoved()
+}
+
+// ConsumedInCallView is the open test's mocks that have answered, as db, the
+// store a call is held to, lists them (ExactConsumedReader), and whether they
+// may be joined with the call's other reads: false when the call's view moved
+// (CallViewMoved, asked after the list is read, so a view installed while it
+// is read is seen), as its miss and the list may then be of two views. A
+// parser that builds a verdict or a report from both reads them here, so
+// none joins two views: on false it tells neither that the call is one more
+// than its test recorded nor that it is not, and a report redacts the call
+// whole. None, and true, for a store that lists none.
+func ConsumedInCallView(db MockMemDb) ([]*models.Mock, bool) {
+	er, ok := db.(ExactConsumedReader)
+	if !ok {
+		return nil, true
+	}
+	answered := er.ConsumedTestMocks()
+	if CallViewMoved(db) {
+		return nil, false
+	}
+	return answered, true
+}
+
 // ExactServedReader is an optional MockMemDb extension of a store that
 // serves each test its own mocks exactly (the proven switch), with a served
 // observer (the learn tracker's ServedMock). ServedInOpenTest returns, of one
@@ -593,6 +715,9 @@ type CallRound struct {
 	// ahead is whether the read found the learn tracker had begun a test
 	// the store had not opened (WithTrackerAhead).
 	ahead bool
+	// view is the store's own token of the view the read was made in
+	// (InStoreView), nil where the read kept none.
+	view any
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -664,6 +789,22 @@ func (c CallRound) WithTrackerAhead(ahead bool) CallRound {
 // TrackerAhead reports whether c's read found the learn tracker ahead of the
 // store (WithTrackerAhead).
 func (c CallRound) TrackerAhead() bool { return c.ahead }
+
+// InStoreView is c, of a read made in the view the store's token v names
+// (opaque to a parser; RoundParts.View): a store held to c's call
+// (RoundHolder) is held to that view, so every hold of the call tells it
+// moved (CallViewTeller) once another view is in force, however late the
+// hold is made and however many there are. A read that keeps no sequence
+// view (a round snapshot's, RoundSnapshot.CallRound) carries it, so a view
+// installed between the snapshot and a hold, or between two holds, is never
+// taken for the view the call was read in.
+func (c CallRound) InStoreView(v any) CallRound {
+	c.view = v
+	return c
+}
+
+// StoreView is the token InStoreView kept, nil for none.
+func (c CallRound) StoreView() any { return c.view }
 
 // ShowsWorker reports whether c's read found a test's view that showed the
 // worker scope (WithSequence, InWorkerView).

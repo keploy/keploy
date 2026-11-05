@@ -282,7 +282,7 @@ install() {
     local cmd flags=(-f)
     [ "$run_shell" = bash ] && flags=(--norc --noprofile)
     printf -v cmd '%q ' "$run_shell" "${flags[@]}" -i -c "$body" install "$src" "$@"
-    runner=(timeout 120 script -qec "$cmd" /dev/null)
+    runner=(bash "$repo/.github/workflows/test_workflow_scripts/hang_guard.sh" 120 script -qec "$cmd" /dev/null)
   else
     runner=("$run_shell" -c "$body" install "$src" "$@")
   fi

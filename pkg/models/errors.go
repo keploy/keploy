@@ -313,7 +313,9 @@ type MockMismatchReport struct {
 	// similarity): likely one another test recorded, which the replay names
 	// (UnmatchedCall.RecordedIn).
 	NotOwned bool
-	// Reason is why the call missed, when the learn step decided it
+	// Reason is why the call missed, when the learn step decided it, or
+	// MissViewReplaced when a test's begin or end, or another view served
+	// between tests, replaced its view before its miss was diagnosed
 	// (UnmatchedCall.Reason): only in record's full round.
 	Reason string
 	// Concurrent is UnmatchedCall.Concurrent: what the learn step knows of
@@ -432,6 +434,10 @@ type ParserError struct {
 	// MissOutsideTest), set by the proxy under exact serving; empty without
 	// the proven switch.
 	MissKind string
+	// Instance is the test worker whose process made the call, as the
+	// kernel stamped its connection (0: no worker): its tests alone are
+	// charged the miss.
+	Instance uint32
 	// Recorded is, for MissExtraCall, how many times the call was recorded
 	// for the test.
 	Recorded int

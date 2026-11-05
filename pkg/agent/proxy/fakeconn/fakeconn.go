@@ -146,9 +146,12 @@ type FakeConn struct {
 	closed          atomic.Bool
 	// first is the first floor DropBefore was given (guarded by mu), 0 until
 	// then: the stream's start is what was captured before it (started). In
-	// the padding after closed, so a FakeConn stays in the 288 B size class.
+	// the padding after closed.
 	first   uint32
 	closeCh chan struct{}
+	// endCh is closed (under mu) as the reader is first handed io.EOF: it has
+	// read the stream to the end its producer gave it (ReadToEnd).
+	endCh chan struct{}
 
 	deadlineMu        sync.Mutex
 	deadlineCh        chan struct{}
@@ -202,6 +205,7 @@ func newWithLogger(ch <-chan Chunk, localAddr, remoteAddr net.Addr, log logger) 
 		ch:      ch,
 		logger:  log,
 		closeCh: make(chan struct{}),
+		endCh:   make(chan struct{}),
 		local:   localAddr,
 		remote:  remoteAddr,
 	}
@@ -583,7 +587,7 @@ func (f *FakeConn) receive() (Chunk, error) {
 			select {
 			case c, ok := <-f.ch:
 				if !ok {
-					return Chunk{}, io.EOF
+					return Chunk{}, f.readEnd()
 				}
 				return c, nil
 			default:
@@ -594,7 +598,7 @@ func (f *FakeConn) receive() (Chunk, error) {
 		select {
 		case c, ok := <-f.ch:
 			if !ok {
-				return Chunk{}, io.EOF
+				return Chunk{}, f.readEnd()
 			}
 			return c, nil
 		default:
@@ -610,7 +614,7 @@ func (f *FakeConn) receive() (Chunk, error) {
 		case c, ok := <-f.ch:
 			f.waiting.Store(false)
 			if !ok {
-				return Chunk{}, io.EOF
+				return Chunk{}, f.readEnd()
 			}
 			return c, nil
 		case <-f.closeCh:
@@ -625,6 +629,29 @@ func (f *FakeConn) receive() (Chunk, error) {
 		}
 	}
 }
+
+// readEnd notes that the reader has read the stream to its end (ReadToEnd),
+// and returns the io.EOF it reads there.
+func (f *FakeConn) readEnd() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	select {
+	case <-f.endCh:
+	default:
+		close(f.endCh)
+	}
+	return io.EOF
+}
+
+// ReadToEnd returns a channel closed once the reader has read this stream to
+// the end its producer gave it: it was handed every chunk the producer put on
+// the channel, and then io.EOF. Nothing more can reach the reader then. The
+// relay ends a stream so only once its tee has handed on every chunk it
+// captured for it (or where a hole cut the stream, which it says itself:
+// Config.EndAtHole), so a reader past it holds nothing of the capture unread.
+// A reader closed before its producer ended the stream reads ErrClosed, not
+// the end, and never gets there.
+func (f *FakeConn) ReadToEnd() <-chan struct{} { return f.endCh }
 
 // Dropped is a run of chunks the floor dropped (FakeConn.DropBefore), reported
 // once as it ends.

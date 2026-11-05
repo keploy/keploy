@@ -671,6 +671,121 @@ func TestEmitMockOnShutdownLeavesOutAndReportsAMockMarkedIncomplete(t *testing.T
 	}
 }
 
+// A mock EmitMockOnShutdown hands to a session's channel that is full is left
+// out with its reason, counted and spanned once, its pending work cleared, and
+// never delivered. Before, the shutdown's non-blocking send dropped it with
+// nothing said. The session's ctx is cancelled, as it is at shutdown.
+// Not parallel: the WARN limit is process-wide, and this test sets its clock.
+func TestEmitMockOnShutdownLeavesOutAMockTheFullChannelCannotTake(t *testing.T) {
+	clock := time.Unix(7100, 0)
+	prev := leftOutWarns
+	leftOutWarns = &WarnLimiters{every: leftOutWarnEvery, now: func() time.Time { return clock }}
+	t.Cleanup(func() { leftOutWarns = prev })
+	core, logs := observer.New(zapcore.DebugLevel)
+	spans := &rawSpans{}
+	mgr := syncMock.New(nil)
+	mocks := make(chan *models.Mock, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := &Session{Mgr: mgr, Orphans: spans, Mocks: mocks, Logger: zap.New(core), Ctx: ctx, ClientConnID: "full-conn"}
+	cleared := 0
+	s.OnPendingCleared = func() { cleared++ }
+	at := time.Now().Add(-time.Minute)
+	first := &models.Mock{Name: "first", Kind: models.GENERIC}
+	first.Spec.ReqTimestampMock, first.Spec.ResTimestampMock = at, at.Add(time.Millisecond)
+	second := &models.Mock{Name: "second", Kind: models.GENERIC}
+	second.Spec.ReqTimestampMock, second.Spec.ResTimestampMock = at.Add(time.Second), at.Add(time.Second+3*time.Millisecond)
+	for _, m := range []*models.Mock{first, second} {
+		if err := s.EmitMockOnShutdown(m); err != nil {
+			t.Fatalf("EmitMockOnShutdown(%s) = %v, want nil", m.Name, err)
+		}
+	}
+	if len(mocks) != 1 || <-mocks != first {
+		t.Fatal("the channel does not hold the first mock alone")
+	}
+	if n := mgr.MocksLeftOut(); n != 1 {
+		t.Fatalf("the manager counts %d mock(s) left out, want the one the full channel could not take", n)
+	}
+	if len(spans.got) != 1 || !spans.got[0][0].Equal(second.Spec.ReqTimestampMock) || !spans.got[0][1].Equal(second.Spec.ResTimestampMock) {
+		t.Fatalf("Orphans got %v, want the second mock's exchange once", spans.got)
+	}
+	if cleared != 2 {
+		t.Fatalf("pending work cleared %d time(s), want once for each mock", cleared)
+	}
+	var reasons []any
+	for _, e := range logs.All() {
+		if e.Message == LeftOutWarnMsg || e.Message == LeftOutDebugMsg {
+			reasons = append(reasons, e.ContextMap()["reason"])
+		}
+	}
+	if len(reasons) != 1 || reasons[0] != LeftOutChannelFullAtStop {
+		t.Fatalf("logged left-out reasons %v, want one: %q", reasons, LeftOutChannelFullAtStop)
+	}
+}
+
+// EmitMockOutcome says whether the session left the mock out instead of
+// handing it on: for the capture's incomplete flag, on either path, and at
+// shutdown for a channel that is full. A mock handed on is not left out, nor
+// is one a session with no context sends, nor one a session with no channel
+// takes, and one refused (the context ended, not at shutdown) is neither
+// handed on nor left out. The manager counts only the mocks it says it left
+// out.
+// Not parallel: the WARN limit is process-wide.
+func TestEmitMockOutcomeSaysWhetherTheSessionLeftTheMockOut(t *testing.T) {
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, c := range []struct {
+		name       string
+		shutdown   bool
+		incomplete bool
+		room       int
+		noChannel  bool
+		ctx        context.Context
+		leftOut    bool
+		refused    bool
+	}{
+		{name: "handed on", room: 1, ctx: context.Background()},
+		{name: "handed on with no context", room: 1},
+		{name: "handed on with no context at shutdown", shutdown: true, room: 1},
+		{name: "no channel", noChannel: true, ctx: context.Background()},
+		{name: "no channel at shutdown", shutdown: true, noChannel: true, ctx: ended},
+		{name: "handed on at shutdown", shutdown: true, room: 1, ctx: ended},
+		{name: "incomplete", incomplete: true, room: 1, ctx: context.Background(), leftOut: true},
+		{name: "incomplete at shutdown", shutdown: true, incomplete: true, room: 1, ctx: ended, leftOut: true},
+		{name: "channel full at shutdown", shutdown: true, ctx: ended, leftOut: true},
+		{name: "refused", ctx: ended, refused: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mgr := syncMock.New(nil)
+			s := &Session{Mgr: mgr, Orphans: &rawSpans{}, Mocks: make(chan *models.Mock, c.room), Logger: zap.NewNop(),
+				Ctx: c.ctx, ClientConnID: "outcome-conn"}
+			if c.noChannel {
+				s.Mocks = nil
+			}
+			if c.incomplete {
+				s.MarkMockIncomplete("memory_pressure")
+			}
+			at := time.Now().Add(-time.Minute)
+			m := &models.Mock{Name: "m", Kind: models.GENERIC}
+			m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(time.Millisecond)
+			leftOut, err := s.EmitMockOutcome(m, c.shutdown)
+			if leftOut != c.leftOut || (err != nil) != c.refused {
+				t.Fatalf("EmitMockOutcome = (%v, %v), want left out %v, refused %v", leftOut, err, c.leftOut, c.refused)
+			}
+			want := int64(0)
+			if c.leftOut {
+				want = 1
+			}
+			if n := mgr.MocksLeftOut(); n != want {
+				t.Fatalf("the manager counts %d mock(s) left out, want %d", n, want)
+			}
+			if handed := len(s.Mocks) == 1; handed != (!c.leftOut && !c.refused && !c.noChannel) {
+				t.Fatalf("the channel holds %d mock(s), want it only if the mock was handed on", len(s.Mocks))
+			}
+		})
+	}
+}
+
 type rawSpans struct{ got [][2]time.Time }
 
 func (r *rawSpans) Record(start, end time.Time) { r.got = append(r.got, [2]time.Time{start, end}) }

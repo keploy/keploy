@@ -426,16 +426,47 @@ func TestComposeDownProject(t *testing.T) {
 			}
 		})
 	}
-	t.Run("keploy's environment, in-process", func(t *testing.T) {
-		t.Setenv("COMPOSE_PROJECT_NAME", "real")
-		a := &App{logger: zap.NewNop(), docker: &labelDocker{}, cmd: "COMPOSE_PROJECT_NAME=x docker compose up",
-			container: "user-app", keployContainer: "keploy-v3", composeContent: []byte("services: {}\n")}
-		// The command's own assignment is what a shell reads, and the shell
-		// out is the only runner now.
-		if got := a.composeDownProject(context.Background()); got != "x" {
-			t.Fatalf("project %q; want %q", got, "x")
-		}
-	})
+	// In-process, the project is the one the library's up ran, which needs
+	// no daemon; an assignment in the command, which no shell reads there,
+	// is not it. Through the docker CLI, the shell reads the assignment.
+	// With no runner registered (every keploy build) the in-memory document's
+	// down takes the command's assignment; with one, the runner's own project
+	// or keploy's environment, as the in-process up resolved it.
+	for _, arm := range []struct {
+		name    string
+		library bool
+	}{{name: "shelled out", library: false}, {name: "in-process", library: true}} {
+		t.Run("the compose library's own, "+arm.name, func(t *testing.T) {
+			if arm.library {
+				forceComposeLibrary(t)
+			}
+			t.Setenv("COMPOSE_PROJECT_NAME", "")
+			a := &App{logger: zap.NewNop(), docker: &labelDocker{}, cmd: "COMPOSE_PROJECT_NAME=x docker compose up",
+				container: "user-app", keployContainer: "keploy-v3", composeContent: []byte("services: {}\n"), composeRunnerVal: &fakeComposeStack{}}
+			want := "x"
+			if arm.library {
+				want = "fake"
+			}
+			if got := a.composeDownProject(context.Background()); got != want {
+				t.Fatalf("project %q; want %q", got, want)
+			}
+		})
+		t.Run("keploy's environment, "+arm.name, func(t *testing.T) {
+			if arm.library {
+				forceComposeLibrary(t)
+			}
+			t.Setenv("COMPOSE_PROJECT_NAME", "real")
+			a := &App{logger: zap.NewNop(), docker: &labelDocker{}, cmd: "COMPOSE_PROJECT_NAME=x docker compose up",
+				container: "user-app", keployContainer: "keploy-v3", composeContent: []byte("services: {}\n")}
+			want := "x"
+			if arm.library {
+				want = "real"
+			}
+			if got := a.composeDownProject(context.Background()); got != want {
+				t.Fatalf("project %q; want %q", got, want)
+			}
+		})
+	}
 	// A saturated daemon never answers the app's inspect: keploy's bound on
 	// no answer (its runnable time, here shortened) ends that read, and the
 	// agent's inspect still tells the project.

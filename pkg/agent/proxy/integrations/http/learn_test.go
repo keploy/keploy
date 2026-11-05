@@ -372,7 +372,7 @@ func TestLearnMatchMissReasons(t *testing.T) {
 				t.Fatalf("served %v miss %+v err %v, want reason %s", served, miss, err, tc.reason)
 			}
 			r := &models.MockMismatchReport{NextSteps: "re-record"}
-			miss.explain(r)
+			miss.explain(r, false)
 			if r.Reason != tc.reason || !strings.HasPrefix(r.NextSteps, "keploy's learn step: ") || !strings.HasSuffix(r.NextSteps, " re-record") {
 				t.Fatalf("report %+v", r)
 			}
@@ -4549,7 +4549,7 @@ func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
 				// The miss says where the call was read and what moved, and
 				// gives no reason: nothing of the request was compared.
 				r := &models.MockMismatchReport{}
-				d.miss.explain(r)
+				d.miss.explain(r, false)
 				if r.Reason != "" || !strings.HasPrefix(r.NextSteps, movedWhy(store.where, store.moved)+": keploy learns nothing of a call in a round it was not made in") {
 					t.Fatalf("%s, %s: the miss reads reason %q, next steps %q; want no reason, and the round that moved", store.name, c.name, r.Reason, r.NextSteps)
 				}

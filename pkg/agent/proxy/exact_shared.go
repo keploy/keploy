@@ -285,6 +285,20 @@ func (m *MockManager) WhenRestaged(slot any, release func()) {
 	m.restagedMu.Unlock()
 }
 
+// Keep implements integrations.ParserKeep: the value kept for slot, made by
+// mk when slot holds none (two first calls at once may both run mk; one
+// value is kept). It is kept with the manager, and read after Close as
+// before it.
+func (m *MockManager) Keep(slot any, mk func() any) (any, bool) {
+	if v, ok := m.parserKept.Load(slot); ok {
+		return v, true
+	}
+	v, _ := m.parserKept.LoadOrStore(slot, mk())
+	return v, true
+}
+
+var _ integrations.ParserKeep = (*MockManager)(nil)
+
 // letDerivedGo runs what the parsers asked to run at a staging or Close
 // (WhenRestaged), outside the lock: called after the staging's moves, so a
 // parser that asks after the call samples the moved generation. A parser

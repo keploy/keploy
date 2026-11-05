@@ -550,7 +550,10 @@ type UnmatchedCall struct {
 	// Kind is where the call was made, under the proven switch (MissInTest,
 	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
 	// extra call, how many times the test recorded that call.
-	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	// Instance is the test worker whose process made the call (0, left
+	// out: the run of one test process, or no worker).
+	Instance uint32 `json:"instance,omitempty" yaml:"instance,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
 	// BeforeSet says, under the proven switch, that the call was made before
 	// its test set's first test began, with no test's window open: the
@@ -581,14 +584,24 @@ type UnmatchedCall struct {
 	// likely one that test recorded, such as a later exchange of a connection
 	// it opened, whose handshake was recorded there.
 	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// OrderDependent says, under the proven switch, a test of one of a
+	// run's parallel test workers made the call RecordedIn's test recorded:
+	// a call a worker makes once (a token fetch, a pooled connection's
+	// handshake) lands in whichever of its tests it runs first, and the
+	// workers take tests in another order each run, so the call is no one
+	// test's. The test fails on it, named, as it fails on any miss: keploy
+	// never answers it with the other test's recording.
+	OrderDependent bool `json:"order_dependent,omitempty" yaml:"order_dependent,omitempty"`
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
-	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
-	// record's full round, where the learn step runs, gives one; empty
-	// everywhere else, and for a call of that round no reason of judging's
-	// names: one keploy could not judge because its own store could not read
-	// a recorded answer back, one a parser's pairing found tied between
-	// recordings whose replies differ, or one call more than the test
-	// recorded (Kind and Recorded say so).
+	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall, or
+	// MissViewReplaced for a call whose view a test's begin or end, or another
+	// view served between tests, replaced before keploy diagnosed its miss (its
+	// next steps say which). Only record's full round, where the learn step
+	// runs, gives one; empty everywhere else, and for a call of that round no
+	// reason of judging's names: one keploy could not judge because its own
+	// store could not read a recorded answer back, one a parser's pairing found
+	// tied between recordings whose replies differ, or one call more than the
+	// test recorded (Kind and Recorded say so).
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 	// Concurrent is, under the proven switch, what keploy knows of the call
 	// when the test was recorded while other tests' requests were open
@@ -778,6 +791,18 @@ const (
 	// destination and shape.
 	MissUnmockedCall = "unmocked_call"
 )
+
+// MissViewReplaced is the reason of a miss of record's full round whose view
+// went before keploy diagnosed it (UnmatchedCall.Reason): keploy record's
+// full round decided the call in one view, a test's or the pool's between
+// tests (its learn step did, or the variable pass for a call a recording
+// that declares variables fits), and a test's begin or end, or another view
+// of the recordings served between tests, replaced that view first, so
+// keploy compared it with no recording and names none. Its next steps say
+// which test ended or began, or that another view was served. Judging
+// counts it as a miss (an unmocked call), and nothing of it moves a
+// recording.
+const MissViewReplaced = "view_replaced"
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it
 // served and the outgoing calls that matched none of them -- what

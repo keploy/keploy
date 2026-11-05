@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"go.keploy.io/server/v3/pkg"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -284,12 +285,12 @@ func readBootFile(path string) func(context.Context) (utils.BootProgress, bool) 
 }
 
 // readContainerBoot reads the start's progress the agent in container c
-// reports (kdocker.AgentBootProgressFile), through the engine's `cp`, as its
-// teardown's is read (readContainerProgress). A `cp` out of it notes, on c,
+// reports (kdocker.AgentBootProgressFile), copied out of it through the
+// engine's API, or its `cp` (containerLook). A copy out of it notes, on c,
 // that it is there.
-func readContainerBoot(cli *engineCLI, c *namedContainer) func(context.Context) (utils.BootProgress, bool) {
+func readContainerBoot(look *containerLook, c *namedContainer) func(context.Context) (utils.BootProgress, bool) {
 	return func(ctx context.Context) (utils.BootProgress, bool) {
-		out, err := cli.stdout(ctx, "cp", c.name+":"+kdocker.AgentBootProgressFile, "-")
+		out, err := look.copyOut(ctx, c.name, kdocker.AgentBootProgressFile)
 		if err != nil {
 			return utils.BootProgress{}, false
 		}
@@ -307,15 +308,16 @@ func readContainerBoot(cli *engineCLI, c *namedContainer) func(context.Context) 
 // is running. False while it is still being created or started, while it is
 // paused (its processes frozen: the engine says Running of a paused one too),
 // restarting, or once it has exited, and when it cannot be told. An inspect
-// the engine answers notes, on c, that it is there.
+// the engine answers (through its API, or its CLI: containerLook) notes, on
+// c, that it is there.
 //
 // A look the engine does not answer (an error, other than the container not
 // being there) is no answer: it keeps what the last answer said, so that a
 // daemon that errs now and then does not reset the judge's bounds look by
 // look.
-func containerRunning(cli *engineCLI, c *namedContainer) func(context.Context) bool {
+func containerRunning(look *containerLook, c *namedContainer) func(context.Context) bool {
 	return runningByStatus(func(ctx context.Context) ([]byte, error) {
-		out, err := cli.stdout(ctx, "inspect", "-f", "{{.State.Status}}", c.name)
+		out, err := look.inspect(ctx, c.name, false)
 		if err == nil {
 			c.know()
 		}
@@ -339,11 +341,14 @@ func runningByStatus(inspect func(context.Context) ([]byte, error)) func(context
 	}
 }
 
-// engineSaysGone reports whether the engine's CLI answered a question about
-// a container (out, err) with its not being there: "No such container" or
-// "No such object", as Docker and Podman say it, in either case, on stderr
-// (which an *exec.ExitError carries) or on stdout.
+// engineSaysGone reports whether the engine answered a question about a
+// container (out, err) with its not being there: its API's not-found, or its
+// CLI's "No such container" or "No such object", as Docker and Podman say it,
+// in either case, on stderr (which an *exec.ExitError carries) or on stdout.
 func engineSaysGone(out []byte, err error) bool {
+	if err != nil && cerrdefs.IsNotFound(err) {
+		return true
+	}
 	said := string(out)
 	if err != nil {
 		said += "\n" + err.Error()
@@ -559,9 +564,9 @@ func (a *AgentClient) containerNamed(name string) *namedContainer {
 // serve is over. One being removed is gone. One that runs has not ended.
 // What it knows of c, and what it notes, is c's: the entry of the Setup that
 // named it.
-func containerExited(cli *engineCLI, c *namedContainer) func(context.Context) (int, bool) {
+func containerExited(look *containerLook, c *namedContainer) func(context.Context) (int, bool) {
 	return func(ctx context.Context) (int, bool) {
-		out, err := cli.stdout(ctx, "inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", c.name)
+		out, err := look.inspect(ctx, c.name, true)
 		if err != nil {
 			if engineSaysGone(out, err) {
 				// Known first: a container keploy saw, which the run's
@@ -587,7 +592,7 @@ func containerExited(cli *engineCLI, c *namedContainer) func(context.Context) (i
 			}
 		}
 		if len(f) >= 1 && f[0] != "running" && c.runOver() {
-			cli.logger.Debug("the run of the application is over, and the keploy agent's container is there, not running: the release has no run left to release",
+			look.cli.logger.Debug("the run of the application is over, and the keploy agent's container is there, not running: the release has no run left to release",
 				zap.String("container", c.name), zap.String("status", f[0]))
 			return containerLeftNotRunning, true
 		}
@@ -596,17 +601,18 @@ func containerExited(cli *engineCLI, c *namedContainer) func(context.Context) (i
 }
 
 // containerEnd is how keploy asks whether the agent's container c has ended
-// (containerExited). A variable for tests.
-var containerEnd = func(logger *zap.Logger, c *namedContainer) func(context.Context) (int, bool) {
-	return containerExited(newEngineCLI(logger), c)
+// (containerExited), through the engine's API api (nil: its CLI alone). A
+// variable for tests.
+var containerEnd = func(logger *zap.Logger, api containerAPI, c *namedContainer) func(context.Context) (int, bool) {
+	return containerExited(newContainerLook(logger, api), c)
 }
 
 // containerBootLook is how keploy looks at the start of the agent in container
-// c: its report, read out of the container, and whether the engine runs it.
-// A variable for tests.
-var containerBootLook = func(logger *zap.Logger, c *namedContainer) (read func(context.Context) (utils.BootProgress, bool), running func(context.Context) bool) {
-	cli := newEngineCLI(logger)
-	return readContainerBoot(cli, c), containerRunning(cli, c)
+// c: its report, read out of the container, and whether the engine runs it,
+// through the engine's API api (nil: its CLI alone). A variable for tests.
+var containerBootLook = func(logger *zap.Logger, api containerAPI, c *namedContainer) (read func(context.Context) (utils.BootProgress, bool), running func(context.Context) bool) {
+	look := newContainerLook(logger, api)
+	return readContainerBoot(look, c), containerRunning(look, c)
 }
 
 // alwaysRunning is a native agent's: its process runs once it has started.
@@ -951,10 +957,17 @@ func startWaitNext(cur bootLookResult, inContainer bool, silence time.Duration) 
 // by its name only, which another client's Setup may have drawn too: what its
 // looks see is noted on an entry of its own, never on a client's.
 func WatchContainerAgentStart(ctx context.Context, logger *zap.Logger, name string) <-chan error {
-	read, running := containerBootLook(logger, &namedContainer{name: name})
-	errs, _ := startErrors(ctx, watchStart(ctx, logger, read, running, nil, true, true), func(j startJudgment) error {
+	api, closeAPI := envContainerAPI(logger)
+	read, running := containerBootLook(logger, api, &namedContainer{name: name})
+	errs, over := startErrors(ctx, watchStart(ctx, logger, read, running, nil, true, true), func(j startJudgment) error {
 		return startFailure(j.p.ExitCode, j.why)
 	})
+	// The looks read through api until the watch is over, and its look
+	// with it (watchStart): its client is closed then.
+	go func() {
+		<-over
+		closeAPI()
+	}()
 	return errs
 }
 
@@ -1030,9 +1043,9 @@ func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) (errs <-ch
 	running := alwaysRunning
 	switch {
 	case container != nil:
-		read, running = containerBootLook(a.logger, container)
+		read, running = containerBootLook(a.logger, a.containerAPI(), container)
 		if endOnExit {
-			ended = containerEnd(a.logger, container)
+			ended = containerEnd(a.logger, a.containerAPI(), container)
 		}
 	case run != nil:
 		read = readBootFile(run.bootReport)

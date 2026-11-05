@@ -1206,36 +1206,15 @@ func CloneGlobalNoise(src config.GlobalNoise) config.GlobalNoise {
 }
 
 // PrepareMockNoiseConfig builds the noise configuration handed to the proxy
-// integrations (OutgoingOptions.NoiseConfig) for mock matching. It carries
-// the "header" noise (HTTP outgoing header matching) AND the "body" noise:
-// parsers that compare outgoing payloads — e.g. the Pulsar SEND payload
-// matcher — strip these body-noise field names so non-deterministic fields
-// (emit timestamps, generated event ids) don't false-reject a replay.
+// integrations (OutgoingOptions.NoiseConfig) for mock matching: the global
+// noise joined with the test set's entry, cut to the buckets the agent's mock
+// matchers read (models.MockMatchingNoise: header, body, requestbody, url).
 func PrepareMockNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
 	noiseConfig := CloneGlobalNoise(globalNoise)
 	if tsNoise, ok := testSetNoise[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
 	}
-
-	// Extract the noise buckets the proxy consumes for mock matching:
-	//   - "header": HTTP outgoing header-key matching.
-	//   - "body":   outgoing-payload matchers (e.g. the Pulsar SEND matcher in
-	//               the integrations repo) strip these field names.
-	//   - "requestbody": DEDICATED HTTP request-body matching noise — kept
-	//               separate from "body" so response-assertion noise can't
-	//               silently soften request matching (see http/decode.go).
-	mockNoiseConfig := map[string]map[string][]string{}
-	if headerNoise, ok := noiseConfig["header"]; ok {
-		mockNoiseConfig["header"] = headerNoise
-	}
-	if bodyNoise, ok := noiseConfig["body"]; ok {
-		mockNoiseConfig["body"] = bodyNoise
-	}
-	if reqBodyNoise, ok := noiseConfig["requestbody"]; ok {
-		mockNoiseConfig["requestbody"] = reqBodyNoise
-	}
-
-	return mockNoiseConfig
+	return models.MockMatchingNoise(models.GlobalNoise(noiseConfig))
 }
 
 // PrepareHeaderNoiseConfig is retained for backward compatibility with

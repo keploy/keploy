@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # End-to-end guard for parallel test workers in `keploy mock`, both ways:
 #
-# Under the proven switch (KEPLOY_PROVEN=1), a REFUSAL check until release 2.
-# The first release runs one test process per keploy run, with one test open
-# at a time (release1-cut §2.1); parallel workers arrive in release 2. So, in
-# `keploy mock record`, over scope protocol v1:
+# Under the proven switch (KEPLOY_PROVEN=1), a REFUSAL check: test processes
+# that declare no worker count run one per keploy run, each with one test
+# open at a time. So, in `keploy mock record`, over scope protocol v1:
 #   - a test process that claims the run while another live one holds it is
 #     refused: 422 one_test_process_at_a_time;
 #   - a test that begins while another test of the same process is open is
 #     refused: 422 one_test_at_a_time;
 # each with a message that says what ran at once, and a remedy that names
-# running one at a time and the later release. Each refused process fails, as
+# running one at a time, and no later release. Each refused process fails, as
 # an integration must on any non-2xx answer, so the run does not pass: keploy
 # exits non-zero and keeps no recording. A control run, one process running
 # the same two tests one after the other, passes and records both.
@@ -49,6 +48,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 # This lane's directory: the shared harness (keploy_v1.py).
@@ -399,8 +400,9 @@ line_of() {
 
 if half on; then
 echo "== 1. under the proven switch: one test process, two tests one after the other, passes =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name p-proven --disable-tele 2>&1 | tee rec-proven.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name p-proven --disable-tele 2>&1 | tee rec-proven.log
 RC=${PIPESTATUS[0]}
+verify_ran 1 rec-proven.log || FAIL=1
 [ "$RC" -eq 0 ] || fail "under the switch, one test process running two tests in turn should record (exit 0), got $RC"
 [ "$(line_of rec-proven.log CLAIM)" = v1 ] || fail "under the switch the agent did not take the claim on scope protocol v1 (claim: '$(line_of rec-proven.log CLAIM)')"
 grep -q "RECORD_OK" rec-proven.log || fail "the record driver did not complete under the switch"
@@ -422,8 +424,9 @@ if sorted(got) != ["rec.py::t1", "rec.py::t2"] or any(len(v) != 1 for v in got.v
 PY
 
 echo "== 2. under the proven switch: two test processes, and two tests at once, are refused =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 refuse.py $PORT" --name p-refused --disable-tele 2>&1 | tee refused.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 refuse.py $PORT" --name p-refused --disable-tele 2>&1 | tee refused.log
 RC=${PIPESTATUS[0]}
+verify_ran 1 refused.log || FAIL=1
 A_PID=$(line_of refused.log A_PID)
 B_PID=$(line_of refused.log B_PID)
 # Two tests at once in one process.
@@ -433,8 +436,8 @@ line_of refused.log A_MESSAGE | grep -F "refuse.py::t2 began while refuse.py::t1
   fail "the one_test_at_a_time refusal does not say which tests ran at once: '$(line_of refused.log A_MESSAGE)'"
 line_of refused.log A_REMEDY | grep -F "run them one at a time" >/dev/null ||
   fail "the one_test_at_a_time refusal does not say to run them one at a time: '$(line_of refused.log A_REMEDY)'"
-line_of refused.log A_REMEDY | grep -F "parallel test workers arrive in a later keploy release" >/dev/null ||
-  fail "the one_test_at_a_time refusal does not say parallel workers come later: '$(line_of refused.log A_REMEDY)'"
+line_of refused.log A_REMEDY | grep -F "later" >/dev/null &&
+  fail "the one_test_at_a_time refusal promises a later release: '$(line_of refused.log A_REMEDY)'"
 grep -q "A_BEGAN_T2_WHILE_T1_WAS_OPEN" refused.log && fail "the agent opened a second test while the first was open"
 # A second test process.
 [ "$(line_of refused.log B_REFUSED)" = "422 one_test_process_at_a_time" ] ||
@@ -444,8 +447,8 @@ grep -q "A_BEGAN_T2_WHILE_T1_WAS_OPEN" refused.log && fail "the agent opened a s
   fail "the one_test_process_at_a_time refusal does not name both processes (A=$A_PID, B=$B_PID): '$(line_of refused.log B_MESSAGE)'"
 line_of refused.log B_REMEDY | grep -F "run one test process at a time" >/dev/null ||
   fail "the one_test_process_at_a_time refusal does not say to run one test process at a time: '$(line_of refused.log B_REMEDY)'"
-line_of refused.log B_REMEDY | grep -F "parallel test workers arrive in a later keploy release" >/dev/null ||
-  fail "the one_test_process_at_a_time refusal does not say parallel workers come later: '$(line_of refused.log B_REMEDY)'"
+[ "$(line_of refused.log B_REMEDY)" = "run one test process at a time (go test -p 1, pytest without -n, jest --runInBand)" ] ||
+  fail "the one_test_process_at_a_time refusal's fix is not to run one test process at a time, alone (this keploy runs one test worker): '$(line_of refused.log B_REMEDY)'"
 grep -q "B_CLAIMED_WHILE_A_HELD_THE_RUN" refused.log && fail "the agent let a second test process claim the run while the first held it"
 # The run does not pass: each process reached its end, refused, and failed.
 [ "$(line_of refused.log A_END)" = refused ] || fail "the first test process did not end refused (A_END='$(line_of refused.log A_END)'): its exit is not the refusal"
@@ -461,7 +464,7 @@ if half off; then
 echo "== 3. without the switch: record two endpoints under two pid scopes, with the suite mark and without it, and through the boot-pool app =="
 # record_off NAME [marks]: records NAME without the switch.
 record_off() {
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT ${2:-}" --name "$1" --disable-tele 2>&1 | tee "rec-$1.log"
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT ${2:-}" --name "$1" --disable-tele 2>&1 | tee "rec-$1.log"
   local rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || fail "without the switch the record of $1 should pass (exit 0), got $rc"
   case "$(line_of "rec-$1.log" CLAIM)" in
@@ -477,7 +480,7 @@ record_off p-bare
 grep -q "^suites:" keploy/p/mappings.yaml || fail "the record with the suite mark kept no suite in its mapping"
 grep -q "^suites:" keploy/p-bare/mappings.yaml && fail "the record without the suite mark kept a suite in its mapping"
 ( cd "$MOCK_DIR/boot-pool" && go build -o "$WORK/bootpool" . ) || fail "could not build the boot-pool app"
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rpool.py $PORT" --name pb --disable-tele 2>&1 | tee rec-pb.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rpool.py $PORT" --name pb --disable-tele 2>&1 | tee rec-pb.log
 [ "${PIPESTATUS[0]}" -eq 0 ] || fail "without the switch the record of the boot-pool app should pass (exit 0)"
 grep -q "RECORD_OK" rec-pb.log || fail "the boot-pool app's record driver did not complete"
 [ "$(mocks_of rec-pb.log)" = "2" ] || fail "expected 2 recorded mocks in pb, got $(mocks_of rec-pb.log)"
@@ -485,12 +488,12 @@ kill "$DP" 2>/dev/null
 wait "$DP" 2>/dev/null
 
 echo "== 4. without the switch, with the marks: two concurrent workers, both hitting /b, dependency DOWN =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 run.py $PORT" --name p --disable-tele 2>&1 | tee rep.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 run.py $PORT" --name p --disable-tele 2>&1 | tee rep.log
 grep -q "t2=SERVED:BBB" rep.log || fail "the worker scoped to t2 was NOT served /b"
 grep -q "t1=MISS"       rep.log || fail "the worker scoped to t1 was NOT isolated (it saw another test's mock)"
 
 echo "== 5. without the switch, without the marks: a test that begins with a pid is refused, and fails the run =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 bare.py $PORT" --name p-bare --disable-tele 2>&1 | tee bare.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 bare.py $PORT" --name p-bare --disable-tele 2>&1 | tee bare.log
 RC=${PIPESTATUS[0]}
 BARE_PID=$(line_of bare.log BARE_PID)
 [ "$(line_of bare.log BARE_STATUS)" = 422 ] ||
@@ -506,7 +509,7 @@ grep -qxF -- "$PIDLESS_WAY" bare-body.txt ||
 [ "$RC" -ne 0 ] || fail "a replay whose test was refused passed (keploy exited 0)"
 
 echo "== 5b. without the switch, without the marks: a harness that ignores the refusal and runs the test is served nothing, and the replay fails =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 ignore.py $PORT" --name p-bare --disable-tele 2>&1 | tee ignore.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 ignore.py $PORT" --name p-bare --disable-tele 2>&1 | tee ignore.log
 RC=${PIPESTATUS[0]}
 sed 's/\x1b\[[0-9;]*m//g' ignore.log > ignore-plain.log
 [ "$(line_of ignore.log IGN_STATUS)" = 422 ] ||
@@ -526,7 +529,7 @@ grep -qx "failedBy: begin_refused" keploy/p-bare/last-replay.yaml ||
 [ "$RC" -ne 0 ] || fail "a replay whose harness ran a test keploy refused at its begin passed (keploy exited 0, as the harness did)"
 echo "== 6. without the switch, with the marks: an app's boot connection, of no test process, while one test is open and while two are =="
 rm -f app.in app.out app2.in app2.out && mkfifo app.in app.out app2.in app2.out || fail "could not make the boot-pool apps' pipes"
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay \
   -c "bash -c './bootpool 127.0.0.1:$PORT <app.in >app.out & ./bootpool 127.0.0.1:$PORT <app2.in >app2.out & python3 shared.py; rc=\$?; wait; exit \$rc'" \
   --name pb --disable-tele 2>&1 | tee shared.log
 APP_PID=$(line_of shared.log APP_PID)

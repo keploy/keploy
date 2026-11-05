@@ -214,7 +214,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	clientKey := *clientKeyPtr
 
 	// Read HandshakeV10 from DestStream.
-	handshake, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+	handshake, err := readPacket(logger, sess.DestStream)
 	if err != nil {
 		return res, fmt.Errorf("read server greeting: %w", err)
 	}
@@ -251,7 +251,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 
 	// Read the client's first response: HandshakeResponse41 OR
 	// SSLRequest (short form).
-	clientFirst, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+	clientFirst, err := readPacket(logger, sess.ClientStream)
 	if err != nil {
 		return res, fmt.Errorf("read client handshake response: %w", err)
 	}
@@ -336,7 +336,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		clientKey = newKey
 
 		// Read post-TLS HandshakeResponse41.
-		hr41Buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+		hr41Buf, err := readPacket(logger, sess.ClientStream)
 		if err != nil {
 			return res, fmt.Errorf("read post-TLS handshake response: %w", err)
 		}
@@ -365,7 +365,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	}
 
 	// Auth decider: AuthSwitchRequest / AuthMoreData / OK / ERR.
-	authData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+	authData, err := readPacket(logger, sess.DestStream)
 	if err != nil {
 		return res, fmt.Errorf("read auth data from server: %w", err)
 	}
@@ -379,7 +379,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		pkt := authDecider.Message.(*mysql.AuthSwitchRequestPacket)
 		decodeCtx.PluginName = pkt.PluginName
 
-		switchResp, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+		switchResp, err := readPacket(logger, sess.ClientStream)
 		if err != nil {
 			return res, fmt.Errorf("read auth switch response: %w", err)
 		}
@@ -389,7 +389,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		}
 		res.req = append(res.req, mysqlUtils.ClientAuthData(switchPkt, mysql.AuthSwithResponse))
 
-		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		authData, err = readPacket(logger, sess.DestStream)
 		if err != nil {
 			return res, fmt.Errorf("read auth data after switch: %w", err)
 		}
@@ -468,7 +468,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	var firstBuf []byte
 	if err == nil {
 		res.firstCmdAt = first.ReadAt
-		firstBuf, err = mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, firstChain.take)
+		firstBuf, err = readPacketChecked(logger, sess.ClientStream, firstChain.take)
 	}
 	if err != nil {
 		return res, fmt.Errorf("post-TLS V2: read first client packet: %w", err)
@@ -698,7 +698,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 
 	// 5. Auth exchange off DestStream — reuse the same decider + AuthSwitch +
 	//    handleAuthV2 flow as handleInitialHandshakeV2.
-	authData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+	authData, err := readPacket(logger, sess.DestStream)
 	if err != nil {
 		return res, fmt.Errorf("post-TLS V2: read auth data from server: %w", err)
 	}
@@ -710,7 +710,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		res.resp = append(res.resp, mysql.Response{PacketBundle: *authDecider})
 		decodeCtx.PluginName = asr.PluginName
 
-		switchResp, sErr := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+		switchResp, sErr := readPacket(logger, sess.ClientStream)
 		if sErr != nil {
 			return res, fmt.Errorf("post-TLS V2: read auth switch response: %w", sErr)
 		}
@@ -720,7 +720,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		}
 		res.req = append(res.req, mysqlUtils.ClientAuthData(switchPkt, mysql.AuthSwithResponse))
 
-		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		authData, err = readPacket(logger, sess.DestStream)
 		if err != nil {
 			return res, fmt.Errorf("post-TLS V2: read auth data after switch: %w", err)
 		}
@@ -834,7 +834,7 @@ func handleFastAuthSuccessV2(ctx context.Context, logger *zap.Logger, sess *supe
 		req:  make([]mysql.Request, 0),
 		resp: make([]mysql.Response, 0),
 	}
-	finalResp, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+	finalResp, err := readPacket(logger, sess.DestStream)
 	if err != nil {
 		return res, fmt.Errorf("read final auth response: %w", err)
 	}
@@ -862,7 +862,7 @@ func handleFullAuthV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// The client asks for the server's public key, or, holding the key
 	// already, sends its password encrypted with it at once
 	// (mysqlUtils.IsPublicKeyRequest).
-	encPassBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+	encPassBuf, err := readPacket(logger, sess.ClientStream)
 	if err != nil {
 		return res, fmt.Errorf("read public key request or encrypted password: %w", err)
 	}
@@ -874,7 +874,7 @@ func handleFullAuthV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		res.req = append(res.req, mysql.Request{PacketBundle: *pubKeyReqPkt})
 
 		// Server sends public key.
-		pubKey, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		pubKey, err := readPacket(logger, sess.DestStream)
 		if err != nil {
 			return res, fmt.Errorf("read public key response: %w", err)
 		}
@@ -886,7 +886,7 @@ func handleFullAuthV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		res.resp = append(res.resp, mysql.Response{PacketBundle: *pubKeyPkt})
 
 		// Client sends encrypted password.
-		encPassBuf, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+		encPassBuf, err = readPacket(logger, sess.ClientStream)
 		if err != nil {
 			return res, fmt.Errorf("read encrypted password: %w", err)
 		}
@@ -898,7 +898,7 @@ func handleFullAuthV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	res.req = append(res.req, mysqlUtils.ClientAuthData(encPass, mysql.EncryptedPassword))
 
 	// Final OK/ERR from server.
-	finalBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+	finalBuf, err := readPacket(logger, sess.DestStream)
 	if err != nil {
 		return res, fmt.Errorf("read final auth response: %w", err)
 	}
@@ -916,7 +916,7 @@ func handlePlainPasswordV2(ctx context.Context, logger *zap.Logger, sess *superv
 		req:  make([]mysql.Request, 0),
 		resp: make([]mysql.Response, 0),
 	}
-	plainBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+	plainBuf, err := readPacket(logger, sess.ClientStream)
 	if err != nil {
 		return res, fmt.Errorf("read plain password: %w", err)
 	}
@@ -926,7 +926,7 @@ func handlePlainPasswordV2(ctx context.Context, logger *zap.Logger, sess *superv
 	}
 	// The password is recorded by its length only (mysqlUtils.ClientAuthData).
 	res.req = append(res.req, mysqlUtils.ClientAuthData(plainPkt, mysql.PlainPassword))
-	finalBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+	finalBuf, err := readPacket(logger, sess.DestStream)
 	if err != nil {
 		return res, fmt.Errorf("read final auth response (plain): %w", err)
 	}
@@ -1619,10 +1619,16 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			zap.String("connID", sess.ClientConnID), zap.Int64("skippedBytes", n))
 		return nil
 	}
+	// The loop does not end on the context's end: at the recording's stop a
+	// recorder behind its capture still holds commands and answers the relay
+	// captured before it, and records every one it reads whole. Its streams
+	// end the loop (the relay ends them once it has handed on what it
+	// captured, and the supervisor's abort closes them), and its reads
+	// (readPacket, readPacketChecked) take no context, so none ends on the
+	// stop and none waits on the network. A loop that returned on the
+	// context's end lost those exchanges with nothing recording, leaving out
+	// or reporting them.
 	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		if !serverRealign {
 			lastAnswerEnd = sess.DestStream.LastReadTime()
 		}
@@ -1659,7 +1665,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// While a PREPARE is held, the server's bytes after its
 			// definitions are still its own (heldPrepare).
 			if _, err = sess.NextRequest(models.MySQL, held != nil); err == nil {
-				cmdBuf, err = mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, cs.take)
+				cmdBuf, err = readPacketChecked(logger, sess.ClientStream, cs.take)
 			}
 			respFirst, joined = cs.next, cs.joined
 			if err != nil {
@@ -2094,7 +2100,7 @@ func notAResponseHead(logger *zap.Logger, sess *supervisor.Session, command stri
 // refusing it on its header when its sequence id is not the next one (see
 // packetSeq), before waiting for the payload that header claims.
 func readResponsePacket(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, seq *packetSeq, part string) ([]byte, error) {
-	buf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.DestStream, func(header []byte) error {
+	buf, err := readPacketChecked(logger, sess.DestStream, func(header []byte) error {
 		return seq.take(header, part)
 	})
 	if err != nil {
@@ -2394,11 +2400,7 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 		},
 	}
 
-	if err := sess.EmitMock(m); err != nil {
-		if sess.Logger != nil {
-			sess.Logger.Debug("V2: emit mock failed", zap.Error(err))
-		}
-	}
+	emitV2(sess, m)
 	// Note: EmitMock takes the incomplete flag when it drops a partial
 	// mock, clearing it unless the session was retired for a hang, whose
 	// mark stays set (see supervisor.Session.EmitMock). On the healthy-
@@ -2406,6 +2408,51 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 	// NOT call MarkMockComplete here because the relay may have set
 	// the flag for memory-guard reasons we must respect.
 	_ = ctx
+}
+
+// leftOutRefusedAtStop is the reason emitV2 leaves out a mock the session
+// refused as its context ended.
+const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange read whole was handed over"
+
+// emitV2 hands the session m, the mock of an exchange read whole, whether or
+// not the session's context (Session.Ctx) has ended: EmitMock while it lasts,
+// EmitMockOnShutdown once it has ended, as at the recording's stop, where
+// EmitMock refuses every mock. A mock EmitMock refuses all the same, as the
+// context ends between the check and its own, is left out and said so
+// (leftOutRefusedAtStop), not dropped: EmitMock refuses a mock only for its
+// context's end.
+func emitV2(sess *supervisor.Session, m *models.Mock) {
+	if c := sess.Ctx; c != nil && c.Err() != nil {
+		_ = sess.EmitMockOnShutdown(m)
+		return
+	}
+	if err := sess.EmitMock(m); err != nil {
+		if sess.Logger != nil {
+			sess.Logger.Debug("V2: the session refused a mock as its context ended", zap.Error(err))
+		}
+		sess.ReportLeftOut(m, leftOutRefusedAtStop)
+	}
+}
+
+// readPacket reads one packet from one of the session's streams. It takes no
+// context: a read of a stream ends on the stream's end (io.EOF once the relay
+// has handed on what it captured, fakeconn.ErrClosed at the supervisor's
+// abort), never on the recording's stop and never on the network, so at the
+// stop the recorder reads what its capture holds. The packet helpers it wraps
+// (mysqlUtils.ReadPacketBuffer and ReadPacketBufferChecked) return a
+// context's error before every read, and a recording that handed them the
+// recording's context lost what the relay captured before the stop. Every
+// read of a session's stream goes through readPacket or readPacketChecked,
+// so no read can be handed that context.
+func readPacket(logger *zap.Logger, stream *fakeconn.FakeConn) ([]byte, error) {
+	return mysqlUtils.ReadPacketBuffer(context.Background(), logger, stream)
+}
+
+// readPacketChecked is readPacket for a packet read as the protocol frames it
+// (mysqlUtils.ReadPacketBufferChecked): check sees every header before its
+// payload is read.
+func readPacketChecked(logger *zap.Logger, stream *fakeconn.FakeConn, check func(header []byte) error) ([]byte, error) {
+	return mysqlUtils.ReadPacketBufferChecked(context.Background(), logger, stream, check)
 }
 
 // sentinelConn is a zero-behaviour net.Conn used only as a map key in

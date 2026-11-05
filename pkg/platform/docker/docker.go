@@ -893,7 +893,10 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		//
 		// It dates from the agent/client split, where it was introduced as a
 		// copy of the agent port's `%d:%d` line; the agent port has since been
-		// narrowed and this one had not been.
+		// narrowed and this one had not been. An agent that finds this port
+		// taken in its namespace (by Docker's embedded DNS resolver) moves its
+		// proxy to a free one (agent.letProxyPortsMove), and this publish
+		// then names a port the proxy does not listen on.
 		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.ProxyPort, opts.ProxyPort))
 	}
 

@@ -29,6 +29,12 @@
 #      its mock is incomplete and is dropped — only mock-0 (call-1)
 #      lands on disk.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 # Explicit set +e: even when this script is sourced from a workflow
 # step that has -e enabled by default (GitHub Actions does this for
@@ -97,7 +103,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 echo "=== run keploy record + app.py (call-1, sleep 8s, call-2) ==="
-sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record \
     -c "python3 app.py 127.0.0.1 9090 8" \
     > record_logs.txt 2>&1
 record_status=$?

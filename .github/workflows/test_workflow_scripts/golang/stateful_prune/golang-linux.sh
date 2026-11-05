@@ -25,6 +25,13 @@
 # recording's stated lifetimes, so it states none whatever the recorder (as
 # one made before lifetimes were stated); WORK (default: a new temporary
 # directory).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -111,7 +118,7 @@ run_test() {
     local log="$1" before
     shift
     before="$(newest_run)"
-    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$WORK/app tick" --delay 1 --health-path /healthz --api-timeout 30 \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "$WORK/app tick" --delay 1 --health-path /healthz --api-timeout 30 \
         "$@" --generateGithubActions=false --disable-tele >"$log" 2>&1 </dev/null
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
@@ -124,7 +131,7 @@ run_test() {
 "$WORK/app" counter >counter.log 2>&1 &
 DEP_PID=$!
 wait_listen "$DEP" "$DEP_PID" || { echo "::error::the counter did not start"; exit 1; }
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$WORK/app tick" --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$WORK/app tick" --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
 for i in 1 2 3 4 5 6 7 8; do

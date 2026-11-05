@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
@@ -103,9 +104,32 @@ type origins struct {
 
 // connOrigin is one connection's process, named once, at its first stamp.
 type connOrigin struct {
-	pid   uint32
-	name  procName
-	named bool
+	pid uint32
+	// instance is the keploy instance (a test worker's) the kernel stamped
+	// the connection with (NoteOriginIn): 0 for none.
+	instance uint32
+	// endedAt is when the worker of instance ended (InstanceEnded) while
+	// the connection was noted; zero while it lives. bornEnded: it had
+	// ended, or was never live, when the connection was noted, so every
+	// call on it is an ended worker's.
+	endedAt   time.Time
+	bornEnded bool
+	name      procName
+	named     bool
+}
+
+// liveAt reports whether a call whose request keploy read at at, on c, was
+// made while c's worker was live: the worker had not ended when c was
+// noted, nor by at. A call read at the instant it ended, or with no time,
+// is not (fail closed: charged as one from no live worker).
+func (c *connOrigin) liveAt(at time.Time) bool {
+	switch {
+	case c.bornEnded:
+		return false
+	case c.endedAt.IsZero():
+		return true
+	}
+	return !at.IsZero() && at.Before(c.endedAt)
 }
 
 // procName is a process's comm and argv[0]; ok is false when it could not
@@ -132,6 +156,13 @@ func (r *Registry) SetLogger(l *zap.Logger) {
 // A connection ID noted again while it is open is the later connection's;
 // only its last ForgetOrigin closes it.
 func (r *Registry) NoteOrigin(conn string, pid uint32) {
+	r.NoteOriginIn(conn, pid, 0)
+}
+
+// NoteOriginIn is NoteOrigin for a connection the kernel stamped with the
+// keploy instance its process was in (agent.NetworkAddress.Instance; 0 for
+// none), which each mock it records carries (StampInstance).
+func (r *Registry) NoteOriginIn(conn string, pid, instance uint32) {
 	if conn == "" || pid == 0 {
 		return
 	}
@@ -142,8 +173,10 @@ func (r *Registry) NoteOrigin(conn string, pid uint32) {
 		o.conns, o.opened = map[string]*connOrigin{}, map[string]int{}
 	}
 	cur, known := o.conns[conn]
-	if !known || cur.pid != pid {
-		o.conns[conn] = &connOrigin{pid: pid}
+	if !known || cur.pid != pid || cur.instance != instance {
+		// Under o.mu, as InstanceEnded marks a worker's connections: one
+		// noted after its worker ended is born ended.
+		o.conns[conn] = &connOrigin{pid: pid, instance: instance, bornEnded: r.InstanceGone(instance)}
 	}
 	o.opened[conn]++
 	// Noted afresh: no longer among the closed (a later close puts it
@@ -203,6 +236,36 @@ func (r *Registry) StampOrigin(m *models.Mock) {
 		o.Clock = m.Origin.Clock
 	}
 	m.Origin = o
+}
+
+// StampInstance gives m, a recorded mock, the keploy instance its
+// connection was stamped with (NoteOriginIn), which record charges it by
+// (models.Mock.Instance). One whose request keploy read after its worker
+// ended (connOrigin.liveAt: by the order of the read, m's
+// ReqTimestampMock, and the end, never by when its parser hands it over) is
+// no live worker's: m gets it as its EndedInstance and no instance, so
+// record charges it as a call from a process in no worker. A mock that
+// carries either already, or whose connection is not known, is left as it
+// is.
+func (r *Registry) StampInstance(m *models.Mock) {
+	if m == nil || m.Instance != 0 || m.EndedInstance != 0 {
+		return
+	}
+	id := m.ConnectionID
+	if id == "" && m.Spec.Metadata != nil {
+		id = m.Spec.Metadata["connID"]
+	}
+	o := &r.origin
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	c := o.conns[id]
+	switch {
+	case c == nil:
+	case c.liveAt(m.Spec.ReqTimestampMock):
+		m.Instance = c.instance
+	default:
+		m.EndedInstance = c.instance
+	}
 }
 
 // origin is the origin a mock or a call from n's process names it by: its

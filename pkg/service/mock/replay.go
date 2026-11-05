@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/ids"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
@@ -269,10 +270,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// 3. Put the proxy in mock-serving mode with the miss policy and
 	// keploy.yml's matching settings, as keploy test's replay hands them:
 	// test.globalNoise's global entries with the set's own test-sets entry
-	// joined in (replay.PrepareMockNoiseConfig: its header, body and
-	// requestbody buckets), so a header or field declared noise there is not
-	// compared, nor a declared header required to be present, when a call is
-	// matched to its mock;
+	// joined in (replay.PrepareMockNoiseConfig: its header, body,
+	// requestbody and url buckets, models.MockMatchingNoise), so a header,
+	// field or url part declared noise there is not compared, nor a declared
+	// header required to be present, when a call is matched to its mock;
 	// test.disableAutoHeaderNoise; and test.mockNoiseDetection and
 	// test.mockNoiseStrict. keploy mock record's judging rounds are runs of
 	// this replay and take them the same way.
@@ -294,8 +295,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 		DisableStatefulMocks:      m.statefulMocksDisabled(),
 		DisableMockCorrelation:    m.config.Test.DisableMockCorrelation,
-		NoiseConfig:               replay.PrepareMockNoiseConfig(m.config.Test.GlobalNoise.Global, m.config.Test.GlobalNoise.Testsets, name),
-		DisableAutoHeaderNoise:    m.config.Test.DisableAutoHeaderNoise,
+		NoiseConfig:               m.matchNoise(name).NoiseConfig,
+		DisableAutoHeaderNoise:    m.matchNoise(name).DisableAutoHeaderNoise,
 		MockNoiseDetection:        m.config.Test.NoiseDetection(),
 		MockNoiseStrict:           m.config.Test.NoiseStrict(),
 		Learn:                     m.learning(),
@@ -1304,6 +1305,18 @@ func recordedGivens(mp *models.Mapping) map[string][]models.GivenValue {
 	return out
 }
 
+// matchNoise is the noise the agent matches mock set name's calls with, as
+// the replay hands it (MockOutgoing): test.globalNoise's global entries with
+// the set's own test-sets entry joined in (replay.PrepareMockNoiseConfig)
+// and test.disableAutoHeaderNoise. A test's repeated reads are proved under
+// the same (httpint.NewRepeatReadNoise).
+func (m *mockService) matchNoise(name string) models.OutgoingOptions {
+	return models.OutgoingOptions{
+		NoiseConfig:            replay.PrepareMockNoiseConfig(m.config.Test.GlobalNoise.Global, m.config.Test.GlobalNoise.Testsets, name),
+		DisableAutoHeaderNoise: m.config.Test.DisableAutoHeaderNoise,
+	}
+}
+
 // pushProvenTable hands the agent, under the proven switch, what each test
 // owns and each key's pool slice (design v14 §5.2): the one view the agent
 // serves a replay from. A test owns exactly the mocks its mapping lists (the
@@ -1317,7 +1330,8 @@ func recordedGivens(mp *models.Mapping) map[string][]models.GivenValue {
 // read, or that names a mock the recording does not have, refuses, and so
 // does an agent that refuses the table: nothing is served from a whole pool
 // instead. The values each test gave when it was recorded go in the same
-// request.
+// request, and so do the repeated reads the registered namer names
+// (namedRepeatReads).
 func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
@@ -1373,11 +1387,12 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
 	worker := workerSlices(mp, pool)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp)); err != nil {
+	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
+	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp), repeats); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.Int("tests with a repeated read", len(repeats)), zap.String("mock-set", name))
 	return nil
 }
 
@@ -2402,11 +2417,22 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// Under the proven switch a miss whose closest recording another test
 	// owns names that test, as keploy test's replay does (markRecordedIn):
 	// judging lists it as the root of the test's entry.
-	if named := withRecordedIn(counts.tests, m.mockOwners); len(named) > 0 {
+	named, orderDependent := withRecordedIn(counts.tests, m.mockOwners, detail.windows)
+	if len(named) > 0 {
 		m.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under evidence.misses.recorded_in in "+TestsReceiptFile,
 			zap.String("mock-set", m.setName()),
 			zap.Strings("calls", named[:min(len(named), 20)]),
 			zap.String("next_step", "record the set again with keploy mock record so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
+	}
+	// A test of a parallel test worker that made a call another test
+	// recorded fails as order-dependent: which of a worker's tests makes a
+	// call the worker makes once depends on the order the framework hands
+	// it tests, which changes from run to run.
+	if len(orderDependent) > 0 {
+		m.logger.Warn("tests of parallel test workers made a call another test recorded, and each fails as order-dependent: a call a worker makes once (a token fetch, a pooled connection's handshake) lands in whichever of its tests it runs first, and the framework hands the workers their tests in another order each run (KEPLOY_PROVEN=1); each is named under evidence.misses (order_dependent, recorded_in) in "+TestsReceiptFile,
+			zap.String("mock-set", m.setName()),
+			zap.Strings("calls", orderDependent[:min(len(orderDependent), 20)]),
+			zap.String("next_step", "make the call once in each worker before its tests (a worker-scoped fixture, or beforeAll) and record the set again, or record and replay with one worker"))
 	}
 	if provenswitch.On() {
 		// When each test began serves the proven flow's reading of a cut
@@ -2463,7 +2489,10 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	}
 	if miss.Reason != "" {
 		// Why it missed, in judging's words (record's full round): the
-		// next step then is the learn step's own reason.
+		// next step then is the learn step's own reason; for view_replaced
+		// (models.MissViewReplaced) it ends with the line that says which
+		// test ended or began, or that another view was served between
+		// tests.
 		fields = append(fields, zap.String("reason", miss.Reason))
 	}
 	logger.Warn(msg, append(fields, zap.String("next_step", next))...)
@@ -2555,12 +2584,21 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 // withRecordedIn names, on each miss of tests' evidence that is a recording
 // its test does not own (NotOwned, ClosestMock), the other test that owns it
 // (owners: models.MockOwners of the table the replay pushed), as keploy
-// test's replay does (models.UnmatchedCall.NameRecordedIn). The evidence is
-// withEvidence's own copy, never the windows'. It returns
-// "test: call (closest mock, recorded in test)" for each it named. With the
-// switch off owners is nil and no miss is NotOwned: nothing changes.
-func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
-	var named []string
+// test's replay does (models.UnmatchedCall.NameRecordedIn). A test a
+// parallel test worker ran (its window's Instance, in windows) made it out
+// of the order its worker recorded in: the miss is order-dependent
+// (models.UnmatchedCall.OrderDependent). The evidence is withEvidence's own
+// copy, never the windows'. It returns "test: call (closest mock, recorded
+// in test)" for each it named, a worker's test's in orderDependent and any
+// other's in named. With the switch off owners is nil and no miss is
+// NotOwned: nothing changes.
+func withRecordedIn(tests []TestReceipt, owners map[string][]string, windows []models.ScopeWindow) (named, orderDependent []string) {
+	workers := make(map[string]bool)
+	for _, w := range windows {
+		if w.Instance != 0 {
+			workers[w.Name] = true
+		}
+	}
 	for i := range tests {
 		ev := tests[i].Evidence
 		if ev == nil {
@@ -2568,12 +2606,19 @@ func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
 		}
 		for j := range ev.Misses {
 			c := &ev.Misses[j]
-			if c.NameRecordedIn(tests[i].Name, owners) {
-				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, c.Named(), c.ClosestMock, c.RecordedIn))
+			if !c.NameRecordedIn(tests[i].Name, owners) {
+				continue
 			}
+			line := fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, c.Named(), c.ClosestMock, c.RecordedIn)
+			if workers[tests[i].Name] {
+				c.OrderDependent = true
+				orderDependent = append(orderDependent, line)
+				continue
+			}
+			named = append(named, line)
 		}
 	}
-	return named
+	return named, orderDependent
 }
 
 // withBegan puts on each test's line when its latest run began: its latest

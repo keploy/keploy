@@ -155,7 +155,9 @@ type Session struct {
 	// such end it was (FirstEndNoFault); whether the server spoke unasked
 	// before the current request (ServerSpokeUnasked); and, from
 	// endedWithConnectionShift, one bit per fakeconn.Direction: that stream
-	// ended because its connection did (MarkEndedWithConnection). Internal;
+	// ended because its connection did (MarkEndedWithConnection); and, from
+	// clientEndErrnoShift, the errno the client's socket gave after the
+	// relay was done with it (MarkClientEndError). Internal;
 	// one word here, in the padding after the bools, so a Session stays in
 	// its size class with clientStopped.
 	peerEnds atomic.Uint32
@@ -936,8 +938,13 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 // matches the defensive shape of RecordSession call sites. A nil m is
 // a programming error and treated as a no-op returning nil.
 func (s *Session) EmitMock(m *models.Mock) error {
-	return s.emitMockCore(m, false)
+	_, err := s.emitMockCore(m, false)
+	return err
 }
+
+// LeftOutChannelFullAtStop is the reason EmitMockOnShutdown leaves out a
+// mock that found the session's channel (Session.Mocks) full.
+const LeftOutChannelFullAtStop = "the recording stopped with the session's mock channel full as this mock was handed over"
 
 // EmitMockOnShutdown is the shutdown-time variant of EmitMock used by
 // parsers that have just reconstructed an in-flight invocation from
@@ -954,17 +961,32 @@ func (s *Session) EmitMock(m *models.Mock) error {
 //     place to enforce shutdown-time backpressure.
 //
 //   - Direct-channel path: replace the select-against-ctx with a
-//     non-blocking best-effort send. If the channel is full at
-//     shutdown the mock is dropped (the alternative — blocking on a
-//     channel whose consumer is itself shutting down — would deadlock
-//     the parser). Callers that need stricter delivery semantics
-//     during shutdown should serialise through the SyncMock manager.
+//     non-blocking send. A mock that finds the channel full at shutdown
+//     is left out with its reason (ReportLeftOut,
+//     LeftOutChannelFullAtStop): counted, spanned and logged, never
+//     dropped with nothing said. Blocking on a channel whose consumer is
+//     itself shutting down would deadlock the parser. Callers that need
+//     stricter delivery semantics during shutdown should serialise
+//     through the SyncMock manager.
 //
 // All other invariants (incomplete-mock gate, ClientConnID
 // propagation, ReqTimestampMock monotonicity, OnMockRecorded hook
 // chain, OnPendingCleared) match EmitMock byte-for-byte.
 func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
-	return s.emitMockCore(m, true)
+	_, err := s.emitMockCore(m, true)
+	return err
+}
+
+// EmitMockOutcome is EmitMock, or EmitMockOnShutdown when shutdown is set,
+// saying also whether the session left m out (ReportLeftOut) instead of
+// handing it on: for the capture's incomplete flag (LeaveOutIfIncomplete), or
+// at shutdown for a full channel (LeftOutChannelFullAtStop). A mock refused
+// (err set) is neither handed on nor left out: what to do with it is the
+// caller's. A parser that reports the rest of an exchange as left out unless
+// the exchange itself was left out asks this, so it counts the exchange
+// once.
+func (s *Session) EmitMockOutcome(m *models.Mock, shutdown bool) (leftOut bool, err error) {
+	return s.emitMockCore(m, shutdown)
 }
 
 // MockHeld tells the session its parser holds a mock it made instead of
@@ -978,9 +1000,9 @@ func (s *Session) MockHeld() {
 	}
 }
 
-func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
+func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	if s == nil || m == nil {
-		return nil
+		return false, nil
 	}
 	if s.LeaveOutIfIncomplete(m) {
 		// Left out, and the flag reset, so the next mock in this cycle
@@ -993,7 +1015,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		// would make the hang watchdog fire once the connection goes
 		// idle, a spurious abort after a benign drop (memory pressure,
 		// chunk gate, short write).
-		return nil
+		return true, nil
 	}
 
 	// Propagate the session's ClientConnID onto the mock when the
@@ -1068,7 +1090,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		if !shutdown {
 			if ctx := s.Ctx; ctx != nil {
 				if err := ctx.Err(); err != nil {
-					return err
+					return false, err
 				}
 			}
 		}
@@ -1076,14 +1098,14 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}
-		return nil
+		return false, nil
 	}
 
 	if s.Mocks == nil {
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}
-		return nil
+		return false, nil
 	}
 	ctx := s.Ctx
 	if ctx == nil {
@@ -1093,31 +1115,34 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}
-		return nil
+		return false, nil
 	}
 	if shutdown {
 		// Non-blocking send: at shutdown the consumer is also
 		// winding down so a blocked send would deadlock the
-		// parser. Drop on full channel; callers that want stricter
-		// delivery during shutdown should route via SyncMock.
+		// parser. A mock that finds the channel full is left out,
+		// reported, as any mock the session could not record;
+		// callers that want stricter delivery during shutdown
+		// should route via SyncMock.
 		select {
 		case s.Mocks <- m:
 			if s.OnPendingCleared != nil {
 				s.OnPendingCleared()
 			}
-			return nil
 		default:
-			return nil
+			s.ReportLeftOut(m, LeftOutChannelFullAtStop)
+			return true, nil
 		}
+		return false, nil
 	}
 	select {
 	case s.Mocks <- m:
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}
-		return nil
+		return false, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 }
 
@@ -1273,8 +1298,10 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 // no request time. The connection's stop is logged apart from it: by the
 // dispatcher (its "parser retired" WARN), or by the parser, when the error it
 // returns wraps ErrReported. Neither the end of a stream nor a recording's
-// stop (ctx done) is an exchange stopped on: a parser that returns on either
-// reports nothing. Nil-safe.
+// stop (ctx done) is in itself an exchange stopped on: a parser that returns
+// on either reports nothing. At the stop the HTTP/1 recorder reads on to its
+// streams' end, and reports an exchange the end cut as it would before the
+// stop. Nil-safe.
 func (s *Session) ReportStoppedOn(kind models.Kind, reqTs time.Time, reason string) {
 	if s == nil {
 		return

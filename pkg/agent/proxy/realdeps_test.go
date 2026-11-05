@@ -103,7 +103,7 @@ type served struct {
 func serveRealAsync(p *Proxy, accepted net.Conn, dst string) chan served {
 	out := make(chan served, 1)
 	go func() {
-		h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, nil)
+		h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, realdeps.Origin{}, nil)
 		out <- served{h, c, err}
 	}()
 	return out
@@ -211,14 +211,14 @@ func TestServeRealDecidesNothingWithoutTheSwitchOrAList(t *testing.T) {
 	p := realProxy(t, []string{dst}, nil)
 	t.Setenv(provenswitch.Env, "")
 	_, accepted := realConnPair(t)
-	h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, nil)
+	h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, realdeps.Origin{}, nil)
 	require.False(t, h)
 	require.NoError(t, err)
 	require.Same(t, accepted, c)
 
 	t.Setenv(provenswitch.Env, "1")
 	empty := &Proxy{logger: zap.NewNop()}
-	h, c, _ = empty.serveReal(context.Background(), accepted, dst, "", 1, nil)
+	h, c, _ = empty.serveReal(context.Background(), accepted, dst, "", 1, realdeps.Origin{}, nil)
 	require.False(t, h)
 	require.Same(t, accepted, c)
 }
@@ -483,7 +483,7 @@ func TestARealPredialOfADependencyIsClosedInAReplay(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = c.Close() })
 		_, accepted := realConnPair(t)
-		h, _, err := p.serveReal(context.Background(), accepted, up, "", 1, util.NewPredialed(up, c))
+		h, _, err := p.serveReal(context.Background(), accepted, up, "", 1, realdeps.Origin{}, util.NewPredialed(up, c))
 		require.False(t, h)
 		require.NoError(t, err)
 		_, werr := c.Write([]byte("x"))
@@ -642,11 +642,11 @@ func TestKeepRealDepsKeepsTheRunsBookkeeping(t *testing.T) {
 	ctx := context.Background()
 	p := &Proxy{logger: zap.NewNop()}
 	require.NoError(t, p.SetRealDeps(ctx, []string{"localhost:5432"}))
-	p.realTracker.Dialed(1, "localhost:5432", true)
+	p.realTracker.Dialed(realdeps.Origin{}, 1, "localhost:5432", true)
 	require.NoError(t, p.KeepRealDeps(ctx, []string{"localhost:5432"}))
 	require.Equal(t, []string{"localhost:5432"}, p.RealRun().Reached, "the same list keeps what the run saw")
 
-	p.realTracker.Dialed(1, "localhost:5432", true)
+	p.realTracker.Dialed(realdeps.Origin{}, 1, "localhost:5432", true)
 	require.NoError(t, p.KeepRealDeps(ctx, []string{"localhost:6379"}))
 	require.Empty(t, p.RealRun().Reached, "another list starts afresh")
 	require.Equal(t, []string{"localhost:6379"}, p.realList().list.Labels())
@@ -670,6 +670,7 @@ func TestKeepRealDepsKeepsTheRunsBookkeeping(t *testing.T) {
 // once it ends. One whose placing does not end is capture_incomplete: never a
 // silent miss.
 func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing.T) {
+	liveInstances(t, 4)
 	refused := testnet.RefusedAddr(t, "tcp")
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
@@ -685,10 +686,15 @@ func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing
 		containerkey.Default = k
 		resolved := make(chan struct{}, 1)
 		p.realDialResolved = func() { resolved <- struct{}{} }
-		p.realTracker.BeginTest()
+		// Two test workers' tests open: the connect is worker 4's, whose
+		// instance the kernel stamped it with, and never worker 9's.
+		p.realTracker.BeginTestOf(9)
+		p.realTracker.BeginTestOf(4)
+		dest := ipv4Dest(t, refused)
+		dest.Instance = 4
 
 		// Answered at once: the decision returns before the placing ends.
-		d := p.decideHandshake(fakeHandshakeDest{dest: ipv4Dest(t, refused)})(context.Background(), appEnd, proxyEnd)
+		d := p.decideHandshake(fakeHandshakeDest{dest: dest})(context.Background(), appEnd, proxyEnd)
 		require.Equal(t, synhold.Refuse, d.Outcome, "placed=%v", placed)
 		<-f.awaiting // the placing is waited for, off the decision's path
 		if placed {
@@ -698,7 +704,11 @@ func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing
 		}
 		<-resolved
 		end()
-		uses, inc := p.realTracker.EndTest()
+		other := p.realTracker.EndTestOf(9)
+		require.Empty(t, other.Uses, "placed=%v: worker 9's", placed)
+		require.Empty(t, other.Incomplete, "placed=%v: worker 9's", placed)
+		mine := p.realTracker.EndTestOf(4)
+		uses, inc := mine.Uses, mine.Incomplete
 		if placed {
 			require.Equal(t, []models.RealUse{{Dest: "container:redis", Failed: 1}}, uses)
 			require.Empty(t, inc)
@@ -764,6 +774,7 @@ func (f placedOnPending) AwaitReadsOf(ctx context.Context, _ []string) {
 // is found placed, and the failure counts at once: the placings are read
 // before the destination is looked up, so the end of one is never missed.
 func TestARefusedDialToAContainerPlacedMeanwhileCountsAtOnce(t *testing.T) {
+	liveInstances(t, 4)
 	refused := testnet.RefusedAddr(t, "tcp")
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
@@ -777,12 +788,16 @@ func TestARefusedDialToAContainerPlacedMeanwhileCountsAtOnce(t *testing.T) {
 	k.Bind(session)
 	k.Watch(session, zap.NewNop())
 	containerkey.Default = k
-	p.realTracker.BeginTest()
-	d := p.decideHandshake(fakeHandshakeDest{dest: ipv4Dest(t, refused)})(context.Background(), appEnd, proxyEnd)
+	// Two test workers' tests open: the failure is worker 4's, whose
+	// instance the kernel stamped the connect with.
+	twoWorkers(t, p)
+	dest := ipv4Dest(t, refused)
+	dest.Instance = 4
+	d := p.decideHandshake(fakeHandshakeDest{dest: dest})(context.Background(), appEnd, proxyEnd)
 	require.Equal(t, synhold.Refuse, d.Outcome)
-	uses, inc := p.realTracker.EndTest()
-	require.Equal(t, []models.RealUse{{Dest: "container:redis", Failed: 1}}, uses, "the failure was not counted when it was decided")
-	require.Empty(t, inc)
+	mine := endWorkers(t, p)
+	require.Equal(t, []models.RealUse{{Dest: "container:redis", Failed: 1}}, mine.Uses, "the failure was not counted when it was decided")
+	require.Empty(t, mine.Incomplete)
 }
 
 // A refused connect to a localhost entry's IPv4 loopback written the
@@ -866,7 +881,7 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 			ctx, endRun := context.WithCancel(context.Background())
 			done := make(chan served, 1)
 			go func() {
-				h, c, err := p.serveReal(ctx, reading, dst, "", 1, pre)
+				h, c, err := p.serveReal(ctx, reading, dst, "", 1, realdeps.Origin{}, pre)
 				done <- served{h, c, err}
 			}()
 			// serveReal reads the client for its name once the connection
@@ -947,4 +962,120 @@ type readSignal struct {
 func (c *readSignal) Read(p []byte) (int, error) {
 	c.once.Do(func() { close(c.started) })
 	return c.Conn.Read(p)
+}
+
+// workerFour is a connection's origin in test worker 4's keploy instance.
+var workerFour = realdeps.Origin{Instance: 4, Pid: 1004}
+
+// twoWorkers opens test worker 9's test, then worker 4's, on p's tracker.
+func twoWorkers(t *testing.T, p *Proxy) {
+	liveInstances(t, 9, 4)
+	p.realTracker.BeginTestOf(9)
+	p.realTracker.BeginTestOf(4)
+}
+
+// endWorkers ends both tests twoWorkers opened, requires that worker 9's
+// holds nothing and that worker 4's holds nothing unattributed, and returns
+// worker 4's.
+func endWorkers(t *testing.T, p *Proxy) realdeps.TestEnd {
+	t.Helper()
+	other := p.realTracker.EndTestOf(9)
+	require.Empty(t, other.Uses, "worker 9's REAL row")
+	require.Empty(t, other.Incomplete, "worker 9's evidence")
+	require.Empty(t, other.Unattributed, "worker 9's unattributed uses")
+	mine := p.realTracker.EndTestOf(4)
+	require.Empty(t, mine.Unattributed, "worker 4's own connection is never unattributed")
+	return mine
+}
+
+func serveRealFrom(p *Proxy, accepted net.Conn, dst string, from realdeps.Origin) chan served {
+	out := make(chan served, 1)
+	go func() {
+		h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, from, nil)
+		out <- served{h, c, err}
+	}()
+	return out
+}
+
+// sendAndRead writes b on app, half-closes it, and reads what comes back.
+func sendAndRead(t *testing.T, app net.Conn, b string) string {
+	t.Helper()
+	_, err := app.Write([]byte(b))
+	require.NoError(t, err)
+	require.NoError(t, app.(*net.TCPConn).CloseWrite())
+	got, _ := io.ReadAll(app)
+	return string(got)
+}
+
+// Two test workers' tests open at once: what a REAL connection from worker
+// 4's process does (the kernel stamped it with instance 4) is worker 4's
+// test's alone, whichever way it goes: relayed, h2c, refused at the dial or
+// at the handshake, ended by a name check, or closed before naming itself.
+// Worker 9's test holds nothing of it, and nothing is unattributed.
+func TestARealConnectionIsItsOwnWorkersTestsWhicheverWayItGoes(t *testing.T) {
+	liveInstances(t, 4)
+	dst := realServer(t)
+	_, portText, _ := net.SplitHostPort(dst)
+	named := "api.test:" + portText
+
+	p := realProxy(t, []string{dst}, nil)
+	twoWorkers(t, p)
+	app, accepted := realConnPair(t)
+	done := serveRealFrom(p, accepted, dst, workerFour)
+	require.Equal(t, "real:hello", sendAndRead(t, app, "hello"))
+	require.True(t, (<-done).handled)
+	require.Equal(t, []models.RealUse{{Dest: dst, Conns: 1}}, endWorkers(t, p).Uses, "relayed")
+
+	// The one name keploy's DNS gave the address makes it REAL at the
+	// accept, with its names checked: h2c's are not read, and its row says
+	// so.
+	p = realProxy(t, []string{named}, map[string]string{"api.test": "127.0.0.1"})
+	p.real.Load().book.Answered("api.test", []netip.Addr{netip.MustParseAddr("127.0.0.1")})
+	twoWorkers(t, p)
+	app, accepted = realConnPair(t)
+	done = serveRealFrom(p, accepted, dst, workerFour)
+	preface := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+	require.Equal(t, "real:"+preface, sendAndRead(t, app, preface))
+	require.True(t, (<-done).handled)
+	require.Equal(t, []models.RealUse{{Dest: named, Conns: 1, H2: true}}, endWorkers(t, p).Uses, "h2c")
+
+	refused := testnet.RefusedAddr(t, "tcp")
+	p = realProxy(t, []string{refused}, nil)
+	twoWorkers(t, p)
+	_, accepted = realConnPair(t)
+	require.True(t, (<-serveRealFrom(p, accepted, refused, workerFour)).handled)
+	require.Equal(t, []models.RealUse{{Dest: refused, Failed: 1}}, endWorkers(t, p).Uses, "refused at the dial")
+
+	p = realProxy(t, []string{refused}, nil)
+	p.setSession(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: models.OutgoingOptions{Mocking: true}})
+	twoWorkers(t, p)
+	dest := ipv4Dest(t, refused)
+	dest.Instance, dest.KernelPid = workerFour.Instance, workerFour.Pid
+	d := p.decideHandshake(fakeHandshakeDest{dest: dest})(context.Background(), appEnd, proxyEnd)
+	require.Equal(t, synhold.Refuse, d.Outcome)
+	require.Equal(t, []models.RealUse{{Dest: refused, Failed: 1}}, endWorkers(t, p).Uses, "refused at the handshake")
+
+	// Two names on the address: the first request's names it, the second's
+	// is one mock.real does not list, and keploy ends the connection.
+	p = realProxy(t, []string{named}, map[string]string{"api.test": "127.0.0.1", "web.test": "127.0.0.1"})
+	twoWorkers(t, p)
+	app, accepted = realConnPair(t)
+	done = serveRealFrom(p, accepted, dst, workerFour)
+	sendAndRead(t, app, "GET / HTTP/1.1\r\nHost: api.test\r\n\r\nGET / HTTP/1.1\r\nHost: web.test\r\n\r\n")
+	require.True(t, (<-done).handled)
+	mine := endWorkers(t, p)
+	require.Equal(t, []models.RealUse{{Dest: named, Conns: 1}}, mine.Uses, "its first request went")
+	require.Len(t, mine.Incomplete, 1, "a name check ended it")
+	require.Contains(t, mine.Incomplete[0].Why, "web.test")
+
+	p = realProxy(t, []string{"db.test:3306"}, map[string]string{"db.test": "127.0.0.1"})
+	twoWorkers(t, p)
+	app, accepted = realConnPair(t)
+	done = serveRealFrom(p, accepted, "127.0.0.1:3306", workerFour)
+	require.NoError(t, app.Close())
+	require.True(t, (<-done).handled)
+	mine = endWorkers(t, p)
+	require.Empty(t, mine.Uses)
+	require.Len(t, mine.Incomplete, 1, "closed before naming itself")
+	require.Contains(t, mine.Incomplete[0].Why, "before naming it")
 }

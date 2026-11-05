@@ -211,7 +211,7 @@ func TestHandleChunkedRequestsSkipsEmptyLinesBeforeTheRequestLine(t *testing.T) 
 		send([]byte("hello"), now, now)
 		var finalReq []byte
 		done := make(chan error, 1)
-		go func() { done <- h.readRequestV2(context.Background(), stream, &finalReq) }()
+		go func() { done <- h.readRequestV2(stream, &finalReq) }()
 		select {
 		case err := <-done:
 			if err != nil || string(finalReq) != head+"hello" {
@@ -316,7 +316,7 @@ func TestChunkedResponsesWithoutABody(t *testing.T) {
 			send([]byte(head), time.Now(), time.Now())
 			var v2Resp []byte
 			go func() {
-				_, err := h.readResponseV2(context.Background(), stream, &v2Resp, tc.method)
+				_, err := h.readResponseV2(stream, &v2Resp, tc.method)
 				done <- err
 			}()
 			for i := 0; i < 2; i++ {
@@ -493,7 +493,7 @@ func TestReadRequestV2ChunkedFraming(t *testing.T) {
 			}
 			var finalReq []byte
 			done := make(chan error, 1)
-			go func() { done <- h.readRequestV2(context.Background(), stream, &finalReq) }()
+			go func() { done <- h.readRequestV2(stream, &finalReq) }()
 			select {
 			case err := <-done:
 				if err != nil {
@@ -519,7 +519,7 @@ func TestReadResponseV2ChunkedTrailer(t *testing.T) {
 	}
 	var finalResp []byte
 	done := make(chan error, 1)
-	go func() { _, err := h.readResponseV2(context.Background(), stream, &finalResp, "GET"); done <- err }()
+	go func() { _, err := h.readResponseV2(stream, &finalResp, "GET"); done <- err }()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -654,7 +654,7 @@ func TestTransferEncodingOverridesContentLength(t *testing.T) {
 		send([]byte(body[1]), now, now)
 		var finalReq []byte
 		done := make(chan error, 1)
-		go func() { done <- h.readRequestV2(context.Background(), stream, &finalReq) }()
+		go func() { done <- h.readRequestV2(stream, &finalReq) }()
 		select {
 		case err := <-done:
 			if err != nil || string(finalReq) != both+strings.Join(body, "") {
@@ -698,7 +698,7 @@ func TestReadResponseV2ReadsAnUpgradedConnectionToItsClose(t *testing.T) {
 	send([]byte("\x81\x05hello"), now, now)
 	finalResp := []byte(head) // the first chunk, already read by recordV2
 	done := make(chan error, 1)
-	go func() { _, err := h.readResponseV2(context.Background(), stream, &finalResp, "GET"); done <- err }()
+	go func() { _, err := h.readResponseV2(stream, &finalResp, "GET"); done <- err }()
 	select {
 	case err := <-done:
 		t.Fatalf("readResponseV2 returned (%v) at the 101's head, with the connection still open", err)

@@ -26,10 +26,13 @@ type MockEntry struct {
 	ReqTimestampMock string `json:"reqTimestampMock,omitempty" yaml:"reqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock string `json:"resTimestampMock,omitempty" yaml:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 	Start            string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
-	// Key is, for a start-up (pool) mock recorded under the proven switch,
-	// the key of the claim active when it was recorded: replay serves it
-	// only while a test process of that key holds the run and no test is
-	// open. Empty means PoolKeyNone.
+	// Key is, for a start-up: or worker: entry keploy mock record wrote
+	// under the proven switch, the key of the claim active when it was
+	// recorded; for a worker: entry moved out of a test's list, the key the
+	// move names, else that test's, else the entry's own
+	// (MappingDb.MoveToWorker). Replay serves it only while a test process of
+	// that key holds the run, a worker: entry in a test's window too
+	// (Mapping.Worker). Empty means PoolKeyNone.
 	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
 	// Place is, for a mock of the set's worker scope (Mapping.Worker), where
 	// in the set's run it becomes reachable: after the test case of this ID
