@@ -517,6 +517,99 @@ func TestAFullRoundCallWhoseViewMovedIsNeverAnsweredByAnotherTestsOwnRecording(t
 	}
 }
 
+// In record's full round a call of test-1 that a recording of its own
+// declaring a variable fits, whose variable does not hold (test-1's
+// mock-read1 reads the order r1 the test created; the call reads zz), is
+// decided by the variable pass, not the learn step: it misses in the
+// variable phase, naming mock-read1, with no learn-step miss behind it.
+// When the replay ends test-1 (or ends it and begins test-2) after that
+// decision, before the miss's report or in its lookup of a recording made
+// elsewhere, the miss names no recording, shows no diff, gets view_replaced
+// and says once why: the code does not hang on a learn-step miss standing
+// behind it. (No repeat note is looked up for it: its test recorded a call
+// under the same keys, ownRecordingUnder.)
+func TestAVariablePassMissWhoseViewGoesGetsViewReplaced(t *testing.T) {
+	type tc struct{ at, move string }
+	cases := []tc{{"before the report", "never"}}
+	for _, at := range []string{"before the report", "not-owned"} {
+		for _, move := range []string{"the test ends", "the next test begins"} {
+			cases = append(cases, tc{at, move})
+		}
+	}
+	for _, c := range cases {
+		t.Run(c.at+"/"+c.move, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			p := startedDrainProxy(t, 100)
+			p.learnTracker = learn.NewTracker()
+			start := time.Now().Add(time.Second)
+			read1 := r3Mock("mock-read1", start.Add(100*time.Millisecond), "GET", "/orders/r1", "", `{"state":"paid"}`)
+			read1.Spec.Variables = models.MockVariables{"orderId": {Recorded: "r1", Use: []string{"url.path[1]"}}}
+			own2 := r3Mock("mock-own2", start.Add(1100*time.Millisecond), "GET", "/orders/r2", "", `{"state":"new"}`)
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SeedRecordedWindows([]models.TestWindow{
+				{TestCase: "test-1", Start: start, End: start.Add(900 * time.Millisecond)},
+				{TestCase: "test-2", Start: start.Add(time.Second), End: start.Add(1900 * time.Millisecond)},
+			})
+			mm.SetMocksWithWindow(nil, []*models.Mock{read1, own2}, models.BaseTime, start.Add(time.Hour))
+			p.setMockManager(mm)
+			t.Cleanup(func() { p.setMockManager(nil) })
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-read1")})
+			p.ContinueTestErrorCapture()
+			move := func() {
+				if c.move == "never" {
+					return
+				}
+				mm.ServeExactPool(models.PoolKeyNone, nil)
+				p.EndTestErrorCapture()
+				if c.move == "the next test begins" {
+					mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+					p.ContinueTestErrorCapture()
+				}
+			}
+			lg, db := zap.NewNop(), &lookupHook{MockManager: mm, at: c.at, move: move}
+			if c.at == "before the report" {
+				lg = onDebugLine("after matching the http request", move)
+			}
+			code, got := r3SendVia(t, context.Background(), httpint.New(lg), p, db, models.OutgoingOptions{Learn: true, LearnPool: true}, httpGet("/orders/zz"))
+			if code == http.StatusOK {
+				t.Fatalf("answered %d %s", code, got)
+			}
+			if c.at != "before the report" && !db.ran.Load() {
+				t.Fatalf("precondition: the miss's %s lookup never ran", c.at)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 {
+				t.Fatalf("misses %+v; want 1", misses)
+			}
+			m := misses[0]
+			if m.MatchPhase != models.MatchPhaseVariable {
+				t.Fatalf("precondition: the miss's phase is %q; want the variable pass's %q", m.MatchPhase, models.MatchPhaseVariable)
+			}
+			why := map[string]string{
+				"the test ends":        "decided this request in test-1, and the replay ended test-1 before keploy diagnosed its miss, so no recording is named for it",
+				"the next test begins": "decided this request in test-1, and the replay ended test-1 and began test-2 before keploy diagnosed its miss, so no recording is named for it",
+			}[c.move]
+			switch {
+			case c.move == "never":
+				if m.ClosestMock != "mock-read1" || m.Reason == models.MissViewReplaced || strings.Contains(m.NextSteps, "no recording is named") {
+					t.Errorf("the unmoved miss names %q, code %q (next steps %q); want test-1's mock-read1, and no word of a move", m.ClosestMock, m.Reason, m.NextSteps)
+				}
+			case m.ClosestMock != "" || m.ClosestMockReq != "" || m.Diff != "" || len(m.FieldDiffs) > 0:
+				t.Errorf("a variable-pass miss whose view went %s names %q (rendered %q, diff %q, fields %+v); want no recording", c.at, m.ClosestMock, m.ClosestMockReq, m.Diff, m.FieldDiffs)
+			case m.Reason != models.MissViewReplaced:
+				t.Errorf("a variable-pass miss whose view went %s reads code %q, next steps %q; want %s", c.at, m.Reason, m.NextSteps, models.MissViewReplaced)
+			case !strings.Contains(m.NextSteps, why) || strings.Count(m.NextSteps, "keploy record's full round") != 1:
+				t.Errorf("the moved miss's next steps read %q; want them to say once %q", m.NextSteps, why)
+			}
+		})
+	}
+}
+
 // The hold of a call marked from a round snapshot of test-1's view (record's
 // full round) whose view a test's begin or end replaced holds none of
 // another test's own recordings in any read, and settles none through a
