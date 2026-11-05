@@ -125,16 +125,20 @@ func (d *placedDb) reach(anchor int) { d.move(func(p *models.RunPlace) { p.Reach
 func (d *placedDb) waitHeld(t *testing.T) {
 	t.Helper()
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
-		d.mu.Lock()
-		n := len(d.waits)
-		d.mu.Unlock()
-		if n > 0 {
+		if d.waiting() > 0 {
 			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the parser did not hold the answer")
 		}
 	}
+}
+
+// waiting is the number of waits on the place's next move.
+func (d *placedDb) waiting() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.waits)
 }
 
 // idleCount is a connection's request holder that counts its idle marks
@@ -190,6 +194,16 @@ func serveHeld(t *testing.T, db integrations.MockMemDb, holder integrations.Requ
 // serveHeldCall is serveHeld for the application's request call.
 func serveHeldCall(t *testing.T, db integrations.MockMemDb, holder integrations.RequestHolder, call string) (net.Conn, <-chan error) {
 	t.Helper()
+	app, returned, _ := serveHeldCtx(t, db, holder, call)
+	return app, returned
+}
+
+// serveHeldCtx is serveHeldCall with the call's cancel, for a row that ends
+// the call's context. The cleanup ends it too, and fails the row when the
+// parser does not return then: a parser that kept running would otherwise
+// hang the package's run.
+func serveHeldCtx(t *testing.T, db integrations.MockMemDb, holder integrations.RequestHolder, call string) (net.Conn, <-chan error, context.CancelFunc) {
+	t.Helper()
 	app, proxy := tcpPair(t)
 	h := &HTTP{Logger: zap.NewNop()}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -200,8 +214,16 @@ func serveHeldCall(t *testing.T, db integrations.MockMemDb, holder integrations.
 		defer close(finished)
 		returned <- h.decodeHTTP(ctx, []byte(call), proxy, nil, db, models.OutgoingOptions{})
 	}()
-	t.Cleanup(func() { cancel(); _ = app.Close(); <-finished })
-	return app, returned
+	t.Cleanup(func() {
+		cancel()
+		_ = app.Close()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("the parser did not return after its call's context ended")
+		}
+	})
+	return app, returned, cancel
 }
 
 const quiet = 150 * time.Millisecond
@@ -445,6 +467,42 @@ func TestHeldAnswer_TheAppClosingDropsTheRest(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("decodeHTTP did not end after the app closed")
+	}
+}
+
+// A held answer waits once per place: the parser marks one wait, idle, until
+// the place moves, and does not spin while it stays.
+func TestHeldAnswer_AHoldWaitsOncePerPlace(t *testing.T) {
+	registerStandIn(t)
+	db := newPlacedDb(singleAnswer(t, releaseAt(45)))
+	app, _ := serveHeld(t, db, nil)
+	for _, anchor := range []int{models.RunOpen(1), models.RunEnd(1)} {
+		db.waitHeld(t)
+		if got := readFor(app, quiet); got != "" {
+			t.Fatalf("written before test-3's open: %q", got)
+		}
+		if n := db.waiting(); n != 1 {
+			t.Fatalf("%d waits on one place, want 1", n)
+		}
+		db.reach(anchor)
+	}
+}
+
+// A call whose context ends while its answer waits ends the hold: the parser
+// returns, and writes nothing.
+func TestHeldAnswer_ItsCallsEndEndsTheHold(t *testing.T) {
+	registerStandIn(t)
+	db := newPlacedDb(singleAnswer(t, releaseAt(45)))
+	app, returned, cancel := serveHeldCtx(t, db, nil, releaseCall)
+	db.waitHeld(t)
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the parser kept the hold after its call's context ended")
+	}
+	if got := readFor(app, quiet); got != "" {
+		t.Fatalf("written after the call's end: %q", got)
 	}
 }
 
