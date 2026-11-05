@@ -131,8 +131,28 @@ func TestOutcomeAWordOfATokenLearningCannotReadWholeNamesNoValue(t *testing.T) {
 	}
 }
 
+// vfBothWays is in with an exchange recorded at the call's own instant
+// before it, so the call is read both ways (bothWays) and its value made
+// anew in each reading.
+func vfBothWays(t *testing.T, in Input) Input {
+	t.Helper()
+	in.Earlier = oServed("mock-0", false, false, Response, oText("body.note", "ok"), "ok", time.Millisecond)
+	in.Earlier[0].At, in.Earlier[0].AsRecorded = in.At, true
+	if _, late := leafedAtCall(in.Earlier, in.At); len(late) == 0 {
+		t.Fatal("the exchange at the call's own instant is not read both ways; the row tests nothing")
+	}
+	return in
+}
+
 func TestOutcomeAValueWhoseWordTheCallSendsApartNamesNone(t *testing.T) {
 	const upper = "6F9619FF-8B86-4011-B42D-00C04FC964FF"
+	// Read both ways, the words keep the first reading's value (bothWays),
+	// so that reading is the one the call is read in for a word apart: the
+	// value's words are each still made anew, and name none.
+	for _, g := range []string{"4011", "47c8"} {
+		in := vfBothWays(t, vfInput([3]string{"q.id", vfRec, vfLive}, [3]string{"q.g", g, g}))
+		vfNone(t, "read both ways, another field holds "+g+" alone", Decide(in), "q.id", true)
+	}
 	for _, tc := range []struct {
 		what   string
 		leaves [][3]string
@@ -306,12 +326,7 @@ func TestOutcomeAValueFormScansOncePerDecision(t *testing.T) {
 	}
 	// An exchange recorded at the call's own instant: the call is read
 	// both ways, and the UUID is made anew in each.
-	both := vfInput([3]string{"q.id", vfRec, vfLive})
-	both.Earlier = oServed("mock-0", false, false, Response, oText("body.note", "ok"), "ok", time.Millisecond)
-	both.Earlier[0].At, both.Earlier[0].AsRecorded = both.At, true
-	if _, late := leafedAtCall(both.Earlier, both.At); len(late) == 0 {
-		t.Fatal("the exchange at the call's own instant is not read both ways; the row tests nothing")
-	}
+	both := vfBothWays(t, vfInput([3]string{"q.id", vfRec, vfLive}))
 	if _, _, n := decideBoth(both, false); n != 1 {
 		t.Errorf("a UUID made anew, the call read both ways: %d scans, want one", n)
 	}
