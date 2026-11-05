@@ -574,12 +574,18 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 				outside = append(outside, p)
 			}
 		case evDisproven:
-			took := ""
+			took, tok := "", ""
 			if p.lateCall != "" && !piece {
 				took = dc.lateCallTook(ps, i, w)
 			}
+			if dc.allScope || !p.otherTest {
+				tok = sameTokenAround(p, w)
+			}
 			switch {
 			case p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, text):
+				conflict = append(conflict, p)
+			case tok != "":
+				p.why = strconv.Quote(tok) + " stood whole at " + p.name + " in both runs, and the value did not follow it: keploy cannot tell whether the value came from there"
 				conflict = append(conflict, p)
 			case p.outsideTest != "" && !piece:
 				// F gave it only before the call's test began, in an older
