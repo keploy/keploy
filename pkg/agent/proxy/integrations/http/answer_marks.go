@@ -19,12 +19,9 @@ type respWrite struct {
 	at  time.Time
 }
 
-// noteWrite notes a write that ended at end, written at at, when writes is
-// not nil.
+// noteWrite notes a write that ended at end, written at at.
 func noteWrite(writes *[]respWrite, end int, at time.Time) {
-	if writes != nil {
-		*writes = append(*writes, respWrite{end: end, at: at})
-	}
+	*writes = append(*writes, respWrite{end: end, at: at})
 }
 
 // answerMarks is the marks of an answer the relay wrote to the client in
