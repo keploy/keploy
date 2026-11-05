@@ -2454,7 +2454,10 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	}
 	if miss.Reason != "" {
 		// Why it missed, in judging's words (record's full round): the
-		// next step then is the learn step's own reason.
+		// next step then is the learn step's own reason; for view_replaced
+		// (models.MissViewReplaced) it ends with the line that says which
+		// test ended or began, or that another view was served between
+		// tests.
 		fields = append(fields, zap.String("reason", miss.Reason))
 	}
 	logger.Warn(msg, append(fields, zap.String("next_step", next))...)

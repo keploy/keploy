@@ -314,9 +314,9 @@ type MockMismatchReport struct {
 	// (UnmatchedCall.RecordedIn).
 	NotOwned bool
 	// Reason is why the call missed, when the learn step decided it, or
-	// MissViewReplaced when a test's begin or end replaced its view before
-	// its miss was diagnosed (UnmatchedCall.Reason): only in record's full
-	// round.
+	// MissViewReplaced when a test's begin or end, or another view served
+	// between tests, replaced its view before its miss was diagnosed
+	// (UnmatchedCall.Reason): only in record's full round.
 	Reason string
 	// Concurrent is UnmatchedCall.Concurrent: what the learn step knows of
 	// the tests the call's recordings were made beside.

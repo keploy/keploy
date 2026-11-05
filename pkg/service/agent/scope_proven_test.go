@@ -1670,7 +1670,7 @@ func TestAFailedTestsReasonSaysWhyEachCallMissed(t *testing.T) {
 	}
 	r = evidenceReason("t", &models.ScopeEvidence{Misses: many}, nil, time.Time{})
 	require.Equal(t, 5, strings.Count(r, "missed (request_changed)"))
-	require.Contains(t, r, "and 2 more call(s) missed for a reason the learn step gave")
+	require.Contains(t, r, "and 2 more call(s) missed for a reason keploy record's full round gave")
 }
 
 // A miss of record's full round whose view a test's begin or end replaced
