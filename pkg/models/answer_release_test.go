@@ -24,3 +24,14 @@ func TestRegisterAnswerReleaseRemovesOnlyItsOwn(t *testing.T) {
 		t.Fatal("a kind whose releases were all removed still has one")
 	}
 }
+
+// A second release registered for one kind keeps every other kind's.
+func TestRegisterAnswerReleaseKeepsOtherKinds(t *testing.T) {
+	const kind, other Kind = "answer-release-test", "answer-release-other"
+	t.Cleanup(RegisterAnswerRelease(other, func(RunPlace, time.Time) bool { return true }))
+	t.Cleanup(RegisterAnswerRelease(kind, func(RunPlace, time.Time) bool { return true }))
+	t.Cleanup(RegisterAnswerRelease(kind, func(RunPlace, time.Time) bool { return false }))
+	if _, ok := AnswerReleaseOf(other); !ok {
+		t.Fatal("a second release for one kind removed another kind's")
+	}
+}

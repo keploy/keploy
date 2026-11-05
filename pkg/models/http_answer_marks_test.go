@@ -324,6 +324,19 @@ func TestLegacyFramePiecesOfNoFrameAreNone(t *testing.T) {
 	}
 }
 
+// A chunk before the first frame has no bytes of the body: its piece ends at
+// the body's start, not after a separator.
+func TestLegacyFramePiecesBeforeTheFirstFrameEndAtTheStart(t *testing.T) {
+	chunks := append([]HTTPStreamChunk{{Data: []HTTPStreamDataField{{Key: " ", Value: "x"}}}},
+		parseSSEBodyToChunks("data: a\n\ndata: b\n\n", time.Time{})...)
+	body := streamChunksToLegacyBody(chunks, streamBodyKindSSE)
+	got, ok := legacyFramePieces(chunks, streamBodyKindSSE)
+	want := []int{0, strings.Index(body, "data:b"), len(body)}
+	if !ok || len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("pieces of %q = %v (%v), want %v", body, got, ok, want)
+	}
+}
+
 // A frame ends after the blank line that ends it, read with CR, LF or CRLF
 // line ends; a blank line with no frame before it ends none.
 func TestSSEFrameEndsAreTheFramesTheParserKeeps(t *testing.T) {
