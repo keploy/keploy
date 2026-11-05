@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -123,6 +124,9 @@ type decider struct {
 	// recording outside the call's scope holds (outside), read once.
 	set []GivenPlaces
 	op  *offsetPlaces
+	// oh: the call's ask of the set's index of op's word lists (held),
+	// built at its first ask.
+	oh *outsideHeld
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
@@ -718,16 +722,47 @@ func (dc *decider) answeredAfter(r string) []Place {
 			add(Place{Mock: p.mock, Side: p.side, Path: p.path})
 		}
 	}
-	for _, g := range dc.outside().words {
-		if !g.noTime && !g.at.After(dc.in.At) && g.answered.After(dc.in.At) && listsHold(g.answerLists, r) {
+	gs, oh := dc.outside().words, dc.held()
+	inR := oh.holding(r)
+	for _, j := range oh.asked(false, inR) {
+		if g := gs[j]; !g.noTime && !g.at.After(dc.in.At) && g.answered.After(dc.in.At) && inR[j]&inOwn != 0 {
 			add(Place{Mock: g.mock, Side: Response})
 		}
 	}
 	return out
 }
 
-// wordAt is word's verdict.
+// outsideAsked counts the outside recordings a word's check decides
+// (setEvidence), for the rows that bound a call's work: those whose lists
+// hold its words or whose state leaves them unknown, not every one.
+var outsideAsked atomic.Int64
+
+// wordPasses counts the times a word is decided (wordBy), for the rows
+// that bound a call's work: twice only where wordAt decides it again.
+var wordPasses atomic.Int64
+
+// wordAt is word's verdict. Where serve order made a candidate place
+// unknown (orderUnknown) and the word is refused as unknown, it is decided
+// again with the order not asked: a conflict there, a candidate that held
+// R's word where F's did not follow, is the truer reason, and is named
+// instead. A conflict wins over an unknown place (wordBy), so it can come
+// only from a place the order marked. Any other verdict there keeps the
+// order's refusal: the second decision names a refusal, never loosens one.
 func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text string, w readWord, piece bool) Decision {
+	ordered := false
+	d := dc.wordBy(path, bare, rec, live, text, w, piece, &ordered)
+	if ordered && d.Refusal != nil && d.Refusal.Kind == RefusalUnknown {
+		if c := dc.wordBy(path, bare, rec, live, text, w, piece, nil); c.Refusal != nil && c.Refusal.Kind == RefusalConflict {
+			return c
+		}
+	}
+	return d
+}
+
+// wordBy is word's verdict, serve order asked where ordered is not nil
+// (set where the order made a place unknown), and not asked where it is.
+func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text string, w readWord, piece bool, ordered *bool) Decision {
+	wordPasses.Add(1)
 	at, n := w.At, w.At.Word
 	ps := make([]evPlace, len(dc.ps))
 	for i, p := range dc.ps {
@@ -759,8 +794,8 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 			shown = shown || moved[i] == ""
 		}
 	}
-	if !shown {
-		orderUnknown(dc.in, ps, cand)
+	if !shown && ordered != nil {
+		*ordered = orderUnknown(dc.in, ps, cand)
 	}
 	swapUnknown(dc.in, ps, w, held)
 	// aside: places that held R's word where F's did not follow, too
@@ -835,9 +870,15 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 			unknown = append(unknown, p)
 		}
 	}
-	for _, g := range dc.outside().words {
+	// Only the outside recordings whose lists hold R's or F's word, or whose
+	// state leaves them unknown, show anything of it (outsideHeld).
+	gs, oh := dc.outside().words, dc.held()
+	inR, inF := oh.holding(w.Rec), oh.holding(w.Live)
+	for _, j := range oh.asked(true, inR, inF) {
+		g := gs[j]
+		outsideAsked.Add(1)
 		p := evPlace{name: g.mock, mock: g.mock, otherTest: true, scope: "another test, or after this call", at: g.at}
-		ev, changed := setEvidence(g, w.Rec, w.Live, dc.in.At, piece)
+		ev, changed := setEvidence(g, inR[j], inF[j], dc.in.At, piece)
 		if changed {
 			p.live = withoutMark + w.Live
 		}
@@ -852,7 +893,7 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 			p.why = setUnknownWhy(g, dc.in.At)
 			unknown = append(unknown, p)
 		case evDisproven:
-			if !listsHold(g.answerLists, w.Rec) {
+			if inR[j]&inOwn == 0 {
 				p.why = strconv.Quote(w.Live) + " stood whole at " + p.name + ", served as recorded, where " + strconv.Quote(w.Rec) + " never stood: the value did not follow"
 			}
 			if wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 {
@@ -947,9 +988,11 @@ func (dc *decider) lateCallTook(ps []evPlace, i int, w readWord) string {
 			return stands(q.name)
 		}
 	}
-	for _, g := range dc.outside().words {
-		if listsHold(g.answerLists, lacks) || listsHold(g.view, lacks) {
-			return stands(g.mock)
+	gs, oh := dc.outside().words, dc.held()
+	in := oh.holding(lacks)
+	for _, j := range oh.asked(false, in) {
+		if in[j]&(inOwn|inView) != 0 {
+			return stands(gs[j].mock)
 		}
 	}
 	return ""

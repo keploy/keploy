@@ -2,11 +2,15 @@ package learn
 
 import (
 	"cmp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
+	"weak"
 
 	"go.keploy.io/server/v3/pkg/variables"
 )
@@ -558,10 +562,11 @@ func untimedAnswer(req, answered time.Time) bool {
 // answer once, so an application copying by position may have taken
 // another serve of it in F. Two places are tied alike here never: an
 // order the recording cannot tell, or one that differs, marks them
-// unknown even where both hold the value's words at the same fields.
-func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
+// unknown even where both hold the value's words at the same fields. It
+// reports whether it marked a place.
+func orderUnknown(in Input, ps []evPlace, cand map[string]bool) (marked bool) {
 	if len(cand) == 0 || len(cand) == 1 && !servedAgain(in, cand) {
-		return
+		return false
 	}
 	source := func(mock string) bool { return cand[mock] }
 	rec, _, untoldRec := recordedOrder(in.At, in.Earlier, in.Raw, source, func(Raw) string { return "" })
@@ -571,13 +576,15 @@ func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
 		why = "another order: " + d
 	}
 	if why == "" {
-		return
+		return false
 	}
 	for i := range ps {
 		if cand[ps[i].mock] && ps[i].state == stateBefore {
 			ps[i].state, ps[i].why = stateUnknown, why
+			marked = true
 		}
 	}
+	return marked
 }
 
 // servedAgain reports whether round F served a candidate of cand at two
@@ -1024,27 +1031,28 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 }
 
 // setEvidence is what g shows of the changed word r (R) to f (F), and
-// whether round F changed it: the evidence table, read by words. Its
+// whether round F changed it: the evidence table, read by words, where inR
+// and inF are the lists of g that hold r and f (outsideHeld.holding). Its
 // recorded words count for R only where it was recorded before the call.
 // It shows or disproves only where it is before the call in both runs, as a
 // recording handed to the call is (rawState): one with no answer time, or
 // recorded or answered at the call's own instant, is unknown there.
-func setEvidence(g givenWords, r, f string, at time.Time, piece bool) (ev wordEvidence, changed bool) {
+func setEvidence(g givenWords, inR, inF heldRoles, at time.Time, piece bool) (ev wordEvidence, changed bool) {
 	// A recording answered after the call gave R's application nothing
 	// before it: R's word there decides nothing (F's still does).
-	hr := listsHold(g.answerLists, r) && (g.noTime || !g.at.After(at) && !g.answered.After(at))
+	hr := inR&inOwn != 0 && (g.noTime || !g.at.After(at) && !g.answered.After(at))
 	before := g.at.Before(at) && !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
 	switch {
 	case g.unstated || g.unread:
 		// Round F served it and keploy cannot tell what it gave there.
 		return evUnknown, true
 	case len(g.views) > 0:
-		if hr || slices.ContainsFunc(g.views, func(v answerLists) bool { return listsHold(v, f) }) {
+		if hr || inF&inViews != 0 {
 			return evUnknown, true
 		}
 		return evNone, true
 	case len(g.view.words) > 0:
-		hf := listsHold(g.view, f)
+		hf := inF&inView != 0
 		switch {
 		case !hr && !hf:
 			return evNone, true
@@ -1058,7 +1066,7 @@ func setEvidence(g givenWords, r, f string, at time.Time, piece bool) (ev wordEv
 		return evUnknown, true
 	case len(g.same) > 0:
 		// Served as recorded: unchanged.
-		hf := listsHold(g.answerLists, f)
+		hf := inF&inOwn != 0
 		switch {
 		case !hr && !hf:
 			return evNone, false
@@ -1107,6 +1115,268 @@ func listsHold(l answerLists, t string) bool {
 		}
 	}
 	return false
+}
+
+// heldRoles are the lists of an outside recording (givenWords) that hold a
+// word: its answer's (inOwn), F's view of it (inView), any view F's serves
+// of it gave (inViews), as listsHold reads each.
+type heldRoles uint8
+
+const (
+	inOwn heldRoles = 1 << iota
+	inView
+	inViews
+)
+
+// The set's index of its outside recordings' word lists (setLists): each
+// answerLists a call's outside recordings hold (their answers', F's views
+// of them, the views F's serves gave), its words read once for the set into
+// postings, by word, of the lists that hold it. A call asks a word's
+// postings, and decides only the recordings whose lists hold R's or F's
+// word, and those whose state alone leaves them unknown (unstated, unread):
+// any other shows nothing of the word (setEvidence: evNone). Asked per
+// recording, a word cost each call a search of every recording's lists in
+// each reading, however few held it. A list is the set's by its identity
+// (listsKey): the set reads its outside recordings' lists once (setPlaces,
+// outsideWords) and hands each call the same lists, which nothing writes
+// after answerListsOf builds them. A list past the set's budget, or of a
+// call in no set, is searched as before (listsHold), and decides the same.
+
+// listsEntry is what the set keeps of one list: the id its postings name it
+// by (-1 where it did not fit the set's budget), its words, to take it out
+// of their postings once the list is let go, and the bytes it counts on the
+// set's budget.
+type listsEntry struct {
+	once  sync.Once
+	id    int32
+	words []string
+	bytes int64
+}
+
+// Sizes a list's entry counts: the entry and its map slot, and per word its
+// slot in the entry, its posting, and its letters and slot in the
+// postings' map (counted for every word, the side that counts more).
+const (
+	listsEntryBytes = 96
+	listsWordBytes  = 16 + 4 + 64
+)
+
+// listsKey is l's identity: its words' backing array, weakly, so the set's
+// index never keeps a list alive, and a list let go is never taken for a
+// later one at its address. ok false where l holds no words list.
+func listsKey(l answerLists) (k weak.Pointer[[]string], ok bool) {
+	if len(l.words) == 0 {
+		return k, false
+	}
+	return weak.Make(unsafe.SliceData(l.words)), true
+}
+
+// listsAsks counts the lists a call searched for a word, the set's index
+// keeping none of them (outsideHeld.open), for the rows that bound a
+// call's work; setFilters.listBuilds counts the lists a set's index read.
+var listsAsks atomic.Int64
+
+// buildLists reads l's words into the set's postings, once for the set,
+// counted on its budget; e keeps id -1 past it.
+func buildLists(fs *setFilters, s *setDerived, e *listsEntry, l answerLists) {
+	e.id = -1
+	seen := map[string]bool{}
+	var words []string
+	for _, ls := range [][][]string{l.words, l.stamped} {
+		for _, list := range ls {
+			for _, w := range list {
+				if !seen[w] {
+					seen[w] = true
+					words = append(words, w)
+				}
+			}
+		}
+	}
+	n := int64(listsEntryBytes)
+	for _, w := range words {
+		n += listsWordBytes + int64(len(w))
+	}
+	if !setClaim(s, n) {
+		return
+	}
+	fs.mu.Lock()
+	id := fs.nextList
+	fs.nextList++
+	for _, w := range words {
+		fs.post[w] = append(fs.post[w], id)
+	}
+	fs.listBuilds++
+	fs.mu.Unlock()
+	e.id, e.words, e.bytes = id, words, n
+}
+
+// listsGone is what a list's cleanup needs: the set and its filters, and
+// the list's key, all weakly, so the cleanup keeps none of them alive.
+type listsGone struct {
+	set weak.Pointer[setDerived]
+	fs  weak.Pointer[setFilters]
+	key weak.Pointer[[]string]
+}
+
+// dropLists takes a list the set let go out of its index: its entry, its id
+// from its words' postings, and its bytes from the set's budget.
+func dropLists(g listsGone) {
+	fs := g.fs.Value()
+	if fs == nil {
+		return
+	}
+	fs.mu.Lock()
+	e := fs.lists[g.key]
+	delete(fs.lists, g.key)
+	fs.mu.Unlock()
+	if e == nil {
+		return
+	}
+	// An entry past the budget (id -1) has no words and no bytes: its
+	// drop takes nothing.
+	e.once.Do(func() { e.id = -1 })
+	fs.mu.Lock()
+	for _, w := range e.words {
+		ids := fs.post[w]
+		if i, ok := slices.BinarySearch(ids, e.id); ok {
+			ids = slices.Delete(ids, i, i+1)
+		}
+		if len(ids) == 0 {
+			delete(fs.post, w)
+		} else {
+			fs.post[w] = ids
+		}
+	}
+	fs.mu.Unlock()
+	if s := g.set.Value(); s != nil {
+		s.mu.Lock()
+		s.budget.used -= e.bytes
+		s.mu.Unlock()
+	}
+}
+
+// outsideHeld is a call's ask of the set's index: each list of each of its
+// outside recordings (dc.outside().words: of, by recording and role), by
+// list id the lists of the call it is (byID), those the index keeps none of
+// (open: searched as before), and the recordings whose state alone leaves
+// them unknown (state).
+type outsideHeld struct {
+	ls    []heldList
+	byID  map[int32][]int32
+	open  []int32
+	state []int32
+	fs    *setFilters
+}
+
+// heldList is one list of recording g (its index in the call's outside
+// recordings) in its role.
+type heldList struct {
+	g    int32
+	role heldRoles
+	l    answerLists
+}
+
+// held is the call's outsideHeld, built at its first ask: its outside
+// recordings' lists found in the set's index, each list new to it read
+// once for the set (buildLists).
+func (dc *decider) held() *outsideHeld {
+	if dc.oh != nil {
+		return dc.oh
+	}
+	// A call in no set asks empty postings: every list is open.
+	oh := &outsideHeld{byID: map[int32][]int32{}, fs: &setFilters{}}
+	dc.oh = oh
+	for j, g := range dc.outside().words {
+		if g.unstated || g.unread {
+			oh.state = append(oh.state, int32(j))
+		}
+		add := func(role heldRoles, l answerLists) {
+			if len(l.words) > 0 || len(l.stamped) > 0 {
+				oh.ls = append(oh.ls, heldList{g: int32(j), role: role, l: l})
+			}
+		}
+		add(inOwn, g.answerLists)
+		add(inView, g.view)
+		for _, v := range g.views {
+			add(inViews, v)
+		}
+	}
+	var s *setDerived
+	if dc.x != nil && dc.x.set != nil {
+		s, oh.fs = dc.x.set, dc.x.filters
+	}
+	es := make([]*listsEntry, len(oh.ls))
+	if fs := oh.fs; s != nil {
+		keys := make([]weak.Pointer[[]string], len(oh.ls))
+		has := make([]bool, len(oh.ls))
+		for i, h := range oh.ls {
+			keys[i], has[i] = listsKey(h.l)
+		}
+		fs.mu.Lock()
+		for i := range oh.ls {
+			if !has[i] {
+				continue
+			}
+			e := fs.lists[keys[i]]
+			if e == nil {
+				e = &listsEntry{}
+				fs.lists[keys[i]] = e
+				runtime.AddCleanup(unsafe.SliceData(oh.ls[i].l.words), dropLists, listsGone{set: weak.Make(s), fs: weak.Make(fs), key: keys[i]})
+			}
+			es[i] = e
+		}
+		fs.mu.Unlock()
+	}
+	for i, e := range es {
+		if e != nil {
+			e.once.Do(func() { buildLists(oh.fs, s, e, oh.ls[i].l) })
+		}
+		if e == nil || e.id < 0 {
+			oh.open = append(oh.open, int32(i))
+			continue
+		}
+		oh.byID[e.id] = append(oh.byID[e.id], int32(i))
+	}
+	return oh
+}
+
+// holding is, by outside recording (its index in the call's), the lists of
+// it that hold t: those the set's postings of t name, and those the index
+// keeps none of that hold it (listsHold).
+func (oh *outsideHeld) holding(t string) map[int32]heldRoles {
+	out := map[int32]heldRoles{}
+	oh.fs.mu.Lock()
+	ids := slices.Clone(oh.fs.post[t])
+	oh.fs.mu.Unlock()
+	for _, id := range ids {
+		for _, i := range oh.byID[id] {
+			out[oh.ls[i].g] |= oh.ls[i].role
+		}
+	}
+	for _, i := range oh.open {
+		listsAsks.Add(1)
+		if listsHold(oh.ls[i].l, t) {
+			out[oh.ls[i].g] |= oh.ls[i].role
+		}
+	}
+	return out
+}
+
+// asked is, in order, the outside recordings a word's check reads: those
+// whose lists hold one of the words (in), and those whose state alone
+// leaves them unknown where state is asked.
+func (oh *outsideHeld) asked(state bool, in ...map[int32]heldRoles) []int32 {
+	var gs []int32
+	if state {
+		gs = slices.Clone(oh.state)
+	}
+	for _, m := range in {
+		for g := range m {
+			gs = append(gs, g)
+		}
+	}
+	slices.Sort(gs)
+	return slices.Compact(gs)
 }
 
 // viewNew reports whether round F's view of g holds a word its recording

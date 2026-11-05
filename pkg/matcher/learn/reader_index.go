@@ -465,6 +465,13 @@ type setFilters struct {
 	textBuilds  int
 	words       map[string][]*wordsEntry
 	wordsBuilds int
+	// lists, post, nextList and listBuilds are the set's index of its
+	// outside recordings' word lists (setLists): each list's entry, by the
+	// list (listsKey), and by word the ids of the lists that hold it.
+	lists      map[weak.Pointer[[]string]]*listsEntry
+	post       map[string][]int32
+	nextList   int32
+	listBuilds int
 }
 
 // filterTextKey is a text by what it holds: its length and two hashes of
@@ -509,7 +516,8 @@ func filtersOf(s *setDerived) *setFilters {
 		return v.(*setFilters)
 	}
 	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{},
-		seeds: [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}, words: map[string][]*wordsEntry{}})
+		seeds: [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}, words: map[string][]*wordsEntry{},
+		lists: map[weak.Pointer[[]string]]*listsEntry{}, post: map[string][]int32{}})
 	if !loaded {
 		runtime.AddCleanup(s, func(k weak.Pointer[setDerived]) { setsFilters.Delete(k) }, k)
 	}
