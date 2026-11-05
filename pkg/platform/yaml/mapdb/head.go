@@ -30,17 +30,24 @@ const (
 
 // encodeOver encodes mapping in format to replace old, the file's bytes
 // before (nil for a new file), as a writer of the file (testSetID's) writes
-// it, whatever the proven switch. A YAML file keeps what a hand edit added
-// to old (EncodeOver), and keploy says what it could not keep, so an edit is
-// never lost without a word. A file that holds no hand edit is written as
-// keploy always wrote it: the encoding, with keploy's line where the writer
-// always put it (h). JSON is the encoding: it has no comments, and a field
-// a person added to it is not kept.
-func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old []byte, h header, testSetID string) ([]byte, error) {
+// it, whatever the proven switch. doc is the YAML document old parses to,
+// which the writer decoded its mapping from (decodeInto; nil when old holds
+// none). A YAML file keeps what a hand edit added to old (EncodeOver), and
+// keploy says what it could not keep, so an edit is never lost without a
+// word. A file that holds no hand edit is written as keploy always wrote
+// it: the encoding, with keploy's line where the writer always put it (h).
+// JSON is the encoding: it has no comments, and a field a person added to
+// it is not kept, but named (jsonDropped).
+func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old []byte, doc *yamlLib.Node, h header, testSetID string) ([]byte, error) {
 	if format != yaml.FormatYAML {
+		if fields := jsonDropped(old); len(fields) > 0 && format == yaml.FormatJSON {
+			db.logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d field(s) a hand edit added: a JSON mappings file keeps only the fields keploy writes", len(fields)),
+				zap.String("testSetID", testSetID), zap.Strings("fields", fields),
+				zap.String("next_step", "keep a note in mappings.yaml, which keeps a field a person adds, or outside the set"))
+		}
 		return EncodeMappingF(mapping, db.logger, format)
 	}
-	data, unkept, err := encodeYAMLOver(mapping, old, nil, h)
+	data, unkept, err := encodeYAMLOver(mapping, old, doc, nil, h)
 	if err != nil {
 		db.logger.Error("failed to marshal mapping", zap.Error(err))
 		return nil, err
@@ -61,6 +68,34 @@ func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old
 			zap.String("next_step", "the entry each field was on is gone from the file (removed, or its call recorded anew): add the field again where it belongs now"))
 	}
 	return data, nil
+}
+
+// decodeInto decodes data, a mapping file's bytes in format, into m, and
+// is the YAML document data parses to (nil for JSON). The file is parsed
+// once: the writer decodes its mapping from the
+// document, and its rewrite keeps the file's hand edits from it
+// (encodeOver). It decodes as yaml.UnmarshalGeneric does.
+func decodeInto(format yaml.Format, data []byte, m *models.Mapping) (*yamlLib.Node, error) {
+	if format == yaml.FormatJSON {
+		return nil, yaml.UnmarshalGeneric(format, data, m)
+	}
+	var doc yamlLib.Node
+	if err := yamlLib.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	return &doc, doc.Decode(m)
+}
+
+// decodeOld is decodeInto for a writer: the mapping data holds, and its
+// document; it logs what fails, as DecodeMappingF does.
+func (db *MappingDb) decodeOld(data []byte, format yaml.Format) (*models.Mapping, *yamlLib.Node, error) {
+	var m models.Mapping
+	doc, err := decodeInto(format, data, &m)
+	if err != nil {
+		db.logger.Error("failed to unmarshal mapping data", zap.Error(err))
+		return nil, nil, err
+	}
+	return &m, doc, nil
 }
 
 // Unkept is what a rewrite of a mapping file could not keep of the file it
@@ -96,18 +131,18 @@ type Unkept struct {
 // passes the identity map of them, {"mock-1": "mock-1"}; one that renames
 // them passes {old: new}, e.g. {"mock-1": "mock-3"}.
 func EncodeOver(mapping *models.Mapping, old []byte, renames map[string]string) ([]byte, Unkept, error) {
-	return encodeYAMLOver(mapping, old, renames, headerAlways)
+	return encodeYAMLOver(mapping, old, nil, renames, headerAlways)
 }
 
 // encodeYAMLOver is EncodeOver with keploy's line where h puts it when old
-// starts with no comment.
-func encodeYAMLOver(mapping *models.Mapping, old []byte, renames map[string]string, h header) ([]byte, Unkept, error) {
+// starts with no comment, and doc, the document old parses to when the
+// caller parsed it (nil: keepEdits parses old).
+func encodeYAMLOver(mapping *models.Mapping, old []byte, doc *yamlLib.Node, renames map[string]string, h header) ([]byte, Unkept, error) {
 	data, err := yaml.MarshalGeneric(yaml.FormatYAML, mapping)
 	if err != nil {
 		return nil, Unkept{}, err
 	}
-	var unkept Unkept
-	data, unkept.Fields, unkept.Dropped = keepEdits(old, data, renames)
+	data, unkept := keepEdits(old, doc, data, renames)
 	head := commentHead(old)
 	switch {
 	case len(head) > 0:
@@ -115,7 +150,6 @@ func encodeYAMLOver(mapping *models.Mapping, old []byte, renames map[string]stri
 	case h == headerAlways || h == headerOnNew && old == nil:
 		data = append([]byte(utils.GetVersionAsComment()), data...)
 	}
-	unkept.Comments = droppedComments(old, data)
 	return data, unkept, nil
 }
 
@@ -125,33 +159,39 @@ func encodeYAMLOver(mapping *models.Mapping, old []byte, renames map[string]stri
 // line is keploy's, not a hand edit, and a writer puts it where it always
 // did (header), so a file no person edited is written as keploy always wrote
 // it. A document marker (---) or a directive (%YAML) before them is skipped:
-// the writer writes neither.
+// the writer writes neither. It reads data no further than its head.
 func commentHead(data []byte) []byte {
 	var head bytes.Buffer
 	blanks := 0
 	edited := false
-	for _, line := range strings.SplitAfter(string(data), "\n") {
-		t := strings.TrimSpace(line)
-		if t == "" {
+	for len(data) > 0 {
+		line := data
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			line = data[:i+1]
+		}
+		data = data[len(line):]
+		t := bytes.TrimSpace(line)
+		if len(t) == 0 {
 			blanks++
 			continue
 		}
-		if head.Len() == 0 && (t == "---" || strings.HasPrefix(t, "%")) {
+		if head.Len() == 0 && (string(t) == "---" || t[0] == '%') {
 			continue
 		}
-		if !strings.HasPrefix(t, "#") {
+		if t[0] != '#' {
 			break
 		}
 		if head.Len() > 0 {
 			head.WriteString(strings.Repeat("\n", blanks))
 		}
 		blanks = 0
-		if strings.HasPrefix(t, versionLine) {
+		if bytes.HasPrefix(t, []byte(versionLine)) {
 			head.WriteString(utils.GetVersionAsComment())
 			continue
 		}
 		edited = true
-		head.WriteString(strings.TrimRight(line, "\r\n") + "\n")
+		head.Write(bytes.TrimRight(line, "\r\n"))
+		head.WriteByte('\n')
 	}
 	if !edited {
 		return nil
@@ -159,81 +199,46 @@ func commentHead(data []byte) []byte {
 	return head.Bytes()
 }
 
-// droppedComments is how many of the comment lines old, a mapping file's
-// bytes before a rewrite, holds that written, its bytes after, does not:
-// each line counted as often as it appears, a "# Generated by Keploy" line
-// not at all (a rewrite brings it up to date). A comment the rewrite kept,
-// at the head, on a key keploy writes, or beside a field keploy does not
-// know, is not dropped. 0 for old that does not parse.
-func droppedComments(old, written []byte) int {
-	if !bytes.Contains(pastHead(old), []byte("#")) {
-		// Every comment is in the head, which a rewrite keeps: no file is
-		// parsed (a recording's batches rewrite the file often).
-		return 0
+// headComments is the lines of the head commentHead keeps of data, each
+// trimmed: the comment lines data starts with, which a rewrite keeps.
+func headComments(data []byte) []string {
+	return strings.Split(strings.TrimSpace(string(commentHead(data))), "\n")
+}
+
+// commentLines adds to out the comment lines of the YAML node n and of the
+// nodes under it, each trimmed, without keploy's "# Generated by Keploy"
+// line.
+func commentLines(n *yamlLib.Node, out []string) []string {
+	if n == nil {
+		return out
 	}
-	kept := map[string]int{}
-	for _, l := range commentTexts(written) {
-		kept[l]++
+	for _, c := range []string{n.HeadComment, n.LineComment, n.FootComment} {
+		for _, l := range strings.Split(c, "\n") {
+			if l = strings.TrimSpace(l); strings.HasPrefix(l, "#") && !strings.HasPrefix(l, versionLine) {
+				out = append(out, l)
+			}
+		}
+	}
+	for _, child := range n.Content {
+		out = commentLines(child, out)
+	}
+	return out
+}
+
+// uncounted is how many of the lines of old are not in kept, each line
+// counted as often as it appears.
+func uncounted(old, kept []string) int {
+	have := make(map[string]int, len(kept))
+	for _, l := range kept {
+		have[l]++
 	}
 	n := 0
-	for _, l := range commentTexts(old) {
-		if kept[l] > 0 {
-			kept[l]--
+	for _, l := range old {
+		if have[l] > 0 {
+			have[l]--
 			continue
 		}
 		n++
 	}
 	return n
-}
-
-// pastHead is data after the comment and blank lines it starts with, and a
-// document marker or directive before them (commentHead).
-func pastHead(data []byte) []byte {
-	comments := false
-	for len(data) > 0 {
-		line := data
-		if i := bytes.IndexByte(data, '\n'); i >= 0 {
-			line = data[:i+1]
-		}
-		t := bytes.TrimSpace(line)
-		switch {
-		case len(t) == 0:
-		case t[0] == '#':
-			comments = true
-		case !comments && (string(t) == "---" || t[0] == '%'):
-		default:
-			return data
-		}
-		data = data[len(line):]
-	}
-	return nil
-}
-
-// commentTexts is the comment lines the YAML document data holds, wherever
-// they are, each trimmed, without the "# Generated by Keploy" line; nil for
-// data that does not parse.
-func commentTexts(data []byte) []string {
-	if len(data) == 0 {
-		return nil
-	}
-	var doc yamlLib.Node
-	if yamlLib.Unmarshal(data, &doc) != nil {
-		return nil
-	}
-	var out []string
-	var walk func(*yamlLib.Node)
-	walk = func(x *yamlLib.Node) {
-		for _, c := range []string{x.HeadComment, x.LineComment, x.FootComment} {
-			for _, l := range strings.Split(c, "\n") {
-				if l = strings.TrimSpace(l); strings.HasPrefix(l, "#") && !strings.HasPrefix(l, versionLine) {
-					out = append(out, l)
-				}
-			}
-		}
-		for _, child := range x.Content {
-			walk(child)
-		}
-	}
-	walk(&doc)
-	return out
 }

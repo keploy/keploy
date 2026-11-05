@@ -1,7 +1,9 @@
 package mapdb
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -18,28 +20,45 @@ const maxAliasNodes = 10000
 // old, the file it replaces, that the encoding lacks: each key old has and
 // the encoding lacks at a level of the file whose keys keploy knows
 // (models.MappingKeys) -- the top, a test entry (matched by its id), a mock
-// entry (by its name in its list), a boot, a concurrency group, a suite --
-// with its comments, in its place among the keys around it; old's comments
-// on the keys both have (an older test's mocks: is its mock_entries:); and
-// the comment old ends with. A key keploy knows and left out is keploy's to
-// leave out, and is not brought back. The comment old starts with is its
-// head, which encodeOver keeps (commentHead). renames is how the
+// entry (by its name in its list), a boot, a concurrency group, a suite, a
+// value a test gave (by its name) -- with its comments, in its place among
+// the keys around it; old's comments on the keys both have (an older test's
+// mocks: is its mock_entries:); and the comment old ends with. A key keploy
+// knows and left out is keploy's to leave out, and is not brought back. The
+// comment old starts with is its head, which encodeOver keeps
+// (commentHead). od is the document old parses to when the caller parsed it
+// (nil: keepEdits parses old); keepEdits may change it. renames is how the
 // rewrite renamed the mocks old's mock entries name (EncodeOver): nil when
-// each keeps its name. lost names the fields it could not keep (aliases),
-// dropped the hand-added fields of old's items the encoding has no item for
-// (dropItem). data is returned as it is when old has nothing to keep, or
-// either does not parse.
-func keepEdits(old, data []byte, renames map[string]string) (out []byte, lost, dropped []string) {
-	if len(old) == 0 {
-		return data, nil, nil
+// each keeps its name. The Unkept is what it could not keep: the comment
+// lines of old the result and old's head do not hold, the fields it could
+// not keep (aliases), and the hand-added fields of old's items the encoding
+// has no item for (dropItem). data is returned as it is when old holds no
+// hand edit (holdsEdits), which costs no parse of data, or when old has
+// nothing to keep it in, or either does not parse.
+func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]string) ([]byte, Unkept) {
+	if od == nil {
+		if len(old) == 0 {
+			return data, Unkept{}
+		}
+		od = &yamlLib.Node{}
+		if yamlLib.Unmarshal(old, od) != nil {
+			return data, Unkept{}
+		}
 	}
-	var od, nd yamlLib.Node
-	if yamlLib.Unmarshal(old, &od) != nil || yamlLib.Unmarshal(data, &nd) != nil {
-		return data, nil, nil
+	oroot := docRoot(od)
+	if oroot != nil && oroot.Kind == yamlLib.MappingNode && !holdsEdits(od, oroot) {
+		return data, Unkept{}
 	}
-	oroot, nroot := docRoot(&od), docRoot(&nd)
-	if oroot == nil || nroot == nil || oroot.Kind != yamlLib.MappingNode || nroot.Kind != yamlLib.MappingNode {
-		return data, nil, nil
+	// Each comment line old holds, its head's included: what the result
+	// and the head do not hold is dropped, and counted.
+	before := commentLines(od, nil)
+	var nd yamlLib.Node
+	if oroot == nil || oroot.Kind != yamlLib.MappingNode || yamlLib.Unmarshal(data, &nd) != nil {
+		return data, Unkept{Comments: uncounted(before, headComments(old))}
+	}
+	nroot := docRoot(&nd)
+	if nroot == nil || nroot.Kind != yamlLib.MappingNode {
+		return data, Unkept{Comments: uncounted(before, headComments(old))}
 	}
 	// YAML hangs the comment a file starts with on the document or on its
 	// first key: it is the file's head, never that key's.
@@ -57,14 +76,76 @@ func keepEdits(old, data []byte, renames map[string]string) (out []byte, lost, d
 	if m.placeMoved(nroot) {
 		changed = true
 	}
-	if !changed {
-		return data, m.lost, m.dropped
+	unkept := Unkept{Fields: m.lost, Dropped: m.dropped}
+	kept := headComments(old)
+	if changed {
+		enc, err := yamlLib.Marshal(&nd)
+		if err != nil {
+			unkept.Comments = uncounted(before, kept)
+			return data, unkept
+		}
+		data, kept = enc, commentLines(&nd, kept)
 	}
-	enc, err := yamlLib.Marshal(&nd)
-	if err != nil {
-		return data, m.lost, m.dropped
+	unkept.Comments = uncounted(before, kept)
+	return data, unkept
+}
+
+// holdsEdits reports whether doc, a mapping file's document, and root, its
+// mapping, hold what a hand edit adds: a comment past the file's head
+// (commentHead keeps the head, which YAML hangs on the document and on the
+// first key), a key keploy does not know at a level of the file
+// (models.MappingKeys), an alias, which can bring an item of one level into
+// another, or a merge key (<<): keploy writes none of them. A file keploy
+// wrote holds none, and keepEdits keeps nothing of it: its rewrite is the
+// encoding as it is.
+func holdsEdits(doc, root *yamlLib.Node) bool {
+	if doc.LineComment != "" || doc.FootComment != "" || nodeEdited(root) {
+		return true
 	}
-	return enc, m.lost, m.dropped
+	if len(root.Content) > 0 {
+		first := root.Content[0]
+		head := first.HeadComment
+		first.HeadComment = ""
+		defer func() { first.HeadComment = head }()
+	}
+	return levelEdited(root, models.MappingLevelTop)
+}
+
+// nodeEdited reports whether the node n itself holds a comment or is an
+// alias. An anchor no alias names changes nothing a rewrite writes.
+func nodeEdited(n *yamlLib.Node) bool {
+	return n.HeadComment != "" || n.LineComment != "" || n.FootComment != "" || n.Kind == yamlLib.AliasNode
+}
+
+// levelEdited reports whether what n, an item at level of a mapping file
+// ("" for a value under one of its keys), holds is a hand edit or holds
+// one (holdsEdits); n itself its caller checks (nodeEdited).
+func levelEdited(n *yamlLib.Node, level string) bool {
+	if level == "" || n.Kind != yamlLib.MappingNode {
+		for _, c := range n.Content {
+			if nodeEdited(c) || levelEdited(c, "") {
+				return true
+			}
+		}
+		return false
+	}
+	known := models.MappingKeys(level)
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		if !known[k.Value] || nodeEdited(k) || nodeEdited(v) {
+			return true
+		}
+		sub, ok := childLevel(level, k.Value)
+		if !ok || v.Kind != yamlLib.SequenceNode {
+			sub = ""
+		}
+		for _, item := range v.Content {
+			if nodeEdited(item) || levelEdited(item, sub) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // merger brings old's hand edits into a new encoding (keepEdits): renames
@@ -101,8 +182,11 @@ func childLevel(level, key string) (string, bool) {
 			return models.MappingLevelSuite, true
 		}
 	case models.MappingLevelTest:
-		if key == "mock_entries" || key == "mocks" {
+		switch key {
+		case "mock_entries", "mocks":
 			return models.MappingLevelEntry, true
+		case "given":
+			return models.MappingLevelGiven, true
 		}
 	case models.MappingLevelBoot:
 		if key == "mocks" {
@@ -122,7 +206,7 @@ func identityKeys(level string) []string {
 	switch level {
 	case models.MappingLevelTest, models.MappingLevelGroup:
 		return []string{"id"}
-	case models.MappingLevelEntry:
+	case models.MappingLevelEntry, models.MappingLevelGiven:
 		return []string{"name"}
 	case models.MappingLevelBoot:
 		return []string{"dir", "key"}
@@ -472,7 +556,7 @@ func keepComments(old, cur *yamlLib.Node) bool {
 // only while the scalar has none of its own. So the comment after the pair
 // goes on the key for a block value and on the value otherwise; when the
 // pair had one on each node, the one on the other node is left out, and
-// counted (droppedComments).
+// counted (keepEdits).
 func keepPairComments(k, v, ck, cv *yamlLib.Node) bool {
 	changed := keepComments(k, ck)
 	if keepComments(v, cv) {
@@ -553,4 +637,70 @@ func docRoot(d *yamlLib.Node) *yamlLib.Node {
 		return d.Content[0]
 	}
 	return nil
+}
+
+// jsonDropped names each field a hand edit added to old, a JSON mapping
+// file, at a level of the file whose keys keploy knows
+// (models.MappingJSONKeys), as keepEdits names a YAML one, keys in order: a
+// JSON rewrite writes only the fields keploy knows, so each is dropped, and
+// keploy says so. nil for no old, and for old that does not decode.
+func jsonDropped(old []byte) []string {
+	var doc any
+	if len(old) == 0 || json.Unmarshal(old, &doc) != nil {
+		return nil
+	}
+	var out []string
+	var walk func(v any, level, at string)
+	walk = func(v any, level, at string) {
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return
+		}
+		known := models.MappingJSONKeys(level)
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if !known[strings.ToLower(k)] {
+				out = append(out, at+k)
+				continue
+			}
+			sub, ok := childLevel(level, strings.ToLower(k))
+			items, isList := obj[k].([]any)
+			if !ok || !isList {
+				continue
+			}
+			listed := map[string]int{}
+			for i, item := range items {
+				where := fmt.Sprintf("%s[%d].", at+k, i)
+				if id := jsonIdentity(item, identityKeys(sub)); id != "" {
+					where = nextListing(at+k, id, listed)
+				}
+				walk(item, sub, where)
+			}
+		}
+	}
+	walk(doc, models.MappingLevelTop, "")
+	return out
+}
+
+// jsonIdentity is identity for an item of a decoded JSON mapping file.
+func jsonIdentity(item any, keys []string) string {
+	obj, ok := item.(map[string]any)
+	if !ok {
+		return ""
+	}
+	var parts []string
+	found := false
+	for _, k := range keys {
+		v, isString := obj[k].(string)
+		found = found || isString
+		parts = append(parts, v)
+	}
+	if !found {
+		return ""
+	}
+	return strings.Join(parts, " ")
 }

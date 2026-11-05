@@ -49,6 +49,7 @@ const (
 	MappingLevelBoot  = "boot"
 	MappingLevelGroup = "group"
 	MappingLevelSuite = "suite"
+	MappingLevelGiven = "given"
 )
 
 var (
@@ -58,7 +59,8 @@ var (
 
 // MappingKeys is the keys keploy reads and writes at a level of a mapping
 // file: the top (MappingLevelTop), a test entry in every shape it reads in
-// (MappingLevelTest), a mock entry, a boot, a concurrency group and a suite.
+// (MappingLevelTest), a mock entry, a boot, a concurrency group, a suite and
+// a value a test gave (MappingLevelGiven, an item of a test's given:).
 // A key a writer leaves out at its level is keploy's to leave out; any other
 // is a hand edit (mapdb keeps it).
 func MappingKeys(level string) map[string]bool {
@@ -72,9 +74,57 @@ func MappingKeys(level string) map[string]bool {
 			MappingLevelBoot:  yamlKeys(reflect.TypeOf(BootSpec{})),
 			MappingLevelGroup: yamlKeys(reflect.TypeOf(ConcurrencyGroup{})),
 			MappingLevelSuite: yamlKeys(reflect.TypeOf(SuiteSpan{})),
+			MappingLevelGiven: yamlKeys(reflect.TypeOf(GivenValue{})),
 		}
 	})
 	return mappingKeys[level]
+}
+
+var (
+	mappingJSONKeysOnce sync.Once
+	mappingJSONKeys     map[string]map[string]bool
+)
+
+// MappingJSONKeys is MappingKeys for a mapping file in JSON: the keys the
+// json tags name at each level, in lower case, since a JSON decode matches
+// a key to its field whatever its case.
+func MappingJSONKeys(level string) map[string]bool {
+	mappingJSONKeysOnce.Do(func() {
+		test := jsonKeys(reflect.TypeOf(writtenTestFormat{}))
+		test["mocks"] = true
+		mappingJSONKeys = map[string]map[string]bool{
+			MappingLevelTop:   jsonKeys(reflect.TypeOf(Mapping{})),
+			MappingLevelTest:  test,
+			MappingLevelEntry: jsonKeys(reflect.TypeOf(MockEntry{})),
+			MappingLevelBoot:  jsonKeys(reflect.TypeOf(BootSpec{})),
+			MappingLevelGroup: jsonKeys(reflect.TypeOf(ConcurrencyGroup{})),
+			MappingLevelSuite: jsonKeys(reflect.TypeOf(SuiteSpan{})),
+			MappingLevelGiven: jsonKeys(reflect.TypeOf(GivenValue{})),
+		}
+	})
+	return mappingJSONKeys[level]
+}
+
+// jsonKeys is the keys the json tags of t's fields name, in lower case,
+// embedded structs' included: what a JSON decode of t knows.
+func jsonKeys(t reflect.Type) map[string]bool {
+	keys := map[string]bool{}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		switch {
+		case name == "-":
+		case name == "" && f.Anonymous && f.Type.Kind() == reflect.Struct:
+			for k := range jsonKeys(f.Type) {
+				keys[k] = true
+			}
+		case name != "":
+			keys[strings.ToLower(name)] = true
+		case f.IsExported():
+			keys[strings.ToLower(f.Name)] = true
+		}
+	}
+	return keys
 }
 
 // yamlKeys is the keys the yaml tags of t's fields name, inline structs'
