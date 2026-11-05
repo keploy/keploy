@@ -140,7 +140,7 @@ func TestAClaimOfAnEarlierStagingsCopyKeepsNothing(t *testing.T) {
 	mm.ArmSetFence()
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
 	mm.SetMocksWithWindow([]*models.Mock{statedPoll("poll", `{"id":"a"}`, 2010, 2050)}, nil, winStart(2), winEnd(2))
-	if mm.keepOwned(pool[0]) {
+	if _, keeps := mm.keepOwned(pool[0]); keeps {
 		t.Fatalf("the claim of a copy of the earlier staging kept it before marking it used (its set %d, the store's %d)", pool[0].TestModeInfo.StagedSet, mm.setGen.Load())
 	}
 	if mm.ClaimForRepeats(*pool[0]) {
@@ -149,6 +149,53 @@ func TestAClaimOfAnEarlierStagingsCopyKeepsNothing(t *testing.T) {
 	fresh, _ := mm.GetPerTestMocksInWindow()
 	if len(fresh) != 1 || !mm.ClaimForRepeats(*fresh[0]) {
 		t.Fatalf("the new staging's recording could not be kept after the stale claim")
+	}
+}
+
+// A claim the store refuses to mark used takes back its own keep and no
+// other. The claim runs a test hook once it kept test-2's recording, before
+// the mark (testHookMark), and the row stages the next set there, as the agent
+// starts one, and claims the new set's same-named recording for its test-2.
+// The store then refuses to mark the earlier set's copy used. A claim that
+// takes back its keep by name alone deletes the new set's keep: the new set's
+// recording, served once, would serve a request that does not repeat it again,
+// and a repeat would not be answered by it. The row is decided by the hook,
+// not by timing.
+func TestARefusedClaimTakesBackOnlyItsOwnKeep(t *testing.T) {
+	mm, pool := claimRig(t, statedPoll("poll", `{"id":"a"}`, 2010, 2050))
+	marks := 0
+	var fresh []*models.Mock
+	var freshClaimed bool
+	mm.testHookMark = func() {
+		marks++
+		if marks > 1 {
+			return
+		}
+		mm.ResetForReplaySession()
+		mm.ArmSetFence()
+		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		mm.SetMocksWithWindow([]*models.Mock{statedPoll("poll", `{"id":"a"}`, 2010, 2050)}, nil, winStart(2), winEnd(2))
+		fresh, _ = mm.GetPerTestMocksInWindow()
+		if len(fresh) == 1 {
+			freshClaimed = mm.ClaimForRepeats(*fresh[0])
+		}
+	}
+	// The hook runs inside the claim, on this goroutine, so marks is final
+	// when it returns; a claim that skips the hook fails at once.
+	if mm.ClaimForRepeats(*pool[0]) {
+		t.Fatalf("the earlier set's copy was marked used once the next set was staged (its set %d, the store's %d)", pool[0].TestModeInfo.StagedSet, mm.setGen.Load())
+	}
+	if marks != 2 {
+		t.Fatalf("the claims reached their mark %d times, want twice (the earlier set's claim and the new set's inside it)", marks)
+	}
+	if len(fresh) != 1 || !freshClaimed {
+		t.Fatalf("the new set's pool %v: its recording's claim kept %v, want it kept for its test", fresh, freshClaimed)
+	}
+	if !kept(mm, "poll") {
+		t.Fatalf("the earlier set's refused claim took back the new set's keep of its same-named recording")
+	}
+	if mm.ClaimForRepeats(*fresh[0]) {
+		t.Fatalf("the new set's recording was kept a second time: two requests that do not repeat it would both be served it")
 	}
 }
 
