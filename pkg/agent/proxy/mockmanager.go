@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -39,6 +42,8 @@ import (
 //	                          with hitMu as that leaf)
 //	sigMu                    (window-change signal; a LEAF — nothing is
 //	                          taken under it, and it may be taken under any)
+//	setEndMu                 (set-end registrations; a LEAF, released
+//	                          before any registration runs)
 //	swapMu  →  exact.outside.mu  →  treesMu  →  TreeDb.mu
 //	                         (prepareOutside reads the staged trees under the
 //	                          staging lock; nothing takes swapMu under it)
@@ -404,6 +409,21 @@ type MockManager struct {
 	// sigMu guards the swap and is a LEAF lock: nothing is acquired under it.
 	sigMu     sync.Mutex
 	windowSig chan struct{}
+
+	// setEndFilers are the parsers' registrations to file, at a read of a
+	// test set's end, the misses of the calls they hold for a test of the set
+	// (AtSetEnd, FileAtSetEnd), in the order they were made. setEndMu guards
+	// them and is a LEAF lock: the registrations run with it released.
+	setEndMu     sync.Mutex
+	setEndFilers []setEndFiler
+	setEndNext   uint64
+	// notAtSetEnd is set on a test worker's manager (instanceServing): no
+	// set's end read asks it, so AtSetEnd registers nothing there.
+	notAtSetEnd atomic.Bool
+	// readsSetEnds is the replay session's client's word that it reads each
+	// set's end (models.OutgoingOptions.ReadsSetEnds, SetReadsSetEnds):
+	// without it AtSetEnd registers nothing.
+	readsSetEnds atomic.Bool
 
 	// stagingEpoch changes at every staging call (a SetMocksWithWindow with the
 	// models.BaseTime sentinel): a new set, or the same set staged again after
@@ -4371,6 +4391,102 @@ func (m *MockManager) signalWindowChange() {
 	m.windowSig = make(chan struct{})
 	m.sigMu.Unlock()
 	close(old)
+}
+
+// setEndFiler is one AtSetEnd registration.
+type setEndFiler struct {
+	id   uint64
+	file func(context.Context)
+}
+
+var _ integrations.SetEndFiler = (*MockManager)(nil)
+
+// SetReadsSetEnds says whether the replay session's client reads each of
+// its test sets' end with a set's end read (models.OutgoingOptions
+// .ReadsSetEnds). Proxy.Mock sets it on the run's manager alone, at each
+// session; a registration AtSetEnd took in an earlier session stays.
+func (m *MockManager) SetReadsSetEnds(reads bool) {
+	m.readsSetEnds.Store(reads)
+}
+
+// AtSetEnd implements integrations.SetEndFiler: file runs at each read of a
+// test set's end (FileAtSetEnd) until cancel. It registers nothing and says
+// !ok where no read of a set's end will run it: on a test worker's manager,
+// which no such read asks; in a session whose client makes no such read
+// (SetReadsSetEnds); on a closed manager; and for a nil file.
+func (m *MockManager) AtSetEnd(file func(ctx context.Context)) (cancel func(), ok bool) {
+	if file == nil || m.notAtSetEnd.Load() || !m.readsSetEnds.Load() || m.IsClosed() {
+		return func() {}, false
+	}
+	m.setEndMu.Lock()
+	defer m.setEndMu.Unlock()
+	m.setEndNext++
+	id := m.setEndNext
+	m.setEndFilers = append(m.setEndFilers, setEndFiler{id: id, file: file})
+	return func() {
+		m.setEndMu.Lock()
+		defer m.setEndMu.Unlock()
+		m.setEndFilers = slices.DeleteFunc(m.setEndFilers, func(f setEndFiler) bool { return f.id == id })
+	}, true
+}
+
+// FileAtSetEnd runs, once each and in the order they were made, the
+// registrations AtSetEnd held when it began, and returns once all have
+// returned: each has filed the misses of the calls its connection holds for
+// a test of the set, so a read of the misses made after it takes them. It
+// runs them with setEndMu released, so a registration may file in-band and
+// cancel itself or another. One cancelled before this read reaches it is
+// not run by it; one made while they run is not run by this read. Each is
+// handed ctx, the read's, and stops waiting once it is done.
+//
+// The error says the read cannot take every such miss: a registration
+// panicked (recovered here, so the others still run and the read says why,
+// not a dropped connection), or ctx was done by the time those it ran
+// returned, and one may have returned before it filed. With none run,
+// nothing is left unfiled: nil.
+func (m *MockManager) FileAtSetEnd(ctx context.Context) error {
+	m.setEndMu.Lock()
+	filers := slices.Clone(m.setEndFilers)
+	m.setEndMu.Unlock()
+	var panicked []string
+	ran := false
+	for _, f := range filers {
+		if !m.setEndRegistered(f.id) {
+			continue
+		}
+		ran = true
+		if p := m.runSetEndFiler(ctx, f.file); p != nil {
+			panicked = append(panicked, fmt.Sprint(p))
+		}
+	}
+	if len(panicked) > 0 {
+		return fmt.Errorf("a parser panicked filing the calls it holds for a test of the set: %s", strings.Join(panicked, "; "))
+	}
+	if !ran {
+		return nil
+	}
+	return ctx.Err()
+}
+
+// runSetEndFiler runs one registration, recovering its panic: what it
+// panicked with, or nil.
+func (m *MockManager) runSetEndFiler(ctx context.Context, file func(context.Context)) (panicked any) {
+	defer func() {
+		if p := recover(); p != nil {
+			m.logger.Error("a parser panicked filing, at the test set's end read, the calls it holds for a test of the set; the read is not judged",
+				zap.Any("panic", p), zap.Stack("stack"))
+			panicked = p
+		}
+	}()
+	file(ctx)
+	return nil
+}
+
+// setEndRegistered reports whether registration id is not cancelled yet.
+func (m *MockManager) setEndRegistered(id uint64) bool {
+	m.setEndMu.Lock()
+	defer m.setEndMu.Unlock()
+	return slices.ContainsFunc(m.setEndFilers, func(f setEndFiler) bool { return f.id == id })
 }
 
 // MarkMockAsUsed marks the given mock as used (consumed) without modifying

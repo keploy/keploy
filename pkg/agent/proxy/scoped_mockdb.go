@@ -1102,6 +1102,17 @@ func (s *scopedMockDb) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock
 	return nil, nil
 }
 
+// AtSetEnd hands on the wrapped store's SetEndFiler: a scoped connection's
+// misses are filed where its store's are, so the store's set's end read is
+// its own. Over a test worker's manager, or a store without the facet, it is
+// !ok, as theirs is.
+func (s *scopedMockDb) AtSetEnd(file func(ctx context.Context)) (cancel func(), ok bool) {
+	if f, ok := s.MockMemDb.(integrations.SetEndFiler); ok {
+		return f.AtSetEnd(file)
+	}
+	return func() {}, false
+}
+
 func (s *scopedMockDb) StagingEpoch() uint64 {
 	if p, ok := s.MockMemDb.(integrations.WindowPacer); ok {
 		return p.StagingEpoch()

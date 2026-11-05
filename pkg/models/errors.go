@@ -313,6 +313,12 @@ type MockMismatchReport struct {
 	// similarity): likely one another test recorded, which the replay names
 	// (UnmatchedCall.RecordedIn).
 	NotOwned bool
+	// HeldPastWindow says, under the proven switch, the parser held the call
+	// past its own window for a later test's recording, and files its miss
+	// because none answered it by the set's end or its connection's end
+	// (integrations.SetEndFiler). Such a call may have been made in a test
+	// or between two (UnmatchedCall.Held).
+	HeldPastWindow bool
 	// Reason is why the call missed, when the learn step decided it, or
 	// MissViewReplaced when a test's begin or end, or another view served
 	// between tests, replaced its view before its miss was diagnosed

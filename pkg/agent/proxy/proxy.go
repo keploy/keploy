@@ -4505,6 +4505,9 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 			}
 		})
 	}
+	// Whether this session's client reads its sets' ends, on the run's
+	// manager alone: no set's end read asks a test worker's (AtSetEnd).
+	p.getMockManager().SetReadsSetEnds(opts.ReadsSetEnds)
 	if provenswitch.On() {
 		// A new test set, as for the learn step above: its variables begin
 		// with none bound, the previous set's run's neither (its mocks
@@ -5865,6 +5868,20 @@ func (p *Proxy) GetErrorChannel() <-chan error {
 	return p.errChannel
 }
 
+var _ agent.SetEndFilingProxy = (*Proxy)(nil)
+
+// FileAtSetEnd implements agent.SetEndFilingProxy: the parsers serving the
+// run's connections file the misses of the calls they hold for a test of the
+// set (MockManager.FileAtSetEnd), before keploy test reads the set's end. A
+// test worker's manager is not asked: the run's read reads the run's misses,
+// and a worker's manager registers nothing (MockManager.AtSetEnd).
+func (p *Proxy) FileAtSetEnd(ctx context.Context) error {
+	if m := p.getMockManager(); m != nil {
+		return m.FileAtSetEnd(ctx)
+	}
+	return nil
+}
+
 // GetMockErrors drains all mock-not-found errors and returns them.
 // When StartErrorDrain is active, it reads from the test accumulator instead
 // of the channel (which is drained by the background goroutine).
@@ -6022,6 +6039,9 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 					Given:            parserErr.MismatchReport.Given,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
+					// A call the parser held for a later test's recording
+					// that none answered: missed only at the set's end.
+					Held: parserErr.MismatchReport.HeldPastWindow,
 					// Why the call missed, when record's full round's learn
 					// step decided it: judging's evidence.
 					Reason:     parserErr.MismatchReport.Reason,
