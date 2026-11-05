@@ -26,13 +26,27 @@ func TestOnlyTheUndeliveredTagMarksAnAnswerTheClientNeverRead(t *testing.T) {
 		t.Fatal("an answer tagged undelivered was read as delivered")
 	}
 	bare := &Mock{Name: "bare", Kind: Kind("Kafka")}
-	if bare.MarkUndelivered(); !bare.IsUndelivered() {
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("MarkUndelivered on a mock with no metadata panicked: %v", p)
+			}
+		}()
+		bare.MarkUndelivered()
+	}()
+	if !bare.IsUndelivered() {
 		t.Fatal("MarkUndelivered on a mock with no metadata did not tag it")
 	}
-	// No data-plane mock: every site that asks whether a mock is a test's
-	// or the worker scope's reads it as none.
-	if !undeliveredMock("unread", 1000, true).IsProtocolPhase() || !bare.IsProtocolPhase() {
-		t.Fatal("an answer the client never read was read as a data-plane mock")
+	// No test's and no worker scope's, but still the data-plane answer it is
+	// to every site that serves or matches: no path that serves
+	// protocol-phase mocks takes it for one.
+	for _, m := range []*Mock{undeliveredMock("unread", 1000, true), bare} {
+		if !m.OutsideTestScopes() {
+			t.Fatalf("%s, an answer the client never read, was read as one a test or the worker scope may require", m.Name)
+		}
+		if m.IsProtocolPhase() {
+			t.Fatalf("%s, an answer the client never read, was read as protocol-phase", m.Name)
+		}
 	}
 	other := undeliveredMock("read", 1000, false)
 	other.Spec.Metadata[MetadataUndeliveredKey] = "false"
@@ -40,9 +54,13 @@ func TestOnlyTheUndeliveredTagMarksAnAnswerTheClientNeverRead(t *testing.T) {
 		if m.IsUndelivered() {
 			t.Fatalf("%+v was read as undelivered", m)
 		}
-		if m != nil && m.Name != "no-metadata" && m.IsProtocolPhase() {
-			t.Fatalf("%+v, an answer the client read, was read as protocol-phase", m)
+		if m != nil && m.Name != "no-metadata" && m.OutsideTestScopes() {
+			t.Fatalf("%+v, an answer the client read, was read as outside every test's scope", m)
 		}
+	}
+	// A protocol-phase mock is outside them as before.
+	if cfg := (&Mock{Name: "cfg", Kind: Kind("Kafka"), Spec: MockSpec{Metadata: map[string]string{"type": "config"}}}); !cfg.OutsideTestScopes() {
+		t.Fatal("a protocol-phase mock was read as one a test may require")
 	}
 }
 

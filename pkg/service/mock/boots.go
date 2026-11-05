@@ -105,7 +105,8 @@ func suiteAt(suites []models.SuiteSpan, at time.Time) string {
 // mapping, unless it is a protocol mock (capturedMock.protocol: under the
 // proven switch a protocol-phase one, and under either an answer the client
 // never read), which, as in correlateScopes' dataPlane, no test's mapping
-// lists; and among the mocks its cases are correlated with, as before.
+// lists; and among the mocks its cases are correlated with, which
+// correlateCases reads as the path without starts does.
 func (p *bootPlan) inTest(test string, entry models.MockEntry, mk capturedMock) {
 	if !mk.protocol {
 		p.tests[test] = append(p.tests[test], entry)

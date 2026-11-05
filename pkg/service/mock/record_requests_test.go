@@ -1248,7 +1248,20 @@ func TestAMappingListsNoAnswerTheClientNeverRead(t *testing.T) {
 			}
 			plan := classify(tests, starts, []models.SuiteSpan{{Dir: "/r", Start: at(0), End: at(200)}}, withStarts)
 			require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0@s1", Kind: "Http", Start: "app#1"}, {Name: "mock-0", Kind: "Http"}}}, plan.tests)
-			require.Len(t, plan.perTest, 4, "its cases are correlated with every mock in the test's window, as before")
+			// A case's mocks list it on neither path either: correlateCases
+			// reads every mock in the case's span, with starts (perTest) and
+			// without (every mock recorded).
+			cases := []capturedMock{{name: "case-1", ts: at(5), end: at(30)}}
+			for path, owned := range map[string][]capturedMock{"with starts": plan.perTest, "without starts": mocks} {
+				var listed []string
+				for _, tc := range correlateCases(windows, owned, cases, nil) {
+					listed = append(listed, tc.CaseMocks["case-1"]...)
+				}
+				require.NotEmpty(t, listed, "%s: the case's mocks", path)
+				for _, n := range listed {
+					require.NotContains(t, n, "mock-1", "%s: a case's mocks list an answer the client never read", path)
+				}
+			}
 		})
 	}
 }

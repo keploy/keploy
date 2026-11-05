@@ -1277,8 +1277,11 @@ type capturedMock struct {
 	// (models.Mock.IsUndelivered), which no replay serves: so in no test's
 	// mapping and in the pool.
 	protocol bool
-	start    string
-	ref      string
+	// unread: an answer the client never read (models.Mock.IsUndelivered),
+	// so, under either switch, among no case's mocks either (correlateCases).
+	unread bool
+	start  string
+	ref    string
 	// instance is the keploy instance (a test worker's) the call's
 	// connection was stamped with (models.Mock.Instance): only a window of
 	// that worker's (ScopeWindow.Instance) holds it. 0 for none.
@@ -1296,8 +1299,9 @@ func capturedOf(mk *models.Mock) capturedMock {
 	// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
 	// So is an answer the client never read, under either switch: no test
 	// makes the call it recorded.
-	protocol := provenswitch.On() && mk.IsProtocolPhase() || mk.IsUndelivered()
-	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef}
+	unread := mk.IsUndelivered()
+	protocol := provenswitch.On() && mk.IsProtocolPhase() || unread
+	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, unread: unread, start: mk.Start, ref: mk.StartRef}
 }
 
 // stagingSetID returns the staging set name record captures into while recording
@@ -1463,6 +1467,8 @@ func dataPlane(mocks []capturedMock) []capturedMock {
 }
 
 // correlateCases lists each flow's test cases by the window their request fell in; a case outside every window stays unmapped.
+// A case's mocks are the calls made in its span but the boot ones and the
+// answers the client never read (capturedMock.unread), which no replay serves.
 func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, steps []models.ScopeWindow) map[string]models.MappedTestCase {
 	byTest := make(map[string]models.MappedTestCase)
 	spans := make(map[string]models.ScopeWindow, len(cases))
@@ -1480,7 +1486,7 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 	var own []capturedMock
 	at := make(map[string]time.Time, len(mocks))
 	for _, mk := range mocks {
-		if !mk.boot {
+		if !mk.boot && !mk.unread {
 			own = append(own, mk)
 			at[mk.name] = mk.ts
 		}

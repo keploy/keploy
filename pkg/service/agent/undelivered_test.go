@@ -36,3 +36,18 @@ func TestATestsOwnMocksHoldNoAnswerTheClientNeverRead(t *testing.T) {
 		t.Fatalf("a test's own mocks = %v; want [read-1 read-2]", names)
 	}
 }
+
+// A refused answer the client never read is no recorded call its test is
+// judged for (refusedOf), as a refused protocol-phase mock is not; a refused
+// answer the client read is one.
+func TestARefusedAnswerTheClientNeverReadChargesNoTest(t *testing.T) {
+	read := &models.Mock{Name: "read", Kind: models.Kind("Kafka"), Spec: models.MockSpec{Metadata: map[string]string{"type": "mocks"}}}
+	unread := &models.Mock{Name: "unread", Kind: models.Kind("Kafka"), Spec: models.MockSpec{Metadata: map[string]string{"type": "mocks"}}}
+	unread.MarkUndelivered()
+	s := &ClientMockStorage{}
+	s.noteRefused(read)
+	s.noteRefused(unread)
+	if !s.refused["read"] || s.refused["unread"] {
+		t.Fatalf("refused test mocks %v; want the answer read alone", s.refused)
+	}
+}

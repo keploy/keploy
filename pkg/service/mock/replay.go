@@ -1552,12 +1552,13 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 }
 
 // ownsTestMocks reports whether a test of table owns a test mock: a
-// data-plane mock of loaded (a protocol-phase mock is the pool's).
+// data-plane mock of loaded (a protocol-phase mock is the pool's, and an
+// answer the client never read no test's: models.Mock.OutsideTestScopes).
 func ownsTestMocks(table map[string][]string, loaded []*models.Mock) bool {
 	test := make(map[string]bool, len(loaded))
 	for _, mk := range loaded {
 		if mk != nil && mk.Name != "" {
-			test[mk.Name] = !mk.IsProtocolPhase()
+			test[mk.Name] = !mk.OutsideTestScopes()
 		}
 	}
 	for _, names := range table {

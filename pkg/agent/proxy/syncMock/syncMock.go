@@ -2036,6 +2036,38 @@ func attributedReusable(mock *models.Mock) bool {
 	return !(provenswitch.On() && !mock.IsProtocolPhase() && !mock.IsAsync())
 }
 
+// mapsTo reports whether a test's mapping lists mock once the test's window
+// owns it: every mock but an answer the client never read
+// (models.Mock.IsUndelivered), which no replay serves, so no test makes the
+// call it recorded, under either switch. That one is owned, named, sent and
+// pruned as its window's other mocks are; only the mappings leave it out
+// (withMapped, withLate, noteSentClaimedLocked).
+func mapsTo(mock *models.Mock) bool {
+	return !mock.IsUndelivered()
+}
+
+// withMapped is ids, a test's mapping, with mock's name added when the
+// mapping lists mock (mapsTo).
+func withMapped(ids []string, mock *models.Mock) []string {
+	if !mapsTo(mock) {
+		return ids
+	}
+	return append(ids, mock.Name)
+}
+
+// withLate is late, the late mappings by test, with mock's name added to
+// test's when the mapping lists mock (mapsTo); late is made when nil.
+func withLate(late map[string][]string, test string, mock *models.Mock) map[string][]string {
+	if !mapsTo(mock) {
+		return late
+	}
+	if late == nil {
+		late = make(map[string][]string)
+	}
+	late[test] = append(late[test], mock.Name)
+	return late
+}
+
 // flushTakeLocked is what the next FlushOwnedWindows does with mock, and the
 // windows it does it by (ownerOrSharedLocked). BacklogBefore asks it too: what
 // a flush will take is still to be handed on. Caller holds m.mu.
@@ -2178,10 +2210,7 @@ func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mock
 		case flushOwned:
 			mock.Name = "mock-" + generateRandomString(8)
 			if w.mapping {
-				if lateMappings == nil {
-					lateMappings = make(map[string][]string)
-				}
-				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
+				lateMappings = withLate(lateMappings, w.testName, mock)
 			}
 			// Owned by the matched window's test → tag it so a capacity
 			// drop suppresses that TC.
@@ -2969,10 +2998,7 @@ func (m *SyncMockManager) handOwedLocked(outChanBound bool, send *[]ownedMock, l
 		n++
 		o.mock.Name = "mock-" + generateRandomString(8)
 		if o.to.mapping {
-			if *late == nil {
-				*late = make(map[string][]string)
-			}
-			(*late)[o.to.testName] = append((*late)[o.to.testName], o.mock.Name)
+			*late = withLate(*late, o.to.testName, o.mock)
 		}
 		*send = append(*send, ownedMock{mock: o.mock, owner: o.to.testName})
 	}
@@ -3943,9 +3969,10 @@ func (m *SyncMockManager) startupClaimedLocked(mk *models.Mock, self *Window) bo
 // outgoing call and the test's resolve). owner, if not nil, is the resolved
 // kept window whose part after its yield covers it (sentClaim.owner). Reports
 // whether it was noted: its send's end must then be told (sentClaimDone).
-// Caller holds m.mu.
+// An answer the client never read is never noted (mapsTo): no mapping lists
+// it, and its drop costs no test a call. Caller holds m.mu.
 func (m *SyncMockManager) noteSentClaimedLocked(mk *models.Mock, self *Window, owner *resolvedWindow) bool {
-	if !m.startupClaimedLocked(mk, self) {
+	if !mapsTo(mk) || !m.startupClaimedLocked(mk, self) {
 		return false
 	}
 	if len(m.sentClaimed) >= maxSentClaimed {
@@ -4321,7 +4348,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 					continue
 				}
 				mock.Name = "mock-" + generateRandomString(8)
-				associatedMockIDs = append(associatedMockIDs, mock.Name)
+				associatedMockIDs = withMapped(associatedMockIDs, mock)
 				// Owned by THIS window's test → tag it so a capacity
 				// drop suppresses testName rather than orphaning it.
 				mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: testName})
@@ -4341,10 +4368,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 				}
 				mock.Name = "mock-" + generateRandomString(8)
 				if ownerW.mapping {
-					if lateMappings == nil {
-						lateMappings = make(map[string][]string)
-					}
-					lateMappings[ownerW.testName] = append(lateMappings[ownerW.testName], mock.Name)
+					lateMappings = withLate(lateMappings, ownerW.testName, mock)
 				}
 				mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: ownerW.testName})
 				lateBinned++
@@ -4445,10 +4469,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			}
 			mock.Name = "mock-" + generateRandomString(8)
 			if ownerW.mapping {
-				if lateMappings == nil {
-					lateMappings = make(map[string][]string)
-				}
-				lateMappings[ownerW.testName] = append(lateMappings[ownerW.testName], mock.Name)
+				lateMappings = withLate(lateMappings, ownerW.testName, mock)
 			}
 			// Owned by the retro-matched window's test → tag it so a
 			// capacity drop suppresses that TC.
@@ -4562,7 +4583,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			fromHold := make([]ownedMock, 0, len(taken))
 			for _, mock := range taken {
 				mock.Name = "mock-" + generateRandomString(8)
-				associatedMockIDs = append(associatedMockIDs, mock.Name)
+				associatedMockIDs = withMapped(associatedMockIDs, mock)
 				fromHold = append(fromHold, ownedMock{mock: mock, owner: testName})
 			}
 			heldTaken = len(fromHold)
@@ -4786,10 +4807,7 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 			}
 			mock.Name = "mock-" + generateRandomString(8)
 			if w.mapping {
-				if lateMappings == nil {
-					lateMappings = make(map[string][]string)
-				}
-				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
+				lateMappings = withLate(lateMappings, w.testName, mock)
 			}
 			// Owned by the rescued window's test → tag it so a capacity
 			// drop suppresses that TC.

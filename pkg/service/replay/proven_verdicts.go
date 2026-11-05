@@ -30,13 +30,10 @@ func (r *Replayer) assertTestMocks() bool {
 // the client never read (models.Mock.IsUndelivered) is left out under both:
 // no replay serves it, so no test makes the call it recorded.
 func excludedFromTestMockAssertion(m *models.Mock) bool {
-	if m.IsUndelivered() {
-		return true
-	}
 	if provenswitch.On() {
-		return m.IsProtocolPhase()
+		return m.OutsideTestScopes()
 	}
-	return isReusableTierMock(m)
+	return m.IsUndelivered() || isReusableTierMock(m)
 }
 
 // unconsumedTestMocks is, under the proven switch, how many test mocks a test
