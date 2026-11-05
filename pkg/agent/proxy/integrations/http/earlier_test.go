@@ -50,6 +50,26 @@ func (d ownGateDb) FindStagedNotOwned(kind models.Kind, call integrations.CallRo
 	return "", true
 }
 
+// anyRoundDb is ownGateDb whose staged lookup shows each of its recordings
+// whatever round the call read, a round never marked included: a store
+// that would name an earlier recording without the switch, under which
+// nothing marks a call's round, so only the switch keeps it unnamed.
+type anyRoundDb struct{ ownGateDb }
+
+func (d anyRoundDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return d, func() bool { return false }
+}
+
+func (d anyRoundDb) FindStagedNotOwned(kind models.Kind, _ integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
+	*d.lookups++
+	for _, m := range d.staged {
+		if m.Kind == kind {
+			match(m)
+		}
+	}
+	return "", false
+}
+
 // readFailsDb is ownGateDb whose per-test read fails: the open test's own
 // recordings it has not answered are then unknown.
 type readFailsDb struct{ ownGateDb }
@@ -182,13 +202,16 @@ func TestAChangedCallOfTheTestsOwnNamesTheEarlierTestsRecordingOfItsMethodAndPat
 			if r := missReportOf(t, db(nil, []*models.Mock{own}, early), addr, put(2), opts); r.MissKind != models.MissExtraCall || r.Earlier != "" {
 				t.Fatalf("an extra PUT is kind %q, earlier %q; want an extra call naming no earlier recording", r.MissKind, r.Earlier)
 			}
-			// Without the switch nothing is named. (The test's own recording
-			// carries a header the call lacks, so the matcher without the
-			// switch, which this store cannot serve, has no candidate.)
+			// Without the switch nothing is named, even by a store whose
+			// lookup would show the earlier recording for a call whose round
+			// no one marked (anyRoundDb): the switch is what keeps it
+			// unnamed, not the store. (The test's own recording carries a
+			// header the call lacks, so the matcher without the switch,
+			// which this store cannot serve, has no candidate.)
 			t.Setenv(provenswitch.Env, "")
 			ownHdr := secretPut("mock-own-hdr", "PUT", path, host, 2, rec)
 			ownHdr.Spec.HTTPReq.Header["X-Vault-Token"] = "t"
-			if r := missReportOf(t, db([]*models.Mock{ownHdr}, nil, early), addr, put(5), opts); r.Earlier != "" {
+			if r := missReportOf(t, anyRoundDb{db([]*models.Mock{ownHdr}, nil, early)}, addr, put(5), opts); r.Earlier != "" {
 				t.Fatalf("without the switch, a changed PUT names earlier %q; want none", r.Earlier)
 			}
 		})
