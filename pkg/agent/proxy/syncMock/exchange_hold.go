@@ -8,11 +8,11 @@ import (
 // HoldExchanges notes that a parser holds exchanges it made, requested from
 // at on, instead of handing them on, until it can tell what they are (the
 // Generic recorder's first exchange of a connection that may lie wholly
-// inside one test, or an exchange whose answer may go on). stopping is closed once the stop of the recording it is
-// made in begins (it asks what is pending, BacklogBefore): the parser decides
-// them then, with what it has, and hands them on. Until it calls handedOn,
-// after handing them on, they are pending for the stop: its streams do not
-// end without them. Nil-safe.
+// inside one test, or an exchange whose answer may go on). stopping is closed
+// once the stop of the recording it is made in begins (it asks what is
+// pending, BacklogBefore): the parser decides them then, with what it has,
+// and hands them on. Until it calls handedOn, after handing them on, they are
+// pending for the stop: its streams do not end without them. Nil-safe.
 func (m *SyncMockManager) HoldExchanges(at time.Time) (stopping <-chan struct{}, handedOn func()) {
 	if m == nil {
 		return nil, func() {}
@@ -67,10 +67,11 @@ func (m *SyncMockManager) newHoldsSession() {
 }
 
 // HoldsSession is the signal the holds of the current recording are told its
-// stop by (HoldExchanges' stopping), nil before the first hold: a new one
-// once a re-record follows a stop (newHoldsSession). A parser that decided a
-// hold as a stop began compares it with the signal that told it, to know
-// whether it is still in that recording. Nil-safe.
+// stop by (HoldExchanges' stopping), nil before the first hold or stop
+// (stopHolds makes it too): a new one once a re-record follows a stop
+// (newHoldsSession). A parser that decided a hold as a stop began compares it
+// with the signal that told it, to know whether it is still in that
+// recording. Nil-safe.
 func (m *SyncMockManager) HoldsSession() <-chan struct{} {
 	if m == nil {
 		return nil

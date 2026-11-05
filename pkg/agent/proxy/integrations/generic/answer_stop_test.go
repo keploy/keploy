@@ -2,7 +2,9 @@ package generic
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +31,23 @@ func awaitReturn(t *testing.T, done <-chan error) {
 		}
 	case <-time.After(waitBound):
 		t.Fatal("the parser did not return once its events ended")
+	}
+}
+
+// spannedFromTo fails the row unless spans has a span from from to to, and
+// none just past to: a part of an answer left out is spanned from when the
+// relay read it to when its write returned, the times a test case that waited
+// on it spans.
+func spannedFromTo(t *testing.T, spans *syncMock.Spans, what string, from, to time.Time) {
+	t.Helper()
+	for _, at := range []time.Time{from, to} {
+		if over, _ := spans.Overlaps(at, at); !over {
+			t.Fatalf("%s has no span at %v: want one from its read, %v, to its write's return, %v", what, at, from, to)
+		}
+	}
+	past := to.Add(time.Nanosecond)
+	if over, _ := spans.Overlaps(past, past); over {
+		t.Fatalf("%s is spanned past its write's return, %v", what, to)
 	}
 }
 
@@ -272,6 +291,7 @@ func TestV2_TheRestOfAnAnswerTheStopCutIsSpannedAsTheParserTakesIt(t *testing.T)
 			if !over {
 				t.Fatalf("the parser took the rest of the answer the stop cut short and recorded no span over it (the stop waits on %q)", st.WaitingOn)
 			}
+			spannedFromTo(t, spans, "the rest of the answer the stop cut short", tailAt, tailAt.Add(3*time.Second))
 			// An exchange after the stop is recorded as any is: its
 			// request starts it, and its answer is decided at the next
 			// look that finds no more of it.
@@ -297,10 +317,13 @@ func TestV2_TheRestOfAnAnswerTheStopCutIsSpannedAsTheParserTakesIt(t *testing.T)
 // send returns once the parser has taken the chunk, and the next once it is
 // done with it.
 type directRun struct {
-	mgr    *syncMock.SyncMockManager
-	spans  *syncMock.Spans
-	sess   *supervisor.Session
-	mocks  chan *models.Mock
+	mgr   *syncMock.SyncMockManager
+	spans *syncMock.Spans
+	sess  *supervisor.Session
+	mocks chan *models.Mock
+	// out is the recording's channel, the manager's: where a session that
+	// hands its mocks to the manager (RouteMocksViaSyncMock) has them go.
+	out    chan *models.Mock
 	events chan chunkEvent
 	done   chan error
 	ended  bool
@@ -308,12 +331,23 @@ type directRun struct {
 
 func startDirect(t *testing.T) *directRun {
 	t.Helper()
+	return startDirectWith(t, nil)
+}
+
+// startDirectWith is startDirect with setup, when set, given the session
+// before the parser starts.
+func startDirectWith(t *testing.T, setup func(*supervisor.Session)) *directRun {
+	t.Helper()
 	r := &directRun{mgr: syncMock.New(zap.NewNop()), spans: &syncMock.Spans{},
-		mocks: make(chan *models.Mock, 8), events: make(chan chunkEvent), done: make(chan error, 1)}
+		mocks: make(chan *models.Mock, 8), out: make(chan *models.Mock, 8),
+		events: make(chan chunkEvent), done: make(chan error, 1)}
 	r.mgr.SetWatermark(neverBehind{})
-	r.mgr.SetOutputChannel(make(chan *models.Mock, 1)) // the recording
+	r.mgr.SetOutputChannel(r.out) // the recording
 	r.sess = &supervisor.Session{Mocks: r.mocks, Logger: zap.NewNop(), Mgr: r.mgr, Orphans: r.spans,
 		Ctx: syncMock.NewContext(context.Background(), r.mgr), ClientConnID: "c"}
+	if setup != nil {
+		setup(r.sess)
+	}
 	go func() { r.done <- pairChunkEvents(r.events, r.sess, zap.NewNop()) }()
 	t.Cleanup(func() {
 		if !r.ended {
@@ -368,10 +402,11 @@ func TestV2_TheRestOfAnAnswerTheStopCutIsOneExchangeLeftOut(t *testing.T) {
 			r.events <- chunkEvent{dir: fakeconn.FromDest, bytes: []byte("rest-1"), connSeq: 3, readAt: a1, writtenAt: a1.Add(time.Second)}
 			r.events <- chunkEvent{dir: fakeconn.FromDest, bytes: []byte("rest-2"), connSeq: 4, readAt: a2, writtenAt: a2.Add(time.Second)}
 			r.events <- chunkEvent{dir: fakeconn.FromDest}
+			// Each is spanned from its read to its write's return: the
+			// first with the count (leaveOutTail), the second only spanned
+			// (Session.ReportLeftOutPart).
 			for i, at := range []time.Time{a1, a2} {
-				if over, _ := r.spans.Overlaps(at, at); !over {
-					t.Fatalf("chunk %d of the rest has no span from its read once the parser has taken it", i+1)
-				}
+				spannedFromTo(t, r.spans, fmt.Sprintf("chunk %d of the rest", i+1), at, at.Add(time.Second))
 			}
 			if n := r.mgr.MocksLeftOut(); n != 1 {
 				t.Fatalf("%d left out for the rest of one answer in two chunks, want 1", n)
@@ -399,7 +434,8 @@ func TestV2_TheRestOfAnAnswerTheStopCutIsOneExchangeLeftOut(t *testing.T) {
 // of the split left out), and the next answer was teed ahead of its request
 // with no capture numbers, so the merge could not place it: held, it pairs
 // with the request read before it. Taken for the rest of the first
-// recording's cut answer, it was dropped and the request recorded with none.
+// recording's cut answer, it was dropped, and the request, with no answer,
+// was recorded nowhere.
 func TestV2_ARecordingAfterTheStopThatDecidedAnAnswerPairsItsAnswersAsAny(t *testing.T) {
 	for _, proven := range []string{"0", "1"} {
 		t.Run("proven="+proven, func(t *testing.T) {
@@ -487,7 +523,8 @@ func TestV2_TheRestOfAnAnswerLeftOutAtTheStopIsCountedWithIt(t *testing.T) {
 // exchange has its answer teed ahead of its request, with no capture numbers
 // for the merge to place it by. Held, it pairs with the request read before
 // it. Taken for the rest of the cut answer, it was spanned in the re-record
-// and never counted there, and the request was recorded with no answer.
+// and never counted there, and the request, with no answer, was recorded
+// nowhere.
 func TestV2_ARecordingAfterTheStopThatDecidedAnAnswerHoldsItsFirstAnswer(t *testing.T) {
 	for _, proven := range []string{"0", "1"} {
 		t.Run("proven="+proven, func(t *testing.T) {
@@ -513,6 +550,139 @@ func TestV2_ARecordingAfterTheStopThatDecidedAnAnswerHoldsItsFirstAnswer(t *test
 			if n := r.mgr.MocksLeftOut(); n != 1 {
 				t.Fatalf("%d left out, want only the rest of the first recording's cut answer", n)
 			}
+		})
+	}
+}
+
+// The stop decides a held answer, and the exchange comes off the stop's count
+// only once it is handed on (flushMock releases the answer's hold as it
+// returns): the stop, which looks until nothing is pending and then ends the
+// recording, finds the mock with the recording's manager by then. Here the
+// session hands its mocks to the manager (Session.RouteMocksViaSyncMock, as
+// production wires it), and its post-record hook, which runs before the
+// manager has the mock, holds the hand-on open while the stop looks. Released
+// before the hand-on, the hold let the stop find nothing pending while the
+// mock was on its way to the manager, and end without it. Under both
+// switches.
+func TestV2_TheStopFindsTheAnswerItDecidedWithTheManagerOnceNothingIsPending(t *testing.T) {
+	for _, proven := range []string{"0", "1"} {
+		t.Run("proven="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			t0 := time.Unix(6000, 0)
+			stop := t0.Add(10 * time.Second)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			r := startDirectWith(t, func(s *supervisor.Session) {
+				s.RouteMocksViaSyncMock = true
+				s.OnMockRecorded = func(*models.Mock) {
+					once.Do(func() {
+						close(entered)
+						<-release
+					})
+				}
+			})
+			released := false
+			t.Cleanup(func() { // runs before startDirectWith's: the parser can return
+				if !released {
+					close(release)
+				}
+			})
+			r.events <- stopChunk(fakeconn.FromClient, "GET big", 1, t0)
+			r.events <- stopChunk(fakeconn.FromDest, "head", 2, t0.Add(time.Second))
+			r.events <- chunkEvent{dir: fakeconn.FromDest} // a look past the head: it is held
+			r.mgr.BacklogBefore(stop)                      // the stop begins
+			select {
+			case <-entered:
+			case <-time.After(waitBound):
+				t.Fatal("the stop did not decide the held exchange")
+			}
+			// The parser is handing the mock on, and the manager does not
+			// have it yet: the stop waits on the answer's hold.
+			st := r.mgr.BacklogBefore(stop)
+			if !st.Pending {
+				t.Fatal("the stop finds nothing pending while the mock it decided is on its way to the manager: it would end the recording without it")
+			}
+			if !strings.HasPrefix(st.WaitingOn, "a parser holds exchanges") {
+				t.Fatalf("the stop waits on %q, want the answer's hold while the mock it decided is on its way to the manager", st.WaitingOn)
+			}
+			released = true
+			close(release)
+			bound := time.Now().Add(waitBound) // only turns a hang into a failure
+			for st = r.mgr.BacklogBefore(stop); st.Pending; st = r.mgr.BacklogBefore(stop) {
+				if time.Now().After(bound) {
+					t.Fatalf("the stop still finds the exchange pending once it was handed on: %q", st.WaitingOn)
+				}
+				time.Sleep(time.Millisecond) // a yield between looks
+			}
+			select {
+			case m := <-r.out:
+				assertExchange(t, m, []string{"GET big"}, []string{"head"})
+			default:
+				t.Fatal("the stop found nothing pending before the manager had the mock it decided")
+			}
+			r.end(t)
+			if n := r.mgr.MocksLeftOut(); n != 0 {
+				t.Fatalf("%d left out, want the exchange handed on", n)
+			}
+		})
+	}
+}
+
+// A recording can begin between the last one's stop signal and the parser's
+// decision of the answer that stop told it of: here the parser, deciding,
+// waits on an answer chunk its dest reader took off the stream before the
+// stop, the stop finds the hold pending (it gives up at its bound), and a
+// re-record begins on the same manager (SyncMockManager.newHoldsSession)
+// before the chunk reaches the parser. The decision is that stop's, the one
+// that told the hold (answerStopping), not the new recording's: so the
+// re-record's first answer, teed ahead of its request with no capture
+// numbers, pairs with its request as in any recording. Tied to the new
+// recording, it was taken for the rest of the answer cut: counted and spanned
+// in the re-record, and its request, with no answer, recorded nowhere.
+func TestV2_ARecordingThatBeginsBeforeTheLastStopDecidesHoldsItsFirstAnswer(t *testing.T) {
+	for _, proven := range []string{"0", "1"} {
+		t.Run("proven="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			t0 := time.Unix(6000, 0)
+			destCh := make(chan fakeconn.Chunk, 1)
+			dest := fakeconn.New(destCh, nil, nil)
+			// take has the dest's reader take an answer chunk of b off its
+			// stream, and says how far into it the reader is then.
+			take := func(b string) int64 {
+				destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte(b)}
+				if _, err := dest.ReadChunk(); err != nil {
+					t.Fatal(err)
+				}
+				return dest.ReadThrough()
+			}
+			r := startDirectWith(t, func(s *supervisor.Session) { s.DestStream = dest })
+			r.events <- stopChunk(fakeconn.FromClient, "GET one", 1, t0)
+			head := stopChunk(fakeconn.FromDest, "one", 2, t0.Add(time.Second))
+			head.through = take("one")
+			r.events <- head
+			r.events <- chunkEvent{dir: fakeconn.FromDest} // a look past the head: it is held
+			rest := stopChunk(fakeconn.FromDest, "one-rest", 3, t0.Add(2*time.Second))
+			rest.through = take("one-rest") // on its way to the parser
+			// The first recording's stop begins, and finds the hold pending.
+			if st := r.mgr.BacklogBefore(t0.Add(10 * time.Second)); !st.Pending {
+				t.Fatal("setup: the stop finds nothing pending while the parser waits on the answer chunk its reader took")
+			}
+			r.mgr.SetOutputChannel(make(chan *models.Mock, 1)) // the re-record
+			r.events <- rest
+			r.handedOn(t, []string{"GET one"}, []string{"one", "one-rest"})
+			t1 := t0.Add(time.Minute)
+			c := chunkEvent{dir: fakeconn.FromDest, bytes: []byte("c"), readAt: t1.Add(time.Second), writtenAt: t1.Add(time.Second)}
+			c.through = take("c")
+			r.events <- c
+			r.events <- chunkEvent{dir: fakeconn.FromClient, bytes: []byte("GET c"), readAt: t1}
+			r.end(t)
+			if over, _ := r.spans.Overlaps(t1.Add(time.Second), t1.Add(time.Second)); over {
+				t.Fatal("the re-record's first answer was spanned as the rest of the last recording's cut answer")
+			}
+			if n := r.mgr.MocksLeftOut(); n != 0 {
+				t.Fatalf("%d left out, want none: the first recording's answer was handed on whole", n)
+			}
+			r.handedOn(t, []string{"GET c"}, []string{"c"})
 		})
 	}
 }

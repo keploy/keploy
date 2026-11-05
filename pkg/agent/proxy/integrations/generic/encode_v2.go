@@ -205,9 +205,10 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	}
 	// emit hands on the exchanges a preambleHold held (handOn).
 	emit := func(m *models.Mock) { emitV2(sess, logger, m) }
-	// leaveOutTail reports answer chunks no exchange it records holds as left
-	// out: chunks the server sent after the exchange they would end was
-	// handed on (the recording's stop decided it: each as the parser takes
+	// leaveOutTail reports answer chunks no exchange it records holds as one
+	// exchange left out: chunks the server sent after the exchange they would
+	// end was handed on (the recording's stop decided it: the rest's first
+	// chunk, as the parser takes it, and leaveOutCutTail spans each after
 	// it), or with no request before them, up to the next request. n is how
 	// many there are (none: a no-op); they span from from, when the relay
 	// read the first of them or earlier, to when its write of the last
@@ -274,16 +275,16 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// it: the last exchange of a pooled connection, held until a request that
 	// may never come, would miss the stop. So the hold is counted with the
 	// recording's manager (SyncMockManager.HoldExchanges, as the preamble
-	// hold's is), which the stop finds pending
-	// until it is handed on, and the stop decides it (answerStopping): once the
-	// parser has taken every chunk the merge has ready, and every answer chunk
-	// its dest reader has taken off its stream (destRead), the exchange is
-	// handed on with the answer read so far. Its answer has then ended as far
-	// as the capture shows. A chunk of it that the parser takes after that
-	// (stopDecided) is left out with its span as the parser takes it
-	// (leaveOutTail), not held to the next request or the streams' end, which
-	// may come after the verdict of the test case over it: that test case is
-	// left out, never saved over the answer cut short.
+	// hold's is), which the stop finds pending until it is handed on, and the
+	// stop decides it (answerStopping): once the parser has taken every chunk
+	// the merge has ready, and every answer chunk its dest reader has taken
+	// off its stream (destRead), the exchange is handed on with the answer
+	// read so far. Its answer has then ended as far as the capture shows. A
+	// chunk of it that the parser takes after that (stopDecided) is left out
+	// with its span as the parser takes it (leaveOutCutTail: the rest counted
+	// once, each chunk of it spanned), not held to the next request or the
+	// streams' end, which may come after the verdict of the test case over
+	// it: that test case is left out, never saved over the answer cut short.
 	var (
 		answerStopping <-chan struct{}
 		answerHandedOn func()
