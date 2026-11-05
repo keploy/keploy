@@ -1852,6 +1852,12 @@ func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilt
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	// Create the URL with query parameters
 	url := fmt.Sprintf("%s/consumedmocks", a.conf.Agent.AgentURI)
+	if models.SetEndRead(ctx) {
+		// The read of what was consumed after a set's last test, with the
+		// proven switch off: the agent moves the run's place to the set's
+		// end first. An agent that predates the parameter ignores it.
+		url += "?" + models.SetEndReadQuery + "=1"
+	}
 	// Create a new GET request with the query parameter
 	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
@@ -4567,6 +4573,12 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 		// for a test of the set first. An agent that predates the parameter
 		// ignores it, and reads as it reads a test's end.
 		url += "?" + models.SetEndReadQuery + "=1"
+	} else if test, ok := models.TestEndRead(ctx); ok {
+		// A test's end read names the test: the agent moves the run's place
+		// to its end first. An agent that predates the parameter ignores it,
+		// and an answer recorded after the test waits for the next test's
+		// window to open.
+		url += "?" + models.TestEndReadQuery + "=" + neturl.QueryEscape(test)
 	}
 	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
