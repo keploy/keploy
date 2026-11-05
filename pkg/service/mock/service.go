@@ -144,7 +144,7 @@ type SetPusher interface {
 // key's worker scope (models.ScopeTableReq.Worker) and the values each test
 // gave when it was recorded (models.ScopeTableReq.Given).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error
+	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead) error
 }
 
 type MappingReader interface {

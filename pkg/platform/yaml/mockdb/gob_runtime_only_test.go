@@ -57,7 +57,7 @@ func mockRuntimeOnlyFields(t *testing.T) []taggedRuntimeOnly {
 		"SourcePID", "StartRef",
 		"TestModeInfo.Lifetime", "TestModeInfo.LifetimeDerived", "TestModeInfo.Consume",
 		"TestModeInfo.IsStartup", "TestModeInfo.ServedIn", "TestModeInfo.StagedSet",
-		"TestModeInfo.Concurrent",
+		"TestModeInfo.Concurrent", "TestModeInfo.RepeatRead",
 	} {
 		if !have[name] {
 			t.Fatalf("the walk found no %s among %v", name, fields)
@@ -82,6 +82,23 @@ func setNonZero(t *testing.T, name string, v reflect.Value) {
 		v.SetUint(1)
 	case reflect.String:
 		v.SetString("runtime-only")
+	case reflect.Pointer:
+		// A new value of its own, itself set: RepeatRead's mark is then
+		// {Name: "runtime-only", At: 1}, the first read a replay names.
+		p := reflect.New(v.Type().Elem())
+		setNonZero(t, name, p.Elem())
+		v.Set(p)
+	case reflect.Struct:
+		set := false
+		for i := 0; i < v.NumField(); i++ {
+			if f := v.Type().Field(i); f.IsExported() {
+				setNonZero(t, name+"."+f.Name, v.Field(i))
+				set = true
+			}
+		}
+		if !set {
+			t.Fatalf("%s has no exported field: give it a value here", name)
+		}
 	default:
 		t.Fatalf("%s is of kind %s: give it a value here", name, v.Kind())
 	}
@@ -116,7 +133,11 @@ func runtimeOnlyMock(t *testing.T, name string) *models.Mock {
 	m := recordedMock(name)
 	v := reflect.ValueOf(m).Elem()
 	for _, f := range mockRuntimeOnlyFields(t) {
-		setNonZero(t, f.name, v.FieldByIndex(f.index))
+		fv := v.FieldByIndex(f.index)
+		setNonZero(t, f.name, fv)
+		if fv.IsZero() {
+			t.Fatalf("%s is still its zero value: the rows would not see it written or cleared", f.name)
+		}
 	}
 	return m
 }
@@ -187,26 +208,28 @@ func decodeGobFileRaw(t *testing.T, path string) []*models.Mock {
 
 // The code under test finds a field by its tags alone: exported, "-" for both
 // json and bson, at any depth of the exported structs held by value, a tagged
-// struct whole and not its fields, and nothing behind a pointer.
+// struct or pointer whole and not what it holds (TestModeInfo.RepeatRead is
+// such a pointer), and nothing behind an untagged pointer.
 func TestRuntimeOnlyPathsFollowTheTags(t *testing.T) {
 	type inner struct {
 		Tagged   int `json:"-" bson:"-"`
 		Recorded int `json:"recorded" bson:"recorded"`
 	}
 	type sample struct {
-		Tagged       int    `json:"-" bson:"-"`
-		JSONOnly     int    `json:"-" bson:"jsonOnly"`
-		BSONOnly     int    `json:"bsonOnly" bson:"-"`
-		Untagged     string // a field with no tags is recorded by name
-		hidden       inner  // no encoder or setter reaches it
-		Inner        inner
-		TaggedStruct inner  `json:"-" bson:"-"`
-		Pointer      *inner `json:"pointer"`
-		Deep         struct{ Inner inner }
+		Tagged        int    `json:"-" bson:"-"`
+		JSONOnly      int    `json:"-" bson:"jsonOnly"`
+		BSONOnly      int    `json:"bsonOnly" bson:"-"`
+		Untagged      string // a field with no tags is recorded by name
+		hidden        inner  // no encoder or setter reaches it
+		Inner         inner
+		TaggedStruct  inner  `json:"-" bson:"-"`
+		Pointer       *inner `json:"pointer"`
+		TaggedPointer *inner `json:"-" bson:"-"`
+		Deep          struct{ Inner inner }
 	}
 	_ = sample{}.hidden
 	got := runtimeOnlyPaths(reflect.TypeOf(sample{}))
-	want := [][]int{{0}, {5, 0}, {6}, {8, 0, 0}}
+	want := [][]int{{0}, {5, 0}, {6}, {8}, {9, 0, 0}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("runtimeOnlyPaths = %v, want %v", got, want)
 	}
@@ -214,7 +237,7 @@ func TestRuntimeOnlyPathsFollowTheTags(t *testing.T) {
 	for _, f := range runtimeOnlyFieldsOf(reflect.TypeOf(sample{}), "", nil) {
 		names = append(names, f.name)
 	}
-	if got := strings.Join(names, " "); got != "Tagged Inner.Tagged TaggedStruct Deep.Inner.Tagged" {
+	if got := strings.Join(names, " "); got != "Tagged Inner.Tagged TaggedStruct TaggedPointer Deep.Inner.Tagged" {
 		t.Fatalf("the rows' own walk found %q", got)
 	}
 }

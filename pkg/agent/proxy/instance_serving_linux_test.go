@@ -386,7 +386,9 @@ func TestEveryStagingOfTheSetReachesEachTestWorker(t *testing.T) {
 	for _, st := range p.instances.staged {
 		keys = append(keys, st.key)
 	}
-	want := "mocks mocksWindow poolNames bgRules bg recordedOfKind recordingTimes recordedBefore recordingSource startupCutoff catalog recordedWindows"
+	// The session instanceProxy began staged the header noise its repeated
+	// reads are proved under first.
+	want := "repeat-read-noise mocks mocksWindow poolNames bgRules bg recordedOfKind recordingTimes recordedBefore recordingSource startupCutoff catalog recordedWindows"
 	if got := strings.Join(keys, " "); got != want {
 		t.Fatalf("kept stagings: %s, want %s", got, want)
 	}
@@ -414,7 +416,7 @@ func TestEveryStagingOfTheSetReachesEachTestWorker(t *testing.T) {
 	for _, st := range p.instances.staged {
 		keys = append(keys, st.key)
 	}
-	want = "mocks mocksWindow bgRules bg recordedOfKind recordingTimes recordedBefore recordingSource startupCutoff catalog recordedWindows poolNames"
+	want = "repeat-read-noise mocks mocksWindow bgRules bg recordedOfKind recordingTimes recordedBefore recordingSource startupCutoff catalog recordedWindows poolNames"
 	if got := strings.Join(keys, " "); got != want {
 		t.Fatalf("kept stagings after pool names came again: %s, want %s", got, want)
 	}

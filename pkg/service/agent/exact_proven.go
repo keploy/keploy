@@ -338,6 +338,7 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	}
 	a.scopeMu.Lock()
 	names := append([]string(nil), a.scopeTable[id]...)
+	reads := a.testRepeats[id]
 	a.scopeMu.Unlock()
 	var owned []*models.Mock
 	if len(names) > 0 {
@@ -345,7 +346,7 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		owned = a.notReal(id, testMocks(names, mocks))
+		owned = models.MarkRepeatReads(a.notReal(id, testMocks(names, mocks)), reads)
 	}
 	// What the store refused of the test's mapping serves nothing; its end
 	// counts each as a recorded call the test did not make.
