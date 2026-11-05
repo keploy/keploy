@@ -47,6 +47,9 @@ import (
 //	swapMu  →  exact.outside.mu  →  treesMu  →  TreeDb.mu
 //	                         (prepareOutside reads the staged trees under the
 //	                          staging lock; nothing takes swapMu under it)
+//	swapMu  →  cursorMu      (a staging drops the per-test cursors and the
+//	                          recordings kept for repeats; keepOwned decides
+//	                          a recording's owner and keeps it under swapMu)
 //	swapMu  →  treesMu, carry.mu
 //	                         (fileCarryOver, under SetMocksWithWindow;
 //	                          carry.mu is a LEAF, also taken bare by
@@ -221,6 +224,24 @@ type MockManager struct {
 	// view prefixes its scope). Guarded by cursorMu, and dropped with the
 	// per-test cursors at every staging.
 	kept map[string]struct{}
+	// keptGen counts the stagings that dropped kept (resetPerTestCursors). A
+	// claim the store refuses to mark used takes back its keep only while
+	// keptGen is the one it kept in: once a staging dropped that keep, the
+	// name kept now, if any, is a later claim's. Guarded by cursorMu.
+	keptGen uint64
+	// testHookSetRead, testHookOwnerRead and testHookKeep, set only by a
+	// test before the manager is shared, run in a claim (keepOwned): the
+	// first in its set check, once that read the set generation, as it
+	// returns; the second in its owner check, once that read the open test,
+	// its window and its pool, as it returns; the third under cursorMu just
+	// before the keep. No staging may land from the first through the third.
+	// testHookMark runs in ClaimForRepeats once keepOwned kept the
+	// recording, holding no lock, before the store marks it used: a staging
+	// may land there.
+	testHookSetRead   func()
+	testHookOwnerRead func()
+	testHookKeep      func()
+	testHookMark      func()
 	// usedUp are the recordings a worker's test consumed, held for the test
 	// instead of deleted, so a run of the same test again is served them
 	// (scopedMockDb.DeleteFilteredMock); by its scope and the name. Guarded by
@@ -2417,6 +2438,7 @@ func (m *MockManager) resetPerTestCursors() {
 		}
 	}
 	m.kept = nil
+	m.keptGen++
 	m.usedUp = nil
 }
 
@@ -2491,6 +2513,75 @@ func (m *MockManager) KeptForRepeats() func(key string) bool {
 	return snapshotKeys(m.kept)
 }
 
+// ClaimForRepeats keeps mk, the open test's own per-test recording, for its
+// test's byte-identical repeats and marks it used, when no consume kept it
+// yet (integrations.RepeatClaimer). It is false, keeping nothing, for a mock
+// of an earlier set, one that is not the open test's own (OwnedByOpenTest),
+// one already kept, and one the store cannot mark used (an unnamed mock).
+//
+// The mark runs after the keep, outside the staging's lock (the mark door
+// can take that lock for read itself, and a second read lock waits behind a
+// staging queued for the write lock), so a staging may land between them:
+// the store then refuses to mark the earlier staging's copy used, and the
+// claim takes back only its own keep (unkeep), never a later claim's of the
+// same name.
+func (m *MockManager) ClaimForRepeats(mk models.Mock) bool {
+	gen, ok := m.keepOwned(&mk)
+	if !ok {
+		return false
+	}
+	if m.testHookMark != nil {
+		m.testHookMark()
+	}
+	if m.MarkMockAsUsed(mk) {
+		return true
+	}
+	m.unkeep(mk.Name, gen)
+	return false
+}
+
+// keepOwned keeps mk for its test's repeats when it is of this set, the open
+// test's own, and not kept yet, and returns the kept generation (keptGen) it
+// kept in. It decides holding swapMu, which every staging holds while it
+// drops what was kept and swaps the trees and the window: no staging lands
+// from the set check's read through the keep, so a consume of one test's
+// recording that straddles the next test's staging keeps nothing for that
+// test, and a copy of the previous set's pool read before the next set's
+// fenced staging (ArmSetFence) keeps nothing for the new set.
+func (m *MockManager) keepOwned(mk *models.Mock) (uint64, bool) {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	if m.stalePooledRead(mk, m.testHookSetRead) || !m.ownedByOpenTest(mk, m.testHookOwnerRead) {
+		return 0, false
+	}
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if _, kept := m.kept[mk.Name]; kept {
+		return 0, false
+	}
+	if m.kept == nil {
+		m.kept = make(map[string]struct{})
+	}
+	if m.testHookKeep != nil {
+		m.testHookKeep()
+	}
+	m.kept[mk.Name] = struct{}{}
+	return m.keptGen, true
+}
+
+// unkeep takes back the keep of name a claim made in the kept generation
+// gen, once the store refused to mark the recording used. It decides under
+// cursorMu, which every staging holds while it drops what was kept and moves
+// keptGen: in gen the name's keep is this claim's (keepOwned keeps a name
+// once), and after a staging it is not this claim's to take back.
+func (m *MockManager) unkeep(name string, gen uint64) {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if m.keptGen == gen {
+		delete(m.kept, name)
+	}
+}
+
 // OwnedByOpenTest reports whether mk is the open test's own recording
 // (integrations.TestOwner): a test is open (IsTestWindowActive) and mk is in
 // the per-test pool served for it: under exact serving, the test's mapping
@@ -2500,8 +2591,18 @@ func (m *MockManager) KeptForRepeats() func(key string) bool {
 // staging before the first test, between tests, or a replay that opens none)
 // no mock is.
 func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
+	return m.ownedByOpenTest(mk, nil)
+}
+
+// ownedByOpenTest is OwnedByOpenTest. read, when not nil, runs once the check
+// read the open test, its window and its pool, as it returns: keepOwned's
+// test hook at the point the claim's owner is decided.
+func (m *MockManager) ownedByOpenTest(mk *models.Mock, read func()) bool {
 	if mk == nil {
 		return false
+	}
+	if read != nil {
+		defer read()
 	}
 	if v := m.exactView(); v != nil {
 		// The open test's test mocks (ServeExactTest), by name: its index
@@ -4125,6 +4226,16 @@ func (m *MockManager) deleteStartupTier(mock models.Mock) bool {
 func (m *MockManager) stalePooled(mk *models.Mock) bool {
 	g := mk.TestModeInfo.StagedSet
 	return g != 0 && g != m.setGen.Load()
+}
+
+// stalePooledRead is stalePooled. read, when not nil, runs once the check
+// read the set generation, as it returns: keepOwned's test hook at the point
+// the claim's set is decided.
+func (m *MockManager) stalePooledRead(mk *models.Mock, read func()) bool {
+	if read != nil {
+		defer read()
+	}
+	return m.stalePooled(mk)
 }
 
 // deleteStartupMockFrom is deleteStartupMock on tree, the startup tier the
