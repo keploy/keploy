@@ -121,6 +121,11 @@ type FinalHTTP struct {
 	// apart is a server that closed the connection partway through its
 	// response: the client read all there was, and it is recorded as that.
 	RespReadInPart bool
+	// RespWrites is where in Resp each write the relay made of the response
+	// to the client ended, and when, in order (readResponseWrites): what the
+	// answer's marks are worked out from (answerMarks). Nil where nothing
+	// noted them.
+	RespWrites []respWrite
 	// Fault is how the call ended, when the upstream did not give its whole
 	// answer (recordV2's noAnswerFault and partAnswerFault): with no answer,
 	// the mock is built with no response and this fault. With part of one
