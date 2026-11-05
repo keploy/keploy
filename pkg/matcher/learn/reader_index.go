@@ -122,9 +122,10 @@ type readerText struct {
 	// scans counts the questions contains answered by a scan of the text
 	// through this handle, before the text's suffix array.
 	scans int
-	// filter is the set's entry for the recording's filter of its words
-	// (setFilter), once asked.
-	filter *filterEntry
+	// filter is the set's entry for the filter of the text's words
+	// (setFilter), once asked; filterKey the bytes its key keeps there.
+	filter    *filterEntry
+	filterKey int64
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
@@ -429,9 +430,11 @@ func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
 // place, no byte that reading reads as a word byte stands beside w there,
 // and each reading reads every letter and digit so: each run of w's letters
 // and digits is a whole run of the form's (eachWord), which the filter
-// holds. A w of no letter or digit, a text the caller handed, a view (no
-// recording's identity) and a recording the set keeps no filter of are
-// never ruled out: they are scanned.
+// holds. A text the caller handed and a view (no recording's identity) are
+// asked through the set's filter of their text's words, by the text itself
+// (textEntry). A w of no letter or digit, a text shorter than
+// filterTextMin, and a text the set keeps no filter of are never ruled
+// out: they are scanned.
 func (t *readerText) ruledOut(w string) bool {
 	f := t.setFilter()
 	if f == nil {
@@ -448,24 +451,50 @@ func (t *readerText) ruledOut(w string) bool {
 var filterLookups atomic.Int64
 
 // setFilters are the filters a set keeps of its recordings' words
-// (setFilter), by recording (Raw.id), and the words of other tests'
-// recordings handed to its calls (outsideWords), by recording. builds and
-// wordsBuilds count the filters and the words read, for the rows.
+// (setFilter), by recording (Raw.id), of the words of texts with no
+// recording's identity (textEntry), by the text (filterTextKey, read with
+// seeds), and the words of other tests' recordings handed to its calls
+// (outsideWords), by recording. builds, textBuilds and wordsBuilds count
+// the filters and the words read, for the rows.
 type setFilters struct {
 	mu          sync.Mutex
 	of          map[string]*filterEntry
 	builds      int
+	texts       map[filterTextKey]*filterEntry
+	seeds       [2]maphash.Seed
+	textBuilds  int
 	words       map[string][]*wordsEntry
 	wordsBuilds int
 }
 
-// filterEntry is one recording's filter, built once for the set (once):
-// nil where the recording was not read then, or where the filter did not
-// fit the set's budget, and the recording is scanned in each call as
-// before, never read again to build one.
+// filterTextKey is a text by what it holds: its length and two hashes of
+// it by the set's two seeds, drawn at random for the set. Two texts that differ
+// share a key about once in 2^128 pairs, by chance alone: no text keploy
+// is handed can be chosen to share another's, as no one outside the set
+// reads its seeds.
+type filterTextKey struct {
+	n    int
+	a, b uint64
+}
+
+// filterTextKeyBytes is what a text's key keeps in its entry's map slot.
+const filterTextKeyBytes = 24
+
+// filterTextMin is the shortest text with no recording's identity that a
+// set keeps a filter of (textEntry): a shorter one is scanned for each word
+// in fewer bytes than finding its filter reads (its two hashes, and the
+// set's lock).
+const filterTextMin = 256
+
+// filterEntry is one recording's filter, or one text's, built once for the
+// set (once): nil where the recording was not read then, or where the
+// filter did not fit the set's budget, and the text is scanned in each call
+// as before, never read again to build one.
 type filterEntry struct {
 	once sync.Once
 	f    wordFilter
+	// byText: the entry is a text's (textEntry), not a recording's.
+	byText bool
 }
 
 // setsFilters are each set's filters (filtersOf), by the set, held weakly:
@@ -479,7 +508,8 @@ func filtersOf(s *setDerived) *setFilters {
 	if v, ok := setsFilters.Load(k); ok {
 		return v.(*setFilters)
 	}
-	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, words: map[string][]*wordsEntry{}})
+	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{},
+		seeds: [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}, words: map[string][]*wordsEntry{}})
 	if !loaded {
 		runtime.AddCleanup(s, func(k weak.Pointer[setDerived]) { setsFilters.Delete(k) }, k)
 	}
@@ -492,32 +522,74 @@ func filtersOf(s *setDerived) *setFilters {
 // of the set asks the recording a word, and kept for the set on its budget
 // (setClaim). A recording's identity fixes its text for the set (Raw.id), so
 // every later call asks the filter, not the text, for a word it cannot hold.
-// Calls asking at once wait for the one building it. nil where t is no
-// recording of a set (a handed text, a view: no identity), or where the
-// entry keeps none.
+// A text with no recording's identity (a handed text, a view) has its
+// filter by its text (textEntry) instead. Calls asking at once wait for the
+// one building it. nil where t is in no set's call, where its text has no
+// entry (textEntry), or where the entry keeps none.
 func (t *readerText) setFilter() wordFilter {
 	if t.filter == nil {
-		if t.raw == nil || t.raw.id == "" || t.x.filters == nil {
+		fs := t.x.filters
+		if fs == nil {
 			return nil
 		}
-		fs := t.x.filters
-		fs.mu.Lock()
-		e := fs.of[t.raw.id]
-		if e == nil {
-			e = &filterEntry{}
-			fs.of[strings.Clone(t.raw.id)] = e
+		if t.raw == nil || t.raw.id == "" {
+			e, ok := t.textEntry(fs)
+			if !ok {
+				return nil
+			}
+			t.filter = e
+		} else {
+			fs.mu.Lock()
+			e := fs.of[t.raw.id]
+			if e == nil {
+				e = &filterEntry{}
+				fs.of[strings.Clone(t.raw.id)] = e
+			}
+			fs.mu.Unlock()
+			t.filter, t.filterKey = e, int64(len(t.raw.id))
 		}
-		fs.mu.Unlock()
-		t.filter = e
 	}
 	e := t.filter
 	e.once.Do(func() { e.f = t.buildFilter() })
 	return e.f
 }
 
-// buildFilter is the filter of t's recording's words (setFilter), counted
-// on the set's budget; nil where the recording was not read or the filter
-// does not fit.
+// textEntry is the set's entry for the filter of the words of t's text, t
+// having no recording's identity: a text the caller handed, or a view, which
+// round F's calls each hand anew (Raw.viewOf reads a view per call, and a
+// call's places hand their leaves' texts). Two handles of one text, in one
+// call or in two, find one entry, by the text (filterTextKey), so the set
+// builds its filter once, at the first ask, and every later call asks the
+// filter, not the text. A text shorter than filterTextMin, and a view keploy could
+// not read (the scan counts it unread), have none (ok false), and are
+// scanned.
+func (t *readerText) textEntry(fs *setFilters) (e *filterEntry, ok bool) {
+	s := t.text
+	if t.raw != nil {
+		b := t.raw.payload()
+		if !b.read {
+			return nil, false
+		}
+		s = b.text
+	}
+	if len(s) < filterTextMin {
+		return nil, false
+	}
+	k := filterTextKey{n: len(s), a: maphash.String(fs.seeds[0], s), b: maphash.String(fs.seeds[1], s)}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if e = fs.texts[k]; e == nil {
+		e = &filterEntry{byText: true}
+		fs.texts[k] = e
+	}
+	t.filterKey = filterTextKeyBytes
+	return e, true
+}
+
+// buildFilter is the filter of t's recording's words (setFilter), or of its
+// text's (textEntry), counted on the set's budget with its entry's key
+// (filterKey); nil where the recording was not read or the filter does not
+// fit.
 func (t *readerText) buildFilter() wordFilter {
 	s, _, ok := t.read()
 	if !ok {
@@ -536,9 +608,13 @@ func (t *readerText) buildFilter() wordFilter {
 	}
 	fs := t.x.filters
 	fs.mu.Lock()
-	fs.builds++
+	if t.filter.byText {
+		fs.textBuilds++
+	} else {
+		fs.builds++
+	}
 	fs.mu.Unlock()
-	if !setClaim(t.x.set, headerBytes+8*int64(len(f))+filterEntryBytes+int64(len(t.raw.id))) {
+	if !setClaim(t.x.set, headerBytes+8*int64(len(f))+filterEntryBytes+t.filterKey) {
 		return nil
 	}
 	return f
