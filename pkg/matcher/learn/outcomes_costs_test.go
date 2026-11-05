@@ -1,7 +1,9 @@
 package learn
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -1030,4 +1032,134 @@ func TestOutcomeCostAPlaceThatCannotBeReadAgainLeavesTheWordUnknown(t *testing.T
 		}
 	}
 	t.Logf("decisions: %v", seen)
+}
+
+// wordsRead is how many outside recordings' words dc's set has read
+// (outsideWords).
+func wordsRead(dc *DriftCache) int {
+	fs := filtersOf(dc.set)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.wordsBuilds
+}
+
+// costOutside is n recordings of other tests (Raw.OfAnotherTest), each
+// served changed with round F's view of it (ServedLive), as the Mongo
+// adapter hands them to each call, handed to two calls of one set, one
+// recording holding R's word where F's view holds F's: each call's verdict
+// and how many recordings' words it read.
+func costOutside(n int) (got [2]string, builds [2]int) {
+	const rec, live = "ids a1b2c3d4", "ids f0e9d8c7"
+	mocks, views := make([]*models.Mock, n), make([]*models.Mock, n)
+	for i := range mocks {
+		name, url, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+		body, view := fmt.Sprintf(`{"note":"Item %d","ref":"Ref-%05d"}`, i, i), fmt.Sprintf(`{"note":"Item %d","ref":"Ref-%05d","seen":"yes"}`, i, i)
+		if i == n/2 {
+			body, view = `{"ref":"a1b2c3d4"}`, `{"ref":"f0e9d8c7"}`
+		}
+		mocks[i], views[i] = getAnswer(name, url, body, at), getAnswer(name, url, view, at)
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	for c := range got {
+		tr.Begin()
+		dc := tr.Drifts()
+		raw := make([]Raw, n)
+		for i, m := range mocks {
+			raw[i] = dc.LazyRawOf(m, true, nil).ServedAs(i + 1).ServedLive(RawOf(views[i], true)).OfAnotherTest()
+		}
+		b := wordsRead(dc)
+		got[c] = oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, raw, nil, nil)))
+		builds[c] = wordsRead(dc) - b
+		tr.End()
+	}
+	return got, builds
+}
+
+// A set reads the words of each other test's recording handed to its calls
+// once, at the first call, and a later call handed it as before asks the
+// kept words, not its texts and its view's: no recording's words read again,
+// however many the set holds. Past the set's budget none is kept, each call
+// reads them as before, and the verdicts stay.
+func TestOutcomeCostASetReadsEachOtherTestsRecordingsWordsOnce(t *testing.T) {
+	for _, n := range []int{50, 500} {
+		got, builds := costOutside(n)
+		t.Logf("%d recordings: decided %s; words read %v (first test, second)", n, got[1], builds)
+		if got[0] != got[1] {
+			t.Errorf("over %d recordings the tests decide %q; want one verdict", n, got)
+		}
+		if builds != [2]int{n, 0} {
+			t.Errorf("over %d recordings the tests read %v recordings' words; want each once, in the first test: [%d 0]", n, builds, n)
+		}
+		func() {
+			defer func(b int64) { learnBudget = b }(learnBudget)
+			learnBudget = 1
+			past, pastBuilds := costOutside(n)
+			if past != got {
+				t.Errorf("over %d recordings past the budget the tests decide %q; want %q", n, past, got)
+			}
+			if pastBuilds != [2]int{n, n} {
+				t.Errorf("over %d recordings past the budget the tests read %v recordings' words; want each in each test, kept by none: [%d %d]", n, pastBuilds, n, n)
+			}
+		}()
+	}
+}
+
+// The words a set keeps of another test's recording are the words wordsOf
+// reads of it as each call hands it: its own serves and test in that call,
+// and one entry for each way F served it and each view F gave, which a
+// later call handed it another way reads apart.
+func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *testing.T) {
+	at := eRecAt.Add(-time.Second)
+	m := getAnswer("mock-x", "http://api/items/1", `{"ref":"a1b2c3d4","note":"Kept","at":"2026-10-24T09:55:50Z"}`, at)
+	view := func(body string) Raw { return RawOf(getAnswer("mock-x", "http://api/items/1", body, at), true) }
+	v1, v2, v3 := view(`{"ref":"f0e9d8c7"}`), view(`{"ref":"e9d8c7b6","note":"Kept"}`), view(`{"ref":"e9d8c7b6"}`)
+	gone := getAnswer("mock-gone", "http://api/items/2", `{"ref":"b2c3d4e5"}`, at)
+	type shape struct {
+		name     string
+		of       func(Raw, int) Raw
+		unserved bool
+	}
+	shapes := []shape{
+		{name: "served as recorded", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedAsRecorded() }},
+		{name: "with F's view", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v1) }},
+		{name: "with another view", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v2) }},
+		{name: "with other words at the view's fields", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v3) }},
+		{name: "with two views", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedChanged(v1, v2) }},
+		{name: "with the two views the other way", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedChanged(v2, v1) }},
+		{name: "served changed, no view read", of: func(x Raw, n int) Raw { return x.ServedIn(n, n+2).ServedChanged() }},
+		{name: "served, nothing stated", of: func(x Raw, n int) Raw { return x.ServedIn(n, n+1) }},
+		{name: "not served", of: func(x Raw, _ int) Raw { return x }, unserved: true},
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	for c := range 2 {
+		tr.Begin()
+		dc := tr.Drifts()
+		d := &decider{dr: dc}
+		b := wordsRead(dc)
+		// The call's own earlier place, and a recording of another test keploy
+		// cannot read: offsetPlacesOf reads neither's words.
+		raw := []Raw{dc.LazyRawOf(m, true, nil).ServedAs(1).ServedAsRecorded(),
+			dc.LazyRawOf(gone, true, func() (*models.Mock, error) { return nil, errors.New("gone") }).ServedAs(2).OfAnotherTest()}
+		for i, s := range shapes {
+			x := s.of(dc.LazyRawOf(m, !s.unserved, nil), 1+i+10*c).OfAnotherTest()
+			x.test, x.prev, x.late = 2+c, c == 1, c == 1
+			if got, want := d.outsideWords(x), dc.wordsOf(x); !reflect.DeepEqual(got, want) {
+				t.Errorf("test %d, %s: the set's words are %+v; want wordsOf's %+v", c+1, s.name, got, want)
+			}
+			raw = append(raw, x)
+		}
+		if got, want := wordsRead(dc)-b, []int{len(shapes), 0}[c]; got != want {
+			t.Errorf("test %d read the recording's words %d times; want %d (one entry each way it was handed)", c+1, got, want)
+		}
+		// The call's places are offsetPlacesOf's, in its order: raw's, then the
+		// set's.
+		set := []GivenPlaces{PlacesOf(RawOf(getAnswer("mock-set", "http://api/items/3", `{"ref":"c3d4e5f6","at":"2026-10-24T09:55:51Z"}`, at), true).ServedAs(3))}
+		got, want := (&decider{dr: dc, in: Input{At: eRecAt, Raw: raw}, set: set}).offsetPlaces(), dc.offsetPlacesOf(eRecAt, nil, raw, set)
+		if len(got.words) != len(shapes)+1 || len(got.answers) == 0 || !reflect.DeepEqual(got.words, want.words) || !reflect.DeepEqual(got.answers, want.answers) {
+			t.Errorf("test %d: the call reads %d outside recordings' words %+v and instants %+v; want offsetPlacesOf's %d: %+v and %+v", c+1, len(got.words), got.words, got.answers, len(want.words), want.words, want.answers)
+		}
+		tr.End()
+	}
 }

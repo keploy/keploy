@@ -801,10 +801,152 @@ func (dc *decider) outside() *offsetPlaces {
 	if dc.op == nil {
 		dc.op = &offsetPlaces{}
 		if len(dc.set) > 0 || slices.ContainsFunc(dc.in.Raw, func(r Raw) bool { return r.elsewhere }) {
-			dc.op = dc.dr.offsetPlacesOf(dc.in.At, dc.in.Earlier, dc.in.Raw, dc.set)
+			dc.op = dc.offsetPlaces()
 		}
 	}
 	return dc.op
+}
+
+// offsetPlaces is offsetPlacesOf's places for the call, with the words and
+// instants of each recording of another test handed to it
+// (Raw.OfAnotherTest) read as offsetPlacesOf reads them, in raw's order
+// before the set's, but its words kept for the set (outsideWords), not read
+// again in each call. offsetPlacesOf reads Raw.elsewhere only there, so it
+// is handed raw with the mark cleared, and reads every other place as
+// before.
+func (dc *decider) offsetPlaces() *offsetPlaces {
+	raw := dc.in.Raw
+	var words []givenWords
+	var answers []givenMoment
+	if slices.ContainsFunc(raw, func(r Raw) bool { return r.elsewhere }) {
+		raw = slices.Clone(raw)
+		for i, x := range dc.in.Raw {
+			if x.elsewhere {
+				raw[i].elsewhere = false
+				if x.isRead() {
+					words = append(words, dc.outsideWords(x))
+					answers = append(answers, dc.dr.answerMoments(x)...)
+				}
+			}
+		}
+	}
+	op := dc.dr.offsetPlacesOf(dc.in.At, dc.in.Earlier, raw, dc.set)
+	op.words = append(words, op.words...)
+	op.answers = append(answers, op.answers...)
+	return op
+}
+
+// outsideWords is wordsOf(x), x a recording of another test handed to the
+// call, its words kept for the set by x's identity (Raw.id) and what else
+// makes them (wordsKey): how round F served x and the payload of each view
+// of it the call was handed, which a call reads again from the recording's
+// statements (Order.ServedView). Counted on the set's budget (setClaim). A
+// later call handed x as an earlier one was asks the kept words, not x's
+// texts; one handed another view reads them again, and keeps them apart, as
+// one past the budget, or of no set, reads them in each call.
+func (dc *decider) outsideWords(x Raw) givenWords {
+	s := dc.dr.setOf(x)
+	if s == nil {
+		return dc.dr.wordsOf(x)
+	}
+	fs, k := filtersOf(s), wordsKeyOf(x)
+	fs.mu.Lock()
+	i := slices.IndexFunc(fs.words[x.id], func(e *wordsEntry) bool { return e.key.equal(k) })
+	if i >= 0 {
+		e := fs.words[x.id][i]
+		fs.mu.Unlock()
+		return e.of(x)
+	}
+	fs.wordsBuilds++
+	fs.mu.Unlock()
+	g := dc.dr.wordsOf(x)
+	e := &wordsEntry{key: k, lists: g}
+	if setClaim(s, e.size()+int64(len(x.id))) {
+		fs.mu.Lock()
+		fs.words[strings.Clone(x.id)] = append(fs.words[x.id], e)
+		fs.mu.Unlock()
+	}
+	return g
+}
+
+// wordsEntry is what the set keeps of an outside recording's words
+// (outsideWords): its words as wordsOf read them (lists), and what they
+// were read from (key).
+type wordsEntry struct {
+	key   wordsKey
+	lists givenWords
+}
+
+// wordsKey is what makes a recording's words (wordsOf) past its identity,
+// which fixes its own payload: how round F served it (Raw.served,
+// asRecorded, unseen) and the payloads of F's view of it (live) and of the
+// views F's serves of it gave (views).
+type wordsKey struct {
+	served, asRecorded, unseen bool
+	live                       *rawBody
+	views                      []rawBody
+}
+
+func wordsKeyOf(x Raw) wordsKey {
+	k := wordsKey{served: x.served, asRecorded: x.asRecorded, unseen: x.unseen}
+	if x.live != nil {
+		b := x.live.payload()
+		k.live = &b
+	}
+	for _, v := range x.views {
+		k.views = append(k.views, v.payload())
+	}
+	return k
+}
+
+func (k wordsKey) equal(o wordsKey) bool {
+	return k.served == o.served && k.asRecorded == o.asRecorded && k.unseen == o.unseen &&
+		(k.live == nil) == (o.live == nil) && (k.live == nil || sameBody(*k.live, *o.live)) && slices.EqualFunc(k.views, o.views, sameBody)
+}
+
+// sameBody reports whether a and b are one payload: text, fields, stamps
+// and clock reads alike.
+func sameBody(a, b rawBody) bool {
+	return a.text == b.text && a.read == b.read && a.unread == b.unread && slices.Equal(a.fields, b.fields) &&
+		slices.Equal(a.stamps, b.stamps) && slices.EqualFunc(a.answerClock, b.answerClock, time.Time.Equal)
+}
+
+// of is e's words as wordsOf reads them of x, the recording e keeps them
+// of: x's own times, serves and test (as wordsOf copies them), and e's
+// words.
+func (e *wordsEntry) of(x Raw) givenWords {
+	g := e.lists
+	g.mock, g.at, g.late, g.noTime, g.answered, g.conn, g.pos = strings.Clone(x.mock), x.at, x.late, x.noTime, x.answered, strings.Clone(x.conn), x.pos
+	g.test, g.prev, g.first, g.last = x.test, x.prev, x.first, x.last
+	return g
+}
+
+// size is about what e holds in memory, in bytes: each word it keeps, and
+// the payloads its key holds.
+func (e *wordsEntry) size() int64 {
+	n := int64(filterEntryBytes)
+	if e.key.live != nil {
+		n += e.key.live.size()
+	}
+	for _, b := range e.key.views {
+		n += b.size()
+	}
+	g := e.lists
+	for _, l := range append([]answerLists{g.answerLists, g.view}, g.views...) {
+		n += listsBytes(l.words) + listsBytes(l.stamped)
+	}
+	return n + listsBytes(g.same) + listsBytes(g.gave)
+}
+
+// listsBytes is about what ls holds in memory, in bytes.
+func listsBytes(ls [][]string) int64 {
+	n := int64(24 * len(ls))
+	for _, l := range ls {
+		for _, w := range l {
+			n += int64(unsafe.Sizeof(w)) + int64(len(w))
+		}
+	}
+	return n
 }
 
 // setSecondSource names a recording of the set (Input.Given), which round
