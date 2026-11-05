@@ -2284,6 +2284,15 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	}
 	utils.BootStep("the proxy listens")
 
+	// The retired CA's JDK keystore alias, off the start path: its removal
+	// may run keytool, and a JVM takes seconds on a starved host. The app
+	// reads keploy's merged truststore, not that keystore.
+	g.Go(func() error {
+		defer utils.Recover(p.logger)
+		pTls.SweepLegacyJavaAlias(ctx, p.logger)
+		return nil
+	})
+
 	// Serve DNS over TCP and UDP, and wait for both to be bound.
 	if err := p.startDNSServers(ctx, g); err != nil {
 		return err

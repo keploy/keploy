@@ -273,6 +273,8 @@ func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPI
 	// Best-effort: remove the retired static CA this host may still trust from
 	// older runs or the "bake it into the image" recipe. Runs before this run's
 	// CA is installed so the trust-store refresh does not race our new anchor.
+	// Its JDK keystore alias is the agent's to remove once the proxy listens
+	// (SweepLegacyJavaAlias).
 	SweepLegacyCA(ctx, logger, false)
 
 	if isDocker {
@@ -1086,6 +1088,12 @@ type nativeInstall struct {
 	noJavaAlias bool
 }
 
+// jdkKeystoreMu serialises keploy's keytool writes to a JDK keystore: the
+// run's import and its teardown's delete, and the retired alias's removal,
+// which runs beside the agent's start (SweepLegacyJavaAlias). keytool
+// rewrites the whole keystore file, so two at once could lose one's change.
+var jdkKeystoreMu sync.Mutex
+
 var (
 	installedNativeMu sync.Mutex
 	installedNative   *nativeInstall
@@ -1367,6 +1375,8 @@ func removeJavaAlias(ctx context.Context, logger *zap.Logger, alias string) {
 	if !ok {
 		return
 	}
+	jdkKeystoreMu.Lock()
+	defer jdkKeystoreMu.Unlock()
 	cmd := exec.CommandContext(ctx, keytool, "-delete", "-alias", alias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		logger.Debug("could not delete this run's JDK alias", zap.String("alias", alias), zap.ByteString("output", out), zap.Error(err))
@@ -1717,6 +1727,8 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 
 	logger.Debug("", zap.String("java_home", javaHome), zap.String("keytool", keytoolBin), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath), zap.String("alias", alias))
 
+	jdkKeystoreMu.Lock()
+	defer jdkKeystoreMu.Unlock()
 	if jdkKeystoreTrusts(cacertsPath, storePass, caPath) {
 		logger.Debug("the JDK's keystore trusts the CA already: the system store's update put it there", zap.String("path", cacertsPath))
 		return false, nil

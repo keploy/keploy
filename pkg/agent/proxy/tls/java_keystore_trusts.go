@@ -31,7 +31,7 @@ func jdkKeystoreTrusts(cacertsPath, storePass, caPath string) bool {
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	ks := keystore.New()
 	if err := ks.Load(f, []byte(storePass)); err != nil {
 		return false
@@ -43,4 +43,27 @@ func jdkKeystoreTrusts(cacertsPath, storePass, caPath string) bool {
 		}
 	}
 	return false
+}
+
+// jdkKeystoreAliasCert reads, in Go, the certificate the JDK keystore at
+// cacertsPath trusts under alias: no JVM runs. read is false when the
+// keystore is not a JKS whose integrity checks with storePass (a JDK 18 or
+// later ships its cacerts as PKCS12), or cannot be read: only keytool can
+// say then. With read true, der is nil when no trusted certificate is under
+// alias.
+func jdkKeystoreAliasCert(cacertsPath, storePass, alias string) (der []byte, read bool) {
+	f, err := os.Open(cacertsPath)
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = f.Close() }()
+	ks := keystore.New()
+	if err := ks.Load(f, []byte(storePass)); err != nil {
+		return nil, false
+	}
+	e, err := ks.GetTrustedCertificateEntry(alias)
+	if err != nil {
+		return nil, true
+	}
+	return e.Certificate.Content, true
 }

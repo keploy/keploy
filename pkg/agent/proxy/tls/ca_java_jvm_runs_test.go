@@ -293,8 +293,11 @@ func writeJKS(t *testing.T, path, pass string, certs map[string][]byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
 	if err := ks.Store(f, []byte(pass)); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
