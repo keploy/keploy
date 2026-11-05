@@ -3238,7 +3238,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	case isDockerCmd:
 		// The container this Setup named: what its looks see is noted on
 		// the client's entry of it.
-		read, running = containerBootLook(a.logger, a.containerNamed(opts.KeployContainer))
+		read, running = containerBootLook(a.logger, a.containerAPI(), a.containerNamed(opts.KeployContainer))
 	case run != nil:
 		read = readBootFile(run.bootReport)
 		if run.bootPrompt {

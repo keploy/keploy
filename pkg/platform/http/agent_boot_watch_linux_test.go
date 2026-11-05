@@ -157,7 +157,7 @@ func TestAPausedContainerIsNotRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	running := containerRunning(newEngineCLI(zap.NewNop()), &namedContainer{name: "keploy-v3"})
+	running := containerRunning(newContainerLook(zap.NewNop(), nil), &namedContainer{name: "keploy-v3"})
 	for _, tc := range []struct {
 		status string
 		want   bool
@@ -913,7 +913,7 @@ func TestTheReleaseEndsOnceTheRunEndedLeavingTheAgentsContainerNotRunning(t *tes
 				t.Fatalf("the release ended with %v; want the run ended with the agent's container not running", err)
 			}
 
-			exited := containerExited(newEngineCLI(zap.NewNop()), a.containerNamed(name))
+			exited := containerExited(newContainerLook(zap.NewNop(), nil), a.containerNamed(name))
 			e.set(t, "running")
 			if code, ended := exited(context.Background()); ended {
 				t.Fatalf("containerExited = %d, %v of a container that runs, once its run is over; want not ended", code, ended)
