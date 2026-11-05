@@ -827,6 +827,54 @@ func TestReplayOffersH2OnlyToTheHostTheClientHelloNames(t *testing.T) {
 	}
 }
 
+// A client that made a CONNECT request named its destination there, so the h2
+// offer goes by the CONNECT host, not by the name its ClientHello asks for: a
+// client can ask for another name (a TLS server-name override) while its
+// HTTP/2 requests, which the mocks were recorded from, carry the host it
+// connected to.
+func TestReplayOffersH2ToTheHostTheConnectRequestNames(t *testing.T) {
+	recorded := []*models.Mock{h2MockForTest("vault", "vault.example.com:443")}
+	for _, tc := range []struct {
+		name     string
+		connect  string
+		sni      string
+		wantALPN string
+	}{
+		{name: "the CONNECT names the host recorded speaking HTTP/2", connect: "vault.example.com", sni: "queue.example.com", wantALPN: "h2"},
+		{name: "the CONNECT names another host", connect: "queue.example.com", sni: "vault.example.com", wantALPN: "http/1.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, src := acceptedConn(t)
+			// The connect hooks report the corporate proxy the application
+			// dialled.
+			p := replayProxyTo(t, "10.96.0.9:3128", models.OutgoingOptions{}, recorded...)
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+
+			if _, err := fmt.Fprintf(app, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", tc.connect, tc.connect); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.ReadResponse(bufio.NewReader(app), &http.Request{Method: http.MethodConnect})
+			if err != nil {
+				t.Fatalf("reading the CONNECT reply: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("CONNECT answered %s, want 200", resp.Status)
+			}
+			client := leafCheckingClient(app, tc.sni, tc.sni)
+			if err := client.Handshake(); err != nil {
+				t.Fatalf("client handshake after CONNECT %s: %v", tc.connect, err)
+			}
+			if got := client.ConnectionState().NegotiatedProtocol; got != tc.wantALPN {
+				t.Fatalf("negotiated %q, want %q", got, tc.wantALPN)
+			}
+			_ = client.Close()
+			awaitEvent(t, done, "handleConnection returning after the client left")
+		})
+	}
+}
+
 // replayProxyTo is a proxy replaying mocks, with opts, the connections the
 // connect hooks say went to dst (an ip:port).
 func replayProxyTo(t *testing.T, dst string, opts models.OutgoingOptions, mocks ...*models.Mock) *Proxy {
