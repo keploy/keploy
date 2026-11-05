@@ -11,11 +11,12 @@ import (
 // Rows for the learned value a word bind is a word of
 // (models.MockVariable.Of), as the learn step writes it: the whole UUID, as
 // recorded, on each of its five word variables. Where the mock also sends
-// the UUID whole at another place, the five words are one value at replay,
+// the UUID whole at another place, or sends it once as a whole token of its
+// field (alone, or after "APP:"), the five words are one value at replay,
 // so two fresh UUIDs that share a group by chance bind; with no Of, or an Of
-// that is not the stretch the mock holds, each word is its own value and the
-// shared group is refused, as main refuses it. A copy (one UUID where the
-// recording had two) is refused either way.
+// that is not that stretch, each word is its own value and the shared group
+// is refused, as main refuses it. A copy (one UUID where the recording had
+// two) is refused either way.
 
 // ofWords is vars with variables prefix0..prefix<n-1> each named a word of
 // of, the learned value.
@@ -43,29 +44,32 @@ func eventAndSuiteOf(prefixed, sentWhole bool, evOf, suOf string) []*models.Mock
 }
 
 // Two fresh UUIDs whose version groups are equal by chance bind where
-// learning named each UUID's words one value and the mock sends each UUID
-// whole in a field of its own, bare or after "APP:".
+// learning named each UUID's words one value, bare or after "APP:", whether
+// the mock sends each UUID whole in a field of its own or only once, as the
+// whole token of its id field.
 func TestVariables_TwoFreshUUIDsWithOneEqualGroupBindAsTheValuesLearningNamed(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	for _, prefixed := range []bool{false, true} {
-		h := newHTTP()
-		db := &varDb{perTest: eventAndSuiteOf(prefixed, true, recEvent, recSuite)}
-		if ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/events", eventBody(liveEvent, true))); !ok || stub.Name != "mock-1" {
-			t.Fatalf("prefixed %v: the event should be answered by mock-1: ok=%v stub=%v diag=%+v", prefixed, ok, stub, diag)
-		}
-		if ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/suites/events", suiteBody(liveSuite, prefixed, true))); !ok || stub.Name != "mock-2" {
-			t.Fatalf("prefixed %v: the suite event should be answered by mock-2 (the equal group is chance inside two values): ok=%v stub=%v diag=%+v", prefixed, ok, stub, diag)
-		}
-		if b, bound := db.table.Lookup("su2"); !bound || b.Value != "41a3" {
-			t.Fatalf("prefixed %v: su2 bound %v to %q, want 41a3", prefixed, bound, b.Value)
+	for _, sentWhole := range []bool{true, false} {
+		for _, prefixed := range []bool{false, true} {
+			h := newHTTP()
+			db := &varDb{perTest: eventAndSuiteOf(prefixed, sentWhole, recEvent, recSuite)}
+			if ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/events", eventBody(liveEvent, sentWhole))); !ok || stub.Name != "mock-1" {
+				t.Fatalf("sent whole %v, prefixed %v: the event should be answered by mock-1: ok=%v stub=%v diag=%+v", sentWhole, prefixed, ok, stub, diag)
+			}
+			if ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/suites/events", suiteBody(liveSuite, prefixed, sentWhole))); !ok || stub.Name != "mock-2" {
+				t.Fatalf("sent whole %v, prefixed %v: the suite event should be answered by mock-2 (the equal group is chance inside two values): ok=%v stub=%v diag=%+v", sentWhole, prefixed, ok, stub, diag)
+			}
+			if b, bound := db.table.Lookup("su2"); !bound || b.Value != "41a3" {
+				t.Fatalf("sent whole %v, prefixed %v: su2 bound %v to %q, want 41a3", sentWhole, prefixed, bound, b.Value)
+			}
 		}
 	}
 }
 
 // The same calls stay refused at the equal group, as main refuses them,
-// where learning named no value, named only one of the two UUIDs, named a
-// text that is not the UUID the mock holds whole, or where the mock sends
-// no UUID whole elsewhere.
+// where learning named no value, named only one of the two UUIDs, or named
+// a text that is not the UUID, whether or not the mock sends each UUID
+// whole elsewhere.
 func TestVariables_TwoFreshUUIDsWithOneEqualGroupAreRefusedWithoutTheirLearnedValues(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, c := range []struct {
@@ -79,7 +83,11 @@ func TestVariables_TwoFreshUUIDsWithOneEqualGroupAreRefusedWithoutTheirLearnedVa
 		{"only the event's UUID named", true, recEvent, "", "su2"},
 		{"each named the other's UUID", true, recSuite, recEvent, "su2"},
 		{"each named a part of its UUID", true, recEvent[:13], recSuite[:13], "su2"},
-		{"named, but no UUID sent whole elsewhere", false, recEvent, recSuite, "su2"},
+		{"sent once, no learned value", false, "", "", "su2"},
+		{"sent once, only the suite's UUID named", false, "", recSuite, "su2"},
+		{"sent once, each named the other's UUID", false, recSuite, recEvent, "su2"},
+		{"sent once, each named a part of its UUID", false, recEvent[:13], recSuite[:13], "su2"},
+		{"sent once, each named its UUID with a text after it", false, recEvent + "/1", recSuite + "/1", "su2"},
 	} {
 		for _, prefixed := range []bool{false, true} {
 			h := newHTTP()
@@ -96,40 +104,45 @@ func TestVariables_TwoFreshUUIDsWithOneEqualGroupAreRefusedWithoutTheirLearnedVa
 }
 
 // One UUID where the recording had two is a copy, refused at its first word
-// even where learning named each UUID one value.
+// even where learning named each UUID one value, sent whole elsewhere or
+// sent once.
 func TestVariables_OneUUIDWhereTwoWereRecordedIsRefusedWhereLearningNamedThem(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	for _, prefixed := range []bool{false, true} {
-		h := newHTTP()
-		db := &varDb{perTest: eventAndSuiteOf(prefixed, true, recEvent, recSuite)}
-		if ok, _, diag := matchVar(t, h, db, liveReq("POST", "/events", eventBody(liveEvent, true))); !ok {
-			t.Fatalf("prefixed %v: the event was not answered: %+v", prefixed, diag)
-		}
-		ok, _, diag := matchVar(t, h, db, liveReq("POST", "/suites/events", suiteBody(liveEvent, prefixed, true)))
-		if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != "su0" {
-			t.Fatalf("prefixed %v: refused at %s, want su0: %q", prefixed, p.name, p.why)
+	for _, sentWhole := range []bool{true, false} {
+		for _, prefixed := range []bool{false, true} {
+			h := newHTTP()
+			db := &varDb{perTest: eventAndSuiteOf(prefixed, sentWhole, recEvent, recSuite)}
+			if ok, _, diag := matchVar(t, h, db, liveReq("POST", "/events", eventBody(liveEvent, sentWhole))); !ok {
+				t.Fatalf("sent whole %v, prefixed %v: the event was not answered: %+v", sentWhole, prefixed, diag)
+			}
+			ok, _, diag := matchVar(t, h, db, liveReq("POST", "/suites/events", suiteBody(liveEvent, prefixed, sentWhole)))
+			if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != "su0" {
+				t.Fatalf("sent whole %v, prefixed %v: refused at %s, want su0: %q", sentWhole, prefixed, p.name, p.why)
+			}
 		}
 	}
 }
 
 // Two groups of one fresh UUID equal by chance bind where learning named
-// its words one value and the mock sends it whole elsewhere; refused at the
+// its words one value, sent whole elsewhere or sent once; refused at the
 // second, as main, where it named none.
 func TestVariables_TwoEqualGroupsOfOneUUIDBindAsTheValueLearningNamed(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const live = "7d444840-41a3-41a3-a15b-5b4c7a3f9e21"
-	for _, of := range []string{recEvent, ""} {
-		h := newHTTP()
-		db := &varDb{perTest: eventAndSuiteOf(false, true, of, "")[:1]}
-		ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/events", eventBody(live, true)))
-		if of == "" {
-			if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != "ev2" {
-				t.Fatalf("no learned value: refused at %s, want ev2: %q", p.name, p.why)
+	for _, sentWhole := range []bool{true, false} {
+		for _, of := range []string{recEvent, ""} {
+			h := newHTTP()
+			db := &varDb{perTest: eventAndSuiteOf(false, sentWhole, of, "")[:1]}
+			ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/events", eventBody(live, sentWhole)))
+			if of == "" {
+				if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != "ev2" {
+					t.Fatalf("sent whole %v, no learned value: refused at %s, want ev2: %q", sentWhole, p.name, p.why)
+				}
+				continue
 			}
-			continue
-		}
-		if !ok || stub.Name != "mock-1" {
-			t.Fatalf("named one value: the event should be answered by mock-1: ok=%v stub=%v diag=%+v", ok, stub, diag)
+			if !ok || stub.Name != "mock-1" {
+				t.Fatalf("sent whole %v, named one value: the event should be answered by mock-1: ok=%v stub=%v diag=%+v", sentWhole, ok, stub, diag)
+			}
 		}
 	}
 }

@@ -88,8 +88,10 @@ type MockVariable struct {
 	// whole stretch of that text the learn step read as one value, every
 	// word of which is a variable bound here naming the same Of. A replay
 	// reads two such words as one value only inside that stretch, where the
-	// mock also holds it whole at another place (variables.WordBind.Of); a
-	// word with none is its own value, checked word by word. Deleting it
+	// mock also holds it whole at another place, or where it is one whole id
+	// token of its text both as recorded and in the call
+	// (variables.WordBind.Of); a word with none is its own value, checked
+	// word by word. Deleting it
 	// undoes it. Only the learn step sets it, with a Bind; none for any
 	// other variable.
 	Of string `json:"of,omitempty" yaml:"of,omitempty" bson:"of,omitempty"`

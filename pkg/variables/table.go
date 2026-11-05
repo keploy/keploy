@@ -438,19 +438,21 @@ const wordRunSep = "-"
 // a place: one name for one text), Word is the word's index in it (Words; -1
 // for a value whole), Live is the word, live, and Recorded the word its
 // recording holds there. RecordedText is that text as recorded (decoded by
-// its steps), and Elsewhere reports whether the binding's mock holds a
-// string, whole, at a place other than Text (a field, a segment, a header, a
-// value of its answer): the evidence that cuts a run into held stretches
-// (WordRuns). Of is the learned value Live is a word of, as recorded
-// (models.MockVariable.Of): a held stretch is one value only when each of
-// its words names that stretch, as recorded, so. A WordBind with none of
-// them has no span but its own word.
+// its steps), LiveText the text the call holds there (decoded so), and
+// Elsewhere reports whether the binding's mock holds a string, whole, at a
+// place other than Text (a field, a segment, a header, a value of its
+// answer): the evidence that cuts a run into held stretches (WordRuns). Of
+// is the learned value Live is a word of, as recorded
+// (models.MockVariable.Of): a stretch is one value only when each of its
+// words names that stretch, as recorded, so. A WordBind with none of them
+// has no span but its own word.
 type WordBind struct {
 	Text         string
 	Word         int
 	Live         string
 	Recorded     string
 	RecordedText string
+	LiveText     string
 	Elsewhere    func(string) bool
 	Of           string
 }
@@ -480,19 +482,23 @@ const maxSpanRun = 64
 // text, its own among them, in word order; words the call binds apart, with
 // a word between them it does not bind, are two runs) that hold the one
 // value its word is a word of. That is the shortest stretch of the run
-// around its word whose recorded text its mock holds whole elsewhere (a cid
-// or an appId sent whole in another field) and that holds no shorter such
-// stretch (a stretch that holds one, "<B>/3" sent whole beside "<B>", is two
-// values), when each of its words names that stretch, as recorded, its
-// learned value (Of). A held
-// stretch is not proof of one value by itself: "<B>/3" sent whole elsewhere
-// may be one id or a cid beside a count, and the recording does not say
-// which. Every other word is its own value, alone, checked word by word as
-// main checks it: a word no held stretch covers (never the words around it:
-// "<cid>/<appId>/7" with only the cid held leaves "7" alone, not with the
-// appId), a word of a held stretch its words do not all name so, a word
-// whose recorded text does not hold the run's recorded words where the run
-// says, and one with no Elsewhere. A binding of a value whole has none.
+// around its word that is a value, and that holds no shorter value (a
+// stretch that holds one, "<B>/3" sent whole beside "<B>", is two values),
+// when each of its words names that stretch, as recorded, its learned value
+// (Of). A stretch is a value where its mock holds its recorded text whole
+// elsewhere (a cid or an appId sent whole in another field), or where each
+// of its words names it so and it is one whole id token (idByte) of its
+// text both as recorded and live (a UUID sent once, as "_id" alone, or
+// after "APP:"; never "ORD-<id>" with the id named, or a live text that
+// carries the token on). A held stretch is not proof of one value by
+// itself: "<B>/3" sent whole elsewhere may be one id or a cid beside a
+// count, and the recording does not say which. Every other word is its own
+// value, alone, checked word by word as main checks it: a word no value
+// covers (never the words around it: "<cid>/<appId>/7" with only the cid
+// held leaves "7" alone, not with the appId), a word of a stretch its words
+// do not all name so, a word whose recorded text does not hold the run's
+// recorded words where the run says, and one with no Elsewhere. A binding
+// of a value whole has none.
 func WordRuns(ws []WordBind) []Run {
 	runs := make([]Run, len(ws))
 	byText := map[string][]int{}
@@ -549,16 +555,39 @@ func spansOf(ws []WordBind, run []int) [][2]int {
 			return spans
 		}
 	}
-	// value[a*n+b]: the stretch a..b of run is held whole elsewhere and holds
-	// no shorter stretch held whole (inner). A held stretch that holds another
-	// ("<B>/3" beside "<B>") is two values, never one.
+	// liveWords: where the run's live words stand in its live text, or nil
+	// where the text does not hold them there (no stretch of it is then a
+	// token, live).
+	liveWords := Words(first.LiveText)
+	if ws[run[n-1]].Word >= len(liveWords) {
+		liveWords = nil
+	}
+	for _, j := range run {
+		if liveWords == nil {
+			break
+		}
+		if x := liveWords[ws[j].Word]; ws[j].LiveText != first.LiveText || first.LiveText[x[0]:x[1]] != ws[j].Live {
+			liveWords = nil
+		}
+	}
+	// token reports whether the stretch a..b of run is one value learning
+	// named (each word's Of is its recorded text) and one whole id token of
+	// its text, as recorded and live.
+	token := func(a, b int) bool {
+		from, to := words[ws[run[a]].Word][0], words[ws[run[b]].Word][1]
+		return liveWords != nil && oneValue(ws, run[a:b+1], first.RecordedText[from:to]) &&
+			wholeToken(first.RecordedText, from, to) && wholeToken(first.LiveText, liveWords[ws[run[a]].Word][0], liveWords[ws[run[b]].Word][1])
+	}
+	// value[a*n+b]: the stretch a..b of run is a value (held whole elsewhere,
+	// or a token learning named) and holds no shorter value (inner). A value
+	// that holds another ("<B>/3" beside "<B>") is two values, never one.
 	value, inner := make([]bool, n*n), make([]bool, n*n)
 	for a := n - 1; a >= 0; a-- {
 		for b := a; b < n; b++ {
 			if b > a {
 				inner[a*n+b] = value[(a+1)*n+b] || inner[(a+1)*n+b] || value[a*n+b-1] || inner[a*n+b-1]
 			}
-			value[a*n+b] = !inner[a*n+b] && first.Elsewhere(first.RecordedText[words[ws[run[a]].Word][0]:words[ws[run[b]].Word][1]])
+			value[a*n+b] = !inner[a*n+b] && (first.Elsewhere(first.RecordedText[words[ws[run[a]].Word][0]:words[ws[run[b]].Word][1]]) || token(a, b))
 		}
 	}
 	for at := range spans {
@@ -590,6 +619,28 @@ func oneValue(ws []WordBind, stretch []int, text string) bool {
 	}
 	return true
 }
+
+// wholeToken reports whether text[from:to] is one whole id token of text:
+// all of it bytes an id carries (idByte), none of them right before or
+// after it.
+func wholeToken(text string, from, to int) bool {
+	if from > 0 && idByte(text[from-1]) || to < len(text) && idByte(text[to]) {
+		return false
+	}
+	for i := from; i < to; i++ {
+		if !idByte(text[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// idByte reports whether c continues an id token: a letter or digit, '-' or
+// '_', or any byte of a character beyond ASCII, as the learn step reads a
+// value's token (learn's idByte). A byte beyond ASCII is no word byte
+// (Words) but carries a token on, so a token is never shorter here than
+// where learning read it.
+func idByte(c byte) bool { return isWordByte(c) || c >= 0x80 || c == '-' || c == '_' }
 
 // Start begins a new scope (as Reset) with the values its test case gave
 // bound, under one lock: no call of the scope binds before them. A name given

@@ -588,7 +588,8 @@ func TestVariables_OneWordWhereTwoWereRecordedBesideOtherValuesIsRefused(t *test
 // (variables.WordBind.Elsewhere): a value the recorded request holds whole
 // at a place other than the run's own text, a body scalar, a path segment, a
 // query parameter's value or a header's value, a header named in any case.
-// RecordedText is the run's text as recorded. Named a learned value each
+// RecordedText is the run's text as recorded, LiveText the call's text there
+// (none where the call holds no value there). Named a learned value each
 // (variables.WordBind.Of), a cid sent whole in a query parameter and an
 // appId in a header cut "<cid>/<appId>" into two spans; no learned value
 // named, each word is its own.
@@ -614,7 +615,12 @@ func TestVariables_TheEvidenceAWordRunIsCutBy(t *testing.T) {
 	if bad != "" {
 		t.Fatalf("the mock's variables do not read: %s", bad)
 	}
-	names, ws := wordBindsOf(m, decls, map[string]held{})
+	const liveB, liveA = "7d444840-9dc0-41a3-a15b-5b4c7a3f9e21", "e3b0c442-98fc-41a3-8d2e-1c5a4e9b7f30"
+	live, read := recordedView(varMock("live", "POST", "http://store/markers/"+recD+"?cid="+liveB, `{"id":"`+liveB+`/`+liveA+`","kind":"`+recC+`"}`, 201, `{}`, nil).Spec.HTTPReq)
+	if !read {
+		t.Fatal("the live request does not read")
+	}
+	names, ws := wordBindsOf(m, decls, live, map[string]held{})
 	by := map[string]int{}
 	for i, n := range names {
 		by[n] = i
@@ -622,6 +628,9 @@ func TestVariables_TheEvidenceAWordRunIsCutBy(t *testing.T) {
 	id, hdr := ws[by["c0"]], ws[by["h0"]]
 	if id.RecordedText != recB+"/"+recA || hdr.RecordedText != recE {
 		t.Fatalf("recorded texts %q and %q, want %q and %q", id.RecordedText, hdr.RecordedText, recB+"/"+recA, recE)
+	}
+	if id.LiveText != liveB+"/"+liveA || hdr.LiveText != "" {
+		t.Fatalf("live texts %q and %q, want %q and none (the call sends no X-Key)", id.LiveText, hdr.LiveText, liveB+"/"+liveA)
 	}
 	for _, c := range []struct {
 		name, value string

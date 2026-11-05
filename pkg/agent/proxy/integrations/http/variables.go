@@ -911,7 +911,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	if table == nil {
 		return nil, &varProblem{mock: m.Name, why: "this keploy's mock store keeps no variables, so it cannot follow them", next: "run the keploy agent of this keploy version"}
 	}
-	return holdVariables(m, decls, liveAt, table, refuse)
+	return holdVariables(m, decls, live, liveAt, table, refuse)
 }
 
 // typeChanged is the evidence of a call that sent actual, a value of another
@@ -929,14 +929,14 @@ func typeChanged(mock, name string, vp varPlace, expected, actual string) *varPr
 }
 
 // holdVariables checks the variables of m on a call that fits its recording
-// (liveAt holds the call's values at m's places): it returns the hit and what
-// it binds, or the evidence why they do not hold, or neither when the call is
-// another test's.
-func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
+// (live; liveAt holds the call's values at m's places): it returns the hit
+// and what it binds, or the evidence why they do not hold, or neither when
+// the call is another test's.
+func holdVariables(m *models.Mock, decls []varDecl, live reqView, liveAt map[string]held, table *variables.Table, refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
 	// 2. The variables hold.
 	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}, saw: map[string]string{}}
 	taken := map[string]variables.Binding{} // this call's new bindings, by name
-	runOf := wordRunsOf(m, decls, liveAt)
+	runOf := wordRunsOf(m, decls, live, liveAt)
 	for _, d := range decls {
 		places := d.requestPlaces()
 		if d.echo {
@@ -1037,8 +1037,8 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 
 // wordRunsOf is, by name, the value span (variables.WordRuns) of each
 // variable decls bind at a word of a value of the call (wordBindsOf).
-func wordRunsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) map[string]variables.Run {
-	names, ws := wordBindsOf(m, decls, liveAt)
+func wordRunsOf(m *models.Mock, decls []varDecl, live reqView, liveAt map[string]held) map[string]variables.Run {
+	names, ws := wordBindsOf(m, decls, live, liveAt)
 	out := make(map[string]variables.Run, len(names))
 	for i, r := range variables.WordRuns(ws) {
 		out[names[i]] = r
@@ -1047,13 +1047,13 @@ func wordRunsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) map[str
 }
 
 // wordBindsOf is the word bind (variables.WordBind) of each variable decls
-// bind at a word of a value of the call, and its name: the text that holds
-// it (one place, one decode), live and as recorded, with the evidence that
-// cuts a run into held stretches, the places other than that text where m's
-// request holds a value whole (heldWhole), and the learned value its word is
-// a word of (WordBind.Of: the variable's Of). An echo is the call's own,
+// bind at a word of a value of the call (live), and its name: the text that
+// holds it (one place, one decode), live and as recorded, with the evidence
+// that cuts a run into held stretches, the places other than that text where
+// m's request holds a value whole (heldWhole), and the learned value its word
+// is a word of (WordBind.Of: the variable's Of). An echo is the call's own,
 // never bound in the table, so it has none.
-func wordBindsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) ([]string, []variables.WordBind) {
+func wordBindsOf(m *models.Mock, decls []varDecl, live reqView, liveAt map[string]held) ([]string, []variables.WordBind) {
 	rec, _ := recordedView(m.Spec.HTTPReq) // fitVariables refused a recording whose URL does not read
 	whole := heldWhole(rec)
 	var names []string
@@ -1063,15 +1063,19 @@ func wordBindsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) ([]str
 			continue
 		}
 		at := d.bind.at
+		textAt := variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}
 		w := variables.WordBind{
-			Text:     variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}.String(),
+			Text:     textAt.String(),
 			Word:     at.Word,
 			Live:     liveAt[d.bind.key()].value,
 			Recorded: d.recorded,
 			Of:       d.of,
 		}
+		if l, ok := live.leaf(at.Place); ok {
+			w.LiveText, _ = textAt.WordOf(l.value)
+		}
 		if l, ok := rec.leaf(at.Place); ok {
-			if text, ok := (variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}).WordOf(l.value); ok {
+			if text, ok := textAt.WordOf(l.value); ok {
 				own := placeKey(at.Place)
 				w.RecordedText = text
 				w.Elsewhere = func(s string) bool {
