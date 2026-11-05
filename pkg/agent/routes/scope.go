@@ -292,6 +292,18 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !provenswitch.On() && req.Sets == nil {
+		// With the switch off, the recorded windows are the run's place's
+		// alone: an answer recorded in a later window than its call is
+		// written once the replay reaches it. A table without them (an older
+		// CLI, a set with no test) leaves the set none: written at once.
+		if s, ok := a.svc.(runPlaceWindowsSetter); ok {
+			if err := s.SetRunPlaceWindows(r.Context(), req.Windows); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
 	if provenswitch.On() && req.Sets == nil {
 		// Under the switch a table without pool slices serves no pool mock
 		// between tests: an older CLI's push fails closed.
@@ -413,6 +425,13 @@ type scopeTrailsSetter interface {
 // wire).
 type scopeNotRequiredSetter interface {
 	SetScopeNotRequired(ctx context.Context, notRequired map[string][]string) error
+}
+
+// runPlaceWindowsSetter installs, with the proven switch off, the recorded
+// window of every test of the set keploy mock replay serves, for the run's
+// place alone (models.ScopeTableReq.Windows).
+type runPlaceWindowsSetter interface {
+	SetRunPlaceWindows(ctx context.Context, ws []models.TestWindow) error
 }
 
 // recordedWindowsSetter installs the recorded window of every test of the

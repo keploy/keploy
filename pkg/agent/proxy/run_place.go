@@ -24,6 +24,10 @@ type runPlace struct {
 	reached int
 	setEnd  bool
 	sig     chan struct{}
+	// ended is, by the index of a window several tests were merged into
+	// (models.TestWindow.Tests), those of them that have ended: its end is
+	// reached once each has.
+	ended map[int]map[string]bool
 }
 
 // RunPlace is the run's place now (integrations.RunPlacer): the anchor it
@@ -34,7 +38,7 @@ func (m *MockManager) RunPlace() models.RunPlace {
 	m.place.mu.Lock()
 	p := models.RunPlace{Staging: m.place.gen, Reached: m.place.reached, SetEnd: m.place.setEnd}
 	m.place.mu.Unlock()
-	p.Windows = m.testWindows.Load()
+	p.Windows = m.placeSchedule()
 	if m.closed.Load() {
 		p.SetEnd = true
 	}
@@ -76,7 +80,7 @@ func (m *MockManager) beginRunPlace() {
 	m.place.mu.Lock()
 	defer m.place.mu.Unlock()
 	m.place.gen++
-	m.place.reached, m.place.setEnd = 0, false
+	m.place.reached, m.place.setEnd, m.place.ended = 0, false, nil
 	m.signalRunPlaceLocked()
 }
 
@@ -111,16 +115,19 @@ func (m *MockManager) placeWindowAt(start time.Time) {
 		m.beginRunPlace()
 		return
 	}
-	if i := m.testWindows.Load().CurrentIndex(start); i >= 0 {
+	if i := m.placeSchedule().CurrentIndex(start); i >= 0 {
 		m.reachRunPlace(models.RunOpen(i), false)
 	}
 }
 
 // reachTest notes that test's window opened (open) or that test ended
 // (!open), by its name in the seeded schedule. A name it does not hold moves
-// nothing.
+// nothing. A window several tests were merged into (tests run at once) opens
+// at the first of them to begin, and its end is reached once each of them
+// has ended: before that, an end moves the place only to its open.
 func (m *MockManager) reachTest(test string, open bool) {
-	i, ok := m.testWindows.Load().IndexOfTest(test)
+	s := m.placeSchedule()
+	i, ok := s.IndexOfTest(test)
 	if !ok {
 		return
 	}
@@ -128,8 +135,69 @@ func (m *MockManager) reachTest(test string, open bool) {
 		m.reachRunPlace(models.RunOpen(i), false)
 		return
 	}
+	if members := s.Window(i).Tests; len(members) > 1 && !m.allEnded(i, test, members) {
+		m.reachRunPlace(models.RunOpen(i), false)
+		return
+	}
 	m.reachRunPlace(models.RunEnd(i), false)
 }
+
+// allEnded notes that test, one of the tests merged into window i (members),
+// has ended, and reports whether each of them has.
+func (m *MockManager) allEnded(i int, test string, members []string) bool {
+	m.place.mu.Lock()
+	defer m.place.mu.Unlock()
+	if m.place.ended == nil {
+		m.place.ended = map[int]map[string]bool{}
+	}
+	if m.place.ended[i] == nil {
+		m.place.ended[i] = map[string]bool{}
+	}
+	m.place.ended[i][test] = true
+	for _, t := range members {
+		if !m.place.ended[i][t] {
+			return false
+		}
+	}
+	return true
+}
+
+// placeSchedule is the schedule the run's place is among: the set's
+// recorded test windows (SeedRecordedWindows), else those seeded for the
+// place alone (SeedRunPlaceWindows); nil where the replay seeded neither.
+func (m *MockManager) placeSchedule() *models.WindowSchedule {
+	if s := m.testWindows.Load(); s != nil {
+		return s
+	}
+	return m.placeWindows.Load()
+}
+
+// SeedRunPlaceWindows installs the recorded window of every test of the set
+// a replay serves for the run's place alone: a replay that seeds no recorded
+// windows (SeedRecordedWindows), keploy mock replay with the proven switch
+// off, whose windows nothing else reads, so a parser, the learn step and
+// the window release rules behave as before. Parked at a set boundary until
+// the set's staging installs it, as SeedRecordedWindows' are; none leaves
+// the set none.
+func (m *MockManager) SeedRunPlaceWindows(ws []models.TestWindow) {
+	var s *models.WindowSchedule
+	if len(ws) > 0 {
+		s = models.NewWindowSchedule(ws)
+	}
+	m.swapMu.Lock()
+	if m.boundaryPending {
+		m.placeWindowsSeeded = s
+	} else {
+		m.placeWindows.Store(s)
+	}
+	m.swapMu.Unlock()
+	m.signalRunPlace()
+}
+
+// ReachRunTest notes that the replay began test (open) or ended it (!open):
+// keploy mock replay's scope begin and end with the proven switch off, which
+// serves no exact view to move the place (serveExactTest, ServeExactPool).
+func (m *MockManager) ReachRunTest(test string, open bool) { m.reachTest(test, open) }
 
 // EndRunTest notes that the replay has ended test: it has the test's answer,
 // or gave up on it. Answers recorded in the gap after it are due.

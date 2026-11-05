@@ -16,6 +16,11 @@ type TestWindow struct {
 	// Clock names, under the proven switch, the clock Start is on: the test
 	// case's Origin.Clock (RecordedWindow). "" is untrusted.
 	Clock string `json:"clock,omitempty"`
+	// Tests are, for a window several tests' windows were merged into (tests
+	// run at once; TestCase ""), the tests merged: the run reaches it when
+	// any of them begins, and passes its end once each of them has ended
+	// (models.RunPlace). Empty for one test's window.
+	Tests []string `json:"tests,omitempty"`
 }
 
 // WindowSchedule is every recorded test window of one test set, sorted by
@@ -50,10 +55,12 @@ type WindowSchedule struct {
 	// maxEnd[i] is the latest End among windows[0..i]. Monotone, so the first
 	// window containing t is a binary search over it.
 	maxEnd []time.Time
-	// byTest is each test case's window, by its name (Of): built at the
-	// first Of, once.
+	// byTest is each test case's window, by its name (Of), and byMember
+	// each test merged into a window no test names (IndexOfTest): built at
+	// the first lookup, once.
 	byTestOnce sync.Once
 	byTest     map[string]int
+	byMember   map[string]int
 }
 
 // NewWindowSchedule sorts a copy of ws by Start. Windows with a zero Start are
@@ -90,31 +97,54 @@ func (s *WindowSchedule) Len() int {
 
 // Of returns the window recorded for the test case named testCase: false
 // when the schedule holds none (a case with no request time opens none). A
-// name recorded twice gives its first window in Start order.
+// name recorded twice gives its first window in Start order. A test merged
+// into a window no test names (TestWindow.Tests) has none of its own.
 func (s *WindowSchedule) Of(testCase string) (TestWindow, bool) {
-	i, ok := s.IndexOfTest(testCase)
+	if s.Len() == 0 || testCase == "" {
+		return TestWindow{}, false
+	}
+	s.indexTests()
+	i, ok := s.byTest[testCase]
 	if !ok {
 		return TestWindow{}, false
 	}
 	return s.windows[i], true
 }
 
-// IndexOfTest is the index, in Start order (Window), of the window Of returns
-// for testCase; false where Of finds none.
+// IndexOfTest is the index, in Start order (Window), of the window testCase
+// runs in: the one Of returns, else the merged window that lists it
+// (TestWindow.Tests); false where there is neither.
 func (s *WindowSchedule) IndexOfTest(testCase string) (int, bool) {
 	if s.Len() == 0 || testCase == "" {
 		return 0, false
 	}
+	s.indexTests()
+	if i, ok := s.byTest[testCase]; ok {
+		return i, true
+	}
+	i, ok := s.byMember[testCase]
+	return i, ok
+}
+
+// indexTests builds byTest and byMember, once: a name's first window in
+// Start order.
+func (s *WindowSchedule) indexTests() {
 	s.byTestOnce.Do(func() {
 		s.byTest = make(map[string]int, len(s.windows))
 		for i, w := range s.windows {
 			if _, seen := s.byTest[w.TestCase]; !seen && w.TestCase != "" {
 				s.byTest[w.TestCase] = i
 			}
+			for _, t := range w.Tests {
+				if _, seen := s.byMember[t]; !seen {
+					if s.byMember == nil {
+						s.byMember = map[string]int{}
+					}
+					s.byMember[t] = i
+				}
+			}
 		}
 	})
-	i, ok := s.byTest[testCase]
-	return i, ok
 }
 
 // After reports whether t is later than every window's End: recorded after

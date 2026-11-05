@@ -900,6 +900,39 @@ func TestTheReplayPushesTheRecordedTestWindows(t *testing.T) {
 	}, instr.recordedWindows)
 }
 
+// With the switch off the replay hands the agent the same windows with its
+// per-test table, for the run's place alone (an answer recorded in a later
+// window than its call is written once the replay reaches it): derived from
+// every recording the set decoded, the ones the agent never holds included.
+// A test's recorded begin (at:) is read only under the switch, so each
+// window starts at its test's first recording.
+func TestTheReplayPushesTheRecordedTestWindowsWithTheSwitchOff(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-1\n      at: 2026-01-02T03:04:10Z\n    - id: o::TestB\n      dir: o\n      mocks:\n        - name: mock-2\n        - name: mock-3\n      at: 2026-01-02T03:04:20Z\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-1"}, {Name: "mock-2"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path = keployDir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	db := named("mock-0", "mock-1", "mock-2", "mock-3")
+	for i, span := range [][2]int{{1, 2}, {11, 12}, {21, 23}, {25, 26}} {
+		db.mocks[i].Spec.ReqTimestampMock = t0.Add(time.Duration(span[0]) * time.Second)
+		db.mocks[i].Spec.ResTimestampMock = t0.Add(time.Duration(span[1]) * time.Second)
+	}
+	db.mocks[3].Kind = models.ConnectionFailure
+	require.NoError(t, New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, []models.TestWindow{
+		{TestCase: "o::TestA", Start: t0.Add(11 * time.Second), End: t0.Add(11 * time.Second)},
+		{TestCase: "o::TestB", Start: t0.Add(21 * time.Second), End: t0.Add(25 * time.Second)},
+	}, instr.scopeWindows)
+}
+
 // Under the switch the replay never arms the whole pool before its run: the
 // table push armed the slice of calls made before any claim, and arming the
 // whole pool would let any test's mock answer them. With the switch off it

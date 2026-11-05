@@ -110,3 +110,101 @@ func TestRunPlace_ACloseEndsTheSet(t *testing.T) {
 		t.Fatal("a close did not end the set")
 	}
 }
+
+// A window several tests run at once were merged into (models.TestWindow
+// Tests, keploy mock replay's recordedTestWindows) opens at the first of
+// them to begin, and its end is reached only once each has ended: an
+// answer recorded in the gap after it is not written while one of them
+// still runs, and is written at the last one's end, not held to a later
+// window.
+func TestRunPlace_AMergedWindowEndsAtItsLastTestsEnd(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{Start: placeAt(0), End: placeAt(12), Tests: []string{"test-a", "test-b"}},
+		{TestCase: "test-c", Start: placeAt(20), End: placeAt(30)},
+	})
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.ReachRunTest("test-b", true)
+	if got := mm.RunPlace().Reached; got != models.RunOpen(0) {
+		t.Fatalf("at test-b's begin: %d, want the merged window's open %d", got, models.RunOpen(0))
+	}
+	mm.ReachRunTest("test-a", true)
+	mm.ReachRunTest("test-a", false)
+	if got := mm.RunPlace().Reached; got != models.RunOpen(0) {
+		t.Fatalf("test-a ended while test-b runs: %d, want %d", got, models.RunOpen(0))
+	}
+	mm.ReachRunTest("test-b", false)
+	if got := mm.RunPlace().Reached; got != models.RunEnd(0) {
+		t.Fatalf("at the last merged test's end: %d, want %d", got, models.RunEnd(0))
+	}
+
+	// The next set's staging forgets which merged tests ended.
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.ReachRunTest("test-b", false)
+	if got := mm.RunPlace().Reached; got != models.RunOpen(0) {
+		t.Fatalf("a staging kept the previous set's ends: %d", got)
+	}
+}
+
+// keploy mock replay with the switch off seeds the windows for the run's
+// place alone: they place the run, and nothing else reads them (the learn
+// step's testWindows stay unset). Seeded at a set boundary they wait for
+// the set's staging, and a set that seeds none has none, not the previous
+// set's. A set's recorded windows (SeedRecordedWindows) come first.
+func TestRunPlace_WindowsSeededForThePlaceAlone(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	mm.ResetForReplaySession()
+	ch := mm.RunPlaceChanged()
+	mm.SeedRunPlaceWindows(placeWindows())
+	if !fired(ch) {
+		t.Fatal("a seed woke no waiter")
+	}
+	if mm.RunPlace().Windows.Len() != 0 {
+		t.Fatal("a seed at a set boundary was installed before the set's staging")
+	}
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if p := mm.RunPlace(); p.Windows.Len() != 3 {
+		t.Fatalf("the set's staging did not install the place's windows: %+v", p)
+	}
+	if _, known := mm.InRecordedTestWindow(placeAt(5)); known {
+		t.Fatal("the place's windows reached the learn step's")
+	}
+	mm.ReachRunTest("test-2", true)
+	if got := mm.RunPlace().Reached; got != models.RunOpen(1) {
+		t.Fatalf("at test-2's begin: %d", got)
+	}
+	mm.ReachRunTest("test-2", false)
+	if got := mm.RunPlace().Reached; got != models.RunEnd(1) {
+		t.Fatalf("at test-2's end: %d", got)
+	}
+
+	// Mid-set, a seed is installed at once.
+	mm.SeedRunPlaceWindows(placeWindows()[:1])
+	if got := mm.RunPlace().Windows.Len(); got != 1 {
+		t.Fatalf("a mid-set seed: %d windows, want 1", got)
+	}
+
+	// The next set seeds none: it has none.
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if p := mm.RunPlace(); p.Windows != nil {
+		t.Fatalf("a set that seeded none kept the previous set's windows: %d", p.Windows.Len())
+	}
+
+	// A seed parked for a set whose staging never came is not the next
+	// set's.
+	mm.ResetForReplaySession()
+	mm.SeedRunPlaceWindows(placeWindows())
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if p := mm.RunPlace(); p.Windows != nil {
+		t.Fatalf("an aborted set's parked windows reached the next set: %d", p.Windows.Len())
+	}
+
+	// A set's recorded windows are the place's when it has both.
+	mm.SeedRunPlaceWindows(placeWindows())
+	mm.SeedRecordedWindows(placeWindows()[:2])
+	if got := mm.RunPlace().Windows.Len(); got != 2 {
+		t.Fatalf("the place reads %d windows, want the recorded 2", got)
+	}
+}

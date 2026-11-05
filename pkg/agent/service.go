@@ -748,6 +748,18 @@ type RecordedWindowsSeeder interface {
 	SeedRecordedWindows(ws []models.TestWindow)
 }
 
+// RunPlaceSeeder is the optional extension implemented by proxies that hold
+// an answer's write until the replay's run reaches its recorded place
+// (integrations.RunPlacer), for a replay that seeds no recorded windows
+// (keploy mock replay with the proven switch off): SeedRunPlaceWindows gives
+// the run's place the set's recorded test windows, and ReachRunTest moves it
+// at each test's begin (open) and end. An agent whose proxy lacks it writes
+// every answer at once, as before.
+type RunPlaceSeeder interface {
+	SeedRunPlaceWindows(ws []models.TestWindow)
+	ReachRunTest(test string, open bool)
+}
+
 // StatefulCursorResetter is the optional extension implemented by proxies whose
 // mock manager keeps per-request cursors for stateful dependency replay (serving
 // successive recorded responses in record order). The agent calls it once per

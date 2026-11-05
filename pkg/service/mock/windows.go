@@ -47,7 +47,9 @@ import (
 // could otherwise read as two tests', and a value one gave the other as
 // noise. Read as one, each test's recordings are earlier places of the
 // others', and a window no test names is no one test's (its stateful
-// sequences walk every recording, as with no window).
+// sequences walk every recording, as with no window). It lists the tests
+// merged (models.TestWindow.Tests): a replay's run reaches the window when
+// any of them begins, and passes its end once each of them has ended.
 func recordedTestWindows(mp *models.Mapping, table map[string][]string, decoded []*models.Mock) []models.TestWindow {
 	byName := make(map[string]*models.Mock, len(decoded))
 	for _, mk := range decoded {
@@ -107,7 +109,11 @@ func recordedTestWindows(mp *models.Mapping, table map[string][]string, decoded 
 			if w.End.After(last.End) {
 				last.End = w.End
 			}
-			last.TestCase = ""
+			if last.TestCase != "" {
+				last.Tests = []string{last.TestCase}
+				last.TestCase = ""
+			}
+			last.Tests = append(last.Tests, w.TestCase)
 			continue
 		}
 		merged = append(merged, w)

@@ -50,6 +50,10 @@ func (p *stageProxy) GetPersistentConsumed() map[string]models.MockState {
 	return p.mm.GetPersistentConsumed()
 }
 
+func (p *stageProxy) RefuseWorker(uint32, string)                {}
+func (p *stageProxy) SeedRunPlaceWindows(ws []models.TestWindow) { p.mm.SeedRunPlaceWindows(ws) }
+func (p *stageProxy) ReachRunTest(test string, open bool)        { p.mm.ReachRunTest(test, open) }
+
 func (p *stageProxy) FirstTestWindowStart() time.Time { return p.mm.FirstTestWindowStart() }
 func (p *stageProxy) SetMappedUniverse([]string)      {}
 

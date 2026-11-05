@@ -1,0 +1,134 @@
+package agent
+
+import (
+	"bufio"
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"testing"
+	"time"
+
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+)
+
+// placeRelease stands in for the release enterprise registers
+// (models.RegisterAnswerRelease): a moment inside a window is due once that
+// window opened, one in the gap after a test once that test ended, one
+// before every window at once, and every one at the set's end.
+func placeRelease(p models.RunPlace, t time.Time) bool {
+	if p.SetEnd || p.Windows.Len() == 0 {
+		return true
+	}
+	i := p.Windows.ReleaseIndex(t)
+	if i < 0 {
+		return true
+	}
+	anchor := models.RunOpen(i)
+	if !p.Windows.Contains(t) {
+		anchor = models.RunEnd(i)
+	}
+	return anchor <= p.Reached
+}
+
+// heldCall sends GET path through the real HTTP parser and returns, once the
+// application has read the whole answer, the recording that answered it
+// ("" for none).
+func heldCall(mm *proxyPkg.MockManager, path string) <-chan string {
+	out := make(chan string, 1)
+	app, agentEnd := net.Pipe()
+	go func() {
+		_ = httpparser.New(zap.NewNop()).MockOutgoing(context.Background(), agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
+		agentEnd.Close()
+	}()
+	go func() {
+		defer app.Close()
+		got := ""
+		if _, err := app.Write([]byte("GET " + path + " HTTP/1.1\r\nHost: api\r\n\r\n")); err == nil {
+			if resp, err := http.ReadResponse(bufio.NewReader(app), nil); err == nil {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					got = string(body)
+				}
+			}
+		}
+		out <- got
+	}()
+	return out
+}
+
+// notYet fails the test when the application has its answer.
+func notYet(t *testing.T, got <-chan string, what string) {
+	t.Helper()
+	select {
+	case a := <-got:
+		t.Fatalf("%s: the application read %q", what, a)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func written(t *testing.T, got <-chan string, want, what string) {
+	t.Helper()
+	select {
+	case a := <-got:
+		if a != want {
+			t.Fatalf("%s: the application read %q, want %q", what, a, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: the answer was not written", what)
+	}
+}
+
+// keploy mock replay with the proven switch off: the scope table's recorded
+// windows give the run's place the set's windows, and each test's begin and
+// end move it. A call made in Test1 whose answer was recorded in Test2's
+// window is matched in Test1 and written at Test2's begin, not before; one
+// whose answer was recorded in the gap after Test1 is written at Test1's
+// end. A test with no mapping moves the place too.
+func TestMockReplayWritesAnAnswerAtItsRecordedPlaceWithTheSwitchOff(t *testing.T) {
+	t.Cleanup(models.RegisterAnswerRelease(models.HTTP, placeRelease))
+	slow := stageMock("mock-slow", "/slow", stageT0)
+	slow.Spec.ResTimestampMock = stageT0.Add(5 * time.Second)
+	gap := stageMock("mock-gap", "/gap", stageT0.Add(500*time.Millisecond))
+	gap.Spec.ResTimestampMock = stageT0.Add(3 * time.Second)
+	late := stageMock("mock-late", "/late", stageT0.Add(5*time.Second))
+	late.Spec.ResTimestampMock = stageT0.Add(9 * time.Second)
+	a, p := newStageReplay(t,
+		[]*models.Mock{slow, gap, late, stageMock("mock-b", "/b", stageT0.Add(4*time.Second))},
+		nil,
+		map[string][]string{"Test1": {"mock-slow", "mock-gap"}, "Test2": {"mock-b", "mock-late"}})
+	if err := a.SetRunPlaceWindows(context.Background(), []models.TestWindow{
+		{TestCase: "Test1", Start: stageT0, End: stageT0.Add(time.Second)},
+		{TestCase: "Test2", Start: stageT0.Add(4 * time.Second), End: stageT0.Add(6 * time.Second)},
+		{TestCase: "Test3", Start: stageT0.Add(8 * time.Second), End: stageT0.Add(10 * time.Second)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scopeBegin(t, a, "Test1")
+	slowGot, gapGot := heldCall(p.mm, "/slow"), heldCall(p.mm, "/gap")
+	notYet(t, slowGot, "Test2's answer during Test1")
+	notYet(t, gapGot, "the answer recorded after Test1, during Test1")
+	scopeEnd(t, a, "Test1")
+	written(t, gapGot, "mock-gap", "at Test1's end")
+	notYet(t, slowGot, "Test2's answer after Test1's end")
+	// A begin keploy refuses (a worker pid with no marks) opens nothing.
+	if err := a.BeginScope(context.Background(), "Test2", 4242); err == nil {
+		t.Fatal("a begin with a worker pid and no marks was not refused")
+	}
+	notYet(t, slowGot, "Test2's answer at a refused begin")
+	scopeBegin(t, a, "Test2")
+	written(t, slowGot, "mock-slow", "at Test2's begin")
+
+	lateGot := heldCall(p.mm, "/late")
+	notYet(t, lateGot, "Test3's answer during Test2")
+	scopeEnd(t, a, "Test2")
+	notYet(t, lateGot, "Test3's answer after Test2's end")
+	scopeBegin(t, a, "Test3")
+	written(t, lateGot, "mock-late", "at the begin of Test3, which has no mapping")
+	scopeEnd(t, a, "Test3")
+}

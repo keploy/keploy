@@ -81,7 +81,9 @@ type composeInstr struct {
 	trails map[string]string
 	// recordedWindows are the recorded test windows that push sent.
 	recordedWindows []models.TestWindow
-	given           map[string][]models.GivenValue
+	// scopeWindows are those the switch-off table push sent.
+	scopeWindows []models.TestWindow
+	given        map[string][]models.GivenValue
 	// repeats are the repeated reads that push named.
 	repeats map[string][]models.RepeatRead
 	// notRequired are the names of each test's own list that push said
@@ -231,8 +233,12 @@ func (f *composeInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, e
 	return f.windows, f.windowsErr
 }
 
-// PushScopeTable takes the per-test table (ScopePusher).
-func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) error { return nil }
+// PushScopeTable takes the per-test table and the recorded test windows
+// (ScopePusher), and keeps the windows.
+func (f *composeInstr) PushScopeTable(_ context.Context, _ map[string][]string, windows []models.TestWindow) error {
+	f.scopeWindows = windows
+	return nil
+}
 
 // PushProvenTable takes the per-test table, the pool slices, the worker
 // scope, the names of it that are skipped tests' reads, the trails, the

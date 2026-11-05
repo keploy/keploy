@@ -232,3 +232,36 @@ func TestWindowScheduleAfterIsPastEveryWindowsEnd(t *testing.T) {
 		t.Fatal("with no schedule a moment is after the windows")
 	}
 }
+
+// A test merged into a window no test names (TestWindow.Tests) runs in that
+// window (IndexOfTest), and has no window of its own (Of).
+func TestWindowSchedule_AMergedTestRunsInItsMergedWindow(t *testing.T) {
+	t0 := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
+	s := NewWindowSchedule([]TestWindow{
+		{TestCase: "c", Start: t0.Add(20 * time.Second), End: t0.Add(30 * time.Second)},
+		{Start: t0, End: t0.Add(12 * time.Second), Tests: []string{"a", "b"}},
+	})
+	for _, tc := range []struct {
+		test string
+		i    int
+		ok   bool
+	}{{"a", 0, true}, {"b", 0, true}, {"c", 1, true}, {"d", 0, false}, {"", 0, false}} {
+		if i, ok := s.IndexOfTest(tc.test); i != tc.i || ok != tc.ok {
+			t.Errorf("IndexOfTest(%q) = %d, %v; want %d, %v", tc.test, i, ok, tc.i, tc.ok)
+		}
+	}
+	if _, ok := s.Of("a"); ok {
+		t.Error("a merged test has a window of its own")
+	}
+	// A test listed in two merged windows runs in the first in Start order.
+	twice := NewWindowSchedule([]TestWindow{
+		{Start: t0.Add(40 * time.Second), End: t0.Add(50 * time.Second), Tests: []string{"a", "e"}},
+		{Start: t0, End: t0.Add(12 * time.Second), Tests: []string{"a", "b"}},
+	})
+	if i, ok := twice.IndexOfTest("a"); i != 0 || !ok {
+		t.Errorf("a test in two merged windows: IndexOfTest = %d, %v; want the first, 0", i, ok)
+	}
+	if w, ok := s.Of("c"); !ok || w.TestCase != "c" {
+		t.Errorf("Of(c) = %+v, %v", w, ok)
+	}
+}
