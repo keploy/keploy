@@ -271,6 +271,18 @@ func TestATrailReadsATestsRecordingOnlyWhereThatTestLeftIt(t *testing.T) {
 	}
 	in.Scope = func(string) Scope { return ScopeTest("test-0") }
 	oRefused(t, "listed in test-0, in a later window", oWord(t, Decide(in), "ced721e3", "4db9566f"), RefusalAnotherScope, "mock-31", "ced721e3")
+	// A recording of the list read as another test's (Raw.OfAnotherTest) in
+	// the trailed test's own window stays refused as one, and one round F
+	// never served shows nothing of what F gave, trailed or not.
+	dc := oDrifts()
+	at := oAt.Add(-time.Minute)
+	elsewhere := dc.RawOf(trailInsert(r, at), true).ServedAs(3).ServedLive(dc.RawOf(trailInsert(f, at), true)).OfAnotherTest()
+	in = oInput("body.app_id", r, f, nil, []Raw{elsewhere})
+	in.Drifts, in.Test, in.Trails = dc, "test-1", trail
+	oRefused(t, "a recording read as another test's, in the trailed test's window", oWord(t, Decide(in), "ced721e3", "4db9566f"), RefusalAnotherScope, "mock-31", "ced721e3")
+	in = oInput("body.app_id", r, f, nil, []Raw{dc.RawOf(trailInsert(r, at), false).ServedInAnOlderTest()})
+	in.Drifts, in.Test, in.Trails = dc, "test-2", trail
+	oRefused(t, "a recording round F never served, in a later window", oWord(t, Decide(in), "ced721e3", "4db9566f"), RefusalUnknown, "mock-31", "ced721e3")
 	// Another id than F's view shows, in a later window.
 	const other = "9a8b7c6d-1e2f-4a3b-8c4d-5e6f7a8b9c0d"
 	if d := oWord(t, Decide(trailRawInput(r, f, other, "test-2", true, trail)), "ced721e3", "9a8b7c6d"); d.Outcome == OutcomeValue && d.From.Mock == "mock-31" {
