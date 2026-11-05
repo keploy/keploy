@@ -211,3 +211,61 @@ func TestANamerIsNotHandedTheReadsASkippedTestMovedToWorker(t *testing.T) {
 	require.Equal(t, []string{"mock-own"}, handed["o::TestList"])
 	require.Empty(t, instr.repeats, "a read named of the moved reads is not sent as the skipped test's")
 }
+
+// A test that passed on a skipped test's read (the agent's window:
+// SkippedReads) says so on the replay's receipt, with the skipped test the
+// read was moved from (TestReceipt.SkippedReads), so judging can tell it
+// passed on a recording keploy's CI replay of the published set never
+// loads. Every run of the test counts: a read that answered an earlier
+// attempt answered a call the published set has no answer for. A name the
+// replay did not move is left off, and so is every name when the replay
+// skips no test.
+func TestTheReceiptNamesTheSkippedReadsThatAnsweredATest(t *testing.T) {
+	for _, skips := range []bool{true, false} {
+		t.Run(map[bool]string{true: "the gate skips TestCRUD", false: "the gate skips none"}[skips], func(t *testing.T) {
+			provenOn(t)
+			RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+				if !skips {
+					return nil, nil, nil
+				}
+				return map[string]string{"o::TestCRUD": "flaky: flipped"}, nil, nil
+			})
+			t.Cleanup(func() { RegisterScopeSkipSource(nil) })
+			repo := t.TempDir()
+			t.Chdir(repo)
+			keployDir := filepath.Join(repo, "keploy")
+			require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestCRUD\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-pat\n        - name: mock-put\n    - id: o::TestList\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-own\n    - id: o::TestOther\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-other\n"), 0o644))
+			instr := &gatedInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})}
+			instr.consumedMocks = []models.MockState{{Name: "mock-own"}, {Name: "mock-pat"}, {Name: "mock-other"}}
+			windows := []models.ScopeWindow{
+				{Name: "o::TestList", Outcome: models.ScopeOutcomeFailed, SkippedReads: []string{"mock-pat"}},
+				{Name: "o::TestList", Outcome: models.ScopeOutcomePassed, SkippedReads: []string{"mock-own"}},
+				{Name: "o::TestOther", Outcome: models.ScopeOutcomePassed},
+			}
+			instr.windows = windows
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			db := namedMockDB{mocks: []*models.Mock{httpMock("mock-pat", "GET"), httpMock("mock-put", "PUT"), httpMock("mock-own", "GET"), httpMock("mock-other", "GET")}}
+			_ = New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+			tests, err := ReadTestsReceipt(keployDir, "set")
+			require.NoError(t, err)
+			require.NotNil(t, tests, "the replay writes what each test did")
+			got := map[string][]SkippedReadAnswer{}
+			for _, tr := range tests.Tests {
+				if tr.Name == "o::TestCRUD" {
+					continue
+				}
+				got[tr.Name] = tr.SkippedReads
+			}
+			want := map[string][]SkippedReadAnswer{"o::TestList": nil, "o::TestOther": nil}
+			if skips {
+				want["o::TestList"] = []SkippedReadAnswer{{Mock: "mock-pat", Test: "o::TestCRUD"}}
+			}
+			require.Equal(t, want, got, "a test names each read the replay moved from a skipped test that answered it, in any of its runs")
+			require.Equal(t, []string{"mock-pat"}, windows[0].SkippedReads, "the agent's window is read, never written")
+		})
+	}
+}

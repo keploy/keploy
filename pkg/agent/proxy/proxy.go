@@ -5221,6 +5221,17 @@ func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
 	return m.ExactTestOutcome()
 }
 
+// ExactTestSkippedReads implements agent.ExactSkippedReadsReader (exact.go).
+func (p *Proxy) ExactTestSkippedReads() (string, []string) {
+	m := p.getMockManager()
+	if m == nil {
+		return "", nil
+	}
+	return m.ExactTestSkippedReads()
+}
+
+var _ agent.ExactSkippedReadsReader = (*Proxy)(nil)
+
 var (
 	_ agent.ExactServer            = (*Proxy)(nil)
 	_ agent.ExactTestOpener        = (*Proxy)(nil)

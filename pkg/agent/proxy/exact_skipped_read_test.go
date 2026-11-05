@@ -361,3 +361,64 @@ func TestARepeatedReadsOnceFewerHoldsBesideASkippedReadsCall(t *testing.T) {
 		t.Fatalf("test-a's outcome: test %q, never made %v, exact %v; want test-a with nothing charged: its GET /x made once fewer than its named read", test, left, ok)
 	}
 }
+
+// A test that passes on a skipped test's read passed on a recording a
+// replay that loads no skipped test's does not have: keploy's CI replay of
+// a published set pulls only the kept tests' recordings. So the read that
+// answered goes on the test's outcome, read while the test is open and,
+// final, once it ended, whatever its own recordings did; the next test's
+// starts with none. Before, the read surfaced only on an extra call's miss:
+// a test that made the call once passed with nothing said, was kept, and
+// failed the CI replay.
+func TestATestsOutcomeNamesTheSkippedReadsThatAnsweredItsCalls(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	skippedX := workerProbe("mock-skipped-x", time.Second, "/x", "skipped-x")
+	ownY := workerProbe("mock-own-y", 4*time.Second, "/y", "own-y")
+	ownZ := workerProbe("mock-own-z", 6*time.Second, "/z", "own-z")
+	mm := stagedManager(t, nil, []*models.Mock{skippedX, ownY, ownZ})
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)},
+		{TestCase: "test-b", Start: exactT0.Add(5 * time.Second), End: exactT0.Add(7 * time.Second)},
+	})
+	mm.ServeExactWorkerSkipped([]string{skippedX.Name}, []string{skippedX.Name})
+	p := &Proxy{}
+	p.setMockManager(mm)
+	var r agent.ExactSkippedReadsReader = p
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.ServeExactTest("test-a", []*models.Mock{roundMock(mm, ownY.Name)})
+	if !mm.ExactServing() || integrations.S12Background(mm) {
+		t.Fatal("precondition: test-a is not served exactly, by today's rules")
+	}
+	for _, c := range []struct{ path, want string }{{"/y", "own-y"}, {"/x", "skipped-x"}} {
+		if got, miss := httpMissCall(t, mm, c.path); got != c.want {
+			t.Fatalf("test-a's GET %s was answered %q (miss %+v); want %q", c.path, got, miss, c.want)
+		}
+	}
+	want := []string{skippedX.Name}
+	if test, reads := r.ExactTestSkippedReads(); test != "test-a" || !slices.Equal(reads, want) {
+		t.Fatalf("while test-a is open, ExactTestSkippedReads = %q %v; want test-a %v", test, reads, want)
+	}
+	if test, consumed, unconsumed, _ := mm.ExactTestOutcome(); test != "test-a" || !slices.Equal(consumed, []string{ownY.Name}) || len(unconsumed) != 0 {
+		t.Fatalf("test-a's outcome is %q consumed %v unconsumed %v; want only its own %s consumed", test, consumed, unconsumed, ownY.Name)
+	}
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	if test, reads := r.ExactTestSkippedReads(); test != "test-a" || !slices.Equal(reads, want) {
+		t.Fatalf("once test-a ended, ExactTestSkippedReads = %q %v; want test-a %v, final", test, reads, want)
+	}
+
+	mm.ServeExactTest("test-b", []*models.Mock{roundMock(mm, ownZ.Name)})
+	if got, miss := httpMissCall(t, mm, "/z"); got != "own-z" {
+		t.Fatalf("test-b's GET /z was answered %q (miss %+v); want its own", got, miss)
+	}
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	if test, reads := r.ExactTestSkippedReads(); test != "test-b" || len(reads) != 0 {
+		t.Fatalf("test-b, answered only by its own recording, has ExactTestSkippedReads = %q %v; want test-b and none", test, reads)
+	}
+	// A session that opened no test names none.
+	fresh := stagedManager(t, nil, []*models.Mock{skippedX})
+	fresh.ServeExactWorkerSkipped([]string{skippedX.Name}, []string{skippedX.Name})
+	fresh.ServeExactPool(models.PoolKeyNone, nil)
+	if test, reads := fresh.ExactTestSkippedReads(); test != "" || len(reads) != 0 {
+		t.Fatalf("before any test opened, ExactTestSkippedReads = %q %v; want none", test, reads)
+	}
+}

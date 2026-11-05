@@ -2544,6 +2544,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// judging lists it as the root of the test's entry.
 	named, orderDependent := withRecordedIn(counts.tests, m.mockOwners, detail.windows)
 	withSkippedTest(counts.tests, m.skippedReadOf)
+	withSkippedReads(counts.tests, detail.windows, m.skippedReadOf)
 	if len(named) > 0 {
 		m.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under evidence.misses.recorded_in in "+TestsReceiptFile,
 			zap.String("mock-set", m.setName()),
@@ -2763,6 +2764,33 @@ func withSkippedTest(tests []TestReceipt, skippedOf map[string]string) {
 			c.Repeat = c.Repeat.Clone()
 			c.Repeat.SkippedTest = skippedOf[c.Repeat.Mock]
 		}
+	}
+}
+
+// withSkippedReads puts on each test's line the reads of tests this
+// replay's gate skips that answered its calls (models.ScopeWindow
+// .SkippedReads), each with the skipped test whose recording it is, from
+// skippedOf: each read keploy mock replay moved to the worker scope, with
+// its test (skippedReads). Every run of the test this replay is counted, in
+// the order its windows closed: a read that answered one attempt answered a
+// call a replay without it cannot. A name skippedOf does not hold is no
+// read this replay moved and is left off.
+func withSkippedReads(tests []TestReceipt, windows []models.ScopeWindow, skippedOf map[string]string) {
+	var byName map[string][]SkippedReadAnswer
+	for _, w := range windows {
+		for _, name := range w.SkippedReads {
+			test, ok := skippedOf[name]
+			if !ok {
+				continue
+			}
+			if byName == nil {
+				byName = map[string][]SkippedReadAnswer{}
+			}
+			byName[w.Name] = append(byName[w.Name], SkippedReadAnswer{Mock: name, Test: test})
+		}
+	}
+	for i := range tests {
+		tests[i].SkippedReads = byName[tests[i].Name]
 	}
 }
 

@@ -382,6 +382,22 @@ type TestReceipt struct {
 	// test's recording, each field as "<mock> <path> (<kind>)" (design v14
 	// §7.2 step 10). Only that round has any.
 	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
+	// SkippedReads is, under the proven switch, each read of a test this
+	// replay's gate skips that answered one of the test's calls, whatever
+	// its outcome, in the order they did (models.ScopeWindow.SkippedReads),
+	// with the skipped test whose recording it is: keploy mock replay moved
+	// it to the worker scope for this replay (skippedReads). A replay that
+	// loads no skipped test's recordings has no answer for those calls, so
+	// a test that passed on one did not pass on its own recordings.
+	SkippedReads []SkippedReadAnswer `yaml:"skippedReads,omitempty" json:"skippedReads,omitempty"`
+}
+
+// SkippedReadAnswer is one read of a skipped test that answered a test's
+// call (TestReceipt.SkippedReads): Mock is the recording's name, Test the
+// skipped test whose window recorded it.
+type SkippedReadAnswer struct {
+	Mock string `yaml:"mock" json:"mock"`
+	Test string `yaml:"test" json:"test"`
 }
 
 // isolation decides whether a finished run proved isolation: the runner

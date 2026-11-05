@@ -73,6 +73,11 @@ type wireProxy struct {
 	failPools int
 	// staged counts the stagings (SetMocks).
 	staged int
+	// skippedReads are the skipped tests' reads that answered the latest
+	// test opened (ExactTestSkippedReads); skippedOf, when set, is the test
+	// it names instead of that one.
+	skippedReads []string
+	skippedOf    string
 	// seeded are the recorded test windows last seeded
 	// (SeedRecordedWindows), and seededAt the stagings made before.
 	seeded   []models.TestWindow
@@ -236,6 +241,20 @@ func (p *wireProxy) ExactTestOutcome() (string, []string, []string, bool) {
 		}
 	}
 	return p.lastTest, consumed, unconsumed, true
+}
+
+var _ coreAgent.ExactSkippedReadsReader = (*wireProxy)(nil)
+
+// ExactTestSkippedReads names the latest test opened, or skippedOf, with
+// skippedReads.
+func (p *wireProxy) ExactTestSkippedReads() (string, []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	test := p.lastTest
+	if p.skippedOf != "" {
+		test = p.skippedOf
+	}
+	return test, append([]string(nil), p.skippedReads...)
 }
 
 // exactless cannot serve each test exactly.
@@ -2934,4 +2953,55 @@ func TestAMissNamesASkippedTestsReadOnlyWhenItRepeatsOne(t *testing.T) {
 	skipped := models.UnmatchedCall{Repeat: &models.RepeatNote{Mock: "mock-1", SkippedRead: true}}
 	require.Equal(t, ": it is one call past o::TestCRUD's read mock-1 (that test is skipped), which answers as many calls as that test recorded and already answered one at this replay", missWhyText(skipped, skippedOf))
 	require.Equal(t, ": it is one call past a skipped test's read mock-1, which answers as many calls as that test recorded and already answered one at this replay", missWhyText(skipped, nil))
+}
+
+// A replayed test's window names the skipped tests' reads that answered its
+// calls (models.ScopeWindow.SkippedReads), whatever its outcome: a test that
+// passed on one passed on a recording keploy's CI replay of the published
+// set never loads. A test no such read answered names none; reads the proxy
+// names for a test opened since are no reads of the ending test's; and a
+// note made once a test's window closed reaches no later run of it.
+func TestAReplayedTestsWindowNamesTheSkippedReadsThatAnsweredIt(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	claimSelf(t, a)
+	runs := []struct {
+		test, outcome, of string
+		reads, want       []string
+	}{
+		{test: "TestA", outcome: "passed", reads: []string{"mock-9", "mock-4"}, want: []string{"mock-9", "mock-4"}},
+		{test: "TestB", outcome: "passed"},
+		{test: "TestC", outcome: "failed", reads: []string{"mock-9"}, want: []string{"mock-9"}},
+		{test: "TestD", outcome: "passed", reads: []string{"mock-9"}, of: "o::TestE"},
+		{test: "TestB", outcome: "passed", of: "o::TestE"},
+	}
+	for i, c := range runs {
+		if i == len(runs)-1 {
+			a.noteScopeSkippedReads("o::TestB", []string{"mock-stale"})
+		}
+		_, serr := a.ProvenBegin(ctx, begin(c.test))
+		require.Nil(t, serr)
+		p.mu.Lock()
+		p.skippedReads, p.skippedOf = c.reads, c.of
+		p.mu.Unlock()
+		_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: c.test, Outcome: c.outcome})
+		require.Nil(t, serr)
+	}
+	ws, err := a.FinalScopeWindows(ctx)
+	require.NoError(t, err)
+	var got []models.ScopeWindow
+	for _, w := range ws {
+		if w.Name != "" {
+			got = append(got, w)
+		}
+	}
+	require.Len(t, got, len(runs))
+	for i, c := range runs {
+		w := got[i]
+		require.Equal(t, "o::"+c.test, w.Name)
+		require.Equal(t, c.want, w.SkippedReads, "run %d, %s's window", i, c.test)
+		if c.outcome == "passed" {
+			require.Equal(t, models.ScopeOutcomePassed, w.Outcome, "a skipped read that answered %s does not fail it here: judging reads it", c.test)
+		}
+	}
 }

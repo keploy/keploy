@@ -2033,6 +2033,24 @@ func (m *MockManager) ExactTestOutcome() (test string, consumed, unconsumed []st
 	return o.test, append([]string(nil), o.consumed...), append([]string(nil), o.unconsumed...), true
 }
 
+// ExactTestSkippedReads implements agent.ExactSkippedReadsReader: under
+// exact serving, the latest test opened, open or ended (ExactTestOutcome),
+// and the reads of the tests the replay's gate skips (isSkippedRead) that
+// answered a call in its window, in the order they did. Read once the test
+// stops being served, it is final, as ExactTestOutcome is. test is "" when
+// no test has been opened this session.
+func (m *MockManager) ExactTestSkippedReads() (test string, reads []string) {
+	var o *testOutcome
+	if v := m.exact.last.Load(); v != nil {
+		v.mu.Lock()
+		o = v.outcomeLocked()
+		v.mu.Unlock()
+	} else if o = m.exact.ended.Load(); o == nil {
+		return "", nil
+	}
+	return o.test, append([]string(nil), o.skipped...)
+}
+
 // ExactTestServed is, under exact serving, the test whose view is in force
 // now: "" when none is, the pool being served, before a set's first test or
 // after a test ended (agent.ExactTestServedReader). It reads the published
@@ -2050,6 +2068,10 @@ func (m *MockManager) ExactTestServed() string {
 type testOutcome struct {
 	test                 string
 	consumed, unconsumed []string
+	// skipped are the skipped tests' reads that answered a call in the
+	// view's window (skippedSpent), in the order they did
+	// (ExactTestSkippedReads).
+	skipped []string
 }
 
 // outcomeLocked is v's outcome, v.mu held: which of its test mocks have
@@ -2067,6 +2089,9 @@ func (v *exactView) outcomeLocked() *testOutcome {
 		if !done && !v.isCand(i) && !excused[i] {
 			o.unconsumed = append(o.unconsumed, v.owned[i].Name)
 		}
+	}
+	for _, mk := range v.skippedSpent {
+		o.skipped = append(o.skipped, mk.Name)
 	}
 	return o
 }

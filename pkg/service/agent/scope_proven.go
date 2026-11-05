@@ -1916,6 +1916,15 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 		}
 	}
 	ev.Unconsumed = append(ev.Unconsumed, unservable...)
+	// The skipped tests' reads that answered the test's calls go on its
+	// window whatever its outcome: a test that passed on one passed on a
+	// recording a replay that loads no skipped test's has not. Only the
+	// ending test's: a view another test opened since is no read of its.
+	if r, ok := es.(coreAgent.ExactSkippedReadsReader); ok {
+		if t, reads := r.ExactTestSkippedReads(); t == id {
+			a.noteScopeSkippedReads(id, reads)
+		}
+	}
 	return ev, nil
 }
 
@@ -2063,6 +2072,23 @@ func (a *Agent) noteScopeEvidence(id string, ev *models.ScopeEvidence) {
 	}
 	meta := a.scopeMeta[k]
 	meta.evidence = ev
+	a.scopeMeta[k] = meta
+}
+
+// noteScopeSkippedReads attaches the skipped tests' reads that answered a
+// test's calls to the window id's end closes (ScopeWindow.SkippedReads).
+func (a *Agent) noteScopeSkippedReads(id string, reads []string) {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	k := scopeKey{pid: 0, name: id}
+	if _, open := a.workerOpen[k]; !open {
+		return
+	}
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	meta := a.scopeMeta[k]
+	meta.skippedReads = reads
 	a.scopeMeta[k] = meta
 }
 

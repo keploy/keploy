@@ -978,6 +978,18 @@ type ExactServer interface {
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
 }
 
+// ExactSkippedReadsReader is an optional ExactServer capability:
+// ExactTestSkippedReads is the latest test opened, open or ended, as
+// ExactTestOutcome names it, and the reads of the tests the replay's gate
+// skips, moved to the worker scope (ExactWorkerSkippedServer), that
+// answered a call in its window, in the order they did; final once the test
+// stops being served. A replay that never loads the skipped tests'
+// recordings has no answer for those calls. test is "" when no test has
+// been opened.
+type ExactSkippedReadsReader interface {
+	ExactTestSkippedReads() (test string, reads []string)
+}
+
 // ExactTestServedReader is an optional ExactServer capability: ExactTestServed
 // is the test whose view is in force now, "" when none is (the pool is
 // served: before a set's first test, or after a test ended). Unlike
