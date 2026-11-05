@@ -430,13 +430,18 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 	}
 	// Past the budget each question reads the recording once: its text and
 	// its fields from one read, its instants and their declared forms from
-	// one read.
+	// one read. A word the set's filter of the recording's words rules out
+	// (setFilter) reads it not at all.
 	last := places[n-1]
+	loads = dc.Loads()
+	if held, read := last.holdsWord("zzz"); held || !read || dc.Loads() != loads {
+		t.Errorf("a word the recording's filter rules out, past the budget: held %v, read %v, %d loads; want not held, read, none", held, read, dc.Loads()-loads)
+	}
 	for _, q := range []struct {
 		name string
 		ask  func()
 	}{
-		{"a word", func() { last.holdsWord("zzz") }},
+		{"a word its filter may hold", func() { last.holdsWord("w") }},
 		{"a base64 run", func() { last.holdsToken(tokenB64, "QUJDREVGR0g") }},
 		{"a word's fields", func() { last.fieldsWith(id(n - 1)) }},
 		{"an instant", func() { last.holdsMoment(moment{}) }},
