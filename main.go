@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,13 @@ import (
 
 	_ "net/http/pprof"
 	"runtime/pprof"
+
+	// Mozilla's root list, which pkg/agent/proxy/tls already links, as Go's
+	// system roots when the host has none (a distroless image, or a k8s
+	// sidecar whose /etc/ssl/certs is an empty volume). keploy loads its own
+	// roots before it points SSL_CERT_FILE at files meant for the app, so
+	// without this such a host would leave keploy's own TLS with no roots.
+	_ "golang.org/x/crypto/x509roots/fallback"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -39,6 +47,11 @@ var apiServerURI = "http://localhost:8083"
 var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
+	// Load this process's TLS roots before anything can change what
+	// crypto/x509 would read: keploy points SSL_CERT_FILE at files meant for
+	// the app, and in native mode adds its CA to the system store
+	// (pkg/agent/proxy/tls, loadOwnRoots).
+	_, _ = x509.SystemCertPool()
 	setVersion()
 	ctx := utils.NewCtx()
 	// An agent's teardown records its steps, and its long stages as work in
