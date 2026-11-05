@@ -6205,6 +6205,9 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 					Given:            parserErr.MismatchReport.Given,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
+					// The same request as a set background recording:
+					// listed, counted against no test.
+					Background: parserErr.MismatchReport.Background,
 					// A call the parser held for a later test's recording
 					// that none answered: missed only at the set's end.
 					Held: parserErr.MismatchReport.HeldPastWindow,

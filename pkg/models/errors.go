@@ -122,19 +122,22 @@ const (
 
 // CountsAgainstTest reports whether a miss is evidence against the test it was
 // made in: every miss but a DNS lookup's (the proxy answers an unrecorded name
-// itself) and a connection whose client sent nothing (MatchPhaseNoRequest: no
-// call was made, and a dependency's TCP health check closes the same way). An
-// answered call (Answer, under the proven switch) is no miss, and counts
-// against nothing. Every verdict, count and evidence line that judges misses
-// reads this.
+// itself), a connection whose client sent nothing (MatchPhaseNoRequest: no
+// call was made, and a dependency's TCP health check closes the same way), and
+// a background miss (Background: the same request as one of the set's
+// background recordings, which the application's background work makes, not
+// a test). An answered call (Answer, under the proven switch) is no miss, and
+// counts against nothing. Every verdict, count and evidence line that judges
+// misses reads this, under either switch, and so does the set's: a background
+// miss made before the set's first test fails no set either.
 func (c UnmatchedCall) CountsAgainstTest() bool {
-	return c.Answer == "" && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
+	return c.Answer == "" && !c.Background && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
 }
 
 // CountsAgainstTest is UnmatchedCall.CountsAgainstTest for the report a miss
 // is made from, for the places that hold the report and not the call.
 func (r *MockMismatchReport) CountsAgainstTest() bool {
-	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase, Answer: r.Answer}.CountsAgainstTest()
+	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase, Answer: r.Answer, Background: r.Background}.CountsAgainstTest()
 }
 
 // Destination-scope verdicts recorded on MockMismatchReport.DestinationScope.
@@ -326,6 +329,14 @@ type MockMismatchReport struct {
 	// (integrations.SetEndFiler). Such a call may have been made in a test
 	// or between two (UnmatchedCall.Held).
 	HeldPastWindow bool
+	// Background says, under either switch, the parser found the call the
+	// same request as one of the set's background recordings (the set's
+	// worker: or startup: mocks in mappings.yaml), apart from the places its
+	// matcher reads as noise or as a read of the application's clock: one
+	// more run of the application's own background work, a poll on a timer,
+	// that no recording was left to answer. Its miss is listed, and counts
+	// against no test (UnmatchedCall.Background).
+	Background bool
 	// Reason is why the call missed, when the learn step decided it, or
 	// MissViewReplaced when a test's begin or end, or another view served
 	// between tests, replaced its view before its miss was diagnosed

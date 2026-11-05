@@ -1198,16 +1198,39 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 // (FailureInfo.UnmatchedCalls) for a test. Field-diff paths use the noise
 // vocabulary, so the rendered output doubles as copy-paste material for
 // test.globalNoise / spec.assertions.noise.
+//
+// A background miss (models.UnmatchedCall.Background: the same request as one
+// of the set's background recordings, which counts against no test) is listed
+// apart, after the test's own, with how many there were: never under the
+// "likely root cause" heading, which it is not.
 func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
-	if len(test.FailureInfo.UnmatchedCalls) == 0 {
-		return
+	var own, background []models.UnmatchedCall
+	for _, uc := range test.FailureInfo.UnmatchedCalls {
+		if uc.Background {
+			background = append(background, uc)
+			continue
+		}
+		own = append(own, uc)
 	}
-	sb.WriteString("=== OUTGOING CALLS WITH NO MATCHING MOCK (likely root cause) ===\n")
+	if len(own) > 0 {
+		sb.WriteString("=== OUTGOING CALLS WITH NO MATCHING MOCK (likely root cause) ===\n")
+		renderMissList(sb, own)
+	}
+	if len(background) > 0 {
+		fmt.Fprintf(sb, "=== %d BACKGROUND CALL(S) WITH NO MATCHING MOCK (count against no test) ===\n", len(background))
+		sb.WriteString("  each is the same request as a recording of the set's background (mappings.yaml worker: or startup:), made once more than one was left to answer it\n")
+		renderMissList(sb, background)
+	}
+}
+
+// renderMissList writes each of calls, and the shared explanation of an
+// out-of-scope destination once if any call has one, then a blank line.
+func renderMissList(sb *strings.Builder, calls []models.UnmatchedCall) {
 	// Set by any out-of-scope call below; the shared explanation is written
 	// ONCE for the whole test after the loop, never once per call — see
 	// models.OutOfScopeDestinationCauses.
 	var outOfScope bool
-	for _, uc := range test.FailureInfo.UnmatchedCalls {
+	for _, uc := range calls {
 		fmt.Fprintf(sb, "  [%s] %s", uc.Protocol, uc.Named())
 		if uc.MatchPhase != "" {
 			sb.WriteString(fmt.Sprintf(" (match stopped at: %s", uc.MatchPhase))
