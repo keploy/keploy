@@ -3254,11 +3254,12 @@ func (m *learnMiss) diag() *matchDiag {
 // explain writes the learn step's reason onto the miss's report: its code,
 // for judging, and what differed, for the person who reads it. Neither holds
 // a value. Of a call whose view went before its miss was diagnosed (viewGone:
-// integrations.CallViewGoneWhy told, the report viewless), it writes the
-// reason's kind alone, its code and the code's sentence: the reason's text
-// and its next step tell what the learn step read of that view (a
-// recording's name, the places the call differs from it at), and such a
-// miss carries nothing it read of the view.
+// integrations.CallViewGoneWhy told, the report viewless), it writes no
+// reason: the code is judging's class of a call it compared with the view's
+// recordings (one made elsewhere would be taken for an unmocked call, with a
+// next step to record again), and the text names what the learn step read
+// of that view. Such a miss carries the empty code of a call keploy could
+// not judge (models.UnmatchedCall.Reason), which judging counts as a miss.
 func (m *learnMiss) explain(r *models.MockMismatchReport, viewGone bool) {
 	if r == nil || m.answered != nil {
 		return // a stateful walk's miss: the report says so (answeredSequence)
@@ -3272,11 +3273,11 @@ func (m *learnMiss) explain(r *models.MockMismatchReport, viewGone bool) {
 		r.NextSteps = strings.TrimSpace(why + " " + r.NextSteps)
 		return
 	}
+	if viewGone {
+		return
+	}
 	r.Reason = m.res.Reason
 	why, steps := "keploy's learn step: "+m.res.Why+".", m.steps
-	if viewGone {
-		why, steps = "keploy's learn step missed this request.", ""
-	}
 	switch m.res.Reason {
 	case models.MissUnstableOrder:
 		why += " The app sent the array in another order than it was recorded in (unstable_order)."

@@ -598,8 +598,9 @@ type UnmatchedCall struct {
 	// everywhere else, and for a call of that round no reason of judging's
 	// names: one keploy could not judge because its own store could not read
 	// a recorded answer back, one a parser's pairing found tied between
-	// recordings whose replies differ, or one call more than the test
-	// recorded (Kind and Recorded say so).
+	// recordings whose replies differ, one whose view a test's begin or end
+	// replaced before keploy diagnosed its miss (its next steps say so), or
+	// one call more than the test recorded (Kind and Recorded say so).
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 	// Concurrent is, under the proven switch, what keploy knows of the call
 	// when the test was recorded while other tests' requests were open

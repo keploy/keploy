@@ -2432,16 +2432,18 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 // (integrations.CallViewGoneWhy): it drops all that r read of a recording,
 // whichever view the read was of. That is the closest recording, its
 // rendered request, the diff, the field diffs and their reasons, and the
-// compared set's destination scope. Its next steps become those of a miss
-// compared with no recording, at r's phase. The call's own summary and
-// rendering stay redacted by the places r was built with.
+// compared set's destination scope, and its next steps: each is advice from
+// that comparison (record again, declare noise), which a call keploy could
+// not compare in its own view does not take. The caller says why it has
+// none (CallViewGoneWhy). The call's own summary and rendering stay
+// redacted by the places r was built with.
 func viewless(r *models.MockMismatchReport) {
 	plain := mismatch.NewReport(r.Protocol, r.ActualSummary).
 		WithDestination(r.Destination).
 		WithPhase(r.MatchPhase, r.CandidateCount).Build()
 	r.ClosestMock, r.ClosestMockReq, r.Diff = "", "", ""
 	r.FieldDiffs, r.Differs, r.FieldReasons = nil, nil, nil
-	r.DestinationScope, r.NextSteps = plain.DestinationScope, plain.NextSteps
+	r.DestinationScope, r.NextSteps = plain.DestinationScope, ""
 }
 
 // sessionCallHint tells how to serve a call to every test, for a recording

@@ -608,11 +608,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// reads above. Asked after every one of them, so a move
 				// during them is told too, and then the miss carries
 				// nothing any of them read (viewless): no closest
-				// recording, no diff, no recording made elsewhere and no
-				// repeat note, whichever view a read was of. Its learn
-				// step's reason is told by its kind alone, since its text
-				// names what that step read of the view (learnMiss.explain).
-				// A learn step's moved miss tells the move itself.
+				// recording, no diff, no recording made elsewhere, no
+				// repeat note and no next step of a comparison, whichever
+				// view a read was of. Nor does it get its learn step's
+				// reason (learnMiss.explain): that code is judging's class
+				// of a call compared in its view, and the empty one is a
+				// call keploy could not judge. It keeps its kind, and the
+				// count of an extra call, decided before the move. A learn
+				// step's moved miss tells the move itself.
 				gone := ""
 				if report != nil {
 					gone = integrations.CallViewGoneWhy(db)

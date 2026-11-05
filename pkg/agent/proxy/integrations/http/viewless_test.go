@@ -14,9 +14,10 @@ import (
 // had named its closest, mock-own1, with a value-drift diff, a rendering of
 // that recording's request, the diff's field reasons and a destination
 // scope its compared set decided (none of it targets the call's
-// destination). It keeps none of them, and its next steps are those of a
-// miss compared with no recording at its phase, not the hint its compared
-// set gave. The call's own summary and rendering stay.
+// destination). It keeps none of them, and no next step: the hint its
+// compared set gave is advice from that comparison, and so is a plain
+// miss's at its phase (record again). The call's own summary, rendering,
+// phase and candidate count stay.
 func TestAViewlessMissKeepsNothingItReadOfARecording(t *testing.T) {
 	r := mismatch.NewReport(mismatch.ProtocolHTTP, "GET /orders").
 		WithDestination("deps.example").
@@ -35,21 +36,21 @@ func TestAViewlessMissKeepsNothingItReadOfARecording(t *testing.T) {
 	if r.ClosestMock != "" || r.ClosestMockReq != "" || r.Diff != "" || r.FieldDiffs != nil || r.Differs != nil || r.FieldReasons != nil {
 		t.Errorf("the viewless miss keeps closest %q, its rendering %q, diff %q, fields %+v, differs %v, reasons %+v; want none", r.ClosestMock, r.ClosestMockReq, r.Diff, r.FieldDiffs, r.Differs, r.FieldReasons)
 	}
-	if r.NextSteps != plain.NextSteps || r.DestinationScope != plain.DestinationScope {
-		t.Errorf("the viewless miss's next steps %q and scope %q; want a plain miss's %q and %q", r.NextSteps, r.DestinationScope, plain.NextSteps, plain.DestinationScope)
+	if r.NextSteps != "" || r.DestinationScope != plain.DestinationScope {
+		t.Errorf("the viewless miss's next steps %q and scope %q; want none and a plain miss's %q", r.NextSteps, r.DestinationScope, plain.DestinationScope)
 	}
 	if r.ActualSummary != "GET /orders" || r.ReceivedReq != "GET /orders?page=2" || r.MatchPhase != models.MatchPhaseExhausted || r.CandidateCount != 2 {
 		t.Errorf("the viewless miss lost the call's own summary %q, rendering %q, phase %q or count %d", r.ActualSummary, r.ReceivedReq, r.MatchPhase, r.CandidateCount)
 	}
 }
 
-// The learn step's reason on a miss whose view went before it was diagnosed
-// is told by its kind alone: its code (request_changed, for judging) and
-// the code's sentence, never its text, which names the test's mock-own1
-// the learn step read in that view, nor its next step, which speaks of that
-// recording. A miss whose view stayed keeps both, and a moved learn miss
-// keeps telling the move, which names no recording.
-func TestAViewlessMissTellsItsLearnReasonByItsKindAlone(t *testing.T) {
+// A miss whose view went before it was diagnosed gets no learn step reason:
+// no code, so judging takes it for a call keploy could not judge (not
+// request_changed, a class judged from what the learn step compared in that
+// view), and no text, which names the test's mock-own1 the learn step read
+// there, nor its next step. A miss whose view stayed keeps all three, and a
+// moved learn miss keeps telling the move, which names no recording.
+func TestAViewlessMissGetsNoLearnReason(t *testing.T) {
 	const why = "keploy cannot tell which recordings of the test set came before mock-own1, which has no recorded time, so it cannot tell whether what changed came from one"
 	plain := func() *models.MockMismatchReport {
 		return mismatch.NewReport(mismatch.ProtocolHTTP, "POST /orders").
@@ -59,15 +60,16 @@ func TestAViewlessMissTellsItsLearnReasonByItsKindAlone(t *testing.T) {
 	miss := &learnMiss{res: learn.Result{Outcome: learn.Miss, Index: -1, Reason: models.MissRequestChanged, Why: why}, steps: placeSteps}
 	stayed := plain()
 	miss.explain(stayed, false)
-	if !strings.Contains(stayed.NextSteps, why) || !strings.Contains(stayed.NextSteps, placeSteps) {
-		t.Fatalf("precondition: the miss whose view stayed reads %q; want the reason %q and its next step", stayed.NextSteps, why)
+	if stayed.Reason != models.MissRequestChanged || !strings.Contains(stayed.NextSteps, why) || !strings.Contains(stayed.NextSteps, placeSteps) {
+		t.Fatalf("precondition: the miss whose view stayed reads code %q, next steps %q; want %q, the reason %q and its next step", stayed.Reason, stayed.NextSteps, models.MissRequestChanged, why)
 	}
-	gone := plain()
-	base := gone.NextSteps
-	miss.explain(gone, true)
-	const kind = "keploy's learn step missed this request. The request changed since it was recorded in a way keploy does not learn (request_changed)."
-	if want := strings.TrimSpace(kind + " " + base); gone.Reason != models.MissRequestChanged || gone.NextSteps != want {
-		t.Errorf("the viewless miss's learn reason reads code %q, next steps %q; want %q and %q", gone.Reason, gone.NextSteps, models.MissRequestChanged, want)
+	for _, reason := range []string{models.MissRequestChanged, models.MissUnstableOrder, models.MissUnmockedCall} {
+		gone := &models.MockMismatchReport{NextSteps: "keploy record's full round decided this request in test-1"}
+		miss := &learnMiss{res: learn.Result{Outcome: learn.Miss, Index: -1, Reason: reason, Why: why}, steps: placeSteps}
+		miss.explain(gone, true)
+		if gone.Reason != "" || gone.NextSteps != "keploy record's full round decided this request in test-1" {
+			t.Errorf("the viewless miss of a %s learn reason reads code %q, next steps %q; want no code and its own next steps alone", reason, gone.Reason, gone.NextSteps)
+		}
 	}
 	moved := &learnMiss{res: learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request in test-1, and the replay ended test-1 before keploy could answer it"}, moved: true}
 	r := plain()

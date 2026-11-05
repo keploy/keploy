@@ -169,6 +169,8 @@ func TestAFullRoundMissWhoseViewMovesAfterItsDecisionNamesNoRecording(t *testing
 				}
 			case m.ClosestMock != "" || m.ClosestMockReq != "" || m.Diff != "" || len(m.FieldDiffs) > 0:
 				t.Errorf("a test-1 miss whose view moved %s names %q (rendered %q, diff %q, fields %+v, next steps %q); want no recording", c.at, m.ClosestMock, m.ClosestMockReq, m.Diff, m.FieldDiffs, m.NextSteps)
+			case m.Reason != "" || strings.Contains(m.NextSteps, "Re-record") || strings.Contains(m.NextSteps, "learn step"):
+				t.Errorf("a test-1 miss whose view moved %s reads code %q, next steps %q; want no learn step reason and no advice of a comparison", c.at, m.Reason, m.NextSteps)
 			case !strings.Contains(m.NextSteps, why) || strings.Count(m.NextSteps, "keploy record's full round") != 1:
 				t.Errorf("the moved miss's next steps read %q; want them to say once %q", m.NextSteps, why)
 			}
@@ -185,7 +187,10 @@ func TestAFullRoundMissWhoseViewMovesAfterItsDecisionNamesNoRecording(t *testing
 // recording made elsewhere, or after that lookup found mock-own1 (in the
 // repeat note's lookup), the miss names no recording and notes no repeat:
 // whatever the miss read of the view goes with it, a lookup that found its
-// recording too.
+// recording too. Nor is it given its learn step's reason (unmocked_call:
+// test-2 recorded no such call) and that reason's advice to record again:
+// it carries no code, as a call keploy could not judge, and its next steps
+// are the move's alone.
 func TestAMovedMissOfACallMadeElsewhereNamesNoRecording(t *testing.T) {
 	type tc struct{ call, at, move string }
 	var cases []tc
@@ -259,24 +264,103 @@ func TestAMovedMissOfACallMadeElsewhereNamesNoRecording(t *testing.T) {
 				t.Errorf("a test-2 miss whose view moved %s names %q (made elsewhere %v, repeat %+v, rendered %q, diff %q, fields %+v, next steps %q); want no recording", c.at, m.ClosestMock, m.NotOwned, m.Repeat, m.ClosestMockReq, m.Diff, m.FieldDiffs, m.NextSteps)
 			case strings.Contains(m.NextSteps, "mock-") || strings.Contains(m.NextSteps, "that recording's"):
 				t.Errorf("the moved miss's next steps read %q; want no recording named or spoken of", m.NextSteps)
-			case !strings.Contains(m.NextSteps, why) || strings.Count(m.NextSteps, "keploy record's full round") != 1:
-				t.Errorf("the moved miss's next steps read %q; want them to say once %q", m.NextSteps, why)
+			case m.Reason != "" || m.NextSteps != "keploy record's full round "+why+": keploy reads nothing of a view a test's begin or end replaced.":
+				t.Errorf("the moved miss reads code %q, next steps %q; want no code, and the move alone: %q", m.Reason, m.NextSteps, why)
 			}
 		})
 	}
 }
 
-// A moved full-round miss gives its learn step's reason by its kind alone.
-// Between tests, a call keploy cannot tell from test-2's mock-own2, a
-// recording it cannot read back from disk, misses with the learn step's
-// reason, which names mock-own2 and the pool's mock-pool it would pair the
-// call with, and the next step for keploy failing to read its recordings.
-// Once the replay begins test-2 before the miss's report, or in its lookup
-// of a recording made elsewhere, the miss names neither and keeps no next
-// step of that reason: both are what the learn step read of the pool's
-// view, which went. Before, the reason and its names stayed beside the
-// sentence saying no recording is named.
-func TestAMovedMissTellsItsLearnReasonByItsKindAlone(t *testing.T) {
+// A miss of a call made elsewhere shows only the recording it names. In
+// test-2, which owns mock-own2 (plum), a call that is exactly test-1's
+// mock-own1 (pear) misses naming mock-own1 as made elsewhere, with its
+// request rendered and no diff: none of mock-own1's fields differs. Before,
+// it kept the diff its report built against mock-own2, the closest of
+// test-2's own view, beside mock-own1's name. Once the replay ends test-2
+// (or ends it and begins test-3) before the miss's report or in its lookup
+// of a recording made elsewhere, after the report named mock-own2, the miss
+// names neither, diffs against neither and gets no learn step reason
+// (request_changed, from mock-own2): its next steps are the move's alone.
+func TestAMissMadeElsewhereShowsOnlyTheRecordingItNames(t *testing.T) {
+	type tc struct{ at, move string }
+	cases := []tc{{"before the report", "never"}}
+	for _, at := range []string{"before the report", "not-owned"} {
+		for _, move := range []string{"the test ends", "the next test begins"} {
+			cases = append(cases, tc{at, move})
+		}
+	}
+	for _, c := range cases {
+		t.Run(c.at+"/"+c.move, func(t *testing.T) {
+			p, mm := elsewhereOrders(t, false, func(pool, own1, own2 *models.Mock) []*models.Mock { return []*models.Mock{pool, own1, own2} }, nil)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			p.EndTestErrorCapture()
+			mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+			p.ContinueTestErrorCapture()
+			if _, err := p.GetMockErrors(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			move := func() {
+				if c.move == "never" {
+					return
+				}
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				p.EndTestErrorCapture()
+				if c.move == "the next test begins" {
+					mm.ServeExactTest("test-3", nil)
+					p.ContinueTestErrorCapture()
+				}
+			}
+			lg, db := zap.NewNop(), &lookupHook{MockManager: mm, at: c.at, move: move}
+			if c.at == "before the report" {
+				lg = onDebugLine("after matching the http request", move)
+			}
+			code, got := r3SendVia(t, context.Background(), httpint.New(lg), p, db, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(`{"item":"pear"}`))
+			if code == http.StatusOK {
+				t.Fatalf("answered %d %s", code, got)
+			}
+			if c.at != "before the report" && !db.ran.Load() {
+				t.Fatalf("precondition: the miss's %s lookup never ran", c.at)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 {
+				t.Fatalf("misses %+v; want 1", misses)
+			}
+			m := misses[0]
+			why := map[string]string{
+				"the test ends":        "decided this request in test-2, and the replay ended test-2 before keploy diagnosed its miss, so no recording is named for it",
+				"the next test begins": "decided this request in test-2, and the replay ended test-2 and began test-3 before keploy diagnosed its miss, so no recording is named for it",
+			}[c.move]
+			switch {
+			case c.move == "never":
+				if m.ClosestMock != "mock-own1" || !m.NotOwned || m.Diff != "" || len(m.FieldDiffs) > 0 || !strings.Contains(m.ClosestMockReq, "pear") || strings.Contains(m.ClosestMockReq+m.NextSteps, "plum") {
+					t.Errorf("the unmoved miss names %q (made elsewhere %v), rendered %q, diff %q, fields %+v, next steps %q; want mock-own1 made elsewhere, rendered, with no diff and nothing of mock-own2", m.ClosestMock, m.NotOwned, m.ClosestMockReq, m.Diff, m.FieldDiffs, m.NextSteps)
+				}
+			case m.ClosestMock != "" || m.ClosestMockReq != "" || m.NotOwned || m.Diff != "" || len(m.FieldDiffs) > 0 || strings.Contains(m.NextSteps, "mock-"):
+				t.Errorf("a test-2 miss whose view moved %s names %q (made elsewhere %v, rendered %q, diff %q, fields %+v, next steps %q); want no recording", c.at, m.ClosestMock, m.NotOwned, m.ClosestMockReq, m.Diff, m.FieldDiffs, m.NextSteps)
+			case m.Reason != "" || m.NextSteps != "keploy record's full round "+why+": keploy reads nothing of a view a test's begin or end replaced.":
+				t.Errorf("the moved miss reads code %q, next steps %q; want no code, and the move alone: %q", m.Reason, m.NextSteps, why)
+			}
+		})
+	}
+}
+
+// A moved full-round miss gets no learn step reason. Between tests, a call
+// keploy cannot tell from test-2's mock-own2, a recording it cannot read back
+// from disk, misses with the learn step's reason, which names mock-own2 and
+// the pool's mock-pool it would pair the call with, and the next step for
+// keploy failing to read its recordings. Once the replay begins test-2
+// before the miss's report, or in its lookup of a recording made elsewhere,
+// the miss names neither and keeps no next step of that reason: the reason
+// is what the learn step read of the pool's view, which went. Its next
+// steps are the move's alone. Before, the reason and its names stayed
+// beside the sentence saying no recording is named; then the sentence
+// that the learn step missed it did.
+func TestAMovedMissGetsNoLearnReason(t *testing.T) {
 	const why = "keploy cannot read every recording of the test set (read the recording mock-own2 kept on disk: disk mocks: short read)"
 	const unread = "keploy failing to read its own recordings"
 	const gone = "decided this request between tests, and the replay began test-2 before keploy diagnosed its miss, so no recording is named for it"
@@ -317,8 +401,8 @@ func TestAMovedMissTellsItsLearnReasonByItsKindAlone(t *testing.T) {
 				}
 			case m.ClosestMock != "" || strings.Contains(m.NextSteps, "mock-") || strings.Contains(m.NextSteps, unread):
 				t.Errorf("a miss whose view moved %s names %q, next steps %q; want no recording named and no next step of the learn step's reason", at, m.ClosestMock, m.NextSteps)
-			case !strings.HasPrefix(m.NextSteps, "keploy's learn step missed this request.") || strings.Count(m.NextSteps, gone) != 1:
-				t.Errorf("the moved miss's next steps read %q; want the learn step's miss told by its kind, and %q once", m.NextSteps, gone)
+			case m.Reason != "" || m.NextSteps != "keploy record's full round "+gone+": keploy reads nothing of a view a test's begin or end replaced.":
+				t.Errorf("the moved miss reads code %q, next steps %q; want no code, and the move alone: %q", m.Reason, m.NextSteps, gone)
 			}
 		})
 	}
