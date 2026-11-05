@@ -120,6 +120,23 @@ func (d *placedDb) move(f func(p *models.RunPlace)) {
 
 func (d *placedDb) reach(anchor int) { d.move(func(p *models.RunPlace) { p.Reached = anchor }) }
 
+// waitHeld waits until the parser holds an answer: it waits, idle, for the
+// place to move. A move before that would find the answer due at its call.
+func (d *placedDb) waitHeld(t *testing.T) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		d.mu.Lock()
+		n := len(d.waits)
+		d.mu.Unlock()
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the parser did not hold the answer")
+		}
+	}
+}
+
 // idleCount is a connection's request holder that counts its idle marks
 // (integrations.IdleMarker).
 type idleCount struct{ marked atomic.Int32 }
@@ -196,6 +213,7 @@ func TestHeldAnswer_ASingleAnswerIsWrittenAtItsWindowsOpen(t *testing.T) {
 	registerStandIn(t)
 	db := newPlacedDb(singleAnswer(t, releaseAt(45)))
 	app, _ := serveHeld(t, db, nil)
+	db.waitHeld(t)
 	if got := readFor(app, quiet); got != "" {
 		t.Fatalf("written while test-1 runs: %q", got)
 	}
@@ -217,6 +235,7 @@ func TestHeldAnswer_AGapAnswerIsWrittenAtTheTestsEnd(t *testing.T) {
 	db := newPlacedDb(singleAnswer(t, releaseAt(35)))
 	db.reach(models.RunOpen(1))
 	app, _ := serveHeld(t, db, nil)
+	db.waitHeld(t)
 	if got := readFor(app, quiet); got != "" {
 		t.Fatalf("written at test-2's open: %q", got)
 	}
@@ -469,6 +488,7 @@ func TestHeldAnswer_TheCallsProtocolDecidesChunking(t *testing.T) {
 	t.Run("an HTTP/1.0 call", func(t *testing.T) {
 		db := newPlacedDb(sseMock(t, releaseAt(25), releaseAt(45), ""))
 		app, _ := serveHeldCall(t, db, nil, "GET /job HTTP/1.0\r\nHost: api.example\r\n\r\n")
+		db.waitHeld(t)
 		if got := readFor(app, quiet); got != "" {
 			t.Fatalf("written while test-1 runs: %q", got)
 		}
@@ -604,6 +624,7 @@ func TestHeldAnswer_TheHeadGoesOutBeforeAnyPart(t *testing.T) {
 	m.Spec.HTTPResp.Marks.Head = releaseAt(25)
 	db := newPlacedDb(m)
 	app, _ := serveHeld(t, db, nil)
+	db.waitHeld(t)
 	if got := readFor(app, quiet); got != "" {
 		t.Fatalf("written before the head's place: %q", got)
 	}
@@ -628,6 +649,7 @@ func TestHeldAnswer_ItsConnectionAnswersTheNextCall(t *testing.T) {
 	next.TestModeInfo.Lifetime = models.LifetimePerTest
 	db := newPlacedDb(singleAnswer(t, releaseAt(45)), next)
 	app, _ := serveHeld(t, db, nil)
+	db.waitHeld(t)
 	db.reach(models.RunOpen(2))
 	if got := readUntil(app, `{"state":"done"}`, 5*time.Second); !strings.HasSuffix(got, `{"state":"done"}`) {
 		t.Fatalf("the held answer: %q", got)
