@@ -3437,7 +3437,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		hsCtx := withDstIPOf(pTls.WithConnectTarget(ctx, connectTargetHost), dstAddr)
 		if rule.Mode == models.MODE_TEST {
 			connectHost, _ := hostPortFromAuthority(connectTargetHost, "")
-			port, preferAll := destInfo.Port, rule.OutgoingOptions.PreferH2
+			port, preferAll := destInfo.Port, rule.PreferH2
 			// On hsCtx, not ctx: the destination IP set above must survive
 			// the hint.
 			hsCtx = pTls.WithPreferH2For(hsCtx, func(serverName string) bool {

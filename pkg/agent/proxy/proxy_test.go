@@ -822,7 +822,8 @@ func TestReplayOffersH2OnlyToTheHostTheClientHelloNames(t *testing.T) {
 				t.Fatalf("negotiated %q, want %q", got, tc.wantALPN)
 			}
 			_ = client.Close()
-			awaitEvent(t, done, "handleConnection returning after the client left")
+			// The row checks the ALPN offer, not how the connection ends.
+			_ = awaitEvent(t, done, "handleConnection returning after the client left")
 		})
 	}
 }
@@ -870,7 +871,7 @@ func TestReplayOffersH2ToTheHostTheConnectRequestNames(t *testing.T) {
 				t.Fatalf("negotiated %q, want %q", got, tc.wantALPN)
 			}
 			_ = client.Close()
-			awaitEvent(t, done, "handleConnection returning after the client left")
+			_ = awaitEvent(t, done, "handleConnection returning after the client left")
 		})
 	}
 }
