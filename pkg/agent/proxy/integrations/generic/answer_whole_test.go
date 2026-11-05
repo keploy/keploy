@@ -201,7 +201,19 @@ func pooledRun(t *testing.T, viaSyncMock bool, after []byte) (m *models.Mock, pe
 		t.Fatal("the exchange held was not handed on as the stop began")
 	}
 	if after != nil {
-		destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: after, ReadAt: t0.Add(3 * time.Second), WrittenAt: t0.Add(3 * time.Second), ConnSeq: 4}
+		// Read before the stop's instant, taken after the stop decided:
+		// its span is recorded as the parser takes it, with the streams
+		// still open, not at their end, which may come after the verdict
+		// of the test case over it.
+		at := t0.Add(3 * time.Second)
+		destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: after, ReadAt: at, WrittenAt: at, ConnSeq: 4}
+		bound := time.Now().Add(waitBound) // only turns a hang into a failure
+		for over, _ := r.spans.Overlaps(at, at); !over; over, _ = r.spans.Overlaps(at, at) {
+			if time.Now().After(bound) {
+				t.Fatal("the parser took the rest of the answer the stop cut short and recorded no span over it while the streams were open")
+			}
+			time.Sleep(time.Millisecond) // a yield between looks
+		}
 	}
 	end()
 	if n := endOfParser(t, mocks, done); n != 0 {
@@ -218,6 +230,18 @@ func pooledRun(t *testing.T, viaSyncMock bool, after []byte) (m *models.Mock, pe
 	}
 	r.counted = mgr.MocksLeftOut()
 	return m, pendingAtStop, r
+}
+
+// switchesAndDeliveries is each switch (provenswitch.Env) with each mock
+// delivery (the session's channel, the sync-mock manager).
+var switchesAndDeliveries = []struct {
+	name, proven string
+	viaSyncMock  bool
+}{
+	{"proven=0/viaSyncMock=no", "0", false},
+	{"proven=0/viaSyncMock=yes", "0", true},
+	{"proven=1/viaSyncMock=no", "1", false},
+	{"proven=1/viaSyncMock=yes", "1", true},
 }
 
 // The last exchange of a pooled connection has no next request to end its
@@ -243,13 +267,17 @@ func TestV2_ThePooledConnectionsLastExchangeIsHandedOnWholeAsTheStopBegins(t *te
 	}
 }
 
-// A chunk of the answer the server sends after the stop handed its exchange
-// on is left out with its span, so a test case over it is left out, never
-// saved over the answer cut short.
+// A chunk of the answer that reaches the parser after the stop handed its
+// exchange on, though the relay read it before the stop's instant, has its
+// span recorded as the parser takes it, with the streams still open (pooledRun
+// checks that), and is counted left out once, so a test case over it is left
+// out, never saved over the answer cut short; on both deliveries and under
+// both switches.
 func TestV2_AChunkOfAnAnswerAfterTheStopDecidedItIsLeftOut(t *testing.T) {
-	for _, viaSyncMock := range []bool{false, true} {
-		t.Run("viaSyncMock="+map[bool]string{false: "no", true: "yes"}[viaSyncMock], func(t *testing.T) {
-			m, _, r := pooledRun(t, viaSyncMock, []byte("more"))
+	for _, c := range switchesAndDeliveries {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, c.proven)
+			m, _, r := pooledRun(t, c.viaSyncMock, []byte("more"))
 			assertExchange(t, m, []string{"GET big\r\n"}, []string{"head", "tail"})
 			if len(r.leftOut) != 1 || r.leftOut[0] != leftOutAnswerTail || r.counted != 1 {
 				t.Fatalf("left out %q (the manager counts %d), want the chunk after the stop, for %q", r.leftOut, r.counted, leftOutAnswerTail)

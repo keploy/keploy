@@ -700,6 +700,8 @@ func TestV2ARecorderThatLeavesHoldingReportsItsExchangesLeftOut(t *testing.T) {
 			sess, _ := newV2Session(t, clientCh, destCh)
 			sess.Ctx = syncMock.NewContext(context.Background(), mgr)
 			sess.Mgr = mgr
+			spans := &syncMock.Spans{}
+			sess.Orphans = spans
 			core, logs := observer.New(zapcore.DebugLevel)
 			sess.Logger = zap.New(core)
 			clears := 0
@@ -729,10 +731,58 @@ func TestV2ARecorderThatLeavesHoldingReportsItsExchangesLeftOut(t *testing.T) {
 			if len(reasons) != 1 || reasons[0] != c.reason {
 				t.Fatalf("left out for %q, want %q", reasons, c.reason)
 			}
+			// With its span, so a test case over it is left out too.
+			if over, _ := spans.Overlaps(t0.Add(time.Second), t0.Add(time.Second+time.Millisecond)); !over {
+				t.Fatal("the exchange left out has no span: a test case over it is kept without it")
+			}
 			if st := mgr.BacklogBefore(t0.Add(10 * time.Second)); st.Pending {
 				t.Fatalf("the stop still waits on the hold of a parser that left: %+v", st)
 			}
 		})
+	}
+}
+
+// Under the proven switch, a connection wholly inside its test: its second
+// exchange goes from the hold for the rest of its answer into the preamble
+// hold (flushMock), which counts it for the stop by its own. Once the
+// connection has ended and every exchange is out, the stop finds nothing
+// pending: the answer's hold left on the stop's count would keep the stop
+// waiting to its stall bound, and end the recording as a capture lost.
+func TestV2AnAnswerHeldIntoThePreambleHoldIsOffTheStopsCount(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	at := func(i int) time.Time { return t0.Add(time.Duration(i+1) * time.Second) }
+	answer := t0.Add(10 * time.Second)
+	mgr := syncMock.New(zap.NewNop())
+	mgr.SetWatermark(neverBehind{})
+	w := mgr.OpenWindow(t0, nil)
+	w.Yield(answer)
+	w.Tested(t0, answer)
+	w.Close()
+	clientCh := make(chan fakeconn.Chunk, 4)
+	destCh := make(chan fakeconn.Chunk, 4)
+	order := newCaptureOrder(nil)
+	for i, x := range []string{"publish 1", "publish 2"} {
+		clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ConnSeq: uint32(2*i + 1), ReadAt: at(i)}                         // #nosec G115 -- test-only
+		destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), ConnSeq: uint32(2*i + 2), WrittenAt: at(i).Add(time.Millisecond)} // #nosec G115 -- test-only
+		order.put[0] += int64(len(x))
+		order.put[1] += int64(len("ok"))
+	}
+	close(clientCh)
+	close(destCh)
+	sess, mocks := newV2Session(t, clientCh, destCh)
+	sess.Order = order.StreamedBefore
+	sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+	sess.Mgr = mgr
+	if err := dispatch(t, sess); err != nil {
+		t.Fatal(err)
+	}
+	close(mocks)
+	if got := drainMocks(mocks); len(got) != 2 {
+		t.Fatalf("handed on %d mocks, want both exchanges", len(got))
+	}
+	if st := mgr.BacklogBefore(t0.Add(time.Hour)); st.Pending {
+		t.Fatalf("every exchange out and the connection ended, the stop still waits: %s", st.WaitingOn)
 	}
 }
 
