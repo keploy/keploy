@@ -1478,7 +1478,9 @@ func oCarried(mock, field, r, f string, before, answered time.Duration, first in
 // not where F's word came from, and a wrong bind goes red at replay, which
 // checks the bound value at every use. With no place showing the pair the
 // order still decides, and the word stays refused
-// (TestOutcomeAWordCopiedFromAnswersGivenInAnotherOrderIsUnknown).
+// (TestOutcomeAWordCopiedFromAnswersGivenInAnotherOrderIsUnknown). Where
+// every candidate kept the recorded word, none gave F's in any order: the
+// word is refused as the conflict, not the order.
 func TestOutcomeAWordOnePlaceShowsIsBoundWhateverTheOrder(t *testing.T) {
 	const r, f = "78b0ada8", "46a13c03"
 	first := oCarried("mock-1", "body.docs.0.appId", r, f, 2*time.Second, time.Second, 1)
@@ -1503,10 +1505,14 @@ func TestOutcomeAWordOnePlaceShowsIsBoundWhateverTheOrder(t *testing.T) {
 			t.Errorf("%s: %s; want a Value bound at the earliest place", tc.name, oDescribe([]Decision{d}))
 		}
 	}
-	// No place shows the pair: which candidate the application had last
-	// is all that could tie the word to one, and keploy cannot tell it.
+	// No place shows the pair, and the candidates, recorded at one instant,
+	// have no order keploy can read; each kept the recorded word, so none
+	// gave F's word whichever the application had last: the conflict.
 	d := oWord(t, Decide(oInput("body.cmd.filter.appId", "id "+r, "id "+f, []Earlier{kept, oCarried("mock-4", "body.note", r, r, 1800*time.Millisecond, 100*time.Millisecond, 3)}, nil)), r, f)
-	oRefused(t, "only candidates that kept the recorded word, in flight together", d, RefusalUnknown, "at one instant")
+	oRefused(t, "only candidates that kept the recorded word, in flight together", d, RefusalConflict, "mock-3", "did not follow")
+	if strings.Contains(d.Line, "at one instant") {
+		t.Errorf("only candidates that kept the recorded word, in flight together: %q names the serve order; want the conflict alone", d.Line)
+	}
 }
 
 // A fresh UUID's 16-bit group, beside its 32-bit group that changed too,
@@ -2210,10 +2216,13 @@ func TestOutcomeAWordOnlyADecodedFormCarriesIsRefusedWhereAPlaceHoldsIt(t *testi
 // copy from those places, in any order, gives F's word, so the call is
 // refused whether or not keploy can number F's serve of one of them (a serve
 // made while another request was in flight on a parallel connection,
-// learn.Order.Of: 0, 0). Untold, the line names the serve order; told, it
-// names the conflict. Neither is fresh and neither binds. Where F's views
-// hold F's word, the places show the link and F's serve order is never
-// asked: the word is a Value from the earliest.
+// learn.Order.Of: 0, 0). Told or untold, the line names the conflict, its
+// truer reason, not the serve order: the word is decided again with the
+// order not asked, which costs a second decision only there. Neither is
+// fresh and neither binds. Where F's views hold F's word, the places show
+// the link and F's serve order is never asked: the word is a Value from the
+// earliest. A word refused as unknown where the order marked no place (one
+// candidate, or every serve numbered in the recorded order) is decided once.
 func TestOutcomeAWordNoEarlierPlaceGaveInFIsRefusedWhateverTheServeOrder(t *testing.T) {
 	const path = "bind.$8"
 	const rec, live, other = "882bd918-1111-4222-8333-444455556666", "57af450e-aaaa-4bbb-8ccc-ddddeeeeffff", "c0ffee00-9999-4888-8777-666655554444"
@@ -2236,22 +2245,65 @@ func TestOutcomeAWordNoEarlierPlaceGaveInFIsRefusedWhateverTheServeOrder(t *test
 			place("mock-d", 200*time.Millisecond, dn, view),
 		}
 	}
+	// passes: the word's decisions per word of the value Decide decided.
+	decide := func(raw []Raw) (Decision, float64) {
+		before := wordPasses.Load()
+		ds := Decide(oInput(path, "id "+rec, "id "+live, nil, raw))
+		return oWord(t, ds, "882bd918", "57af450e"), float64(wordPasses.Load()-before) / float64(len(ds))
+	}
+	for _, tc := range []struct {
+		name   string
+		raw    []Raw
+		passes float64
+	}{
+		{"F's views hold another id, one serve not numbered", places(0, other), 2},
+		{"F's views hold another id, every serve numbered", places(3, other), 1},
+		{"served as recorded, one serve not numbered", places(0, ""), 2},
+		{"served as recorded, every serve numbered", places(3, ""), 1},
+	} {
+		d, passes := decide(tc.raw)
+		oRefused(t, tc.name, d, "conflict", "mock-a", "did not follow")
+		if strings.Contains(d.Line, "does not know where") || passes != tc.passes {
+			t.Errorf("%s: %v decisions a word, line %q; want %v, naming no serve order", tc.name, passes, d.Line, tc.passes)
+		}
+	}
+	d, _ := decide(places(0, live))
+	if d.Outcome != OutcomeValue || d.From.Mock != "mock-a" {
+		t.Errorf("F's views hold F's id, one serve not numbered: %s; want a Value from mock-a", oDescribe([]Decision{d}))
+	}
+	// F's view of each place not stated: unknown at each, whatever the
+	// order, which marks none of them here.
+	unstated := func(name string, before time.Duration, n int) Raw { return oAnswer(name, before, rec).ServedAs(n) }
 	for _, tc := range []struct {
 		name string
 		raw  []Raw
-		kind RefusalKind
-		says string
 	}{
-		{"F's views hold another id, one serve not numbered", places(0, other), "unknown", "does not know where record's full round served mock-d"},
-		{"F's views hold another id, every serve numbered", places(3, other), "conflict", "did not follow"},
-		{"served as recorded, one serve not numbered", places(0, ""), "unknown", "does not know where record's full round served mock-d"},
-		{"served as recorded, every serve numbered", places(3, ""), "conflict", "did not follow"},
+		{"one candidate, F's view not stated", []Raw{unstated("mock-a", 400*time.Millisecond, 1)}},
+		{"two candidates numbered in the recorded order, F's views not stated", []Raw{unstated("mock-a", 400*time.Millisecond, 1), unstated("mock-b", 300*time.Millisecond, 2)}},
 	} {
-		d := oWord(t, Decide(oInput(path, "id "+rec, "id "+live, nil, tc.raw)), "882bd918", "57af450e")
-		oRefused(t, tc.name, d, tc.kind, "mock-a", tc.says)
+		d, passes := decide(tc.raw)
+		oRefused(t, tc.name, d, "unknown", "mock-a")
+		if passes != 1 {
+			t.Errorf("%s: %v decisions a word; want 1 (the order marked no place)", tc.name, passes)
+		}
 	}
-	d := oWord(t, Decide(oInput(path, "id "+rec, "id "+live, nil, places(0, live))), "882bd918", "57af450e")
-	if d.Outcome != OutcomeValue || d.From.Mock != "mock-a" {
-		t.Errorf("F's views hold F's id, one serve not numbered: %s; want a Value from mock-a", oDescribe([]Decision{d}))
+	// Another test's answer that kept the recorded word is a conflict
+	// whatever the order marked: the refusal names it and the word is
+	// decided once, the order not asked again.
+	const r1, f1, o1 = "882bd918", "57af450e", "c0ffee00"
+	gaveOther := func(name string, before time.Duration, n int) Raw {
+		r := oAnswer(name, before, r1).WithServed(true)
+		if n > 0 {
+			r = r.ServedAs(n)
+		}
+		return r.ServedLive(oAnswer(name, before, o1))
+	}
+	before := wordPasses.Load()
+	ds := Decide(oInput(path, "id "+r1, "id "+f1, nil, []Raw{gaveOther("mock-a", 400*time.Millisecond, 1), gaveOther("mock-b", 300*time.Millisecond, 0),
+		oAnswer("mock-x", 500*time.Millisecond, r1).ServedAs(3).ServedAsRecorded().OfAnotherTest()}))
+	d = oWord(t, ds, r1, f1)
+	oRefused(t, "another test's answer kept the recorded word, one serve not numbered", d, "conflict", "mock-x")
+	if n := wordPasses.Load() - before; d.Refusal == nil || d.Refusal.Places[0] != "mock-x" || n != int64(len(ds)) {
+		t.Errorf("another test's answer kept the recorded word, one serve not numbered: %d decisions of %d words, %s; want one each, naming mock-x first", n, len(ds), oDescribe([]Decision{d}))
 	}
 }
