@@ -17,9 +17,10 @@ import (
 // test entry, data a replay acts on under the switch only: the test's claim
 // key, begin, mock.real destinations, given values and browser seed, beside
 // its dir, cases, case mocks, case steps and starts, and the set's suites,
-// boots and runner. mapdb keeps a set's data whatever the switch: every
-// writer of mappings.yaml run with the switch off keeps each of them, in YAML
-// and JSON, but for what it writes itself (UpsertBoots' boots). A rewrite
+// boots and runner. mapdb keeps every field keploy writes on a set whatever
+// the switch: every writer of mappings.yaml run with the switch off keeps
+// each of them, in YAML and JSON, but for what it writes itself
+// (UpsertBoots' boots). A rewrite
 // that dropped one would replay the set wrong with the switch on, and say
 // nothing (a lost begin runs the test at the start time; a lost key leaves a
 // later move out of the test no key to give the moved call). A call moved
@@ -58,10 +59,7 @@ func TestEachWriterKeepsEachTestsFieldsWithoutTheSwitch(t *testing.T) {
 				got, err := db.GetMapping(ctx, "s")
 				must(t, err)
 				b, a := testEntry(before, "o::TestA"), testEntry(got, "o::TestA")
-				if b.Key != "pkg/a" || b.At.IsZero() || len(b.Given) == 0 || b.Seed == "" || len(before.Runner) == 0 {
-					t.Fatalf("the set was not written under the switch: %+v", before)
-				}
-				for _, f := range []struct {
+				fields := []struct {
 					field      string
 					was, is    any
 					writerSets bool
@@ -80,7 +78,15 @@ func TestEachWriterKeepsEachTestsFieldsWithoutTheSwitch(t *testing.T) {
 					{field: "boots", was: before.Boots, is: got.Boots, writerSets: name == "UpsertBoots"},
 					{field: "runner", was: before.Runner, is: got.Runner},
 					{field: "o::TestB's key", was: testEntry(before, "o::TestB").Key, is: testEntry(got, "o::TestB").Key},
-				} {
+				}
+				// Each field the set holds before the writer runs, so a writer
+				// that drops one cannot pass by finding it already empty.
+				for _, f := range fields {
+					if empty(f.was) {
+						t.Fatalf("the set was not written whole under the switch: its %s is empty: %+v", f.field, before)
+					}
+				}
+				for _, f := range fields {
 					t.Run(f.field, func(t *testing.T) {
 						if f.writerSets {
 							t.Skipf("%s writes the set's %s", name, f.field)
@@ -107,6 +113,18 @@ func TestEachWriterKeepsEachTestsFieldsWithoutTheSwitch(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// empty says whether v, a field of a set, holds nothing: a zero value, or a
+// slice, map or string of length 0.
+func empty(v any) bool {
+	r := reflect.ValueOf(v)
+	switch r.Kind() {
+	case reflect.Slice, reflect.Map, reflect.String:
+		return r.Len() == 0
+	default:
+		return !r.IsValid() || r.IsZero()
 	}
 }
 

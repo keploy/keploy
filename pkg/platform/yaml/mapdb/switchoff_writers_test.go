@@ -112,11 +112,14 @@ func fileWriters() map[string]func(*MappingDb) error {
 // for byte the file keploy wrote before it kept hand edits: what a hand edit
 // added and the comments are dropped, and keploy's line is where each writer
 // always put it (on every write, on a file it creates, or never). The
-// goldens were written by main before this change, but for one fix: what a
-// writer did not touch survives it whatever the switch, so Insert, which
-// dropped each test entry's fields beside its mocks, keeps them (the
-// handedited fixture's dir: o; TestEachWriterKeepsEachTestsFieldsWithoutTheSwitch
-// has the rest). A file whose entries use
+// goldens were written by main before this change, but for one fix: every
+// field keploy writes that a writer did not touch survives it whatever the
+// switch, so Insert, which dropped each test entry's fields beside its
+// mocks, keeps them (the handedited fixture's dir: o;
+// TestEachWriterKeepsEachTestsFieldsWithoutTheSwitch has the rest). What a
+// hand edit added (its comments, reviewed_by, ticket and note here) is kept
+// only under the switch, by design, so these goldens still drop it. A file
+// whose entries use
 // a YAML merge key (<<) is not among them: keploy reads what the merge key
 // brings now, a declared fix
 // (models.TestAMergeKeyGivesATestEntryItsMocks).

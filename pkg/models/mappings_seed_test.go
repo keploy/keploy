@@ -37,9 +37,9 @@ func TestMappedTestCaseSeedRoundTrip(t *testing.T) {
 	}
 }
 
-// A test's seed: is read whatever the switch, as its key: (mapdb keeps a
-// test entry's data whatever the switch; a replay answers a begin with it
-// under the switch only). One that is not a string fails the decode either
+// A test's seed: is read whatever the switch, as its key: (mapdb keeps
+// every field keploy writes on a test entry whatever the switch; a replay
+// answers a begin with it under the switch only). One that is not a string fails the decode either
 // way, never reads the entry without it (its replay would draw other numbers
 // than its recording).
 func TestMappedTestCaseSeedIsReadWhateverTheSwitch(t *testing.T) {

@@ -123,9 +123,9 @@ func TestMappedTestCaseRefusesAGivenThatIsNotAList(t *testing.T) {
 	require.ErrorContains(t, err, "not a list")
 }
 
-// A test's given: is read whatever the switch, as its key: (mapdb keeps a
-// test entry's data whatever the switch; a replay binds the givens under the
-// switch only). One that is not a list of givens fails the decode either way.
+// A test's given: is read whatever the switch, as its key: (mapdb keeps
+// every field keploy writes on a test entry whatever the switch; a replay
+// binds the givens under the switch only). One that is not a list of givens fails the decode either way.
 func TestMappedTestCaseGivenIsReadWhateverTheSwitch(t *testing.T) {
 	for _, sw := range []string{"1", ""} {
 		t.Setenv(provenswitch.Env, sw)

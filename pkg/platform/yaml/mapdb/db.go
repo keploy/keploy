@@ -150,13 +150,16 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	if len(mapping.RecordedWith) > 0 {
 		newMapping.RecordedWith = mapping.RecordedWith
 	}
-	// The rebuild loses nothing it does not write, whatever the proven switch:
-	// each test entry keeps what it holds beside its mocks (its cases, dir,
-	// starts, at, real, given, key, seed...), and the app starts, suites and
-	// runner sections are kept, replace-or-keep as the startup section.
-	// mapdb keeps a set's data whatever the switch; what acts on it checks
-	// the switch itself (models.MappedTestCase.At). A set keploy mock record
-	// wrote under the switch and keploy rewrote without it keeps all of it.
+	// The rebuild loses no field keploy writes that it does not write itself,
+	// whatever the proven switch: each test entry keeps what it holds beside
+	// its mocks (its cases, dir, starts, at, real, given, key, seed...), and
+	// the app starts, suites and runner sections are kept, replace-or-keep as
+	// the startup section. mapdb keeps every field keploy writes on a set
+	// whatever the switch; what acts on one checks the switch itself
+	// (models.MappedTestCase.At). A set keploy mock record wrote under the
+	// switch and keploy rewrote without it keeps every such field. What a hand
+	// edit added (its comments, a person's own fields) is kept only under the
+	// switch, by design (encodeOver).
 	keepEntries(newMapping, existingConfig.TestCases, mapping.TestCases)
 	if len(mapping.Suites) == 0 {
 		newMapping.Suites = existingConfig.Suites

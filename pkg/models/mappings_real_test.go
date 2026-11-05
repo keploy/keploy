@@ -51,9 +51,9 @@ func TestMappedTestCaseRefusesARealThatIsNotAList(t *testing.T) {
 	require.ErrorContains(t, err, "not a list")
 }
 
-// A test's real: is read whatever the switch, as its key: (mapdb keeps a
-// test entry's data whatever the switch; a replay puts the test on the real
-// clock under the switch only). One that is not a list of destinations fails
+// A test's real: is read whatever the switch, as its key: (mapdb keeps
+// every field keploy writes on a test entry whatever the switch; a replay
+// puts the test on the real clock under the switch only). One that is not a list of destinations fails
 // the decode either way.
 func TestMappedTestCaseRealIsReadWhateverTheSwitch(t *testing.T) {
 	for _, sw := range []string{"1", ""} {

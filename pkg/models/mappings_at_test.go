@@ -121,9 +121,9 @@ func TestMappedTestCaseRefusesABeginThatIsNotATime(t *testing.T) {
 	}
 }
 
-// A test's at: is read whatever the switch, as its key: (mapdb keeps a test
-// entry's data whatever the switch; a replay runs the test on its recorded
-// clock under the switch only). One that is not a time fails the decode
+// A test's at: is read whatever the switch, as its key: (mapdb keeps every
+// field keploy writes on a test entry whatever the switch; a replay runs
+// the test on its recorded clock under the switch only). One that is not a time fails the decode
 // either way: read in another shape, the entry would lose its mocks.
 func TestMappedTestCaseAtIsReadWhateverTheSwitch(t *testing.T) {
 	want := time.Date(2026, 10, 6, 9, 30, 15, 0, time.UTC)
