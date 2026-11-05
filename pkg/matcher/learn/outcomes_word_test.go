@@ -698,20 +698,36 @@ func TestOutcomeAValueBehindADecodeStepKeepsItsAnswerWhereItsFieldIsEchoedWhole(
 	}
 }
 
-// A fresh word beside an earlier place it set aside (the test's find gave
-// "blue-17" in both runs) whose answer holds it inside a longer text is
-// refused, as one nothing set aside is: the aside names no source, and
-// replay would give the application the recorded word back. Main refuses
-// the field there (unaccounted: the find holds a word of it).
-func TestOutcomeAFreshWordBesideAPlaceSetAsideIsRefusedWhereItsAnswerHoldsIt(t *testing.T) {
-	find := oServed("mock-0", false, false, Response, oText("body.tag", "blue-17"), "blue-17", time.Millisecond)
-	in := oInput("body.note", "blue-17", "red-42", find, nil)
-	in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
-	in.Resp = []Leaf{oText("body.msg", "seen 17 times")}
-	oRefused(t, "a word set aside at the find, held in the answer", oWord(t, Decide(in), "17", "42"), RefusalCannotCheck, "comes back in the answer at body.msg,")
-	in.Resp = []Leaf{oText("body.msg", "seen 99 times")}
-	if d := oWord(t, Decide(in), "17", "42"); d.Outcome != OutcomeFresh || !strings.Contains(d.Line, "set aside") {
-		t.Errorf("a word set aside at the find, not in the answer: %s, line %q; want fresh, naming the find set aside", oDescribe([]Decision{d}), d.Line)
+// A word whose whole token an earlier place of the call's test held in
+// both runs (the test's find gave "blue-17" in both runs, and the request
+// went "blue-17" to "red-42") is refused, each word of it, as main refuses
+// the field (unaccounted: the find holds a word of it, which did not drift
+// with it): the token stood there whole, which is no chance of a short word,
+// and keploy cannot tell whether the value came from there. So it is
+// whether or not the call's answer holds the word, and with no answer. A
+// short word that is a whole token of its own there ("82" of "slot 82"
+// beside an answer of 82) is still chance.
+func TestOutcomeAWordWhoseWholeTokenAPlaceOfTheTestGaveInBothRunsIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		what string
+		resp []Leaf
+	}{
+		{"the answer holds the word", []Leaf{oText("body.msg", "seen 17 times")}},
+		{"the answer does not hold it", []Leaf{oText("body.msg", "seen 99 times")}},
+		{"no answer", nil},
+	} {
+		find := oServed("mock-0", false, false, Response, oText("body.tag", "blue-17"), "blue-17", time.Millisecond)
+		in := oInput("body.note", "blue-17", "red-42", find, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		in.Resp = c.resp
+		ds := Decide(in)
+		for _, wd := range [][2]string{{"blue", "red"}, {"17", "42"}} {
+			oRefused(t, c.what+", "+wd[0], oWord(t, ds, wd[0], wd[1]), RefusalConflict, `"blue-17" stood whole at mock-0 body.tag in both runs`)
+		}
+	}
+	find := oServed("mock-0", false, false, Response, oText("body.n", "82"), "82", time.Millisecond)
+	if d := oWord(t, Decide(oInput("body.note", "slot 82", "slot 7", find, nil)), "82", "7"); d.Outcome != OutcomeFresh || !strings.Contains(d.Line, "set aside") {
+		t.Errorf("a short word, a token of its own, beside a place that gave it in both runs: %s, line %q; want fresh, naming the place set aside", oDescribe([]Decision{d}), d.Line)
 	}
 }
 
@@ -825,6 +841,34 @@ func TestOutcomeAnAnswerTextPastTheBudgetIsNeverMappedWhole(t *testing.T) {
 	}
 }
 
+// Past the reader's budget, the call's own word held only in the batch
+// whose claim fails stays mapped: settle lets go only of the words that are
+// none of the call's, so the word is refused there, as within the budget.
+func TestOutcomeACallsWordInTheBatchWhoseClaimFailsStaysMapped(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	for _, b := range []int64{0, 1} {
+		readerBudget = b
+		in := oInput("body.id", "id-Q1Z0000X", "id-Q2Z0000X", nil, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		in.Resp = []Leaf{oText("body.msg", "seen Q1Z0000X once"), oText("body.ok", "true")}
+		oRefused(t, fmt.Sprintf("budget %d", b), oWord(t, Decide(in), "Q1Z0000X", "Q2Z0000X"), RefusalCannotCheck, "comes back in the answer at body.msg,")
+	}
+}
+
+// Past the reader's budget, a word the answer holds only in another case
+// ("ab12" of "ref ab12 seen" for a request's "batch-AB12") is still found by
+// its folded ask, and refused there, as within the budget.
+func TestOutcomeAFoldedWordPastTheBudgetIsFound(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	for _, b := range []int64{0, 1} {
+		readerBudget = b
+		in := oInput("body.batch", "batch-AB12", "batch-CD34", nil, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		in.Resp = []Leaf{oText("body.ref", "ref ab12 seen")}
+		oRefused(t, fmt.Sprintf("budget %d", b), oWord(t, Decide(in), "AB12", "CD34"), RefusalCannotCheck, "comes back in the answer at body.ref,")
+	}
+}
+
 // A key of the call's answer that is the request's whole recorded text
 // ({"A7K29QXM":{"ok":true}} answering a lookup of A7K29QXM) reads the
 // request back, as a field holding it whole does; keploy cannot name a key
@@ -874,25 +918,24 @@ func TestOutcomeAReadBackOfAnotherScalarTypeIsAnsweredThere(t *testing.T) {
 
 // A fresh word's line names the earlier place it set aside as its source
 // (learning legible; main's line named it): the test's earlier find answered
-// "blue-17" in both runs, and the call sends "red-42" where the recording
-// sent "blue-17". A copy moves with its source, so the find is no source:
-// each changed word is fresh, and its line says the find held the recorded
-// word and round F gave it unchanged there. With no such find the line names
-// nothing set aside. (Integrations' mongo learn_test.go
-// TestLearn_NoiseLearnedPastASourceSetAsideNamesItOnTheLearnLine.)
+// 82 in both runs, and the call sends "slot 7" where the recording sent
+// "slot 82". A copy moves with its source, so the find is no source, and a
+// word that short, a token of its own, may stand there by chance: the word
+// is fresh, and its line says the find held the recorded word and round F
+// gave it unchanged there. With no such find the line names nothing set
+// aside. A find that held the word's whole longer token ("blue-17" for
+// "blue-17" sent, then "red-42") refuses it instead
+// (TestOutcomeAWordWhoseWholeTokenAPlaceOfTheTestGaveInBothRunsIsRefused).
 func TestOutcomeAFreshWordNamesThePlaceItSetAside(t *testing.T) {
 	for _, withFind := range []bool{true, false} {
 		var earlier []Earlier
 		if withFind {
-			earlier = oServed("mock-0", false, false, Response, oText("body.tag", "blue-17"), "blue-17", time.Millisecond)
+			earlier = oServed("mock-0", false, false, Response, oText("body.n", "82"), "82", time.Millisecond)
 		}
-		ds := Decide(oInput("body.note", "blue-17", "red-42", earlier, nil))
-		for _, w := range [][2]string{{"blue", "red"}, {"17", "42"}} {
-			d := oWord(t, ds, w[0], w[1])
-			named := strings.Contains(d.Line, "mock-0") && strings.Contains(d.Line, "set aside")
-			if d.Outcome != OutcomeFresh || named != withFind {
-				t.Errorf("the earlier find %v, %s to %s: %s, line %q; want fresh, naming mock-0 set aside: %v", withFind, w[0], w[1], oDescribe([]Decision{d}), d.Line, withFind)
-			}
+		d := oWord(t, Decide(oInput("body.note", "slot 82", "slot 7", earlier, nil)), "82", "7")
+		named := strings.Contains(d.Line, "mock-0") && strings.Contains(d.Line, "set aside")
+		if d.Outcome != OutcomeFresh || named != withFind {
+			t.Errorf("the earlier find %v: %s, line %q; want fresh, naming mock-0 set aside: %v", withFind, oDescribe([]Decision{d}), d.Line, withFind)
 		}
 	}
 }

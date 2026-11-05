@@ -721,6 +721,25 @@ func heldWhole(p evPlace, w readWord, rec string) bool {
 		slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return tokenIn(p.t.rec, t.Kind, t.Rec) }))
 }
 
+// sameTokenAround is the recorded value's whole token around w, longer than
+// w, that p, a place both runs gave alike, held in R ("blue-17" for "17" of
+// "blue-17"), "" where it held none. Such a token stood there whole in both
+// runs while the value moved off it: no chance of a short word, so keploy
+// cannot tell whether the value came from there (main refuses it as a word
+// of an earlier place that did not drift with it). p's texts are set
+// (withTexts), as heldWhole reads them.
+func sameTokenAround(p evPlace, w readWord) string {
+	if !p.same() {
+		return ""
+	}
+	for _, t := range w.Tokens {
+		if tokenIn(p.t.rec, t.Kind, t.Rec) {
+			return t.Rec
+		}
+	}
+	return ""
+}
+
 // nothingNew reports whether every word of round F's text at p stands among
 // the recording's: true where keploy could not read one (it shows nothing).
 func nothingNew(p evPlace) bool {
