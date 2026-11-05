@@ -527,7 +527,7 @@ func TestALostAnswerReportIsSaidToBeNoMiss(t *testing.T) {
 		t.Fatalf("the loss of a pairing's report is %v; want it said as no miss, with the list's cause", cause)
 	}
 	p = &Proxy{}
-	p.pendingDroppedForRoom(answer)
+	p.pendingDroppedForRoom(&p.missWindow, answer)
 	if !p.pendingLost {
 		t.Fatal("a pairing's report dropped while no window was open left the next read complete")
 	}
@@ -537,7 +537,7 @@ func TestALostAnswerReportIsSaidToBeNoMiss(t *testing.T) {
 	core, logs := observer.New(zapcore.WarnLevel)
 	p = &Proxy{logger: zap.New(core)}
 	p.noteMissLost(byKind, missLostListFull)
-	p.pendingDroppedForRoom(byKind)
+	p.pendingDroppedForRoom(&p.missWindow, byKind)
 	if cause := p.missLoss.Load(); cause != nil || p.pendingLost {
 		t.Fatalf("a by-kind answer's lost report made a read incomplete: %v, pending %v", cause, p.pendingLost)
 	}

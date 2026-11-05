@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -104,17 +106,40 @@ const OwnedLossesPastTheBound = "from connections each written in a test whose e
 
 type endOfKey struct{}
 
+// endOf is the end a wait runs under (WithEndOf, WithEndOfWorker).
+type endOf struct {
+	test   string
+	worker uint32
+}
+
 // WithEndOf is ctx carrying the test whose end waits under it: a wait of the
 // proxy's that ends short of what it waited for leaves what it could not see
-// reached marked as that test's (OwnedLoss).
+// reached marked as that test's (OwnedLoss). The test is of a run of one test
+// process: every connection the wait had not seen reached is marked.
 func WithEndOf(ctx context.Context, test string) context.Context {
-	return context.WithValue(ctx, endOfKey{}, test)
+	return context.WithValue(ctx, endOfKey{}, endOf{test: test})
+}
+
+// WithEndOfWorker is WithEndOf for a test of the test worker with keploy
+// instance worker: a wait cut short marks only that worker's connections
+// (the kernel's stamp of the process that made each). Another worker's bytes
+// are not this test's, and stay the test open when their loss is counted.
+// worker 0 is WithEndOf.
+func WithEndOfWorker(ctx context.Context, test string, worker uint32) context.Context {
+	return context.WithValue(ctx, endOfKey{}, endOf{test: test, worker: worker})
 }
 
 // EndOf is the test WithEndOf put in ctx: "" for none.
 func EndOf(ctx context.Context) string {
-	s, _ := ctx.Value(endOfKey{}).(string)
-	return s
+	e, _ := ctx.Value(endOfKey{}).(endOf)
+	return e.test
+}
+
+// EndWorkerOf is the worker WithEndOfWorker put in ctx: 0 for a test of a run
+// of one test process, or for none.
+func EndWorkerOf(ctx context.Context) uint32 {
+	e, _ := ctx.Value(endOfKey{}).(endOf)
+	return e.worker
 }
 
 // BetweenTestCases is what a keploy test call that serves the pool with no
@@ -204,6 +229,92 @@ type ProxyConnPairing struct {
 	// AppSeq: where the connection is going, its own, whatever any other
 	// connection on the same port was doing.
 	Dst *NetworkAddress
+}
+
+// MaxInstanceID is the highest keploy instance id the kernel keeps (its
+// instance_lost array holds ids 0 to MaxInstanceID; 0 is no instance).
+const MaxInstanceID uint32 = 1023
+
+// An instance value is what the kernel stamps a member's connection with:
+// InstanceValue(id, generation), the id in its low 10 bits and, above them,
+// the generation: how many times the agent gave the id before. No two claims
+// get the same value, so a connection a gone worker's process made, which
+// keeps its stamp after the instance ends, is never a later claim's of the
+// same id.
+const (
+	instanceIDBits = 10
+	// MaxInstanceGeneration is the highest generation a value carries.
+	MaxInstanceGeneration uint32 = 1<<(32-instanceIDBits) - 1
+)
+
+// InstanceValue is the value of the generation-th claim of instance id.
+func InstanceValue(id, generation uint32) uint32 {
+	return generation<<instanceIDBits | id
+}
+
+// InstanceIDOf is the instance id of value v: the worker slot a person
+// reads ("test worker N"), and the kernel's instance_lost key.
+func InstanceIDOf(v uint32) uint32 {
+	return v & MaxInstanceID
+}
+
+// InstanceLabel is how a message names the instance of value v: its id and,
+// for a later claim of the id, which claim, so two claims of one id never
+// read as the same worker.
+func InstanceLabel(v uint32) string {
+	id, gen := InstanceIDOf(v), v>>instanceIDBits
+	if gen == 0 {
+		return strconv.FormatUint(uint64(id), 10)
+	}
+	return fmt.Sprintf("%d (claim %d of that id)", id, uint64(gen)+1)
+}
+
+// ErrInstanceHeld is SetInstance's refusal of an id a process is still in:
+// one that stayed in an ended instance, or that it forked as it ended. A
+// process in it would stamp its new connections with the old value, so the
+// id is not given again until the last such process exits.
+var ErrInstanceHeld = errors.New("a process is still in this keploy instance")
+
+// InstanceStamper is the optional extension implemented by hooks whose
+// kernel programs stamp each redirected connection with the keploy instance
+// of the process that made it (NetworkAddress.Instance). An instance is a
+// test worker: the process given it and every process it forks from then on,
+// each until it exits. The agent type-asserts for it; with hooks that do not
+// implement it no connection is in an instance.
+type InstanceStamper interface {
+	// SetInstance puts the process tgid, by its kernel TGID, in the
+	// instance of value v (InstanceValue: an id 1 to MaxInstanceID and its
+	// generation), and with it every process it forks from now on; each
+	// stamps its connections with v. It refuses an id a process is in,
+	// whatever its generation (ErrInstanceHeld), a process already in an
+	// instance, a process that is gone or a zombie, and hooks whose agent is
+	// in a PID namespace of its own, which does not number processes by
+	// their kernel TGIDs.
+	SetInstance(tgid, v uint32) error
+	// EndInstance takes every process out of the instance of value v (every
+	// process in its id) and says how many were in it. A process the
+	// instance forks while it ends may stay in it; SetInstance refuses the
+	// id until that one exits.
+	EndInstance(v uint32) (int, error)
+	// InstanceLost is what the kernel could not put in the instance of
+	// value v since SetInstance last gave its id.
+	InstanceLost(v uint32) (InstanceLoss, error)
+	// InstanceRefusal is why these hooks can give no process an instance,
+	// the same for every process of the run, nil when they can: an agent in
+	// a PID namespace of its own cannot, as SetInstance refuses.
+	InstanceRefusal() error
+}
+
+// InstanceLoss counts the processes an instance forked that the kernel
+// could not put in it (its membership map was full, or it could not read the
+// new process), so their connections carry no instance.
+type InstanceLoss struct {
+	// Forks is how many, since SetInstance last gave the id.
+	Forks uint64
+	// LastTgid is the latest one's kernel TGID, 0 when it could not be read.
+	LastTgid uint32
+	// LastErr is the error the kernel gave it, a negative errno.
+	LastErr int32
 }
 
 // ProxyConnsReporter is the optional extension implemented by hooks that
@@ -368,6 +479,21 @@ type InFlightWindower interface {
 	// before the window began, still sending or not, is not the test's),
 	// until the next InFlightBeginWindow.
 	InFlightBeginWindow()
+}
+
+// InFlightWorkerScoper is the optional extension of an InFlightWindower that
+// keeps each test worker's windows apart, by the keploy instance the kernel
+// stamped each connection with (DestInfo.Instance): instance 0 is the run's,
+// every connection, as InFlightScope and InFlightBeginWindow.
+type InFlightWorkerScoper interface {
+	// InFlightScopeOf is InFlightScope over the connections of instance's
+	// processes, and those whose stamp the proxy has not read yet (which
+	// may be its).
+	InFlightScopeOf(instance uint32) InFlightScope
+	// InFlightBeginWindowOf is InFlightBeginWindow on the connections of
+	// instance's processes alone: another worker's requests stay its
+	// window's.
+	InFlightBeginWindowOf(instance uint32)
 }
 
 // InFlightScope is InFlightState and InFlightPendingProgress over the
@@ -880,9 +1006,11 @@ type AppClockRunSetter interface {
 // integrations.PoolMembership. owners is, of the same table, the key of the
 // test process whose tests list each mock ("" where no one key is known),
 // which bounds each process's teardown, the calls it makes after its own last
-// test.
+// test. tests is the table itself (test ID -> the mocks it lists), which
+// tells the run of a test's recording on no clock, and so the clock it
+// bounds the teardown of.
 type PoolNamesSetter interface {
-	SetPoolNames(names []string, owners map[string]string) error
+	SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error
 }
 
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
@@ -916,6 +1044,20 @@ type ExactConcurrentServer interface {
 // stateful cursors start over.
 type ExactKeyRestarter interface {
 	RestartExactKey(key string, names []string) error
+}
+
+// InstanceServer is an optional ExactServer capability of a proxy that serves
+// each test worker of a replay (the kernel's instance stamp on each of its
+// connections, structs.DestInfo.Instance) from a mock manager of the
+// worker's own, staged as the run's is: ServeInstance starts serving worker
+// inst and returns how the agent serves its tests there (the ExactServer
+// capabilities above, on inst's manager alone). From then until the next
+// session, a connection from no worker, or from a worker that is not served
+// (StopServingInstance, or never begun), is refused before anything answers
+// it.
+type InstanceServer interface {
+	ServeInstance(inst uint32) (ExactServer, error)
+	StopServingInstance(inst uint32) error
 }
 
 // ScopeStager is an optional Proxy capability: it stages the pool of a test
@@ -1041,7 +1183,9 @@ type AppConnEnd struct {
 // read. ok is false where it holds nothing for the connection: one whose end
 // came before the application released it (a shutdown(2), or the proxy's end
 // first), a record the kernel's LRU evicted, or hooks that make no such
-// record.
+// record. A client's end the proxy reads where its DestInfo is not a
+// ConnEndInfo records no fault: nothing tells the application's giving up
+// from its process's exit.
 type ConnEndInfo interface {
 	TakeAppConnEnd(app netip.AddrPort) (end AppConnEnd, ok bool)
 }
@@ -1085,6 +1229,10 @@ type NetworkAddress struct {
 	// a process outside the agent's namespace (with KernelPid set), or none
 	// known (KernelPid 0 too).
 	AgentNsPid uint32
+	// Instance is the keploy instance (a test worker's, InstanceStamper) the
+	// source process was in when it connected, read by the kernel at the
+	// connect: 0 for none, and always 0 on hooks that stamp none.
+	Instance uint32
 }
 
 // Sessions provides a thread-safe store for Session objects, keyed by ID.

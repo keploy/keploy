@@ -838,20 +838,42 @@ func spanOf(o models.ClockOffset, s Span) (Span, string) {
 // no byte of it), and reads the word alone as the read o is, as above
 // (wordIn). A refusal names where the word stands, never what the text
 // holds.
+//
+// Where a serve made after the running test began starts s (s.TestFrom,
+// Tracker.LiveSpan), a value s refuses passes where it holds in s from the
+// test's begin: another goroutine's call can be served between the read
+// and this call (a queue's consumer beside the test's handler, 2026-10-31),
+// so that serve bounds no read of this call. s is checked first, so a read
+// plus an offset checkable in s alone is checked there as before; a value
+// outside both is refused with s's reason.
 func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known bool) (bool, string) {
 	if o.Empty() {
 		return false, path + " was learned at more than one call as " + o.String() + ": no one read of the application's clock explains them all, so keploy refuses the value whatever it is. Record the test again; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
 	learned := learnedAs(path, o)
-	if o.Word.IsZero() {
-		return checkClockRead(o, live, s, known, learned)
+	if !o.Word.IsZero() {
+		word, why := wordIn(o.Word, live)
+		if why != "" {
+			return false, learned + why
+		}
+		o.Word, live = models.ClockWord{}, word
 	}
-	word, why := wordIn(o.Word, live)
-	if why != "" {
-		return false, learned + why
+	ok, why := checkClockRead(o, live, s, known, learned)
+	if ok || s.TestFrom.IsZero() || !s.TestFrom.Before(s.From) {
+		return ok, why
 	}
-	o.Word = models.ClockWord{}
-	return checkClockRead(o, word, s, known, learned)
+	// A serve made after the test began started s (Span.TestFrom): another
+	// goroutine's call, served between the read and this call, bounds no
+	// read of this call, so a value that holds in the span from the test's
+	// begin passes. The span s, narrower, is checked first: a read plus an
+	// offset checkable in it may not be in the wider one (Checkable), and
+	// a value that holds in it holds in the test's span.
+	wide := s
+	wide.From, wide.TestFrom = s.TestFrom, time.Time{}
+	if ok, _ := checkClockRead(o, live, wide, known, learned); ok {
+		return true, ""
+	}
+	return false, why
 }
 
 // learnedAs is how a refusal of a replay's value at path, a place the learn
@@ -865,6 +887,43 @@ func learnedAs(path string, o models.ClockOffset) string {
 		read += " plus that offset"
 	}
 	return path + " was learned as " + o.String() + ", " + read
+}
+
+// ClockReadAbsent is why a replay refuses a call that carries no value at
+// path, a place the learn step learned as o, a read of the application's
+// clock (models.MockSpec.Clocks): the read is not in the call at all, so it
+// says so, not how a value there fails the check (a text too short, no
+// instant), which would name a value the call never sent.
+func ClockReadAbsent(path string, o models.ClockOffset) string {
+	return learnedAs(path, o) + ", and this call carries no value at " + path + ": it changed"
+}
+
+// ReadsAsClockRead reports whether live, the leaf a replay's call carries at
+// a place the learn step learned as o, a read of the application's clock,
+// is a value of the form that read is written in, whatever instant it
+// names: of a word read, the word o names, every byte beside it the
+// recorded text's (wordIn); read whole as an instant, or as a time of day
+// at a place learned as one (clockReadOf, timeOfDayOf); in o's layout where
+// the learn step saw one (any, where it saw more than one: LayoutApart). A
+// stale instant is one: whether it holds in the call's span is
+// CheckClockRead's. A value of no such form ("me" where an instant was) is
+// no read of any clock.
+func ReadsAsClockRead(o models.ClockOffset, live Leaf) bool {
+	if !o.Word.IsZero() {
+		word, why := wordIn(o.Word, live)
+		if why != "" {
+			return false
+		}
+		live = word
+	}
+	if models.LayoutTimeOfDay(o.Layout) {
+		_, _, lay, ok := timeOfDayOf(live)
+		return ok && lay == o.Layout
+	}
+	if _, _, _, ok := clockReadOf(live); !ok {
+		return false
+	}
+	return o.Layout == "" || o.Layout == models.LayoutApart || leafLayout(live) == o.Layout
 }
 
 // wordIn is the word of live, the leaf a replay's call carries at a place

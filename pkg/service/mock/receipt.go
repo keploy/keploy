@@ -284,6 +284,12 @@ type TestsReceipt struct {
 	// Refusals are, in a record's file, what keploy refused during it
 	// (Receipt.Refusals): a record that reported no test says why.
 	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
+	// Workers is, in a record's file, the most test workers a test process
+	// of the record declared at its claim (models.ScopeWindow.Workers): 0
+	// when none declared more than one. Whatever judges the record reads it:
+	// a judge that replays one test worker at a time cannot rerun the
+	// record's own command as it ran.
+	Workers int `yaml:"workers,omitempty" json:"workers,omitempty"`
 	// Live and Mocked are, under the proven switch, where the run's calls to
 	// local listeners went, each row naming the test open then (none:
 	// outside every test): a listener of the run's own process tree, called
@@ -345,10 +351,14 @@ func (r TestsReceipt) empty() bool {
 
 // TestReceipt is one test's line in a TestsReceipt. Outcome is its latest
 // run's verdict this replay (models.ScopeOutcome*); "" when it did not run or
-// reported none. A count the agent did not report in full is -1.
+// reported none. Random is how the test's browser drew its random numbers
+// in that run, as its harness said at its end, else at its begin
+// (models.ScopeWindow.Random): seeded, own, or "" when it said nothing. A
+// count the agent did not report in full is -1.
 type TestReceipt struct {
 	Name     string `yaml:"name" json:"name"`
 	Outcome  string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
+	Random   string `yaml:"random,omitempty" json:"random,omitempty"`
 	Consumed int    `yaml:"consumed" json:"consumed"`
 	Missed   int    `yaml:"missed" json:"missed"`
 	// Began is when the test's latest run began (its window's start); zero
@@ -448,7 +458,7 @@ func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceip
 		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
 			continue
 		}
-		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome, Real: w.Real}
+		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome, Random: w.Random, Real: w.Real}
 		// What keploy could not capture while the test ran (a record's
 		// window carries no misses): a verdict against real infra keploy
 		// did not see whole is no basis for judging the recording.

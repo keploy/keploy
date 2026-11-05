@@ -1226,3 +1226,56 @@ func TestNodeJwtsSignupEchoPastStartUpsTiedAlike(t *testing.T) {
 		t.Errorf("FALSE GREEN? a role INSERT whose bind holds 1 beside a pool start-up: %s (%q), want refused for the order", got.Kind, got.Why)
 	}
 }
+
+// A start-up's word a swap can change is no source the value is learned
+// from (swapHolds): a value holding only that word ("flyway" of the pool's
+// application_name, in "flyway-7") is refused, naming the start-up. A later
+// payload made before the call that holds the value whole (the
+// application's own earlier query sent "flyway-7") outranks that part: the
+// value is learned as its variable, which every replay checks, under the
+// rule a copy follows its source and without it. One recorded after the
+// call that F had not served before it is no place, and the refusal stands.
+func TestAWholeCopyInALaterPayloadOutranksAStartUpsPart(t *testing.T) {
+	const path = "bind.$8"
+	given := func(raw []Raw) Learned {
+		t.Helper()
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "hikari-7"}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "flyway-7"}}}, eRecAt, nil, raw, nil, nil, nil)
+		if len(got) != 1 {
+			t.Fatalf("%+v", got)
+		}
+		return got[0]
+	}
+	named := func(name string, before time.Duration, pid int32, app string) *models.Mock {
+		m := eLaneSession(name, before, pid)
+		m.Spec.PostgresV3.Session.ParameterStatus["application_name"] = app
+		return m
+	}
+	startUps := func() []Raw {
+		return []Raw{RawOf(named("mock-hs-81", 900*time.Millisecond, 81, "flyway"), false).ServedAs(1).ServedAsRecorded(),
+			RawOf(named("mock-hs-82", 850*time.Millisecond, 82, "hikari"), false).ServedAs(2).ServedAsRecorded()}
+	}
+	query := func(at time.Time) Raw {
+		return RawOf(&models.Mock{Name: "mock-q-3", Kind: "Pulsar", Spec: models.MockSpec{
+			GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"SEND","payload":{"pool":"flyway-7"}}`}}}},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+		}}, false)
+	}
+	for _, c := range []struct {
+		what  string
+		raw   []Raw
+		whole bool
+	}{
+		{"the start-up's part alone", startUps(), false},
+		{"a later query holding the value whole", append(startUps(), query(eRecAt.Add(-100*time.Millisecond))), true},
+		{"the query recorded after the call, not served before it", append(startUps(), query(eRecAt.Add(100*time.Millisecond))), false},
+	} {
+		for rule, got := range map[string]Learned{"a copy follows its source": classifyF(t, "flyway-7", "hikari-7", nil, c.raw, nil), "without it": given(c.raw)} {
+			switch {
+			case c.whole && (got.Kind != KindVariable || got.From.Mock != "mock-q-3" || got.From.Held != "flyway-7"):
+				t.Errorf("%s, %s: %s from %q held %q (%s); want the variable of mock-q-3 holding the value whole", c.what, rule, got.Kind, got.From.Mock, got.From.Held, got.Why)
+			case !c.whole && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-hs-81 at spec.postgresV3.session.parameterStatus.application_name, a connection's recorded start-up")):
+				t.Errorf("FALSE GREEN? %s, %s: %s from %q (%s); want refused, naming mock-hs-81's application_name", c.what, rule, got.Kind, got.From.Mock, got.Why)
+			}
+		}
+	}
+}

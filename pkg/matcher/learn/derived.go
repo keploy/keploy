@@ -635,7 +635,7 @@ func driftBytes(d *valueDrift) int64 {
 	for _, f := range d.forms {
 		n += headerBytes + int64(len(f[0])+len(f[1]))
 	}
-	for _, ws := range [][]map[string]bool{d.lost, d.gained, d.movedRec, d.movedLive, d.recTok, d.liveTok, {d.clock.rec, d.clock.live, d.wholes}} {
+	for _, ws := range [][]map[string]bool{d.lost, d.gained, d.movedRec, d.movedLive, d.recTok, d.liveTok, {d.clock.rec, d.clock.live, d.wholes, d.plainRuns}} {
 		for _, w := range ws {
 			n += wordsBytes(w)
 		}

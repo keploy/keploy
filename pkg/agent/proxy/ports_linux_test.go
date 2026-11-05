@@ -260,6 +260,47 @@ func TestOnlyATakenPortMovesAndOnlyToABoundOne(t *testing.T) {
 	}
 }
 
+// A port that moves never moves onto one of the agent's own: the port its
+// server binds once the proxy has started (as --port gives it: in Docker,
+// above the container's ephemeral range, among a move's candidates), nor the
+// DNS server's when the proxy moves, nor the proxy's when the DNS server does.
+func TestAMoveNeverTakesAPortTheAgentHolds(t *testing.T) {
+	cfg := config.New()
+	cfg.ProxyPort, cfg.DNSPort, cfg.Agent.AgentPort = 16789, 65002, 65001
+	for _, c := range []struct {
+		server string
+		port   func(p *Proxy) *uint32
+		held   []uint32
+	}{
+		{"proxy", func(p *Proxy) *uint32 { return &p.Port }, []uint32{65001, 65002}},
+		{"DNS server", func(p *Proxy) *uint32 { return &p.DNSPort }, []uint32{65001, 65003}},
+	} {
+		p := New(zap.NewNop(), plainDestInfo{}, cfg)
+		if c.server == "DNS server" {
+			p.Port, p.DNSPort = 65003, 26789
+		}
+		var told [][2]uint32
+		recordMoves(p, &told, nil)
+		from := *c.port(p)
+		tried := map[uint32]bool{}
+		err := p.bindOrMove(c.server, c.port(p), func(port uint32) error {
+			tried[port] = true
+			return syscall.EADDRINUSE
+		}, func() { t.Fatal("nothing bound was let go") })
+		if err == nil || len(told) != 0 || *c.port(p) != from {
+			t.Fatalf("%s: every port taken: got %v, port %d, told %v", c.server, err, *c.port(p), told)
+		}
+		if !tried[65004] {
+			t.Skipf("%s: port 65004 is no candidate of a move on this host (its ephemeral range ends above it): nothing to check", c.server)
+		}
+		for _, h := range c.held {
+			if tried[h] {
+				t.Fatalf("%s: a move tried port %d, which the agent holds", c.server, h)
+			}
+		}
+	}
+}
+
 // askDNS sends the DNS server on port a query over network and returns nil
 // once it answers.
 func askDNS(t *testing.T, network string, port uint32) error {

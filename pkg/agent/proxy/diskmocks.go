@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -24,22 +26,23 @@ type DiskMocks struct {
 	f        *os.File
 	path     string
 	offset   int64
-	entries  []diskEntry          // sorted by placeTsNano after Finalize
+	entries  []diskEntry          // by place, then offset, after Finalize (sortRecorded)
 	byName   map[string]diskEntry // name -> entry, by value so it survives sorting entries
 	finalize bool
 	logger   *zap.Logger
 	closed   bool
 
 	// carry indexes the carry-over entries (models.IsCarryOver at Add: a
-	// RegisterCarryOver kind's, a StagingRelease need's), sorted with
-	// entries, so the lookahead load reads only them. Empty while nothing is
-	// registered.
+	// RegisterCarryOver kind's, a StagingRelease need's), sorted by request
+	// time when Finalize sorts entries, so the lookahead load reads only
+	// them. Empty while nothing is registered.
 	carry []diskEntry
 
 	// staged indexes the entries a models.StagingWithStartup need declares
-	// (models.IsStagedAtStaging at Add), sorted with entries, so the set's
-	// staging call reads only them beside the startup band (LoadStaged).
-	// Empty while no kind declares one.
+	// (models.IsStagedAtStaging at Add), sorted by request time when
+	// Finalize sorts entries, so the set's staging call reads only them
+	// beside the startup band (LoadStaged). Empty while no kind declares
+	// one.
 	staged []diskEntry
 
 	// placed indexes the entries placed at their answer (models.IsAnswerPlaced
@@ -375,19 +378,49 @@ func (d *DiskMocks) bytesAt(off int64, n int) ([]byte, error) {
 // Finalize sorts the index and the answer-placed one by place
 // (models.PlaceOf: the request timestamp, or the answer's for a mock placed
 // at its answer) for binary search, and the carry-over and staged indexes by
-// request timestamp. Idempotent.
+// request timestamp, which their loads search by, the mocks of one time in
+// the order they were added (sortRecorded). A carry-over or staged mock is
+// never placed at its answer (models.IsAnswerPlaced, held so by
+// models.TestPlaceOfIsTheAnswerForAMockPlacedAtItsAnswer), so its place is
+// its request time, and a sort of those two by place would order them
+// alike. Idempotent.
 func (d *DiskMocks) Finalize() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.finalize {
 		return
 	}
-	sort.Slice(d.entries, func(i, j int) bool { return d.entries[i].placeTsNano < d.entries[j].placeTsNano })
-	sort.Slice(d.carry, func(i, j int) bool { return d.carry[i].reqTsNano < d.carry[j].reqTsNano })
-	sort.Slice(d.staged, func(i, j int) bool { return d.staged[i].reqTsNano < d.staged[j].reqTsNano })
-	sort.Slice(d.placed, func(i, j int) bool { return d.placed[i].placeTsNano < d.placed[j].placeTsNano })
+	sortRecorded(d.entries, entryPlace)
+	sortRecorded(d.carry, entryRequest)
+	sortRecorded(d.staged, entryRequest)
+	sortRecorded(d.placed, entryPlace)
 	d.finalize = true
 }
+
+// sortRecorded sorts entries by at, and the entries of one time by their
+// offset in the store: the order Add took them in, as it writes each at a
+// running offset, which is the mock file's order, the order they were
+// recorded in. Every frame of one client write is read at that write's time,
+// so a pipeline of commands records many mocks of one request time, and a
+// parser answers a repeated command from its recordings in turn (a counter
+// read again and again): a sort by time alone, which may reorder entries of
+// one time, would have them answered out of turn. No two entries share an
+// offset, so the order is total.
+func sortRecorded(entries []diskEntry, at func(diskEntry) int64) {
+	slices.SortFunc(entries, func(a, b diskEntry) int { return recordedFirst(a, b, at) })
+}
+
+// recordedFirst compares two entries by at, and two of one time by their
+// offset (sortRecorded).
+func recordedFirst(a, b diskEntry, at func(diskEntry) int64) int {
+	if c := cmp.Compare(at(a), at(b)); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.off, b.off)
+}
+
+func entryPlace(e diskEntry) int64   { return e.placeTsNano }
+func entryRequest(e diskEntry) int64 { return e.reqTsNano }
 
 // readAt decodes the mock at an entry, into a mock of its own (gobRecords).
 // Stored records never change, so reads are concurrency-safe. Elided
@@ -647,7 +680,7 @@ func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) 
 		}
 	}
 	d.mu.Unlock()
-	sort.SliceStable(sel, func(i, j int) bool { return sel[i].reqTsNano < sel[j].reqTsNano })
+	sortRecorded(sel, entryRequest)
 	for _, e := range sel {
 		m, err := d.readAt(e)
 		if err != nil {
@@ -677,12 +710,7 @@ func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
 		sel = append(sel, e)
 	}
 	d.mu.Unlock()
-	sort.Slice(sel, func(i, j int) bool {
-		if sel[i].reqTsNano != sel[j].reqTsNano {
-			return sel[i].reqTsNano < sel[j].reqTsNano
-		}
-		return sel[i].off < sel[j].off
-	})
+	sortRecorded(sel, entryRequest)
 	return d.decodeAll(sel)
 }
 
@@ -708,12 +736,7 @@ func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 		}
 	}
 	d.mu.Unlock()
-	sort.Slice(sel, func(i, j int) bool {
-		if sel[i].reqTsNano != sel[j].reqTsNano {
-			return sel[i].reqTsNano < sel[j].reqTsNano
-		}
-		return sel[i].off < sel[j].off
-	})
+	sortRecorded(sel, entryRequest)
 	return d.decodeAll(sel)
 }
 
@@ -765,7 +788,7 @@ func (d *DiskMocks) RangeKeys(kind models.Kind, keys []string, visit func(name s
 		}
 	}
 	d.mu.Unlock()
-	sort.SliceStable(cs, func(i, j int) bool { return cs[i].e.reqTsNano < cs[j].e.reqTsNano })
+	slices.SortFunc(cs, func(a, b candidate) int { return recordedFirst(a.e, b.e, entryRequest) })
 	for _, c := range cs {
 		e := c.e
 		if !visit(c.name, func() (*models.Mock, error) { return d.readAt(e) }) {
@@ -803,7 +826,7 @@ func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load fun
 		}
 	}
 	d.mu.Unlock()
-	sort.SliceStable(cs, func(i, j int) bool { return cs[i].e.reqTsNano < cs[j].e.reqTsNano })
+	slices.SortFunc(cs, func(a, b candidate) int { return recordedFirst(a.e, b.e, entryRequest) })
 	for _, c := range cs {
 		e := c.e
 		if !visit(c.name, func() (*models.Mock, error) { return d.readAt(e) }) {

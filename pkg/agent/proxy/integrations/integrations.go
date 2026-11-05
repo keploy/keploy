@@ -428,6 +428,41 @@ type ExactConsumedReader interface {
 	ConsumedTestMocks() []*models.Mock
 }
 
+// RepeatReadAnswerer is an optional MockMemDb extension of a store that
+// serves each test its own mocks exactly (ExactConsumedReader). A call one
+// more than the open test recorded misses (models.MissExtraCall), except a
+// repeated read its mapping names (models.TestModeInfo.RepeatRead): the test
+// recorded that read at least twice, every time with one answer.
+// AnswerRepeatRead is given the open test's answered recordings the call
+// matches, as the matcher judges it. It answers the call again
+// (RepeatReadAnswer) when every one of them is a recording of one repeated
+// read of the test, every recording of that read has answered, and the read
+// has not been answered once more in this test yet. It answers each repeated
+// read at most once more per test; ok is false otherwise.
+type RepeatReadAnswerer interface {
+	AnswerRepeatRead(matched []*models.Mock) (answer RepeatReadAnswer, ok bool)
+}
+
+// RepeatReadAnswer is a repeated read answered once more than its test
+// recorded it (RepeatReadAnswerer), as the answer's log line names it: the
+// recording it is answered with, the ID of the test, and how many times the
+// test recorded the read.
+type RepeatReadAnswer struct {
+	Mock     *models.Mock
+	Test     string
+	Recorded int
+}
+
+// AnswerRepeatRead is db's answer to a call one more than the open test
+// recorded (RepeatReadAnswerer); ok is false from a store that has none.
+func AnswerRepeatRead(db MockMemDb, matched []*models.Mock) (RepeatReadAnswer, bool) {
+	r, ok := db.(RepeatReadAnswerer)
+	if !ok || len(matched) == 0 {
+		return RepeatReadAnswer{}, false
+	}
+	return r.AnswerRepeatRead(matched)
+}
+
 // ExactServedReader is an optional MockMemDb extension of a store that
 // serves each test its own mocks exactly (the proven switch), with a served
 // observer (the learn tracker's ServedMock). ServedInOpenTest returns, of one
@@ -479,6 +514,33 @@ type ExactServedReader interface {
 // must forward it.
 type AnsweredFinder interface {
 	FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (AnsweredCall, bool)
+}
+
+// AnsweredRedactingReader is an optional MockMemDb extension: of the test set
+// staged now at least (a store may keep earlier sets' too), every per-test
+// recording of kind that answered a call and holds a pattern (Mock.Noise: the obfuscator redacted something in it), its
+// request and patterns kept, and whether the store kept every one (it keeps
+// them under a bound). An answered per-test recording is in no read after it
+// answers, while a call that repeats it carries again the secret it
+// redacted: a parser redacts a miss's report and its logs by these
+// recordings' places too, and by every place when the store did not keep
+// them all. For a miss's diagnosis and logs only: never served. A
+// MockMemDb wrapper forwards it; one that does not is read as a store that
+// did not keep them all (AnsweredRedacting).
+type AnsweredRedactingReader interface {
+	AnsweredRedacting(kind models.Kind) (mocks []*models.Mock, complete bool)
+}
+
+// AnsweredRedacting is db's AnsweredRedacting (AnsweredRedactingReader):
+// none, and not complete, for a store without it (nil included), whose
+// answered recordings cannot be known, so a miss and its logs are redacted
+// by every place. A wrapper that does not forward it hides the store's
+// list and so leaks nothing by the omission (fail closed by construction).
+func AnsweredRedacting(db MockMemDb, kind models.Kind) ([]*models.Mock, bool) {
+	if r, ok := db.(AnsweredRedactingReader); ok {
+		return r.AnsweredRedacting(kind)
+	}
+	return nil, false
 }
 
 // AnsweredCall is what AnsweredFinder found: the recording, and when it

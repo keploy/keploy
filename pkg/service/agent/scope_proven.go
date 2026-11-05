@@ -56,8 +56,18 @@ type provenWire struct {
 	// directory.
 	key string
 	dir string
-	// open is the open test's ID, "" when none is.
-	open string
+	// open is, by test worker's instance (0: the run's, in a run of one
+	// test process), the attempt of the test that instance has open; an
+	// instance with none open has no entry. Each worker runs one test at a
+	// time; different workers' tests may be open at once, in a run that
+	// takes its workers (workerHooks).
+	open map[uint32]scopeTest
+	// openFrom is, by test ID, the capture-loss counts read as a test began
+	// while another worker's test was open: the test's own kinds
+	// (models.PerTest) count from there (chargeCaptureLosses). A test begun
+	// with none other open counts them from testLosses, which then holds
+	// the counts of the last moment no test was open.
+	openFrom map[string]models.CaptureLosses
 	// skip is the gate: test ID -> the reason its harness skips it with.
 	// needs holds a test to the tests that must begin before it
 	// (models.ScopeGateReq.Needs), and began is every test opened since the
@@ -88,6 +98,10 @@ type provenWire struct {
 	ownedLeft []coreAgent.OwnedLoss
 	// claim is the live claim; zero when none.
 	claim claimant
+	// workers is, in a run whose claims declared more than one test worker,
+	// each live worker's claim by its keploy instance (workers_proven.go);
+	// claim is then zero.
+	workers map[uint32]workerClaim
 	// claims is every claim of the session, in order: from each one's time
 	// on, until the next, a call made while no test is open belongs to the
 	// pool slice of its key (design v14 §5.2). Record reads them with the
@@ -112,16 +126,18 @@ type provenWire struct {
 	// recorded before it, and the pool by name. Zero when the CLI sent no
 	// window.
 	firstRecorded time.Time
-	// servedSince is when exact serving began serving the open test
-	// (serveTestExactly): a miss made before it is no call of the test's.
-	servedSince time.Time
+	// servedSince is when exact serving began serving each open test, by
+	// its ID (serveTestExactly): a miss made before it is no call of the
+	// test's.
+	servedSince map[string]time.Time
 	// realSaid names the recorded mocks already said to go to a mock.real
 	// destination (notReal).
 	realSaid map[string]bool
-	// unservable are the open test's mapped mocks the agent's store refused
-	// (variables this keploy cannot follow): nothing serves them, and its end
-	// counts each as a recorded call it did not make.
-	unservable []string
+	// unservable are each open test's mapped mocks, by its ID, that the
+	// agent's store refused (variables this keploy cannot follow): nothing
+	// serves them, and its end counts each as a recorded call it did not
+	// make.
+	unservable map[string][]string
 	// drops are the proxy listener's drops read when the window now open
 	// began (a test's begin, or the previous end); dropsKnown says they were
 	// read (settle); dropCarry is what the window before left unpaired
@@ -135,10 +151,13 @@ type provenWire struct {
 	dropsInTest       bool
 	dropsUncounted    uint64
 	dropsUncountedWhy string
-	// owned is the work the last window's end cut (settledSince), nil when
-	// it cut none (its proxy cannot, or the switch is off): all a begin
-	// waits for (settleBegin).
-	owned coreAgent.InFlightScope
+	// owned is, by test worker's instance (0: the run's, in a run of one
+	// test process), the work the worker's last window's end cut
+	// (settledSince), none when it cut none (its proxy cannot, or the
+	// switch is off): all that worker's next begin waits for (settleBegin).
+	// Another worker's leftover calls are that worker's, never the
+	// beginning test's.
+	owned map[uint32]coreAgent.InFlightScope
 	// refusals are what the wire refused, and what an integration refused
 	// and told the agent, in order, as windows (models.ScopeWindow.Refused).
 	refusals []models.ScopeWindow
@@ -150,18 +169,21 @@ type provenWire struct {
 	topology topologyRows
 	// losses is the run's capture-loss counts at its start, which each
 	// test's end counts from (capture_loss.go); testLosses the counts as the
-	// previous test ended, or its process claimed, which a test's own kinds
-	// (models.PerTest) count from (nil before the first test's end: the
-	// run's mark).
+	// last test ended that left no test open, or its process claimed, which
+	// a test's own kinds (models.PerTest) count from unless it began while
+	// another worker's test was open (openFrom; nil before the first test's
+	// end: the run's mark).
 	losses     captureLossMark
 	testLosses models.CaptureLosses
 	// scopeTests is, by the id of the keyer's scope each test was
-	// (containerkey's Scope), the test's attempt: a mock stamped late, its
-	// container's read the daemon did not answer, is charged to the attempt
-	// its request was sent in (unreadMock). unreadOutside is what such
+	// (containerkey's Scope), the attempts of the tests open in it (more
+	// than one only while different workers' tests were open at once,
+	// reScope): a mock stamped late, its container's read the daemon did
+	// not answer, is charged to every attempt its request may have been
+	// sent in (unreadMock). unreadOutside is what such
 	// mocks of the time outside tests, or of an attempt whose window is
 	// gone, charged no test with: the run's (UnchargedCaptureLosses).
-	scopeTests    map[uint64]scopeTest
+	scopeTests    map[uint64][]scopeTest
 	unreadOutside models.CaptureLosses
 	// order is, in a session that runs the learn step, the recorded order of
 	// its tests and how far the session's begins went in it
@@ -205,6 +227,49 @@ func (o recordedOrder) learnsOnto(id string) bool {
 type scopeTest struct {
 	id    string
 	start time.Time
+}
+
+// openOf is the ID of the test instance inst has open, "" when none is.
+func (w *provenWire) openOf(inst uint32) string { return w.open[inst].id }
+
+// openIDs are the open tests' IDs, by instance, in order.
+func (w *provenWire) openIDs() []uint32 {
+	ids := make([]uint32, 0, len(w.open))
+	for inst := range w.open {
+		ids = append(ids, inst)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+// openBesides is the lowest instance other than inst with a test open, and
+// that test's ID; ok is false when no other instance has one.
+func (w *provenWire) openBesides(inst uint32) (other uint32, id string, ok bool) {
+	for _, o := range w.openIDs() {
+		if o != inst {
+			return o, w.open[o].id, true
+		}
+	}
+	return 0, "", false
+}
+
+// openBut says a test other than test id is open.
+func (w *provenWire) openBut(id string) bool {
+	for _, t := range w.open {
+		if t.id != id {
+			return true
+		}
+	}
+	return false
+}
+
+// openTests are the attempts of every open test, by instance, in order.
+func (w *provenWire) openTests() []scopeTest {
+	var ts []scopeTest
+	for _, inst := range w.openIDs() {
+		ts = append(ts, w.open[inst])
+	}
+	return ts
 }
 
 // claimant is the process that claimed the run: a pid, and its start time,
@@ -318,8 +383,11 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	}
 	left = boundOwnedLeft(left)
 	a.provenMu.Lock()
+	workers := a.workerIDs()
 	a.proven = provenWire{losses: losses, ownedLeft: left}
 	a.provenMu.Unlock()
+	// The previous session's workers are no workers of this one.
+	a.endInstances(workers)
 	if provenswitch.On() {
 		// The listener's drops are counted from here too (openDrops).
 		a.openDrops()
@@ -389,9 +457,28 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 			fmt.Sprintf("process %d is not part of this keploy run, so keploy cannot capture or mock its calls", caller),
 			`run the test command through keploy, to record: keploy mock record -c "<command>"; to replay: keploy mock replay -c "<command>"`)
 	}
+	declared, serr := declaredWorkers(req.Workers, caller)
+	if serr != nil {
+		return models.InstanceResp{}, serr
+	}
+	a.endGoneWorkers(ctx)
 	me := claimant{pid: caller, start: start}
+	if declared > 1 {
+		stamper, serr := a.workerHooks(ctx, declared)
+		if serr != nil {
+			return models.InstanceResp{}, serr
+		}
+		return a.claimWorker(ctx, req, me, declared, stamper)
+	}
 	a.provenMu.Lock()
-	prev, open := a.proven.claim, a.proven.open
+	if ids := a.workerIDs(); len(ids) > 0 {
+		w := a.proven.workers[ids[0]]
+		a.provenMu.Unlock()
+		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrWorkersMismatch,
+			fmt.Sprintf("process %d declared one test worker while test worker %s (process %d), which declared %d, still runs this keploy run's tests", caller, coreAgent.InstanceLabel(ids[0]), w.pid, w.declared),
+			"declare the same worker count from every test process the run starts at once")
+	}
+	prev, open := a.proven.claim, a.proven.openOf(0)
 	switch {
 	case prev == me && open != "":
 		a.provenMu.Unlock()
@@ -402,14 +489,14 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		a.provenMu.Unlock()
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestProcess,
 			fmt.Sprintf("process %d asked to run tests while process %d still runs this keploy run's tests: two test processes ran at once", caller, prev.pid),
-			"run one test process at a time (go test -p 1, pytest without -n, jest --runInBand); parallel test workers arrive in a later keploy release")
+			a.oneProcessRemedy(ctx, caller))
 	}
 	// The previous claimer is gone: a test it left open can no longer end,
 	// and fails. (A test is begun only under a claim, so with no previous
 	// claimer none is open.)
 	stale := ""
 	if prev != me {
-		stale = a.proven.open
+		stale = a.proven.openOf(0)
 	}
 	a.provenMu.Unlock()
 	if stale != "" {
@@ -511,7 +598,8 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	// says a mock was recorded while no test was open (the recorded test
 	// windows the table sends, SetRecordedWindows, end at each test's last
 	// recording, not at its scope's end). Whose tests list each, by key,
-	// bounds each test process's teardown.
+	// bounds each test process's teardown, and the table itself tells the
+	// run, and so the clock, of a test's recording on no clock.
 	if ps, ok := a.Proxy.(coreAgent.PoolNamesSetter); ok {
 		var names []string
 		for _, slice := range cp {
@@ -519,8 +607,9 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 		}
 		a.scopeMu.Lock()
 		owners := teardownOwners(a.scopeTable, cp)
+		tests := maps.Clone(a.scopeTable)
 		a.scopeMu.Unlock()
-		if err := ps.SetPoolNames(names, owners); err != nil {
+		if err := ps.SetPoolNames(names, owners, tests); err != nil {
 			return err
 		}
 	}
@@ -774,15 +863,29 @@ func (a *Agent) recordedStart(id string, starts map[string]time.Time) (start tim
 }
 
 // applyPool serves the current key's pool slice exactly (servePoolExactly),
-// unless a test is open: its end serves it.
+// unless a test is open: its end serves it. In a run of test workers, each
+// served worker none of whose tests is open is served its own key's slice.
 func (a *Agent) applyPool(ctx context.Context) error {
 	a.provenMu.Lock()
-	open := a.proven.open
-	a.provenMu.Unlock()
-	if open != "" {
-		return nil
+	var serve []uint32
+	if ids := a.workerIDs(); len(ids) == 0 {
+		serve = []uint32{0}
+	} else {
+		serve = ids
 	}
-	return a.servePoolExactly(ctx)
+	idle := serve[:0]
+	for _, w := range serve {
+		if _, open := a.proven.open[w]; !open {
+			idle = append(idle, w)
+		}
+	}
+	a.provenMu.Unlock()
+	for _, w := range idle {
+		if err := a.servePoolExactly(ctx, w); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // claimWindows is the session's claims, refusals and topology rows, as
@@ -869,27 +972,43 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	if serr := oldWireFields(req); serr != nil {
 		return models.ScopeBeginResp{}, serr
 	}
+	worker, serr := a.callerWorker(ctx, "begin", req.Name)
+	if serr != nil {
+		return models.ScopeBeginResp{}, serr
+	}
 	at := time.Now()
 	a.provenMu.Lock()
 	if a.proven.closed {
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, errClosed()
 	}
-	// A claim whose process exited is no claim: its key would name another
-	// process's tests.
-	if c := a.proven.claim; c.pid == 0 || !procAlive(c.pid, c.start) {
+	key, dir := a.proven.key, a.proven.dir
+	if w, ok := a.proven.workers[worker]; ok {
+		key, dir = w.key, w.dir
+	} else if c := a.proven.claim; c.pid == 0 || !procAlive(c.pid, c.start) {
+		// A claim whose process exited is no claim: its key would name
+		// another process's tests.
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			req.Name+" began before its test process claimed this keploy run, so keploy cannot tell that its calls are captured or mocked",
 			"have the test process claim the run before its first test: go-sdk keploytest and @keploy/playwright do; a framework with neither claims it by hand (POST /agent/instance with its package folder, relative to the project, as key)")
 	}
-	id := models.TestID(req.Project, req.File, a.proven.key, req.Name)
-	if open := a.proven.open; open != "" {
+	id := models.TestID(req.Project, req.File, key, req.Name)
+	if open := a.proven.openOf(worker); open != "" {
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestAtATime,
 			fmt.Sprintf("%s began while %s was still open: two tests ran at once in one test process", id, open),
-			"run them one at a time: in Go, start parallel tests with keploytest.Parallel and subtests with keploytest.Run, which take turns; elsewhere, end each test before the next one begins; parallel test workers arrive in a later keploy release")
+			"run them one at a time: in Go, start parallel tests with keploytest.Parallel and subtests with keploytest.Run, which take turns; elsewhere, end each test before the next one begins")
 	}
+	other, otherTest, overlaps := a.proven.openBesides(worker)
+	if overlaps && otherTest == id {
+		a.provenMu.Unlock()
+		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestAtATime,
+			fmt.Sprintf("%s began in test worker %s while test worker %s ran the same test: one test's calls cannot be told apart from another run of it", id, coreAgent.InstanceLabel(worker), coreAgent.InstanceLabel(other)),
+			"give each test worker its own key, or run each test in one worker at a time")
+	}
+	a.provenMu.Unlock()
+	a.provenMu.Lock()
 	reason, gated := a.proven.skip[id]
 	outcome := models.ScopeOutcomeGated
 	// A test whose call holds a value an earlier test's call sends runs
@@ -899,8 +1018,12 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
 		}
 	}
-	dir := a.proven.dir
+	// The process whose hooks must carry the test is the one that claimed
+	// it: its worker's, or the run's.
 	claimer := a.proven.claim.pid
+	if w, ok := a.proven.workers[worker]; ok {
+		claimer = w.pid
+	}
 	a.provenMu.Unlock()
 	if a.replaying() && gated {
 		a.noteScopeNotRun(id, 0, at, outcome)
@@ -914,11 +1037,18 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// opened: a begin that fails leaves nothing behind.
 	var capture missCapturer
 	if a.replaying() {
-		if _, err := a.exactServer(); err != nil {
+		es, err := a.exactServerOf(worker)
+		if err != nil {
 			return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy cannot judge "+id+": "+err.Error(), "run the keploy agent of this keploy version")
 		}
-		c, ok := a.Proxy.(missCapturer)
+		// A test worker's test's misses are its worker's window's, kept
+		// on the manager that serves it.
+		var src any = a.Proxy
+		if worker != 0 {
+			src = es
+		}
+		c, ok := src.(missCapturer)
 		if !ok {
 			return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy cannot judge "+id+": this keploy agent's proxy cannot keep each test's misses apart", "run the keploy agent of this keploy version")
@@ -947,18 +1077,32 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// background work, and do not hold the begin.
 	// A connection whose held requests cannot be told does not stop the
 	// begin: the test's end finds it, and the test is not verified.
-	drops, err := a.settleBegin(ctx, a.replaying())
+	drops, err := a.settleBegin(ctx, a.replaying(), worker)
 	if err != nil && !errors.Is(err, errHoldsUnknown) {
 		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy cannot judge "+id+": "+err.Error(), "check the agent's log")
 	}
-	// The test's end waits only for the requests opened from here.
-	a.beginWindow()
+	// The test's end waits only for the requests its worker opened from
+	// here.
+	a.beginWindow(worker)
 	// The drops read now close the gap's window, whose drops are the
 	// beginning test's (markDrops), and open the test's: its end compares
-	// the listener's drops with these.
-	a.markDrops(ctx, drops)
+	// the listener's drops with these. With another worker's test open the
+	// window they close is that test's, not a gap.
+	a.markDrops(ctx, drops, !overlaps)
+	// Begun while another worker's test is open, the test's own kinds of
+	// capture loss count from now: what came before is the open test's.
+	// Not read, they count from the last moment no test was open, which
+	// charges it the other test's too (chargeCaptureLosses).
+	var from models.CaptureLosses
+	if overlaps {
+		from, _ = a.CaptureLosses(ctx)
+	}
 	a.NoteScope(id, 0, dir, false)
+	seed := a.beginSeed(id, models.NormalizeScopeSeed(req.Seed))
+	a.noteScopeRandom(id, 0, models.NormalizeScopeRandom(req.Random), seed)
+	// The worker that begins it, whose calls alone its window holds.
+	a.noteScopeInstance(id, worker)
 	// opened: the test's capture window opened (open), so a begin that
 	// fails after it takes the window back.
 	var open func()
@@ -1006,30 +1150,57 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			"keploy's agent could not open "+id+": "+err.Error(), "check the agent's log")
 	}
 	if t := a.realTracker(); t != nil {
-		// The mock.real destinations its connections send bytes to from
-		// here are this test's.
-		t.BeginTest()
+		// The mock.real destinations its worker's connections send bytes
+		// to from here are this test's.
+		t.BeginTestOf(worker)
 	}
 	a.provenMu.Lock()
-	a.proven.open = id
+	if a.proven.open == nil {
+		a.proven.open = map[uint32]scopeTest{}
+	}
+	a.proven.open[worker] = scopeTest{id: id, start: boundaryTime(at)} // its window's start (BeginScopeAt)
+	if from != nil {
+		if a.proven.openFrom == nil {
+			a.proven.openFrom = map[string]models.CaptureLosses{}
+		}
+		a.proven.openFrom[id] = from
+	}
 	if a.proven.began == nil {
 		a.proven.began = map[string]bool{}
 	}
 	a.proven.began[id] = true
 	a.provenMu.Unlock()
 	a.noteBegunInOrder(id)
-	// The test is a scope of its own from here (containerkey); closeOpen
-	// goes back to the run's however the test closes.
-	containerkey.Default.BeginTest()
-	scope := containerkey.Default.Scope()
-	a.provenMu.Lock()
-	if a.proven.scopeTests == nil {
-		a.proven.scopeTests = map[uint64]scopeTest{}
-	}
-	a.proven.scopeTests[scope] = scopeTest{id: id, start: boundaryTime(at)} // its window's start (BeginScopeAt)
-	a.provenMu.Unlock()
+	// The test is a scope of its own from here (containerkey), shared with
+	// the tests other workers have open; closeOpen goes back to the run's
+	// however the last open test closes.
+	a.reScope()
 	begun = true
-	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
+	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Seed: seed}, nil
+}
+
+// beginSeed is the seed a beginning test's browser draws its random numbers
+// from (ScopeBeginResp.Seed), for a begin that sent one (asked; "" for one
+// that sent none). In a replay it is the one the test's recording kept
+// (SetTestSeeds), and none when it kept none: the browser then draws its own,
+// as it did in that recording. In a record it is the one the test's earlier
+// attempt in this record drew, so a retry draws the numbers the attempt did,
+// and else asked: each record of a test draws new numbers.
+func (a *Agent) beginSeed(id, asked string) string {
+	if asked == "" {
+		return ""
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	if a.replaying() {
+		return a.testSeeds[id]
+	}
+	for _, w := range a.scopeWindows {
+		if w.Name == id && w.Seed != "" {
+			return w.Seed
+		}
+	}
+	return asked
 }
 
 // shimRefusal refuses test id's begin when the hooks intercept through a
@@ -1097,10 +1268,19 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	if req.Name == "" {
 		return models.ScopeEndResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest, "an end names its test", "send the name its begin sent")
 	}
+	worker, serr := a.callerWorker(ctx, "end", req.Name)
+	if serr != nil {
+		return models.ScopeEndResp{}, serr
+	}
 	at := time.Now()
 	a.provenMu.Lock()
-	id := models.TestID(req.Project, req.File, a.proven.key, req.Name)
-	open := a.proven.open
+	key := a.proven.key
+	if w, ok := a.proven.workers[worker]; ok {
+		key = w.key
+	}
+	id := models.TestID(req.Project, req.File, key, req.Name)
+	// Another worker's open test is no test of this worker's to end.
+	open := a.proven.openOf(worker)
 	a.provenMu.Unlock()
 	if serr := oldWireFields(req); serr != nil {
 		// The test it names is failed and closed with keploy's reason:
@@ -1139,6 +1319,9 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	if outcome == "" {
 		outcome = models.ScopeOutcomeFailed
 	}
+	// How the test's browser drew its random numbers, as its harness saw
+	// it: it replaces what the begin meant to do.
+	a.noteScopeRandomDone(id, 0, models.NormalizeScopeRandom(req.Random))
 	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, "")
 	if err != nil {
 		// A test keploy could not read is unread on its window (its
@@ -1162,21 +1345,61 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	defer func() {
 		a.provenMu.Lock()
-		closed := a.proven.open == id
-		if closed {
-			a.proven.open = ""
+		closed := false
+		for inst, t := range a.proven.open {
+			if t.id == id {
+				delete(a.proven.open, inst)
+				closed = true
+			}
 		}
+		delete(a.proven.openFrom, id)
 		a.provenMu.Unlock()
 		if closed {
 			// Connections from here on are the run's again, in a scope of
-			// their own until the next test (containerkey).
-			containerkey.Default.EndTest()
+			// their own until the next test, or, while other workers' tests
+			// are open, theirs (containerkey, reScope).
+			a.reScope()
 			// The learn step it held, if any, is taken back up: calls from
 			// here are the next test's.
 			a.releaseLearn(id)
 		}
 	}()
 	return a.endTest(ctx, id, outcome, at, why)
+}
+
+// reScope opens the keyer's scope (containerkey) for the tests open now: a
+// scope of their own, which a mock stamped in it is charged to all of
+// (unreadMock), or, with none open, the run's. Called as a test begins and
+// as one closes, with the wire held. In a run of one test process it opens
+// the test's scope at its begin and the run's at its end, as before workers.
+func (a *Agent) reScope() {
+	a.provenMu.Lock()
+	open := a.proven.openTests()
+	a.provenMu.Unlock()
+	if len(open) == 0 {
+		containerkey.Default.EndTest()
+		return
+	}
+	containerkey.Default.BeginTest()
+	scope := containerkey.Default.Scope()
+	a.provenMu.Lock()
+	if a.proven.scopeTests == nil {
+		a.proven.scopeTests = map[uint64][]scopeTest{}
+	}
+	a.proven.scopeTests[scope] = open
+	a.provenMu.Unlock()
+}
+
+// oneProcessRemedy is the fix for a second test process that claimed the
+// run, from process pid, while the first still runs its tests: run one at a
+// time, or, where this run would take them (takesWorkers), declare the
+// processes as the run's test workers.
+func (a *Agent) oneProcessRemedy(ctx context.Context, pid int) string {
+	remedy := "run one test process at a time (go test -p 1, pytest without -n, jest --runInBand)"
+	if a.takesWorkers(ctx, pid) {
+		remedy += ", or declare, in every test process's claim, how many test workers the run starts at once"
+	}
+	return remedy
 }
 
 // failOpen ends, as failed, a test whose harness can no longer end it. With
@@ -1199,18 +1422,18 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	// a call it made that the proxy has not yet taken or answered is its
 	// own, whatever the load. One keploy cannot settle leaves the test
 	// unjudged, and failed.
-	settleErr := a.settledSince(ctx, a.replaying(), id)
+	settleErr := a.settledSince(ctx, a.replaying(), a.scopeInstance(id), id)
 	// The mock.real destinations the test used, and the connections keploy
 	// could neither capture nor relay as real while it was open: in a record
 	// as in a replay (design v14 §3.2, §4).
-	var uses []models.RealUse
-	var incomplete []models.CaptureIncomplete
+	var real realdeps.TestEnd
 	if t := a.realTracker(); t != nil {
-		uses, incomplete = t.EndTest()
+		real = t.EndTestOf(a.scopeInstance(id))
 	}
+	uses, incomplete := real.Uses, real.Incomplete
 	// When exact serving began serving the test: a miss made before it is
 	// no call of the test's (evidenceReason).
-	beganAt := a.servedSince()
+	beganAt := a.servedSince(id)
 	if a.replaying() {
 		// The test stops being served before what it did is read: a call
 		// that lands after the read cannot consume one of its mocks, so the
@@ -1218,7 +1441,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		// A pool that cannot be served is keploy's failure to end the test,
 		// not to read it: the end serves the pool again below (EndScopeAt)
 		// and, failing again, makes it the run's refusal.
-		if err := a.servePoolExactly(ctx); err != nil {
+		if err := a.servePoolExactly(ctx, a.scopeInstance(id)); err != nil {
 			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), zap.Error(err))
 		}
 		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped, beganAt)
@@ -1251,6 +1474,17 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	}
 	// Before why: why goes in front of whatever reason the evidence gives.
 	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil, beganAt)
+	if len(real.Unattributed) > 0 {
+		// A mock.real use from a process in no test worker's instance,
+		// while this test was open, could have been its: it is in no
+		// test's REAL row, and leaves each test open then without a
+		// verdict, as the record does a mock of such a call. The hooks
+		// never count it, so it is charged to no run-wide total.
+		if ev == nil {
+			ev = &models.ScopeEvidence{}
+		}
+		ev.ChargeNotJudged(real.Unattributed)
+	}
 	// A value the test gave that its recording does not hold checks
 	// nothing, and the call that carries it misses as a plain call, or
 	// leaves the recorded one unmade: said first, with the step that fixes
@@ -1325,6 +1559,13 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.ScopeEvidence, outcome string, fromEvidence bool, beganAt time.Time) (*models.ScopeEvidence, string) {
 	a.provenMu.Lock()
 	mark, test := a.proven.losses, a.proven.testLosses
+	if from, ok := a.proven.openFrom[id]; ok {
+		test = from
+	}
+	// Another worker's test still open goes on counting its own kinds from
+	// where it began, and so does the next test any worker begins while it
+	// is open: the cursor moves only at an end that leaves no test open.
+	others := a.proven.openBut(id)
 	a.provenMu.Unlock()
 	lost, now, err := a.captureLossesSince(ctx, mark, test)
 	// What a cut-short end owned that was counted since: this test's when
@@ -1347,7 +1588,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		// it came, not by the count, which may come after its test ended.
 		lost, now = lost.Without(models.CaptureLossContainerUnread), now.Without(models.CaptureLossContainerUnread)
 	}
-	if err == nil && now != nil {
+	if err == nil && now != nil && !others {
 		// The next test's own losses count from here.
 		a.provenMu.Lock()
 		a.proven.testLosses = now
@@ -1442,9 +1683,15 @@ func (a *Agent) unreadMock(scope uint64, what string) {
 	}
 	loss := models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: what}}
 	a.provenMu.Lock()
-	t, inTest := a.proven.scopeTests[scope]
+	open := a.proven.scopeTests[scope]
 	a.provenMu.Unlock()
-	if inTest && a.chargeAttempt(t, loss) {
+	charged := false
+	for _, t := range open {
+		if a.chargeAttempt(t, loss) {
+			charged = true
+		}
+	}
+	if charged {
 		return
 	}
 	a.provenMu.Lock()
@@ -1481,21 +1728,15 @@ func (a *Agent) chargeAttempt(t scopeTest, loss models.CaptureLosses) bool {
 
 // withUnread is ev (a copy, nil for none) with loss, mocks whose container the
 // Docker daemon did not answer the read of: what leaves the test not judged,
-// and said in its reason.
+// and said in its reason, one sentence with what it was charged before
+// (models.ScopeEvidence.ChargeNotJudged).
 func withUnread(ev *models.ScopeEvidence, loss models.CaptureLosses) *models.ScopeEvidence {
 	out := &models.ScopeEvidence{}
 	if ev != nil {
 		c := *ev
 		out = &c
 	}
-	out.CannotCapture = out.CannotCapture.Plus(loss)
-	text := loss.NotJudgedText()
-	switch {
-	case out.Reason == "":
-		out.Reason = "keploy: " + text + "."
-	default:
-		out.Reason = strings.TrimSpace(out.Reason + " Also " + text + ".")
-	}
+	out.ChargeNotJudged(loss)
 	return out
 }
 
@@ -1520,6 +1761,31 @@ func (a *Agent) failClosedWindow(id, why string) {
 	}
 }
 
+// missReader reads the misses of a test worker's test (proxy's
+// instanceExact): its process tree's alone.
+type missReader interface {
+	GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error)
+}
+
+// missesOf reads the misses made since the last read by test worker
+// worker's processes (0: the run's, the proxy's own): a worker's test is
+// charged its worker's misses, never another's, which stay for that
+// worker's own test.
+func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.UnmatchedCall, error) {
+	if worker == 0 {
+		return a.Proxy.GetMockErrors(ctx)
+	}
+	es, err := a.exactServerOf(worker)
+	if err != nil {
+		return nil, err
+	}
+	r, ok := es.(missReader)
+	if !ok {
+		return nil, fmt.Errorf("this keploy agent's proxy cannot read test worker %s's misses apart from the others'", coreAgent.InstanceLabel(worker))
+	}
+	return r.GetMockErrors(ctx)
+}
+
 // testEvidence is what fails the open test id at its end: its data-plane
 // misses (models.UnmatchedCall.CountsAgainstTest: DNS is protocol-phase, and
 // a connection that sent nothing made no call), and the test mocks it did not
@@ -1537,7 +1803,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 		return nil, errors.New("no proxy")
 	}
 	ev := &models.ScopeEvidence{}
-	all, err := a.Proxy.GetMockErrors(ctx)
+	all, err := a.missesOf(ctx, a.scopeInstance(id))
 	var misses, outside []models.UnmatchedCall
 	for _, m := range all {
 		if outsideEveryTest(m, beganAt) {
@@ -1563,7 +1829,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	}
 	// A read that fails from here keeps the misses already found: they are
 	// this test's whatever else could not be told.
-	es, err := a.exactServer()
+	es, err := a.exactServerOf(a.scopeInstance(id))
 	if err != nil {
 		return ev, err
 	}
@@ -1572,7 +1838,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 		return ev, fmt.Errorf("keploy's proxy was not serving %s exactly at its end (it was serving %q)", id, test)
 	}
 	a.provenMu.Lock()
-	unservable := append([]string(nil), a.proven.unservable...)
+	unservable := append([]string(nil), a.proven.unservable[id]...)
 	a.provenMu.Unlock()
 	ev.Unconsumed = append(unconsumed, unservable...)
 	return ev, nil
@@ -1646,12 +1912,12 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 	return out, nil
 }
 
-// servedSince is when exact serving began serving the open test; zero
-// when it does not.
-func (a *Agent) servedSince() time.Time {
+// servedSince is when exact serving began serving open test id; zero when
+// it does not.
+func (a *Agent) servedSince(id string) time.Time {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
-	return a.proven.servedSince
+	return a.proven.servedSince[id]
 }
 
 // refusedOf is, in order, the names of names the agent's store refused that
@@ -1760,18 +2026,33 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 	// The run is over: what a process still running claims or begins now
 	// would never be read.
 	a.proven.closed = true
-	id, c := a.proven.open, a.proven.claim
-	if id == "" {
-		a.provenMu.Unlock()
-		return nil
+	// Each open test, with the process that began it: the worker's, or the
+	// run's one test process.
+	type stale struct {
+		id string
+		c  claimant
 	}
+	var open []stale
+	for _, inst := range a.proven.openIDs() {
+		c := a.proven.claim
+		if w, ok := a.proven.workers[inst]; ok {
+			c = w.claimant
+		}
+		open = append(open, stale{id: a.proven.openOf(inst), c: c})
+	}
+	// Nothing more is claimed: the workers' processes are no worker's.
+	workers := a.workerIDs()
+	a.proven.workers = nil
 	a.proven.claim = claimant{}
 	a.provenMu.Unlock()
-	why := "the test process exited while the test was open"
-	if procAlive(c.pid, c.start) {
-		why = fmt.Sprintf("the test was still open when keploy read the run's results: its process %d outlived the test command", c.pid)
+	a.endInstances(workers)
+	for _, t := range open {
+		why := "the test process exited while the test was open"
+		if procAlive(t.c.pid, t.c.start) {
+			why = fmt.Sprintf("the test was still open when keploy read the run's results: its process %d outlived the test command", t.c.pid)
+		}
+		a.failOpen(ctx, t.id, why)
 	}
-	a.failOpen(ctx, id, why)
 	return nil
 }
 

@@ -71,6 +71,24 @@ func TestBindFreePortTriesEachPortAboveTheEphemeralRangeOnce(t *testing.T) {
 	}
 }
 
+// The ports the caller holds are never tried, and every other candidate is.
+func TestBindFreePortNeverTriesAHeldPort(t *testing.T) {
+	held := []uint32{61000, 63333, 65535}
+	tried := map[uint32]bool{}
+	_, err := bindFreePortAbove(func() (uint32, uint32, bool) { return 32768, 60999, true }, func(p uint32) error {
+		tried[p] = true
+		return syscall.EADDRINUSE
+	}, held...)
+	for _, p := range held {
+		if tried[p] {
+			t.Fatalf("held port %d was tried", p)
+		}
+	}
+	if err == nil || len(tried) != 4536-len(held) {
+		t.Fatalf("tried %d ports, want %d (err %v)", len(tried), 4536-len(held), err)
+	}
+}
+
 // PortTaken names what holds the port where it can, and says it cannot
 // where it cannot.
 func TestPortTakenNamesTheHolderWhereItCan(t *testing.T) {

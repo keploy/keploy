@@ -255,11 +255,12 @@ type tee struct {
 	// [tee.abandon] does skew it: chunks counted here are thrown away
 	// undelivered, so accepted can end up permanently ahead of what the
 	// FakeConn received. That is safe in the only way that matters —
-	// abandon returns from drain, whose deferred close of out closes the
-	// FakeConn's channel, so a discard watermark left stranded above the
-	// delivered total ends in io.EOF rather than a stall, and no byte
-	// ABOVE the watermark can be lost to it (everything delivered is
-	// below it by construction).
+	// abandon returns from drain, which ends the stream (endStream): its
+	// reader reads io.EOF there, or fakeconn.ErrClosed if it was closed
+	// first, so a discard watermark left stranded above the delivered total
+	// ends the read rather than stalling it, and no byte ABOVE the
+	// watermark can be lost to it (everything delivered is below it by
+	// construction).
 	//
 	// It exists so the relay can name a position in the parser's stream
 	// — "the parser must not see anything below offset N" — when it
@@ -302,6 +303,12 @@ type tee struct {
 	// view of the tee at that instant. Nil outside tests. Read-only after
 	// construction.
 	pushStart func()
+
+	// endingStream, when set, runs as endStream begins, before it decides
+	// the stream's end: a test's view of the tee at that instant. It runs on
+	// the drain goroutine, before done is signalled, so it must return. Nil
+	// outside tests. Read-only after construction.
+	endingStream func()
 }
 
 // newTee builds a tee. The drain goroutine does not run until [tee.start]
@@ -553,7 +560,7 @@ func (t *tee) drop(reason string) {
 }
 
 // drain moves chunks from the queue to the FakeConn-facing channel in FIFO
-// order, then closes out and signals done.
+// order, then ends the stream (endStream) and signals done.
 //
 // Delivery is a blocking send. That is the point: a parser that is merely
 // slow — the boot burst this path exists for, or a node under load — must
@@ -578,8 +585,14 @@ func (t *tee) drop(reason string) {
 // loss once with the total, and marks the tee closed so no later push is
 // accepted into a queue that no drain is left to serve.
 func (t *tee) drain() {
-	defer close(t.done)
-	defer close(t.out)
+	// End the stream, then signal done, in that order: the relay's teardown
+	// waits on done and then closes the FakeConns, so that close comes after
+	// endStream has read consumerGone. Signalled first, it could land before
+	// that read and leave open a stream that ended normally (ErrClosed).
+	defer func() {
+		t.endStream()
+		close(t.done)
+	}()
 	for {
 		t.mu.Lock()
 		if len(t.q) == 0 {
@@ -772,6 +785,33 @@ func (t *tee) abandon(held fakeconn.Chunk) {
 			zap.String("dir", t.dir.String()),
 			zap.Int("chunks", lost),
 		)
+	}
+}
+
+// endStream ends the FakeConn's stream as drain returns: it closes out, so
+// its reader reads io.EOF once it has taken what out holds, unless the reader
+// was closed first (consumerGone). That stream is left open, so its reader
+// reads fakeconn.ErrClosed there instead: the session closed it (the
+// supervisor's abort, or the dispatcher once its parser has returned) while
+// the capture could still send, and what the connection did after is not the
+// stream's. Closing it would make the session's close read as the
+// connection's end to a reader behind its capture, one that gets to the end
+// only after the connection has ended, while a reader that waited there read
+// ErrClosed: the HTTP parser records a call that got no answer with the fault
+// its end says the upstream gave (noAnswerFault). The two events are ordered
+// here, on the one goroutine that ends the stream: a close seen before the
+// end leaves the stream open, and one that comes after the end finds it
+// ended, and its reader reads io.EOF, as a reader closed by the relay's
+// teardown does. A closed FakeConn never waits on its channel, so nothing
+// blocks on one left open.
+func (t *tee) endStream() {
+	if t.endingStream != nil {
+		t.endingStream()
+	}
+	select {
+	case <-t.consumerGone:
+	default:
+		close(t.out)
 	}
 }
 

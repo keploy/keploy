@@ -284,8 +284,13 @@ func (p *Proxy) recordViaSupervisor(
 		// first: a call the destination never answered is recorded with
 		// the fault it gave (its reset or its close), or as the client's
 		// giving up when the client closed first. An end that is the
-		// application's stop records no fault (peerEndMarker).
+		// application's stop, or a client's end the hooks cannot tell from
+		// its process's exit, records no fault (peerEndMarker).
 		PeerEnded: p.peerEndMarker(svSess, appEndOf(srcConn)),
+		// The error the client's socket gave after the relay's last write
+		// to it: a client that sent its FIN and then reset what reached it
+		// after, which no read of its end says (relay/client_end.go).
+		ClientEndError: svSess.MarkClientEndError,
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
@@ -426,8 +431,9 @@ func (p *Proxy) recordViaSupervisor(
 	switch {
 	case result.FallthroughToPassthrough:
 		// A parser retired as the recording stops (RecordingStopping), however
-		// it ends: aborted in a read once the supervisor's grace is over
-		// (canceled), or dead of a panic as the recording stops (panicked).
+		// it ends: aborted once it has read its streams to their end, or once
+		// the stop's deadline passed (canceled), or dead of a panic as the
+		// recording stops (panicked).
 		// There is no "rest of the connection" left to lose, so the warning
 		// does not apply, any more than the span does (openSpan): emitting it
 		// would tell the user their recording is broken at the exact moment

@@ -167,9 +167,10 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta is what a log says about req: its method, its host, its path
-// and the names of its query parameters. Never a query value, a header or
-// the body: those are the application's content (tokens, credentials), and
+// GetReqMeta is what a log says about req: its method, its host, its path's
+// shape (URLPathShape) and the names of its query parameters. Never a path
+// segment, a query value, a header or the body: those are the application's
+// content (a segment may be a token the recording redacted), and
 // logs get pasted into issues. A query part with no "=" is not named either,
 // since it may be a bare token; a bare token that holds "=" (padded base64,
 // ?dG9rZW4=) is named by what comes before its first "=" (dG9rZW4).
@@ -181,12 +182,35 @@ func GetReqMeta(req *http.Request) map[string]string {
 	reqMeta["method"] = req.Method
 	reqMeta["host"] = req.Host
 	if req.URL != nil {
-		reqMeta["path"] = req.URL.Path
+		reqMeta["path"] = URLPathShape(req.URL)
 		if keys := queryKeys(req.URL.RawQuery); len(keys) > 0 {
 			reqMeta["query keys"] = strings.Join(keys, ",")
 		}
 	}
 	return reqMeta
+}
+
+// URLPathShape is u's path in its shape: each segment of the escaped path
+// written {}, an empty one (a trailing "/", "//") kept empty, so it names
+// how many segments the path has and never a value of one. A log made where
+// no recording is at hand names a path this way: keploy does not know there
+// which segment holds a secret the recording redacted. "" for a nil u.
+func URLPathShape(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	escaped := u.EscapedPath()
+	segs := strings.Split(strings.TrimPrefix(escaped, "/"), "/")
+	for i, seg := range segs {
+		if seg != "" {
+			segs[i] = "{}"
+		}
+	}
+	out := strings.Join(segs, "/")
+	if strings.HasPrefix(escaped, "/") {
+		out = "/" + out
+	}
+	return out
 }
 
 // queryKeys are the names of rawQuery's name=value parameters, unescaped,
@@ -1407,8 +1431,43 @@ func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
 // Its probe listeners are plain TCP, never Go's default MPTCP: for as long as
 // one is open it listens on every interface.
 func GetAvailablePort() (uint32, error) {
-	if _, ephemeralHi, known := ephemeralPortRange(); known && ephemeralHi < 65535 {
-		lo := ephemeralHi + 1
+	return availablePortAbove(hostEphemeralRange, 0)
+}
+
+// hostEphemeralRange reads the host's ephemeral port range for
+// GetAvailablePort and GetAvailableContainerPort (ephemeralPortRange).
+var hostEphemeralRange = ephemeralPortRange
+
+// containerEphemeralHi is the top of a container's ephemeral port range: the
+// kernel gives each new network namespace Linux's default range, 32768-60999,
+// whatever the host's is.
+const containerEphemeralHi = defaultEphemeralHi
+
+// GetAvailableContainerPort is GetAvailablePort for a port a container
+// listens on that the host publishes as itself (127.0.0.1:P:P), as a Docker
+// agent's: free on the host, and above the container's own ephemeral range
+// too. On a user-defined network, as every compose stack's is, Docker's
+// embedded DNS resolver listens in the container's namespace, on 127.0.0.11,
+// on a TCP and a UDP port the kernel drew from that range before the
+// container's process ran. A port the CLI found free on the host could be one
+// of them, and the process in the container then cannot bind it, nor move off
+// it: the CLI reaches it through the publish. A host whose range ends below
+// 60999, or reaches 65535, or is unknown (macOS, Windows), would otherwise
+// hand out ports inside it.
+func GetAvailableContainerPort() (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, containerEphemeralHi)
+}
+
+// availablePortAbove is GetAvailablePort with the host's ephemeral range read
+// by ephemeral (ephemeralPortRange's signature), whose candidates are above
+// floor too.
+func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32) (uint32, error) {
+	top := floor
+	if _, ephemeralHi, known := ephemeral(); known && ephemeralHi < 65535 && ephemeralHi > top {
+		top = ephemeralHi
+	}
+	if top > 0 {
+		lo := top + 1
 		span := 65536 - lo // inclusive of 65535
 		// A random start, not a scan from the bottom. Scanning upward returns
 		// the LOWEST free port every time, so two keploy processes started
@@ -1435,9 +1494,11 @@ func GetAvailablePort() (uint32, error) {
 	}
 
 	// Either the platform's ephemeral range is unknown, or every port above it
-	// is taken, or the range reaches 65535 leaving no space. Fall back to the
-	// OS assignment rather than failing: a port that may race is strictly
-	// better than no port at all, and this is the historical behaviour.
+	// is taken, or the range reaches 65535 leaving no space (with no floor).
+	// Fall back to the OS assignment rather than failing: a port that may race
+	// is strictly better than no port at all, and this is the historical
+	// behaviour. A container's port that then meets one of the resolver's
+	// fails the agent's start at its bind, as no port at all would.
 	listener, err := plaintcp.Listen(context.Background(), "tcp", ":0")
 	if err != nil {
 		return 0, fmt.Errorf("failed to find available port: %w", err)

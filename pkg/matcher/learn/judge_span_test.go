@@ -62,6 +62,32 @@ func TestJudgeSpan_AWorkerServeDoesNotStartTheSpanOfACheckAgainstTheTestsOwnReco
 	spanFrom(t, "after a start-up serve", s, ok, startServe)
 }
 
+// SetServeOwner's false says the store holds the recording another's
+// (OwnerOther), never that it cannot say (OwnerUnknown): the span of a call
+// checked against a worker:'s recording carries no test's begin
+// (Span.TestFrom), the bound CheckClockRead passes a read made earlier in
+// the test by, while that of a call checked against the test's own
+// recording carries it, in a server test and in a client test alike.
+func TestJudgeSpan_ABoolOwnersFalseIsAnothersRecording(t *testing.T) {
+	began := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	arrival := began.Add(30 * time.Millisecond)
+	for _, client := range []bool{false, true} {
+		tr := spanRun(t, "own-1", "own-2")
+		tr.SetClientTests(client)
+		tr.SetAppClockRun(func(time.Time) (time.Time, bool) { return time.Time{}, true })
+		tr.NewSetAt(began.Add(-time.Second))
+		tr.BeginAt(began)
+		tr.ServedMockAt(rec("own-1"), began.Add(10*time.Millisecond))
+		tr.ServedMockAt(rec("worker-1"), began.Add(20*time.Millisecond))
+		if s, ok := tr.LiveSpanOf(arrival, rec("own-2")); !ok || !s.TestFrom.Equal(began) {
+			t.Errorf("client %v, checked against the test's own recording: span %+v, %v; want it carrying the test's begin %v", client, s, ok, began)
+		}
+		if s, ok := tr.LiveSpanOf(arrival, rec("worker-2")); !ok || !s.TestFrom.IsZero() {
+			t.Errorf("client %v, checked against a worker: recording the store says is not the test's: span %+v, %v; want no test's begin", client, s, ok)
+		}
+	}
+}
+
 // The span of a test's own call never starts before the latest serve of any
 // flow made before the test began: a read the application kept from TestA
 // (its last serve a worker: one) and sent in TestB's first call is before

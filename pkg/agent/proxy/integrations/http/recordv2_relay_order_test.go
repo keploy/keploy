@@ -56,9 +56,15 @@ type relayedConn struct {
 	// grace is the relay's HalfCloseGrace (0: its default).
 	grace time.Duration
 	// stopBegun is whether the recording's stop has begun as the relay reads
-	// an end (Session.MarkPeerEndedStopping): set, as keploy record's client
-	// says it is stopping before it stops the application.
+	// an end (Session.MarkPeerEndedBy, EndAtStop): set, as keploy record's
+	// client says it is stopping before it stops the application.
 	stopBegun atomic.Bool
+	// clientEnd is the end that records no fault (a supervisor.NoFaultEnd)
+	// the relay reads the client's end as before the stop has begun, as the
+	// proxy's peerEndMarker reads it of the hooks: EndAtExit where they saw
+	// the client's process exit on its own, EndUnjudged where they cannot
+	// say how it released the connection (the macOS and Windows hooks).
+	clientEnd atomic.Uint32
 }
 
 // loopback returns the two ends of a loopback TCP connection.
@@ -123,7 +129,13 @@ func (c *relayedConn) startRelay(t *testing.T) {
 		dst = c.wrapDst(dst)
 	}
 	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped, PeerEnded: func(dir fakeconn.Direction, reset bool) {
-		c.sess.MarkPeerEndedStopping(dir, reset, c.stopBegun.Load())
+		why := supervisor.EndMayBeFault
+		if c.stopBegun.Load() {
+			why = supervisor.EndAtStop
+		} else if dir == fakeconn.FromClient {
+			why = supervisor.NoFaultEnd(c.clientEnd.Load())
+		}
+		c.sess.MarkPeerEndedBy(dir, reset, why)
 	}}, src, dst)
 	c.sess.ClientStream, c.sess.DestStream = r.ClientStream(), r.DestStream()
 	ctx, cancel := context.WithCancel(context.Background())

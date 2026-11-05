@@ -77,9 +77,12 @@ type composeInstr struct {
 	// recordedWindows are the recorded test windows that push sent.
 	recordedWindows []models.TestWindow
 	given           map[string][]models.GivenValue
-	// begins is what the last push of the tests' recorded begins sent, and
-	// beginsErr what it fails with.
+	// repeats are the repeated reads that push named.
+	repeats map[string][]models.RepeatRead
+	// begins and seeds are what the last push of the tests' recorded begins
+	// sent, and beginsErr what it fails with.
 	begins    map[string]time.Time
+	seeds     map[string]string
 	beginsErr error
 	// windows is what the agent answers the windows read with.
 	windows []models.ScopeWindow
@@ -221,17 +224,17 @@ func (f *composeInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, e
 func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) error { return nil }
 
 // PushProvenTable takes the per-test table, the pool slices, the worker
-// scope, the recorded test windows and the recorded givens
-// (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error {
-	f.table, f.pool, f.worker, f.recordedWindows, f.given = table, pool, worker, windows, given
+// scope, the recorded test windows, the recorded givens and the named
+// repeated reads (ProvenTablePusher), and keeps them.
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead) error {
+	f.table, f.pool, f.worker, f.recordedWindows, f.given, f.repeats = table, pool, worker, windows, given, repeats
 	return nil
 }
 
 // PushTestBegins takes the tests' recorded begins (TestBeginsPusher), or
 // fails with beginsErr.
-func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string) error {
-	f.begins = begins
+func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string, seeds map[string]string) error {
+	f.begins, f.seeds = begins, seeds
 	return f.beginsErr
 }
 

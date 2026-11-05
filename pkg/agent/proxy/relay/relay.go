@@ -125,6 +125,9 @@ type Relay struct {
 	// (io.EOF), so a look that finds the connection closed finds the FIN.
 	finMu                sync.Mutex
 	clientFIN, clientEOF atomic.Bool
+	// clientWriteErr is the error the first failed write to the client
+	// failed with (noteClientWriteFailed), for clientEnd.
+	clientWriteErr atomic.Pointer[error]
 	// clientStopped: destination chunks were refused, and no later one is
 	// teed. Set under verdictMu, read without it.
 	clientStopped atomic.Bool
@@ -624,6 +627,10 @@ func (r *Relay) run(ctx context.Context) error {
 	// for its answer (client_took.go): they are teed or refused before the
 	// tees close.
 	r.awaitClientVerdict()
+	// What the client's socket says once the relay is done with it, before
+	// the streams end and before the relay closes or resets it
+	// (client_end.go).
+	r.clientEnd(ctx)
 	if n := r.notTakenBytes.Load(); n > 0 && r.cfg.Logger != nil {
 		r.cfg.Logger.Debug("relay: the client had closed its side and did not take what the destination sent it after; "+
 			"the parser was not given those bytes (the client's stack acknowledged none of them)",
@@ -666,10 +673,13 @@ func (r *Relay) run(ctx context.Context) error {
 	r.teeD2C.waitDone()
 
 	// Close the FakeConns. Their streams have ended by now (each drain
-	// closed its channel as it returned), so a parser still reading takes
-	// what is left and then reads io.EOF, whether it gets there before this
-	// Close or after it: the Close changes nothing a reader sees. It closes
-	// FakeConn.Done, on which the tees, which have returned, selected.
+	// ended its stream as it returned: tee.endStream), but for one whose
+	// FakeConn the session closed before its end, which was left open. A
+	// parser still reading an ended stream takes what is left and then reads
+	// io.EOF; one reading a stream left open reads fakeconn.ErrClosed. Either
+	// way it reads the same whether it gets there before this Close or after
+	// it: the Close changes nothing a reader sees. It closes FakeConn.Done,
+	// on which the tees, which have returned, selected.
 	_ = r.clientStream.Close()
 	_ = r.destStream.Close()
 
@@ -1067,6 +1077,7 @@ func (r *Relay) forward(
 				// The write failure means the opposite peer has
 				// gone. Flag and return: the other forwarder will
 				// see EOF/error too.
+				r.noteClientWriteFailed(dir, werr)
 				if log != nil {
 					log.Debug("relay: forward write error",
 						zap.String("dir", dir.String()),

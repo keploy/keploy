@@ -110,6 +110,13 @@ type OutgoingOptions struct {
 	Synchronous bool
 	Mocking     bool // used to enable/disable mocking
 	SwapIDs     bool
+	// SrcInstance is the test worker instance the kernel stamped THIS
+	// connection with (0: none). Runtime, per-connection: json:"-" like
+	// SrcPid. It sits in the word the three bools above leave four bytes
+	// of: supervisor.Session holds these options by value, once per
+	// connection, and stays in the 640 B size class only so
+	// (TestASessionStaysInThe640ByteSizeClass).
+	SrcInstance uint32 `json:"-"`
 	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
 	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
 	// default), "passthrough" (dial the real upstream, don't persist), or

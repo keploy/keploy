@@ -18,14 +18,12 @@ import (
 	"syscall"
 	"time"
 
-	cli "github.com/docker/cli/cli"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
-	mobyclient "github.com/moby/moby/client"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -123,14 +121,8 @@ type App struct {
 	// their way out, the compose project's down -- is a movement of it,
 	// which that run's drains wait on (utils.DrainErrGroupProgress).
 	teardown atomic.Pointer[utils.TeardownScope]
-	// composeAPI is the Engine API client the compose library drives the
-	// stack through (docker.NewComposeAPIClient). Built with the first runner
-	// and kept for the App's life, as the docker client is: the runner is
-	// rebuilt for every test-set, and a client per runner would leave a
-	// connection pool behind each time. Guarded by composeRunnerMu.
-	composeAPI mobyclient.APIClient
 	// newComposeStack overrides how the runner is built. Production leaves it
-	// nil and gets the compose library; tests substitute a fake so the
+	// nil and gets the registered in-process runner; tests substitute a fake so the
 	// in-memory path keeps unit coverage without a docker daemon.
 	newComposeStack func(context.Context) (composeStack, error)
 	// --from-container only. sourceContainer is the user's own container, which
@@ -929,8 +921,10 @@ func (a *App) ComposeDown() {
 			a.logger.Debug("compose down finished with error (may be expected if containers already removed, or keploy cut a down that made no progress)",
 				zap.Error(err))
 		}
-	// Reached only where the library is not linked (darwin): same teardown,
-	// through `docker compose -f -` with the generated document on stdin.
+	// Reached whenever no in-process runner is registered (every keploy build;
+	// enterprise's on darwin, on windows and without composelib on linux):
+	// same teardown, through `docker compose -f -` with the generated document
+	// on stdin.
 	case len(a.composeContent) > 0:
 		a.logger.Debug("Running docker compose down using in-memory compose content")
 		args := []string{"-f", "-"}
@@ -1674,8 +1668,9 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 
 	var args []string
 	switch {
-	// Reached only where the library is not linked (darwin): the generated
-	// document goes to `docker compose -f -` on stdin, exactly as before.
+	// Reached whenever no in-process runner is registered (every keploy build;
+	// enterprise's on darwin, on windows and without composelib on linux): the
+	// generated document goes to `docker compose -f -` on stdin.
 	case len(a.composeContent) > 0:
 		args = []string{"-f", "-"}
 		args = append(args, a.composeProjectArgs(a.composeDownProject(ctx))...)
@@ -1713,22 +1708,21 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 // stack in-process.
 //
 // Two conditions, and both matter. composeContent is the seam: only a document
-// keploy generated itself is ever driven by the library. ComposeLibrarySupported
-// is false on darwin, which keeps the docker CLI that installed its engine
-// (see pkg/platform/docker/compose_backend_unsupported.go, which also covers
-// every build made WITHOUT -tags composelib). Every site that would use the
-// library asks this first and otherwise keeps the `docker compose -f -`
-// shell-out, which is what keploy did before the library existed and is always
-// available on a laptop.
+// keploy generated itself is ever driven in process. composeLibrarySupported
+// is whether the build registered an in-process runner
+// (docker.RegisterComposeStack); keploy itself registers none. Every site that
+// would use the runner asks this first and otherwise keeps the
+// `docker compose -f -` shell-out.
 func (a *App) useComposeLibrary() bool {
-	return len(a.composeContent) > 0 && composeLibrarySupported
+	return len(a.composeContent) > 0 && composeLibrarySupported()
 }
 
-// composeLibrarySupported is docker.ComposeLibrarySupported. It is a variable
-// only so a row can take the library path's decisions (recentAppLogs reading
-// the attach tail) in a build without -tags composelib, which is how OSS CI
-// builds; production never sets it.
-var composeLibrarySupported = docker.ComposeLibrarySupported
+// composeLibrarySupported reports whether this build registered an in-process
+// compose runner (docker.RegisterComposeStack). It is a variable only so a row
+// can take the library path's decisions (recentAppLogs reading the attach
+// tail) in a build that registers none, which is every OSS build; production
+// never sets it.
+var composeLibrarySupported = docker.ComposeStackRegistered
 
 // parseComposePSIDs extracts the container ids from `docker compose ps -aq`
 // output: one id per line, ignoring blank lines and surrounding whitespace.
@@ -1839,7 +1833,8 @@ func (a *App) composeServiceStatesOf(ctx context.Context, project string) []comp
 
 	var args []string
 	switch {
-	// Reached only where the library is not linked (darwin).
+	// Reached whenever no in-process runner is registered (every keploy build;
+	// enterprise's on darwin, on windows and without composelib on linux).
 	case len(a.composeContent) > 0:
 		args = []string{"-f", "-"}
 		args = append(args, a.composeProjectArgs(project)...)
@@ -2646,20 +2641,20 @@ func exitCodeFromErr(err error) int {
 		return 1
 	}
 	// The in-process compose path never runs a child process, so it cannot
-	// produce an *exec.ExitError. Compose reports the --exit-code-from status
-	// as cli.StatusError instead; without this branch every compose exit code
-	// would silently collapse to -1 and the wrapped runner's status would stop
-	// propagating.
-	var statusErr cli.StatusError
-	if errors.As(err, &statusErr) {
-		return statusErr.StatusCode
+	// produce an *exec.ExitError. Its runner reports the --exit-code-from
+	// status as a *docker.ComposeExitError instead; without this branch every
+	// compose exit code would silently collapse to -1 and the wrapped runner's
+	// status would stop propagating.
+	var stackErr *docker.ComposeExitError
+	if errors.As(err, &stackErr) {
+		return stackErr.Code
 	}
 	return -1
 }
 
 // composeCommand is a compose subcommand (args: what follows `docker compose`)
 // run through the active engine's compose command, for the teardown and probes
-// that run where the compose library is not linked.
+// that run where no in-process runner is registered.
 func composeCommand(ctx context.Context, args ...string) *exec.Cmd {
 	compose := engine.Active().Compose
 	return exec.CommandContext(ctx, compose[0], append(append([]string{}, compose[1:]...), args...)...)

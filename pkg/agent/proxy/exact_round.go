@@ -81,6 +81,10 @@ type roundState struct {
 	// drives a change between any two reads with them, never with sleeps.
 	onWait func()
 	onRead func(step string)
+	// onAnswerAgain is a test seam too: it runs as a held call is about to
+	// be answered once more (heldScope.AnswerRepeatRead), its staging
+	// checked, holding the round lock.
+	onAnswerAgain func()
 	// onSettled is a test seam too: it runs once a consume has settled and
 	// let the round lock go, before what it tells the replay
 	// (flagMockAsUsed).
@@ -1269,6 +1273,25 @@ func (h *heldScope) ConsumedTestMocks() []*models.Mock {
 	return h.heldOf(h.MockManager.ConsumedTestMocks())
 }
 
+// AnswerRepeatRead is the manager's (integrations.RepeatReadAnswerer) while
+// the staging is still h's call's: a call of a set the replay staged another
+// under is answered by no recording of it. The check and the answer are one
+// step under the round lock, which a staging holds as it moves its epoch
+// (bumpStagingEpoch), as a by-kind spend's are (spendByKindAt): a staging
+// lands before the check, and the call is refused, or after the answer.
+func (h *heldScope) AnswerRepeatRead(matched []*models.Mock) (integrations.RepeatReadAnswer, bool) {
+	m := h.MockManager
+	m.lockRound()
+	if ok, _ := m.guardLocked(&h.g, nil); !ok {
+		return integrations.RepeatReadAnswer{}, false
+	}
+	defer m.exact.round.mu.Unlock()
+	if f := m.exact.round.onAnswerAgain; f != nil {
+		f()
+	}
+	return m.AnswerRepeatRead(matched)
+}
+
 // FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while
 // the staging is still h's call's after the lookup: the answered log is the
 // staged set's, and recordings' names restart in each set, so a call of one
@@ -1280,6 +1303,18 @@ func (h *heldScope) FindAnsweredEarlier(kind models.Kind, keys []string, match f
 		return integrations.AnsweredCall{}, false
 	}
 	return a, ok
+}
+
+// AnsweredRedacting is the manager's (integrations.AnsweredRedactingReader)
+// while the staging is still h's call's after the read; once another set was
+// staged under the call, the log is that set's, and the call's recordings are
+// not known: none, and not complete, so the miss is redacted by every place.
+func (h *heldScope) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
+	mocks, complete := h.MockManager.AnsweredRedacting(kind)
+	if h.moved() {
+		return nil, false
+	}
+	return mocks, complete
 }
 
 func (h *heldScope) ExactTakenCandidates(kind models.Kind) []*models.Mock {

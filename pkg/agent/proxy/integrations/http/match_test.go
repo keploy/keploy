@@ -34,6 +34,12 @@ type mockMemDb struct {
 	cursors                 map[string]int // backs MockCursorIndex/AdvanceMockCursor for cursor tests
 }
 
+// AnsweredRedacting makes the double a store that tells the set's answered
+// recordings that redacted something (integrations.AnsweredRedactingReader),
+// as the agent's does: it takes none out of its reads, so it tells none, all
+// it has. A store that does not tell them redacts a miss whole.
+func (m *mockMemDb) AnsweredRedacting(models.Kind) ([]*models.Mock, bool) { return nil, true }
+
 // MockCursorIndex / AdvanceMockCursor give the double the optional
 // stateful-cursor capability (peek + commit) so cursorPick can advance through
 // identical-request recordings in tests.

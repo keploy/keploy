@@ -22,33 +22,43 @@ import (
 // that holds only them and that no match can consume, so one definition of
 // "the same call" serves both the answer and this verdict.
 func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (int, time.Time) {
+	n, first, _ := h.extraCallOf(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
+	return n, first
+}
+
+// extraCallOf is extraCall, and the test's answered mocks the request
+// matches each on its own (matched): the recordings of the call it is one
+// more of, which a repeated read is answered again from
+// (integrations.AnswerRepeatRead). matched may be empty where n is not 0:
+// the request matches the answered mocks together and none alone.
+func (h *HTTP) extraCallOf(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (int, time.Time, []*models.Mock) {
 	er, ok := mockDb.(integrations.ExactConsumedReader)
 	if !ok {
-		return 0, time.Time{}
+		return 0, time.Time{}, nil
 	}
 	answered := FilterHTTPMocks(er.ConsumedTestMocks())
 	if len(answered) == 0 {
-		return 0, time.Time{}
+		return 0, time.Time{}, nil
 	}
 	dry := h.answeredMatch(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
 	if !dry(answered) {
-		return 0, time.Time{}
+		return 0, time.Time{}, nil
 	}
 	// How often the test recorded the call: each answered mock the call
 	// matches on its own (recordings of one call may differ where its
 	// variables sit), and the earliest of them.
-	n := 0
+	var matched []*models.Mock
 	var first time.Time
 	for _, a := range answered {
 		if !dry([]*models.Mock{a}) {
 			continue
 		}
-		n++
+		matched = append(matched, a)
 		if at := a.Spec.ReqTimestampMock; !at.IsZero() && (first.IsZero() || at.Before(first)) {
 			first = at
 		}
 	}
-	return max(n, 1), first
+	return max(len(matched), 1), first, matched
 }
 
 // ownCall reports whether the request is one of the open test's own calls

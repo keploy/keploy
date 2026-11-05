@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,7 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 				}
 			}
 			said := logs.FilterMessageSnippet("tests made a call that another test recorded")
+			require.Zero(t, logs.FilterMessageSnippet("order-dependent").Len(), "no test of a single test process is order-dependent")
 			if !on {
 				require.Len(t, got, len(misses), "the windows' misses are on the receipt")
 				for _, line := range got {
@@ -87,4 +89,68 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 			require.Empty(t, instr.windows[1].Evidence.Misses[0].RecordedIn)
 		})
 	}
+}
+
+// A test of a run's parallel test workers that made a call another test
+// recorded (a token fetch its worker makes once, in whichever of its tests
+// it runs first) fails as order-dependent: its receipt's miss says so beside
+// the test that recorded it, and the replay names the call and both tests
+// once, apart from a single-worker run's calls, with the remedy for workers.
+// A worker's miss that is no other test's recording, and a single test
+// process's that is, are not order-dependent.
+func TestAWorkersCallAnotherTestRecordedFailsAsOrderDependent(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\n    - id: o::TestB\n      dir: o\n      mocks:\n        - name: mock-1\n    - id: o::TestC\n      dir: o\n      mocks:\n        - name: mock-2\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-1"}, {Name: "mock-2"}}
+	token := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /token", Destination: "auth:80", NotOwned: true, ClosestMock: "mock-0"}
+	changed := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /changed", Destination: "api:80", ClosestMock: "mock-1"}
+	instr.windows = []models.ScopeWindow{
+		{Name: "o::TestA", Instance: 1, Outcome: models.ScopeOutcomePassed},
+		{Name: "o::TestB", Instance: 2, Outcome: models.ScopeOutcomeFailed, Evidence: &models.ScopeEvidence{Misses: []models.UnmatchedCall{token, changed}}},
+		// A single test process's test (no instance) beside them, as a
+		// window from before the workers claimed would be.
+		{Name: "o::TestC", Outcome: models.ScopeOutcomeFailed, Evidence: &models.ScopeEvidence{Misses: []models.UnmatchedCall{token}}},
+	}
+	cfg := instrConfig(instr, utils.Native, "go test -p 2 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	core, logs := observer.New(zap.WarnLevel)
+	_ = New(zap.New(core), instr, named("mock-0", "mock-1", "mock-2"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	tests, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.NotNil(t, tests, "the replay writes what each test did")
+	var got []string
+	for _, tr := range tests.Tests {
+		if tr.Evidence == nil {
+			continue
+		}
+		for _, c := range tr.Evidence.Misses {
+			got = append(got, fmt.Sprintf("%s %s -> %s order-dependent=%v", tr.Name, c.ActualSummary, c.RecordedIn, c.OrderDependent))
+		}
+	}
+	require.Equal(t, []string{
+		"o::TestB POST /token -> o::TestA order-dependent=true",
+		"o::TestB GET /changed ->  order-dependent=false",
+		"o::TestC POST /token -> o::TestA order-dependent=false",
+	}, got, "only a worker's test's call that another test recorded is order-dependent")
+	for _, tr := range tests.Tests {
+		if tr.Name == "o::TestB" {
+			require.Equal(t, models.ScopeOutcomeFailed, tr.Outcome, "an order-dependent test fails")
+		}
+	}
+	dep := logs.FilterMessageSnippet("fails as order-dependent")
+	require.Equal(t, 1, dep.Len(), "the replay says once which workers' calls are order-dependent")
+	require.Equal(t, []any{"o::TestB: POST /token (mock-0, recorded in o::TestA)"}, dep.All()[0].ContextMap()["calls"])
+	require.Contains(t, dep.All()[0].ContextMap()["next_step"], "record and replay with one worker")
+	other := logs.FilterMessageSnippet("tests made a call that another test recorded")
+	require.Equal(t, 1, other.Len(), "a single test process's call another test recorded is said as before")
+	require.Equal(t, []any{"o::TestC: POST /token (mock-0, recorded in o::TestA)"}, other.All()[0].ContextMap()["calls"])
+	require.False(t, instr.windows[1].Evidence.Misses[0].OrderDependent, "the agent's windows are read, never written")
 }

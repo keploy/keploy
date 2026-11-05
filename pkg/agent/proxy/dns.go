@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -215,8 +216,18 @@ const (
 	// Entries expire automatically after this duration.
 	dnsCacheTTL = 30 * time.Second
 
-	// recordedDNSMocksMaxSize is the maximum number of entries in the DNS deduplication tracker.
+	// recordedDNSMocksMaxSize is the maximum number of questions with a
+	// resolved answer in the DNS deduplication tracker.
 	recordedDNSMocksMaxSize = 1024
+	// recordedDNSNegativesMaxSize is the maximum number of negative answers,
+	// NXDOMAIN or NODATA, in the DNS deduplication tracker. An app asks many
+	// more names that do not exist than names that do: under k8s ndots:5 an
+	// external name is asked under each of four search domains first, so its
+	// A and AAAA questions add 8 NXDOMAINs, and its AAAA a NODATA, to its one
+	// resolved answer. Four times the resolved bound holds those 9 negative
+	// answers of 455 names, near the 512 names (A and AAAA) the one shared
+	// tracker of 1024 held before negative answers were recorded.
+	recordedDNSNegativesMaxSize = 4 * recordedDNSMocksMaxSize
 	// recordedDNSMocksTTL is the TTL for recorded DNS mock entries.
 	// Recording sessions typically don't last longer than this.
 	recordedDNSMocksTTL = 30 * time.Minute
@@ -242,12 +253,10 @@ func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 // shouldCacheDNSResponse reports whether a DNS resolution result is
 // eligible for the per-proxy dnsCache.
 //
-// Only real upstream responses are cached (FromUpstream == true), in
-// both record and test modes. Replayed-mock responses and
-// synthetic/fallback responses are intentionally NOT cached: mock
-// responses already come from an in-memory store and adding another
-// layer only complicates invalidation, and caching a fallback would
-// pin it for 30 s after transient upstream failures.
+// Only answers marked FromUpstream are cached, in both record and test
+// modes: a resolver's answer, and at replay a recorded mock's answer
+// (dnsMockAnswer). Synthetic/fallback responses are NOT cached: caching
+// a fallback would pin it for 30 s after transient upstream failures.
 //
 // Record-mode caching is safe against duplicate DNS-mock emission
 // because a cache hit short-circuits before resolveUncachedDNSResponse
@@ -266,9 +275,45 @@ func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
 	return mode == models.MODE_TEST || mode == models.MODE_RECORD
 }
 
-// newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
-func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
-	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
+// dnsRecordDedupe holds the questions recordDNSMock has recorded an answer of
+// each kind (dnsAnswerRank) for, so each is recorded once while it stays here.
+// Resolved answers and negative ones, NXDOMAIN and NODATA, are kept in bounded,
+// TTL-expiring trackers of their own: the many names an app asks that do not
+// exist (search-list expansions) never evict a resolved answer, which would be
+// recorded again each time its question leaves the dnsCache.
+type dnsRecordDedupe struct {
+	resolved *expirable.LRU[string, bool]
+	negative *expirable.LRU[string, bool]
+}
+
+// newRecordedDNSMocksCache creates the bounded, TTL-expiring trackers for DNS
+// mock deduplication.
+func newRecordedDNSMocksCache() *dnsRecordDedupe {
+	return &dnsRecordDedupe{
+		resolved: expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL),
+		negative: expirable.NewLRU[string, bool](recordedDNSNegativesMaxSize, nil, recordedDNSMocksTTL),
+	}
+}
+
+// firstAnswer reports whether question's answer of kind rank is not held yet,
+// holding it when so, with the key it is held under. Non-atomic Get-then-Add:
+// two concurrent first answers can both record, as before.
+func (d *dnsRecordDedupe) firstAnswer(question dns.Question, rank int) (string, bool) {
+	tracker, key := d.resolved, generateDNSDedupeKey(question)
+	if rank != dnsRankResolved {
+		tracker, key = d.negative, key+dnsDedupeSuffix[rank]
+	}
+	if _, held := tracker.Get(key); held {
+		return key, false
+	}
+	tracker.Add(key, true)
+	return key, true
+}
+
+// Purge empties both trackers in place (see ResetRecordedDNSMocks).
+func (d *dnsRecordDedupe) Purge() {
+	d.resolved.Purge()
+	d.negative.Purge()
 }
 
 // newNodataRelayLogCache creates the bounded, TTL-expiring tracker that dedupes
@@ -436,11 +481,13 @@ func udpAnswerSize(r *dns.Msg) int {
 // resolver produces while walking its search list past an already-qualified
 // name (ndots:5 is the Kubernetes default).
 //
-// Such a name cannot resolve, so capture never recorded it: both capture
-// paths skip non-Success rcodes deliberately — recordDNSMock below, and
-// enterprise pkg/agent/proxy/dns_capture.go. Its absence at replay is
-// therefore expected, and the miss report's own advice — "re-record to
-// capture DNS queries" — can never succeed for it.
+// Such a name cannot resolve. When the app asked it while keploy's DNS server
+// recorded, its NXDOMAIN is a mock (recordDNSMock below) and the replay serves
+// it. One with no mock was not asked then, or its recording holds no NXDOMAIN
+// answers: one made before keploy recorded them, or by enterprise
+// pkg/agent/proxy/dns_capture.go, which keeps NOERROR answers only. Its
+// absence is a name that does not exist, not a gap in what the app depends
+// on, so a test does not fail over it.
 //
 // Decided from the name alone on purpose. #4565 suppresses the same class of
 // report but only on a definitive NXDOMAIN from upstream, which makes the
@@ -478,7 +525,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// Use recorded DNS mocks only.
 		if mockingEnabled {
 			if resp, mocked := p.getMockedDNSResponse(question); mocked {
-				return resp
+				return p.replayDNSAnswer(question, resp)
 			}
 		}
 		// Mock miss (or mocking disabled). Before falling back to a
@@ -517,9 +564,10 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// fallback below, as does every name a container or cluster
 		// network does not own.
 		// Set when upstream answers authoritatively that the name does not
-		// exist. Such a name has no mock and never could: the record side
-		// deliberately skips non-Success rcodes, so its absence is correct
-		// rather than a recording gap. See the mock-miss report below.
+		// exist. Such a name has no mock to miss: a recording that asked it
+		// holds its NXDOMAIN, served above, so one that reaches here was not
+		// asked while recording or comes from a recording that holds no
+		// NXDOMAIN answers. See the mock-miss report below.
 		upstreamSaysNameDoesNotExist := false
 		// keploy never reports the gRPC service-config probe or a redundant
 		// search-list expansion as a miss (both below), so none of the
@@ -679,10 +727,10 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			return p.defaultDNSResponse(question)
 		}
 		// Skipped when upstream said NXDOMAIN: there is no mock to be missing.
-		// The record side deliberately does not store non-Success rcodes, so a
-		// name that does not resolve was never recordable, and the report's
-		// own advice -- "re-record to capture DNS queries" -- can never
-		// succeed for it. Kubernetes resolvers reach here routinely: with
+		// A recording that asked the name holds its NXDOMAIN and the replay
+		// served it above, so a name that reaches here does not exist and the
+		// app did not ask it while recording, or its recording holds no
+		// NXDOMAIN answers. Kubernetes resolvers reach here routinely: with
 		// ndots:5 a name like appdb.ns.svc.cluster.local is first tried as
 		// appdb.ns.svc.cluster.local.ns.svc.cluster.local, which NXDOMAINs by
 		// design.
@@ -696,14 +744,14 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		//
 		// The app is unaffected either way -- it still receives the synthetic
 		// NOERROR steer below (issue #2006). Only the spurious verdict goes.
-		// A redundant search expansion is unrecordable by construction, so it
+		// A redundant search expansion cannot resolve by construction, so it
 		// is filtered here rather than on upstream's verdict — that keeps the
 		// report from depending on whether the resolver answered at all.
 		if redundantExpansion {
 			// The only field-visible trace that the name-shape gate fired.
 			// Without it a suppressed report and a report that never reached
 			// the gate look identical in the agent log.
-			p.logger.Debug("DNS query not reported as a miss: redundant search-list expansion, unrecordable by construction",
+			p.logger.Debug("DNS query not reported as a miss: redundant search-list expansion, a name that cannot resolve",
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.Strings("search", p.dnsSearch))
@@ -729,7 +777,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					NextSteps:     "DNS mocks may be missing. Re-record to capture DNS queries.",
 				},
 			}
-			p.SendError(proxyErr)
+			p.sendDNSMiss(proxyErr, question)
 		}
 		return p.defaultDNSResponse(question)
 
@@ -874,51 +922,80 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 		return dnsCacheEntry{}, false
 	}
 
-	if _, resp := findDNSMock(filteredMocks, question, p.logger); resp.Msg != nil {
-		return resp, true
+	// A question may hold up to three recorded answers, one of each kind
+	// (recordDNSMock): resolved, NODATA and NXDOMAIN. The replay serves the
+	// best (dnsMockRank), the first recorded of that kind, filtered mocks
+	// before unfiltered ones. Only that one's records are decoded whole.
+	var best *models.Mock
+	bestRank := -1
+	for _, mocks := range [][]*models.Mock{filteredMocks, unfilteredMocks} {
+		for _, mock := range mocks {
+			if mock == nil || !dnsRequestMatches(mock.Spec.DNSReq, question) {
+				continue
+			}
+			if rank := dnsMockRank(mock.Spec.DNSResp); rank > bestRank {
+				best, bestRank = mock, rank
+			}
+		}
 	}
-
-	if _, resp := findDNSMock(unfilteredMocks, question, p.logger); resp.Msg != nil {
-		return resp, true
+	if best == nil {
+		return dnsCacheEntry{}, false
 	}
-
-	return dnsCacheEntry{}, false
+	return dnsMockAnswer(best, p.logger), true
 }
 
-func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger) (*models.Mock, dnsCacheEntry) {
-	for _, mock := range mocks {
-		if mock == nil || mock.Spec.DNSReq == nil {
-			continue
-		}
-		if !dnsRequestMatches(mock.Spec.DNSReq, question) {
-			continue
-		}
-
-		resp := dnsCacheEntry{
-			Msg: &dns.Msg{
-				MsgHdr: dns.MsgHdr{
-					Rcode:              dns.RcodeSuccess,
-					Authoritative:      true,
-					RecursionAvailable: true,
-				},
-			},
-			FromUpstream: true,
-		}
-
-		if mock.Spec.DNSResp != nil {
-			resp.Rcode = mock.Spec.DNSResp.Rcode
-			resp.Authoritative = mock.Spec.DNSResp.Authoritative
-			resp.RecursionAvailable = mock.Spec.DNSResp.RecursionAvailable
-			resp.Truncated = mock.Spec.DNSResp.Truncated
-
-			resp.Answer = decodeDNSRRs(logger, mock.Spec.DNSResp.Answers)
-			resp.Ns = decodeDNSRRs(logger, mock.Spec.DNSResp.Ns)
-			resp.Extra = decodeDNSRRs(logger, mock.Spec.DNSResp.Extra)
-		}
-
-		return mock, resp
+// replayDNSAnswer is a replay's answer to question, whose best recorded answer
+// is recorded (getMockedDNSResponse). A negative one, NODATA or NXDOMAIN, says
+// what the name was while recording, as for a container or service not up
+// yet. So for a name the replay's own network owns, its resolver is asked
+// first (inNetworkServers), and its answer is served when it ranks above the
+// recorded one: a container that exists at replay resolves, as it did before
+// keploy recorded negative answers. Every other name, and every name of a
+// native replay, which has no in-network resolver, gets the recorded answer,
+// as does an owned name the network does not resolve better or whose resolver
+// does not answer.
+func (p *Proxy) replayDNSAnswer(question dns.Question, recorded dnsCacheEntry) dnsCacheEntry {
+	rank := dnsAnswerRank(recorded.Msg)
+	if rank == dnsRankResolved {
+		return recorded
 	}
-	return nil, dnsCacheEntry{}
+	live, err := p.forwardDNS(question, p.inNetworkServers(question.Name, question.Qtype))
+	if err != nil || dnsAnswerRank(live) <= rank {
+		return recorded
+	}
+	p.logger.Debug("DNS answer recorded as negative; the replay's own network answers the name better, serving its answer",
+		zap.String("query", question.Name),
+		zap.String("qtype", dns.TypeToString[question.Qtype]),
+		zap.String("recorded_rcode", dns.RcodeToString[recorded.Rcode]),
+		zap.Int("answers", len(live.Answer)))
+	return dnsCacheEntry{Msg: live, FromUpstream: true}
+}
+
+// dnsMockAnswer is the answer recorded in mock, a DNS mock.
+func dnsMockAnswer(mock *models.Mock, logger *zap.Logger) dnsCacheEntry {
+	resp := dnsCacheEntry{
+		Msg: &dns.Msg{
+			MsgHdr: dns.MsgHdr{
+				Rcode:              dns.RcodeSuccess,
+				Authoritative:      true,
+				RecursionAvailable: true,
+			},
+		},
+		FromUpstream: true,
+	}
+
+	if mock.Spec.DNSResp != nil {
+		resp.Rcode = mock.Spec.DNSResp.Rcode
+		resp.Authoritative = mock.Spec.DNSResp.Authoritative
+		resp.RecursionAvailable = mock.Spec.DNSResp.RecursionAvailable
+		resp.Truncated = mock.Spec.DNSResp.Truncated
+
+		resp.Answer = decodeDNSRRs(logger, mock.Spec.DNSResp.Answers)
+		resp.Ns = decodeDNSRRs(logger, mock.Spec.DNSResp.Ns)
+		resp.Extra = decodeDNSRRs(logger, mock.Spec.DNSResp.Extra)
+	}
+
+	return resp
 }
 
 func dnsRequestMatches(recorded *models.DNSReq, question dns.Question) bool {
@@ -940,16 +1017,29 @@ func decodeDNSRRs(logger *zap.Logger, rrs []string) []dns.RR {
 	}
 	decoded := make([]dns.RR, 0, len(rrs))
 	for _, raw := range rrs {
-		rr, err := dns.NewRR(raw)
-		if err != nil {
-			if logger != nil {
-				logger.Debug("failed to parse dns rr", zap.String("rr", raw), zap.Error(err))
-			}
-			continue
+		if rr, ok := decodeDNSRR(logger, raw); ok {
+			decoded = append(decoded, rr)
 		}
-		decoded = append(decoded, rr)
 	}
 	return decoded
+}
+
+// decodeDNSRR is raw, a record recorded in zone format (encodeDNSRRs),
+// decoded; ok is false for a string that does not parse or that holds no
+// record (an empty line or a comment, which dns.NewRR returns as a nil
+// record), as a hand edit can leave a mock. decodeDNSRRs leaves such a string
+// out of the answer served. Served, its nil record crashed keploy's agent: a
+// nil pointer dereference when the replay copied the answer into its
+// dnsCache.
+func decodeDNSRR(logger *zap.Logger, raw string) (rr dns.RR, ok bool) {
+	rr, err := dns.NewRR(raw)
+	if err != nil || rr == nil {
+		if logger != nil {
+			logger.Debug("failed to parse dns rr", zap.String("rr", raw), zap.Error(err))
+		}
+		return nil, false
+	}
+	return rr, true
 }
 
 func encodeDNSRRs(rrs []dns.RR) []string {
@@ -965,6 +1055,79 @@ func encodeDNSRRs(rrs []dns.RR) []string {
 	}
 	return encoded
 }
+
+// recordableDNSRcode reports whether a resolver's answer with rcode is
+// recorded as a DNS mock: NOERROR, with its records or with none (NODATA: the
+// name has no record of the type), and NXDOMAIN (the name does not exist).
+// Each is what the app got, with the SOA whose TTL tells its resolver how long
+// to keep a negative verdict, and an isolated replay can only serve what was
+// recorded: an app that asks for AAAA of a host /etc/hosts holds as IPv4 only
+// gets NXDOMAIN at every request, and each was a mock miss at replay.
+//
+// SERVFAIL, REFUSED, NOTIMP, FORMERR and the rest are not recorded: they say
+// the resolver could not or would not answer at that moment, nothing about
+// the name, so serving one at replay would fail the app on a failure that was
+// the resolver's.
+func recordableDNSRcode(rcode int) bool {
+	return rcode == dns.RcodeSuccess || rcode == dns.RcodeNameError
+}
+
+// The kinds of a resolver's answer to a question, in the order a replay
+// prefers them (getMockedDNSResponse): NXDOMAIN, the name does not exist;
+// NODATA, NOERROR with no answer, the name exists with no record of the type;
+// resolved, NOERROR with records. A name's answers can change while recording
+// (a service not up yet), and the better kind is what the app got once the
+// name existed: musl's getaddrinfo fails a name whose AAAA question answers
+// NXDOMAIN even when its A question resolved, where NODATA lets it resolve.
+const (
+	dnsRankNXDOMAIN = iota
+	dnsRankNODATA
+	dnsRankResolved
+)
+
+// dnsAnswerRank is m's kind.
+func dnsAnswerRank(m *dns.Msg) int {
+	return dnsRank(m.Rcode, len(m.Answer))
+}
+
+// dnsMockRank is the kind of the answer recorded in resp as dnsMockAnswer
+// serves it: its rcode, and whether one of its answer records decodes, since
+// decodeDNSRRs leaves out the ones that do not. So a mock whose answer
+// records all fail to decode, which keploy never writes but a hand edit can,
+// ranks as the NODATA it is served as, under a valid resolved answer recorded
+// after it. Answer records are decoded up to the first that decodes; the
+// served mock's records are decoded whole by dnsMockAnswer. A mock with no
+// response is served as NOERROR with no answer: NODATA.
+func dnsMockRank(resp *models.DNSResp) int {
+	if resp == nil {
+		return dnsRankNODATA
+	}
+	answers := 0
+	if slices.ContainsFunc(resp.Answers, func(raw string) bool {
+		_, ok := decodeDNSRR(nil, raw)
+		return ok
+	}) {
+		answers = 1
+	}
+	return dnsRank(resp.Rcode, answers)
+}
+
+// dnsRank is the kind of an answer with rcode and that many answer records.
+// NXDOMAIN is negative even with records (a CNAME to a name that does not
+// exist). Another rcode, which keploy does not record, ranks with NXDOMAIN.
+func dnsRank(rcode, answers int) int {
+	if rcode != dns.RcodeSuccess {
+		return dnsRankNXDOMAIN
+	}
+	if answers == 0 {
+		return dnsRankNODATA
+	}
+	return dnsRankResolved
+}
+
+// dnsDedupeSuffix keeps a question's negative answers of each kind apart in
+// recordedDNSMocks, so each kind is recorded once.
+var dnsDedupeSuffix = [...]string{dnsRankNXDOMAIN: ":nxdomain", dnsRankNODATA: ":nodata", dnsRankResolved: ""}
 
 // generateDNSDedupeKey creates a unique key for DNS mock deduplication.
 // The key is based solely on the DNS question (name + type + class).
@@ -1083,13 +1246,12 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		return resp, nil
 	}
 
-	// Do not record failed DNS responses (e.g., NXDOMAIN, SERVFAIL, REFUSED) in mocks.yaml.
-	// These are often noise from search domain expansion or external transient issues.
-	// Silent on this path: negatives are not deduped via recordedDNSMocks (we only
-	// add successful responses there), so they re-enter recordDNSMock every 30s
-	// once the dnsCache TTL elapses. A debug log here would fill the agent log
-	// for the full lifetime of a recording session against a chatty client.
-	if in.Rcode != dns.RcodeSuccess {
+	// Only the resolver's answers about the name are recorded (see
+	// recordableDNSRcode). A failure to answer is not: it re-enters
+	// recordDNSMock every 30s once the dnsCache TTL elapses, so this path is
+	// silent, or it would fill the agent log for a whole recording against a
+	// chatty client.
+	if !recordableDNSRcode(in.Rcode) {
 		return resp, nil
 	}
 
@@ -1099,13 +1261,16 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// Silent on the dedup-hit path: this fires on every cache miss after
 	// the first record (every 30s once the dnsCache TTL elapses) for the
 	// duration of the dedup tracker TTL — a debug log here would burst
-	// just like the negative-rcode path above.
-	dedupeKey := generateDNSDedupeKey(question)
-	if _, alreadyRecorded := p.recordedDNSMocks.Get(dedupeKey); alreadyRecorded {
+	// just like the resolver-failure path above.
+	//
+	// Each kind of answer (dnsAnswerRank) is recorded once: a name that did
+	// not resolve at first (a service not up yet) and did later keeps its
+	// later answer, which a replay serves before the earlier one
+	// (getMockedDNSResponse).
+	dedupeKey, first := p.recordedDNSMocks.firstAnswer(question, dnsAnswerRank(in))
+	if !first {
 		return resp, nil
 	}
-	// Mark as recorded
-	p.recordedDNSMocks.Add(dedupeKey, true)
 	// ============================================
 
 	resTime := time.Now().UTC()
@@ -1138,8 +1303,8 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		},
 	}
 
-	// One log per UNIQUE (name, qtype) — bounded by recordedDNSMocksMaxSize
-	// (1024) so this is naturally rate-limited. Keep counts only; full
+	// One log per UNIQUE (name, qtype, kind) — bounded by the dedupe
+	// trackers' sizes so this is naturally rate-limited. Keep counts only; full
 	// answer/ns/extra string dumps would balloon log size for chatty clients.
 	p.logger.Debug("Recording new DNS mock",
 		append(dnsQuestionFields(question),

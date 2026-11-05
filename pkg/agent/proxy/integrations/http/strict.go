@@ -233,10 +233,15 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 			phase = models.MatchPhaseSchema
 		}
 		for _, f := range closestDiffs {
-			if f.why != "" {
+			switch {
+			case f.clock:
 				// A read of the application's clock the closest recording
 				// learned that this call does not hold: why, legibly.
 				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
+			case f.why != "":
+				// A field keploy.yml's noise lets vary only within
+				// patterns, one side's value outside them.
+				h.Logger.Warn("a keploy.yml noise pattern does not excuse a field", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
 			}
 		}
 		diag = &matchDiag{phase: phase, candidates: len(comparedPool), pool: comparedPool, live: &live, closest: closest, differs: closestDiffs}
@@ -402,6 +407,8 @@ var strictDiffs atomic.Int64
 // strictCompare compares the live request with each recording of pool, in
 // order (strictDiff): fits are those that are this very call, and near is
 // the closest of the others (closerThan), its mock nil when there is none.
+// A recording of another route is ranked and named by the walk's fields
+// alone (walkOnly).
 func strictCompare(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise) (fits []*models.Mock, near nearest, err error) {
 	for _, m := range pool {
 		if ctx.Err() != nil {
@@ -412,18 +419,49 @@ func strictCompare(ctx context.Context, input *req, live destination, pool []*mo
 			fits = append(fits, m)
 			continue
 		}
-		if c := (nearest{mock: m, diffs: d, route: routeMatches(d)}); c.closerThan(near) {
+		c := nearest{mock: m, diffs: d, route: routeMatches(d)}
+		if !c.route {
+			// A recording of another route (method, destination or path)
+			// is not this call: a read of the clock it learned is no read
+			// this call made, and checking it would blame the clock for a
+			// call no recording is. It is compared by the walk alone, which
+			// excuses a place learned as a read of the clock as it does one
+			// learned as noise, and no field of it is refused for a reason
+			// of its own.
+			c.diffs = walkOnly(d)
+		}
+		if c.closerThan(near) {
 			near = c
 		}
 	}
 	return fits, near, nil
 }
 
+// walkOnly are the fields of fields the walk found differing, not the
+// refused reads of the clock (strictField.clock), each with only its name
+// and how it differs (diff, shape): no reason of any kind a field may carry,
+// nor what kind it is.
+func walkOnly(fields []strictField) []strictField {
+	out := make([]strictField, 0, len(fields))
+	for _, f := range fields {
+		if !f.clock {
+			out = append(out, strictField{diff: f.diff, shape: f.shape})
+		}
+	}
+	return out
+}
+
 // routeMatches reports whether a recording that differs by diffs is of the
 // live request's route: the same method, destination (host or container)
-// and path.
+// and path. A refused read of the application's clock (strictField.clock)
+// is no part of the route, though one in a path segment is named "path":
+// the walk excused that segment, so it is of the call's route, and its
+// refusal keeps its reason.
 func routeMatches(diffs []strictField) bool {
 	for _, d := range diffs {
+		if d.clock {
+			continue
+		}
 		switch d.diff.Path {
 		case "method", "host", "container", "path":
 			return false
@@ -578,25 +616,56 @@ func statefulBand(first *models.Mock, group []*models.Mock, own func(*models.Moc
 // which is what keploy's reason for the failed test names ("(body.amount
 // differs)"). Only the fields the strict comparison found differ are named:
 // a field it excused, or found equal, is not.
-func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKey string, diag *matchDiag, comparedDests []string, phase string, candidateCount int) *models.MockMismatchReport {
+//
+// places are those the report is redacted by: the pool's (poolPlaces).
+func strictMismatchReport(request *http.Request, liveBody []byte, dest string, diag *matchDiag, comparedDests []string, phase string, candidateCount int, places redactedPlaces) *models.MockMismatchReport {
 	closest := diag.closest
 	diffs := fieldDiffs(diag.differs)
 	differs := differsOf(diag.differs)
-	redactFieldDiffs(diffs, closest.Noise)
-	r := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+	redactFieldDiffs(diffs, places, request.URL.EscapedPath())
+	r := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 		WithDestination(dest).
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closest.Name, diffs).
+		WithGuarded(guardedPaths(diag.differs)...).
+		WithoutNoise(payloadHashPaths()...).
 		WithRenderedRequests(
 			renderMockRequest(closest.Spec.HTTPReq, closest.Noise),
-			renderLiveRequest(request, liveBody, closest.Noise),
+			renderLiveRequest(request, liveBody, places),
 		).Build()
 	if r != nil {
 		r.Differs = differs
 		r.FieldReasons = reasonsOf(diag.differs)
 	}
 	return r
+}
+
+// guardedPaths are the report paths of fields keploy.yml's noise guards with
+// patterns that a side's value is outside of: those with a reason that is no
+// refused read of the application's clock (strictField.why).
+func guardedPaths(fields []strictField) []string {
+	var out []string
+	for _, f := range fields {
+		if f.why != "" && !f.clock {
+			out = append(out, f.diff.Path)
+		}
+	}
+	return out
+}
+
+// payloadHashPaths are the report paths of the headers that carry a hash of
+// the request's body (models.PayloadHashHeaders), for the hint to offer no
+// keploy.yml noise for. Under the proven switch each is compared with the body
+// the client sent (samePayloadHash); declaring it noise would stop that
+// comparison for every recording. One keploy.yml serves both modes, so
+// neither offers it.
+func payloadHashPaths() []string {
+	out := make([]string, len(models.PayloadHashHeaders))
+	for i, h := range models.PayloadHashHeaders {
+		out[i] = "header." + h
+	}
+	return out
 }
 
 // reasonsOf are, of fields, those refused for a reason of their own (a

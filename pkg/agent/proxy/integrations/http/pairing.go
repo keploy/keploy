@@ -261,14 +261,16 @@ func sqsPoll(input *req) bool {
 func reportPairing(ctx context.Context, input *req, x *models.Mock, a integrations.AnsweredCall, repeat bool) {
 	path, dest := "/", input.header.Get("Host")
 	if input.url != nil {
-		if input.url.Path != "" {
-			path = input.url.Path
+		if escaped := input.url.EscapedPath(); escaped != "" {
+			path = escaped
 		}
 		if dest == "" {
 			dest = input.url.Host
 		}
 	}
-	r := mismatch.NewReport(mismatch.ProtocolHTTP, input.method+" "+path).WithDestination(dest).Build()
+	// The path shows the segments x redacted redacted: the call sent its
+	// secret there.
+	r := mismatch.NewReport(mismatch.ProtocolHTTP, placesOf(x).summary(input.method, path)).WithDestination(dest).Build()
 	r.Operation = models.HTTPOperationLabel(liveRequest(nil, input))
 	r.Answer, r.ClosestMock, r.NotOwned = models.AnswerProvisional, x.Name, true
 	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)

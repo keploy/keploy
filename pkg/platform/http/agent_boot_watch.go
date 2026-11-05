@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"go.keploy.io/server/v3/pkg"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -284,12 +285,12 @@ func readBootFile(path string) func(context.Context) (utils.BootProgress, bool) 
 }
 
 // readContainerBoot reads the start's progress the agent in container c
-// reports (kdocker.AgentBootProgressFile), through the engine's `cp`, as its
-// teardown's is read (readContainerProgress). A `cp` out of it notes, on c,
+// reports (kdocker.AgentBootProgressFile), copied out of it through the
+// engine's API, or its `cp` (containerLook). A copy out of it notes, on c,
 // that it is there.
-func readContainerBoot(cli *engineCLI, c *namedContainer) func(context.Context) (utils.BootProgress, bool) {
+func readContainerBoot(look *containerLook, c *namedContainer) func(context.Context) (utils.BootProgress, bool) {
 	return func(ctx context.Context) (utils.BootProgress, bool) {
-		out, err := cli.stdout(ctx, "cp", c.name+":"+kdocker.AgentBootProgressFile, "-")
+		out, err := look.copyOut(ctx, c.name, kdocker.AgentBootProgressFile)
 		if err != nil {
 			return utils.BootProgress{}, false
 		}
@@ -307,15 +308,16 @@ func readContainerBoot(cli *engineCLI, c *namedContainer) func(context.Context) 
 // is running. False while it is still being created or started, while it is
 // paused (its processes frozen: the engine says Running of a paused one too),
 // restarting, or once it has exited, and when it cannot be told. An inspect
-// the engine answers notes, on c, that it is there.
+// the engine answers (through its API, or its CLI: containerLook) notes, on
+// c, that it is there.
 //
 // A look the engine does not answer (an error, other than the container not
 // being there) is no answer: it keeps what the last answer said, so that a
 // daemon that errs now and then does not reset the judge's bounds look by
 // look.
-func containerRunning(cli *engineCLI, c *namedContainer) func(context.Context) bool {
+func containerRunning(look *containerLook, c *namedContainer) func(context.Context) bool {
 	return runningByStatus(func(ctx context.Context) ([]byte, error) {
-		out, err := cli.stdout(ctx, "inspect", "-f", "{{.State.Status}}", c.name)
+		out, err := look.inspect(ctx, c.name, false)
 		if err == nil {
 			c.know()
 		}
@@ -339,11 +341,14 @@ func runningByStatus(inspect func(context.Context) ([]byte, error)) func(context
 	}
 }
 
-// engineSaysGone reports whether the engine's CLI answered a question about
-// a container (out, err) with its not being there: "No such container" or
-// "No such object", as Docker and Podman say it, in either case, on stderr
-// (which an *exec.ExitError carries) or on stdout.
+// engineSaysGone reports whether the engine answered a question about a
+// container (out, err) with its not being there: its API's not-found, or its
+// CLI's "No such container" or "No such object", as Docker and Podman say it,
+// in either case, on stderr (which an *exec.ExitError carries) or on stdout.
 func engineSaysGone(out []byte, err error) bool {
+	if err != nil && cerrdefs.IsNotFound(err) {
+		return true
+	}
 	said := string(out)
 	if err != nil {
 		said += "\n" + err.Error()
@@ -559,9 +564,9 @@ func (a *AgentClient) containerNamed(name string) *namedContainer {
 // serve is over. One being removed is gone. One that runs has not ended.
 // What it knows of c, and what it notes, is c's: the entry of the Setup that
 // named it.
-func containerExited(cli *engineCLI, c *namedContainer) func(context.Context) (int, bool) {
+func containerExited(look *containerLook, c *namedContainer) func(context.Context) (int, bool) {
 	return func(ctx context.Context) (int, bool) {
-		out, err := cli.stdout(ctx, "inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", c.name)
+		out, err := look.inspect(ctx, c.name, true)
 		if err != nil {
 			if engineSaysGone(out, err) {
 				// Known first: a container keploy saw, which the run's
@@ -587,7 +592,7 @@ func containerExited(cli *engineCLI, c *namedContainer) func(context.Context) (i
 			}
 		}
 		if len(f) >= 1 && f[0] != "running" && c.runOver() {
-			cli.logger.Debug("the run of the application is over, and the keploy agent's container is there, not running: the release has no run left to release",
+			look.cli.logger.Debug("the run of the application is over, and the keploy agent's container is there, not running: the release has no run left to release",
 				zap.String("container", c.name), zap.String("status", f[0]))
 			return containerLeftNotRunning, true
 		}
@@ -596,17 +601,18 @@ func containerExited(cli *engineCLI, c *namedContainer) func(context.Context) (i
 }
 
 // containerEnd is how keploy asks whether the agent's container c has ended
-// (containerExited). A variable for tests.
-var containerEnd = func(logger *zap.Logger, c *namedContainer) func(context.Context) (int, bool) {
-	return containerExited(newEngineCLI(logger), c)
+// (containerExited), through the engine's API api (nil: its CLI alone). A
+// variable for tests.
+var containerEnd = func(logger *zap.Logger, api containerAPI, c *namedContainer) func(context.Context) (int, bool) {
+	return containerExited(newContainerLook(logger, api), c)
 }
 
 // containerBootLook is how keploy looks at the start of the agent in container
-// c: its report, read out of the container, and whether the engine runs it.
-// A variable for tests.
-var containerBootLook = func(logger *zap.Logger, c *namedContainer) (read func(context.Context) (utils.BootProgress, bool), running func(context.Context) bool) {
-	cli := newEngineCLI(logger)
-	return readContainerBoot(cli, c), containerRunning(cli, c)
+// c: its report, read out of the container, and whether the engine runs it,
+// through the engine's API api (nil: its CLI alone). A variable for tests.
+var containerBootLook = func(logger *zap.Logger, api containerAPI, c *namedContainer) (read func(context.Context) (utils.BootProgress, bool), running func(context.Context) bool) {
+	look := newContainerLook(logger, api)
+	return readContainerBoot(look, c), containerRunning(look, c)
 }
 
 // alwaysRunning is a native agent's: its process runs once it has started.
@@ -618,6 +624,9 @@ type bootLookResult struct {
 	p       utils.BootProgress
 	ok      bool
 	running bool
+	// whole: the look is done. A look says whether the process runs first,
+	// on its own (whole false), and then all it found.
+	whole bool
 	// ended: the process does not run, and has ended for good, with code
 	// (watchStart's ended).
 	ended bool
@@ -658,6 +667,10 @@ func withRunnableBound(ctx context.Context, d time.Duration, cause error) (conte
 	return ctx, func() { cancel(context.Canceled) }
 }
 
+// startClock is watchStart's clock: nil, keploy's own runnable time
+// (stall.Process). Tests set one they drive.
+var startClock stall.Clock
+
 // startJudgment is watchStart's word on a start it gave up on: its verdict
 // (bootFailed or bootStalled), why, and the last report read.
 type startJudgment struct {
@@ -670,12 +683,23 @@ type startJudgment struct {
 // it has seen (bootJudge): whether its process runs (running), and its last
 // report (read). It sends one judgment when the start has failed or stopped
 // making progress, and nothing while it makes progress; it ends with ctx.
+// Its channel is closed once it has ended, and its look with it: the look
+// out as it ends is cancelled, and waited for until the engine command it
+// runs has been killed and waited for, unless keploy may not signal that
+// command, which is left to end by itself (containerEngineCommand,
+// runEngine).
 // Each look asks first whether the process runs, then, once it does, reads
 // its report, one look at a time, off the caller's goroutine: a look into a
 // container goes through the engine's CLI, which a busy daemon answers
 // slowly, or not at all. A look that does not come back holds up no rule: its
-// silence is judged as any other, and a look out for long is said once.
-// inContainer says, for that line, whether the agent runs in a container.
+// silence is judged as any other. A wait that goes on is said every
+// stillWaitingLooks ticks since the agent's last new report (or since the
+// watch began), with what the latest look found: the look has not said
+// whether the process runs, it does not run, or it runs with no report, or
+// no new one, read. A look out past the silence bound is said once, at WARN,
+// in place of the next of those lines, with what it is out on and what keploy
+// does next (lookOutWarning). inContainer says, for those lines, whether the
+// agent runs in a container.
 // ended, when set, is asked of a process that does not run whether it has
 // ended for good (its container exited), and with what code: the judgment is
 // then bootExited, or bootFailed for an agent whose last report says its start
@@ -687,58 +711,87 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 	out := make(chan startJudgment, 1)
 	// What the watch's goroutine reads of the package's settings is read
 	// here, on the caller's: the goroutine outlives the wait it serves.
-	clk, release := stall.Process()
+	clk, release := startClock, func() {}
+	if clk == nil {
+		clk, release = stall.Process()
+	}
 	judge := newBootJudge(clk)
 	look, silence, every := bootLook, bootSilence, stillWaitingLooks
 	go func() {
-		defer release()
-		runs := make(chan bool, 1)
-		looks := make(chan bootLookResult, 1)
+		// The look out ends with the watch, however the watch ends, and the
+		// watch ends only once it has: a look's funcs return only once the
+		// engine command each ran on lookCtx has been killed, with the
+		// processes still in its process group that keploy may signal, and
+		// waited for, unless keploy may not signal it (containerEngineCommand,
+		// runEngine). Its channel closes then.
+		lookCtx, endLook := context.WithCancel(ctx)
+		var lookOut sync.WaitGroup
+		defer func() {
+			endLook()
+			lookOut.Wait()
+			release()
+			close(out)
+		}()
+		// A look's two words come on the one channel, in the order it
+		// says them: one look is out at a time, so neither is ever taken
+		// for another look's.
+		looks := make(chan bootLookResult, 2)
 		lookNow := func() {
-			go func() {
-				r := running(ctx)
+			lookOut.Go(func() {
+				r := running(lookCtx)
 				select {
-				case runs <- r:
-				case <-ctx.Done(): // the wait is over
+				case looks <- bootLookResult{running: r}:
+				case <-lookCtx.Done(): // the watch is over
 					return
 				}
-				l := bootLookResult{running: r}
+				l := bootLookResult{running: r, whole: true}
 				switch {
 				case r:
-					l.p, l.ok = read(ctx)
+					l.p, l.ok = read(lookCtx)
 				case ended != nil:
 					// Its last report, read out of the container that ended.
-					if l.code, l.ended = ended(ctx); l.ended {
-						l.p, l.ok = read(ctx)
+					if l.code, l.ended = ended(lookCtx); l.ended {
+						l.p, l.ok = read(lookCtx)
 					}
 				}
 				select {
 				case looks <- l:
-				case <-ctx.Done():
+				case <-lookCtx.Done():
 				}
-			}()
+			})
 		}
 		var cur bootLookResult
 		tick := time.NewTicker(look)
 		defer tick.Stop()
 		looking := false
 		// lookSince is when (runnable time) the look out began; lookSaid,
-		// that it has been said to be out for long.
+		// that it has been said, at WARN, to be out for long.
 		var lookSince time.Duration
 		lookSaid := false
-		// idle is the looks in a row that found the process not running:
-		// a wait no rule bounds, said every `every` of them.
-		idle := 0
+		// asking: the look out has not said yet whether the process runs.
+		// asked: the ticks that look has been out, the one it began at
+		// included.
+		asking, asked := false, 0
+		// waited is the ticks since the agent last made progress (a report
+		// of its start keploy had not read before), or since the watch
+		// began. The wait is said every `every` of them, with what the
+		// latest look found, however long each look takes to come back.
+		waited := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case r := <-runs:
-				cur.running = r
 			case l := <-looks:
+				cur.running, asking = l.running, false
+				if !l.whole {
+					// Whether it runs, while the look reads on.
+					continue
+				}
 				looking = false
-				cur.running = l.running
 				if l.ok {
+					if !cur.ok || l.p.Beat != cur.p.Beat || l.p.Seq != cur.p.Seq {
+						waited = 0
+					}
 					cur.p, cur.ok = l.p, true
 				}
 				if untilReady && cur.ok && cur.p.Ready && !cur.p.Failed {
@@ -763,32 +816,29 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 					out <- startJudgment{verdict: bootExited, why: why, p: p}
 					return
 				}
-				if l.running {
-					idle = 0
-				} else {
-					idle++
-					if every > 0 && idle%every == 0 {
-						if inContainer {
-							logger.Info("still waiting for the keploy agent: the container engine does not run its container (not started yet, paused, or stopped), and keploy waits for it to run however long that takes",
-								zap.Int("looks", idle))
-						} else {
-							logger.Info("still waiting for the keploy agent: its process has not begun to run (sudo may be asking for a password), and keploy waits for it however long that takes",
-								zap.Int("looks", idle))
-						}
-					}
-				}
 			case <-tick.C:
 				if !looking {
 					looking, lookSince, lookSaid = true, clk.Runnable(), false
+					asking, asked = true, 0
 					lookNow()
-				} else if !lookSaid && clk.Runnable()-lookSince >= silence {
-					// Once its first report is in, a start is judged by the
-					// agent's beats, which a look that does not come back
-					// brings no more of: said once, so a wait that seems to
-					// hang says what it waits on.
-					lookSaid = true
-					logger.Warn("keploy's look at the agent's start has not come back for a while; the container engine may not be answering, and keploy waits on",
-						zap.Duration("runnable_time", silence), zap.Bool("in_a_container", inContainer))
+				}
+				asked++
+				waited++
+				if every > 0 && waited%every == 0 {
+					if line := startWaitLine(cur, asking && asked >= every, inContainer, silence); line != "" {
+						if !lookSaid && clk.Runnable()-lookSince >= silence {
+							// A look out past the silence bound is said
+							// once at WARN, in place of the line: the
+							// agent's beats, once its first report is in,
+							// are what judge its start, and a look that
+							// does not come back brings no more of them.
+							lookSaid = true
+							logger.Warn(lookOutWarning(cur, asking, ended != nil, inContainer, silence),
+								zap.Duration("runnable_time", silence), zap.Bool("in_a_container", inContainer), zap.Duration("waited", time.Duration(waited)*look))
+						} else {
+							logger.Info(line, zap.Duration("waited", time.Duration(waited)*look))
+						}
+					}
 				}
 				if verdict, why := judge.look(cur.p, cur.ok, cur.running); verdict != bootWaiting {
 					out <- startJudgment{verdict: verdict, why: why, p: cur.p}
@@ -798,6 +848,100 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 		}
 	}()
 	return out
+}
+
+// startWaitLine is what a start's wait that has gone on says: what the latest
+// look found (cur). notAnswered: the look out has not said whether the
+// process runs for a whole line's worth of ticks (a container's look asks the
+// engine, which may not answer while it is still creating or starting the
+// container); the line then says what keploy does next (startWaitNext;
+// silence: the silence bound). "" once a report says the start failed: the
+// watch ends the wait with that failure at the same tick (bootJudge.look
+// judges a failure first). "" too when the latest look found the process
+// running and its report says its server listens (the ready rule bounds that
+// wait), unless notAnswered.
+func startWaitLine(cur bootLookResult, notAnswered, inContainer bool, silence time.Duration) string {
+	what := "its process"
+	if inContainer {
+		what = "its container"
+	}
+	switch {
+	case cur.ok && cur.p.Failed:
+		return ""
+	case notAnswered && inContainer:
+		return "waiting on the container engine: it has not answered keploy's look at the keploy agent's container, as an engine still creating or starting a container may not until that is done; " + startWaitNext(cur, inContainer, silence)
+	case notAnswered:
+		return "waiting on the keploy agent's start: keploy's look at it has not come back; " + startWaitNext(cur, inContainer, silence)
+	case !cur.running && inContainer:
+		return "still waiting for the keploy agent: the container engine does not run its container (not started yet, paused, or stopped), and keploy waits for it to run however long that takes"
+	case !cur.running:
+		return "still waiting for the keploy agent: its process has not begun to run (sudo may be asking for a password), and keploy waits for it however long that takes"
+	case !cur.ok:
+		return "still waiting for the keploy agent: " + what + " runs, and keploy has read no report of its start from it yet"
+	case cur.p.Ready:
+		return ""
+	default:
+		return "still waiting for the keploy agent: " + what + " runs, and keploy has read no new report of its start since its last"
+	}
+}
+
+// lookOutWarning is the silence bound's warning of a look out (watchStart):
+// what the look has not come back with, by what it has said so far, then what
+// keploy does next (startWaitNext). asking: it has not said whether the
+// process runs. Else it has (cur.running): for one that runs, it reads the
+// report of its start; for a container that does not run, it asks whether
+// the container has ended, and reads its last report if it has (ending: the
+// watch asks that); else it has nothing left to say. (The look's result may
+// also be in already and not yet taken, when a tick that came at the same
+// time is taken first; the warning then says what the look had said before
+// that result.) A container's look goes through the engine's CLI, a native
+// agent's through keploy's own reads of its process and its report's file:
+// only a container's names the engine.
+func lookOutWarning(cur bootLookResult, asking, ending, inContainer bool, silence time.Duration) string {
+	var out string
+	switch {
+	case asking && inContainer:
+		out = "the container engine has not answered whether it runs the agent's container"
+	case asking:
+		out = "keploy has not yet found out whether the agent's process runs"
+	case cur.running && inContainer:
+		out = "the agent's container runs, and the container engine has not yet given keploy the report of its start from inside it"
+	case cur.running:
+		out = "the agent's process runs, and keploy's read of the report of its start has not come back"
+	case ending && inContainer:
+		out = "the container engine does not run the agent's container, and has not yet said whether the container has ended or, if it has, given keploy its last report from inside it"
+	case inContainer:
+		out = "the container engine does not run the agent's container"
+	default:
+		out = "the agent's process does not run"
+	}
+	return "keploy's look at the agent's start has not come back for a while: " + out + "; " + startWaitNext(cur, inContainer, silence)
+}
+
+// startWaitNext is what keploy does next in a start's wait while a look is
+// out, by what the latest look found (cur), as bootJudge.look judges the wait
+// with no new report: no time limit while the process is not known to run; an
+// agent found running with no report read is given up on once it has been
+// found running for the silence bound, and one that says its server listens
+// once it has not answered keploy for that bound; otherwise only a new report
+// can show that its start has stalled, and keploy reads none until the look
+// comes back. (A report that says the start failed has no line at all:
+// startWaitLine.)
+func startWaitNext(cur bootLookResult, inContainer bool, silence time.Duration) string {
+	what := "process"
+	if inContainer {
+		what = "container"
+	}
+	switch {
+	case !cur.running:
+		return "keploy sets no time limit on the wait while the agent's " + what + " is not known to run, and waits on"
+	case !cur.ok:
+		return fmt.Sprintf("keploy gives up on the start once it has found the agent's %s running, with no report of its start read, for %s of keploy's runnable time", what, silence)
+	case cur.p.Ready:
+		return fmt.Sprintf("keploy gives up on the start once the agent, which says its server listens, has not answered keploy for %s of keploy's runnable time", silence)
+	default:
+		return "keploy waits on: the agent has reported, so only a new report from it can show that its start has stalled, and keploy reads none until this look comes back"
+	}
 }
 
 // WatchContainerAgentStart watches the start of the keploy agent in container
@@ -813,10 +957,18 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 // by its name only, which another client's Setup may have drawn too: what its
 // looks see is noted on an entry of its own, never on a client's.
 func WatchContainerAgentStart(ctx context.Context, logger *zap.Logger, name string) <-chan error {
-	read, running := containerBootLook(logger, &namedContainer{name: name})
-	return startErrors(ctx, watchStart(ctx, logger, read, running, nil, true, true), func(j startJudgment) error {
+	api, closeAPI := envContainerAPI(logger)
+	read, running := containerBootLook(logger, api, &namedContainer{name: name})
+	errs, over := startErrors(ctx, watchStart(ctx, logger, read, running, nil, true, true), func(j startJudgment) error {
 		return startFailure(j.p.ExitCode, j.why)
 	})
+	// The looks read through api until the watch is over, and its look
+	// with it (watchStart): its client is closed then.
+	go func() {
+		<-over
+		closeAPI()
+	}()
+	return errs
 }
 
 // startFailure is the error of a start the agent reports failed (failure),
@@ -831,21 +983,31 @@ func startFailure(code int, failure string) error {
 // startErrors is judged's judgment as an error: failed's for a start the agent
 // reports failed or whose container exited, pkg.ErrAgentNotReady for one that
 // stopped making progress.
-// One is sent, once; none once ctx ends.
-func startErrors(ctx context.Context, judged <-chan startJudgment, failed func(startJudgment) error) <-chan error {
-	out := make(chan error, 1)
+// One is sent, once; none once ctx ends. over is closed once the watch that
+// judges (watchStart, on ctx) has ended: judged is closed.
+func startErrors(ctx context.Context, judged <-chan startJudgment, failed func(startJudgment) error) (errs <-chan error, over <-chan struct{}) {
+	out, ends := make(chan error, 1), make(chan struct{})
 	go func() {
+		defer close(ends)
 		select {
 		case <-ctx.Done():
-		case j := <-judged:
-			if j.verdict == bootFailed || j.verdict == bootExited {
-				out <- failed(j)
+		case j, ok := <-judged:
+			switch {
+			case !ok:
+				// The watch ended with no judgment (untilReady).
 				return
+			case j.verdict == bootFailed || j.verdict == bootExited:
+				out <- failed(j)
+			default:
+				out <- fmt.Errorf("%w: %s", pkg.ErrAgentNotReady, j.why)
 			}
-			out <- fmt.Errorf("%w: %s", pkg.ErrAgentNotReady, j.why)
+		}
+		// The watch ends with ctx too, and has ended, or is ending, once
+		// it has judged.
+		for range judged {
 		}
 	}()
-	return out
+	return out, ends
 }
 
 // WatchAgentStart implements pkg.AgentStartWatcher: it watches the start of
@@ -856,7 +1018,8 @@ func startErrors(ctx context.Context, judged <-chan startJudgment, failed func(s
 // it: a Kubernetes sidecar) is watched at its URI (watchAgentAt). nil, which
 // never sends, for a client with no agent at all.
 func (a *AgentClient) WatchAgentStart(ctx context.Context) <-chan error {
-	return a.watchAgent(ctx, false)
+	errs, _ := a.watchAgent(ctx, false)
+	return errs
 }
 
 // watchAgent is WatchAgentStart, ending also, with endOnExit, once the agent's
@@ -868,7 +1031,10 @@ func (a *AgentClient) WatchAgentStart(ctx context.Context) <-chan error {
 // of the application ends. It watches the container this client's Setup
 // named, through the entry the client keeps of it, not by its name: what it
 // sees is noted there, and what it asks (known, the run over) is asked there.
-func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) <-chan error {
+// over is closed once the watch has ended, with ctx or its verdict, and its
+// look with it (watchStart, watchAgentAt). Both are nil where there is no
+// watch: a client with no agent, or an agent URI that names no address.
+func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) (errs <-chan error, over <-chan struct{}) {
 	a.mu.Lock()
 	container, run := a.agentContainer, a.run
 	a.mu.Unlock()
@@ -877,9 +1043,9 @@ func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) <-chan err
 	running := alwaysRunning
 	switch {
 	case container != nil:
-		read, running = containerBootLook(a.logger, container)
+		read, running = containerBootLook(a.logger, a.containerAPI(), container)
 		if endOnExit {
-			ended = containerEnd(a.logger, container)
+			ended = containerEnd(a.logger, a.containerAPI(), container)
 		}
 	case run != nil:
 		read = readBootFile(run.bootReport)
@@ -889,7 +1055,7 @@ func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) <-chan err
 	case a.conf != nil && a.conf.Agent.AgentURI != "":
 		return a.watchAgentAt(ctx, a.conf.Agent.AgentURI)
 	default:
-		return nil
+		return nil, nil
 	}
 	inContainer := container != nil
 	return startErrors(ctx, watchStart(ctx, a.logger, read, running, ended, inContainer, false), func(j startJudgment) error {
@@ -920,9 +1086,9 @@ var _ pkg.AgentStartWatcher = (*AgentClient)(nil)
 var uriClock stall.Clock
 
 // stillWaitingLooks is how many looks pass between the lines that say keploy
-// still waits for an agent no rule bounds the wait for: one known only by its
-// URI (watchAgentAt), and one whose container the engine does not run
-// (watchStart). A variable for tests.
+// still waits for an agent known only by its URI (watchAgentAt), and how many
+// ticks of a start's wait with no new report from the agent pass between
+// those that say what the wait is on (watchStart). A variable for tests.
 var stillWaitingLooks = 30
 
 // agentDialWait is how long one look at an agent known only by its URI waits
@@ -945,11 +1111,13 @@ const agentDialWait = time.Second
 //     that it still waits, and what it found.
 //
 // ctx ends it; so does the wait, once the agent's health check answers.
-func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) <-chan error {
-	out := make(chan error, 1)
+// over is closed once it has ended, its look with it (each look is on the
+// watch's own goroutine). Both are nil for a URI that names no address.
+func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) (errs <-chan error, over <-chan struct{}) {
+	out, ends := make(chan error, 1), make(chan struct{})
 	addr := agentAddr(uri)
 	if addr == "" {
-		return nil
+		return nil, nil
 	}
 	// Read here, on the caller's goroutine: the watch's outlives the wait.
 	clk, release := uriClock, func() {}
@@ -958,6 +1126,7 @@ func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) <-chan error
 	}
 	look, silence, every, lookAt := bootLook, bootSilence, stillWaitingLooks, lookAtAgent
 	go func() {
+		defer close(ends)
 		defer release()
 		tick := time.NewTicker(look)
 		defer tick.Stop()
@@ -994,7 +1163,7 @@ func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) <-chan error
 			}
 		}
 	}()
-	return out
+	return out, ends
 }
 
 // agentAddr is the host:port an agent URI names; "" for one that names none.

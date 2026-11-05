@@ -44,6 +44,9 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 
 	var data []byte
 	var err error
+	// firstLen, when set, is the payload length of a composite message's
+	// first packet, as encoded here (see the header below).
+	firstLen := -1
 
 	//Get the server greeting from the decode context
 	serverGreeting, ok := decodeCtx.ServerGreetings.Load(clientConn)
@@ -139,7 +142,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("expected StmtPrepareOkPacket, got %T", packet.Message)
 		}
 
-		data, err = preparedstmt.EncodePrepareOk(ctx, logger, pkt, serverGreeting.CapabilityFlags)
+		data, err = preparedstmt.EncodePrepareOk(ctx, logger, pkt, serverGreeting.CapabilityFlags, decodeCtx.MetadataFraming())
 		if err != nil {
 			return nil, fmt.Errorf("error encoding StmtPrepareOkPacket: %v", err)
 		}
@@ -152,14 +155,16 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("expected TextResultSet, got %T", packet.Message)
 		}
 
-		if data = pkt.WireCache().Load(); data == nil {
-			data, err = query.EncodeTextResultSet(ctx, logger, pkt)
+		framing := decodeCtx.MetadataFraming()
+		if data = pkt.WireCache().Load(framing); data == nil {
+			data, err = query.EncodeTextResultSet(ctx, logger, pkt, framing)
 			if err != nil {
 				return nil, fmt.Errorf("error encoding TextResultSet: %v", err)
 			}
-			data = pkt.WireCache().Store(data)
+			data = pkt.WireCache().Store(framing, data)
 			resultSetEncodes.Add(1)
 		}
+		firstLen = query.ColumnCountPayloadLen(pkt.ColumnCount, framing)
 
 	case *mysql.BinaryProtocolResultSet:
 		pkt, ok := packet.Message.(*mysql.BinaryProtocolResultSet)
@@ -167,14 +172,16 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("expected BinaryProtocolResultSet, got %T", packet.Message)
 		}
 
-		if data = pkt.WireCache().Load(); data == nil {
-			data, err = query.EncodeBinaryResultSet(ctx, logger, pkt)
+		framing := decodeCtx.MetadataFraming()
+		if data = pkt.WireCache().Load(framing); data == nil {
+			data, err = query.EncodeBinaryResultSet(ctx, logger, pkt, framing)
 			if err != nil {
 				return nil, fmt.Errorf("error encoding BinaryProtocolResultSet: %v", err)
 			}
-			data = pkt.WireCache().Store(data)
+			data = pkt.WireCache().Store(framing, data)
 			resultSetEncodes.Add(1)
 		}
+		firstLen = query.ColumnCountPayloadLen(pkt.ColumnCount, framing)
 	default:
 		return nil, fmt.Errorf("unhandled mysql message type %T for encoding", packet.Message)
 	}
@@ -206,6 +213,12 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	payloadLen := len(data)
 	if isCompositeMessage(packet.Message) && packet.Header.Header != nil {
 		payloadLen = int(packet.Header.Header.PayloadLength)
+	}
+	// A result set's column count packet is as long as it is encoded for
+	// this connection: under MariaDB's metadata cache it carries one more
+	// byte than on a connection without it, whatever the recording's was.
+	if firstLen >= 0 {
+		payloadLen = firstLen
 	}
 	binary.LittleEndian.PutUint32(header, uint32(payloadLen))
 	if packet.Header.Header != nil {

@@ -127,9 +127,10 @@ type ScopeGatePusher interface {
 
 // TestBeginsPusher is an optional Instrumentation extension: under the proven
 // switch Replay hands the agent when each test of the recording began, so the
-// agent moves the run's clock per test (design v14 §3.4).
+// agent moves the run's clock per test (design v14 §3.4), and the seed each
+// test's recording kept for its browser's random numbers.
 type TestBeginsPusher interface {
-	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) error
+	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string) error
 }
 
 type SetPusher interface {
@@ -143,7 +144,7 @@ type SetPusher interface {
 // key's worker scope (models.ScopeTableReq.Worker) and the values each test
 // gave when it was recorded (models.ScopeTableReq.Given).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error
+	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead) error
 }
 
 type MappingReader interface {

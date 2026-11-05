@@ -264,12 +264,15 @@ jobs:
   # container's network, so keploy moves them onto the agent container, and
   # maps host.docker.internal to host-gateway there. `keploy record` of each
   # must start the app, reach its dependency by the name its entry gives, and
-  # record the calls.
+  # record the calls. Then the agent container's own namespace: the agent
+  # handed the ports Docker's embedded DNS resolver holds there moves its
+  # proxy and DNS server off them, and the app, which reaches its dependency
+  # by its service name, is recorded and replayed through the moved ones.
   compose_extra_hosts_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     name: app host entries (docker_compose, docker run)
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -291,6 +294,12 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-extra-hosts-linux.sh"
+
+      - name: Run agent ports taken by Docker's resolver e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-agent-port-taken-linux.sh"
 
   # A compose app published on another host port ("N:8080"): replay sends
   # each test to the port it was recorded on, 8080, and in Docker mode, when

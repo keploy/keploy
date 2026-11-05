@@ -382,7 +382,11 @@ type MockManager struct {
 	// session) that seeds none has none there, not the previous one's: a
 	// keploy test session's windows would otherwise decide whose a later
 	// keploy mock replay's recordings are, over its scope table.
-	testWindows       atomic.Pointer[models.WindowSchedule]
+	testWindows atomic.Pointer[models.WindowSchedule]
+	// repeatNoise is the header noise the session's matcher compares the
+	// set's calls with, which proves a test's repeated reads
+	// (SetRepeatReadNoise); nil, none, until the session sets it.
+	repeatNoise       atomic.Pointer[repeatReadNoise]
 	testWindowsSeeded *models.WindowSchedule
 	windowsSeeded     *models.WindowSchedule
 
@@ -713,11 +717,13 @@ func (m *MockManager) ResetForReplaySession() {
 	m.SetRecordingSource(nil)
 	m.SetRecordedBefore(nil)
 	m.SetRecordedOfKind(nil)
-	// Nor its scope table's pool names (SetPoolNames) and owners
-	// (SetPoolOwners): until the next session sends its own, whose mock is
-	// the pool's, and whose tests list each, is not known.
+	// Nor its scope table's pool names (SetPoolNames), owners
+	// (SetPoolOwners) and tests (SetPoolTests): until the next session sends
+	// its own, whose mock is the pool's, and whose tests list each, is not
+	// known.
 	m.exact.poolNames.Store(nil)
 	m.exact.poolOwners.Store(nil)
+	m.exact.poolTests.Store(nil)
 	if m.exact.view.Load() != nil {
 		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
 	}
@@ -4567,23 +4573,41 @@ func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 // into it, shared with it; never its worker: scope's or the background
 // pool's; and none while a pool view, which is no test's, is in force, even
 // one holding the next test's recordings ahead) or one of the set's start-up
-// recordings (startupNames). The learn
-// tracker files each serve so (learn.Tracker.SetServeOwner), and judging and
-// a replay check a call against such a recording in a span those serves
-// start (learn.Tracker.LiveSpanOf). It runs while a serve holds the round
-// lock and reads the view and the names atomically: it takes no lock and
-// never calls back into the manager.
+// recordings (startupNames), whatever the view. It is ServeOwnerOf's
+// learn.OwnerTest, which the learn tracker files each serve by
+// (learn.Tracker.SetServeOwnerOf); judging and a replay check a call against
+// such a recording in a span those serves start (learn.Tracker.LiveSpanOf).
+// It runs while a serve holds the round lock and reads the view and the
+// names atomically: it takes no lock and never calls back into the manager.
 func (m *MockManager) ServedAsOwnOrStartup(mk *models.Mock) bool {
+	return m.ServeOwnerOf(mk) == learn.OwnerTest
+}
+
+// ServeOwnerOf is ServedAsOwnOrStartup with what the store cannot say told
+// apart from what it says no to (learn.Tracker.SetServeOwnerOf):
+// learn.OwnerTest where that says yes (a start-up recording whatever the
+// view); learn.OwnerOther where a test's view is in force and does not hold
+// mk as its own (a worker: scope's, the background's, another test's);
+// learn.OwnerUnknown where no test's view is in force (none yet, or a pool
+// view) and mk is no start-up recording, or mk has no name. It reads the
+// view once, under the same rules.
+func (m *MockManager) ServeOwnerOf(mk *models.Mock) learn.ServeOwner {
 	if m == nil || mk == nil || mk.Name == "" {
-		return false
+		return learn.OwnerUnknown
 	}
 	if names := m.startupNames.Load(); names != nil {
 		if _, ok := (*names)[mk.Name]; ok {
-			return true
+			return learn.OwnerTest
 		}
 	}
 	v := m.exactView()
-	return v != nil && v.test != "" && v.holds(mk.Name) && !v.isWorker(mk.Name) && !v.bg.has(mk.Name)
+	switch {
+	case v == nil || v.test == "":
+		return learn.OwnerUnknown
+	case v.holds(mk.Name) && !v.isWorker(mk.Name) && !v.bg.has(mk.Name):
+		return learn.OwnerTest
+	}
+	return learn.OwnerOther
 }
 
 // SetServedInObserver sets the observer told, instead of the served

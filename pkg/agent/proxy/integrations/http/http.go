@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
@@ -100,6 +101,12 @@ type FinalHTTP struct {
 	Resp             []byte
 	ReqTimestampMock time.Time
 	ResTimestampMock time.Time
+	// ReqClock is the clock ReqTimestampMock is on: the request's first
+	// chunk's (fakeconn.Chunk.ReadClock), as the producer that took the
+	// stamp named it; fakeconn.ClockUnset for a stamp it did not take, which
+	// names none. Under the proven switch buildHTTPMock writes its id on the
+	// mock (models.Origin.Clock).
+	ReqClock fakeconn.Clock
 	// RespReadInPart: Resp may be only the part of the response its client
 	// read. An observe-only capture (a DaemonSet's, OutgoingOptions.SkipTLSMITM)
 	// carries the bytes the client read and nothing else, so a client that

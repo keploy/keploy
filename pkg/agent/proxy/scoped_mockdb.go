@@ -556,6 +556,13 @@ func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
 	return nil
 }
 
+// AnswerRepeatRead forwards the store's answer to a call one more than the
+// open test recorded (integrations.RepeatReadAnswerer), none when it has
+// none.
+func (s *scopedMockDb) AnswerRepeatRead(matched []*models.Mock) (integrations.RepeatReadAnswer, bool) {
+	return integrations.AnswerRepeatRead(s.MockMemDb, matched)
+}
+
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
 // keeps none, so a learn step on a scoped view reads the store's account as
@@ -576,11 +583,18 @@ func (s *scopedMockDb) FindAnsweredEarlier(kind models.Kind, keys []string, matc
 	return integrations.AnsweredCall{}, false
 }
 
+// AnsweredRedacting forwards the store's answered recordings that hold a
+// pattern (integrations.AnsweredRedactingReader).
+func (s *scopedMockDb) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
+	return integrations.AnsweredRedacting(s.MockMemDb, kind)
+}
+
 var (
-	_ integrations.AnsweredFinder      = (*scopedMockDb)(nil)
-	_ integrations.ExactServingReader  = (*scopedMockDb)(nil)
-	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
-	_ integrations.ExactServedReader   = (*scopedMockDb)(nil)
+	_ integrations.AnsweredRedactingReader = (*scopedMockDb)(nil)
+	_ integrations.AnsweredFinder          = (*scopedMockDb)(nil)
+	_ integrations.ExactServingReader      = (*scopedMockDb)(nil)
+	_ integrations.ExactConsumedReader     = (*scopedMockDb)(nil)
+	_ integrations.ExactServedReader       = (*scopedMockDb)(nil)
 )
 
 // ClaimantOf and ExactTakenCandidates forward what the store's open test's view says of the recordings it shares

@@ -170,22 +170,24 @@ func (h holdsUnknown) Is(target error) bool { return target == errHoldsUnknown }
 // with its begin's (windowDrops). An error says keploy cannot tell: the test
 // is not judged. holdsUnknown comes with the drops.
 func (a *Agent) settle(ctx context.Context, answers bool) (models.ListenDrops, error) {
-	return a.settleKeeping(ctx, answers, nil)
+	return a.settleKeeping(ctx, answers, 0, nil)
 }
 
 // settleKeeping is settle; keep, when set, is given the scope the settle
 // cuts (coreAgent.InFlightScope) as it cuts it: what a window's end owned
-// (settledSince), which the next begin waits for (settleBegin). Under the
+// (settledSince), which the next begin waits for (settleBegin). The scope is
+// worker's connections' (inFlightScope): a test worker's end waits for its
+// own worker's calls, never another worker's. Under the
 // proven switch a settle that fails before its cut cuts as it fails: the
 // work its connections then held is still the window's, and a call of it
 // answered later is never the next test's.
-func (a *Agent) settleKeeping(ctx context.Context, answers bool, keep func(coreAgent.InFlightScope)) (models.ListenDrops, error) {
+func (a *Agent) settleKeeping(ctx context.Context, answers bool, worker uint32, keep func(coreAgent.InFlightScope)) (models.ListenDrops, error) {
 	none := models.ListenDrops{}
 	cut := false
 	if keep != nil && provenswitch.On() {
 		defer func() {
 			if sr, ok := a.Proxy.(coreAgent.InFlightScoper); ok && !cut {
-				keep(sr.InFlightScope())
+				keep(inFlightScope(sr, worker))
 			}
 		}()
 	}
@@ -275,7 +277,7 @@ func (a *Agent) settleKeeping(ctx context.Context, answers bool, keep func(coreA
 	// timer's call, its miss, a new connection, the next call on a pooled
 	// one) cannot hold it.
 	if sr, ok := a.Proxy.(coreAgent.InFlightScoper); ok && proven {
-		sc := sr.InFlightScope()
+		sc := inFlightScope(sr, worker)
 		scoped.Store(&sc)
 		view = scopeView{sc}
 		if keep != nil {
@@ -548,9 +550,12 @@ func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc,
 // miss of the gap. The gap starts at the test before it's end, its process's
 // claim (which counts what came before it as the run's: closeDropsGapHeld),
 // or the session's start (openDrops). What the gap left unpaired, what the
-// test before it left included, is carried on whole (chargeDrops).
-func (a *Agent) markDrops(ctx context.Context, drops models.ListenDrops) {
-	n, why, _ := a.windowDrops(drops, true, true)
+// test before it left included, is carried on whole (chargeDrops). gap is
+// false when the window it closes is another worker's open test's, not a
+// gap: what it counts is then charged to that test, which is open across
+// it, and to every test open as the next loss read is made.
+func (a *Agent) markDrops(ctx context.Context, drops models.ListenDrops, gap bool) {
+	n, why, _ := a.windowDrops(drops, gap, true)
 	a.countDrops(ctx, n, why)
 }
 
@@ -673,16 +678,20 @@ func (a *Agent) openDrops() {
 // whose capture losses cannot be read (countsCaptureLosses) would have no
 // reader take them, so there the window fails instead, with errDropped: not
 // verified, never charged to nothing.
-func (a *Agent) settledSince(ctx context.Context, answers bool, what string) error {
-	// What the window owned at its cut is what the next begin waits for
-	// (settleBegin).
+func (a *Agent) settledSince(ctx context.Context, answers bool, worker uint32, what string) error {
+	// What the window owned at its cut is what its worker's next begin
+	// waits for (settleBegin).
 	var owned coreAgent.InFlightScope
 	// A bytes wait the end cuts short leaves what it could not see reached
-	// as this test's (coreAgent.WithEndOf): a loss of it counted later is
-	// charged here, or to the run, never to the test open then.
-	drops, err := a.settleKeeping(coreAgent.WithEndOf(ctx, what), answers, func(sc coreAgent.InFlightScope) { owned = sc })
+	// on its worker's connections as this test's (coreAgent.WithEndOfWorker):
+	// a loss of it counted later is charged here, or to the run, never to
+	// the test open then. Another worker's are its open test's.
+	drops, err := a.settleKeeping(coreAgent.WithEndOfWorker(ctx, what, worker), answers, worker, func(sc coreAgent.InFlightScope) { owned = sc })
 	a.provenMu.Lock()
-	a.proven.owned = owned
+	if a.proven.owned == nil {
+		a.proven.owned = map[uint32]coreAgent.InFlightScope{}
+	}
+	a.proven.owned[worker] = owned
 	a.provenMu.Unlock()
 	if err != nil && !errors.Is(err, errHoldsUnknown) {
 		// Said in the agent's own log too, where the lines of the calls it
@@ -692,9 +701,10 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 			a.logger.Warn("keploy's agent made no progress settling the test's calls at its end; it gave up on them, so the test is not judged", zap.String("test", what), zap.Strings("connections", g.held))
 		}
 		// Not read: the test's window goes on as the gap's, which the next
-		// begin, or the run's last read, closes. The test is not judged.
+		// begin, or the run's last read, closes, or as another worker's
+		// open test's, whose end closes it. The test is not judged.
 		a.provenMu.Lock()
-		a.proven.dropsInTest = false
+		a.proven.dropsInTest = a.proven.openBut(what)
 		a.provenMu.Unlock()
 		return err
 	}
@@ -703,7 +713,12 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 	if errors.As(err, &bl) {
 		bl.charge()
 	}
-	n, why, open := a.windowDrops(drops, false, false)
+	// With another worker's test still open, the window that opens is
+	// that test's, not a gap.
+	a.provenMu.Lock()
+	others := a.proven.openBut(what)
+	a.provenMu.Unlock()
+	n, why, open := a.windowDrops(drops, false, others)
 	if !open {
 		return err
 	}
@@ -742,7 +757,7 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 // test's, whose end has already failed. With the switch off a begin
 // settles as it always did (settle). It returns the proxy listener's drops,
 // read once settled, which open the test's drops' window (markDrops).
-func (a *Agent) settleBegin(ctx context.Context, answers bool) (models.ListenDrops, error) {
+func (a *Agent) settleBegin(ctx context.Context, answers bool, worker uint32) (models.ListenDrops, error) {
 	if !provenswitch.On() {
 		return a.settle(ctx, answers)
 	}
@@ -751,7 +766,7 @@ func (a *Agent) settleBegin(ctx context.Context, answers bool) (models.ListenDro
 		return models.ListenDrops{}, errors.New("this keploy agent's proxy cannot tell which calls it still holds")
 	}
 	a.provenMu.Lock()
-	owned := a.proven.owned
+	owned := a.proven.owned[worker]
 	a.provenMu.Unlock()
 	if owned != nil {
 		if err := a.settleOwned(ctx, ir, owned, answers); err != nil {
@@ -770,14 +785,35 @@ func (a *Agent) settleBegin(ctx context.Context, answers bool) (models.ListenDro
 // before it are settled: the test's end then waits only for the requests
 // opened since (an HTTP/2 or gRPC stream opened before the test began, a
 // long-lived one that keeps sending, is not the test's and never holds its
-// end). With the switch off it cuts nothing.
-func (a *Agent) beginWindow() {
+// end). With the switch off it cuts nothing. A test worker's window (worker
+// not 0) cuts its own worker's connections alone
+// (coreAgent.InFlightWorkerScoper): a cut on another worker's would take
+// that worker's open test's requests out of its end's wait. A proxy that
+// cannot keep workers apart cuts none for it, so its end waits for more,
+// never less.
+func (a *Agent) beginWindow(worker uint32) {
 	if !provenswitch.On() {
 		return
 	}
-	if w, ok := a.Proxy.(coreAgent.InFlightWindower); ok {
+	if w, ok := a.Proxy.(coreAgent.InFlightWorkerScoper); ok {
+		w.InFlightBeginWindowOf(worker)
+		return
+	}
+	if w, ok := a.Proxy.(coreAgent.InFlightWindower); ok && worker == 0 {
 		w.InFlightBeginWindow()
 	}
+}
+
+// inFlightScope is sr's scope of worker's connections
+// (coreAgent.InFlightWorkerScoper; worker 0, a run of one test process's,
+// is every connection), or, from a proxy that cannot keep workers apart, of
+// every connection: a wait for more than the worker's calls, never for
+// fewer.
+func inFlightScope(sr coreAgent.InFlightScoper, worker uint32) coreAgent.InFlightScope {
+	if ws, ok := sr.(coreAgent.InFlightWorkerScoper); ok {
+		return ws.InFlightScopeOf(worker)
+	}
+	return sr.InFlightScope()
 }
 
 // settleOwned waits until sc, a previous end's scope, holds no work, its

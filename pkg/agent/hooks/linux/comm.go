@@ -93,6 +93,13 @@ func (h *Hooks) GetForConn(_ context.Context, app netip.AddrPort) (*agent.Networ
 	if err := h.redirectProxyMap.Lookup(redirectKeyFor(app), &d); err != nil {
 		return nil, err
 	}
+	return networkAddress(d), nil
+}
+
+// networkAddress is the original destination the kernel kept for one of the
+// application's connections (dest_info_t), with the process that made it
+// and that process's keploy instance.
+func networkAddress(d structs.DestInfo) *agent.NetworkAddress {
 	return &agent.NetworkAddress{
 		Version:    d.IPVersion,
 		IPv4Addr:   d.DestIP4,
@@ -100,7 +107,8 @@ func (h *Hooks) GetForConn(_ context.Context, app netip.AddrPort) (*agent.Networ
 		Port:       d.DestPort,
 		KernelPid:  d.KernelPid,
 		AgentNsPid: d.AgentNsPid,
-	}, nil
+		Instance:   d.Instance,
+	}
 }
 
 // DeleteForConn drops the redirect of the connection whose application end

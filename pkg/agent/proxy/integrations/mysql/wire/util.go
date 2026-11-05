@@ -25,6 +25,12 @@ type DecodeContext struct {
 	ClientCaps         uint32 // live client's caps (from HandshakeResponse41)
 	RecordedClientCaps uint32 // caps from the recorded config mock
 	PreferRecordedCaps bool   // if true, prefer RecordedClientCaps over ClientCaps
+	// ServerMariaDBCaps and ClientMariaDBCaps are the MariaDB extended
+	// capabilities each side sent: the greeting's
+	// (HandshakeV10Packet.MariaDBCapabilities) and the client's
+	// HandshakeResponse41 or SSLRequest's. MetadataFraming reads them.
+	ServerMariaDBCaps uint32
+	ClientMariaDBCaps uint32
 	// FramingAssumed is set while ClientCaps is assumed rather than read off
 	// the client's HandshakeResponse41 or SSLRequest (a connection joined
 	// mid-stream, with no SSLRequest of its own captured): the recorder
@@ -94,6 +100,25 @@ func (d *DecodeContext) effectiveClientCaps() uint32 {
 func (d *DecodeContext) DeprecateEOF() bool {
 	return (d.ServerCaps&CLIENT_DEPRECATE_EOF) != 0 &&
 		(d.effectiveClientCaps()&CLIENT_DEPRECATE_EOF) != 0
+}
+
+// MetadataFraming returns which of MariaDB's optional result-set metadata
+// fields the connection's responses carry: those of the extended
+// capabilities both sides sent, when both speak MariaDB's extensions
+// (CLIENT_MYSQL clear on both). A MySQL server or client gets none.
+func (d *DecodeContext) MetadataFraming() mysql.MetadataFraming {
+	if d.ServerCaps&mysql.CLIENT_MYSQL != 0 || d.effectiveClientCaps()&mysql.CLIENT_MYSQL != 0 {
+		return 0
+	}
+	caps := d.ServerMariaDBCaps & d.ClientMariaDBCaps
+	var f mysql.MetadataFraming
+	if caps&mysql.MARIADB_CLIENT_EXTENDED_METADATA != 0 {
+		f |= mysql.FramingExtendedMetadata
+	}
+	if caps&mysql.MARIADB_CLIENT_CACHE_METADATA != 0 {
+		f |= mysql.FramingMetadataFollows
+	}
+	return f
 }
 
 // This map is used to store the last operation that was performed on a connection.
