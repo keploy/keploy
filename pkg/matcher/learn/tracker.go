@@ -830,7 +830,7 @@ func (t *Tracker) Placed() Placed {
 // orderLocked is the order of the set's serves as a read now sees it
 // (Placed.Order). t.mu is held.
 func (t *Tracker) orderLocked() Order {
-	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, starts: t.starts[:len(t.starts):len(t.starts)], places: t.places, flights: t.flights, handshakes: t.handshakes, phases: t.phases, set: t.setEpoch, landings: t.landings, flying: t.flying, serveAt: t.serveAt[:len(t.serveAt):len(t.serveAt)]}
+	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, starts: t.starts[:len(t.starts):len(t.starts)], places: t.places, views: t.derived.views, flights: t.flights, handshakes: t.handshakes, phases: t.phases, set: t.setEpoch, landings: t.landings, flying: t.flying, serveAt: t.serveAt[:len(t.serveAt):len(t.serveAt)]}
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
@@ -1019,6 +1019,9 @@ type Order struct {
 	// (Tracker.starts).
 	starts []int
 	places *setPlaces
+	// views is the store of the read set's views (setDerived.views), which
+	// ServedView reads them through (viewRead).
+	views *bodyStore
 	// flights, landings and flying are the set's requests of each serve,
 	// the landings the read saw and whether F's order is read by flights
 	// (Order.told).
@@ -1144,12 +1147,13 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	id := MockID(m)
 	unstated := r.viewUnstated()
 	var recorded, unread, ok bool
+	var keys []int
 	var loads []func() (*models.Mock, error)
 	o.t.mu.Lock()
 	older, before, after := o.olderTestLocked(id), o.beforeTestLocked(id), o.servedAfterLocked(id)
 	test := o.testOf(o.ofLocked(id))
 	if unstated {
-		recorded, _, loads, unread, ok = o.viewsLocked(id)
+		recorded, keys, loads, unread, ok = o.viewsLocked(id)
 	}
 	o.t.mu.Unlock()
 	if older {
@@ -1170,7 +1174,7 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	}
 	views := make([]Raw, len(loads))
 	for i, load := range loads {
-		views[i] = viewRaw(m, load)
+		views[i] = o.viewRead(m, id, keys[i], load)
 	}
 	if !recorded && len(views) == 1 {
 		return r.ServedLive(views[0])
@@ -1222,6 +1226,23 @@ func (o Order) viewsLocked(id string) (recorded bool, keys []int, loads []func()
 		}
 	}
 	return recorded, keys, loads, unread, told == k
+}
+
+// viewRead is viewRaw of the view load gives of m, the k-th the set keeps
+// of the mock of identity id (viewsLocked's keys), its payload read through
+// the read set's store of views (Order.views): loaded once for the set,
+// where every later call that reads m finds it, and again at each read
+// past the set's budget, or once the set is over (setDerived.drop), as
+// each call read it before. A view that could not be loaded is kept by
+// none (bodyStore.forgetUnread). Read as Raw.viewOf reads viewRaw's: the
+// same text, fields, stamps and clock reads, kept by none of the set's
+// caches by recording.
+func (o Order) viewRead(m *models.Mock, id string, k int, load func() (*models.Mock, error)) Raw {
+	b := o.views.get(id+"\x00"+strconv.Itoa(k), m.Name, load)
+	r := viewRaw(m, load)
+	r.src = nil
+	r.rText, r.rClock, r.rFields, r.rStamps, r.rRead = b.text, b.answerClock, b.fields, b.stamps, b.read
+	return r
 }
 
 // viewRaw is the view load gives of m, which F served (Tracker.ServedMockLive),
@@ -1529,16 +1550,17 @@ func (t *Tracker) ServedMockAsRecorded(m *models.Mock) {
 // forms) gave the application another view of m than its recording, which
 // its adapter knows whole: view gives m as F's application sent its request
 // and F answered it (Raw.ServedLive's live), read where a later call's rule
-// reads it, never kept by the set's caches; key names that view among m's,
-// the same for two serves that gave the same view and another for each
-// other. An adapter tells it once for each such serve, after the serve, in
-// place of ServedMockAsRecorded, and only where it knows the whole view. A
-// later call of the set reads m with the view (Order.ServedView) where every
-// serve of it the call's read saw was told; with each where they differ. A
-// nil view, a key "", or a view past the maxLiveViews different ones a set
-// keeps of m, says F gave a view keploy cannot read: a later call refuses
-// every word a value holds now that may stand there (Raw.ServedChanged with
-// none: fail closed).
+// first reads it and kept for the set's later calls in a store of the
+// set's views (setDerived.views, Order.viewRead), never in its caches by
+// recording; key names that view among m's, the same for two serves that
+// gave the same view and another for each other. An adapter tells it once
+// for each such serve, after the serve, in place of ServedMockAsRecorded,
+// and only where it knows the whole view. A later call of the set reads m
+// with the view (Order.ServedView) where every serve of it the call's read
+// saw was told; with each where they differ. A nil view, a key "", or a
+// view past the maxLiveViews different ones a set keeps of m, says F gave a
+// view keploy cannot read: a later call refuses every word a value holds
+// now that may stand there (Raw.ServedChanged with none: fail closed).
 func (t *Tracker) ServedMockLive(m *models.Mock, key string, view func() (*models.Mock, error)) {
 	if t == nil || m == nil {
 		return

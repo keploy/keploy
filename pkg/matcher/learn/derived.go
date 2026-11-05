@@ -125,6 +125,15 @@ type setDerived struct {
 	// bodies are the payloads of the set's recordings its readers loaded
 	// (bodyStore), one more tier on budget.
 	bodies *bodyStore
+	// views are the views F's serves gave of the set's recordings
+	// (Tracker.ServedMockLive) that its calls read (Order.ServedView), by
+	// the recording's identity and the view's place among those the set
+	// keeps of it (viewsLocked's keys): one more tier on budget, let go
+	// after the payloads, so a view is read once for the set, not once for
+	// each call that reads the recording, and again only past the budget.
+	// Its own store, not bodies: a view bears its recording's identity,
+	// and read as the recording a word only the view holds would pass.
+	views *bodyStore
 	// offsets are the set's places the offset rule reads, by place and
 	// moment (offsetIndex), within offsetBudget: its handlers share them.
 	offsets *offsetIndex
@@ -242,7 +251,8 @@ func newTier[P any](cap int64, set *budget, lru bool) tier[P] {
 // kept while the set is within it, whichever tier the part is of. letGo
 // frees need bytes for a part: the words tier lets go of its recordings
 // read least recently, then, where that is not enough, the payloads tier
-// (bodyStore) of its own (newSetDerived).
+// (bodyStore) of its own, and last the views' (setDerived.views;
+// newSetDerived).
 type budget struct {
 	limit, used int64
 	letGo       func(need int64)
@@ -508,14 +518,18 @@ func newSetDerived() *setDerived {
 	b := &budget{limit: setBudget()}
 	s := &setDerived{budget: b, held: newTier[heldParts](heldBudget, b, false), words: newTier[wordParts](derivedBudget, b, true), forms: newTier[formParts](formsBudget, b, false), drifts: newTier[driftPart](driftBudget, b, false), reading: map[readingKey]chan struct{}{}, reads: map[readTally]int{}, warming: map[string]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
 	s.bodies = newSetBodyStore(&s.mu, b, bodyBudget)
+	s.views = newSetBodyStore(&s.mu, b, viewBudget)
+	s.views.forgetUnread = true
 	s.inFlight = semaphore.NewWeighted(readInFlight)
 	// The words go first: a recording's words are read again from its
 	// payload, where one let go is decoded again (a JSON encode and decode
-	// of the whole recording) before any of its parts can be read.
+	// of the whole recording) before any of its parts can be read. The
+	// views go last: every call that reads a recording F served with a
+	// view reads the view.
 	b.letGo = func(need int64) {
-		if freed := s.words.letGo(need); freed < need {
-			s.bodies.kept.letGo(need - freed)
-		}
+		freed := s.words.letGo(need)
+		freed += s.bodies.kept.letGo(need - freed)
+		s.views.kept.letGo(need - freed)
 	}
 	return s
 }
@@ -537,6 +551,7 @@ func (s *setDerived) drop() {
 	s.drifts.drop()
 	s.bodies.kept.drop()
 	s.bodies.over = true
+	s.views.kept.drop()
 }
 
 // keepsPayloads reports whether the set's store keeps the payloads a test
@@ -557,7 +572,7 @@ func (s *setDerived) keepsPayloads() bool {
 func (s *setDerived) usedBytes() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.held.used + s.words.used + s.forms.used + s.drifts.used + s.bodies.kept.used
+	return s.held.used + s.words.used + s.forms.used + s.drifts.used + s.bodies.kept.used + s.views.kept.used
 }
 
 // keepRun counts size bytes more of the run's places (Tracker.keepRun) on
