@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Rows for the one value a word made anew is a word of (Decision.Of, the
@@ -161,6 +162,25 @@ func TestOutcomeAValueWithAWordBoundEarlierNamesNone(t *testing.T) {
 	vfNone(t, "a word bound before the call", ds, "q.id", false)
 	if d := oWord(t, ds, "6f9619ff", "1c2d3e4f"); d.Outcome != OutcomeValue {
 		t.Errorf("the bound word: %s; want a Value from mock-23", oDescribe([]Decision{d}))
+	}
+}
+
+// A UUID whose whole token an earlier place of the call's test gave in both
+// runs (the test's find gave the recorded UUID in both runs, and the request
+// moved off it): each word is refused, naming the place, as main refuses
+// the field. None is made anew, so none names the value: refused words are
+// never bound as one.
+func TestOutcomeAUUIDAPlaceOfTheTestGaveWholeInBothRunsNamesNone(t *testing.T) {
+	in := vfInput([3]string{"q.id", vfRec, vfLive})
+	in.Earlier = oServed("mock-0", false, false, Response, oText("body.ref", vfRec), vfRec, time.Millisecond)
+	ds := Decide(in)
+	vfNone(t, "a UUID a find gave whole in both runs", ds, "q.id", false)
+	at := vfAt(ds, "q.id")
+	if len(at) != 5 {
+		t.Fatalf("a UUID a find gave whole in both runs: %d words, want 5: %s", len(at), oDescribe(ds))
+	}
+	for _, d := range at {
+		oRefused(t, "a UUID a find gave whole in both runs", d, RefusalConflict, "stood whole at mock-0 body.ref")
 	}
 }
 
