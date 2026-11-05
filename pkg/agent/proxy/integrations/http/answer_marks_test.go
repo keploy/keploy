@@ -325,3 +325,45 @@ func TestRecordKeepsTheTerminalChunksOwnMark(t *testing.T) {
 	}, []time.Time{markAt(1), markAt(2), markAt(5)})
 	wantMarks(t, m.Spec.HTTPResp.Marks, markAt(1), w(8, 1), w(16, 2), w(16, 5))
 }
+
+// dechunkedAt places each end where it falls, ends short of the wire too, and
+// reads only framing it can: a size line that is empty, not hex, negative or
+// past the wire's end is no framing (ok false), never a panic.
+func TestDechunkedAtReadsOnlyFramingItCan(t *testing.T) {
+	wire := chunk("abc") + chunk("def") + "0\r\n\r\n"
+	for _, tc := range []struct {
+		name    string
+		wire    string
+		ends    []int
+		decoded []int
+		ok      bool
+	}{
+		{"an end at each chunk's frame end", wire, []int{8, 16, len(wire)}, []int{3, 6, 6}, true},
+		{"one end inside the first chunk", wire, []int{4}, []int{1}, true},
+		{"one end before the second chunk", wire, []int{8}, []int{3}, true},
+		{"an empty size line", "\r\nabc\r\n0\r\n\r\n", []int{12}, nil, false},
+		{"a size that is not hex", "zz\r\nabc\r\n0\r\n\r\n", []int{14}, nil, false},
+		{"a negative size", "-3\r\nabc\r\n0\r\n\r\n", []int{14}, nil, false},
+		{"a size past the wire", "7fffffffffffffff\r\nabc\r\n0\r\n\r\n", []int{28}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decoded, data, ok := func() (decoded []int, data []byte, ok bool) {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("dechunkedAt(%q, %v) panicked: %v", tc.wire, tc.ends, r)
+					}
+				}()
+				return dechunkedAt([]byte(tc.wire), tc.ends)
+			}()
+			if ok != tc.ok {
+				t.Fatalf("dechunkedAt(%q, %v) ok = %v, want %v (decoded %v)", tc.wire, tc.ends, ok, tc.ok, decoded)
+			}
+			if !ok {
+				return
+			}
+			if string(data) != "abcdef" || fmt.Sprint(decoded) != fmt.Sprint(tc.decoded) {
+				t.Errorf("dechunkedAt(%q, %v) = %v, %q; want %v, %q", tc.wire, tc.ends, decoded, data, tc.decoded, "abcdef")
+			}
+		})
+	}
+}
