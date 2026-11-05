@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -73,20 +74,33 @@ type redactedLiveCase struct {
 	secrets []string
 }
 
+// persisted is r as a report persists it (its JSON), but for when the call
+// missed (At): that is the clock's reading, built from no part of the call
+// nor of a recording, and its digits spell a live number by chance (a
+// number of 4 digits about one report in 2,000), which no redaction can
+// prevent. A row that looks for a live value in a report reads this.
+func persisted(t testing.TB, r *models.MockMismatchReport) string {
+	t.Helper()
+	c := *r
+	c.At = time.Time{}
+	all, err := json.Marshal(&c)
+	if err != nil {
+		t.Errorf("the report does not marshal: %v", err)
+	}
+	return string(all)
+}
+
 // carried are the secrets of c the report r carries anywhere it persists.
 func (c redactedLiveCase) carried(t *testing.T, r *models.MockMismatchReport) []string {
 	t.Helper()
-	all, err := json.Marshal(r)
-	if err != nil {
-		t.Fatal(err)
-	}
+	all := persisted(t, r)
 	secrets := c.secrets
 	if len(secrets) == 0 {
 		secrets = []string{liveSecret}
 	}
 	var out []string
 	for _, s := range secrets {
-		if strings.Contains(string(all), s) {
+		if strings.Contains(all, s) {
 			out = append(out, s)
 		}
 	}
@@ -301,10 +315,7 @@ func TestMissReportRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 				if r == nil {
 					t.Fatal("no report")
 				}
-				all, err := json.Marshal(r)
-				if err != nil {
-					t.Fatal(err)
-				}
+				all := persisted(t, r)
 				for _, d := range r.FieldDiffs {
 					t.Logf("diff %s %s exp=%q act=%q", d.Path, d.Kind, d.Expected, d.Actual)
 				}
@@ -436,12 +447,9 @@ func noSecret(t *testing.T, r *models.MockMismatchReport, wantSummary bool) {
 	if r == nil {
 		t.Fatal("no report")
 	}
-	all, err := json.Marshal(r)
-	if err != nil {
-		t.Fatal(err)
-	}
+	all := persisted(t, r)
 	for _, s := range []string{liveSecret, liveBound, liveNumber} {
-		if strings.Contains(string(all), s) {
+		if strings.Contains(all, s) {
 			t.Errorf("the report carries %q, a live value at a place the recording redacted:\nsummary: %s\nDiff: %s\nreport: %s", s, r.ActualSummary, r.Diff, all)
 		}
 	}
@@ -913,11 +921,7 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 				if mode != "on" && r.ClosestMock != "b" {
 					t.Fatalf("the report names %q, not the nearer recording b", r.ClosestMock)
 				}
-				all, err := json.Marshal(r)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if strings.Contains(string(all), liveSecret) {
+				if strings.Contains(persisted(t, r), liveSecret) {
 					t.Errorf("the report at closest %q carries the live value at a place recording a redacted:\nsummary: %s\nDiff: %s\nReceivedReq:\n%s\nnext: %s", r.ClosestMock, r.ActualSummary, r.Diff, r.ReceivedReq, r.NextSteps)
 				}
 				// The rest of the call still shows, and the path diff names
@@ -982,8 +986,8 @@ func TestAnAnsweredMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 			if r == nil || r.ClosestMock != "b" {
 				t.Fatalf("the report %+v does not name the walk's last recording b", r)
 			}
-			all, _ := json.Marshal(r)
-			if strings.Contains(string(all), liveSecret) {
+			all := persisted(t, r)
+			if strings.Contains(all, liveSecret) {
 				t.Errorf("the report carries the live value at a place recording a redacted: %s", all)
 			}
 			if want := "POST /x/" + valueRedacted + "/y"; r.ActualSummary != want {
@@ -1021,8 +1025,8 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 		if r == nil {
 			t.Fatal("no report")
 		}
-		all, _ := json.Marshal(r)
-		if r.ActualSummary != summary || strings.Contains(string(all), liveSecret) {
+		all := persisted(t, r)
+		if r.ActualSummary != summary || strings.Contains(all, liveSecret) {
 			t.Errorf("summary %q, want %q, and no secret in the report: %s", r.ActualSummary, summary, all)
 		}
 		if got := missedCall(request, r); got != summary {

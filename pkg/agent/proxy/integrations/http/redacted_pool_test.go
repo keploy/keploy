@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -60,11 +62,7 @@ func poolMiss(t *testing.T, h *HTTP, mode, path string, hdr map[string]string, b
 // carriesNo fails t when r carries secret anywhere it persists.
 func carriesNo(t *testing.T, r *models.MockMismatchReport, secret string) {
 	t.Helper()
-	all, err := json.Marshal(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(all), secret) {
+	if strings.Contains(persisted(t, r), secret) {
 		t.Errorf("the report carries %q:\nsummary: %s\nDiff: %s\nReceivedReq:\n%s", secret, r.ActualSummary, r.Diff, r.ReceivedReq)
 	}
 }
@@ -320,7 +318,7 @@ func TestMissesAtOnceLeaveTheClosestRecordingsOwnPlacesAsTheyWere(t *testing.T) 
 							t.Error("the row is of reports at the closest recording orders")
 							return
 						}
-						if all, _ := json.Marshal(r); strings.Contains(string(all), liveSecret) {
+						if strings.Contains(persisted(t, r), liveSecret) {
 							t.Errorf("the report carries %q: %s", liveSecret, r.ActualSummary)
 						}
 					}
@@ -410,6 +408,46 @@ func TestAReportShowsARootStringAndANumberTheRecordingKept(t *testing.T) {
 				t.Errorf("ReceivedReq does not show the number the recording kept:\n%s", r.ReceivedReq)
 			}
 		})
+	}
+}
+
+// A row that looks for a live value in a report reads all the report
+// persists but when the call missed (persisted): a report whose time spells
+// the number row's live value carries none, and one that holds the value in
+// any text field, or in a field diff, carries it.
+func TestARowReadsAllAReportPersistsButWhenTheCallMissed(t *testing.T) {
+	// 15:38:29.918223411 spells 9182, as the time of about one report of
+	// the number row's in 2,000 does.
+	at := time.Date(2026, 11, 5, 15, 38, 29, 918223411, time.UTC)
+	base := models.MockMismatchReport{At: at, Protocol: "HTTP", ActualSummary: "POST /x"}
+	if all, _ := json.Marshal(&base); !strings.Contains(string(all), "9182") {
+		t.Fatalf("the row is of a report whose JSON spells 9182 in its time: %s", all)
+	}
+	if s := persisted(t, &base); strings.Contains(s, "9182") {
+		t.Errorf("a row reads when the call missed: %s", s)
+	}
+	read := 0
+	v := reflect.ValueOf(base)
+	for i := 0; i < v.NumField(); i++ {
+		c := base
+		f := reflect.ValueOf(&c).Elem().Field(i)
+		switch {
+		case f.Kind() == reflect.String:
+			f.SetString("POST /x/9182")
+		case f.Kind() == reflect.Slice && f.Type().Elem().Kind() == reflect.String:
+			f.Set(reflect.ValueOf([]string{"body.pin=9182"}).Convert(f.Type()))
+		case f.Type() == reflect.TypeOf([]models.MockFieldDiff(nil)):
+			f.Set(reflect.ValueOf([]models.MockFieldDiff{{Path: "body.pin", Actual: "9182"}}))
+		default:
+			continue
+		}
+		read++
+		if !strings.Contains(persisted(t, &c), "9182") {
+			t.Errorf("a row does not read the report's %s", v.Type().Field(i).Name)
+		}
+	}
+	if read < 8 {
+		t.Fatalf("the row read %d text fields of a report: it is of a report's text fields", read)
 	}
 }
 
