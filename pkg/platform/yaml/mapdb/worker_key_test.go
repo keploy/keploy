@@ -16,11 +16,11 @@ import (
 // sat in the slice of no test process and was never served. The test's key
 // wins over a key the entry carries; of several tests whose lists held the
 // mock, the first gives it, even when the first has none. A test with no key
-// leaves the entry's own key, as does every test without the proven switch
-// (a test's key is read only under it), and an entry the scope lists already
-// keeps its own when it is placed again. A move that names a key gives the
-// entry that key, moved or placed again, with or without the switch, as a
-// move that names an owner does.
+// leaves the entry's own key, and an entry the scope lists already keeps its
+// own when it is placed again. All of it holds with or without the proven
+// switch: a test's key is read and kept whatever it says. A move that names
+// a key gives the entry that key, moved or placed again, as a move that
+// names an owner does.
 func TestMoveToWorkerGivesAMovedCallItsTestsKey(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		sw, name := "", "switch=off"
@@ -77,11 +77,7 @@ func TestMoveToWorkerGivesAMovedCallItsTestsKey(t *testing.T) {
 				want := map[string]string{
 					"mock-9": "pkg/own", "mock-11": "pkg/own11", "mock-2": "pkg/w",
 					"mock-6": "pkg/a", "mock-5": "pkg/c",
-					// Without the switch no test's key is read: each entry keeps its own.
-					"mock-7": "", "mock-10": "", "mock-12": "pkg/own12",
-				}
-				if on {
-					want["mock-7"], want["mock-10"], want["mock-12"] = "pkg/b", "pkg/x", "pkg/v"
+					"mock-7": "pkg/b", "mock-10": "pkg/x", "mock-12": "pkg/v",
 				}
 				for name, w := range want {
 					if v, ok := keys[name]; !ok || v != w {
