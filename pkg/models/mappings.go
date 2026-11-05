@@ -87,9 +87,10 @@ type MockEntry struct {
 	Drift bool `json:"drift,omitempty" yaml:"drift,omitempty" bson:"drift,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy record
 	// proved the recording served, not required, and why, in keploy's words:
-	// the recording sent the call while another call of the same test was
-	// unanswered, and a round of the same code, answered at once, did not
-	// make it and otherwise passed the test. Under the proven switch a
+	// the test's record made the call, and a round of the same code,
+	// answered at once, did not make it and otherwise passed the test, so
+	// whether the app makes it depends on more than the code (how fast an
+	// answer comes, for one). Under the proven switch a
 	// replay serves it to that test alone, when the app makes the call, by
 	// the same matching as the test's other recordings, and never charges
 	// the test for not making it. Written by record's judging only; read and
