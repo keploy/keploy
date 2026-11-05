@@ -2203,3 +2203,55 @@ func TestOutcomeAWordOnlyADecodedFormCarriesIsRefusedWhereAPlaceHoldsIt(t *testi
 		fresh(enc.name+", a view of an answer round F served changed holding another word", Decide(view(o)))
 	}
 }
+
+// An id the application made and sent in earlier requests, where round F's
+// call holds another id that no earlier place gave in F (an asynchronous
+// delete of another test's record, landing in this call's window in F): no
+// copy from those places, in any order, gives F's word, so the call is
+// refused whether or not keploy can number F's serve of one of them (a serve
+// made while another request was in flight on a parallel connection,
+// learn.Order.Of: 0, 0). Untold, the line names the serve order; told, it
+// names the conflict. Neither is fresh and neither binds. Where F's views
+// hold F's word, the places show the link and F's serve order is never
+// asked: the word is a Value from the earliest.
+func TestOutcomeAWordNoEarlierPlaceGaveInFIsRefusedWhateverTheServeOrder(t *testing.T) {
+	const path = "bind.$8"
+	const rec, live, other = "882bd918-1111-4222-8333-444455556666", "57af450e-aaaa-4bbb-8ccc-ddddeeeeffff", "c0ffee00-9999-4888-8777-666655554444"
+	place := func(name string, before time.Duration, n int, view string) Raw {
+		r := oAnswer(name, before, rec)
+		if n == 0 {
+			r = r.WithServed(true)
+		} else {
+			r = r.ServedAs(n)
+		}
+		if view == "" {
+			return r.ServedAsRecorded()
+		}
+		return r.ServedLive(oAnswer(name, before, view))
+	}
+	places := func(dn int, view string) []Raw {
+		return []Raw{
+			place("mock-a", 400*time.Millisecond, 1, view),
+			place("mock-b", 300*time.Millisecond, 2, view),
+			place("mock-d", 200*time.Millisecond, dn, view),
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+		kind RefusalKind
+		says string
+	}{
+		{"F's views hold another id, one serve not numbered", places(0, other), "unknown", "does not know where record's full round served mock-d"},
+		{"F's views hold another id, every serve numbered", places(3, other), "conflict", "did not follow"},
+		{"served as recorded, one serve not numbered", places(0, ""), "unknown", "does not know where record's full round served mock-d"},
+		{"served as recorded, every serve numbered", places(3, ""), "conflict", "did not follow"},
+	} {
+		d := oWord(t, Decide(oInput(path, "id "+rec, "id "+live, nil, tc.raw)), "882bd918", "57af450e")
+		oRefused(t, tc.name, d, tc.kind, "mock-a", tc.says)
+	}
+	d := oWord(t, Decide(oInput(path, "id "+rec, "id "+live, nil, places(0, live))), "882bd918", "57af450e")
+	if d.Outcome != OutcomeValue || d.From.Mock != "mock-a" {
+		t.Errorf("F's views hold F's id, one serve not numbered: %s; want a Value from mock-a", oDescribe([]Decision{d}))
+	}
+}
