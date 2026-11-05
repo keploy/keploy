@@ -563,6 +563,25 @@ type ExactSkippedReadsReader interface {
 	SkippedReadsAnswered() []*models.Mock
 }
 
+// SkippedReadsInCallView is the skipped tests' reads that answered in the
+// open test's window, as db, the store a call is held to, lists them
+// (ExactSkippedReadsReader): none when the call's view moved (CallViewMoved,
+// asked after the list is read, so a view installed while it is read is
+// seen), as the list may then be another test's, which an extra-call line
+// joined with the call's answered list (ConsumedInCallView) would count as
+// this test's calls. None for a store that lists none.
+func SkippedReadsInCallView(db MockMemDb) []*models.Mock {
+	sr, ok := db.(ExactSkippedReadsReader)
+	if !ok {
+		return nil
+	}
+	reads := sr.SkippedReadsAnswered()
+	if CallViewMoved(db) {
+		return nil
+	}
+	return reads
+}
+
 // ExactServedReader is an optional MockMemDb extension of a store that
 // serves each test its own mocks exactly (the proven switch), with a served
 // observer (the learn tracker's ServedMock). ServedInOpenTest returns, of one

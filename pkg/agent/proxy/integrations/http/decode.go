@@ -621,6 +621,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// during them is told too, and then the miss carries
 				// nothing any of them read (viewless): no closest
 				// recording, no diff, no recording made elsewhere, no
+				// earlier test's recording of its method and path, no
 				// repeat note and no next step of a comparison, whichever
 				// view a read was of. Nor does it get its learn step's
 				// reason (learnMiss.explain): that code is judging's class
