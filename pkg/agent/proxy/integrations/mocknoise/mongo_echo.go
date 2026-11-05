@@ -22,14 +22,18 @@ const (
 )
 
 // mongoMsgDoc returns the flattened document of an OP_MSG body section, or
-// false for any other section (a document sequence, a section the recorder
+// nil for any other section (a document sequence, a section the recorder
 // could not write as JSON).
-func mongoMsgDoc(section string) (map[string][]string, bool) {
-	if !strings.HasPrefix(section, mongoMsgPrefix) || !strings.HasSuffix(section, mongoMsgSuffix) {
-		return nil, false
+func mongoMsgDoc(section string) map[string][]string {
+	body, ok := strings.CutPrefix(section, mongoMsgPrefix)
+	if !ok {
+		return nil
 	}
-	flat := flattenJSONBody(section[len(mongoMsgPrefix) : len(section)-len(mongoMsgSuffix)])
-	return flat, len(flat) > 0
+	body, ok = strings.CutSuffix(body, mongoMsgSuffix)
+	if !ok {
+		return nil
+	}
+	return flattenJSONBody(body)
 }
 
 // mongoWritten reports whether path is a place whose value the application
@@ -44,19 +48,22 @@ func mongoWritten(path string) bool {
 		strings.HasPrefix(path, "documents.")
 }
 
-// mongoOpMsg returns the one OP_MSG request and answer of a Mongo mock, or
-// false when the mock holds anything else (no request, several, another
-// opcode's message).
-func mongoOpMsg(m *models.Mock) (req, resp *models.MongoOpMessage, ok bool) {
-	if m == nil || m.Kind != models.Mongo || len(m.Spec.MongoRequests) != 1 || len(m.Spec.MongoResponses) != 1 {
-		return nil, nil, false
+// mongoOpMsgSections returns the sections of a Mongo mock's one request and
+// one answer (the caller's dispatch decides the kind), or none when the mock
+// holds several requests or answers. A message of another opcode has no
+// sections.
+func mongoOpMsgSections(m *models.Mock) (req, resp []string) {
+	if len(m.Spec.MongoRequests) != 1 || len(m.Spec.MongoResponses) != 1 {
+		return nil, nil
 	}
-	req, okReq := m.Spec.MongoRequests[0].Message.(*models.MongoOpMessage)
-	resp, okResp := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
-	if !okReq || !okResp || req == nil || resp == nil {
-		return nil, nil, false
+	return opMsgSections(m.Spec.MongoRequests[0].Message), opMsgSections(m.Spec.MongoResponses[0].Message)
+}
+
+func opMsgSections(msg interface{}) []string {
+	if m, _ := msg.(*models.MongoOpMessage); m != nil {
+		return m.Sections
 	}
-	return req, resp, true
+	return nil
 }
 
 // mongoCorrelations detects the values a recorded Mongo write echoes: a value
@@ -67,32 +74,18 @@ func mongoOpMsg(m *models.Mock) (req, resp *models.MongoOpMessage, ok bool) {
 // not answered, or only answered) is not a correlation, nor is a value in a
 // filter.
 func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
-	req, resp, ok := mongoOpMsg(m)
-	if !ok {
-		return nil
-	}
+	req, resp := mongoOpMsgSections(m)
 	answered := make(map[string][]string)
-	for j, s := range resp.Sections {
-		doc, ok := mongoMsgDoc(s)
-		if !ok {
-			continue
-		}
-		for path, vals := range doc {
+	for j, s := range resp {
+		for path, vals := range mongoMsgDoc(s) {
 			for _, v := range vals {
 				answered[v] = append(answered[v], mongoSectionPlace+strconv.Itoa(j)+"."+path)
 			}
 		}
 	}
-	if len(answered) == 0 {
-		return nil
-	}
 	var out []models.FieldCorrelation
-	for i, s := range req.Sections {
-		doc, ok := mongoMsgDoc(s)
-		if !ok {
-			continue
-		}
-		for path, vals := range doc {
+	for i, s := range req {
+		for path, vals := range mongoMsgDoc(s) {
 			if !mongoWritten(path) || len(vals) != 1 {
 				continue
 			}
@@ -126,8 +119,8 @@ func mongoPlace(place string) (int, string, bool) {
 	if !ok {
 		return 0, "", false
 	}
-	idx, path, ok := strings.Cut(rest, ".")
-	if !ok || path == "" {
+	idx, path, _ := strings.Cut(rest, ".")
+	if path == "" {
 		return 0, "", false
 	}
 	i, err := strconv.Atoi(idx)
@@ -154,22 +147,10 @@ func RenderMongoEchoes(corrs []models.FieldCorrelation, liveSections []string, r
 	if resp == nil || len(corrs) == 0 {
 		return resp
 	}
-	live := make(map[int]map[string][]string)
-	liveDoc := func(i int) (map[string][]string, bool) {
-		if doc, ok := live[i]; ok {
-			return doc, doc != nil
-		}
-		var doc map[string][]string
-		if i < len(liveSections) {
-			doc, _ = mongoMsgDoc(liveSections[i])
-		}
-		live[i] = doc
-		return doc, doc != nil
-	}
 	bound := make(map[string]string)
 	refused := make(map[string]bool)
 	for _, c := range corrs {
-		if c.RecordedValue == "" || refused[c.RecordedValue] {
+		if c.RecordedValue == "" {
 			continue
 		}
 		i, path, ok := mongoPlace(c.RequestPath)
@@ -177,9 +158,11 @@ func RenderMongoEchoes(corrs []models.FieldCorrelation, liveSections []string, r
 			refused[c.RecordedValue] = true
 			continue
 		}
-		doc, ok := liveDoc(i)
-		vals := doc[path]
-		if !ok || len(vals) != 1 {
+		var vals []string
+		if i < len(liveSections) {
+			vals = mongoMsgDoc(liveSections[i])[path]
+		}
+		if len(vals) != 1 {
 			refused[c.RecordedValue] = true
 			continue
 		}

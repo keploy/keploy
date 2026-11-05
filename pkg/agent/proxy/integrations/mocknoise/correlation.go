@@ -30,10 +30,13 @@ import (
 // mock's headers, URL query and non-JSON bodies are not read: a value there
 // is matched as recorded.
 func CorrelationsFromMock(m *models.Mock) []models.FieldCorrelation {
-	if m != nil && m.Kind == models.Mongo {
+	if m == nil {
+		return nil
+	}
+	if m.Kind == models.Mongo {
 		return mongoCorrelations(m)
 	}
-	if m == nil || m.Spec.HTTPReq == nil || m.Spec.HTTPResp == nil {
+	if m.Spec.HTTPReq == nil || m.Spec.HTTPResp == nil {
 		return nil
 	}
 	// An answer with no body (a 204) echoes nothing, so its request, however
