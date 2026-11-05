@@ -148,8 +148,17 @@ func TestV2_TheStopDecidesAnAnswerTeedAheadOfItsRequestAtOnce(t *testing.T) {
 				m.Spec.GenericResponses[0].Message[0].Data != answer {
 				t.Fatalf("handed on %v -> %v, want GET -> the whole answer", m.Spec.GenericRequests, m.Spec.GenericResponses)
 			}
-			if st := mgr.BacklogBefore(t0.Add(10 * time.Second)); st.Pending {
-				t.Fatalf("the stop still finds the exchange pending once it was handed on: %q", st.WaitingOn)
+			// The hold is released as the flush returns, after the hand-on
+			// (released first, the stop could end before the mock is
+			// added): the stop, which looks until nothing is pending, finds
+			// nothing once the parser has, with the streams still open.
+			bound := time.Now().Add(waitBound) // only turns a hang into a failure
+			for st := mgr.BacklogBefore(t0.Add(10 * time.Second)); st.Pending; st = mgr.BacklogBefore(t0.Add(10 * time.Second)) {
+				if time.Now().After(bound) {
+					close(events)
+					t.Fatalf("the stop still finds the exchange pending once it was handed on: %q", st.WaitingOn)
+				}
+				time.Sleep(time.Millisecond) // a yield between looks
 			}
 			close(events)
 			awaitReturn(t, done)
