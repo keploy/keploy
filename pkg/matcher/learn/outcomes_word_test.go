@@ -698,36 +698,72 @@ func TestOutcomeAValueBehindADecodeStepKeepsItsAnswerWhereItsFieldIsEchoedWhole(
 	}
 }
 
-// A word whose whole token an earlier place of the call's test held in
-// both runs (the test's find gave "blue-17" in both runs, and the request
-// went "blue-17" to "red-42") is refused, each word of it, as main refuses
-// the field (unaccounted: the find holds a word of it, which did not drift
-// with it): the token stood there whole, which is no chance of a short word,
-// and keploy cannot tell whether the value came from there. So it is
-// whether or not the call's answer holds the word, and with no answer. A
-// short word that is a whole token of its own there ("82" of "slot 82"
+// A word whose whole token an earlier place of the run held in both runs
+// (a find gave "blue-17" in both runs, and the request went "blue-17" to
+// "red-42") is refused, each word of it, as main refuses the field
+// (unaccounted: the find holds a word of it, which did not drift with it):
+// the token stood there whole, which is no chance of a short word, and
+// keploy cannot tell whether the value came from there. So it is whether or
+// not the call's answer holds the word, and with no answer, at a place of
+// the call's test, of the start-up, and of an older test (main: "appears in
+// an earlier test of the set"), one F gave only before the call's test too.
+// A short word that is a whole token of its own there ("82" of "slot 82"
 // beside an answer of 82) is still chance.
-func TestOutcomeAWordWhoseWholeTokenAPlaceOfTheTestGaveInBothRunsIsRefused(t *testing.T) {
-	for _, c := range []struct {
-		what string
-		resp []Leaf
+func TestOutcomeAWordWhoseWholeTokenAnEarlierPlaceKeptInBothRunsIsRefused(t *testing.T) {
+	for _, s := range []struct {
+		what               string
+		run, startUp, gone bool
 	}{
-		{"the answer holds the word", []Leaf{oText("body.msg", "seen 17 times")}},
-		{"the answer does not hold it", []Leaf{oText("body.msg", "seen 99 times")}},
-		{"no answer", nil},
+		{"the call's test", false, false, false},
+		{"the start-up", true, true, false},
+		{"an older test", true, false, false},
+		{"an older test, given only before the call's test", true, false, true},
 	} {
-		find := oServed("mock-0", false, false, Response, oText("body.tag", "blue-17"), "blue-17", time.Millisecond)
-		in := oInput("body.note", "blue-17", "red-42", find, nil)
-		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
-		in.Resp = c.resp
-		ds := Decide(in)
-		for _, wd := range [][2]string{{"blue", "red"}, {"17", "42"}} {
-			oRefused(t, c.what+", "+wd[0], oWord(t, ds, wd[0], wd[1]), RefusalConflict, `"blue-17" stood whole at mock-0 body.tag in both runs`)
+		for _, c := range []struct {
+			what string
+			resp []Leaf
+		}{
+			{"the answer holds the word", []Leaf{oText("body.msg", "seen 17 times")}},
+			{"the answer does not hold it", []Leaf{oText("body.msg", "seen 99 times")}},
+			{"no answer", nil},
+		} {
+			find := oServed("mock-0", s.run, s.startUp, Response, oText("body.tag", "blue-17"), "blue-17", time.Millisecond)
+			find[0].beforeTest = s.gone
+			in := oInput("body.note", "blue-17", "red-42", find, nil)
+			in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+			in.Resp = c.resp
+			ds := Decide(in)
+			for _, wd := range [][2]string{{"blue", "red"}, {"17", "42"}} {
+				oRefused(t, s.what+", "+c.what+", "+wd[0], oWord(t, ds, wd[0], wd[1]), RefusalConflict, `"blue-17" stood whole at mock-0 body.tag in both runs`)
+			}
 		}
 	}
 	find := oServed("mock-0", false, false, Response, oText("body.n", "82"), "82", time.Millisecond)
 	if d := oWord(t, Decide(oInput("body.note", "slot 82", "slot 7", find, nil)), "82", "7"); d.Outcome != OutcomeFresh || !strings.Contains(d.Line, "set aside") {
 		t.Errorf("a short word, a token of its own, beside a place that gave it in both runs: %s, line %q; want fresh, naming the place set aside", oDescribe([]Decision{d}), d.Line)
+	}
+}
+
+// A place of an older test whose token round F moved (a find gave
+// "blue-17", then "green-9", and the request went "blue-17" to "red-42") is
+// no conflict: the value did not follow it, and a moved place counts only in
+// the call's scope or the start-up, so each word is fresh, as main learns
+// the field a variable. The same place in the call's own test is a conflict.
+func TestOutcomeAWordWhoseTokenAnOlderTestsPlaceMovedIsFresh(t *testing.T) {
+	for _, s := range []struct {
+		what string
+		run  bool
+		want WordOutcome
+	}{{"an older test", true, OutcomeFresh}, {"the call's test", false, OutcomeRefused}} {
+		find := oServed("mock-0", s.run, false, Response, oText("body.tag", "blue-17"), "green-9", time.Millisecond)
+		in := oInput("body.note", "blue-17", "red-42", find, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		ds := Decide(in)
+		for _, wd := range [][2]string{{"blue", "red"}, {"17", "42"}} {
+			if d := oWord(t, ds, wd[0], wd[1]); d.Outcome != s.want {
+				t.Errorf("%s moved the token, %s: %s; want %v", s.what, wd[0], oDescribe([]Decision{d}), s.want)
+			}
+		}
 	}
 }
 
@@ -925,7 +961,7 @@ func TestOutcomeAReadBackOfAnotherScalarTypeIsAnsweredThere(t *testing.T) {
 // gave it unchanged there. With no such find the line names nothing set
 // aside. A find that held the word's whole longer token ("blue-17" for
 // "blue-17" sent, then "red-42") refuses it instead
-// (TestOutcomeAWordWhoseWholeTokenAPlaceOfTheTestGaveInBothRunsIsRefused).
+// (TestOutcomeAWordWhoseWholeTokenAnEarlierPlaceKeptInBothRunsIsRefused).
 func TestOutcomeAFreshWordNamesThePlaceItSetAside(t *testing.T) {
 	for _, withFind := range []bool{true, false} {
 		var earlier []Earlier
