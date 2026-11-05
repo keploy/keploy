@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // setEndManager is the run's manager in a session whose client reads each
@@ -265,10 +266,11 @@ func TestMockManager_TakesASetEndRegistrationOnlyWhereAReadRunsIt(t *testing.T) 
 
 // A registration that panics is recovered: the others still run, and the
 // read is told why it cannot take every miss, naming the parser that
-// panicked. A read whose context is done is told so: a registration may
-// have returned before it filed.
+// panicked, as the logged panic does. A read whose context is done is told
+// so: a registration may have returned before it filed.
 func TestMockManager_FileAtSetEndSaysWhenItCannotVouch(t *testing.T) {
-	m := setEndManager(t)
+	m, logs := observedSetEndManager(t)
+	handTicked(t) // never ticked: no watch warns, so the panic is all the log holds
 	var ran []string
 	mustRegister(t, m, func(context.Context) { ran = append(ran, "a") })
 	cancelB := mustRegisterKind(t, m, models.REDIS, func(context.Context) { panic("parser bug") })
@@ -279,6 +281,10 @@ func TestMockManager_FileAtSetEndSaysWhenItCannotVouch(t *testing.T) {
 	}
 	if want := []string{"a", "c"}; !slices.Equal(ran, want) {
 		t.Fatalf("ran %v, want %v: a panic stops no other registration", ran, want)
+	}
+	logged := logs.AllUntimed()
+	if len(logged) != 1 || logged[0].Level != zapcore.ErrorLevel || logged[0].ContextMap()["kind"] != string(models.REDIS) || logged[0].ContextMap()["panic"] != "parser bug" {
+		t.Fatalf("a Redis registration panicked: the log holds %v, want one error, naming the panic and its parser, Redis, alone", logged)
 	}
 	cancelB()
 	done, cancel := context.WithCancel(context.Background())

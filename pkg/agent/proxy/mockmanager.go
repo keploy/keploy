@@ -4518,6 +4518,10 @@ type setEndFiler struct {
 // read, and nothing else would say which parser does.
 var setEndFilingBeat = 5 * time.Second
 
+// newSetEndFilingTicker makes a watch's ticker (watchSetEndFiling), at the
+// beat: a test ticks it by hand.
+var newSetEndFilingTicker = time.NewTicker
+
 var _ integrations.SetEndFiler = (*MockManager)(nil)
 
 // SetReadsSetEnds says whether the replay session's client reads each of
@@ -4616,9 +4620,9 @@ func (m *MockManager) watchSetEndFiling(ctx context.Context, kind models.Kind) (
 	done := make(chan struct{})
 	ended := make(chan struct{})
 	beat := setEndFilingBeat
+	ticker := newSetEndFilingTicker(beat)
 	go func() {
 		defer close(ended)
-		ticker := time.NewTicker(beat)
 		defer ticker.Stop()
 		for beats := 1; ; beats++ {
 			select {

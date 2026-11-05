@@ -14,13 +14,10 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// watchedSetEndManager is setEndManager whose log the test reads, with a
-// set-end filing beat of beat.
-func watchedSetEndManager(t *testing.T, beat time.Duration) (*MockManager, *observer.ObservedLogs) {
+// observedSetEndManager is setEndManager whose warnings and errors the test
+// reads.
+func observedSetEndManager(t *testing.T) (*MockManager, *observer.ObservedLogs) {
 	t.Helper()
-	was := setEndFilingBeat
-	setEndFilingBeat = beat
-	t.Cleanup(func() { setEndFilingBeat = was })
 	core, logs := observer.New(zapcore.WarnLevel)
 	m := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.New(core))
 	t.Cleanup(m.Close)
@@ -45,89 +42,144 @@ func waitForSetEnd(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// handTicker makes the set-end filing watches' tickers
+// (newSetEndFilingTicker) while a test runs: it keeps the beat each was
+// made with, in the order made, and the test ticks each by hand. A tick is
+// taken only by a watch that waits for one. A ticker not made by
+// time.NewTicker sends only what is sent on its channel, and its Stop does
+// nothing.
+type handTicker struct {
+	mu    sync.Mutex
+	beats []time.Duration
+	ticks []chan time.Time
+}
+
+// handTicked has the test's set-end filing watches ticked by hand.
+func handTicked(t *testing.T) *handTicker {
+	t.Helper()
+	h := &handTicker{}
+	was := newSetEndFilingTicker
+	newSetEndFilingTicker = func(beat time.Duration) *time.Ticker {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		c := make(chan time.Time)
+		h.beats = append(h.beats, beat)
+		h.ticks = append(h.ticks, c)
+		return &time.Ticker{C: c}
+	}
+	t.Cleanup(func() { newSetEndFilingTicker = was })
+	return h
+}
+
+// made is the beat of each ticker made so far.
+func (h *handTicker) made() []time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.beats)
+}
+
+// tick ticks the i-th ticker made, and says whether its watch took the
+// tick within the bound.
+func (h *handTicker) tick(i int, within time.Duration) bool {
+	h.mu.Lock()
+	c := h.ticks[i]
+	h.mu.Unlock()
+	select {
+	case c <- time.Now():
+		return true
+	case <-time.After(within):
+		return false
+	}
+}
+
 // A registration that has not returned is named, at each beat it runs
 // through, by its parser's kind and the count of beats: a parser that
 // ignores the read's context holds the read with a signal, and the warning
-// says the context is done by then. The read waits as it did, and no
-// warning follows the registration's return.
+// says whether the context is done by then. Each watch's ticker is made
+// with the beat and is ticked here by hand: one warning comes at each tick,
+// none without one. The read waits as it did, and a watch takes no tick
+// once its registration has returned, so no warning follows that.
 func TestMockManager_SetEndFilingThatHasNotReturnedIsNamedAtEachBeat(t *testing.T) {
-	const beat = 20 * time.Millisecond
-	m, logs := watchedSetEndManager(t, beat)
+	const beat = 7 * time.Second
+	was := setEndFilingBeat
+	setEndFilingBeat = beat
+	t.Cleanup(func() { setEndFilingBeat = was })
+	m, logs := observedSetEndManager(t)
+	ticker := handTicked(t)
 	release := make(chan struct{})
 	mustRegister(t, m, func(context.Context) {})
 	mustRegisterKind(t, m, models.REDIS, func(context.Context) { <-release })
 	read, cancelRead := context.WithCancel(context.Background())
 	defer cancelRead()
 	filed := make(chan error, 1)
-	began := time.Now()
 	go func() { filed <- m.FileAtSetEnd(read) }()
 
-	waitForSetEnd(t, "two beats of a registration that has not returned", func() bool { return len(filingWarnings(logs)) >= 2 })
+	const kafka, redis = 0, 1
+	waitForSetEnd(t, "the watch of the registration that has not returned", func() bool { return len(ticker.made()) == 2 })
+	if made := ticker.made(); !slices.Equal(made, []time.Duration{beat, beat}) {
+		t.Fatalf("the watches' tickers were made with %v, want each with the beat, %s", made, beat)
+	}
+	if ticker.tick(kafka, 50*time.Millisecond) {
+		t.Fatal("the watch of the Kafka registration, which returned at once, took a tick")
+	}
+	if got := len(filingWarnings(logs)); got != 0 {
+		t.Fatalf("%d warnings before any tick, want none without one", got)
+	}
+	const beats = 3
+	for n := 1; n <= beats; n++ {
+		if n == beats {
+			cancelRead()
+		}
+		if !ticker.tick(redis, 20*time.Second) {
+			t.Fatalf("beat %d: the watch of the registration that has not returned took no tick", n)
+		}
+		waitForSetEnd(t, fmt.Sprintf("the warning of beat %d", n), func() bool { return len(filingWarnings(logs)) >= n })
+		if got := len(filingWarnings(logs)); got != n {
+			t.Fatalf("%d warnings after %d ticks, want one a tick", got, n)
+		}
+		select {
+		case err := <-filed:
+			t.Fatalf("the read returned (%v) while a registration it ran had not: the watch must change nothing of the read", err)
+		default:
+		}
+	}
+	close(release)
 	select {
 	case err := <-filed:
-		t.Fatalf("the read returned (%v) while a registration it ran had not: the watch must change nothing of the read", err)
-	default:
-	}
-	cancelRead()
-	waitForSetEnd(t, "a beat after the read's context is done", func() bool {
-		ws := filingWarnings(logs)
-		return ws[len(ws)-1].ContextMap()["readContextDone"] == true
-	})
-	close(release)
-	var err error
-	select {
-	case err = <-filed:
+		if err == nil {
+			t.Fatal("a read whose context ended while a registration ran was vouched for")
+		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("the read did not return once its registrations had")
 	}
-	took := time.Since(began)
-	if err == nil {
-		t.Fatal("a read whose context ended while a registration ran was vouched for")
-	}
-	ws := filingWarnings(logs)
-	if most := int(took / beat); len(ws) > most {
-		t.Fatalf("%d warnings in a read of %s, at most one a beat (%s) is %d", len(ws), took, beat, most)
-	}
-	time.Sleep(5 * beat)
-	if after := filingWarnings(logs); len(after) != len(ws) {
-		t.Fatalf("%d warnings followed the registration's return: %v", len(after)-len(ws), after[len(ws):])
+	if ticker.tick(redis, 50*time.Millisecond) {
+		t.Fatal("the watch took a tick after its registration returned")
 	}
 
-	sawLive, sawDone := false, false
+	ws := filingWarnings(logs)
+	if len(ws) != beats {
+		t.Fatalf("%d warnings in all, want %d, one a tick: %v", len(ws), beats, ws)
+	}
 	for i, w := range ws {
-		beats := i + 1
-		want := fmt.Sprintf("set-end filing for Redis has not returned after %s", time.Duration(beats)*beat)
+		n := i + 1
+		want := fmt.Sprintf("set-end filing for Redis has not returned after %s", time.Duration(n)*beat)
 		if w.Message != want || w.Level != zapcore.WarnLevel {
-			t.Fatalf("warning %d: %s %q, want WARN %q", beats, w.Level, w.Message, want)
+			t.Fatalf("warning %d: %s %q, want WARN %q", n, w.Level, w.Message, want)
 		}
 		fields := w.ContextMap()
-		if fields["kind"] != "Redis" || fields["beats"] != int64(beats) || fields["beat"] != beat {
-			t.Fatalf("warning %d: fields %v, want kind Redis, beats %d, beat %s", beats, fields, beats, beat)
-		}
-		switch fields["readContextDone"] {
-		case false:
-			if sawDone {
-				t.Fatalf("warning %d says the read's context is live after one said it was done", beats)
-			}
-			sawLive = true
-		case true:
-			sawDone = true
-		default:
-			t.Fatalf("warning %d: readContextDone is %v, want a bool", beats, fields["readContextDone"])
+		if fields["kind"] != "Redis" || fields["beats"] != int64(n) || fields["beat"] != beat || fields["readContextDone"] != (n == beats) {
+			t.Fatalf("warning %d: fields %v, want kind Redis, beats %d, beat %s, readContextDone %v", n, fields, n, beat, n == beats)
 		}
 	}
-	if !sawLive {
-		t.Fatal("no warning said the read's context was live while it was")
-	}
-	if got := logs.FilterMessageSnippet("Kafka").Len(); got != 0 {
-		t.Fatalf("%d warnings named the Kafka registration, which returned at once", got)
+	if got := logs.FilterMessageSnippet("Kafka").Len() + logs.FilterField(zap.String("kind", string(models.KAFKA))).Len(); got != 0 {
+		t.Fatalf("%d entries named the Kafka registration, which returned at once", got)
 	}
 }
 
-// A registration that returns within its first beat, as one that files
-// in-band does, is never warned of.
+// A registration that returns before its first beat, as one that files
+// in-band does, is not warned of.
 func TestMockManager_SetEndFilingThatReturnsIsNotWarnedOf(t *testing.T) {
-	m, logs := watchedSetEndManager(t, setEndFilingBeat)
+	m, logs := observedSetEndManager(t)
 	n := 0
 	mustRegister(t, m, func(context.Context) { n++ })
 	if err := m.FileAtSetEnd(context.Background()); err != nil || n != 1 {
