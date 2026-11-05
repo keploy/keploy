@@ -30,6 +30,9 @@ sleep 8 & p=$!
 touch "$1"
 while kill -0 "$p" 2>/dev/null; do wait "$p"; done
 E
+# cpu_children: the user + system time, in clock ticks, of the children this
+# shell has waited for (from /proc), watchdogs and their sleeps among them.
+cpu_children() { local f; read -r -a f <"/proc/$$/stat"; echo $((f[15] + f[16])); }
 ready() { local i; for ((i = 0; i < 100; i++)); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 
 # row NAME WANT_RC WANT_LINES(count of HANG_LINE lines) RC LOG
@@ -61,7 +64,7 @@ hang_start -q 1 sleep 30 2>"$tmp/l9"; hang_wait "$HANG_PID"; rc=$?
 [ "$HANG_FIRED" = 1 ] && [ ! -s "$tmp/l9" ] && [ "$rc" = 143 ] && ok "-q: says nothing, and HANG_FIRED says it fired" ||
   bad "-q: HANG_FIRED=$HANG_FIRED, exit $rc, said \"$(cat "$tmp/l9")\""
 # -k: the run ends on the TERM while the watchdog waits to KILL it; the
-# watchdog, stopped then, still counts as fired.
+# watchdog, which then ends by itself, counts as fired.
 hang_start -q -k 30 1 sleep 30 2>/dev/null; hang_wait "$HANG_PID"; rc=$?
 [ "$HANG_FIRED" = 1 ] && [ "$rc" = 143 ] && ok "-k: a run the TERM ended sets HANG_FIRED" ||
   bad "-k: HANG_FIRED=$HANG_FIRED, exit $rc, for a run the guard's TERM ended"
@@ -77,10 +80,38 @@ got=$( (bounded -s KILL 1 sleep 30 2>/dev/null; echo "rc=$?") | cat)
 
 # Neither the run nor its watchdog runs the caller's EXIT trap: once, for
 # the caller itself. A builtin run is not exec'd, so its subshell exits.
+# Runs that end at once are the ones whose watchdog a signal would reach as
+# it starts, while it still has the caller's handlers (that ran the trap in
+# a few of every hundred such runs on bash 5.2 when the guard TERMed it).
 : >"$tmp/exit-trap"
-( trap 'echo x >>"$tmp/exit-trap"' EXIT; bounded 5 true; bounded -q 1 sleep 5 ) 2>/dev/null
+(
+  trap 'echo x >>"$tmp/exit-trap"' EXIT
+  for ((i = 0; i < 20; i++)); do bounded 5 true; done
+  bounded -q 1 sleep 5
+) 2>/dev/null
 n=$(wc -l <"$tmp/exit-trap")
 [ "$n" = 1 ] && ok "the caller's EXIT trap runs once, in the caller only" || bad "the caller's EXIT trap ran $n times, want 1"
+
+# The guard signals the run's group and nothing else: not its watchdog,
+# whether the run ends in time or the guard ends it. (A function named kill
+# runs in place of the builtin, in the watchdog too.)
+: >"$tmp/kills"
+got=$(
+  kill() { echo "$*" >>"$tmp/kills"; builtin kill "$@"; }
+  bounded 5 true
+  bounded -q 1 sleep 30
+  echo "$HANG_PID"
+) 2>/dev/null
+[ "$(cat "$tmp/kills")" = "-s TERM -- -$got" ] && ok "the guard signals only the run's process group" ||
+  bad "the guard sent: \"$(tr '\n' ';' <"$tmp/kills")\", want only \"-s TERM -- -$got\""
+
+# The watchdog sleeps between its looks at the run: a 2 s run costs it a
+# few ticks of CPU, not the 2 s a busy loop would.
+c0=$(cpu_children)
+bounded 5 sleep 2 2>/dev/null
+c1=$(cpu_children)
+[ $((c1 - c0)) -lt 50 ] && ok "the watchdog sleeps between its looks at the run" ||
+  bad "a 2 s bounded run cost its children $((c1 - c0)) ticks of CPU, want under 50"
 
 # The guard leaves job control as the caller had it.
 bounded 5 true 2>/dev/null
@@ -117,10 +148,22 @@ else
 fi
 
 # The bound is real time even when the caller's PATH has a sleep that
-# returns at once (golang-docker-fakes.sh puts one there).
+# returns at once (golang-docker-fakes.sh puts one there), and the watchdog
+# still sleeps between its looks: it does not spin on the fake.
 mkdir -p "$tmp/fakebin" && printf '#!/bin/sh\nexit 0\n' >"$tmp/fakebin/sleep" && chmod +x "$tmp/fakebin/sleep"
-PATH="$tmp/fakebin:$PATH" bounded 3 sh -c '/bin/sleep 1; exit 5' 2>"$tmp/l12"
+c0=$(cpu_children)
+PATH="$tmp/fakebin:$PATH" bounded 3 sh -c '/bin/sleep 2; exit 5' 2>"$tmp/l12"
 row "a fake sleep on PATH does not end the bound early" 5 0 $? "$tmp/l12"
+c1=$(cpu_children)
+[ $((c1 - c0)) -lt 50 ] && ok "a fake sleep on PATH: the watchdog still sleeps between its looks" ||
+  bad "a 2 s bounded run with a fake sleep on PATH cost its children $((c1 - c0)) ticks of CPU, want under 50"
+
+# The guard's signal reaches the run's whole process group: a child the run
+# started ends with it.
+bounded -s KILL 1 bash -c 'sleep 30 & echo $! >"$1"; wait' _ "$tmp/child" 2>/dev/null
+cp=$(cat "$tmp/child" 2>/dev/null)
+if [ -n "$cp" ] && ! hang_running "$cp"; then ok "the guard's signal ends the run's children too"; else
+  bad "the run's child ${cp:-?} still runs after the guard's KILL"; [ -z "$cp" ] || kill "$cp" 2>/dev/null; fi
 
 got=$(echo piped | bounded 5 cat 2>/dev/null)
 [ "$got" = piped ] && ok "the run reads the caller's stdin" || bad "the run read \"$got\" from stdin, want \"piped\""
