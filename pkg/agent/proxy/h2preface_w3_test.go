@@ -9,7 +9,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -589,11 +591,20 @@ func TestAClientThatHangsUpBeforeItsHeadersIsDecidedOnWhatCame(t *testing.T) {
 				if err := h.hangUp(r.c.(*net.TCPConn)); err != nil {
 					t.Fatal(err)
 				}
-				buf := awaitEvent(t, r.saw, "the HTTP/2 matcher being asked")
+				// handleConnection asks the matcher before it returns, so
+				// once it has returned the matcher was asked or never will
+				// be: a connection ended without asking it fails at once.
+				err := awaitEvent(t, r.done, "handleConnection returning")
+				var buf []byte
+				select {
+				case buf = <-r.saw:
+				default:
+					t.Fatalf("a %s before the HEADERS ended handleConnection with %v, and the matcher was never asked", h.name, err)
+				}
 				if util.HasHTTP2HeadersFrame(buf) {
 					t.Fatalf("the matcher was handed HEADERS the client never sent: %s", h2Described(buf))
 				}
-				if err := awaitEvent(t, r.done, "handleConnection returning"); err != nil {
+				if err != nil {
 					t.Fatalf("a %s before the HEADERS ended handleConnection with %v; want a hang-up", h.name, err)
 				}
 				if errs := r.logs.FilterLevelExact(zap.ErrorLevel).All(); len(errs) > 0 {
@@ -626,6 +637,41 @@ func TestAClientThatHangsUpInItsPrefaceEndsItsRead(t *testing.T) {
 			}
 		})
 	}
+}
+
+// failingReadConn is the proxy's end of a connection whose reads all fail
+// with err, and whose writes all succeed.
+type failingReadConn struct {
+	net.Conn
+	err error
+}
+
+func (c failingReadConn) Read([]byte) (int, error)    { return 0, c.err }
+func (c failingReadConn) Write(p []byte) (int, error) { return len(p), nil }
+
+// Only a FIN or a reset is the client hanging up. A read that fails for any
+// other reason, here TCP giving up on a peer that stopped answering
+// (ETIMEDOUT, as net reports it on Linux), ends the read of the preface and
+// the wait for HEADERS with that error, for handleConnection to log at
+// ERROR: the connection is not decided on what came as if the client had
+// hung up.
+func TestAReadErrorThatIsNoHangUpIsReturned(t *testing.T) {
+	timedOut := failingReadConn{err: &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ETIMEDOUT)}}
+	t.Run("waiting for HEADERS", func(t *testing.T) {
+		var initial bytes.Buffer
+		initial.WriteString(http2.ClientPreface)
+		if err := http2.NewFramer(&initial, nil).WriteSettings(); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := readHTTP2UntilHeaders(context.Background(), timedOut, initial.Bytes()); !errors.Is(err, syscall.ETIMEDOUT) {
+			t.Fatalf("the wait for HEADERS ended with %v; want the read's ETIMEDOUT", err)
+		}
+	})
+	t.Run("reading the preface", func(t *testing.T) {
+		if _, err := readHTTP2Preface(context.Background(), timedOut, []byte(http2.ClientPreface[:15])); !errors.Is(err, syscall.ETIMEDOUT) {
+			t.Fatalf("the read of the preface ended with %v; want the read's ETIMEDOUT", err)
+		}
+	})
 }
 
 // An h2c replay is decided on its HEADERS, however long its client takes to
