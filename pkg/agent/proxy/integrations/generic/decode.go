@@ -144,7 +144,10 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				if n > 0 {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
 				} else if name, restaged := notOwnedExchange(genericRequests, db, call); name != "" && n == 0 {
-					report.ClosestMock, report.NotOwned = name, true
+					// The call is name, so no diff: the report's own
+					// was against the closest exchange it compared,
+					// another one.
+					report.ClosestMock, report.NotOwned, report.Diff = name, true, ""
 					report.NextSteps = notOwnedExchangeNextSteps(name)
 				} else if restaged {
 					// The lookup checks the staging last: a matcher held to

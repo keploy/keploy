@@ -593,14 +593,15 @@ type UnmatchedCall struct {
 	// never answers it with the other test's recording.
 	OrderDependent bool `json:"order_dependent,omitempty" yaml:"order_dependent,omitempty"`
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
-	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
+	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall, or
+	// MissViewReplaced for a call whose view a test's begin or end replaced
+	// before keploy diagnosed its miss (its next steps say which). Only
 	// record's full round, where the learn step runs, gives one; empty
 	// everywhere else, and for a call of that round no reason of judging's
 	// names: one keploy could not judge because its own store could not read
 	// a recorded answer back, one a parser's pairing found tied between
-	// recordings whose replies differ, one whose view a test's begin or end
-	// replaced before keploy diagnosed its miss (its next steps say so), or
-	// one call more than the test recorded (Kind and Recorded say so).
+	// recordings whose replies differ, or one call more than the test
+	// recorded (Kind and Recorded say so).
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 	// Concurrent is, under the proven switch, what keploy knows of the call
 	// when the test was recorded while other tests' requests were open
@@ -790,6 +791,14 @@ const (
 	// destination and shape.
 	MissUnmockedCall = "unmocked_call"
 )
+
+// MissViewReplaced is the reason of a miss of record's full round whose view
+// went before keploy diagnosed it (UnmatchedCall.Reason): the learn step
+// decided the call in one test's view, and a test's begin or end replaced
+// that view first, so keploy compared it with no recording and names none.
+// Its next steps say which test ended or began. Judging counts it as a miss
+// (an unmocked call), and nothing of it moves a recording.
+const MissViewReplaced = "view_replaced"
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it
 // served and the outgoing calls that matched none of them -- what

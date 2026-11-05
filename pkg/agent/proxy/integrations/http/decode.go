@@ -612,10 +612,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// repeat note and no next step of a comparison, whichever
 				// view a read was of. Nor does it get its learn step's
 				// reason (learnMiss.explain): that code is judging's class
-				// of a call compared in its view, and the empty one is a
-				// call keploy could not judge. It keeps its kind, and the
+				// of a call compared in its view. It gets view_replaced
+				// (models.MissViewReplaced) with the line that says why,
+				// so judging counts it as a miss and record's reason for
+				// the failed test says why. It keeps its kind, and the
 				// count of an extra call, decided before the move. A learn
-				// step's moved miss tells the move itself.
+				// step's moved miss tells the move itself, with no code.
 				gone := ""
 				if report != nil {
 					gone = integrations.CallViewGoneWhy(db)
@@ -640,6 +642,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					markRepeat(report, earlier)
 				}
 				if gone != "" && (lmiss == nil || !lmiss.moved) {
+					report.Reason = models.MissViewReplaced
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + gone)
 				}
 				if report != nil {

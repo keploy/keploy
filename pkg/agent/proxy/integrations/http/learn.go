@@ -3258,8 +3258,8 @@ func (m *learnMiss) diag() *matchDiag {
 // reason: the code is judging's class of a call it compared with the view's
 // recordings (one made elsewhere would be taken for an unmocked call, with a
 // next step to record again), and the text names what the learn step read
-// of that view. Such a miss carries the empty code of a call keploy could
-// not judge (models.UnmatchedCall.Reason), which judging counts as a miss.
+// of that view. Its caller gives such a miss models.MissViewReplaced, with
+// the line that says why (integrations.CallViewGoneWhy).
 func (m *learnMiss) explain(r *models.MockMismatchReport, viewGone bool) {
 	if r == nil || m.answered != nil {
 		return // a stateful walk's miss: the report says so (answeredSequence)

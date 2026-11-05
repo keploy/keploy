@@ -45,11 +45,11 @@ func TestAViewlessMissKeepsNothingItReadOfARecording(t *testing.T) {
 }
 
 // A miss whose view went before it was diagnosed gets no learn step reason:
-// no code, so judging takes it for a call keploy could not judge (not
-// request_changed, a class judged from what the learn step compared in that
-// view), and no text, which names the test's mock-own1 the learn step read
-// there, nor its next step. A miss whose view stayed keeps all three, and a
-// moved learn miss keeps telling the move, which names no recording.
+// not its code (request_changed, a class judged from what the learn step
+// compared in that view; its caller gives view_replaced), and no text, which
+// names the test's mock-own1 the learn step read there, nor its next step.
+// A miss whose view stayed keeps all three, and a moved learn miss keeps
+// telling the move, which names no recording.
 func TestAViewlessMissGetsNoLearnReason(t *testing.T) {
 	const why = "keploy cannot tell which recordings of the test set came before mock-own1, which has no recorded time, so it cannot tell whether what changed came from one"
 	plain := func() *models.MockMismatchReport {

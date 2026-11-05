@@ -1673,6 +1673,19 @@ func TestAFailedTestsReasonSaysWhyEachCallMissed(t *testing.T) {
 	require.Contains(t, r, "and 2 more call(s) missed for a reason the learn step gave")
 }
 
+// A miss of record's full round whose view a test's begin or end replaced
+// before keploy diagnosed it (view_replaced) says why in the failed test's
+// reason: its code and the line its next steps carry. With no code it read
+// only that the call had no recorded answer.
+func TestAFailedTestsReasonSaysWhyAMissWhoseViewWentMissed(t *testing.T) {
+	const gone = "keploy record's full round decided this request in test-2, and the replay ended test-2 before keploy diagnosed its miss, so no recording is named for it: keploy reads nothing of a view a test's begin or end replaced."
+	ev := &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /orders", Reason: models.MissViewReplaced, NextSteps: gone}}}
+	require.Equal(t, "keploy: POST /orders had no recorded answer.\n"+
+		"POST /orders missed (view_replaced): "+gone+"\n"+
+		"If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting test-2>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine test-2 --reason \"<why>\".", evidenceReason("test-2", ev, nil, time.Time{}))
+}
+
 // End to end on the agent: the test's end answers fail with the learn
 // step's reason, and the run's miss list (the CLI's round log) keeps it.
 // The run's miss list says which test each miss was charged to: a call that
