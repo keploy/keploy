@@ -1087,6 +1087,13 @@ func (s *scopedMockDb) cursorKey(key string) string {
 	return s.lastScope + "\x00" + key
 }
 
+// BackgroundRecordings is the set's background recordings whatever this
+// view's allowlist (integrations.BackgroundRecordingReader): they are read,
+// never served.
+func (s *scopedMockDb) BackgroundRecordings(kind models.Kind) []models.BackgroundRecording {
+	return integrations.BackgroundRecordingsOf(s.MockMemDb, kind)
+}
+
 // RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
 // pass straight through.
 func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {

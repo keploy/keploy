@@ -2285,6 +2285,13 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	disk := storage.diskMocks
 	storage.mu.RUnlock()
 
+	// The staging call (recordedSetShape populated, as for the cursors'
+	// reset above) hands the proxy the set's background recordings, read
+	// from every mock held for the set, served or not.
+	if !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
+		a.seedBackgroundRecordings(params, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk)
+	}
+
 	// On WindowedProxy the agent filter runs non-strict (SetMocksWithWindow does
 	// the authoritative strict enforcement); env override still applies inside.
 	_, isWindowedProxy := a.Proxy.(coreAgent.WindowedProxy)

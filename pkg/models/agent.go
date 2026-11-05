@@ -612,6 +612,17 @@ type MockFilterParams struct {
 	BeforeTime      time.Time    `json:"beforeTime,omitempty"`
 	MockMapping     []string     `json:"mockMapping,omitempty"`
 	UseMappingBased bool         `json:"useMappingBased"`
+	// BackgroundMocks names the set's background recordings: its
+	// mappings.yaml worker: and startup: mocks, the calls the application
+	// made on its own rather than for a test's request. Sent on the staging
+	// call only, beside RecordedWindows, under either switch. The agent
+	// hands them to the proxy read-only, served or not, each with its
+	// recorded span (BackgroundRecording), through the optional
+	// BackgroundRecordingsSeeder capability, so a parser can tell a miss is
+	// one more run of one of them (MockMismatchReport.Background). No test
+	// is served differently for it. Empty: the set has none, and every miss
+	// stays its test's.
+	BackgroundMocks []string `json:"backgroundMocks,omitempty"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase

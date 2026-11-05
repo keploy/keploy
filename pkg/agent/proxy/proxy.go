@@ -4875,6 +4875,13 @@ func (p *Proxy) SeedStatementCatalog(mocks []*models.Mock) {
 	_ = p.stageOn("catalog", func(m *MockManager) { m.SeedStatementCatalog(mocks) })
 }
 
+// SeedBackgroundRecordings hands the underlying MockManager the set's
+// background recordings (MockManager.SeedBackgroundRecordings). Satisfies the
+// agent's optional BackgroundRecordingsSeeder extension interface.
+func (p *Proxy) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
+	_ = p.stageOn("backgroundRecordings", func(m *MockManager) { m.SeedBackgroundRecordings(recs) })
+}
+
 // SeedRecordedWindows hands the underlying MockManager the recorded window of
 // every test of the set being staged. Satisfies the agent's optional
 // RecordedWindowsSeeder extension interface.

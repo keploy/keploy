@@ -369,6 +369,27 @@ func (m *Mapping) StartupMockNames() []string {
 	return names
 }
 
+// BackgroundMockNames returns the names of the set's background recordings,
+// each once: its worker: mocks, then its startup: mocks, the calls the
+// application made on its own rather than for a test's request
+// (MockFilterParams.BackgroundMocks). nil when it has neither.
+func (m *Mapping) BackgroundMockNames() []string {
+	if m == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, list := range [][]MockEntry{m.Worker, m.Startup} {
+		for _, e := range list {
+			if e.Name != "" && !seen[e.Name] {
+				seen[e.Name] = true
+				out = append(out, e.Name)
+			}
+		}
+	}
+	return out
+}
+
 type MappedTestCase struct {
 	ID string `json:"id" yaml:"id" bson:"id"`
 	// Mocks is written and read as mock_entries (MarshalYAML, MarshalJSON);
