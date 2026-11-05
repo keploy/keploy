@@ -189,8 +189,7 @@ func TestAFullRoundMissWhoseViewMovesAfterItsDecisionNamesNoRecording(t *testing
 // whatever the miss read of the view goes with it, a lookup that found its
 // recording too. Nor is it given its learn step's reason (unmocked_call:
 // test-2 recorded no such call) and that reason's advice to record again:
-// it carries no code, as a call keploy could not judge, and its next steps
-// are the move's alone.
+// its code is view_replaced, and its next steps are the move's alone.
 func TestAMovedMissOfACallMadeElsewhereNamesNoRecording(t *testing.T) {
 	type tc struct{ call, at, move string }
 	var cases []tc
@@ -416,13 +415,13 @@ func TestAMovedMissGetsViewReplacedNotItsLearnReason(t *testing.T) {
 // recordings, by the variable pass or any read of its hold: neither by
 // test-2's mock-var2, which declares a variable the call's path binds, once
 // test-2 began, nor by that recording in flight as test-1 ended (the pool
-// view's ahead). It misses, naming no recording, and says the replay ended
-// test-1. It still reads the shared scopes in the view in force: the worker
-// scope's mock-wvar answers a call of /jobs it fits. And a call decided
-// between tests, where test-2's mock-var2 was in flight, is answered by it
-// once test-2 began: that recording was its view's own too. Before, the
-// variable pass read the view in force and answered the test-1 call with
-// test-2's recording.
+// view's ahead). It misses, naming no recording, with view_replaced, and
+// says the replay ended test-1. It still reads the shared scopes in the view
+// in force: the worker scope's mock-wvar answers a call of /jobs it fits.
+// And a call decided between tests, where test-2's mock-var2 was in flight,
+// is answered by it once test-2 began: that recording was its view's own
+// too. Before, the variable pass read the view in force and answered the
+// test-1 call with test-2's recording.
 func TestAFullRoundCallWhoseViewMovedIsNeverAnsweredByAnotherTestsOwnRecording(t *testing.T) {
 	for _, c := range []struct {
 		name, target, want, why string
@@ -510,8 +509,8 @@ func TestAFullRoundCallWhoseViewMovedIsNeverAnsweredByAnotherTestsOwnRecording(t
 			if len(misses) != 1 {
 				t.Fatalf("misses %+v; want 1", misses)
 			}
-			if m := misses[0]; c.why != "" && (m.ClosestMock != "" || !strings.Contains(m.NextSteps, c.why)) {
-				t.Errorf("the moved miss names %q, its next steps %q; want no recording, and that the replay %s", m.ClosestMock, m.NextSteps, c.why)
+			if m := misses[0]; c.why != "" && (m.ClosestMock != "" || m.Reason != models.MissViewReplaced || !strings.Contains(m.NextSteps, c.why)) {
+				t.Errorf("the moved miss names %q, reads code %q, its next steps %q; want no recording, %s, and next steps that say %q", m.ClosestMock, m.Reason, m.NextSteps, models.MissViewReplaced, c.why)
 			}
 		})
 	}
@@ -605,6 +604,242 @@ func TestAVariablePassMissWhoseViewGoesGetsViewReplaced(t *testing.T) {
 				t.Errorf("a variable-pass miss whose view went %s reads code %q, next steps %q; want %s", c.at, m.Reason, m.NextSteps, models.MissViewReplaced)
 			case !strings.Contains(m.NextSteps, why) || strings.Count(m.NextSteps, "keploy record's full round") != 1:
 				t.Errorf("the moved miss's next steps read %q; want them to say once %q", m.NextSteps, why)
+			}
+		})
+	}
+}
+
+// A full-round call one more than its test recorded whose view went keeps
+// its kind and count, gets view_replaced and says why. In test-1, which
+// recorded POST /orders {"item":"pear"} once (mock-own1), a second such call
+// misses as an extra call, recorded once, naming mock-own1, with no code.
+// When the replay ends test-1 after the call was decided and counted,
+// before the miss's report or in its lookup of a recording made elsewhere,
+// the miss is still an extra call recorded once (decided before the move),
+// names no recording, gets view_replaced, and its next steps are the move's
+// line alone.
+func TestAnExtraCallWhoseViewWentKeepsItsCountWithViewReplaced(t *testing.T) {
+	const gone = "keploy record's full round decided this request in test-1, and the replay ended test-1 before keploy diagnosed its miss, so no recording is named for it: keploy reads nothing of a view a test's begin or end replaced."
+	for _, at := range []string{"never", "before the report", "not-owned"} {
+		t.Run(at, func(t *testing.T) {
+			p, mm := heldOrders(t, false)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+			if code, got := r3Send(t, p, mm, opts, roundPost(`{"item":"pear"}`)); code != http.StatusOK || got != `{"order":1}` {
+				t.Fatalf("precondition: test-1's call was answered %d %s; want mock-own1's", code, got)
+			}
+			ended := false
+			end := func() {
+				if at == "never" {
+					return
+				}
+				ended = true
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				p.EndTestErrorCapture()
+			}
+			lg, db := zap.NewNop(), &lookupHook{MockManager: mm, at: at, move: end}
+			if at == "before the report" {
+				lg = onDebugLine("after matching the http request", end)
+			}
+			code, got := r3SendVia(t, context.Background(), httpint.New(lg), p, db, opts, roundPost(`{"item":"pear"}`))
+			if code == http.StatusOK {
+				t.Fatalf("test-1's call once more than recorded was answered %d %s; want a miss", code, got)
+			}
+			if at != "never" && !ended {
+				t.Fatalf("precondition: the replay never ended test-1 %s", at)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 {
+				t.Fatalf("misses %+v; want 1", misses)
+			}
+			m := misses[0]
+			switch {
+			case m.Kind != models.MissExtraCall || m.Recorded != 1:
+				t.Errorf("the miss %s is of kind %q, recorded %d; want %s, recorded once", at, m.Kind, m.Recorded, models.MissExtraCall)
+			case at == "never":
+				if m.ClosestMock != "mock-own1" || m.Reason != "" || strings.Contains(m.NextSteps, "no recording is named") {
+					t.Errorf("the unmoved extra call names %q, code %q (next steps %q); want test-1's mock-own1, no code, and no word of a move", m.ClosestMock, m.Reason, m.NextSteps)
+				}
+			case m.ClosestMock != "" || m.ClosestMockReq != "" || m.NotOwned || m.Diff != "" || len(m.FieldDiffs) > 0:
+				t.Errorf("an extra call whose view went %s names %q (made elsewhere %v, rendered %q, diff %q, fields %+v); want no recording", at, m.ClosestMock, m.NotOwned, m.ClosestMockReq, m.Diff, m.FieldDiffs)
+			case m.Reason != models.MissViewReplaced || m.NextSteps != gone:
+				t.Errorf("an extra call whose view went %s reads code %q, next steps %q; want %s, and the move alone: %q", at, m.Reason, m.NextSteps, models.MissViewReplaced, gone)
+			}
+		})
+	}
+}
+
+// A full-round miss whose view went while the replay staged a test set
+// again under it says both: that the set was staged again, and that its
+// view went, with view_replaced. In test-1, GET /orders, which no recording
+// has the method of, misses naming test-1's mock-own1 with its learn step's
+// unmocked_call. The replay stages the next set (it installs that set's pool
+// view) after the learn step decided the call: at the call's hold, before
+// the variable pass, the pairing and the miss read it (the miss then asks no
+// lookup of a recording made elsewhere, and the hold tells the staging);
+// before the miss's report; or in its lookup of a recording made elsewhere
+// (which tells the staging). The miss names no recording, shows no diff,
+// and its next steps are the staging's note, then the move's line, once
+// each.
+func TestARestagedMissWhoseViewWentSaysBothWithViewReplaced(t *testing.T) {
+	const restaged = "keploy replay staged a test set again while it decided this request, so keploy answered it with no recording and names none made elsewhere for it: a request is never answered with, nor named as, a recording of a staging made after it began."
+	const gone = "keploy record's full round decided this request in test-1, and the replay ended test-1 before keploy diagnosed its miss, so no recording is named for it: keploy reads nothing of a view a test's begin or end replaced."
+	for _, at := range []string{"never", "the hold", "before the report", "not-owned"} {
+		t.Run(at, func(t *testing.T) {
+			p, mm := heldOrders(t, false)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			staged := false
+			stage := func() {
+				if at == "never" {
+					return
+				}
+				staged = true
+				next := r3Mock("s2-jobs", time.Now(), "GET", "/jobs/1", "", `{"job":1}`)
+				mm.SetMocksWithWindow(nil, []*models.Mock{next}, models.BaseTime, time.Now().Add(time.Hour))
+				mm.ServeExactPool(models.PoolKeyNone, nil)
+			}
+			lg := zap.NewNop()
+			var db integrations.MockMemDb = &lookupHook{MockManager: mm, at: at, move: stage}
+			switch at {
+			case "the hold":
+				db = &heldHook{MockManager: mm, onHold: stage}
+			case "before the report":
+				lg = onDebugLine("after matching the http request", stage)
+			}
+			code, got := r3SendVia(t, context.Background(), httpint.New(lg), p, db, models.OutgoingOptions{Learn: true, LearnPool: true}, "GET /orders HTTP/1.1\r\nHost: deps.example\r\n\r\n")
+			if code == http.StatusOK {
+				t.Fatalf("answered %d %s", code, got)
+			}
+			if at != "never" && !staged {
+				t.Fatalf("precondition: the replay never staged the next set %s", at)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 {
+				t.Fatalf("misses %+v; want 1", misses)
+			}
+			m := misses[0]
+			switch {
+			case at == "never":
+				if m.ClosestMock != "mock-own1" || m.Reason != models.MissUnmockedCall || strings.Contains(m.NextSteps, "staged a test set again") || strings.Contains(m.NextSteps, "no recording is named") {
+					t.Errorf("the miss no staging moved names %q, code %q (next steps %q); want test-1's mock-own1, %s, and no word of a staging or a move", m.ClosestMock, m.Reason, m.NextSteps, models.MissUnmockedCall)
+				}
+			case m.ClosestMock != "" || m.ClosestMockReq != "" || m.NotOwned || m.Diff != "" || len(m.FieldDiffs) > 0:
+				t.Errorf("a miss the replay staged a set under %s names %q (made elsewhere %v, rendered %q, diff %q, fields %+v); want no recording", at, m.ClosestMock, m.NotOwned, m.ClosestMockReq, m.Diff, m.FieldDiffs)
+			case m.Reason != models.MissViewReplaced || m.NextSteps != restaged+" "+gone:
+				t.Errorf("a miss the replay staged a set under %s reads code %q, next steps %q; want %s, the staging's note and then the move's line: %q", at, m.Reason, m.NextSteps, models.MissViewReplaced, restaged+" "+gone)
+			}
+		})
+	}
+}
+
+// A stateful walk's miss in record's full round whose view went gets
+// view_replaced and says why. Between tests the pool's bg-poll and test-1's
+// own bg-later are the two recordings of GET /status, in that order; test-1
+// answered its call with bg-later, and a call between tests after it with
+// bg-poll. The next such call is the learn step's stateful walk's miss
+// (answeredSequence): both recordings have answered and bg-later, the last,
+// can answer no more. With no move it names bg-later and says the call was
+// made more times than recorded, with no code. When the replay begins
+// test-2 after the learn step decided the call (at its hold, before the
+// miss's report, or in its lookup of a recording made elsewhere), the miss
+// names no recording, gets view_replaced, and its next steps are the
+// move's line alone. The walk's miss writes no reason of its own
+// (learnMiss.explain), so the code comes from the move alone: without it
+// the miss said nothing of why it missed.
+func TestAStatefulWalksMissWhoseViewWentGetsViewReplaced(t *testing.T) {
+	const gone = "keploy record's full round decided this request between tests, and the replay began test-2 before keploy diagnosed its miss, so no recording is named for it: keploy reads nothing of a view a test's begin or end replaced."
+	for _, at := range []string{"never", "the hold", "before the report", "not-owned"} {
+		t.Run(at, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			p := startedDrainProxy(t, 100)
+			p.learnTracker = learn.NewTracker()
+			start := time.Now().Add(time.Second)
+			stated := func(name string, at time.Time, resp string) *models.Mock {
+				m := r3Mock(name, at, "GET", "/status", "", resp)
+				m.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
+				m.DeriveLifetime()
+				if m.TestModeInfo.Consume != models.ConsumeCursorSaturate {
+					t.Fatalf("precondition: %s is no stateful recording: %+v", name, m.TestModeInfo)
+				}
+				return m
+			}
+			poll := stated("bg-poll", start.Add(-time.Second), `{"s":"running"}`)
+			later := stated("bg-later", start.Add(100*time.Millisecond), `{"s":"done"}`)
+			own2 := r3Mock("mock-own2", start.Add(1100*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SeedRecordedWindows([]models.TestWindow{
+				{TestCase: "test-1", Start: start, End: start.Add(900 * time.Millisecond)},
+				{TestCase: "test-2", Start: start.Add(time.Second), End: start.Add(1900 * time.Millisecond)},
+			})
+			mm.SetMocksWithWindow(nil, []*models.Mock{poll, later, own2}, models.BaseTime, start.Add(time.Hour))
+			p.setMockManager(mm)
+			t.Cleanup(func() { p.setMockManager(nil) })
+			opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+			h := httpint.New(zap.NewNop())
+			mm.ServeExactPool(models.PoolKeyNone, []string{"bg-poll"})
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "bg-later")})
+			p.ContinueTestErrorCapture()
+			if code, got := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/status")); code != http.StatusOK || got != `{"s":"done"}` {
+				t.Fatalf("precondition: test-1's call was answered %d %s; want its own bg-later", code, got)
+			}
+			mm.ServeExactPool(models.PoolKeyNone, []string{"bg-poll"})
+			p.EndTestErrorCapture()
+			if code, got := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/status")); code != http.StatusOK || got != `{"s":"running"}` {
+				t.Fatalf("precondition: the call between tests was answered %d %s; want the pool's bg-poll", code, got)
+			}
+			if misses, err := p.GetMockErrors(context.Background()); err != nil || len(misses) > 0 {
+				t.Fatalf("precondition: misses %+v (%v) before the walk's; want none", misses, err)
+			}
+			moved := false
+			begin2 := func() {
+				if at == "never" {
+					return
+				}
+				moved = true
+				mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+				p.ContinueTestErrorCapture()
+			}
+			lg := zap.NewNop()
+			var db integrations.MockMemDb = &lookupHook{MockManager: mm, at: at, move: begin2}
+			switch at {
+			case "the hold":
+				db = &heldHook{MockManager: mm, onHold: begin2}
+			case "before the report":
+				lg = onDebugLine("after matching the http request", begin2)
+			}
+			code, got := r3SendVia(t, context.Background(), httpint.New(lg), p, db, opts, httpGet("/status"))
+			if code == http.StatusOK {
+				t.Fatalf("the walk's last call was answered %d %s; want a miss", code, got)
+			}
+			if at != "never" && !moved {
+				t.Fatalf("precondition: the replay never began test-2 %s", at)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 {
+				t.Fatalf("misses %+v; want 1", misses)
+			}
+			m := misses[0]
+			switch {
+			case at == "never":
+				if m.ClosestMock != "bg-later" || m.Reason != "" || !strings.Contains(m.NextSteps, "made this call more times than the recording holds") {
+					t.Errorf("the unmoved walk's miss names %q, code %q, next steps %q; want bg-later, no code, and that the call was made more times than recorded", m.ClosestMock, m.Reason, m.NextSteps)
+				}
+			case m.ClosestMock != "" || m.ClosestMockReq != "" || m.NotOwned || m.Diff != "" || len(m.FieldDiffs) > 0:
+				t.Errorf("a walk's miss whose view went %s names %q (made elsewhere %v, rendered %q, diff %q, fields %+v); want no recording", at, m.ClosestMock, m.NotOwned, m.ClosestMockReq, m.Diff, m.FieldDiffs)
+			case m.Reason != models.MissViewReplaced || m.NextSteps != gone:
+				t.Errorf("a walk's miss whose view went %s reads code %q, next steps %q; want %s, and the move alone: %q", at, m.Reason, m.NextSteps, models.MissViewReplaced, gone)
 			}
 		})
 	}

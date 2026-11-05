@@ -679,6 +679,7 @@ func heldOrdersWith(t *testing.T, routed bool, logger *zap.Logger, more func(now
 	own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
 	own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
 	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
 	mm.SeedRecordedWindows([]models.TestWindow{
 		{Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
 		{Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
@@ -2222,6 +2223,7 @@ func elsewhereOrders(t *testing.T, routed bool, trees func(pool, own1, own2 *mod
 	own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
 	own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
 	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
 	mm.SeedRecordedWindows([]models.TestWindow{
 		{TestCase: "test-1", Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
 		{TestCase: "test-2", Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
