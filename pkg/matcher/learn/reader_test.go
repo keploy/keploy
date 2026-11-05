@@ -506,7 +506,8 @@ func TestReaderWholeBase64RunsAreTheScansTokens(t *testing.T) {
 // tiers keep within (setBudget), never on a budget beside it: what it keeps
 // is counted there while the call runs, it keeps none of what the set has
 // no room for once the tiers that let go (words, payloads) have let go of
-// theirs, and it gives all of it back when the call is over (release). Its
+// theirs, and it gives all of it back when the call is over (release): the
+// set's own filter of a text's words stays, counted on that budget. Its
 // answers are the same kept or not.
 func TestReaderIndexKeepsOnTheSetsOneBudget(t *testing.T) {
 	defer func(b, r int64) { learnBudget, readerBudget = b, r }(learnBudget, readerBudget)
@@ -519,12 +520,23 @@ func TestReaderIndexKeepsOnTheSetsOneBudget(t *testing.T) {
 	if held, read := x.text(text).holdsWord("7f3c"); !held || !read {
 		t.Fatalf("held %v read %v; want the word held", held, read)
 	}
-	if x.used <= 0 || dc.set.budget.used != x.used {
-		t.Fatalf("the index keeps %d bytes; the set's budget counts %d: want what the index keeps counted on the set's budget", x.used, dc.set.budget.used)
+	// The set keeps the filter of the text's words past the call
+	// (textEntry), on the same budget.
+	kept := int64(0)
+	fs := filtersOf(dc.set)
+	fs.mu.Lock()
+	for _, e := range fs.texts {
+		if e.f != nil {
+			kept += headerBytes + 8*int64(len(e.f)) + filterEntryBytes + filterTextKeyBytes
+		}
+	}
+	fs.mu.Unlock()
+	if x.used <= 0 || kept <= 0 || dc.set.budget.used != x.used+kept {
+		t.Fatalf("the index keeps %d bytes and the set's filter of the text %d; the set's budget counts %d: want both counted on the set's budget", x.used, kept, dc.set.budget.used)
 	}
 	x.release()
-	if dc.set.budget.used != 0 {
-		t.Fatalf("the call is over and the set's budget still counts %d bytes of its index", dc.set.budget.used)
+	if dc.set.budget.used != kept {
+		t.Fatalf("the call is over and the set's budget counts %d bytes; want only the set's filter's %d, none of the index's", dc.set.budget.used, kept)
 	}
 
 	// The set's tiers that let none go keep all but 1 KiB of its budget.

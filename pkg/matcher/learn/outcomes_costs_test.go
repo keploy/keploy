@@ -861,6 +861,151 @@ func TestOutcomeCostASetFiltersEachRecordingsWordsOnceAndScansOnlyWhereOneMayHol
 	}
 }
 
+// costViews decides costSet's call in two tests of one set over n
+// recordings of the running test, each served changed with round F's view
+// of it (ServedLive) of pad bytes past its recording, as the Mongo adapter
+// hands each call a view it reads anew: one recording holds R's word and its
+// view F's. It returns what each test decided, the filters of texts it built
+// (setFilters.textBuilds) and the scans of a text it made for a word
+// (heldScans).
+func costViews(n, pad int) (got [2]string, builds [2]int, scans [2]int64) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
+	mocks, views := make([]*models.Mock, n), make([]*models.Mock, n)
+	for i := range mocks {
+		name, url, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+		body, view := fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d"}`, i, i), fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d","seen":"%s"}`, i, i, strings.Repeat("as served ", pad/10))
+		if i == n/2 {
+			body, view = `{"note":"Kept A1B2C3D4","ref":"a1b2c3d4"}`, fmt.Sprintf(`{"note":"Kept F0E9D8C7","ref":"f0e9d8c7","seen":"%s"}`, strings.Repeat("as served ", pad/10))
+		}
+		mocks[i], views[i] = getAnswer(name, url, body, at), getAnswer(name, url, view, at)
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	for c := range got {
+		tr.Begin()
+		dc := tr.Drifts()
+		raw := make([]Raw, n)
+		for i, m := range mocks {
+			raw[i] = dc.LazyRawOf(m, true, nil).ServedAs(i + 1).ServedLive(RawOf(views[i], true))
+		}
+		b, sc := textsBuilt(dc), heldScans.Load()
+		got[c] = oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, raw, nil, nil)))
+		builds[c], scans[c] = textsBuilt(dc)-b, heldScans.Load()-sc
+		tr.End()
+	}
+	return got, builds, scans
+}
+
+// textsBuilt is how many filters of texts dc's set has built (textEntry).
+func textsBuilt(dc *DriftCache) int {
+	fs := filtersOf(dc.set)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.textBuilds
+}
+
+// Round F's view of a recording is read anew in each call, with no
+// recording's identity, yet a set builds the filter of each view's words
+// once, by its text, at the first call that asks it a word, and every later
+// call that hands the same text asks the filter: a scan of a view only where
+// its filter may hold the word, however many views the set holds. The
+// verdicts stay, and are those of a set past its budget, which keeps no
+// filter.
+func TestOutcomeCostASetFiltersEachViewsWordsOnceByItsText(t *testing.T) {
+	const words = 5
+	for _, n := range []int{300, 3000} {
+		got, builds, scans := costViews(n, filterTextMin)
+		t.Logf("%d views: decided %s; filters built %v, scans %v (first test, second)", n, got[1], builds, scans)
+		if got[0] != got[1] {
+			t.Errorf("over %d views the tests decide %q; want one verdict", n, got)
+		}
+		if builds != [2]int{n, 0} {
+			t.Errorf("over %d views the tests built %v filters of texts; want each view's once, in the first test: [%d 0]", n, builds, n)
+		}
+		// The view that holds F's word, asked in a few places, and a false
+		// hit in a hundred lookups at most.
+		if limit := int64(4*words + n/100); scans[1] > limit {
+			t.Errorf("over %d views the second test scanned a text %d times for a word; want at most %d", n, scans[1], limit)
+		}
+		func() {
+			defer func(b int64) { learnBudget = b }(learnBudget)
+			learnBudget = 1
+			past, _, pastScans := costViews(n, filterTextMin)
+			if past != got {
+				t.Errorf("over %d views past the budget the tests decide %q; want %q", n, past, got)
+			}
+			if pastScans[1] < int64(words*n) {
+				t.Errorf("over %d views past the budget the second test scanned a text %d times; want each view scanned for each word, as with no filter", n, pastScans[1])
+			}
+		}()
+	}
+}
+
+// A text with no recording's identity has the set's filter of its own words:
+// a handed text and a view of one text share one, built once for the set,
+// and two texts of one length that differ in a word keep two, so neither
+// rules out the word only the other lacks. A view keploy could not read is
+// filtered by no text, and stays unread. A text shorter than filterTextMin
+// keeps no filter, and is scanned for each word in each test. Each filter
+// counts its words and its key on the set's budget.
+func TestOutcomeCostATextsFilterIsKeptByItsWholeText(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	pad := strings.Repeat("as served ", filterTextMin/10)
+	one, other := `{"ref":"a1b2c3d4","seen":"`+pad+`"}`, `{"ref":"a1b2c3d5","seen":"`+pad+`"}`
+	for c := 0; c < 2; c++ {
+		tr.Begin()
+		dc := tr.Drifts()
+		x := newReaderIndex(dc)
+		used := func() int64 { dc.set.mu.Lock(); defer dc.set.mu.Unlock(); return dc.set.budget.used }
+		b, u := textsBuilt(dc), used()
+		handed, view := x.text(one), x.textOf(Raw{mock: "mock-view", rText: one, rRead: true})
+		if !handed.ruledOut("f0e9d8c7") || !view.ruledOut("f0e9d8c7") {
+			t.Errorf("test %d: the filter of %s does not rule out f0e9d8c7, which it lacks", c, one)
+		}
+		if n := textsBuilt(dc) - b; n != 1-c {
+			t.Errorf("test %d: the handed text and the view of one text built %d filters; want %d (one for the set, in the first test)", c, n, 1-c)
+		}
+		if c == 0 {
+			var f wordFilter
+			if handed.filter != nil {
+				f = handed.filter.f
+			}
+			if want, got := headerBytes+8*int64(len(f))+filterEntryBytes+filterTextKeyBytes, used()-u; f == nil || got != want {
+				t.Errorf("the text's filter counted %d bytes on the set's budget; want %d: its words and its key (a filter kept: %v)", got, want, f != nil)
+			}
+		}
+		for _, v := range []struct{ text, word string }{{other, "a1b2c3d5"}, {one, "a1b2c3d4"}} {
+			if held, _ := x.textOf(Raw{mock: "mock-view", rText: v.text, rRead: true}).holdsWord(v.word); !held {
+				t.Errorf("test %d: the view %s does not hold %q", c, v.text, v.word)
+			}
+			if held, _ := x.text(v.text).holdsWord(v.word); !held {
+				t.Errorf("test %d: the handed text %s does not hold %q", c, v.text, v.word)
+			}
+		}
+		unread := x.textOf(Raw{mock: "mock-view", rText: one, rRead: false})
+		if held, read := unread.holdsWord("f0e9d8c7"); held || read {
+			t.Errorf("test %d: a view keploy could not read holds f0e9d8c7 %v, read %v; want unread", c, held, read)
+		}
+		head := `{"ref":"a1b2c3d4","seen":"`
+		short := head + pad[:filterTextMin-1-len(head)-2] + `"}`
+		b, sc := textsBuilt(dc), heldScans.Load()
+		for _, h := range []*readerText{x.text(short), x.textOf(Raw{mock: "mock-view", rText: short, rRead: true})} {
+			if h.ruledOut("f0e9d8c7") {
+				t.Errorf("test %d: the %d-byte text %s is ruled out of f0e9d8c7 by a filter; want it scanned", c, len(short), short)
+			}
+			if held, _ := h.holdsWord("f0e9d8c7"); held {
+				t.Errorf("test %d: the text %s holds f0e9d8c7", c, short)
+			}
+		}
+		if n, scans := textsBuilt(dc)-b, heldScans.Load()-sc; len(short) != filterTextMin-1 || n != 0 || scans != 4 {
+			t.Errorf("test %d: the %d-byte text, handed and as a view, built %d filters and was scanned %d times; want a %d-byte text, none built, each scanned (with its forms) for the word: 4", c, len(short), n, scans, filterTextMin-1)
+		}
+		x.release()
+		tr.End()
+	}
+}
+
 // Past the set's budget a recording keeps no filter: each call scans it as
 // before, and none reads it again to build one. The verdict stays.
 func TestOutcomeCostARecordingsFilterPastTheSetsBudgetIsNotKept(t *testing.T) {
@@ -920,8 +1065,8 @@ func TestOutcomeCostARecordingUnreadAtItsFirstAskKeepsNoFilter(t *testing.T) {
 // A recording's filter rules out only a word no form of its text holds in
 // any reading: never one a reading holds, a word of letters glued to '_',
 // '-' or a byte past ASCII included; and it rules out most words its text
-// does not hold. A view (a text with no recording's identity) is never
-// filtered: two views of a set keep no filter of each other's words.
+// does not hold. A short view (a text with no recording's identity, below
+// filterTextMin) is never filtered: it holds its own words.
 func TestOutcomeCostARecordingsFilterRulesOutOnlyWordsNoFormHolds(t *testing.T) {
 	tr := NewTracker()
 	tr.NewSet()
@@ -1115,6 +1260,28 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 	view := func(body string) Raw { return RawOf(getAnswer("mock-x", "http://api/items/1", body, at), true) }
 	v1, v2, v3 := view(`{"ref":"f0e9d8c7"}`), view(`{"ref":"e9d8c7b6","note":"Kept"}`), view(`{"ref":"e9d8c7b6"}`)
 	gone := getAnswer("mock-gone", "http://api/items/2", `{"ref":"b2c3d4e5"}`, at)
+	// One view three more ways, each alike in all but one part of its
+	// payload wordsOf reads: a clock read of the instant its body holds, a
+	// stamp over that instant, its body's field dropped.
+	const instant = "2026-10-24T09:55:50Z"
+	vt := view(`{"ref":"e9d8c7b6","at":"` + instant + `"}`)
+	// Its payload read now (a lazy Raw reads it from its loader), so each
+	// copy changes one part of it.
+	b := vt.payload()
+	vt.src, vt.rText, vt.rClock, vt.rFields, vt.rStamps, vt.rRead = nil, b.text, b.answerClock, b.fields, b.stamps, b.read
+	vClock, vStamp, vField := vt, vt, vt
+	in, err := time.Parse(time.RFC3339, instant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vClock.rClock = []time.Time{in}
+	start := strings.Index(vt.rText, instant)
+	vStamp.rStamps = []rawField{{start: start, end: start + len(instant), path: "Res.body"}}
+	body := slices.IndexFunc(vt.rFields, func(f rawField) bool { return f.path == "Res.body" && !f.key })
+	if start < 0 || body < 0 || len(vt.rClock)+len(vt.rStamps) > 0 {
+		t.Fatalf("fixture: the view's body (%d), its instant (%d), and no clock read or stamp (%v, %v)", body, start, vt.rClock, vt.rStamps)
+	}
+	vField.rFields = slices.Delete(slices.Clone(vt.rFields), body, body+1)
 	type shape struct {
 		name     string
 		of       func(Raw, int) Raw
@@ -1125,6 +1292,10 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 		{name: "with F's view", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v1) }},
 		{name: "with another view", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v2) }},
 		{name: "with other words at the view's fields", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v3) }},
+		{name: "with a view holding an instant", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(vt) }},
+		{name: "with that view's clock read of its instant", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(vClock) }},
+		{name: "with that view's instant a stamp", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(vStamp) }},
+		{name: "with that view's body field dropped", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(vField) }},
 		{name: "with two views", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedChanged(v1, v2) }},
 		{name: "with the two views the other way", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedChanged(v2, v1) }},
 		{name: "served changed, no view read", of: func(x Raw, n int) Raw { return x.ServedIn(n, n+2).ServedChanged() }},
@@ -1138,6 +1309,7 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 		dc := tr.Drifts()
 		d := &decider{dr: dc}
 		b := wordsRead(dc)
+		read := map[string][]any{}
 		// The call's own earlier place, and a recording of another test keploy
 		// cannot read: offsetPlacesOf reads neither's words.
 		raw := []Raw{dc.LazyRawOf(m, true, nil).ServedAs(1).ServedAsRecorded(),
@@ -1145,10 +1317,17 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 		for i, s := range shapes {
 			x := s.of(dc.LazyRawOf(m, !s.unserved, nil), 1+i+10*c).OfAnotherTest()
 			x.test, x.prev, x.late = 2+c, c == 1, c == 1
-			if got, want := d.outsideWords(x), dc.wordsOf(x); !reflect.DeepEqual(got, want) {
+			got, want := d.outsideWords(x), dc.wordsOf(x)
+			if !reflect.DeepEqual(got, want) {
 				t.Errorf("test %d, %s: the set's words are %+v; want wordsOf's %+v", c+1, s.name, got, want)
 			}
+			read[s.name] = []any{want.same, want.gave, want.view}
 			raw = append(raw, x)
+		}
+		for _, n := range []string{"with that view's clock read of its instant", "with that view's instant a stamp", "with that view's body field dropped"} {
+			if reflect.DeepEqual(read[n], read["with a view holding an instant"]) {
+				t.Fatalf("fixture: %s reads the words the view does without it: %+v", n, read[n])
+			}
 		}
 		if got, want := wordsRead(dc)-b, []int{len(shapes), 0}[c]; got != want {
 			t.Errorf("test %d read the recording's words %d times; want %d (one entry each way it was handed)", c+1, got, want)
