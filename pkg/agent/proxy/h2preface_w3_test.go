@@ -297,10 +297,10 @@ func (h2Probe) MockOutgoing(context.Context, net.Conn, *models.ConditionalDstCfg
 	return nil
 }
 
-// replayH2Through hands an h2c connection whose client waits for the server's
-// SETTINGS before its HEADERS to handleConnection in replay, and returns what
-// the HTTP/2 matcher was handed.
-func replayH2Through(t *testing.T, proven bool) []byte {
+// startH2Replay starts handleConnection in replay, with the proven switch or
+// without it, on a connection whose HTTP/2 parser is a probe, and returns the
+// connection's client end and what the probe's matcher is handed.
+func startH2Replay(t *testing.T, proven bool) (*h2Client, <-chan []byte) {
 	t.Helper()
 	if proven {
 		t.Setenv(provenswitch.Env, "1")
@@ -319,30 +319,68 @@ func replayH2Through(t *testing.T, proven bool) []byte {
 	}
 	app, src := acceptedConn(t)
 	go func() { _ = p.handleConnection(context.Background(), src) }()
-	cl := newH2Client(t, app)
-	cl.preface()
-	if proven {
-		if s, ok := cl.read().(*http2.SettingsFrame); !ok || s.IsAck() {
-			t.Fatal("keploy did not answer the client preface with SETTINGS")
-		}
-		cl.request("application/json")
-		if err := cl.fr.WriteSettingsAck(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return awaitEvent(t, probe.saw, "the HTTP/2 matcher being asked")
+	return newH2Client(t, app), probe.saw
 }
 
-// Under the proven switch an h2c replay is decided on its HEADERS, however
-// long its client takes to send them; without it, as before, the matcher is
-// handed the preface alone once 150 ms passed in silence (and an h2c client
-// that waits for the server's preface is then taken for gRPC).
-func TestAnH2cReplayIsDecidedOnItsHeadersUnderTheSwitch(t *testing.T) {
+// replayH2Through hands an h2c connection whose client waits for the server's
+// SETTINGS before its HEADERS to handleConnection in replay, and returns what
+// the HTTP/2 matcher was handed.
+func replayH2Through(t *testing.T, proven bool) []byte {
+	t.Helper()
+	cl, saw := startH2Replay(t, proven)
+	cl.preface()
+	if s, ok := cl.read().(*http2.SettingsFrame); !ok || s.IsAck() {
+		t.Fatal("keploy did not answer the client preface with SETTINGS")
+	}
+	cl.request("application/json")
+	if err := cl.fr.WriteSettingsAck(); err != nil {
+		t.Fatal(err)
+	}
+	return awaitEvent(t, saw, "the HTTP/2 matcher being asked")
+}
+
+// An HTTP/2 client may write its connection preface, its SETTINGS and its
+// first request each on its own, and the request well after the rest:
+// OkHttp's writer flushes after each, and a client busy elsewhere (a JVM
+// loading its HTTP/2 classes on a cold start) sends its HEADERS when it gets
+// to them. Replay decides such a connection on its HEADERS, with the proven
+// switch or without it: a plain HTTP/2 call is never taken for gRPC, and
+// answered by the gRPC mock server (415, empty body), because its client
+// wrote in pieces or was slow to write.
+func TestAnHTTP2ClientWritingInPiecesIsDecidedOnItsHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		proven bool
+	}{{"without the switch", false}, {"under the switch", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl, saw := startH2Replay(t, tc.proven)
+			if _, err := io.WriteString(cl.c, http2.ClientPreface); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(20 * time.Millisecond)
+			if err := cl.fr.WriteSettings(); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(200 * time.Millisecond)
+			cl.request("application/json")
+			buf := awaitEvent(t, saw, "the HTTP/2 matcher being asked")
+			if ct := contentType(buf); ct != "application/json" {
+				t.Fatalf("the HTTP/2 matcher read content-type %q from the frames %v; want application/json", ct, h2Frames(buf))
+			}
+		})
+	}
+}
+
+// An h2c replay is decided on its HEADERS, however long its client takes to
+// send them, with the proven switch or without it: keploy answers the client
+// preface, so a client that waits for the server's preface sends its HEADERS,
+// and is not taken for gRPC for having waited.
+func TestAnH2cReplayIsDecidedOnItsHeaders(t *testing.T) {
 	if ct := contentType(replayH2Through(t, true)); ct != "application/json" {
 		t.Fatalf("under the switch the HTTP/2 matcher read content-type %q, want application/json", ct)
 	}
-	if buf := replayH2Through(t, false); util.HasHTTP2HeadersFrame(buf) {
-		t.Fatal("without the switch the matcher was handed HEADERS its client never sent")
+	if ct := contentType(replayH2Through(t, false)); ct != "application/json" {
+		t.Fatalf("without the switch the HTTP/2 matcher read content-type %q, want application/json", ct)
 	}
 }
 
