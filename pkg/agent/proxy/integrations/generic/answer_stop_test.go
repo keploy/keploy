@@ -248,8 +248,12 @@ func TestV2_TheRestOfAnAnswerTheStopCutIsSpannedAsTheParserTakesIt(t *testing.T)
 			case <-time.After(waitBound):
 				t.Fatal("the held exchange was not handed on as the stop began")
 			}
-			tailAt := t0.Add(2 * time.Second) // read before the stop's instant
-			events <- stopChunk(fakeconn.FromDest, "tail", 3, tailAt)
+			// Read before the stop's instant, and its write stamped
+			// later: the span starts at the read, which the client may
+			// have had the bytes from, and its test case ended, before
+			// the write's return was stamped.
+			tailAt := t0.Add(2 * time.Second)
+			events <- chunkEvent{dir: fakeconn.FromDest, bytes: []byte("tail"), connSeq: 3, readAt: tailAt, writtenAt: tailAt.Add(3 * time.Second)}
 			events <- chunkEvent{dir: fakeconn.FromDest} // the parser is done with the tail
 			st := mgr.BacklogBefore(stop)
 			over, _ := spans.Overlaps(tailAt, tailAt)
@@ -275,6 +279,230 @@ func TestV2_TheRestOfAnAnswerTheStopCutIsSpannedAsTheParserTakesIt(t *testing.T)
 			awaitReturn(t, done)
 			if n := mgr.MocksLeftOut(); n != 1 {
 				t.Fatalf("%d left out, want the rest of the answer counted once", n)
+			}
+		})
+	}
+}
+
+// directRun drives the parser's loop with an unbuffered events channel: each
+// send returns once the parser has taken the chunk, and the next once it is
+// done with it.
+type directRun struct {
+	mgr    *syncMock.SyncMockManager
+	spans  *syncMock.Spans
+	sess   *supervisor.Session
+	mocks  chan *models.Mock
+	events chan chunkEvent
+	done   chan error
+	ended  bool
+}
+
+func startDirect(t *testing.T) *directRun {
+	t.Helper()
+	r := &directRun{mgr: syncMock.New(zap.NewNop()), spans: &syncMock.Spans{},
+		mocks: make(chan *models.Mock, 8), events: make(chan chunkEvent), done: make(chan error, 1)}
+	r.mgr.SetWatermark(neverBehind{})
+	r.mgr.SetOutputChannel(make(chan *models.Mock, 1)) // the recording
+	r.sess = &supervisor.Session{Mocks: r.mocks, Logger: zap.NewNop(), Mgr: r.mgr, Orphans: r.spans,
+		Ctx: syncMock.NewContext(context.Background(), r.mgr), ClientConnID: "c"}
+	go func() { r.done <- pairChunkEvents(r.events, r.sess, zap.NewNop()) }()
+	t.Cleanup(func() {
+		if !r.ended {
+			close(r.events)
+			select {
+			case <-r.done:
+			case <-time.After(waitBound):
+			}
+		}
+	})
+	return r
+}
+
+// handedOn waits for the parser to hand on the exchange reqs|resps.
+func (r *directRun) handedOn(t *testing.T, reqs, resps []string) {
+	t.Helper()
+	select {
+	case m := <-r.mocks:
+		assertExchange(t, m, reqs, resps)
+	case <-time.After(waitBound):
+		t.Fatalf("the exchange %q was not handed on", reqs)
+	}
+}
+
+// end ends the parser's events and waits for it to return.
+func (r *directRun) end(t *testing.T) {
+	t.Helper()
+	r.ended = true
+	close(r.events)
+	awaitReturn(t, r.done)
+}
+
+// The rest of an answer the stop cut short is one exchange lost, however many
+// chunks it comes in: counted once, at its first chunk, and every chunk of it
+// spanned from its read as the parser takes it. Counted per chunk, a rest in
+// three chunks read as three exchanges lost in the recording's summary and
+// its WARNs. The rest of the next answer the stop cuts is one more.
+func TestV2_TheRestOfAnAnswerTheStopCutIsOneExchangeLeftOut(t *testing.T) {
+	for _, proven := range []string{"0", "1"} {
+		t.Run("proven="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			t0 := time.Unix(6000, 0)
+			r := startDirect(t)
+			r.events <- stopChunk(fakeconn.FromClient, "GET big", 1, t0)
+			r.events <- stopChunk(fakeconn.FromDest, "head", 2, t0.Add(time.Second))
+			r.events <- chunkEvent{dir: fakeconn.FromDest} // a look past the head: it is held
+			r.mgr.BacklogBefore(t0.Add(10 * time.Second))  // the stop begins
+			r.handedOn(t, []string{"GET big"}, []string{"head"})
+			// The rest, in two chunks read before the stop's instant, each
+			// write's return stamped after its read.
+			a1, a2 := t0.Add(2*time.Second), t0.Add(4*time.Second)
+			r.events <- chunkEvent{dir: fakeconn.FromDest, bytes: []byte("rest-1"), connSeq: 3, readAt: a1, writtenAt: a1.Add(time.Second)}
+			r.events <- chunkEvent{dir: fakeconn.FromDest, bytes: []byte("rest-2"), connSeq: 4, readAt: a2, writtenAt: a2.Add(time.Second)}
+			r.events <- chunkEvent{dir: fakeconn.FromDest}
+			for i, at := range []time.Time{a1, a2} {
+				if over, _ := r.spans.Overlaps(at, at); !over {
+					t.Fatalf("chunk %d of the rest has no span from its read once the parser has taken it", i+1)
+				}
+			}
+			if n := r.mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("%d left out for the rest of one answer in two chunks, want 1", n)
+			}
+			// An exchange after the stop is decided at the parser's next
+			// look that finds no more of it; the rest of its answer is
+			// another exchange lost.
+			r.events <- stopChunk(fakeconn.FromClient, "GET small", 5, t0.Add(11*time.Second))
+			r.events <- stopChunk(fakeconn.FromDest, "small", 6, t0.Add(12*time.Second))
+			r.handedOn(t, []string{"GET small"}, []string{"small"})
+			r.events <- stopChunk(fakeconn.FromDest, "small-rest", 7, t0.Add(13*time.Second))
+			r.end(t)
+			if n := r.mgr.MocksLeftOut(); n != 2 {
+				t.Fatalf("%d left out, want 2: the rest of each of two answers the stop cut", n)
+			}
+		})
+	}
+}
+
+// A pooled connection can outlive the recording whose stop decided its answer:
+// in a re-record on the same manager (its holds reopened,
+// SyncMockManager.newHoldsSession), an answer chunk with no request before it
+// is not the rest of that answer once a request has come, and it is held as
+// any is. Here a holed capture leaves the parser with no request (both halves
+// of the split left out), and the next answer was teed ahead of its request
+// with no capture numbers, so the merge could not place it: held, it pairs
+// with the request read before it. Taken for the rest of the first
+// recording's cut answer, it was dropped and the request recorded with none.
+func TestV2_ARecordingAfterTheStopThatDecidedAnAnswerPairsItsAnswersAsAny(t *testing.T) {
+	for _, proven := range []string{"0", "1"} {
+		t.Run("proven="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			t0 := time.Unix(6000, 0)
+			r := startDirect(t)
+			r.events <- stopChunk(fakeconn.FromClient, "GET one", 1, t0)
+			r.events <- stopChunk(fakeconn.FromDest, "one", 2, t0.Add(time.Second))
+			r.events <- chunkEvent{dir: fakeconn.FromDest}
+			r.mgr.BacklogBefore(t0.Add(10 * time.Second)) // the first recording's stop
+			r.handedOn(t, []string{"GET one"}, []string{"one"})
+			r.events <- stopChunk(fakeconn.FromDest, "one-rest", 3, t0.Add(2*time.Second))
+			r.events <- chunkEvent{dir: fakeconn.FromDest}
+			r.mgr.SetOutputChannel(make(chan *models.Mock, 1)) // the re-record
+			t1 := t0.Add(time.Minute)
+			r.events <- stopChunk(fakeconn.FromClient, "GET a", 10, t1)
+			r.events <- stopChunk(fakeconn.FromClient, "GET b", 12, t1.Add(2*time.Second))
+			r.events <- chunkEvent{dir: fakeconn.FromDest}
+			r.sess.MarkMockIncomplete("a chunk was lost")
+			r.events <- stopChunk(fakeconn.FromDest, "a", 11, t1.Add(time.Second))
+			r.events <- chunkEvent{dir: fakeconn.FromDest, bytes: []byte("c"), readAt: t1.Add(4 * time.Second), writtenAt: t1.Add(4 * time.Second)}
+			r.events <- chunkEvent{dir: fakeconn.FromClient, bytes: []byte("GET c"), readAt: t1.Add(3 * time.Second)}
+			r.end(t)
+			r.handedOn(t, []string{"GET c"}, []string{"c"})
+			select {
+			case m := <-r.mocks:
+				t.Fatalf("handed on more than the exchange after the holed one: %q", pairsOf([]*models.Mock{m}))
+			default:
+			}
+		})
+	}
+}
+
+// An exchange the stop decides that is left out as it is handed on (here the
+// capture's incomplete flag) is counted and spanned over its own times, and
+// the rest of its answer with it: neither counted again nor spanned, however
+// many chunks it comes in, as the rest of any exchange left out is not
+// (leaveOutTail). Spanned, it would leave out test cases that did not wait on
+// the exchange.
+func TestV2_TheRestOfAnAnswerLeftOutAtTheStopIsCountedWithIt(t *testing.T) {
+	for _, proven := range []string{"0", "1"} {
+		t.Run("proven="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			t0 := time.Unix(6000, 0)
+			r := startDirect(t)
+			r.events <- stopChunk(fakeconn.FromClient, "GET big", 1, t0)
+			r.events <- stopChunk(fakeconn.FromDest, "head", 2, t0.Add(time.Second))
+			r.events <- chunkEvent{dir: fakeconn.FromDest}
+			r.sess.MarkMockIncomplete("a chunk was lost")
+			r.mgr.BacklogBefore(t0.Add(10 * time.Second)) // the stop begins
+			deadline := time.Now().Add(waitBound)
+			for r.mgr.MocksLeftOut() == 0 {
+				if time.Now().After(deadline) {
+					t.Fatal("the stop did not decide the held exchange the capture marked incomplete")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			a1, a2 := t0.Add(2*time.Second), t0.Add(4*time.Second)
+			r.events <- chunkEvent{dir: fakeconn.FromDest, bytes: []byte("rest-1"), connSeq: 3, readAt: a1, writtenAt: a1.Add(time.Second)}
+			r.events <- chunkEvent{dir: fakeconn.FromDest, bytes: []byte("rest-2"), connSeq: 4, readAt: a2, writtenAt: a2.Add(time.Second)}
+			r.end(t)
+			for i, at := range []time.Time{a1, a2} {
+				if over, _ := r.spans.Overlaps(at, at); over {
+					t.Fatalf("chunk %d of the rest of an exchange left out is spanned apart from it", i+1)
+				}
+			}
+			if over, _ := r.spans.Overlaps(t0, t0); !over {
+				t.Fatal("the exchange left out at the stop has no span over its request")
+			}
+			if n := r.mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("%d left out, want the exchange counted once with the rest of its answer", n)
+			}
+			select {
+			case m := <-r.mocks:
+				t.Fatalf("handed on %q, an exchange the capture marked incomplete", pairsOf([]*models.Mock{m}))
+			default:
+			}
+		})
+	}
+}
+
+// In a re-record on the same manager, an answer chunk that comes with no
+// request before it is not the rest of the answer the last recording's stop
+// cut, even when no request came between: here the re-record's first
+// exchange has its answer teed ahead of its request, with no capture numbers
+// for the merge to place it by. Held, it pairs with the request read before
+// it. Taken for the rest of the cut answer, it was spanned in the re-record
+// and never counted there, and the request was recorded with no answer.
+func TestV2_ARecordingAfterTheStopThatDecidedAnAnswerHoldsItsFirstAnswer(t *testing.T) {
+	for _, proven := range []string{"0", "1"} {
+		t.Run("proven="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			t0 := time.Unix(6000, 0)
+			r := startDirect(t)
+			r.events <- stopChunk(fakeconn.FromClient, "GET one", 1, t0)
+			r.events <- stopChunk(fakeconn.FromDest, "one", 2, t0.Add(time.Second))
+			r.events <- chunkEvent{dir: fakeconn.FromDest}
+			r.mgr.BacklogBefore(t0.Add(10 * time.Second)) // the first recording's stop
+			r.handedOn(t, []string{"GET one"}, []string{"one"})
+			r.events <- stopChunk(fakeconn.FromDest, "one-rest", 3, t0.Add(2*time.Second))
+			r.events <- chunkEvent{dir: fakeconn.FromDest}
+			r.mgr.SetOutputChannel(make(chan *models.Mock, 1)) // the re-record
+			t1 := t0.Add(time.Minute)
+			r.events <- chunkEvent{dir: fakeconn.FromDest, bytes: []byte("c"), readAt: t1.Add(time.Second), writtenAt: t1.Add(time.Second)}
+			r.events <- chunkEvent{dir: fakeconn.FromClient, bytes: []byte("GET c"), readAt: t1}
+			r.end(t)
+			r.handedOn(t, []string{"GET c"}, []string{"c"})
+			if over, _ := r.spans.Overlaps(t1.Add(time.Second), t1.Add(time.Second)); over {
+				t.Fatal("the re-record's first answer was spanned as the rest of the last recording's cut answer")
+			}
+			if n := r.mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("%d left out, want only the rest of the first recording's cut answer", n)
 			}
 		})
 	}

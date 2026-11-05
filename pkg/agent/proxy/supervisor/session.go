@@ -1232,14 +1232,7 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 	if m == nil {
 		m = &models.Mock{}
 	}
-	start, end := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
-	spanned := !start.IsZero()
-	if spanned {
-		if end.Before(start) {
-			end = start
-		}
-		s.RecordOrphanWindow(start, end)
-	}
+	spanned := s.spanLeftOut(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	s.manager().NoteMockLeftOut()
 	if s.OnPendingCleared != nil {
 		s.OnPendingCleared()
@@ -1260,6 +1253,34 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
 	}
 	s.Logger.Warn(LeftOutWarnMsg, append(fields, zap.String("next_step", leftOutNextStep(class, spanned)))...)
+}
+
+// ReportLeftOutPart reports a part of an exchange already reported left out
+// (ReportLeftOut) that the parser took after it, from start to end: its span,
+// by ReportLeftOut's rule, and nothing else. The exchange is counted and
+// logged once, however many parts of it come after: the Generic recorder's
+// rest of an answer the recording's stop cut short, in more than one chunk,
+// is one exchange lost, not one per chunk. Each part is spanned as the parser
+// takes it, so a test case over it is left out, not checked and kept before
+// the span exists. It does not touch the session's pending work: the report
+// of the exchange the part belongs to dealt with it. Nil-safe.
+func (s *Session) ReportLeftOutPart(start, end time.Time) {
+	s.spanLeftOut(start, end)
+}
+
+// spanLeftOut records the span of a mock left out, the one rule for it
+// (ReportLeftOut): [start, end], ending where it starts when end is before
+// it, and none for a zero start. It reports whether it recorded one.
+// Nil-safe (RecordOrphanWindow).
+func (s *Session) spanLeftOut(start, end time.Time) bool {
+	if start.IsZero() {
+		return false
+	}
+	if end.Before(start) {
+		end = start
+	}
+	s.RecordOrphanWindow(start, end)
+	return true
 }
 
 // ReportStoppedOn reports the exchange a parser stops on, as it returns

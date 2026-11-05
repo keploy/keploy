@@ -66,6 +66,20 @@ func (m *SyncMockManager) newHoldsSession() {
 	}
 }
 
+// HoldsSession is the signal the holds of the current recording are told its
+// stop by (HoldExchanges' stopping), nil before the first hold: a new one
+// once a re-record follows a stop (newHoldsSession). A parser that decided a
+// hold as a stop began compares it with the signal that told it, to know
+// whether it is still in that recording. Nil-safe.
+func (m *SyncMockManager) HoldsSession() <-chan struct{} {
+	if m == nil {
+		return nil
+	}
+	m.holdsMu.Lock()
+	defer m.holdsMu.Unlock()
+	return m.holdsStopping
+}
+
 // holdsPendingBefore says why exchanges requested at or before `before` are
 // still to be handed on, "" when none are: a parser holds them
 // (HoldExchanges).

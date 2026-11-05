@@ -297,12 +297,44 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		// still on its way to the loop (the reader's queue, the merge).
 		destRead int64
 		// stopDecided is set once the stop has decided a held answer: an
-		// answer chunk the loop takes after that with no request before it
-		// is the rest of an answer the stop cut short. Every answer held
-		// after the stop has begun is decided at the loop's next look that
-		// finds nothing more of it, so the flag is not cleared.
+		// answer chunk the loop takes after that with no request before it,
+		// in the recording whose stop it was (decidedBy), is the rest of an
+		// answer the stop cut short. It is cleared at the connection's next
+		// request: the merge orders numbered chunks by capture, so the rest
+		// of the answer comes before that request. A chunk it cannot place
+		// (no capture numbers) is taken as it comes, as anywhere else. A
+		// pooled connection can outlive the recording whose stop decided its
+		// answer: in a re-record on the same manager
+		// (SyncMockManager.newHoldsSession) an answer chunk with no request
+		// is held as any is, whether or not a request came first.
 		stopDecided bool
+		// decidedBy is the stop signal of the recording whose stop decided
+		// the answer (answerStopping): the manager's HoldsSession while
+		// that recording lasts.
+		decidedBy <-chan struct{}
+		// cutTailCounted is set once the first chunk of the rest of an
+		// answer the stop cut short is counted (leaveOutCutTail), and
+		// cleared with stopDecided.
+		cutTailCounted bool
 	)
+	// leaveOutCutTail leaves out ev, a chunk of the rest of an answer the
+	// stop cut short (stopDecided), with its span, as the parser takes it.
+	// That rest is one exchange lost, however many chunks it comes in: its
+	// first chunk is counted (leaveOutTail), and each after it, up to the
+	// next request, is spanned and not counted again
+	// (Session.ReportLeftOutPart). Counted per chunk, a rest in three chunks
+	// read as three exchanges lost. The rest of an exchange left out as it
+	// was handed on is counted and spanned with it (leaveOutTail).
+	leaveOutCutTail := func(ev chunkEvent) {
+		from, to := readOrWritten(ev), ev.writtenAt
+		switch {
+		case !cutTailCounted:
+			cutTailCounted = true
+			leaveOutTail(1, from, to)
+		case !flushedLeftOut:
+			sess.ReportLeftOutPart(from, to)
+		}
+	}
 	// answerOnItsWay reports whether the dest's reader has taken a chunk off
 	// its stream that the loop has not taken yet. A session with no dest
 	// stream (a row driving the loop) has none.
@@ -455,6 +487,7 @@ drain:
 				}
 				// An answer is held only with its exchange's request
 				// (holdAnswer), so the flush takes it, and ends deciding.
+				decidedBy = answerStopping
 				flushMock()
 				stopDecided = true
 				continue
@@ -533,6 +566,9 @@ drain:
 
 		switch ev.dir {
 		case fakeconn.FromClient:
+			// The rest of an answer the stop cut short, if any, came
+			// before this request (stopDecided).
+			stopDecided, cutTailCounted = false, false
 			// The next request ends the answer held (holdAnswer): the
 			// exchange is handed on whole before a new one starts, as
 			// the legacy encoder does.
@@ -698,13 +734,15 @@ drain:
 					continue
 				}
 			}
-			if stopDecided && len(genericRequests) == 0 {
+			if stopDecided && syncMock.FromContextOrGlobal(ctx).HoldsSession() == decidedBy {
 				// The rest of an answer the stop cut short (or an
 				// answer with no request, after the stop): left out
 				// with its span as the parser takes it, not held to
 				// the next request or the streams' end, which may come
-				// after the verdict of the test case over it.
-				leaveOutTail(1, readOrWritten(ev), ev.writtenAt)
+				// after the verdict of the test case over it. The
+				// decision took every request the parser had, and the
+				// next request clears the flag, so none is held here.
+				leaveOutCutTail(ev)
 				continue
 			}
 			if len(genericResponses) == 0 {
