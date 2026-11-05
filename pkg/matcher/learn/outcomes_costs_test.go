@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"weak"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -1248,6 +1249,178 @@ func TestOutcomeCostASetReadsEachOtherTestsRecordingsWordsOnce(t *testing.T) {
 			}
 		}()
 	}
+}
+
+// listsRead is how many outside recordings' word lists dc's set has read
+// into its index (outsideHeld).
+func listsRead(dc *DriftCache) int {
+	fs := filtersOf(dc.set)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.listBuilds
+}
+
+// costOutsideAsks is costOutside's two calls, each call's verdict, the
+// lists its set's index read in it, the outside recordings its word's check
+// decided (outsideAsked), and the lists it searched with no index of them
+// (listsAsks).
+func costOutsideAsks(n int) (got [2]string, builds, asked, searched [2]int64) {
+	const rec, live = "ids a1b2c3d4", "ids f0e9d8c7"
+	mocks, views := make([]*models.Mock, n), make([]*models.Mock, n)
+	for i := range mocks {
+		name, url, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+		body, view := fmt.Sprintf(`{"note":"Item %d","ref":"Ref-%05d"}`, i, i), fmt.Sprintf(`{"note":"Item %d","ref":"Ref-%05d","seen":"yes"}`, i, i)
+		if i == n/2 {
+			body, view = `{"ref":"a1b2c3d4"}`, `{"ref":"f0e9d8c7"}`
+		}
+		mocks[i], views[i] = getAnswer(name, url, body, at), getAnswer(name, url, view, at)
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	for c := range got {
+		tr.Begin()
+		dc := tr.Drifts()
+		raw := make([]Raw, n)
+		for i, m := range mocks {
+			raw[i] = dc.LazyRawOf(m, true, nil).ServedAs(i + 1).ServedLive(RawOf(views[i], true)).OfAnotherTest()
+			if i%3 == 2 && i != n/2 {
+				// Served as recorded: it holds no view's list.
+				raw[i] = dc.LazyRawOf(m, true, nil).ServedAs(i + 1).ServedAsRecorded().OfAnotherTest()
+			}
+		}
+		b, a, l := listsRead(dc), outsideAsked.Load(), listsAsks.Load()
+		got[c] = oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, raw, nil, nil)))
+		builds[c], asked[c], searched[c] = int64(listsRead(dc)-b), outsideAsked.Load()-a, listsAsks.Load()-l
+		tr.End()
+	}
+	return got, builds, asked, searched
+}
+
+// A set reads its outside recordings' word lists into its index once, at
+// the first call, and a call's check of a word decides only the outside
+// recordings whose lists hold R's or F's word: one of 50 and one of 500
+// alike, searching no list. Past the set's budget the index keeps none, each
+// call searches every list as before, and the verdicts stay.
+func TestOutcomeCostACallDecidesOnlyTheOutsideRecordingsThatHoldItsWords(t *testing.T) {
+	for _, n := range []int{50, 500} {
+		got, builds, asked, searched := costOutsideAsks(n)
+		t.Logf("%d recordings: decided %s; lists read %v, recordings decided %v, lists searched %v (first test, second)", n, got[1], builds, asked, searched)
+		if got[0] != got[1] {
+			t.Errorf("over %d recordings the tests decide %q; want one verdict", n, got)
+		}
+		if want := fmt.Sprintf("refused another-scope: the value mock-%d sent in an earlier test", n/2); !strings.Contains(got[0], want) {
+			t.Errorf("over %d recordings the tests decide %q; want %q, the one recording holding R's word named", n, got[0], want)
+		}
+		if builds[0] < int64(n) || builds[1] != 0 {
+			t.Errorf("over %d recordings the set's index read %v lists; want each recording's at the first test (at least %d), none at the second", n, builds, n)
+		}
+		if asked[0] == 0 || asked[0] > 2 || asked[1] != asked[0] {
+			t.Errorf("over %d recordings the word's checks decided %v outside recordings; want the one holding its words (each test alike), not every one", n, asked)
+		}
+		if searched != [2]int64{} {
+			t.Errorf("over %d recordings the calls searched %v lists with no index of them; want none", n, searched)
+		}
+		func() {
+			defer func(b int64) { learnBudget = b }(learnBudget)
+			learnBudget = 1
+			past, pastBuilds, pastAsked, pastSearched := costOutsideAsks(n)
+			if past != got {
+				t.Errorf("over %d recordings past the budget the tests decide %q; want %q", n, past, got)
+			}
+			if pastBuilds != [2]int64{} || pastAsked != asked || pastSearched[0] < int64(n) || pastSearched[1] != pastSearched[0] {
+				t.Errorf("over %d recordings past the budget: lists indexed %v, recordings decided %v, lists searched %v; want none indexed, %v decided, every list searched in each test", n, pastBuilds, pastAsked, pastSearched, asked)
+			}
+		}()
+	}
+}
+
+// A list the set lets go leaves its index: its id leaves its words'
+// postings, its entry the index, and its bytes the set's budget; a list of
+// another identity with the same words is read anew.
+func TestOutcomeCostAListTheSetLetsGoLeavesItsIndex(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	s, fs := dc.set, filtersOf(dc.set)
+	mk := func() answerLists {
+		return answerLists{words: [][]string{{"alpha", "a1b2c3d4"}, {"a1b2c3d4"}}, stamped: [][]string{{"zeta"}, nil}}
+	}
+	used := func() int64 { s.mu.Lock(); defer s.mu.Unlock(); return s.budget.used }
+	base := used()
+	l1, l2 := mk(), mk()
+	ids := [2]int32{}
+	for i, l := range []answerLists{l1, l2} {
+		k, _ := listsKey(l)
+		e := &listsEntry{}
+		fs.mu.Lock()
+		fs.lists[k] = e
+		fs.mu.Unlock()
+		e.once.Do(func() { buildLists(fs, s, e, l) })
+		ids[i] = e.id
+	}
+	if ids[0] < 0 || ids[1] <= ids[0] {
+		t.Fatalf("two lists of one set's words read ids %v; want two, in order", ids)
+	}
+	fs.mu.Lock()
+	post := slices.Clone(fs.post["a1b2c3d4"])
+	fs.mu.Unlock()
+	if !slices.Equal(post, ids[:]) || used() <= base {
+		t.Fatalf("the postings of a1b2c3d4 are %v, the budget used %d (from %d); want %v, and more used", post, used(), base, ids)
+	}
+	k1, _ := listsKey(l1)
+	dropLists(listsGone{set: weak.Make(s), fs: weak.Make(fs), key: k1})
+	fs.mu.Lock()
+	post, gone, zeta := slices.Clone(fs.post["a1b2c3d4"]), fs.lists[k1] == nil, slices.Clone(fs.post["zeta"])
+	fs.mu.Unlock()
+	if !slices.Equal(post, ids[1:]) || !slices.Equal(zeta, ids[1:]) || !gone {
+		t.Errorf("after the first list is let go: postings %v and %v, its entry gone %v; want only %v, and gone", post, zeta, gone, ids[1])
+	}
+	k2, _ := listsKey(l2)
+	dropLists(listsGone{set: weak.Make(s), fs: weak.Make(fs), key: k2})
+	fs.mu.Lock()
+	var left []string
+	for _, w := range []string{"a1b2c3d4", "alpha", "zeta"} {
+		if _, ok := fs.post[w]; ok {
+			left = append(left, w)
+		}
+	}
+	fs.mu.Unlock()
+	if len(left) != 0 || used() != base {
+		t.Errorf("after both lists are let go: postings of %q left, the budget used %d; want none, and %d", left, used(), base)
+	}
+	// A drop that comes again, or after the set or its filters were let go,
+	// takes nothing and stops nowhere.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("a list's drop after its entry, its set or its filters were let go panicked: %v", r)
+			}
+		}()
+		dropLists(listsGone{set: weak.Make(s), fs: weak.Make(fs), key: k2})
+		dropLists(listsGone{key: k2})
+		l3 := mk()
+		k3, _ := listsKey(l3)
+		e := &listsEntry{}
+		fs.mu.Lock()
+		fs.lists[k3] = e
+		fs.mu.Unlock()
+		e.once.Do(func() { buildLists(fs, s, e, l3) })
+		dropLists(listsGone{fs: weak.Make(fs), key: k3})
+		fs.mu.Lock()
+		_, kept := fs.post["a1b2c3d4"]
+		fs.mu.Unlock()
+		if kept {
+			t.Errorf("a list dropped after its set was let go left its postings")
+		}
+		s.mu.Lock()
+		s.budget.used -= e.bytes // its set is alive here: give back what the drop could not
+		s.mu.Unlock()
+		runtime.KeepAlive(l3)
+	}()
+	runtime.KeepAlive(l1)
+	runtime.KeepAlive(l2)
 }
 
 // The words a set keeps of another test's recording are the words wordsOf
