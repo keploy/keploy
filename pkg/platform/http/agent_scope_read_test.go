@@ -158,18 +158,20 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	given := map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}}
 	repeats := map[string][]models.RepeatRead{"o::TestA": {{Name: "onboarding", Mocks: []string{"mock-3", "mock-3"}}}}
 	notRequired := map[string][]string{"o::TestA": {"mock-3"}}
-	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, map[string][]string{"o": {"mock-1"}}, nil, windows, given, repeats, notRequired); err != nil {
+	skipped := map[string]string{"mock-1": "o::TestCRUD"}
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, map[string][]string{"o": {"mock-1"}}, skipped, windows, given, repeats, notRequired); err != nil {
 		t.Fatal(err)
 	}
 	windows[0].TestCase = "o::Changed" // the caller's slice is its own
 	given["o::TestA"] = nil            // and so is its map
 	repeats["o::TestA"] = nil          // and its repeated reads
 	notRequired["o::TestA"] = nil      // and its marks
+	skipped["mock-1"] = "o::Changed"   // and its skipped reads
 	if err := a.session().reapply(context.Background(), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
-	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}],"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]},"worker":{"o":["mock-1"]},"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-3"]}]},"notRequired":{"o::TestA":["mock-3"]}}`
+	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}],"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]},"worker":{"o":["mock-1"]},"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-3"]}]},"notRequired":{"o::TestA":["mock-3"]},"skipped_reads":{"mock-1":"o::TestCRUD"}}`
 	if !slices.Equal(bodies, []string{want, want}) {
-		t.Fatalf("posted %q, want the table, its windows, its givens, its worker scope and its not-required marks twice: %q", bodies, want)
+		t.Fatalf("posted %q, want the table, its windows, its givens, its worker scope, its repeated reads, its not-required marks and its skipped reads twice: %q", bodies, want)
 	}
 }

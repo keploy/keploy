@@ -278,3 +278,86 @@ func TestACallPastASkippedTestsReadIsTheCallingTestsMissInEveryShape(t *testing.
 		})
 	}
 }
+
+// skippedRepeatManager stages a test's own recordings of GET /x twice with
+// one answer, marked as one repeated read its mapping names
+// (models.MarkRepeatReads, as the agent marks them), beside its other own
+// recordings and the skipped tests' reads keploy mock replay moved to the
+// worker scope (ServeExactWorkerSkipped), and opens test-a on them.
+func skippedRepeatManager(t *testing.T, other, skipped []*models.Mock) *MockManager {
+	t.Helper()
+	x1 := workerProbe("mock-own-x-1", 4*time.Second, "/x", "own-x")
+	x2 := workerProbe("mock-own-x-2", 4*time.Second+100*time.Millisecond, "/x", "own-x")
+	staged := append(append([]*models.Mock{x1, x2}, other...), skipped...)
+	mm := stagedManager(t, nil, staged)
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+	var names []string
+	for _, mk := range skipped {
+		names = append(names, mk.Name)
+	}
+	p := &Proxy{}
+	p.setMockManager(mm)
+	var ws agent.ExactWorkerSkippedServer = p
+	if err := ws.ServeExactWorkerSkipped(names, names); err != nil {
+		t.Fatal(err)
+	}
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	own := []*models.Mock{roundMock(mm, x1.Name), roundMock(mm, x2.Name)}
+	for _, mk := range other {
+		own = append(own, roundMock(mm, mk.Name))
+	}
+	mm.ServeExactTest("test-a", models.MarkRepeatReads(own, []models.RepeatRead{{Name: "GET /x", Mocks: []string{x1.Name, x2.Name}}}))
+	return mm
+}
+
+// A test's repeated read its mapping names is answered once more than the
+// test recorded it, and a skipped test's read of the same call answers one
+// call more on its own bound: the two allowances add up and neither takes
+// the other's. The once-more answer is the test's own recording, never a
+// skipped test's read, so the call past both names the skipped read once,
+// and the skipped read's bound is never spent by it.
+func TestARepeatedReadsOnceMoreAndASkippedReadEachAnswerTheirOwnCall(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	skipped := workerProbe("mock-skipped-x", time.Second, "/x", "skipped")
+	mm := skippedRepeatManager(t, nil, []*models.Mock{skipped})
+	for i, want := range []string{"own-x", "own-x", "skipped", "own-x"} {
+		if got, miss := httpMissCall(t, mm, "/x"); got != want {
+			t.Fatalf("test-a's GET /x number %d was answered %q (miss %+v); want %q: two own recordings, the skipped test's read, then the read once more", i+1, got, miss, want)
+		}
+	}
+	got, miss := httpMissCall(t, mm, "/x")
+	if got != "" || miss == nil {
+		t.Fatalf("test-a's fifth GET /x, past both allowances, was answered %q", got)
+	}
+	if miss.MissKind != models.MissExtraCall || miss.Recorded != 2 || !slices.Equal(miss.SkippedReads, []string{skipped.Name}) {
+		t.Fatalf("the fifth GET /x missed as %q, recorded %d, skipped reads %v; want %q, 2 and [%s]", miss.MissKind, miss.Recorded, miss.SkippedReads, models.MissExtraCall, skipped.Name)
+	}
+	if spent := mm.SkippedReadsAnswered(); len(spent) != 1 || spent[0].Name != skipped.Name {
+		t.Fatalf("the skipped reads that answered in test-a's window are %v; want the one skipped read alone, not the once-more answer", mockNames(spent))
+	}
+	if test, _, left, ok := mm.ExactTestOutcome(); !ok || test != "test-a" || len(left) != 0 {
+		t.Fatalf("test-a's outcome: test %q, never made %v, exact %v; want test-a with nothing unmade", test, left, ok)
+	}
+}
+
+// A test that makes its named repeated read once fewer than recorded is not
+// charged the recording it left unmade, while a skipped test's read answers
+// its other call one more than it recorded: the skipped read's bound never
+// undoes the once-fewer excuse, and the excuse never takes the read's call.
+func TestARepeatedReadsOnceFewerHoldsBesideASkippedReadsCall(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ownY := workerProbe("mock-own-y", 4*time.Second+200*time.Millisecond, "/y", "own-y")
+	skippedY := workerProbe("mock-skipped-y", time.Second, "/y", "skipped-y")
+	mm := skippedRepeatManager(t, []*models.Mock{ownY}, []*models.Mock{skippedY})
+	for i, c := range []struct{ path, want string }{{"/x", "own-x"}, {"/y", "own-y"}, {"/y", "skipped-y"}} {
+		if got, miss := httpMissCall(t, mm, c.path); got != c.want {
+			t.Fatalf("test-a's call %d, GET %s, was answered %q (miss %+v); want %q", i+1, c.path, got, miss, c.want)
+		}
+	}
+	if spent := mm.SkippedReadsAnswered(); len(spent) != 1 || spent[0].Name != skippedY.Name {
+		t.Fatalf("the skipped reads that answered in test-a's window are %v; want [%s]", mockNames(spent), skippedY.Name)
+	}
+	if test, _, left, ok := mm.ExactTestOutcome(); !ok || test != "test-a" || len(left) != 0 {
+		t.Fatalf("test-a's outcome: test %q, never made %v, exact %v; want test-a with nothing charged: its GET /x made once fewer than its named read", test, left, ok)
+	}
+}

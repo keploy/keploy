@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/utils"
@@ -171,4 +172,42 @@ func TestReadOnlyKnowsAnHTTPReadByItsMethod(t *testing.T) {
 	require.False(t, readOnly(&models.Mock{Kind: models.Mongo, Name: "m", Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET"}}}), "a request of another kind is not read as HTTP")
 	require.False(t, readOnly(&models.Mock{Kind: models.HTTP, Name: "m"}), "an HTTP mock with no request is not known to read")
 	require.False(t, readOnly(nil))
+}
+
+// The registered namer of repeated reads is handed each test's own
+// recordings as the replay serves them: a read a skipped test recorded is
+// the worker scope's for the replay, no longer the test's, so it is not
+// handed over as the skipped test's, and a read named of it is not sent.
+func TestANamerIsNotHandedTheReadsASkippedTestMovedToWorker(t *testing.T) {
+	provenOn(t)
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return map[string]string{"o::TestCRUD": "flaky: flipped"}, nil, nil
+	})
+	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
+	handed := map[string][]string{}
+	t.Cleanup(RegisterRepeatReadNamer(func(_ string, _ httpint.RepeatReadNoise, owned map[string][]*models.Mock) map[string][]models.RepeatRead {
+		for test, mocks := range owned {
+			for _, mk := range mocks {
+				handed[test] = append(handed[test], mk.Name)
+			}
+		}
+		return map[string][]models.RepeatRead{"o::TestCRUD": {{Name: "GET /v1/secret/data/pat", Mocks: []string{"mock-pat", "mock-pat-2"}}}}
+	}))
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestCRUD\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-pat\n        - name: mock-pat-2\n        - name: mock-put\n    - id: o::TestList\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-own\n"), 0o644))
+	instr := &gatedInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	db := namedMockDB{mocks: []*models.Mock{httpMock("mock-pat", "GET"), httpMock("mock-pat-2", "GET"), httpMock("mock-put", "PUT"), httpMock("mock-own", "GET")}}
+	require.NoError(t, New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+
+	require.Equal(t, map[string]string{"mock-pat": "o::TestCRUD", "mock-pat-2": "o::TestCRUD"}, instr.skippedReads, "precondition: both reads moved to worker:")
+	require.Equal(t, []string{"mock-put"}, handed["o::TestCRUD"], "the namer is handed the skipped test's write alone, not the reads moved to worker:")
+	require.Equal(t, []string{"mock-own"}, handed["o::TestList"])
+	require.Empty(t, instr.repeats, "a read named of the moved reads is not sent as the skipped test's")
 }
