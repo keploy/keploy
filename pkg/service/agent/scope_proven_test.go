@@ -1679,9 +1679,7 @@ func TestAFailedTestsReasonSaysWhyAMissWhoseViewWentMissed(t *testing.T) {
 	const gone = "keploy record's full round decided this request in test-2, and the replay ended test-2 before keploy diagnosed its miss, so no recording is named for it: keploy reads nothing of a view a test's begin or end replaced."
 	ev := &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /orders", Reason: models.MissViewReplaced, NextSteps: gone}}}
 	require.Equal(t, "keploy: POST /orders had no recorded answer.\n"+
-		"POST /orders missed (view_replaced): "+gone+"\n"+
-		"If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting test-2>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine test-2 --reason \"<why>\".", evidenceReason("test-2", ev, nil, time.Time{}))
+		"POST /orders missed (view_replaced): "+gone, evidenceReason("test-2", ev, nil, time.Time{}, ""))
 }
 
 // End to end on the agent: the test's end answers fail with the learn
