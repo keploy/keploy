@@ -52,8 +52,8 @@ func (a *Agent) AppListenAddrs(_ context.Context, port uint16) ([]netip.Addr, er
 			return nil, fmt.Errorf("keploy's ingress forwarder holds port %d and the app's own port is not known yet", port)
 		}
 	}
-	if config.KeployPorts(a.config)[listenPort] {
-		return nil, fmt.Errorf("keploy's own proxy, DNS server or API listens on port %d, so no socket there is the app's", listenPort)
+	if own := config.KeployPorts(a.config)[listenPort]; own != "" {
+		return nil, fmt.Errorf("keploy's own %s listens on port %d, so no socket there is the app's", own, listenPort)
 	}
 	var addrs []netip.Addr
 	for i, table := range procNetTables {

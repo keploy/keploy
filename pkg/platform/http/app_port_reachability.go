@@ -125,9 +125,9 @@ func (a *AgentClient) inspectPublish(ctx context.Context, host string, port, app
 	}
 	// The agent container also publishes keploy's own ports on loopback; the
 	// user never asked for those, so they are not listed as theirs.
-	own := map[string]bool{}
-	for p := range config.KeployPorts(a.conf) {
-		own[strconv.Itoa(int(p))] = true
+	own := map[string]config.KeployListener{}
+	for p, l := range config.KeployPorts(a.conf) {
+		own[strconv.Itoa(int(p))] = l
 	}
 	return appPortPublish(inspect, host, port, appPort, own)
 }
@@ -200,6 +200,8 @@ type portPublish struct {
 	notHereOn []string // the addresses of those
 	published []string // every tcp publish of the user's, as -p writes it
 	elsewhere []string // other host ports target() is published on, where host reaches them
+
+	keploys config.KeployListener // what of keploy's listens on target() in this run, where the app cannot; "" for nothing
 }
 
 // target is the app's port the tests have to reach: the one they were recorded
@@ -232,8 +234,9 @@ func portNumber(s string) uint16 {
 // to host:port for the app's port appPort (0: not known). ok is false when
 // the question does not apply: a stopped container refuses everything, and
 // under host networking the app's ports are the host's. keployPorts are
-// container ports that are keploy's, not the app's.
-func appPortPublish(inspect container.InspectResponse, host string, port, appPort uint16, keployPorts map[string]bool) (portPublish, bool) {
+// container ports that are keploy's, not the app's, with what of keploy's
+// listens on each.
+func appPortPublish(inspect container.InspectResponse, host string, port, appPort uint16, keployPorts map[string]config.KeployListener) (portPublish, bool) {
 	pub := portPublish{host: host, port: strconv.Itoa(int(port))}
 	if appPort != 0 {
 		pub.appPort = strconv.Itoa(int(appPort))
@@ -253,9 +256,10 @@ func appPortPublish(inspect container.InspectResponse, host string, port, appPor
 	}
 	var leads []lead
 	target := pub.target()
+	pub.keploys = keployPorts[target]
 	for containerPort, bindings := range inspect.NetworkSettings.Ports {
 		cport := containerPort.Port()
-		if containerPort.Proto() != "tcp" || keployPorts[cport] {
+		if containerPort.Proto() != "tcp" || keployPorts[cport] != "" {
 			continue
 		}
 		for _, b := range bindings {
@@ -371,7 +375,7 @@ func (a *AgentClient) appListening(ctx context.Context, port uint16) appListenin
 	if a.conf.Agent.AgentURI == "" {
 		return appListening{}
 	}
-	if config.KeployPorts(a.conf)[port] {
+	if config.KeployPorts(a.conf)[port] != "" {
 		// keploy's proxy, DNS server or API listens there, in the namespace
 		// the app shares: a socket seen there is keploy's, and where the app
 		// listens cannot be told from it. An agent older than its own check
@@ -595,8 +599,43 @@ func unreachableAppPortReason(pub portPublish, cmdType utils.CmdType, listening,
 		return r.reaching(listening)
 	case pub.leadsTo != "":
 		return r.leadingElsewhere(listening, atTarget)
+	case pub.keploys != "":
+		return r.keploysPort()
 	}
 	return r.notPublished(listening)
+}
+
+// keploys says the port the tests have to reach is one keploy listens on in
+// this run (pub.keploys), in the namespace the app shares.
+func (r reason) keploys() string {
+	return fmt.Sprintf("%s is keploy's %s port in this run, where the app cannot listen", r.theTarget(), r.pub.keploys)
+}
+
+// keployFlag is the setting that moves keploy's listener l to another port:
+// none for its API, whose port keploy picks itself.
+func keployFlag(l config.KeployListener) string {
+	switch l {
+	case config.KeployProxy:
+		return "--proxy-port (proxyPort in keploy.yml)"
+	case config.KeployDNS:
+		return "--dns-port (dnsPort in keploy.yml)"
+	}
+	return ""
+}
+
+// keploysPort is the reason for host port port reaching nothing of the app's
+// while the port the tests have to reach is one keploy listens on in this run.
+// Publishing that port, or listening there, is no fix: a publish to it reaches
+// keploy, and the app cannot bind it. Moving keploy's listener off it, or the
+// app and these tests to another port, is.
+func (r reason) keploysPort() string {
+	app := fmt.Sprintf("have the app listen on another port and send these tests to a host port published to it with a port map in keploy.yml (test.replaceWith.global.port: {%s: <host port>})%s",
+		r.target, r.redirected())
+	s := fmt.Sprintf("%s, and %s. ", r.keploys(), r.sends())
+	if flag := keployFlag(r.pub.keploys); flag != "" {
+		return s + fmt.Sprintf("Give keploy's %s another port with %s, or %s", r.pub.keploys, flag, app)
+	}
+	return s + "keploy picks that port itself: " + app
 }
 
 // reaching is the reason for host port port leading to the tests' port, where
@@ -645,6 +684,10 @@ func (r reason) leadingElsewhere(there, atTarget appListening) string {
 		}
 		s := fmt.Sprintf("host port %s is published to the container's port %s, where the app listens only on %s, which no published port reaches, and %s. keploy cannot replay these tests from the host through it: the app would have to listen on 0.0.0.0:%s",
 			r.port, to, loopback, r.sends(), to)
+		if r.pub.keploys != "" {
+			// Publishing host port port to it would reach keploy.
+			return s + " (" + r.keploys() + ")"
+		}
 		if r.known || atTarget.listens() {
 			// A test that does not say its port has nothing else to go by
 			// unless the app is seen on the port it stands in for.
