@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -12,6 +13,14 @@ func h2MockForTest(name, authority string) *models.Mock {
 	mk := newMockForTest(name, time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC), models.LifetimeSession)
 	mk.Kind = models.HTTP2
 	mk.Spec.HTTP2Req = &models.HTTP2Req{Authority: authority, Scheme: "https"}
+	return mk
+}
+
+// h1MockForTest is an Http (HTTP/1.x) mock recorded calling host (its Host
+// header) at url.
+func h1MockForTest(name, host, url string) *models.Mock {
+	mk := newMockForTest(name, time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC), models.LifetimeSession)
+	mk.Spec.HTTPReq = &models.HTTPReq{Method: http.MethodGet, URL: url, Header: map[string]string{"Host": host}}
 	return mk
 }
 

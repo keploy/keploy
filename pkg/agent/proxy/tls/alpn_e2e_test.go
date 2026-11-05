@@ -93,11 +93,21 @@ func TestMITM_DualProtocol_DefaultDowngrades(t *testing.T) {
 }
 
 // TestMITM_HTTP1Only_StaysHTTP1 guards the non-regression: an http/1.1-only
-// client stays http/1.1 regardless of the PreferH2 hint.
+// client stays http/1.1 regardless of the PreferH2 hint, and the decision,
+// which reads the recorded mocks, is not asked about a client that does not
+// offer h2.
 func TestMITM_HTTP1Only_StaysHTTP1(t *testing.T) {
-	cp, sp := mitmNegotiate(t, preferH2ForEvery(context.Background()), []string{"http/1.1"})
+	asked := 0
+	hsCtx := WithPreferH2For(context.Background(), func(string) bool {
+		asked++
+		return true
+	})
+	cp, sp := mitmNegotiate(t, hsCtx, []string{"http/1.1"})
 	if cp != "http/1.1" || sp != "http/1.1" {
 		t.Fatalf("http/1.1-only client should stay http/1.1; got client=%q server=%q", cp, sp)
+	}
+	if asked != 0 {
+		t.Fatalf("the decision was asked %d times about a client that does not offer h2, want 0", asked)
 	}
 }
 

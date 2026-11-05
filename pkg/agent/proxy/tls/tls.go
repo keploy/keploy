@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -333,8 +334,10 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	var certSent atomic.Bool
 	config := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			// With no decision on ctx, h2 is never preferred.
-			preserveH2 := preferH2 != nil && preferH2(hello.ServerName)
+			// With no decision on ctx, h2 is never preferred, and a client
+			// that does not offer h2 is not asked about (the decision reads
+			// the recorded mocks).
+			preserveH2 := preferH2 != nil && slices.Contains(hello.SupportedProtos, "h2") && preferH2(hello.ServerName)
 			nextProtos := negotiateNextProtos(hello.SupportedProtos, preserveH2)
 			logger.Debug("ALPN negotiation",
 				zap.Strings("clientProtos", hello.SupportedProtos),
