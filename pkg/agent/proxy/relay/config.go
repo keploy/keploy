@@ -549,6 +549,18 @@ type Config struct {
 	// records the upstream's fault, or the client giving up, unless the end
 	// records no fault). It must not block. Nil is safe.
 	PeerEnded func(dir fakeconn.Direction, reset bool)
+
+	// ClientEndError, when set, is told at most once, as the relay ends and
+	// before the streams end, of the error the client's socket gave after
+	// the relay's last read of it and last write to it: the error a write
+	// to the client failed with, or else the error the socket holds then
+	// (SO_ERROR). It is what PeerEnded cannot say: a client that sent its
+	// FIN and then reset the bytes that reached it after (client_end.go).
+	// Not told when there is none, or where the client's socket cannot be
+	// asked and no write to it failed. The proxy wires it to
+	// supervisor.Session.MarkClientEndError. It must not block. Nil is
+	// safe: the relay does not look.
+	ClientEndError func(err error)
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields

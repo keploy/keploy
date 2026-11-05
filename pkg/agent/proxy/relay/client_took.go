@@ -93,7 +93,8 @@ import (
 // not the relay has read it yet: the socket says so, not the relay's own
 // reading. A chunk written while the FIN was still on its way is teed as
 // before, even if the closed client resets it: the relay could only learn of
-// the FIN once it had handed the chunk on.
+// the FIN once it had handed the chunk on. That reset is handed on as the relay
+// ends (Config.ClientEndError, client_end.go), for the parser to judge by.
 //
 // While chunks wait for the client's answer, the capture watermark waits for
 // them (they are unconsumed: tee.awaiting), and the parser reads them only
