@@ -1327,7 +1327,8 @@ func (m *mockService) matchNoise(name string) models.OutgoingOptions {
 // does an agent that refuses the table: nothing is served from a whole pool
 // instead. The values each test gave when it was recorded go in the same
 // request, and so do the repeated reads the registered namer names
-// (namedRepeatReads).
+// (namedRepeatReads) and the names of each test's own list marked served,
+// not required (notRequired).
 func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)

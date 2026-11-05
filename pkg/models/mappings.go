@@ -101,9 +101,11 @@ type MockEntry struct {
 	// serves the recording, when the app makes the call, by the same matching
 	// as the test's other recordings, and does not charge that test, and only
 	// that test, for not making it, unless the store refused the recording,
-	// which nothing could serve. Only that judging decides a mark (a pull of a
-	// published recording gives back the mark its publish carried); read and
-	// kept by each rewrite of mappings.yaml, whatever the switch.
+	// which nothing could serve. keploy writes a mark only from that judging
+	// (a pull of a published recording gives back the mark its publish
+	// carried); a replay honours any mark an entry of the test's own list
+	// carries, one edited by hand too. Read and kept by each rewrite of
+	// mappings.yaml, whatever the switch.
 	NotRequired string `json:"notRequired,omitempty" yaml:"notRequired,omitempty" bson:"not_required,omitempty"`
 }
 
