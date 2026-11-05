@@ -607,14 +607,15 @@ const (
 // start-up carries alike is no swap's, and reads as any recording's. Only
 // a place whose recorded text holds the word is asked: swapHolds reads a
 // match it finds in no one field as a swap's. A recording that is no
-// start-up is no swap's, and is not loaded to ask.
-func swapUnknown(in Input, ps []evPlace, w readWord) {
+// start-up is no swap's, and is not loaded to ask. held is what each
+// place's texts hold of w (heldAt), asked once for the word.
+func swapUnknown(in Input, ps []evPlace, w readWord, held []evHeld) {
 	holds := func(own string) bool {
 		return holdsToken(own, w.Rec) || slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return holdsToken(own, t.Rec) })
 	}
 	for i := range ps {
 		p := &ps[i]
-		if p.raw == 0 || p.state != stateBefore || !evHolds(p.t.rec, w.Rec) {
+		if p.raw == 0 || p.state != stateBefore || !held[i].hr {
 			continue
 		}
 		if r := in.Raw[p.raw-1]; r.startUp && r.swapHolds(r.payload().text, in.Raw, holds) {
@@ -623,15 +624,28 @@ func swapUnknown(in Input, ps []evPlace, w readWord) {
 	}
 }
 
-// evidenceAt is what p shows of the changed word r (R) to f (F): the
-// evidence table, read through x. read is false where p's text lay
-// past the call's budget.
-func evidenceAt(p evPlace, r, f string, piece bool) (ev wordEvidence, read bool) {
+// evHeld is what a place's two texts hold of a changed word: R's text the
+// recorded word (hr), round F's text F's (hf), and whether both were read.
+// It is asked of a place once per word: serve order (orderUnknown,
+// swapUnknown) changes only the place's state, which no text answers.
+type evHeld struct{ hr, hf, read bool }
+
+// heldAt asks p's texts for the changed word r (R) to f (F), once each.
+func heldAt(p evPlace, r, f string) evHeld {
 	hr, okR := p.t.rec.holdsWord(r)
 	hf, okF := p.t.live.holdsWord(f)
-	if !okR || !okF {
+	return evHeld{hr: hr, hf: hf, read: okR && okF}
+}
+
+// evidenceOf is what p shows of the changed word r (R) to f (F), given
+// what its texts hold of it (h, heldAt): the evidence table, read through x,
+// at p's state as it stands now. read is false where p's text lay past the
+// call's budget.
+func evidenceOf(p evPlace, h evHeld, r, f string, piece bool) (ev wordEvidence, read bool) {
+	if !h.read {
 		return evNone, false
 	}
+	hr, hf := h.hr, h.hf
 	// A recording answered after the call gave R's application nothing
 	// before it: R's word there decides nothing (F's still does), as
 	// setEvidence reads a set entry.

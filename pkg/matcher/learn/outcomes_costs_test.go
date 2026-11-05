@@ -3,6 +3,7 @@ package learn
 import (
 	"fmt"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -743,4 +744,114 @@ func TestOutcomeCostAWordIsFoundWhereMainsListsHoldIt(t *testing.T) {
 	if lists != 0 {
 		t.Errorf("the questions built %d lists of every word of a text; want each word checked alone", lists)
 	}
+}
+
+// A call asks each place's texts once for each word it decides, in one scan
+// of each text for all three readings: the scans grow with the places times
+// the words asked, at a fixed few per place and word, and the verdicts stay.
+func TestOutcomeCostACallScansEachPlaceOnceForEachWordItAsks(t *testing.T) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
+	const words = 5
+	call := func(n int) (string, int64) {
+		mocks := make([]*models.Mock, n)
+		for i := range mocks {
+			name, body, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d"}`, i, i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+			if i == n/2 {
+				name, body, at = "mock-held", `{"note":"Kept A1B2C3D4","ref":"a1b2c3d4"}`, eRecAt.Add(-time.Second)
+			}
+			mocks[i] = getAnswer(name, fmt.Sprintf("http://api/items/%d", i), body, at)
+		}
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		defer tr.End()
+		dc := tr.Drifts()
+		before := heldScans.Load()
+		got := oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, lazyOf(dc, mocks), nil, nil)))
+		return got, heldScans.Load() - before
+	}
+	small, sScans := call(300)
+	large, lScans := call(3000)
+	t.Logf("decided: %s; scans %d over 300 recordings, %d over 3,000", small, sScans, lScans)
+	if large != small {
+		t.Errorf("over 3,000 recordings the call decides %s; over 300 it decided %s", large, small)
+	}
+	// Each place has two texts (as recorded and as round F gave it), each
+	// read with its other declared forms: four scans for each word.
+	const perPlaceWord = 4
+	for _, c := range []struct {
+		n     int
+		scans int64
+	}{{300, sScans}, {3000, lScans}} {
+		if limit := int64(perPlaceWord*words*c.n + 64); c.scans > limit {
+			t.Errorf("over %d recordings the call made %d scans of a text for a word; want at most %d: a place asked twice for a word, or once for each reading", c.n, c.scans, limit)
+		}
+	}
+}
+
+// A word some byte of which no reading reads as a word byte is a word of no
+// text, and no text is scanned for it; one only some readings read is held
+// where those readings hold it.
+func TestOutcomeCostAWordNoReadingReadsScansNoText(t *testing.T) {
+	const s = `{"note":"cart_42 a b, x%y"}`
+	before := heldScans.Load()
+	for _, w := range []string{"a b", "x%y", "\""} {
+		if heldIn(textForms(s), w, 0, 1, 2) {
+			t.Errorf("%q is held as a word of %s; no reading reads it as one", w, s)
+		}
+	}
+	if n := heldScans.Load() - before; n != 0 {
+		t.Errorf("asking words no reading reads scanned a text %d times; want none", n)
+	}
+	// Asked in every reading at once, a word is held where any one reading's
+	// list of the text's words holds it, though another reading that reads
+	// each of its bytes holds it nowhere in the text.
+	for _, text := range []string{s, `{"id":"order-17","path":"up_17/a.png","k":"tok_a-b_c --x__ v1.2"}`} {
+		for r := range readings {
+			for w := range tokensBy(text, readings[r]) {
+				want := slices.ContainsFunc(readings, func(word func(byte) bool) bool { return tokensBy(text, word)[w] })
+				if got := heldIn([]string{text}, w, 0, 1, 2); got != want {
+					t.Errorf("%q in %s, asked in every reading: held %v; the readings' lists hold it: %v", w, text, got, want)
+				}
+			}
+		}
+	}
+	// Whatever order the readings are asked in: "42" is no word of
+	// "cart_42" where '_' continues a word, and is one where it does not.
+	if !heldIn([]string{s}, "42", 2, 0) || heldIn([]string{s}, "42", 2) {
+		t.Errorf("42 in %s: held asked in readings 2 and 0 %v, in reading 2 alone %v; want held only where a reading ends a word at '_'", s, heldIn([]string{s}, "42", 2, 0), heldIn([]string{s}, "42", 2))
+	}
+	if !heldIn([]string{s}, "cart_42", 0, 1, 2) || heldIn([]string{s}, "cart_42", 0) {
+		t.Errorf("cart_42 in %s: held in any reading %v, in reading 0 alone %v; want held only where a reading reads '_' as a word byte", s, heldIn([]string{s}, "cart_42", 0, 1, 2), heldIn([]string{s}, "cart_42", 0))
+	}
+}
+
+// A place keploy read for the call but cannot read again where the call
+// asks it for the word (past the reader's budget, its load failing) leaves
+// the word unknown: refused, never fresh by a place taken to hold nothing.
+func TestOutcomeCostAPlaceThatCannotBeReadAgainLeavesTheWordUnknown(t *testing.T) {
+	defer func(r, b, d, x int64) { readerBudget, bodyBudget, derivedBudget, textBudget = r, b, d, x }(readerBudget, bodyBudget, derivedBudget, textBudget)
+	readerBudget, bodyBudget, derivedBudget, textBudget = 1, 1, 1, 1
+	m := getAnswer("mock-held", "http://api/items/1", `{"note":"Kept a1b2c3d4"}`, eRecAt.Add(-time.Second))
+	seen := map[string]bool{}
+	for k := 1; k <= 12; k++ {
+		loads := 0
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		dc := tr.Drifts()
+		raw := dc.LazyRawOf(m, true, func() (*models.Mock, error) {
+			if loads++; loads > k {
+				return nil, fmt.Errorf("load %d of the recording failed", loads)
+			}
+			return m, nil
+		}).ServedAs(1).ServedAsRecorded()
+		got := oDescribe(Decide(costCall(dc, "body.ids", "ids a1b2c3d4", "ids f0e9d8c7", eRecAt, nil, []Raw{raw}, nil, nil)))
+		tr.End()
+		seen[got] = true
+		if strings.Contains(got, " fresh]") {
+			t.Errorf("the recording's load %d failed: %s; want the word refused, as unread or past the budget", k+1, got)
+		}
+	}
+	t.Logf("decisions: %v", seen)
 }
