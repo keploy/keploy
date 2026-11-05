@@ -64,10 +64,13 @@ type answeredEntry struct {
 	at   time.Time
 	// background is the scope of the set's background mock is of
 	// (models.RepeatNote.Background), empty for a test's own recording.
-	background string
-	keys       []string
-	refs       int // the key lists it is in: 0 once dropped
-	size       int // answeredSize
+	// skippedRead says mock is a skipped test's read that answered
+	// (noteSkippedReadSpent; models.RepeatNote.SkippedRead): no background.
+	background  string
+	skippedRead bool
+	keys        []string
+	refs        int // the key lists it is in: 0 once dropped
+	size        int // answeredSize
 }
 
 const (
@@ -88,12 +91,13 @@ const (
 // A recording that holds a pattern is kept apart too, whatever its keys and
 // size, under redactingMaxBytes alone (keepRedacting).
 func (l *answeredLog) note(mk *models.Mock, at time.Time) {
-	l.noteFrom(mk, at, "")
+	l.noteFrom(mk, at, "", false)
 }
 
 // noteFrom is note of a recording of the set's background of scope
-// background (models.RepeatNote.Background); "" is a test's own.
-func (l *answeredLog) noteFrom(mk *models.Mock, at time.Time, background string) {
+// background (models.RepeatNote.Background); "" is a test's own, or, with
+// skippedRead, a skipped test's read (models.RepeatNote.SkippedRead).
+func (l *answeredLog) noteFrom(mk *models.Mock, at time.Time, background string, skippedRead bool) {
 	if mk == nil || mk.Name == "" {
 		return
 	}
@@ -123,7 +127,7 @@ func (l *answeredLog) noteFrom(mk *models.Mock, at time.Time, background string)
 	if l.byKey == nil {
 		l.byKey = map[string][]*answeredEntry{}
 	}
-	e := &answeredEntry{mock: probe, at: at, background: background, keys: keys, size: size}
+	e := &answeredEntry{mock: probe, at: at, background: background, skippedRead: skippedRead, keys: keys, size: size}
 	l.queue = append(l.queue, e)
 	l.live++
 	l.bytes += size
@@ -571,12 +575,24 @@ var _ integrations.AnsweredRedactingReader = (*MockManager)(nil)
 // calls it answers no more: a later identical call it does not answer then
 // names it, and its scope (FindAnsweredEarlier).
 func (m *MockManager) noteBackgroundSpent(mk *models.Mock, background string) {
-	m.answered.noteFrom(mk, time.Now(), background)
+	m.answered.noteFrom(mk, time.Now(), background, false)
+}
+
+// noteSkippedReadSpent records that mk, the read of a test the replay's gate
+// skips that keploy mock replay moved to the worker scope (isSkippedRead),
+// answered a call now: a later identical call it does not answer names it
+// as that skipped test's read, with no scope of the background
+// (FindAnsweredEarlier). The read answers at most as many calls as its test
+// recorded it, so that call is one past what the set recorded: the miss of
+// the test it was made in, never a background call charged to no test.
+func (m *MockManager) noteSkippedReadSpent(mk *models.Mock) {
+	m.answered.noteFrom(mk, time.Now(), "", true)
 }
 
 // FindAnsweredEarlier implements integrations.AnsweredFinder: of the per-test
-// recordings of kind that answered a call earlier in this test set, and of
-// the background's a call spent (AnsweredCall.Background), under any of
+// recordings of kind that answered a call earlier in this test set, of the
+// background's a call spent (AnsweredCall.Background), and of the skipped
+// tests' reads a call spent (AnsweredCall.SkippedRead), under any of
 // keys, the one answered last that match accepts, and is not the open test's
 // own (recorded inside its window, or in its exact view). ok is false when
 // there is none.
@@ -604,7 +620,7 @@ func (m *MockManager) FindAnsweredEarlier(kind models.Kind, keys []string, match
 	if best.mock == nil {
 		return integrations.AnsweredCall{}, false
 	}
-	return integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at, Background: best.background}, true
+	return integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at, Background: best.background, SkippedRead: best.skippedRead}, true
 }
 
 var _ integrations.AnsweredFinder = (*MockManager)(nil)

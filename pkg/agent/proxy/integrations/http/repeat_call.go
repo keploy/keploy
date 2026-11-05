@@ -117,6 +117,6 @@ func markRepeat(report *models.MockMismatchReport, a integrations.AnsweredCall) 
 		report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	}
 	report.Repeat = models.NewRepeatNote(m.Name, a.AnsweredAt, m.Spec.ReqTimestampMock, report.At)
-	report.Repeat.Background = a.Background
+	report.Repeat.Background, report.Repeat.SkippedRead = a.Background, a.SkippedRead
 	report.NextSteps = report.Repeat.ExplainMiss(report.NotOwned, report.ClosestMock, "", mismatch.RecordCommand())
 }

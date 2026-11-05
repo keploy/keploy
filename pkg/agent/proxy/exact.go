@@ -3499,7 +3499,8 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 		// test's window (one read between tests spends nothing, above); a
 		// pool view's list, a call in flight as its test ended, is read by
 		// no one.
-		if verdict == exactServed && v.isSkippedRead(mk.Name) {
+		skipped := verdict == exactServed && v.isSkippedRead(mk.Name)
+		if skipped {
 			v.skippedSpent = append(v.skippedSpent, mk)
 		}
 		v.mu.Unlock()
@@ -3509,13 +3510,21 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 		m.takeLocked(integrations.Take{Mock: m.stagedRecording(mk), How: integrations.TakeSpent, Gen: v.round, Test: v.test})
 		// The spend is the background's: one of the worker scope's for the
 		// windows, else one of the pool's for the staging. A later identical
-		// call it no longer answers names it (noteBackgroundSpent).
+		// call it no longer answers names it (noteBackgroundSpent). A
+		// skipped test's read is no background's: it is spent as that
+		// test's recording, and a later identical call, one past what the
+		// test recorded, stays the miss of the test that made it
+		// (noteSkippedReadSpent).
 		background := models.RepeatBackgroundPool
 		if worker {
 			background = models.RepeatBackgroundWorker
 		}
 		return verdict, nil, func() {
 			m.noteExactSpent(mk)
+			if skipped {
+				m.noteSkippedReadSpent(mk)
+				return
+			}
 			m.noteBackgroundSpent(mk, background)
 		}
 	}

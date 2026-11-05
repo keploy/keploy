@@ -2919,3 +2919,19 @@ func TestAnExtraCallLineCountsTheSkippedReadsThatAnsweredIt(t *testing.T) {
 	r = evidenceReason("o::TestA", &models.ScopeEvidence{Misses: []models.UnmatchedCall{x, x}}, nil, time.Time{}, skippedOf)
 	require.Contains(t, r, "GET /x to h:80 was called 3 times, recorded 1.", "no skipped read answered it: the line reads as before")
 }
+
+// A miss's line names the skipped test's read it is one call past only for
+// a note that says the call repeats one (models.RepeatNote.SkippedRead), by
+// the test the replay names for it, or as a skipped test's when it names
+// none; a repeat of another test's own recording, and a miss with no note,
+// say only what differs.
+func TestAMissNamesASkippedTestsReadOnlyWhenItRepeatsOne(t *testing.T) {
+	skippedOf := map[string]string{"mock-1": "o::TestCRUD"}
+	differs := models.UnmatchedCall{Differs: []string{"body.cas"}}
+	require.Equal(t, " (body.cas differs)", missWhyText(differs, skippedOf))
+	plain := models.UnmatchedCall{Repeat: &models.RepeatNote{Mock: "mock-1"}}
+	require.Empty(t, missWhyText(plain, skippedOf), "a repeat that is no skipped test's read is named one")
+	skipped := models.UnmatchedCall{Repeat: &models.RepeatNote{Mock: "mock-1", SkippedRead: true}}
+	require.Equal(t, ": it is one call past o::TestCRUD's read mock-1 (that test is skipped), which answers as many calls as that test recorded and already answered one at this replay", missWhyText(skipped, skippedOf))
+	require.Equal(t, ": it is one call past a skipped test's read mock-1, which answers as many calls as that test recorded and already answered one at this replay", missWhyText(skipped, nil))
+}

@@ -86,6 +86,14 @@ type RepeatNote struct {
 	// call, made after it answered, found no answer. Empty for a test's own
 	// recording.
 	Background string `json:"background,omitempty" yaml:"background,omitempty"`
+	// SkippedRead says Mock is the read of a test this replay's gate skips,
+	// which keploy mock replay moved to the worker scope for the replay
+	// (ScopeTableReq.SkippedReads): it answers at most as many calls as that
+	// test recorded it, so this call, one past that, found no answer. Such a
+	// read is no recording of the background (Background is empty): the call
+	// stays the miss of the test it was made in, which the skipped test's
+	// read would otherwise answer more often than it was recorded.
+	SkippedRead bool `json:"skipped_read,omitempty" yaml:"skipped_read,omitempty"`
 }
 
 // The scopes of the set's background a note's recording can be of
@@ -199,6 +207,12 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 	b.WriteString("This request is identical to ")
 	b.WriteString(n.Mock)
 	switch {
+	case n.SkippedRead:
+		b.WriteString(", the read of a test this replay skips, which the replay moved to the test set's worker scope: it answers at most as many calls as that test recorded it, and already answered a call at this replay")
+		if n.Test != "" {
+			fmt.Fprintf(&b, " (consumed by test %s)", n.Test)
+		}
+		b.WriteString(". ")
 	case n.Background != "":
 		fmt.Fprintf(&b, ", %s, which already answered a call at this replay", backgroundPhrase(n.Background))
 		if n.Test != "" {
@@ -229,9 +243,12 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 	default:
 		b.WriteString("If the application keeps that answer for a span of elapsed time (a cache with expire-after-write, a token, a refresh window), a replay slower than the recording passes it and the application asks again; keploy's time freeze does not slow that clock. ")
 	}
-	if n.Background != "" {
+	switch {
+	case n.SkippedRead:
+		b.WriteString("keploy does not answer a call past what the skipped test recorded, which could hide a bug: the call is this test's. ")
+	case n.Background != "":
 		b.WriteString("keploy does not answer a second call with that recording, which could hide a bug; a call the application makes on its own schedule (a timer, a janitor's sweep) is made as often as the replay's timing allows. ")
-	} else {
+	default:
 		b.WriteString("keploy does not answer it with the earlier test's recording, which could hide a bug. ")
 	}
 	fmt.Fprintf(&b, "To make the test independent of timing, record it with that cache disabled or its span longer than the replay ('%s'), or make the call in every test that needs it.", recordCmd)

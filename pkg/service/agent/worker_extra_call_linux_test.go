@@ -92,6 +92,66 @@ func TestKeployMockSkippedTestsReadAnswersATestsCallOnceMore(t *testing.T) {
 	}
 }
 
+// The founder's bound in every shape: a skipped test's read answers at most
+// as many calls as that test recorded it, never more. TestCRUD is skipped,
+// and keploy mock replay moved its read of /x (mock-1) to the worker scope.
+// A call past it fails the test that makes it, whether or not that test
+// recorded /x itself, and its line names the read it is past; no miss is
+// charged to no test as a background call. Before, the call was told a
+// repeat of the worker scope's recording: TestA and TestB passed with a
+// refused call, and the run listed it as the set's background call.
+func TestKeployMockACallPastASkippedTestsReadFailsTheTestThatMakesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tests [][]string // the /x calls of TestA, then TestB
+		own   bool       // TestA recorded /x itself (mock-2)
+		fails string     // the test the call past the bound fails
+	}{
+		{"the same test makes the read twice, with no own recording", [][]string{{"/x", "/x"}}, false, "TestA"},
+		{"the next test makes the read again, with no own recording", [][]string{{"/x"}, {"/x"}}, false, "TestB"},
+		{"own, then the skipped test's read, then the next test", [][]string{{"/x", "/x"}, {"/x"}}, true, "TestB"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := wireAgent(t, models.MODE_TEST)
+			p := newServingProxy()
+			a.Proxy = p
+			ctx := context.Background()
+			mocks := []*models.Mock{pingMock("mock-1", "/x", "skipped", t0)}
+			table := map[string][]string{"o::TestA": {}, "o::TestB": {}}
+			if tc.own {
+				mocks = append(mocks, pingMock("mock-2", "/x", "own", t0.Add(time.Second)))
+				table["o::TestA"] = []string{"mock-2"}
+			}
+			require.NoError(t, a.StoreMocks(ctx, nil, mocks))
+			require.NoError(t, a.SetScopeTable(ctx, table))
+			require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-1"}}))
+			require.NoError(t, a.SetScopeSkippedReads(ctx, map[string]string{"mock-1": "o::TestCRUD"}))
+			require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-1"}}))
+			claimSelf(t, a)
+			for i, calls := range tc.tests {
+				name := []string{"TestA", "TestB"}[i]
+				got, e := runTest(t, a, p, name, calls...)
+				t.Logf("%s got %v action=%q reason=%q", name, got, e.Action, e.Reason)
+				if name != tc.fails {
+					require.NotEqual(t, models.ScopeActionFail, e.Action, "%s made no call past the bound: %s", name, e.Reason)
+					continue
+				}
+				require.True(t, strings.HasPrefix(got[len(got)-1], "502"), "a /x past the skipped test's one recording was answered: %v", got)
+				require.Equal(t, models.ScopeActionFail, e.Action, "the call past the bound must fail %s, the test that made it", name)
+				require.Contains(t, e.Reason, "GET /x to 127.0.0.1:18093 had no recorded answer: it is one call past o::TestCRUD's read mock-1 (that test is skipped)")
+			}
+			for _, m := range a.takeChargedMisses() {
+				bg := ""
+				if m.Repeat != nil {
+					bg = m.Repeat.Background
+				}
+				require.Empty(t, bg, "the call past the bound was told a background call: %+v", m)
+				require.Equal(t, "o::"+tc.fails, m.ChargedTo, "the call past the bound was charged to %q: %+v", m.ChargedTo, m)
+			}
+		})
+	}
+}
+
 // A worker: list names only what its own key's pool slice holds: a name the
 // table lists under key o that only key p's slice holds (another test
 // process's recording, moved into o's worker: by an edit) answers none of

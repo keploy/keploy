@@ -2251,7 +2251,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		if before(m) {
 			// Where it was made is not known: a miss is filed by the view
 			// served when it is filed, which may be after its own test.
-			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missDiffersText(m))
+			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missWhyText(m, skippedOf))
 			continue
 		}
 		switch m.Kind {
@@ -2263,12 +2263,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 			}
 		case models.MissOutsideTest:
 			if !beganAt.IsZero() && !m.At.IsZero() {
-				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missDiffersText(m))
+				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missWhyText(m, skippedOf))
 				continue
 			}
-			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missDiffersText(m))
+			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missWhyText(m, skippedOf))
 		default:
-			what = append(what, missText(m)+" had no recorded answer"+missDiffersText(m))
+			what = append(what, missText(m)+" had no recorded answer"+missWhyText(m, skippedOf))
 		}
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
@@ -2419,6 +2419,25 @@ func missText(m models.UnmatchedCall) string {
 		}
 	}
 	return s
+}
+
+// missWhyText is what a reason says after a miss's call: the fields it
+// differs in (missDiffersText), and, for a call one past a skipped test's
+// read that already answered one (models.RepeatNote.SkippedRead), that
+// read, by the skipped test skippedOf names for it (SetScopeSkippedReads).
+// keploy mock replay moves such a read to the worker scope for the replay,
+// where it answers as many calls as its test recorded it: the call past
+// that is the test's own miss, and the line says which read it is past.
+func missWhyText(m models.UnmatchedCall, skippedOf map[string]string) string {
+	t := missDiffersText(m)
+	if m.Repeat == nil || !m.Repeat.SkippedRead {
+		return t
+	}
+	read := "a skipped test's read " + m.Repeat.Mock
+	if test := skippedOf[m.Repeat.Mock]; test != "" {
+		read = test + "'s read " + m.Repeat.Mock + " (that test is skipped)"
+	}
+	return t + ": it is one call past " + read + ", which answers as many calls as that test recorded and already answered one at this replay"
 }
 
 // missDiffersText is what a reason says of the fields m differs in

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,5 +189,92 @@ func TestASkippedReadsAccountHoldsOnlyWhatTheOpenWindowSpent(t *testing.T) {
 	}
 	if got := exactNames(mm.SkippedReadsAnswered()); len(got) != 0 {
 		t.Fatalf("with no test open, skipped reads %v answered; want none", got)
+	}
+}
+
+// A skipped test's read answers at most as many calls as that test recorded
+// it (founder, the bound): a call one past it is the miss of the test that
+// makes it, in every shape, and names the read it is past as the skipped
+// test's (models.RepeatNote.SkippedRead), never as a recording of the
+// background. Before, its spend was noted as the worker scope's, so the
+// call past the bound was told a background repeat: charged to no test and
+// printed as the set's background call, while a test that held its own
+// recording of the read failed on the same call as an extra one.
+func TestACallPastASkippedTestsReadIsTheCallingTestsMissInEveryShape(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct {
+		name  string
+		own   bool
+		tests [][]string // the /x calls of test-a, then test-b
+		want  []string   // each call's answer; "" for the miss
+	}{
+		{"the test that makes the read makes it twice, with no own recording", false, [][]string{{"/x", "/x"}}, []string{"skipped", ""}},
+		{"the next test makes it, with no own recording", false, [][]string{{"/x"}, {"/x"}}, []string{"skipped", ""}},
+		{"the first test's own, then the read, then the next test", true, [][]string{{"/x", "/x"}, {"/x"}}, []string{"own", "skipped", ""}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			skipped := workerProbe("mock-skipped-x", time.Second, "/x", "skipped")
+			staged := []*models.Mock{skipped}
+			var own *models.Mock
+			if c.own {
+				own = workerProbe("mock-own-x", 4*time.Second, "/x", "own")
+				staged = append(staged, own)
+			}
+			mm := stagedManager(t, nil, staged)
+			mm.SeedRecordedWindows([]models.TestWindow{
+				{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)},
+				{TestCase: "test-b", Start: exactT0.Add(6 * time.Second), End: exactT0.Add(7 * time.Second)},
+			})
+			p := &Proxy{}
+			p.setMockManager(mm)
+			var ws agent.ExactWorkerSkippedServer = p
+			if err := ws.ServeExactWorkerSkipped([]string{skipped.Name}, []string{skipped.Name}); err != nil {
+				t.Fatal(err)
+			}
+			var miss *models.MockMismatchReport
+			i := 0
+			for n, calls := range c.tests {
+				mm.ServeExactPool(models.PoolKeyNone, nil)
+				var mine []*models.Mock
+				if n == 0 && own != nil {
+					mine = []*models.Mock{roundMock(mm, own.Name)}
+				}
+				mm.ServeExactTest([]string{"test-a", "test-b"}[n], mine)
+				if !mm.ExactServing() || integrations.S12Background(mm) {
+					t.Fatal("precondition: the test is not served exactly, by today's rules")
+				}
+				for _, path := range calls {
+					got, m := httpMissCall(t, mm, path)
+					if got != c.want[i] {
+						t.Fatalf("call %d (GET %s) was answered %q (miss %+v); want %q", i+1, path, got, m, c.want[i])
+					}
+					if got == "" {
+						miss = m
+					}
+					i++
+				}
+			}
+			if miss == nil {
+				t.Fatal("no call missed")
+			}
+			if miss.MissKind == models.MissExtraCall {
+				t.Fatalf("the call past the bound missed as %q; the test that made it recorded no such call", miss.MissKind)
+			}
+			if miss.Repeat == nil || miss.Repeat.Mock != skipped.Name || miss.ClosestMock != skipped.Name {
+				t.Fatalf("the call past the bound missed with closest %q and note %+v; want both naming the skipped test's read %s", miss.ClosestMock, miss.Repeat, skipped.Name)
+			}
+			if miss.Repeat.Background != "" {
+				t.Fatalf("the note calls the skipped test's read a recording of the background %q: the call would be charged to no test", miss.Repeat.Background)
+			}
+			if !miss.Repeat.SkippedRead {
+				t.Fatalf("the note does not say %s is a skipped test's read: %+v", skipped.Name, miss.Repeat)
+			}
+			if !strings.Contains(miss.NextSteps, "the read of a test this replay skips") || strings.Contains(miss.NextSteps, "worker scope (mappings.yaml worker:), which answers at most one call") {
+				t.Fatalf("the miss's next step does not name the skipped test's read, or calls it the worker scope's: %s", miss.NextSteps)
+			}
+			if !strings.Contains(miss.NextSteps, "keploy does not answer a call past what the skipped test recorded") || strings.Contains(miss.NextSteps, "on its own schedule") {
+				t.Fatalf("the miss's next step does not say the call is past the skipped test's read, or calls it the application's background work: %s", miss.NextSteps)
+			}
+		})
 	}
 }

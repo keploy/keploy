@@ -646,10 +646,14 @@ func AnsweredRedacting(db MockMemDb, kind models.Kind) ([]*models.Mock, bool) {
 // AnsweredCall is what AnsweredFinder found: the recording, and when it
 // answered at this replay. Background is the scope of the set's background
 // the recording is of (models.RepeatNote.Background), empty for a test's own.
+// SkippedRead says it is the read of a test the replay's gate skips, moved
+// to the worker scope for the replay (models.RepeatNote.SkippedRead): no
+// recording of the background, so Background is empty.
 type AnsweredCall struct {
-	Mock       *models.Mock
-	AnsweredAt time.Time
-	Background string
+	Mock        *models.Mock
+	AnsweredAt  time.Time
+	Background  string
+	SkippedRead bool
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the
