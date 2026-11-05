@@ -4477,6 +4477,12 @@ func (a *AgentClient) GetErrorChannel() <-chan error {
 // GetMockErrors fetches mock-not-found errors from the agent via HTTP.
 func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
 	url := fmt.Sprintf("%s/mockerrors", a.conf.Agent.AgentURI)
+	if models.SetEndRead(ctx) {
+		// A set's end read: the agent has its parsers file what they hold
+		// for a test of the set first. An agent that predates the parameter
+		// ignores it, and reads as it reads a test's end.
+		url += "?" + models.SetEndReadQuery + "=1"
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %s", err.Error())

@@ -48,8 +48,10 @@ type TestReport struct {
 	// UnclaimedCalls are the calls the set's application made outside every
 	// test that no mock answered (proven switch): after its last test, a pool
 	// miss no later test takes, and before its first, as it started
-	// (UnmatchedCall.BeforeSet). They fail the set; JUnit fails a case of its
-	// own with them.
+	// (UnmatchedCall.BeforeSet); and those a parser held for a later test's
+	// recording that no test answered, wherever they were made
+	// (UnmatchedCall.Held). They fail the set; JUnit fails a case of its own
+	// with them, and another with the held ones.
 	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
 	// AppNotStopped, under the proven switch, says why keploy read the set's
 	// end with its application still running (a stack kept across test-sets,
@@ -561,6 +563,13 @@ type UnmatchedCall struct {
 	// no test's: the replay fails the set with it, naming the call, and
 	// charges no test (the read of the set's first test carries it).
 	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
+	// Held mirrors MockMismatchReport.HeldPastWindow: a parser held the call
+	// past its own window for a later test's recording, and none answered it
+	// by the set's end or its connection's end, where its miss was filed. It
+	// may have been made in a test or between two. It is the set's, no
+	// test's: whichever read takes it, the replay fails the set with it,
+	// naming it as held, and charges no test.
+	Held bool `json:"held,omitempty" yaml:"held,omitempty"`
 	// ChargedTo names, under the proven switch, the test whose end charged
 	// the call to it: the call counts against that test (CountsAgainstTest)
 	// and that test's evidence lists it. Empty for a call no test was

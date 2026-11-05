@@ -96,7 +96,11 @@ func (a *Agent) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) GetMockErrors(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	mockErrors, err := a.svc.GetMockErrors(r.Context())
+	ctx := r.Context()
+	if r.URL.Query().Get(models.SetEndReadQuery) == "1" {
+		ctx = models.WithSetEndRead(ctx)
+	}
+	mockErrors, err := a.svc.GetMockErrors(ctx)
 	if err != nil && !errors.Is(err, models.ErrUnmatchedCallsUnread) {
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return

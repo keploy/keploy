@@ -307,6 +307,19 @@ type OutgoingOptions struct {
 	// older CLI that never sets it never receives one — the version-skew
 	// guard for the deferred-orphan revoke protocol. Record path only.
 	SupportsDroppedRevoke bool
+	// ReadsSetEnds is a capability flag set by the CLI on the replay
+	// session's /mock request: when true, the CLI reads each of its test
+	// sets' end with a set's end read (WithSetEndRead), as keploy test does
+	// under the proven switch. The run's mock manager takes a parser's
+	// set's end registration (integrations.SetEndFiler), which the parser
+	// makes at each call it would hold for a later test, ONLY in a session
+	// that sets it, so under a client that never makes the read (keploy
+	// mock, a keploy test without the switch or from before the read) a
+	// parser holds no call for a later test: it misses it at once instead.
+	// The agent passes it on only to a Proxy that files those calls at the
+	// read (agent.SetEndFilingProxy), and false to any other. Replay path
+	// only.
+	ReadsSetEnds bool
 	// UpstreamTLSVerify mirrors config.Record.UpstreamTLS.Verify: when true,
 	// keploy's own dial to the REAL destination validates the server's
 	// certificate chain and hostname instead of skipping verification.
