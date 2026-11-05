@@ -904,11 +904,12 @@ func (k wordsKey) equal(o wordsKey) bool {
 		(k.live == nil) == (o.live == nil) && (k.live == nil || sameBody(*k.live, *o.live)) && slices.EqualFunc(k.views, o.views, sameBody)
 }
 
-// sameBody reports whether a and b are one payload: text, fields, stamps
-// and clock reads alike.
+// sameBody reports whether a and b, the payloads of two views (Raw.viewOf),
+// are one: text, fields, stamps and clock reads alike. A view is one keploy
+// read, so neither tells read from unread.
 func sameBody(a, b rawBody) bool {
-	return a.text == b.text && a.read == b.read && a.unread == b.unread && slices.Equal(a.fields, b.fields) &&
-		slices.Equal(a.stamps, b.stamps) && slices.EqualFunc(a.answerClock, b.answerClock, time.Time.Equal)
+	return a.text == b.text && slices.Equal(a.fields, b.fields) && slices.Equal(a.stamps, b.stamps) &&
+		slices.EqualFunc(a.answerClock, b.answerClock, time.Time.Equal)
 }
 
 // of is e's words as wordsOf reads them of x, the recording e keeps them

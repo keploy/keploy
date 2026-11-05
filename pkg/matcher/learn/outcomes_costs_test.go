@@ -1115,6 +1115,28 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 	view := func(body string) Raw { return RawOf(getAnswer("mock-x", "http://api/items/1", body, at), true) }
 	v1, v2, v3 := view(`{"ref":"f0e9d8c7"}`), view(`{"ref":"e9d8c7b6","note":"Kept"}`), view(`{"ref":"e9d8c7b6"}`)
 	gone := getAnswer("mock-gone", "http://api/items/2", `{"ref":"b2c3d4e5"}`, at)
+	// One view three more ways, each alike in all but one part of its
+	// payload wordsOf reads: a clock read of the instant its body holds, a
+	// stamp over that instant, its body's field dropped.
+	const instant = "2026-10-24T09:55:50Z"
+	vt := view(`{"ref":"e9d8c7b6","at":"` + instant + `"}`)
+	// Its payload read now (a lazy Raw reads it from its loader), so each
+	// copy changes one part of it.
+	b := vt.payload()
+	vt.src, vt.rText, vt.rClock, vt.rFields, vt.rStamps, vt.rRead = nil, b.text, b.answerClock, b.fields, b.stamps, b.read
+	vClock, vStamp, vField := vt, vt, vt
+	in, err := time.Parse(time.RFC3339, instant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vClock.rClock = []time.Time{in}
+	start := strings.Index(vt.rText, instant)
+	vStamp.rStamps = []rawField{{start: start, end: start + len(instant), path: "Res.body"}}
+	body := slices.IndexFunc(vt.rFields, func(f rawField) bool { return f.path == "Res.body" && !f.key })
+	if start < 0 || body < 0 || len(vt.rClock)+len(vt.rStamps) > 0 {
+		t.Fatalf("fixture: the view's body (%d), its instant (%d), and no clock read or stamp (%v, %v)", body, start, vt.rClock, vt.rStamps)
+	}
+	vField.rFields = slices.Delete(slices.Clone(vt.rFields), body, body+1)
 	type shape struct {
 		name     string
 		of       func(Raw, int) Raw
@@ -1125,6 +1147,10 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 		{name: "with F's view", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v1) }},
 		{name: "with another view", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v2) }},
 		{name: "with other words at the view's fields", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v3) }},
+		{name: "with a view holding an instant", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(vt) }},
+		{name: "with that view's clock read of its instant", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(vClock) }},
+		{name: "with that view's instant a stamp", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(vStamp) }},
+		{name: "with that view's body field dropped", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(vField) }},
 		{name: "with two views", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedChanged(v1, v2) }},
 		{name: "with the two views the other way", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedChanged(v2, v1) }},
 		{name: "served changed, no view read", of: func(x Raw, n int) Raw { return x.ServedIn(n, n+2).ServedChanged() }},
@@ -1138,6 +1164,7 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 		dc := tr.Drifts()
 		d := &decider{dr: dc}
 		b := wordsRead(dc)
+		read := map[string][]any{}
 		// The call's own earlier place, and a recording of another test keploy
 		// cannot read: offsetPlacesOf reads neither's words.
 		raw := []Raw{dc.LazyRawOf(m, true, nil).ServedAs(1).ServedAsRecorded(),
@@ -1145,10 +1172,17 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 		for i, s := range shapes {
 			x := s.of(dc.LazyRawOf(m, !s.unserved, nil), 1+i+10*c).OfAnotherTest()
 			x.test, x.prev, x.late = 2+c, c == 1, c == 1
-			if got, want := d.outsideWords(x), dc.wordsOf(x); !reflect.DeepEqual(got, want) {
+			got, want := d.outsideWords(x), dc.wordsOf(x)
+			if !reflect.DeepEqual(got, want) {
 				t.Errorf("test %d, %s: the set's words are %+v; want wordsOf's %+v", c+1, s.name, got, want)
 			}
+			read[s.name] = []any{want.same, want.gave, want.view}
 			raw = append(raw, x)
+		}
+		for _, n := range []string{"with that view's clock read of its instant", "with that view's instant a stamp", "with that view's body field dropped"} {
+			if reflect.DeepEqual(read[n], read["with a view holding an instant"]) {
+				t.Fatalf("fixture: %s reads the words the view does without it: %+v", n, read[n])
+			}
 		}
 		if got, want := wordsRead(dc)-b, []int{len(shapes), 0}[c]; got != want {
 			t.Errorf("test %d read the recording's words %d times; want %d (one entry each way it was handed)", c+1, got, want)
