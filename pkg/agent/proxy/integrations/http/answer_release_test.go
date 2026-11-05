@@ -167,6 +167,12 @@ func sseMock(t *testing.T, at2, at3 time.Time, encoding string) *models.Mock {
 // serveHeld runs decodeHTTP on the call over db and returns the app's end.
 func serveHeld(t *testing.T, db integrations.MockMemDb, holder integrations.RequestHolder) (net.Conn, <-chan error) {
 	t.Helper()
+	return serveHeldCall(t, db, holder, releaseCall)
+}
+
+// serveHeldCall is serveHeld for the application's request call.
+func serveHeldCall(t *testing.T, db integrations.MockMemDb, holder integrations.RequestHolder, call string) (net.Conn, <-chan error) {
+	t.Helper()
 	app, proxy := tcpPair(t)
 	h := &HTTP{Logger: zap.NewNop()}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -175,7 +181,7 @@ func serveHeld(t *testing.T, db integrations.MockMemDb, holder integrations.Requ
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		returned <- h.decodeHTTP(ctx, []byte(releaseCall), proxy, nil, db, models.OutgoingOptions{})
+		returned <- h.decodeHTTP(ctx, []byte(call), proxy, nil, db, models.OutgoingOptions{})
 	}()
 	t.Cleanup(func() { cancel(); _ = app.Close(); <-finished })
 	return app, returned
@@ -391,10 +397,10 @@ func TestHeldAnswer_ARepeatIsNotHeld(t *testing.T) {
 	registerStandIn(t)
 	h := &HTTP{Logger: zap.NewNop()}
 	db := newPlacedDb()
-	if a, err := h.heldAnswerOf(singleAnswer(t, releaseAt(45)), db, true); err != nil || a != nil {
+	if a, err := h.heldAnswerOf(singleAnswer(t, releaseAt(45)), releaseRequest(t, releaseCall), db, true); err != nil || a != nil {
 		t.Fatalf("repeat: held %v, %v", a, err)
 	}
-	if a, err := h.heldAnswerOf(singleAnswer(t, releaseAt(45)), db, false); err != nil || a == nil {
+	if a, err := h.heldAnswerOf(singleAnswer(t, releaseAt(45)), releaseRequest(t, releaseCall), db, false); err != nil || a == nil {
 		t.Fatalf("first serve: held %v, %v; want held", a, err)
 	}
 }
@@ -441,4 +447,65 @@ func TestHeldAnswer_MarksThatDoNotFitAreNone(t *testing.T) {
 			t.Errorf("marksFit(%v, %d) = %v, want %v", tc.writes, tc.n, got, tc.fit)
 		}
 	}
+}
+
+// releaseRequest is call as decodeHTTP reads the application's request.
+func releaseRequest(t *testing.T, call string) *http.Request {
+	t.Helper()
+	r, err := http.ReadRequest(bufio.NewReader(strings.NewReader(call)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// The application's call, not the recorded one, decides whether a held
+// stream goes out chunked: its client reads the answer. An HTTP/1.0 call
+// takes it whole, with its length, at its last frame's place; an HTTP/1.1
+// call takes it frame by frame, chunked, though the recorded call was
+// HTTP/1.0.
+func TestHeldAnswer_TheCallsProtocolDecidesChunking(t *testing.T) {
+	registerStandIn(t)
+	t.Run("an HTTP/1.0 call", func(t *testing.T) {
+		db := newPlacedDb(sseMock(t, releaseAt(25), releaseAt(45), ""))
+		app, _ := serveHeldCall(t, db, nil, "GET /job HTTP/1.0\r\nHost: api.example\r\n\r\n")
+		if got := readFor(app, quiet); got != "" {
+			t.Fatalf("written while test-1 runs: %q", got)
+		}
+		db.reach(models.RunOpen(1))
+		if got := readFor(app, quiet); got != "" {
+			t.Fatalf("written at test-2's open, before its last frame's place: %q", got)
+		}
+		db.reach(models.RunOpen(2))
+		_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+		resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil || len(resp.TransferEncoding) != 0 || resp.ContentLength != 24 || string(body) != "data:a\n\ndata:b\n\ndata:c\n\n" {
+			t.Fatalf("answer: transfer %v, length %d, body %q, %v; want the whole body with its length", resp.TransferEncoding, resp.ContentLength, body, err)
+		}
+	})
+	t.Run("an HTTP/1.1 call recorded as HTTP/1.0", func(t *testing.T) {
+		m := sseMock(t, releaseAt(25), releaseAt(45), "")
+		m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, 0
+		db := newPlacedDb(m)
+		app, _ := serveHeld(t, db, nil)
+		r := bufio.NewReader(app)
+		_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+		resp, err := http.ReadResponse(r, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.TransferEncoding) != 1 || resp.TransferEncoding[0] != "chunked" {
+			t.Fatalf("head: transfer %v; want chunked", resp.TransferEncoding)
+		}
+		if got := string(dechunk(t, r, 1)[0]); got != "data:a\n\n" {
+			t.Fatalf("first part %q", got)
+		}
+		if got := readFor(app, quiet); got != "" || r.Buffered() > 0 {
+			t.Fatalf("written while test-1 runs: %q", got)
+		}
+	})
 }

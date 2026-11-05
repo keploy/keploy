@@ -785,7 +785,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// An answer recorded later than the run's place now is written
 			// as the run reaches each part's recorded place (holdAnswer):
 			// the call was matched and consumed above, in its own test.
-			if held, err := h.heldAnswerOf(stub, mockDb, repeat); err != nil {
+			if held, err := h.heldAnswerOf(stub, request, mockDb, repeat); err != nil {
 				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
 				return
