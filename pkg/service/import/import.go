@@ -479,7 +479,7 @@ func constructResponse(res PostmanResponse) models.HTTPResp {
 }
 
 func replaceTemplateVars(input string, variables map[string]string) string {
-	re := regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
+	re := regexp.MustCompile(`\{\{\s*([\w-]+)\s*\}\}`)
 
 	return re.ReplaceAllStringFunc(input, func(match string) string {
 		submatches := re.FindStringSubmatch(match)
