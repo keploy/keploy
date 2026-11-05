@@ -275,3 +275,53 @@ func TestAnswerMarksReadsChunksCutAnywhere(t *testing.T) {
 	marks := answerMarks([]byte(resp), cuts, "GET", "", 10)
 	wantMarks(t, marks, markAt(1), w(2, 2), w(5, 3), w(10, 5))
 }
+
+// wholeInTwoWrites is a whole Content-Length answer the relay wrote in two
+// writes, and those writes.
+func wholeInTwoWrites() ([]byte, []respWrite) {
+	resp := []byte("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nabcd")
+	return resp, []respWrite{{end: len(resp) - 2, at: markAt(1)}, {end: len(resp), at: markAt(2)}}
+}
+
+// A whole answer the upstream ended in a fault after it is recorded with no
+// fault and keeps its marks, as any whole answer; one its client read in part
+// keeps none: the rest has no place.
+func TestRecordMarksAWholeAnswerOnlyAsTheClientReadItAll(t *testing.T) {
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	build := func(m *FinalHTTP) *models.Mock {
+		t.Helper()
+		m.Req, m.ReqTimestampMock, m.ResTimestampMock = []byte(marksReq), markAt(0), markAt(2)
+		mock, err := h.buildHTTPMock(m, 80, "marks-conn", models.OutgoingOptions{})
+		if err != nil || mock == nil {
+			t.Fatalf("buildHTTPMock = (%v, %v)", mock, err)
+		}
+		return mock
+	}
+	resp, writes := wholeInTwoWrites()
+	reset := build(&FinalHTTP{Resp: resp, RespWrites: writes,
+		Fault: &models.Fault{Kind: models.FaultReset, AfterHead: true}})
+	if reset.Spec.Fault != nil {
+		t.Fatalf("a whole answer is recorded with a fault: %+v", reset.Spec.Fault)
+	}
+	wantMarks(t, reset.Spec.HTTPResp.Marks, markAt(1), w(2, 1), w(4, 2))
+
+	resp, writes = wholeInTwoWrites()
+	if m := build(&FinalHTTP{Resp: resp, RespWrites: writes, RespReadInPart: true}).Spec.HTTPResp.Marks; m != nil {
+		t.Errorf("read in part: marks = %+v, want none", m)
+	}
+	resp, writes = wholeInTwoWrites()
+	if m := build(&FinalHTTP{Resp: resp[:len(resp)-1], RespWrites: writes[:1], RespReadInPart: true}).Spec.HTTPResp.Marks; m != nil {
+		t.Errorf("cut: marks = %+v, want none", m)
+	}
+}
+
+// The terminal chunk of an NDJSON stream, written later than its last line,
+// keeps its own mark at the body's end.
+func TestRecordKeepsTheTerminalChunksOwnMark(t *testing.T) {
+	m := recordWrites(t, marksReq, []string{
+		"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n" + chunk("{\"n\":1}\n"),
+		chunk("{\"n\":2}\n"),
+		"0\r\n\r\n",
+	}, []time.Time{markAt(1), markAt(2), markAt(5)})
+	wantMarks(t, m.Spec.HTTPResp.Marks, markAt(1), w(8, 1), w(16, 2), w(16, 5))
+}

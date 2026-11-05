@@ -166,3 +166,87 @@ func TestMarksSurviveBSONJSONAndClone(t *testing.T) {
 		t.Error("a clone shares its marks")
 	}
 }
+
+// A write that ends inside the CRLF blank line that ends an SSE frame did not
+// complete it: the frame takes the time of the write that ends the blank line.
+func TestAFrameEndsWithItsWholeCRLFBlankLine(t *testing.T) {
+	body := "data: a\r\n\r\ndata: b\r\n\r\n"
+	resp := HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "text/event-stream"},
+		Body:       body,
+		Marks: &HTTPAnswerMarks{Head: sec(0), Writes: []HTTPAnswerWrite{
+			{Offset: len("data: a\r\n\r"), TS: sec(1)},
+			{Offset: len("data: a\r\n\r\n"), TS: sec(2)},
+			{Offset: len(body), TS: sec(3)},
+		}},
+	}
+	back, out := roundTripYAML(t, resp)
+	if len(back.StreamBody) != 2 || !back.StreamBody[0].TS.Equal(sec(2)) || !back.StreamBody[1].TS.Equal(sec(3)) {
+		t.Fatalf("frames = %+v, want frame 1 at write 2 and frame 2 at write 3:\n%s", back.StreamBody, out)
+	}
+	if got := pieces(back); strings.Join(got, "|") != "data:a\n\n|data:b" {
+		t.Errorf("pieces = %q", got)
+	}
+	if !back.Marks.Writes[0].TS.Equal(sec(2)) {
+		t.Errorf("frame 1's piece at %v, want %v", back.Marks.Writes[0].TS, sec(2))
+	}
+}
+
+// The terminal write of an NDJSON stream, later than its last line, keeps its
+// own mark at the body's end: replay ends the answer at its place, not at
+// the last line's.
+func TestTheTerminalWriteKeepsItsOwnMark(t *testing.T) {
+	body := "{\"n\":1}\n{\"n\":2}\n"
+	resp := HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "application/x-ndjson"},
+		Body:       body,
+		Marks: &HTTPAnswerMarks{Head: sec(0), Writes: []HTTPAnswerWrite{
+			{Offset: 8, TS: sec(1)},
+			{Offset: len(body), TS: sec(2)},
+			{Offset: len(body), TS: sec(5)},
+		}},
+	}
+	back, out := roundTripYAML(t, resp)
+	if len(back.StreamBody) != 2 || !back.StreamBody[1].TS.Equal(sec(2)) {
+		t.Fatalf("frames = %+v:\n%s", back.StreamBody, out)
+	}
+	ws := back.Marks.Writes
+	if len(ws) != 3 || ws[1].Offset != len(back.Body) || !ws[1].TS.Equal(sec(2)) ||
+		ws[2].Offset != len(back.Body) || !ws[2].TS.Equal(sec(5)) {
+		t.Errorf("writes = %+v, want the last line at 2s and the end at 5s, both at %d", ws, len(back.Body))
+	}
+}
+
+// An NDJSON body of blank lines only has no line to place: it reads back as
+// the body it was, and its marks index that body.
+func TestBlankNDJSONKeepsMarksOnItsBody(t *testing.T) {
+	body := "\n\n\n"
+	resp := HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "application/x-ndjson"},
+		Body:       body,
+		Marks:      &HTTPAnswerMarks{Head: sec(0), Writes: []HTTPAnswerWrite{{Offset: 1, TS: sec(1)}, {Offset: 3, TS: sec(2)}}},
+	}
+	back, out := roundTripYAML(t, resp)
+	if back.Body != body || len(back.StreamBody) != 1 || back.Marks == nil {
+		t.Fatalf("read back %q, %d frames, marks %+v:\n%s", back.Body, len(back.StreamBody), back.Marks, out)
+	}
+	if ws := back.Marks.Writes; len(ws) != 1 || ws[0].Offset != len(body) || !ws[0].TS.Equal(sec(2)) {
+		t.Errorf("writes = %+v, want the whole body at 2s", ws)
+	}
+}
+
+// A response a producer gave only as frames (StreamBody, no Body) keeps the
+// marks it came with: they already index the body its frames read back as.
+func TestFramesOnlyResponseKeepsItsMarks(t *testing.T) {
+	frames := SplitStreamBody(HTTPStreamSSE, "data: a\n\ndata: b\n\n")
+	frames[0].TS, frames[1].TS = sec(1), sec(2)
+	marks := &HTTPAnswerMarks{Head: sec(0), Writes: []HTTPAnswerWrite{{Offset: 8, TS: sec(1)}, {Offset: 14, TS: sec(2)}}}
+	resp := HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "text/event-stream"}, StreamBody: frames, Marks: marks}
+	back, out := roundTripYAML(t, resp)
+	if back.Marks == nil || len(back.Marks.Writes) != 2 || back.Marks.Writes[0].Offset != 8 || !back.Marks.Writes[1].TS.Equal(sec(2)) {
+		t.Fatalf("marks = %+v, want them as given:\n%s", back.Marks, out)
+	}
+}

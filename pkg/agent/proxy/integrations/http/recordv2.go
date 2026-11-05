@@ -617,13 +617,13 @@ func (h *HTTP) readRequestV2(stream *fakeconn.FakeConn, finalReq *[]byte) error 
 // "server closed after sending a full response" case; the caller
 // decides whether to emit a mock.
 func (h *HTTP) readResponseV2(stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string) (time.Time, error) {
-	return h.readResponseWrites(stream, finalResp, reqMethod, nil)
+	var writes []respWrite
+	return h.readResponseWrites(stream, finalResp, reqMethod, &writes)
 }
 
-// readResponseWrites is readResponseV2 that also notes, in writes when it is
-// not nil, where in *finalResp each chunk it consumed ended and when the
-// relay wrote it to the client (respWrite): the answer's marks
-// (answerMarks).
+// readResponseWrites is readResponseV2 that also notes, in writes, where in
+// *finalResp each chunk it consumed ended and when the relay wrote it to the
+// client (respWrite): the answer's marks (answerMarks).
 func (h *HTTP) readResponseWrites(stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string, writes *[]respWrite) (time.Time, error) {
 	var lastWr time.Time
 
@@ -980,9 +980,12 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 	}
 	// When each part of the answer reached the client, for one the relay
-	// wrote in more than one write: replay writes each part at its place.
+	// wrote in more than one write: replay writes each part at its place. A
+	// whole answer the upstream ended in a fault after it is recorded with
+	// no fault, and is placed as any whole answer; one its client read in
+	// part has no place for the rest it did not read.
 	var marks *models.HTTPAnswerMarks
-	if m.Fault == nil && !cut && !m.RespReadInPart {
+	if fault == nil && !cut && !m.RespReadInPart {
 		marks = answerMarks(m.Resp, m.RespWrites, req.Method, respParsed.Header.Get("Content-Encoding"), len(respBody))
 	}
 
