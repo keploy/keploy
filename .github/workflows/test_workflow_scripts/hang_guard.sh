@@ -24,10 +24,11 @@
 #
 # The watchdog beside the run waits SECONDS (whole seconds) and, if the run
 # still runs, says so on stderr (the run's stderr, so its log), in a line that
-# starts with HANG_LINE (-q: says nothing, for a caller that reports it
-# itself), and sends SIG (TERM unless given) to the run's process group, as
-# timeout(1) does, root's command under sudo included (hang_signal); with
-# -k, KILL that many seconds later if it still runs.
+# starts with HANG_LINE (-q: not that line, for a caller that reports it
+# itself; hang_signal's own line still shows), and sends SIG (TERM unless
+# given) to the run's process group, as timeout(1) does, root's command
+# under sudo included (hang_signal); with -k, KILL that many seconds later
+# if it still runs.
 # That the guard ended a run is told by HANG_LINE or HANG_FIRED, not by an
 # exit code. CMD runs in a process group of its own, with the caller's stdin,
 # and with SIGINT and SIGQUIT as the caller has them (bash ignores both in a
@@ -98,14 +99,16 @@ hang_foreign() {
 # SIG goes through `sudo -n kill` too (a runner has password-free sudo); if
 # that fails while such a member is still there (not when the run ended on
 # the signal sudo relayed meanwhile), the guard says root's command may
-# still run (the rows "a run under sudo", on sudo 1.9 and sudo-rs). A command that sudo runs in a
+# still run (the rows "a run under sudo", on sudo 1.9 and sudo-rs), under -q
+# too: no caller can tell that by itself. A command that sudo runs in a
 # terminal of its own (use_pty, when sudo has one) is in another session,
 # and so not in the group: no lane runs one under the guard.
 hang_signal() {
   kill -s "$1" -- "-$2" 2>/dev/null
   hang_foreign "$2" || return 0
   sudo -n kill -s "$1" -- "-$2" 2>/dev/null || ! hang_foreign "$2" ||
-    echo "$HANG_LINE could not send SIG$1 to another user's process in the run's group (sudo -n kill failed): it may still run" >&2
+    echo "$HANG_LINE could not send SIG$1 to another user's process" \
+      "in the run's group (sudo -n kill failed): it may still run" >&2
 }
 
 hang_start() {
