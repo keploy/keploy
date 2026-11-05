@@ -13,7 +13,8 @@
 # workspace, so it loads where a workflow checks keploy out at a path; a script
 # that copies a script's functions into a file to run them there checks that
 # the copy loads sudo_env.sh, unless the script it copies from loads none. No
-# script or workflow runs keploy through `sudo -E` without SUDO_ENV.
+# command in a script or workflow under .github/ hands sudo -E or runs env
+# through sudo without naming SUDO_ENV, whatever command it runs.
 # verify_ran passes a run under the proven switch whose log holds the agent's
 # verify line, and fails one whose log lacks it or does not exist, saying so; a
 # run without the switch, or with KEPLOY_EXACT_VIEW_VERIFY other than 1, passes
@@ -137,25 +138,55 @@ printf '. ./.github/workflows/test_workflow_scripts/%s.sh\n' "$name" > "$tmp/src
 printf 'source "$GITHUB_WORKSPACE/scripts/%s.sh"\n' "$name" > "$tmp/src/ws-only.sh"
 from_workspace_is workspace-forms "$tmp/src" "a/ws.sh:2|rel.sh:1|ws-only.sh:1"
 
-# No script or workflow runs keploy through `sudo -E` (or a --preserve-env
-# with no list) without SUDO_ENV: sudo-rs ignores -E, so such a run gets none
-# of the switches its workflow sets. A script written from an older one's
+# No command under .github/ hands sudo -E or a bare --preserve-env, or runs
+# env through sudo, without naming SUDO_ENV, whatever command it runs: sudo-rs
+# ignores -E, and a sudo'd env passes only what it names, so such a run gets
+# none of the switches its workflow sets. A script written from an older one's
 # `sudo -E` line then fails this job instead of passing without them.
-# sudo_e_keploy DIR: each command in a script or workflow under DIR (its
-# continued lines joined, comments left out) whose sudo takes -E, alone or
-# among its other one-letter options, or a bare --preserve-env, and runs keploy
-# (a keploy word, or a variable whose name ends in BIN, before the command's
-# end at ; & | or a closing parenthesis), without naming SUDO_ENV, as
-# "FILE:LINE" of the command's first line. A sudo inside a quoted command
-# keploy is handed (`-c "sudo -E docker run ..."`) runs no keploy, and passes.
-# Limits: an option with an argument before -E (`sudo -u root -E`) ends the
-# options read, and a $( ) inside the sudo'd command ends it early.
-sudo_e_keploy() {
+# sudo_unnamed DIR: each command in a script or workflow under DIR (its
+# continued lines joined, comments left out) with a sudo that takes -E (alone
+# or among its one-letter options) or a bare --preserve-env, or that runs env
+# (its first word after sudo's options and their arguments), and whose
+# command (up to its end at ; & | or a closing parenthesis) does not name
+# SUDO_ENV, as "FILE:LINE" of the command's first line. Let through: a sudo
+# that opens a quoted string, which is text handed to another command (the
+# podman refusal test's `-c "sudo -E podman run ..."`, which keploy must
+# refuse), and a sudo'd env without -E that sudo_env_free names.
+# Limits: a sudo later in a quoted string is read as a command, and a `)` in
+# the sudo'd command (a `$( )`) ends it there, so a SUDO_ENV after it is not
+# seen: either is reported, never let through. A long option whose argument
+# is the next word (`sudo --user root -E`) ends the options read, and a quoted
+# string a shell runs (`bash -c 'sudo -E ...'`) is not read: no script spells
+# either.
+# sudo_env_free: each sudo'd env that needs no switch, after why, as
+# FILE (under .github/)|an awk regex its words after sudo match from the first.
+sudo_env_free=(
+  # Go test binaries the job built, not keploy: they read only the
+  # KEPLOY_TEST_ variables the line names.
+  'workflows/go-test.yaml|env (KEPLOY_TEST_[[:upper:]_]+=1 )+/tmp/[[:lower:]]+[.]test '
+  # Drops from root to the user of the case, in a here-document, where
+  # SUDO_ENV is not defined; the keploy run it starts names
+  # KEPLOY_EXACT_VIEW_VERIFY itself.
+  'workflows/test_workflow_scripts/mock/mock-hangup-linux.sh|-u "[$]AS" env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND HOME="[$]HOME" PATH="[$]PATH"$'
+  # A row of the guard, as root, with a fake sudo first on PATH: no keploy.
+  'workflows/test_workflow_scripts/hang_guard.tests.sh|-n env PATH="[$]tmp/fakesudo:/usr/sbin:/usr/bin:/sbin:/bin" FAKE_SUDO_LOG="[$]tmp/sudo-calls" bash -c +'"'"'[.] "[$]1"$'
+)
+sudo_unnamed() {
   local f
   grep -rlE --include='*.sh' --include='*.yml' --include='*.yaml' 'sudo' "$1" | sort |
     while IFS= read -r f; do
-      awk -v file="${f#"$1"/}" -v q="'" '
-        BEGIN { kw = "(^|[[:space:]\"" q "/])keploy([[:space:]\"" q "]|$)" }
+      awk -v file="${f#"$1"/}" -v q="'" -v free="$(printf '%s\n' "${sudo_env_free[@]}")" '
+        # free_env(SEG): whether sudo_env_free lets this env through.
+        function free_env(s,   i, p) {
+          sub(/^[[:space:]]+/, "", s)
+          sub(/[[:space:]]+$/, "", s)
+          for (i = 1; i <= nfree; i++) {
+            split(fr[i], p, "|")
+            if (p[1] == file && s ~ ("^" p[2])) return 1
+          }
+          return 0
+        }
+        BEGIN { nfree = split(free, fr, "\n") }
         {
           if (cmd == "") start = FNR
           l = $0
@@ -166,53 +197,86 @@ sudo_e_keploy() {
           sub(/[[:space:]]#.*/, "", code)
           rest = code
           while (match(rest, /(^|[^[:alnum:]_.-])sudo[[:space:]]/)) {
+            before = substr(rest, RSTART, 1)
             rest = substr(rest, RSTART + RLENGTH)
+            if (before == "\"" || before == q) continue
             seg = rest
             if (match(seg, /[;&|)]/)) seg = substr(seg, 1, RSTART - 1)
             n = split(seg, w, /[[:space:]]+/)
             e = 0
+            word = ""
             for (k = 1; k <= n; k++) {
               if (w[k] == "") continue
-              if (w[k] !~ /^-/) break
+              if (w[k] !~ /^-/) { word = w[k]; break }
               if (w[k] == "--preserve-env" || w[k] ~ /^-[[:alpha:]]*E[[:alpha:]]*$/) e = 1
+              if (w[k] ~ /^-[[:alpha:]]*[CDghpRrTtUu]$/) k++
             }
-            if (e && seg !~ /SUDO_ENV/ && (seg ~ kw || seg ~ /[$][{]?[[:alnum:]_]*BIN/)) {
-              print file ":" start
-              break
-            }
+            if (!e && word !~ /^(.*\/)?env$/) continue
+            if (seg ~ /SUDO_ENV/ || (!e && free_env(seg))) continue
+            print file ":" start
+            break
           }
         }' "$f"
     done
 }
-# sudo_e_is NAME DIR WANT: sudo_e_keploy DIR, its lines joined by "|", is WANT.
-sudo_e_is() {
+# sudo_unnamed_is NAME DIR WANT: sudo_unnamed DIR, its lines joined by "|", is
+# WANT.
+sudo_unnamed_is() {
   local got
   cases=$((cases + 1))
-  got=$(sudo_e_keploy "$2" | sort | paste -sd'|')
+  got=$(sudo_unnamed "$2" | sort | paste -sd'|')
   if [ "$got" != "$3" ]; then
-    echo "FAIL $1: commands that run keploy under sudo with -E and without SUDO_ENV (sudo-rs ignores -E): '$got', want '$3'"
+    echo "FAIL $1: commands whose sudo takes -E or runs env without naming SUDO_ENV (sudo-rs ignores -E): '$got', want '$3'"
     fails=$((fails + 1))
   fi
 }
-sudo_e_is scripts "$here/../.." ""
+sudo_unnamed_is scripts "$here/../.." ""
 mkdir -p "$tmp/se"
-# Each fixture's -E is a printf argument, so no line here runs keploy through
-# sudo -E.
+# Each fixture's -E, or the sudo of its sudo'd env, is a printf argument, or
+# its sudo follows a quote or a \n in printf's format, so no line here hands
+# sudo -E or runs a sudo'd env.
 # The line a script written from an older one carried, continued.
 printf 'cd x\nsudo %s env PATH="$PATH" \\\n  "$RECORD_BIN" record -c "docker compose up" > log 2>&1 &\n' -E > "$tmp/se/tmpl.sh"
-# What the podman refusal test hands keploy: no keploy under that sudo.
-printf 'refused x record -c "sudo %s podman run --name app img"\nout=$(timeout 60 "$BIN" test -c "sudo %s docker run --name app img" --disable-tele 2>&1 </dev/null)\n' -E -E > "$tmp/se/quoted.sh"
+# How the scripts on main ran keploy, each line its own spelling.
+printf 'run() { sudo %s env PATH="$PATH" "$@"; }\nsudo %s env PATH="$PATH" "$bin" record -c "java Loop"\nsudo %s env PATH="$PATH" "$1" test -c ./faults\nsudo %s env KEPLOY_E2E_CRASH=x PATH="$PATH" "$WORK/keploy-crash" record -c ./app\nsudo %s env PATH=$PATH keployR test -c ./app\nsudo %s "$KEPLOY" record -c ./app\nsudo %s ./keployv2 record -c ./app\n' -E -E -E -E -E -E -E > "$tmp/se/spellings.sh"
+# Any command, not only keploy.
+printf 'sudo %s apt-get install -y jq\nsudo %s docker compose down && keploy record -c x\nsudo %s rm -rf /root/.keploy\n' -E -E -E > "$tmp/se/any.sh"
+# What the podman refusal test hands keploy: text, run by nothing here.
+printf 'refused x record -c "sudo %s podman run --name app img"\nout=$(timeout 60 "$BIN" test -c '"'"'sudo %s docker run --name app img'"'"' --disable-tele 2>&1 </dev/null)\n' -E -E > "$tmp/se/quoted.sh"
 printf 'sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c x\nsudo %s env "${SUDO_ENV[@]}" keploy test -c x\n' -E > "$tmp/se/named.sh"
+# SUDO_ENV named on the line, but after the sudo'd command ends.
+printf 'sudo %s keploy test -c ./app; echo "${SUDO_ENV[@]}"\nsudo env PATH="$PATH" "$BIN" test && run "${SUDO_ENV[@]}"\n' -E > "$tmp/se/later.sh"
 printf 'out=$(sudo %s keploy test -c "./app")\n' -nE > "$tmp/se/bundled.sh"
 # Two on one line: the line once.
 printf 'sudo %s keploy test -c ./app; sudo %s keploy report\n' -E -E > "$tmp/se/twice.sh"
 # A list sudo keeps (sudo-rs honours one) names its variables.
 printf 'sudo %s "$BIN" test -c ./app\nsudo %s "$BIN" mock record\n' --preserve-env=GOCOVERDIR --preserve-env > "$tmp/se/preserve.sh"
+# A sudo'd env, after options and their arguments, or by its path.
+printf 'sudo env PATH="$PATH" "$BIN" test\nsudo -u "$AS" env HOME="$HOME" "$BIN" record\nsudo -nu "$AS" env A=1 "$BIN" record\nsudo -u root %s "$BIN" test\nsudo -- /usr/bin/env A=1 keploy record\n' -E > "$tmp/se/env.sh"
+# Not a sudo'd env, and no -E: envsubst, an -E that is the command's own, a
+# sudo that is part of a word.
+printf 'sudo envsubst < a > b\nsudo "$REPLAY_BIN" test -c "grep -E ok out.txt"\nfakesudo %s keploy record\nsudo.sh %s keploy record\n' -E -E > "$tmp/se/other.sh"
 printf '# sudo %s keploy record\ntrue # sudo %s keploy record\n' -E -E > "$tmp/se/comment.sh"
 printf 'jobs:\n  a:\n    steps:\n      - run: sudo  %s /usr/local/bin/keploy test -c ./app\n' -E > "$tmp/se/wf.yml"
-printf 'sudo %s apt-get install -y jq\nsudo %s docker compose down && keploy record -c x\nsudo "$REPLAY_BIN" test -c "grep %s ok out.txt"\nfakesudo %s keploy record\nsudo %s rm -rf keploy/reports\nsudo %s rm -rf /root/.keploy\n' -E -E -E -E -E -E > "$tmp/se/other.sh"
 printf 'sudo %s keploy record\n' -E > "$tmp/se/notes.txt"
-sudo_e_is sudo-e-forms "$tmp/se" "bundled.sh:1|preserve.sh:2|tmpl.sh:2|twice.sh:1|wf.yml:4"
+# sudo_env_free: only its own file, only an env without -E, only what its
+# regex matches (from the first word, and to the end where it says so).
+mkdir -p "$tmp/se/workflows/test_workflow_scripts/mock"
+{
+  printf '      - run: %s env KEPLOY_TEST_A=1 /tmp/utils.test -test.v | tee out\n' sudo
+  printf '      - run: %s env KEPLOY_TEST_A=1 keploy test | tee out\n' sudo
+  printf '      - run: sudo%s env KEPLOY_TEST_A=1 /tmp/utils.test -test.v | tee out\n' " -E" " -n" " "
+} > "$tmp/se/workflows/go-test.yaml"
+printf 'sudo env KEPLOY_TEST_A=1 /tmp/utils.test -test.v\n' > "$tmp/se/workflows/other.yaml"
+printf 'set -- %s -u "$AS" env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND HOME="$HOME" PATH="$PATH"%s\n' sudo "" sudo " A=1" sudo " | cat" > "$tmp/se/workflows/test_workflow_scripts/mock/mock-hangup-linux.sh"
+sudo_unnamed_is sudo-forms "$tmp/se" "any.sh:1|any.sh:2|any.sh:3|bundled.sh:1|env.sh:1|env.sh:2|env.sh:3|env.sh:4|env.sh:5|later.sh:1|later.sh:2|preserve.sh:2|spellings.sh:1|spellings.sh:2|spellings.sh:3|spellings.sh:4|spellings.sh:5|spellings.sh:6|spellings.sh:7|tmpl.sh:2|twice.sh:1|wf.yml:4|workflows/go-test.yaml:2|workflows/go-test.yaml:3|workflows/go-test.yaml:4|workflows/other.yaml:1|workflows/test_workflow_scripts/mock/mock-hangup-linux.sh:2"
+# An entry never lets an -E through, even one whose regex matches it.
+free_kept=("${sudo_env_free[@]}")
+sudo_env_free=('e.sh|-E env A=1 true$' 'e.sh|env A=1 true$')
+mkdir -p "$tmp/sf"
+printf 'sudo %s env A=1 true\nsudo env A=1 true\n' -E > "$tmp/sf/e.sh"
+sudo_unnamed_is free-never-e "$tmp/sf" "e.sh:1"
+sudo_env_free=("${free_kept[@]}")
 
 # The same scripts in GitHub's layout for `path: keploy`: the repository under
 # $GITHUB_WORKSPACE/keploy and nothing at the workspace root.

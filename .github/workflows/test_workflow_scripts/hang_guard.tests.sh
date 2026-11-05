@@ -290,7 +290,7 @@ left=$(ps -o pid=,args= --ppid $$ | grep -c 'sleep 20')
 # own: a flag, a number or a variable's value; so `local timeout kind` is not
 # a run. A comment line is not code. A spelling no script uses (timeout's
 # limit from a command substitution, `command timeout`, a background run's
-# `& pid=$!` on its own line, a multi-line `( ... ) &`) is not looked for.
+# `& pid=$!` on the same line, a multi-line `( ... ) &`) is not looked for.
 # timeout_takers FILE...: prints FILE:LINE for each such line.
 timeout_takers() {
   awk '
@@ -316,7 +316,7 @@ cat >"$tmp/takes.sh" <<'E'
 timeout 5 keploy record; rc=$?
 out=$(timeout 60 keploy test 2>&1 </dev/null)
 rc=$?
-sudo env A=1 timeout -k 10 180 keploy record \
+sudo env "${SUDO_ENV[@]}" A=1 timeout -k 10 180 keploy record \
   --record-timer 60s > log 2>&1 &
 timeout 30 keploy record >log 2>&1 &
 docker run --rm img timeout -s KILL 30 keploy report >log 2>&1

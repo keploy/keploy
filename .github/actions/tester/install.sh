@@ -3,6 +3,10 @@ echo Github_workspace "${GITHUB_WORKSPACE}"
 
 # Add fake installation-id for the workflow.
 source ${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/test-iid.sh
+# The switches the calling workflow sets for keploy (SUDO_ENV), each named in
+# the sudo lines below: sudo-rs ignores -E.
+# shellcheck source=../../workflows/test_workflow_scripts/sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 
 delete_if_exists() {
     local path=$1
@@ -82,7 +86,7 @@ for dir in $test_sets; do
         echo "Build version of keploy is being used for recording, Latest version of keploy is being used for testing" 
     fi
    
-    sudo env PATH=$PATH GOCOVERDIR=$GOCOVERDIR ${KEPLOY_RECORD_BIN} record -c "sudo env PATH=$PATH GOCOVERDIR=$GOCOVERDIR ${KEPLOY_TEST_BIN} test -c '${COMMAND}' --proxyPort 56789 --dnsPort 46789  --delay=${DELAY} --testsets $dir --configPath '${CONFIG_PATH}' --path '$pre_rec' --enableTesting   " --path "./test-bench/" --proxyPort=36789 --dnsPort 26789 --configPath "${CONFIG_PATH}" --enableTesting    
+    sudo env PATH=$PATH GOCOVERDIR=$GOCOVERDIR "${SUDO_ENV[@]}" ${KEPLOY_RECORD_BIN} record -c "sudo env PATH=$PATH GOCOVERDIR=$GOCOVERDIR ${KEPLOY_TEST_BIN} test -c '${COMMAND}' --proxyPort 56789 --dnsPort 46789  --delay=${DELAY} --testsets $dir --configPath '${CONFIG_PATH}' --path '$pre_rec' --enableTesting   " --path "./test-bench/" --proxyPort=36789 --dnsPort 26789 --configPath "${CONFIG_PATH}" --enableTesting    
     # Wait for 1 second before new test-set
     sleep 1
 done
@@ -134,7 +138,7 @@ echo "Mock assertion prepared successfully 🎉"
 delete_if_exists "$pre_rec/keploy/reports"
 
 ## Run tests for pre-recorded test cases
-sudo env PATH=$PATH GOCOVERDIR=$GOCOVERDIR keployR test -c "${COMMAND}" --delay ${DELAY} --path "$pre_rec"   
+sudo env PATH=$PATH GOCOVERDIR=$GOCOVERDIR "${SUDO_ENV[@]}" keployR test -c "${COMMAND}" --delay ${DELAY} --path "$pre_rec"   
 
 sleep 5
 
@@ -149,7 +153,7 @@ echo "New mocks are consistent with the pre-recorded mocks 🎉"
 
 
 ## Run tests for test-bench-recorded test cases
-sudo env PATH=$PATH GOCOVERDIR=$GOCOVERDIR keployR test -c "${COMMAND}" --delay ${DELAY} --path "$test_bench_rec"   
+sudo env PATH=$PATH GOCOVERDIR=$GOCOVERDIR "${SUDO_ENV[@]}" keployR test -c "${COMMAND}" --delay ${DELAY} --path "$test_bench_rec"   
 
 sleep 5
 
