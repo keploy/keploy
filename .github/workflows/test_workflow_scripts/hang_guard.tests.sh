@@ -5,14 +5,19 @@
 # Runs on any host with bash (no root, no network).
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FAILS=0
+ok() { echo "ok: $1"; }
+bad() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
+# Sourced, the guard only defines its functions; run as a command, it bounds
+# what it is given (rows below).
+got=$(bash -c '. "$1" && type -t bounded' _ "$here/hang_guard.sh" 2>&1 </dev/null)
+[ "$got" = function ] && ok "sourced, the guard defines its functions and runs nothing" ||
+  { bad "sourcing hang_guard.sh gave \"$got\", want only its functions defined"; exit 1; }
 # shellcheck source=hang_guard.sh
 . "$here/hang_guard.sh" || exit 1
 root="$(cd "$here/../../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-FAILS=0
-ok() { echo "ok: $1"; }
-bad() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
 
 # A command that exits 0 on SIGINT, SIGTERM or SIGHUP, once it is ready,
 # and ends its sleep first (a background sleep ignores INT; left, it held
@@ -57,6 +62,7 @@ bounded -s KILL 1 sleep 30 2>"$tmp/l3"; row "the guard's KILL: 137, and it says 
 bounded 1 sleep 30 2>"$tmp/l4"; row "the guard's TERM: 143, and it says so" 143 1 $? "$tmp/l4"
 bounded -s INT 1 bash "$tmp/trap0.sh" "$tmp/r5" 2>"$tmp/l5"; row "the guard's INT, the run exits 0 on it: 0, and it says so" 0 1 $? "$tmp/l5"
 bounded -k 1 1 bash "$tmp/ignterm.sh" "$tmp/r6" 2>"$tmp/l6"; row "-k: KILL after the TERM a run ignores: 137, both lines" 137 2 $? "$tmp/l6"
+bounded -q -k 1 1 bash "$tmp/ignterm.sh" "$tmp/r13" 2>"$tmp/l13"; row "-q -k: KILL after the TERM a run ignores: 137, no line" 137 0 $? "$tmp/l13"
 bash "$here/hang_guard.sh" 5 sh -c 'exit 7' 2>"$tmp/l7"; row "run as a command: the code passes as it is" 7 0 $? "$tmp/l7"
 bash "$here/hang_guard.sh" -s KILL 1 sleep 30 2>"$tmp/l8"; row "run as a command: the guard's KILL is 137" 137 1 $? "$tmp/l8"
 
@@ -119,6 +125,11 @@ case $- in *m*) bad "job control is on after a bounded run, and was off" ;; *) o
 set -m; bounded 5 true 2>/dev/null
 case $- in *m*) ok "job control stays on" ;; *) bad "job control is off after a bounded run, and was on" ;; esac
 set +m
+
+# hang_running takes a pid: nothing else counts as running, not even a word
+# /proc has an entry for.
+if hang_running "" || hang_running self; then bad "hang_running: an empty or non-numeric pid counts as running"; else
+  ok "hang_running: only a number is a pid"; fi
 
 # A run that ended but is not reaped yet (its caller is stopped, so the run
 # is a zombie) is not running: the watchdog does not fire on it.
@@ -203,17 +214,20 @@ timeout_takers() {
     }
   ' "$@"
 }
-# Fixtures: each must be found, and none of the clean ones.
+# Fixtures: each must be found, and none of the clean ones; a line is found
+# by its own rule, not by a $? on the line after it, and a file's first line
+# reads no $? of the file before it.
 cat >"$tmp/takes.sh" <<'E'
 timeout 5 keploy record; rc=$?
 out=$(timeout 60 keploy test 2>&1 </dev/null)
 rc=$?
 sudo env A=1 timeout -k 10 180 keploy record \
   --record-timer 60s > log 2>&1 &
+timeout 30 keploy record >log 2>&1 &
 docker run --rm img timeout -s KILL 30 keploy report >log 2>&1
 echo $? >exit
-runner=(timeout 120 script -qec "$cmd" /dev/null)
 x=1 timeout 45 apt-get update || rc=$?
+runner=(timeout 120 script -qec "$cmd" /dev/null)
 E
 cat >"$tmp/clean.sh" <<'E'
 # timeout 5 keploy record; rc=$?
@@ -222,9 +236,11 @@ if ! timeout 5s bash -c "until x; do sleep 1; done"; then echo no; fi
 local timeout kind
 bounded -k 10 180 keploy record; rc=$?
 echo "--timeout 5"; rc=$?
+timeout 5 sync
 E
-want="$tmp/takes.sh:1 $tmp/takes.sh:2 $tmp/takes.sh:4 $tmp/takes.sh:6 $tmp/takes.sh:8 $tmp/takes.sh:9"
-got=$(timeout_takers "$tmp/takes.sh" "$tmp/clean.sh" | tr '\n' ' ')
+printf 'rc=$?\n' >"$tmp/next.sh"
+want="$tmp/takes.sh:1 $tmp/takes.sh:2 $tmp/takes.sh:4 $tmp/takes.sh:6 $tmp/takes.sh:7 $tmp/takes.sh:9 $tmp/takes.sh:10"
+got=$(timeout_takers "$tmp/takes.sh" "$tmp/clean.sh" "$tmp/next.sh" | tr '\n' ' ')
 [ "${got% }" = "$want" ] && ok "the sweep finds each spelling that keeps timeout's code, and no other line" ||
   bad "the sweep found \"${got% }\", want \"$want\""
 # Every file but this one, whose fixtures above are such lines on purpose.
