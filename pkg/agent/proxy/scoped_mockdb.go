@@ -480,6 +480,14 @@ func (s *scopedMockDb) HoldToRound(call integrations.CallRound) (integrations.Mo
 	return &c, restaged
 }
 
+// DiagnoseInCallView implements integrations.CallViewDiagnoser: this view
+// over the store DiagnoseInCallView returned for it.
+func (s *scopedMockDb) DiagnoseInCallView() integrations.MockMemDb {
+	c := *s
+	c.MockMemDb = integrations.DiagnoseInCallView(s.MockMemDb)
+	return &c
+}
+
 // HideBackgroundWhen implements integrations.BackgroundHider: this view over
 // the store HideBackgroundWhen returned for it, a held store being one
 // call's, as HoldToRound's copy is. Under exact serving scopedFor wraps no
@@ -562,6 +570,20 @@ func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
 func (s *scopedMockDb) AnswerRepeatRead(matched []*models.Mock) (integrations.RepeatReadAnswer, bool) {
 	return integrations.AnswerRepeatRead(s.MockMemDb, matched)
 }
+
+// CallViewMoved forwards the held store's answer (integrations.CallViewTeller)
+// with its answered test mocks (ConsumedTestMocks): false over a store that
+// tells none.
+func (s *scopedMockDb) CallViewMoved() bool { return integrations.CallViewMoved(s.MockMemDb) }
+
+// CallViewGoneWhy forwards the held store's answer
+// (integrations.CallViewGoneTeller).
+func (s *scopedMockDb) CallViewGoneWhy() string { return integrations.CallViewGoneWhy(s.MockMemDb) }
+
+var (
+	_ integrations.CallViewTeller     = (*scopedMockDb)(nil)
+	_ integrations.CallViewGoneTeller = (*scopedMockDb)(nil)
+)
 
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
@@ -1551,3 +1573,11 @@ func (s *scopedMockDb) StatesLifetimes(kind models.Kind) bool {
 func (s *scopedMockDb) WhenRestaged(slot any, release func()) {
 	integrations.WhenRestaged(s.MockMemDb, slot, release)
 }
+
+// Keep implements integrations.ParserKeep: the store's, so what a parser keeps
+// through a view is the store's; nothing over a store that keeps nothing.
+func (s *scopedMockDb) Keep(slot any, mk func() any) (any, bool) {
+	return integrations.Keep(s.MockMemDb, slot, mk)
+}
+
+var _ integrations.ParserKeep = (*scopedMockDb)(nil)

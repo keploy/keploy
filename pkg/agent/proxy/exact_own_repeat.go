@@ -60,22 +60,87 @@ func (h *heldScope) RefusesAnswer(mk *models.Mock) bool {
 // call's decision asked first when mk is a background recording the open
 // test does not own (background), about to answer the call.
 func (h *heldScope) refuses(mk *models.Mock) bool {
+	if mk != nil && h.othersOwn(h.movedTo(), mk) {
+		return true
+	}
 	if mk == nil || h.owns == nil && !h.hideBg || !h.background(mk.Name) {
 		return false
 	}
 	return h.HidesBackground()
 }
 
-// hides reports whether h hides mk (hidesName).
+// hides reports whether h hides mk: the background's, by name (hidesName),
+// or, by the view that served it, another test's own (othersOwn).
 func (h *heldScope) hides(mk *models.Mock) bool {
-	return mk != nil && h.hidesName(mk.Name)
+	return mk != nil && (h.hidesName(mk.Name) || h.othersOwn(h.movedTo(), mk))
 }
 
 // hidesName reports whether h hides the recording named name: the call is
 // one of the open test's own calls (HidesBackground said so) and name is one
-// of the background's recordings it does not own (background).
+// of the background's recordings it does not own (background); or the call
+// was decided in a view that did not own name, and the view in force that
+// replaced it does (othersOwn's, read by name alone, MockSpent's).
 func (h *heldScope) hidesName(name string) bool {
-	return h.hideBg && h.background(name)
+	if h.hideBg && h.background(name) {
+		return true
+	}
+	moved := h.movedTo()
+	return moved.owns(name) && !h.heldIn.owns(name)
+}
+
+// movedTo is the view in force when h's call reads it but was not decided
+// in it: the call was marked from a round snapshot (snapped: record's full
+// round, whose learn step decided it in the view that snapshot read,
+// heldIn), and a test's begin or end has since installed another view. nil
+// otherwise: while that view is in force, and for every other call, which
+// reads the view its mark kept (readIn) or is decided in the view in force
+// (one marked where the learn tracker was ahead of the store). Asked after a
+// read, nil says the read was of the call's view: views are installed new
+// and never again, so one still in force after a read was for all of it.
+func (h *heldScope) movedTo() *exactView {
+	if !h.snapped {
+		return nil
+	}
+	if v := h.exactView(); v != h.heldIn {
+		return v
+	}
+	return nil
+}
+
+// othersOwn reports whether mk, read or consumed by h's call once its view
+// moved (moved, movedTo: nil for none), is a test's own recording that the
+// view the call was decided in did not own: a copy another view served
+// (models.TestModeInfo.ServedIn: the next test's, or a pool view's ahead,
+// the next test's calls in flight), however late in the move the read that
+// found it was, or, a mock that carries no view, one the view in force
+// owns. Such a call reads, walks and spends the shared scopes (the pool,
+// the worker scope, the start-up) in the view in force, but is never
+// answered from another test's own recordings: no read of h holds one, and
+// no consume or spend door of h settles one (refuses). A recording the
+// call's view owned too (a between-tests call's in-flight recording of the
+// test that then began) is the call's own still.
+func (h *heldScope) othersOwn(moved *exactView, mk *models.Mock) bool {
+	if moved == nil || h.heldIn.owns(mk.Name) {
+		return false
+	}
+	if mk.TestModeInfo.ServedIn != 0 {
+		// A view's copy: the view that served it filed it in its index
+		// (exactView.add), so one heldIn served is one heldIn owns, and
+		// this copy another view served.
+		return true
+	}
+	return moved.owns(mk.Name)
+}
+
+// owns reports whether the recording named name is one of v's own: the
+// open test's, or on a pool view the next test's in flight (ahead). None
+// for a nil v.
+func (v *exactView) owns(name string) bool {
+	if v == nil {
+		return false
+	}
+	_, own := v.index[name]
+	return own
 }
 
 // background reports whether the recording named name is one of the
@@ -97,14 +162,17 @@ func (h *heldScope) background(name string) bool {
 	return !own
 }
 
-// unhidden is mocks less what h hides; mocks itself when it hides nothing.
+// unhidden is mocks less what h hides (hides, the view in force read once,
+// after the read); mocks itself when it hides nothing.
 func (h *heldScope) unhidden(mocks []*models.Mock) []*models.Mock {
-	if !h.hideBg {
+	moved := h.movedTo()
+	if !h.hideBg && moved == nil {
 		return mocks
 	}
 	out := mocks
 	for i, mk := range mocks {
-		if !h.hides(mk) {
+		hide := mk != nil && (h.hideBg && h.background(mk.Name) || h.othersOwn(moved, mk))
+		if !hide {
 			if len(out) != len(mocks) {
 				out = append(out, mk)
 			}

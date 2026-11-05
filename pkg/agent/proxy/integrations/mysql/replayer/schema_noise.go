@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -225,7 +227,12 @@ type strictGate struct {
 	//                 exactly WHICH request fields drifted outside noise.
 	rejected    int
 	closestMock string
-	fieldDiffs  []models.MockFieldDiff
+	// closestPlaces are the places of closestMock's recording the
+	// obfuscator redacted (placesOf). fieldDiffs hold both values as they
+	// were compared: a report shows them by reportDiffs only, by the places
+	// of every recording it names.
+	closestPlaces redactedPlaces
+	fieldDiffs    []models.MockFieldDiff
 
 	// exactRejected is how many of rejected the rule of exact serving ruled
 	// out (allowsDrift without strict enforcement, allowsLiterals):
@@ -525,6 +532,7 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 	g.rejected++
 	if g.closestMock == "" {
 		g.closestMock = mock.Name
+		g.closestPlaces = placesOf(mock)
 		if recorded, recordedOK := g.recordedBody(mock); recordedOK {
 			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
 			// skips those paths so the report shows only non-noise drift.
@@ -575,10 +583,17 @@ type bodyNoiseKey struct {
 	leftOut string
 }
 
+// reportDiffs are fieldDiffs as a miss's report shows them: both values of
+// each at a place of places, the places of every recording the report names
+// (closestPlaces among them), redacted.
+func (g *strictGate) reportDiffs(places redactedPlaces) []models.MockFieldDiff {
+	return places.fieldDiffs(slices.Clone(g.fieldDiffs), liveStatementOf(g.live, g.liveQuery))
+}
+
 // resetDiagnostics clears the rejection diagnostics for a scan that starts over
 // on the same command, keeping the verdicts: they still hold.
 func (g *strictGate) resetDiagnostics() {
-	g.rejected, g.closestMock, g.fieldDiffs, g.exactRejected = 0, "", nil, 0
+	g.rejected, g.closestMock, g.closestPlaces, g.fieldDiffs, g.exactRejected = 0, "", redactedPlaces{}, nil, 0
 }
 
 // queryShape is the literal-split view of a SQL text: the query with every
@@ -601,6 +616,16 @@ type queryShape struct {
 // SQL texts on the same code paths.
 const queryShapeCacheSize = querySigCacheSize
 
+// bytes is about what s holds beside the statement it was read from: its
+// template and comments, and its literals' values and headers.
+func (s *queryShape) bytes() int {
+	n := len(s.template) + len(s.comments) + int(unsafe.Sizeof(""))*cap(s.literals)
+	for _, v := range s.literals {
+		n += len(v)
+	}
+	return n
+}
+
 // queryShapeCache memoizes extractQueryShape per SQL text — the same query is
 // re-canonicalized for every candidate mock during a pool scan, and mock-side
 // texts repeat across commands. Sibling of match.go's querySigCache, 2Q for
@@ -620,13 +645,16 @@ func newQueryShapeCache() *lru.TwoQueueCache[string, *queryShape] {
 // extractQueryShape parses sql with the vitess parser (the one the matcher
 // already uses for AST-structure signatures) and splits it into template +
 // literals + comments — the MySQL equivalent of the "give it a query, get its
-// fields" helper the Postgres integration uses. Results are memoized.
+// fields" helper the Postgres integration uses. Results are memoized, those
+// memoKeeps keeps.
 func extractQueryShape(sql string) *queryShape {
 	if v, ok := queryShapeCache.Get(sql); ok {
 		return v
 	}
 	shape := computeQueryShape(sql)
-	queryShapeCache.Add(sql, shape)
+	if memoKeeps(sql, shape.bytes()) {
+		queryShapeCache.Add(sql, shape)
+	}
 	return shape
 }
 
@@ -679,7 +707,9 @@ func computeQueryShape(sql string) (shape *queryShape) {
 	}, nil)
 
 	return &queryShape{
-		template: sqlparser.String(out),
+		// The rendering's buffer may be up to twice its length: a copy
+		// holds what the cache counts (queryShape.bytes).
+		template: strings.Clone(sqlparser.String(out)),
 		literals: literals,
 		comments: strings.TrimSpace(strings.Join(comments, " ")),
 		ok:       true,

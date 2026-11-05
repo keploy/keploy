@@ -123,20 +123,19 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// (integrations.OwnRepeat): one is compared and reported with
 				// the background hidden.
 				integrations.OwnRepeat(db)
-				preview := genericRequests[0]
-				if len(preview) > 64 {
-					preview = preview[:64]
-				}
 				// Build the universal mismatch report so generic misses show
 				// up in the mismatch table / report yaml like HTTP and MySQL
 				// misses do, instead of vanishing as a bare error.
 				// Under exact serving: one exchange more than the test
 				// recorded? Any other miss is compared with the test's
 				// answered exchanges too: they are in no read now.
+				// One whose view moved (n < 0) is told neither: it misses
+				// plainly, compared with no answered exchange, and no
+				// exchange made elsewhere is named for it.
 				n := extraCall(genericRequests, db)
 				var answered []*models.Mock
 				if n == 0 {
-					answered = answeredExchanges(db)
+					answered, _ = answeredExchanges(db)
 				}
 				report := buildGenericMismatchReport(ctx, genericRequests, db, answered)
 				// The miss was decided where the request first read the
@@ -144,8 +143,11 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				integrations.StampMark(report, call)
 				if n > 0 {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
-				} else if name, restaged := notOwnedExchange(genericRequests, db, call); name != "" {
-					report.ClosestMock, report.NotOwned = name, true
+				} else if name, restaged := notOwnedExchange(genericRequests, db, call); name != "" && n == 0 {
+					// The call is name, so no diff: the report's own
+					// was against the closest exchange it compared,
+					// another one.
+					report.ClosestMock, report.NotOwned, report.Diff = name, true, ""
 					report.NextSteps = notOwnedExchangeNextSteps(name)
 				} else if restaged {
 					// The lookup checks the staging last: a matcher held to
@@ -160,14 +162,17 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// Per-call generic detail at Debug; the canonical mock-mismatch
 				// WARN is emitted once in proxy.sendMockNotFoundErrorFrom (covers
 				// every parser), so this stays Debug to avoid double-logging.
+				// It prints only what the report prints, and the report
+				// carries none of the live bytes: a live buffer at a place a
+				// recording redacted (a token the obfuscator took out) is a
+				// secret, at any log level.
 				logger.Debug("no matching generic mock found for outgoing call",
 					zap.String("protocol", report.Protocol),
 					zap.Int("requestCount", len(genericRequests)),
 					zap.Int("firstRequestBytes", len(genericRequests[0])),
 					zap.String("closest", report.ClosestMock),
 					zap.String("diff", report.Diff),
-					zap.String("next_step", report.NextSteps),
-					zap.Binary("preview", preview))
+					zap.String("next_step", report.NextSteps))
 				errCh <- models.NewMockMismatchError(fmt.Errorf("generic: %w", models.ErrNoMockMatched), report)
 				return
 			}

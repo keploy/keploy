@@ -16,7 +16,11 @@ import (
 // answered. It returns how many times that call was recorded for the test,
 // 0 when the request is not such a call or exact serving is off, and the
 // earliest request time of those recordings (notOwnedRecordingBefore's
-// before): zero when none has one, so keploy cannot place them.
+// before): zero when none has one, so keploy cannot place them. It returns
+// -1 when the call's view moved (integrations.ConsumedInCallView): its miss
+// and the test's answered list may be of two views, so it is told neither
+// one call more than recorded nor not one, which would pair it or name a
+// recording made elsewhere for it; it misses plainly.
 //
 // The test's answered mocks are matched as the live pool would be, on a view
 // that holds only them and that no match can consume, so one definition of
@@ -30,13 +34,15 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 // matches each on its own (matched): the recordings of the call it is one
 // more of, which a repeated read is answered again from
 // (integrations.AnswerRepeatRead). matched may be empty where n is not 0:
-// the request matches the answered mocks together and none alone.
+// the request matches the answered mocks together and none alone. It is
+// empty where n is -1 (the call's view moved): no recording of a list that
+// may be of another view answers the call again.
 func (h *HTTP) extraCallOf(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (int, time.Time, []*models.Mock) {
-	er, ok := mockDb.(integrations.ExactConsumedReader)
-	if !ok {
-		return 0, time.Time{}, nil
+	consumed, oneView := integrations.ConsumedInCallView(mockDb)
+	if !oneView {
+		return -1, time.Time{}, nil
 	}
-	answered := FilterHTTPMocks(er.ConsumedTestMocks())
+	answered := FilterHTTPMocks(consumed)
 	if len(answered) == 0 {
 		return 0, time.Time{}, nil
 	}
@@ -120,20 +126,19 @@ func (h *HTTP) answeredMatch(ctx context.Context, input *req, mockDb integration
 // live pool's first on a tie, and the diagnosis takes the closer. As in the
 // live pool, a mock that declares variable places is not compared strictly
 // (the variable pass's evidence reports those). They are only compared,
-// never served: the match already failed. diag is returned as
-// it is when exact serving is off, when the test has no answered mock, and
-// for a miss whose recording fit but whose variables did not hold, and for a
-// stateful walk's (matchDiag.answered): that is what each reports. The caller leaves an extra call's diagnosis as the
-// match found it.
+// never served: the match already failed. diag is returned as it is when
+// exact serving is off, when the test has no answered mock, when the call's
+// view moved (integrations.ConsumedInCallView tells none: the list may be of
+// another view than the miss), for a miss whose recording fit but whose
+// variables did not hold, and for a stateful walk's (matchDiag.answered):
+// that is what each reports. The caller leaves an extra call's diagnosis as
+// the match found it.
 func (h *HTTP) answeredDiag(ctx context.Context, input *req, mockDb integrations.MockMemDb, diag *matchDiag, headerNoise, bodyNoise map[string][]string, urlNoise []string) *matchDiag {
 	if !provenswitch.On() || (diag != nil && (diag.variable != nil || diag.answered != nil)) {
 		return diag
 	}
-	er, ok := mockDb.(integrations.ExactConsumedReader)
-	if !ok {
-		return diag
-	}
-	_, answered := splitVariableMocks(FilterHTTPMocks(er.ConsumedTestMocks()))
+	consumed, _ := integrations.ConsumedInCallView(mockDb)
+	_, answered := splitVariableMocks(FilterHTTPMocks(consumed))
 	if len(answered) == 0 {
 		return diag
 	}

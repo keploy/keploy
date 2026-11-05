@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -99,17 +100,18 @@ func TestAPoolIsReadForItsPlacesOnceARecording(t *testing.T) {
 				pool[i].Noise = []string{"^" + placeholder + "$"}
 			}
 			// And one that redacted nothing, and two that redacted the same
-			// value (one pattern, compiled once for both).
+			// value among other text (one pattern, read within both and
+			// compiled once for both).
 			pool = append(pool, recorded("plain", "/x/q9P/y", jsonHdr, `{"a":"alpha1"}`))
 			shared := fmt.Sprintf("REDACTED_shared%s%d", mode, run)
 			for _, name := range []string{"s1", "s2"} {
-				m := recorded(name, "/x/"+shared+"/"+name, jsonHdr, `{"a":"`+shared+`"}`)
+				m := recorded(name, "/x/"+shared+"/"+name, jsonHdr, `{"a":"id `+shared+`"}`)
 				m.Noise = []string{"^" + shared + "$"}
 				pool = append(pool, m)
 			}
 			core, logs := observer.New(zap.DebugLevel)
 			h := &HTTP{Logger: zap.New(core)}
-			reads, compiles := placesReads.Load(), anchorFreeCompiles.Load()
+			reads, compiles := placesReads.Load(), util.UnanchoredCompiles()
 			for c := 0; c < calls; c++ {
 				r := poolMiss(t, h, mode, "/x/"+liveSecret+"/z", jsonHdr, `{"a":"bravo2"}`, pool...)
 				carriesNo(t, r, liveSecret)
@@ -120,7 +122,7 @@ func TestAPoolIsReadForItsPlacesOnceARecording(t *testing.T) {
 			if got := placesReads.Load() - reads; got != n+2 {
 				t.Errorf("%d calls at a pool of %d recordings with patterns read %d recordings for their places, want %d", calls, n+2, got, n+2)
 			}
-			if got := anchorFreeCompiles.Load() - compiles; got != n+1 {
+			if got := util.UnanchoredCompiles() - compiles; got != n+1 {
 				t.Errorf("%d calls at a pool of recordings of %d patterns compiled %d patterns, want %d", calls, n+1, got, n+1)
 			}
 			// A recording given another request, or other patterns as many,
@@ -173,7 +175,7 @@ func TestATestsPoolOfCopiesIsReadOnceARun(t *testing.T) {
 			stored = append(stored, recorded("plain", "/x/q9P/y", jsonHdr, `{"a":"alpha1"}`))
 			core, logs := observer.New(zap.DebugLevel)
 			h := &HTTP{Logger: zap.New(core)}
-			reads, compiles := placesReads.Load(), anchorFreeCompiles.Load()
+			reads, compiles := placesReads.Load(), util.UnanchoredCompiles()
 			for test := 0; test < tests; test++ {
 				pool := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), stored, nil)
 				if len(pool) != len(stored) || slices.Contains(stored, pool[0]) {
@@ -189,7 +191,7 @@ func TestATestsPoolOfCopiesIsReadOnceARun(t *testing.T) {
 			if got := placesReads.Load() - reads; got != n {
 				t.Errorf("%d tests' pools of copies of %d recordings with patterns read %d recordings for their places, want %d", tests, n, got, n)
 			}
-			if got := anchorFreeCompiles.Load() - compiles; got != n {
+			if got := util.UnanchoredCompiles() - compiles; got != n {
 				t.Errorf("%d tests' pools of copies of recordings of %d patterns compiled %d patterns, want %d", tests, n, got, n)
 			}
 		})
@@ -461,31 +463,6 @@ func TestTheKeptPlacesAreBounded(t *testing.T) {
 	}
 	if (redactedPlaces{}).size(nil) <= 0 {
 		t.Error("places that hold nothing cost nothing kept")
-	}
-}
-
-// A pattern that does not compile is kept as one, and not compiled again.
-func TestAPatternThatDoesNotCompileIsCompiledOnce(t *testing.T) {
-	pat := fmt.Sprintf("^(unclosed%d$", costRun.Add(1))
-	compiles := anchorFreeCompiles.Load()
-	if first, again := anchorFree(pat), anchorFree(pat); first != nil || again != nil {
-		t.Fatal("the row is of a pattern that does not compile")
-	}
-	if got := anchorFreeCompiles.Load() - compiles; got != 1 {
-		t.Errorf("a pattern that does not compile was compiled %d times, want 1", got)
-	}
-}
-
-// The compiled patterns are bounded: a full cache is emptied.
-func TestTheAnchorFreePatternsAreBounded(t *testing.T) {
-	for i := 0; i <= maxAnchorFree; i++ {
-		_ = anchorFree(fmt.Sprintf("^bounded%d_%d$", costRun.Add(1), i))
-		anchorFreeMu.RLock()
-		n := len(anchorFreeCache)
-		anchorFreeMu.RUnlock()
-		if n > maxAnchorFree {
-			t.Fatalf("%d patterns compiled are kept, more than %d", n, maxAnchorFree)
-		}
 	}
 }
 

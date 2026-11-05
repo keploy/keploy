@@ -484,6 +484,10 @@ type MockManager struct {
 	restagedMu sync.Mutex
 	restaged   map[any]func()
 
+	// parserKept is what the parsers keep with the manager, by slot
+	// (integrations.ParserKeep): it goes with the manager.
+	parserKept sync.Map
+
 	// noConnMocks is a negative cache for GetConnectionMocks's
 	// fallback scan. A connID that returned zero connection-scoped
 	// mocks on a full scan gets memoised here so subsequent matches
@@ -2893,6 +2897,10 @@ func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
 // repeated identical prepared-statement reads (e.g. login's username lookup,
 // register's read-back of a freshly-generated id) so each consumes the row
 // recorded at that position rather than a stale earlier-test row.
+//
+// It takes windowMu alone, for read, and never swapMu: the MySQL replayer
+// reads it under a lock of its own, also from a release a staging runs
+// while it holds swapMu (WhenRestaged), so swapMu here would deadlock.
 func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
 	// Under exact serving no recorded time narrows what a test is served:
 	// its mapping does.

@@ -88,6 +88,12 @@ type answeredOnly struct {
 
 func (answeredOnly) ExactServing() bool { return true }
 
+// Keep implements integrations.ParserKeep: the store's, so a parser's data
+// kept through the dry match is the store's.
+func (a answeredOnly) Keep(slot any, mk func() any) (any, bool) {
+	return integrations.Keep(a.MockMemDb, slot, mk)
+}
+
 func (a answeredOnly) InFlightIntoOpenTest(m *models.Mock) bool {
 	return integrations.InFlightIntoOpenTest(a.MockMemDb, m)
 }

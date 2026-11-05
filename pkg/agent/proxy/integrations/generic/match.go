@@ -126,9 +126,15 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 // matches the pool (fuzzyMatch): exactly. An exchange merely like one the
 // test answered is a changed exchange, not one more. It returns how many
 // times the test recorded that exchange, 0 when it is not one or exact
-// serving is off.
+// serving is off, and -1 when the exchange's view moved (answeredExchanges):
+// its miss and the test's answered list may be of two views, so it is told
+// neither one exchange more than recorded nor not one, which would name an
+// exchange made elsewhere for it; it misses plainly.
 func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
-	answered := answeredExchanges(mockDb)
+	answered, oneView := answeredExchanges(mockDb)
+	if !oneView {
+		return -1
+	}
 	if len(answered) == 0 {
 		return 0
 	}
@@ -147,19 +153,18 @@ func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
 
 // answeredExchanges are, under exact serving (the proven switch), the open
 // test's Generic mocks that have answered, in the order they did: in no read
-// any more, each answers once. None when exact serving is off.
-func answeredExchanges(mockDb integrations.MockMemDb) []*models.Mock {
-	er, ok := mockDb.(integrations.ExactConsumedReader)
-	if !ok {
-		return nil
-	}
-	var answered []*models.Mock
-	for _, mk := range er.ConsumedTestMocks() {
+// any more, each answers once. None when exact serving is off. oneView is
+// false, and they are none, when the exchange's view moved
+// (integrations.ConsumedInCallView): they may be of another view than its
+// miss.
+func answeredExchanges(mockDb integrations.MockMemDb) (answered []*models.Mock, oneView bool) {
+	consumed, oneView := integrations.ConsumedInCallView(mockDb)
+	for _, mk := range consumed {
 		if mk.Kind == models.GENERIC {
 			answered = append(answered, mk)
 		}
 	}
-	return answered
+	return answered, oneView
 }
 
 // sameRequests reports whether two recorded exchanges sent the same bytes.

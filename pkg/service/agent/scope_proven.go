@@ -2167,7 +2167,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	}
 	head := "keploy: " + strings.Join(what, "; ") + "."
 	if whys := missWhys(ev.Misses, before, most); len(whys) > 0 {
-		// The learn step's reasons, one line each, before what to do: they
+		// The full round's reasons, one line each, before what to do: they
 		// are what tells an intended change from a flaky one.
 		head += "\n" + strings.Join(whys, "\n") + "\n"
 	} else {
@@ -2178,11 +2178,14 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 }
 
 // missWhys are, for a failed test's reason, why its calls missed, in the
-// learn step's words (record's full round, where a miss has a Reason): one
-// line per call, "<call> missed (<reason>): <next step>", each said once,
-// at most most of them and a count of the rest. A miss made before the test
-// began is no call of the test's (before), and is not explained here. The
-// next step is evidence's (nextStepOf): no value of the call.
+// words of record's full round, where a miss has a Reason: the learn step's
+// reason, or, for a call whose view went before keploy diagnosed it
+// (models.MissViewReplaced), its next steps, which end with the line that
+// says which test ended or began, or that another view was served between
+// tests. One line per call, "<call> missed (<reason>): <next step>", each
+// said once, at most most of them and a count of the rest. A miss made before
+// the test began is no call of the test's (before), and is not explained
+// here. The next step is evidence's (nextStepOf): no value of the call.
 func missWhys(misses []models.UnmatchedCall, before func(models.UnmatchedCall) bool, most int) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -2206,7 +2209,7 @@ func missWhys(misses []models.UnmatchedCall, before func(models.UnmatchedCall) b
 		out = append(out, line)
 	}
 	if more > 0 {
-		out = append(out, fmt.Sprintf("and %d more call(s) missed for a reason the learn step gave", more))
+		out = append(out, fmt.Sprintf("and %d more call(s) missed for a reason keploy record's full round gave", more))
 	}
 	return out
 }

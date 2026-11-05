@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
@@ -137,6 +138,12 @@ type mockMiss struct {
 	// hunt for a lost recording.
 	candidateCount int
 	matchPhase     string
+	// places are the places the obfuscator redacted in the recordings of
+	// the pool and in those the report names (its closest mock, the first
+	// one strict rejected), every place when the pool cannot be read
+	// (everyPlace): the report and the miss's log show the live command's
+	// value at each as valueRedacted.
+	places redactedPlaces
 	// why and nextSteps, when set, are what the report says about the miss
 	// in place of the generic diff note and advice.
 	why       string
@@ -155,6 +162,35 @@ type mockMiss struct {
 	extraCall int
 }
 
+// liveCommand is the live command msg as the miss's report shows it, by
+// its places: its statement (an EXECUTE's prepared one, by decodeCtx) and
+// an EXECUTE's bound values, or a COM_STMT_SEND_LONG_DATA's parameter and
+// size.
+func (m *mockMiss) liveCommand(msg any, decodeCtx *wire.DecodeContext) string {
+	switch msg := msg.(type) {
+	case *mysql.QueryPacket:
+		return m.places.liveStatement(sqlStatementIdentity(msg.Query))
+	case *mysql.StmtPreparePacket:
+		return m.places.liveStatement(sqlStatementIdentity(msg.Query))
+	case *mysql.StmtExecutePacket:
+		// EXECUTE carries no SQL text of its own: the prepared query is
+		// resolved by the runtime stmtID map, and the bound values shown,
+		// so the report isn't a blank "COM_STMT_EXECUTE".
+		if msg != nil {
+			query := ""
+			if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
+				query = m.places.liveStatement(sqlStatementIdentity(decodeCtx.StmtIDToQuery[msg.StatementID]))
+			}
+			return strings.TrimSpace(query + " " + formatExecParams(m.places.liveParams(msg.Parameters)))
+		}
+	case *mysql.StmtSendLongDataPacket:
+		if msg != nil {
+			return fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
+		}
+	}
+	return ""
+}
+
 // maxUnknownStatementsNamed caps how many mocks a miss of an unknown statement
 // names.
 const maxUnknownStatementsNamed = 5
@@ -163,7 +199,9 @@ const maxUnknownStatementsNamed = 5
 // recording holds EXECUTE mocks that lost their statement (unknown, in pool
 // order): refused because the mock it would have served instead (instead)
 // was recorded for another test, or, with instead nil, matched by no mock.
-// candidates is the scan's candidate count.
+// candidates is the scan's candidate count. Its places are those of every
+// recording of unknown, any of which may be the command's own, and of
+// instead.
 func unknownStatementsMiss(unknown []*models.Mock, instead *models.Mock, candidates int) *mockMiss {
 	names := make([]string, 0, min(len(unknown), maxUnknownStatementsNamed))
 	for _, m := range unknown[:min(len(unknown), maxUnknownStatementsNamed)] {
@@ -177,10 +215,15 @@ func unknownStatementsMiss(unknown []*models.Mock, instead *models.Mock, candida
 	if instead != nil {
 		why += fmt.Sprintf(", so keploy does not answer it with %s, which was recorded for another test", instead.Name)
 	}
+	places := placesOf(instead)
+	for _, m := range unknown {
+		places = places.or(placesOf(m))
+	}
 	return &mockMiss{
 		closestMock:    unknown[0].Name,
 		candidateCount: candidates,
 		matchPhase:     models.MatchPhaseExhausted,
+		places:         places,
 		why:            why,
 		nextSteps:      "The COM_STMT_PREPARE mocks these EXECUTEs need were most likely deleted by an older keploy's mock prune (--remove-unused-mocks, or the prune after an auto-replay), which did not keep the mocks a kept mock needs. Re-record the test set with '" + mismatch.RecordCommand() + "', or restore its mocks from a copy made before the prune.",
 	}
