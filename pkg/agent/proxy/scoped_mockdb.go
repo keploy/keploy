@@ -1105,6 +1105,23 @@ func (s *scopedMockDb) WindowChanged() <-chan struct{} {
 	return nil
 }
 
+// RunPlace and RunPlaceChanged carry no mock data either. A wrapped store
+// without the facet reports the set's end and a channel that never fires: a
+// parser holds nothing over it, as over a store with no facet at all.
+func (s *scopedMockDb) RunPlace() models.RunPlace {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.RunPlace()
+	}
+	return models.RunPlace{SetEnd: true}
+}
+
+func (s *scopedMockDb) RunPlaceChanged() <-chan struct{} {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.RunPlaceChanged()
+	}
+	return nil
+}
+
 // The carry-over tier is a read tier like the others, so it goes through keep().
 func (s *scopedMockDb) GetCarryOverMocks() ([]*models.Mock, error) {
 	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {

@@ -446,6 +446,10 @@ type MockManager struct {
 	// without it AtSetEnd registers nothing.
 	readsSetEnds atomic.Bool
 
+	// place is where the replay's run is among the set's recorded windows
+	// (RunPlace, run_place.go).
+	place runPlace
+
 	// stagingEpoch changes at every staging call (a SetMocksWithWindow with the
 	// models.BaseTime sentinel): a new set, or the same set staged again after
 	// an agent replacement. State a consumer builds from one staging snapshot
@@ -667,6 +671,9 @@ func (m *MockManager) Close() {
 		// stop. The replacement channel stays open, so a waiter that does not
 		// check IsClosed blocks again instead of spinning.
 		m.signalWindowChange()
+		// An answer held for the run's place is written: a closed manager
+		// is at the set's end (RunPlace).
+		m.signalRunPlace()
 		// A parser's data built from this manager's reads goes with it.
 		m.letDerivedGo()
 	})
@@ -1398,6 +1405,7 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
 	m.keepRunOnlyForAnExactStartUp(start)
 	m.setMocksWithWindow(filtered, unfiltered, start, end)
+	m.placeWindowAt(start)
 }
 
 // keepRunOnlyForAnExactStartUp, under the proven switch, decides at a
@@ -2219,6 +2227,8 @@ func (m *MockManager) getUnFilteredMocksIn(v *exactView) ([]*models.Mock, error)
 // identical to SetMocksWithWindow.
 func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup []*models.Mock, start, end time.Time) {
 	m.keepRunOnlyForAnExactStartUp(start)
+	// The run's place moves once the window is visible.
+	defer m.placeWindowAt(start)
 	// Signal once everything below has landed, startup additions included.
 	defer m.signalWindowChange()
 	m.swapMu.Lock()

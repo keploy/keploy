@@ -320,6 +320,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				stub  *models.Mock
 				diag  *matchDiag
 				lmiss *learnMiss
+				// repeat is set where the answer is a recording answered
+				// again (AnswerRepeatRead): it is written at once, never
+				// held for its place (holdAnswer).
+				repeat bool
 				// extra is the full round's own-repeat check (extraCall),
 				// asked before its pairing; -1 where it was not asked, or
 				// could not be told (the call's view moved), which pairs
@@ -507,7 +511,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// it, and how many times the test recorded it.
 					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
 						zap.String("test", again.Test), zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.Mock.TestModeInfo.ReadMark().Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
-					stub, ok, diag, lmiss = again.Mock, true, nil, nil
+					stub, ok, diag, lmiss, repeat = again.Mock, true, nil, nil, true
 				}
 			}
 
@@ -776,6 +780,34 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- nil
 					return
 				}
+			}
+
+			// An answer recorded later than the run's place now is written
+			// as the run reaches each part's recorded place (holdAnswer):
+			// the call was matched and consumed above, in its own test.
+			if held, err := h.heldAnswerOf(stub, mockDb, repeat); err != nil {
+				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
+				errCh <- err
+				return
+			} else if held != nil {
+				if err := h.writeHeld(ctx, clientConn, held); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					// The application closed its connection while the
+					// answer waited for its place: the rest is dropped.
+					h.Logger.Info("the application closed the connection of a mock's answer while the answer waited for its recorded place; the rest of the answer is dropped",
+						zap.String("mock", stub.Name), zap.Error(err))
+					errCh <- nil
+					return
+				}
+				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+				if err != nil {
+					h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
+					errCh <- nil
+					return
+				}
+				continue
 			}
 
 			// Serialize the matched mock's response to wire bytes (hydrates a
