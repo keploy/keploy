@@ -1182,6 +1182,125 @@ func TestOutcomeCostARecordingWhoseFSideIsUnstatedIsReadForEveryWord(t *testing.
 	}
 }
 
+// costInSet decides call's input in each of two tests of one set: the
+// second test asks the postings the first one built.
+func costInSet(call func(dc *DriftCache) Input) (ds [2][]Decision) {
+	tr := NewTracker()
+	tr.NewSet()
+	for c := range ds {
+		tr.Begin()
+		ds[c] = Decide(call(tr.Drifts()))
+		tr.End()
+	}
+	return ds
+}
+
+// A word glued to the bytes around it ("s17" of "BAs17xx…") in a long
+// request body that declares no media type, in a set: the body's words are
+// posted and none of them is the word, yet the body may hold it glued
+// (gluedAt), so each check reads the body whatever its postings name, and
+// refuses the word as unknown, naming the request, in each test, as with
+// no set.
+func TestOutcomeCostAWordGluedInALongBodyOfNoDeclaredTypeIsReadInASet(t *testing.T) {
+	framed := "BAs17" + strings.Repeat("x", 150) + "BAs18" + strings.Repeat("x", 150)
+	req := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body", Recorded: framed, Sent: framed}}})}
+	ds := costInSet(func(dc *DriftCache) Input { return costCall(dc, "body.slot", "s17", "s18", costAt, req, nil, nil, nil) })
+	for c := range ds {
+		d := oWord(t, ds[c], "s17", "s18")
+		oRefused(t, fmt.Sprintf("test %d: s17 glued in a %d-byte body of no media type", c, len(framed)), d, RefusalUnknown, "test-1")
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "declares no media type") {
+			t.Errorf("test %d: %q; want it to say the body declares no media type", c, d.Refusal.Why)
+		}
+	}
+}
+
+// A long given (#5016) glued inside a word that changed with it, in a set:
+// the given's text is posted, and its one run is no run of the word
+// ("seed<given>"), yet the word holds it, so each check reads the given
+// whatever its postings name, and refuses the word as a part of it, in each
+// test, as with no set.
+func TestOutcomeCostALongGivenGluedInsideAWordIsReadInASet(t *testing.T) {
+	gr, gf := strings.Repeat("ab12", 70), strings.Repeat("cd34", 70)
+	gave := []Earlier{TestGiven("test o::TestApps", "given:name", gr, gf)}
+	ds := costInSet(func(dc *DriftCache) Input {
+		return costCall(dc, "body.name", "seed"+gr, "seed"+gf, costAt, gave, nil, nil, nil)
+	})
+	for c := range ds {
+		d := oWord(t, ds[c], "seed"+gr, "seed"+gf)
+		oRefused(t, fmt.Sprintf("test %d: a %d-byte given glued inside the word", c, len(gr)), d, RefusalUnknown, "test o::TestApps")
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "the given stands inside the word in both runs") {
+			t.Errorf("test %d: %q; want it to say the given stands inside the word", c, d.Refusal.Why)
+		}
+	}
+}
+
+// A test case's request leaf whose recorded text is under the posting
+// floor and whose sent text is past it ("a1b2c3d4", then "k7k7k7k7" and
+// 300 bytes more) is read for every word, as the floor reads a text: the
+// recorded word stood whole there and round F sent another value, so the
+// word is refused as a conflict naming the request, in each test of a set.
+func TestOutcomeCostARequestLeafPostedOnOneSideIsReadForEveryWord(t *testing.T) {
+	sent := `{"ref":"k7k7k7k7 ` + strings.Repeat("p", 300) + `"}`
+	req := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: `{"ref":"a1b2c3d4"}`, Sent: sent}}})}
+	ds := costInSet(func(dc *DriftCache) Input {
+		return costCall(dc, "body.ref", "a1b2c3d4", "f0e9d8c7", costAt, req, nil, nil, nil)
+	})
+	for c := range ds {
+		oRefused(t, fmt.Sprintf("test %d: the recorded word at a request leaf sent as %d bytes", c, len(sent)), oWord(t, ds[c], "a1b2c3d4", "f0e9d8c7"), RefusalConflict, "test-1 body.ref")
+	}
+}
+
+// costServed is n recordings of the running test, each served changed
+// with round F's view of it (ServedLive): HTTP answers of no header, whose
+// bodies are body(i) and view(i), so a view of a short body is a text
+// under the posting floor (filterTextMin).
+func costServed(dc *DriftCache, n int, body, view func(i int) string) []Raw {
+	raw := make([]Raw, n)
+	for i := range raw {
+		name, url, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf("/i/%d", i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+		answer := func(b string) *models.Mock {
+			return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{Method: "GET", URL: url}, HTTPResp: &models.HTTPResp{StatusCode: 200, Body: b},
+				ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+			}}
+		}
+		raw[i] = dc.LazyRawOf(answer(body(i)), true, nil).ServedAs(i + 1).ServedLive(RawOf(answer(view(i)), true))
+	}
+	return raw
+}
+
+// A recording whose round F view holds F's word, its recording not R's,
+// shows that F gave the application the word before the call: unknown,
+// refused, naming it, in each test of a set, whether the view's text is
+// under the posting floor (read for every word: 20 places a test) or past
+// it (read where the postings name F's word: that one place).
+func TestOutcomeCostAViewThatHoldsOnlyFsWordIsReadAtAnyLength(t *testing.T) {
+	for _, c := range []struct {
+		pad   int
+		reads int64
+	}{{0, 40}, {300, 2}} {
+		seen := strings.Repeat("s", c.pad)
+		body := func(i int) string { return fmt.Sprintf(`{"note":"Item %d"}`, i) }
+		view := func(i int) string {
+			if i == 7 {
+				return fmt.Sprintf(`{"note":"Item %d","ref":"f0e9d8c7","seen":"%s"}`, i, seen)
+			}
+			return fmt.Sprintf(`{"note":"Item %d","seen":"%s"}`, i, seen)
+		}
+		a := placeAsks.Load()
+		ds := costInSet(func(dc *DriftCache) Input {
+			return costCall(dc, "body.ref", "a1b2c3d4", "f0e9d8c7", eRecAt, nil, costServed(dc, 20, body, view), nil, nil)
+		})
+		reads := placeAsks.Load() - a
+		for i := range ds {
+			oRefused(t, fmt.Sprintf("test %d, views padded %d bytes", i, c.pad), oWord(t, ds[i], "a1b2c3d4", "f0e9d8c7"), RefusalUnknown, "mock-7")
+		}
+		if reads != c.reads {
+			t.Errorf("views padded %d bytes: the two tests read %d places; want %d", c.pad, reads, c.reads)
+		}
+	}
+}
+
 // The set's postings name a word's texts by every run of it: a text that
 // holds each of its runs, never one that lacks any. A word of no letter or
 // digit has no run to name, and every text may hold it. A base64 token is
