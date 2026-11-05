@@ -661,3 +661,24 @@ func TestHeldAnswer_ItsConnectionAnswersTheNextCall(t *testing.T) {
 		t.Fatalf("the next call's answer: %q", got)
 	}
 }
+
+// A write recorded at the body's end after its last event (the terminal
+// chunk's own mark) adds no chunk: the body ends once, at that write's place.
+func TestHeldAnswer_TheTerminalWriteEndsTheBodyOnce(t *testing.T) {
+	registerStandIn(t)
+	m := sseMock(t, releaseAt(5), releaseAt(45), "")
+	m.Spec.HTTPResp.Marks.Writes = []models.HTTPAnswerWrite{{Offset: 8, TS: releaseAt(5)}, {Offset: 16, TS: releaseAt(5)}, {Offset: 24, TS: releaseAt(5)}, {Offset: 24, TS: releaseAt(45)}}
+	db := newPlacedDb(m)
+	app, _ := serveHeld(t, db, nil)
+	db.waitHeld(t)
+	if got := readUntil(app, "data:c\n\n\r\n", 5*time.Second); !strings.HasSuffix(got, "data:c\n\n\r\n") {
+		t.Fatalf("the events due at once: %q", got)
+	}
+	db.reach(models.RunOpen(2))
+	if got := readUntil(app, "0\r\n\r\n", 5*time.Second); got != "0\r\n\r\n" {
+		t.Fatalf("at test-3's open: %q, want the body's one end", got)
+	}
+	if got := readFor(app, quiet); got != "" {
+		t.Fatalf("after the body's end: %q", got)
+	}
+}

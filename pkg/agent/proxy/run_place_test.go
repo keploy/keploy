@@ -287,6 +287,17 @@ func TestRunPlace_TheProxyEndsTheRunsSet(t *testing.T) {
 	(&Proxy{}).EndRunSet() // no manager: nothing to end
 }
 
+// The proxy hands the windows the replay sends to its manager's place.
+func TestRunPlace_TheProxySeedsTheRunsWindows(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	p := &Proxy{mockManager: mm}
+	p.SeedRunPlaceWindows(placeWindows())
+	if got, want := mm.RunPlace().Windows.Len(), len(placeWindows()); got != want {
+		t.Fatalf("the run's place has %d windows, want %d", got, want)
+	}
+}
+
 // The first window's open is reached as any other's.
 func TestRunPlace_TheFirstWindowsOpenIsReached(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())

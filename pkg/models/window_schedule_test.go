@@ -239,8 +239,9 @@ func TestWindowSchedule_AMergedTestRunsInItsMergedWindow(t *testing.T) {
 	t0 := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
 	s := NewWindowSchedule([]TestWindow{
 		{TestCase: "c", Start: t0.Add(20 * time.Second), End: t0.Add(30 * time.Second)},
-		{Start: t0, End: t0.Add(12 * time.Second), Tests: []string{"a", "b"}},
+		{Start: t0, End: t0.Add(12 * time.Second), Tests: []string{"a", "b", ""}},
 	})
+	// An empty name names no test, though a merged window lists one.
 	for _, tc := range []struct {
 		test string
 		i    int
