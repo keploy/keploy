@@ -1627,7 +1627,7 @@ func TestSetupCaCertEnv_WholeStoreVariablesNameTheRootsPlusKeploysCA(t *testing.
 			t.Setenv(envSSLCertFile, tc.certFile)
 			t.Setenv(envSSLCertDir, "")
 			t.Setenv(EnvJavaToolOptions, "")
-			if err := SetupCaCertEnv(zap.NewNop(), testCACertPEM()); err != nil {
+			if err := SetupCaCertEnv(context.Background(), zap.NewNop(), testCACertPEM()); err != nil {
 				t.Fatal(err)
 			}
 			want := mergeCABundle(tc.roots, testCACertPEM())
@@ -1673,51 +1673,6 @@ func TestSetupCaCertEnv_WholeStoreVariablesNameTheRootsPlusKeploysCA(t *testing.
 				}
 			})
 		})
-	}
-}
-
-// The app's bundle has one path per user and keploy CA: a later run with the
-// same CA rewrites it, with the roots as they are then, rather than leave
-// another copy of the roots behind; a run with another CA gets its own file.
-func TestWriteAppCABundle_OnePathPerCA(t *testing.T) {
-	tmp := t.TempDir()
-	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
-		t.Setenv(k, tmp)
-	}
-	caA, caB := makeSelfSignedPEM(t, "ca-a"), makeSelfSignedPEM(t, "ca-b")
-	first, err := writeAppCABundle(concat(makeSelfSignedPEM(t, "old-root"), caA), caA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	newer := concat(makeSelfSignedPEM(t, "new-root"), caA)
-	again, err := writeAppCABundle(newer, caA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again != first {
-		t.Fatalf("the same CA got a new path: %q, then %q", first, again)
-	}
-	if got, _ := os.ReadFile(again); !bytes.Equal(got, newer) {
-		t.Fatal("the rewrite did not replace the bundle")
-	}
-	other, err := writeAppCABundle(caB, caB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if other == first {
-		t.Fatal("another CA shares the first CA's bundle path")
-	}
-	entries, err := os.ReadDir(tmp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("the temp directory holds %d entries; want the two bundles and no leftover temporary file", len(entries))
-	}
-	if runtime.GOOS != "windows" {
-		if st, err := os.Stat(first); err != nil || st.Mode().Perm() != 0o644 {
-			t.Fatalf("mode %v (%v); want 0644 so the app can read it", st.Mode().Perm(), err)
-		}
 	}
 }
 

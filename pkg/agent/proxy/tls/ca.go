@@ -289,24 +289,34 @@ func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPI
 // setupNativeForApp, which needs root and changes the host's trust stores.
 var setupNativeForAppFn = setupNativeForApp
 
-// SetupCaCertEnv extracts the run CA's public certificate to a temp file, and
-// writes beside it a bundle of that certificate and the roots keploy's loader
-// reads, and points the language-runtime trust env vars at them (client side,
-// native mode): NODE_EXTRA_CA_CERTS at the certificate, the variables that
-// replace a runtime's whole trust store at the bundle.
+// SetupCaCertEnv writes the run CA's public certificate, and a bundle of that
+// certificate and the roots keploy's loader reads, to a directory of this
+// run's own in the temp directory, and points the language-runtime trust env
+// vars at them (client side, native mode): NODE_EXTRA_CA_CERTS at the
+// certificate, the variables that replace a runtime's whole trust store at the
+// bundle. The directory is removed when ctx ends; one a run that died left
+// behind is removed by the next run's call (reapEndedRunDirs).
 //
 // certPEM is the PUBLIC certificate of the running agent's CA, fetched from the
 // agent over the control-plane API (the client no longer carries its own copy of
 // a shared CA). An empty certPEM is a programmer error — the caller must obtain
 // the cert from the agent first — and is refused rather than silently producing
 // an empty trust file.
-func SetupCaCertEnv(logger *zap.Logger, certPEM []byte) error {
+func SetupCaCertEnv(ctx context.Context, logger *zap.Logger, certPEM []byte) error {
 	if len(certPEM) == 0 {
 		return fmt.Errorf("SetupCaCertEnv: no CA certificate provided (fetch it from the agent first)")
 	}
 	loadOwnRoots()
-	tempPath, err := extractCertToTemp(certPEM)
+	reapEndedRunDirs(logger)
+	run, err := newRunTrustDir()
 	if err != nil {
+		utils.LogError(logger, err, "Failed to make this run's CA directory in the tmp folder")
+		return err
+	}
+	run.removeWhenDone(ctx, logger)
+	tempPath, err := run.write(runCAFile, certPEM)
+	if err != nil {
+		_ = run.remove()
 		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
 		return err
 	}
@@ -318,12 +328,14 @@ func SetupCaCertEnv(logger *zap.Logger, certPEM []byte) error {
 	// built into keploy) plus keploy's CA, as in docker and k8s. Node adds
 	// NODE_EXTRA_CA_CERTS to its own roots, so it gets keploy's CA alone.
 	systemBundle, _ := loadSystemCABundleFn(logger)
-	bundlePath, err := writeAppCABundle(mergeCABundle(systemBundle, certPEM), certPEM)
+	bundlePath, err := run.write(runBundleFile, mergeCABundle(systemBundle, certPEM))
 	if err != nil {
+		_ = run.remove()
 		utils.LogError(logger, err, "Failed to write the app's CA bundle to the tmp folder")
 		return err
 	}
 	if err := setEnvForSharedVolume(logger, bundlePath, tempPath); err != nil {
+		_ = run.remove()
 		return err
 	}
 	// Java: point the JVM at a merged truststore via JAVA_TOOL_OPTIONS instead of
@@ -1332,7 +1344,8 @@ func removeJavaAlias(ctx context.Context, logger *zap.Logger, alias string) {
 }
 
 // extractCertToTemp writes the run CA's public certificate to a temp file for
-// the language-runtime trust env vars to point at.
+// certutil and keytool to read (Windows native install), which removes it once
+// they have.
 //
 // Mode 0644 (world-readable, owner-writable) — NOT the old 0666, which under
 // keploy's process-wide umask 0 left the file world-WRITABLE so any local user
@@ -1354,40 +1367,6 @@ func extractCertToTemp(certPEM []byte) (string, error) {
 	}
 
 	return tempFile.Name(), nil
-}
-
-// writeAppCABundle writes bundle, the trust bundle SetupCaCertEnv gives the app
-// (with keploy's CA certPEM in it), to the temp directory and returns its path.
-//
-// The name is fixed per user and per keploy CA, not random, so runs do not each
-// leave a copy of the roots (a few hundred KB) behind: a later run with the same
-// CA rewrites the file, with the roots as they are then. A run with another CA
-// writes another file, so concurrent runs never hand an app a bundle without its
-// own CA. The uid keeps a root-owned file from a `sudo keploy` run from blocking
-// the user's runs, as for the Java truststore. The file is replaced by a rename,
-// so an app reading it sees the old bundle or the new one, never part of one.
-// Mode 0644: the bundle holds public certificates only.
-func writeAppCABundle(bundle, certPEM []byte) (string, error) {
-	sum := sha256.Sum256(certPEM)
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("keploy-ca-bundle-%d-%x.crt", os.Geteuid(), sum[:8]))
-	f, err := os.CreateTemp(os.TempDir(), ".keploy-ca-bundle-*")
-	if err != nil {
-		return "", err
-	}
-	tmp := f.Name()
-	_, werr := f.Write(bundle)
-	err = errors.Join(werr, f.Close())
-	if err == nil {
-		err = os.Chmod(tmp, 0o644)
-	}
-	if err == nil {
-		err = os.Rename(tmp, path)
-	}
-	if err != nil {
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	return path, nil
 }
 
 // generateTrustStore creates a JKS file from every CERTIFICATE PEM block

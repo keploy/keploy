@@ -3720,7 +3720,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// token-authenticated control-plane API rather than carrying an embedded copy
 	// of a shared CA. In docker-run, compose and k8s the shared /tmp/keploy-tls
 	// volume delivers trust to the app container instead, and this call would only
-	// leak an unused host temp file — so it is skipped there.
+	// write host files no app reads — so it is skipped there. The files are
+	// removed when ctx, the run, ends.
 	if !isDockerCmd && opts.CommandType != string(utils.DockerCompose) {
 		certPEM, caErr := a.fetchAgentCA(ctx)
 		if caErr != nil {
@@ -3730,7 +3731,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		// TODO : Proxy or TLS should not be imported in the agent
 		// This is done because to set env variable for TLS
-		if err = ptls.SetupCaCertEnv(a.logger, certPEM); err != nil {
+		if err = ptls.SetupCaCertEnv(ctx, a.logger, certPEM); err != nil {
 			utils.LogError(a.logger, err, "failed to set TLS environment")
 			return err
 		}

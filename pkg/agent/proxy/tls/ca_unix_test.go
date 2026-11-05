@@ -61,3 +61,16 @@ func TestReadRegularFile_RefusesFIFOsAndDevices(t *testing.T) {
 		}
 	}
 }
+
+// ownedByThisUser tells this user's directory from one another user owns.
+func TestOwnedByThisUser(t *testing.T) {
+	if !ownedByThisUser(t.TempDir()) {
+		t.Fatal("this user's own directory is not this user's")
+	}
+	if os.Geteuid() != 0 && ownedByThisUser("/") {
+		t.Fatal("root's / is this user's")
+	}
+	if ownedByThisUser(filepath.Join(t.TempDir(), "missing")) {
+		t.Fatal("a missing path is this user's")
+	}
+}
