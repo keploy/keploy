@@ -3539,15 +3539,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// after the rest (a cold JVM), or send it only once it has the server's
 	// SETTINGS (a gRPC client).
 	//
-	// Nothing is decided from a silence (row W3, out of the proven switch:
+	// Nothing is decided from a silence, with KEPLOY_PROVEN or without it:
 	// deciding from one short read sent plain HTTP/2 calls whose client wrote
 	// in pieces to the gRPC mock server, which answered them 415 with an empty
-	// body). The rest of a partial preface is read before anything is decided
-	// on it. On replay keploy is the server: it answers the client preface
-	// with its own, and reads until the HEADERS arrive, however long the
-	// client takes (readHTTP2UntilHeaders). On record the HTTP/2 parser claims
-	// every HTTP/2 connection whatever its HEADERS say, and the real server
-	// answers the preface, so nothing is waited for.
+	// body. The rest of a partial preface is read before anything is decided
+	// on it, on record and on replay. On replay keploy is the server: it
+	// answers the client preface with its own, and reads until the HEADERS
+	// arrive, however long the client takes (readHTTP2UntilHeaders). On
+	// record the HTTP/2 parser claims every HTTP/2 connection whatever its
+	// HEADERS say, and the real server answers the preface, so nothing more
+	// is waited for.
 	if isHTTP2PrefacePrefix(initialBuf) {
 		initialBuf, err = readHTTP2Preface(parserCtx, srcConn, initialBuf)
 		if err != nil {

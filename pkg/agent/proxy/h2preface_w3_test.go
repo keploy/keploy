@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 	"google.golang.org/grpc"
@@ -281,26 +283,71 @@ func TestTheHandOffServerNeverSeesTheAckOfKeploysSettings(t *testing.T) {
 	}
 }
 
-// h2Probe is a parser that claims every HTTP/2 connection and reports what
-// its matcher was handed.
+// h2Probe is a parser that claims every HTTP/2 connection and reports the
+// first buffer its matcher is handed, HTTP/2 or not.
 type h2Probe struct{ saw chan []byte }
 
 func (p h2Probe) MatchType(_ context.Context, buf []byte) bool {
-	if util.IsHTTP2Preface(buf) {
-		p.saw <- append([]byte(nil), buf...)
-		return true
+	select {
+	case p.saw <- append([]byte(nil), buf...):
+	default:
 	}
-	return false
+	return util.IsHTTP2Preface(buf)
 }
 func (h2Probe) RecordOutgoing(context.Context, *integrations.RecordSession) error { return nil }
 func (h2Probe) MockOutgoing(context.Context, net.Conn, *models.ConditionalDstCfg, integrations.MockMemDb, models.OutgoingOptions) error {
 	return nil
 }
 
+// readWatchConn is the proxy's end of a connection, telling each Read as it
+// begins, and the bytes read in all as it returns.
+type readWatchConn struct {
+	net.Conn
+	mu    sync.Mutex
+	total int
+	ev    chan readEvent
+}
+
+// readEvent is a Read beginning (begun), or one returning with total bytes
+// read in all.
+type readEvent struct {
+	begun bool
+	total int
+}
+
+func (c *readWatchConn) NetConn() net.Conn { return c.Conn }
+
+func (c *readWatchConn) Read(p []byte) (int, error) {
+	c.tell(readEvent{begun: true})
+	n, err := c.Conn.Read(p)
+	c.mu.Lock()
+	c.total += n
+	total := c.total
+	c.mu.Unlock()
+	c.tell(readEvent{total: total})
+	return n, err
+}
+
+func (c *readWatchConn) tell(e readEvent) {
+	select {
+	case c.ev <- e:
+	default:
+	}
+}
+
+// h2Replay is the client's end of a connection handleConnection replays,
+// whose HTTP/2 parser is a probe.
+type h2Replay struct {
+	*h2Client
+	saw   <-chan []byte          // the first buffer the probe's matcher is handed
+	reads *readWatchConn         // the proxy's end
+	logs  *observer.ObservedLogs // what the proxy logged
+	done  <-chan error           // handleConnection's return
+}
+
 // startH2Replay starts handleConnection in replay, with the proven switch or
-// without it, on a connection whose HTTP/2 parser is a probe, and returns the
-// connection's client end and what the probe's matcher is handed.
-func startH2Replay(t *testing.T, proven bool) (*h2Client, <-chan []byte) {
+// without it, on a connection whose HTTP/2 parser is a probe.
+func startH2Replay(t *testing.T, proven bool) *h2Replay {
 	t.Helper()
 	if proven {
 		t.Setenv(provenswitch.Env, "1")
@@ -309,7 +356,8 @@ func startH2Replay(t *testing.T, proven bool) (*h2Client, <-chan []byte) {
 	}
 	cfg := config.New()
 	cfg.Agent.Mode = models.MODE_TEST
-	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, "127.0.0.1:50051")}, cfg)
+	core, logs := observer.New(zap.DebugLevel)
+	p := New(zap.New(core), fakeDestInfo{dest: ipv4Dest(t, "127.0.0.1:50051")}, cfg)
 	p.nsswitchData = []byte("preseeded-by-test")
 	probe := h2Probe{saw: make(chan []byte, 1)}
 	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.HTTP2: probe}
@@ -318,8 +366,47 @@ func startH2Replay(t *testing.T, proven bool) (*h2Client, <-chan []byte) {
 		t.Fatal(err)
 	}
 	app, src := acceptedConn(t)
-	go func() { _ = p.handleConnection(context.Background(), src) }()
-	return newH2Client(t, app), probe.saw
+	reads := &readWatchConn{Conn: src, ev: make(chan readEvent, 1024)}
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(context.Background(), reads) }()
+	return &h2Replay{h2Client: newH2Client(t, app), saw: probe.saw, reads: reads, logs: logs, done: done}
+}
+
+// awaitKeployReading waits until the proxy's end has read n bytes of the
+// client's in all and begun its next Read: keploy waits for more of the
+// client. It fails the test if the matcher is asked first, keploy having
+// decided on what it had.
+func (r *h2Replay) awaitKeployReading(n int) {
+	r.t.Helper()
+	var expired <-chan time.Time
+	if dl, ok := r.t.Deadline(); ok {
+		timer := time.NewTimer(time.Until(dl) / 4)
+		defer timer.Stop()
+		expired = timer.C
+	}
+	read := false
+	for {
+		select {
+		case e := <-r.reads.ev:
+			if e.begun && read {
+				return
+			}
+			read = read || (!e.begun && e.total >= n)
+		case buf := <-r.saw:
+			r.t.Fatalf("the matcher was asked on %s before the client's HEADERS", h2Described(buf))
+		case <-expired:
+			r.t.Fatalf("keploy never read %d bytes of the client's and waited for more", n)
+		}
+	}
+}
+
+// h2Described names what buf holds: the frames after the client preface, or
+// how much of the preface it is.
+func h2Described(buf []byte) string {
+	if !util.IsHTTP2Preface(buf) {
+		return fmt.Sprintf("%d bytes, not the whole client preface", len(buf))
+	}
+	return fmt.Sprintf("the client preface and %v", h2Frames(buf))
 }
 
 // replayH2Through hands an h2c connection whose client waits for the server's
@@ -327,16 +414,26 @@ func startH2Replay(t *testing.T, proven bool) (*h2Client, <-chan []byte) {
 // the HTTP/2 matcher was handed.
 func replayH2Through(t *testing.T, proven bool) []byte {
 	t.Helper()
-	cl, saw := startH2Replay(t, proven)
-	cl.preface()
-	if s, ok := cl.read().(*http2.SettingsFrame); !ok || s.IsAck() {
+	r := startH2Replay(t, proven)
+	r.preface()
+	if s, ok := r.read().(*http2.SettingsFrame); !ok || s.IsAck() {
 		t.Fatal("keploy did not answer the client preface with SETTINGS")
 	}
-	cl.request("application/json")
-	if err := cl.fr.WriteSettingsAck(); err != nil {
+	r.request("application/json")
+	if err := r.fr.WriteSettingsAck(); err != nil {
 		t.Fatal(err)
 	}
-	return awaitEvent(t, saw, "the HTTP/2 matcher being asked")
+	return awaitEvent(t, r.saw, "the HTTP/2 matcher being asked")
+}
+
+// bothSwitches runs f with the proven switch off and on.
+func bothSwitches(t *testing.T, f func(t *testing.T, proven bool)) {
+	for _, tc := range []struct {
+		name   string
+		proven bool
+	}{{"without the switch", false}, {"under the switch", true}} {
+		t.Run(tc.name, func(t *testing.T) { f(t, tc.proven) })
+	}
 }
 
 // An HTTP/2 client may write its connection preface, its SETTINGS and its
@@ -346,26 +443,186 @@ func replayH2Through(t *testing.T, proven bool) []byte {
 // to them. Replay decides such a connection on its HEADERS, with the proven
 // switch or without it: a plain HTTP/2 call is never taken for gRPC, and
 // answered by the gRPC mock server (415, empty body), because its client
-// wrote in pieces or was slow to write.
+// wrote in pieces or was slow to write. Each piece is written once keploy
+// has read the last and waits for more, so keploy reads them one by one,
+// however loaded the host is.
 func TestAnHTTP2ClientWritingInPiecesIsDecidedOnItsHeaders(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		proven bool
-	}{{"without the switch", false}, {"under the switch", true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			cl, saw := startH2Replay(t, tc.proven)
-			if _, err := io.WriteString(cl.c, http2.ClientPreface); err != nil {
+	bothSwitches(t, func(t *testing.T, proven bool) {
+		r := startH2Replay(t, proven)
+		if _, err := io.WriteString(r.c, http2.ClientPreface); err != nil {
+			t.Fatal(err)
+		}
+		r.awaitKeployReading(len(http2.ClientPreface))
+		if err := r.fr.WriteSettings(); err != nil {
+			t.Fatal(err)
+		}
+		r.awaitKeployReading(len(http2.ClientPreface) + h2FrameHeaderLen)
+		r.request("application/json")
+		buf := awaitEvent(t, r.saw, "the HTTP/2 matcher being asked")
+		if ct := contentType(buf); ct != "application/json" {
+			t.Fatalf("the HTTP/2 matcher read content-type %q from %s; want application/json", ct, h2Described(buf))
+		}
+	})
+}
+
+// h2OneWrite is a client's preface, its SETTINGS and a request with
+// content-type ct, as one write.
+func h2OneWrite(t *testing.T, ct string) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	b.WriteString(http2.ClientPreface)
+	cl := &h2Client{t: t, fr: http2.NewFramer(&b, nil)}
+	if err := cl.fr.WriteSettings(); err != nil {
+		t.Fatal(err)
+	}
+	cl.request(ct)
+	return b.Bytes()
+}
+
+// Most HTTP/2 clients (java.net.http, many gRPC stacks, Go's for a request
+// queued before its connection) write their preface, SETTINGS and first
+// request at once. Such a connection is decided on the HEADERS it came with:
+// keploy writes it nothing (it waits for no other HEADERS, and its own
+// SETTINGS would be a second server preface the parser never sent).
+func TestAnHTTP2ClientWritingAllAtOnceIsDecidedAtOnce(t *testing.T) {
+	bothSwitches(t, func(t *testing.T, proven bool) {
+		for _, ct := range []string{"application/json", "application/grpc"} {
+			t.Run(ct, func(t *testing.T) {
+				r := startH2Replay(t, proven)
+				if _, err := r.c.Write(h2OneWrite(t, ct)); err != nil {
+					t.Fatal(err)
+				}
+				// The probe's parser returns at once, and handleConnection
+				// closes the client's connection: the client reads its end,
+				// or whatever keploy wrote before it.
+				one := make([]byte, 1)
+				if n, err := r.c.Read(one); n > 0 || !errors.Is(err, io.EOF) {
+					t.Fatalf("keploy wrote %d bytes to a client whose HEADERS it had (read error %v)", n, err)
+				}
+				buf := awaitEvent(t, r.saw, "the HTTP/2 matcher being asked")
+				if got := contentType(buf); got != ct {
+					t.Fatalf("the HTTP/2 matcher read content-type %q from %s; want %q", got, h2Described(buf), ct)
+				}
+			})
+		}
+	})
+}
+
+// A first read may hold only part of the client preface (12 to 23 bytes of
+// it look like gRPC to the gRPC parser's matcher). Replay reads on to the
+// whole preface, then to the HEADERS, with the proven switch or without it:
+// such a connection is decided on its HEADERS, not on the piece of preface.
+func TestAPartialPrefaceReplayIsDecidedOnItsHeaders(t *testing.T) {
+	bothSwitches(t, func(t *testing.T, proven bool) {
+		r := startH2Replay(t, proven)
+		all := h2OneWrite(t, "application/json")
+		const first = 15
+		if _, err := r.c.Write(all[:first]); err != nil {
+			t.Fatal(err)
+		}
+		r.awaitKeployReading(first)
+		settingsEnd := len(http2.ClientPreface) + h2FrameHeaderLen
+		if _, err := r.c.Write(all[first:settingsEnd]); err != nil {
+			t.Fatal(err)
+		}
+		r.awaitKeployReading(settingsEnd)
+		if _, err := r.c.Write(all[settingsEnd:]); err != nil {
+			t.Fatal(err)
+		}
+		buf := awaitEvent(t, r.saw, "the HTTP/2 matcher being asked")
+		if ct := contentType(buf); ct != "application/json" {
+			t.Fatalf("the HTTP/2 matcher read content-type %q from %s; want application/json", ct, h2Described(buf))
+		}
+	})
+}
+
+// Only an HTTP/2 connection is answered as one. A replayed HTTP/1 call holds
+// no HEADERS frame either: it is handed to the matchers at once, and keploy
+// never writes its client an HTTP/2 SETTINGS frame, nor waits for HEADERS.
+func TestAnHTTP1ReplayIsNotAnsweredAsHTTP2(t *testing.T) {
+	bothSwitches(t, func(t *testing.T, proven bool) {
+		r := startH2Replay(t, proven)
+		req := "GET /v1/items HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"
+		if _, err := io.WriteString(r.c, req); err != nil {
+			t.Fatal(err)
+		}
+		// Whatever keploy writes comes after it decided, or it closes the
+		// connection: never a frame header first.
+		first := make([]byte, h2FrameHeaderLen)
+		n, err := io.ReadFull(r.c, first)
+		if n > 0 && bytes.Equal(first[:n], h2ServerPreface[:n]) {
+			t.Fatalf("keploy answered an HTTP/1 client with HTTP/2 SETTINGS: % x (read error %v)", first[:n], err)
+		}
+		if buf := awaitEvent(t, r.saw, "the matcher being asked"); string(buf) != req {
+			t.Fatalf("the matcher was asked on %q, want the HTTP/1 request", buf)
+		}
+	})
+}
+
+// hangUps are the two ways a client hangs up: a FIN (its write half closed)
+// and a reset (closed with linger 0).
+var hangUps = []struct {
+	name   string
+	hangUp func(*net.TCPConn) error
+}{
+	{"FIN", (*net.TCPConn).CloseWrite},
+	{"reset", func(c *net.TCPConn) error {
+		if err := c.SetLinger(0); err != nil {
+			return err
+		}
+		return c.Close()
+	}},
+}
+
+// A client may hang up a connection it never sent a request on: a pool's
+// idle connection, dropped as its app stops, with a FIN or a reset. While
+// keploy waits for its HEADERS either ends the wait: the connection is
+// decided on what came, and nothing is logged at ERROR, however long the
+// connection sat idle.
+func TestAClientThatHangsUpBeforeItsHeadersIsDecidedOnWhatCame(t *testing.T) {
+	for _, h := range hangUps {
+		t.Run(h.name, func(t *testing.T) {
+			bothSwitches(t, func(t *testing.T, proven bool) {
+				r := startH2Replay(t, proven)
+				r.preface()
+				r.awaitKeployReading(len(http2.ClientPreface) + h2FrameHeaderLen)
+				if err := h.hangUp(r.c.(*net.TCPConn)); err != nil {
+					t.Fatal(err)
+				}
+				buf := awaitEvent(t, r.saw, "the HTTP/2 matcher being asked")
+				if util.HasHTTP2HeadersFrame(buf) {
+					t.Fatalf("the matcher was handed HEADERS the client never sent: %s", h2Described(buf))
+				}
+				if err := awaitEvent(t, r.done, "handleConnection returning"); err != nil {
+					t.Fatalf("a %s before the HEADERS ended handleConnection with %v; want a hang-up", h.name, err)
+				}
+				if errs := r.logs.FilterLevelExact(zap.ErrorLevel).All(); len(errs) > 0 {
+					t.Fatalf("a %s before the HEADERS was logged at ERROR: %q %v", h.name, errs[0].Message, errs[0].Context)
+				}
+			})
+		})
+	}
+}
+
+// A client that hangs up in the middle of its preface, with a FIN or a
+// reset, ends the read of the preface with what came, and no error.
+func TestAClientThatHangsUpInItsPrefaceEndsItsRead(t *testing.T) {
+	for _, h := range hangUps {
+		t.Run(h.name, func(t *testing.T) {
+			app, proxySide := acceptedConn(t)
+			if _, err := io.WriteString(app, http2.ClientPreface[:15]); err != nil {
 				t.Fatal(err)
 			}
-			time.Sleep(20 * time.Millisecond)
-			if err := cl.fr.WriteSettings(); err != nil {
+			initial := make([]byte, 15)
+			if _, err := io.ReadFull(proxySide, initial); err != nil {
 				t.Fatal(err)
 			}
-			time.Sleep(200 * time.Millisecond)
-			cl.request("application/json")
-			buf := awaitEvent(t, saw, "the HTTP/2 matcher being asked")
-			if ct := contentType(buf); ct != "application/json" {
-				t.Fatalf("the HTTP/2 matcher read content-type %q from the frames %v; want application/json", ct, h2Frames(buf))
+			if err := h.hangUp(app); err != nil {
+				t.Fatal(err)
+			}
+			buf, err := readHTTP2Preface(context.Background(), proxySide, initial)
+			if err != nil || string(buf) != http2.ClientPreface[:15] {
+				t.Fatalf("after a %s the preface read %q, %v; want its 15 bytes and no error", h.name, buf, err)
 			}
 		})
 	}
