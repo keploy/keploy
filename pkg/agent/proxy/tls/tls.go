@@ -77,17 +77,12 @@ func negotiateNextProtos(clientProtos []string, preserveH2 bool) []string {
 // OutgoingOptions.PreferH2.
 type preferH2CtxKey struct{}
 
-// WithPreferH2 marks ctx so the MITM advertises h2 (not a forced http/1.1
-// downgrade) to every client that offers it. See negotiateNextProtos.
-func WithPreferH2(ctx context.Context) context.Context {
-	return WithPreferH2For(ctx, func(string) bool { return true })
-}
-
-// WithPreferH2For marks ctx so the MITM advertises h2 to a client that offers
-// it when prefer, handed the server name the client's ClientHello asks for
-// ("" when it names none), says so. The hello is where a connection with no
-// CONNECT request first names its host, so the offer for that host is decided
-// there, not before the handshake.
+// WithPreferH2For marks ctx so the MITM advertises h2 (not a forced http/1.1
+// downgrade, see negotiateNextProtos) to a client that offers it when prefer,
+// handed the server name the client's ClientHello asks for ("" when it names
+// none), says so. The hello is where a connection with no CONNECT request
+// first names its host, so the offer for that host is decided there, not
+// before the handshake.
 func WithPreferH2For(ctx context.Context, prefer func(serverName string) bool) context.Context {
 	return context.WithValue(ctx, preferH2CtxKey{}, prefer)
 }
