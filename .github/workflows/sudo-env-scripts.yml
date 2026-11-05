@@ -42,3 +42,6 @@ jobs:
 
       - name: Test hang_guard.sh (a bounded run's exit code is its own, not timeout's; no script takes one from timeout)
         run: bash .github/workflows/test_workflow_scripts/hang_guard.tests.sh
+
+      - name: Test record-exit-codes-linux.sh (a recording that hangs fails its case, app-killed's too, whose 137 the guard's SIGKILL also gives)
+        run: bash .github/workflows/test_workflow_scripts/mock/record-exit-codes-linux.tests.sh

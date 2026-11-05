@@ -14,7 +14,9 @@
 # #4772 an app that died exited 0 too. A recording whose agent cannot start is
 # mock-agent-cannot-start-linux.sh's.
 #
-# Env: RECORD_BIN (the keploy binary under test).
+# Env: RECORD_BIN (the keploy binary under test); RECORD_HANG_SECONDS (the
+# bound on each recording, 120 by default: record-exit-codes-linux.tests.sh
+# shortens it, with a keploy that hangs).
 set -uo pipefail
 # Job control: without it a background job of a script starts with SIGINT
 # ignored, and sudo, finding it ignored, never relays the interrupt this lane
@@ -49,7 +51,7 @@ start() {
   shift
   mkdir -p "$WORK/$name"
   cd "$WORK/$name" || exit 1
-  hang_start -s KILL 120 sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$BIN" record "$@" --disable-tele > "$WORK/$name.log" 2>&1
+  hang_start -s KILL "${RECORD_HANG_SECONDS:-120}" sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$BIN" record "$@" --disable-tele > "$WORK/$name.log" 2>&1
   PID=$HANG_PID
   cd - >/dev/null || exit 1
 }
