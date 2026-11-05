@@ -1720,7 +1720,7 @@ func TestAFailedTestsReasonSaysWhyAMissWhoseViewWentMissed(t *testing.T) {
 	require.Equal(t, "keploy: POST /orders had no recorded answer.\n"+
 		"POST /orders missed (view_replaced): "+gone+"\n"+
 		"If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting test-2>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine test-2 --reason \"<why>\".", evidenceReason("test-2", ev, nil, time.Time{}))
+		"If it is flaky, not broken: keploy mock quarantine test-2 --reason \"<why>\".", evidenceReason("test-2", ev, nil, time.Time{}, nil))
 }
 
 // End to end on the agent: the test's end answers fail with the learn
