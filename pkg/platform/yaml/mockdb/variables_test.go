@@ -26,6 +26,8 @@ func variablesMock() *models.Mock {
 			Variables: models.MockVariables{
 				"orderId":   {Recorded: "o1", Bind: "body.id", Answer: []string{"body.id"}},
 				"requestId": {Recorded: "r1", Bind: "header.X-Request-Id", Use: []string{"url.query.rid"}, Echo: true},
+				// A word bound as a word of one learned value (Of).
+				"orderKey": {Recorded: "4011", Bind: "body.key#2", Of: "6f9619ff-8b86-4011-b42d-00c04fc964ff"},
 			},
 			ReqTimestampMock: time.Unix(1_700_000_000, 0).UTC(),
 			ResTimestampMock: time.Unix(1_700_000_001, 0).UTC(),
@@ -56,6 +58,9 @@ func TestVariablesBlockRoundTrips(t *testing.T) {
 	text := buf.String()
 	if !strings.Contains(text, "\nvariables:\n") || strings.Contains(text, "spec:\n    variables") {
 		t.Fatalf("the block is not a top-level key of the document:\n%s", text)
+	}
+	if !strings.Contains(text, "\n        of: 6f9619ff-8b86-4011-b42d-00c04fc964ff\n") {
+		t.Fatalf("the word's value is not written as its of: key:\n%s", text)
 	}
 	var back yaml.NetworkTrafficDoc
 	if err := yamlLib.Unmarshal(buf.Bytes(), &back); err != nil {

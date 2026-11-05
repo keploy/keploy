@@ -197,3 +197,98 @@ func TestOutcomeAValueFormInASecretFieldPrintsMasked(t *testing.T) {
 		}
 	}
 }
+
+// The token's size bounds: a two-word id token names its value, and so does
+// one of exactly chanceBits in each run (8 hex digits, in three words).
+func TestOutcomeAValueFormAtItsBounds(t *testing.T) {
+	vfNamed(t, "a two-word id token", Decide(vfInput([3]string{"q.id", "6f9619ff-8b86", "1c2d3e4f-5a6b"})), "q.id", "6f9619ff-8b86", 2)
+	if b := wordBits("ab12-cd-ef"); b != chanceBits || wordBits("9e8d-7c-6b") != chanceBits {
+		t.Fatalf("the row's tokens carry %v and %v bits; want exactly %d", b, wordBits("9e8d-7c-6b"), chanceBits)
+	}
+	vfNamed(t, "a token of exactly chanceBits", Decide(vfInput([3]string{"q.id", "ab12-cd-ef", "9e8d-7c-6b"})), "q.id", "ab12-cd-ef", 3)
+}
+
+// Only a whole id token (word bytes, '-' and '_') names a value: the words
+// of a standard base64 run, whose '+' and '/' no id carries, are each their
+// own value, though they changed together around the same separators in
+// both runs, each made anew, and carry far more than chanceBits.
+func TestOutcomeAWordsOfABase64RunNameNoValue(t *testing.T) {
+	for _, tc := range [][2]string{
+		{"Ox1Cm+lFL2O/gSsz", "qIX9IT+NEkr/J8Yc"}, // 12 bytes, decoded
+		{"QmFz/ZTY0/dGV4", "Zm9v/YmFy/YmF6"},
+	} {
+		if wordBits(tc[0]) < chanceBits || wordBits(tc[1]) < chanceBits {
+			t.Fatalf("the row's runs carry %v and %v bits; want %d or more", wordBits(tc[0]), wordBits(tc[1]), chanceBits)
+		}
+		ds := Decide(vfInput([3]string{"q.tok", tc[0], tc[1]}))
+		vfNone(t, "the words of the base64 run "+tc[0], ds, "q.tok", true)
+		if n := len(vfAt(ds, "q.tok")); n != 3 {
+			t.Errorf("the base64 run %s: %d words, want 3: %s", tc[0], n, oDescribe(ds))
+		}
+	}
+}
+
+// A long leaf of a call in a test set (filterTextMin bytes or more) is asked
+// through the set's filter of its words: one that holds a word of the value
+// apart, as written or in another case, still names none, and one that holds
+// none of them leaves the value named.
+func TestOutcomeAValueSentApartInALongLeafOfASetNamesNone(t *testing.T) {
+	const upper = "6F9619FF-8B86-4011-B42D-00C04FC964FF"
+	pad := strings.Repeat("as served ", filterTextMin/10)
+	for _, tc := range []struct {
+		what, rec, live, note string
+		named                 bool
+	}{
+		{"a word held apart as written", vfRec, vfLive, pad + " 4011 " + pad, false},
+		{"a word held apart in lower case", upper, strings.ToUpper(vfLive), pad + " 6f9619ff " + pad, false},
+		{"a word held apart in upper case", vfRec, vfLive, pad + " 6F9619FF " + pad, false},
+		{"no word of it held", vfRec, vfLive, pad + " 5150 " + pad, true},
+	} {
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		in := vfInput([3]string{"q.id", tc.rec, tc.live}, [3]string{"q.note", tc.note, tc.note})
+		in.Drifts = tr.Drifts()
+		built := textsBuilt(in.Drifts)
+		ds := Decide(in)
+		if n := textsBuilt(in.Drifts) - built; n == 0 {
+			t.Errorf("%s: the %d-byte leaf built no filter of its words; want it asked through one", tc.what, len(tc.note))
+		}
+		if tc.named {
+			vfNamed(t, tc.what, ds, "q.id", tc.rec, 5)
+		} else {
+			vfNone(t, tc.what, ds, "q.id", true)
+		}
+		tr.End()
+	}
+}
+
+// The call's texts are read for a word of a value sent apart only once
+// every word of the value is made anew: a token whose words are uses of an
+// earlier place names none whatever the call sends, so it costs no scan.
+func TestOutcomeAValueFormScansOnlyAValueMadeAnew(t *testing.T) {
+	scans := func(in Input) ([]Decision, int) {
+		x := newReaderIndex(in.Drifts)
+		defer x.release()
+		dc := newDecider(in, false, x)
+		ds, _ := dc.decide()
+		return ds, dc.apartScans
+	}
+	ds, n := scans(vfInput([3]string{"q.id", vfRec, vfLive}))
+	if at := vfAt(ds, "q.id"); n != 1 || len(at) != 5 || at[0].Of != vfRec {
+		t.Errorf("a UUID made anew: %d scans, %s; want one scan and its words naming it", n, oDescribe(ds))
+	}
+	in := vfInput([3]string{"q.id", vfRec, vfLive})
+	in.Earlier = oServed("mock-0", false, false, Response, oText("body.ref", vfRec), vfLive, time.Millisecond)
+	ds, n = scans(in)
+	at := vfAt(ds, "q.id")
+	if n != 0 || len(at) != 5 {
+		t.Errorf("a UUID an earlier place gave: %d scans, %d words; want none and five", n, len(at))
+	}
+	for _, d := range at {
+		if d.Outcome != OutcomeValue {
+			t.Errorf("a UUID an earlier place gave: %s; want a use of mock-0", oDescribe([]Decision{d}))
+		}
+	}
+	vfNone(t, "a UUID an earlier place gave", Decide(in), "q.id", false)
+}

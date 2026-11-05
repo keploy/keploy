@@ -146,6 +146,12 @@ type decider struct {
 	// answer is the call's answer index (answerIndex), built at its first
 	// ask.
 	answer *answerWords
+	// forms are the values valueForms named (Decision.Of), each with its
+	// stretch in F at every token that names it, asked whether the call
+	// sends a word of one apart once the call is decided (formsApart);
+	// apartScans counts the values sentApart read, for the rows.
+	forms      map[string][]string
+	apartScans int
 }
 
 // decideWords decides every changed word of in, and the field each
@@ -203,6 +209,7 @@ func (dc *decider) decide() ([]Decision, []string) {
 				Edit{Kind: EditReRecord}, dc.fieldNoise(fields[i]))
 		}
 	}
+	dc.formsApart(out)
 	return out, fields
 }
 
@@ -375,16 +382,16 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 // the one value learning reads it as a word of, as recorded: the whole
 // idByte token around it (main's id token: word bytes, '-' and '_') in both
 // runs, where two or more changed words, paired by position, stand inside
-// it around the same separators in both runs; where it carries chanceBits
-// or more in each run, so its words standing together are no chance; and
-// where the call sends none of its words apart from it (sentApart). Such a
-// value is one the application made anew whole, as a UUID: its words
-// changed together and stand only together. A word of any other token is
-// named none, and is its own value at replay, as main reads it. That every
-// word of the token, in R, is one made anew in this call (none kept inside
-// it, "ORD-<id>"; none a part of an instant, which is decided whole) is
-// keepWholeForms', which counts them; equal separators leave F's token no
-// word R's lacks.
+// it around the same separators in both runs; and where it carries
+// chanceBits or more in each run, so its words standing together are no
+// chance. Such a value is one the application made anew whole, as a UUID:
+// its words changed together and stand only together. A word of any other
+// token is named none, and is its own value at replay, as main reads it.
+// That the call sends none of its words apart from it is formsApart's, once
+// the call is decided; that every word of the token, in R, is one made anew
+// in this call (none kept inside it, "ORD-<id>"; none a part of an instant,
+// which is decided whole) is keepWholeForms', which counts them; equal
+// separators leave F's token no word R's lacks.
 func (dc *decider) valueForms(rd textReading) map[int]string {
 	type span struct{ r, l [2]int }
 	groups := map[span][]int{}
@@ -405,12 +412,16 @@ func (dc *decider) valueForms(rd textReading) map[int]string {
 		ks := groups[at]
 		sr, sf := rd.Rec[at.r[0]:at.r[1]], rd.Live[at.l[0]:at.l[1]]
 		if len(ks) < 2 || between(rd.Rec, rd.RecWords, at.r) != between(rd.Live, rd.LiveWords, at.l) ||
-			wordBits(sr) < chanceBits || wordBits(sf) < chanceBits || dc.sentApart(sr, sf) {
+			wordBits(sr) < chanceBits || wordBits(sf) < chanceBits {
 			continue
 		}
 		if out == nil {
 			out = map[int]string{}
 		}
+		if dc.forms == nil {
+			dc.forms = map[string][]string{}
+		}
+		dc.forms[sr] = append(dc.forms[sr], sf)
 		for _, k := range ks {
 			out[k] = sr
 		}
@@ -442,10 +453,11 @@ func between(s string, words [][2]int, at [2]int) string {
 // place before the call is the word's own decision: a word one shows in
 // both runs is bound to it, not made anew.
 func (dc *decider) sentApart(sr, sf string) bool {
+	dc.apartScans++
 	apart := func(v, s string) bool {
 		t := dc.x.text(cutToken(v, s))
 		for _, w := range wordsOfText(s) {
-			if evHolds(t, w) || evHolds(t, strings.ToLower(w)) {
+			if folded := strings.ToLower(w); evHolds(t, w) || folded != w && evHolds(t, folded) {
 				return true
 			}
 		}
@@ -508,6 +520,52 @@ func formSays(field, of string) string {
 	return "; a word of one value, " + q + ", the whole token around it in both runs: its words changed together, each made anew in this call, and the call sends none of them apart from it"
 }
 
+// formsApart drops the value (Decision.Of) of each word whose value the call
+// sends a word of apart (sentApart, at each token naming it). It asks only a
+// value whose every word is still made anew once the call is decided, one
+// decision per word (wholeForms): any other names none whatever the call
+// sends (keepWholeForms), so the call's texts are not read for it, as for a
+// find whose id's words are uses of an earlier place.
+func (dc *decider) formsApart(ds []Decision) {
+	for of, f := range wholeForms(ds) {
+		if !f.whole || !slices.ContainsFunc(dc.forms[of], func(sf string) bool { return dc.sentApart(of, sf) }) {
+			continue
+		}
+		for _, i := range f.at {
+			ds[i].Of = ""
+		}
+	}
+}
+
+// valueForm is one value's words in a call's decisions: their indexes, and
+// whether each is made anew with one decision per word of the value.
+type valueForm struct {
+	at    []int
+	whole bool
+}
+
+// wholeForms are the values ds's words name (Decision.Of), each with its
+// words (valueForm).
+func wholeForms(ds []Decision) map[string]*valueForm {
+	forms := map[string]*valueForm{}
+	for i, d := range ds {
+		if d.Of == "" {
+			continue
+		}
+		f := forms[d.Of]
+		if f == nil {
+			f = &valueForm{whole: true}
+			forms[d.Of] = f
+		}
+		f.at = append(f.at, i)
+		f.whole = f.whole && d.Outcome == OutcomeFresh && strings.Contains(d.Line, undoMark)
+	}
+	for of, f := range forms {
+		f.whole = f.whole && len(f.at) == len(variables.Words(of))
+	}
+	return forms
+}
+
 // keepWholeForms keeps a word's value (Decision.Of) only where every word of
 // that value is still made anew in this call once the call is decided
 // (other uses, two readings, a recording keploy could not read, the
@@ -517,27 +575,9 @@ func formSays(field, of string) string {
 // one field: a later place of the call that holds them is a use of the
 // first (oneValue), so it is no word made anew.
 func keepWholeForms(ds []Decision, fields []string) {
-	type form struct {
-		at    []int
-		whole bool
-	}
-	forms := map[string]*form{}
-	for i, d := range ds {
-		if d.Of == "" {
-			continue
-		}
-		f := forms[d.Of]
-		if f == nil {
-			f = &form{whole: true}
-			forms[d.Of] = f
-		}
-		f.at = append(f.at, i)
-		f.whole = f.whole && d.Outcome == OutcomeFresh && strings.Contains(d.Line, undoMark)
-	}
-	for of, f := range forms {
-		keep := f.whole && len(f.at) == len(variables.Words(of))
+	for of, f := range wholeForms(ds) {
 		for _, i := range f.at {
-			if !keep {
+			if !f.whole {
 				ds[i].Of = ""
 				continue
 			}
