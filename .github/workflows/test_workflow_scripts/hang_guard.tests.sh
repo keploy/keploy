@@ -207,6 +207,33 @@ if [ "$(id -u)" != 0 ] && sudo -n true 2>/dev/null; then
   grep -q "could not send SIGKILL" "$tmp/l17" || bad "the guard's line for a failed sudo -n kill is missing: $(cat "$tmp/l17")"
   # shellcheck disable=SC2046
   sudo -n kill -s KILL $(cat "$tmp/s4" 2>/dev/null) 2>/dev/null
+  # A sudo -n kill that fails because the run ended meanwhile (on the TERM
+  # sudo relayed) is no failure to report: a sudo that waits until the
+  # group is gone, then fails as kill(1) does, while root's command takes a
+  # moment to end on its TERM.
+  mkdir -p "$tmp/fakesudo-gone" && cat >"$tmp/fakesudo-gone/sudo" <<'E' && chmod +x "$tmp/fakesudo-gone/sudo"
+#!/usr/bin/env bash
+echo "$*" >>"$FAKE_SUDO_LOG"
+pg=${6#-}
+for ((i = 0; i < 100; i++)); do
+  in=""
+  for f in /proc/[0-9]*/stat; do
+    { read -r l <"$f"; } 2>/dev/null || continue
+    l=${l##*) }
+    read -r _ _ g _ <<<"$l"
+    [ "$g" = "$pg" ] && { in=1; break; }
+  done
+  [ -n "$in" ] || break
+  /bin/sleep 0.1
+done
+exit 1
+E
+  : >"$tmp/sudo-calls"
+  FAKE_SUDO_LOG="$tmp/sudo-calls" PATH="$tmp/fakesudo-gone:$PATH" \
+    bounded 3 "$realsudo" -n sh -c 'trap "sleep 1; exit 0" TERM; while :; do sleep 0.2; done' 2>"$tmp/l19"
+  row "a run under sudo that ends a moment after the TERM: a sudo -n kill that finds it gone says nothing" 0 1 $? "$tmp/l19"
+  [ -s "$tmp/sudo-calls" ] && ok "the guard sends its TERM through sudo to root's command that outlives it" ||
+    bad "the guard did not send its TERM through sudo to root's command that outlived it"
   # As root the guard needs no sudo, for another user's member too, one
   # that outlives the TERM.
   : >"$tmp/sudo-calls"

@@ -96,14 +96,15 @@ hang_foreign() {
 # command, but not KILL: KILL ends sudo alone and leaves root's command
 # running under pid 1. So while a member of the group is another user's,
 # SIG goes through `sudo -n kill` too (a runner has password-free sudo); if
-# that fails, the guard says root's command may still run (the rows "a run
-# under sudo", on sudo 1.9 and sudo-rs). A command that sudo runs in a
+# that fails while such a member is still there (not when the run ended on
+# the signal sudo relayed meanwhile), the guard says root's command may
+# still run (the rows "a run under sudo", on sudo 1.9 and sudo-rs). A command that sudo runs in a
 # terminal of its own (use_pty, when sudo has one) is in another session,
 # and so not in the group: no lane runs one under the guard.
 hang_signal() {
   kill -s "$1" -- "-$2" 2>/dev/null
   hang_foreign "$2" || return 0
-  sudo -n kill -s "$1" -- "-$2" 2>/dev/null ||
+  sudo -n kill -s "$1" -- "-$2" 2>/dev/null || ! hang_foreign "$2" ||
     echo "$HANG_LINE could not send SIG$1 to another user's process in the run's group (sudo -n kill failed): it may still run" >&2
 }
 
