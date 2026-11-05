@@ -163,7 +163,7 @@ run_case() {
             env "$@" PATH="$dir/bin:$PATH" HOME="$dir/home" GITHUB_WORKSPACE="$dir/ws" \
                 FAKE_DIR="$dir/counters" RECORD_BIN="$dir/bin/keploy" REPLAY_BIN="$dir/bin/keploy" \
                 LANE_SCRIPT="$LANE_SCRIPT" \
-                timeout 60 bash ${LANE_SHELL_OPTS:--e} -c 'source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/$LANE_SCRIPT"'
+                bash "$fakes_here/../hang_guard.sh" 60 bash ${LANE_SHELL_OPTS:--e} -c 'source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/$LANE_SCRIPT"'
     ) >"$out" 2>&1 || rc=$?
 }
 

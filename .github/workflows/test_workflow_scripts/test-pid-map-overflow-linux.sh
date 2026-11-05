@@ -54,6 +54,8 @@ set -uo pipefail
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 # shellcheck source=sudo_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
+# shellcheck source=hang_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/hang_guard.sh" || exit 1
 # http_mocks_only: the recording is the app's calls to its dependency, by kind.
 # shellcheck source=mock-kinds.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mock-kinds.sh" || exit 1
@@ -261,9 +263,9 @@ echo "== record $N tests, one dependency call each =="
 # No --record-timer: the recording is stopped as a user stops one, with
 # Ctrl+C, once every request has had its answer. timeout only ends a keploy
 # that hangs.
-sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" timeout -k 10 600 "$RECORD_BIN" record -c "bash app.sh" \
-  --generateGithubActions=false --disable-tele > record.log 2>&1 &
-KP=$!
+hang_start -k 10 600 sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "bash app.sh" \
+  --generateGithubActions=false --disable-tele > record.log 2>&1
+KP=$HANG_PID
 # Until the app listens (a connect, which records no test): keploy starts it
 # once its agent is up. The bound is only for an agent that never comes up.
 UP=0
@@ -279,7 +281,7 @@ done
 # Ctrl+C to keploy itself, timeout's child, whose command line starts with
 # the binary (the agent it starts says "agent", not "record").
 sudo pkill -INT -f "^$RECORD_BIN record -c bash app\.sh" || fail "record: found no keploy record to stop"
-wait "$KP"
+hang_wait "$KP"
 echo "record: keploy exited $?"
 
 # mocks <file>: how many mocks it holds, of any kind; 0 for a file that is not
@@ -323,7 +325,7 @@ ktest() {
   # full), so that fallback must stay unreachable -- the outer timeout, the
   # same 600s, is the real hang guard, and app.py exits the app if the holder
   # dies, so a stuck /healthz never burns the window on a dead app.
-  sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$@" timeout -k 30 600 "$REPLAY_BIN" test -c "bash app.sh" \
+  bounded -k 30 600 sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$@" "$REPLAY_BIN" test -c "bash app.sh" \
     --health-url "http://127.0.0.1:$APP/healthz" --health-poll-timeout 600s \
     --remove-unused-mocks --generateGithubActions=false --disable-tele > "$log" 2>&1
   echo $?
@@ -359,7 +361,7 @@ ktest_kept() {
   sudo rm -rf keploy hold.out && sudo cp -a keploy.rec keploy
   make_kept_set || { echo 99; return; }
   : > dep.log
-  sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$@" timeout -k 30 900 "$REPLAY_BIN" test -c "bash app.sh" --keep-app-alive \
+  bounded -k 30 900 sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$@" "$REPLAY_BIN" test -c "bash app.sh" --keep-app-alive \
     --health-url "http://127.0.0.1:$APP/healthz" --generateGithubActions=false --disable-tele > "$log" 2>&1
   echo $?
 }

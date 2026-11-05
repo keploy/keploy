@@ -170,7 +170,7 @@ run_record() {
     (
         cd "$root/ws" &&
             env -u KEPLOY_EXACT_VIEW_VERIFY -u NOVERIFY "${verify[@]}" PATH="$root/bin:$PATH" ROOT="$root" CURL="$2" WRITE="$3" DROP="$4" FUNCS="$funcs" RECORD_BIN="$root/bin/record" PORT=1 KNAME=app PROJECT=setend-tests \
-                timeout 60 bash -c 'FAIL=0; . "$FUNCS"; record 0; echo "RECORD RETURNED FAIL=$FAIL"'
+                bash "$here/hang_guard.sh" 60 bash -c 'FAIL=0; . "$FUNCS"; record 0; echo "RECORD RETURNED FAIL=$FAIL"'
     ) >"$root/$1.out" 2>&1
     rc=$?
     cp "$root/ws/record0.log" "$root/$1.log" 2>/dev/null
@@ -221,7 +221,7 @@ await_case() {
         (sleep 1) &
     fi
     job=$!
-    FUNCS="$funcs" LOG="$log" JOB="$job" timeout 60 bash -c '. "$FUNCS"; await "$LOG" "$JOB" "APP LISTENING" 1'
+    FUNCS="$funcs" LOG="$log" JOB="$job" bash "$here/hang_guard.sh" 60 bash -c '. "$FUNCS"; await "$LOG" "$JOB" "APP LISTENING" 1'
     rc=$?
     kill "$job" 2>/dev/null
     wait "$job" 2>/dev/null

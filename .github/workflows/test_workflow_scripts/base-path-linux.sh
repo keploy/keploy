@@ -58,6 +58,8 @@
 # switches a workflow sets for keploy, each only while it is set.
 # shellcheck source=sudo_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
+# shellcheck source=hang_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/hang_guard.sh" || exit 1
 
 set -uo pipefail
 
@@ -237,7 +239,7 @@ DRIVER=$!
 # The timer stops the recording: the app is a server and would not end. It
 # runs from when keploy starts the app, so a slow agent does not use it up.
 # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-sudo env PATH="$PATH" "${SUDO_ENV[@]}" timeout -k 10 480 "$RECORD_BIN" record -c "python3 app.py 127.0.0.1 $APP_PORT $DEP_PORT" \
+bounded -k 10 480 sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "python3 app.py 127.0.0.1 $APP_PORT $DEP_PORT" \
   --record-timer 20s --generateGithubActions=false --disable-tele > record.log 2>&1
 echo "record exit status: $?"
 # Once keploy is gone nothing will answer a driver still waiting for the app.
@@ -270,7 +272,7 @@ replay() {
   local report="keploy/reports/test-run-$RUN/test-set-0-report.yaml"
   shift 6
   [ "${want%% *}" = NONE ] || RUN=$((RUN + 1))
-  timeout -k 10 120 "$REPLAY_BIN" test --base-path "$base" --generateGithubActions=false --disable-tele "$@" > "$name.log" 2>&1 </dev/null
+  bounded -k 10 120 "$REPLAY_BIN" test --base-path "$base" --generateGithubActions=false --disable-tele "$@" > "$name.log" 2>&1 </dev/null
   rc=$?
   sed -i 's/\x1b\[[0-9;]*m//g' "$name.log"
   local before=$FAIL
@@ -366,19 +368,19 @@ echo "== 8. the run is stopped as a test waits for its answer =="
 up 127.0.0.1 "$APP_PORT" "$DEP_PORT" hold || exit 1
 # --must-pass, which deletes the tests a run reports as failed, and longer for
 # the app to answer than this leg takes, so that the stop is what ends the wait.
-timeout -k 30 120 "$REPLAY_BIN" test --base-path "http://127.0.0.1:$APP_PORT" --must-pass --test-sets test-set-0 \
-  --api-timeout 100 --generateGithubActions=false --disable-tele > stopped.log 2>&1 </dev/null &
-KEPLOY=$!
+hang_start -k 30 120 "$REPLAY_BIN" test --base-path "http://127.0.0.1:$APP_PORT" --must-pass --test-sets test-set-0 \
+  --api-timeout 100 --generateGithubActions=false --disable-tele > stopped.log 2>&1 </dev/null
+KEPLOY=$HANG_PID
 for ((i = 0; i < 600; i++)); do
   [ -e app.holding ] && break
   sleep 0.2
 done
 BEFORE=$FAIL
 [ -e app.holding ] || fail "stopped: the app was never asked for the order it holds"
-# To keploy itself, which is timeout's child: a script's background job is
-# started with SIGINT ignored, and timeout does not hand on what it ignores.
-pkill -INT -P "$KEPLOY"
-wait "$KEPLOY"
+# To keploy itself (hang_start runs it with SIGINT not ignored, which a
+# script's background job otherwise is).
+kill -INT "$KEPLOY"
+hang_wait "$KEPLOY"
 rc=$?
 down
 sed -i 's/\x1b\[[0-9;]*m//g' stopped.log
@@ -409,22 +411,22 @@ for stop in INT:130 TERM:143 HUP:129; do
   # The run before this one (leg 8's, at first) wrote test-run-$RUN.
   RUN=$((RUN + 1))
   rm -f app.holding
-  timeout -k 30 120 "$REPLAY_BIN" test --base-path "http://127.0.0.1:$APP_PORT" --test-sets test-set-0 \
-    --api-timeout 100 --generateGithubActions=false --disable-tele > "$name.log" 2>&1 </dev/null &
-  KEPLOY=$!
+  hang_start -k 30 120 "$REPLAY_BIN" test --base-path "http://127.0.0.1:$APP_PORT" --test-sets test-set-0 \
+    --api-timeout 100 --generateGithubActions=false --disable-tele > "$name.log" 2>&1 </dev/null
+  KEPLOY=$HANG_PID
   # Until the app holds the first test, or keploy has ended without asking
-  # for it; timeout ends keploy if neither comes.
+  # for it; the hang guard ends keploy if neither comes.
   until [ -e app.holding ] || ! kill -0 "$KEPLOY" 2>/dev/null; do
     sleep 0.2
   done
   BEFORE=$FAIL
   if [ -e app.holding ]; then
     # To keploy itself, as in leg 8.
-    pkill -"$sig" -P "$KEPLOY" || fail "$name: keploy had ended before its SIG$sig"
+    kill -"$sig" "$KEPLOY" || fail "$name: keploy had ended before its SIG$sig"
   else
     fail "$name: the app was never asked for the first test"
   fi
-  wait "$KEPLOY"
+  hang_wait "$KEPLOY"
   rc=$?
   sed -i 's/\x1b\[[0-9;]*m//g' "$name.log"
   [ "$rc" -eq "$want" ] || fail "$name: exit code $rc, want $want: the run was stopped before any test got a verdict"

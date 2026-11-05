@@ -7,7 +7,10 @@ name: Sudo env scripts
 # does not read; a check that every script sources sudo_env.sh by its own
 # path, so it loads where a workflow checks keploy out at a path; and
 # verify_ran, which fails a run under the proven switch whose agent never said
-# its exact view's verify mode is on.
+# its exact view's verify mode is on. hang_guard.tests.sh: the hang guard a
+# script bounds a run with, whose exit code is the run's own on GNU and uutils
+# coreutils alike (Ubuntu 26.04's timeout(1) is uutils'), and a check that no
+# script takes an exit code it checks from timeout(1).
 #
 # Those checks read every workflow and every CI script, so this one short job
 # runs on a change to any file under .github. It has a workflow of its own so
@@ -36,3 +39,6 @@ jobs:
 
       - name: Test sudo_env.sh (a sudo'd keploy run names each workflow switch and loads sudo_env.sh by its own path; a run under the switch whose agent did not say verify mode is on fails)
         run: bash .github/workflows/test_workflow_scripts/sudo_env.tests.sh
+
+      - name: Test hang_guard.sh (a bounded run's exit code is its own, not timeout's; no script takes one from timeout)
+        run: bash .github/workflows/test_workflow_scripts/hang_guard.tests.sh
