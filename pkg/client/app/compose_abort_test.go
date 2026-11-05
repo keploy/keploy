@@ -28,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // abortDaemon is a daemon holding one compose project's containers, by name
@@ -58,7 +59,10 @@ type abortContainer struct {
 	// project is the container's compose project when it is not the
 	// daemon's (another stack on the same daemon).
 	project string
-	made    int
+	// oneOff: a `docker compose run` container of service, not one of the
+	// up's.
+	oneOff bool
+	made   int
 }
 
 type abortSub struct {
@@ -89,7 +93,12 @@ func (d *abortDaemon) labels(c *abortContainer) map[string]string {
 	if c.project != "" {
 		project = c.project
 	}
-	return map[string]string{composeProjectLabelKey: project, composeServiceLabelKey: c.service}
+	// compose labels every container of its own with oneoff, True or False.
+	oneOff := "False"
+	if c.oneOff {
+		oneOff = "True"
+	}
+	return map[string]string{composeProjectLabelKey: project, composeServiceLabelKey: c.service, composeOneOffLabelKey: oneOff}
 }
 
 func (d *abortDaemon) takes(s abortSub, m events.Message) bool {
@@ -421,7 +430,10 @@ func TestAComposeUpThatAbortedBeforeTheAppStartedEndsAndIsRetried(t *testing.T) 
 // once the test closes reopen, and asked is closed as the watch asks for it.
 // Its next read of the daemon's time fails once failInfo is set (as the
 // others, at once or slow); every one fails with infoErr when that is set,
-// and says the time infoTime when that is set. infoReads counts those reads.
+// says the time infoTime when that is set, and, with infoHangs, answers only
+// when its caller's context ends, as a daemon whose /info hangs while its
+// events still flow. infoReads counts those reads, and infoCapped those of
+// them that hung until their cap passed.
 // Once agentFails is set, every inspect of keploy's agent's container fails,
 // as a daemon's that fails it for good (a socket proxy's rule); agentReads
 // counts those inspects.
@@ -431,6 +443,7 @@ type flakyDaemon struct {
 	slow       bool
 	infoErr    error
 	infoTime   *string
+	infoHangs  bool
 	breakFirst chan error
 	asked      chan struct{}
 	reopen     chan struct{}
@@ -440,13 +453,22 @@ type flakyDaemon struct {
 	listFails, agentFails         bool
 	listNeeds                     time.Duration
 	streams, infoReads            int
-	agentReads                    int
+	agentReads, infoCapped        int
 }
 
 func (d *flakyDaemon) Info(ctx context.Context) (system.Info, error) {
 	d.fmu.Lock()
 	d.infoReads++
 	d.fmu.Unlock()
+	if d.infoHangs {
+		<-ctx.Done()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			d.fmu.Lock()
+			d.infoCapped++
+			d.fmu.Unlock()
+		}
+		return system.Info{}, ctx.Err()
+	}
 	if d.infoErr != nil {
 		return system.Info{}, d.infoErr
 	}
@@ -703,8 +725,9 @@ func TestTheAbortWatchReadsEventsOnTheDaemonsClock(t *testing.T) {
 // the watch has read the daemon's time, so a daemon that will not say it
 // must leave the watch on keploy's clock, not hold the up: one that refuses
 // the read, cannot be reached, or gives no time it reads, at the first read;
-// one whose every read fails (a 5xx), after composeAbortSinceReads reads.
-// The up starts, and its abort is seen and retried. Each of the run's two up
+// one whose every read fails (a 5xx), after 3 reads (the ruled count, not
+// composeAbortSinceReads: a change of the count must fail here). The up
+// starts, and its abort is seen and retried. Each of the run's two up
 // attempts (the aborted one and its retry) reads the time.
 func TestAnAbortWatchOnADaemonThatWillNotSayItsTime(t *testing.T) {
 	refused := errors.New("Error response from daemon: not served")
@@ -724,7 +747,7 @@ func TestAnAbortWatchOnADaemonThatWillNotSayItsTime(t *testing.T) {
 		{name: "keploy's client cannot connect", err: cannotConnect, perUp: 1},
 		{name: "an empty time", time: &empty, perUp: 1},
 		{name: "a time keploy does not read", time: &malformed, perUp: 1},
-		{name: "every read fails (a 500)", err: errdefs.System(errors.New("Error response from daemon: internal error")), perUp: composeAbortSinceReads},
+		{name: "every read fails (a 500)", err: errdefs.System(errors.New("Error response from daemon: internal error")), perUp: 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newAbortDaemon("tmpproj")
@@ -737,6 +760,110 @@ func TestAnAbortWatchOnADaemonThatWillNotSayItsTime(t *testing.T) {
 				t.Fatalf("the two ups read the daemon's time %d times, want %d (%d each)", reads, want, tc.perUp)
 			}
 		})
+	}
+}
+
+// TestAWatchOnKeploysClockSaysSoOncePerUp: a watch that takes keploy's clock
+// says so in one Warn per up attempt, with how many reads of the daemon's
+// time it made: that line is all a user is told of why the watch is on
+// keploy's clock (the daemon refuses its time, as a socket proxy's rule does;
+// keploy's Engine API client cannot reach it, as with Docker Desktop,
+// rootless or sudo; it gives no time; every read fails). A daemon that says
+// its time gets no Warn. A daemon whose /info never answers while its events
+// still flow, so that every read of its time runs past its cap, is read 3
+// times (caps of 2, 4 and 8 s), not for ever with a cap that doubles: the up
+// starts, on keploy's clock.
+func TestAWatchOnKeploysClockSaysSoOncePerUp(t *testing.T) {
+	const warning = "keploy could not read the docker daemon's time"
+	cannotConnect := realConnectionFailure(t)
+	empty := ""
+	for _, tc := range []struct {
+		name  string
+		err   error
+		time  *string
+		hangs bool
+		// perUp is how often each up attempt reads the daemon's time.
+		perUp int
+		// clock: the up attempt takes keploy's clock.
+		clock bool
+		// oneUp: one up attempt, not two (each of the hung daemon's takes
+		// about 14 s, and a second shows nothing the 500's does not).
+		oneUp bool
+	}{
+		{name: "the daemon says its time", perUp: 1},
+		{name: "forbidden (a socket proxy's rule)", err: errdefs.Forbidden(errors.New("Error response from daemon: not served")), perUp: 1, clock: true},
+		{name: "keploy's client cannot connect", err: cannotConnect, perUp: 1, clock: true},
+		{name: "an empty time", time: &empty, perUp: 1, clock: true},
+		{name: "every read fails (a 500)", err: errdefs.System(errors.New("Error response from daemon: internal error")), perUp: 3, clock: true},
+		{name: "every read runs past its cap (its /info hangs)", hangs: true, perUp: 3, clock: true, oneUp: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			fd := &flakyDaemon{abortDaemon: newAbortDaemon("tmpproj"), agent: "keploy-v3-test",
+				infoErr: tc.err, infoTime: tc.time, infoHangs: tc.hangs}
+			a := &App{logger: zap.New(core), docker: fd, kind: utils.DockerCompose,
+				keployContainer: "keploy-v3-test", container: "runner", composeService: "runner"}
+			ups := 2
+			if tc.oneUp {
+				ups = 1
+			}
+			// Each up attempt (an up and its retry) watches on its own: it
+			// reads the time, and says it took keploy's clock, again.
+			for up := 1; up <= ups; up++ {
+				watchAnUp(t, a)
+				fd.fmu.Lock()
+				reads, capped := fd.infoReads, fd.infoCapped
+				fd.fmu.Unlock()
+				if want := up * tc.perUp; reads != want {
+					t.Fatalf("after up %d the daemon's time was read %d times, want %d (%d each up)", up, reads, want, tc.perUp)
+				}
+				if tc.hangs && capped != reads {
+					t.Fatalf("%d of the %d reads of the hung daemon's time ended on their cap, want all: the row does not test reads past their cap", capped, reads)
+				}
+				warns := 0
+				if tc.clock {
+					warns = up
+				}
+				said := logs.FilterLevelExact(zap.WarnLevel).FilterMessageSnippet(warning).All()
+				if len(said) != warns || logs.Len() != warns {
+					t.Fatalf("after up %d keploy said it took its clock in %d Warn lines (%d lines at Warn or above), want %d, one each up that takes keploy's clock: %v", up, len(said), logs.Len(), warns, logs.All())
+				}
+				if warns > 0 {
+					if got := said[warns-1].ContextMap()["reads"]; got != int64(tc.perUp) {
+						t.Fatalf("up %d's Warn says %v reads of the daemon's time, want %d", up, got, tc.perUp)
+					}
+				}
+			}
+		})
+	}
+}
+
+// watchAnUp is one up attempt's watch, as run() makes it before the up
+// starts and stops it once the up has returned. The up starts once the watch
+// has returned: it fails the test when that is not within a minute, or when
+// the watch ended the up it let start.
+func watchAnUp(t *testing.T, a *App) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type watch struct {
+		upCtx context.Context
+		stop  func()
+	}
+	watched := make(chan watch, 1)
+	go func() {
+		upCtx, stop := a.watchComposeAbort(ctx)
+		watched <- watch{upCtx, stop}
+	}()
+	var w watch
+	select {
+	case w = <-watched:
+	case <-time.After(time.Minute):
+		t.Fatal("the watch did not return within a minute: the up waits for the daemon's time")
+	}
+	defer w.stop()
+	if err := w.upCtx.Err(); err != nil {
+		t.Fatalf("the watch ended the up it let start: %v", context.Cause(w.upCtx))
 	}
 }
 
@@ -813,27 +940,7 @@ func TestAnAbortWatchOnADaemonKeployCannotReachLetsTheUpStart(t *testing.T) {
 			cd := &infoCountingDaemon{Client: dc}
 			a := &App{logger: zap.NewNop(), docker: cd, kind: utils.DockerCompose,
 				keployContainer: "keploy-v3-test", container: "runner", composeService: "runner"}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			type watch struct {
-				upCtx context.Context
-				stop  func()
-			}
-			watched := make(chan watch, 1)
-			go func() {
-				upCtx, stop := a.watchComposeAbort(ctx)
-				watched <- watch{upCtx, stop}
-			}()
-			var w watch
-			select {
-			case w = <-watched:
-			case <-time.After(time.Minute):
-				t.Fatal("the watch did not return within a minute: the up waits for the time of a daemon keploy's Engine API client cannot reach")
-			}
-			if err := w.upCtx.Err(); err != nil {
-				t.Fatalf("the watch ended the up it let start: %v", context.Cause(w.upCtx))
-			}
-			w.stop()
+			watchAnUp(t, a)
 			if n := cd.reads.Load(); n != 1 {
 				t.Fatalf("the watch read the time of a daemon it cannot reach %d times, want 1", n)
 			}
@@ -946,10 +1053,16 @@ func TestTheProvenSwitchLeavesTheAbortWatchOff(t *testing.T) {
 // Nor for a scaled app service (scaled: a second container of it): keploy
 // decides on the app's one container only, as its stop of the app does
 // (compose_appstop.go), so a project with two is never read as that end.
+// A one-off container (`docker compose run`) is in the project's list but
+// not of the up: an exited one of the app's service (appRun: `docker compose
+// run app` without --rm) is not a second app container, nor is a running
+// one of another service (depRun) a container of the up that still runs.
+// Read as the up's, either hid the abort, and keploy waited on the up.
 func TestComposeAbortedBeforeTheAppReadsTheWholeProject(t *testing.T) {
 	for _, tc := range []struct {
 		name                    string
 		app, scaled, agent, dep string
+		appRun, depRun          string
 		want                    bool
 	}{
 		{name: "all stopped, app never started", app: "created", agent: "exited", dep: "exited", want: true},
@@ -963,6 +1076,8 @@ func TestComposeAbortedBeforeTheAppReadsTheWholeProject(t *testing.T) {
 		{name: "no agent container", app: "created", dep: "exited"},
 		{name: "scaled app, neither started", app: "created", scaled: "created", agent: "exited", dep: "exited"},
 		{name: "scaled app, one ran", app: "created", scaled: "exited", agent: "exited", dep: "exited"},
+		{name: "all stopped, app never started, an exited one-off of the app", app: "created", appRun: "exited", agent: "exited", dep: "exited", want: true},
+		{name: "all stopped, app never started, a one-off of the dependency runs", app: "created", depRun: "running", agent: "exited", dep: "exited", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cs := []*abortContainer{{name: "p-dep-1", service: "dep", status: tc.dep, exitCode: 3}}
@@ -974,6 +1089,12 @@ func TestComposeAbortedBeforeTheAppReadsTheWholeProject(t *testing.T) {
 			}
 			if tc.scaled != "" {
 				cs = append(cs, &abortContainer{name: "p-app-2", service: "app", status: tc.scaled})
+			}
+			if tc.appRun != "" {
+				cs = append(cs, &abortContainer{name: "p-app-run-0123456789ab", service: "app", status: tc.appRun, oneOff: true})
+			}
+			if tc.depRun != "" {
+				cs = append(cs, &abortContainer{name: "p-dep-run-0123456789ab", service: "dep", status: tc.depRun, oneOff: true})
 			}
 			d := newAbortDaemon("p", cs...)
 			a := &App{logger: zap.NewNop(), docker: d, kind: utils.DockerCompose, keployContainer: "agent", container: "app", composeService: "app"}
