@@ -558,10 +558,11 @@ func untimedAnswer(req, answered time.Time) bool {
 // answer once, so an application copying by position may have taken
 // another serve of it in F. Two places are tied alike here never: an
 // order the recording cannot tell, or one that differs, marks them
-// unknown even where both hold the value's words at the same fields.
-func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
+// unknown even where both hold the value's words at the same fields. It
+// reports whether it marked a place.
+func orderUnknown(in Input, ps []evPlace, cand map[string]bool) (marked bool) {
 	if len(cand) == 0 || len(cand) == 1 && !servedAgain(in, cand) {
-		return
+		return false
 	}
 	source := func(mock string) bool { return cand[mock] }
 	rec, _, untoldRec := recordedOrder(in.At, in.Earlier, in.Raw, source, func(Raw) string { return "" })
@@ -571,13 +572,15 @@ func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
 		why = "another order: " + d
 	}
 	if why == "" {
-		return
+		return false
 	}
 	for i := range ps {
 		if cand[ps[i].mock] && ps[i].state == stateBefore {
 			ps[i].state, ps[i].why = stateUnknown, why
+			marked = true
 		}
 	}
+	return marked
 }
 
 // servedAgain reports whether round F served a candidate of cand at two

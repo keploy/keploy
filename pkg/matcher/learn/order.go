@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -503,8 +504,32 @@ func (dc *decider) answeredAfter(r string) []Place {
 	return out
 }
 
-// wordAt is word's verdict.
+// wordPasses counts the times a word is decided (wordBy), for the rows
+// that bound a call's work: twice only where wordAt decides it again.
+var wordPasses atomic.Int64
+
+// wordAt is word's verdict. Where serve order made a candidate place
+// unknown (orderUnknown) and the word is refused as unknown, it is decided
+// again with the order not asked: a conflict there, a candidate that held
+// R's word where F's did not follow, is the truer reason, and is named
+// instead. A conflict wins over an unknown place (wordBy), so it can come
+// only from a place the order marked. Any other verdict there keeps the
+// order's refusal: the second decision names a refusal, never loosens one.
 func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text string, w readWord, piece bool) Decision {
+	ordered := false
+	d := dc.wordBy(path, bare, rec, live, text, w, piece, &ordered)
+	if ordered && d.Refusal != nil && d.Refusal.Kind == RefusalUnknown {
+		if c := dc.wordBy(path, bare, rec, live, text, w, piece, nil); c.Refusal != nil && c.Refusal.Kind == RefusalConflict {
+			return c
+		}
+	}
+	return d
+}
+
+// wordBy is word's verdict, serve order asked where ordered is not nil
+// (set where the order made a place unknown), and not asked where it is.
+func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text string, w readWord, piece bool, ordered *bool) Decision {
+	wordPasses.Add(1)
 	at, n := w.At, w.At.Word
 	ps := make([]evPlace, len(dc.ps))
 	for i, p := range dc.ps {
@@ -536,8 +561,8 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 			shown = shown || moved[i] == ""
 		}
 	}
-	if !shown {
-		orderUnknown(dc.in, ps, cand)
+	if !shown && ordered != nil {
+		*ordered = orderUnknown(dc.in, ps, cand)
 	}
 	swapUnknown(dc.in, ps, w, held)
 	// aside: places that held R's word where F's did not follow, too
