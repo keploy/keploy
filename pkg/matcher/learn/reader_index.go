@@ -472,6 +472,11 @@ type setFilters struct {
 	post       map[string][]int32
 	nextList   int32
 	listBuilds int
+	// runs and nextText are the set's postings of its filters' words
+	// (postRuns): by run of letters and digits, the ids of the filter
+	// entries whose text holds it, in order.
+	runs     map[string][]int32
+	nextText int32
 }
 
 // filterTextKey is a text by what it holds: its length and two hashes of
@@ -502,6 +507,9 @@ type filterEntry struct {
 	f    wordFilter
 	// byText: the entry is a text's (textEntry), not a recording's.
 	byText bool
+	// id names the entry in the set's postings of its words (postRuns);
+	// -1 where they hold none of its words.
+	id int32
 }
 
 // setsFilters are each set's filters (filtersOf), by the set, held weakly:
@@ -517,7 +525,7 @@ func filtersOf(s *setDerived) *setFilters {
 	}
 	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{},
 		seeds: [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}, words: map[string][]*wordsEntry{},
-		lists: map[weak.Pointer[[]string]]*listsEntry{}, post: map[string][]int32{}})
+		lists: map[weak.Pointer[[]string]]*listsEntry{}, post: map[string][]int32{}, runs: map[string][]int32{}})
 	if !loaded {
 		runtime.AddCleanup(s, func(k weak.Pointer[setDerived]) { setsFilters.Delete(k) }, k)
 	}
@@ -599,6 +607,7 @@ func (t *readerText) textEntry(fs *setFilters) (e *filterEntry, ok bool) {
 // (filterKey); nil where the recording was not read or the filter does not
 // fit.
 func (t *readerText) buildFilter() wordFilter {
+	t.filter.id = -1
 	s, _, ok := t.read()
 	if !ok {
 		return nil
@@ -625,7 +634,77 @@ func (t *readerText) buildFilter() wordFilter {
 	if !setClaim(t.x.set, headerBytes+8*int64(len(f))+filterEntryBytes+t.filterKey) {
 		return nil
 	}
+	postRuns(fs, t.x.set, t.filter, forms)
 	return f
+}
+
+// postRuns adds e's words, each run of letters and digits of every form of
+// its text (forms), to the set's postings (setFilters.runs) under a new id,
+// counted on the set's budget; e keeps id -1 past it. Where the filter of a
+// text may hold a word by chance, the postings name exactly the texts that
+// hold each run, so a call finds the places that may hold a word without
+// asking every place (placeIndex). Each new run's letters are copied: the
+// postings keep no text alive.
+func postRuns(fs *setFilters, s *setDerived, e *filterEntry, forms []string) {
+	seen := map[string]bool{}
+	for _, text := range forms {
+		eachWord(text, func(run string) { seen[run] = true })
+	}
+	n := int64(headerBytes)
+	for run := range seen {
+		n += listsWordBytes + int64(len(run))
+	}
+	if !setClaim(s, n) {
+		return
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	e.id = fs.nextText
+	fs.nextText++
+	for run := range seen {
+		if ids, ok := fs.runs[run]; ok {
+			fs.runs[run] = append(ids, e.id)
+		} else {
+			fs.runs[strings.Clone(run)] = []int32{e.id}
+		}
+	}
+}
+
+// postID is the id the set's postings name t's text by (postRuns), its
+// filter built at the first ask (setFilter); -1 where they hold none of its
+// words: t is in no set's call, its text has no entry, or the entry's
+// words did not fit the set's budget.
+func (t *readerText) postID() int32 {
+	if t.setFilter() == nil {
+		return -1
+	}
+	return t.filter.id
+}
+
+// holdingRuns is, in order, the ids of the set's texts whose words hold
+// every run of runs (postRuns); ok false where runs is empty, which every
+// text may hold.
+func (fs *setFilters) holdingRuns(runs []string) (ids []int32, ok bool) {
+	if len(runs) == 0 {
+		return nil, false
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	lists := make([][]int32, len(runs))
+	for i, run := range runs {
+		lists[i] = fs.runs[run]
+	}
+	slices.SortFunc(lists, func(a, b []int32) int { return len(a) - len(b) })
+next:
+	for _, id := range lists[0] {
+		for _, l := range lists[1:] {
+			if _, in := slices.BinarySearch(l, id); !in {
+				continue next
+			}
+		}
+		ids = append(ids, id)
+	}
+	return ids, true
 }
 
 // filterEntryBytes is what an entry keeps past its filter's words: the
