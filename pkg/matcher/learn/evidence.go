@@ -1473,20 +1473,11 @@ func (dc *decider) places() *placeIndex {
 // (eachB64Run), so it may be no whole run there.
 func (pi *placeIndex) asked(n int, w readWord) []bool {
 	ask := make([]bool, n)
-	mark := func(side map[int32][]int32, runs []string) bool {
-		ids, ok := pi.fs.holdingRuns(runs)
-		for _, id := range ids {
-			for _, i := range side[id] {
-				ask[i] = true
-			}
-		}
-		return ok
-	}
-	if !mark(pi.rec, runsOf(w.Rec, false)) || !mark(pi.live, runsOf(w.Live, false)) {
+	if !pi.mark(ask, pi.rec, runsOf(w.Rec, false)) || !pi.mark(ask, pi.live, runsOf(w.Live, false)) {
 		return nil
 	}
 	for _, t := range w.Tokens {
-		if !mark(pi.rec, runsOf(t.Rec, t.Kind == tokenB64)) {
+		if !pi.mark(ask, pi.rec, runsOf(t.Rec, t.Kind == tokenB64)) {
 			return nil
 		}
 	}
@@ -1494,6 +1485,36 @@ func (pi *placeIndex) asked(n int, w readWord) []bool {
 		ask[i] = true
 	}
 	return ask
+}
+
+// recAsked reports, by place, whether its recorded text may hold r as a
+// word (holdsWord), as asked's does for R's word, or is read always; nil
+// where r has no run of letters and digits the postings can name. A text
+// that holds r as a word in any reading holds each of r's runs whole: every
+// reading reads a letter or digit as a word byte, so none stands right
+// before or after r.
+func (pi *placeIndex) recAsked(n int, r string) []bool {
+	ask := make([]bool, n)
+	if !pi.mark(ask, pi.rec, runsOf(r, false)) {
+		return nil
+	}
+	for _, i := range pi.always {
+		ask[i] = true
+	}
+	return ask
+}
+
+// mark marks in ask the places whose text on side (rec or live) the set's
+// postings say may hold every run of runs; false where runs is empty, which
+// every text may hold.
+func (pi *placeIndex) mark(ask []bool, side map[int32][]int32, runs []string) bool {
+	ids, ok := pi.fs.holdingRuns(runs)
+	for _, id := range ids {
+		for _, i := range side[id] {
+			ask[i] = true
+		}
+	}
+	return ok
 }
 
 // runsOf is s's runs of letters and digits, as eachWord cuts them; inner:

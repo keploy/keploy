@@ -485,7 +485,9 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 // answered after it. An exchange's place names its leaf, a recording's its
 // answer whole. One asked after the call is after it by its request too,
 // and a word its request holds is placed by when it was sent (placedFor):
-// neither is listed. A recording handed in twice is listed once.
+// neither is listed. A recording handed in twice is listed once. Only the
+// places whose recorded text the set's postings say may hold r are placed
+// and asked (recAsked): any other does not hold it.
 func (dc *decider) answeredAfter(r string) []Place {
 	var out []Place
 	add := func(p Place) {
@@ -493,7 +495,12 @@ func (dc *decider) answeredAfter(r string) []Place {
 			out = append(out, p)
 		}
 	}
-	for _, p := range dc.ps {
+	ask := dc.places().recAsked(len(dc.ps), r)
+	for i, p := range dc.ps {
+		if ask != nil && !ask[i] {
+			continue
+		}
+		answeredPlaced.Add(1)
 		if p = placedFor(p, r); !p.recAfter || p.at.After(dc.in.At) {
 			continue
 		}
@@ -510,6 +517,10 @@ func (dc *decider) answeredAfter(r string) []Place {
 	}
 	return out
 }
+
+// answeredPlaced counts the places answeredAfter places and asks for a
+// word, for the rows that bound a call's work.
+var answeredPlaced atomic.Int64
 
 // outsideAsked counts the outside recordings a word's check decides
 // (setEvidence), for the rows that bound a call's work: those whose lists

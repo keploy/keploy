@@ -2051,3 +2051,68 @@ func TestOutcomeCostServeOrderCopiesOnlyTheCandidatesPlaces(t *testing.T) {
 		t.Errorf("the check copied %v places beside 100 and 1000 other recordings; want as many beside both", copies)
 	}
 }
+
+// A decision's list of the recordings answered after the call
+// (answeredAfter) places and asks only the places whose recorded text the
+// set's postings say may hold R's word, not every place of the call for
+// every word: the one recording that holds it, beside 100 other recordings
+// as beside 1,000, round F's answer there the recorded one or the new value.
+// A set whose budget posts no text asks every place. Each lists that
+// recording, asked before the call and answered after it.
+func TestOutcomeCostAnsweredAfterPlacesOnlyThePlacesThatMayHoldTheWord(t *testing.T) {
+	const path = "bind.$8"
+	rows := func(v string) []models.PostgresV3Cells { return []models.PostgresV3Cells{{{Value: v}, {Value: "5"}}} }
+	want := []Place{{Mock: "mock-5", Side: Response}}
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	for _, c := range []struct {
+		name, rec, live string
+		budget          int64
+		fView, every    bool
+	}{
+		{"a word the postings name", "82", "6c7d", 0, false, false},
+		{"a word the postings name, round F's answer holding the new value", "82", "6c7d", 0, true, false},
+		{"a word in a set whose budget posts no text", "82", "6c7d", 1, false, true},
+	} {
+		learnBudget = c.budget
+		for _, n := range []int{100, 1000} {
+			tr := NewTracker()
+			tr.NewSet()
+			tr.Begin()
+			dc := tr.Drifts()
+			var raw []Raw
+			for i := range n {
+				name := fmt.Sprintf("mock-row-%04d", i)
+				m := oPgMock(name, 400*time.Millisecond-time.Duration(i)*time.Microsecond, "SELECT id, n FROM "+name, rows("none"), "SELECT 1")
+				raw = append(raw, dc.LazyRawOf(m, true, nil).ServedAs(1+i).ServedAsRecorded())
+			}
+			// Its answer is long enough that the set posts round F's view of
+			// it too, which holds the new value alone.
+			late := func(v string) *models.Mock {
+				cells := []models.PostgresV3Cells{{{Value: v}, {Value: strings.Repeat("a note kept with the job ", 12)}}}
+				m := oPgMock("mock-5", 10*time.Millisecond, "SELECT id, n FROM jobs", cells, "SELECT 1")
+				m.Spec.ResTimestampMock = oAt.Add(time.Second)
+				return m
+			}
+			x := dc.LazyRawOf(late(c.rec), true, nil).ServedAs(1 + n).ServedAsRecorded()
+			if c.fView {
+				x = dc.LazyRawOf(late(c.rec), true, nil).ServedAs(1 + n).ServedLive(dc.LazyRawOf(late(c.live), true, nil))
+			}
+			raw = append(raw, x)
+			p := answeredPlaced.Load()
+			d := oWord(t, Decide(costCall(dc, path, c.rec, c.live, oAt, nil, raw, nil, nil)), c.rec, c.live)
+			placed := answeredPlaced.Load() - p
+			tr.End()
+			var aside []string
+			for _, p := range d.AnsweredAfter {
+				aside = append(aside, fmt.Sprint(p.Mock, " ", p.Side, " ", p.Path))
+			}
+			t.Logf("%s, beside %d other recordings: %s; set aside as answered after %q; places placed for the list %d", c.name, n, oDescribe([]Decision{d}), aside, placed)
+			if !slices.Equal(d.AnsweredAfter, want) {
+				t.Errorf("%s, beside %d other recordings: the decision set aside %q as answered after the call; want mock-5's answer", c.name, n, aside)
+			}
+			if wantPlaced := map[bool]int64{false: 1, true: int64(n + 1)}[c.every]; placed != wantPlaced {
+				t.Errorf("%s, beside %d other recordings: the list placed and asked %d places; want %d", c.name, n, placed, wantPlaced)
+			}
+		}
+	}
+}
