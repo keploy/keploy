@@ -2,6 +2,8 @@ package tls
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,11 +21,19 @@ import (
 // lock no process holds (reapEndedRunDirs). Only the process holding a lock
 // lets it go, at its exit however it ends, so a live run's directory is never
 // taken and a dead run's goes at the next start.
+//
+// An ended run's directory is renamed to <name>.ended-<random> before anything
+// in it is deleted (retireRunDir), so a removal cut short leaves nothing under
+// the run's name without its lock, and the next run removes what is under the
+// ended name whole. A run killed between making its directory and taking its
+// lock leaves that directory, with no certificate in it: nothing tells it from
+// a run starting, so it stays.
 const (
 	runDirPrefix  = "keploy-ca-"
 	runLockName   = "run.lock"
 	runCAFile     = "keploy-ca.crt"
 	runBundleFile = "keploy-ca-bundle.crt"
+	runEndedMark  = ".ended-"
 )
 
 // runDirPattern is the name of this user's run directories up to the random
@@ -92,12 +102,39 @@ func (r *runTrustDir) removeWhenDone(ctx context.Context, logger *zap.Logger) {
 func (r *runTrustDir) remove() error {
 	var err error
 	r.once.Do(func() {
-		// First: on Windows a file open here cannot be removed.
+		// First: Windows renames no directory while a file in it is open.
 		_ = r.lock.Close()
-		err = os.RemoveAll(r.dir)
+		err = retireRunDir(r.dir)
+		// Last: a test waits on this to know the whole removal is done.
 		liveRunDirs.Delete(r)
 	})
 	return err
+}
+
+// removeAllFn is os.RemoveAll; a test stubs it to cut a removal short.
+var removeAllFn = os.RemoveAll
+
+// retireRunDir removes the directory of a run that has ended and whose lock
+// no process holds. It renames the directory to an ended name first and only
+// then deletes it. A removal cut short before the rename leaves the directory
+// whole, its lock file free, and the next run takes it by its lock; one cut
+// short after it leaves a directory under an ended name, which only an ended
+// run's directory is given, and the next run takes it whole. So the run's own
+// name never holds its files without its lock, and a directory under that name
+// without a lock is only ever a run between making it and taking its lock.
+// Deleting in place could not give that: in every order the last file goes
+// before the directory, and an empty directory is what a run starting looks
+// like. The ended name's random part keeps another user of a shared temp
+// directory from making it first, which would fail the rename for good.
+func retireRunDir(dir string) error {
+	ended := dir + runEndedMark + rand.Text()
+	if err := os.Rename(dir, ended); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // another run's reaper retired it first
+		}
+		return err
+	}
+	return removeAllFn(ended)
 }
 
 // ownedByThisUserFn is ownedByThisUser; a test stubs it, as it cannot make a
@@ -105,8 +142,9 @@ func (r *runTrustDir) remove() error {
 var ownedByThisUserFn = ownedByThisUser
 
 // reapEndedRunDirs removes this user's run directories in the temp directory
-// whose run has ended: their lock file is there and no process holds it. A
-// directory without a lock file is a run between making it and taking its
+// whose run has ended: each under an ended name (a removal cut short), and
+// each whose lock file is there and no process holds. A directory under its
+// run's name without a lock file is a run between making it and taking its
 // lock, and is left alone.
 func reapEndedRunDirs(logger *zap.Logger) {
 	tmp := os.TempDir()
@@ -123,12 +161,18 @@ func reapEndedRunDirs(logger *zap.Logger) {
 		if !ownedByThisUserFn(dir) {
 			continue
 		}
-		release, ended := runEnded(dir)
-		if !ended {
-			continue
+		if strings.Contains(e.Name(), runEndedMark) {
+			err = removeAllFn(dir)
+		} else {
+			release, ended := runEnded(dir)
+			if !ended {
+				continue
+			}
+			// First: Windows renames no directory while a file in it is open.
+			release()
+			err = retireRunDir(dir)
 		}
-		release()
-		if err := os.RemoveAll(dir); err != nil {
+		if err != nil {
 			logger.Debug("could not remove an ended run's CA files", zap.String("dir", dir), zap.Error(err))
 			continue
 		}
