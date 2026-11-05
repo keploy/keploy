@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/docker/docker/api/types/container"
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -125,10 +126,8 @@ func (a *AgentClient) inspectPublish(ctx context.Context, host string, port, app
 	// The agent container also publishes keploy's own ports on loopback; the
 	// user never asked for those, so they are not listed as theirs.
 	own := map[string]bool{}
-	for _, p := range []uint32{a.conf.Agent.AgentPort, a.conf.Agent.ProxyPort, a.conf.ProxyPort, a.conf.Agent.DnsPort, a.conf.DNSPort} {
-		if p != 0 {
-			own[strconv.FormatUint(uint64(p), 10)] = true
-		}
+	for p := range config.KeployPorts(a.conf) {
+		own[strconv.Itoa(int(p))] = true
 	}
 	return appPortPublish(inspect, host, port, appPort, own)
 }
@@ -370,6 +369,13 @@ func (l appListening) listens() bool {
 // the app listens on port.
 func (a *AgentClient) appListening(ctx context.Context, port uint16) appListening {
 	if a.conf.Agent.AgentURI == "" {
+		return appListening{}
+	}
+	if config.KeployPorts(a.conf)[port] {
+		// keploy's proxy, DNS server or API listens there, in the namespace
+		// the app shares: a socket seen there is keploy's, and where the app
+		// listens cannot be told from it. An agent older than its own check
+		// (AppListenAddrs) counted keploy's socket as the app's.
 		return appListening{}
 	}
 	url := fmt.Sprintf("%s/app/listen-addrs?port=%d", a.conf.Agent.AgentURI, port)
