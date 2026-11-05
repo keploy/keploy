@@ -1,8 +1,11 @@
 package learn
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -677,8 +680,12 @@ func TestOutcomeCostACallChecksEachRecordingOnlyForTheWordsItAsks(t *testing.T) 
 		n int
 		r result
 	}{{300, small}, {3000, large}} {
-		if c.r.extras != [2]int{c.n, 0} {
-			t.Errorf("over %d recordings the two tests derived the recordings' other forms %v times; want each once for the set, in the first test, and none in the later", c.n, c.r.extras)
+		// The set derives a recording's other forms (payloadExtra) only where
+		// a scan reads it, past its filter (setFilter): the recording that
+		// holds the word and a filter's rare false hit, once for the set, in
+		// the first test, and none in the later.
+		if c.r.extras[0] < 1 || c.r.extras[0] > 1+c.n/100 || c.r.extras[1] != 0 {
+			t.Errorf("over %d recordings the two tests derived the recordings' other forms %v times; want once for each recording a scan reads (1 and a few false hits), in the first test, and none in the later", c.n, c.r.extras)
 		}
 	}
 }
@@ -742,5 +749,417 @@ func TestOutcomeCostAWordIsFoundWhereMainsListsHoldIt(t *testing.T) {
 	}
 	if lists != 0 {
 		t.Errorf("the questions built %d lists of every word of a text; want each word checked alone", lists)
+	}
+}
+
+// A call asks each place's texts once for each word it decides, in one scan
+// of each text for all three readings: the scans grow with the places times
+// the words asked, at a fixed few per place and word, and the verdicts stay.
+func TestOutcomeCostACallScansEachPlaceOnceForEachWordItAsks(t *testing.T) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
+	const words = 5
+	call := func(n int) (string, int64) {
+		mocks := make([]*models.Mock, n)
+		for i := range mocks {
+			name, body, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d"}`, i, i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+			if i == n/2 {
+				name, body, at = "mock-held", `{"note":"Kept A1B2C3D4","ref":"a1b2c3d4"}`, eRecAt.Add(-time.Second)
+			}
+			mocks[i] = getAnswer(name, fmt.Sprintf("http://api/items/%d", i), body, at)
+		}
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		defer tr.End()
+		dc := tr.Drifts()
+		before := heldScans.Load()
+		got := oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, lazyOf(dc, mocks), nil, nil)))
+		return got, heldScans.Load() - before
+	}
+	small, sScans := call(300)
+	large, lScans := call(3000)
+	t.Logf("decided: %s; scans %d over 300 recordings, %d over 3,000", small, sScans, lScans)
+	if large != small {
+		t.Errorf("over 3,000 recordings the call decides %s; over 300 it decided %s", large, small)
+	}
+	// Each place has two texts (as recorded and as round F gave it), each
+	// read with its other declared forms: four scans for each word.
+	const perPlaceWord = 4
+	for _, c := range []struct {
+		n     int
+		scans int64
+	}{{300, sScans}, {3000, lScans}} {
+		if limit := int64(perPlaceWord*words*c.n + 64); c.scans > limit {
+			t.Errorf("over %d recordings the call made %d scans of a text for a word; want at most %d: a place asked twice for a word, or once for each reading", c.n, c.scans, limit)
+		}
+	}
+}
+
+// costSet decides the call of costCall's row in two tests of one set over
+// n recordings, one of which holds the recorded word: what each test
+// decided, and the filters it built (setFilters.builds), the scans of a text
+// it made for a word (heldScans) and the words it asked of filters
+// (filterLookups).
+func costSet(n int) (got [2]string, builds [2]int, scans, lookups [2]int64) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
+	mocks := make([]*models.Mock, n)
+	for i := range mocks {
+		name, body, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d"}`, i, i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+		if i == n/2 {
+			name, body, at = "mock-held", `{"note":"Kept A1B2C3D4","ref":"a1b2c3d4"}`, eRecAt.Add(-time.Second)
+		}
+		mocks[i] = getAnswer(name, fmt.Sprintf("http://api/items/%d", i), body, at)
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	built := func(dc *DriftCache) int {
+		fs := filtersOf(dc.set)
+		fs.mu.Lock()
+		defer fs.mu.Unlock()
+		return fs.builds
+	}
+	for c := range got {
+		tr.Begin()
+		dc := tr.Drifts()
+		b, sc, l := built(dc), heldScans.Load(), filterLookups.Load()
+		got[c] = oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, lazyOf(dc, mocks), nil, nil)))
+		builds[c], scans[c], lookups[c] = built(dc)-b, heldScans.Load()-sc, filterLookups.Load()-l
+		tr.End()
+	}
+	return got, builds, scans, lookups
+}
+
+// A set builds the filter of each recording's words once, at the first call
+// that asks it a word, and every later call of the set asks the filters:
+// a few lookups per place and word asked, and a scan of a text only where
+// its filter may hold the word (the recording that holds it, and the
+// filter's rare false hits), however many recordings the set holds. The
+// verdicts stay.
+func TestOutcomeCostASetFiltersEachRecordingsWordsOnceAndScansOnlyWhereOneMayHoldAWord(t *testing.T) {
+	const words = 5
+	var first string
+	for _, n := range []int{300, 3000} {
+		got, builds, scans, lookups := costSet(n)
+		t.Logf("%d recordings: decided %s; filters built %v, scans %v, lookups %v (first test, second)", n, got[1], builds, scans, lookups)
+		if first == "" {
+			first = got[0]
+		}
+		if got[0] != first || got[1] != first {
+			t.Errorf("over %d recordings the tests decide %q; want %q in both", n, got, first)
+		}
+		if builds[0] != n || builds[1] != 0 {
+			t.Errorf("over %d recordings the tests built %v filters; want each recording's once, in the first test: [%d 0]", n, builds, n)
+		}
+		// The recording that holds the word, asked for the recorded and round
+		// F's word in a few places, and a false hit in a hundred lookups at most.
+		if limit := int64(4*words + n/100); scans[1] > limit {
+			t.Errorf("over %d recordings the second test scanned a text %d times for a word; want at most %d", n, scans[1], limit)
+		}
+		if lookups[1] < int64(words*n) || lookups[1] > int64(4*words*n) {
+			t.Errorf("over %d recordings the second test asked filters %d words; want a few for each of %d places and %d words", n, lookups[1], n, words)
+		}
+	}
+}
+
+// Past the set's budget a recording keeps no filter: each call scans it as
+// before, and none reads it again to build one. The verdict stays.
+func TestOutcomeCostARecordingsFilterPastTheSetsBudgetIsNotKept(t *testing.T) {
+	const words = 5
+	_, _, wantScans, _ := costSet(300)
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	learnBudget = 1
+	want, _, _, _ := costSet(300)
+	got, builds, scans, lookups := costSet(300)
+	t.Logf("past the budget: decided %s; filters built %v, scans %v, lookups %v (with room: scans %v)", got[1], builds, scans, lookups, wantScans)
+	if got != want {
+		t.Errorf("past the budget the tests decide %q; want %q", got, want)
+	}
+	if builds[0] != 300 || builds[1] != 0 || lookups != [2]int64{} {
+		t.Errorf("past the budget the tests built %v filters and asked them %v words; want each built once, kept by none, asked none", builds, lookups)
+	}
+	if scans[1] < int64(words*300) {
+		t.Errorf("past the budget the second test scanned a text %d times; want each place scanned for each word, as with no filter", scans[1])
+	}
+}
+
+// A recording keploy could not read when a call first asked it a word
+// keeps no filter of no words: the set marks it unread (the store's read
+// bit), so every later test of the set refuses it as unread, as a set whose
+// reads all succeed decides it, never fresh.
+func TestOutcomeCostARecordingUnreadAtItsFirstAskKeepsNoFilter(t *testing.T) {
+	defer func(r, b int64) { readerBudget, bodyBudget = r, b }(readerBudget, bodyBudget)
+	readerBudget, bodyBudget = 1, 1
+	const rec, live = "ids a1b2c3d4", "ids f0e9d8c7"
+	m := getAnswer("mock-held", "http://api/items/1", `{"note":"Kept a1b2c3d4"}`, eRecAt.Add(-time.Second))
+	decide := func(fail int) (got [2]string) {
+		tr := NewTracker()
+		tr.NewSet()
+		for c := range got {
+			tr.Begin()
+			dc := tr.Drifts()
+			loads := 0
+			raw := dc.LazyRawOf(m, true, func() (*models.Mock, error) {
+				if loads++; c == 0 && loads == fail {
+					return nil, fmt.Errorf("load %d of the recording failed", loads)
+				}
+				return m, nil
+			}).ServedAs(1).ServedAsRecorded()
+			got[c] = oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, []Raw{raw}, nil, nil)))
+			tr.End()
+		}
+		return got
+	}
+	want := decide(0)
+	for k := 1; k <= 12; k++ {
+		if got := decide(k); got[1] != want[1] && !strings.Contains(got[1], " refused unread: ") || strings.Contains(got[1], " fresh]") {
+			t.Errorf("the first test's load %d failed; the second decides %s; want it refused as unread, or %s as where every read succeeds", k, got[1], want[1])
+		}
+	}
+}
+
+// A recording's filter rules out only a word no form of its text holds in
+// any reading: never one a reading holds, a word of letters glued to '_',
+// '-' or a byte past ASCII included; and it rules out most words its text
+// does not hold. A view (a text with no recording's identity) is never
+// filtered: two views of a set keep no filter of each other's words.
+func TestOutcomeCostARecordingsFilterRulesOutOnlyWordsNoFormHolds(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	x := newReaderIndex(dc)
+	defer x.release()
+	texts := []string{
+		`{"note":"cart_42 a b, x%y","id":"order-17","path":"up_17/a.png"}`,
+		`{"k":"tok_a-b_c --x__ v1.2","u":"na\u00efve42\u00e9 café-9"}`,
+		`{"cursor":"eyJpZCI6ImFiYzEyMyIsIm4iOjd9","q":"a%20b42%2Fc"}`,
+	}
+	out, absent := 0, 0
+	for i, text := range texts {
+		r := dc.LazyRawOf(getAnswer(fmt.Sprintf("mock-%d", i), "http://api/items", text, eRecAt), true, nil)
+		h := x.textOf(r)
+		forms := textForms(text)
+		joined := strings.Join(forms, "\n")
+		for a := 0; a < len(joined); a++ {
+			for b := a + 1; b <= len(joined) && b <= a+16; b++ {
+				w := joined[a:b]
+				held := heldIn(forms, w, 0, 1, 2)
+				if h.ruledOut(w) {
+					out++
+					if held {
+						t.Errorf("the filter of %s rules out %q, which a reading holds as a word of it", text, w)
+					}
+				}
+				if !held && slices.ContainsFunc(wordsBy(w, isWord), func(run string) bool { return !slices.Contains(wordsBy(joined, isWord), run) }) {
+					absent++
+				}
+			}
+		}
+	}
+	if out*10 < absent*9 {
+		t.Errorf("the filters ruled out %d words of %d with a run of letters and digits their texts lack; want nearly all", out, absent)
+	}
+	for _, v := range []struct{ text, word string }{{"alpha 17", "17"}, {"beta 42", "42"}} {
+		if held, _ := x.textOf(Raw{mock: "mock-view", rText: v.text, rRead: true}).holdsWord(v.word); !held {
+			t.Errorf("the view %q does not hold %q", v.text, v.word)
+		}
+	}
+}
+
+// A word some byte of which no reading reads as a word byte is a word of no
+// text, and no text is scanned for it; one only some readings read is held
+// where those readings hold it.
+func TestOutcomeCostAWordNoReadingReadsScansNoText(t *testing.T) {
+	const s = `{"note":"cart_42 a b, x%y"}`
+	before := heldScans.Load()
+	for _, w := range []string{"a b", "x%y", "\""} {
+		if heldIn(textForms(s), w, 0, 1, 2) {
+			t.Errorf("%q is held as a word of %s; no reading reads it as one", w, s)
+		}
+	}
+	if n := heldScans.Load() - before; n != 0 {
+		t.Errorf("asking words no reading reads scanned a text %d times; want none", n)
+	}
+	// Asked in every reading at once, a word is held where any one reading's
+	// list of the text's words holds it, though another reading that reads
+	// each of its bytes holds it nowhere in the text.
+	for _, text := range []string{s, `{"id":"order-17","path":"up_17/a.png","k":"tok_a-b_c --x__ v1.2"}`} {
+		for r := range readings {
+			for w := range tokensBy(text, readings[r]) {
+				want := slices.ContainsFunc(readings, func(word func(byte) bool) bool { return tokensBy(text, word)[w] })
+				if got := heldIn([]string{text}, w, 0, 1, 2); got != want {
+					t.Errorf("%q in %s, asked in every reading: held %v; the readings' lists hold it: %v", w, text, got, want)
+				}
+			}
+		}
+	}
+	// Whatever order the readings are asked in: "42" is no word of
+	// "cart_42" where '_' continues a word, and is one where it does not.
+	if !heldIn([]string{s}, "42", 2, 0) || heldIn([]string{s}, "42", 2) {
+		t.Errorf("42 in %s: held asked in readings 2 and 0 %v, in reading 2 alone %v; want held only where a reading ends a word at '_'", s, heldIn([]string{s}, "42", 2, 0), heldIn([]string{s}, "42", 2))
+	}
+	if !heldIn([]string{s}, "cart_42", 0, 1, 2) || heldIn([]string{s}, "cart_42", 0) {
+		t.Errorf("cart_42 in %s: held in any reading %v, in reading 0 alone %v; want held only where a reading reads '_' as a word byte", s, heldIn([]string{s}, "cart_42", 0, 1, 2), heldIn([]string{s}, "cart_42", 0))
+	}
+}
+
+// A place keploy read for the call but cannot read again where the call
+// asks it for the word (past the reader's budget, its load failing) leaves
+// the word unknown: refused, never fresh by a place taken to hold nothing.
+func TestOutcomeCostAPlaceThatCannotBeReadAgainLeavesTheWordUnknown(t *testing.T) {
+	defer func(r, b, d, x int64) { readerBudget, bodyBudget, derivedBudget, textBudget = r, b, d, x }(readerBudget, bodyBudget, derivedBudget, textBudget)
+	readerBudget, bodyBudget, derivedBudget, textBudget = 1, 1, 1, 1
+	m := getAnswer("mock-held", "http://api/items/1", `{"note":"Kept a1b2c3d4"}`, eRecAt.Add(-time.Second))
+	seen := map[string]bool{}
+	for k := 1; k <= 12; k++ {
+		loads := 0
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		dc := tr.Drifts()
+		raw := dc.LazyRawOf(m, true, func() (*models.Mock, error) {
+			if loads++; loads > k {
+				return nil, fmt.Errorf("load %d of the recording failed", loads)
+			}
+			return m, nil
+		}).ServedAs(1).ServedAsRecorded()
+		got := oDescribe(Decide(costCall(dc, "body.ids", "ids a1b2c3d4", "ids f0e9d8c7", eRecAt, nil, []Raw{raw}, nil, nil)))
+		tr.End()
+		seen[got] = true
+		if strings.Contains(got, " fresh]") {
+			t.Errorf("the recording's load %d failed: %s; want the word refused, as unread or past the budget", k+1, got)
+		}
+	}
+	t.Logf("decisions: %v", seen)
+}
+
+// wordsRead is how many outside recordings' words dc's set has read
+// (outsideWords).
+func wordsRead(dc *DriftCache) int {
+	fs := filtersOf(dc.set)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.wordsBuilds
+}
+
+// costOutside is n recordings of other tests (Raw.OfAnotherTest), each
+// served changed with round F's view of it (ServedLive), as the Mongo
+// adapter hands them to each call, handed to two calls of one set, one
+// recording holding R's word where F's view holds F's: each call's verdict
+// and how many recordings' words it read.
+func costOutside(n int) (got [2]string, builds [2]int) {
+	const rec, live = "ids a1b2c3d4", "ids f0e9d8c7"
+	mocks, views := make([]*models.Mock, n), make([]*models.Mock, n)
+	for i := range mocks {
+		name, url, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+		body, view := fmt.Sprintf(`{"note":"Item %d","ref":"Ref-%05d"}`, i, i), fmt.Sprintf(`{"note":"Item %d","ref":"Ref-%05d","seen":"yes"}`, i, i)
+		if i == n/2 {
+			body, view = `{"ref":"a1b2c3d4"}`, `{"ref":"f0e9d8c7"}`
+		}
+		mocks[i], views[i] = getAnswer(name, url, body, at), getAnswer(name, url, view, at)
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	for c := range got {
+		tr.Begin()
+		dc := tr.Drifts()
+		raw := make([]Raw, n)
+		for i, m := range mocks {
+			raw[i] = dc.LazyRawOf(m, true, nil).ServedAs(i + 1).ServedLive(RawOf(views[i], true)).OfAnotherTest()
+		}
+		b := wordsRead(dc)
+		got[c] = oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, raw, nil, nil)))
+		builds[c] = wordsRead(dc) - b
+		tr.End()
+	}
+	return got, builds
+}
+
+// A set reads the words of each other test's recording handed to its calls
+// once, at the first call, and a later call handed it as before asks the
+// kept words, not its texts and its view's: no recording's words read again,
+// however many the set holds. Past the set's budget none is kept, each call
+// reads them as before, and the verdicts stay.
+func TestOutcomeCostASetReadsEachOtherTestsRecordingsWordsOnce(t *testing.T) {
+	for _, n := range []int{50, 500} {
+		got, builds := costOutside(n)
+		t.Logf("%d recordings: decided %s; words read %v (first test, second)", n, got[1], builds)
+		if got[0] != got[1] {
+			t.Errorf("over %d recordings the tests decide %q; want one verdict", n, got)
+		}
+		if builds != [2]int{n, 0} {
+			t.Errorf("over %d recordings the tests read %v recordings' words; want each once, in the first test: [%d 0]", n, builds, n)
+		}
+		func() {
+			defer func(b int64) { learnBudget = b }(learnBudget)
+			learnBudget = 1
+			past, pastBuilds := costOutside(n)
+			if past != got {
+				t.Errorf("over %d recordings past the budget the tests decide %q; want %q", n, past, got)
+			}
+			if pastBuilds != [2]int{n, n} {
+				t.Errorf("over %d recordings past the budget the tests read %v recordings' words; want each in each test, kept by none: [%d %d]", n, pastBuilds, n, n)
+			}
+		}()
+	}
+}
+
+// The words a set keeps of another test's recording are the words wordsOf
+// reads of it as each call hands it: its own serves and test in that call,
+// and one entry for each way F served it and each view F gave, which a
+// later call handed it another way reads apart.
+func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *testing.T) {
+	at := eRecAt.Add(-time.Second)
+	m := getAnswer("mock-x", "http://api/items/1", `{"ref":"a1b2c3d4","note":"Kept","at":"2026-10-24T09:55:50Z"}`, at)
+	view := func(body string) Raw { return RawOf(getAnswer("mock-x", "http://api/items/1", body, at), true) }
+	v1, v2, v3 := view(`{"ref":"f0e9d8c7"}`), view(`{"ref":"e9d8c7b6","note":"Kept"}`), view(`{"ref":"e9d8c7b6"}`)
+	gone := getAnswer("mock-gone", "http://api/items/2", `{"ref":"b2c3d4e5"}`, at)
+	type shape struct {
+		name     string
+		of       func(Raw, int) Raw
+		unserved bool
+	}
+	shapes := []shape{
+		{name: "served as recorded", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedAsRecorded() }},
+		{name: "with F's view", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v1) }},
+		{name: "with another view", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v2) }},
+		{name: "with other words at the view's fields", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedLive(v3) }},
+		{name: "with two views", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedChanged(v1, v2) }},
+		{name: "with the two views the other way", of: func(x Raw, n int) Raw { return x.ServedAs(n).ServedChanged(v2, v1) }},
+		{name: "served changed, no view read", of: func(x Raw, n int) Raw { return x.ServedIn(n, n+2).ServedChanged() }},
+		{name: "served, nothing stated", of: func(x Raw, n int) Raw { return x.ServedIn(n, n+1) }},
+		{name: "not served", of: func(x Raw, _ int) Raw { return x }, unserved: true},
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	for c := range 2 {
+		tr.Begin()
+		dc := tr.Drifts()
+		d := &decider{dr: dc}
+		b := wordsRead(dc)
+		// The call's own earlier place, and a recording of another test keploy
+		// cannot read: offsetPlacesOf reads neither's words.
+		raw := []Raw{dc.LazyRawOf(m, true, nil).ServedAs(1).ServedAsRecorded(),
+			dc.LazyRawOf(gone, true, func() (*models.Mock, error) { return nil, errors.New("gone") }).ServedAs(2).OfAnotherTest()}
+		for i, s := range shapes {
+			x := s.of(dc.LazyRawOf(m, !s.unserved, nil), 1+i+10*c).OfAnotherTest()
+			x.test, x.prev, x.late = 2+c, c == 1, c == 1
+			if got, want := d.outsideWords(x), dc.wordsOf(x); !reflect.DeepEqual(got, want) {
+				t.Errorf("test %d, %s: the set's words are %+v; want wordsOf's %+v", c+1, s.name, got, want)
+			}
+			raw = append(raw, x)
+		}
+		if got, want := wordsRead(dc)-b, []int{len(shapes), 0}[c]; got != want {
+			t.Errorf("test %d read the recording's words %d times; want %d (one entry each way it was handed)", c+1, got, want)
+		}
+		// The call's places are offsetPlacesOf's, in its order: raw's, then the
+		// set's.
+		set := []GivenPlaces{PlacesOf(RawOf(getAnswer("mock-set", "http://api/items/3", `{"ref":"c3d4e5f6","at":"2026-10-24T09:55:51Z"}`, at), true).ServedAs(3))}
+		got, want := (&decider{dr: dc, in: Input{At: eRecAt, Raw: raw}, set: set}).offsetPlaces(), dc.offsetPlacesOf(eRecAt, nil, raw, set)
+		if len(got.words) != len(shapes)+1 || len(got.answers) == 0 || !reflect.DeepEqual(got.words, want.words) || !reflect.DeepEqual(got.answers, want.answers) {
+			t.Errorf("test %d: the call reads %d outside recordings' words %+v and instants %+v; want offsetPlacesOf's %d: %+v and %+v", c+1, len(got.words), got.words, got.answers, len(want.words), want.words, want.answers)
+		}
+		tr.End()
 	}
 }

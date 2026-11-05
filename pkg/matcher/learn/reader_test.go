@@ -430,13 +430,18 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 	}
 	// Past the budget each question reads the recording once: its text and
 	// its fields from one read, its instants and their declared forms from
-	// one read.
+	// one read. A word the set's filter of the recording's words rules out
+	// (setFilter) reads it not at all.
 	last := places[n-1]
+	loads = dc.Loads()
+	if held, read := last.holdsWord("zzz"); held || !read || dc.Loads() != loads {
+		t.Errorf("a word the recording's filter rules out, past the budget: held %v, read %v, %d loads; want not held, read, none", held, read, dc.Loads()-loads)
+	}
 	for _, q := range []struct {
 		name string
 		ask  func()
 	}{
-		{"a word", func() { last.holdsWord("zzz") }},
+		{"a word its filter may hold", func() { last.holdsWord("w") }},
 		{"a base64 run", func() { last.holdsToken(tokenB64, "QUJDREVGR0g") }},
 		{"a word's fields", func() { last.fieldsWith(id(n - 1)) }},
 		{"an instant", func() { last.holdsMoment(moment{}) }},
@@ -993,14 +998,17 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 	room := viewRoom(t, rec, w)
 	p, stop := rec.payload(), int64(0)
 	eachField(p.text, p.fields, func(_ fieldAt, text string) { _, held := formsHeld(text); stop = max(stop, held) })
-	otherBody, _ := uuidAnswer(40, 64<<10)
+	otherBody, otherIDs := uuidAnswer(40, 64<<10)
 	other := RawOf(getAnswer("mock-2", "http://api/items/2", otherBody, eRecAt), false)
+	// A word the other text holds: a set's filter of its words (setFilter)
+	// rules out none of it, so asking it keeps the text's words.
+	held := otherIDs[5][9:13]
 	answers := map[bool][]fieldAt{}
 	for _, keeps := range []bool{false, true} {
 		kept := int64(0)
 		if keeps {
 			probe := newReaderIndex(NewDriftCache())
-			probe.textOf(other).holdsWord("zzzz")
+			probe.textOf(other).holdsWord(held)
 			if kept = probe.used; kept == 0 {
 				t.Fatalf("fixture: the other text's words were not kept")
 			}
@@ -1012,7 +1020,7 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 			readerBudget = c.budget
 			x := newReaderIndex(NewDriftCache())
 			if keeps {
-				if x.textOf(other).holdsWord("zzzz"); x.used != kept {
+				if x.textOf(other).holdsWord(held); x.used != kept {
 					t.Fatalf("fixture: kept %d, want %d", x.used, kept)
 				}
 			}

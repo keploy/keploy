@@ -7,10 +7,14 @@ import (
 	"hash/maphash"
 	"index/suffixarray"
 	"io"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+	"weak"
 )
 
 // The reader's index: what the places before a call hold of its changed
@@ -61,6 +65,9 @@ type readerIndex struct {
 	// momentAsks counts the instants holdsMoment asks byMoment of: what
 	// keeps a call's work near linear in the instants it decides.
 	momentAsks int
+	// filters are the set's filters of its recordings' words (filtersOf);
+	// nil where the call is no set's.
+	filters *setFilters
 }
 
 // readerEntry is what the index keeps of one text: its other declared forms,
@@ -115,6 +122,9 @@ type readerText struct {
 	// scans counts the questions contains answered by a scan of the text
 	// through this handle, before the text's suffix array.
 	scans int
+	// filter is the set's entry for the recording's filter of its words
+	// (setFilter), once asked.
+	filter *filterEntry
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
@@ -123,6 +133,9 @@ func newReaderIndex(dc *DriftCache) *readerIndex {
 	x := &readerIndex{dc: dc, budget: readerBudgetBytes(), seed: maphash.MakeSeed(), texts: map[uint64][]*readerEntry{}}
 	if dc != nil {
 		x.set = dc.set
+	}
+	if x.set != nil {
+		x.filters = filtersOf(x.set)
 	}
 	return x
 }
@@ -134,22 +147,27 @@ func newReaderIndex(dc *DriftCache) *readerIndex {
 // words, then the payloads, each read again where asked for), and past the
 // budget still it counts none.
 func (x *readerIndex) claim(n int64) bool {
-	if x.used+n > x.budget {
+	if x.used+n > x.budget || x.set != nil && !setClaim(x.set, n) {
 		return false
 	}
-	if s := x.set; s != nil {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		b := s.budget
-		if need := b.used + n - b.limit; need > 0 && b.letGo != nil {
-			b.letGo(need)
-		}
-		if b.used+n > b.limit {
-			return false
-		}
-		b.used += n
-	}
 	x.used += n
+	return true
+}
+
+// setClaim counts n bytes more on s's one budget, as a tier that lets none
+// go keeps there (tier.keep): it first has the set let go of what it is past
+// its budget (budget.letGo), and past the budget still it counts none.
+func setClaim(s *setDerived, n int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.budget
+	if need := b.used + n - b.limit; need > 0 && b.letGo != nil {
+		b.letGo(need)
+	}
+	if b.used+n > b.limit {
+		return false
+	}
+	b.used += n
 	return true
 }
 
@@ -382,12 +400,16 @@ func (t *readerText) holdsWord(w string) (held, read bool) {
 // the text's words hold it: by a scan of the text and of its other forms
 // (formsOf), kept for the call with the text where both fit the budget; past
 // it, by a scan of the text read again and its forms (textForms) derived
-// for the question, kept by no one, not by the set either. No list
-// of the text's other words is built: a call asks a few words of each of
-// thousands of places, so listing every word of each, call after call, cost
+// for the question, kept by no one, not by the set either. A recording of
+// the set is first asked through the set's filter of its words (ruledOut),
+// and scanned only where the filter may hold w: a call asks a few words of
+// each of thousands of places, so a scan of each place for each word cost
 // more than all the rest of the call. read is false where the recording was
 // not read.
 func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
+	if t.ruledOut(w) {
+		return false, true
+	}
 	var text string
 	forms, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[string] { return &e.forms },
 		uncapped(func(s string, _ []rawField) string { text = s; return t.formsOf(s) }), stringBytes,
@@ -401,34 +423,175 @@ func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
 	return heldIn([]string{text, forms}, w, rs...), true
 }
 
+// ruledOut reports whether the set's filter of t's recording (setFilter)
+// shows that no form of its text holds w as a word in any reading: a run of
+// w's letters and digits is none of its words. Where a reading holds w at a
+// place, no byte that reading reads as a word byte stands beside w there,
+// and each reading reads every letter and digit so: each run of w's letters
+// and digits is a whole run of the form's (eachWord), which the filter
+// holds. A w of no letter or digit, a text the caller handed, a view (no
+// recording's identity) and a recording the set keeps no filter of are
+// never ruled out: they are scanned.
+func (t *readerText) ruledOut(w string) bool {
+	f := t.setFilter()
+	if f == nil {
+		return false
+	}
+	filterLookups.Add(1)
+	out := false
+	eachWord(w, func(run string) { out = out || !f.has(run) })
+	return out
+}
+
+// filterLookups counts the words asked of recordings' filters (ruledOut),
+// for the rows that bound a call's work.
+var filterLookups atomic.Int64
+
+// setFilters are the filters a set keeps of its recordings' words
+// (setFilter), by recording (Raw.id), and the words of other tests'
+// recordings handed to its calls (outsideWords), by recording. builds and
+// wordsBuilds count the filters and the words read, for the rows.
+type setFilters struct {
+	mu          sync.Mutex
+	of          map[string]*filterEntry
+	builds      int
+	words       map[string][]*wordsEntry
+	wordsBuilds int
+}
+
+// filterEntry is one recording's filter, built once for the set (once):
+// nil where the recording was not read then, or where the filter did not
+// fit the set's budget, and the recording is scanned in each call as
+// before, never read again to build one.
+type filterEntry struct {
+	once sync.Once
+	f    wordFilter
+}
+
+// setsFilters are each set's filters (filtersOf), by the set, held weakly:
+// a set the tracker let go (NewSet) takes its filters, and what they count
+// on its budget, with it.
+var setsFilters sync.Map // weak.Pointer[setDerived] -> *setFilters
+
+// filtersOf are s's filters.
+func filtersOf(s *setDerived) *setFilters {
+	k := weak.Make(s)
+	if v, ok := setsFilters.Load(k); ok {
+		return v.(*setFilters)
+	}
+	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, words: map[string][]*wordsEntry{}})
+	if !loaded {
+		runtime.AddCleanup(s, func(k weak.Pointer[setDerived]) { setsFilters.Delete(k) }, k)
+	}
+	return v.(*setFilters)
+}
+
+// setFilter is the set's filter of the words of t's recording: of its text
+// and of its other declared forms (textForms), as wordIn reads them, by runs
+// of letters and digits (eachWord, wordFilter), built the first time a call
+// of the set asks the recording a word, and kept for the set on its budget
+// (setClaim). A recording's identity fixes its text for the set (Raw.id), so
+// every later call asks the filter, not the text, for a word it cannot hold.
+// Calls asking at once wait for the one building it. nil where t is no
+// recording of a set (a handed text, a view: no identity), or where the
+// entry keeps none.
+func (t *readerText) setFilter() wordFilter {
+	if t.filter == nil {
+		if t.raw == nil || t.raw.id == "" || t.x.filters == nil {
+			return nil
+		}
+		fs := t.x.filters
+		fs.mu.Lock()
+		e := fs.of[t.raw.id]
+		if e == nil {
+			e = &filterEntry{}
+			fs.of[strings.Clone(t.raw.id)] = e
+		}
+		fs.mu.Unlock()
+		t.filter = e
+	}
+	e := t.filter
+	e.once.Do(func() { e.f = t.buildFilter() })
+	return e.f
+}
+
+// buildFilter is the filter of t's recording's words (setFilter), counted
+// on the set's budget; nil where the recording was not read or the filter
+// does not fit.
+func (t *readerText) buildFilter() wordFilter {
+	s, _, ok := t.read()
+	if !ok {
+		return nil
+	}
+	// Its forms derived for the build alone (textForms), as a scan past the
+	// budget derives them: the set keeps none of them for the filter.
+	forms := textForms(s)
+	n := 0
+	for _, text := range forms {
+		eachWord(text, func(string) { n++ })
+	}
+	f := newWordFilter(n)
+	for _, text := range forms {
+		eachWord(text, f.add)
+	}
+	fs := t.x.filters
+	fs.mu.Lock()
+	fs.builds++
+	fs.mu.Unlock()
+	if !setClaim(t.x.set, headerBytes+8*int64(len(f))+filterEntryBytes+int64(len(t.raw.id))) {
+		return nil
+	}
+	return f
+}
+
+// filterEntryBytes is what an entry keeps past its filter's words: the
+// entry, its key's header, and the map's slot for it.
+const filterEntryBytes = 64
+
 // heldIn reports whether one of a text's declared forms (textForms) holds w
 // as a word in any of the readings rs.
 func heldIn(forms []string, w string, rs ...int) bool {
-	return slices.ContainsFunc(forms, func(f string) bool {
-		return slices.ContainsFunc(rs, func(r int) bool { return heldBy(f, w, readings[r]) })
-	})
+	return slices.ContainsFunc(forms, func(f string) bool { return heldBy(f, w, rs...) })
 }
 
-// heldBy reports whether w is a word of s as word reads it (tokensBy(s,
-// word)[w]) without reading s's other words: w stands in s, every byte of
-// it continues a word, and no byte that does stands right before or after.
-func heldBy(s, w string, word func(byte) bool) bool {
+// heldScans counts the scans heldBy makes of a text for a word, for the
+// rows that bound a call's work.
+var heldScans atomic.Int64
+
+// heldBy reports whether w is a word of s in any of the readings rs as each
+// reads it (tokensBy(s, readings[r])[w]) without reading s's other words: w
+// stands in s, every byte of it continues a word, and no byte that does
+// stands right before or after. One scan finds each place w stands in s for
+// every reading.
+func heldBy(s, w string, rs ...int) bool {
 	if w == "" {
 		return false
 	}
-	for i := 0; i < len(w); i++ {
-		if !word(w[i]) {
-			return false
+	by := make([]func(byte) bool, 0, 3)
+next:
+	for _, r := range rs {
+		word := readings[r]
+		for i := 0; i < len(w); i++ {
+			if !word(w[i]) {
+				continue next
+			}
 		}
+		by = append(by, word)
 	}
+	if len(by) == 0 {
+		return false
+	}
+	heldScans.Add(1)
 	for off := 0; off <= len(s)-len(w); {
 		i := strings.Index(s[off:], w)
 		if i < 0 {
 			return false
 		}
 		i += off
-		if (i == 0 || !word(s[i-1])) && (i+len(w) == len(s) || !word(s[i+len(w)])) {
-			return true
+		for _, word := range by {
+			if (i == 0 || !word(s[i-1])) && (i+len(w) == len(s) || !word(s[i+len(w)])) {
+				return true
+			}
 		}
 		off = i + 1
 	}
