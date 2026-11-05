@@ -246,6 +246,9 @@ func entryOver(o, w models.MappedTestCase) models.MappedTestCase {
 	if len(w.Real) > 0 {
 		o.Real = w.Real
 	}
+	if w.Key != "" {
+		o.Key = w.Key
+	}
 	return o
 }
 
@@ -679,6 +682,11 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		// (proven switch only): they replace what an earlier record wrote.
 		if len(in.Real) > 0 {
 			tc.Real = in.Real
+		}
+		// The key of the claim this record's run of the test ran under
+		// (proven switch only): it replaces what an earlier record wrote.
+		if in.Key != "" {
+			tc.Key = in.Key
 		}
 	}
 	if len(suites) > 0 {

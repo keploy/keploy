@@ -343,11 +343,14 @@ type SequenceView struct {
 	// window was open, at its place in the gap it was made in, and an idle
 	// answer wherever it was recorded), so its request's sequence is walked
 	// on Between over every reached recording of it, by placement, with no
-	// window: one sequence for the set wherever its calls land.
+	// window: one sequence across the test windows wherever its calls land
+	// in them.
 	Worker func(*models.Mock) bool
-	// Between is, with Worker, the stateful cursor the calls between tests
-	// advance (the last pool view's), which a worker-scope call in a test
-	// reads and advances too.
+	// Between is, with Worker, the worker scope's stateful cursor in the
+	// test windows: one sequence across the windows of the staging. The
+	// calls between tests never advance it (they walk the last pool view's
+	// cursor), so a window's answers never depend on how many calls landed
+	// between tests.
 	Between MockCursor
 }
 
@@ -560,6 +563,9 @@ type CallRound struct {
 	// every is whether the read held every recording as its own because
 	// its store could not tell which are the call's (HoldingEvery).
 	every bool
+	// ahead is whether the read found the learn tracker had begun a test
+	// the store had not opened (WithTrackerAhead).
+	ahead bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -617,6 +623,20 @@ func (c CallRound) InWorkerView(shows bool) CallRound {
 	c.worker = c.worker || shows
 	return c
 }
+
+// WithTrackerAhead is c, of a read that found the learn tracker had begun a
+// test the store had not opened when ahead is true
+// (RoundSnapshot.TrackerAhead): the call is decided in the test the store
+// opens next, so a store held to it (RoundHolder) reads the view in force,
+// not the one the read was made in.
+func (c CallRound) WithTrackerAhead(ahead bool) CallRound {
+	c.ahead = c.ahead || ahead
+	return c
+}
+
+// TrackerAhead reports whether c's read found the learn tracker ahead of the
+// store (WithTrackerAhead).
+func (c CallRound) TrackerAhead() bool { return c.ahead }
 
 // ShowsWorker reports whether c's read found a test's view that showed the
 // worker scope (WithSequence, InWorkerView).

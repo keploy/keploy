@@ -321,8 +321,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				lmiss *learnMiss
 				// extra is the full round's own-repeat check (extraCall),
 				// asked before its pairing; -1 where it was not asked. A
-				// miss reads it rather than asking again.
-				extra = -1
+				// miss reads it rather than asking again. extraAt is the
+				// earliest of the test's own recordings of it.
+				extra   = -1
+				extraAt time.Time
 				// call is where the request's first read of the round
 				// found it made (integrations.CallRound): a miss's lookup
 				// of a recording made elsewhere is asked of that round.
@@ -359,7 +361,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// recording to the worker scope on its account. A call
 					// whose test recorded none of its kind still pairs.
 					held, _ := integrations.HoldToRound(mockDb, call)
-					extra = h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+					extra, extraAt = h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
 					if extra == 0 {
 						if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
@@ -457,9 +459,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// the scope open now, the next test's once a test ended.
 				// Where the full round asked already (extra) it read this
 				// same held store: asking again would repeat that read.
-				n := extra
+				n, nAt := extra, extraAt
 				if n < 0 {
-					n = h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+					n, nAt = h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				}
 				if n == 0 && lmiss == nil {
 					// (A learn-step miss names the candidate it refused.)
@@ -479,11 +481,18 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// It is asked of the round the request's first read found it
 				// made in (notOwnedRecording): never a recording that read
 				// held as its view's own, nor one of a set the replay staged
-				// under the request, which the miss then says.
+				// under the request, which the miss then says. A call one
+				// more than the test recorded is named only as an earlier
+				// test's recording, made before the test's own of it
+				// (notOwnedRecordingBefore): the replay passed that test
+				// without the call, which moved here (its first use, with
+				// that test skipped). It stays an extra call. No later
+				// test's recording is named for it, and none when keploy
+				// cannot place the test's own (nAt zero).
 				var elsewhere *models.Mock
 				restaged := false
-				if n == 0 && report != nil && provenswitch.On() {
-					elsewhere, restaged = notOwnedRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+				if report != nil && provenswitch.On() && (n == 0 || !nAt.IsZero()) {
+					elsewhere, restaged = notOwnedRecordingBefore(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call, nAt)
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)
