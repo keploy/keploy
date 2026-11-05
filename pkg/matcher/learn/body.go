@@ -156,6 +156,9 @@ var everyRawLazy func(m *models.Mock, served bool) Raw
 // of reading one again.
 var bodyBudget int64 = noCap
 
+// viewBudget is bodyBudget for the set's views (setDerived.views).
+var viewBudget int64 = noCap
+
 // partBody is the one part the store's tier keeps of a recording: its
 // payload.
 const partBody part = 1
@@ -183,6 +186,11 @@ type bodyStore struct {
 	// over: the store's set is over (setDerived.drop), and it keeps no
 	// more.
 	over bool
+	// forgetUnread: a payload that could not be loaded is kept by none, and
+	// the next read loads it again (the set's views, setDerived.views: a
+	// view's loader that failed once may give it at a later call, which
+	// read it again before the set kept views).
+	forgetUnread bool
 	// loads counts the payloads loaded, for the rows.
 	loads int
 }
@@ -244,8 +252,18 @@ func (s *bodyStore) get(id, name string, load func() (*models.Mock, error)) rawB
 	l.body = loadBody(name, load)
 
 	s.mu.Lock()
-	s.read[id] = l.body.read
-	s.kept.keep(id, partBody, l.body.size(), func(p *rawBody) { *p = l.body })
+	// The store of views (forgetUnread) writes the read bit too, though
+	// Raw.isRead never asks it (Order.viewRead hands out a view with no
+	// source): one bool a view it read, kept after the view is let go
+	// past the budget and after the set is over (setDerived.drop clears
+	// no read bits, and a stale Order of the set may still add some).
+	// There are at most maxLiveViews of each recording the set served,
+	// and they go with the store once neither the set's setDerived nor
+	// an Order of the set (Order.views) holds it.
+	if l.body.read || !s.forgetUnread {
+		s.read[id] = l.body.read
+		s.kept.keep(id, partBody, l.body.size(), func(p *rawBody) { *p = l.body })
+	}
 	delete(s.loading, id)
 	s.mu.Unlock()
 	close(l.ready)

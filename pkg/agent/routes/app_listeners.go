@@ -17,7 +17,10 @@ type appListenAddrsReader interface {
 // HandleAppListenAddrs answers GET /app/listen-addrs?port=N with the addresses
 // the app's sockets listen on for its port N, as seen from the network
 // namespace the agent shares with the app. 501 from an agent that cannot tell,
-// and 500 when it cannot tell right now: both mean "unknown", never "nothing".
+// and 500 when it cannot tell for this port, for now or for good (one: keploy's
+// own proxy, DNS server or API listens on the port the app's sockets are read
+// on, so the sockets there are keploy's): each means "unknown", never
+// "nothing".
 func (a *Agent) HandleAppListenAddrs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	reader, ok := a.svc.(appListenAddrsReader)

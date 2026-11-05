@@ -863,10 +863,12 @@ type ExactBackgroundServer interface {
 }
 
 // RecordedOfKindSetter is implemented by a proxy whose pairing (record's full
-// round) reads, beside what is staged, the set's recordings of
-// a kind the agent keeps on disk: a test's own are staged only as it opens.
-// SetRecordedOfKind sets where (src visits the on-disk mocks of a kind, in
-// recorded order, decoding one only as visit loads it; nil for none).
+// round), and whose finder of a held call's unserved recordings
+// (integrations.UnservedRecordingFinder), read, beside what is staged, the
+// set's recordings of a kind the agent keeps on disk: a test's own are staged
+// only as it opens. SetRecordedOfKind sets where (src visits the on-disk mocks
+// of a kind, in recorded order, decoding one only as visit loads it; nil for
+// none).
 type RecordedOfKindSetter interface {
 	SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error
 }
