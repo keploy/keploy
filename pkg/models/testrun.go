@@ -549,12 +549,15 @@ type UnmatchedCall struct {
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 	// Kind is where the call was made, under the proven switch (MissInTest,
 	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
-	// extra call, how many times the test recorded that call.
+	// extra call, how many times the test recorded that call, and
+	// AnsweredAgain how many calls of it the test was answered once more
+	// than that, as a repeated read (MockMismatchReport.AnsweredAgain).
 	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	// Instance is the test worker whose process made the call (0, left
 	// out: the run of one test process, or no worker).
-	Instance uint32 `json:"instance,omitempty" yaml:"instance,omitempty"`
-	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	Instance      uint32 `json:"instance,omitempty" yaml:"instance,omitempty"`
+	Recorded      int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	AnsweredAgain int    `json:"answered_again,omitempty" yaml:"answered_again,omitempty"`
 	// BeforeSet says, under the proven switch, that the call was made before
 	// its test set's first test began, with no test's window open: the
 	// application's startup. Its Kind is MissOutsideTest. It is the set's,

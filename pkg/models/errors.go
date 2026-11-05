@@ -278,6 +278,12 @@ type MockMismatchReport struct {
 	// made. Empty without the switch.
 	MissKind string
 	Recorded int
+	// AnsweredAgain is, for a MissExtraCall, how many calls of it the open
+	// test was answered once more than recorded, as a repeated read its
+	// mapping names (integrations.RepeatReadAnswerer): calls the test made
+	// that neither Recorded nor its misses count. Set by the HTTP matcher,
+	// the only one that answers a repeated read once more.
+	AnsweredAgain int
 	// Differs names the compared fields in which the call differs from the
 	// closest recording (host, header.<name>, body.<path>, ...), never a
 	// value: the reason keploy gives for a failed test names them (proven
@@ -439,8 +445,10 @@ type ParserError struct {
 	// charged the miss.
 	Instance uint32
 	// Recorded is, for MissExtraCall, how many times the call was recorded
-	// for the test.
-	Recorded int
+	// for the test, and AnsweredAgain how many calls of it the test was
+	// answered once more than that (MockMismatchReport.AnsweredAgain).
+	Recorded      int
+	AnsweredAgain int
 	// Staging is, under exact serving, that the miss was made while the
 	// replay was staging a test set's mocks, which then answer no call: its
 	// read says so in the call's next steps.

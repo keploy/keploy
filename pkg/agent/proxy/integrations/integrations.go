@@ -438,7 +438,9 @@ type ExactConsumedReader interface {
 // (RepeatReadAnswer) when every one of them is a recording of one repeated
 // read of the test, every recording of that read has answered, and the read
 // has not been answered once more in this test yet. It answers each repeated
-// read at most once more per test; ok is false otherwise.
+// read at most once more per test; ok is false otherwise, and answer then
+// says only whether the read was answered once more in this test already
+// (RepeatReadAnswer.Spent).
 type RepeatReadAnswerer interface {
 	AnswerRepeatRead(matched []*models.Mock) (answer RepeatReadAnswer, ok bool)
 }
@@ -446,11 +448,15 @@ type RepeatReadAnswerer interface {
 // RepeatReadAnswer is a repeated read answered once more than its test
 // recorded it (RepeatReadAnswerer), as the answer's log line names it: the
 // recording it is answered with, the ID of the test, and how many times the
-// test recorded the read.
+// test recorded the read. A call refused because its read was answered once
+// more in this test already is told Spent, and nothing else: the call
+// answered then is one the test made, which its miss counts
+// (models.MockMismatchReport.AnsweredAgain).
 type RepeatReadAnswer struct {
 	Mock     *models.Mock
 	Test     string
 	Recorded int
+	Spent    bool
 }
 
 // AnswerRepeatRead is db's answer to a call one more than the open test

@@ -109,7 +109,8 @@ func (v *exactView) oneRead(at []int, noise repeatReadNoise) bool {
 // more than recorded matches. It answers with the last recording of the
 // repeated read they all belong to, once per read per test, the test's ID
 // and how many times the test recorded the read (its recordings exact
-// serving holds).
+// serving holds). A call of a read answered once more already is refused
+// as Spent.
 func (m *MockManager) AnswerRepeatRead(matched []*models.Mock) (integrations.RepeatReadAnswer, bool) {
 	v := m.exactView()
 	if v == nil {
@@ -132,8 +133,11 @@ func (m *MockManager) AnswerRepeatRead(matched []*models.Mock) (integrations.Rep
 		read = r
 	}
 	at, ok := v.repeats[read]
-	if !ok || v.answeredAgain[read] {
+	if !ok {
 		return integrations.RepeatReadAnswer{}, false
+	}
+	if v.answeredAgain[read] {
+		return integrations.RepeatReadAnswer{Spent: true}, false
 	}
 	for _, i := range at {
 		if !v.consumed[i] {

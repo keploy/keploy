@@ -6017,6 +6017,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
 					Kind:             parserErr.MissKind,
 					Recorded:         parserErr.Recorded,
+					AnsweredAgain:    parserErr.AnsweredAgain,
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
@@ -6262,19 +6263,20 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 	// in the open test, outside every test, or, as its matcher found, as one
 	// call more than the test recorded.
 	if r := proxyErr.MismatchReport; r != nil {
-		proxyErr.Recorded = r.Recorded
+		proxyErr.Recorded, proxyErr.AnsweredAgain = r.Recorded, r.AnsweredAgain
 	}
 	if m := p.missManager(inst); m != nil {
 		if proxyErr.MissKind = m.exactMissKind(proxyErr.MismatchReport); proxyErr.MissKind != "" {
 			// Only a miss made in the open test is an extra call, and only
-			// an extra call says how often the call was recorded. The
+			// an extra call says how often the call was recorded, and how
+			// often it was answered once more as a repeated read. The
 			// matcher found it one against the test's own answered mocks,
 			// which only an open test has: an extra call filed after its
 			// test ended (its last call in flight) stays one.
 			if r := proxyErr.MismatchReport; r != nil && r.MissKind == models.MissExtraCall {
 				proxyErr.MissKind = models.MissExtraCall
 			} else {
-				proxyErr.Recorded = 0
+				proxyErr.Recorded, proxyErr.AnsweredAgain = 0, 0
 			}
 			// A miss made while the replay was staging the set's mocks says
 			// so (stagingMissNote), told where its call was decided.

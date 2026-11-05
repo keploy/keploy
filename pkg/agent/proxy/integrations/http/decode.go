@@ -488,18 +488,24 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// request then matches none, and nothing changes. A call
 			// whose view moved is told neither (-1) and matches none: no
 			// recording of a list that may be of another view answers it
-			// again.
+			// again. A call past the one answered once more misses, and
+			// its miss counts that one (answeredAgain): a call the test
+			// made that neither its recordings nor its misses count.
+			var answeredAgain int
 			if !ok {
 				if extra < 0 {
 					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				}
-				if again, yes := integrations.AnswerRepeatRead(db, extraMatched); yes {
+				again, yes := integrations.AnswerRepeatRead(db, extraMatched)
+				if yes {
 					// One line per read a replay answers once more, as it
 					// answers it: the test, the read as the replay named
 					// it, and how many times the test recorded it.
 					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
 						zap.String("test", again.Test), zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.Mock.TestModeInfo.ReadMark().Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
 					stub, ok, diag, lmiss = again.Mock, true, nil, nil
+				} else if again.Spent {
+					answeredAgain = 1
 				}
 			}
 
@@ -550,7 +556,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
 				if n > 0 && report != nil {
-					report.MissKind, report.Recorded = models.MissExtraCall, n
+					report.MissKind, report.Recorded, report.AnsweredAgain = models.MissExtraCall, n, answeredAgain
 				}
 				// The miss was decided where the request first read the
 				// round: whether that read found a staging is told from it.

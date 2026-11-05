@@ -2109,7 +2109,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		return !beganAt.IsZero() && !m.At.IsZero() && m.At.Before(beganAt)
 	}
 	// One call made more often than recorded is said once: how often the
-	// test made it, and how often it was recorded.
+	// test made it, and how often it was recorded (extraCallText).
 	extra := map[string]int{}
 	for _, m := range ev.Misses {
 		if m.Kind == models.MissExtraCall && !before(m) {
@@ -2127,7 +2127,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		case models.MissExtraCall:
 			call := missText(m)
 			if n, ok := extra[call]; ok {
-				what = append(what, fmt.Sprintf("%s was called %d times, recorded %d", call, m.Recorded+n, m.Recorded))
+				what = append(what, extraCallText(call, m.Recorded, m.AnsweredAgain, n))
 				delete(extra, call)
 			}
 		case models.MissOutsideTest:
@@ -2225,6 +2225,21 @@ func shellQuote(s string) string {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// extraCallText says one call a test made more often than it recorded, from
+// its miss: how often the test made it and how often it recorded it ("GET /x
+// to h was called 3 times, recorded 2"). Where the test's repeated read was
+// answered once more than recorded (again, UnmatchedCall.AnsweredAgain), the
+// test made that call too, which neither its recordings nor its extra
+// misses count: the line counts every call and says what answered each
+// ("GET /x to h was called 4 times: 2 recorded, 1 answered once more as a
+// repeated read, 1 extra").
+func extraCallText(call string, recorded, again, extra int) string {
+	if again > 0 {
+		return fmt.Sprintf("%s was called %d times: %d recorded, %d answered once more as a repeated read, %d extra", call, recorded+again+extra, recorded, again, extra)
+	}
+	return fmt.Sprintf("%s was called %d times, recorded %d", call, recorded+extra, recorded)
 }
 
 // missText names a miss: an HTTP or gRPC call by its method and target
