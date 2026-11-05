@@ -787,6 +787,46 @@ func TestHandleConnectionNamesTheLeafForAnIPLiteralDestinationOnReplay(t *testin
 	}
 }
 
+// On replay the MITM offers h2 only to a destination that was recorded
+// speaking HTTP/2. On the transparent path (no CONNECT request) the host is
+// known only from the ClientHello's SNI, so the offer has to be decided there:
+// decided before the handshake, it went by the port alone, and a recorded
+// HTTP/2 destination on :443 pushed every other :443 host onto h2. A client
+// that offers both (Go's net/http, every cloud SDK on it) then spoke HTTP/2 to
+// a host it was recorded speaking HTTP/1.1 to, and none of its calls matched:
+// the HTTP/2 matcher never sees the host's http/1.1 mocks.
+func TestReplayOffersH2OnlyToTheHostTheClientHelloNames(t *testing.T) {
+	const ip = "10.0.0.9"
+	recorded := []*models.Mock{h2MockForTest("vault", "vault.example.com:443")}
+	for _, tc := range []struct {
+		name     string
+		sni      string
+		wantALPN string
+	}{
+		{name: "another host on the same port was recorded speaking HTTP/2", sni: "queue.example.com", wantALPN: "http/1.1"},
+		{name: "this host was recorded speaking HTTP/2", sni: "vault.example.com", wantALPN: "h2"},
+		{name: "the recorded host differs only in case", sni: "VAULT.example.com", wantALPN: "h2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, src := acceptedConn(t)
+			p := replayProxyTo(t, ip+":443", models.OutgoingOptions{}, recorded...)
+
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+
+			client := leafCheckingClient(app, tc.sni, tc.sni)
+			if err := client.Handshake(); err != nil {
+				t.Fatalf("client handshake with %s: %v", tc.sni, err)
+			}
+			if got := client.ConnectionState().NegotiatedProtocol; got != tc.wantALPN {
+				t.Fatalf("negotiated %q, want %q", got, tc.wantALPN)
+			}
+			_ = client.Close()
+			awaitEvent(t, done, "handleConnection returning after the client left")
+		})
+	}
+}
+
 // replayProxyTo is a proxy replaying mocks, with opts, the connections the
 // connect hooks say went to dst (an ip:port).
 func replayProxyTo(t *testing.T, dst string, opts models.OutgoingOptions, mocks ...*models.Mock) *Proxy {
