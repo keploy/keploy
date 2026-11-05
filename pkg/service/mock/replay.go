@@ -334,10 +334,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// Under the proven switch, every mock the set decoded, before what the
 	// agent never holds is left out: what a mapping may name
 	// (pushProvenTable).
-	var decoded []*models.Mock
-	if provenswitch.On() {
-		decoded = append(append([]*models.Mock(nil), filtered...), unfiltered...)
-	}
+	// With the switch off, the same: the recordings each test's recorded
+	// window is derived from (recordedTestWindows).
+	decoded := append(append([]*models.Mock(nil), filtered...), unfiltered...)
 	filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
 	loaded := len(filtered) + len(unfiltered)
 	// The recording this run replays, for the receipt: read after Pull, so in
@@ -1279,11 +1278,17 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered,
 		}
 		table[testName] = names
 	}
-	if err := pusher.PushScopeTable(ctx, table); err != nil {
+	// Every test's recorded window, as under the switch, for the run's
+	// place alone: an answer recorded in a later window than its call is
+	// written once the replay reaches it. A test's recorded begin (at:) is
+	// read only under the switch, so each window starts at its test's first
+	// recording.
+	windows := recordedTestWindows(nil, table, decoded)
+	if err := pusher.PushScopeTable(ctx, table, windows); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
 		return nil
 	}
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
 	return nil
 }
 

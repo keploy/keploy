@@ -415,6 +415,12 @@ type MockManager struct {
 	repeatNoise       atomic.Pointer[repeatReadNoise]
 	testWindowsSeeded *models.WindowSchedule
 	windowsSeeded     *models.WindowSchedule
+	// placeWindows are the recorded test windows a replay seeded for the
+	// run's place alone (SeedRunPlaceWindows), read where it seeded no
+	// testWindows. Parked (placeWindowsSeeded) and installed as testWindows
+	// are, under swapMu.
+	placeWindows       atomic.Pointer[models.WindowSchedule]
+	placeWindowsSeeded *models.WindowSchedule
 
 	// statedKinds are the kinds of which a mock staged since the current
 	// set's boundary states its lifetime (models.Mock.StatesLifetime): the
@@ -854,6 +860,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// Same for a parked window seed: it belongs to the set that sent it.
 	m.windowsSeeded = nil
 	m.testWindowsSeeded = nil
+	m.placeWindowsSeeded = nil
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -1750,6 +1757,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// session, that seeded none places no recording by the last one's.
 			m.testWindows.Store(m.testWindowsSeeded)
 			m.testWindowsSeeded = nil
+			// The run's place's too (SeedRunPlaceWindows).
+			m.placeWindows.Store(m.placeWindowsSeeded)
+			m.placeWindowsSeeded = nil
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}

@@ -177,16 +177,16 @@ func TestRecordedWindow(t *testing.T) {
 	httpTC := &TestCase{Name: "h", Kind: HTTP, HTTPReq: HTTPReq{Timestamp: wmAt(1)}, HTTPResp: HTTPResp{Timestamp: wmAt(2)}}
 	grpcTC := &TestCase{Name: "g", Kind: GRPC_EXPORT, GrpcReq: GrpcReq{Timestamp: wmAt(3)}, GrpcResp: GrpcResp{Timestamp: wmAt(4)}}
 	other := &TestCase{Name: "o", Kind: Kind("Other"), HTTPReq: HTTPReq{Timestamp: wmAt(5)}}
-	if w := RecordedWindow(httpTC); w != (TestWindow{TestCase: "h", Start: wmAt(1), End: wmAt(2)}) {
+	if w := RecordedWindow(httpTC); !reflect.DeepEqual(w, TestWindow{TestCase: "h", Start: wmAt(1), End: wmAt(2)}) {
 		t.Fatalf("HTTP window %+v", w)
 	}
-	if w := RecordedWindow(grpcTC); w != (TestWindow{TestCase: "g", Start: wmAt(3), End: wmAt(4)}) {
+	if w := RecordedWindow(grpcTC); !reflect.DeepEqual(w, TestWindow{TestCase: "g", Start: wmAt(3), End: wmAt(4)}) {
 		t.Fatalf("gRPC window %+v", w)
 	}
 	if w := RecordedWindow(other); !w.Start.IsZero() {
 		t.Fatalf("a %s test case opened a window: %+v", other.Kind, w)
 	}
-	if w := RecordedWindow(nil); w != (TestWindow{}) {
+	if w := RecordedWindow(nil); !reflect.DeepEqual(w, TestWindow{}) {
 		t.Fatalf("nil test case: %+v", w)
 	}
 }
