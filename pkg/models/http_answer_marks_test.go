@@ -161,6 +161,9 @@ func TestMarksSurviveBSONJSONAndClone(t *testing.T) {
 		t.Errorf("no marks read back as %+v (%v)", none.Marks, err)
 	}
 	c := resp.clone()
+	if c.Marks == nil || !c.Marks.Head.Equal(sec(1)) || len(c.Marks.Writes) != 2 {
+		t.Fatalf("a clone's marks = %+v, want the response's", c.Marks)
+	}
 	c.Marks.Writes[0].Offset = 3
 	if resp.Marks.Writes[0].Offset != 2 {
 		t.Error("a clone shares its marks")

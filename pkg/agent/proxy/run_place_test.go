@@ -298,6 +298,23 @@ func TestRunPlace_TheProxySeedsTheRunsWindows(t *testing.T) {
 	}
 }
 
+// The proxy hands the run's manager a test's begin as its window's open and
+// its end as its end.
+func TestRunPlace_TheProxyReachesATestsOpenThenItsEnd(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	p := &Proxy{mockManager: mm}
+	p.SeedRunPlaceWindows(placeWindows())
+	p.ReachRunTest("test-2", true)
+	if got := mm.RunPlace().Reached; got != models.RunOpen(1) {
+		t.Fatalf("at test-2's begin: %d, want its open %d", got, models.RunOpen(1))
+	}
+	p.ReachRunTest("test-2", false)
+	if got := mm.RunPlace().Reached; got != models.RunEnd(1) {
+		t.Fatalf("at test-2's end: %d, want its end %d", got, models.RunEnd(1))
+	}
+}
+
 // The first window's open is reached as any other's.
 func TestRunPlace_TheFirstWindowsOpenIsReached(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
