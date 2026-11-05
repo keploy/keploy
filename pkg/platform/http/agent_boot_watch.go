@@ -957,10 +957,17 @@ func startWaitNext(cur bootLookResult, inContainer bool, silence time.Duration) 
 // by its name only, which another client's Setup may have drawn too: what its
 // looks see is noted on an entry of its own, never on a client's.
 func WatchContainerAgentStart(ctx context.Context, logger *zap.Logger, name string) <-chan error {
-	read, running := containerBootLook(logger, envContainerAPI(logger), &namedContainer{name: name})
-	errs, _ := startErrors(ctx, watchStart(ctx, logger, read, running, nil, true, true), func(j startJudgment) error {
+	api, closeAPI := envContainerAPI(logger)
+	read, running := containerBootLook(logger, api, &namedContainer{name: name})
+	errs, over := startErrors(ctx, watchStart(ctx, logger, read, running, nil, true, true), func(j startJudgment) error {
 		return startFailure(j.p.ExitCode, j.why)
 	})
+	// The looks read through api until the watch is over, and its look
+	// with it (watchStart): its client is closed then.
+	go func() {
+		<-over
+		closeAPI()
+	}()
 	return errs
 }
 

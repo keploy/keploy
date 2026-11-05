@@ -117,14 +117,22 @@ func (a *AgentClient) containerAPI() containerAPI {
 
 // envContainerAPI is an engine API client for a wait with no client of its
 // own (WatchContainerAgentStart), at the endpoint the environment names
-// (DOCKER_HOST, which keploy sets to the active engine's): nil, and the CLI
-// reads, when none can be made. Making one connects to nothing.
-func envContainerAPI(logger *zap.Logger) containerAPI {
+// (DOCKER_HOST, which keploy sets to the active engine's), and the func that
+// closes it once the wait is over, so no wait leaves a connection to the
+// engine's socket open behind it: nil, and the CLI reads, when none can be
+// made. Making one connects to nothing. It negotiates the API's version with
+// the engine on its first read, so an engine older than this client's API
+// answers it too.
+func envContainerAPI(logger *zap.Logger) (api containerAPI, closeAPI func()) {
 	c, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.Debug("keploy could not make a container engine API client; it reads the keploy agent's container through the engine's CLI",
 			zap.Error(err))
-		return nil
+		return nil, func() {}
 	}
-	return c
+	return c, func() {
+		if err := c.Close(); err != nil {
+			logger.Debug("keploy could not close its container engine API client", zap.Error(err))
+		}
+	}
 }

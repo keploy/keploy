@@ -212,13 +212,17 @@ func TestAnAPIAnswerIsNotHandedToTheCLI(t *testing.T) {
 // when the environment names none that can be made.
 func TestAWaitWithNoClientMakesOneForTheEnvironment(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix:///nowhere/docker.sock")
-	if envContainerAPI(zap.NewNop()) == nil {
+	api, closeAPI := envContainerAPI(zap.NewNop())
+	if api == nil {
 		t.Fatal("no API client was made for DOCKER_HOST unix:///nowhere/docker.sock")
 	}
+	closeAPI()
 	t.Setenv("DOCKER_HOST", "not a host")
-	if api := envContainerAPI(zap.NewNop()); api != nil {
+	api, closeAPI = envContainerAPI(zap.NewNop())
+	if api != nil {
 		t.Fatalf("an API client %T was made for a DOCKER_HOST that names no endpoint", api)
 	}
+	closeAPI()
 }
 
 // unreachableEngine is the error an Engine API client gives when the engine's
