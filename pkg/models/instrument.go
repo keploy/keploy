@@ -548,8 +548,9 @@ type SetupOptions struct {
 	// behaviour as an opt-in rollback knob.
 	EnableIPv6Redirect bool
 	// CAJavaHome, when non-empty, forces the Keploy MITM CA truststore
-	// install (installJavaCAForHome) to target $CAJavaHome/lib/security/
-	// cacerts using $CAJavaHome/bin/keytool, instead of the PATH-resolved
+	// install (resolveJavaKeystore) to target $CAJavaHome's cacerts
+	// (lib/security, or jre/lib/security on JDK 8) using
+	// $CAJavaHome/bin/keytool, instead of the PATH-resolved
 	// keytool. This is the manual-override knob for the app-aware
 	// java.home detector in pkg/agent/proxy/tls/java_detect.go:
 	// auto-detection from /proc/<ClientNSPID>/environ +

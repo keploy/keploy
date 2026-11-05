@@ -270,6 +270,11 @@ func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPI
 		return err
 	}
 
+	// The install's changes of the trust stores, the legacy sweep's among them,
+	// share one bound for the store lock: once a wait ends at it, the changes
+	// after it try the lock once, until one gets it (withStoreLockBudget).
+	ctx = withStoreLockBudget(ctx)
+
 	// Best-effort: remove the retired static CA this host may still trust from
 	// older runs or the "bake it into the image" recipe. Runs before this run's
 	// CA is installed so the trust-store refresh does not race our new anchor.
@@ -1075,10 +1080,11 @@ func runAlias(ca *caState) string        { return "keploy-mitm-" + ca.runID }
 // can remove exactly that and nothing else. remove is false for a persisted
 // per-user CA (Windows), which is kept so the user is not re-prompted next run.
 type nativeInstall struct {
-	certFile string // system-store filename (Linux)
-	nssDir   string // NSS shared database the CA was added to (Linux)
-	alias    string // JDK keystore alias
-	cn       string // certificate CN, for the Windows ROOT-store removal
+	certFile string       // system-store filename (Linux)
+	nssDir   string       // NSS shared database the CA was added to (Linux)
+	alias    string       // JDK keystore alias
+	java     javaKeystore // the JDK keystore the alias is imported into (zero: none)
+	cn       string       // certificate CN, for the Windows ROOT-store removal
 	remove   bool
 }
 
@@ -1098,10 +1104,15 @@ func recordNativeInstall(n *nativeInstall) {
 // filename for the duration of the run (removed at teardown; crashed-run copies
 // are inert because the key died with the process and are swept at next start).
 func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, store caStore, appPID int, javaHomeOverride string) error {
+	// Its changes of the trust stores go under one budget for the store lock:
+	// once a wait ends at storeLockWait, the changes after it try once, until
+	// one gets it (withStoreLockBudget; SetupCAForApp's, when it has given
+	// one).
+	ctx = withStoreLockBudget(ctx)
 	// Resolve the target JDK's java.home once, up front. Order:
 	//   1. --ca-java-home CLI override wins (opts.Agent.CAJavaHome).
 	//   2. /proc/<appPID>/environ JAVA_HOME, then /proc/<appPID>/exe.
-	//   3. Empty — installJavaCAForHome falls back to PATH keytool.
+	//   3. Empty — resolveJavaKeystore falls back to the PATH java's JDK.
 	// We log the chosen source at Debug so operators can see why a
 	// particular cacerts file was targeted without turning on trace.
 	resolvedJavaHome := resolveAppJavaHome(logger, appPID, javaHomeOverride)
@@ -1121,13 +1132,18 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 			}
 		}()
 
+		// This run's lock, before any entry is written: other keploy runs'
+		// sweeps leave a live run's entries (runlock.go).
+		holdRunLock(ctx, logger, ca.runID)
+
 		// Recorded before the install, as on Linux below: whatever it leaves
 		// in the ROOT store is removed by this run's teardown however the
 		// install ends (removeWindowsCAByName finds nothing to remove when it
 		// added nothing). A persisted per-user CA is kept across runs (so the
 		// ROOT-store prompt fires at most once); an ephemeral one is removed
 		// at teardown.
-		recordNativeInstall(&nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey()})
+		javaKS, javaErr := resolveJavaKeystore(ctx, logger, resolvedJavaHome)
+		recordNativeInstall(&nativeInstall{alias: alias, java: javaKS, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey()})
 
 		// Install certificate using certutil
 		if err = installWindowsCA(ctx, logger, tempCertPath); err != nil {
@@ -1139,9 +1155,7 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		// also trusts the keploy CA via the JAVA_TOOL_OPTIONS merged truststore
 		// the client sets (SetupCaCertEnv), so a missing/failing keytool must not
 		// fail CA setup for a run that may not even use Java.
-		if err = installJavaCAForHome(ctx, logger, tempCertPath, resolvedJavaHome, alias); err != nil {
-			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
-		}
+		importJavaCAOrWarn(ctx, logger, javaKS, javaErr, tempCertPath, alias)
 
 		// Set environment variables for Node.js and Python to use the custom CA
 		if err := SetEnvForPath(logger, tempCertPath); err != nil {
@@ -1165,6 +1179,10 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		return err
 	}
 
+	// This run's lock, before any entry is written: other keploy runs' sweeps
+	// leave a live run's entries (runlock.go).
+	holdRunLock(ctx, logger, ca.runID)
+
 	// Remove any keploy-mitm-*.crt a previous run left behind on a crash before
 	// installing this run's. Those copies are inert (their signing key died with
 	// the process), but leaving them accumulates dead anchors.
@@ -1179,7 +1197,8 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	// written). Recorded only once the update had succeeded, such an install
 	// left its anchor trusted until the next run's sweep.
 	nssDir := nssDBDir(appPID)
-	recordNativeInstall(&nativeInstall{certFile: certFileName, alias: alias, nssDir: nssDir, remove: true})
+	javaKS, javaErr := resolveJavaKeystore(ctx, logger, resolvedJavaHome)
+	recordNativeInstall(&nativeInstall{certFile: certFileName, alias: alias, java: javaKS, nssDir: nssDir, remove: true})
 	var finalCAPath string
 	for _, path := range caPaths {
 		caPath := filepath.Join(path, certFileName)
@@ -1199,17 +1218,16 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 			return err
 		}
 		fs.Close()
-
-		// install CA in the java keystore if java is installed. Non-fatal for the
-		// same reason as the Windows path above: JAVA_TOOL_OPTIONS is the primary
-		// Java mechanism now, so a missing keytool degrades gracefully.
-		if err := installJavaCAForHome(ctx, logger, caPath, resolvedJavaHome, alias); err != nil {
-			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
-		}
 	}
 
+	// install CA in the java keystore if java is installed, once (every path
+	// above holds the same certificate). Non-fatal for the same reason as the
+	// Windows path above: JAVA_TOOL_OPTIONS is the primary Java mechanism now,
+	// so a missing keytool or keystore degrades gracefully.
+	importJavaCAOrWarn(ctx, logger, javaKS, javaErr, finalCAPath, alias)
+
 	// Update the system store
-	if err := updateCaStore(ctx); err != nil {
+	if err := updateCaStore(ctx, logger); err != nil {
 		utils.LogError(logger, err, "Failed to update the CA store")
 		return err
 	}
@@ -1247,8 +1265,12 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 // path, where the run's context is already cancelled — so it runs the trust-store
 // and keytool commands under its own short-lived context rather than the dead
 // one. Safe to call when nothing was installed (docker/k8s modes, or a persisted
-// per-user CA): it is then a no-op.
+// per-user CA): it then removes nothing, and only gives up the run's lock if it
+// holds one.
 func TeardownNativeCA(logger *zap.Logger) {
+	// The run's lock goes last, once its entries are gone: until then other
+	// runs' sweeps leave them.
+	defer releaseRunLock()
 	installedNativeMu.Lock()
 	n := installedNative
 	installedNative = nil
@@ -1275,11 +1297,11 @@ func TeardownNativeCA(logger *zap.Logger) {
 		// keploy-mitm-<id>.crt, removed directly here, so a full bundle rebuild is
 		// unnecessary. --fresh is reserved for `keploy ca clean`, where pruning
 		// stale hash-links of a generically-named legacy anchor matters.
-		if err := refreshCaStore(ctx, false); err != nil {
+		if err := refreshCaStore(ctx, logger, false); err != nil {
 			logger.Debug("could not refresh the CA store after removing this run's anchor", zap.Error(err))
 		}
 	}
-	removeJavaAlias(ctx, logger, n.alias)
+	removeJavaAlias(ctx, logger, n.java, n.alias)
 	removeNSSCA(ctx, logger, n.nssDir, n.alias)
 	if runtime.GOOS == "windows" {
 		removeWindowsCAByName(ctx, logger, n.cn)
@@ -1309,9 +1331,13 @@ func removeWindowsCAByName(ctx context.Context, logger *zap.Logger, cn string) {
 	}
 }
 
-// sweepRunLeftovers removes keploy-mitm-*.crt anchors from a previous crashed
-// run (any run id other than the current one). They are inert — their signing
-// key is gone — so this is housekeeping, not a security fix.
+// sweepRunLeftovers removes the keploy-mitm-*.crt anchors of other runs (any
+// run id other than the current one) that are no longer alive: a run that
+// holds its lock (runLive) keeps its anchor. A crashed run's anchor is inert —
+// its signing key is gone — so this is housekeeping, not a security fix. Such
+// a run's JDK alias and NSS nickname are removed where this run adds its own:
+// the JDK alias a few per start (sweepJavaLeftovers), the NSS nickname at once
+// (sweepNSSLeftovers).
 func sweepRunLeftovers(logger *zap.Logger, currentRunID string) {
 	current := "keploy-mitm-" + currentRunID + ".crt"
 	for _, dir := range caStorePath {
@@ -1324,21 +1350,32 @@ func sweepRunLeftovers(logger *zap.Logger, currentRunID string) {
 			if name == current || !strings.HasPrefix(name, "keploy-mitm-") || !strings.HasSuffix(name, ".crt") {
 				continue
 			}
+			if liveRunEntry(name) {
+				logger.Debug("left the CA anchor of a keploy run that is still alive", zap.String("path", filepath.Join(dir, name)))
+				continue
+			}
 			if err := os.Remove(filepath.Join(dir, name)); err == nil {
-				logger.Debug("swept a crashed run's CA anchor", zap.String("path", filepath.Join(dir, name)))
+				logger.Debug("swept another run's CA anchor", zap.String("path", filepath.Join(dir, name)))
 			}
 		}
 	}
 }
 
-// removeJavaAlias deletes alias from the resolvable JDK's cacerts, best-effort.
-func removeJavaAlias(ctx context.Context, logger *zap.Logger, alias string) {
-	keytool, cacerts, ok := resolveKeytoolAndCacerts()
-	if !ok {
+// removeJavaAlias deletes alias from the keystore this run imported it into,
+// best-effort. The keystore is the one the import resolved (the app's JDK),
+// not whichever JDK this process's JAVA_HOME or PATH names: on a host with
+// several JDKs those differ, and deleting from another file left the alias
+// behind. A zero ks (no Java, or no keystore found) imported nothing.
+func removeJavaAlias(ctx context.Context, logger *zap.Logger, ks javaKeystore, alias string) {
+	if ks.cacerts == "" {
 		return
 	}
-	cmd := exec.CommandContext(ctx, keytool, "-delete", "-alias", alias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	var out []byte
+	err := withStoreLock(ctx, logger, func() (err error) {
+		out, err = exec.CommandContext(ctx, ks.keytool, "-delete", "-alias", alias, "-keystore", ks.cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+		return err
+	})
+	if err != nil {
 		logger.Debug("could not delete this run's JDK alias", zap.String("alias", alias), zap.ByteString("output", out), zap.Error(err))
 	}
 }
@@ -1542,7 +1579,16 @@ func commandExists(cmd string) bool {
 	return err == nil
 }
 
-func updateCaStore(ctx context.Context) error {
+// updateCaStore rebuilds the system trust bundle from the anchors' directory,
+// holding the store lock (withStoreLock): a rebuild that ran beside another
+// run's wrote out a bundle without the anchor that run had just added.
+func updateCaStore(ctx context.Context, logger *zap.Logger) error {
+	return withStoreLock(ctx, logger, func() error { return runCaStoreUpdate(ctx) })
+}
+
+// runCaStoreUpdate runs the first of caStoreUpdateCmd this host has. Its
+// callers hold the store lock.
+func runCaStoreUpdate(ctx context.Context) error {
 	commandRun := false
 	for _, cmd := range caStoreUpdateCmd {
 		if commandExists(cmd) {
@@ -1583,7 +1629,7 @@ func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bo
 // cacertsPath, using a specific keytool executable.
 //
 // The split vs isJavaCAExist exists so callers with a resolved
-// $javaHome/bin/keytool (installJavaCAForHome) use the SAME keytool for
+// $javaHome/bin/keytool (resolveJavaKeystore) use the SAME keytool for
 // the existence check as for the import — otherwise a PATH keytool's
 // different default store format or cacerts layout can produce a false
 // negative and we'd re-import over and over across agent restarts.
@@ -1599,42 +1645,34 @@ func isJavaCAExistWithTool(ctx context.Context, keytoolBin, alias, storepass, ca
 	return err == nil
 }
 
-// installJavaCA installs the Keploy MITM CA into the Java keystore
-// resolved from PATH (`java -XshowSettings:properties`).
-//
-// Legacy entry point — prefer installJavaCAForHome when the app PID or
-// operator override is available. On multi-JDK hosts (SDKMAN, Maven
-// wrappers, fat-jar launches with absolute JDK paths) the PATH JDK may
-// differ from the one the app actually runs with, which silently causes
-// the Keploy MITM certificate to be trusted in the wrong cacerts file
-// — TLS handshakes from the app then fail cert-verify even though this
-// function returned nil.
-//
-// Signature preserved for backward compat (external callers + tests). It uses
-// the legacy fixed alias; production callers pass a per-run alias instead.
-func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error {
-	return installJavaCAForHome(ctx, logger, caPath, "", legacyCAAlias)
+// javaKeystore is the keytool and the cacerts file of one JDK: where the
+// keploy CA is imported, and so where this run's teardown deletes it from.
+type javaKeystore struct {
+	keytool string
+	cacerts string
 }
 
-// installJavaCAForHome installs the Keploy MITM CA into a specific JDK's
-// cacerts truststore.
+// resolveJavaKeystore resolves the keytool and the cacerts file an import for
+// javaHome uses. A zero javaKeystore with a nil error means Java is not
+// installed (javaHome "" and no java on PATH): there is nothing to import into.
 //
 // javaHome semantics:
 //   - "" (empty): legacy behaviour — fall back to
 //     util.GetJavaHome(ctx), which runs `java` from PATH. Used when the
 //     agent has no better signal (pre-registration boot, or the
 //     auto-detector returned empty).
-//   - non-empty: use $javaHome/bin/keytool as the executable and
-//     $javaHome/lib/security/cacerts as the target keystore, bypassing
-//     PATH. This is the path that fixes the SDKMAN/Maven-wrapper
-//     divergence described at the top of java_detect.go.
+//   - non-empty: use $javaHome/bin/keytool as the executable and the
+//     cacerts under $javaHome (jdkCacerts) as the target keystore,
+//     bypassing PATH. This is the path that fixes the
+//     SDKMAN/Maven-wrapper divergence described at the top of
+//     java_detect.go.
 //
 // The split matters because keytool reads and writes cacerts using its
 // own JDK's security providers; on multi-JDK hosts the PATH keytool can
 // silently write to a different file than the app's JVM reads at
 // startup, producing "unable to find valid certification path" at TLS
 // handshake time even though the import appeared to succeed.
-func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaHome, alias string) error {
+func resolveJavaKeystore(ctx context.Context, logger *zap.Logger, javaHome string) (javaKeystore, error) {
 	if javaHome == "" {
 		// Legacy path — fall back to PATH keytool after the usual
 		// "is java installed?" guard. When no PATH java exists this
@@ -1642,14 +1680,14 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 		// don't run Java workloads at all.
 		if !util.IsJavaInstalled() {
 			logger.Debug("Java is not installed on the system")
-			return nil
+			return javaKeystore{}, nil
 		}
 		logger.Debug("checking java path from default java home")
 		var err error
 		javaHome, err = util.GetJavaHome(ctx)
 		if err != nil {
 			utils.LogError(logger, err, "Java detected but failed to find JAVA_HOME")
-			return err
+			return javaKeystore{}, err
 		}
 	}
 
@@ -1674,29 +1712,162 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 		keytoolBin = "keytool"
 	}
 
-	// Assuming modern Java structure (without /jre/).
-	// Use filepath.Join for proper cross-platform path handling (Windows uses backslashes).
-	cacertsPath := filepath.Join(javaHome, "lib", "security", "cacerts")
+	cacertsPath, ok := jdkCacerts(javaHome)
+	if !ok {
+		return javaKeystore{}, fmt.Errorf("no cacerts keystore under %s (looked in lib/security and jre/lib/security)", javaHome)
+	}
+	return javaKeystore{keytool: keytoolBin, cacerts: cacertsPath}, nil
+}
+
+// jdkCacerts returns the cacerts keystore of the JDK or JRE at home: JDK 9+
+// and a JRE keep it in <home>/lib/security, JDK 8 in <home>/jre/lib/security
+// (its <home>/lib/security does not exist). ok=false when neither file exists.
+func jdkCacerts(home string) (string, bool) {
+	for _, p := range []string{
+		filepath.Join(home, "lib", "security", "cacerts"),
+		filepath.Join(home, "jre", "lib", "security", "cacerts"),
+	} {
+		if fileExists(p) {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// importJavaCA imports the CA at caPath into ks under alias, unless the alias
+// is already there. It first lists ks, and removes up to javaSweepMax of the
+// aliases other keploy CAs left there (sweepJavaLeftovers); only when ks
+// cannot be listed does it ask keytool for alias alone.
+func importJavaCA(ctx context.Context, logger *zap.Logger, ks javaKeystore, caPath, alias string) error {
 	// You can modify these as per your requirements
 	storePass := "changeit"
 
-	logger.Debug("", zap.String("java_home", javaHome), zap.String("keytool", keytoolBin), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath), zap.String("alias", alias))
+	logger.Debug("", zap.String("keytool", ks.keytool), zap.String("caCertsPath", ks.cacerts), zap.String("caPath", caPath), zap.String("alias", alias))
 
-	if isJavaCAExistWithTool(ctx, keytoolBin, alias, storePass, cacertsPath) {
-		logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
+	present, listed := sweepJavaLeftovers(ctx, logger, ks, alias)
+	if !listed {
+		present = isJavaCAExistWithTool(ctx, ks.keytool, alias, storePass, ks.cacerts)
+	}
+	if present {
+		logger.Debug("Java detected and CA already exists", zap.String("path", ks.cacerts))
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
-	cmdOutput, err := cmd.CombinedOutput()
+	// The store lock: an import beside another run's rewrite of the keystore
+	// was lost, or lost that run's change (storelock.go).
+	var cmdOutput []byte
+	err := withStoreLock(ctx, logger, func() (err error) {
+		cmdOutput, err = exec.CommandContext(ctx, ks.keytool, "-import", "-trustcacerts", "-keystore", ks.cacerts, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath).CombinedOutput()
+		return err
+	})
 	utils.BootStep("keytool -import is over")
 	if err != nil {
 		utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
 		return err
 	}
-	logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
+	logger.Debug("Java detected and successfully imported CA", zap.String("path", ks.cacerts), zap.String("output", string(cmdOutput)))
 	logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
 	return nil
+}
+
+// javaSweepMax is the most aliases of other keploy CAs one install removes.
+// Each removal is a keytool -delete: a JVM start and a rewrite of the whole
+// keystore, about 0.3 s. A keystore can hold hundreds of them (a teardown
+// that deleted from another JDK's keystore left every run's alias behind),
+// so a backlog is worked off a few per start instead of holding one start up
+// for minutes.
+const javaSweepMax = 3
+
+// sweepJavaLeftovers lists ks and removes from it up to javaSweepMax aliases
+// named keploy-mitm-* other than alias, this run's, whose runs are no longer
+// alive (runLive), and nothing else. Such an alias is an earlier run's, whose
+// teardown deletes only its own alias and never runs after a crash (its key
+// died with it), or that of another user's persisted Windows CA in a JDK both
+// use, once no run of that user is alive (it is re-imported at that user's
+// next run). It stops at the first delete that fails: the keystore is most
+// likely not writable, and the next would fail too (or another start removed
+// that alias first, and then likely the next ones). It reports whether the
+// listing holds alias and whether ks could be listed at all (when not, present
+// says nothing). Like the NSS sweep (sweepNSSLeftovers), it is best-effort.
+//
+// A run is found dead before its aliases are deleted, a keytool -delete
+// (about 0.3 s) each. A random run id never comes back, but a persisted
+// Windows CA's does: that user's next run, starting in between, finds its
+// alias still there and does not import it, and this sweep then deletes it.
+// That run's Java still trusts the CA through the JAVA_TOOL_OPTIONS
+// truststore.
+func sweepJavaLeftovers(ctx context.Context, logger *zap.Logger, ks javaKeystore, alias string) (present, listed bool) {
+	out, err := exec.CommandContext(ctx, ks.keytool, "-list", "-keystore", ks.cacerts, "-storepass", "changeit").Output()
+	utils.BootStep("keytool -list is over")
+	if err != nil {
+		logger.Debug("could not list the JDK keystore to remove other keploy CAs' aliases", zap.String("cacerts", ks.cacerts), zap.Error(err))
+		return false, false
+	}
+	present, others := javaLeftovers(out, alias)
+	var leftovers []string
+	for _, a := range others {
+		if !liveRunEntry(a) {
+			leftovers = append(leftovers, a)
+		}
+	}
+	removed := 0
+	var failed error // the delete the sweep stopped at, with keytool's output
+	for _, a := range leftovers[:min(len(leftovers), javaSweepMax)] {
+		var delOut []byte
+		delErr := withStoreLock(ctx, logger, func() (err error) {
+			delOut, err = exec.CommandContext(ctx, ks.keytool, "-delete", "-alias", a, "-keystore", ks.cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+			return err
+		})
+		utils.BootStep("keytool -delete is over")
+		if delErr != nil {
+			logger.Debug("could not remove another keploy CA's alias from the JDK keystore", zap.String("alias", a), zap.String("cacerts", ks.cacerts), zap.ByteString("output", delOut), zap.Error(delErr))
+			failed = fmt.Errorf("keytool -delete -alias %s: %w: %s", a, delErr, bytes.TrimSpace(delOut))
+			break
+		}
+		removed++
+		logger.Debug("removed another keploy CA's alias from the JDK keystore", zap.String("alias", a), zap.String("cacerts", ks.cacerts))
+	}
+	if remaining := len(leftovers) - removed; remaining > 0 {
+		logger.Info("the JDK keystore holds CA aliases that other keploy runs left there",
+			zap.String("cacerts", ks.cacerts), zap.Int("removed", removed), zap.Int("remaining", remaining), zap.Int("removedPerStart", javaSweepMax),
+			zap.NamedError("deleteFailed", failed))
+	}
+	return present, true
+}
+
+// javaLeftovers reads `keytool -list` output: whether it lists alias (this
+// run's), and every alias in it that another keploy CA left there, named
+// keploy-mitm-<run id> (runAlias) and not alias. keytool prints each entry as
+// a line that starts with its alias and a comma ("<alias>, <date>,
+// trustedCertEntry,"), in each of its languages. A JKS or PKCS12 keystore
+// keeps its aliases in lower case, so alias is compared without case.
+func javaLeftovers(list []byte, alias string) (present bool, leftovers []string) {
+	for _, line := range strings.Split(string(list), "\n") {
+		a, _, _ := strings.Cut(line, ",")
+		if strings.EqualFold(a, alias) {
+			present = true
+			continue
+		}
+		if strings.HasPrefix(a, "keploy-mitm-") {
+			leftovers = append(leftovers, a)
+		}
+	}
+	return present, leftovers
+}
+
+// importJavaCAOrWarn imports the CA into the resolved keystore (ks and
+// resolveErr are resolveJavaKeystore's results: ks is zero whenever resolveErr
+// is set) and only warns when it cannot: Java also trusts the keploy CA
+// through the JAVA_TOOL_OPTIONS merged truststore the client sets
+// (SetupCaCertEnv).
+func importJavaCAOrWarn(ctx context.Context, logger *zap.Logger, ks javaKeystore, resolveErr error, caPath, alias string) {
+	err := resolveErr
+	if ks.cacerts != "" {
+		err = importJavaCA(ctx, logger, ks, caPath, alias)
+	}
+	if err != nil {
+		logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
+	}
 }
 
 // installWindowsCA installs the CA certificate into a Windows trust store.

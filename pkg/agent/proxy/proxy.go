@@ -2022,6 +2022,33 @@ func (p *Proxy) startContainerKeys(ctx context.Context) {
 	}
 }
 
+// logSetupCAFailure logs that the CA's install failed with err. Terminal: the
+// CA cannot be installed in this process and Keploy-proxied TLS will fail
+// cert-verify for every workload that gets routed through the proxy. Logged at
+// Error (not Warn) to match the severity, with a next_step so operators see
+// the likely fix without grepping source.
+func logSetupCAFailure(logger *zap.Logger, err error) {
+	nextStep := "Verify the agent container has write access to the " +
+		"shared /tmp/keploy-tls volume (docker/k8s mode) or " +
+		"to the host's CA trust store under /usr/local/share/" +
+		"ca-certificates or /etc/pki/ca-trust/source/anchors " +
+		"(native mode). Restart the agent after fixing."
+	if errors.Is(err, pTls.ErrStoreLockHeld) {
+		// The native Linux install's store update did not run because
+		// another process held the trust stores' lock past its bound: no
+		// access is missing.
+		nextStep = pTls.StoreLockHeldNextStep()
+	}
+	logger.Error(
+		"SetupCA failed — Keploy-proxied TLS will fail cert-verify. "+
+			"The /agent/ready endpoint will return 503 with this error "+
+			"so dependents don't wait forever for a readiness that "+
+			"will never come.",
+		zap.Error(err),
+		zap.String("next_step", nextStep),
+	)
+}
+
 // In proxy.go
 func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	p.bindContainerKeys(ctx)
@@ -2056,7 +2083,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// traffic and surfacing the error to readiness probes is a better
 	// signal to operators than hard-aborting the agent here.
 	// Use the PID-aware SetupCAForApp so the Java truststore import
-	// (installJavaCAForHome) targets the JDK the instrumented app is
+	// (resolveJavaKeystore) targets the JDK the instrumented app is
 	// actually running with. On non-Java workloads / shared-volume
 	// mode / appPID==0 these extra args are harmless — SetupCAForApp
 	// falls back to the legacy PATH-keytool behaviour. See
@@ -2064,24 +2091,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	err = p.setupCA(ctx)
 	utils.BootStep("the CA's install is over")
 	if err != nil {
-		// Terminal: the CA cannot be installed in this process and
-		// Keploy-proxied TLS will fail cert-verify for every workload
-		// that gets routed through the proxy. Log at Error (not Warn)
-		// to match the severity, and include a next_step so operators
-		// see the likely fix without grepping source.
-		p.logger.Error(
-			"SetupCA failed — Keploy-proxied TLS will fail cert-verify. "+
-				"The /agent/ready endpoint will return 503 with this error "+
-				"so dependents don't wait forever for a readiness that "+
-				"will never come.",
-			zap.Error(err),
-			zap.String("next_step",
-				"Verify the agent container has write access to the "+
-					"shared /tmp/keploy-tls volume (docker/k8s mode) or "+
-					"to the host's CA trust store under /usr/local/share/"+
-					"ca-certificates or /etc/pki/ca-trust/source/anchors "+
-					"(native mode). Restart the agent after fixing."),
-		)
+		logSetupCAFailure(p.logger, err)
 		pTls.MarkCAFailed(err)
 	}
 

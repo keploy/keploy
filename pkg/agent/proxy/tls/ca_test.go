@@ -2,7 +2,6 @@ package tls
 
 import (
 	"bytes"
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -979,7 +978,7 @@ func TestTeardownRemovesAnInstallThatDidNotFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, ""); err == nil {
+	if err := setupNativeForApp(installCtx(t), zap.NewNop(), ca, nil, 0, ""); err == nil {
 		t.Fatal("the install succeeded with a trust-store update that failed")
 	}
 	anchor := filepath.Join(store, runCertFileName(ca))

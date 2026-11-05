@@ -452,6 +452,10 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
           SCENARIO: ${{ matrix.scenario }}
+          # One cell starts the record run's app JVM 75 s late (a stalled
+          # runner): the lane's waits end on events, never on a count of
+          # seconds, so a slow boot still passes.
+          SLOW_BOOT_SECONDS: ${{ matrix.scenario == 'boot_blocking' && '75' || '0' }}
         run: |
           cd samples-java/async-config-poll
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/async_config_poll/java-linux.sh
