@@ -30,7 +30,14 @@ func TestKeployPorts(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}
-	if got := KeployPorts(nil); len(got) != 0 {
-		t.Errorf("no configuration: got %v, want none", got)
-	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("no configuration: panicked: %v", r)
+			}
+		}()
+		if got := KeployPorts(nil); len(got) != 0 {
+			t.Errorf("no configuration: got %v, want none", got)
+		}
+	}()
 }
