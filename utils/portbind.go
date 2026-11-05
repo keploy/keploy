@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"syscall"
 )
 
@@ -18,13 +19,19 @@ import (
 // a random start, so that runs started together try different ones. Where that
 // range is unknown or reaches 65535, they are the ports from 1024 up, from a
 // random start. Any error but EADDRINUSE ends the search with it.
-func BindFreePort(bind func(port uint32) error) (uint32, error) {
-	return bindFreePortAbove(ephemeralPortRange, bind)
+//
+// The ports in held are never tried: the caller holds them, or will, as the
+// agent does the port its server binds once its proxy has started (a Docker
+// agent's is above its container's ephemeral range too, among these
+// candidates: utils.GetAvailableContainerPort). Bound by the proxy first,
+// that port fails the agent's start.
+func BindFreePort(bind func(port uint32) error, held ...uint32) (uint32, error) {
+	return bindFreePortAbove(ephemeralPortRange, bind, held...)
 }
 
 // bindFreePortAbove is BindFreePort with the ephemeral range read by
 // ephemeral (ephemeralPortRange's signature).
-func bindFreePortAbove(ephemeral func() (lo, hi uint32, known bool), bind func(port uint32) error) (uint32, error) {
+func bindFreePortAbove(ephemeral func() (lo, hi uint32, known bool), bind func(port uint32) error, held ...uint32) (uint32, error) {
 	lo, span := uint32(1024), uint32(65536-1024)
 	if _, hi, known := ephemeral(); known && hi < 65535 {
 		lo, span = hi+1, 65536-(hi+1)
@@ -36,6 +43,9 @@ func bindFreePortAbove(ephemeral func() (lo, hi uint32, known bool), bind func(p
 	var last error
 	for i := uint32(0); i < span; i++ {
 		port := lo + ((start - lo + i) % span)
+		if slices.Contains(held, port) {
+			continue
+		}
 		err := bind(port)
 		if err == nil {
 			return port, nil
