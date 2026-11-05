@@ -1009,8 +1009,9 @@ func TestComposeRecreatingARunningAgentIsNotTheAbort(t *testing.T) {
 // read lists its containers, then inspects each. One removed in between (the
 // app's old container, which compose removes when it recreates the app)
 // answers NotFound: it is gone, so the read decides on the others, and the
-// abort is still seen. Read as "not the abort", the watch let that die go,
-// and on the abort's last die no other die comes.
+// abort is still seen, on that list. Read as "not the abort", the watch let
+// that die go, and on the abort's last die no other die comes; read as a
+// failed read, the decision waited for another list.
 func TestAContainerRemovedSinceTheListIsNotInTheAbortsDecision(t *testing.T) {
 	d := &removedSinceListDaemon{abortDaemon: newAbortDaemon("p",
 		&abortContainer{name: "p-dep-1", service: "dep", status: "exited", exitCode: 3},
@@ -1026,6 +1027,70 @@ func TestAContainerRemovedSinceTheListIsNotInTheAbortsDecision(t *testing.T) {
 	if !d.listedRemoved.Load() {
 		t.Fatal("the read never listed the removed container: the row does not test it")
 	}
+	lists := 0
+	for _, e := range d.trailNow() {
+		if e == "list" {
+			lists++
+		}
+	}
+	if lists != 1 {
+		t.Fatalf("keploy listed the project %d times, want 1 (%v): a container removed since the list is read as a failed read, and the decision waits for another list", lists, d.trailNow())
+	}
+}
+
+// TestTheAbortWatchPassesByADieBeforeKeploysAgentExists: compose builds or
+// pulls the project's images before it makes any container, which can take
+// minutes, and another project's container dies meanwhile. keploy's agent's
+// container does not exist yet, so that die is not of keploy's project: the
+// watch reads the agent's container once on it, passes it by, and reads the
+// project again on the next die; the project's abort is then seen. Read as a
+// failed read, the missing agent kept the watch asking the daemon for it
+// every 200 ms until compose made it.
+func TestTheAbortWatchPassesByADieBeforeKeploysAgentExists(t *testing.T) {
+	d := &agentInspectCountingDaemon{abortDaemon: newAbortDaemon("tmpproj"), agent: "keploy-v3-test"}
+	a := &App{logger: zap.NewNop(), docker: d, kind: utils.DockerCompose,
+		keployContainer: "keploy-v3-test", container: "runner", composeService: "runner"}
+	upCtx, stop := a.watchComposeAbort(context.Background())
+	defer stop()
+	d.add(&abortContainer{name: "other-db-1", service: "db", status: "running", project: "other"})
+	d.exit("other-db-1", 1)
+	eventually(t, "the watch reads keploy's agent's container on the other project's die", func() bool {
+		return d.agentInspects.Load() > 0
+	})
+	// No die comes for a second: nothing asks for the agent again.
+	time.Sleep(time.Second)
+	if n := d.agentInspects.Load(); n != 1 {
+		t.Fatalf("keploy read its agent's container %d times on one die before compose made it, want 1: the missing agent is read as a failed read and asked for again", n)
+	}
+	d.add(
+		&abortContainer{name: "tmpproj-dep-1", service: "dep", status: "running"},
+		&abortContainer{name: "keploy-v3-test", service: keployAgentComposeService, status: "running"},
+		&abortContainer{name: "runner", service: "runner", status: "created"})
+	d.exit("tmpproj-dep-1", 3)
+	d.exit("keploy-v3-test", 0)
+	select {
+	case <-upCtx.Done():
+	case <-time.After(time.Minute):
+		t.Fatalf("the watch did not end the up within a minute of its project's abort after another project's die before compose made keploy's agent (daemon %v)", d.trailNow())
+	}
+	if cause := context.Cause(upCtx); !errors.Is(cause, errComposeUpAborted) {
+		t.Fatalf("the up ended with %v, not keploy's end of the abort", cause)
+	}
+}
+
+// agentInspectCountingDaemon counts the inspects of keploy's agent's
+// container (agent), made or not.
+type agentInspectCountingDaemon struct {
+	*abortDaemon
+	agent         string
+	agentInspects atomic.Int32
+}
+
+func (d *agentInspectCountingDaemon) ContainerInspect(ctx context.Context, ref string) (container.InspectResponse, error) {
+	if ref == d.agent {
+		d.agentInspects.Add(1)
+	}
+	return d.abortDaemon.ContainerInspect(ctx, ref)
 }
 
 // removedSinceListDaemon lists removed, a container it no longer has, in its
