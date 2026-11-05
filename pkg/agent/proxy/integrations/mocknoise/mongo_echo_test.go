@@ -205,6 +205,11 @@ func TestARecordedValueWrittenTwiceBindsOnlyOneLiveValue(t *testing.T) {
 	if got := RenderMongoEchoes(m.Spec.Correlations, []string{mongoMsg(two(liveKeyID, recKeyID))}, recorded); got != recorded {
 		t.Fatalf("two live values bound: served %q", got.Sections)
 	}
+	// Refused at one place, the value stays refused: neither live key is
+	// served.
+	if got := RenderMongoEchoes(m.Spec.Correlations, []string{mongoMsg(two(liveKeyID, "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0"))}, recorded); got != recorded {
+		t.Fatalf("two new live values bound: served %q", got.Sections)
+	}
 	got := RenderMongoEchoes(m.Spec.Correlations, []string{mongoMsg(two(liveKeyID, liveKeyID))}, recorded)
 	if want := mongoMsg(`{"value":{"key_id":"` + liveKeyID + `"},"ok":1}`); got.Sections[0] != want {
 		t.Fatalf("served %q, want %q", got.Sections[0], want)
