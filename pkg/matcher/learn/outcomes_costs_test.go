@@ -1100,10 +1100,10 @@ func postingBytes(text string) int64 {
 }
 
 // freshPostBytes is what the set's postings count for a run they hold no
-// list of yet (postBytes): its slot in their map (96 bytes), its letters
-// as their allocation rounds them up, and one id (8 bytes). The rows state
-// the sizes, not the code's names for them.
-func freshPostBytes(w string) int64 { return 8 + 96 + int64(len(w)+len(w)/8+16) }
+// list of yet (postBytes): its slot in their map (112 bytes), its letters
+// as their allocation rounds them up, and its list of one id (16 bytes).
+// The rows state the sizes, not the code's names for them.
+func freshPostBytes(w string) int64 { return 16 + 112 + int64(len(w)+len(w)/8+16) }
 
 // postedBytes is what the set's postings of its texts' words keep (postRuns):
 // each run's letters and an id per text that holds it.
@@ -2151,6 +2151,8 @@ func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
 		{"8 texts of 20,000 fresh runs", 8, 20000, false, false},
 		{"8 texts of the same 20,000 runs", 8, 20000, true, false},
 		{"one text of 1,000 fresh runs", 1, 1000, false, false},
+		{"one text of 897 fresh runs (the map just split)", 1, 897, false, false},
+		{"one text of 449 fresh runs (the map just grew)", 1, 449, false, false},
 		{"8 word lists of 20,000 fresh words", 8, 20000, false, true},
 	} {
 		// The set's filters made here, not through filtersOf: the earlier
@@ -2209,6 +2211,70 @@ func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
 		if held > counted {
 			t.Errorf("%s: the postings hold %d bytes of heap and count %d on the budget: want no more held than counted", c.name, held, counted)
 		}
+	}
+}
+
+// A posting's slot in the map of postings counts at least what the map
+// holds a word at its least fill: just after its table grows or splits,
+// 7/16 full, where a table of 1,024 slots takes its groups as whole pages.
+// Measured on the map alone (keys the words' own text, no lists), at each
+// size where it grows: 449 words in one table of 1,024 slots and 897 in
+// two hold 110 bytes a word, over the 96 a slot counted before.
+func TestOutcomeCostAPostingsSlotCountsItsMapAtItsLeastFill(t *testing.T) {
+	var b strings.Builder
+	for j := range 2000 {
+		fmt.Fprintf(&b, "w%d ", j)
+	}
+	words := strings.Fields(b.String())
+	for _, n := range []int{9, 15, 29, 57, 113, 225, 449, 897, 1000, 1793} {
+		var m0, m1 runtime.MemStats
+		runtime.GC()
+		runtime.GC()
+		runtime.ReadMemStats(&m0)
+		m := map[string][]int32{}
+		for _, w := range words[:n] {
+			m[w] = nil
+		}
+		runtime.GC()
+		runtime.ReadMemStats(&m1)
+		held := int64(m1.HeapAlloc) - int64(m0.HeapAlloc)
+		runtime.KeepAlive(m)
+		t.Logf("%d words: the map holds %d bytes, %.1f a word; a slot counts %d", n, held, float64(held)/float64(n), postSlotBytes)
+		if held > int64(n)*postSlotBytes {
+			t.Errorf("%d words: the map holds %d bytes, %.1f a word, over the %d a slot counts", n, held, float64(held)/float64(n), postSlotBytes)
+		}
+	}
+}
+
+// postingSink keeps the small garbage the row below interleaves with each
+// list on the heap.
+var postingSink []byte
+
+// A run's first list, of one 4-byte id, counts the whole 16-byte block the
+// runtime packs small objects into: once the rest of its block is garbage,
+// the list keeps it alive alone. Measured on lists made each beside 12
+// bytes that die: they hold 16 bytes each, over the 8 the first id counted
+// before. The heap's own work between the two reads (a few hundred bytes
+// in these rows) is allowed up to 4 KiB, under half a byte a list.
+func TestOutcomeCostAPostingsFirstIdCountsItsWholeBlock(t *testing.T) {
+	const n = 10000
+	lists := make([][]int32, n)
+	var m0, m1 runtime.MemStats
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&m0)
+	for i := range lists {
+		lists[i] = []int32{int32(i)}
+		postingSink = make([]byte, 12)
+	}
+	postingSink = nil
+	runtime.GC()
+	runtime.ReadMemStats(&m1)
+	held := int64(m1.HeapAlloc) - int64(m0.HeapAlloc)
+	runtime.KeepAlive(lists)
+	t.Logf("%d lists of one id: %d bytes held, %.1f a list; a first id counts %d", n, held, float64(held)/n, postFirstIDBytes)
+	if held > n*postFirstIDBytes+4096 {
+		t.Errorf("%d lists of one id hold %d bytes, %.1f a list, over the %d a first id counts", n, held, float64(held)/n, postFirstIDBytes)
 	}
 }
 

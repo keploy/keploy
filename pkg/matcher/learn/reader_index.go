@@ -683,21 +683,29 @@ func postRuns(fs *setFilters, s *setDerived, e *filterEntry, forms []string) {
 
 // postBytes is what a map of postings (setFilters.runs, post) holds for one
 // id more under w: the id, at twice its list's length (append doubles a
-// full list), and, fresh (the map holds no list of w yet), w's slot (its
-// key's and its list's headers, 40 bytes, and their control byte, at 7/16
-// of its table filled: the least a table holds just after it grows) and
-// w's letters as their allocation rounds them up (a size class at most an
-// eighth over them, or a 16-byte block of small ones).
+// full list), and, fresh (the map holds no list of w yet), its list of one
+// id as a whole 16-byte block (a 4-byte list keeps the small-object block
+// it shares alive alone once the rest is garbage, and the race detector's
+// runtime gives each its own), w's slot and w's letters as their
+// allocation rounds them up (a size class at most an eighth over them, or
+// a 16-byte block of small ones).
+//
+// A slot is its key's and its list's headers, 40 bytes, and their control
+// byte, at 7/16 of its table filled: the least a table holds just after it
+// grows or splits. A table of 1,024 slots, the most one holds, takes its
+// 41,984 bytes of groups as 6 pages (49,152 bytes), so its slot is 48
+// bytes at 7/16: 110 bytes a word, with the table's own header.
 func postBytes(w string, fresh bool) int64 {
 	if !fresh {
 		return postIDBytes
 	}
-	return postIDBytes + postSlotBytes + int64(len(w)+len(w)/8+16)
+	return postFirstIDBytes + postSlotBytes + int64(len(w)+len(w)/8+16)
 }
 
 const (
-	postIDBytes   = 8
-	postSlotBytes = 96
+	postIDBytes      = 8
+	postFirstIDBytes = 16
+	postSlotBytes    = 112
 )
 
 // postID is the id the set's postings name t's text by (postRuns), its
