@@ -184,11 +184,6 @@ func settledWithin(t *testing.T, tr *inflight, cond func() bool, what string) {
 	}
 }
 
-func bothSwitches(t *testing.T, row func(t *testing.T, proven bool)) {
-	t.Run("switch off", func(t *testing.T) { row(t, false) })
-	t.Run("switch on", func(t *testing.T) { row(t, true) })
-}
-
 // An answer recorded in test-3's window, for a call made in test-1, is
 // written at test-3's open though test-3 calls none of its own recordings:
 // the place moves on the windows the replayer opens, never on a call the
