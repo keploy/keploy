@@ -801,6 +801,35 @@ func TestTheReplayPushesTheWorkerScope(t *testing.T) {
 		"each worker: name under the key whose slice holds it, in worker:'s order; mock-0 stays TestA's")
 }
 
+// A call moved out of a keyed test's list (mapdb's MoveToWorker) is pushed
+// under the claim key of the test it left, not of the test at its place: the
+// replay hands the agent the call in that key's worker scope, which the
+// agent serves while a test process of that key holds the run. Moved under
+// no key, it sat in the slice no test process holds and was never served.
+func TestTheReplayPushesACallMovedOutOfAKeyedTestUnderItsKey(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: a::TestA\n      dir: a\n      key: a\n      mocks:\n        - name: mock-0\n    - id: b::TestB\n      dir: b\n      key: b\n      mocks:\n        - name: mock-1\n        - name: mock-2\nworker:\n    - name: mock-3\n      key: a\n"), 0o644))
+	db := mapdb.New(zap.NewNop(), keployDir, "")
+	moved, err := db.MoveToWorker(context.Background(), "set", []models.MockEntry{{Name: "mock-1", Place: "a::TestA", Owner: "b::TestB"}})
+	require.NoError(t, err)
+	require.Equal(t, []string{"mock-1"}, moved)
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}, {Name: "mock-2"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-1", "mock-2", "mock-3"), db, nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, map[string][]string{"a": {"mock-3"}, "b": {"mock-1"}}, instr.worker, "the moved call is in the worker scope of the key of the test it left")
+	require.NotContains(t, instr.pool[models.PoolKeyNone], "mock-1", "the moved call is in no slice of no key")
+	require.Contains(t, instr.pool["b"], "mock-1")
+}
+
 // Under the switch the replay hands the agent, with the table, the recorded
 // window of every test of the set from its mappings (keploy test's staging
 // sends them from its test cases): the learn step then reads another test's
