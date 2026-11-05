@@ -618,3 +618,129 @@ func TestOutcomeCostAReadSinceItsTestBeganBesideAnExchangeWithNoPayloadIsRefused
 	put.Payload = Raw{mock: "mock-204", unread: "its kind is unknown"}
 	costRefused(t, "a read since its test began beside a send of the same second, its payload unread", call(put), []RefusalKind{RefusalUnread}, "mock-204", "keploy could not read mock-204")
 }
+
+// A call's word questions read each earlier recording once and check only
+// the words the call asks about: no list of a recording's every word is
+// built, so the call's work does not grow with the words of the run, and a
+// later test of the set reads each recording's other forms as the set keeps
+// them, derived once for the set, not again per test. A list of every word
+// of every recording, built again on every call because no cache held a
+// run's ~3,000 recordings, was half of the agent's CPU and doubled the
+// round's time. Counted, not timed; the verdicts are the same at both sizes
+// and in both tests.
+func TestOutcomeCostACallChecksEachRecordingOnlyForTheWordsItAsks(t *testing.T) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
+	lists, read := 0, tokensOfForms
+	t.Cleanup(func() { tokensOfForms = read })
+	tokensOfForms = func(f []string) []map[string]bool { lists++; return read(f) }
+	extra := readTally{tierWords, partExtra}
+	type result struct {
+		lists, extras [2]int
+		got           [2]string
+	}
+	call := func(n int) (r result) {
+		mocks := make([]*models.Mock, n)
+		for i := range mocks {
+			name, body, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d"}`, i, i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+			if i == n/2 {
+				name, body, at = "mock-held", `{"note":"Kept A1B2C3D4","ref":"a1b2c3d4"}`, eRecAt.Add(-time.Second)
+			}
+			mocks[i] = getAnswer(name, fmt.Sprintf("http://api/items/%d", i), body, at)
+		}
+		tr := NewTracker()
+		tr.NewSet()
+		for test := range 2 {
+			tr.Begin()
+			before := tallyOf(tr.derived)
+			lists = 0
+			dc := tr.Drifts()
+			r.got[test] = oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, lazyOf(dc, mocks), nil, nil)))
+			r.lists[test], r.extras[test] = lists, readSince(before, tallyOf(tr.derived))[extra]
+			tr.End()
+		}
+		return r
+	}
+	small, large := call(300), call(3000)
+	t.Logf("decided: %s; word lists built %v over 300 recordings, %v over 3,000", small.got[0], small.lists, large.lists)
+	for _, r := range []result{small, large} {
+		if r.got[1] != r.got[0] {
+			t.Errorf("a later test's call decides %s; the first decided %s", r.got[1], r.got[0])
+		}
+	}
+	if large.got[0] != small.got[0] {
+		t.Errorf("over 3,000 recordings the call decides %s; over 300 it decided %s", large.got[0], small.got[0])
+	}
+	if large.lists != small.lists {
+		t.Errorf("the call built %v lists of every word of a text over 3,000 recordings, %v over 300: it lists each recording's words, not only the words it asks", large.lists, small.lists)
+	}
+	for _, c := range []struct {
+		n int
+		r result
+	}{{300, small}, {3000, large}} {
+		if c.r.extras != [2]int{c.n, 0} {
+			t.Errorf("over %d recordings the two tests derived the recordings' other forms %v times; want each once for the set, in the first test, and none in the later", c.n, c.r.extras)
+		}
+	}
+}
+
+// What a call's question finds of a word in a text, read as a recording
+// the set keeps, as one read whole, or as a text the caller hands, is what
+// main's lists of the text's words in every declared form hold, in each
+// reading, within the call's budget and past it, and no such list is built.
+func TestOutcomeCostAWordIsFoundWhereMainsListsHoldIt(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	bodies := []string{
+		`{"id":"order-17","path":"uploads/17/a.png","q":"Order+17"}`,
+		`{"note":"cart_42 and 43, café é9 tok_a-b_c --x__ ABC Def"}`,
+		`{"jwt":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig_-x"}`,
+		`{"u":"a%2Fb%20c%3D17 dGVzdC12YWx1ZQ== x"}`,
+		`{"note":"{\"inner\":\"V-9\"}"}`,
+	}
+	lists, read := 0, tokensOfForms
+	t.Cleanup(func() { tokensOfForms = read })
+	tokensOfForms = func(f []string) []map[string]bool { lists++; return read(f) }
+	mocks := make([]*models.Mock, len(bodies))
+	for i, b := range bodies {
+		mocks[i] = getAnswer(fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), b, eRecAt.Add(-time.Second))
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	lazy := lazyOf(dc, mocks)
+	for _, budget := range []int64{0, 1} {
+		readerBudget = budget
+		for i, m := range mocks {
+			whole := RawOf(m, true)
+			text := whole.payload().text
+			want := read(textForms(text))
+			words := map[string]bool{"": true, "zz": true, "17/a": true, "-": true, "a-b": true, "order-17": true}
+			for _, set := range want {
+				for w := range set {
+					words[w], words[w[:len(w)/2]], words[strings.ToUpper(w)] = true, true, true
+				}
+			}
+			x := newReaderIndex(dc)
+			for _, h := range []struct {
+				what string
+				t    *readerText
+			}{{"the set's recording", x.textOf(lazy[i])}, {"a recording read whole", x.textOf(whole)}, {"a handed text", x.text(text)}} {
+				for w := range words {
+					for r := range readings {
+						if held, ok := h.t.wordIn(w, r); held != want[r][w] || !ok {
+							t.Errorf("budget %d, %s of %s: %q in reading %d held %v read %v; main's lists hold it: %v", budget, h.what, m.Name, w, r, held, ok, want[r][w])
+						}
+					}
+					if held, _ := h.t.holdsWord(w); held != (want[0][w] || want[1][w] || want[2][w]) {
+						t.Errorf("budget %d, %s of %s: %q held %v; main's lists hold it in a reading: %v", budget, h.what, m.Name, w, held, !held)
+					}
+				}
+			}
+			x.release()
+		}
+	}
+	if lists != 0 {
+		t.Errorf("the questions built %d lists of every word of a text; want each word checked alone", lists)
+	}
+}

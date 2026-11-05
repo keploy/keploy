@@ -738,9 +738,31 @@ func TestOutcomeAWordWhoseWholeTokenAnEarlierPlaceKeptInBothRunsIsRefused(t *tes
 			}
 		}
 	}
-	find := oServed("mock-0", false, false, Response, oText("body.n", "82"), "82", time.Millisecond)
-	if d := oWord(t, Decide(oInput("body.note", "slot 82", "slot 7", find, nil)), "82", "7"); d.Outcome != OutcomeFresh || !strings.Contains(d.Line, "set aside") {
-		t.Errorf("a short word, a token of its own, beside a place that gave it in both runs: %s, line %q; want fresh, naming the place set aside", oDescribe([]Decision{d}), d.Line)
+	// The short word stays chance at each earlier place, an older test's
+	// too. Only a place F gave the application before the call's test began
+	// refuses it, by main's older-test rule for a whole word, not by its
+	// token.
+	for _, s := range []struct {
+		what               string
+		run, startUp, gone bool
+		want               WordOutcome
+	}{
+		{"the call's test", false, false, false, OutcomeFresh},
+		{"the start-up", true, true, false, OutcomeFresh},
+		{"an older test", true, false, false, OutcomeFresh},
+		{"an older test, given only before the call's test", true, false, true, OutcomeRefused},
+	} {
+		find := oServed("mock-0", s.run, s.startUp, Response, oText("body.n", "82"), "82", time.Millisecond)
+		find[0].beforeTest = s.gone
+		d := oWord(t, Decide(oInput("body.note", "slot 82", "slot 7", find, nil)), "82", "7")
+		switch {
+		case d.Outcome != s.want:
+			t.Errorf("a short word, a token of its own, beside %s that gave it in both runs: %s; want %v", s.what, oDescribe([]Decision{d}), s.want)
+		case s.want == OutcomeFresh && !strings.Contains(d.Line, "set aside"):
+			t.Errorf("a short word beside %s: line %q; want it to name the place set aside", s.what, d.Line)
+		case s.want == OutcomeRefused && (d.Refusal == nil || d.Refusal.Kind != RefusalUnknown || strings.Contains(d.Line, "stood whole")):
+			t.Errorf("a short word beside %s: %s; want unknown by the older-test rule, not the whole-token one", s.what, oDescribe([]Decision{d}))
+		}
 	}
 }
 
