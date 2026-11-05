@@ -1225,7 +1225,7 @@ func TestAMappingListsNoAnswerTheClientNeverRead(t *testing.T) {
 	mock := func(name string, ms int, unread bool) *models.Mock {
 		m := &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"type": "HTTP_CLIENT"}, ReqTimestampMock: at(ms)}}
 		if unread {
-			m.Spec.Metadata[models.MetadataUndeliveredKey] = models.MetadataUndelivered
+			m.MarkUndelivered()
 		}
 		return m
 	}
@@ -1235,6 +1235,20 @@ func TestAMappingListsNoAnswerTheClientNeverRead(t *testing.T) {
 			mocks := []capturedMock{capturedOf(mock("mock-0", 10, false)), capturedOf(mock("mock-1", 20, true))}
 			require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0", Kind: "Http"}}}, correlateScopes(windows, dataPlane(mocks)))
 			require.Equal(t, []models.MockEntry{{Name: "mock-1", Kind: "Http"}}, startupMocks(windows, mocks, nil))
+			// With a runner's starts (classify), filed by its start's worker
+			// and by its own pid alike.
+			tests := []models.ScopeWindow{{Name: "o::TestA", Start: at(0), End: at(100), PID: 10}}
+			starts := []models.ScopeWindow{{App: true, Ref: "s1", Name: "app#1", Dir: "/r", Program: "app", N: 1, Ready: at(5), Worker: 10}}
+			var withStarts []capturedMock
+			for _, c := range mocks {
+				byStart, byPID := c, c
+				byStart.name, byStart.ref = c.name+"@s1", "s1"
+				byPID.pid = 10
+				withStarts = append(withStarts, byStart, byPID)
+			}
+			plan := classify(tests, starts, []models.SuiteSpan{{Dir: "/r", Start: at(0), End: at(200)}}, withStarts)
+			require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0@s1", Kind: "Http", Start: "app#1"}, {Name: "mock-0", Kind: "Http"}}}, plan.tests)
+			require.Len(t, plan.perTest, 4, "its cases are correlated with every mock in the test's window, as before")
 		})
 	}
 }

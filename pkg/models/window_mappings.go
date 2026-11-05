@@ -40,11 +40,10 @@ type WindowedMock struct {
 	// Place is where it sits in the recording (PlaceOf): At, or Res for a
 	// mock placed at its answer. The window that holds it owns it.
 	Place time.Time
-	// TestMock says a test may own it: a data-plane mock (IsProtocolPhase) that
-	// no async lane serves and the client read (IsUndelivered). An async
-	// lane's mocks are served in their lane's recorded order whichever test is
-	// open, so no test owns one; an answer the client never read is never
-	// served, so neither a test nor the worker scope owns one.
+	// TestMock says a test may own it: a data-plane mock (IsProtocolPhase:
+	// not an answer the client never read, either) that no async lane serves.
+	// An async lane's mocks are served in their lane's recorded order
+	// whichever test is open, so no test owns one.
 	TestMock bool
 	// InFlight says the in-flight rule applies to it (InFlightEligible): sent
 	// in the gap before a test and answered at or after its start, it is that
@@ -93,7 +92,7 @@ func NewWindowedMock(m *Mock) WindowedMock {
 		At:       m.Spec.ReqTimestampMock,
 		Res:      m.Spec.ResTimestampMock,
 		Place:    PlaceOf(m),
-		TestMock: !m.IsProtocolPhase() && !m.IsAsync() && !m.IsUndelivered(),
+		TestMock: !m.IsProtocolPhase() && !m.IsAsync(),
 		InFlight: InFlightEligible(m),
 		Idle:     IsIdleAnswer(m),
 		Clock:    m.Origin.clock(),

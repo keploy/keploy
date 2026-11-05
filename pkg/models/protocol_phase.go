@@ -10,6 +10,10 @@ package models
 //     COM_RESET_CONNECTION), or what an out-of-tree parser declared through
 //     RegisterSessionReusable;
 //   - DNS;
+//   - an answer its recorder tagged as one the client never read
+//     (IsUndelivered): no replay serves it, so no test or worker makes a
+//     call it must answer, and every site that asks whether a mock is a
+//     test's or the worker scope's reads it as none;
 //   - a mock its recorder stated session or connection lifetime
 //     (MetadataLifetimeKey): the MySQL recorder states a connection's setup
 //     (SET, SHOW VARIABLES, USE), transaction control (BEGIN, COMMIT) and a
@@ -31,6 +35,9 @@ package models
 func (m *Mock) IsProtocolPhase() bool {
 	if m == nil {
 		return false
+	}
+	if m.IsUndelivered() {
+		return true
 	}
 	if m.Kind == DNS {
 		return true

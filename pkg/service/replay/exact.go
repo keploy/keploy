@@ -716,15 +716,15 @@ func (r *Replayer) windowOwnershipOf(testSetID string, cases []*models.TestCase,
 // order; it is not the pool's.
 func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEntry, stored ...[]*models.Mock) *exactPlan {
 	p := &exactPlan{owned: make(map[string][]string, len(mappings))}
-	// held: the stored mocks by name, true for a test mock (data-plane). An
-	// answer the client never read (models.Mock.IsUndelivered) is no test
-	// mock: no replay serves it, so whatever mapping lists it, neither its
-	// test nor the worker scope requires it.
+	// held: the stored mocks by name, true for a test mock (data-plane; an
+	// answer the client never read, models.Mock.IsUndelivered, is none, so
+	// whatever mapping lists it, neither its test nor the worker scope
+	// requires it).
 	held := map[string]bool{}
 	for _, list := range stored {
 		for _, mk := range list {
 			if mk != nil && mk.Name != "" {
-				held[mk.Name] = !mk.IsProtocolPhase() && !mk.IsUndelivered()
+				held[mk.Name] = !mk.IsProtocolPhase()
 				if models.IsAnswerPlaced(mk) {
 					if p.answerPlaced == nil {
 						p.answerPlaced = map[string]bool{}

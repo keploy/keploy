@@ -14,7 +14,7 @@ func undeliveredMock(name string, at int, tagged bool) *Mock {
 		ResTimestampMock: wmAt(at + 1),
 	}}
 	if tagged {
-		m.Spec.Metadata[MetadataUndeliveredKey] = MetadataUndelivered
+		m.MarkUndelivered()
 	}
 	return m
 }
@@ -25,11 +25,23 @@ func TestOnlyTheUndeliveredTagMarksAnAnswerTheClientNeverRead(t *testing.T) {
 	if !undeliveredMock("unread", 1000, true).IsUndelivered() {
 		t.Fatal("an answer tagged undelivered was read as delivered")
 	}
+	bare := &Mock{Name: "bare", Kind: Kind("Kafka")}
+	if bare.MarkUndelivered(); !bare.IsUndelivered() {
+		t.Fatal("MarkUndelivered on a mock with no metadata did not tag it")
+	}
+	// No data-plane mock: every site that asks whether a mock is a test's
+	// or the worker scope's reads it as none.
+	if !undeliveredMock("unread", 1000, true).IsProtocolPhase() || !bare.IsProtocolPhase() {
+		t.Fatal("an answer the client never read was read as a data-plane mock")
+	}
 	other := undeliveredMock("read", 1000, false)
 	other.Spec.Metadata[MetadataUndeliveredKey] = "false"
 	for _, m := range []*Mock{undeliveredMock("read", 1000, false), other, nil, {Name: "no-metadata"}} {
 		if m.IsUndelivered() {
 			t.Fatalf("%+v was read as undelivered", m)
+		}
+		if m != nil && m.Name != "no-metadata" && m.IsProtocolPhase() {
+			t.Fatalf("%+v, an answer the client read, was read as protocol-phase", m)
 		}
 	}
 }
