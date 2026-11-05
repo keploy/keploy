@@ -10,7 +10,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
@@ -58,8 +57,17 @@ func recordChunks(t *testing.T, chunks []fakeconn.Chunk, viaSyncMock bool, want 
 		mgr.SetOutputChannel(mocks)
 		sess.RouteMocksViaSyncMock = true
 	}
-	if err := dispatch(t, sess); err != nil {
-		t.Fatalf("the parser returned %v", err)
+	// Its streams have ended, so the parser returns, bounded only to turn a
+	// parser that never does into a failure.
+	done := make(chan error, 1)
+	go func() { done <- dispatch(t, sess) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the parser returned %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the parser did not return at its streams' end")
 	}
 	// The parser has returned, so it has handed over every mock it records.
 	// The bound only turns a mock that never comes into a failure; one more
@@ -89,101 +97,6 @@ collect:
 	return r
 }
 
-// The chunks of the rows below: a request, and an answer the server sent in
-// two chunks (head, then tail), read off the destination's socket and written
-// on, then the next request and its one-chunk answer.
-var (
-	tailReq0At   = time.Unix(7000, 0)
-	tailHeadRead = time.Unix(7001, 0)
-	tailHeadSent = tailHeadRead.Add(100 * time.Millisecond)
-	tailRead     = time.Unix(7002, 0)
-	tailSent     = tailRead.Add(100 * time.Millisecond)
-	tailReq1At   = time.Unix(7003, 0)
-	tailResp1At  = time.Unix(7004, 0)
-)
-
-func tailChunks(withNext bool) []fakeconn.Chunk {
-	chunks := []fakeconn.Chunk{
-		{Dir: fakeconn.FromClient, Bytes: []byte("GET big\r\n"), ReadAt: tailReq0At, ConnSeq: 1},
-		{Dir: fakeconn.FromDest, Bytes: []byte("head"), ReadAt: tailHeadRead, WrittenAt: tailHeadSent, ConnSeq: 2},
-		{Dir: fakeconn.FromDest, Bytes: []byte("tail"), ReadAt: tailRead, WrittenAt: tailSent, ConnSeq: 3},
-	}
-	if withNext {
-		chunks = append(chunks,
-			fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("GET small\r\n"), ReadAt: tailReq1At, ConnSeq: 4},
-			fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("+OK\r\n"), ReadAt: tailResp1At, WrittenAt: tailResp1At, ConnSeq: 5})
-	}
-	return chunks
-}
-
-// checkTailLeftOut fails t unless r left out exactly one mock, the answer's
-// tail, for leftOutAnswerTail, counted, over the tail's own times: from when
-// the relay read it to when its write returned.
-func checkTailLeftOut(t *testing.T, r tailRun) {
-	t.Helper()
-	if len(r.leftOut) != 1 || r.leftOut[0] != leftOutAnswerTail || r.counted != 1 {
-		t.Fatalf("left out %q (the manager counts %d), want the answer's tail alone, for %q",
-			r.leftOut, r.counted, leftOutAnswerTail)
-	}
-	if c, o := r.spans.Counts(); c != 1 || o != 0 {
-		t.Fatalf("the spans hold (closed=%d, open=%d), want the tail's", c, o)
-	}
-	if over, _ := r.spans.Overlaps(tailRead, tailRead); !over {
-		t.Fatal("a test case over the tail's read is not left out")
-	}
-	if over, _ := r.spans.Overlaps(tailSent, tailSent); !over {
-		t.Fatal("a test case over the tail's write is not left out")
-	}
-	if over, _ := r.spans.Overlaps(tailReq0At, tailRead.Add(-time.Millisecond)); over {
-		t.Fatal("the span starts before the relay read the tail: it is wider than the chunks left out")
-	}
-	if over, _ := r.spans.Overlaps(tailSent.Add(time.Millisecond), tailResp1At.Add(time.Second)); over {
-		t.Fatal("the span ends after the tail's write returned: it is wider than the chunks left out")
-	}
-}
-
-// A server's answer in more than one chunk (over the relay's 32 KiB read, or
-// written in parts) is recorded as its first chunk, as before, and the part
-// after it is left out with its span, so the test case that waited on the
-// whole answer is left out instead of saved with an answer cut short. Before,
-// the later chunks were dropped with nothing left out, counted or said, on
-// both deliveries and under both switches. The tail here comes before the next
-// request.
-func TestV2_AnAnswersLaterChunksAreLeftOutBeforeTheNextRequest(t *testing.T) {
-	for _, proven := range []string{"0", "1"} {
-		for _, viaSyncMock := range []bool{false, true} {
-			t.Run("proven="+proven+"/viaSyncMock="+map[bool]string{false: "no", true: "yes"}[viaSyncMock], func(t *testing.T) {
-				t.Setenv(provenswitch.Env, proven)
-				r := recordChunks(t, tailChunks(true), viaSyncMock, 2)
-				if len(r.recorded) != 2 {
-					t.Fatalf("recorded %d mocks, want both exchanges", len(r.recorded))
-				}
-				assertExchange(t, r.recorded[0], []string{"GET big\r\n"}, []string{"head"})
-				assertExchange(t, r.recorded[1], []string{"GET small\r\n"}, []string{"+OK\r\n"})
-				checkTailLeftOut(t, r)
-			})
-		}
-	}
-}
-
-// The same when the connection ends after the tail: the streams' end is where
-// the parser learns no request follows it.
-func TestV2_AnAnswersLaterChunksAreLeftOutAtTheStreamsEnd(t *testing.T) {
-	for _, proven := range []string{"0", "1"} {
-		for _, viaSyncMock := range []bool{false, true} {
-			t.Run("proven="+proven+"/viaSyncMock="+map[bool]string{false: "no", true: "yes"}[viaSyncMock], func(t *testing.T) {
-				t.Setenv(provenswitch.Env, proven)
-				r := recordChunks(t, tailChunks(false), viaSyncMock, 1)
-				if len(r.recorded) != 1 {
-					t.Fatalf("recorded %d mocks, want the exchange", len(r.recorded))
-				}
-				assertExchange(t, r.recorded[0], []string{"GET big\r\n"}, []string{"head"})
-				checkTailLeftOut(t, r)
-			})
-		}
-	}
-}
-
 // pairCounted runs evs through the exchange state machine with the spans it
 // could not record kept in spans, marking the capture holed first when holed
 // is set, and returns the mocks it emitted and the manager's count of mocks
@@ -208,42 +121,6 @@ func pairCounted(t *testing.T, spans *syncMock.Spans, holed bool, evs []chunkEve
 	}
 	close(mocks)
 	return drainMocks(mocks), mgr.MocksLeftOut()
-}
-
-// An answer teed ahead of its request in more than one chunk is paired with
-// the request by its first chunk, and the rest of it is left out, from that
-// chunk to the last one's write. Before, the rest was dropped with nothing
-// said. A chunk with no read time spans from its write.
-func TestV2_TheTailOfAnAnswerTeedAheadOfItsRequestIsLeftOut(t *testing.T) {
-	t.Parallel()
-
-	var (
-		head = time.Unix(1001, 0)
-		tail = time.Unix(1002, 0)
-	)
-	spans := &syncMock.Spans{}
-	got, counted := pairCounted(t, spans, false, []chunkEvent{
-		destChunk("head", 2, head),
-		destChunk("tail", 3, tail),
-		clientChunk("GET big\r\n", 1, time.Unix(1000, 0)),
-		clientChunk("GET small\r\n", 4, time.Unix(1003, 0)),
-		destChunk("+OK\r\n", 5, time.Unix(1004, 0)),
-	})
-
-	if len(got) != 2 {
-		t.Fatalf("expected 2 mocks, got %d", len(got))
-	}
-	assertExchange(t, got[0], []string{"GET big\r\n"}, []string{"head"})
-	assertExchange(t, got[1], []string{"GET small\r\n"}, []string{"+OK\r\n"})
-	if counted != 1 {
-		t.Fatalf("the manager counts %d mock(s) left out, want the answer's tail", counted)
-	}
-	if over, _ := spans.Overlaps(tail, tail); !over {
-		t.Fatal("a test case over the tail is not left out")
-	}
-	if over, _ := spans.Overlaps(tail.Add(time.Millisecond), tail.Add(time.Hour)); over {
-		t.Fatal("the span ends after the tail's write returned")
-	}
 }
 
 // An answer teed ahead of its request in one chunk has no tail: nothing is
@@ -511,9 +388,9 @@ func TestV2_TheTailOfAnExchangeLeftOutIsCountedWithIt(t *testing.T) {
 }
 
 // Chunks after an exchange left out are the rest of it, reported with it. The
-// next exchange the parser records is its own: the tail of its answer is left
-// out, as on any connection.
-func TestV2_TheTailOfAnExchangeAfterOneLeftOutIsLeftOut(t *testing.T) {
+// next exchange the parser records is its own, recorded whole: the tail of
+// its answer is held with it, and no test case over it is left out.
+func TestV2_TheExchangeAfterOneLeftOutIsRecordedWhole(t *testing.T) {
 	t.Parallel()
 
 	spans := &syncMock.Spans{}
@@ -529,11 +406,14 @@ func TestV2_TheTailOfAnExchangeAfterOneLeftOutIsLeftOut(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected the second exchange alone, got %d mock(s)", len(got))
 	}
-	assertExchange(t, got[0], []string{"q1"}, []string{"r1"})
-	if counted != 2 {
-		t.Fatalf("the manager counts %d mock(s) left out, want the holed exchange (its tail with it) and the second one's tail", counted)
+	assertExchange(t, got[0], []string{"q1"}, []string{"r1", "r1-tail"})
+	if counted != 1 {
+		t.Fatalf("the manager counts %d mock(s) left out, want the holed exchange once, its tail with it", counted)
 	}
-	if over, _ := spans.Overlaps(time.Unix(1005, 0), time.Unix(1005, 0)); !over {
-		t.Fatal("a test case over the second answer's tail is not left out")
+	if over, _ := spans.Overlaps(time.Unix(1002, 0), time.Unix(1002, 0)); !over {
+		t.Fatal("a test case over the holed exchange's tail is not left out")
+	}
+	if over, _ := spans.Overlaps(time.Unix(1003, 0), time.Unix(1005, 0)); over {
+		t.Fatal("a test case over the second exchange, recorded whole, is left out")
 	}
 }

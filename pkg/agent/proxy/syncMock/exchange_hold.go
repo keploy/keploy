@@ -8,7 +8,7 @@ import (
 // HoldExchanges notes that a parser holds exchanges it made, requested from
 // at on, instead of handing them on, until it can tell what they are (the
 // Generic recorder's first exchange of a connection that may lie wholly
-// inside one test). stopping is closed once the stop of the recording it is
+// inside one test, or an exchange whose answer may go on). stopping is closed once the stop of the recording it is
 // made in begins (it asks what is pending, BacklogBefore): the parser decides
 // them then, with what it has, and hands them on. Until it calls handedOn,
 // after handing them on, they are pending for the stop: its streams do not
@@ -75,7 +75,7 @@ func (m *SyncMockManager) holdsPendingBefore(before time.Time) string {
 	n := before.UnixNano()
 	for _, at := range m.exchangeHolds {
 		if at <= n {
-			return "a parser holds exchanges from before it until it has decided whether they are one test's"
+			return "a parser holds exchanges from before it until it has decided them (whether a connection's first exchange is one test's, or whether an answer has ended)"
 		}
 	}
 	return ""
