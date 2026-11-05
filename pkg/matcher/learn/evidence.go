@@ -278,9 +278,22 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		// and its answer an answer (halves).
 		other := r.olderTest || r.elsewhere
 		startUp, other, scope := inScope(in, r.Mock(), r.beforeTest && !other, other)
+		// A recording of the test the call trails is the call's own place
+		// (Input.Trails), as an exchange of it is (above), where keploy
+		// served that test's call from its mappings and so kept no
+		// exchange of it leaf by leaf: one F gave the application only in
+		// that test, older than the call's, and one F gave in that test's
+		// own window where the call lands in it too. Bound there, a value
+		// is the run's variable, so a replay binds it in whichever window
+		// the call lands. One mappings.yaml lists in another test than the
+		// trailed one stays that test's.
+		trailed := in.trails(r.Mock()) && !startUp && (scope == "" || scope == in.Trails.Test) && (r.InAnOlderTest() || !other && in.Test == in.Trails.Test)
+		if trailed {
+			other = false
+		}
 		p := evPlace{
 			name: r.Mock(), mock: r.Mock(), src: src, fSrc: live, side: Response,
-			startUp: startUp, otherTest: other, outsideTest: rawOutsideTest(r), scope: scope,
+			startUp: startUp, otherTest: other, trailed: trailed, outsideTest: rawOutsideTest(r), scope: scope,
 			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
 			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
 			fGave: r.served && !r.servedAfter, recAfter: !r.noTime && (r.at.After(in.At) || r.answered.After(in.At)),

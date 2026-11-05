@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // trailSent is the place test-1's own call left the run (Earlier.Run): its
@@ -156,4 +158,122 @@ func TestATrailingCallInItsTestsOwnWindowBindsTheRunsVariable(t *testing.T) {
 	in.Test, in.Trails = "test-1", trail
 	in.Scope = func(string) Scope { return ScopeTest("test-0") }
 	oRefused(t, "an exchange mappings.yaml lists in test-0, in test-1's window", oWord(t, Decide(in), r, f), RefusalAnotherScope, "mock-0", r)
+}
+
+// trailInsert is test-1's insert of the id it minted, recorded at at: its
+// request carries the id (an app inserting the row it made), its answer
+// none.
+func trailInsert(id string, at time.Time) *models.Mock {
+	return &models.Mock{Name: "mock-31", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata:         map[string]string{"operation": "POST", "type": "HTTP_CLIENT"},
+		HTTPReq:          &models.HTTPReq{Method: "POST", ProtoMajor: 1, ProtoMinor: 1, URL: "/apps", Header: map[string]string{"Content-Type": "application/json"}, Body: `{"appId":"` + id + `"}`},
+		HTTPResp:         &models.HTTPResp{StatusCode: 201, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"ok":true}`},
+		ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+	}}
+}
+
+// trailRawInput is a trailing call carrying live where the recording held
+// r, decided in test's window, whose one place is test-1's insert of the id
+// (trailInsert): round F served it with the id f in its request (its view),
+// in the call's own test, or only in an older test (older).
+func trailRawInput(r, f, live, test string, older bool, trail Trail) Input {
+	dc := oDrifts()
+	at := oAt.Add(-time.Minute)
+	x := dc.RawOf(trailInsert(r, at), true).ServedAs(3).ServedLive(dc.RawOf(trailInsert(f, at), true))
+	if older {
+		x = x.ServedInAnOlderTest()
+	}
+	in := oInput("body.app_id", r, live, nil, []Raw{x})
+	in.Drifts, in.Test, in.Trails = dc, test, trail
+	return in
+}
+
+// The place a trailed test's call sent its minted id reaches the learn step
+// as that test's recording, with round F's view of it, where keploy served
+// the call from its mappings (no exchange of it leaf by leaf, so the test's
+// end left the run no place of it): in the test's own window, where the
+// round ran the clean-up sooner, and in a later test's window, where F gave
+// the recording only in the trailed test, an older one. A call trailing that
+// test binds the id there as the run's variable, which a replay keeps past
+// the test's end, and the line names the trail.
+func TestATrailingCallBindsTheIDAtItsTestsRecording(t *testing.T) {
+	const r, f = "ced721e3-5d3a-4fb3-9283-0b1ecc742299", "4db9566f-0893-4ade-bf9c-97361f46945e"
+	trail := Trail{Test: "test-1", Mocks: []string{"mock-9", "mock-31"}}
+	for _, tc := range []struct {
+		name  string
+		test  string
+		older bool
+	}{
+		{"in the trailed test's own window", "test-1", false},
+		{"in a later test's window", "test-2", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := oWord(t, Decide(trailRawInput(r, f, f, tc.test, tc.older, trail)), "ced721e3", "4db9566f")
+			if d.Outcome != OutcomeValue || d.From.Mock != "mock-31" || !d.From.Run || d.From.InStartUp {
+				t.Fatalf("%s: %s, from %+v; want a value bound at mock-31 as the run's variable", tc.name, oDescribe([]Decision{d}), d.From)
+			}
+			if !strings.Contains(d.Line, "sent in test-1, which this call trails") {
+				t.Errorf("the line %q does not name the test the call trails", d.Line)
+			}
+		})
+	}
+}
+
+// Every other reading of such a recording stays as it was: with no trail, a
+// trail that names no test or a trail of another test, the recording is the
+// test's own variable in its own window and refused as another test's in a
+// later one (the pinned "a value from another test is refused"); a
+// recording of the trailed test's list that round F served in the call's
+// own test, a later one, is that test's own; a start-up recording is the
+// start-up's; one mappings.yaml lists in another test stays refused; and a
+// trailing call carrying another id than the one F's view shows binds
+// nothing.
+func TestATrailReadsATestsRecordingOnlyWhereThatTestLeftIt(t *testing.T) {
+	const r, f = "ced721e3-5d3a-4fb3-9283-0b1ecc742299", "4db9566f-0893-4ade-bf9c-97361f46945e"
+	trail := Trail{Test: "test-1", Mocks: []string{"mock-31"}}
+	for _, no := range []struct {
+		name  string
+		trail Trail
+	}{
+		{"no trail", Trail{}},
+		{"a trail that names no test", Trail{Mocks: []string{"mock-31"}}},
+		{"a trail of another test", Trail{Test: "test-0", Mocks: []string{"mock-7"}}},
+	} {
+		t.Run(no.name, func(t *testing.T) {
+			d := oWord(t, Decide(trailRawInput(r, f, f, "test-1", false, no.trail)), "ced721e3", "4db9566f")
+			if d.Outcome != OutcomeValue || d.From.Mock != "mock-31" || d.From.Run || strings.Contains(d.Line, "trails") {
+				t.Fatalf("in the test's own window: %s, from %+v; want the test's own variable", oDescribe([]Decision{d}), d.From)
+			}
+			oRefused(t, no.name+", in a later window", oWord(t, Decide(trailRawInput(r, f, f, "test-2", true, no.trail)), "ced721e3", "4db9566f"), RefusalAnotherScope, "mock-31", "ced721e3")
+		})
+	}
+	// Served in the call's own test, a later one than the trailed test.
+	if d := oWord(t, Decide(trailRawInput(r, f, f, "test-2", false, trail)), "ced721e3", "4db9566f"); d.Outcome != OutcomeValue || d.From.Run || strings.Contains(d.Line, "trails") {
+		t.Fatalf("served in the call's own later test: %s, from %+v; want the test's own variable", oDescribe([]Decision{d}), d.From)
+	}
+	// The start-up's, as mappings.yaml places it.
+	in := trailRawInput(r, f, f, "test-1", false, trail)
+	in.Scope = func(string) Scope { return ScopeStartup }
+	if d := oWord(t, Decide(in), "ced721e3", "4db9566f"); d.Outcome != OutcomeValue || !d.From.InStartUp || strings.Contains(d.Line, "trails") {
+		t.Fatalf("the start-up's recording: %s, from %+v; want the start-up's variable, naming no trail", oDescribe([]Decision{d}), d.From)
+	}
+	// Listed in another test, in the trailed test's own window.
+	in = trailRawInput(r, f, f, "test-1", false, trail)
+	in.Scope = func(string) Scope { return ScopeTest("test-0") }
+	oRefused(t, "a recording mappings.yaml lists in test-0", oWord(t, Decide(in), "ced721e3", "4db9566f"), RefusalAnotherScope, "mock-31", "ced721e3")
+	// In a later window, mappings.yaml's list decides: one it lists in the
+	// trailed test is the trailed test's place, one it lists in another
+	// test stays refused as that test's.
+	in = trailRawInput(r, f, f, "test-2", true, trail)
+	in.Scope = func(string) Scope { return ScopeTest("test-1") }
+	if d := oWord(t, Decide(in), "ced721e3", "4db9566f"); d.Outcome != OutcomeValue || !d.From.Run || !strings.Contains(d.Line, "sent in test-1, which this call trails") {
+		t.Fatalf("listed in the trailed test, in a later window: %s, from %+v; want the run's variable, naming the trail", oDescribe([]Decision{d}), d.From)
+	}
+	in.Scope = func(string) Scope { return ScopeTest("test-0") }
+	oRefused(t, "listed in test-0, in a later window", oWord(t, Decide(in), "ced721e3", "4db9566f"), RefusalAnotherScope, "mock-31", "ced721e3")
+	// Another id than F's view shows, in a later window.
+	const other = "9a8b7c6d-1e2f-4a3b-8c4d-5e6f7a8b9c0d"
+	if d := oWord(t, Decide(trailRawInput(r, f, other, "test-2", true, trail)), "ced721e3", "9a8b7c6d"); d.Outcome == OutcomeValue && d.From.Mock == "mock-31" {
+		t.Fatalf("a trailing call with another id: %s, from %+v; want nothing bound at mock-31", oDescribe([]Decision{d}), d.From)
+	}
 }
