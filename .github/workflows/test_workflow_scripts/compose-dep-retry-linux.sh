@@ -163,6 +163,9 @@ record() {
   hang_wait "$pid"
   rc=$?
   [ "$rc" -eq 0 ] || fail "$name: keploy record exited $rc"
+  # keploy record exits 0 on the guard's TERM too, so a record still
+  # running at 180 s is told by the guard, not by its code.
+  [ "$HANG_FIRED" = 0 ] || fail "$name: keploy record still ran after 180 s; the hang guard ended it"
   # The commands that attach to the app alone print none of the agent's
   # lines: its debug log holds them.
   verify_ran "${KEPLOY_PROVEN:-}" "$name.log" keploy/agent-debug.log || FAIL=$((FAIL + 1))
