@@ -1199,23 +1199,8 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 			return err
 		}
 		fs.Close()
-
-		// install CA in the java keystore if java is installed. Non-fatal for the
-		// same reason as the Windows path above: JAVA_TOOL_OPTIONS is the primary
-		// Java mechanism now, so a missing keytool degrades gracefully.
-		if err := installJavaCAForHome(ctx, logger, caPath, resolvedJavaHome, alias); err != nil {
-			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
-		}
 	}
 
-	// Update the system store
-	if err := updateCaStore(ctx); err != nil {
-		utils.LogError(logger, err, "Failed to update the CA store")
-		return err
-	}
-
-	// Set Env Vars pointing to the installed cert.
-	//
 	// By construction finalCAPath is non-empty here: getCaPaths() returns
 	// an error (caught above) when it can't find any CA store path, so the
 	// per-path loop that assigns finalCAPath always runs at least once on
@@ -1227,6 +1212,27 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	if finalCAPath == "" {
 		return fmt.Errorf("setupNative: finalCAPath is empty after ranging %d CA store paths — this is a programmer error (getCaPaths should have returned an error)", len(caPaths))
 	}
+
+	// Install the CA in the Java keystore if Java is installed: once, from
+	// the last anchor written. Every anchor holds the same certificate under
+	// the same alias, and the keystore is one per JDK, not one per trust
+	// store directory: a pass per directory ran its JVMs again (the PATH
+	// JDK's lookup and keytool -list) only to find the alias the first pass
+	// had imported. Each JVM takes seconds on a starved host, and the
+	// agent's start waits for them. Non-fatal for the same reason as the
+	// Windows path above: JAVA_TOOL_OPTIONS is the primary Java mechanism
+	// now, so a missing keytool degrades gracefully.
+	if err := installJavaCAForHome(ctx, logger, finalCAPath, resolvedJavaHome, alias); err != nil {
+		logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
+	}
+
+	// Update the system store
+	if err := updateCaStore(ctx); err != nil {
+		utils.LogError(logger, err, "Failed to update the CA store")
+		return err
+	}
+
+	// Set Env Vars pointing to the installed cert.
 	if err := SetEnvForPath(logger, finalCAPath); err != nil {
 		return err
 	}
@@ -1620,8 +1626,8 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 // cacerts truststore.
 //
 // javaHome semantics:
-//   - "" (empty): legacy behaviour — fall back to
-//     util.GetJavaHome(ctx), which runs `java` from PATH. Used when the
+//   - "" (empty): legacy behaviour — fall back to the java.home of
+//     the `java` on PATH (pathJavaHome). Used when the
 //     agent has no better signal (pre-registration boot, or the
 //     auto-detector returned empty).
 //   - non-empty: use $javaHome/bin/keytool as the executable and
@@ -1646,7 +1652,7 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 		}
 		logger.Debug("checking java path from default java home")
 		var err error
-		javaHome, err = util.GetJavaHome(ctx)
+		javaHome, err = pathJavaHome(ctx)
 		if err != nil {
 			utils.LogError(logger, err, "Java detected but failed to find JAVA_HOME")
 			return err
