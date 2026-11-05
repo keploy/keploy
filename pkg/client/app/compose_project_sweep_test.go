@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -77,8 +78,43 @@ for a in "$@"; do
   if [ "$a" = "up" ] && [ -n "${KEPLOY_STUB_UP_WAIT_FILE:-}" ]; then
     # KEPLOY_STUB_UP_WAIT_FILE: the up runs until the file exists, as an
     # up attached to the app alone runs until the app has stopped.
-    while [ ! -e "$KEPLOY_STUB_UP_WAIT_FILE" ]; do sleep 0.05 </dev/null >/dev/null 2>&1; done
+    # KEPLOY_STUB_UP_CODE: the first up exits with this code, and every up
+    # after it exits 0 at once, as a retried up whose dependency is healthy
+    # now (the first up may also be killed: it is the first all the same).
+    if [ -n "${KEPLOY_STUB_UP_CODE:-}" ]; then
+      if [ -e "$KEPLOY_STUB_UP_WAIT_FILE.first" ]; then
+        printf 'UP-RETRIED\n' >> "` + argvLog + `"
+        exit 0
+      fi
+      : > "$KEPLOY_STUB_UP_WAIT_FILE.first"
+      # The first up ignores TERM and INT, as an up whose own handling of a
+      # signal does not end it: only a kill does. It notes each it gets.
+      trap 'printf "UP-SIGNALLED\n" >> "` + argvLog + `"' TERM INT
+      # It starts a child in its process group, as the docker CLI starts
+      # its compose plugin. The child ignores TERM and INT too, ends with
+      # the up when the up ends on its own, and notes it if it outlives
+      # the group's leader: a kill of the leader alone, not of the group.
+      # The leader is this up, or the sh -c keploy runs it through, when
+      # that sh forks the up rather than exec it (Debian's and Ubuntu's
+      # dash), and then a kill of the leader alone leaves this up too.
+      ( trap '' TERM INT
+        pg=$(ps -o pgid= -p $$ | tr -d ' ')
+        if [ -z "$pg" ]; then printf 'UP-CHILD-NO-PGID\n' >> "` + argvLog + `"; exit 0; fi
+        printf 'UP-CHILD-STARTED\n' >> "` + argvLog + `"
+        while kill -0 "$pg" 2>/dev/null && [ -d "` + dir + `" ] && kill -0 ` + strconv.Itoa(os.Getpid()) + ` 2>/dev/null; do sleep 0.05; done
+        if [ -d "` + dir + `" ] && ! kill -0 "$pg" 2>/dev/null; then printf 'UP-CHILD-OUTLIVED\n' >> "` + argvLog + `"; fi
+      ) </dev/null >/dev/null 2>&1 &
+      child=$!
+    fi
+    # The wait also ends once this stand-in's dir is gone (its test ended)
+    # or the test process is (it died before its cleanups ran): no
+    # stand-in up outlives its test.
+    while [ ! -e "$KEPLOY_STUB_UP_WAIT_FILE" ] && [ -d "` + dir + `" ] && kill -0 ` + strconv.Itoa(os.Getpid()) + ` 2>/dev/null; do sleep 0.05 </dev/null >/dev/null 2>&1; done
     printf 'UP-DONE\n' >> "` + argvLog + `"
+    if [ -n "${KEPLOY_STUB_UP_CODE:-}" ]; then
+      kill -KILL "$child" 2>/dev/null
+      exit "$KEPLOY_STUB_UP_CODE"
+    fi
     exit 0
   fi
 done
