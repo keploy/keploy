@@ -37,10 +37,13 @@ type HTTPStreamDataField struct {
 // For NDJSON and plain-text streams this is one newline-delimited line.
 // For binary streams this is the full captured body.
 //
-// TS is the wall-clock time the chunk was received during recording,
-// used by the replay engine to preserve the inter-chunk timing when replaying.
+// TS is when the chunk reached the application during recording: for a mock
+// recorded with marks (HTTPResp.Marks), the time of the write that completed
+// it. Replay keeps no timing between chunks: it writes each part of an
+// answer once the replay has reached or passed its recorded place, which it
+// reads from the marks.
 type HTTPStreamChunk struct {
-	TS   time.Time             // Wall-clock time this chunk arrived during recording
+	TS   time.Time             // When this chunk reached the application during recording
 	Data []HTTPStreamDataField // Key-value fields that make up this chunk
 }
 
@@ -84,8 +87,16 @@ func (c HTTPStreamChunk) ValueByKey(key string) (string, bool) {
 // as a YAML sequence of chunks. Otherwise, it is written as a plain scalar string.
 func (h HTTPResp) MarshalYAML() (interface{}, error) {
 	bodyNode := &yamlLib.Node{}
+	marks := h.Marks
 	if chunks, ok := streamChunksForYAML(h); ok {
-		// Streaming response — encode as a YAML sequence of chunks
+		// Streaming response — encode as a YAML sequence of chunks. A fresh
+		// recording's frames are split from its body here: each takes the
+		// time of the write that completed it, and the marks move to the
+		// body the frames read back as. A response read back from frames
+		// (StreamBody) has both already.
+		if marks != nil && len(h.StreamBody) == 0 {
+			chunks, marks = marksOnFrames(h, chunks)
+		}
 		bodyNode = encodeStreamChunksNode(chunks)
 	} else {
 		// Non-streaming response, OR a stream whose bytes cannot survive the
@@ -122,6 +133,7 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		Timestamp     time.Time         `yaml:"timestamp"`
 
 		HeaderLineLengths HeaderLineLengths `yaml:"header_line_lengths,omitempty"`
+		Marks             *HTTPAnswerMarks  `yaml:"marks,omitempty"`
 	}
 
 	return httpRespYAML{
@@ -137,6 +149,7 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		Timestamp:     h.Timestamp,
 
 		HeaderLineLengths: h.HeaderLineLengths,
+		Marks:             marks,
 	}, nil
 }
 
@@ -157,6 +170,7 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 		Timestamp     time.Time         `yaml:"timestamp"`
 
 		HeaderLineLengths HeaderLineLengths `yaml:"header_line_lengths,omitempty"`
+		Marks             *HTTPAnswerMarks  `yaml:"marks,omitempty"`
 	}
 
 	var raw httpRespYAML
@@ -174,6 +188,7 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 	h.Binary = raw.Binary
 	h.Timestamp = raw.Timestamp
 	h.HeaderLineLengths = raw.HeaderLineLengths
+	h.Marks = raw.Marks
 
 	// Decode body — may produce a plain string body, streaming chunks, or both.
 	// StreamBody is populated only when the YAML body field was a sequence node.
