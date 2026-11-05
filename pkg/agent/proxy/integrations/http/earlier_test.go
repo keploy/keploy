@@ -192,6 +192,14 @@ func TestAChangedCallOfTheTestsOwnNamesTheEarlierTestsRecordingOfItsMethodAndPat
 			if r := missOf(restaged, 5); r.Earlier != "" || *restaged.lookups != 2 {
 				t.Fatalf("with the set staged again under the lookup, a changed PUT names earlier %q after %d lookups; want none after 2", r.Earlier, *restaged.lookups)
 			}
+			// The replay staged another set under the call's first lookup
+			// (of a recording the call is): no earlier one is looked up,
+			// though a later lookup would show it.
+			first := db([]*models.Mock{own}, nil, early)
+			first.restageAt = 1
+			if r := missOf(first, 5); r.Earlier != "" {
+				t.Fatalf("with the set staged again under the call's first lookup, a changed PUT names earlier %q; want none", r.Earlier)
+			}
 			// The call IS the earlier test's recording: it is named as that
 			// recording made elsewhere, not as an earlier one.
 			if r := miss([]*models.Mock{own}, 1, early); !r.NotOwned || r.ClosestMock != "mock-early" || r.Earlier != "" {
