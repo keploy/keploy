@@ -2,12 +2,15 @@ package tls
 
 import (
 	"context"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 )
@@ -227,7 +230,7 @@ func TestJavaInstallWithNoJDKNamedRunsOnlyThePATHJDKsKeytool(t *testing.T) {
 	if err := os.WriteFile(caPath, []byte("ca"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := installJavaCAForHome(context.Background(), zap.NewNop(), caPath, "", "keploy-mitm-x"); err != nil {
+	if _, err := installJavaCAForHome(context.Background(), zap.NewNop(), caPath, "", "keploy-mitm-x"); err != nil {
 		t.Fatal(err)
 	}
 	cacerts := filepath.Join(jdk, "lib", "security", "cacerts")
@@ -270,5 +273,206 @@ func TestThePATHJDKsLayoutGivesTheJavaHomeItsJVMSays(t *testing.T) {
 	}
 	if len(seen) == 0 {
 		t.Skip("no JDK on this host")
+	}
+}
+
+// writeJKS stores a JKS keystore at path, under pass, trusting each
+// certificate (DER) under its alias.
+func writeJKS(t *testing.T, path, pass string, certs map[string][]byte) {
+	t.Helper()
+	ks := keystore.New()
+	for alias, der := range certs {
+		if err := ks.SetTrustedCertificateEntry(alias, keystore.TrustedCertificateEntry{
+			CreationTime: time.Now(),
+			Certificate:  keystore.Certificate{Type: "X509", Content: der},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := ks.Store(f, []byte(pass)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// On Debian and Ubuntu the system store's update puts a new anchor into the
+// keystore a packaged JDK's cacerts links to, under an alias of its own
+// (ca-certificates-java's debian:<anchor>.pem; Adoptium's rebuild, under the
+// certificate's name). keploy reads that keystore in Go to see whether it
+// trusts the CA already: only a JKS whose integrity checks with the store's
+// password, holding this very certificate, says yes.
+func TestTheJDKKeystoreIsReadInGoForTheCA(t *testing.T) {
+	dir := t.TempDir()
+	ca, err := generateRunCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := generateRunCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPath := filepath.Join(dir, "ca.crt")
+	if err := os.WriteFile(caPath, ca.certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(keyPEM, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: ca.cert.Raw}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ks := func(name, pass string, certs map[string][]byte) string {
+		p := filepath.Join(dir, name)
+		writeJKS(t, p, pass, certs)
+		return p
+	}
+	withCA := ks("with-ca", "changeit", map[string][]byte{"debian:keploy-mitm-x.pem": ca.cert.Raw, "debian:other.pem": other.cert.Raw})
+	notPEM := filepath.Join(dir, "not-pem.crt")
+	if err := os.WriteFile(notPEM, []byte("not a PEM file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notJKS := filepath.Join(dir, "pkcs12")
+	if err := os.WriteFile(notJKS, []byte{0x30, 0x82, 0x01, 0x00, 0x02, 0x01, 0x03}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, cacerts, ca string
+		want              bool
+	}{
+		{"the CA under another alias", withCA, caPath, true},
+		{"only another certificate", ks("other-only", "changeit", map[string][]byte{"debian:other.pem": other.cert.Raw}), caPath, false},
+		{"an empty keystore", ks("empty", "changeit", nil), caPath, false},
+		{"the CA under another password", ks("other-pass", "secret", map[string][]byte{"keploy": ca.cert.Raw}), caPath, false},
+		{"not a JKS", notJKS, caPath, false},
+		{"no keystore", filepath.Join(dir, "none"), caPath, false},
+		{"no CA file", withCA, filepath.Join(dir, "none.crt"), false},
+		{"a CA file with no certificate", withCA, keyPEM, false},
+		{"a CA file with no PEM", withCA, notPEM, false},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: jdkKeystoreTrusts panicked: %v", tc.name, r)
+				}
+			}()
+			if got := jdkKeystoreTrusts(tc.cacerts, "changeit", tc.ca); got != tc.want {
+				t.Errorf("%s: jdkKeystoreTrusts = %v, want %v", tc.name, got, tc.want)
+			}
+		}()
+	}
+}
+
+// A stop that tears the install down while it runs takes its record: the
+// install's note of its JDK import then finds none, and changes nothing.
+func TestAJavaImportNotedAfterTheTeardownChangesNothing(t *testing.T) {
+	recordNativeInstall(nil)
+	t.Cleanup(func() { recordNativeInstall(nil) })
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("noteJavaImport with no install recorded panicked: %v", r)
+			}
+		}()
+		noteJavaImport(false)
+	}()
+	installedNativeMu.Lock()
+	n := installedNative
+	installedNativeMu.Unlock()
+	if n != nil {
+		t.Fatalf("noteJavaImport with no install recorded recorded %+v", n)
+	}
+}
+
+// The install imports the CA into the JDK's keystore after the system
+// store's update, and runs no keytool when that update put the CA there
+// (here the update puts a keystore trusting it in the JDK's cacerts, as
+// Debian's and Adoptium's hooks do): neither at the install nor, having
+// imported no alias, at the teardown. Before, the import ran first, with
+// its keytool -list and -import, and the teardown's keytool -delete.
+// Where the update does not put it there, the install imports it, and the
+// teardown deletes the alias: also when keytool found the alias there
+// already, and when its import failed part way. With no JDK on PATH and
+// none named, the install finds none and imports nothing: the teardown,
+// which finds a JDK by JAVA_HOME, runs no keytool either.
+func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytool(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the trust-store anchors are Linux's")
+	}
+	for _, tc := range []struct {
+		name    string
+		hooked  bool
+		keytool string // the JDK's keytool's exit, by its first word; "" for fakeJDK's
+		noJDK   bool   // no JDK named, nor a java on PATH, at the install
+		want    []string
+	}{
+		{"the update put the CA there", true, "", false, nil},
+		{"the update left the keystore alone", false, "", false, []string{"keytool -list ", "keytool -import ", "keytool -delete "}},
+		{"keytool finds the alias there already", false, "-list) exit 0;;", false, []string{"keytool -list ", "keytool -delete "}},
+		{"keytool's import fails", false, "-list|-import) exit 1;;", false, []string{"keytool -list ", "keytool -import ", "keytool -delete "}},
+		{"no JDK at the install", false, "", true, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			calls := filepath.Join(dir, "calls")
+			jdk := filepath.Join(dir, "jdk")
+			fakeJDK(t, jdk, ".", jdk, calls)
+			if tc.keytool != "" {
+				writeScript(t, filepath.Join(jdk, "bin", "keytool"), "echo \"keytool $*\" >> "+calls+"\ncase \"$1\" in "+tc.keytool+" esac\n")
+			}
+			bin, home := filepath.Join(dir, "bin"), filepath.Join(dir, "home")
+			hooked := filepath.Join(dir, "hooked.jks")
+			update := "exit 0\n"
+			if tc.hooked {
+				update = "/bin/cp " + hooked + " " + filepath.Join(jdk, "lib", "security", "cacerts") + "\n"
+			}
+			writeScript(t, filepath.Join(bin, "keploy-test-update-ca"), update)
+			store := filepath.Join(dir, "a")
+			for _, d := range []string{store, home} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", bin)
+			t.Setenv("JAVA_HOME", "")
+			t.Setenv("HOME", home)
+			t.Setenv("SUDO_USER", "")
+			for _, k := range []string{"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CARGO_HTTP_CAINFO"} {
+				t.Setenv(k, "")
+			}
+			oldPaths, oldCmds := caStorePath, caStoreUpdateCmd
+			caStorePath, caStoreUpdateCmd = []string{store + "/"}, []string{"keploy-test-update-ca"}
+			t.Cleanup(func() {
+				caStorePath, caStoreUpdateCmd = oldPaths, oldCmds
+				recordNativeInstall(nil)
+				ResetCAReadyForTest()
+			})
+			ca, err := generateRunCA()
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeJKS(t, hooked, "changeit", map[string][]byte{"debian:" + strings.TrimSuffix(runCertFileName(ca), ".crt") + ".pem": ca.cert.Raw})
+
+			named := jdk
+			if tc.noJDK {
+				named = ""
+			}
+			if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, named); err != nil {
+				t.Fatal(err)
+			}
+			// The teardown finds the JDK by JAVA_HOME.
+			t.Setenv("JAVA_HOME", jdk)
+			TeardownNativeCA(zap.NewNop())
+			got := readCalls(t, calls)
+			if len(got) != len(tc.want) {
+				t.Fatalf("the install's and teardown's JVM runs: %q, want %q", got, tc.want)
+			}
+			for i, w := range tc.want {
+				if !strings.HasPrefix(got[i], w) || !strings.Contains(got[i]+" ", " -alias "+runAlias(ca)+" ") {
+					t.Fatalf("the install's and teardown's JVM runs: %q, want %q, each of this run's alias", got, tc.want)
+				}
+			}
+		})
 	}
 }

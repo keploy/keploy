@@ -1080,6 +1080,10 @@ type nativeInstall struct {
 	alias    string // JDK keystore alias
 	cn       string // certificate CN, for the Windows ROOT-store removal
 	remove   bool
+	// noJavaAlias: the install imported no alias into the JDK's keystore
+	// (no JDK, or its keystore trusted the CA already), so the teardown has
+	// none to delete and runs no keytool.
+	noJavaAlias bool
 }
 
 var (
@@ -1091,6 +1095,16 @@ func recordNativeInstall(n *nativeInstall) {
 	installedNativeMu.Lock()
 	installedNative = n
 	installedNativeMu.Unlock()
+}
+
+// noteJavaImport records, for the teardown, whether the install imported
+// this run's alias into the JDK's keystore.
+func noteJavaImport(imported bool) {
+	installedNativeMu.Lock()
+	defer installedNativeMu.Unlock()
+	if installedNative != nil {
+		installedNative.noJavaAlias = !imported
+	}
 }
 
 // setupNativeForApp is the PID-aware native-install path. It installs this run's
@@ -1139,7 +1153,9 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		// also trusts the keploy CA via the JAVA_TOOL_OPTIONS merged truststore
 		// the client sets (SetupCaCertEnv), so a missing/failing keytool must not
 		// fail CA setup for a run that may not even use Java.
-		if err = installJavaCAForHome(ctx, logger, tempCertPath, resolvedJavaHome, alias); err != nil {
+		imported, err := installJavaCAForHome(ctx, logger, tempCertPath, resolvedJavaHome, alias)
+		noteJavaImport(imported)
+		if err != nil {
 			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
 		}
 
@@ -1213,23 +1229,29 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		return fmt.Errorf("setupNative: finalCAPath is empty after ranging %d CA store paths — this is a programmer error (getCaPaths should have returned an error)", len(caPaths))
 	}
 
-	// Install the CA in the Java keystore if Java is installed: once, from
-	// the last anchor written. Every anchor holds the same certificate under
-	// the same alias, and the keystore is one per JDK, not one per trust
-	// store directory: a pass per directory ran its JVMs again (the PATH
-	// JDK's lookup and keytool -list) only to find the alias the first pass
-	// had imported. Each JVM takes seconds on a starved host, and the
-	// agent's start waits for them. Non-fatal for the same reason as the
-	// Windows path above: JAVA_TOOL_OPTIONS is the primary Java mechanism
-	// now, so a missing keytool degrades gracefully.
-	if err := installJavaCAForHome(ctx, logger, finalCAPath, resolvedJavaHome, alias); err != nil {
-		logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
-	}
-
 	// Update the system store
 	if err := updateCaStore(ctx); err != nil {
 		utils.LogError(logger, err, "Failed to update the CA store")
 		return err
+	}
+
+	// Install the CA in the Java keystore if Java is installed: once, from
+	// the last anchor written, after the system store's update. Every anchor
+	// holds the same certificate under the same alias, and the keystore is
+	// one per JDK, not one per trust store directory: a pass per directory
+	// ran its JVMs again (the PATH JDK's lookup and keytool -list) only to
+	// find the alias the first pass had imported. After the update, because
+	// on Debian and Ubuntu the update's Java hooks put the CA into the
+	// keystore a packaged JDK's cacerts links to (installJavaCAForHome then
+	// runs no keytool), or rebuild that keystore, dropping an import made
+	// before it. Each JVM takes seconds on a starved host, and the agent's
+	// start waits for them. Non-fatal for the same reason as the Windows path
+	// above: JAVA_TOOL_OPTIONS is the primary Java mechanism now, so a
+	// missing keytool degrades gracefully.
+	imported, err := installJavaCAForHome(ctx, logger, finalCAPath, resolvedJavaHome, alias)
+	noteJavaImport(imported)
+	if err != nil {
+		logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
 	}
 
 	// Set Env Vars pointing to the installed cert.
@@ -1285,7 +1307,9 @@ func TeardownNativeCA(logger *zap.Logger) {
 			logger.Debug("could not refresh the CA store after removing this run's anchor", zap.Error(err))
 		}
 	}
-	removeJavaAlias(ctx, logger, n.alias)
+	if !n.noJavaAlias {
+		removeJavaAlias(ctx, logger, n.alias)
+	}
 	removeNSSCA(ctx, logger, n.nssDir, n.alias)
 	if runtime.GOOS == "windows" {
 		removeWindowsCAByName(ctx, logger, n.cn)
@@ -1619,7 +1643,8 @@ func isJavaCAExistWithTool(ctx context.Context, keytoolBin, alias, storepass, ca
 // Signature preserved for backward compat (external callers + tests). It uses
 // the legacy fixed alias; production callers pass a per-run alias instead.
 func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error {
-	return installJavaCAForHome(ctx, logger, caPath, "", legacyCAAlias)
+	_, err := installJavaCAForHome(ctx, logger, caPath, "", legacyCAAlias)
+	return err
 }
 
 // installJavaCAForHome installs the Keploy MITM CA into a specific JDK's
@@ -1640,7 +1665,12 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 // silently write to a different file than the app's JVM reads at
 // startup, producing "unable to find valid certification path" at TLS
 // handshake time even though the import appeared to succeed.
-func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaHome, alias string) error {
+//
+// imported says whether alias may now be in the JDK's keystore, keploy's to
+// delete at the teardown: false when no JDK is found, and when the keystore
+// trusts the CA already (jdkKeystoreTrusts), under an alias of its own: the
+// system store's update put it there. keytool then does not run at all.
+func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaHome, alias string) (imported bool, err error) {
 	if javaHome == "" {
 		// Legacy path — fall back to PATH keytool after the usual
 		// "is java installed?" guard. When no PATH java exists this
@@ -1648,14 +1678,13 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 		// don't run Java workloads at all.
 		if !util.IsJavaInstalled() {
 			logger.Debug("Java is not installed on the system")
-			return nil
+			return false, nil
 		}
 		logger.Debug("checking java path from default java home")
-		var err error
 		javaHome, err = pathJavaHome(ctx)
 		if err != nil {
 			utils.LogError(logger, err, "Java detected but failed to find JAVA_HOME")
-			return err
+			return false, err
 		}
 	}
 
@@ -1688,9 +1717,14 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 
 	logger.Debug("", zap.String("java_home", javaHome), zap.String("keytool", keytoolBin), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath), zap.String("alias", alias))
 
+	if jdkKeystoreTrusts(cacertsPath, storePass, caPath) {
+		logger.Debug("the JDK's keystore trusts the CA already: the system store's update put it there", zap.String("path", cacertsPath))
+		return false, nil
+	}
+
 	if isJavaCAExistWithTool(ctx, keytoolBin, alias, storePass, cacertsPath) {
 		logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
-		return nil
+		return true, nil
 	}
 
 	cmd := exec.CommandContext(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
@@ -1698,11 +1732,11 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 	utils.BootStep("keytool -import is over")
 	if err != nil {
 		utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
-		return err
+		return true, err
 	}
 	logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
 	logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
-	return nil
+	return true, nil
 }
 
 // installWindowsCA installs the CA certificate into a Windows trust store.
