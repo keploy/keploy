@@ -59,6 +59,13 @@ func runtimeOnlyPaths(t reflect.Type) [][]int {
 //   - IsStartup, ServedIn, StagedSet and Concurrent: the recorder's buffer
 //     and the replay's staging and serving set them on live mocks; a file
 //     would carry a past run's values.
+//   - RepeatRead: the agent marks it on its copies of a test's recordings
+//     when the test opens, from the reads this replay's namer named
+//     (models.MarkRepeatReads). A file that kept a past run's mark would
+//     hand exact serving a read no namer of this run named (keploy alone
+//     names none). Where the recordings prove that read, exact serving
+//     would answer one call more than recorded and not charge one of its
+//     recordings left unmade. A pointer, it is cleared whole (nil).
 //
 // Parts of the mock held through a pointer, slice or map (Spec's HTTPReq and
 // the other payloads) are not walked: walking every payload would cost every
