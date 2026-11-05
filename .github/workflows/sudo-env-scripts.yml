@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   sudo-env:
-    # Forty-one cases on files the script writes; about a second.
+    # Forty-three cases on files the script writes; about a second.
     timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:

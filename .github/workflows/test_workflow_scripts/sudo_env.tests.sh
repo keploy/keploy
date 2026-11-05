@@ -10,7 +10,9 @@
 # included, and nothing while it is unset, and every KEPLOY_ variable a
 # workflow's env: block sets is one of them or one keploy does not read. Every
 # script that sources sudo_env.sh does so by its own path, never through the
-# workspace, so it loads where a workflow checks keploy out at a path.
+# workspace, so it loads where a workflow checks keploy out at a path; a script
+# that copies a script's functions into a file to run them there checks that
+# the copy loads sudo_env.sh, unless the script it copies from loads none.
 # verify_ran passes a run under the proven switch whose log holds the agent's
 # verify line, and fails one whose log lacks it or does not exist, saying so; a
 # run without the switch, or with KEPLOY_EXACT_VIEW_VERIFY other than 1, passes
@@ -176,6 +178,59 @@ printf 'source "$(dirname "${BASH_SOURCE[0]}")/../../%s.sh" || exit 1\n' "$name"
 printf 'source "$(dirname "${BASH_SOURCE[0]}")/../%s.sh" || exit 1\n' "$name" > "$tmp/pc/golang/x/short.sh"
 path_checkout_is path-checkout-depth "$tmp/pc" "golang/x/short.sh(bash)|golang/x/short.sh(source)"
 path_checkout_is path-checkout-none "$tmp/none" "no script"
+
+# A script that copies another's functions into a file and runs them from
+# there runs them away from that script's directory: what it loads at its top
+# by its own path (sudo_env.sh's SUDO_ENV and verify_ran) is in the copy only
+# if the copy loads it too, and a check of the copy is what fails the job when
+# it does not (compose-proven-setend-linux.tests.sh's).
+# copies_unchecked DIR: each line of a script under DIR that copies functions
+# (awk or sed over a function's head, or declare, typeset or export -f), as
+# "FILE:LINE", unless the script checks its copy has verify_ran (declare -F
+# verify_ran) or every script the line names is under DIR and loads no
+# sudo_env.sh. A line that names no script it can find is counted (the copy
+# may be of a script that loads it).
+copy_re='^[^#]*(\b(awk|sed)\b.*[]A-Za-z0-9_*+]\\*\(\\*\) *\\*\{|\b(declare|typeset|export) -f\b)'
+copies_unchecked() {
+  local f n line tok src uses
+  grep -rnE --include='*.sh' "$copy_re" "$1" |
+    while IFS=: read -r f n line; do
+      grep -qE '^[^#]*declare -F verify_ran' "$f" && continue
+      uses=unknown
+      while IFS= read -r tok; do
+        src=$(find "$1" -type f -name "$(basename "$tok")" | head -n1)
+        [ -n "$src" ] || continue
+        [ "$uses" = unknown ] && uses=no
+        grep -qE '^[^#]*(SUDO_ENV|verify_ran|sudo_env\.sh)' "$src" && uses=yes
+      done < <(grep -oE '[A-Za-z0-9_./-]+\.sh' <<<"$line")
+      [ "$uses" = no ] || echo "${f#"$1"/}:$n"
+    done
+}
+# copies_unchecked_is NAME DIR WANT: copies_unchecked DIR, its lines joined by
+# "|", is WANT.
+copies_unchecked_is() {
+  local got
+  cases=$((cases + 1))
+  got=$(copies_unchecked "$2" | sort | paste -sd'|')
+  if [ "$got" != "$3" ]; then
+    echo "FAIL $1: scripts that copy functions into a file with no check that the copy loads sudo_env.sh: '$got', want '$3'"
+    fails=$((fails + 1))
+  fi
+}
+copies_unchecked_is copies "$here/../../.." ""
+mkdir -p "$tmp/cp/sub"
+# (Each fixture's command is a printf argument, so no line here is a copy.)
+fn='() {'
+printf "sed -n '/^record%s/,/^}/p' lane.sh >\"\$t/f.sh\"\nbash -c '. \"\$1\" && declare -F verify_ran' _ \"\$t/f.sh\" || exit 1\n" "$fn" > "$tmp/cp/checked.sh"
+printf "%s -v names='^[a-z_]+\\\\\\\\(\\\\\\\\) \\\\\\\\{' '\$0 ~ names' \"\$lane\" >\"\$t/f.sh\"\n# declare -F verify_ran, in a comment only\n" awk > "$tmp/cp/sub/awk.sh"
+printf '%s -f record\nbash -c record\n' export > "$tmp/cp/export.sh"
+printf '# sed -n "/^record%s/,/^}/p", in a comment\necho "record%s"\n' "$fn" "$fn" > "$tmp/cp/not-a-copy.sh"
+printf "x=\$(printf %%s \"\$1\" | sed 's/[][\\\\.*^\$+?%s}|]/\\\\\\\\&/g')\n" "(){" > "$tmp/cp/escape.sh"
+printf 'helper() { echo hi; }\n' > "$tmp/cp/plain-lane.sh"
+printf 'source "$(dirname "${BASH_SOURCE[0]}")/%s.sh" || exit 1\nhelper() { sudo env "${SUDO_ENV[@]}" true; }\n' "$name" > "$tmp/cp/env-lane.sh"
+printf 'eval "$(sed -n "/^helper%s/,/^}/p" "$d/plain-lane.sh")"\n' "$fn" > "$tmp/cp/plain-copy.sh"
+printf 'eval "$(sed -n "/^helper%s/,/^}/p" "$d/env-lane.sh")"\n' "$fn" > "$tmp/cp/env-copy.sh"
+copies_unchecked_is copies-fixtures "$tmp/cp" "env-copy.sh:1|export.sh:1|sub/awk.sh:1"
 
 LINE="2026-11-05T00:00:00Z INFO Keploy(agent): the exact view's verify mode is on in this agent: each read it keeps is recomputed"
 printf 'start\n%s\nend\n' "$LINE" > "$tmp/with.log"
