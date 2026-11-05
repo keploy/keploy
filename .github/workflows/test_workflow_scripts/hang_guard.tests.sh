@@ -14,16 +14,21 @@ FAILS=0
 ok() { echo "ok: $1"; }
 bad() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
 
-# A command that exits 0 on SIGINT, SIGTERM or SIGHUP, once it is ready.
+# A command that exits 0 on SIGINT, SIGTERM or SIGHUP, once it is ready,
+# and ends its sleep first (a background sleep ignores INT; left, it held
+# the caller's stdout 30 s after the rows ended).
 cat >"$tmp/trap0.sh" <<'E'
-for s in INT TERM HUP; do trap "exit 0" $s; done
+for s in INT TERM HUP; do trap 'kill "$p" 2>/dev/null; exit 0' $s; done
+sleep 30 & p=$!
 touch "$1"
-sleep 30 & wait
+wait
 E
+# One that ignores SIGTERM, and ends by itself (0) after 8 s.
 cat >"$tmp/ignterm.sh" <<'E'
 trap "" TERM
+sleep 8 & p=$!
 touch "$1"
-sleep 30 & while :; do wait; done
+while kill -0 "$p" 2>/dev/null; do wait "$p"; done
 E
 ready() { local i; for ((i = 0; i < 100; i++)); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 
@@ -55,19 +60,79 @@ bash "$here/hang_guard.sh" -s KILL 1 sleep 30 2>"$tmp/l8"; row "run as a command
 hang_start -q 1 sleep 30 2>"$tmp/l9"; hang_wait "$HANG_PID"; rc=$?
 [ "$HANG_FIRED" = 1 ] && [ ! -s "$tmp/l9" ] && [ "$rc" = 143 ] && ok "-q: says nothing, and HANG_FIRED says it fired" ||
   bad "-q: HANG_FIRED=$HANG_FIRED, exit $rc, said \"$(cat "$tmp/l9")\""
+# -k: the run ends on the TERM while the watchdog waits to KILL it; the
+# watchdog, stopped then, still counts as fired.
+hang_start -q -k 30 1 sleep 30 2>/dev/null; hang_wait "$HANG_PID"; rc=$?
+[ "$HANG_FIRED" = 1 ] && [ "$rc" = 143 ] && ok "-k: a run the TERM ended sets HANG_FIRED" ||
+  bad "-k: HANG_FIRED=$HANG_FIRED, exit $rc, for a run the guard's TERM ended"
+# -k with a run the TERM ended, waited on only later: the KILL is not sent,
+# nor said (one guard line), and it still counts as fired.
+hang_start -k 1 1 sleep 30 2>"$tmp/l11"; sleep 3; hang_wait "$HANG_PID"
+row "-k: a run the TERM ended gets no KILL, one line" 143 1 $? "$tmp/l11"
+[ "$HANG_FIRED" = 1 ] || bad "-k: HANG_FIRED=$HANG_FIRED for a run the TERM ended, its watchdog done"
 bounded 5 true 2>/dev/null
 [ "$HANG_FIRED" = 0 ] && ok "HANG_FIRED is 0 for a run that ends in time" || bad "HANG_FIRED=$HANG_FIRED for a run that ended in time"
 got=$( (bounded -s KILL 1 sleep 30 2>/dev/null; echo "rc=$?") | cat)
 [ "$got" = rc=137 ] && ok "in a pipeline's subshell, the guard still ends the run" || bad "in a pipeline: \"$got\", want rc=137"
 
+# Neither the run nor its watchdog runs the caller's EXIT trap: once, for
+# the caller itself. A builtin run is not exec'd, so its subshell exits.
+: >"$tmp/exit-trap"
+( trap 'echo x >>"$tmp/exit-trap"' EXIT; bounded 5 true; bounded -q 1 sleep 5 ) 2>/dev/null
+n=$(wc -l <"$tmp/exit-trap")
+[ "$n" = 1 ] && ok "the caller's EXIT trap runs once, in the caller only" || bad "the caller's EXIT trap ran $n times, want 1"
+
+# The guard leaves job control as the caller had it.
+bounded 5 true 2>/dev/null
+case $- in *m*) bad "job control is on after a bounded run, and was off" ;; *) ok "job control stays off" ;; esac
+set -m; bounded 5 true 2>/dev/null
+case $- in *m*) ok "job control stays on" ;; *) bad "job control is off after a bounded run, and was on" ;; esac
+set +m
+
+# A run that ended but is not reaped yet (its caller is stopped, so the run
+# is a zombie) is not running: the watchdog does not fire on it.
+(
+  hang_start -q 1 sleep 0.3
+  touch "$tmp/z-ready"
+  sleep 2.5
+  hang_wait "$HANG_PID"
+  echo "rc=$? fired=$HANG_FIRED" >"$tmp/z-out"
+) 2>/dev/null &
+zp=$!
+ready "$tmp/z-ready" && kill -STOP "$zp"
+sleep 2
+kill -CONT "$zp"
+wait "$zp"
+got=$(cat "$tmp/z-out" 2>/dev/null)
+[ "$got" = "rc=0 fired=0" ] && ok "a zombie run is not running: the watchdog does not fire" || bad "a zombie run: \"$got\", want rc=0 fired=0"
+
+# A run under sudo: sudo keeps this user's real uid while its command runs,
+# so the guard's signal reaches it, and sudo relays it. Needs password-free
+# sudo for a user that is not root (a GitHub runner's); without it the row
+# says it did not run.
+if [ "$(id -u)" != 0 ] && sudo -n true 2>/dev/null; then
+  bounded 1 sudo -n sleep 30 2>"$tmp/l10"; row "a run under sudo: the guard's TERM reaches it and sudo relays it: 143" 143 1 $? "$tmp/l10"
+else
+  echo "skip: a run under sudo (needs password-free sudo, as a user that is not root)"
+fi
+
+# The bound is real time even when the caller's PATH has a sleep that
+# returns at once (golang-docker-fakes.sh puts one there).
+mkdir -p "$tmp/fakebin" && printf '#!/bin/sh\nexit 0\n' >"$tmp/fakebin/sleep" && chmod +x "$tmp/fakebin/sleep"
+PATH="$tmp/fakebin:$PATH" bounded 3 sh -c '/bin/sleep 1; exit 5' 2>"$tmp/l12"
+row "a fake sleep on PATH does not end the bound early" 5 0 $? "$tmp/l12"
+
 got=$(echo piped | bounded 5 cat 2>/dev/null)
 [ "$got" = piped ] && ok "the run reads the caller's stdin" || bad "the run read \"$got\" from stdin, want \"piped\""
 
-# A run that ends in time leaves no watchdog, nor its sleep, behind.
-bounded 600 true 2>/dev/null
-left=$(ps -o pid=,args= --ppid $$ | grep -c 'sleep 600')
-[ "$left" = 0 ] && [ "${#HANG_WATCHDOG[@]}" = 0 ] && ok "a run that ends in time leaves no watchdog" ||
-  bad "a run that ended in time left $left sleep(s), ${#HANG_WATCHDOG[@]} watchdog(s)"
+# A run that ends in time returns at once, and leaves no watchdog, nor its
+# sleep, behind.
+t0=$SECONDS
+bounded 20 true 2>/dev/null
+took=$((SECONDS - t0))
+left=$(ps -o pid=,args= --ppid $$ | grep -c 'sleep 20')
+[ "$took" -le 3 ] && [ "$left" = 0 ] && [ "${#HANG_WATCHDOG[@]}" = 0 ] && ok "a run that ends in time returns at once and leaves no watchdog" ||
+  bad "a run that ended in time took ${took}s, left $left sleep(s), ${#HANG_WATCHDOG[@]} watchdog(s)"
 
 # The sweep: a line that runs timeout(1) and whose exit status is kept (into
 # a variable, or by the next line that reads $?), or whose run is started in
