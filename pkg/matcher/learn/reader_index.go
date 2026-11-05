@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 	"weak"
 )
 
@@ -494,8 +495,15 @@ type filterTextKey struct {
 	a, b uint64
 }
 
-// filterTextKeyBytes is what a text's key keeps in its entry's map slot.
-const filterTextKeyBytes = 24
+// Slots of the set's maps of filter entries, at 7/16 of their tables
+// filled (as postSlotBytes): a recording's (setFilters.of: its id's header
+// and the entry's pointer, 24 bytes, and their control byte), 64 bytes
+// past its id's letters; a text's (texts: its key, 24 bytes, and the
+// pointer), 96, whose table of 1,024 slots takes whole pages.
+const (
+	filterIDSlotBytes   = 64
+	filterTextSlotBytes = 96
+)
 
 // filterTextMin is the shortest text with no recording's identity that a
 // set keeps a filter of (textEntry): a shorter one is scanned for each word
@@ -567,7 +575,7 @@ func (t *readerText) setFilter() wordFilter {
 				fs.of[strings.Clone(t.raw.id)] = e
 			}
 			fs.mu.Unlock()
-			t.filter, t.filterKey = e, int64(len(t.raw.id))
+			t.filter, t.filterKey = e, filterIDSlotBytes+allocBytes(len(t.raw.id), false)
 		}
 	}
 	e := t.filter
@@ -603,7 +611,7 @@ func (t *readerText) textEntry(fs *setFilters) (e *filterEntry, ok bool) {
 		e = &filterEntry{byText: true}
 		fs.texts[k] = e
 	}
-	t.filterKey = filterTextKeyBytes
+	t.filterKey = filterTextSlotBytes
 	return e, true
 }
 
@@ -636,7 +644,7 @@ func (t *readerText) buildFilter() wordFilter {
 		fs.builds++
 	}
 	fs.mu.Unlock()
-	if !setClaim(t.x.set, headerBytes+8*int64(len(f))+filterEntryBytes+t.filterKey) {
+	if !setClaim(t.x.set, allocBytes(uintptr(cap(f))*unsafe.Sizeof(f[0]), false)+allocBytes(unsafe.Sizeof(filterEntry{}), true)+t.filterKey) {
 		return nil
 	}
 	postRuns(fs, t.x.set, t.filter, forms)
@@ -684,11 +692,10 @@ func postRuns(fs *setFilters, s *setDerived, e *filterEntry, forms []string) {
 // postBytes is what a map of postings (setFilters.runs, post) holds for one
 // id more under w: the id, at twice its list's length (append doubles a
 // full list), and, fresh (the map holds no list of w yet), its list of one
-// id as a whole 16-byte block (a 4-byte list keeps the small-object block
-// it shares alive alone once the rest is garbage, and the race detector's
-// runtime gives each its own), w's slot and w's letters as their
-// allocation rounds them up (a size class at most an eighth over them, or
-// a 16-byte block of small ones).
+// id, w's slot and w's letters, each as the runtime allocates them
+// (allocBytes): the list keeps the whole 16-byte block it shares with other
+// small objects alive alone once the rest is garbage, and a run past 32 KiB
+// takes whole pages.
 //
 // A slot is its key's and its list's headers, 40 bytes, and their control
 // byte, at 7/16 of its table filled: the least a table holds just after it
@@ -699,14 +706,49 @@ func postBytes(w string, fresh bool) int64 {
 	if !fresh {
 		return postIDBytes
 	}
-	return postFirstIDBytes + postSlotBytes + int64(len(w)+len(w)/8+16)
+	return allocBytes(4, false) + postSlotBytes + allocBytes(len(w), false)
 }
 
 const (
-	postIDBytes      = 8
-	postFirstIDBytes = 16
-	postSlotBytes    = 112
+	postIDBytes   = 8
+	postSlotBytes = 112
 )
+
+// allocBytes is what the runtime holds for one object of n bytes, the one
+// way every structure the set's budget bounds counts its allocations: n
+// rounded up to its size class (sizeClasses), and past the largest whole
+// 8 KiB pages. An object that holds pointers (ptrs) and passes 512 bytes
+// carries an 8-byte header first; one that holds none and is under 16
+// bytes shares a 16-byte block with other small objects, which it keeps
+// alive alone once they are garbage, so it counts the block. 0 bytes take
+// nothing.
+func allocBytes[N int | int64 | uintptr](n N, ptrs bool) int64 {
+	size := int64(n)
+	switch {
+	case size <= 0:
+		return 0
+	case !ptrs && size < 16:
+		return 16
+	case ptrs && size > 512 && size+8 <= sizeClasses[len(sizeClasses)-1]:
+		size += 8
+	}
+	if size > sizeClasses[len(sizeClasses)-1] {
+		return (size + pageBytes - 1) / pageBytes * pageBytes
+	}
+	i, _ := slices.BinarySearch(sizeClasses[:], size)
+	return sizeClasses[i]
+}
+
+// pageBytes is the runtime's page: an object past its largest size class
+// takes whole pages.
+const pageBytes = 8 << 10
+
+// sizeClasses are the runtime's size classes (internal/runtime/gc): a small
+// object takes the least that holds it.
+var sizeClasses = [...]int64{8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320,
+	352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 896, 1024, 1152, 1280, 1408, 1536, 1792, 2048, 2304, 2688, 3072,
+	3200, 3456, 4096, 4864, 5376, 6144, 6528, 6784, 6912, 8192, 9472, 9728, 10240, 10880, 12288, 13568, 14336, 16384,
+	18432, 19072, 20480, 21760, 24576, 27264, 28672, 32768}
 
 // postID is the id the set's postings name t's text by (postRuns), its
 // filter built at the first ask (setFilter); -1 where they hold none of its
@@ -744,10 +786,6 @@ next:
 	}
 	return ids, true
 }
-
-// filterEntryBytes is what an entry keeps past its filter's words: the
-// entry, its key's header, and the map's slot for it.
-const filterEntryBytes = 64
 
 // heldIn reports whether one of a text's declared forms (textForms) holds w
 // as a word in any of the readings rs. by: the readings of rs that read

@@ -527,7 +527,7 @@ func TestReaderIndexKeepsOnTheSetsOneBudget(t *testing.T) {
 	fs.mu.Lock()
 	for _, e := range fs.texts {
 		if e.f != nil {
-			kept += headerBytes + 8*int64(len(e.f)) + filterEntryBytes + filterTextKeyBytes
+			kept += textFilterBytes(e.f)
 		}
 		if e.id >= 0 {
 			kept += postingBytes(text)

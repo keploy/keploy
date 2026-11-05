@@ -907,21 +907,131 @@ func (dc *decider) outsideWords(x Raw) givenWords {
 	fs.wordsBuilds++
 	fs.mu.Unlock()
 	g := dc.dr.wordsOf(x)
-	e := &wordsEntry{key: k, lists: g}
-	if setClaim(s, e.size()+int64(len(x.id))) {
+	// The entry counts its slot in the set's map (as a posting's, a key
+	// and a list's headers) with the id's letters, and its pointer in the
+	// id's list at twice its size.
+	e := keptWordsOf(k, g)
+	e.bytes += postSlotBytes + allocBytes(len(x.id), false) + allocBytes(16, true)
+	if setClaim(s, e.bytes) {
 		fs.mu.Lock()
 		fs.words[strings.Clone(x.id)] = append(fs.words[x.id], e)
 		fs.mu.Unlock()
+		return e.of(x)
 	}
 	return g
 }
 
 // wordsEntry is what the set keeps of an outside recording's words
 // (outsideWords): its words as wordsOf read them (lists), and what they
-// were read from (key).
+// were read from (key), each its own copy (keptWordsOf), and the bytes it
+// counts on the set's budget: what both hold, and its slot in the set's
+// map.
 type wordsEntry struct {
 	key   wordsKey
 	lists givenWords
+	bytes int64
+}
+
+// keptWordsOf is the entry the set keeps of g, the words wordsOf read of a
+// recording with key k, counted as it holds them (allocBytes): the entry,
+// a copy of each payload of k, and a copy of each list of g cut to its
+// length (an empty one allocates none: no capacity answerListsOf left in a
+// list stays alive with it), each word once and its own copy, and lists that
+// share one array (a recording served as recorded gave the same words)
+// sharing one copy. Each copy is the entry's own: no text the call read
+// stays alive in it past what it counts. A later call is handed the
+// entry's lists (of), the same each time: the set's index of word lists
+// (listsKey) reads them once.
+func keptWordsOf(k wordsKey, g givenWords) *wordsEntry {
+	e := &wordsEntry{}
+	n := allocBytes(unsafe.Sizeof(*e), true)
+	e.key.served, e.key.asRecorded, e.key.unseen = k.served, k.asRecorded, k.unseen
+	if k.live != nil {
+		b, bn := keptPayload(*k.live)
+		e.key.live, n = &b, n+bn+allocBytes(unsafe.Sizeof(b), true)
+	}
+	if k.views != nil {
+		e.key.views = make([]rawBody, len(k.views))
+		n += allocBytes(uintptr(len(k.views))*unsafe.Sizeof(rawBody{}), true)
+		for i, v := range k.views {
+			b, bn := keptPayload(v)
+			e.key.views[i], n = b, n+bn
+		}
+	}
+	words, copies := map[string]string{}, map[*[]string][][]string{}
+	keep := func(ls [][]string) [][]string {
+		if ls == nil {
+			return nil
+		}
+		if c, ok := copies[unsafe.SliceData(ls)]; ok && len(c) == len(ls) {
+			return c
+		}
+		c := make([][]string, len(ls))
+		n += allocBytes(uintptr(len(ls))*unsafe.Sizeof(ls[0]), true)
+		for i, l := range ls {
+			if len(l) == 0 {
+				if l != nil {
+					c[i] = []string{}
+				}
+				continue
+			}
+			c[i] = make([]string, len(l))
+			n += allocBytes(uintptr(len(l))*unsafe.Sizeof(l[0]), true)
+			for j, w := range l {
+				kw, ok := words[w]
+				if !ok {
+					kw = strings.Clone(w)
+					words[kw] = kw
+					n += allocBytes(len(kw), false)
+				}
+				c[i][j] = kw
+			}
+		}
+		copies[unsafe.SliceData(ls)] = c
+		return c
+	}
+	keepLists := func(l answerLists) answerLists { return answerLists{words: keep(l.words), stamped: keep(l.stamped)} }
+	e.lists = g
+	e.lists.answerLists, e.lists.view = keepLists(g.answerLists), keepLists(g.view)
+	e.lists.same, e.lists.gave = keep(g.same), keep(g.gave)
+	if g.views != nil {
+		e.lists.views = make([]answerLists, len(g.views))
+		n += allocBytes(uintptr(len(g.views))*unsafe.Sizeof(answerLists{}), true)
+		for i, v := range g.views {
+			e.lists.views[i] = keepLists(v)
+		}
+	}
+	e.lists.mock, e.lists.conn = "", ""
+	e.bytes = n
+	return e
+}
+
+// keptPayload is a copy of b the set keeps (keptWordsOf), its text, its
+// fields' and stamps' lists and paths and its clock reads each its own,
+// and the bytes the copy holds (allocBytes).
+func keptPayload(b rawBody) (rawBody, int64) {
+	c := rawBody{text: strings.Clone(b.text), unread: strings.Clone(b.unread), read: b.read}
+	n := allocBytes(len(c.text), false) + allocBytes(len(c.unread), false)
+	if b.answerClock != nil {
+		c.answerClock = make([]time.Time, len(b.answerClock))
+		copy(c.answerClock, b.answerClock)
+		n += allocBytes(uintptr(len(b.answerClock))*unsafe.Sizeof(time.Time{}), true)
+	}
+	fields := func(fs []rawField) []rawField {
+		if fs == nil {
+			return nil
+		}
+		out := make([]rawField, len(fs))
+		n += allocBytes(uintptr(len(fs))*unsafe.Sizeof(rawField{}), true)
+		for i, f := range fs {
+			f.path = strings.Clone(f.path)
+			n += allocBytes(len(f.path), false)
+			out[i] = f
+		}
+		return out
+	}
+	c.fields, c.stamps = fields(b.fields), fields(b.stamps)
+	return c, n
 }
 
 // wordsKey is what makes a recording's words (wordsOf) past its identity,
@@ -967,34 +1077,6 @@ func (e *wordsEntry) of(x Raw) givenWords {
 	g.mock, g.at, g.late, g.noTime, g.answered, g.conn, g.pos = strings.Clone(x.mock), x.at, x.late, x.noTime, x.answered, strings.Clone(x.conn), x.pos
 	g.test, g.prev, g.first, g.last = x.test, x.prev, x.first, x.last
 	return g
-}
-
-// size is about what e holds in memory, in bytes: each word it keeps, and
-// the payloads its key holds.
-func (e *wordsEntry) size() int64 {
-	n := int64(filterEntryBytes)
-	if e.key.live != nil {
-		n += e.key.live.size()
-	}
-	for _, b := range e.key.views {
-		n += b.size()
-	}
-	g := e.lists
-	for _, l := range append([]answerLists{g.answerLists, g.view}, g.views...) {
-		n += listsBytes(l.words) + listsBytes(l.stamped)
-	}
-	return n + listsBytes(g.same) + listsBytes(g.gave)
-}
-
-// listsBytes is about what ls holds in memory, in bytes.
-func listsBytes(ls [][]string) int64 {
-	n := int64(24 * len(ls))
-	for _, l := range ls {
-		for _, w := range l {
-			n += int64(unsafe.Sizeof(w)) + int64(len(w))
-		}
-	}
-	return n
 }
 
 // setSecondSource names a recording of the set (Input.Given), which round
@@ -1195,18 +1277,13 @@ type listsEntry struct {
 	post int64
 }
 
-// Sizes a list's entry counts: the entry (64 bytes as allocated) and its
-// slot in the set's map of lists (listsSlotBytes: 17 bytes, at 7/16 of the
-// map's table filled), and per word its slot in the entry's words (16
-// bytes, at twice their length), past what the postings' map holds for it
-// (postBytes): counted fresh for every word, the side that counts more, as
-// a word another list posted first stays in the map once that list is let
-// go.
-const (
-	listsEntryBytes = 104
-	listsSlotBytes  = 40
-	listsWordBytes  = 32
-)
+// Sizes a list's entry counts past its allocations (allocBytes: the entry
+// and its words' list): its slot in the set's map of lists (40 bytes, at
+// 7/16 of the map's table filled), and per word what the postings' map
+// holds for it (postBytes), counted fresh for every word, the side that
+// counts more, as a word another list posted first stays in the map once
+// that list is let go.
+const listsSlotBytes = 40
 
 // listsKey is l's identity: its words' backing array, weakly, so the set's
 // index never keeps a list alive, and a list let go is never taken for a
@@ -1243,7 +1320,7 @@ func buildLists(fs *setFilters, s *setDerived, e *listsEntry, l answerLists) {
 	for _, w := range words {
 		post += postBytes(w, true)
 	}
-	n := listsEntryBytes + listsWordBytes*int64(len(words)) + post
+	n := allocBytes(unsafe.Sizeof(*e), true) + listsSlotBytes + allocBytes(uintptr(cap(words))*unsafe.Sizeof(""), true) + post
 	if !setClaim(s, n) {
 		return
 	}
