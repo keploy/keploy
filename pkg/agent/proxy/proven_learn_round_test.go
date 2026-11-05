@@ -707,8 +707,9 @@ func heldMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, where, mov
 
 // roundMiss fails t unless the call was answered by nothing, learned nothing
 // onto any recording, and missed once, with no reason, its next steps
-// saying why. It returns the misses it read: the read takes them, so a
-// later read finds none.
+// saying why, and that alone of a move: not again as a move after the call
+// was decided (integrations.CallViewGoneWhy). It returns the misses it
+// read: the read takes them, so a later read finds none.
 func roundMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, why string) []models.UnmatchedCall {
 	t.Helper()
 	for name, st := range r3States(mm) {
@@ -725,6 +726,9 @@ func roundMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, why strin
 	}
 	if len(misses) != 1 || misses[0].Reason != "" || !strings.Contains(misses[0].NextSteps, why) {
 		t.Fatalf("the miss reads %+v; want one, with no reason, saying %q", misses, why)
+	}
+	if strings.Contains(misses[0].NextSteps, "before keploy diagnosed its miss") {
+		t.Fatalf("the miss's next steps %q tell its move twice; want only %q", misses[0].NextSteps, why)
 	}
 	return misses
 }

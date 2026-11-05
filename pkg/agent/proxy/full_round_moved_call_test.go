@@ -49,35 +49,105 @@ func (d *heldHook) HoldToRound(call integrations.CallRound) (integrations.MockMe
 	return d.MockManager.HoldToRound(call)
 }
 
+// lookupHook is the manager whose holds run move once, first, in the miss's
+// lookup named at: "not-owned" (the recording-made-elsewhere lookup, run
+// after the report read the hold) or "repeat" (the repeat note's, the
+// miss's last read).
+type lookupHook struct {
+	*MockManager
+	at   string
+	move func()
+	ran  atomic.Bool
+}
+
+func (d *lookupHook) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	db, restaged := d.MockManager.HoldToRound(call)
+	if hs, ok := db.(*heldScope); ok {
+		return &lookupHeld{heldScope: hs, d: d}, restaged
+	}
+	return db, restaged
+}
+
+// lookupHeld is a call's hold whose lookup d.at runs d.move once, first.
+type lookupHeld struct {
+	*heldScope
+	d *lookupHook
+}
+
+func (w *lookupHeld) in(at string) {
+	if w.d.at == at && w.d.ran.CompareAndSwap(false, true) {
+		w.d.move()
+	}
+}
+
+func (w *lookupHeld) DiagnoseInCallView() integrations.MockMemDb {
+	w.heldScope.DiagnoseInCallView()
+	return w
+}
+
+func (w *lookupHeld) FindStagedNotOwnedByKeys(kind models.Kind, call integrations.CallRound, keys []string, match func(*models.Mock) bool) (string, bool) {
+	w.in("not-owned")
+	return w.heldScope.FindStagedNotOwnedByKeys(kind, call, keys, match)
+}
+
+func (w *lookupHeld) FindStagedNotOwned(kind models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
+	w.in("not-owned")
+	return w.heldScope.FindStagedNotOwned(kind, call, match)
+}
+
+func (w *lookupHeld) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
+	w.in("repeat")
+	return w.heldScope.FindAnsweredEarlier(kind, keys, match)
+}
+
 // A full-round miss whose view moves after the call was decided (its learn
 // step, variable pass, extra-call count and pairing all read test-1's view,
-// and the replay ends test-1, or ends it and begins test-2, before the miss
-// is diagnosed) names no recording: none of the pool's, none of test-2's,
-// and diffs the call against none. It says why: the replay ended test-1
-// (and began test-2) after the call was decided. With no move, the miss
-// names test-1's own mock-own1. Before, the moved miss named the pool's
-// mock-pool or test-2's mock-own2 as its closest, with a diff of a test-1
-// call against it.
+// and the replay ends test-1, or ends it and begins test-2) names no
+// recording and diffs the call against none, and says why: the replay
+// ended test-1 (and began test-2) after the call was decided. That holds
+// wherever the move lands: before the miss's report, after the report read
+// the hold and named its closest (in the lookup of a recording made
+// elsewhere), or in its last read (the repeat note's lookup): whatever the
+// miss read before the move is dropped with it. The move is told once.
+// With no move, the miss names test-1's own mock-own1. Before, a move
+// before the report named the pool's mock-pool or test-2's mock-own2 as
+// its closest, with a diff of a test-1 call against it; and a move after
+// the report kept test-1's mock-own1 and its diff beside a sentence saying
+// no recording is named.
 func TestAFullRoundMissWhoseViewMovesAfterItsDecisionNamesNoRecording(t *testing.T) {
-	for _, when := range []string{"never", "the test ends", "the next test begins"} {
-		t.Run(when, func(t *testing.T) {
+	type tc struct{ at, move string }
+	cases := []tc{{"before the report", "never"}}
+	for _, at := range []string{"before the report", "not-owned", "repeat"} {
+		for _, move := range []string{"the test ends", "the next test begins"} {
+			cases = append(cases, tc{at, move})
+		}
+	}
+	for _, c := range cases {
+		t.Run(c.at+"/"+c.move, func(t *testing.T) {
 			p, mm := heldOrders(t, false)
 			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
 			p.ContinueTestErrorCapture()
-			lg := onDebugLine("after matching the http request", func() {
-				if when == "never" {
+			move := func() {
+				if c.move == "never" {
 					return
 				}
 				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
 				p.EndTestErrorCapture()
-				if when == "the next test begins" {
+				if c.move == "the next test begins" {
 					mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
 					p.ContinueTestErrorCapture()
 				}
-			})
-			code, got := r3SendVia(t, context.Background(), httpint.New(lg), p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, "GET /orders HTTP/1.1\r\nHost: deps.example\r\n\r\n")
+			}
+			lg, db := zap.NewNop(), &lookupHook{MockManager: mm, at: c.at, move: move}
+			if c.at == "before the report" {
+				lg = onDebugLine("after matching the http request", move)
+			}
+			code, got := r3SendVia(t, context.Background(), httpint.New(lg), p, db, models.OutgoingOptions{Learn: true, LearnPool: true}, "GET /orders HTTP/1.1\r\nHost: deps.example\r\n\r\n")
 			if code == http.StatusOK {
 				t.Fatalf("answered %d %s", code, got)
+			}
+			if c.at != "before the report" && !db.ran.Load() {
+				t.Fatalf("precondition: the miss's %s lookup never ran", c.at)
 			}
 			misses, err := p.GetMockErrors(context.Background())
 			if err != nil {
@@ -90,16 +160,16 @@ func TestAFullRoundMissWhoseViewMovesAfterItsDecisionNamesNoRecording(t *testing
 			why := map[string]string{
 				"the test ends":        "decided this request in test-1, and the replay ended test-1 before keploy diagnosed its miss, so no recording is named for it",
 				"the next test begins": "decided this request in test-1, and the replay ended test-1 and began test-2 before keploy diagnosed its miss, so no recording is named for it",
-			}[when]
+			}[c.move]
 			switch {
-			case when == "never":
+			case c.move == "never":
 				if m.ClosestMock != "mock-own1" || strings.Contains(m.NextSteps, "no recording is named") {
 					t.Errorf("the unmoved miss names %q (next steps %q); want test-1's mock-own1, and no word of a move", m.ClosestMock, m.NextSteps)
 				}
-			case m.ClosestMock != "" || m.Diff != "" || len(m.FieldDiffs) > 0:
-				t.Errorf("a test-1 miss whose view moved after it was decided names %q (diff %q, fields %+v); want no recording", m.ClosestMock, m.Diff, m.FieldDiffs)
-			case !strings.Contains(m.NextSteps, why):
-				t.Errorf("the moved miss's next steps read %q; want them to say %q", m.NextSteps, why)
+			case m.ClosestMock != "" || m.ClosestMockReq != "" || m.Diff != "" || len(m.FieldDiffs) > 0:
+				t.Errorf("a test-1 miss whose view moved %s names %q (rendered %q, diff %q, fields %+v, next steps %q); want no recording", c.at, m.ClosestMock, m.ClosestMockReq, m.Diff, m.FieldDiffs, m.NextSteps)
+			case !strings.Contains(m.NextSteps, why) || strings.Count(m.NextSteps, "keploy record's full round") != 1:
+				t.Errorf("the moved miss's next steps read %q; want them to say once %q", m.NextSteps, why)
 			}
 		})
 	}
@@ -415,4 +485,79 @@ func indexOfName(mocks []*models.Mock, name string) int {
 		}
 	}
 	return -1
+}
+
+// A walk of the hold of a call marked from a round snapshot (record's full
+// round) that a test's end straddles yields none of another test's own
+// recordings after the end. The call was decided between tests with
+// test-2's mock-own2 in flight, so mock-own2 is its own. Test-2 then began
+// with mock-own2, mock-own3 and mock-sess2, and each walk starts in
+// test-2's view: its first yield is mock-own2, and there the replay ends
+// test-2. The walk's later copies, mock-own3 and mock-sess2, were served by
+// test-2's view, which the call's view did not own, so they stay hidden,
+// though the pool view now in force names neither of them.
+func TestASnapshotMarkedCallsWalkThatATestsEndStraddlesYieldsNoOtherTestsOwnRecording(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		for _, walk := range []string{"per-test walk", "keyed walk"} {
+			t.Run(map[bool]string{false: "the manager", true: "a scoped view"}[scoped]+"/"+walk, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, "1")
+				now := time.Now()
+				pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
+				own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
+				own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
+				own3 := r3Mock("mock-own3", now.Add(1505*time.Millisecond), "POST", "/orders", `{"item":"fig"}`, `{"order":3}`)
+				sess2 := r3Mock("mock-sess2", now.Add(1510*time.Millisecond), "GET", "/config", "", `{"v":2}`)
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				mm.SeedRecordedWindows([]models.TestWindow{
+					{Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
+					{Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
+				})
+				mm.SetMocksWithWindow([]*models.Mock{pool, own1, own2, own3}, []*models.Mock{sess2}, models.BaseTime, now.Add(time.Hour))
+				mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-pool"}, nil)
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"}, roundMock(mm, "mock-own2"))
+				var store integrations.MockMemDb = mm
+				if scoped {
+					store = &scopedMockDb{MockMemDb: mm}
+				}
+				snap, ok := integrations.SnapshotRound(store, integrations.RoundQuery{})
+				if !ok {
+					t.Fatal("precondition: no round snapshot")
+				}
+				mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2"), roundMock(mm, "mock-own3"), roundMock(mm, "mock-sess2")})
+				held, _ := integrations.HoldToRound(store, snap.CallRound())
+				var yielded []string
+				fn := func(mk *models.Mock) bool {
+					if len(yielded) == 0 {
+						mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+					}
+					yielded = append(yielded, mk.Name)
+					return true
+				}
+				switch walk {
+				case "per-test walk":
+					r, ok := held.(integrations.PerTestRanger)
+					if !ok {
+						t.Fatal("precondition: the hold has no per-test walk")
+					}
+					_ = r.RangePerTestMocksInWindow(fn)
+				default:
+					r, ok := held.(integrations.SessionKeyReader)
+					if !ok {
+						t.Fatal("precondition: the hold has no keyed walk")
+					}
+					ix := &integrations.MockIndex{Keys: func(*models.Mock) []string { return []string{"config"} }}
+					_ = r.RangeSessionMocksWithKey(ix, "config", fn)
+				}
+				if len(yielded) == 0 || yielded[0] != "mock-own2" {
+					t.Fatalf("precondition: the walk yielded %v; want the call's own mock-own2 first, where test-2 ends", yielded)
+				}
+				for _, name := range yielded[1:] {
+					if name == "mock-own3" || name == "mock-sess2" {
+						t.Errorf("after test-2 ended inside the walk, it yielded test-2's %s (all: %v)", name, yielded)
+					}
+				}
+			})
+		}
+	}
 }

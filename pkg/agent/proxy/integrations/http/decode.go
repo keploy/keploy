@@ -585,18 +585,6 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// read in is moved by it too.
 					staged = restaged()
 				}
-				if elsewhere != nil {
-					markNotOwned(report, elsewhere)
-				} else if lmiss != nil {
-					lmiss.explain(report)
-				}
-				if staged {
-					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedNote)
-				} else if why := integrations.UnheldWhy(db); why != "" && report != nil {
-					// The store marked the request's round but could not
-					// hold it: its matcher read nothing (HoldToRound).
-					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
-				}
 				// A call identical to one an earlier test made, whose
 				// recording already answered: the application asked again
 				// where its recording did not (models.RepeatNote). In
@@ -609,18 +597,45 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// record a test in between refilled the cache with the same
 				// call, which this replay, inside the cache's span there,
 				// never made, so its recording is what the call matches.
+				var earlier integrations.AnsweredCall
+				repeated := false
 				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
-					if a, ok := repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n); ok {
-						markRepeat(report, a)
-					}
+					earlier, repeated = repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n)
 				}
-				if why := integrations.CallViewGoneWhy(db); why != "" && report != nil {
-					// The call's view went after the call was decided, so
-					// the miss read nothing and names no recording: it
-					// says which test the replay ended or began. Asked
-					// after every read of the miss, so a move during them
-					// is told too.
+				// The call's view went after the call was decided: a
+				// test's begin or end replaced it before the miss was
+				// diagnosed, or while it was, between any two of the
+				// reads above. Asked after every one of them, so a move
+				// during them is told too, and then the miss carries
+				// nothing any of them read (viewless): no closest
+				// recording, no diff, no recording made elsewhere and no
+				// repeat note, whichever view a read was of. A learn
+				// step's moved miss tells the move itself.
+				gone := ""
+				if report != nil {
+					gone = integrations.CallViewGoneWhy(db)
+				}
+				if gone != "" {
+					viewless(report)
+					elsewhere, repeated = nil, false
+				}
+				if elsewhere != nil {
+					markNotOwned(report, elsewhere)
+				} else if lmiss != nil {
+					lmiss.explain(report)
+				}
+				if staged {
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedNote)
+				} else if why := integrations.UnheldWhy(db); why != "" && report != nil {
+					// The store marked the request's round but could not
+					// hold it: its matcher read nothing (HoldToRound).
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
+				}
+				if repeated {
+					markRepeat(report, earlier)
+				}
+				if gone != "" && (lmiss == nil || !lmiss.moved) {
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + gone)
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
