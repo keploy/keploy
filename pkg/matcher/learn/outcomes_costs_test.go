@@ -997,8 +997,10 @@ func TestOutcomeCostATextsFilterIsKeptByItsWholeText(t *testing.T) {
 			if handed.filter != nil {
 				f = handed.filter.f
 			}
-			if want, got := textFilterBytes(f)+postingBytes(one), used()-u; f == nil || handed.filter.id < 0 || got != want {
-				t.Errorf("the text's filter and postings counted %d bytes on the set's budget; want %d: its words, its key and its runs (a filter kept: %v, posted: %v)", got, want, f != nil, f != nil && handed.filter.id >= 0)
+			// The set's first text and first runs count their maps' first
+			// groups (288 and 352 bytes), and the call's index its entry.
+			if want, got := textFilterBytes(f)+288+postingBytes(one)+352+entryBytes(0, 0), used()-u; f == nil || handed.filter.id < 0 || got != want {
+				t.Errorf("the text's filter and postings counted %d bytes on the set's budget; want %d: its words, its key and its runs, the maps' first groups, the index's entry (a filter kept: %v, posted: %v)", got, want, f != nil, f != nil && handed.filter.id >= 0)
 			}
 		}
 		for _, v := range []struct{ text, word string }{{other, "a1b2c3d5"}, {one, "a1b2c3d4"}} {
@@ -1032,8 +1034,9 @@ func TestOutcomeCostATextsFilterIsKeptByItsWholeText(t *testing.T) {
 	}
 }
 
-// Past the set's budget a recording keeps no filter: each call scans it as
-// before, and none reads it again to build one. The verdict stays.
+// Past the set's budget a recording keeps no filter: its entry does not fit,
+// so no call builds one (or reads the recording to), and each call scans it
+// as before. The verdict stays.
 func TestOutcomeCostARecordingsFilterPastTheSetsBudgetIsNotKept(t *testing.T) {
 	const words = 5
 	_, _, wantScans, _, _ := costSet(300)
@@ -1045,8 +1048,8 @@ func TestOutcomeCostARecordingsFilterPastTheSetsBudgetIsNotKept(t *testing.T) {
 	if got != want {
 		t.Errorf("past the budget the tests decide %q; want %q", got, want)
 	}
-	if builds[0] != 300 || builds[1] != 0 || lookups != [2]int64{} {
-		t.Errorf("past the budget the tests built %v filters and asked them %v words; want each built once, kept by none, asked none", builds, lookups)
+	if builds != [2]int{} || lookups != [2]int64{} {
+		t.Errorf("past the budget the tests built %v filters and asked them %v words; want none built, none asked", builds, lookups)
 	}
 	if scans[1] < int64(words*300) {
 		t.Errorf("past the budget the second test scanned a text %d times; want each place scanned for each word, as with no filter", scans[1])
@@ -1108,9 +1111,9 @@ func postingBytes(text string) int64 {
 func freshPostBytes(w string) int64 { return 16 + 112 + allocBytes(len(w), false) }
 
 // textFilterBytes is what a text's filter counts on the set's budget
-// (buildFilter): its bits as allocated, its entry (48 bytes) and its slot
-// in the set's map of texts (96).
-func textFilterBytes(f wordFilter) int64 { return allocBytes(8*len(f), false) + 48 + 96 }
+// (textEntry, buildFilter): its bits as allocated, its entry (48 bytes) and
+// its slot in the set's map of texts (92: a 32-byte slot, mapSlotBytes).
+func textFilterBytes(f wordFilter) int64 { return allocBytes(8*len(f), false) + 48 + 92 }
 
 // listWordsBytes is what a list's entry counts for the list of its n words
 // (buildLists), as append grows it and the runtime allocates it.
@@ -1723,8 +1726,9 @@ func TestOutcomeCostAListTheSetLetsGoLeavesItsIndex(t *testing.T) {
 		}
 	}
 	fs.mu.Unlock()
-	if len(left) != 0 || used() != base {
-		t.Errorf("after both lists are let go: postings of %q left, the budget used %d; want none, and %d", left, used(), base)
+	// The maps' first groups (144 and 352 bytes) stay counted for the set.
+	if len(left) != 0 || used() != base+496 {
+		t.Errorf("after both lists are let go: postings of %q left, the budget used %d; want none, and %d with the maps' first groups", left, used(), base+496)
 	}
 	// A drop that comes again, or after the set or its filters were let go,
 	// takes nothing and stops nowhere.
@@ -2182,11 +2186,16 @@ func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
 			texts[k] = text(k, c.runs, c.shared)
 			lists[k] = answerLists{words: [][]string{strings.Fields(texts[k])}}
 		}
-		var want int64
+		// The first text or list counts the maps' first groups: the
+		// postings' (352 bytes), and the lists' (144).
+		want := int64(352)
+		if c.list {
+			want += 144
+		}
 		posted := map[string]bool{}
 		for _, x := range texts {
 			if c.list {
-				want += 104 + listWordsBytes(len(strings.Fields(x)))
+				want += 108 + listWordsBytes(len(strings.Fields(x)))
 				for _, w := range strings.Fields(x) {
 					want += freshPostBytes(w)
 				}
@@ -2416,16 +2425,17 @@ func TestOutcomeCostTheListsIndexHoldsNoMoreThanItCountsAfterChurn(t *testing.T)
 			}
 			lists[k] = answerLists{words: [][]string{ws}}
 		}
-		// want is the count by the rule, in literal sizes: an entry 104, its
-		// list of words as allocated (listWordsBytes), and each word's
-		// postings (freshPostBytes); a list let go keeps its slot in the
-		// map of lists (40), a word it held alone its slot
+		// want is the count by the rule, in literal sizes: the maps' first
+		// groups (496, never given back), an entry 108 (its slot in the map
+		// of lists 44), its list of words as allocated (listWordsBytes), and
+		// each word's postings (freshPostBytes); a list let go keeps its
+		// slot in the map of lists (44), a word it held alone its slot
 		// (96), and one another list holds its id (8), counted until those
 		// pass what the live lists count in the maps (live).
-		var want, live, gone int64
+		want, live, gone := int64(496), int64(0), int64(0)
 		holders := map[string]int{}
 		for _, l := range lists {
-			want, live = want+104+listWordsBytes(len(l.words[0])), live+40
+			want, live = want+108+listWordsBytes(len(l.words[0])), live+44
 			for _, w := range l.words[0] {
 				want += freshPostBytes(w)
 				live += freshPostBytes(w)
@@ -2450,7 +2460,7 @@ func TestOutcomeCostTheListsIndexHoldsNoMoreThanItCountsAfterChurn(t *testing.T)
 			}
 			for k := c.keep; k < c.lists; k++ {
 				dropLists(listsGone{set: weak.Make(s), fs: weak.Make(fs), key: keys[k]})
-				want, live, gone = want-104-listWordsBytes(len(lists[k].words[0]))+40, live-40, gone+40
+				want, live, gone = want-108-listWordsBytes(len(lists[k].words[0]))+44, live-44, gone+44
 				for _, w := range lists[k].words[0] {
 					want -= freshPostBytes(w)
 					live -= freshPostBytes(w)
@@ -2641,6 +2651,8 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 		recs, words, wlen, live := 1+r.IntN(400), 1+r.IntN(300), wordLen(), r.IntN(2) == 0
 		if shape == 0 {
 			recs, words = 3000, 1
+		} else if shape == 1 {
+			recs, words = 1, 1
 		}
 		tr := NewTracker()
 		tr.NewSet()
@@ -2678,11 +2690,14 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 		tr.End()
 		runtime.KeepAlive(dc)
 	}
-	for range 10 {
+	for shape := range 10 {
 		texts, runs, shared := 1+r.IntN(64), 1+r.IntN(4000), r.IntN(3) == 0
 		long := r.IntN(4) == 0
 		if long {
 			runs = 1 + r.IntN(3)
+		}
+		if shape == 0 {
+			texts, runs, long = 1, 1, false
 		}
 		in := make([]string, texts)
 		for k := range in {
@@ -2712,10 +2727,13 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 		runtime.KeepAlive(fs)
 		runtime.KeepAlive(s)
 	}
-	for range 8 {
+	for shape := range 8 {
 		n, words, shared := 1+r.IntN(20000), r.IntN(300), r.IntN(3) == 0
 		if r.IntN(2) == 0 {
 			words = r.IntN(4)
+		}
+		if shape == 0 {
+			n, words = 1, 1
 		}
 		n = min(n, 300000/max(words, 1))
 		lists := make([]answerLists, n)
@@ -2744,4 +2762,154 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 		runtime.KeepAlive(fs)
 		runtime.KeepAlive(s)
 	}
+	// The set's filters of its recordings' words (setFilter), by id or by
+	// text, built through a call's index, which then gives back what it
+	// counted itself: the set keeps each filter's entry, slot and bits, and
+	// its postings.
+	for shape := range 8 {
+		recs, words, wlen, byText := 1+r.IntN(600), 1+r.IntN(200), wordLen(), shape%3 == 1
+		if shape == 0 {
+			recs, words = 1, 1
+		}
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		dc := tr.Drifts()
+		in, raws := make([]string, recs), make([]Raw, recs)
+		for i := range recs {
+			parts := make([]string, words)
+			for j := range parts {
+				parts[j] = randomWord(r, i, j, wlen)
+			}
+			in[i] = `{"v":"` + strings.Join(parts, " ") + `"}`
+			if byText {
+				in[i] += strings.Repeat(" ", max(0, filterTextMin-len(in[i])))
+			}
+			raws[i] = RawOf(getAnswer(fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), in[i], eRecAt), true)
+		}
+		x := newReaderIndex(dc)
+		used, h0 := dc.set.budget.used, liveHeap()
+		for i := range recs {
+			h := x.textOf(raws[i])
+			if byText {
+				h = x.text(in[i])
+			}
+			if h.setFilter() == nil {
+				t.Fatalf("filters, shape %d: recording %d has no filter within a 1 GiB budget", shape, i)
+			}
+		}
+		x.release()
+		heldAgainstCounted(t, fmt.Sprintf("filters, %d recordings of %d %d-byte words (by text: %v)", recs, words, wlen, byText), liveHeap()-h0, dc.set.budget.used-used)
+		runtime.KeepAlive(in)
+		runtime.KeepAlive(raws)
+		runtime.KeepAlive(x)
+		tr.End()
+		runtime.KeepAlive(dc)
+	}
+	// A call's index of the texts it asks about (readerIndex): each text's
+	// entry, the text it keeps, and each answer it keeps (its instants, its
+	// other forms, its base64 runs, its moments, its field view, its suffix
+	// array), held as what the index frees once the caller lets go of the
+	// texts and the index lets go of its entries (release).
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	readerBudget = 1 << 30
+	for shape := range 10 {
+		texts, words, long := 1+r.IntN(300), 1+r.IntN(80), shape%4 == 3
+		if shape == 0 {
+			texts, words = 1, 1
+		}
+		in := make([]string, texts)
+		toks := make([]string, texts)
+		for i := range in {
+			var b strings.Builder
+			toks[i] = base64.StdEncoding.EncodeToString([]byte(randomWord(r, i, 0, 9+r.IntN(40))))
+			fmt.Fprintf(&b, `{"id":"%s","at":"2026-11-0%dT10:%02d:%02d.%03dZ","tok":"%s","n":[`, randomWord(r, i, 0, 36), 1+r.IntN(9), r.IntN(60), r.IntN(60), r.IntN(1000), toks[i])
+			for j := range words {
+				fmt.Fprintf(&b, `{"w":"%s","t":"2026-11-02T1%d:00:0%d+05:30"},`, randomWord(r, i, j, wordLen()), r.IntN(10), r.IntN(10))
+			}
+			for long && b.Len() < 30000+i%3*20000 {
+				fmt.Fprintf(&b, `"%s",`, randomWord(r, i, b.Len(), wordLen()))
+			}
+			b.WriteString(`0]}`)
+			in[i] = b.String()
+		}
+		x := newReaderIndex(nil)
+		for i := range in {
+			h := x.text(in[i])
+			if sp, ok := h.spansOf(); ok && len(sp) > 0 {
+				h.holdsMoment(sp[0].moment())
+			}
+			h.holdsWord("w0x0")
+			h.holdsToken(tokenB64, toks[i])
+			h.fieldsWith("w0x0")
+			for q := range containsScans + 1 {
+				h.contains(strconv.Itoa(q))
+			}
+			if h.e == nil || h.e.past || !h.e.subs.ok || !h.e.fields.ok || !h.e.runs.ok || !h.e.forms.ok || !h.e.spans.ok {
+				t.Fatalf("reader index, shape %d: text %d kept no answer of some kind within a 1 GiB budget", shape, i)
+			}
+		}
+		counted, size := x.used, 0
+		for _, s := range in {
+			size += len(s)
+		}
+		in = nil
+		h1 := liveHeap()
+		x.release()
+		heldAgainstCounted(t, fmt.Sprintf("reader index, %d texts of %d words (%d bytes in all; past 32 KiB: %v)", texts, words, size, long), h1-liveHeap(), counted)
+		runtime.KeepAlive(x)
+	}
 }
+
+// allocBytes is what the runtime holds for each object of a size, with
+// pointers and without: 1,000 objects of each size,
+// each tiny one among others that are garbage, so that it alone keeps its
+// 16-byte block, counted against the heap they hold after a collection.
+// A tiny object counts its block, which the race detector's runtime
+// (which has no tiny blocks) holds less of.
+func TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds(t *testing.T) {
+	sizes := []int{1, 2, 7, 8, 9, 15, 16, 17, 24, 25, 100, 504, 512, 513, 520, 1000, 1024, 4096, 9000, 27000, 32760, 32761, 32768, 33000, 40960, 70000}
+	for _, ptrs := range []bool{false, true} {
+		for _, n := range sizes {
+			if ptrs && n%8 != 0 {
+				n = (n + 7) / 8 * 8
+			}
+			// The median of three measures: another allocation in one
+			// measure's window (the test's own logging) adds to it alone.
+			const count = 1000
+			var measures [3]float64
+			for m := range measures {
+				bs, ps := make([][]byte, count), make([][]*int, count)
+				h0 := liveHeap()
+				for i := range count {
+					if ptrs {
+						ps[i] = make([]*int, n/8)
+						continue
+					}
+					bs[i] = make([]byte, n)
+					for range 15 * min(1, 16/n) {
+						allocSink = make([]byte, n)
+					}
+				}
+				allocSink = nil
+				measures[m] = float64(liveHeap()-h0) / float64(count)
+				runtime.KeepAlive(bs)
+				runtime.KeepAlive(ps)
+			}
+			slices.Sort(measures[:])
+			held := measures[1]
+			want := allocBytes(n, ptrs)
+			t.Logf("%d bytes (pointers: %v): the runtime holds %.1f bytes each, allocBytes counts %d", n, ptrs, held, want)
+			if held > float64(want)+0.5 || !ptrs && n < 16 && want != 16 || (ptrs || n >= 16) && held < float64(want)-0.5 {
+				t.Errorf("%d bytes (pointers: %v): the runtime holds %.1f bytes each; allocBytes counts %d", n, ptrs, held, want)
+			}
+		}
+	}
+	if allocBytes(0, true) != 0 || allocBytes(-1, false) != 0 {
+		t.Errorf("no bytes count %d and %d; want 0", allocBytes(0, true), allocBytes(-1, false))
+	}
+}
+
+// allocSink keeps the garbage TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds
+// makes on the heap.
+var allocSink []byte

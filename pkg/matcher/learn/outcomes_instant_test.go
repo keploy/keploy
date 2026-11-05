@@ -3604,8 +3604,8 @@ func TestOutcomeContainsAnswersAsAScanOfTheText(t *testing.T) {
 		past   bool
 	}{
 		{"within the budget", 0, true, false},
-		{"with exactly the room", int64(len(text)) + suffixBytes(len(text)), true, false},
-		{"past the room, within the budget", int64(len(text)) + headerBytes + 100, false, false},
+		{"with exactly the room", entryBytes(0, 0) + textBytes(text) + suffixBytes(len(text)), true, false},
+		{"past the room, within the budget", entryBytes(0, 0) + textBytes(text) + headerBytes + 100, false, false},
 		{"past the budget", 1, false, true},
 	} {
 		readerBudget = c.budget

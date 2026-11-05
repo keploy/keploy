@@ -69,6 +69,9 @@ type readerIndex struct {
 	// filters are the set's filters of its recordings' words (filtersOf);
 	// nil where the call is no set's.
 	filters *setFilters
+	// past is the one entry of every text whose own entry did not fit the
+	// budget (entryOf): past it, it keeps no answer, so no text writes it.
+	past *readerEntry
 }
 
 // readerEntry is what the index keeps of one text: its other declared forms,
@@ -124,9 +127,10 @@ type readerText struct {
 	// through this handle, before the text's suffix array.
 	scans int
 	// filter is the set's entry for the filter of the text's words
-	// (setFilter), once asked; filterKey the bytes its key keeps there.
-	filter    *filterEntry
-	filterKey int64
+	// (setFilter), once asked; noFilter: the text has none (textEntry,
+	// idEntry), and is scanned.
+	filter   *filterEntry
+	noFilter bool
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
@@ -205,18 +209,51 @@ func (x *readerIndex) text(s string) *readerText { return &readerText{x: x, text
 func (x *readerIndex) textOf(r Raw) *readerText { return &readerText{x: x, raw: &r} }
 
 // entryOf is s's entry: the one of its hash and length that keeps s, or
-// that keeps nothing yet; a new one where none does.
+// that keeps nothing yet; a new one where none does, counted in the budget
+// as the index holds it (entryBytes). Where that does not fit, s has the
+// index's one entry past the budget (x.past), which keeps nothing: every
+// question of s is a scan of it, and the index holds nothing more for it.
 func (x *readerIndex) entryOf(s string) *readerEntry {
 	h := maphash.String(x.seed, s)
-	for _, e := range x.texts[h] {
+	es := x.texts[h]
+	for _, e := range es {
 		if e.n == len(s) && (e.text == s || e.text == "") {
 			return e
 		}
 	}
+	if !x.claim(entryBytes(len(x.texts), len(es))) {
+		if x.past == nil {
+			x.past = &readerEntry{past: true}
+		}
+		return x.past
+	}
 	e := &readerEntry{n: len(s)}
-	x.texts[h] = append(x.texts[h], e)
+	x.texts[h] = append(es, e)
 	return e
 }
+
+// entryBytes is what one entry more adds to an index of texts hashes whose
+// hash already has others entries: the entry, its hash's list as append
+// grows it (one more pointer, at twice its length past one), and, for a
+// new hash, its slot in the index's map (mapSlotBytes), the map's first
+// group with the first: each as the runtime allocates it (allocBytes).
+func entryBytes(texts, others int) int64 {
+	n := allocBytes(unsafe.Sizeof(readerEntry{}), true) + allocBytes(8*max(1, 2*others), true)
+	if others == 0 {
+		n += textsSlotBytes
+		if texts == 0 {
+			n += textsGroupBytes
+		}
+	}
+	return n
+}
+
+// The slot of an entry's hash in an index's map (readerIndex.texts), and
+// the map's first group.
+var (
+	textsSlotBytes  = mapSlotBytes(slotOf[uint64, []*readerEntry](), true)
+	textsGroupBytes = mapGroupBytes(slotOf[uint64, []*readerEntry](), true)
+)
 
 // read is the text, read now from its recording where the caller handed
 // one, with that recording's fields (none for a handed text), and with its
@@ -244,14 +281,18 @@ func (t *readerText) read() (string, []rawField, bool) {
 	return b.text, b.fields, true
 }
 
-// own is the bytes keeping s adds to e: its length, where e keeps no text
-// yet.
+// own is the bytes keeping s adds to e: the string as the runtime allocates
+// it (textBytes), where e keeps no text yet.
 func (e *readerEntry) own(s string) int64 {
 	if e.text == "" {
-		return int64(len(s))
+		return textBytes(s)
 	}
 	return 0
 }
+
+// textBytes is what a string the index keeps holds alive: its bytes as the
+// runtime allocates them (allocBytes).
+func textBytes(s string) int64 { return allocBytes(len(s), false) }
 
 // indexOnce is what one kind of question (slot) asks of the text: the
 // answer the entry keeps, or the one of builds from the text read now (and
@@ -333,8 +374,9 @@ func (t *readerText) formsOf(s string) string {
 
 // spansOf are the text's instants (instantSpans), read once for the call
 // where they fit the budget; ok false where the recording was not read.
+// They count their list as allocated (instantsBytes).
 func (t *readerText) spansOf() ([]instant, bool) {
-	v, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.spans }, uncapped(func(s string, _ []rawField) []instant { return t.x.dc.spansOf(s) }), spansBytes, nil)
+	v, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.spans }, uncapped(func(s string, _ []rawField) []instant { return t.x.dc.spansOf(s) }), instantsBytes, nil)
 	return v, ok
 }
 
@@ -386,9 +428,17 @@ func (t *readerText) contains(w string) (held, read bool) {
 	return w == "" || len(ix.Lookup([]byte(w), 1)) > 0, true
 }
 
-// suffixBytes is about what the suffix array of an n-byte text holds: a
-// copy of the text and a 4-byte place per byte.
-func suffixBytes(n int) int64 { return headerBytes + 5*int64(n) }
+// suffixBytes is what the suffix array of an n-byte text holds, as the
+// runtime allocates it (allocBytes): the index, a copy of the text, and a
+// 4-byte place per byte (an int32 each: no text keploy reads passes 2 GiB).
+func suffixBytes(n int) int64 {
+	return allocBytes(unsafe.Sizeof(suffixarray.Index{}), true) + allocBytes(n, false) + allocBytes(4*int64(n), false)
+}
+
+// instantsBytes is what a list of instants holds, by its capacity.
+func instantsBytes(s []instant) int64 {
+	return allocBytes(uintptr(cap(s))*unsafe.Sizeof(instant{}), false)
+}
 
 // holdsWord reports whether the text holds w as a word in any of main's
 // readings (isWord, wordByte, idByte) and any declared form; read is false
@@ -414,7 +464,7 @@ func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
 	}
 	var text string
 	forms, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[string] { return &e.forms },
-		uncapped(func(s string, _ []rawField) string { text = s; return t.formsOf(s) }), stringBytes,
+		uncapped(func(s string, _ []rawField) string { text = s; return t.formsOf(s) }), textBytes,
 		func(s string, _ []rawField) { held = heldIn(textForms(s), w, rs...) })
 	if scanned || !ok {
 		return held, ok
@@ -478,6 +528,8 @@ type setFilters struct {
 	listBuilds int
 	postLive   int64
 	postGone   int64
+	// listsGrouped: lists and post count their first groups (firstGroups).
+	listsGrouped bool
 	// runs and nextText are the set's postings of its filters' words
 	// (postRuns): by run of letters and digits, the ids of the filter
 	// entries whose text holds it, in order.
@@ -495,14 +547,16 @@ type filterTextKey struct {
 	a, b uint64
 }
 
-// Slots of the set's maps of filter entries, at 7/16 of their tables
-// filled (as postSlotBytes): a recording's (setFilters.of: its id's header
-// and the entry's pointer, 24 bytes, and their control byte), 64 bytes
-// past its id's letters; a text's (texts: its key, 24 bytes, and the
-// pointer), 96, whose table of 1,024 slots takes whole pages.
-const (
-	filterIDSlotBytes   = 64
-	filterTextSlotBytes = 96
+// What a filter's entry counts on the set's budget past its filter, as
+// the runtime allocates it: the entry, and its slot in the set's map of
+// them (mapSlotBytes), a recording's (setFilters.of, past its id's
+// letters) or a text's (texts), with the map's first group for the first.
+var (
+	filterEntryBytes     = allocBytes(unsafe.Sizeof(filterEntry{}), true)
+	filterIDSlotBytes    = mapSlotBytes(slotOf[string, *filterEntry](), true)
+	filterIDGroupBytes   = mapGroupBytes(slotOf[string, *filterEntry](), true)
+	filterTextSlotBytes  = mapSlotBytes(slotOf[filterTextKey, *filterEntry](), true)
+	filterTextGroupBytes = mapGroupBytes(slotOf[filterTextKey, *filterEntry](), true)
 )
 
 // filterTextMin is the shortest text with no recording's identity that a
@@ -550,37 +604,72 @@ func filtersOf(s *setDerived) *setFilters {
 // of letters and digits (eachWord, wordFilter), built the first time a call
 // of the set asks the recording a word, and kept for the set on its budget
 // (setClaim). A recording's identity fixes its text for the set (Raw.id), so
-// every later call asks the filter, not the text, for a word it cannot hold.
-// A text with no recording's identity (a handed text, a view) has its
-// filter by its text (textEntry) instead. Calls asking at once wait for the
-// one building it. nil where t is in no set's call, where its text has no
-// entry (textEntry), or where the entry keeps none.
+// every later call asks the filter, not the text, for a word it cannot hold
+// (idEntry). A text with no recording's identity (a handed text, a view) has
+// its filter by its text (textEntry) instead. Calls asking at once wait for
+// the one building it. nil where t is in no set's call, where its text has
+// no entry, or where the entry keeps none.
 func (t *readerText) setFilter() wordFilter {
 	if t.filter == nil {
 		fs := t.x.filters
-		if fs == nil {
+		if fs == nil || t.noFilter {
 			return nil
 		}
 		if t.raw == nil || t.raw.id == "" {
-			e, ok := t.textEntry(fs)
-			if !ok {
-				return nil
-			}
-			t.filter = e
+			t.filter = t.textEntry(fs)
 		} else {
-			fs.mu.Lock()
-			e := fs.of[t.raw.id]
-			if e == nil {
-				e = &filterEntry{}
-				fs.of[strings.Clone(t.raw.id)] = e
-			}
-			fs.mu.Unlock()
-			t.filter, t.filterKey = e, filterIDSlotBytes+allocBytes(len(t.raw.id), false)
+			t.filter = t.idEntry(fs)
+		}
+		if t.filter == nil {
+			t.noFilter = true
+			return nil
 		}
 	}
 	e := t.filter
 	e.once.Do(func() { e.f = t.buildFilter() })
 	return e.f
+}
+
+// idEntry is the set's entry for the filter of t's recording's words, by
+// its id: the one there, or one made and counted on the set's budget as the
+// set holds it (filterEntryBytes, filterIDSlotBytes, the id's letters, and
+// the map's first group for the first). nil where that does not fit.
+func (t *readerText) idEntry(fs *setFilters) *filterEntry {
+	id := t.raw.id
+	fs.mu.Lock()
+	e, first := fs.of[id], len(fs.of) == 0
+	fs.mu.Unlock()
+	if e != nil {
+		return e
+	}
+	n := filterEntryBytes + filterIDSlotBytes + allocBytes(len(id), false)
+	if first {
+		n += filterIDGroupBytes
+	}
+	return newFilterEntry(fs, t.x.set, fs.of, id, strings.Clone, n, false)
+}
+
+// newFilterEntry is m's entry at k, made where m holds none yet: n counted
+// on s's budget first (nil where it does not fit), then the entry stored
+// under key(k), fs's lock held. A call that finds the entry another call
+// made meanwhile gives its count back.
+func newFilterEntry[K comparable](fs *setFilters, s *setDerived, m map[K]*filterEntry, k K, key func(K) K, n int64, byText bool) *filterEntry {
+	if !setClaim(s, n) {
+		return nil
+	}
+	fs.mu.Lock()
+	e := m[k]
+	if e == nil {
+		e, n = &filterEntry{byText: byText}, 0
+		m[key(k)] = e
+	}
+	fs.mu.Unlock()
+	if n > 0 {
+		s.mu.Lock()
+		s.budget.used -= n
+		s.mu.Unlock()
+	}
+	return e
 }
 
 // textEntry is the set's entry for the filter of the words of t's text, t
@@ -589,36 +678,40 @@ func (t *readerText) setFilter() wordFilter {
 // call's places hand their leaves' texts). Two handles of one text, in one
 // call or in two, find one entry, by the text (filterTextKey), so the set
 // builds its filter once, at the first ask, and every later call asks the
-// filter, not the text. A text shorter than filterTextMin, and a view keploy could
-// not read (the scan counts it unread), have none (ok false), and are
-// scanned.
-func (t *readerText) textEntry(fs *setFilters) (e *filterEntry, ok bool) {
+// filter, not the text. A text shorter than filterTextMin, and a view keploy
+// could not read (the scan counts it unread), have none (nil), and are
+// scanned, as is one whose entry does not fit the set's budget (counted as
+// idEntry counts one, by filterTextSlotBytes).
+func (t *readerText) textEntry(fs *setFilters) *filterEntry {
 	s := t.text
 	if t.raw != nil {
 		b := t.raw.payload()
 		if !b.read {
-			return nil, false
+			return nil
 		}
 		s = b.text
 	}
 	if len(s) < filterTextMin {
-		return nil, false
+		return nil
 	}
 	k := filterTextKey{n: len(s), a: maphash.String(fs.seeds[0], s), b: maphash.String(fs.seeds[1], s)}
 	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if e = fs.texts[k]; e == nil {
-		e = &filterEntry{byText: true}
-		fs.texts[k] = e
+	e, first := fs.texts[k], len(fs.texts) == 0
+	fs.mu.Unlock()
+	if e != nil {
+		return e
 	}
-	t.filterKey = filterTextSlotBytes
-	return e, true
+	n := filterEntryBytes + filterTextSlotBytes
+	if first {
+		n += filterTextGroupBytes
+	}
+	return newFilterEntry(fs, t.x.set, fs.texts, k, func(k filterTextKey) filterTextKey { return k }, n, true)
 }
 
 // buildFilter is the filter of t's recording's words (setFilter), or of its
-// text's (textEntry), counted on the set's budget with its entry's key
-// (filterKey); nil where the recording was not read or the filter does not
-// fit.
+// text's (textEntry), counted on the set's budget by its bits as allocated
+// (its entry counted it with its slot); nil where the recording was not
+// read or the filter does not fit.
 func (t *readerText) buildFilter() wordFilter {
 	t.filter.id = -1
 	s, _, ok := t.read()
@@ -644,7 +737,7 @@ func (t *readerText) buildFilter() wordFilter {
 		fs.builds++
 	}
 	fs.mu.Unlock()
-	if !setClaim(t.x.set, allocBytes(uintptr(cap(f))*unsafe.Sizeof(f[0]), false)+allocBytes(unsafe.Sizeof(filterEntry{}), true)+t.filterKey) {
+	if !setClaim(t.x.set, allocBytes(uintptr(cap(f))*unsafe.Sizeof(f[0]), false)) {
 		return nil
 	}
 	postRuns(fs, t.x.set, t.filter, forms)
@@ -669,6 +762,9 @@ func postRuns(fs *setFilters, s *setDerived, e *filterEntry, forms []string) {
 	}
 	n := int64(headerBytes)
 	fs.mu.Lock()
+	if len(fs.runs) == 0 {
+		n += mapGroupBytes(slotOf[string, []int32](), true)
+	}
 	for run := range seen {
 		n += postBytes(run, fs.runs[run] == nil)
 	}
@@ -742,6 +838,58 @@ func allocBytes[N int | int64 | uintptr](n N, ptrs bool) int64 {
 // pageBytes is the runtime's page: an object past its largest size class
 // takes whole pages.
 const pageBytes = 8 << 10
+
+// slotOf is the size of a map[K]V's slot: its key and its value, as the
+// runtime lays them out in a group.
+func slotOf[K comparable, V any]() uintptr {
+	return unsafe.Sizeof(struct {
+		k K
+		v V
+	}{})
+}
+
+// mapHeaderBytes is a map's header (internal/runtime/maps.Map).
+const mapHeaderBytes = 48
+
+// mapGroupBytes is a map's group of 8 slots of slot bytes each, with their
+// 8 control bytes, as allocated (allocBytes): the whole of a map of up to
+// 8 entries past its header. ptrs: its keys or values hold pointers.
+func mapGroupBytes(slot uintptr, ptrs bool) int64 { return allocBytes(8+8*slot, ptrs) }
+
+// mapSlotBytes is the most one entry costs in a map grown by inserts past
+// its first group: a table of c slots (16 to 1,024, the most one holds, as
+// allocated, with its own header and the directory's pointer to it) holds
+// from just past 7/16 of them, the least just after it doubled or split
+// (7/8 full, halved), so each entry is counted at the most a table of any
+// size costs at that fill.
+func mapSlotBytes(slot uintptr, ptrs bool) int64 {
+	var most int64
+	for c := int64(16); c <= 1024; c *= 2 {
+		least := 7*c/16 + 1
+		if c == 16 {
+			least = 9
+		} else if c == 1024 {
+			least = 7 * c / 16
+		}
+		most = max(most, (allocBytes(c/8*(8+8*int64(slot)), ptrs)+mapTableBytes+least-1)/least)
+	}
+	return most
+}
+
+// mapTableBytes is a table's own header and its pointer in the map's
+// directory, at the directory's least fill.
+const mapTableBytes = 48
+
+// mapBytes is what a map of n entries of slot bytes each, built by inserts
+// alone, holds: its header, its first group, and each entry at the most it
+// costs (mapSlotBytes).
+func mapBytes(n int, slot uintptr, ptrs bool) int64 {
+	b := allocBytes(mapHeaderBytes, true)
+	if n > 0 {
+		b += mapGroupBytes(slot, ptrs) + int64(n)*mapSlotBytes(slot, ptrs)
+	}
+	return b
+}
 
 // sizeClasses are the runtime's size classes (internal/runtime/gc): a small
 // object takes the least that holds it.
@@ -871,26 +1019,32 @@ type fieldWords struct {
 	of map[string][]int32
 }
 
-// The sizes a field view counts: a fieldAt (two strings' headers and a
-// bool), and a word's entry in its map past its letters and its list: the
-// slot (a string's header and a slice's) doubled for the map's growth, as
-// wordBytes counts map[string]bool's. A list counts what it holds (its
-// capacity, 4 bytes an index), as append grew it.
-const (
-	fieldAtBytes   = 40
-	fieldWordBytes = 80
-)
-
+// fieldWordsBytes is what a field view holds, each part as the runtime
+// allocates it (allocBytes): its map's header and first group
+// (fieldFirstBytes), its list of fields by capacity (fieldsAtBytes), each
+// field's path and name, and each word its map slot (fieldSlotBytes), its
+// letters, and its list of fields by capacity (4 bytes an index), as append
+// grew it. fieldsWith counts a view as it builds it by the same parts.
 func fieldWordsBytes(f fieldWords) int64 {
-	n := int64(headerBytes + fieldAtBytes*cap(f.at))
+	n := fieldFirstBytes + fieldsAtBytes(cap(f.at))
 	for _, a := range f.at {
-		n += int64(len(a.path) + len(a.in))
+		n += allocBytes(len(a.path), false) + allocBytes(len(a.in), false)
 	}
 	for w, at := range f.of {
-		n += fieldWordBytes + int64(len(w)+4*cap(at))
+		n += fieldSlotBytes + allocBytes(len(w), false) + allocBytes(4*cap(at), false)
 	}
 	return n
 }
+
+// fieldsAtBytes is what a view's list of n fields' places holds.
+func fieldsAtBytes(n int) int64 { return allocBytes(uintptr(n)*unsafe.Sizeof(fieldAt{}), true) }
+
+// A view's word's slot in its map (mapSlotBytes), and the map's header and
+// first group.
+var (
+	fieldSlotBytes  = mapSlotBytes(slotOf[string, []int32](), true)
+	fieldFirstBytes = allocBytes(mapHeaderBytes, true) + mapGroupBytes(slotOf[string, []int32](), true)
+)
 
 // fieldsWith are the fields of the text that hold w as a word, in any of
 // main's readings and any declared form of the field's own text (holdsWord,
@@ -908,14 +1062,14 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 	x := t.x
 	fw, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[fieldWords] { return &e.fields },
 		func(s string, fields []rawField, room int64) (fieldWords, bool) {
-			fw, n, fits, own := fieldWords{of: map[string][]int32{}}, int64(headerBytes), room >= 0, t.e.own(s)
+			fw, n, fits, own := fieldWords{of: map[string][]int32{}}, fieldFirstBytes, room >= 0, t.e.own(s)
 			eachField(s, fields, func(f fieldAt, text string) {
 				if !fits {
 					return
 				}
 				forms, held := formsHeld(text)
 				k, ats := int32(len(fw.at)), append(fw.at, f)
-				head := int64(fieldAtBytes*(cap(ats)-cap(fw.at)) + len(f.path) + len(f.in))
+				head := fieldsAtBytes(cap(ats)) - fieldsAtBytes(cap(fw.at)) + allocBytes(len(f.path), false) + allocBytes(len(f.in), false)
 				if fits = n+head+held <= room; fits {
 					fw.at = ats
 					n += head
@@ -932,9 +1086,9 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 							}
 							w, more, grown := form[i:j], int64(0), append(l, k)
 							if !seen {
-								w, more = strings.Clone(w), fieldWordBytes+int64(len(w))
+								w, more = strings.Clone(w), fieldSlotBytes+allocBytes(len(w), false)
 							}
-							if more += 4 * int64(cap(grown)-cap(l)); n+more+held <= room {
+							if more += allocBytes(4*cap(grown), false) - allocBytes(4*cap(l), false); n+more+held <= room {
 								n += more
 								fw.of[w] = grown
 							} else {
@@ -1190,7 +1344,7 @@ func (t *readerText) holdsToken(kind tokenKind, tok string) (held, read bool) {
 			runs := map[string]bool{}
 			eachB64Run(s, t.x.dc.spansOf(s), func(a, b int) bool { runs[s[a:b]] = true; return true })
 			return runs
-		}), wordsBytes, func(s string, _ []rawField) {
+		}), runsBytes, func(s string, _ []rawField) {
 			eachB64Run(s, t.x.dc.spansOf(s), func(a, b int) bool { held = s[a:b] == tok; return !held })
 		})
 	if scanned || !ok {
@@ -1198,6 +1352,10 @@ func (t *readerText) holdsToken(kind tokenKind, tok string) (held, read bool) {
 	}
 	return runs[tok], true
 }
+
+// runsBytes is what a text's base64 runs hold (holdsToken): their map
+// (mapBytes), whose keys are the text's own bytes, which its entry keeps.
+func runsBytes(runs map[string]bool) int64 { return mapBytes(len(runs), slotOf[string, bool](), true) }
 
 // eachB64Run calls yield with [start, end) of each of s's base64 runs that
 // stand whole outside its instants (spans), in order, until it returns
@@ -1333,10 +1491,14 @@ func newMomentIndex(spans []instant) momentIndex {
 	return ix
 }
 
-// momentIndexBytes is about what ix holds: each moment, and each of its
-// places in the orders.
+// momentIndexBytes is what ix holds: its lists of moments and of their
+// places in the orders, each by its capacity as allocated (allocBytes).
 func momentIndexBytes(ix momentIndex) int64 {
-	return headerBytes + momentBytes*int64(len(ix.moments)) + 4*int64(len(ix.odd)) + 16*int64(len(ix.at)+len(ix.minute)+len(ix.wall))
+	n := allocBytes(uintptr(cap(ix.moments))*unsafe.Sizeof(moment{}), false) + allocBytes(4*cap(ix.odd), false)
+	for _, o := range []momentOrder{ix.at, ix.minute, ix.wall} {
+		n += allocBytes(uintptr(cap(o))*unsafe.Sizeof(orderedMoment{}), false)
+	}
+	return n
 }
 
 // holds is holdsMoment's answer of ix: whether an instant names m by

@@ -905,6 +905,7 @@ func (dc *decider) outsideWords(x Raw) givenWords {
 		return e.of(x)
 	}
 	fs.wordsBuilds++
+	first := len(fs.words) == 0
 	fs.mu.Unlock()
 	g := dc.dr.wordsOf(x)
 	// The entry counts its slot in the set's map (as a posting's, a key
@@ -912,6 +913,9 @@ func (dc *decider) outsideWords(x Raw) givenWords {
 	// id's list at twice its size.
 	e := keptWordsOf(k, g)
 	e.bytes += postSlotBytes + allocBytes(len(x.id), false) + allocBytes(16, true)
+	if first {
+		e.bytes += mapGroupBytes(slotOf[string, []*wordsEntry](), true)
+	}
 	if setClaim(s, e.bytes) {
 		fs.mu.Lock()
 		fs.words[strings.Clone(x.id)] = append(fs.words[x.id], e)
@@ -1278,12 +1282,24 @@ type listsEntry struct {
 }
 
 // Sizes a list's entry counts past its allocations (allocBytes: the entry
-// and its words' list): its slot in the set's map of lists (40 bytes, at
-// 7/16 of the map's table filled), and per word what the postings' map
-// holds for it (postBytes), counted fresh for every word, the side that
-// counts more, as a word another list posted first stays in the map once
-// that list is let go.
-const listsSlotBytes = 40
+// and its words' list): its slot in the set's map of lists (mapSlotBytes),
+// and per word what the postings' map holds for it (postBytes), counted
+// fresh for every word, the side that counts more, as a word another list
+// posted first stays in the map once that list is let go. The first list
+// counts the two maps' first groups (firstGroups).
+var listsSlotBytes = mapSlotBytes(slotOf[weak.Pointer[[]string], *listsEntry](), true)
+
+// firstGroups is what the first insert into the set's map of lists and its
+// postings of their words (setFilters.lists, post) counts once for the set
+// and never gives back: each map's first group, which it holds from then
+// on, a map built anew (dropLists) one in place of the one it lets go.
+// fs.mu is held.
+func (fs *setFilters) firstGroups() int64 {
+	if fs.listsGrouped {
+		return 0
+	}
+	return mapGroupBytes(slotOf[weak.Pointer[[]string], *listsEntry](), true) + mapGroupBytes(slotOf[string, []int32](), true)
+}
 
 // listsKey is l's identity: its words' backing array, weakly, so the set's
 // index never keeps a list alive, and a list let go is never taken for a
@@ -1321,10 +1337,14 @@ func buildLists(fs *setFilters, s *setDerived, e *listsEntry, l answerLists) {
 		post += postBytes(w, true)
 	}
 	n := allocBytes(unsafe.Sizeof(*e), true) + listsSlotBytes + allocBytes(uintptr(cap(words))*unsafe.Sizeof(""), true) + post
-	if !setClaim(s, n) {
+	fs.mu.Lock()
+	groups := fs.firstGroups()
+	fs.mu.Unlock()
+	if !setClaim(s, n+groups) {
 		return
 	}
 	fs.mu.Lock()
+	fs.listsGrouped = fs.listsGrouped || groups > 0
 	id := fs.nextList
 	fs.nextList++
 	for _, w := range words {
