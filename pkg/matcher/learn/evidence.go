@@ -1191,15 +1191,20 @@ type listsEntry struct {
 	id    int32
 	words []string
 	bytes int64
+	// post is what its words count in the postings (postLive).
+	post int64
 }
 
-// Sizes a list's entry counts: the entry and its map slot, and per word its
-// slot in the entry's words (16 bytes, at twice their length), past what
-// the postings' map holds for it (postBytes): counted fresh for every word,
-// the side that counts more, as a word another list posted first stays
-// in the map once that list is let go.
+// Sizes a list's entry counts: the entry (64 bytes as allocated) and its
+// slot in the set's map of lists (listsSlotBytes: 17 bytes, at 7/16 of the
+// map's table filled), and per word its slot in the entry's words (16
+// bytes, at twice their length), past what the postings' map holds for it
+// (postBytes): counted fresh for every word, the side that counts more, as
+// a word another list posted first stays in the map once that list is let
+// go.
 const (
-	listsEntryBytes = 96
+	listsEntryBytes = 104
+	listsSlotBytes  = 40
 	listsWordBytes  = 32
 )
 
@@ -1234,10 +1239,11 @@ func buildLists(fs *setFilters, s *setDerived, e *listsEntry, l answerLists) {
 			}
 		}
 	}
-	n := int64(listsEntryBytes)
+	var post int64
 	for _, w := range words {
-		n += listsWordBytes + postBytes(w, true)
+		post += postBytes(w, true)
 	}
+	n := listsEntryBytes + listsWordBytes*int64(len(words)) + post
 	if !setClaim(s, n) {
 		return
 	}
@@ -1248,8 +1254,9 @@ func buildLists(fs *setFilters, s *setDerived, e *listsEntry, l answerLists) {
 		fs.post[w] = append(fs.post[w], id)
 	}
 	fs.listBuilds++
+	fs.postLive += listsSlotBytes + post
 	fs.mu.Unlock()
-	e.id, e.words, e.bytes = id, words, n
+	e.id, e.words, e.bytes, e.post = id, words, n, post
 }
 
 // listsGone is what a list's cleanup needs: the set and its filters, and
@@ -1261,7 +1268,15 @@ type listsGone struct {
 }
 
 // dropLists takes a list the set let go out of its index: its entry, its id
-// from its words' postings, and its bytes from the set's budget.
+// from its words' postings, and its bytes from the set's budget, but for
+// what the index's maps still hold of it: its slot in the map of lists and
+// the slot of each word it emptied in the postings (a Go map never
+// shrinks), and the id slot of a word another list holds (a list of ids
+// keeps its capacity). Those stay counted (postGone) until they pass what
+// the live lists count in the maps (postLive), when both maps are built
+// anew at their live size, the lists of ids at their length, and give them
+// back: the index never holds more than it counts, and counts at most
+// twice what its live lists do.
 func dropLists(g listsGone) {
 	fs := g.fs.Value()
 	if fs == nil {
@@ -1274,10 +1289,13 @@ func dropLists(g listsGone) {
 	if e == nil {
 		return
 	}
-	// An entry past the budget (id -1) has no words and no bytes: its
-	// drop takes nothing.
-	e.once.Do(func() { e.id = -1 })
+	// An entry past the budget (id -1) counts nothing: its drop gives
+	// nothing back.
+	if e.once.Do(func() { e.id = -1 }); e.id < 0 {
+		return
+	}
 	fs.mu.Lock()
+	gone := int64(listsSlotBytes)
 	for _, w := range e.words {
 		ids := fs.post[w]
 		if i, ok := slices.BinarySearch(ids, e.id); ok {
@@ -1285,14 +1303,32 @@ func dropLists(g listsGone) {
 		}
 		if len(ids) == 0 {
 			delete(fs.post, w)
+			gone += postSlotBytes
 		} else {
 			fs.post[w] = ids
+			gone += postIDBytes
 		}
+	}
+	back := e.bytes - gone
+	fs.postLive -= listsSlotBytes + e.post
+	fs.postGone += gone
+	if fs.postGone > fs.postLive {
+		lists := make(map[weak.Pointer[[]string]]*listsEntry, len(fs.lists))
+		for k, e := range fs.lists {
+			lists[k] = e
+		}
+		post := make(map[string][]int32, len(fs.post))
+		for w, ids := range fs.post {
+			post[w] = slices.Clone(ids)
+		}
+		fs.lists, fs.post = lists, post
+		back += fs.postGone
+		fs.postGone = 0
 	}
 	fs.mu.Unlock()
 	if s := g.set.Value(); s != nil {
 		s.mu.Lock()
-		s.budget.used -= e.bytes
+		s.budget.used -= back
 		s.mu.Unlock()
 	}
 }

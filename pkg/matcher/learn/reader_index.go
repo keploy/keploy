@@ -468,10 +468,15 @@ type setFilters struct {
 	// lists, post, nextList and listBuilds are the set's index of its
 	// outside recordings' word lists (setLists): each list's entry, by the
 	// list (listsKey), and by word the ids of the lists that hold it.
+	// postLive is what lists and post count for the live lists, postGone
+	// what they keep counted for the slots lists let go emptied
+	// (dropLists).
 	lists      map[weak.Pointer[[]string]]*listsEntry
 	post       map[string][]int32
 	nextList   int32
 	listBuilds int
+	postLive   int64
+	postGone   int64
 	// runs and nextText are the set's postings of its filters' words
 	// (postRuns): by run of letters and digits, the ids of the filter
 	// entries whose text holds it, in order.

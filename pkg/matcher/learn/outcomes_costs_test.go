@@ -2213,3 +2213,160 @@ func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
 		}
 	}
 }
+
+// The set's index of other tests' word lists holds no more heap than it
+// counts on the budget after lists come and go, and counts at most twice
+// what its live lists count. A list let go gives back its entry and its
+// words' letters and ids; a map slot it emptied (a Go map never shrinks)
+// and an id slot a word's ids keep stay counted, until what they count
+// passes what the live lists' postings count, when the map is built anew
+// at its live size. Every word of the live list is still found, and none
+// of a list let go.
+func TestOutcomeCostTheListsIndexHoldsNoMoreThanItCountsAfterChurn(t *testing.T) {
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	learnBudget = 1 << 30
+	for _, c := range []struct {
+		name               string
+		lists, keep, words int
+		shared, heap       bool
+	}{
+		{"8 lists of 20,000 fresh words, 7 let go", 8, 1, 20000, false, true},
+		{"64 lists of the same 20,000 words, 63 let go", 64, 1, 20000, true, true},
+		// The map of lists alone: it is built anew with the postings.
+		{"100,000 lists of no words, 90,000 let go", 100000, 10000, 0, false, true},
+		// Let go, 131 lists' slots count what the 12 left count (40 bytes
+		// a list's slot, 8 an id, 127 a word's postings): the maps are
+		// kept, and built anew at the 132nd, past it. Its few KB of heap
+		// are under what a measure tells apart.
+		{"143 lists of the same 10 words, 142 let go", 143, 1, 10, true, false},
+	} {
+		s := newSetDerived()
+		lists := make([]answerLists, c.lists)
+		for k := range lists {
+			ws := make([]string, c.words)
+			for j := range ws {
+				if c.shared {
+					ws[j] = fmt.Sprintf("w%06d", j)
+				} else {
+					ws[j] = fmt.Sprintf("w%dx%d", k, j)
+				}
+			}
+			lists[k] = answerLists{words: [][]string{ws}}
+		}
+		// want is the count by the rule, in literal sizes: an entry 104, a
+		// word 32 and its postings (freshPostBytes); a list let go keeps
+		// its slot in the map of lists (40), a word it held alone its slot
+		// (96), and one another list holds its id (8), counted until those
+		// pass what the live lists count in the maps (live).
+		var want, live, gone int64
+		holders := map[string]int{}
+		for _, l := range lists {
+			want, live = want+104, live+40
+			for _, w := range l.words[0] {
+				want += 32 + freshPostBytes(w)
+				live += freshPostBytes(w)
+				holders[w]++
+			}
+		}
+		keys := make([]weak.Pointer[[]string], c.lists)
+		// What the index holds is the heap that goes with it, the lists and
+		// the set kept, past what a new index's empty maps hold.
+		newFilters := func() *setFilters {
+			return &setFilters{lists: map[weak.Pointer[[]string]]*listsEntry{}, runs: map[string][]int32{}, post: map[string][]int32{}}
+		}
+		var counted int64
+		heldB := heapOf(func() any {
+			fs := newFilters()
+			used := s.budget.used
+			for k, l := range lists {
+				keys[k], _ = listsKey(l)
+				e := &listsEntry{}
+				fs.lists[keys[k]] = e
+				e.once.Do(func() { buildLists(fs, s, e, l) })
+			}
+			for k := c.keep; k < c.lists; k++ {
+				dropLists(listsGone{set: weak.Make(s), fs: weak.Make(fs), key: keys[k]})
+				want, live, gone = want-104+40, live-40, gone+40
+				for _, w := range lists[k].words[0] {
+					want -= 32 + freshPostBytes(w)
+					live -= freshPostBytes(w)
+					if holders[w]--; holders[w] == 0 {
+						want, gone = want+96, gone+96
+					} else {
+						want, gone = want+8, gone+8
+					}
+				}
+				if gone > live {
+					want, gone = want-gone, 0
+				}
+			}
+			if n := c.keep * c.words; c.shared {
+				n = c.words
+			} else if len(fs.post) != n || len(fs.lists) != c.keep {
+				t.Errorf("%s: the index holds %d words of %d lists; want the live lists' %d of %d", c.name, len(fs.post), len(fs.lists), n, c.keep)
+			}
+			for k := range c.keep {
+				for _, w := range lists[k].words[0] {
+					if ids := fs.post[w]; !slices.Contains(ids, int32(k)) || len(ids) != c.keep && c.shared || len(ids) != 1 && !c.shared {
+						t.Errorf("%s: the index names lists %v for %q; want the live lists that hold it", c.name, ids, w)
+						break
+					}
+				}
+			}
+			counted = s.budget.used - used
+			return fs
+		}) - heapOf(func() any { return newFilters() })
+		runtime.KeepAlive(s)
+		runtime.KeepAlive(lists)
+		t.Logf("%s: the index holds %d bytes of heap and counts %d on the budget (want %d; its live list counts %d)", c.name, heldB, counted, want, live)
+		if c.heap && heldB > counted {
+			t.Errorf("%s: the index holds %d bytes of heap and counts %d on the budget: want no more held than counted", c.name, heldB, counted)
+		}
+		if counted != want {
+			t.Errorf("%s: the index counts %d bytes on the budget; want %d", c.name, counted, want)
+		}
+		if liveAll := int64(c.keep)*(64+32*int64(c.words)) + live; counted > 2*liveAll {
+			t.Errorf("%s: the index counts %d bytes on the budget, past twice its live list's %d", c.name, counted, liveAll)
+		}
+	}
+	// A list past the set's budget counts nothing, and its drop, beside a
+	// list that fits, gives the budget nothing back.
+	s := newSetDerived()
+	fs := &setFilters{lists: map[weak.Pointer[[]string]]*listsEntry{}, runs: map[string][]int32{}, post: map[string][]int32{}}
+	ls := []answerLists{{words: [][]string{{"w1", "w2"}}}, {words: [][]string{{"w3"}}}}
+	es, ks := []*listsEntry{{}, {}}, make([]weak.Pointer[[]string], 2)
+	limit := s.budget.limit
+	for i, l := range ls {
+		if i == 1 {
+			s.budget.limit = s.budget.used
+		}
+		ks[i], _ = listsKey(l)
+		fs.lists[ks[i]] = es[i]
+		es[i].once.Do(func() { buildLists(fs, s, es[i], l) })
+	}
+	s.budget.limit = limit
+	used := s.budget.used
+	dropLists(listsGone{set: weak.Make(s), fs: weak.Make(fs), key: ks[1]})
+	if es[0].id != 0 || es[1].id != -1 || s.budget.used != used || len(fs.post) != 2 || len(fs.lists) != 1 {
+		t.Errorf("a list past the budget (id %d) let go beside one that fits (id %d): the budget counts %d, was %d; the index holds %d words, %d lists; want it unchanged, and the other list's 2 words", es[1].id, es[0].id, s.budget.used, used, len(fs.post), len(fs.lists))
+	}
+	runtime.KeepAlive(ls)
+}
+
+// heapOf is the heap what run returns holds: the heap that goes with it once
+// nothing keeps it. Each read follows two collections: what a weak pointer
+// or a cleanup kept goes at the second.
+func heapOf(run func() any) int64 {
+	var m1, m2 runtime.MemStats
+	func() {
+		v := run()
+		runtime.GC()
+		runtime.GC()
+		runtime.ReadMemStats(&m1)
+		runtime.KeepAlive(v)
+	}()
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&m2)
+	return int64(m1.HeapAlloc) - int64(m2.HeapAlloc)
+}
