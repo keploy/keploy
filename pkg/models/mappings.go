@@ -374,8 +374,9 @@ type MappedTestCase struct {
 	// switch, and for a test run under no claim. Read and kept by each
 	// rewrite of mappings.yaml, whatever the switch: mapdb keeps every
 	// field keploy writes on a test entry whatever the switch, and what
-	// acts on it checks the switch itself. A rewrite without the switch that dropped the key
-	// would leave a later move of the test's call no key to give.
+	// acts on it checks the switch itself. A rewrite without the switch
+	// that dropped the key would leave a later move of the test's call no
+	// key to give.
 	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
 	// Seed is the seed the test's browser drew its random numbers from in
 	// its recording (models.ScopeWindow.Seed): each replay's begin is

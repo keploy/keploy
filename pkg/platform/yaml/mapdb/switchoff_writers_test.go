@@ -119,9 +119,8 @@ func fileWriters() map[string]func(*MappingDb) error {
 // TestEachWriterKeepsEachTestsFieldsWithoutTheSwitch has the rest). What a
 // hand edit added (its comments, reviewed_by, ticket and note here) is kept
 // only under the switch, by design, so these goldens still drop it. A file
-// whose entries use
-// a YAML merge key (<<) is not among them: keploy reads what the merge key
-// brings now, a declared fix
+// whose entries use a YAML merge key (<<) is not among them: keploy reads
+// what the merge key brings now, a declared fix
 // (models.TestAMergeKeyGivesATestEntryItsMocks).
 func TestEachWriterWritesAsBeforeWithoutTheSwitch(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")

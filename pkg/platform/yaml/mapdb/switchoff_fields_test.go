@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,12 +21,11 @@ import (
 // boots and runner. mapdb keeps every field keploy writes on a set whatever
 // the switch: every writer of mappings.yaml run with the switch off keeps
 // each of them, in YAML and JSON, but for what it writes itself
-// (UpsertBoots' boots). A rewrite
-// that dropped one would replay the set wrong with the switch on, and say
-// nothing (a lost begin runs the test at the start time; a lost key leaves a
-// later move out of the test no key to give the moved call). A call moved
-// out of a keyed test with the switch off joins worker: under that test's
-// key, as with the switch on.
+// (UpsertBoots' boots). A rewrite that dropped one would replay the set
+// wrong with the switch on, and say nothing (a lost begin runs the test at
+// the start time; a lost key leaves a later move out of the test no key to
+// give the moved call). A call moved out of a keyed test with the switch
+// off joins worker: under that test's key, as with the switch on.
 func TestEachWriterKeepsEachTestsFieldsWithoutTheSwitch(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
@@ -175,6 +175,87 @@ func TestInsertKeepsATestsFieldsUnlessItWritesThem(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// Insert writes the caller's suites:, boots: and runner: over the file's
+// own, and keeps the file's where the caller writes none: replace-or-keep,
+// each section on its own, whatever the switch. A caller that writes
+// through Insert a set it got from elsewhere (the platform's) gives the set
+// those sections with the switch off too. Each section is written alone
+// over a file that holds all three, written under the switch, so an Insert
+// that kept the file's section over the caller's, or that replaced or
+// dropped the sections it was not given, fails, with the switch off or on.
+func TestInsertReplacesOrKeepsEachSetSectionWhateverTheSwitch(t *testing.T) {
+	ctx := context.Background()
+	at := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+	tests := []models.MappedTestCase{
+		{ID: "o::TestA", Key: "pkg/a", Mocks: []models.MockEntry{{Name: "mock-0", Kind: "Http"}}},
+	}
+	// sections is a set's suites, boots and runner, one entry each, tagged.
+	sections := func(tag string) models.Mapping {
+		return models.Mapping{
+			Suites: []models.SuiteSpan{{Dir: tag, Start: at, End: at.Add(time.Minute)}},
+			Boots:  []models.BootSpec{{Dir: tag, Key: "k" + tag, Program: "p" + tag}},
+			Runner: []models.MockEntry{{Name: "mock-" + tag, Kind: "Http"}},
+		}
+	}
+	// tags names the entries of each of m's sections by their tag.
+	tags := func(m *models.Mapping) map[string][]string {
+		got := map[string][]string{}
+		for _, s := range m.Suites {
+			got["suites"] = append(got["suites"], s.Dir)
+		}
+		for _, b := range m.Boots {
+			got["boots"] = append(got["boots"], b.Dir)
+		}
+		for _, r := range m.Runner {
+			got["runner"] = append(got["runner"], strings.TrimPrefix(r.Name, "mock-"))
+		}
+		return got
+	}
+	// all is the tags of a set whose three sections are all tag's.
+	all := func(tag string) map[string][]string {
+		return map[string][]string{"suites": {tag}, "boots": {tag}, "runner": {tag}}
+	}
+	for _, sw := range []struct{ name, env string }{{"off", ""}, {"on", "1"}} {
+		for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+			for _, sec := range []struct {
+				name string
+				only func(models.Mapping) models.Mapping
+			}{
+				{"suites", func(m models.Mapping) models.Mapping { return models.Mapping{Suites: m.Suites} }},
+				{"boots", func(m models.Mapping) models.Mapping { return models.Mapping{Boots: m.Boots} }},
+				{"runner", func(m models.Mapping) models.Mapping { return models.Mapping{Runner: m.Runner} }},
+			} {
+				t.Run("switch-"+sw.name+"/"+format.FileExtension()+"/"+sec.name, func(t *testing.T) {
+					db := NewWithFormat(zap.NewNop(), t.TempDir(), "mappings", format)
+					insert := func(env string, m models.Mapping) {
+						t.Helper()
+						t.Setenv(provenswitch.Env, env)
+						m.TestSetID, m.TestCases = "s", tests
+						must(t, db.Insert(ctx, &m))
+					}
+					check := func(after string, want map[string][]string) {
+						t.Helper()
+						t.Setenv(provenswitch.Env, "1")
+						got, err := db.GetMapping(ctx, "s")
+						must(t, err)
+						if g := tags(got); !reflect.DeepEqual(g, want) {
+							t.Fatalf("after %s, the set's sections are %v; want %v", after, g, want)
+						}
+					}
+					insert("1", sections("a"))
+					check("an Insert of a's three sections under the switch", all("a"))
+					want := all("a")
+					want[sec.name] = []string{"b"}
+					insert(sw.env, sec.only(sections("b")))
+					check("an Insert of b's "+sec.name+" alone with the switch "+sw.name, want)
+					insert(sw.env, models.Mapping{})
+					check("an Insert of no section with the switch "+sw.name, want)
+				})
+			}
 		}
 	}
 }

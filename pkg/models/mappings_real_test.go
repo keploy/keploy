@@ -53,8 +53,8 @@ func TestMappedTestCaseRefusesARealThatIsNotAList(t *testing.T) {
 
 // A test's real: is read whatever the switch, as its key: (mapdb keeps
 // every field keploy writes on a test entry whatever the switch; a replay
-// puts the test on the real clock under the switch only). One that is not a list of destinations fails
-// the decode either way.
+// puts the test on the real clock under the switch only). One that is not
+// a list of destinations fails the decode either way.
 func TestMappedTestCaseRealIsReadWhateverTheSwitch(t *testing.T) {
 	for _, sw := range []string{"1", ""} {
 		t.Setenv(provenswitch.Env, sw)
