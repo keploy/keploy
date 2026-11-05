@@ -346,7 +346,8 @@ type listenState int
 
 const (
 	// listenUnknown is an agent that cannot tell: none, an older one, one that
-	// failed, or an answer it cannot read.
+	// failed, or an answer it cannot read; or a port keploy listens on, which
+	// it is not asked about.
 	listenUnknown listenState = iota
 	// listenNothing is nothing listening there.
 	listenNothing

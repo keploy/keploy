@@ -26,6 +26,7 @@ func TestKeployPorts(t *testing.T) {
 		{"the agent's moves over keploy.yml's ports", func(c *Config) {
 			c.ProxyPort, c.DNSPort, c.Agent.ProxyPort, c.Agent.DnsPort = 6123, 6124, 6125, 6123
 		}, map[uint16]KeployListener{6123: KeployDNS, 6124: KeployDNS, 6125: KeployProxy}},
+		{"the last port", func(c *Config) { c.ProxyPort = 65535 }, map[uint16]KeployListener{65535: KeployProxy}},
 		// Not a TCP port: it names none, and cut to 16 bits it would name
 		// one keploy does not listen on.
 		{"past the last port", func(c *Config) { c.ProxyPort = 1<<16 + 6123 }, map[uint16]KeployListener{}},
