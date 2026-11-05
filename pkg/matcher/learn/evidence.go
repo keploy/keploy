@@ -1194,11 +1194,13 @@ type listsEntry struct {
 }
 
 // Sizes a list's entry counts: the entry and its map slot, and per word its
-// slot in the entry, its posting, and its letters and slot in the
-// postings' map (counted for every word, the side that counts more).
+// slot in the entry's words (16 bytes, at twice their length), past what
+// the postings' map holds for it (postBytes): counted fresh for every word,
+// the side that counts more, as a word another list posted first stays
+// in the map once that list is let go.
 const (
 	listsEntryBytes = 96
-	listsWordBytes  = 16 + 4 + 64
+	listsWordBytes  = 32
 )
 
 // listsKey is l's identity: its words' backing array, weakly, so the set's
@@ -1234,7 +1236,7 @@ func buildLists(fs *setFilters, s *setDerived, e *listsEntry, l answerLists) {
 	}
 	n := int64(listsEntryBytes)
 	for _, w := range words {
-		n += listsWordBytes + int64(len(w))
+		n += listsWordBytes + postBytes(w, true)
 	}
 	if !setClaim(s, n) {
 		return

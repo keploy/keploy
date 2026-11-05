@@ -640,20 +640,26 @@ func (t *readerText) buildFilter() wordFilter {
 
 // postRuns adds e's words, each run of letters and digits of every form of
 // its text (forms), to the set's postings (setFilters.runs) under a new id,
-// counted on the set's budget; e keeps id -1 past it. Where the filter of a
+// counted on the set's budget as the postings hold them (postBytes): a run
+// they hold no list of yet as its slot, its letters and its id, any other
+// as one id more. e keeps id -1 past the budget. Where the filter of a
 // text may hold a word by chance, the postings name exactly the texts that
 // hold each run, so a call finds the places that may hold a word without
 // asking every place (placeIndex). Each new run's letters are copied: the
-// postings keep no text alive.
+// postings keep no text alive. A run another text posts between the count
+// and the posting takes one id, less than its count: the postings never
+// hold more than they counted, and never let a run go.
 func postRuns(fs *setFilters, s *setDerived, e *filterEntry, forms []string) {
 	seen := map[string]bool{}
 	for _, text := range forms {
 		eachWord(text, func(run string) { seen[run] = true })
 	}
 	n := int64(headerBytes)
+	fs.mu.Lock()
 	for run := range seen {
-		n += listsWordBytes + int64(len(run))
+		n += postBytes(run, fs.runs[run] == nil)
 	}
+	fs.mu.Unlock()
 	if !setClaim(s, n) {
 		return
 	}
@@ -669,6 +675,25 @@ func postRuns(fs *setFilters, s *setDerived, e *filterEntry, forms []string) {
 		}
 	}
 }
+
+// postBytes is what a map of postings (setFilters.runs, post) holds for one
+// id more under w: the id, at twice its list's length (append doubles a
+// full list), and, fresh (the map holds no list of w yet), w's slot (its
+// key's and its list's headers, 40 bytes, and their control byte, at 7/16
+// of its table filled: the least a table holds just after it grows) and
+// w's letters as their allocation rounds them up (a size class at most an
+// eighth over them, or a 16-byte block of small ones).
+func postBytes(w string, fresh bool) int64 {
+	if !fresh {
+		return postIDBytes
+	}
+	return postIDBytes + postSlotBytes + int64(len(w)+len(w)/8+16)
+}
+
+const (
+	postIDBytes   = 8
+	postSlotBytes = 96
+)
 
 // postID is the id the set's postings name t's text by (postRuns), its
 // filter built at the first ask (setFilter); -1 where they hold none of its

@@ -1094,10 +1094,16 @@ func postingBytes(text string) int64 {
 	}
 	n := int64(headerBytes)
 	for run := range seen {
-		n += listsWordBytes + int64(len(run))
+		n += freshPostBytes(run)
 	}
 	return n
 }
+
+// freshPostBytes is what the set's postings count for a run they hold no
+// list of yet (postBytes): its slot in their map (96 bytes), its letters
+// as their allocation rounds them up, and one id (8 bytes). The rows state
+// the sizes, not the code's names for them.
+func freshPostBytes(w string) int64 { return 8 + 96 + int64(len(w)+len(w)/8+16) }
 
 // postedBytes is what the set's postings of its texts' words keep (postRuns):
 // each run's letters and an id per text that holds it.
@@ -2113,6 +2119,97 @@ func TestOutcomeCostAnsweredAfterPlacesOnlyThePlacesThatMayHoldTheWord(t *testin
 			if wantPlaced := map[bool]int64{false: 1, true: int64(n + 1)}[c.every]; placed != wantPlaced {
 				t.Errorf("%s, beside %d other recordings: the list placed and asked %d places; want %d", c.name, n, placed, wantPlaced)
 			}
+		}
+	}
+}
+
+// The set's postings count on its budget at least the heap they hold, as
+// measured: of texts of runs no other text holds (a 1 MiB answer of fresh
+// ids, as an integration's memory bound streams them, and a few), of texts
+// whose runs another text posted first (one id each), and of other tests'
+// word lists. A count under the heap lets a set that fills its budget with
+// postings keep more than its budget. A text's runs count as the row
+// derives them: fresh runs whole, runs already posted as one id.
+func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	learnBudget = 1 << 30
+	text := func(k, runs int, shared bool) string {
+		var b strings.Builder
+		for j := 0; j < runs; j++ {
+			if shared {
+				fmt.Fprintf(&b, "w%d ", j)
+			} else {
+				fmt.Fprintf(&b, "w%dx%d ", k, j)
+			}
+		}
+		return b.String()
+	}
+	for _, c := range []struct {
+		name         string
+		texts, runs  int
+		shared, list bool
+	}{
+		{"one text of 116,000 fresh runs", 1, 116000, false, false},
+		{"8 texts of 20,000 fresh runs", 8, 20000, false, false},
+		{"8 texts of the same 20,000 runs", 8, 20000, true, false},
+		{"one text of 1,000 fresh runs", 1, 1000, false, false},
+		{"8 word lists of 20,000 fresh words", 8, 20000, false, true},
+	} {
+		// The set's filters made here, not through filtersOf: the earlier
+		// case's go with their set at the next collection, not at a later
+		// cleanup, inside this one's measure.
+		s := newSetDerived()
+		fs := &setFilters{runs: map[string][]int32{}, post: map[string][]int32{}}
+		texts, lists := make([]string, c.texts), make([]answerLists, c.texts)
+		for k := range texts {
+			texts[k] = text(k, c.runs, c.shared)
+			lists[k] = answerLists{words: [][]string{strings.Fields(texts[k])}}
+		}
+		var want int64
+		posted := map[string]bool{}
+		for _, x := range texts {
+			if c.list {
+				want += listsEntryBytes
+				for _, w := range strings.Fields(x) {
+					want += 32 + freshPostBytes(w)
+				}
+				continue
+			}
+			want += headerBytes
+			for _, w := range strings.Fields(x) {
+				if posted[w] {
+					want += 8
+				} else {
+					want += freshPostBytes(w)
+				}
+				posted[w] = true
+			}
+		}
+		var m0, m1 runtime.MemStats
+		runtime.GC()
+		runtime.GC()
+		runtime.ReadMemStats(&m0)
+		used := s.budget.used
+		for k := range texts {
+			if c.list {
+				buildLists(fs, s, &listsEntry{}, lists[k])
+			} else {
+				postRuns(fs, s, &filterEntry{}, []string{texts[k]})
+			}
+		}
+		runtime.GC()
+		runtime.ReadMemStats(&m1)
+		held, counted := int64(m1.HeapAlloc)-int64(m0.HeapAlloc), s.budget.used-used
+		runtime.KeepAlive(s)
+		runtime.KeepAlive(fs)
+		runtime.KeepAlive(texts)
+		runtime.KeepAlive(lists)
+		t.Logf("%s: the postings hold %d bytes of heap and count %d on the budget", c.name, held, counted)
+		if counted != want {
+			t.Errorf("%s: the postings count %d bytes on the budget; want %d", c.name, counted, want)
+		}
+		if held > counted {
+			t.Errorf("%s: the postings hold %d bytes of heap and count %d on the budget: want no more held than counted", c.name, held, counted)
 		}
 	}
 }

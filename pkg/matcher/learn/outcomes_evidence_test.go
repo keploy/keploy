@@ -717,6 +717,9 @@ func TestOutcomeAWordRefusedAtARecordingAnsweredAfterTheCallSaysWhatRoundFGave(t
 	check := func(what string, d Decision, mock string) {
 		t.Helper()
 		oRefused(t, what, d, RefusalUnknown, mock, fSide)
+		if d.Refusal == nil {
+			t.Fatalf("%s: %s; want refused", what, oDescribe([]Decision{d}))
+		}
 		if strings.Contains(d.Refusal.Why, "did not give the application") {
 			t.Errorf("%s: refused %q; its reason says the recording gave nothing, which refuses nothing", what, d.Refusal.Why)
 		}
