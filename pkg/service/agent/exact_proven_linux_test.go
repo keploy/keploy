@@ -613,6 +613,38 @@ func TestASkippedTestsRecordingNeverShiftsToTheNextTest(t *testing.T) {
 	require.Contains(t, e.Reason, "was called 2 times, recorded 1")
 }
 
+// A test the replay's gate skips never opens, so its recordings answer no
+// call, yet each is still an unserved recording to a parser that holds a
+// call while the set holds one (integrations.UnservedRecordingFinder). Such
+// a call (a worker's blocking pop for a job the skipped test pushed at
+// record) waits, as the server waits with nothing pushed, instead of missing
+// at once in whichever test is open and failing that test for the skip. The
+// next test's own recording, once it answered, is no longer one.
+func TestASkippedTestsRecordingStillBoundsAHeldCall(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
+		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil))
+	b, serr := a.ProvenBegin(ctx, begin("TestSkipped"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+	_, serr = a.ProvenBegin(ctx, begin("TestNext"))
+	require.Nil(t, serr)
+	code, body := p.call(t, "/n")
+	require.Equal(t, "200 next", fmt.Sprintf("%d %s", code, strings.TrimSpace(body)))
+	unserved := func(name string) bool {
+		found, err := p.mm.HasUnservedRecording(models.HTTP, func(m *models.Mock) bool { return m.Name == name })
+		require.NoError(t, err)
+		return found
+	}
+	require.True(t, unserved("mock-1"), "the skipped test's recording no longer bounds a held call")
+	require.False(t, unserved("mock-2"), "the next test's recording that answered still bounds a held call")
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestNext", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, e.Reason)
+}
+
 // keploy #4745's F20 scenarios under ConsumeExact. Tests whose recorded
 // windows overlap (concurrent incoming requests) each made the same call,
 // recorded at 6s and 8s, inside both windows. The mapping gives each
