@@ -735,8 +735,10 @@ type startJudgment struct {
 // watch began), with what the latest look found: the look has not said
 // whether the process runs, it does not run, or it runs with no report, or
 // no new one, read. While its reports move (it beats) but its start takes no
-// new step, the wait is said every stepWaitLooks ticks since its last step,
-// naming that step and the stages in progress (startStepLine): a start slowed
+// new step, the wait is said every stepWaitLooks ticks since its last step
+// up to stepWaitBackOff of them, then every stepWaitLaterLooks
+// (stepLineDue), naming that step and the stages in progress
+// (startStepLine): a start slowed
 // or stuck in one stage would otherwise be waited on in silence, as long as
 // that stage makes progress. A look out past the silence bound is said once,
 // at WARN, in place of the next of those lines, with what it is out on and
@@ -758,7 +760,8 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 		clk, release = stall.Process()
 	}
 	judge := newBootJudge(clk)
-	look, silence, every, stepEvery := bootLook, bootSilence, stillWaitingLooks, stepWaitLooks
+	look, silence, every := bootLook, bootSilence, stillWaitingLooks
+	stepEvery, stepUntil, stepLater := stepWaitLooks, stepWaitBackOff, stepWaitLaterLooks
 	go func() {
 		// The look out ends with the watch, however the watch ends, and the
 		// watch ends only once it has: a look's funcs return only once the
@@ -878,7 +881,7 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 				waited++
 				stepWaited++
 				lineDue := every > 0 && waited%every == 0
-				if !lineDue && stepWaited%stepEvery == 0 && waited < stepWaited {
+				if !lineDue && stepLineDue(stepWaited, stepEvery, stepUntil, stepLater) && waited < stepWaited {
 					if line := startStepLine(cur); line != "" {
 						logger.Info(line, zap.Duration("waited", time.Duration(stepWaited)*look))
 					}
@@ -1158,6 +1161,24 @@ var stillWaitingLooks = 30
 // one stage, worth saying long before the wait is over. A variable for tests;
 // never 0.
 var stepWaitLooks = 10
+
+// stepWaitBackOff is how many ticks with no new step the lines of
+// stepWaitLooks cover; from there on they come every stepWaitLaterLooks
+// ticks (stepLineDue). The first minute of a stage that does not end says
+// where it is often; a stage that goes on for minutes is said less often, so
+// that a three-minute stall in one stage says about ten lines, not
+// eighteen. Variables for tests; stepWaitLaterLooks never 0.
+var stepWaitBackOff, stepWaitLaterLooks = 60, 30
+
+// stepLineDue says whether the line for a start that beats with no new step
+// is due at the tick that makes n ticks since its last step: every `every`
+// ticks up to `until` of them, then every `later` ticks from there.
+func stepLineDue(n, every, until, later int) bool {
+	if n <= until {
+		return n%every == 0
+	}
+	return (n-until)%later == 0
+}
 
 // agentDialWait is how long one look at an agent known only by its URI waits
 // for its connection to be taken: the look's own length, not a bound on the

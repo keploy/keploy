@@ -1938,6 +1938,73 @@ func TestAStartThatBeatsWithNoNewStepNamesItsStep(t *testing.T) {
 	})
 }
 
+// A start that beats on in one step for three minutes, at keploy's own
+// cadence (the package's stepWaitLooks, stepWaitBackOff and
+// stepWaitLaterLooks, as a run has them): its step is said every ten
+// seconds for the first minute since that step, then every thirty, ten
+// lines in all, each naming the step and the stage in progress. The first
+// report is read at the 1st tick, so the nth line's wait is said at the
+// tick after it.
+func TestAStartStuckInOneStepIsSaidOftenAtFirstThenLessOften(t *testing.T) {
+	look, silence, every := bootLook, bootSilence, stillWaitingLooks
+	bootLook, bootSilence, stillWaitingLooks = time.Second, time.Hour, 30
+	t.Cleanup(func() { bootLook, bootSilence, stillWaitingLooks = look, silence, every })
+	const want = "still waiting for the keploy agent's start: it runs, and has taken no new step for a while; its last step: the CA's install began; in progress: the CA's install (making progress; its thread sleeping, in do_wait)"
+	inBubble(t, func(t *testing.T) {
+		core, logs := observer.New(zapcore.InfoLevel)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var reads atomic.Uint64
+		read := func(context.Context) (utils.BootProgress, bool) {
+			return utils.BootProgress{Seq: 5, Beat: reads.Add(1), CountsQuiet: true, Step: "the CA's install began",
+				Stages: []utils.BootStage{{Name: "the CA's install", Progressing: true, State: "S", Wait: "do_wait"}}}, true
+		}
+		judged := watchStart(ctx, zap.New(core), read, alwaysRunning, nil, false, false)
+		start := time.Now()
+		waits := []time.Duration{10, 20, 30, 40, 50, 60, 90, 120, 150, 180}
+		for i, w := range waits {
+			tick := int(w) + 1
+			tickTo(start, tick-1)
+			saidCount(t, logs, judged, tick-1, i, fmt.Sprintf("before the line due %v into the step", w*time.Second))
+			tickTo(start, tick)
+			e := saidBy(t, logs, judged, tick, i+1, zapcore.InfoLevel, want, fmt.Sprintf("%v into the step", w*time.Second))
+			saysExactly(t, e, tick, want)
+			if waitedOf(e) != w*time.Second {
+				t.Fatalf("the line at tick %d says it waited %v; want %v since the step", tick, waitedOf(e), w*time.Second)
+			}
+		}
+		tickTo(start, 200)
+		saidCount(t, logs, judged, 200, len(waits), "twenty ticks past the three minutes' last line")
+	})
+}
+
+// When the line for a start that beats with no new step is due: every
+// `every` ticks since the step up to `until` of them, then every `later`
+// from there. With keploy's own cadence (10, 60, 30) the lines of a
+// three-minute stall come at 10 to 60 and at 90 to 180. A back-off point
+// that is not a line of the first cadence (55) shows where each cadence
+// ends: the last line of the first is at 50, the first of the second at 85.
+func TestStepLineDueBacksOffAfterTheFirstMinute(t *testing.T) {
+	for _, tc := range []struct {
+		every, until, later int
+		want                []int
+	}{
+		{stepWaitLooks, stepWaitBackOff, stepWaitLaterLooks, []int{10, 20, 30, 40, 50, 60, 90, 120, 150, 180}},
+		{10, 55, 30, []int{10, 20, 30, 40, 50, 85, 115, 145, 175}},
+		{5, 10, 20, []int{5, 10, 30, 50, 70, 90, 110, 130, 150, 170}},
+	} {
+		var got []int
+		for n := 1; n <= 180; n++ {
+			if stepLineDue(n, tc.every, tc.until, tc.later) {
+				got = append(got, n)
+			}
+		}
+		if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Fatalf("every %d up to %d, then every %d: lines at %v of 180 ticks; want %v", tc.every, tc.until, tc.later, got, tc.want)
+		}
+	}
+}
+
 // An agent whose report has a beat but no step (its first report, before
 // its first step) beats on: its wait is said from its first report on, as
 // any other's, never from the watch's start.
