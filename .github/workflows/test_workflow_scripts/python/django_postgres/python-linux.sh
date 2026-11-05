@@ -1,6 +1,7 @@
 #!/bin/bash
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-start-wait.sh"
 
 source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
@@ -91,12 +92,21 @@ wait_for_app() {
     done
 
     echo "::error::App proxy did not become ready on ${APP_HOST}:${APP_PORT} within 120 seconds"
+    save_keploy_start_evidence
     stop_recording
     dump_and_force_kill_if_stuck "$REC_PID"
     return 1
 }
 
 send_request(){
+    # The app starts once keploy's agent is ready: its wait, with its full
+    # budget, starts there (keploy-start-wait.sh).
+    # Stopped as on the app's wait's failure: nothing else stops it.
+    if ! await_agent_ready "${app_name}.txt"; then
+        stop_recording
+        dump_and_force_kill_if_stuck "$REC_PID"
+        return 1
+    fi
     sleep 10
     wait_for_app || return 1
     # Start making curl calls to record the testcases and mocks.
@@ -124,6 +134,8 @@ do_record_iteration() {
     local extra_flags="${2:-}"
     local label="${extra_flags:+_json}"
     local app_name="flaskApp_${i}${label}"
+    # Emptied first: the driver waits for this run's ready line in it.
+    : >"${app_name}.txt"
     send_request &
     local request_pid=$!
     # shellcheck disable=SC2086

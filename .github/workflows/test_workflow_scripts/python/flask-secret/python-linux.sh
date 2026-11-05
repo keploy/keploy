@@ -1,6 +1,7 @@
 #!/bin/bash
 
 source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
+source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/keploy-start-wait.sh
 
 # Function to cleanup any remaining keploy processes
 cleanup_keploy() {
@@ -35,6 +36,7 @@ wait_for_health() {
     done
 
     echo "::error::App health endpoint did not become ready within 120 seconds for mode: $mode"
+    save_keploy_start_evidence
     cleanup_keploy
     return 1
 }
@@ -80,6 +82,10 @@ sleep 5  # Allow time for configuration changes
 send_request(){
     mode="$1"
 
+    # The app starts once keploy's agent is ready: its wait, with its full
+    # budget, starts there (keploy-start-wait.sh).
+    # Stopped as on the app's wait's failure: nothing else stops it.
+    await_agent_ready "${app_name}.txt" || { cleanup_keploy; return 1; }
     # wait for app to be ready
     sleep 10
     wait_for_health "$mode" || return 1
@@ -136,6 +142,8 @@ send_request(){
 # --- Record cycles for secret endpoints (2 sets, unchanged behavior) ---
 for i in 1 2; do
     app_name="flaskSecret_${i}"
+    # Emptied first: the driver waits for this run's ready line in it.
+    : >"${app_name}.txt"
     send_request "secrets" &
     request_pid=$!
     wait_for_port_free 8000 || true
@@ -157,6 +165,8 @@ sleep 5
 
 # --- Record cycle for the new /astro endpoint (its own test set) ---
 app_name="flaskAstro"
+# Emptied first: the driver waits for this run's ready line in it.
+: >"${app_name}.txt"
 send_request "astro" &
 request_pid=$!
 wait_for_port_free 8000 || true
@@ -311,6 +321,8 @@ rm -rf keploy
 
 # Record the "misc" endpoints as a new test suite
 app_name="flaskMisc"
+# Emptied first: the driver waits for this run's ready line in it.
+: >"${app_name}.txt"
 send_request "misc" &
 request_pid=$!
 wait_for_port_free 8000 || true
@@ -337,6 +349,8 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 
 if json_pass_supported; then
     app_name="flaskMisc_json"
+    # Emptied first: the driver waits for this run's ready line in it.
+    : >"${app_name}.txt"
     send_request "misc" &
     request_pid=$!
     wait_for_port_free 8000 || true

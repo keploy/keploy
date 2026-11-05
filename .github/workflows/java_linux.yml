@@ -76,6 +76,7 @@ jobs:
             samples-java/${{ matrix.app.path }}/test_logs.txt
             samples-java/${{ matrix.app.path }}/javaApp_*.txt
             samples-java/${{ matrix.app.path }}/mvn_build.log
+            samples-java/${{ matrix.app.path }}/keploy-start-evidence/
           if-no-files-found: warn
           retention-days: 7
 
@@ -143,6 +144,18 @@ jobs:
         run: |
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_dual_conn/java-linux.sh
+
+      # keploy's log and its agent's boot.json, which keploy removes when it
+      # exits: the lane copies them here when it gives up on keploy's start or
+      # the app's (keploy-start-wait.sh).
+      - name: Upload keploy's logs and start reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-dual-conn-${{ matrix.config.job }}-${{ strategy.job-index }}-keploy-start
+          path: samples-java/mysql-dual-conn/keploy-start-evidence/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Automatic MySQL port detection: same sample, relocated to :3307 by the
   # script so nothing in the default port list or the config covers it.
@@ -219,6 +232,7 @@ jobs:
           name: mysql-auto-port-${{ matrix.config.job }}-recordings
           path: |
             samples-java/mysql-dual-conn/keploy/
+            samples-java/mysql-dual-conn/keploy-start-evidence/
             samples-java/mysql-dual-conn/test_logs.txt
             samples-java/mysql-dual-conn/test_logs_drift.txt
             samples-java/mysql-dual-conn/application.properties
@@ -299,6 +313,7 @@ jobs:
           name: tidb-stmt-cache-${{ matrix.config.job }}-recordings
           path: |
             samples-java/tidb-stmt-cache/keploy/
+            samples-java/tidb-stmt-cache/keploy-start-evidence/
             samples-java/tidb-stmt-cache/test_logs_*.txt
             samples-java/tidb-stmt-cache/record.txt
             samples-java/tidb-stmt-cache/mvn_build.log
@@ -463,6 +478,7 @@ jobs:
           name: async-config-poll-${{ matrix.config.job }}-recordings
           path: |
             samples-java/async-config-poll/keploy/
+            samples-java/async-config-poll/keploy-start-evidence/
             samples-java/async-config-poll/test_logs.txt
             samples-java/async-config-poll/record.txt
             samples-java/async-config-poll/mvn_build.log
