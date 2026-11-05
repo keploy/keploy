@@ -175,6 +175,12 @@ func TestOutcomeAValueWhoseWordTheCallSendsApartNamesNone(t *testing.T) {
 		in.Resp = tc.resp
 		vfNone(t, tc.what, Decide(in), "q.id", false)
 	}
+	// A word held only as written: "%6F" decodes to "o", so neither the
+	// decoded text nor its case-folding holds "6F9619FF" or its folding;
+	// the text as sent does, and the word counts as sent apart.
+	vfNamed(t, "an upper-case UUID alone", Decide(vfInput([3]string{"q.id", upper, strings.ToUpper(vfLive)})), "q.id", upper, 5)
+	in := vfInput([3]string{"q.id", upper, strings.ToUpper(vfLive)}, [3]string{"q.g", "%6F9619FF", "%6F9619FF"})
+	vfNone(t, "another field holds a word as written only, its escape decoding it away", Decide(in), "q.id", true)
 }
 
 // One word of the value bound to a place before the call: the other words
