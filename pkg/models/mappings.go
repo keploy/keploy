@@ -89,8 +89,8 @@ type MockEntry struct {
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's
 	// record made the call, round F (the judging's replay of the tests its
-	// command runs) did not make it while the test ran, and the test passed
-	// without it. Under keploy mock record, round F runs the code that
+	// command runs) did not make it while the test ran, and the test failed
+	// on nothing else. Under keploy mock record, round F runs the code that
 	// recorded the call, so whether the app makes it while the test runs
 	// depends on more than the code (how fast an answer comes, for one);
 	// keploy mock judge runs the code as it is when it judges. The words may
