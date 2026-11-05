@@ -43,11 +43,12 @@ func TestMergeLearned_ALaterUseLeavesTheOwningCallsLearnedValue(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const of, other, at = "b0743d2d-c52f-4d6b-8524-272b094a1c9c", "e8e0f266-2cf7-4ed4-8d6c-0250bdbf2acf", "body.docs.msgs.0.appId#2"
 	own := models.MockVariable{Recorded: "4d6b", Bind: at, Of: of, Why: "made anew at mock-217"}
-	later := func(bind string) models.MockState {
+	laterOf := func(bind, of string) models.MockState {
 		return models.MockState{Name: "mock-225",
 			Variables: models.MockVariables{"appId2": {Recorded: "4d6b", Use: []string{"body.docs.msgs.0.app._id#2"}}},
-			Binds:     map[string]models.MockVariables{"mock-217": {"appId2": {Recorded: "4d6b", Bind: bind, Why: "bound at mock-217"}}}}
+			Binds:     map[string]models.MockVariables{"mock-217": {"appId2": {Recorded: "4d6b", Bind: bind, Of: of, Why: "bound at mock-217"}}}}
 	}
+	later := func(bind string) models.MockState { return laterOf(bind, "") }
 	merged := func(onDisk *models.MockVariable, mine *models.MockVariable, use models.MockState) models.MockVariable {
 		states := map[string]models.MockState{"mock-225": use}
 		if mine != nil {
@@ -77,9 +78,32 @@ func TestMergeLearned_ALaterUseLeavesTheOwningCallsLearnedValue(t *testing.T) {
 		{"learned again naming another", &own, &otherOf, later(at), ""},
 		{"on the recording with none, a later use learned after", &noOf, nil, later(at), ""},
 		{"a later use naming the bind at another word", &own, nil, later("body.docs.msgs.0.appId#3"), ""},
+		{"a later use naming another value, the owning call's learning beside it", nil, &own, laterOf(at, other), ""},
+		{"a later use naming another value, learned after", &own, nil, laterOf(at, other), ""},
+		{"a later use naming the same value, learned after", &own, nil, laterOf(at, of), of},
 	} {
 		if got := merged(c.onDisk, c.mine, c.use); got.Of != c.want {
 			t.Errorf("%s: Of %q, want %q (%+v)", c.name, got.Of, c.want, got)
+		}
+	}
+}
+
+// bindOnto keeps the owning call's learned value only beside a declaration
+// of the very bind it has: an Of goes with a bind, so with neither naming
+// one none stays, whatever a carries.
+func TestBindOnto_AnOfGoesWithABind(t *testing.T) {
+	const of = "0b1c2d3e-4f50-4612-8a7b-8c9d0e1f2a3b"
+	for _, c := range []struct {
+		name string
+		a, b models.MockVariable
+		want string
+	}{
+		{"neither binds", models.MockVariable{Recorded: "4612", Of: of}, models.MockVariable{Recorded: "4612", Use: []string{"body.x"}}, ""},
+		{"b names the bind a has", models.MockVariable{Recorded: "4612", Bind: "body.id#2", Of: of}, models.MockVariable{Recorded: "4612", Bind: "body.id#2"}, of},
+		{"b names another bind", models.MockVariable{Recorded: "4612", Bind: "body.id#2", Of: of}, models.MockVariable{Recorded: "4612", Bind: "body.id#3"}, ""},
+	} {
+		if got := bindOnto(c.a, c.b).Of; got != c.want {
+			t.Errorf("%s: Of %q, want %q", c.name, got, c.want)
 		}
 	}
 }
