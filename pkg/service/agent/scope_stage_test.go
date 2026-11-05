@@ -53,6 +53,11 @@ func (p *stageProxy) GetPersistentConsumed() map[string]models.MockState {
 func (p *stageProxy) RefuseWorker(uint32, string)                {}
 func (p *stageProxy) SeedRunPlaceWindows(ws []models.TestWindow) { p.mm.SeedRunPlaceWindows(ws) }
 func (p *stageProxy) ReachRunTest(test string, open bool)        { p.mm.ReachRunTest(test, open) }
+func (p *stageProxy) EndRunSet()                                 { p.mm.EndRunSet() }
+
+func (p *stageProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
+	return nil, nil
+}
 
 func (p *stageProxy) FirstTestWindowStart() time.Time { return p.mm.FirstTestWindowStart() }
 func (p *stageProxy) SetMappedUniverse([]string)      {}

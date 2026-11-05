@@ -132,3 +132,36 @@ func TestMockReplayWritesAnAnswerAtItsRecordedPlaceWithTheSwitchOff(t *testing.T
 	written(t, lateGot, "mock-late", "at the begin of Test3, which has no mapping")
 	scopeEnd(t, a, "Test3")
 }
+
+// An answer recorded in the window of the set's last test, which the run
+// set aside (it never began), is written at the read of the set's end
+// (TestGetMockErrors_ASetEndReadFilesAfterTheSettle: before that read
+// settles), not at the end of the last test that ran, nor at a test's read.
+func TestTheSetsEndReadWritesAnAnswerOfATestTheRunNeverReached(t *testing.T) {
+	t.Cleanup(models.RegisterAnswerRelease(models.HTTP, placeRelease))
+	late := stageMock("mock-late", "/late", stageT0.Add(500*time.Millisecond))
+	late.Spec.ResTimestampMock = stageT0.Add(9 * time.Second)
+	a, p := newStageReplay(t, []*models.Mock{late, stageMock("mock-b", "/b", stageT0.Add(4*time.Second))}, nil,
+		map[string][]string{"Test1": {"mock-late"}, "Test2": {"mock-b"}})
+	if err := a.SetRunPlaceWindows(context.Background(), []models.TestWindow{
+		{TestCase: "Test1", Start: stageT0, End: stageT0.Add(time.Second)},
+		{TestCase: "Test2", Start: stageT0.Add(4 * time.Second), End: stageT0.Add(6 * time.Second)},
+		{TestCase: "Test3", Start: stageT0.Add(8 * time.Second), End: stageT0.Add(10 * time.Second)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	scopeBegin(t, a, "Test1")
+	got := heldCall(p.mm, "/late")
+	scopeEnd(t, a, "Test1")
+	scopeBegin(t, a, "Test2")
+	scopeEnd(t, a, "Test2")
+	notYet(t, got, "Test3's answer at the end of Test2, the last test that ran")
+	if _, err := a.GetMockErrors(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	notYet(t, got, "Test3's answer at a test's read")
+	if _, err := a.GetMockErrors(models.WithSetEndRead(context.Background())); err != nil {
+		t.Fatal(err)
+	}
+	written(t, got, "mock-late", "at the set's end read")
+}

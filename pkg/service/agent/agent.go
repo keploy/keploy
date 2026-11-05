@@ -1009,6 +1009,15 @@ func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 }
 
 func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	// keploy test's read of a set's end: every answer held for a later
+	// place of the set is due (coreAgent.RunSetEnder), before the settle
+	// below, so the read settles the calls those answers make and takes
+	// their misses: it is the set's last.
+	if models.SetEndRead(ctx) {
+		if e, ok := a.Proxy.(coreAgent.RunSetEnder); ok {
+			e.EndRunSet()
+		}
+	}
 	// Under the proven switch a replay's read of its misses waits, as a
 	// test's end does, until every call the application made is in the
 	// proxy's hands and answered (settle_proven.go): the run's last read

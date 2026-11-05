@@ -760,6 +760,17 @@ type RunPlaceSeeder interface {
 	ReachRunTest(test string, open bool)
 }
 
+// RunSetEnder is the optional extension implemented by proxies that hold an
+// answer's write until the replay's run reaches its recorded place
+// (integrations.RunPlacer): EndRunSet moves the run's place to the set's
+// end, at keploy test's read of a set's end (models.SetEndRead), before that
+// read settles the application's calls, so the read settles and takes the
+// calls the answers written then make. An agent whose proxy lacks it ends
+// those holds at the next set's staging or at the store's close.
+type RunSetEnder interface {
+	EndRunSet()
+}
+
 // StatefulCursorResetter is the optional extension implemented by proxies whose
 // mock manager keeps per-request cursors for stateful dependency replay (serving
 // successive recorded responses in record order). The agent calls it once per

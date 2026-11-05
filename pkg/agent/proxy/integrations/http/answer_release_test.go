@@ -65,6 +65,8 @@ type placedDb struct {
 	mu    sync.Mutex
 	place models.RunPlace
 	sig   chan struct{}
+	// waits are the idle marks' releases of the waits on the next move.
+	waits []func()
 }
 
 func newPlacedDb(mocks ...*models.Mock) *placedDb {
@@ -86,13 +88,33 @@ func (d *placedDb) RunPlaceChanged() <-chan struct{} {
 	return d.sig
 }
 
-func (d *placedDb) move(f func(p *models.RunPlace)) {
+func (d *placedDb) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() func()) (func(), bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if changed == nil || changed != d.sig {
+		return func() {}, false
+	}
+	var once sync.Once
+	unmark := mark()
+	release := func() { once.Do(unmark) }
+	d.waits = append(d.waits, release)
+	return release, true
+}
+
+// move moves the place, and releases the waits' idle marks before it
+// returns, as the agent's place does.
+func (d *placedDb) move(f func(p *models.RunPlace)) {
+	d.mu.Lock()
 	f(&d.place)
 	if d.sig != nil {
 		close(d.sig)
 		d.sig = nil
+	}
+	waits := d.waits
+	d.waits = nil
+	d.mu.Unlock()
+	for _, w := range waits {
+		w()
 	}
 }
 

@@ -1122,6 +1122,15 @@ func (s *scopedMockDb) RunPlaceChanged() <-chan struct{} {
 	return nil
 }
 
+// IdleUntilRunPlaceChanges over a wrapped store without the facet marks
+// nothing: its place is the set's end, so no parser waits on it.
+func (s *scopedMockDb) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (func(), bool) {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.IdleUntilRunPlaceChanges(changed, mark)
+	}
+	return func() {}, false
+}
+
 // The carry-over tier is a read tier like the others, so it goes through keep().
 func (s *scopedMockDb) GetCarryOverMocks() ([]*models.Mock, error) {
 	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {
