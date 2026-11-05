@@ -194,6 +194,20 @@ func lifetimeOf(m *Mock) Lifetime {
 	return c.TestModeInfo.Lifetime
 }
 
+// LifetimeUnder is the lifetime DeriveLifetime gives m when rules are the
+// declared session calls, whatever the process installed (SetSessionCalls):
+// a tool that reads a set apart from any run (keploy's mock authoring) reads
+// its lifetimes under that set's keploy.yaml. m itself is not derived, and
+// no fallback count counts it.
+func (m *Mock) LifetimeUnder(rules []SessionCallRule) Lifetime {
+	c := *m
+	c.deriveLifetime(false)
+	if c.TestModeInfo.Lifetime == LifetimePerTest && c.StatesLifetime() && sessionCallsCover(rules, &c) {
+		return LifetimeSession
+	}
+	return c.TestModeInfo.Lifetime
+}
+
 // derive is DeriveLifetime for a mock not derived yet. count says whether a
 // pre-tag recording's kind fallback counts in legacyKindFallbackFires, which
 // operators read as how many such mocks a replay loaded: false for a look at

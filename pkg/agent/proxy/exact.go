@@ -115,6 +115,10 @@ type exactView struct {
 	inFlight map[string]bool
 	// pool is, while no test is open, the names of the pool slice served.
 	pool map[string]struct{}
+	// sourcesReplaced names, on a test view, the recordings the open test's
+	// derived mocks replace in it (models.ReplacedBy): the view never shows
+	// them, wherever they are staged, and every other view does.
+	sourcesReplaced map[string]struct{}
 	// worker is the set's worker-scope mocks the run has reached the place
 	// of, by name, as ServeExactWorker last said when the view was
 	// installed: shown whether a test is open or not.
@@ -1486,7 +1490,12 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	if m.exact.beforeInstall != nil {
 		m.exact.beforeInstall()
 	}
-	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned)+len(cands))}
+	// A derived mock of test's own replaces in it the recording it was
+	// derived from: test is served the derived answer, never the source,
+	// whether the source is staged for every test or shared with test.
+	replaced := models.ReplacedBy(owned)
+	owned, cands = models.WithoutReplaced(owned, replaced), models.WithoutReplaced(cands, replaced)
+	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned)+len(cands)), sourcesReplaced: replaced}
 	if w, ok := m.testWindows.Load().Of(test); ok {
 		v.winStart, v.winEnd = w.Start, w.End
 	}

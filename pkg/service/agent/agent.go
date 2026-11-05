@@ -2327,7 +2327,8 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// MockManager.SetMocksWithWindow enforce strict semantics.
 
 	// Apply filtering based on parameters
-	if params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping) {
+	mapped := params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping)
+	if mapped {
 		filteredMocks = pkg.FilterTcsMocksMappingInWindow(ctx, a.logger, originalFiltered, params.MockMapping, params.AfterTime, params.BeforeTime)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
 	} else {
@@ -2383,6 +2384,34 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		zap.Int("unfilteredMocks", len(unfilteredMocks)),
 		zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
 		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
+
+	// A derived mock of the test this call stages replaces, in that test,
+	// the recording it was derived from (models.Mock.Replaces): the test is
+	// served the derived answer and never its source, from either pool,
+	// while every other test, and the time between tests, is served the
+	// source as before. The test's own are, staged by its mapping, the
+	// mocks it names, and staged by its window, those placed in the window
+	// (pkg.RecordedInWindow), not the start-up band or the calls in flight
+	// staged beside them. A call that stages no test (no mapping and no
+	// window: a set's staging, the pool staged between tests) replaces
+	// nothing. The carry-over below is other tests' mocks, so it is added
+	// after.
+	windowed := !params.AfterTime.IsZero() && !params.AfterTime.Equal(models.BaseTime)
+	if mapped || windowed {
+		own := filteredMocks
+		if !mapped {
+			own = nil
+			w := pkg.ServeWindow{Start: params.AfterTime, End: params.BeforeTime}
+			for _, m := range filteredMocks {
+				if pkg.RecordedInWindow(m, w) {
+					own = append(own, m)
+				}
+			}
+		}
+		replaced := models.ReplacedBy(own)
+		filteredMocks = models.WithoutReplaced(filteredMocks, replaced)
+		unfilteredMocks = models.WithoutReplaced(unfilteredMocks, replaced)
+	}
 
 	// The carry-over lookahead bypasses the filter on purpose: on a windowed
 	// proxy the filter runs lax and would make these session mocks, reachable in

@@ -67,6 +67,9 @@ type NetworkTrafficDocJSON struct {
 	// Clocks is NetworkTrafficDoc.Clocks.
 	Clocks map[string]models.ClockOffset `json:"clocks,omitempty"`
 
+	// Authored is NetworkTrafficDoc.Authored.
+	Authored *models.Authored `json:"authored,omitempty"`
+
 	// Real is NetworkTrafficDoc.Real.
 	Real []string `json:"real,omitempty"`
 
@@ -101,6 +104,7 @@ func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 		Variables:    doc.Variables,
 		Clocks:       doc.Clocks,
 		Real:         doc.Real,
+		Authored:     doc.Authored,
 		Origin:       doc.Origin,
 	}, nil
 }
@@ -171,6 +175,7 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 		Variables:    jsonDoc.Variables,
 		Clocks:       jsonDoc.Clocks,
 		Real:         jsonDoc.Real,
+		Authored:     jsonDoc.Authored,
 		Origin:       jsonDoc.Origin,
 	}
 

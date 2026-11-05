@@ -219,13 +219,18 @@ func (m *Mock) FaultOf() *Fault {
 
 // FaultServed says, for a replay summary, the fault the mock's answer ends in,
 // as the application met it: "mock-12: upstream reset after 0 bytes, as
-// recorded". It is "" for a mock whose answer ends in none.
+// recorded", or "as authored" for a mock written rather than recorded
+// (IsAuthored). It is "" for a mock whose answer ends in none.
 func (m *Mock) FaultServed() string {
 	f := m.FaultOf()
 	if f == nil {
 		return ""
 	}
-	return m.Name + ": " + f.String() + ", as recorded"
+	how := ", as recorded"
+	if m.IsAuthored() {
+		how = ", as authored"
+	}
+	return m.Name + ": " + f.String() + how
 }
 
 // FaultsServed is what a replay summary says of the faults a replay served:
