@@ -1720,3 +1720,185 @@ func TestWriteAppCABundle_OnePathPerCA(t *testing.T) {
 		}
 	}
 }
+
+// envNativeChild names, in the child process of
+// TestSetupCAForApp_LoadsTheProcessesRootsBeforeTheNativeInstall, the bundle
+// file the stubbed native install adds keploy's CA to.
+const envNativeChild = "KEPLOY_TEST_NATIVE_CHILD_BUNDLE"
+
+// On Linux keploy's native install adds its CA to the system bundle, a file
+// crypto/x509 reads on the process's first use of the system pool. keploy's
+// own TLS must keep the roots the process started with, so SetupCAForApp
+// loads them before the install. The install is stubbed to append keploy's CA
+// to the bundle SSL_CERT_FILE names, as the real one appends it to the
+// distro bundle. Run in a child process: the system pool is loaded once per
+// process.
+func TestSetupCAForApp_LoadsTheProcessesRootsBeforeTheNativeInstall(t *testing.T) {
+	if bundle := os.Getenv(envNativeChild); bundle != "" {
+		var installed []byte
+		setupNativeForAppFn = func(_ context.Context, _ *zap.Logger, ca *caState, _ caStore, _ int, _ string) error {
+			installed = ca.certPEM
+			f, err := os.OpenFile(bundle, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				return err
+			}
+			_, err = f.Write(ca.certPEM)
+			if cerr := f.Close(); err == nil {
+				err = cerr
+			}
+			return err
+		}
+		if err := SetupCAForApp(context.Background(), zap.NewNop(), false, 0, ""); err != nil {
+			fmt.Println("SetupCAForApp:", err)
+			os.Exit(2)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			fmt.Println("SystemCertPool:", err)
+			os.Exit(2)
+		}
+		data, err := os.ReadFile(bundle)
+		if err != nil || len(installed) == 0 || !bytes.HasSuffix(data, installed) {
+			fmt.Println("control: the stubbed install did not add keploy's CA to the bundle:", err)
+			os.Exit(2)
+		}
+		if !verifiesPEM(data, pool) { // its first certificate: the distro root
+			fmt.Println("control: the process's system pool lacks the bundle's own root")
+			os.Exit(2)
+		}
+		if verifiesPEM(installed, pool) {
+			fmt.Println("the process's system pool trusts keploy's MITM CA")
+			os.Exit(1)
+		}
+		fmt.Println(primeChildRan)
+		os.Exit(0)
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("the native install adds keploy's CA to a bundle file crypto/x509 reads only on Linux")
+	}
+	dir := t.TempDir()
+	bundle := writePEMFile(t, dir, "ca-certificates.crt", makeSelfSignedPEM(t, "distro-root"))
+	noDir := filepath.Join(dir, "no-cert-dir")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSetupCAForApp_LoadsTheProcessesRootsBeforeTheNativeInstall$", "-test.count=1")
+	cmd.Env = append(os.Environ(), envNativeChild+"="+bundle, envSSLCertFile+"="+bundle, envSSLCertDir+"="+noDir)
+	setOwnProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	cmd.WaitDelay = 10 * time.Second
+	t.Cleanup(func() { _ = killProcessGroup(cmd) })
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte(primeChildRan)) {
+		t.Fatalf("the child ran no check (did -test.run stop matching?):\n%s", out)
+	}
+}
+
+// setEnvVars notes SSL_CERT_FILE by its key, whatever other variables it sets
+// and in whatever order the map yields them, and notes no other variable's
+// value as keploy's SSL_CERT_FILE.
+func TestSetEnvVars_NotesSSLCertFileByItsKey(t *testing.T) {
+	isolateCertEnv(t)
+	dir := t.TempDir()
+	operatorFile := writePEMFile(t, dir, "corp.pem", makeSelfSignedPEM(t, "corp-root"))
+	t.Setenv(envSSLCertFile, operatorFile)
+	keploys := filepath.Join(dir, "keploy-bundle.crt")
+	other := filepath.Join(dir, "keploy-ca.crt")
+
+	if err := setEnvVars(zap.NewNop(), map[string]string{envSSLCertFile: keploys, "NODE_EXTRA_CA_CERTS": other}); err != nil {
+		t.Fatal(err)
+	}
+	if got := operatorCertEnv().file; got != operatorFile {
+		t.Fatalf("after keploy set SSL_CERT_FILE: %q, want the operator's %q", got, operatorFile)
+	}
+	t.Setenv(envSSLCertFile, other)
+	if got := operatorCertEnv().file; got != other {
+		t.Fatalf("SSL_CERT_FILE set to %q by someone else read as %q", other, got)
+	}
+}
+
+// legacyCACertPEM is the public certificate of the retired static MITM CA
+// (legacyCASHA256Hex), once committed at pkg/core/proxy/tls/asset/ca.crt.
+const legacyCACertPEM = `-----BEGIN CERTIFICATE-----
+MIIBczCCARigAwIBAgIUe1yXSfGefdyA09reeQpit2S7TXMwCgYIKoZIzj0EAwIw
+FzEVMBMGA1UEAxMMTXkgQ3VzdG9tIENBMB4XDTIzMDQyMDExMDYwMFoXDTMzMDQx
+NzExMDYwMFowFzEVMBMGA1UEAxMMTXkgQ3VzdG9tIENBMFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAE+QJh3KtWSGRe9NtzZGcJQBcn0ipsjzpo7YlLvbaSFeI62H1b
+5EPUjnbDInG4K0nO1Dq/gPtnsVXZcJx06oHj9qNCMEAwDgYDVR0PAQH/BAQDAgEG
+MA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFDejUAabmE7NFoKSOo5uHAHMumal
+MAoGCCqGSM49BAMCA0kAMEYCIQDkGU6Oku9vLo7fLLquHWXR1rB/1YgWIBghnQXJ
+fF5GawIhAK/0BaJCVm6rkRuYCdtahkN1N5DtTPr8AQoDV+MT0UmL
+-----END CERTIFICATE-----
+`
+
+// The loader rebuilds every file-sourced bundle from the blocks crypto/x509
+// would load as roots, less keploy's own CAs. It leaves out the retired static
+// CA (its key was public, and its CN is not keploy's), a CERTIFICATE block
+// holding no certificate, a CERTIFICATE block with headers and a TRUSTED
+// CERTIFICATE block (OpenSSL's form, whose trust settings a plain
+// CERTIFICATE would drop): crypto/x509 loads none of them.
+func TestLoadCABundle_SSLCertFile_LeavesOutWhatGoDoesNotLoad(t *testing.T) {
+	block, _ := pem.Decode([]byte(legacyCACertPEM))
+	if fp, ok := legacyCAFingerprint(); block == nil || !ok || sha256.Sum256(block.Bytes) != fp {
+		t.Fatal("fixture: legacyCACertPEM is not the retired CA legacyCAFingerprint names")
+	}
+	otherDER, _ := pem.Decode(makeSelfSignedPEM(t, "other-root"))
+	dir := t.TempDir()
+	corp := makeSelfSignedPEM(t, "corp-root")
+	missing := []string{filepath.Join(dir, "none.crt")}
+	for _, tc := range []struct {
+		name string
+		odd  []byte
+	}{
+		{"the retired static CA", []byte(legacyCACertPEM)},
+		{"a CERTIFICATE block holding no certificate", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")})},
+		{"a CERTIFICATE block with headers", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Headers: map[string]string{"Comment": "x"}, Bytes: otherDER.Bytes})},
+		{"a TRUSTED CERTIFICATE block", pem.EncodeToMemory(&pem.Block{Type: "TRUSTED CERTIFICATE", Bytes: otherDER.Bytes})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := writePEMFile(t, t.TempDir(), "bundle.pem", corp, tc.odd)
+			data, source := loadCABundle(zap.NewNop(), certEnv{file: file}, missing, embeddedFallbackRoots)
+			if source != file || !bytes.Equal(data, corp) {
+				t.Fatalf("expected the corporate root alone from %q; got %d certs from %q", file, pemCertCount(data), source)
+			}
+		})
+	}
+}
+
+// With no bundle file and no embedded roots (the disk-only path), the source
+// names only the directories the certificates came from.
+func TestLoadCABundle_NoFallback_SourceNamesOnlyTheCertDir(t *testing.T) {
+	dir := t.TempDir()
+	d := filepath.Join(dir, "certs")
+	if err := os.MkdirAll(d, 0755); err != nil {
+		t.Fatal(err)
+	}
+	corp := makeSelfSignedPEM(t, "corp-root")
+	writePEMFile(t, d, "corp.pem", corp)
+	data, source := loadCABundle(zap.NewNop(), certEnv{dir: d}, []string{filepath.Join(dir, "none.crt")}, nil)
+	if source != d || !bytes.Equal(data, corp) {
+		t.Fatalf("expected the corporate root from %q alone; got %d certs from %q", d, pemCertCount(data), source)
+	}
+}
+
+// An SSL_CERT_DIR holding only keploy's own CA (inherited from a keploy
+// process, or left by an earlier run) adds nothing, and is not an operator
+// misconfiguration to warn about.
+func TestLoadCABundle_SSLCertDir_OnlyKeploysCA_DoesNotWarn(t *testing.T) {
+	dir := t.TempDir()
+	d := filepath.Join(dir, "certs")
+	if err := os.MkdirAll(d, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writePEMFile(t, d, "keploy-ca.crt", testCACertPEM())
+	logger, logs := newObservedLogger(t)
+	data, source := loadCABundle(logger, certEnv{dir: d}, []string{filepath.Join(dir, "none.crt")}, embeddedFallbackRoots)
+	if !bytes.Equal(data, embeddedFallbackRoots) || source != systemCABundleSourceEmbedded {
+		t.Fatalf("expected the embedded roots alone; got %d bytes from %q", len(data), source)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expected no Info+ logs; got %v", logs.All())
+	}
+}

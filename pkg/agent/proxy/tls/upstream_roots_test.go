@@ -843,3 +843,53 @@ func TestLoadUpstreamRootCAs_Linux_UsesTheLoadersRootsNotGosPool(t *testing.T) {
 		}
 	}
 }
+
+// A platform pool that is the embedded list is not an unusable one: keploy
+// says why it swaps in the constrained pool at Debug, and logs nothing at Info
+// or above.
+func TestLoadUpstreamRootCAs_SystemPoolIsTheEmbeddedList_LogsNoFallback(t *testing.T) {
+	ca, _ := newTestCA(t, "nss-root")
+	stubConstrainedNSSRoot(t, ca, nil)
+	stubSystemCertPool(t, poolWith(t, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Raw})), nil)
+	logger, logs := newObservedLogger(t)
+	pool, err := LoadUpstreamRootCAs(logger, "")
+	if err != nil || pool == nil {
+		t.Fatalf("expected the NSS pool; pool=%v err=%v", pool, err)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expected no Info+ logs; got %v", logs.All())
+	}
+}
+
+// An operator's bundle of a corporate CA followed by the public roots (what
+// corporateCAHint asks for) is not the embedded list, though it is longer:
+// the corporate CA stays trusted for upstream verification.
+func TestLoadUpstreamRootCAs_CorporateCAThenTheEmbeddedRoots_KeepsTheCorporateCA(t *testing.T) {
+	stubFileBackedPool(t, true)
+	corp := makeSelfSignedPEM(t, "corp-root")
+	stubSystemCABundle(t, concat(corp, embeddedFallbackRoots), "/corp/bundle.pem")
+	pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+	if err != nil || pool == nil {
+		t.Fatalf("expected the trust bundle's pool; pool=%v err=%v", pool, err)
+	}
+	if !verifiesAgainst(t, corp, pool) {
+		t.Fatal("the corporate CA is not trusted for upstream verification")
+	}
+}
+
+// With no NSS root to build the constrained pool from, the embedded bundle's
+// PEM roots are used, not an empty pool that would reject every upstream.
+func TestLoadUpstreamRootCAs_NoNSSRoots_UsesTheEmbeddedPEM(t *testing.T) {
+	stubFileBackedPool(t, true)
+	old := nssRoots
+	nssRoots = func() iter.Seq[nssbundle.Root] { return func(func(nssbundle.Root) bool) {} }
+	t.Cleanup(func() { nssRoots = old })
+	stubSystemCABundle(t, embeddedFallbackRoots, systemCABundleSourceEmbedded)
+	pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+	if err != nil || pool == nil {
+		t.Fatalf("expected the embedded roots; pool=%v err=%v", pool, err)
+	}
+	if !pool.Equal(poolWith(t, embeddedFallbackRoots)) {
+		t.Fatal("the upstream pool is not the embedded roots")
+	}
+}

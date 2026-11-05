@@ -282,8 +282,12 @@ func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPI
 
 	// Native Mode
 	logger.Debug("Detected Native Mode. Installing to system store...")
-	return setupNativeForApp(ctx, logger, ca, store, appPID, javaHomeOverride)
+	return setupNativeForAppFn(ctx, logger, ca, store, appPID, javaHomeOverride)
 }
+
+// setupNativeForAppFn is an indirection seam for tests: production code uses
+// setupNativeForApp, which needs root and changes the host's trust stores.
+var setupNativeForAppFn = setupNativeForApp
 
 // SetupCaCertEnv extracts the run CA's public certificate to a temp file, and
 // writes beside it a bundle of that certificate and the roots keploy's loader
