@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -41,5 +42,24 @@ func TestABackgroundMissCountsAgainstNoTest(t *testing.T) {
 	}
 	if y, _ := yaml.Marshal(poll); strings.Contains(string(y), "background") {
 		t.Errorf("an unmarked miss writes the mark: %s", y)
+	}
+}
+
+// A set's background recordings are its worker: mocks, then its startup:
+// mocks, each named once; a set with neither names none.
+func TestBackgroundMockNamesAreTheWorkerThenTheStartupMocks(t *testing.T) {
+	m := &Mapping{
+		Worker:    []MockEntry{{Name: "poll-1"}, {Name: ""}, {Name: "poll-2"}},
+		Startup:   []MockEntry{{Name: "boot-1"}, {Name: "poll-1"}},
+		TestCases: []MappedTestCase{{ID: "test-1", Mocks: []MockEntry{{Name: "own-1"}}}},
+	}
+	if got, want := m.BackgroundMockNames(), []string{"poll-1", "poll-2", "boot-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("BackgroundMockNames = %v; want %v", got, want)
+	}
+	if got := (&Mapping{TestCases: m.TestCases}).BackgroundMockNames(); got != nil {
+		t.Fatalf("a set with no worker: or startup: names %v", got)
+	}
+	if got := (*Mapping)(nil).BackgroundMockNames(); got != nil {
+		t.Fatalf("no mapping names %v", got)
 	}
 }

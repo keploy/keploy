@@ -1153,6 +1153,28 @@ type StagedRecordingReader interface {
 	RangeStagedRecordings(kind models.Kind, keys []string, visit func(m *models.Mock) bool) error
 }
 
+// BackgroundRecordingReader is an optional MockMemDb capability: the staged
+// set's background recordings of kind (its mappings.yaml worker: and startup:
+// mocks, models.MockFilterParams.BackgroundMocks), served or not and whatever
+// the open view shows, in recorded order, each with the span in which the
+// application can have read its clock for it (models.BackgroundRecording).
+// For a parser to tell a miss is the same request as one of them, apart from
+// noise and reads of the clock, and mark it (MockMismatchReport.Background).
+// Nothing it returns is served, consumed or to be changed. nil when the set
+// names none, or the store was handed none.
+type BackgroundRecordingReader interface {
+	BackgroundRecordings(kind models.Kind) []models.BackgroundRecording
+}
+
+// BackgroundRecordingsOf is db's background recordings of kind
+// (BackgroundRecordingReader), nil for a store that keeps none.
+func BackgroundRecordingsOf(db MockMemDb, kind models.Kind) []models.BackgroundRecording {
+	if r, ok := db.(BackgroundRecordingReader); ok {
+		return r.BackgroundRecordings(kind)
+	}
+	return nil
+}
+
 // LearnEnder is an optional MockMemDb capability: whether the test set's
 // learn step has ended (models.MockFilterParams.LearnEnded). keploy replay's
 // mock-consistency retry cycles run the passing test cases again, test-1

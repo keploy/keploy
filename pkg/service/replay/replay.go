@@ -7989,9 +7989,14 @@ func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
 //   - windows is the window of EVERY recorded test, selected or not; the agent
 //     releases traffic the test windows do not pace by themselves (server push)
 //     at the recorded window it belongs to.
+//   - background names the set's background recordings, its worker: and
+//     startup: mocks (models.MockFilterParams.BackgroundMocks), which the
+//     agent hands the proxy read-only so a parser can tell a miss is one more
+//     run of one of them. Set by the Replayer's recordedSetShape alone.
 type recordedSetShape struct {
 	firstTestStart time.Time
 	windows        []models.TestWindow
+	background     []string
 }
 
 func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
@@ -8009,6 +8014,7 @@ func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
 // hand them most of the recording.
 func (r *Replayer) recordedSetShape(ctx context.Context, testSetID string, testCases []*models.TestCase) recordedSetShape {
 	shape := recordedSetShapeOf(testCases)
+	shape.background = r.backgroundMockNames(ctx, testSetID)
 	reader, ok := r.testDB.(RecordedStartReader)
 	if !ok {
 		return shape
@@ -8047,6 +8053,42 @@ func recordedTestWindows(testCases []*models.TestCase) []models.TestWindow {
 func testWindowOf(tc *models.TestCase) (time.Time, time.Time) {
 	w := models.RecordedWindow(tc)
 	return w.Start, w.End
+}
+
+// backgroundMockNames is the names of testSetID's background recordings
+// (models.MockFilterParams.BackgroundMocks), under either switch: its
+// mappings.yaml worker: mocks and its startup: mocks. Under the proven switch
+// the worker scope is the one this run serves (exactPlan.worker: a stale move
+// returned to its test is that test's again), otherwise the file's. nil with
+// no mapping store, no file, or a file that cannot be read: every miss then
+// stays its test's, as before.
+func (r *Replayer) backgroundMockNames(ctx context.Context, testSetID string) []string {
+	if r.mappingDB == nil {
+		return nil
+	}
+	var worker, startup []models.MockEntry
+	if mr, ok := r.mappingDB.(mappingReader); ok {
+		m, err := mr.GetMapping(ctx, testSetID)
+		if err != nil {
+			r.logger.Debug("could not read the test set's background recordings from its mappings.yaml; every miss stays its test's",
+				zap.String("testSetID", testSetID), zap.Error(err))
+			return nil
+		}
+		if m != nil {
+			worker, startup = m.Worker, m.Startup
+		}
+	} else {
+		var err error
+		if startup, err = r.mappingDB.GetStartup(ctx, testSetID); err != nil {
+			r.logger.Debug("could not read the test set's startup recordings from its mappings.yaml; every miss stays its test's",
+				zap.String("testSetID", testSetID), zap.Error(err))
+			return nil
+		}
+	}
+	if r.exact != nil {
+		worker = r.exact.worker
+	}
+	return (&models.Mapping{Worker: worker, Startup: startup}).BackgroundMockNames()
 }
 
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of
@@ -8102,6 +8144,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		BeforeTime:             beforeTime,
 		FirstRecordedTestStart: shape.firstTestStart,
 		RecordedWindows:        shape.windows,
+		BackgroundMocks:        shape.background,
 		MockMapping:            expectedMockMapping,
 		UseMappingBased:        useMappingBased,
 		AgentOwnsConsumed:      agentOwnsConsumed,

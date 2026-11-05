@@ -1,11 +1,14 @@
 package replay
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // Under the proven switch, a test whose only misses are background misses
@@ -60,4 +63,78 @@ func TestTheMismatchStoreKeepsTheBackgroundMark(t *testing.T) {
 		got[1].MismatchReport.Background || !got[1].MismatchReport.CountsAgainstTest() {
 		t.Fatalf("the store's reports lost or invented the mark: %+v, %+v", got[0].MismatchReport, got[1].MismatchReport)
 	}
+}
+
+// The set's staging call names its background recordings, its mappings.yaml
+// worker: and startup: mocks, and no per-test call does.
+func TestTheStagingCallNamesTheSetsBackgroundRecordings(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.mappingDB = &shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{
+		Worker:  []models.MockEntry{{Name: "poll-1"}, {Name: "poll-2"}},
+		Startup: []models.MockEntry{{Name: "boot-1"}},
+	}}
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("status %q, want PASSED", status)
+	}
+	h.instr.mu.Lock()
+	params := append([]models.MockFilterParams(nil), h.instr.allParams...)
+	h.instr.mu.Unlock()
+	staged := 0
+	for _, p := range params {
+		if !p.AfterTime.Equal(models.BaseTime) {
+			if len(p.BackgroundMocks) != 0 {
+				t.Fatalf("a per-test call named background recordings %v; they belong to the staging call", p.BackgroundMocks)
+			}
+			continue
+		}
+		staged++
+		if want := []string{"poll-1", "poll-2", "boot-1"}; !reflect.DeepEqual(p.BackgroundMocks, want) {
+			t.Fatalf("the staging call named %v; want %v", p.BackgroundMocks, want)
+		}
+	}
+	if staged != 1 {
+		t.Fatalf("%d staging calls, want 1", staged)
+	}
+}
+
+// The background recordings are the file's worker: and startup: mocks; under
+// the proven switch the worker scope is the one the run serves (a stale move
+// returned to its test is that test's again). A store that reads only the
+// startup section names those; one that cannot read the file names none.
+func TestTheBackgroundRecordingsAreTheWorkerScopeTheRunServes(t *testing.T) {
+	mapping := &models.Mapping{Worker: []models.MockEntry{{Name: "poll-1"}, {Name: "moved-back"}}, Startup: []models.MockEntry{{Name: "boot-1"}}}
+	r := newReplayerWithMappingDB(&shMappingDB{prMappingDB: &prMappingDB{}, mapping: mapping})
+	if got, want := r.backgroundMockNames(context.Background(), "s"), []string{"poll-1", "moved-back", "boot-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("switch off: %v, want %v", got, want)
+	}
+	r.exact = &exactPlan{worker: []models.MockEntry{{Name: "poll-1"}}}
+	if got, want := r.backgroundMockNames(context.Background(), "s"), []string{"poll-1", "boot-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("switch on: %v, want %v", got, want)
+	}
+	r = newReplayerWithMappingDB(&fakeMappingDB{startup: mapping.Startup})
+	if got, want := r.backgroundMockNames(context.Background(), "s"), []string{"boot-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("a startup-only store: %v, want %v", got, want)
+	}
+	r = newReplayerWithMappingDB(&shMappingDB{prMappingDB: &prMappingDB{}})
+	r.exact = &exactPlan{worker: []models.MockEntry{{Name: "poll-1"}}}
+	if got, want := r.backgroundMockNames(context.Background(), "s"), []string{"poll-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("switch on, no file: %v, want the served worker scope %v", got, want)
+	}
+	for _, db := range []MappingDB{&fakeMappingDB{startupErr: errors.New("unreadable")}, unreadableMappingDB{&prMappingDB{}}} {
+		r = newReplayerWithMappingDB(db)
+		r.exact = &exactPlan{worker: []models.MockEntry{{Name: "poll-1"}}}
+		if got := r.backgroundMockNames(context.Background(), "s"); got != nil {
+			t.Fatalf("an unreadable file (%T) named %v", db, got)
+		}
+	}
+	if got := (&Replayer{logger: zap.NewNop()}).backgroundMockNames(context.Background(), "s"); got != nil {
+		t.Fatalf("no mapping store named %v", got)
+	}
+}
+
+// unreadableMappingDB is a mapping store whose mappings.yaml cannot be read.
+type unreadableMappingDB struct{ *prMappingDB }
+
+func (unreadableMappingDB) GetMapping(context.Context, string) (*models.Mapping, error) {
+	return nil, errors.New("unreadable")
 }

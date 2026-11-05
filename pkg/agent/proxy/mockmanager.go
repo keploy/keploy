@@ -409,6 +409,14 @@ type MockManager struct {
 	// keploy test session's windows would otherwise decide whose a later
 	// keploy mock replay's recordings are, over its scope table.
 	testWindows atomic.Pointer[models.WindowSchedule]
+	// background is the current set's background recordings by kind
+	// (SeedBackgroundRecordings, BackgroundRecordings). Like testWindows, a
+	// seed at a set boundary is parked (backgroundSeeded) until that set's
+	// staging call installs it with the trees it describes, and a set that
+	// seeds none has none, not the previous one's: names are unique only
+	// within a set. Stored under swapMu, read lock-free.
+	background       atomic.Pointer[map[models.Kind][]models.BackgroundRecording]
+	backgroundSeeded *map[models.Kind][]models.BackgroundRecording
 	// repeatNoise is the header noise the session's matcher compares the
 	// set's calls with, which proves a test's repeated reads
 	// (SetRepeatReadNoise); nil, none, until the session sets it.
@@ -861,6 +869,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.windowsSeeded = nil
 	m.testWindowsSeeded = nil
 	m.placeWindowsSeeded = nil
+	m.backgroundSeeded = nil
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -1760,6 +1769,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// The run's place's too (SeedRunPlaceWindows).
 			m.placeWindows.Store(m.placeWindowsSeeded)
 			m.placeWindowsSeeded = nil
+			m.background.Store(m.backgroundSeeded)
+			m.backgroundSeeded = nil
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -4476,6 +4487,50 @@ func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 	}
 	m.recordedWindows.Store(s)
 }
+
+// SeedBackgroundRecordings installs the set's background recordings
+// (models.MockFilterParams.BackgroundMocks, as the agent resolves them), by
+// kind, in recorded order: at once, or at a set boundary when that set's
+// staging call installs its trees (see testWindows). Read-only: never served,
+// never consumed. nil or empty installs none.
+func (m *MockManager) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
+	var byKind *map[models.Kind][]models.BackgroundRecording
+	if len(recs) > 0 {
+		kinds := map[models.Kind][]models.BackgroundRecording{}
+		for _, r := range recs {
+			if r.Mock != nil {
+				kinds[r.Mock.Kind] = append(kinds[r.Mock.Kind], r)
+			}
+		}
+		for _, list := range kinds {
+			slices.SortStableFunc(list, func(a, b models.BackgroundRecording) int {
+				return a.Mock.Spec.ReqTimestampMock.Compare(b.Mock.Spec.ReqTimestampMock)
+			})
+		}
+		byKind = &kinds
+	}
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	if m.boundaryPending {
+		m.backgroundSeeded = byKind
+		return
+	}
+	m.background.Store(byKind)
+}
+
+// BackgroundRecordings returns the current set's background recordings of
+// kind (integrations.BackgroundRecordingReader), in recorded order, whatever
+// the open view shows; nil when the set has none. The slice and its mocks
+// are shared: a caller reads them and changes nothing.
+func (m *MockManager) BackgroundRecordings(kind models.Kind) []models.BackgroundRecording {
+	byKind := m.background.Load()
+	if byKind == nil {
+		return nil
+	}
+	return (*byKind)[kind]
+}
+
+var _ integrations.BackgroundRecordingReader = (*MockManager)(nil)
 
 // RecordedWindows returns the current set's recorded test windows, or nil when
 // the replayer sent none (mock replay, an older CLI, SetFilteredMocks-only
