@@ -145,6 +145,11 @@ func TestOutcomeAValueWhoseWordTheCallSendsApartNamesNone(t *testing.T) {
 		{"another field holds it before more id bytes", [][3]string{{"q.id", vfRec, vfLive}, {"q.ref", vfRec + "_old", vfLive + "_old"}}, nil},
 		{"another field holds a word of it case-folded", [][3]string{{"q.id", upper, strings.ToUpper(vfLive)}, {"q.g", "6f9619ff", "6f9619ff"}}, nil},
 		{"its answer reads it back and holds a word apart", [][3]string{{"q.id", vfRec, vfLive}}, []Leaf{oText("r.id", vfRec), oText("r.g", "4011")}},
+		// Sent whole at another field too, which is a use of the first
+		// (oneValue), and a word of it apart: the call is asked once the
+		// use is decided, when the value is whole, so the word apart counts.
+		{"also sent whole at another field, a recorded word apart", [][3]string{{"q.id", vfRec, vfLive}, {"q.ref", vfRec, vfLive}, {"q.g", "4011", "4011"}}, nil},
+		{"also sent whole at another field, a round F word apart", [][3]string{{"q.id", vfRec, vfLive}, {"q.ref", vfRec, vfLive}, {"q.g", "47c8", "47c8"}}, nil},
 	} {
 		in := vfInput(tc.leaves...)
 		in.Resp = tc.resp
@@ -268,11 +273,8 @@ func TestOutcomeAValueSentApartInALongLeafOfASetNamesNone(t *testing.T) {
 // earlier place names none whatever the call sends, so it costs no scan.
 func TestOutcomeAValueFormScansOnlyAValueMadeAnew(t *testing.T) {
 	scans := func(in Input) ([]Decision, int) {
-		x := newReaderIndex(in.Drifts)
-		defer x.release()
-		dc := newDecider(in, false, x)
-		ds, _ := dc.decide()
-		return ds, dc.apartScans
+		ds, _, n := decideWords(in, false, true)
+		return ds, n
 	}
 	ds, n := scans(vfInput([3]string{"q.id", vfRec, vfLive}))
 	if at := vfAt(ds, "q.id"); n != 1 || len(at) != 5 || at[0].Of != vfRec {
@@ -291,4 +293,38 @@ func TestOutcomeAValueFormScansOnlyAValueMadeAnew(t *testing.T) {
 		}
 	}
 	vfNone(t, "a UUID an earlier place gave", Decide(in), "q.id", false)
+}
+
+// The call's texts are read for a word of a value sent apart once per
+// decision: by the first of a call's two readings only (bothWays keeps its
+// words or refuses them), and never in Mode Elsewhere, whose guard names no
+// value (elsewhere).
+func TestOutcomeAValueFormScansOncePerDecision(t *testing.T) {
+	in := vfInput([3]string{"q.id", vfRec, vfLive})
+	if _, _, n := decideBoth(in, false); n != 1 {
+		t.Fatalf("a UUID made anew: %d scans, want one", n)
+	}
+	// An exchange recorded at the call's own instant: the call is read
+	// both ways, and the UUID is made anew in each.
+	both := vfInput([3]string{"q.id", vfRec, vfLive})
+	both.Earlier = oServed("mock-0", false, false, Response, oText("body.note", "ok"), "ok", time.Millisecond)
+	both.Earlier[0].At, both.Earlier[0].AsRecorded = both.At, true
+	if _, late := leafedAtCall(both.Earlier, both.At); len(late) == 0 {
+		t.Fatal("the exchange at the call's own instant is not read both ways; the row tests nothing")
+	}
+	if _, _, n := decideBoth(both, false); n != 1 {
+		t.Errorf("a UUID made anew, the call read both ways: %d scans, want one", n)
+	}
+	vfNamed(t, "a UUID made anew, the call read both ways", Decide(both), "q.id", vfRec, 5)
+	// Mode Elsewhere: the same call names no value, and is not read for one.
+	el := vfInput([3]string{"q.id", vfRec, vfLive})
+	el.Mode, el.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
+	if _, _, n := decideBoth(el, true); n != 0 {
+		t.Errorf("Mode Elsewhere: %d scans, want none", n)
+	}
+	for _, d := range Decide(el) {
+		if d.Of != "" || strings.Contains(d.Line, "a word of one value") {
+			t.Errorf("Mode Elsewhere: %s names %q; want no value named", oDescribe([]Decision{d}), d.Of)
+		}
+	}
 }

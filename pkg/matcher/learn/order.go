@@ -33,10 +33,10 @@ func decideOrder(in Input) []Decision {
 		// Its guard keeps only clock reads (every other word refused, or
 		// dropped as declared noise): no word there is made anew, so none
 		// names a value.
-		ds, fields := decideBoth(in, true)
+		ds, fields, _ := decideBoth(in, true)
 		return elsewhere(in, ds, fields)
 	}
-	ds, fields := decideBoth(in, false)
+	ds, fields, _ := decideBoth(in, false)
 	keepWholeForms(ds, fields)
 	return ds
 }
@@ -51,18 +51,25 @@ func decideOrder(in Input) []Decision {
 // call or after it: the call is read both ways (leafedAtCall), and a word
 // either reading refuses is refused, as is one the two readings learn
 // differently, naming both (bothWays).
-func decideBoth(in Input, allScope bool) ([]Decision, []string) {
+//
+// Only the first reading asks whether the call sends a word of a value
+// apart (formsApart): a word keeps its value (Decision.Of) only from it,
+// as bothWays keeps ds's words or refuses them, and the call's texts are
+// the same in both. Mode Elsewhere (allScope) names no value (elsewhere),
+// so neither asks there. scans is the values the ask read in both readings
+// (apartScans).
+func decideBoth(in Input, allScope bool) (ds []Decision, fields []string, scans int) {
 	in.Earlier, in.Raw = timedEarlier(in.Earlier, in.At), timedRaw(in.Raw, in.At)
 	in.Earlier, in.Raw = leafedAfterCall(in.Earlier, in.Raw, in.At)
-	ds, fields := decideWords(in, allScope)
+	ds, fields, scans = decideWords(in, allScope, !allScope)
 	kept, late := leafedAtCall(in.Earlier, in.At)
 	if len(late) == 0 {
-		return ds, fields
+		return ds, fields, scans
 	}
 	alt := in
 	alt.Earlier, alt.Raw = kept, append(append([]Raw(nil), in.Raw...), late...)
-	as, afields := decideWords(alt, allScope)
-	return bothWays(in, ds, fields, as, afields), fields
+	as, afields, altScans := decideWords(alt, allScope, false)
+	return bothWays(in, ds, fields, as, afields), fields, scans + altScans
 }
 
 // bothWays is ds, the call read with its exchanges at the call's own
@@ -152,19 +159,29 @@ type decider struct {
 	answer *answerWords
 	// forms are the values valueForms named (Decision.Of), each with its
 	// stretch in F at every token that names it, asked whether the call
-	// sends a word of one apart once the call is decided (formsApart);
-	// apartScans counts the values sentApart read, for the rows.
+	// sends a word of one apart once the call is decided (formsApart, which
+	// decideWords runs where asked); apartScans counts the values sentApart
+	// read, for the rows.
 	forms      map[string][]string
 	apartScans int
 }
 
 // decideWords decides every changed word of in, and the field each
 // decision is of; allScope reads every earlier place of the run as the
-// call's scope (Mode Elsewhere).
-func decideWords(in Input, allScope bool) ([]Decision, []string) {
+// call's scope (Mode Elsewhere). Where apart is set it then drops each
+// value the call sends a word of apart (formsApart), once the call's other
+// uses are decided (oneValue): before them, a later whole copy of the
+// value still names it, so the value is not yet whole and is never asked.
+// scans is the values that read (apartScans).
+func decideWords(in Input, allScope, apart bool) ([]Decision, []string, int) {
 	x := newReaderIndex(in.Drifts)
 	defer x.release() // what the index keeps goes back to the set's budget
-	return newDecider(in, allScope, x).decide()
+	dc := newDecider(in, allScope, x)
+	ds, fields := dc.decide()
+	if apart {
+		dc.formsApart(ds)
+	}
+	return ds, fields, dc.apartScans
 }
 
 // newDecider is the decider of the call in, reading its texts through x;
@@ -213,7 +230,6 @@ func (dc *decider) decide() ([]Decision, []string) {
 				Edit{Kind: EditReRecord}, dc.fieldNoise(fields[i]))
 		}
 	}
-	dc.formsApart(out)
 	return out, fields
 }
 
