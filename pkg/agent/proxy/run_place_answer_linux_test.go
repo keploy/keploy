@@ -51,9 +51,13 @@ func placedMock(name, target string, req, res time.Time) *models.Mock {
 // placedSet is a staged set the rows replay, as keploy test does under the
 // proven switch (each test's exact view opens it, the pool's view after it
 // ends it) or with the switch off (each test's staging of its window opens
-// it, and its end is the facet's EndRunTest).
+// it, and its end is the facet's EndRunTest). As there, a test's begin and
+// its end first wait until no call is in the proxy's hands (tr): a call the
+// application made in a test is matched in that test's view, however late
+// its parser reads it.
 type placedSet struct {
 	mm      *MockManager
+	tr      *inflight
 	windows []models.TestWindow
 	mocks   []*models.Mock
 	proven  bool
@@ -71,13 +75,22 @@ func stagePlacedSet(t *testing.T, proven bool, windows []models.TestWindow, mock
 	t.Cleanup(mm.Close)
 	mm.SeedRecordedWindows(windows)
 	mm.SetMocksWithWindow(mocks, nil, models.BaseTime, placeAt(3600))
-	return &placedSet{mm: mm, windows: windows, mocks: mocks, proven: proven}
+	return &placedSet{mm: mm, tr: &inflight{}, windows: windows, mocks: mocks, proven: proven}
+}
+
+// settle waits, as keploy test does before a test's begin and its end, until
+// no call is in the proxy's hands: none unread, none read and not answered
+// or held.
+func (s *placedSet) settle(t *testing.T, what string) {
+	t.Helper()
+	settledWithin(t, s.tr, func() bool { return s.tr.Pending(true) == 0 }, what)
 }
 
 // open opens test's window, serving owned as its own recordings under the
 // switch.
 func (s *placedSet) open(t *testing.T, test string, owned ...string) {
 	t.Helper()
+	s.settle(t, "before "+test+"'s begin")
 	if s.proven {
 		var own []*models.Mock
 		for _, n := range owned {
@@ -100,7 +113,9 @@ func (s *placedSet) open(t *testing.T, test string, owned ...string) {
 }
 
 // end ends test, the one open.
-func (s *placedSet) end(test string) {
+func (s *placedSet) end(t *testing.T, test string) {
+	t.Helper()
+	s.settle(t, "before "+test+"'s end")
 	if s.proven {
 		s.mm.ServeExactPool("k", nil)
 		return
@@ -109,9 +124,9 @@ func (s *placedSet) end(test string) {
 }
 
 // placedCall sends GET target from app through the real HTTP parser on
-// agentEnd, reading s's store, and returns, once the application has read
-// the whole answer, its body, after its status when that is not 200 OK
-// ("" for none).
+// agentEnd, reading s's store, and returns once the application has written
+// the call; the channel then gives, once the application has read the whole
+// answer, its body, after its status when that is not 200 OK ("" for none).
 func (s *placedSet) placedCall(t *testing.T, ctx context.Context, app, agentEnd net.Conn, target string) <-chan string {
 	t.Helper()
 	ctx, cancel := context.WithCancel(ctx)
@@ -122,16 +137,17 @@ func (s *placedSet) placedCall(t *testing.T, ctx context.Context, app, agentEnd 
 		_ = agentEnd.Close()
 	}()
 	out := make(chan string, 1)
+	if _, err := app.Write([]byte(httpGet(target))); err != nil {
+		t.Fatalf("the application's call %s: %v", target, err)
+	}
 	go func() {
 		got := ""
-		if _, err := app.Write([]byte(httpGet(target))); err == nil {
-			if resp, err := http.ReadResponse(bufio.NewReader(app), nil); err == nil {
-				body, _ := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
-				got = string(body)
-				if resp.StatusCode != http.StatusOK {
-					got = resp.Status + ": " + got
-				}
+		if resp, err := http.ReadResponse(bufio.NewReader(app), nil); err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			got = string(body)
+			if resp.StatusCode != http.StatusOK {
+				got = resp.Status + ": " + got
 			}
 		}
 		out <- got
@@ -139,10 +155,13 @@ func (s *placedSet) placedCall(t *testing.T, ctx context.Context, app, agentEnd 
 	return out
 }
 
+// call is the application's call of target in the test open, on a
+// connection the proxy accepted (s.tr), whose parser marks a held answer's
+// wait idle.
 func (s *placedSet) call(t *testing.T, target string) <-chan string {
 	t.Helper()
-	app, agentEnd := net.Pipe()
-	return s.placedCall(t, context.Background(), app, agentEnd, target)
+	app, conn := acceptedPair(t, s.tr)
+	return s.placedCall(t, integrations.WithRequestHolder(context.Background(), conn), app, conn, target)
 }
 
 func placedNotYet(t *testing.T, got <-chan string, what string) {
@@ -197,14 +216,14 @@ func TestHeldAnswer_WrittenAtItsWindowThoughThatTestCallsNothing(t *testing.T) {
 		s.open(t, "test-1", "mock-held")
 		got := s.call(t, "/held")
 		placedNotYet(t, got, "test-3's answer in test-1")
-		s.end("test-1")
+		s.end(t, "test-1")
 		s.open(t, "test-2")
 		placedNotYet(t, got, "test-3's answer in test-2")
-		s.end("test-2")
+		s.end(t, "test-2")
 		placedNotYet(t, got, "test-3's answer after test-2's end")
 		s.open(t, "test-3", "mock-own3")
 		placedWritten(t, got, "mock-held", "at test-3's open, which calls nothing")
-		s.end("test-3")
+		s.end(t, "test-3")
 	})
 }
 
@@ -222,11 +241,11 @@ func TestHeldAnswer_InOverlappingWindowsIsWrittenAtTheFirstOpen(t *testing.T) {
 		s.open(t, "test-1", "mock-held")
 		got := s.call(t, "/held")
 		placedNotYet(t, got, "an answer test-2's window holds, in test-1")
-		s.end("test-1")
+		s.end(t, "test-1")
 		placedNotYet(t, got, "an answer test-2's window holds, after test-1's end")
 		s.open(t, "test-2")
 		placedWritten(t, got, "mock-held", "at test-2's open, the first window that holds it")
-		s.end("test-2")
+		s.end(t, "test-2")
 	})
 }
 
@@ -250,7 +269,7 @@ func TestHeldAnswer_LeavesItsConnectionSettledAndItsCallItsTests(t *testing.T) {
 				t.Fatal("the held answer's call is not consumed in test-1")
 			}
 		}
-		s.end("test-1")
+		s.end(t, "test-1")
 		if proven {
 			test, consumed, _, _ := s.mm.ExactTestOutcome()
 			if test != "test-1" || !slices.Contains(consumed, "mock-held") {
@@ -268,6 +287,6 @@ func TestHeldAnswer_LeavesItsConnectionSettledAndItsCallItsTests(t *testing.T) {
 		if n := conn.idle.Load(); n != 0 {
 			t.Fatalf("idle marks left after the answer was written: %d", n)
 		}
-		s.end("test-2")
+		s.end(t, "test-2")
 	})
 }

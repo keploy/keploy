@@ -250,3 +250,94 @@ func TestFramesOnlyResponseKeepsItsMarks(t *testing.T) {
 		t.Fatalf("marks = %+v, want them as given:\n%s", back.Marks, out)
 	}
 }
+
+// recovered runs f and reports a panic in it as the row's failure.
+func recovered(t *testing.T, what string, f func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("%s: panicked: %v", what, r)
+		}
+	}()
+	f()
+}
+
+// The end of no marks, or of marks with no write, is no time; else it is the
+// last write's.
+func TestAnswerMarksEndOfNoWriteIsZero(t *testing.T) {
+	for name, m := range map[string]*HTTPAnswerMarks{"no marks": nil, "no write": {Head: sec(1)}} {
+		recovered(t, name, func() {
+			if got := m.End(); !got.IsZero() {
+				t.Errorf("%s: End = %v, want zero", name, got)
+			}
+		})
+	}
+	m := &HTTPAnswerMarks{Head: sec(1), Writes: []HTTPAnswerWrite{{Offset: 4, TS: sec(2)}, {Offset: 8, TS: sec(3)}}}
+	if got := m.End(); !got.Equal(sec(3)) {
+		t.Errorf("End = %v, want %v", got, sec(3))
+	}
+}
+
+// The BSON form of no marks is none, and of marks each of them.
+func TestAnswerMarksBSONFormKeepsEachMark(t *testing.T) {
+	recovered(t, "no marks", func() {
+		if b := (*HTTPAnswerMarks)(nil).toBSON(); b != nil {
+			t.Errorf("no marks: %+v, want none", b)
+		}
+	})
+	m := &HTTPAnswerMarks{Head: sec(1), Writes: []HTTPAnswerWrite{{Offset: 4, TS: sec(2)}, {Offset: 8, TS: sec(3)}}}
+	recovered(t, "marks", func() {
+		b := m.toBSON()
+		if b == nil || b.Head != FormatMockTimestamp(sec(1)) || len(b.Writes) != 2 || b.Writes[1].Offset != 8 {
+			t.Errorf("marks: %+v, want the head and both writes", b)
+		}
+	})
+}
+
+// Each kept frame's piece of the read-back body ends after the blank line
+// that follows it, and the last one at the body's end.
+func TestLegacyFramePiecesEndAfterEachFrame(t *testing.T) {
+	chunks := parseSSEBodyToChunks("data: a\n\ndata: b\n\ndata: c\n\n", time.Time{})
+	body := streamChunksToLegacyBody(chunks, streamBodyKindSSE)
+	got, ok := legacyFramePieces(chunks, streamBodyKindSSE)
+	want := []int{strings.Index(body, "data:b"), strings.Index(body, "data:c"), len(body)}
+	if !ok || len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("pieces of %q = %v (%v), want %v", body, got, ok, want)
+	}
+}
+
+// A frame ends after the blank line that ends it, read with CR, LF or CRLF
+// line ends; a blank line with no frame before it ends none.
+func TestSSEFrameEndsAreTheFramesTheParserKeeps(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want []int
+	}{
+		{"data: a\r\rdata: b\r\r", []int{9, 18}},
+		{"data: a\n\n\ndata: b\n\n", []int{9, 19}},
+		{"data: a\r\n\r\ndata: b", []int{11, 18}},
+	} {
+		got := sseFrameEnds(tc.body)
+		if len(got) != len(tc.want) || (len(got) > 0 && (got[0] != tc.want[0] || got[len(got)-1] != tc.want[len(tc.want)-1])) {
+			t.Errorf("sseFrameEnds(%q) = %v, want %v", tc.body, got, tc.want)
+		}
+	}
+}
+
+// A stream is written as its frames with its marks moved onto them, or with
+// none when it has none.
+func TestStreamsMarshalWithAndWithoutMarks(t *testing.T) {
+	body := "data: a\n\ndata: b\n\n"
+	for name, marks := range map[string]*HTTPAnswerMarks{
+		"no marks": nil,
+		"marks":    {Head: sec(1), Writes: []HTTPAnswerWrite{{Offset: 9, TS: sec(1)}, {Offset: len(body), TS: sec(2)}}},
+	} {
+		recovered(t, name, func() {
+			resp := HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "text/event-stream"}, Body: body, Timestamp: sec(9), Marks: marks}
+			back, out := roundTripYAML(t, resp)
+			if len(back.StreamBody) != 2 || (back.Marks != nil) != (marks != nil) {
+				t.Errorf("%s: frames %d, marks %+v:\n%s", name, len(back.StreamBody), back.Marks, out)
+			}
+		})
+	}
+}

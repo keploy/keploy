@@ -286,3 +286,42 @@ func TestRunPlace_TheProxyEndsTheRunsSet(t *testing.T) {
 	}
 	(&Proxy{}).EndRunSet() // no manager: nothing to end
 }
+
+// The first window's open is reached as any other's.
+func TestRunPlace_TheFirstWindowsOpenIsReached(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows(placeWindows())
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	ch := mm.RunPlaceChanged()
+	mm.SetMocksWithWindow(nil, nil, placeAt(0), placeAt(10))
+	if got := mm.RunPlace().Reached; got != models.RunOpen(0) || !fired(ch) {
+		t.Fatalf("at test-1's open: %d (woke: %v), want %d", got, fired(ch), models.RunOpen(0))
+	}
+}
+
+// A second set's end moves nothing, and wakes no waiter.
+func TestRunPlace_ASecondSetEndChangesNothing(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows(placeWindows())
+	mm.EndRunSet()
+	ch := mm.RunPlaceChanged()
+	mm.EndRunSet()
+	if p := mm.RunPlace(); !p.SetEnd || fired(ch) {
+		t.Fatalf("after a second set's end: %+v (woke: %v), want the set's end and no wake", p, fired(ch))
+	}
+}
+
+// A wait on no channel is no wait, even when no channel is handed out now:
+// nothing is marked idle.
+func TestRunPlace_AWaitOnNoChannelMarksNothing(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows(placeWindows())
+	mm.EndRunSet()
+	marked := 0
+	if _, waits := mm.IdleUntilRunPlaceChanges(nil, func() func() { marked++; return func() { marked-- } }); waits || marked != 0 {
+		t.Fatalf("waits %v, marked %d; want no wait and nothing marked", waits, marked)
+	}
+}
