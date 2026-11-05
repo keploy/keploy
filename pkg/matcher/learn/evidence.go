@@ -344,6 +344,39 @@ func placedFor(p evPlace, r string) evPlace {
 	return p
 }
 
+// wordPlaces are a word's check's places (base, the call's): each copied
+// and placed for R's word r (placedFor) at its first read (at), and kept
+// for the check, so serve order and a swap mark the copy. A check reads
+// the places the postings name (placeIndex), the places of a candidate's
+// mock (orderUnknown) and those a late call's search names
+// (lateCallTook): it copies and places those alone, not every place of the
+// call for every word (placeCopies counts each copy).
+type wordPlaces struct {
+	base []evPlace
+	r    string
+	of   []*evPlace
+}
+
+func newWordPlaces(base []evPlace, r string) *wordPlaces {
+	return &wordPlaces{base: base, r: r, of: make([]*evPlace, len(base))}
+}
+
+// at is the i-th place, placed for the word.
+func (ps *wordPlaces) at(i int) *evPlace {
+	if p := ps.of[i]; p != nil {
+		return p
+	}
+	placeCopies.Add(1)
+	p := new(evPlace)
+	*p = placedFor(ps.base[i], ps.r)
+	ps.of[i] = p
+	return p
+}
+
+// placeCopies counts the places a word's check copies and places
+// (wordPlaces), for the rows that bound a call's work.
+var placeCopies atomic.Int64
+
 // textHalf is t, a recording's text, as its request alone (request) or
 // its answer alone: each field in or outside its request (requestPath),
 // laid out as textFields lays a text out; t itself where it is no
@@ -564,7 +597,7 @@ func untimedAnswer(req, answered time.Time) bool {
 // order the recording cannot tell, or one that differs, marks them
 // unknown even where both hold the value's words at the same fields. It
 // reports whether it marked a place.
-func orderUnknown(in Input, ps []evPlace, cand map[string]bool) (marked bool) {
+func orderUnknown(in Input, ps *wordPlaces, cand map[string]bool) (marked bool) {
 	if len(cand) == 0 || len(cand) == 1 && !servedAgain(in, cand) {
 		return false
 	}
@@ -578,9 +611,12 @@ func orderUnknown(in Input, ps []evPlace, cand map[string]bool) (marked bool) {
 	if why == "" {
 		return false
 	}
-	for i := range ps {
-		if cand[ps[i].mock] && ps[i].state == stateBefore {
-			ps[i].state, ps[i].why = stateUnknown, why
+	for i := range ps.base {
+		if !cand[ps.base[i].mock] {
+			continue
+		}
+		if p := ps.at(i); p.state == stateBefore {
+			p.state, p.why = stateUnknown, why
 			marked = true
 		}
 	}
@@ -616,13 +652,16 @@ const (
 // match it finds in no one field as a swap's. A recording that is no
 // start-up is no swap's, and is not loaded to ask. held is what each
 // place's texts hold of w (heldAt), asked once for the word.
-func swapUnknown(in Input, ps []evPlace, w readWord, held []evHeld) {
+func swapUnknown(in Input, ps *wordPlaces, w readWord, held []evHeld) {
 	holds := func(own string) bool {
 		return holdsToken(own, w.Rec) || slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return holdsToken(own, t.Rec) })
 	}
-	for i := range ps {
-		p := &ps[i]
-		if p.raw == 0 || p.state != stateBefore || !held[i].hr {
+	for i := range ps.base {
+		if !held[i].hr {
+			continue
+		}
+		p := ps.at(i)
+		if p.raw == 0 || p.state != stateBefore {
 			continue
 		}
 		if r := in.Raw[p.raw-1]; r.startUp && r.swapHolds(r.payload().text, in.Raw, holds) {

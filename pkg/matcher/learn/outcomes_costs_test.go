@@ -1989,3 +1989,26 @@ func TestOutcomeCostLateCallsFindAValuesPlacesOncePerWord(t *testing.T) {
 		t.Errorf("refused %q; want it to name mock-r1, the other place that holds 7", d.Refusal.Why)
 	}
 }
+
+// A word's check copies and places (placedFor) only the places it reads:
+// those the set's postings name for its words (placeIndex), not every place
+// of the call for every word, so a call over thousands of recordings copies
+// as many places as it reads, however many the set holds. The verdicts stay.
+func TestOutcomeCostAWordsCheckCopiesOnlyThePlacesItReads(t *testing.T) {
+	var first string
+	for _, n := range []int{300, 3000} {
+		c := placeCopies.Load()
+		got, _, _, _, asks := costSet(n)
+		copies := placeCopies.Load() - c
+		t.Logf("%d recordings: decided %s; places read %v, copied %d (both tests)", n, got[1], asks, copies)
+		if first == "" {
+			first = got[0]
+		}
+		if got[0] != first || got[1] != first {
+			t.Errorf("over %d recordings the tests decide %q; want %q in both", n, got, first)
+		}
+		if copies != asks[0]+asks[1] {
+			t.Errorf("over %d recordings the tests copied and placed %d places for their words; want the %d they read", n, copies, asks[0]+asks[1])
+		}
+	}
+}
