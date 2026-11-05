@@ -254,8 +254,10 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	d.entries = append(d.entries, e)
 	// Record's full round pairs by kind (RangeKind), under the proven
 	// switch: every replay under the switch keeps the index (a name per
-	// on-disk mock), so that one can; none without the switch.
-	if provenswitch.On() {
+	// on-disk mock), so that one can. Without the switch it lists only the
+	// kinds whose parser holds a call while the set still holds an unserved
+	// recording of it (models.AnswerPlacedKind), which reads them by kind.
+	if provenswitch.On() || models.AnswerPlacedKind(m.Kind) {
 		if d.byKind == nil {
 			d.byKind, d.kindOf = make(map[models.Kind][]string), make(map[string]models.Kind)
 		}
