@@ -998,14 +998,17 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 	room := viewRoom(t, rec, w)
 	p, stop := rec.payload(), int64(0)
 	eachField(p.text, p.fields, func(_ fieldAt, text string) { _, held := formsHeld(text); stop = max(stop, held) })
-	otherBody, _ := uuidAnswer(40, 64<<10)
+	otherBody, otherIDs := uuidAnswer(40, 64<<10)
 	other := RawOf(getAnswer("mock-2", "http://api/items/2", otherBody, eRecAt), false)
+	// A word the other text holds: a set's filter of its words (setFilter)
+	// rules out none of it, so asking it keeps the text's words.
+	held := otherIDs[5][9:13]
 	answers := map[bool][]fieldAt{}
 	for _, keeps := range []bool{false, true} {
 		kept := int64(0)
 		if keeps {
 			probe := newReaderIndex(NewDriftCache())
-			probe.textOf(other).holdsWord("zzzz")
+			probe.textOf(other).holdsWord(held)
 			if kept = probe.used; kept == 0 {
 				t.Fatalf("fixture: the other text's words were not kept")
 			}
@@ -1017,7 +1020,7 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 			readerBudget = c.budget
 			x := newReaderIndex(NewDriftCache())
 			if keeps {
-				if x.textOf(other).holdsWord("zzzz"); x.used != kept {
+				if x.textOf(other).holdsWord(held); x.used != kept {
 					t.Fatalf("fixture: kept %d, want %d", x.used, kept)
 				}
 			}
