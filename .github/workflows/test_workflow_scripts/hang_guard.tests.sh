@@ -210,7 +210,9 @@ if [ "$(id -u)" != 0 ] && sudo -n true 2>/dev/null; then
   # A sudo -n kill that fails because the run ended meanwhile (on the TERM
   # sudo relayed) is no failure to report: a sudo that waits until the
   # group is gone, then fails as kill(1) does, while root's command takes a
-  # moment to end on its TERM.
+  # moment to end on its TERM. root's command looks for its TERM every fifth
+  # of a second and ends by itself (0) after 30 s, as every run in these rows
+  # does, so a guard that sends it nothing fails the row, not hangs the rows.
   mkdir -p "$tmp/fakesudo-gone" && cat >"$tmp/fakesudo-gone/sudo" <<'E' && chmod +x "$tmp/fakesudo-gone/sudo"
 #!/usr/bin/env bash
 echo "$*" >>"$FAKE_SUDO_LOG"
@@ -230,7 +232,7 @@ exit 1
 E
   : >"$tmp/sudo-calls"
   FAKE_SUDO_LOG="$tmp/sudo-calls" PATH="$tmp/fakesudo-gone:$PATH" \
-    bounded 3 "$realsudo" -n sh -c 'trap "sleep 1; exit 0" TERM; while :; do sleep 0.2; done' 2>"$tmp/l19"
+    bounded 3 "$realsudo" -n sh -c 'trap "sleep 1; exit 0" TERM; n=0; while [ $n -lt 150 ]; do sleep 0.2; n=$((n + 1)); done' 2>"$tmp/l19"
   row "a run under sudo that ends a moment after the TERM: a sudo -n kill that finds it gone says nothing" 0 1 $? "$tmp/l19"
   [ -s "$tmp/sudo-calls" ] && ok "the guard sends its TERM through sudo to root's command that outlives it" ||
     bad "the guard did not send its TERM through sudo to root's command that outlived it"
