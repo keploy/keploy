@@ -9,11 +9,11 @@ import (
 	"syscall"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -217,8 +217,8 @@ const composeAbortSinceReads = 3
 // other failure (no answer, a slow one, a server error) is one a later read
 // may not have.
 func composeAbortDaemonRefuses(err error) bool {
-	return errdefs.IsForbidden(err) || errdefs.IsUnauthorized(err) || errdefs.IsNotFound(err) ||
-		errdefs.IsNotImplemented(err) || errdefs.IsInvalidParameter(err)
+	return cerrdefs.IsPermissionDenied(err) || cerrdefs.IsUnauthorized(err) || cerrdefs.IsNotFound(err) ||
+		cerrdefs.IsNotImplemented(err) || cerrdefs.IsInvalidArgument(err)
 }
 
 // composeAbortRetryPace is how long the watch waits before it reads the
@@ -269,7 +269,7 @@ func (a *App) composeAbortRead(ctx context.Context, what string, read func(conte
 func (a *App) composeAbortProject(ctx context.Context) (project string) {
 	_ = a.composeAbortRead(ctx, "keploy's agent's container", func(rctx context.Context) error {
 		info, err := a.docker.ContainerInspect(rctx, a.keployContainer)
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return nil
 		}
 		if err != nil {
@@ -314,7 +314,7 @@ func (a *App) readComposeAbortedBeforeTheApp(ctx context.Context, project string
 			continue
 		}
 		info, err := a.docker.ContainerInspect(ctx, c.ID)
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			// Removed since the list.
 			continue
 		}

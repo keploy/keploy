@@ -94,9 +94,9 @@ func (d *abortDaemon) labels(c *abortContainer) map[string]string {
 
 func (d *abortDaemon) takes(s abortSub, m events.Message) bool {
 	f := s.f.Filters
-	return !(f.Contains("type") && !f.ExactMatch("type", string(m.Type)) ||
-		f.Contains("event") && !f.ExactMatch("event", string(m.Action)) ||
-		f.Contains("label") && !f.MatchKVList("label", m.Actor.Attributes))
+	return (!f.Contains("type") || f.ExactMatch("type", string(m.Type))) &&
+		(!f.Contains("event") || f.ExactMatch("event", string(m.Action))) &&
+		(!f.Contains("label") || f.MatchKVList("label", m.Actor.Attributes))
 }
 
 // set makes the status of the container named name status, as a start of
@@ -708,6 +708,7 @@ func TestTheAbortWatchReadsEventsOnTheDaemonsClock(t *testing.T) {
 // attempts (the aborted one and its retry) reads the time.
 func TestAnAbortWatchOnADaemonThatWillNotSayItsTime(t *testing.T) {
 	refused := errors.New("Error response from daemon: not served")
+	cannotConnect := realConnectionFailure(t)
 	empty, malformed := "", "Thu Oct 30 15:25:00 IST 2026"
 	for _, tc := range []struct {
 		name  string
@@ -720,7 +721,7 @@ func TestAnAbortWatchOnADaemonThatWillNotSayItsTime(t *testing.T) {
 		{name: "not found", err: errdefs.NotFound(refused), perUp: 1},
 		{name: "not implemented", err: errdefs.NotImplemented(refused), perUp: 1},
 		{name: "an invalid parameter", err: errdefs.InvalidParameter(refused), perUp: 1},
-		{name: "keploy's client cannot connect", err: client.ErrorConnectionFailed("unix:///run/user/1000/docker.sock"), perUp: 1},
+		{name: "keploy's client cannot connect", err: cannotConnect, perUp: 1},
 		{name: "an empty time", time: &empty, perUp: 1},
 		{name: "a time keploy does not read", time: &malformed, perUp: 1},
 		{name: "every read fails (a 500)", err: errdefs.System(errors.New("Error response from daemon: internal error")), perUp: composeAbortSinceReads},
@@ -737,6 +738,25 @@ func TestAnAbortWatchOnADaemonThatWillNotSayItsTime(t *testing.T) {
 			}
 		})
 	}
+}
+
+// realConnectionFailure is the error a real Engine API client gives when
+// nothing serves its DOCKER_HOST (here a socket that does not exist): the
+// error the watch reads as keploy's client cannot connect.
+func realConnectionFailure(t *testing.T) error {
+	t.Helper()
+	cli, err := client.NewClientWithOpts(client.WithHost("unix://" + filepath.Join(t.TempDir(), "docker.sock")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cli.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	_, err = cli.Info(ctx)
+	if !client.IsErrConnectionFailed(err) {
+		t.Fatalf("a client at a socket that does not exist gave %v, not a connection failure", err)
+	}
+	return err
 }
 
 // TestAnAbortWatchOnADaemonKeployCannotReachLetsTheUpStart: keploy's Engine
@@ -983,6 +1003,46 @@ func TestComposeRecreatingARunningAgentIsNotTheAbort(t *testing.T) {
 	if a.composeAbortedBeforeTheApp(context.Background(), "p") {
 		t.Fatal("compose's recreate of a running agent (the new agent created, the old one stopped) is read as the abort: keploy kills the retried up")
 	}
+}
+
+// TestAContainerRemovedSinceTheListIsNotInTheAbortsDecision: the project's
+// read lists its containers, then inspects each. One removed in between (the
+// app's old container, which compose removes when it recreates the app)
+// answers NotFound: it is gone, so the read decides on the others, and the
+// abort is still seen. Read as "not the abort", the watch let that die go,
+// and on the abort's last die no other die comes.
+func TestAContainerRemovedSinceTheListIsNotInTheAbortsDecision(t *testing.T) {
+	d := &removedSinceListDaemon{abortDaemon: newAbortDaemon("p",
+		&abortContainer{name: "p-dep-1", service: "dep", status: "exited", exitCode: 3},
+		&abortContainer{name: "agent", service: keployAgentComposeService, status: "exited"},
+		&abortContainer{name: "app", service: "app", status: "created"},
+	), removed: &abortContainer{name: "0123456789ab_p-app-1", service: "app", status: "exited"}}
+	a := &App{logger: zap.NewNop(), docker: d, kind: utils.DockerCompose, keployContainer: "agent", container: "app", composeService: "app"}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if !a.composeAbortedBeforeTheApp(ctx, "p") {
+		t.Fatal("a container removed between the project's list and its inspect is read as the project not aborted: keploy waits on the up")
+	}
+	if !d.listedRemoved.Load() {
+		t.Fatal("the read never listed the removed container: the row does not test it")
+	}
+}
+
+// removedSinceListDaemon lists removed, a container it no longer has, in its
+// first list of the project only, as the daemon does for a container removed
+// between that list and its inspect.
+type removedSinceListDaemon struct {
+	*abortDaemon
+	removed       *abortContainer
+	listedRemoved atomic.Bool
+}
+
+func (d *removedSinceListDaemon) ContainerList(ctx context.Context, o container.ListOptions) ([]container.Summary, error) {
+	out, err := d.abortDaemon.ContainerList(ctx, o)
+	if err != nil || !o.Filters.ExactMatch("label", composeProjectLabelKey+"="+d.project) || !d.listedRemoved.CompareAndSwap(false, true) {
+		return out, err
+	}
+	return append(out, container.Summary{ID: d.removed.name, Names: []string{"/" + d.removed.name}, Labels: d.labels(d.removed)}), nil
 }
 
 // TestComposeAbortCmdErrorSaysKeployEndedTheUp: an up keploy ended on the
