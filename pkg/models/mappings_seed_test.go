@@ -37,25 +37,26 @@ func TestMappedTestCaseSeedRoundTrip(t *testing.T) {
 	}
 }
 
-// Under the switch, a seed: that is not a string fails the decode, never
-// reads the entry without it (its replay would draw other numbers than its
-// recording); with the switch off seed: is not read, and the entry keeps its
-// mocks.
-func TestMappedTestCaseSeedIsReadUnderTheSwitchOnly(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	var tc MappedTestCase
-	require.ErrorContains(t, yaml.Unmarshal([]byte("id: t1\nseed: [a]\nmock_entries:\n  - name: mock-0\n"), &tc), "browser seed")
-	require.ErrorContains(t, json.Unmarshal([]byte(`{"id":"t1","seed":{"a":1},"mock_entries":[{"name":"mock-0"}]}`), &tc), "browser seed")
-	t.Setenv(provenswitch.Env, "")
-	for _, doc := range []string{"id: t1\nseed: 0123456789abcdef\nmock_entries:\n  - name: mock-0\n", "id: t1\nseed: [a]\nmock_entries:\n  - name: mock-0\n"} {
-		var tc MappedTestCase
-		require.NoError(t, yaml.Unmarshal([]byte(doc), &tc), doc)
-		require.Empty(t, tc.Seed)
-		require.Equal(t, "mock-0", tc.Mocks[0].Name)
+// A test's seed: is read whatever the switch, as its key: (mapdb keeps a
+// test entry's data whatever the switch; a replay answers a begin with it
+// under the switch only). One that is not a string fails the decode either
+// way, never reads the entry without it (its replay would draw other numbers
+// than its recording).
+func TestMappedTestCaseSeedIsReadWhateverTheSwitch(t *testing.T) {
+	for _, sw := range []string{"1", ""} {
+		t.Setenv(provenswitch.Env, sw)
+		var bad MappedTestCase
+		require.ErrorContains(t, yaml.Unmarshal([]byte("id: t1\nseed: [a]\nmock_entries:\n  - name: mock-0\n"), &bad), "browser seed", "switch=%q", sw)
+		require.ErrorContains(t, json.Unmarshal([]byte(`{"id":"t1","seed":{"a":1},"mock_entries":[{"name":"mock-0"}]}`), &bad), "browser seed", "switch=%q", sw)
+		var y MappedTestCase
+		require.NoError(t, yaml.Unmarshal([]byte("id: t1\nseed: 0123456789abcdef\nmock_entries:\n  - name: mock-0\n"), &y))
+		require.Equal(t, "0123456789abcdef", y.Seed, "switch=%q", sw)
+		require.Equal(t, "mock-0", y.Mocks[0].Name)
+		var j MappedTestCase
+		require.NoError(t, json.Unmarshal([]byte(`{"id":"t1","seed":"0123456789abcdef","mock_entries":[{"name":"mock-0"}]}`), &j))
+		require.Equal(t, "0123456789abcdef", j.Seed, "switch=%q", sw)
+		require.Equal(t, "mock-0", j.Mocks[0].Name)
 	}
-	var j MappedTestCase
-	require.NoError(t, json.Unmarshal([]byte(`{"id":"t1","seed":"0123456789abcdef","mock_entries":[{"name":"mock-0"}]}`), &j))
-	require.Empty(t, j.Seed)
 }
 
 // A begin's seed is kept in lower case when it is 8 to 64 hex digits, and

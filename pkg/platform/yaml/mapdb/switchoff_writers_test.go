@@ -98,6 +98,10 @@ func fileWriters() map[string]func(*MappingDb) error {
 		"UpsertCases": func(db *MappingDb) error {
 			return db.UpsertCases(ctx, "s", map[string]models.MappedTestCase{"o::TestA": {ID: "o::TestA", Cases: []string{"test-1"}}}, nil, nil)
 		},
+		"ApplyShares": func(db *MappingDb) error {
+			_, err := db.ApplyShares(ctx, "s", models.SetShares{State: models.SharesComplete, Pins: map[string]string{"mock-1": "o::TestA"}})
+			return err
+		},
 		"UpsertConcurrency": func(db *MappingDb) error {
 			return db.UpsertConcurrency(ctx, "s", []models.ConcurrencyGroup{{ID: "g", Tests: []string{"o::TestA"}}}, []models.MockEntry{{Name: "mock-7"}})
 		},
@@ -108,7 +112,11 @@ func fileWriters() map[string]func(*MappingDb) error {
 // for byte the file keploy wrote before it kept hand edits: what a hand edit
 // added and the comments are dropped, and keploy's line is where each writer
 // always put it (on every write, on a file it creates, or never). The
-// goldens were written by main before this change. A file whose entries use
+// goldens were written by main before this change, but for one fix: what a
+// writer did not touch survives it whatever the switch, so Insert, which
+// dropped each test entry's fields beside its mocks, keeps them (the
+// handedited fixture's dir: o; TestEachWriterKeepsEachTestsFieldsWithoutTheSwitch
+// has the rest). A file whose entries use
 // a YAML merge key (<<) is not among them: keploy reads what the merge key
 // brings now, a declared fix
 // (models.TestAMergeKeyGivesATestEntryItsMocks).

@@ -51,20 +51,23 @@ func TestMappedTestCaseRefusesARealThatIsNotAList(t *testing.T) {
 	require.ErrorContains(t, err, "not a list")
 }
 
-// With the switch off, real: is not read, whatever it holds, so an entry keeps
-// its mocks and its shape.
-func TestMappedTestCaseWithoutTheSwitchIgnoresReal(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
-	for _, doc := range []string{
-		"id: t1\nreal: [db:5432]\nmock_entries:\n  - name: mock-0\n",
-		"id: t1\nreal: {not: a list}\nmock_entries:\n  - name: mock-0\n",
-	} {
-		var tc MappedTestCase
-		require.NoError(t, yaml.Unmarshal([]byte(doc), &tc), doc)
-		require.Nil(t, tc.Real)
-		require.Equal(t, "mock-0", tc.Mocks[0].Name)
+// A test's real: is read whatever the switch, as its key: (mapdb keeps a
+// test entry's data whatever the switch; a replay puts the test on the real
+// clock under the switch only). One that is not a list of destinations fails
+// the decode either way.
+func TestMappedTestCaseRealIsReadWhateverTheSwitch(t *testing.T) {
+	for _, sw := range []string{"1", ""} {
+		t.Setenv(provenswitch.Env, sw)
+		var bad MappedTestCase
+		require.ErrorContains(t, yaml.Unmarshal([]byte("id: t1\nreal: {not: a list}\nmock_entries:\n  - name: mock-0\n"), &bad), "not a list", "switch=%q", sw)
+		require.ErrorContains(t, json.Unmarshal([]byte(`{"id":"t1","real":"x","mock_entries":[{"name":"mock-0"}]}`), &bad), "not a list", "switch=%q", sw)
+		var y MappedTestCase
+		require.NoError(t, yaml.Unmarshal([]byte("id: t1\nreal: [db:5432]\nmock_entries:\n  - name: mock-0\n"), &y))
+		require.Equal(t, []string{"db:5432"}, y.Real, "switch=%q", sw)
+		require.Equal(t, "mock-0", y.Mocks[0].Name)
+		var j MappedTestCase
+		require.NoError(t, json.Unmarshal([]byte(`{"id":"t1","real":["db:5432"],"mock_entries":[{"name":"mock-0"}]}`), &j))
+		require.Equal(t, []string{"db:5432"}, j.Real, "switch=%q", sw)
+		require.Equal(t, "mock-0", j.Mocks[0].Name)
 	}
-	var tc MappedTestCase
-	require.NoError(t, json.Unmarshal([]byte(`{"id":"t1","real":"x","mock_entries":[{"name":"mock-0"}]}`), &tc))
-	require.Nil(t, tc.Real)
 }
