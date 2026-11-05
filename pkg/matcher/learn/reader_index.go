@@ -1,13 +1,17 @@
 package learn
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"hash/maphash"
+	"index/suffixarray"
 	"io"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // The reader's index: what the places before a call hold of its changed
@@ -55,26 +59,32 @@ type readerIndex struct {
 	seed               maphash.Seed
 	texts              map[uint64][]*readerEntry
 	unreadTexts        int
+	// momentAsks counts the instants holdsMoment asks byMoment of: what
+	// keeps a call's work near linear in the instants it decides.
+	momentAsks int
 }
 
-// readerEntry is what the index keeps of one text: its words, its base64
-// runs and its instants, each kept where it fits the budget, and then the
-// text itself (counted in the budget once) to tell it from another text of
-// its hash. An entry that keeps no answer keeps no byte of its text either,
-// so a call that asks about many large recordings holds at once only what
-// fits the budget: the caller's handle holds the text while it asks (or, of
-// a recording, reads it per question), and nothing here holds it after.
+// readerEntry is what the index keeps of one text: its other declared forms,
+// its base64 runs and its instants, each kept where it fits the budget, and
+// then the text itself (counted in the budget once) to tell it from another
+// text of its hash. An entry that keeps no answer keeps no byte of its text
+// either, so a call that asks about many large recordings holds at once only
+// what fits the budget: the caller's handle holds the text while it asks (or,
+// of a recording, reads it per question), and nothing here holds it after.
 type readerEntry struct {
-	n                int
-	text             string
-	tokens           answer[[]map[string]bool]
-	runs             answer[map[string]bool]
-	spans, formSpans answer[[]instant]
-	fields           answer[fieldWords]
+	n    int
+	text string
+	// forms: the text's other declared forms (textForms past the text
+	// itself), one per line, where a word is looked for besides the text.
+	forms     answer[string]
+	runs      answer[map[string]bool]
+	spans     answer[[]instant]
+	formSpans answer[momentIndex]
+	fields    answer[fieldWords]
+	subs      answer[*suffixarray.Index]
 	// past: an answer of the text did not fit what was left of the
 	// budget, which only fills, so the entry keeps none from then on: each
-	// question is answered from the text read again, a word by a scan of
-	// it (wordIn) that builds no list of its other words.
+	// question is answered from the text read again.
 	past bool
 }
 
@@ -103,6 +113,9 @@ type readerText struct {
 	raw       *Raw
 	rawUnread bool
 	e         *readerEntry
+	// scans counts the questions contains answered by a scan of the text
+	// through this handle, before the text's suffix array.
+	scans int
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
@@ -285,12 +298,18 @@ func (x *readerIndex) mayKeep(e *readerEntry, s string) bool {
 	return !e.past
 }
 
-// tokens are the text's words in every declared form, by reading (isWord,
-// wordByte, idByte), read once for the call where they fit the budget, scan
-// answering past it (indexOnce).
-func (t *readerText) tokens(scan func(string, []rawField)) ([]map[string]bool, bool, bool) {
-	return indexOnce(t, func(e *readerEntry) *answer[[]map[string]bool] { return &e.tokens },
-		uncapped(func(s string, _ []rawField) []map[string]bool { return t.x.dc.rawTokens(s) }), tokensBytes, scan)
+// formsOf are s's other declared forms (textForms past s itself), one per
+// line, s being the text read now: a recording's as the set keeps them,
+// derived once for the set from s (payloadExtra: the recording is not read
+// again for them), a handed text's through the test's cache of texts
+// (rawExtra).
+func (t *readerText) formsOf(s string) string {
+	if t.raw == nil {
+		return t.x.dc.rawExtra(s)
+	}
+	now := *t.raw
+	now.src, now.rText, now.rStamps, now.rRead = nil, s, nil, true
+	return t.x.dc.payloadExtra(now)
 }
 
 // spansOf are the text's instants (instantSpans), read once for the call
@@ -316,6 +335,42 @@ func (t *readerText) textNow() (string, bool) {
 	return s, ok
 }
 
+// containsScans is how many questions of a text contains answers through
+// one handle by a scan of it before it reads the text's suffix array:
+// building one costs some tens of scans, so a text asked of a few words is
+// only scanned, and one asked of thousands (an answer of thousands of
+// instants, each changed) is scanned this often at most.
+const containsScans = 16
+
+// contains reports whether the text holds w anywhere, as strings.Contains
+// of it does: by a scan of the text read now for the handle's first
+// containsScans questions, then from the text's suffix array, built once
+// for the call where it fits what is left of the index's cap, and by a scan
+// past it (indexOnce). read is false where the recording was not read.
+func (t *readerText) contains(w string) (held, read bool) {
+	if t.scans < containsScans {
+		t.scans++
+		s, ok := t.textNow()
+		return ok && strings.Contains(s, w), ok
+	}
+	ix, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[*suffixarray.Index] { return &e.subs },
+		func(s string, _ []rawField, room int64) (*suffixarray.Index, bool) {
+			if suffixBytes(len(s)) > room {
+				return nil, false
+			}
+			return suffixarray.New([]byte(s)), true
+		}, func(ix *suffixarray.Index) int64 { return suffixBytes(len(ix.Bytes())) },
+		func(s string, _ []rawField) { held = strings.Contains(s, w) })
+	if scanned || !ok {
+		return held, ok
+	}
+	return w == "" || len(ix.Lookup([]byte(w), 1)) > 0, true
+}
+
+// suffixBytes is about what the suffix array of an n-byte text holds: a
+// copy of the text and a 4-byte place per byte.
+func suffixBytes(n int) int64 { return headerBytes + 5*int64(n) }
+
 // holdsWord reports whether the text holds w as a word in any of main's
 // readings (isWord, wordByte, idByte) and any declared form; read is false
 // where the recording was not read (held is false then).
@@ -324,47 +379,73 @@ func (t *readerText) holdsWord(w string) (held, read bool) {
 }
 
 // wordIn reports whether the text holds w as a word in any of the readings
-// rs (indices of main's readings) and any declared form: from the words the
-// entry keeps (tokens), or, past the budget, by a scan of the text read
-// now and its other declared forms (textForms, the forms main's word lists
-// read), which reads no other word of it and keeps nothing, in no cache
-// either. read is false where the recording was not read.
+// rs (indices of main's readings) and any declared form, as main's lists of
+// the text's words hold it: by a scan of the text and of its other forms
+// (formsOf), kept for the call with the text where both fit the budget; past
+// it, by a scan of the text read again and its forms (textForms) derived
+// for the question, kept by no one, not by the set either. No list
+// of the text's other words is built: a call asks a few words of each of
+// thousands of places, so listing every word of each, call after call, cost
+// more than all the rest of the call. read is false where the recording was
+// not read.
 func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
-	sets, scanned, ok := t.tokens(func(s string, _ []rawField) { held = heldIn(textForms(s), w, rs...) })
+	var text string
+	forms, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[string] { return &e.forms },
+		uncapped(func(s string, _ []rawField) string { text = s; return t.formsOf(s) }), stringBytes,
+		func(s string, _ []rawField) { held = heldIn(textForms(s), w, rs...) })
 	if scanned || !ok {
 		return held, ok
 	}
-	return slices.ContainsFunc(rs, func(r int) bool { return r < len(sets) && sets[r][w] }), true
+	if t.e.forms.ok {
+		text = t.e.text
+	}
+	return heldIn([]string{text, forms}, w, rs...), true
 }
 
 // heldIn reports whether one of a text's declared forms (textForms) holds w
 // as a word in any of the readings rs.
 func heldIn(forms []string, w string, rs ...int) bool {
-	return slices.ContainsFunc(forms, func(f string) bool {
-		return slices.ContainsFunc(rs, func(r int) bool { return heldBy(f, w, readings[r]) })
-	})
+	return slices.ContainsFunc(forms, func(f string) bool { return heldBy(f, w, rs...) })
 }
 
-// heldBy reports whether w is a word of s as word reads it (tokensBy(s,
-// word)[w]) without reading s's other words: w stands in s, every byte of
-// it continues a word, and no byte that does stands right before or after.
-func heldBy(s, w string, word func(byte) bool) bool {
+// heldScans counts the scans heldBy makes of a text for a word, for the
+// rows that bound a call's work.
+var heldScans atomic.Int64
+
+// heldBy reports whether w is a word of s in any of the readings rs as each
+// reads it (tokensBy(s, readings[r])[w]) without reading s's other words: w
+// stands in s, every byte of it continues a word, and no byte that does
+// stands right before or after. One scan finds each place w stands in s for
+// every reading.
+func heldBy(s, w string, rs ...int) bool {
 	if w == "" {
 		return false
 	}
-	for i := 0; i < len(w); i++ {
-		if !word(w[i]) {
-			return false
+	by := make([]func(byte) bool, 0, 3)
+next:
+	for _, r := range rs {
+		word := readings[r]
+		for i := 0; i < len(w); i++ {
+			if !word(w[i]) {
+				continue next
+			}
 		}
+		by = append(by, word)
 	}
+	if len(by) == 0 {
+		return false
+	}
+	heldScans.Add(1)
 	for off := 0; off <= len(s)-len(w); {
 		i := strings.Index(s[off:], w)
 		if i < 0 {
 			return false
 		}
 		i += off
-		if (i == 0 || !word(s[i-1])) && (i+len(w) == len(s) || !word(s[i+len(w)])) {
-			return true
+		for _, word := range by {
+			if (i == 0 || !word(s[i-1])) && (i+len(w) == len(s) || !word(s[i+len(w)])) {
+				return true
+			}
 		}
 		off = i + 1
 	}
@@ -765,22 +846,187 @@ func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 // (byMoment), and whether one does so at a fine cut, in the text or any of
 // its declared forms, the forms main reads an instant in (holdsExact(text)
 // || holdsExact(rawExtra(text))) and holdsWord reads a word in; read as
-// holdsWord, the instants of the text and its forms from one read of it.
+// holdsWord, the instants of the text and its forms from one read of it,
+// kept in the orders momentIndex looks them up by. Past the budget each
+// question asks of every instant of the text read now, and orders none.
 func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
 	dc := t.x.dc
-	spans, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.formSpans },
-		uncapped(func(s string, _ []rawField) []instant {
-			return slices.Concat(dc.spansOf(s), dc.spansOf(dc.rawExtra(s)))
-		}), spansBytes, nil)
+	asked := func() { t.x.momentAsks++ }
+	forms := func(s string) []instant { return slices.Concat(dc.spansOf(s), dc.spansOf(dc.rawExtra(s))) }
+	ix, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[momentIndex] { return &e.formSpans },
+		uncapped(func(s string, _ []rawField) momentIndex { return newMomentIndex(forms(s)) }), momentIndexBytes,
+		func(s string, _ []rawField) {
+			for _, sp := range forms(s) {
+				if !sp.keyed {
+					continue
+				}
+				asked()
+				h, f := byMoment(sp.moment(), m)
+				held, fine = held || h, fine || f
+			}
+		})
+	if !ok {
+		return false, false, false
+	}
+	if !scanned {
+		held, fine = ix.holds(m, asked)
+	}
+	return held, fine, true
+}
+
+// momentIndex is the moments of a text's instants that name one
+// (instant.keyed), in the orders holds looks them up by, so that a
+// question asks byMoment only of the instants cutsNone cannot turn away:
+//   - odd: a time of day, or an instant in a zone not a whole number of
+//     minutes off UTC, which cutsNone turns away from no moment;
+//   - at: every other instant, by its moment (key.at);
+//   - minute: those of at whole at the minute in UTC, the only ones a value
+//     finer than them is built on (cutsNone's finer);
+//   - wall: those of at in a zone off UTC, by the wall clock they write
+//     (key.at plus their offset), the only ones a value of no zone is the
+//     wall clock of.
+type momentIndex struct {
+	moments          []moment
+	odd              []int32
+	at, minute, wall momentOrder
+}
+
+// momentOrder is some of an index's moments by a key, ascending.
+type momentOrder []orderedMoment
+
+// orderedMoment is one moment of an order: its key, and its index in
+// momentIndex.moments (i).
+type orderedMoment struct {
+	key int64
+	i   int32
+}
+
+// newMomentIndex is the index of spans' instants that name a moment.
+func newMomentIndex(spans []instant) momentIndex {
+	var ix momentIndex
+	minute := int64(time.Minute)
+	add := func(o *momentOrder, key int64, i int32) {
+		*o = append(*o, orderedMoment{key, i})
+	}
 	for _, sp := range spans {
 		if !sp.keyed {
 			continue
 		}
-		if h, f := byMoment(sp.moment(), m); h {
-			held, fine = true, fine || f
+		m := sp.moment()
+		i := int32(len(ix.moments))
+		ix.moments = append(ix.moments, m)
+		z := m.offset()
+		if m.key.day || z%minute != 0 {
+			ix.odd = append(ix.odd, i)
+			continue
+		}
+		add(&ix.at, m.key.at, i)
+		if whole(m.key.at, 0, minute) {
+			add(&ix.minute, m.key.at, i)
+		}
+		if z != 0 {
+			add(&ix.wall, m.key.at+z, i)
 		}
 	}
-	return held, fine, ok
+	for _, o := range []momentOrder{ix.at, ix.minute, ix.wall} {
+		slices.SortFunc(o, func(a, b orderedMoment) int { return cmp.Compare(a.key, b.key) })
+	}
+	return ix
+}
+
+// momentIndexBytes is about what ix holds: each moment, and each of its
+// places in the orders.
+func momentIndexBytes(ix momentIndex) int64 {
+	return headerBytes + momentBytes*int64(len(ix.moments)) + 4*int64(len(ix.odd)) + 16*int64(len(ix.at)+len(ix.minute)+len(ix.wall))
+}
+
+// holds is holdsMoment's answer of ix: whether an instant names m by
+// moment (byMoment), and whether one does so at a fine cut. asked counts
+// each instant byMoment is asked of.
+//
+// It asks first of the instants that may hold m at a fine cut: the odd
+// ones, and those that stand within a millisecond of m, as instants or one
+// as the other's wall clock. A cut finer than a millisecond moves an
+// instant by less than one, and a value finer than an instant is built
+// only on a unit longer than F's lead (cutsEach's finerUnits), so no other
+// instant holds m at a fine cut. Where none of those holds m, it asks of
+// the instants cutsNone does not turn away from m (each of its three
+// reaches, coarserReach), and the first that holds m answers. A moment of a
+// time of day, or of a zone not a whole number of minutes off UTC, which
+// cutsNone turns away from nothing, is asked of every instant.
+func (ix *momentIndex) holds(m moment, asked func()) (held, fine bool) {
+	ask := func(i int32) bool {
+		asked()
+		h, f := byMoment(ix.moments[i], m)
+		held, fine = held || h, fine || f
+		return fine
+	}
+	minute := int64(time.Minute)
+	if m.key.day || m.offset()%minute != 0 {
+		for i := range ix.moments {
+			if ask(int32(i)) {
+				break
+			}
+		}
+		return held, fine
+	}
+	at, mz, ms := m.key.at, m.offset(), int64(time.Millisecond)
+	for _, i := range ix.odd {
+		if ask(i) {
+			return held, fine
+		}
+	}
+	if ix.at.each(at, ms, ask) || !m.zoned && ix.wall.each(at, ms, ask) || held {
+		return held, fine
+	}
+	first := func(i int32) bool {
+		ask(i)
+		return held
+	}
+	unzoned := func(i int32) bool { return !ix.moments[i].zoned && first(i) }
+	reach := coarserReach(m)
+	_ = ix.at.each(at, reach, first) ||
+		!m.typed && ix.minute.each(at, nsPerDay, first) ||
+		!m.zoned && ix.wall.each(at, reach, first) ||
+		mz != 0 && ix.at.each(at+mz, 0, unzoned) ||
+		mz != 0 && !m.typed && ix.minute.each(at+mz, nsPerDay, unzoned)
+	return held, fine
+}
+
+// each calls f with each moment of o whose key stands within r of c, from
+// the first at or past c up, then down from it, until f returns true;
+// it reports whether f did.
+func (o momentOrder) each(c, r int64, f func(int32) bool) bool {
+	p, _ := slices.BinarySearchFunc(o, c, func(e orderedMoment, c int64) int { return cmp.Compare(e.key, c) })
+	for j := p; j < len(o) && o[j].key <= c+r; j++ {
+		if f(o[j].i) {
+			return true
+		}
+	}
+	for j := p - 1; j >= 0 && o[j].key >= c-r; j-- {
+		if f(o[j].i) {
+			return true
+		}
+	}
+	return false
+}
+
+// coarserReach is how far from m, an instant of a zone whole minutes off
+// UTC, an instant may stand as an instant and hold m by being cut to a
+// unit m is whole at (cutsNone's coarser): a day where m is whole at the
+// minute, else the longest unit m is whole at in UTC: one of a second or
+// less, as each unit past a second is whole minutes.
+func coarserReach(m moment) int64 {
+	if whole(m.key.at, 0, int64(time.Minute)) {
+		return nsPerDay
+	}
+	var reach int64
+	for _, d := range precisionUnits {
+		if u := int64(d); whole(m.key.at, 0, u) {
+			reach = u
+		}
+	}
+	return reach
 }
 
 // unread reports whether the call asked about a recording keploy could not

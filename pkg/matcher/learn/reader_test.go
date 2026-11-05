@@ -649,23 +649,24 @@ func TestReaderFieldsOfARecordingHoldItsWordsWhereTheyStand(t *testing.T) {
 }
 
 // The index keeps an answer only where it and its text fit what is left of
-// the call's cap: a text that fits alone, whose words do not, keeps none,
-// and the index never holds past its cap.
+// the call's cap: a text that fits alone, whose other forms do not, keeps
+// none, and the index never holds past its cap.
 func TestReaderIndexKeepsNoAnswerPastItsCap(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	var sb strings.Builder
 	for i := 0; i < 64; i++ {
-		fmt.Fprintf(&sb, "w%d ", i)
+		fmt.Fprintf(&sb, "W%d ", i)
 	}
 	text := sb.String()
 	readerBudget = int64(len(text)) + headerBytes + 1
 	x := newReaderIndex(nil)
 	tt := x.text(text)
+	// Only its case-folded form holds w17: its other forms are read.
 	if held, read := tt.holdsWord("w17"); !held || !read {
 		t.Fatalf("held %v read %v; want held", held, read)
 	}
-	if x.used > x.budget || tt.e.tokens.ok {
-		t.Errorf("the index keeps %d bytes (words kept %v) within a cap of %d", x.used, tt.e.tokens.ok, x.budget)
+	if x.used > x.budget || tt.e.forms.ok {
+		t.Errorf("the index keeps %d bytes (other forms kept %v) within a cap of %d", x.used, tt.e.forms.ok, x.budget)
 	}
 	// The entry is past the cap from then on: an answer that would fit
 	// alone (its instants: none) is built for the question and not kept.
@@ -737,16 +738,16 @@ func TestReaderFieldsOfAStreamedBodyAreItsValuesFields(t *testing.T) {
 // The index counts a text it keeps once, however many of its answers it
 // keeps: the entry keeps the text with the first answer it keeps.
 func TestReaderIndexCountsAKeptTextOnce(t *testing.T) {
-	text := "id 7f3c " + strings.Repeat("word ", 20000)
+	text := "ID 7F3C " + strings.Repeat("WORD ", 20000)
 	x := newReaderIndex(NewDriftCache())
 	tt := x.text(text)
 	if held, read := tt.holdsWord("7f3c"); !held || !read {
 		t.Fatalf("held %v read %v; want held", held, read)
 	}
-	if _, ok := tt.spansOf(); !ok || tt.e.text != text || !tt.e.tokens.ok || !tt.e.spans.ok {
-		t.Fatalf("fixture: the entry keeps the text %v, its words %v, its instants %v", tt.e.text == text, tt.e.tokens.ok, tt.e.spans.ok)
+	if _, ok := tt.spansOf(); !ok || tt.e.text != text || !tt.e.forms.ok || !tt.e.spans.ok {
+		t.Fatalf("fixture: the entry keeps the text %v, its other forms %v, its instants %v", tt.e.text == text, tt.e.forms.ok, tt.e.spans.ok)
 	}
-	if want := int64(len(text)) + tokensBytes(tt.e.tokens.v) + spansBytes(tt.e.spans.v); x.used != want {
+	if want := int64(len(text)) + stringBytes(tt.e.forms.v) + spansBytes(tt.e.spans.v); x.used != want {
 		t.Errorf("the index counts %d bytes; want %d: the text once, beside its two answers", x.used, want)
 	}
 }
@@ -756,16 +757,16 @@ func TestReaderIndexCountsAKeptTextOnce(t *testing.T) {
 // the text again and keeps nothing.
 func TestReaderReleaseLetsGoOfEveryAnswer(t *testing.T) {
 	x := newReaderIndex(NewDriftCache())
-	tt := x.text("id 7f3c and more words")
-	if held, read := tt.holdsWord("7f3c"); !held || !read || !tt.e.tokens.ok {
-		t.Fatalf("held %v read %v, words kept %v; want held and kept", held, read, tt.e.tokens.ok)
+	tt := x.text("ID 7F3C AND MORE WORDS")
+	if held, read := tt.holdsWord("7f3c"); !held || !read || !tt.e.forms.ok {
+		t.Fatalf("held %v read %v, other forms kept %v; want held and kept", held, read, tt.e.forms.ok)
 	}
 	x.release()
-	if tt.e.tokens.ok || tt.e.text != "" {
-		t.Errorf("after release the handle's entry keeps its words %v, its text %q; want nothing", tt.e.tokens.ok, tt.e.text)
+	if tt.e.forms.ok || tt.e.text != "" {
+		t.Errorf("after release the handle's entry keeps its other forms %v, its text %q; want nothing", tt.e.forms.ok, tt.e.text)
 	}
-	if held, read := tt.holdsWord("7f3c"); !held || !read || tt.e.tokens.ok || x.used != 0 {
-		t.Errorf("asked after release: held %v read %v, words kept %v, %d bytes; want held, nothing kept", held, read, tt.e.tokens.ok, x.used)
+	if held, read := tt.holdsWord("7f3c"); !held || !read || tt.e.forms.ok || x.used != 0 {
+		t.Errorf("asked after release: held %v read %v, other forms kept %v, %d bytes; want held, nothing kept", held, read, tt.e.forms.ok, x.used)
 	}
 }
 
@@ -877,12 +878,12 @@ func TestReaderReleaseClearsEveryKindOfAnswer(t *testing.T) {
 	const w = "ord7Kq2Xw9"
 	x := newReaderIndex(NewDriftCache())
 	tt := x.textOf(RawOf(getAnswer("mock-1", "http://api/items/1", `{"a":"`+w+` 2026-10-31T10:50:13Z"}`, eRecAt), false))
-	tt.holdsWord(w)
+	tt.holdsWord(strings.ToLower(w)) // only its case-folded form holds it
 	tt.fieldsWith(w)
 	tt.holdsToken(tokenB64, "zzzzzzzz")
 	tt.spansOf()
 	tt.holdsMoment(moment{})
-	if e := tt.e; !e.tokens.ok || !e.fields.ok || !e.runs.ok || !e.spans.ok || !e.formSpans.ok {
+	if e := tt.e; !e.forms.ok || !e.fields.ok || !e.runs.ok || !e.spans.ok || !e.formSpans.ok {
 		t.Fatalf("fixture: kept %+v", e)
 	}
 	x.release()
