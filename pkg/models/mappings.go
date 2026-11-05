@@ -365,9 +365,12 @@ type MappedTestCase struct {
 	// test process's (POST /agent/instance). A reader who moves one of the
 	// test's calls to the set's worker: list gives the moved entry this key,
 	// so a replay serves it while that process holds the run (MockEntry.Key).
-	// Written and read only under the proven switch; empty in recordings
-	// made before keploy kept it, in those made without the switch, and for
-	// a test run under no claim.
+	// keploy mock record writes it under the proven switch only; empty in
+	// recordings made before keploy kept it, in those made without the
+	// switch, and for a test run under no claim. Read and kept by each
+	// rewrite of mappings.yaml, whatever the switch: a rewrite without it
+	// would drop the key, and a later move of the test's call could not
+	// give it.
 	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
 	// Seed is the seed the test's browser drew its random numbers from in
 	// its recording (models.ScopeWindow.Seed): each replay's begin is
@@ -514,12 +517,13 @@ func recordedGivenJSON(data []byte) ([]GivenValue, error) {
 // errRecordedKey is a test entry whose key: is not a string.
 const errRecordedKey = "a test's claim key (key) is not a string: %w"
 
-// recordedKeyYAML is a test entry's key: under the proven switch. One that
-// is not a string is an error, never a reason to read the entry without it:
-// an edit that moves the test's call to worker: would lose the key its
-// replay serves it under. With the switch off key: is not read.
+// recordedKeyYAML is a test entry's key:, whatever the proven switch: a
+// writer that rewrites the file with the switch off keeps it, as it keeps
+// the entry's mocks. One that is not a string is an error, never a reason to
+// read the entry without it: an edit that moves the test's call to worker:
+// would lose the key its replay serves it under.
 func recordedKeyYAML(node *yaml.Node) (string, error) {
-	if !provenswitch.On() || !nodeHasField(node, "key") {
+	if !nodeHasField(node, "key") {
 		return "", nil
 	}
 	var k struct {
@@ -533,7 +537,7 @@ func recordedKeyYAML(node *yaml.Node) (string, error) {
 
 // recordedKeyJSON is recordedKeyYAML for a JSON entry.
 func recordedKeyJSON(data []byte) (string, error) {
-	if !provenswitch.On() || !jsonContainsField(data, "key") {
+	if !jsonContainsField(data, "key") {
 		return "", nil
 	}
 	var k struct {

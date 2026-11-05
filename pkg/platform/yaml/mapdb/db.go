@@ -154,7 +154,10 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	// each test entry keeps what it holds beside its mocks (its cases, dir,
 	// starts...), and the app starts, suites and runner sections are kept,
 	// replace-or-keep as the startup section. Without the switch the file is
-	// written as before (TestEachWriterWritesAsBeforeWithoutTheSwitch).
+	// written as before (TestEachWriterWritesAsBeforeWithoutTheSwitch), but
+	// for each test's claim key, which every writer keeps whatever the switch
+	// (MappedTestCase.Key): a set keploy mock record wrote under the switch
+	// and keploy rewrote without it keeps its keys.
 	if provenswitch.On() {
 		keepEntries(newMapping, existingConfig.TestCases, mapping.TestCases)
 		if len(mapping.Suites) == 0 {
@@ -172,6 +175,8 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		} else {
 			newMapping.Runner = mapping.Runner
 		}
+	} else {
+		keepKeys(newMapping, existingConfig.TestCases, mapping.TestCases)
 	}
 
 	encodedData, err := db.encodeOver(newMapping, effFormat, old, headerAlways, testSetID)
@@ -219,6 +224,28 @@ func keepEntries(rebuilt *models.Mapping, onDisk, written []models.MappedTestCas
 			*e = o
 		}
 		e.Mocks = mocks
+	}
+}
+
+// keepKeys gives each test entry Insert rebuilt from the tests' mocks alone
+// its claim key (models.MappedTestCase.Key): the one the caller wrote for it,
+// else the one the file held for it, as keepEntries does under the proven
+// switch.
+func keepKeys(rebuilt *models.Mapping, onDisk, written []models.MappedTestCase) {
+	before := make(map[string]string, len(onDisk))
+	for _, e := range onDisk {
+		before[e.ID] = e.Key
+	}
+	now := make(map[string]string, len(written))
+	for _, e := range written {
+		now[e.ID] = e.Key
+	}
+	for i := range rebuilt.TestCases {
+		e := &rebuilt.TestCases[i]
+		e.Key = before[e.ID]
+		if k := now[e.ID]; k != "" {
+			e.Key = k
+		}
 	}
 }
 
@@ -461,8 +488,9 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 // takes that test's key (MappedTestCase.Key): the key of the test process
 // the test ran in when it was recorded. Of several tests whose lists held
 // it, the first gives it, as it gives the owner when the move names none.
-// A test with no key (every test without the switch, which reads none)
-// leaves the entry's own, and a worker entry placed again keeps its own.
+// A test's key is read whatever the switch, so a move with the switch off
+// gives it as one with it on. A test with no key leaves the entry's own,
+// and a worker entry placed again keeps its own.
 // The test's key is right for a call its own process made: a caller moving
 // a call made under another claim, or before any test process claimed the
 // run, names that key on the move (models.PoolKeyNone for none).
