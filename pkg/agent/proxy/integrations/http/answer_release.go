@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"net"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -44,12 +45,13 @@ type heldPiece struct {
 	data []byte
 }
 
-// heldAnswerOf is stub's answer as it must be held at the run's place now, or
-// nil when it is written at once, as before: no release is registered for
-// HTTP, the store tells no run place, the serve is not the first of a
-// per-test recording (a session or connection recording, an answer served
-// again: repeat), or every part of it is due already.
-func (h *HTTP) heldAnswerOf(stub *models.Mock, db integrations.MockMemDb, repeat bool) (*heldAnswer, error) {
+// heldAnswerOf is stub's answer to call, the application's request it
+// matched, as it must be held at the run's place now, or nil when it is
+// written at once, as before: no release is registered for HTTP, the store
+// tells no run place, the serve is not the first of a per-test recording (a
+// session or connection recording, an answer served again: repeat), or every
+// part of it is due already.
+func (h *HTTP) heldAnswerOf(stub *models.Mock, call *http.Request, db integrations.MockMemDb, repeat bool) (*heldAnswer, error) {
 	release, ok := models.AnswerReleaseOf(models.HTTP)
 	if !ok || repeat || stub == nil || stub.Spec.HTTPResp == nil {
 		return nil, nil
@@ -69,7 +71,7 @@ func (h *HTTP) heldAnswerOf(stub *models.Mock, db integrations.MockMemDb, repeat
 	if err != nil {
 		return nil, err
 	}
-	a, err := h.planHeld(stub)
+	a, err := h.planHeld(stub, call)
 	if err != nil || a == nil {
 		return nil, err
 	}
@@ -106,20 +108,21 @@ func (a *heldAnswer) dueBy(due func(time.Time) bool) bool {
 //     reached the application.
 //
 // Marks that do not fit the body served (its length differs: a body rewritten
-// since) are read as no marks. A request older than HTTP/1.1 cannot take a
-// chunked answer: its answer is written whole at its last mark.
-func (h *HTTP) planHeld(stub *models.Mock) (*heldAnswer, error) {
+// since) are read as no marks. A call older than HTTP/1.1 cannot take a
+// chunked answer: its answer is written whole at its last mark. The call is
+// the application's request now, not the recorded one: it is the
+// application's client that reads the answer.
+func (h *HTTP) planHeld(stub *models.Mock, call *http.Request) (*heldAnswer, error) {
 	resp := stub.Spec.HTTPResp
 	marks := resp.Marks
 	if marks != nil && !marksFit(marks, len(resp.Body)) {
 		marks = nil
 	}
 	method := ""
-	http11 := true
 	if req := stub.Spec.HTTPReq; req != nil {
 		method = string(req.Method)
-		http11 = req.ProtoMajor > 1 || (req.ProtoMajor == 1 && req.ProtoMinor >= 1)
 	}
+	http11 := call != nil && call.ProtoAtLeast(1, 1)
 	if marks == nil && streamed(resp) {
 		return nil, nil
 	}
@@ -187,16 +190,12 @@ func (h *HTTP) chunkedAnswer(stub *models.Mock, marks *models.HTTPAnswerMarks) (
 	}
 	bodydigest.Apply(stub.Spec.Metadata[models.MetadataBodyDigestsKey], header, body, string(wire))
 
-	protoMajor, protoMinor := 1, 1
-	if req := stub.Spec.HTTPReq; req != nil {
-		protoMajor, protoMinor = req.ProtoMajor, req.ProtoMinor
-	}
+	// HTTP/1.1, whatever the recorded call was: a chunked answer is
+	// HTTP/1.1's framing (a client reads an older answer's
+	// Transfer-Encoding as none), and only an HTTP/1.1 call is answered
+	// chunked (planHeld).
 	out := make([]byte, 0, 256)
-	out = append(out, "HTTP/"...)
-	out = strconv.AppendInt(out, int64(protoMajor), 10)
-	out = append(out, '.')
-	out = strconv.AppendInt(out, int64(protoMinor), 10)
-	out = append(out, ' ')
+	out = append(out, "HTTP/1.1 "...)
 	out = strconv.AppendInt(out, int64(resp.StatusCode), 10)
 	out = append(out, ' ')
 	out = append(out, reasonPhrase(resp)...)
