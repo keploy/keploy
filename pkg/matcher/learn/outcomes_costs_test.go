@@ -1911,3 +1911,81 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 		tr.End()
 	}
 }
+
+// costLate decides a word "82" to "7" beside late, requests older tests'
+// calls left the run, and the recordings of a set: what it decided, the
+// scans of a text it made for a word (heldScans) and the words it asked of
+// filters (filterLookups).
+func costLate(t *testing.T, late []Earlier, mocks []*models.Mock) (_ Decision, scans, lookups int64) {
+	t.Helper()
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	sc, l := heldScans.Load(), filterLookups.Load()
+	ds := Decide(costCall(dc, "body.slot", "slot 82", "slot 7", eRecAt, late, lazyOf(dc, mocks), nil, nil))
+	scans, lookups = heldScans.Load()-sc, filterLookups.Load()-l
+	return oWord(t, ds, "82", "7"), scans, lookups
+}
+
+// lateRequest is a request of an older test's call that left the run k
+// milliseconds before the call (Earlier.ofEarlierTest), sent rec at record
+// and live in round F.
+func lateRequest(k int, rec, live string) Earlier {
+	mock, at := fmt.Sprintf("mock-r%d", k), eRecAt.Add(-time.Duration(1000-k)*2*time.Millisecond)
+	return Earlier{Mock: mock, At: at, Run: true,
+		Payload: Raw{mock: mock, at: at, answered: at.Add(time.Millisecond), ordered: true}.ServedAs(k + 1),
+		Seen:    []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Type: String, Value: rec}, Live: live, Place: "body.slot"}}}
+}
+
+// A word that requests older tests' calls left the run set aside (the late
+// call rule) is checked against the other places once for each value its
+// check asks, not once for each such request: n requests that held F's "7"
+// in both runs set "82" aside, and the scans of texts for the call grow
+// with n, where a search for each request read every place again (n
+// squared). The search reads only the places the set's postings say may
+// hold the value: beside n recordings of the set that hold neither word,
+// the words asked of their filters do not grow with n. The request that
+// holds the value itself names the next place that does, and is set aside
+// where none does.
+func TestOutcomeCostLateCallsFindAValuesPlacesOncePerWord(t *testing.T) {
+	var scans [2]int64
+	for c, n := range []int{100, 200} {
+		late := make([]Earlier, n)
+		for k := range late {
+			late[k] = lateRequest(k, fmt.Sprintf("7 n%d", k), fmt.Sprintf("7 m%d", k))
+		}
+		var d Decision
+		d, scans[c], _ = costLate(t, late, nil)
+		costFresh(t, fmt.Sprintf("%d requests that held 7 in both runs", n), d)
+	}
+	t.Logf("scans of texts for 100 and 200 late requests: %v", scans)
+	if scans[1] > 3*scans[0] || scans[1] > 20*200 {
+		t.Errorf("the call scanned texts %v times beside 100 and 200 late requests; want it to grow with them, at most 20 a request", scans)
+	}
+	var lookups [2]int64
+	for c, n := range []int{100, 400} {
+		mocks := make([]*models.Mock, n)
+		for i := range mocks {
+			mocks[i] = getAnswer(fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/i%d", i), fmt.Sprintf(`{"note":"Item i%d of the run","ref":"Ref-%05d"}`, i, i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond))
+		}
+		var d Decision
+		d, _, lookups[c] = costLate(t, []Earlier{lateRequest(0, "7 n1", "7 n2")}, mocks)
+		costFresh(t, fmt.Sprintf("a late request beside %d recordings", n), d)
+	}
+	t.Logf("filter lookups beside 100 and 400 recordings: %v", lookups)
+	if lookups[1] != lookups[0] {
+		t.Errorf("the call asked %v words of filters beside 100 and 400 recordings that hold neither word; want the same", lookups)
+	}
+	// The request itself holds "7", the value that lacks its word: it names
+	// no place but another that does.
+	self := lateRequest(0, "82 7 n1", "90 n2")
+	d, _, _ := costLate(t, []Earlier{self}, nil)
+	costFresh(t, "a late request that alone holds the value that lacks its word", d)
+	d, _, _ = costLate(t, []Earlier{self, lateRequest(1, "7 n1", "5 n2")}, nil)
+	oRefused(t, "a late request that holds the value, beside another that does", d, RefusalUnknown, "mock-r0 body.slot")
+	if d.Refusal != nil && !strings.Contains(d.Refusal.Why, `"7" stands in mock-r1 body.slot`) {
+		t.Errorf("refused %q; want it to name mock-r1, the other place that holds 7", d.Refusal.Why)
+	}
+}

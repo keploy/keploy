@@ -589,6 +589,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// little to be a conflict; a fresh word's line names them. unserved:
 	// recordings round F never served, which say nothing of a piece.
 	var src, outside, conflict, unknown, aside, unserved []evPlace
+	lateHeld := map[string][2]int{}
 	for i, p := range ps {
 		if ask != nil && !ask[i] {
 			continue
@@ -633,7 +634,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 			// and a whole token there is no chance of a short word.
 			took, tok := "", sameTokenAround(p, w)
 			if p.lateCall != "" && !piece {
-				took = dc.lateCallTook(ps, i, w)
+				took = dc.lateCallTook(ps, i, w, lateHeld)
 			}
 			switch {
 			case p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, text):
@@ -764,8 +765,13 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 // F's word, else F's) holds a word that another place a run gave the
 // application before the call holds, in either run's text there (fail
 // closed), as main's late-call rule reads it (olderTook); "" where no other
-// place does, and the word is set aside.
-func (dc *decider) lateCallTook(ps []evPlace, i int, w readWord) string {
+// place does, and the word is set aside. The places that hold a value are
+// found once a value for the word's check (holders): the first two, in
+// order, that a run gave the application before the call (-1 for none),
+// the first of them other than ps[i] being the one each late place names.
+// The search reads only the places whose texts the set's postings say may
+// hold the value (placeIndex): any other holds it in neither run.
+func (dc *decider) lateCallTook(ps []evPlace, i int, w readWord, holders map[string][2]int) string {
 	p, lacks := ps[i], w.Rec
 	if !evHolds(p.t.live, w.Live) {
 		lacks = w.Live
@@ -773,10 +779,22 @@ func (dc *decider) lateCallTook(ps []evPlace, i int, w readWord) string {
 	stands := func(name string) string {
 		return strconv.Quote(lacks) + " stands in " + name + ", which a run gave the application before the call, and the value that lacks the word " + p.name + " holds holds it; " + p.lateCall
 	}
-	for j, q := range ps {
-		if j != i && q.state != stateNotBefore && (evHolds(q.t.rec, lacks) || evHolds(q.t.live, lacks)) {
-			return stands(q.name)
+	hs, ok := holders[lacks]
+	if !ok {
+		hs = [2]int{-1, -1}
+		ask := dc.places().asked(len(ps), readWord{Rec: lacks, Live: lacks})
+		for j, n := 0, 0; j < len(ps) && n < 2; j++ {
+			if q := ps[j]; (ask == nil || ask[j]) && q.state != stateNotBefore && (evHolds(q.t.rec, lacks) || evHolds(q.t.live, lacks)) {
+				hs[n], n = j, n+1
+			}
 		}
+		holders[lacks] = hs
+	}
+	if j := hs[0]; j >= 0 && j != i {
+		return stands(ps[j].name)
+	}
+	if j := hs[1]; j >= 0 {
+		return stands(ps[j].name)
 	}
 	gs, oh := dc.outside().words, dc.held()
 	in := oh.holding(lacks)

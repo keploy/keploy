@@ -712,38 +712,47 @@ next:
 const filterEntryBytes = 64
 
 // heldIn reports whether one of a text's declared forms (textForms) holds w
-// as a word in any of the readings rs.
+// as a word in any of the readings rs. by: the readings of rs that read
+// every byte of w as a word byte, asked once for every form; no other
+// reading holds w as a word anywhere.
 func heldIn(forms []string, w string, rs ...int) bool {
-	return slices.ContainsFunc(forms, func(f string) bool { return heldBy(f, w, rs...) })
+	var by uint8
+	for _, r := range rs {
+		by |= 1 << r
+	}
+	for i := 0; i < len(w); i++ {
+		by &= wordMask[w[i]]
+	}
+	if w == "" || by == 0 {
+		return false
+	}
+	return slices.ContainsFunc(forms, func(f string) bool { return heldBy(f, w, by) })
 }
+
+// wordMask is, by byte, the readings that read it as a word byte: bit r of
+// wordMask[c] is readings[r](c), so a word's check reads a table, not a
+// function a byte.
+var wordMask = func() (m [256]uint8) {
+	for r, word := range readings {
+		for c := range 256 {
+			if word(byte(c)) {
+				m[c] |= 1 << r
+			}
+		}
+	}
+	return m
+}()
 
 // heldScans counts the scans heldBy makes of a text for a word, for the
 // rows that bound a call's work.
 var heldScans atomic.Int64
 
-// heldBy reports whether w is a word of s in any of the readings rs as each
-// reads it (tokensBy(s, readings[r])[w]) without reading s's other words: w
-// stands in s, every byte of it continues a word, and no byte that does
-// stands right before or after. One scan finds each place w stands in s for
-// every reading.
-func heldBy(s, w string, rs ...int) bool {
-	if w == "" {
-		return false
-	}
-	by := make([]func(byte) bool, 0, 3)
-next:
-	for _, r := range rs {
-		word := readings[r]
-		for i := 0; i < len(w); i++ {
-			if !word(w[i]) {
-				continue next
-			}
-		}
-		by = append(by, word)
-	}
-	if len(by) == 0 {
-		return false
-	}
+// heldBy reports whether w is a word of s in any of the readings by (bits
+// of wordMask; each reads every byte of w as a word byte) as each reads it
+// (tokensBy(s, readings[r])[w]) without reading s's other words: w stands
+// in s, and no byte that reading reads as a word byte stands right before
+// or after. One scan finds each place w stands in s for every reading.
+func heldBy(s, w string, by uint8) bool {
 	heldScans.Add(1)
 	for off := 0; off <= len(s)-len(w); {
 		i := strings.Index(s[off:], w)
@@ -751,10 +760,15 @@ next:
 			return false
 		}
 		i += off
-		for _, word := range by {
-			if (i == 0 || !word(s[i-1])) && (i+len(w) == len(s) || !word(s[i+len(w)])) {
-				return true
-			}
+		var around uint8
+		if i > 0 {
+			around = wordMask[s[i-1]]
+		}
+		if e := i + len(w); e < len(s) {
+			around |= wordMask[s[e]]
+		}
+		if by&^around != 0 {
+			return true
 		}
 		off = i + 1
 	}
