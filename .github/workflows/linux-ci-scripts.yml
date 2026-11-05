@@ -79,6 +79,7 @@ on:
       - '.github/workflows/test_workflow_scripts/mongo-ci.sh'
       - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
       - '.github/workflows/test_workflow_scripts/sudo_env.sh'
+      - '.github/workflows/test_workflow_scripts/hang_guard.sh'
       - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
@@ -104,6 +105,7 @@ on:
       - '.github/workflows/test_workflow_scripts/mongo-ci.sh'
       - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
       - '.github/workflows/test_workflow_scripts/sudo_env.sh'
+      - '.github/workflows/test_workflow_scripts/hang_guard.sh'
       - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
 

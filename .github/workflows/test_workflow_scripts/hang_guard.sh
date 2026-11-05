@@ -26,7 +26,8 @@
 # still runs, says so on stderr (the run's stderr, so its log), in a line that
 # starts with HANG_LINE (-q: says nothing, for a caller that reports it
 # itself), and sends SIG (TERM unless given) to the run's process group, as
-# timeout(1) does; with -k, KILL that many seconds later if it still runs.
+# timeout(1) does, root's command under sudo included (hang_signal); with
+# -k, KILL that many seconds later if it still runs.
 # That the guard ended a run is told by HANG_LINE or HANG_FIRED, not by an
 # exit code. CMD runs in a process group of its own, with the caller's stdin,
 # and with SIGINT and SIGQUIT as the caller has them (bash ignores both in a
@@ -68,12 +69,42 @@ hang_until() {
   return 1
 }
 
-# hang_signal SIG PGID: sends SIG to the process group PGID. A run under
-# sudo needs nothing more: sudo keeps this user's real uid while its command
-# runs, so this user may signal it, and it relays the signal to its command
-# (the row "a run under sudo", on sudo 1.9 and sudo-rs).
+# hang_foreign PGID: 0 when a member of the process group PGID has a real
+# uid that is not this user's (root's command under sudo), by /proc; never
+# for root, who may signal any. A process of this user's real uid is one
+# this user may signal.
+hang_foreign() {
+  local d st pg k ruid
+  [ "$EUID" != 0 ] || return 1
+  for d in /proc/[0-9]*; do
+    # one gone since the glob decides nothing: neither file reads
+    { read -r st <"$d/stat"; } 2>/dev/null || continue
+    st=${st##*) }
+    read -r _ _ pg _ <<<"$st"
+    [ "$pg" = "$1" ] || continue
+    while read -r k ruid _; do
+      [ "$k" = Uid: ] || continue
+      [ "$ruid" = "$EUID" ] || return 0
+    done 2>/dev/null <"$d/status"
+  done
+  return 1
+}
+
+# hang_signal SIG PGID: sends SIG to the process group PGID, root's command
+# under sudo included. This user may signal sudo, which keeps this user's
+# real uid while its command runs and relays what it is sent to its
+# command, but not KILL: KILL ends sudo alone and leaves root's command
+# running under pid 1. So while a member of the group is another user's,
+# SIG goes through `sudo -n kill` too (a runner has password-free sudo); if
+# that fails, the guard says root's command may still run (the rows "a run
+# under sudo", on sudo 1.9 and sudo-rs). A command that sudo runs in a
+# terminal of its own (use_pty, when sudo has one) is in another session,
+# and so not in the group: no lane runs one under the guard.
 hang_signal() {
   kill -s "$1" -- "-$2" 2>/dev/null
+  hang_foreign "$2" || return 0
+  sudo -n kill -s "$1" -- "-$2" 2>/dev/null ||
+    echo "$HANG_LINE could not send SIG$1 to another user's process in the run's group (sudo -n kill failed): it may still run" >&2
 }
 
 hang_start() {

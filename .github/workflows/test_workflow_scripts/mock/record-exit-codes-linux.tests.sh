@@ -10,19 +10,14 @@
 #   as hung and exit 1: app-killed too, where the guard's SIGKILL gives the
 #   very exit code (137) and the fake the very log line ("signal: killed")
 #   that case wants, so only the guard's line in the log tells the hang.
+#   The fake runs as root under sudo, which cannot relay the guard's SIGKILL:
+#   the guard ends it through sudo -n kill, and no fake may run after the lane.
 set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 work="$(mktemp -d)"
-# The fake runs as root under sudo, and the guard's SIGKILL ends sudo, which
-# cannot relay it: end each fake by the pid it wrote.
-cleanup() {
-  local pids
-  pids=$(cat "$work/pids" 2>/dev/null)
-  # shellcheck disable=SC2086
-  [ -z "$pids" ] || sudo kill -KILL $pids 2>/dev/null
-  sudo rm -rf "$work"
-}
-trap cleanup EXIT
+trap 'sudo rm -rf "$work"' EXIT
+# running PID: whether PID runs, by its state in /proc (root's too).
+running() { local s; { read -r s <"/proc/$1/stat"; } 2>/dev/null || return 1; s=${s##*) }; [ "${s%% *}" != Z ]; }
 
 cat >"$work/keploy" <<'FAKE'
 #!/usr/bin/env bash
@@ -47,13 +42,28 @@ for c in app-exits-0 app-exits-42 app-terminated app-interrupted app-killed reco
     bad=1
   fi
 done
+# Each case's fake ended with its case (2 s for root's to be reaped); one
+# left is ended here, so the failed row holds nothing after it.
+left=""
+for ((i = 0; i < 10; i++)); do
+  left=""
+  for p in $(cat "$work/pids" 2>/dev/null); do running "$p" && left+=" $p"; done
+  [ -n "$left" ] || break
+  sleep 0.2
+done
+if [ "$(wc -l <"$work/pids" 2>/dev/null)" != 7 ] || [ -n "$left" ]; then
+  echo "FAIL hang: the guard's KILL left keploy running as root:${left:- none}; $(wc -l <"$work/pids" 2>/dev/null) of 7 fakes started"
+  # shellcheck disable=SC2086
+  [ -z "$left" ] || sudo -n kill -s KILL $left 2>/dev/null
+  bad=1
+fi
 if [ "$bad" -ne 0 ]; then
   echo "--- the lane's output:"
   cat "$work/out"
   echo "---"
   fails=$((fails + 1))
 else
-  echo "ok: a keploy record that hangs fails every case as hung, app-killed's 137 too"
+  echo "ok: a keploy record that hangs fails every case as hung, app-killed's 137 too, and none runs after"
 fi
 
 if [ "$fails" -ne 0 ]; then

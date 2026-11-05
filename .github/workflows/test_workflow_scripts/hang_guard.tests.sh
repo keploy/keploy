@@ -148,12 +148,76 @@ wait "$zp"
 got=$(cat "$tmp/z-out" 2>/dev/null)
 [ "$got" = "rc=0 fired=0" ] && ok "a zombie run is not running: the watchdog does not fire" || bad "a zombie run: \"$got\", want rc=0 fired=0"
 
-# A run under sudo: sudo keeps this user's real uid while its command runs,
-# so the guard's signal reaches it, and sudo relays it. Needs password-free
-# sudo for a user that is not root (a GitHub runner's); without it the row
-# says it did not run.
+# A run of this user's own: the guard needs no sudo, and does not call it
+# (a sudo on PATH that says when it is called), for a run that outlives its
+# TERM too.
+mkdir -p "$tmp/fakesudo" && printf '#!/bin/sh\necho "$*" >>"$FAKE_SUDO_LOG"\nexit "${FAKE_SUDO_RC:-0}"\n' >"$tmp/fakesudo/sudo" &&
+  chmod +x "$tmp/fakesudo/sudo"
+: >"$tmp/sudo-calls"
+FAKE_SUDO_LOG="$tmp/sudo-calls" PATH="$tmp/fakesudo:$PATH" bounded -k 1 1 bash -c 'trap "" TERM; sleep 30 & wait' 2>"$tmp/l16"
+row "a run of this user's own that ignores TERM: -k's KILL: 137, two lines" 137 2 $? "$tmp/l16"
+[ ! -s "$tmp/sudo-calls" ] && ok "a run of this user's own: the guard does not call sudo" ||
+  bad "the guard called sudo for a run of this user's own: $(cat "$tmp/sudo-calls")"
+
+# A run under sudo: the guard ends all of it, root's command included. sudo
+# keeps this user's real uid while its command runs, so the guard's signal
+# reaches it, and sudo relays it; but not KILL, which ends sudo alone, so the
+# guard sends its signal through sudo -n kill too. Needs password-free sudo
+# for a user that is not root (a GitHub runner's): on GitHub Actions the
+# rows fail without it; elsewhere they say they did not run.
+# Each run gets 3 s to start before the guard fires, so a slow sudo still
+# writes its pids first.
+# gone NAME FILE: each pid in FILE has ended (2 s for root's to be reaped);
+# one left is a FAIL, and is ended here so it holds nothing after the rows.
+gone() {
+  local p left="" i
+  for ((i = 0; i < 10; i++)); do
+    left=""
+    for p in $(cat "$2" 2>/dev/null); do hang_running "$p" && left+=" $p"; done
+    [ -n "$left" ] || break
+    sleep 0.2
+  done
+  if [ -s "$2" ] && [ -z "$left" ]; then ok "$1"; else
+    bad "$1: still running:${left:- (no pid written)}"
+    # shellcheck disable=SC2086
+    [ -z "$left" ] || sudo -n kill -s KILL $left 2>/dev/null
+  fi
+}
 if [ "$(id -u)" != 0 ] && sudo -n true 2>/dev/null; then
   bounded 1 sudo -n sleep 30 2>"$tmp/l10"; row "a run under sudo: the guard's TERM reaches it and sudo relays it: 143" 143 1 $? "$tmp/l10"
+  bounded -s KILL 3 sudo -n sh -c 'echo $$ >"$1"; exec sleep 30' _ "$tmp/s1" 2>"$tmp/l14"
+  row "a run under sudo: the guard's KILL: 137, one line" 137 1 $? "$tmp/l14"
+  gone "a run under sudo: the guard's KILL ends root's command, not only sudo" "$tmp/s1"
+  bounded -k 1 3 sudo -n bash -c 'trap "" TERM; echo $$ >"$1"; sleep 30 & echo $! >>"$1"; wait' _ "$tmp/s2" 2>"$tmp/l15"
+  row "a run under sudo that ignores TERM: -k's KILL: 137, two lines" 137 2 $? "$tmp/l15"
+  gone "a run under sudo that ignores TERM: -k's KILL ends root's command and its child" "$tmp/s2"
+  # A command substitution ends when the last writer of its pipe has: root's
+  # command, which only the guard's KILL through sudo ends.
+  t0=$SECONDS
+  got=$(bounded -q -k 1 3 sudo -n bash -c 'trap "" TERM; echo $$ >"$1"; sleep 12; echo late' _ "$tmp/s3" 2>/dev/null)
+  took=$((SECONDS - t0))
+  [ -z "$got" ] && [ "$took" -le 8 ] && ok "a run under sudo in a command substitution is bounded too" ||
+    bad "a run under sudo in a command substitution took ${took}s and printed \"$got\", want at most 8 s and nothing"
+  gone "a run under sudo in a command substitution: root's command ended" "$tmp/s3"
+  # When sudo -n kill fails, the guard says root's command may still run.
+  realsudo=$(command -v sudo)
+  FAKE_SUDO_LOG="$tmp/sudo-calls" FAKE_SUDO_RC=1 PATH="$tmp/fakesudo:$PATH" \
+    bounded -s KILL 3 "$realsudo" -n sh -c 'echo $$ >"$1"; exec sleep 30' _ "$tmp/s4" 2>"$tmp/l17"
+  row "a run under sudo whose sudo -n kill fails: 137, and the guard says so (two lines)" 137 2 $? "$tmp/l17"
+  grep -q "could not send SIGKILL" "$tmp/l17" || bad "the guard's line for a failed sudo -n kill is missing: $(cat "$tmp/l17")"
+  # shellcheck disable=SC2046
+  sudo -n kill -s KILL $(cat "$tmp/s4" 2>/dev/null) 2>/dev/null
+  # As root the guard needs no sudo, for another user's member too, one
+  # that outlives the TERM.
+  : >"$tmp/sudo-calls"
+  sudo -n env PATH="$tmp/fakesudo:/usr/sbin:/usr/bin:/sbin:/bin" FAKE_SUDO_LOG="$tmp/sudo-calls" bash -c \
+    '. "$1"; bounded -k 1 1 setpriv --reuid=65534 --regid=65534 --clear-groups sh -c "trap \"\" TERM; exec sleep 30"' \
+    _ "$here/hang_guard.sh" 2>"$tmp/l18"
+  row "as root, a run of another user's that ignores TERM: -k's KILL: 137, two lines" 137 2 $? "$tmp/l18"
+  [ ! -s "$tmp/sudo-calls" ] && ok "as root, the guard does not call sudo" ||
+    bad "the guard, as root, called sudo: $(cat "$tmp/sudo-calls")"
+elif [ "${GITHUB_ACTIONS:-}" = true ]; then
+  bad "a run under sudo: these rows need password-free sudo, as a user that is not root, which a GitHub runner has"
 else
   echo "skip: a run under sudo (needs password-free sudo, as a user that is not root)"
 fi
@@ -189,13 +253,15 @@ left=$(ps -o pid=,args= --ppid $$ | grep -c 'sleep 20')
   bad "a run that ended in time took ${took}s, left $left sleep(s), ${#HANG_WATCHDOG[@]} watchdog(s)"
 
 # The sweep: a line that runs timeout(1) and whose exit status is kept (into
-# a variable, or by the next line that reads $?), or whose run is started in
+# a variable, or by the next line that reads $? or ${PIPESTATUS[...]}: the
+# code of a timeout run in a pipeline), or whose run is started in
 # the background (its pid waited on), or that sits in an array a run is
 # started from. timeout counts after any word boundary (a `docker run IMAGE
 # timeout` line has it after the image) when its next word is one of its
 # own: a flag, a number or a variable's value; so `local timeout kind` is not
 # a run. A comment line is not code. A spelling no script uses (timeout's
-# limit from a command substitution, `command timeout`) is not looked for.
+# limit from a command substitution, `command timeout`, a background run's
+# `& pid=$!` on its own line, a multi-line `( ... ) &`) is not looked for.
 # timeout_takers FILE...: prints FILE:LINE for each such line.
 timeout_takers() {
   awk '
@@ -203,13 +269,13 @@ timeout_takers() {
     FNR == 1 { held = "" }
     /^[[:space:]]*#/ { next }
     {
-      if (held != "" && $0 ~ /\$\?/) print held
+      if (held != "" && $0 ~ /\$\?|PIPESTATUS/) print held
       held = ""
       if (!cmd($0)) next
-      if ($0 ~ /\$\?/ || $0 ~ /&[[:space:]]*(\\)?$/ || $0 ~ /=\((.* )?timeout /) { print FILENAME ":" FNR; next }
+      if ($0 ~ /\$\?|PIPESTATUS/ || $0 ~ /&[[:space:]]*(\\)?$/ || $0 ~ /=\((.* )?timeout /) { print FILENAME ":" FNR; next }
       # a run continued over lines: its last line decides
       line = FILENAME ":" FNR
-      while ($0 ~ /\\$/ && (getline nxt) > 0) { $0 = nxt; if ($0 ~ /&[[:space:]]*$/ || $0 ~ /\$\?/) { print line; held = ""; next } }
+      while ($0 ~ /\\$/ && (getline nxt) > 0) { $0 = nxt; if ($0 ~ /&[[:space:]]*$/ || $0 ~ /\$\?|PIPESTATUS/) { print line; held = ""; next } }
       held = line
     }
   ' "$@"
@@ -228,9 +294,16 @@ docker run --rm img timeout -s KILL 30 keploy report >log 2>&1
 echo $? >exit
 x=1 timeout 45 apt-get update || rc=$?
 runner=(timeout 120 script -qec "$cmd" /dev/null)
+timeout --kill-after=30s 8m env A=1 \
+  keploy test 2>&1 | tee log
+rc=${PIPESTATUS[0]}
+timeout 5 keploy test |& tee log; rc=${PIPESTATUS[0]}
+timeout 8m env A=1 \
+  keploy test | tee log; rc=${PIPESTATUS[0]}
 E
 cat >"$tmp/clean.sh" <<'E'
 # timeout 5 keploy record; rc=$?
+bash hang_guard.sh 60 keploy test 2>&1 | cat >out; rc=${PIPESTATUS[0]}
 sudo timeout 600 apt-get -y update || true
 if ! timeout 5s bash -c "until x; do sleep 1; done"; then echo no; fi
 local timeout kind
@@ -239,7 +312,7 @@ echo "--timeout 5"; rc=$?
 timeout 5 sync
 E
 printf 'rc=$?\n' >"$tmp/next.sh"
-want="$tmp/takes.sh:1 $tmp/takes.sh:2 $tmp/takes.sh:4 $tmp/takes.sh:6 $tmp/takes.sh:7 $tmp/takes.sh:9 $tmp/takes.sh:10"
+want="$tmp/takes.sh:1 $tmp/takes.sh:2 $tmp/takes.sh:4 $tmp/takes.sh:6 $tmp/takes.sh:7 $tmp/takes.sh:9 $tmp/takes.sh:10 $tmp/takes.sh:11 $tmp/takes.sh:14 $tmp/takes.sh:15"
 got=$(timeout_takers "$tmp/takes.sh" "$tmp/clean.sh" "$tmp/next.sh" | tr '\n' ' ')
 [ "${got% }" = "$want" ] && ok "the sweep finds each spelling that keeps timeout's code, and no other line" ||
   bad "the sweep found \"${got% }\", want \"$want\""

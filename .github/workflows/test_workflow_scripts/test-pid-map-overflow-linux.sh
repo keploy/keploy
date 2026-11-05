@@ -278,7 +278,7 @@ done
 for i in $(seq $N); do
   curl -fsS -o /dev/null "http://127.0.0.1:$APP/order/item$i" || fail "record: GET /order/item$i failed"
 done
-# Ctrl+C to keploy itself, timeout's child, whose command line starts with
+# Ctrl+C to keploy itself, sudo's child, whose command line starts with
 # the binary (the agent it starts says "agent", not "record").
 sudo pkill -INT -f "^$RECORD_BIN record -c bash app\.sh" || fail "record: found no keploy record to stop"
 hang_wait "$KP"
