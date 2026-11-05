@@ -574,12 +574,13 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 				outside = append(outside, p)
 			}
 		case evDisproven:
-			took, tok := "", ""
+			// tok: R's whole token around w that p kept in both runs, at
+			// any earlier place of the run, an older test's too: main
+			// refuses a word of an earlier test that did not drift with it,
+			// and a whole token there is no chance of a short word.
+			took, tok := "", sameTokenAround(p, w)
 			if p.lateCall != "" && !piece {
 				took = dc.lateCallTook(ps, i, w)
-			}
-			if dc.allScope || !p.otherTest {
-				tok = sameTokenAround(p, w)
 			}
 			switch {
 			case p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, text):
