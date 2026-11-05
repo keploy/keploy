@@ -436,7 +436,7 @@ type ScopeTableReq struct {
 	// is then served its exact count.
 	RepeatReads map[string][]RepeatRead `json:"repeatReads,omitempty"`
 	// NotRequired is, under the proven switch, by test ID, the names of the
-	// test's own list (Mappings) that keploy record marked served, not
+	// test's own list (Mappings) that keploy's judging marked served, not
 	// required (MockEntry.NotRequired): each answers that test as its other
 	// recordings do, and the test is not charged when its call is not made.
 	// An agent that cannot take it refuses a table that has one. Absent

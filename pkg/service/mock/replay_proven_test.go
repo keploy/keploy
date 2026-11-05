@@ -998,7 +998,7 @@ func TestTheTableNamesOnlyMocksTheAgentHolds(t *testing.T) {
 	require.Equal(t, map[string][]string{"o::TestA": {"mock-0"}, "o::TestB": {}, "o::TestC": {}}, got)
 }
 
-// The agent is told, by test, the names of its own list that record marked
+// The agent is told, by test, the names of its own list that keploy's judging marked
 // served, not required: an unmarked entry, and a marked one the agent does
 // not hold for that test, are none.
 func TestTheTableNamesTheRecordingsMarkedNotRequiredByTest(t *testing.T) {

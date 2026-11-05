@@ -432,7 +432,7 @@ func (s workerSvc) SetScopeWorker(_ context.Context, w map[string][]string) erro
 	return nil
 }
 
-// notRequiredSvc is poolSvc that takes the recordings record marked served,
+// notRequiredSvc is poolSvc that takes the recordings keploy's judging marked served,
 // not required, too.
 type notRequiredSvc struct{ *poolSvc }
 
@@ -520,8 +520,8 @@ func TestScopeTableCarriesTheWorkerScope(t *testing.T) {
 	}
 }
 
-// Under the switch the scope table carries, by test, the recordings keploy
-// record marked served, not required, installed before the pool slices; a
+// Under the switch the scope table carries, by test, the recordings
+// keploy's judging marked served, not required, installed before the pool slices; a
 // table without them installs none, so a set never keeps the previous
 // set's. An agent that cannot take them refuses a table that has some (it
 // would charge each test for them), and takes a table without. With the

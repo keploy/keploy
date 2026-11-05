@@ -5140,7 +5140,7 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // (models.ScopeTableReq.Worker): names of its pool slice served in a test's
 // window too. repeats are each test's repeated reads
 // (models.ScopeTableReq.RepeatReads). notRequired is, by test, the names of
-// its list record marked served, not required
+// its list keploy's judging marked served, not required
 // (models.ScopeTableReq.NotRequired).
 func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) (retErr error) {
 	if pool == nil {

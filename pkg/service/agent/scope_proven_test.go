@@ -443,7 +443,7 @@ func TestAnEndJudgesAgainstTheCountsAtItsBegin(t *testing.T) {
 	require.Contains(t, e.Reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
 }
 
-// A recording keploy record marked served, not required is not charged when
+// A recording keploy's judging marked served, not required is not charged when
 // the test that lists it did not make its call; a mark another test's table
 // carries charges this one as before, and so does a mark on another name.
 func TestARecordingMarkedNotRequiredIsNotChargedInItsOwnTestOnly(t *testing.T) {

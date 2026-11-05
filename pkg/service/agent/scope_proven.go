@@ -112,7 +112,7 @@ type provenWire struct {
 	// a test's window too (serveKeyWorker). nil when the table had none.
 	worker map[string][]string
 	// notRequired is, in a replay, by test ID, the names of the test's own
-	// list keploy record marked served, not required (the CLI's scope table,
+	// list keploy's judging marked served, not required (the CLI's scope table,
 	// models.ScopeTableReq.NotRequired): its end does not charge the test
 	// for one it did not make (testEvidence). Empty when the table had none.
 	notRequired map[string]map[string]bool
@@ -641,7 +641,7 @@ func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) 
 }
 
 // SetScopeNotRequired installs, for a replay, by test ID, the names of the
-// test's own list keploy record marked served, not required
+// test's own list keploy's judging marked served, not required
 // (models.ScopeTableReq.NotRequired). They are served as the test's other
 // recordings are; a test's end does not charge it for one it did not make,
 // and only that test's (testEvidence). None leaves the set none, never the
@@ -1853,7 +1853,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	unservable := append([]string(nil), a.proven.unservable[id]...)
 	marked := a.proven.notRequired[id]
 	a.provenMu.Unlock()
-	// A recording keploy record marked served, not required is this test's
+	// A recording keploy's judging marked served, not required is this test's
 	// to answer, but the test is not charged when the app did not make its
 	// call. One the store refused (unservable) is still charged: nothing
 	// could have served it.

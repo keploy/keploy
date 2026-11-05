@@ -1553,7 +1553,7 @@ func ownsTestMocks(table map[string][]string, loaded []*models.Mock) bool {
 }
 
 // notRequired is, by test, the names of its list in table (what the agent
-// holds) whose mapping entry keploy record marked served, not required
+// holds) whose mapping entry keploy's judging marked served, not required
 // (models.MockEntry.NotRequired); nil when none is. A mark on a name the
 // test's table does not list marks nothing: the mark is the test's own.
 func notRequired(mappings map[string][]models.MockEntry, table map[string][]string) map[string][]string {

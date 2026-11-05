@@ -328,7 +328,7 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a set's worker: calls in a test's window", http.StatusNotImplemented)
 			return
 		}
-		// The recordings record marked served, not required, by test, before
+		// The recordings keploy's judging marked served, not required, by test, before
 		// the pool is served. Every table says it, an empty one too: a set
 		// never keeps the previous set's. An agent that cannot take them
 		// refuses a table that has some: it would charge each test for them.
@@ -373,7 +373,7 @@ type scopeWorkerSetter interface {
 	SetScopeWorker(ctx context.Context, worker map[string][]string) error
 }
 
-// scopeNotRequiredSetter installs, by test, the recordings keploy record
+// scopeNotRequiredSetter installs, by test, the recordings keploy's judging
 // marked served, not required (models.ScopeTableReq.NotRequired, proven
 // wire).
 type scopeNotRequiredSetter interface {
