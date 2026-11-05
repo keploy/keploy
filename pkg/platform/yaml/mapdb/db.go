@@ -454,6 +454,18 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 // a worker entry placed again keeps its owner unless the move names one.
 // Without the switch no owner is written, so a move writes what it wrote
 // before entries had one.
+//
+// The entry's claim key (MockEntry.Key), under which a replay serves it
+// while a test process of that key holds the run, is the move's when it
+// names one, as with the owner. Else a mock taken out of a test's list
+// takes that test's key (MappedTestCase.Key): the key of the test process
+// the test ran in when it was recorded. Of several tests whose lists held
+// it, the first gives it, as it gives the owner when the move names none.
+// A test with no key (every test without the switch, which reads none)
+// leaves the entry's own, and a worker entry placed again keeps its own.
+// The test's key is right for a call its own process made: a caller moving
+// a call made under another claim, or before any test process claimed the
+// run, names that key on the move (models.PoolKeyNone for none).
 func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves []models.MockEntry) ([]string, error) {
 	if len(moves) == 0 {
 		return nil, nil
@@ -509,11 +521,14 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			if mv.Owner != "" {
 				mapping.Worker[i].Owner = mv.Owner
 			}
+			if mv.Key != "" {
+				mapping.Worker[i].Key = mv.Key
+			}
 			return true
 		}
 	}
 	var entry *models.MockEntry
-	owner := ""
+	owner, key := "", ""
 	for i := range mapping.TestCases {
 		kept := mapping.TestCases[i].Mocks[:0:0]
 		for _, e := range mapping.TestCases[i].Mocks {
@@ -524,7 +539,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			if entry == nil {
 				e := e
 				entry = &e
-				owner = mapping.TestCases[i].ID
+				owner, key = mapping.TestCases[i].ID, mapping.TestCases[i].Key
 			}
 		}
 		if len(kept) != len(mapping.TestCases[i].Mocks) {
@@ -537,6 +552,16 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	entry.Place = mv.Place
 	entry.Reason = mv.Reason
 	entry.Drift = mv.Drift
+	// A replay serves a worker entry only while a test process of its key
+	// holds the run, and a moved entry with none would sit in the slice no
+	// test process holds: the move's key, else the test's. A test with no
+	// key leaves the entry's own, as a move did before.
+	switch {
+	case mv.Key != "":
+		entry.Key = mv.Key
+	case key != "":
+		entry.Key = key
+	}
 	switch {
 	case mv.Owner != "":
 		entry.Owner = mv.Owner
