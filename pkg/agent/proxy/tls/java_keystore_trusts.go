@@ -27,22 +27,31 @@ func jdkKeystoreTrusts(cacertsPath, storePass, caPath string) bool {
 	if block == nil || block.Type != "CERTIFICATE" {
 		return false
 	}
+	aliases, _ := jdkKeystoreAliasesHolding(cacertsPath, storePass, block.Bytes)
+	return len(aliases) > 0
+}
+
+// jdkKeystoreAliasesHolding reads, in Go, the aliases under which the JDK
+// keystore at cacertsPath trusts the certificate der: no JVM runs. read is
+// false when the keystore is not a JKS whose integrity checks with
+// storePass, or cannot be read: only keytool can say then.
+func jdkKeystoreAliasesHolding(cacertsPath, storePass string, der []byte) (aliases []string, read bool) {
 	f, err := os.Open(cacertsPath)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	defer func() { _ = f.Close() }()
 	ks := keystore.New()
 	if err := ks.Load(f, []byte(storePass)); err != nil {
-		return false
+		return nil, false
 	}
 	for _, alias := range ks.Aliases() {
 		e, err := ks.GetTrustedCertificateEntry(alias)
-		if err == nil && bytes.Equal(e.Certificate.Content, block.Bytes) {
-			return true
+		if err == nil && bytes.Equal(e.Certificate.Content, der) {
+			aliases = append(aliases, alias)
 		}
 	}
-	return false
+	return aliases, true
 }
 
 // jdkKeystoreAliasCert reads, in Go, the certificate the JDK keystore at

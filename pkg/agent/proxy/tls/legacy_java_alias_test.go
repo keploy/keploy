@@ -181,12 +181,19 @@ func TestKeytoolRunsOnTheJDKKeystoreOneAtATime(t *testing.T) {
 	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.cert.Raw}), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	oldDebian := debianJavaKeystore
+	debianJavaKeystore = filepath.Join(t.TempDir(), "no-debian-keystore")
+	t.Cleanup(func() { debianJavaKeystore = oldDebian })
 	for _, tc := range []struct {
 		name string
 		run  func(ctx context.Context)
 	}{
 		{"the retired alias's removal", func(ctx context.Context) { removeLegacyJavaAlias(ctx, zap.NewNop(), sha256.Sum256(ca.cert.Raw)) }},
-		{"the teardown's delete", func(ctx context.Context) { removeJavaAlias(ctx, zap.NewNop(), "keploy-run") }},
+		{"the teardown's delete", func(ctx context.Context) {
+			jh := os.Getenv("JAVA_HOME")
+			removeRunCAFromJDKKeystores(ctx, zap.NewNop(), &nativeInstall{alias: "keploy-run", caDER: ca.cert.Raw,
+				keytool: filepath.Join(jh, "bin", "keytool"), keystore: filepath.Join(jh, "lib", "security", "cacerts")})
+		}},
 		{"the run's import", func(ctx context.Context) {
 			_, _ = installJavaCAForHome(ctx, zap.NewNop(), caPath, os.Getenv("JAVA_HOME"), "keploy-run")
 		}},

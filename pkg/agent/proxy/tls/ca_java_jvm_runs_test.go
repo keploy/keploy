@@ -378,7 +378,7 @@ func TestAJavaImportNotedAfterTheTeardownChangesNothing(t *testing.T) {
 				t.Fatalf("noteJavaImport with no install recorded panicked: %v", r)
 			}
 		}()
-		noteJavaImport(false)
+		noteJavaImport(javaInstall{})
 	}()
 	installedNativeMu.Lock()
 	n := installedNative
@@ -391,30 +391,35 @@ func TestAJavaImportNotedAfterTheTeardownChangesNothing(t *testing.T) {
 // The install imports the CA into the JDK's keystore after the system
 // store's update, and runs no keytool when that update put the CA there
 // (here the update puts a keystore trusting it in the JDK's cacerts, as
-// Debian's and Adoptium's hooks do): neither at the install nor, having
-// imported no alias, at the teardown. Before, the import ran first, with
-// its keytool -list and -import, and the teardown's keytool -delete.
-// Where the update does not put it there, the install imports it, and the
-// teardown deletes the alias: also when keytool found the alias there
-// already, and when its import failed part way. With no JDK on PATH and
-// none named, the install finds none and imports nothing: the teardown,
-// which finds a JDK by JAVA_HOME, runs no keytool either.
-func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytool(t *testing.T) {
+// Debian's and Adoptium's hooks do). Before, the import ran first, with its
+// keytool -list and -import, and the teardown's keytool -delete. At the
+// teardown, a hook that rebuilds its keystore from the anchors (Adoptium's)
+// has dropped the CA with the anchor, and no keytool runs; one that is not
+// told of the anchor's removal (Debian's) leaves it, and the teardown
+// deletes the hook's entry, which holds this run's CA. Where the update
+// does not put it there, the install imports it, and the teardown deletes
+// the alias: also when keytool found the alias there already, and when its
+// import failed part way. With no JDK on PATH and none named, the install
+// finds none and imports nothing: the teardown, which finds a JDK by
+// JAVA_HOME, runs no keytool either.
+func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytoolAtTheInstall(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the trust-store anchors are Linux's")
 	}
 	for _, tc := range []struct {
 		name    string
-		hooked  bool
-		keytool string // the JDK's keytool's exit, by its first word; "" for fakeJDK's
-		noJDK   bool   // no JDK named, nor a java on PATH, at the install
-		want    []string
+		hook    string   // "keeps": the update puts the CA there and leaves it (Debian's); "rebuilds": while its anchor is there (Adoptium's); "unreadable": then leaves a keystore Go cannot read; "": never
+		keytool string   // the JDK's keytool's exit, by its first word; "" for fakeJDK's
+		noJDK   bool     // no JDK named, nor a java on PATH, at the install
+		want    []string // each keytool run, "<op> run" of this run's alias, "<op> hook" of the hook's
 	}{
-		{"the update put the CA there", true, "", false, nil},
-		{"the update left the keystore alone", false, "", false, []string{"keytool -list ", "keytool -import ", "keytool -delete "}},
-		{"keytool finds the alias there already", false, "-list) exit 0;;", false, []string{"keytool -list ", "keytool -delete "}},
-		{"keytool's import fails", false, "-list|-import) exit 1;;", false, []string{"keytool -list ", "keytool -import ", "keytool -delete "}},
-		{"no JDK at the install", false, "", true, nil},
+		{"the update put the CA there and rebuilds without it", "rebuilds", "", false, nil},
+		{"the update put the CA there and leaves it", "keeps", "", false, []string{"-delete hook"}},
+		{"the update put the CA there, then leaves a keystore Go cannot read", "unreadable", "", false, nil},
+		{"the update left the keystore alone", "", "", false, []string{"-list run", "-import run", "-delete run"}},
+		{"keytool finds the alias there already", "", "-list) exit 0;;", false, []string{"-list run", "-delete run"}},
+		{"keytool's import fails", "", "-list|-import) exit 1;;", false, []string{"-list run", "-import run", "-delete run"}},
+		{"no JDK at the install", "", "", true, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -425,13 +430,19 @@ func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytool(t *testing.T) {
 				writeScript(t, filepath.Join(jdk, "bin", "keytool"), "echo \"keytool $*\" >> "+calls+"\ncase \"$1\" in "+tc.keytool+" esac\n")
 			}
 			bin, home := filepath.Join(dir, "bin"), filepath.Join(dir, "home")
-			hooked := filepath.Join(dir, "hooked.jks")
+			hooked, rebuilt := filepath.Join(dir, "hooked.jks"), filepath.Join(dir, "rebuilt.jks")
+			store := filepath.Join(dir, "a")
+			cacerts := filepath.Join(jdk, "lib", "security", "cacerts")
 			update := "exit 0\n"
-			if tc.hooked {
-				update = "/bin/cp " + hooked + " " + filepath.Join(jdk, "lib", "security", "cacerts") + "\n"
+			switch tc.hook {
+			case "keeps":
+				update = "/bin/cp " + hooked + " " + cacerts + "\n"
+			case "rebuilds":
+				update = "if [ -e " + store + "/*.crt ]; then /bin/cp " + hooked + " " + cacerts + "; else /bin/cp " + rebuilt + " " + cacerts + "; fi\n"
+			case "unreadable":
+				update = "if [ -e " + store + "/*.crt ]; then /bin/cp " + hooked + " " + cacerts + "; else echo PKCS12 > " + cacerts + "; fi\n"
 			}
 			writeScript(t, filepath.Join(bin, "keploy-test-update-ca"), update)
-			store := filepath.Join(dir, "a")
 			for _, d := range []string{store, home} {
 				if err := os.MkdirAll(d, 0o755); err != nil {
 					t.Fatal(err)
@@ -444,10 +455,11 @@ func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytool(t *testing.T) {
 			for _, k := range []string{"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CARGO_HTTP_CAINFO"} {
 				t.Setenv(k, "")
 			}
-			oldPaths, oldCmds := caStorePath, caStoreUpdateCmd
+			oldPaths, oldCmds, oldDebian := caStorePath, caStoreUpdateCmd, debianJavaKeystore
 			caStorePath, caStoreUpdateCmd = []string{store + "/"}, []string{"keploy-test-update-ca"}
+			debianJavaKeystore = filepath.Join(dir, "no-debian-keystore")
 			t.Cleanup(func() {
-				caStorePath, caStoreUpdateCmd = oldPaths, oldCmds
+				caStorePath, caStoreUpdateCmd, debianJavaKeystore = oldPaths, oldCmds, oldDebian
 				recordNativeInstall(nil)
 				ResetCAReadyForTest()
 			})
@@ -455,7 +467,9 @@ func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytool(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			writeJKS(t, hooked, "changeit", map[string][]byte{"debian:" + strings.TrimSuffix(runCertFileName(ca), ".crt") + ".pem": ca.cert.Raw})
+			hookAlias := "debian:" + strings.TrimSuffix(runCertFileName(ca), ".crt") + ".pem"
+			writeJKS(t, hooked, "changeit", map[string][]byte{hookAlias: ca.cert.Raw})
+			writeJKS(t, rebuilt, "changeit", nil)
 
 			named := jdk
 			if tc.noJDK {
@@ -472,8 +486,13 @@ func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytool(t *testing.T) {
 				t.Fatalf("the install's and teardown's JVM runs: %q, want %q", got, tc.want)
 			}
 			for i, w := range tc.want {
-				if !strings.HasPrefix(got[i], w) || !strings.Contains(got[i]+" ", " -alias "+runAlias(ca)+" ") {
-					t.Fatalf("the install's and teardown's JVM runs: %q, want %q, each of this run's alias", got, tc.want)
+				op, whose, _ := strings.Cut(w, " ")
+				alias := runAlias(ca)
+				if whose == "hook" {
+					alias = hookAlias
+				}
+				if !strings.HasPrefix(got[i], "keytool "+op+" ") || !strings.Contains(got[i]+" ", " -alias "+alias+" ") || !strings.Contains(got[i]+" ", " -keystore "+cacerts+" ") {
+					t.Fatalf("the install's and teardown's JVM runs: %q, want %q (run: %s, hook: %s) in %s", got, tc.want, runAlias(ca), hookAlias, cacerts)
 				}
 			}
 		})

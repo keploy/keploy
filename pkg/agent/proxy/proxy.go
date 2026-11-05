@@ -2279,19 +2279,9 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	p.logAgentEgressKnobs()
 
 	// Wait for the proxy server to be ready or fail
-	if err := <-readyChan; err != nil {
+	if err := p.awaitListen(ctx, g, readyChan); err != nil {
 		return err
 	}
-	utils.BootStep("the proxy listens")
-
-	// The retired CA's JDK keystore alias, off the start path: its removal
-	// may run keytool, and a JVM takes seconds on a starved host. The app
-	// reads keploy's merged truststore, not that keystore.
-	g.Go(func() error {
-		defer utils.Recover(p.logger)
-		pTls.SweepLegacyJavaAlias(ctx, p.logger)
-		return nil
-	})
 
 	// Serve DNS over TCP and UDP, and wait for both to be bound.
 	if err := p.startDNSServers(ctx, g); err != nil {
@@ -2381,6 +2371,27 @@ var beginBootWork = utils.BeginBootWork
 // start function starts the proxy server on the idle local port.
 // When skipListener is true, no TCP listener is created.
 // The function blocks on ctx.Done and handles cleanup on shutdown.
+// sweepLegacyJavaAlias is pTls.SweepLegacyJavaAlias; a test replaces it.
+var sweepLegacyJavaAlias = pTls.SweepLegacyJavaAlias
+
+// awaitListen waits for the proxy's listener (readyChan), then removes the
+// retired CA's JDK keystore alias beside the rest of the start, in g: off
+// the start path, as its removal may run keytool, and a JVM takes seconds
+// on a starved host. The app reads keploy's merged truststore, not that
+// keystore. A start whose listener fails removes nothing.
+func (p *Proxy) awaitListen(ctx context.Context, g *errgroup.Group, readyChan <-chan error) error {
+	if err := <-readyChan; err != nil {
+		return err
+	}
+	utils.BootStep("the proxy listens")
+	g.Go(func() error {
+		defer utils.Recover(p.logger)
+		sweepLegacyJavaAlias(ctx, p.logger)
+		return nil
+	})
+	return nil
+}
+
 func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 
 	if p.skipListener {
