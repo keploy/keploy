@@ -28,7 +28,10 @@
 #      cannot take one at once, however the writes are scheduled: whether
 #      p1's header and body reach the relay apart is the scheduler's call,
 #      so its chunks are only counted);
-#   3. keploy test, with the store down, passes every test case.
+#   3. keploy test, with the store down, passes every test case;
+#   4. with KEPLOY_EXACT_VIEW_VERIFY=1 (the workflow sets it), each keploy
+#      run under the proven switch prints its agent's verify line
+#      (verify_ran): the variable reached keploy through sudo (SUDO_ENV).
 #
 # Env: RECORD_BIN, REPLAY_BIN. Ports: 8080 (app), 9097 (store), 16789
 # (keploy's proxy).
@@ -39,6 +42,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
@@ -109,7 +114,7 @@ record() {
     ../ga-store >store.log 2>&1 &
     STORE_PID=$!
     wait_listen "$STORE" "$STORE_PID" || { echo "::error::the store did not start"; exit 1; }
-    sudo -E env PATH="$PATH" "$(switch_env "$sw")" "$RECORD_BIN" record -c "../ga-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$(switch_env "$sw")" "$RECORD_BIN" record -c "../ga-app" \
         --half-close-grace "$HALF_CLOSE_GRACE" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
@@ -140,6 +145,7 @@ record() {
     wait "$STORE_PID" 2>/dev/null
     STORE_PID=""
     own
+    verify_ran "$(proven_of "$(switch_env "$sw")")" record.log || FAIL=$((FAIL + 1))
     cd "$WORK" || exit 1
 }
 
@@ -189,10 +195,11 @@ check_recording() {
 replay() {
     local sw="$1" dir="rec-$1" rc report
     cd "$dir" || exit 1
-    sudo -E env PATH="$PATH" "$(switch_env "$sw")" "$REPLAY_BIN" test -c "../ga-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$(switch_env "$sw")" "$REPLAY_BIN" test -c "../ga-app" \
         --delay 3 --generateGithubActions=false --disable-tele >replay.log 2>&1 </dev/null
     rc=$?
     own
+    verify_ran "$(proven_of "$(switch_env "$sw")")" replay.log || FAIL=$((FAIL + 1))
     report="$(ls -1d keploy/reports/test-run-*/test-set-0-report.yaml 2>/dev/null | sort -V | tail -n1)"
     if [ -z "$report" ]; then
         fail "$dir: keploy test wrote no report (exit $rc)"
