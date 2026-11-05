@@ -63,17 +63,19 @@ type readerIndex struct {
 	momentAsks int
 }
 
-// readerEntry is what the index keeps of one text: its words, its base64
-// runs and its instants, each kept where it fits the budget, and then the
-// text itself (counted in the budget once) to tell it from another text of
-// its hash. An entry that keeps no answer keeps no byte of its text either,
-// so a call that asks about many large recordings holds at once only what
-// fits the budget: the caller's handle holds the text while it asks (or, of
-// a recording, reads it per question), and nothing here holds it after.
+// readerEntry is what the index keeps of one text: its other declared forms,
+// its base64 runs and its instants, each kept where it fits the budget, and
+// then the text itself (counted in the budget once) to tell it from another
+// text of its hash. An entry that keeps no answer keeps no byte of its text
+// either, so a call that asks about many large recordings holds at once only
+// what fits the budget: the caller's handle holds the text while it asks (or,
+// of a recording, reads it per question), and nothing here holds it after.
 type readerEntry struct {
-	n         int
-	text      string
-	tokens    answer[[]map[string]bool]
+	n    int
+	text string
+	// forms: the text's other declared forms (textForms past the text
+	// itself), one per line, where a word is looked for besides the text.
+	forms     answer[string]
 	runs      answer[map[string]bool]
 	spans     answer[[]instant]
 	formSpans answer[momentIndex]
@@ -81,8 +83,7 @@ type readerEntry struct {
 	subs      answer[*suffixarray.Index]
 	// past: an answer of the text did not fit what was left of the
 	// budget, which only fills, so the entry keeps none from then on: each
-	// question is answered from the text read again, a word by a scan of
-	// it (wordIn) that builds no list of its other words.
+	// question is answered from the text read again.
 	past bool
 }
 
@@ -296,12 +297,18 @@ func (x *readerIndex) mayKeep(e *readerEntry, s string) bool {
 	return !e.past
 }
 
-// tokens are the text's words in every declared form, by reading (isWord,
-// wordByte, idByte), read once for the call where they fit the budget, scan
-// answering past it (indexOnce).
-func (t *readerText) tokens(scan func(string, []rawField)) ([]map[string]bool, bool, bool) {
-	return indexOnce(t, func(e *readerEntry) *answer[[]map[string]bool] { return &e.tokens },
-		uncapped(func(s string, _ []rawField) []map[string]bool { return t.x.dc.rawTokens(s) }), tokensBytes, scan)
+// formsOf are s's other declared forms (textForms past s itself), one per
+// line, s being the text read now: a recording's as the set keeps them,
+// derived once for the set from s (payloadExtra: the recording is not read
+// again for them), a handed text's through the test's cache of texts
+// (rawExtra).
+func (t *readerText) formsOf(s string) string {
+	if t.raw == nil {
+		return t.x.dc.rawExtra(s)
+	}
+	now := *t.raw
+	now.src, now.rText, now.rStamps, now.rRead = nil, s, nil, true
+	return t.x.dc.payloadExtra(now)
 }
 
 // spansOf are the text's instants (instantSpans), read once for the call
@@ -371,17 +378,27 @@ func (t *readerText) holdsWord(w string) (held, read bool) {
 }
 
 // wordIn reports whether the text holds w as a word in any of the readings
-// rs (indices of main's readings) and any declared form: from the words the
-// entry keeps (tokens), or, past the budget, by a scan of the text read
-// now and its other declared forms (textForms, the forms main's word lists
-// read), which reads no other word of it and keeps nothing, in no cache
-// either. read is false where the recording was not read.
+// rs (indices of main's readings) and any declared form, as main's lists of
+// the text's words hold it: by a scan of the text and of its other forms
+// (formsOf), kept for the call with the text where both fit the budget; past
+// it, by a scan of the text read again and its forms (textForms) derived
+// for the question, kept by no one, not by the set either. No list
+// of the text's other words is built: a call asks a few words of each of
+// thousands of places, so listing every word of each, call after call, cost
+// more than all the rest of the call. read is false where the recording was
+// not read.
 func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
-	sets, scanned, ok := t.tokens(func(s string, _ []rawField) { held = heldIn(textForms(s), w, rs...) })
+	var text string
+	forms, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[string] { return &e.forms },
+		uncapped(func(s string, _ []rawField) string { text = s; return t.formsOf(s) }), stringBytes,
+		func(s string, _ []rawField) { held = heldIn(textForms(s), w, rs...) })
 	if scanned || !ok {
 		return held, ok
 	}
-	return slices.ContainsFunc(rs, func(r int) bool { return r < len(sets) && sets[r][w] }), true
+	if t.e.forms.ok {
+		text = t.e.text
+	}
+	return heldIn([]string{text, forms}, w, rs...), true
 }
 
 // heldIn reports whether one of a text's declared forms (textForms) holds w
