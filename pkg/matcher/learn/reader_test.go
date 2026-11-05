@@ -521,18 +521,22 @@ func TestReaderIndexKeepsOnTheSetsOneBudget(t *testing.T) {
 		t.Fatalf("held %v read %v; want the word held", held, read)
 	}
 	// The set keeps the filter of the text's words past the call
-	// (textEntry), on the same budget.
-	kept := int64(0)
+	// (textEntry), and its postings of them (postRuns), on the same budget.
+	kept, posted := int64(0), false
 	fs := filtersOf(dc.set)
 	fs.mu.Lock()
 	for _, e := range fs.texts {
 		if e.f != nil {
 			kept += headerBytes + 8*int64(len(e.f)) + filterEntryBytes + filterTextKeyBytes
 		}
+		if e.id >= 0 {
+			kept += postingBytes(text)
+			posted = true
+		}
 	}
 	fs.mu.Unlock()
-	if x.used <= 0 || kept <= 0 || dc.set.budget.used != x.used+kept {
-		t.Fatalf("the index keeps %d bytes and the set's filter of the text %d; the set's budget counts %d: want both counted on the set's budget", x.used, kept, dc.set.budget.used)
+	if x.used <= 0 || kept <= 0 || !posted || dc.set.budget.used != x.used+kept {
+		t.Fatalf("the index keeps %d bytes and the set's filter of the text and its postings %d (posted: %v); the set's budget counts %d: want both counted on the set's budget", x.used, kept, posted, dc.set.budget.used)
 	}
 	x.release()
 	if dc.set.budget.used != kept {

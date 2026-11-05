@@ -799,9 +799,9 @@ func TestOutcomeCostACallScansEachPlaceOnceForEachWordItAsks(t *testing.T) {
 // costSet decides the call of costCall's row in two tests of one set over
 // n recordings, one of which holds the recorded word: what each test
 // decided, and the filters it built (setFilters.builds), the scans of a text
-// it made for a word (heldScans) and the words it asked of filters
-// (filterLookups).
-func costSet(n int) (got [2]string, builds [2]int, scans, lookups [2]int64) {
+// it made for a word (heldScans), the words it asked of filters
+// (filterLookups) and the places its words' checks read (placeAsks).
+func costSet(n int) (got [2]string, builds [2]int, scans, lookups, asks [2]int64) {
 	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
 	mocks := make([]*models.Mock, n)
 	for i := range mocks {
@@ -822,25 +822,25 @@ func costSet(n int) (got [2]string, builds [2]int, scans, lookups [2]int64) {
 	for c := range got {
 		tr.Begin()
 		dc := tr.Drifts()
-		b, sc, l := built(dc), heldScans.Load(), filterLookups.Load()
+		b, sc, l, a := built(dc), heldScans.Load(), filterLookups.Load(), placeAsks.Load()
 		got[c] = oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, lazyOf(dc, mocks), nil, nil)))
-		builds[c], scans[c], lookups[c] = built(dc)-b, heldScans.Load()-sc, filterLookups.Load()-l
+		builds[c], scans[c], lookups[c], asks[c] = built(dc)-b, heldScans.Load()-sc, filterLookups.Load()-l, placeAsks.Load()-a
 		tr.End()
 	}
-	return got, builds, scans, lookups
+	return got, builds, scans, lookups, asks
 }
 
 // A set builds the filter of each recording's words once, at the first call
-// that asks it a word, and every later call of the set asks the filters:
-// a few lookups per place and word asked, and a scan of a text only where
-// its filter may hold the word (the recording that holds it, and the
-// filter's rare false hits), however many recordings the set holds. The
+// that asks it a word, and every later call of the set asks the filters
+// only of the places its postings name for a word: a few lookups per word,
+// and a scan of a text only where its filter may hold the word (the
+// recording that holds it), however many recordings the set holds. The
 // verdicts stay.
 func TestOutcomeCostASetFiltersEachRecordingsWordsOnceAndScansOnlyWhereOneMayHoldAWord(t *testing.T) {
 	const words = 5
 	var first string
 	for _, n := range []int{300, 3000} {
-		got, builds, scans, lookups := costSet(n)
+		got, builds, scans, lookups, _ := costSet(n)
 		t.Logf("%d recordings: decided %s; filters built %v, scans %v, lookups %v (first test, second)", n, got[1], builds, scans, lookups)
 		if first == "" {
 			first = got[0]
@@ -856,8 +856,31 @@ func TestOutcomeCostASetFiltersEachRecordingsWordsOnceAndScansOnlyWhereOneMayHol
 		if limit := int64(4*words + n/100); scans[1] > limit {
 			t.Errorf("over %d recordings the second test scanned a text %d times for a word; want at most %d", n, scans[1], limit)
 		}
-		if lookups[1] < int64(words*n) || lookups[1] > int64(4*words*n) {
-			t.Errorf("over %d recordings the second test asked filters %d words; want a few for each of %d places and %d words", n, lookups[1], n, words)
+		if lookups[1] > int64(4*words) {
+			t.Errorf("over %d recordings the second test asked filters %d words; want a few for each of %d words, not one for each place", n, lookups[1], words)
+		}
+	}
+}
+
+// A word's check reads only the places the set's postings name for it
+// (placeIndex): the recording whose text holds R's word, of 300 or of 3,000,
+// in each test of the set, the first included, which builds the postings
+// with the filters. Every other place holds neither word, and is not read.
+func TestOutcomeCostAWordsCheckReadsOnlyThePlacesThatHoldItsWords(t *testing.T) {
+	const words = 5
+	var first string
+	for _, n := range []int{300, 3000} {
+		got, _, _, _, asks := costSet(n)
+		t.Logf("%d recordings: decided %s; places read %v (first test, second)", n, got[1], asks)
+		if first == "" {
+			first = got[0]
+		}
+		if got[0] != first || got[1] != first {
+			t.Errorf("over %d recordings the tests decide %q; want %q in both", n, got, first)
+		}
+		// mock-held, read for "a1b2c3d4", the one word any recording holds.
+		if asks != [2]int64{1, 1} {
+			t.Errorf("over %d recordings the tests read %v places for %d words; want the one that holds a word, in each: [1 1]", n, asks, words)
 		}
 	}
 }
@@ -972,8 +995,8 @@ func TestOutcomeCostATextsFilterIsKeptByItsWholeText(t *testing.T) {
 			if handed.filter != nil {
 				f = handed.filter.f
 			}
-			if want, got := headerBytes+8*int64(len(f))+filterEntryBytes+filterTextKeyBytes, used()-u; f == nil || got != want {
-				t.Errorf("the text's filter counted %d bytes on the set's budget; want %d: its words and its key (a filter kept: %v)", got, want, f != nil)
+			if want, got := headerBytes+8*int64(len(f))+filterEntryBytes+filterTextKeyBytes+postingBytes(one), used()-u; f == nil || handed.filter.id < 0 || got != want {
+				t.Errorf("the text's filter and postings counted %d bytes on the set's budget; want %d: its words, its key and its runs (a filter kept: %v, posted: %v)", got, want, f != nil, f != nil && handed.filter.id >= 0)
 			}
 		}
 		for _, v := range []struct{ text, word string }{{other, "a1b2c3d5"}, {one, "a1b2c3d4"}} {
@@ -1011,12 +1034,12 @@ func TestOutcomeCostATextsFilterIsKeptByItsWholeText(t *testing.T) {
 // before, and none reads it again to build one. The verdict stays.
 func TestOutcomeCostARecordingsFilterPastTheSetsBudgetIsNotKept(t *testing.T) {
 	const words = 5
-	_, _, wantScans, _ := costSet(300)
+	_, _, wantScans, _, _ := costSet(300)
 	defer func(b int64) { learnBudget = b }(learnBudget)
 	learnBudget = 1
-	want, _, _, _ := costSet(300)
-	got, builds, scans, lookups := costSet(300)
-	t.Logf("past the budget: decided %s; filters built %v, scans %v, lookups %v (with room: scans %v)", got[1], builds, scans, lookups, wantScans)
+	want, _, _, _, _ := costSet(300)
+	got, builds, scans, lookups, asks := costSet(300)
+	t.Logf("past the budget: decided %s; filters built %v, scans %v, lookups %v, places read %v (with room: scans %v)", got[1], builds, scans, lookups, asks, wantScans)
 	if got != want {
 		t.Errorf("past the budget the tests decide %q; want %q", got, want)
 	}
@@ -1025,6 +1048,298 @@ func TestOutcomeCostARecordingsFilterPastTheSetsBudgetIsNotKept(t *testing.T) {
 	}
 	if scans[1] < int64(words*300) {
 		t.Errorf("past the budget the second test scanned a text %d times; want each place scanned for each word, as with no filter", scans[1])
+	}
+	// No postings past the budget either: every place is read for each word.
+	if asks[1] < int64(words*300) {
+		t.Errorf("past the budget the second test read %d places; want each place read for each word, as with no postings", asks[1])
+	}
+}
+
+// costHolders decides costSet's call in two tests of one set over n
+// recordings, those at held holding the recorded word (mock-held-<i>): each
+// test's decisions, the places its words' checks read (placeAsks), the
+// place indexes its calls built (placeBuilds), and the bytes the set's
+// postings keep after both (postedBytes).
+func costHolders(n int, held ...int) (ds [2][]Decision, asks, builds [2]int64, posted int64) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
+	mocks := make([]*models.Mock, n)
+	for i := range mocks {
+		name, body, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d"}`, i, i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+		if slices.Contains(held, i) {
+			name, body = fmt.Sprintf("mock-held-%d", i), fmt.Sprintf(`{"note":"Kept A1B2C3D4 at %d","ref":"a1b2c3d4"}`, i)
+		}
+		mocks[i] = getAnswer(name, fmt.Sprintf("http://api/items/%d", i), body, at)
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	var fs *setFilters
+	for c := range ds {
+		tr.Begin()
+		dc := tr.Drifts()
+		fs = filtersOf(dc.set)
+		a, b := placeAsks.Load(), placeBuilds.Load()
+		ds[c] = Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, lazyOf(dc, mocks), nil, nil))
+		asks[c], builds[c] = placeAsks.Load()-a, placeBuilds.Load()-b
+		tr.End()
+	}
+	return ds, asks, builds, postedBytes(fs)
+}
+
+// postingBytes is what the set's postings count on its budget for text's
+// words (postRuns): each run of letters and digits of its forms once.
+func postingBytes(text string) int64 {
+	seen := map[string]bool{}
+	for _, f := range textForms(text) {
+		eachWord(f, func(run string) { seen[run] = true })
+	}
+	n := int64(headerBytes)
+	for run := range seen {
+		n += listsWordBytes + int64(len(run))
+	}
+	return n
+}
+
+// postedBytes is what the set's postings of its texts' words keep (postRuns):
+// each run's letters and an id per text that holds it.
+func postedBytes(fs *setFilters) (n int64) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	for run, ids := range fs.runs {
+		n += int64(len(run)) + 4*int64(len(ids))
+	}
+	return n
+}
+
+// Two recordings of 300 hold the recorded word: each test's checks read
+// those two alone, its call building its place index once, and the
+// conflict names both, in order, as where every place is read.
+func TestOutcomeCostAWordsCheckReadsEveryPlaceThePostingsName(t *testing.T) {
+	ds, asks, builds, _ := costHolders(300, 100, 200)
+	t.Logf("decided %s; places read %v, indexes built %v", oDescribe(ds[1]), asks, builds)
+	for c, d := range ds {
+		if len(d) == 0 || d[0].Refusal == nil || !slices.Equal(d[0].Refusal.Places, []string{"mock-held-100", "mock-held-200"}) {
+			t.Errorf("test %d decided %s; want a1b2c3d4 refused naming mock-held-100 and mock-held-200", c, oDescribe(d))
+		}
+	}
+	if asks != [2]int64{2, 2} || builds != [2]int64{1, 1} {
+		t.Errorf("the tests read %v places and built %v place indexes; want the two that hold the word, one index per call: [2 2] [1 1]", asks, builds)
+	}
+}
+
+// Whatever the set's budget holds of the postings, the verdicts are those
+// of a set that holds them all: a text whose words did not fit is read for
+// every word, as with no postings, never taken to hold none. The postings
+// keep no more than the budget.
+func TestOutcomeCostThePostingsDecideAsEveryPlaceReadAtAnyBudget(t *testing.T) {
+	want, _, _, _ := costHolders(40, 10, 30)
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	seen := map[int64]bool{}
+	for budget := int64(1 << 10); budget <= 1<<20; budget += budget / 4 {
+		learnBudget = budget
+		got, asks, _, posted := costHolders(40, 10, 30)
+		seen[asks[1]] = true
+		for c := range got {
+			if oDescribe(got[c]) != oDescribe(want[c]) || len(got[c]) == 0 || got[c][0].Refusal == nil || !slices.Equal(got[c][0].Refusal.Places, want[c][0].Refusal.Places) {
+				t.Errorf("at a budget of %d bytes test %d decided %s; want %s", budget, c, oDescribe(got[c]), oDescribe(want[c]))
+			}
+		}
+		if posted > budget {
+			t.Errorf("at a budget of %d bytes the postings keep %d", budget, posted)
+		}
+	}
+	// The sweep spans no postings, some, and all.
+	t.Logf("places read by the second test across the budgets: %v", seen)
+	if !seen[2] || !seen[200] {
+		t.Errorf("places read across the budgets %v; want 200 (every place, no postings) and 2 (all posted) among them", seen)
+	}
+}
+
+// A recording round F served before the call, where the adapter does not
+// state what round F's answer held (Caps.FViewStated false), may hold round
+// F's new word whatever its recorded text holds: each word's check reads it
+// though the set's postings name it for no word (placeIndex's always), and
+// refuses every word as unknown, naming it, in each test of the set.
+func TestOutcomeCostARecordingWhoseFSideIsUnstatedIsReadForEveryWord(t *testing.T) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5", "ids f0e9d8c7 e9d8c7b6"
+	mocks := make([]*models.Mock, 30)
+	for i := range mocks {
+		mocks[i] = getAnswer(fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d"}`, i, i), eRecAt.Add(-time.Duration(30-i)*time.Millisecond))
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	for c := 0; c < 2; c++ {
+		tr.Begin()
+		dc := tr.Drifts()
+		in := costCall(dc, "body.ids", rec, live, eRecAt, nil, lazyOf(dc, mocks), nil, nil)
+		in.Caps.FViewStated = false
+		ds := Decide(in)
+		tr.End()
+		if len(ds) != 2 || slices.ContainsFunc(ds, func(d Decision) bool {
+			return d.Refusal == nil || d.Refusal.Kind != RefusalUnknown || !slices.Contains(d.Refusal.Places, "mock-0")
+		}) {
+			t.Errorf("test %d decided %s; want each word refused unknown, naming the recordings round F served (mock-0 among them)", c, oDescribe(ds))
+		}
+	}
+}
+
+// costInSet decides call's input in each of two tests of one set: the
+// second test asks the postings the first one built.
+func costInSet(call func(dc *DriftCache) Input) (ds [2][]Decision) {
+	tr := NewTracker()
+	tr.NewSet()
+	for c := range ds {
+		tr.Begin()
+		ds[c] = Decide(call(tr.Drifts()))
+		tr.End()
+	}
+	return ds
+}
+
+// A word glued to the bytes around it ("s17" of "BAs17xx…") in a long
+// request body that declares no media type, in a set: the body's words are
+// posted and none of them is the word, yet the body may hold it glued
+// (gluedAt), so each check reads the body whatever its postings name, and
+// refuses the word as unknown, naming the request, in each test, as with
+// no set.
+func TestOutcomeCostAWordGluedInALongBodyOfNoDeclaredTypeIsReadInASet(t *testing.T) {
+	framed := "BAs17" + strings.Repeat("x", 150) + "BAs18" + strings.Repeat("x", 150)
+	req := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "body", Recorded: framed, Sent: framed}}})}
+	ds := costInSet(func(dc *DriftCache) Input { return costCall(dc, "body.slot", "s17", "s18", costAt, req, nil, nil, nil) })
+	for c := range ds {
+		d := oWord(t, ds[c], "s17", "s18")
+		oRefused(t, fmt.Sprintf("test %d: s17 glued in a %d-byte body of no media type", c, len(framed)), d, RefusalUnknown, "test-1")
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "declares no media type") {
+			t.Errorf("test %d: %q; want it to say the body declares no media type", c, d.Refusal.Why)
+		}
+	}
+}
+
+// A long given (#5016) glued inside a word that changed with it, in a set:
+// the given's text is posted, and its one run is no run of the word
+// ("seed<given>"), yet the word holds it, so each check reads the given
+// whatever its postings name, and refuses the word as a part of it, in each
+// test, as with no set.
+func TestOutcomeCostALongGivenGluedInsideAWordIsReadInASet(t *testing.T) {
+	gr, gf := strings.Repeat("ab12", 70), strings.Repeat("cd34", 70)
+	gave := []Earlier{TestGiven("test o::TestApps", "given:name", gr, gf)}
+	ds := costInSet(func(dc *DriftCache) Input {
+		return costCall(dc, "body.name", "seed"+gr, "seed"+gf, costAt, gave, nil, nil, nil)
+	})
+	for c := range ds {
+		d := oWord(t, ds[c], "seed"+gr, "seed"+gf)
+		oRefused(t, fmt.Sprintf("test %d: a %d-byte given glued inside the word", c, len(gr)), d, RefusalUnknown, "test o::TestApps")
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "the given stands inside the word in both runs") {
+			t.Errorf("test %d: %q; want it to say the given stands inside the word", c, d.Refusal.Why)
+		}
+	}
+}
+
+// A test case's request leaf whose recorded text is under the posting
+// floor and whose sent text is past it ("a1b2c3d4", then "k7k7k7k7" and
+// 300 bytes more) is read for every word, as the floor reads a text: the
+// recorded word stood whole there and round F sent another value, so the
+// word is refused as a conflict naming the request, in each test of a set.
+func TestOutcomeCostARequestLeafPostedOnOneSideIsReadForEveryWord(t *testing.T) {
+	sent := `{"ref":"k7k7k7k7 ` + strings.Repeat("p", 300) + `"}`
+	req := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: `{"ref":"a1b2c3d4"}`, Sent: sent}}})}
+	ds := costInSet(func(dc *DriftCache) Input {
+		return costCall(dc, "body.ref", "a1b2c3d4", "f0e9d8c7", costAt, req, nil, nil, nil)
+	})
+	for c := range ds {
+		oRefused(t, fmt.Sprintf("test %d: the recorded word at a request leaf sent as %d bytes", c, len(sent)), oWord(t, ds[c], "a1b2c3d4", "f0e9d8c7"), RefusalConflict, "test-1 body.ref")
+	}
+}
+
+// costServed is n recordings of the running test, each served changed
+// with round F's view of it (ServedLive): HTTP answers of no header, whose
+// bodies are body(i) and view(i), so a view of a short body is a text
+// under the posting floor (filterTextMin).
+func costServed(dc *DriftCache, n int, body, view func(i int) string) []Raw {
+	raw := make([]Raw, n)
+	for i := range raw {
+		name, url, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf("/i/%d", i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+		answer := func(b string) *models.Mock {
+			return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{Method: "GET", URL: url}, HTTPResp: &models.HTTPResp{StatusCode: 200, Body: b},
+				ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+			}}
+		}
+		raw[i] = dc.LazyRawOf(answer(body(i)), true, nil).ServedAs(i + 1).ServedLive(RawOf(answer(view(i)), true))
+	}
+	return raw
+}
+
+// A recording whose round F view holds F's word, its recording not R's,
+// shows that F gave the application the word before the call: unknown,
+// refused, naming it, in each test of a set, whether the view's text is
+// under the posting floor (read for every word: 20 places a test) or past
+// it (read where the postings name F's word: that one place).
+func TestOutcomeCostAViewThatHoldsOnlyFsWordIsReadAtAnyLength(t *testing.T) {
+	for _, c := range []struct {
+		pad   int
+		reads int64
+	}{{0, 40}, {300, 2}} {
+		seen := strings.Repeat("s", c.pad)
+		body := func(i int) string { return fmt.Sprintf(`{"note":"Item %d"}`, i) }
+		view := func(i int) string {
+			if i == 7 {
+				return fmt.Sprintf(`{"note":"Item %d","ref":"f0e9d8c7","seen":"%s"}`, i, seen)
+			}
+			return fmt.Sprintf(`{"note":"Item %d","seen":"%s"}`, i, seen)
+		}
+		a := placeAsks.Load()
+		ds := costInSet(func(dc *DriftCache) Input {
+			return costCall(dc, "body.ref", "a1b2c3d4", "f0e9d8c7", eRecAt, nil, costServed(dc, 20, body, view), nil, nil)
+		})
+		reads := placeAsks.Load() - a
+		for i := range ds {
+			oRefused(t, fmt.Sprintf("test %d, views padded %d bytes", i, c.pad), oWord(t, ds[i], "a1b2c3d4", "f0e9d8c7"), RefusalUnknown, "mock-7")
+		}
+		if reads != c.reads {
+			t.Errorf("views padded %d bytes: the two tests read %d places; want %d", c.pad, reads, c.reads)
+		}
+	}
+}
+
+// The set's postings name a word's texts by every run of it: a text that
+// holds each of its runs, never one that lacks any. A word of no letter or
+// digit has no run to name, and every text may hold it. A base64 token is
+// named by its runs between two of its other bytes alone.
+func TestOutcomeCostThePostingsNameTheTextsThatHoldEveryRunOfAWord(t *testing.T) {
+	fs := &setFilters{runs: map[string][]int32{"ids": {0, 1, 2, 3}, "a1b2": {1, 3}, "ref": {0, 3}, "x": {2}}}
+	for _, c := range []struct {
+		runs []string
+		want []int32
+		ok   bool
+	}{
+		{[]string{"a1b2"}, []int32{1, 3}, true},
+		{[]string{"ids", "a1b2"}, []int32{1, 3}, true},
+		{[]string{"a1b2", "ids"}, []int32{1, 3}, true},
+		{[]string{"a1b2", "ref"}, []int32{3}, true},
+		{[]string{"ids", "ref", "a1b2"}, []int32{3}, true},
+		{[]string{"a1b2", "x"}, nil, true},
+		{[]string{"zz"}, nil, true},
+		{nil, nil, false},
+	} {
+		if got, ok := fs.holdingRuns(c.runs); !slices.Equal(got, c.want) || ok != c.ok {
+			t.Errorf("texts holding every run of %q: %v, %v; want %v, %v", c.runs, got, ok, c.want, c.ok)
+		}
+	}
+	for _, c := range []struct {
+		s     string
+		inner bool
+		want  []string
+	}{
+		{"ab-12_cd", false, []string{"ab", "12", "cd"}},
+		{"ab+12/cd==", true, []string{"12", "cd"}},
+		{"+ab/cd", true, []string{"ab"}},
+		{"QUJDREVG", true, nil},
+		{"QUJDREVG", false, []string{"QUJDREVG"}},
+		{"日本", false, nil},
+	} {
+		if got := runsOf(c.s, c.inner); !slices.Equal(got, c.want) {
+			t.Errorf("runs of %q (inner %v): %q; want %q", c.s, c.inner, got, c.want)
+		}
 	}
 }
 
@@ -1421,6 +1736,87 @@ func TestOutcomeCostAListTheSetLetsGoLeavesItsIndex(t *testing.T) {
 	}()
 	runtime.KeepAlive(l1)
 	runtime.KeepAlive(l2)
+}
+
+// outsideAs hands mock-x to a call (costOutsideRole).
+type outsideAs func(dc *DriftCache, m *models.Mock, view func(string) Raw) Raw
+
+// costOutsideRole decides costCall's word ("ids a1b2c3d4" to "ids
+// f0e9d8c7") over n other tests' recordings, each served changed with a
+// view holding neither word, and, where x is not nil, one more, mock-x,
+// recorded holding neither and served as x serves it (view reads a body as
+// F's view of it): handed to the call as another test's recording, or,
+// where given, among the recordings the set gave earlier (Input.Given).
+// The verdict.
+func costOutsideRole(n int, x outsideAs, given bool) string {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	raw := make([]Raw, 0, n+1)
+	var set []GivenPlaces
+	for i := range n {
+		name, url, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), eRecAt.Add(-time.Duration(n-i+1)*time.Second)
+		m, v := getAnswer(name, url, fmt.Sprintf(`{"note":"Item %d"}`, i), at), getAnswer(name, url, fmt.Sprintf(`{"note":"Item %d","seen":"yes"}`, i), at)
+		raw = append(raw, dc.LazyRawOf(m, true, nil).ServedAs(i+1).ServedLive(RawOf(v, true)).OfAnotherTest())
+	}
+	if x != nil {
+		at := eRecAt.Add(-time.Second / 2)
+		m := getAnswer("mock-x", "http://api/items/x", `{"note":"Kept"}`, at)
+		view := func(b string) Raw { return RawOf(getAnswer("mock-x", "http://api/items/x", b, at), true) }
+		if r := x(dc, m, view); given {
+			set = append(set, PlacesOf(r))
+		} else {
+			raw = append(raw, r.OfAnotherTest())
+		}
+	}
+	in := costCall(dc, "body.ids", "ids a1b2c3d4", "ids f0e9d8c7", eRecAt, nil, raw, nil, nil)
+	in.Given = func() ([]GivenPlaces, error) { return set, nil }
+	return oDescribe(Decide(in))
+}
+
+// What the set's index finds of another test's recording counts by the
+// role of the list that holds the word: R's word counts only where its own
+// answer holds it, never where only a view F gave holds it; F's word in
+// any one of several views F's serves gave leaves the word unknown; and a
+// recording F served with no view stated is unknown whatever its lists
+// hold, as is one F served changed with a view keploy could not read, so
+// the index never drops either for holding neither word.
+func TestOutcomeCostAnOutsideRecordingCountsByTheRoleOfTheListHoldingTheWord(t *testing.T) {
+	const n = 10
+	alone := costOutsideRole(n, nil, false)
+	if !strings.Contains(alone, " fresh]") {
+		t.Fatalf("over %d recordings holding neither word the call decides %s; want fresh", n, alone)
+	}
+	for _, c := range []struct {
+		name, want string
+		x          outsideAs
+	}{
+		{"F's view alone holds R's word", alone, func(dc *DriftCache, m *models.Mock, view func(string) Raw) Raw {
+			return dc.LazyRawOf(m, true, nil).ServedAs(n + 1).ServedLive(view(`{"note":"Kept","ref":"a1b2c3d4"}`))
+		}},
+		{"one of F's two views alone holds R's word", alone, func(dc *DriftCache, m *models.Mock, view func(string) Raw) Raw {
+			return dc.LazyRawOf(m, true, nil).ServedIn(n+1, n+2).ServedChanged(view(`{"note":"Kept","ref":"a1b2c3d4"}`), view(`{"note":"Kept","seen":"yes"}`))
+		}},
+		{"one of F's two views holds F's word", "refused unknown: keploy cannot tell what round F gave at mock-x before this call", func(dc *DriftCache, m *models.Mock, view func(string) Raw) Raw {
+			return dc.LazyRawOf(m, true, nil).ServedIn(n+1, n+2).ServedChanged(view(`{"note":"Kept","ref":"f0e9d8c7"}`), view(`{"note":"Kept","seen":"yes"}`))
+		}},
+		{"served with no view stated, holding neither word", "refused unknown: keploy cannot tell what round F gave at mock-x before this call", func(dc *DriftCache, m *models.Mock, _ func(string) Raw) Raw {
+			return dc.LazyRawOf(m, true, nil).ServedAs(n + 1)
+		}},
+		{"served changed with a view keploy could not read, holding neither word", "refused unknown: keploy cannot tell what round F gave at mock-x before this call", func(dc *DriftCache, m *models.Mock, _ func(string) Raw) Raw {
+			return dc.LazyRawOf(m, true, nil).ServedAs(n + 1).ServedChanged()
+		}},
+	} {
+		for _, given := range []bool{false, true} {
+			got := costOutsideRole(n, c.x, given)
+			t.Logf("%s, given earlier in the set %v: %s", c.name, given, got)
+			if !strings.Contains(got, c.want) {
+				t.Errorf("%s, given earlier in the set %v: the call decides %s; want %q", c.name, given, got, c.want)
+			}
+		}
+	}
 }
 
 // The words a set keeps of another test's recording are the words wordsOf

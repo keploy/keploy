@@ -132,8 +132,10 @@ type decider struct {
 	set []GivenPlaces
 	op  *offsetPlaces
 	// oh: the call's ask of the set's index of op's word lists (held),
-	// built at its first ask.
+	// built at its first ask; pi: its ask of the set's postings of its
+	// places' words (places), built at its first ask.
 	oh *outsideHeld
+	pi *placeIndex
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
@@ -797,8 +799,16 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// held: what each place's texts hold of the word, asked once here and
 	// read again below, where orderUnknown and swapUnknown may have changed
 	// a place's state but no text.
+	// ask: the places that may show anything of the word (placeIndex);
+	// each other holds neither word nor a token around R's, and shows
+	// nothing (evNone), so both loops pass it.
 	held := make([]evHeld, len(ps))
+	ask := dc.places().asked(len(ps), w)
 	for i, p := range ps {
+		if ask != nil && !ask[i] {
+			held[i] = evHeld{read: true}
+			continue
+		}
 		held[i] = heldAt(p, w.Rec, w.Live)
 		ev, _ := evidenceOf(p, held[i], w.Rec, w.Live, piece)
 		if ev == evNone {
@@ -819,6 +829,9 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// recordings round F never served, which say nothing of a piece.
 	var src, outside, conflict, unknown, aside, unserved []evPlace
 	for i, p := range ps {
+		if ask != nil && !ask[i] {
+			continue
+		}
 		ev, read := evidenceOf(p, held[i], w.Rec, w.Live, piece)
 		if floor && ev == evUnknown && p.fUnstated && !p.fGave {
 			unserved = append(unserved, p)

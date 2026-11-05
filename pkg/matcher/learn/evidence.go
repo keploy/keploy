@@ -639,6 +639,7 @@ type evHeld struct{ hr, hf, read bool }
 
 // heldAt asks p's texts for the changed word r (R) to f (F), once each.
 func heldAt(p evPlace, r, f string) evHeld {
+	placeAsks.Add(1)
 	hr, okR := p.t.rec.holdsWord(r)
 	hf, okF := p.t.live.holdsWord(f)
 	return evHeld{hr: hr, hf: hf, read: okR && okF}
@@ -1378,6 +1379,109 @@ func (oh *outsideHeld) asked(state bool, in ...map[int32]heldRoles) []int32 {
 	slices.Sort(gs)
 	return slices.Compact(gs)
 }
+
+// placeIndex is a call's ask of the set's postings of its texts' words
+// (postRuns) for its places (dc.ps): by a text's id there, the places
+// whose recorded text (rec) or round F's (live) it is, and the places a
+// word's check always reads (always). A word's check reads only the places
+// whose recorded text may hold R's word or a whole token around it, or
+// whose round F's text may hold F's word, and the places always read: any
+// other holds neither word, so it shows nothing of it (evidenceOf: evNone)
+// and no token around it (tokenShown), as the filter of its texts would
+// tell (ruledOut), with no lookup per place. Read always: a place whose
+// texts the postings do not hold (a text shorter than filterTextMin, one
+// keploy could not read, one past the set's budget, a call in no set), and
+// one a word may show at without its texts holding it: F's side unstated
+// (its views and fMay decide), a body that declares no media type
+// (gluedAt), a given (glued inside the word).
+type placeIndex struct {
+	rec, live map[int32][]int32
+	always    []int32
+	fs        *setFilters
+}
+
+// places is the call's placeIndex, built at its first ask: each place's
+// texts' filters built, as their first ask builds them (setFilter).
+func (dc *decider) places() *placeIndex {
+	if dc.pi != nil {
+		return dc.pi
+	}
+	// A call in no set asks empty postings: every place's texts are
+	// unposted (postID), and every place is read.
+	pi := &placeIndex{rec: map[int32][]int32{}, live: map[int32][]int32{}, fs: cmp.Or(dc.x.filters, &setFilters{})}
+	dc.pi = pi
+	placeBuilds.Add(1)
+	for i, p := range dc.ps {
+		r, l := int32(-1), int32(-1)
+		if !p.fUnstated && !p.undeclared && !p.gave {
+			r, l = p.t.rec.postID(), p.t.live.postID()
+		}
+		if r < 0 || l < 0 {
+			pi.always = append(pi.always, int32(i))
+			continue
+		}
+		pi.rec[r] = append(pi.rec[r], int32(i))
+		pi.live[l] = append(pi.live[l], int32(i))
+	}
+	return pi
+}
+
+// asked reports, by place, whether a check of w reads it (placeIndex); nil
+// where it reads every place: R's word, F's word or a whole token around
+// R's has no run of letters and digits the postings can name. A token of
+// base64 is named by its runs that stand between two of its other bytes
+// alone: one at its end may run on into an instant's digits in a text
+// (eachB64Run), so it may be no whole run there.
+func (pi *placeIndex) asked(n int, w readWord) []bool {
+	ask := make([]bool, n)
+	mark := func(side map[int32][]int32, runs []string) bool {
+		ids, ok := pi.fs.holdingRuns(runs)
+		for _, id := range ids {
+			for _, i := range side[id] {
+				ask[i] = true
+			}
+		}
+		return ok
+	}
+	if !mark(pi.rec, runsOf(w.Rec, false)) || !mark(pi.live, runsOf(w.Live, false)) {
+		return nil
+	}
+	for _, t := range w.Tokens {
+		if !mark(pi.rec, runsOf(t.Rec, t.Kind == tokenB64)) {
+			return nil
+		}
+	}
+	for _, i := range pi.always {
+		ask[i] = true
+	}
+	return ask
+}
+
+// runsOf is s's runs of letters and digits, as eachWord cuts them; inner:
+// only those with a byte of s on both sides.
+func runsOf(s string, inner bool) []string {
+	var runs []string
+	for i := 0; i < len(s); {
+		if !isWord(s[i]) {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(s) && isWord(s[j]) {
+			j++
+		}
+		if !inner || i > 0 && j < len(s) {
+			runs = append(runs, s[i:j])
+		}
+		i = j
+	}
+	return runs
+}
+
+// placeAsks counts the places a word's check reads (heldAt), and
+// placeBuilds the calls' place indexes built (places), for the rows that
+// bound a call's work.
+var placeAsks, placeBuilds atomic.Int64
 
 // viewNew reports whether round F's view of g holds a word its recording
 // does not: F gave something new there.
