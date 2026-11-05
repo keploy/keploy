@@ -68,48 +68,90 @@ func opMsgSections(msg interface{}) []string {
 
 // mongoCorrelations detects the values a recorded Mongo write echoes: a value
 // the application writes (mongoWritten) that looks minted at random
-// (appRandomClass) and that the recorded answer holds too, as findAndModify
+// (mongoRandomClass) and that the recorded answer holds too, as findAndModify
 // answers an upsert with the document it wrote. Such a value is seen twice in
 // the recording, once sent and once answered. A value seen once (written and
 // not answered, or only answered) is not a correlation, nor is a value in a
 // filter.
+//
+// The request is read first, and an answer section is parsed only when its
+// raw text holds one of the values the request wrote (mongoAnswerHolds). A
+// read (find, aggregate, getMore) writes none, so its answer, however large,
+// is never parsed here: this runs for every Mongo mock when the agent takes
+// the mocks in.
 func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 	req, resp := mongoOpMsgSections(m)
-	answered := make(map[string][]string)
-	for j, s := range resp {
-		for path, vals := range mongoMsgDoc(s) {
-			for _, v := range vals {
-				answered[v] = append(answered[v], mongoSectionPlace+strconv.Itoa(j)+"."+path)
-			}
-		}
-	}
-	var out []models.FieldCorrelation
+	var written []models.FieldCorrelation
 	for i, s := range req {
 		for path, vals := range mongoMsgDoc(s) {
 			if !mongoWritten(path) || len(vals) != 1 {
 				continue
 			}
-			v := vals[0]
-			class, ok := appRandomClass(v)
+			class, ok := mongoRandomClass(vals[0])
 			if !ok {
 				continue
 			}
-			places, echoed := answered[v]
-			if !echoed {
-				continue
-			}
-			rp := append([]string(nil), places...)
-			sort.Strings(rp)
-			out = append(out, models.FieldCorrelation{
+			written = append(written, models.FieldCorrelation{
 				RequestPath:   mongoSectionPlace + strconv.Itoa(i) + "." + path,
-				ResponsePaths: rp,
-				RecordedValue: v,
+				RecordedValue: vals[0],
 				ValueClass:    class,
 			})
 		}
 	}
+	answered := make(map[string][]string, len(written))
+	for _, c := range written {
+		answered[c.RecordedValue] = nil
+	}
+	for j, s := range resp {
+		if !mongoAnswerHolds(s, written) {
+			continue
+		}
+		for path, vals := range mongoMsgDoc(s) {
+			for _, v := range vals {
+				if places, ok := answered[v]; ok {
+					answered[v] = append(places, mongoSectionPlace+strconv.Itoa(j)+"."+path)
+				}
+			}
+		}
+	}
+	var out []models.FieldCorrelation
+	for _, c := range written {
+		places := answered[c.RecordedValue]
+		if len(places) == 0 {
+			continue
+		}
+		c.ResponsePaths = append([]string(nil), places...)
+		sort.Strings(c.ResponsePaths)
+		out = append(out, c)
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RequestPath < out[j].RequestPath })
 	return out
+}
+
+// mongoRandomClass is appRandomClass for a value read from a Mongo section.
+// The detector finds the value in an answer's raw text and the render writes
+// the live value into it as raw text, so a value is taken only when its JSON
+// text is the value itself. Every class's letters, digits, '-' and '_' are
+// written as they are; space around the value is refused, as JSON escapes a
+// tab or a newline (and the render would write it unescaped).
+func mongoRandomClass(v string) (string, bool) {
+	if strings.TrimSpace(v) != v {
+		return "", false
+	}
+	return appRandomClass(v)
+}
+
+// mongoAnswerHolds reports whether an answer section's raw text holds one of
+// the written values. mongoRandomClass took each only when its JSON text is
+// the value itself, so a section whose text does not hold a value does not
+// answer it, and it is not parsed.
+func mongoAnswerHolds(section string, written []models.FieldCorrelation) bool {
+	for _, c := range written {
+		if strings.Contains(section, c.RecordedValue) {
+			return true
+		}
+	}
+	return false
 }
 
 // mongoPlace splits a Mongo correlation place into its section index and the
@@ -139,7 +181,7 @@ func mongoPlace(place string) (int, string, bool) {
 // recorded value tells the application it lost the claim.
 //
 // A value is replaced only when every place the recording wrote it holds, in
-// the live request, one value of the same class (appRandomClass) that differs
+// the live request, one value of the same class (mongoRandomClass) that differs
 // from the recorded one. Otherwise that value is left as recorded, which is
 // what the answer was before correlations. resp itself is never changed: a
 // changed answer is a copy, so a pooled recording stays as recorded.
@@ -167,7 +209,7 @@ func RenderMongoEchoes(corrs []models.FieldCorrelation, liveSections []string, r
 			continue
 		}
 		v := vals[0]
-		if class, ok := appRandomClass(v); !ok || class != c.ValueClass {
+		if class, ok := mongoRandomClass(v); !ok || class != c.ValueClass {
 			refused[c.RecordedValue] = true
 			continue
 		}

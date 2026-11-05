@@ -1,6 +1,7 @@
 package mocknoise
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -135,8 +136,13 @@ func TestAMongoMockOfAnotherShapeHasNoCorrelation(t *testing.T) {
 	}
 }
 
+// switchOff pins the proven switch off: these rows read correlations the way
+// the agent materializes them, which it does only with the switch off.
+func switchOff(t *testing.T) { t.Setenv(provenswitch.Env, "") }
+
 func claimServed(t *testing.T, liveReq string) (served, recorded *models.MongoOpMessage) {
 	t.Helper()
+	switchOff(t)
 	m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
 	MaterializeCorrelations(m)
 	if len(m.Spec.Correlations) != 1 {
@@ -166,6 +172,7 @@ func TestARecordedUpsertAnswersWithTheKeyTheLiveRequestWrote(t *testing.T) {
 // every place the recording wrote it, the answer is served as recorded, as it
 // was before correlations.
 func TestARecordedUpsertIsServedAsRecordedWhenTheLiveWriteDoesNotBind(t *testing.T) {
+	switchOff(t)
 	for name, live := range map[string]string{
 		"the same key":                  claimRequest(recKeyID),
 		"no key written":                strings.Replace(claimRequest(recKeyID), `"key_id":"`+recKeyID+`",`, "", 1),
@@ -173,7 +180,10 @@ func TestARecordedUpsertIsServedAsRecordedWhenTheLiveWriteDoesNotBind(t *testing
 		"a random key of another class": claimRequest("0123456789abcdef0123"),
 		"several keys written at the place": strings.Replace(claimRequest(recKeyID), `"key_id":"`+recKeyID+`"`,
 			`"key_id":["`+liveKeyID+`","0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0"]`, 1),
-		"not a body section": "",
+		// JSON writes the newline escaped, so the live key's text is not
+		// the key, and written raw into the answer it would break it.
+		"a key with a newline after it": claimRequest(liveKeyID + `\n`),
+		"not a body section":            "",
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
@@ -193,6 +203,7 @@ func TestARecordedUpsertIsServedAsRecordedWhenTheLiveWriteDoesNotBind(t *testing
 // A recorded value written at two places binds only when the live request
 // writes one value at both.
 func TestARecordedValueWrittenTwiceBindsOnlyOneLiveValue(t *testing.T) {
+	switchOff(t)
 	two := func(a, b string) string {
 		return `{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{"key_id":"` + a + `","alias":"` + b + `"}},"upsert":true,"new":true}`
 	}
@@ -264,6 +275,7 @@ func TestAMongoCorrelationPlaceIsASectionIndexAndAPath(t *testing.T) {
 // with no recorded value, a place it cannot parse, a section the live
 // request does not have) leaves the answer as recorded.
 func TestARecordedUpsertIsServedAsRecordedForACorrelationItCannotPlace(t *testing.T) {
+	switchOff(t)
 	m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
 	MaterializeCorrelations(m)
 	recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
@@ -287,5 +299,128 @@ func TestARecordedUpsertIsServedAsRecordedForACorrelationItCannotPlace(t *testin
 	}
 	if got := RenderMongoEchoes([]models.FieldCorrelation{good}, live, nil); got != nil {
 		t.Fatalf("no recorded answer: served %v, want nil", got)
+	}
+}
+
+// writeTwice is a claim that writes one minted key at two places, key_id and
+// alias (a JSON value; none when empty), and answers with key_id.
+func writeTwice(keyID, alias string) string {
+	set := `"key_id":"` + keyID + `"`
+	if alias != "" {
+		set = `"alias":` + alias + `,` + set
+	}
+	return `{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{` + set + `}},"upsert":true,"new":true}`
+}
+
+// A recorded value that cannot bind at one of the places the recording wrote
+// it is served as recorded, though another place binds: the live request has
+// no value there, several, one that is not random, one of another class, or
+// the place cannot be read. Each is checked with the refused place read both
+// before and after the place that binds.
+func TestARecordedValueRefusedAtOnePlaceIsNotBoundAtAnother(t *testing.T) {
+	switchOff(t)
+	m := mongoMock(writeTwice(recKeyID, `"`+recKeyID+`"`), `{"value":{"key_id":"`+recKeyID+`"},"ok":1}`)
+	MaterializeCorrelations(m)
+	if len(m.Spec.Correlations) != 2 || m.Spec.Correlations[0].RequestPath != "section.0.update.$set.alias" {
+		t.Fatalf("correlations = %+v, want alias and key_id", m.Spec.Correlations)
+	}
+	recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
+	alias, key := m.Spec.Correlations[0], m.Spec.Correlations[1]
+	for name, aliasJSON := range map[string]string{
+		"no value":                 ``,
+		"several values":           `["` + liveKeyID + `","` + liveKeyID + `"]`,
+		"a value not random":       `"key-7"`,
+		"a value of another class": `"0123456789abcdef0123"`,
+	} {
+		live := []string{mongoMsg(writeTwice(liveKeyID, aliasJSON))}
+		for order, corrs := range map[string][]models.FieldCorrelation{"refused first": {alias, key}, "refused last": {key, alias}} {
+			if got := RenderMongoEchoes(corrs, live, recorded); got != recorded {
+				t.Errorf("%s, %s: served %q; want the recorded answer itself", name, order, got.Sections)
+			}
+		}
+	}
+	unread := alias
+	unread.RequestPath = "body.alias"
+	live := []string{mongoMsg(writeTwice(liveKeyID, `"`+liveKeyID+`"`))}
+	for order, corrs := range map[string][]models.FieldCorrelation{"refused first": {unread, key}, "refused last": {key, unread}} {
+		if got := RenderMongoEchoes(corrs, live, recorded); got != recorded {
+			t.Errorf("a place it cannot read, %s: served %q; want the recorded answer itself", order, got.Sections)
+		}
+	}
+	// The same live key at both places binds.
+	if got := RenderMongoEchoes([]models.FieldCorrelation{alias, key}, live, recorded); got == recorded || !strings.Contains(got.Sections[0], liveKeyID) {
+		t.Fatalf("one live key at both places must bind: served %q", got.Sections)
+	}
+}
+
+// A minted key of each class binds: a hex token and a letters-and-digits
+// nonce are answered with the live key as a uuid is.
+func TestAMintedHexOrNonceKeyIsAnsweredWithTheLiveKey(t *testing.T) {
+	switchOff(t)
+	for class, keys := range map[string][2]string{
+		"hex":   {"0123456789abcdef0123", "fedcba9876543210fedc"},
+		"nonce": {"AbC123dEf456GhI789jKl0", "ZyX987wVu654TsR321qPo0"},
+	} {
+		m := mongoMock(claimRequest(keys[0]), claimAnswer(keys[0]))
+		MaterializeCorrelations(m)
+		if len(m.Spec.Correlations) != 1 || m.Spec.Correlations[0].ValueClass != class {
+			t.Fatalf("%s: correlations = %+v, want one of class %s", class, m.Spec.Correlations, class)
+		}
+		recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
+		got := RenderMongoEchoes(m.Spec.Correlations, []string{mongoMsg(claimRequest(keys[1]))}, recorded)
+		if want := mongoMsg(claimAnswer(keys[1])); got.Sections[0] != want {
+			t.Errorf("%s: served %q\nwant %q", class, got.Sections[0], want)
+		}
+	}
+}
+
+// A minted key with space around it is not a correlation: JSON escapes a tab
+// or a newline, so the answer's text does not hold the key as it is.
+func TestAMintedKeyWithSpaceAroundItIsNotACorrelation(t *testing.T) {
+	for name, key := range map[string]string{"a newline after it": recKeyID + `\n`, "a space before it": " " + recKeyID} {
+		if got := CorrelationsFromMock(mongoMock(claimRequest(key), claimAnswer(key))); len(got) != 0 {
+			t.Errorf("%s: correlations = %+v, want none", name, got)
+		}
+	}
+}
+
+// manyDocs is a JSON array of n documents, each with a uuid.
+func manyDocs(n int) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"_id":{"$oid":"65a1b2c3d4e5f6a7b8c9%04x"},"key_id":"5b6f1c2e-8d3a-4f7b-9e21-%012x","name":"user %d","scopes":["read","write"]}`, i%65536, i, i)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// A read writes no value, so its answer is never parsed when the agent takes
+// the mocks in, however large; nor is a write's answer that does not hold the
+// value it wrote (a findAndModify that answers the document as it was before
+// the write). Reading the request costs a few hundred allocations, and a
+// parse of these 2.7 MB answers costs hundreds of thousands.
+func TestAMongoReadsLargeAnswerIsNotParsedAtIngest(t *testing.T) {
+	docs := manyDocs(20000)
+	cursor := `{"cursor":{"firstBatch":` + docs + `,"id":{"$numberLong":"0"},"ns":"api.t"},"ok":1}`
+	for name, tc := range map[string]struct{ req, answer string }{
+		"a find":       {`{"find":"t","filter":{"cid":"c1","key_id":"5b6f1c2e-8d3a-4f7b-9e21-000000000007"},"$db":"api"}`, cursor},
+		"an aggregate": {`{"aggregate":"t","pipeline":[{"$match":{"cid":"c1"}}],"cursor":{},"$db":"api"}`, cursor},
+		"a getMore":    {`{"getMore":{"$numberLong":"7"},"collection":"t","$db":"api"}`, cursor},
+		"a write answered with the document before it": {claimRequest(liveKeyID),
+			`{"lastErrorObject":{"n":1,"updatedExisting":true},"value":{"_id":"cid-1:user-1:jti-1","history":` + docs + `},"ok":1}`},
+	} {
+		m := mongoMock(tc.req, tc.answer)
+		allocs := testing.AllocsPerRun(1, func() {
+			if got := CorrelationsFromMock(m); len(got) != 0 {
+				t.Errorf("%s: correlations = %+v, want none", name, got)
+			}
+		})
+		if allocs > 1000 {
+			t.Errorf("%s: %.0f allocations to read a mock whose request writes nothing; its answer was parsed", name, allocs)
+		}
 	}
 }
