@@ -1056,9 +1056,11 @@ func (o Order) ArrivedAt(arrival time.Time) Order {
 }
 
 // servedAfterLocked reports whether every serve of the mock of identity id
-// that o saw was made after o's arrival (ArrivedAt), and there was one: no
+// that o saw was made after o's arrival (ArrivedAt), or in a request of the
+// application's still aloft then (landedAfter), and there was one: no
 // arrival said, a serve of an instant not kept, or one made at or before the
-// arrival, says it was served before the call. o.t.mu is held.
+// arrival in no such request, says it was served before the call. o.t.mu is
+// held.
 func (o Order) servedAfterLocked(id string) bool {
 	if o.arrival.IsZero() {
 		return false
@@ -1069,11 +1071,24 @@ func (o Order) servedAfterLocked(id string) bool {
 		return false
 	}
 	for _, s := range n[:k] {
-		if s < 1 || s > len(o.serveAt) || !o.serveAt[s-1].After(o.arrival) {
+		if s < 1 || s > len(o.serveAt) || !o.serveAt[s-1].After(o.arrival) && !o.landedAfter(s) {
 			return false
 		}
 	}
 	return true
+}
+
+// landedAfter reports whether the serve numbered s was made in a request
+// the application sent (one Lift lifted) that had not landed by o's arrival:
+// its answer had not started to go out (Flight.Land), so the application
+// had none of it when the call reached keploy, however early F claimed the
+// recording (a parser that claims it, then learns and renders the answer
+// before writing it, as the Mongo learn step does). A serve in no request,
+// in a request a serve caused (LiftCaused, landed by its parser), or in one
+// that landed at or before the arrival, is not. o.t.mu is held.
+func (o Order) landedAfter(s int) bool {
+	f := o.flights[s]
+	return f != nil && !f.at.IsZero() && (f.landed == 0 || f.landedAt.After(o.arrival))
 }
 
 // Of is where F served m in the set, in one sequence across its start-up,
@@ -1127,9 +1142,12 @@ func (o Order) Spans(ms []*models.Mock) [][2]int {
 // adapter told of, or one keploy cannot tell from another set's. F's view of
 // r is then one no adapter stated, and a word a value holds now that may
 // stand there is refused (Raw.viewUnstated: fail closed). A Raw with a view
-// already stated (ServedLive, ServedChanged) keeps it. Every adapter's learn
-// step reads the recordings F served through it, so a statement one adapter
-// made holds for every other's call.
+// already stated (ServedLive, ServedChanged) keeps it, except where every
+// serve of m the read saw came after the call reached keploy
+// (Raw.servedAfter): r then carries no view F stated of it changed, as of
+// that arrival, whenever it was stated. Every adapter's learn step reads the
+// recordings F served through it, so a statement one adapter made holds for
+// every other's call.
 //
 // Where F made every serve of m the read saw in an older test of the set
 // (olderTestLocked), r is also marked so (Raw.ServedInAnOlderTest): F gave
@@ -1164,8 +1182,21 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 		r = r.ServedBeforeTheTest()
 	}
 	r.servedAfter = after
+	read := func(i int, load func() (*models.Mock, error)) Raw { return o.viewRead(m, id, keys[i], load) }
+	return statedView(r, unstated && ok, recorded, unread, loads, read).asOfArrival()
+}
+
+// statedView is r, a recording of m F served whose view no adapter stated
+// yet, with the view the statements of F's serves of m give it (ServedView),
+// where every serve was told (told): as recorded where each was told so;
+// the one view they gave (ServedLive); each view where they gave more than
+// one, the recording counted where one was told as recorded
+// (ServedChanged); a view that could not be kept or read standing for any
+// text (ServedChanged with none), each view read by read (Order.viewRead).
+// Untold, r is returned as it is.
+func statedView(r Raw, told, recorded, unread bool, loads []func() (*models.Mock, error), read func(int, func() (*models.Mock, error)) Raw) Raw {
 	switch {
-	case !unstated, !ok:
+	case !told:
 		return r
 	case unread:
 		return r.ServedChanged()
@@ -1174,7 +1205,7 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	}
 	views := make([]Raw, len(loads))
 	for i, load := range loads {
-		views[i] = o.viewRead(m, id, keys[i], load)
+		views[i] = read(i, load)
 	}
 	if !recorded && len(views) == 1 {
 		return r.ServedLive(views[0])

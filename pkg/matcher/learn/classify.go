@@ -278,10 +278,16 @@ type Raw struct {
 	// reads a word of the payload as one of a recording of another test.
 	beforeTest bool
 	// servedAfter: every serve of the mock's the read saw was made after the
-	// call reached keploy (Order.ArrivedAt, ServedView), so F had not served
-	// it before the call. Only the rule a recording F had not served before
-	// the call reads it (follows.notServed); every other rule reads the mock
-	// as served, with F's view of it.
+	// call reached keploy, or in a request whose answer had not started to
+	// go out by then (Order.ArrivedAt, ServedView), so F had not given it
+	// the application before the call. The rule a recording F had not
+	// served before the call reads it (follows.notServed), and so does
+	// viewUnstated: no view stated of it leaves nothing untold before the
+	// call. Every other rule reads the mock as served, with F's view of it
+	// as of the arrival (asOfArrival): no view F stated of it changed
+	// (ServedLive, ServedChanged), whether stated before the call's read or
+	// after it, as F had given the application none of its answer by then;
+	// a serve told as recorded stays so.
 	servedAfter bool
 	// call is the call the mock answers, as one recording of it stands in
 	// for another (callOf): only an answer to the same call is given in
@@ -543,9 +549,29 @@ func (r Raw) BeforeTheTest() bool { return r.served && r.beforeTest }
 // cannot tell what F gave the application there, so a word a value holds now
 // that may stand there is refused, as where a serve's view could not be read
 // (unaccounted): fail closed. Every other rule reads that F gave nothing
-// there. Of a Raw F did not serve it is false: it needs no view.
+// there. Of a Raw F did not serve it is false: it needs no view. So it is
+// of one F gave the application only after the call reached keploy
+// (servedAfter): whatever F gave there, the call's request was sent first.
 func (r Raw) viewUnstated() bool {
-	return r.served && !r.asRecorded && r.live == nil && !r.unseen
+	return r.served && !r.servedAfter && !r.asRecorded && r.live == nil && !r.unseen
+}
+
+// asOfArrival is r with F's view of it as of the call's arrival: where every
+// serve of it the read saw came after the call reached keploy, or in a
+// request still aloft then (servedAfter), F had given the application none
+// of its answer by the arrival, so no view F stated of it changed
+// (ServedLive, ServedChanged) is a place a word the call holds came from,
+// whether it was stated before the call's read or after it. The Mongo learn
+// step states its view just before it writes the answer, so a call that
+// arrived while the answer was unwritten would otherwise be refused a fresh
+// word that stands in that view by chance, or not, by which read came first.
+// A serve told as recorded stays so: it holds no word the recording does
+// not. Every other r is returned as it is.
+func (r Raw) asOfArrival() Raw {
+	if r.servedAfter {
+		r.live, r.views, r.unseen = nil, nil, false
+	}
+	return r
 }
 
 // ServedLive is r, which F served (ServedIn, WithServed) changed, with F's

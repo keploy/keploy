@@ -933,6 +933,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 	// 2. The variables hold.
 	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}, saw: map[string]string{}}
 	taken := map[string]variables.Binding{} // this call's new bindings, by name
+	runOf := wordRunsOf(m, decls, liveAt)
 	for _, d := range decls {
 		places := d.requestPlaces()
 		if d.echo {
@@ -1014,14 +1015,14 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			others = append(others, b)
 		}
 		for _, b := range others {
-			if variables.TwoValues(b, variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Clock: d.clock}) {
+			if variables.TwoValues(b, runOf[d.name].On(variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Clock: d.clock})) {
 				return nil, (&varProblem{
 					mock: m.Name, name: d.name, place: d.bind.raw, expected: "a value other than variable " + b.Name + "'s", actual: v.value,
 					next: fmt.Sprintf("the application sent %s's value where it sent %s's when the test was recorded: fix the application, or re-record the test if that is intended", b.Name, d.name),
 				}).say("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, said{v.value, d.bind.place}, b.Name, b.Mock, b.Place)
 			}
 		}
-		taken[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw, Clock: d.clock}
+		taken[d.name] = runOf[d.name].On(variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw, Clock: d.clock})
 	}
 	for _, d := range decls {
 		if b, ok := taken[d.name]; ok {
@@ -1029,6 +1030,95 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 		}
 	}
 	return hit, nil
+}
+
+// wordRunsOf is, by name, the value span (variables.WordRuns) of each
+// variable decls bind at a word of a value of the call (wordBindsOf).
+func wordRunsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) map[string]variables.Run {
+	names, ws := wordBindsOf(m, decls, liveAt)
+	out := make(map[string]variables.Run, len(names))
+	for i, r := range variables.WordRuns(ws) {
+		out[names[i]] = r
+	}
+	return out
+}
+
+// wordBindsOf is the word bind (variables.WordBind) of each variable decls
+// bind at a word of a value of the call, and its name: the text that holds
+// it (one place, one decode), live and as recorded, with the evidence that
+// cuts a run into held stretches, the places other than that text where m's
+// request holds a value whole (heldWhole). An echo is the call's own, never
+// bound in the table, so it has none. No learned value names a word here
+// (WordBind.Of), so each word's span is its own word (main's word by word
+// check).
+func wordBindsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) ([]string, []variables.WordBind) {
+	rec, _ := recordedView(m.Spec.HTTPReq) // fitVariables refused a recording whose URL does not read
+	whole := heldWhole(rec)
+	var names []string
+	var ws []variables.WordBind
+	for _, d := range decls {
+		if d.echo || d.bind == nil {
+			continue
+		}
+		at := d.bind.at
+		w := variables.WordBind{
+			Text:     variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}.String(),
+			Word:     at.Word,
+			Live:     liveAt[d.bind.key()].value,
+			Recorded: d.recorded,
+		}
+		if l, ok := rec.leaf(at.Place); ok {
+			if text, ok := (variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}).WordOf(l.value); ok {
+				own := placeKey(at.Place)
+				w.RecordedText = text
+				w.Elsewhere = func(s string) bool {
+					for _, k := range whole[s] {
+						if k != own {
+							return true
+						}
+					}
+					return false
+				}
+			}
+		}
+		names = append(names, d.name)
+		ws = append(ws, w)
+	}
+	return names, ws
+}
+
+// heldWhole is, by value, the places (placeKey) where the recorded request
+// rec holds a value whole: each JSON scalar of its body, each URL path
+// segment, each value of a query parameter or a header.
+func heldWhole(rec reqView) map[string][]string {
+	out := map[string][]string{}
+	if leaves, ok := templates.JSONLeaves(rec.body); ok {
+		for _, l := range leaves {
+			k := placeKey(variables.BodyPlace(l.Path))
+			out[l.Value(rec.body)] = append(out[l.Value(rec.body)], k)
+		}
+	}
+	for i, seg := range rec.segments {
+		if v, err := url.PathUnescape(seg); err == nil {
+			out[v] = append(out[v], placeKey(variables.Place{Part: variables.PartPath, Index: i}))
+		}
+	}
+	for part, vs := range map[variables.Part]map[string][]string{variables.PartQuery: rec.query, variables.PartHeader: rec.header} {
+		for name, vals := range vs {
+			for _, v := range vals {
+				out[v] = append(out[v], placeKey(variables.Place{Part: part, Name: name}))
+			}
+		}
+	}
+	return out
+}
+
+// placeKey names p as heldWhole does, a header by its canonical name.
+func placeKey(p variables.Place) string {
+	if p.Part == variables.PartHeader {
+		p.Name = http.CanonicalHeaderKey(p.Name)
+	}
+	return p.String()
 }
 
 // holdsAt checks that every request place of d holds want, the value the
