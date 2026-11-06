@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -463,8 +464,13 @@ func TestUnderTheSwitchABootCallIsNotRequiredOfAnAppKeployDidNotStart(t *testing
 // fails, naming it. A set with no mappings.yaml (its windows give its worker
 // scope) does not say which calls the stop made: one recorded after its last
 // test ended is not waited for either, so it replays as fast as with
-// mappings.yaml, background serving enabled or not, and is required all the
-// same: never made, the set fails, saying why.
+// mappings.yaml, and is required all the same: never made, the set fails,
+// saying why.
+// With background serving enabled or not: the recorded set's mappings.yaml
+// carries recordedWith: s12-routing, so with it enabled the set is served by
+// the background rules, which wait for and require none of its worker scope
+// (a call never made is said, not required). A set with no mappings.yaml is
+// never served so: enabled or not, it is judged as above.
 func TestUnderTheSwitchAShutdownCallIsJudgedOnceTheAppIsStopped(t *testing.T) {
 	for _, s12 := range []bool{false, true} {
 		for _, tc := range []struct {
@@ -503,6 +509,9 @@ func TestUnderTheSwitchAShutdownCallIsJudgedOnceTheAppIsStopped(t *testing.T) {
 					}); err != nil {
 						t.Fatal(err)
 					}
+					if err := db.MarkRecordedWith(context.Background(), "test-set-0", models.RecordedWithS12Routing); err != nil {
+						t.Fatal(err)
+					}
 				} else {
 					// No mappings.yaml: the replay derives the worker scope
 					// from the windows, which do not say what was the
@@ -510,6 +519,11 @@ func TestUnderTheSwitchAShutdownCallIsJudgedOnceTheAppIsStopped(t *testing.T) {
 					if err := db.Delete(context.Background(), "test-set-0"); err != nil {
 						t.Fatal(err)
 					}
+				}
+				want := tc.want
+				background := s12 && tc.recorded
+				if background {
+					want = models.TestSetStatusPassed
 				}
 				inner := consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}})
 				drained := false
@@ -525,11 +539,17 @@ func TestUnderTheSwitchAShutdownCallIsJudgedOnceTheAppIsStopped(t *testing.T) {
 						return inner()
 					}
 				}}
-				if got := h.run(t); got != tc.want {
-					t.Fatalf("set %s, want %s (missing named %d time(s))", got, tc.want, workerNamed(logs))
+				if got := h.run(t); got != want {
+					t.Fatalf("set %s, want %s (missing named %d time(s))", got, want, workerNamed(logs))
 				}
-				if want := map[models.TestSetStatus]int{models.TestSetStatusPassed: 0, models.TestSetStatusFailed: 1}[tc.want]; workerNamed(logs) != want {
+				if h.replayer.exact == nil || h.replayer.exact.background != background {
+					t.Fatalf("the set was served by the background rules: %v; want %v", h.replayer.exact != nil && h.replayer.exact.background, background)
+				}
+				if want := map[models.TestSetStatus]int{models.TestSetStatusPassed: 0, models.TestSetStatusFailed: 1}[want]; workerNamed(logs) != want {
 					t.Fatalf("missing named %d time(s), want %d", workerNamed(logs), want)
+				}
+				if said, want := len(logs.FilterMessageSnippet("background recordings of this test set that its end had not read answered").All()), map[bool]int{true: 1}[background && !tc.made]; said != want {
+					t.Fatalf("the set said %d time(s) a background call went unread, want %d", said, want)
 				}
 				if waited := len(logs.FilterMessageSnippet("waiting for the test set's worker scope").All()); waited != 0 || waits != 0 {
 					t.Fatalf("the set's end waited (%d line(s), %d wait(s)) for a call the application makes only as it is stopped", waited, waits)
@@ -603,6 +623,170 @@ func TestWithTheSwitchOffACallAfterTheLastTestIsServedNotRequired(t *testing.T) 
 				t.Fatalf("the set said %d time(s) it required a call after its last test, want none", said)
 			}
 		})
+	}
+}
+
+// A set with no mappings.yaml whose application keploy does not stop (one
+// kept for the next set): a call recorded after its last test ended is
+// judged as one keploy record marked at its stop is. The set's end waits for
+// it no more than it does once keploy stops the application, does not
+// require it, made after the last test or never, and says which went
+// unjudged and why, where a set whose mappings.yaml marks the call says
+// nothing. Once keploy stops the application, what it consumed as it
+// stopped holds the call, and nothing goes unjudged.
+func TestUnderTheSwitchACallAfterTheLastTestOfAnAppKeployDidNotStopGoesUnjudged(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recorded bool // mappings.yaml's worker scope says the call is the shutdown's
+		serve    bool // keploy keeps the application for the next set
+		late     bool // the application makes the call at the read after its last test's own
+		unjudged bool
+	}{
+		{"kept alive, made after the last test, the scope derived", false, true, true, true},
+		{"kept alive, never made, the scope derived", false, true, false, true},
+		{"kept alive, never made, recorded at the stop", true, true, false, false},
+		{"stopped by keploy, made as it stops, the scope derived", false, false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			fastWorkerWait(t)
+			waits := 0
+			wake := workerWake
+			workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
+				waits++
+				return wake(ctx)
+			}
+			h := newPartialRunHarness(t, 1, 0)
+			pinWindows(h)
+			h.replayer.config.Command = "./app"
+			stopped := make(chan struct{})
+			h.instr.stopped = stopped
+			core, logs := observer.New(zap.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-late", 1500)}
+			db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": mongoEntries("mock-a")})
+			if tc.recorded {
+				if err := db.UpsertWorker(context.Background(), "test-set-0", []models.MockEntry{
+					{Name: "mock-late", Kind: string(models.HTTP), Place: "test-1", AtStop: true},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := db.Delete(context.Background(), "test-set-0"); err != nil {
+				t.Fatal(err)
+			}
+			inner := consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}})
+			var mu sync.Mutex
+			reads, drained := 0, false
+			h.replayer.hookImpl = prHooks{consumedFor: func() []models.MockState {
+				select {
+				case <-stopped:
+					mu.Lock()
+					defer mu.Unlock()
+					if !tc.serve && !drained {
+						drained = true
+						return []models.MockState{mongoAt("mock-late", 1500)}
+					}
+					return nil
+				default:
+				}
+				got := inner()
+				if len(got) == 0 {
+					return nil
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if reads++; reads > 1 && tc.late {
+					return []models.MockState{mongoAt("mock-late", 1500)}
+				}
+				return got
+			}}
+			run := h.run
+			if tc.serve {
+				run = h.runServing
+			}
+			if got := run(t); got != models.TestSetStatusPassed {
+				t.Fatalf("set %s, want PASSED (missing named %d time(s))", got, workerNamed(logs))
+			}
+			if n := workerNamed(logs); n != 0 {
+				t.Fatalf("missing named %d time(s), want none", n)
+			}
+			if waited := len(logs.FilterMessageSnippet("waiting for the test set's worker scope").All()); waited != 0 || waits != 0 {
+				t.Fatalf("the set's end waited (%d line(s), %d wait(s)) for a call marked as its stop's", waited, waits)
+			}
+			said := logs.FilterMessageSnippet("went unjudged").All()
+			if want := map[bool]int{true: 1}[tc.unjudged]; len(said) != want {
+				t.Fatalf("the set said %d time(s) which calls went unjudged, want %d", len(said), want)
+			}
+			if !tc.unjudged {
+				return
+			}
+			fields := said[0].ContextMap()
+			mocks, _ := fields["mocks"].([]interface{})
+			next, _ := fields["next_step"].(string)
+			if len(mocks) != 1 || mocks[0] != "mock-late" || fields["count"] != int64(1) || !strings.Contains(next, "without --sync and with mapping on") {
+				t.Fatalf("the line said %v; want mock-late named once, with the recording that marks the stop's calls as the next step", fields)
+			}
+		})
+	}
+}
+
+// A set with no mappings.yaml whose worker call between two tests is never
+// made fails, naming it, as one with mappings.yaml does: only the calls
+// recorded after its last test ended are marked as ones the stop may make,
+// so neither its reason nor its next step speaks of the stop's calls (the
+// next step is to record again if the application no longer makes the call
+// on its own). A call after the last test that the application makes as it
+// is stopped is read then, and changes none of that.
+func TestUnderTheSwitchAWorkerCallBetweenTestsOfASetWithNoMappingsIsNotTheStops(t *testing.T) {
+	setSwitch(t, true)
+	fastWorkerWait(t)
+	h := newPartialRunHarness(t, 2, 0)
+	pinWindows(h)
+	h.replayer.config.Command = "./app"
+	stopped := make(chan struct{})
+	h.instr.stopped = stopped
+	core, logs := observer.New(zap.InfoLevel)
+	h.replayer.logger = zap.New(core)
+	h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-between", 1500), httpAt("mock-b", 2010), httpAt("mock-late", 2500)}
+	db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": mongoEntries("mock-a"), "test-2": mongoEntries("mock-b")})
+	if err := db.Delete(context.Background(), "test-set-0"); err != nil {
+		t.Fatal(err)
+	}
+	inner := consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-b", 2010)}})
+	drained := false
+	h.replayer.hookImpl = prHooks{consumedFor: func() []models.MockState {
+		select {
+		case <-stopped:
+			if !drained {
+				drained = true
+				return []models.MockState{mongoAt("mock-late", 2500)}
+			}
+			return nil
+		default:
+			return inner()
+		}
+	}}
+	if got := h.run(t); got != models.TestSetStatusFailed {
+		t.Fatalf("set %s, want FAILED: the worker call between the tests was never made", got)
+	}
+	failed := logs.FilterMessageSnippet("test-set failed: the application never made").All()
+	if len(failed) != 1 {
+		t.Fatalf("the set's end said %d time(s) which calls were never made, want once", len(failed))
+	}
+	fields := failed[0].ContextMap()
+	mocks, _ := fields["mocks"].([]interface{})
+	next, _ := fields["next_step"].(string)
+	if len(mocks) != 1 || mocks[0] != "mock-between" {
+		t.Fatalf("the set's end named %v; want [mock-between]", fields["mocks"])
+	}
+	if strings.Contains(failed[0].Message, "recorded after the set's last test ended") {
+		t.Fatalf("the reason speaks of the calls after the last test: %q", failed[0].Message)
+	}
+	if !strings.HasPrefix(next, "if the application no longer makes these calls on its own") {
+		t.Fatalf("next_step %q; want the one for a call the application stopped making on its own", next)
+	}
+	if n := len(logs.FilterMessageSnippet("went unjudged").All()); n != 0 {
+		t.Fatalf("the set said %d time(s) a call went unjudged, though keploy stopped the application", n)
 	}
 }
 

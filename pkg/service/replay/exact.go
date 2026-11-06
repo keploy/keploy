@@ -126,10 +126,12 @@ type exactPlan struct {
 	// stopsDerived: the worker scope's at-stop marks (MockEntry.AtStop) are
 	// derived, not recorded: the set has no mappings.yaml keploy record
 	// wrote, so its windows give its worker scope, and each call of it
-	// recorded after its last test ended is marked (windowOwnership). Such a
-	// call may be one the application makes in its own time, so the set's
-	// end requires it whether or not keploy stopped the application; as one
-	// it may make only as it is stopped, it is never waited for.
+	// recorded after its last test ended is marked (windowOwnership). A
+	// derived mark is treated exactly as a recorded one: never waited for,
+	// required once keploy has stopped the application and read what it
+	// consumed as it stopped, and not required of an application keploy did
+	// not stop, whose end says which went unjudged (unjudgedAtStop).
+	// stopsDerived only picks what a failure says of them (stopsDerivedWhy).
 	stopsDerived bool
 }
 
@@ -280,9 +282,9 @@ func (p *exactPlan) takeWorker(counted, rearm []models.MockState) ([]models.Mock
 // beginning it makes none due, begun), but for the ones whose answer is idle
 // (D3, D4). One the recording made as keploy record stopped the application
 // (MockEntry.AtStop) is required only once keploy has stopped this set's
-// application and read what it consumed as it stopped (stopped); one marked
+// application and read what it consumed as it stopped (stopped), one marked
 // so because no mappings.yaml says which calls the stop made (stopsDerived)
-// is required either way.
+// as well.
 func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState, stopped bool) []string {
 	// Under the background rules the set's end requires none: what a
 	// background call answered is judged by record's judging,
@@ -319,9 +321,9 @@ func (p *exactPlan) owedWorker(consumed map[string]models.MockState, stopped, wa
 		return nil
 	}
 	// A call marked at the stop is left out by the wait, and by the end's
-	// read of an application keploy did not stop, unless its mark is
-	// derived: nothing says the stop made it.
-	skipAtStop := waiting || (!stopped && !p.stopsDerived)
+	// read of an application keploy did not stop, a derived mark as a
+	// recorded one.
+	skipAtStop := waiting || !stopped
 	var out []string
 	for _, e := range p.worker {
 		switch {
@@ -687,9 +689,9 @@ func (r *Replayer) windowOwnershipOf(testSetID string, cases []*models.TestCase,
 	}
 	// No mappings.yaml says which calls keploy record's stop made
 	// (MockEntry.AtStop): each worker-scope call recorded after the set's last
-	// test ended may be one, so each is marked as one. The set's end never
-	// waits for it, and requires it by its end all the same (exactPlan.
-	// stopsDerived), the stop's drain included.
+	// test ended may be one, so each is marked as one, and judged as a
+	// recorded mark is (exactPlan.stopsDerived): the set's end never waits
+	// for it, and requires it once keploy has stopped the application.
 	// A mock with no place (one built without it) is read by its request
 	// time, as the derivation places it.
 	placed := make(map[string]time.Time, len(mocks))
@@ -1239,8 +1241,34 @@ func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consum
 // because no mappings.yaml says which calls keploy record's stop made
 // (stopsDerived), and what keploy did with them: "" for none.
 func (p *exactPlan) stopsDerivedWhy(missing []string) string {
-	if p == nil || !p.stopsDerived {
+	n := len(p.derivedAtStop(missing))
+	if n == 0 {
 		return ""
+	}
+	return fmt.Sprintf("; %d of them were recorded after the set's last test ended, and the set has no mappings.yaml keploy record wrote to say whether the application made them on its own or as keploy record stopped it, so keploy required them by the set's end, what the application consumed as keploy stopped it included, without waiting for them", n)
+}
+
+// unjudgedAtStop is, when keploy did not stop the set's application and
+// read what it consumed as it stopped (stopped false), the calls marked as
+// ones the stop may make only because no mappings.yaml says which calls
+// keploy record's stop made (stopsDerived) that the set's end would require
+// of a stopped application and consumed does not hold: the set's end judges
+// none of them (unansweredWorker), so it says which. Nil when the
+// application was stopped, or under the background rules, which require
+// none.
+func (p *exactPlan) unjudgedAtStop(consumed map[string]models.MockState, stopped bool) []string {
+	if stopped || p == nil || p.background {
+		return nil
+	}
+	return p.derivedAtStop(p.owedWorker(consumed, true, false))
+}
+
+// derivedAtStop is, in the order of names, those of names marked as calls
+// the stop may make only because no mappings.yaml says which calls keploy
+// record's stop made (stopsDerived): none when the set's marks are recorded.
+func (p *exactPlan) derivedAtStop(names []string) []string {
+	if p == nil || !p.stopsDerived {
+		return nil
 	}
 	marked := map[string]bool{}
 	for _, e := range p.worker {
@@ -1248,16 +1276,13 @@ func (p *exactPlan) stopsDerivedWhy(missing []string) string {
 			marked[e.Name] = true
 		}
 	}
-	n := 0
-	for _, name := range missing {
+	var out []string
+	for _, name := range names {
 		if marked[name] {
-			n++
+			out = append(out, name)
 		}
 	}
-	if n == 0 {
-		return ""
-	}
-	return fmt.Sprintf("; %d of them were recorded after the set's last test ended, and the set has no mappings.yaml keploy record wrote to say whether the application made them on its own or as keploy record stopped it, so keploy required them by the set's end, what the application consumed as keploy stopped it included, without waiting for them", n)
+	return out
 }
 
 // workerWhy says what a set's end found of its worker scope: the calls its
