@@ -447,6 +447,10 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		return nil, fmt.Errorf("error creating request for incoming request: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// The test cases are read with models.TestCase, which reads a body object,
+	// so a body that is not UTF-8 comes with its bytes. An agent built before
+	// body objects ignores this and writes each body as a string.
+	req.Header.Set(models.BodyEncodingHeader, models.BodyEncodingBase64)
 	a.markDrainsAfterStop(ctx, req)
 
 	// Registered before it connects; it outlives a restarted agent (see
