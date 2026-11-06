@@ -42,6 +42,9 @@ type answeredLog struct {
 	// set is the test set generation (MockManager.setGen) whose answers the
 	// log holds, moved by fence.
 	set uint64
+	// latest holds, by name, the entry noteLatest made for a recording that
+	// may answer call after call, while a key's list keeps it.
+	latest map[string]*answeredEntry
 	// redacting holds, apart from the keyed entries and their bounds, every
 	// recording noted that holds a pattern (Mock.Noise: the obfuscator
 	// redacted something in it), once a name and content (redactingKey), in
@@ -94,10 +97,48 @@ func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 	l.noteFrom(mk, at, "", false)
 }
 
+// noteLatest is note of a recording that may answer call after call (one of
+// the pool's a door keeps: MockManager.noteKeptAnswer): while the log keeps
+// the entry an earlier noteLatest made for it, only the time it answered
+// moves to at, so each answer after the first copies nothing.
+func (l *answeredLog) noteLatest(mk *models.Mock, at time.Time) {
+	if mk == nil || mk.Name == "" || l.movedLatest(mk, at) {
+		return
+	}
+	l.noteAs(mk, at, "", false, true)
+}
+
+// movedLatest moves the time of the entry noteLatest made for mk, of this
+// test set, to at, and reports whether there is one. A mock an earlier
+// set's staging pooled is refused, as note refuses it, and reported as
+// moved: there is nothing to note.
+func (l *answeredLog) movedLatest(mk *models.Mock, at time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if g := mk.TestModeInfo.StagedSet; g != 0 && g != l.set {
+		return true
+	}
+	e := l.latest[mk.Name]
+	if e == nil || e.mock == nil {
+		return false
+	}
+	if at.After(e.at) {
+		e.at = at
+	}
+	return true
+}
+
 // noteFrom is note of a recording of the set's background of scope
 // background (models.RepeatNote.Background); "" is a test's own, or, with
 // skippedRead, a skipped test's read (models.RepeatNote.SkippedRead).
 func (l *answeredLog) noteFrom(mk *models.Mock, at time.Time, background string, skippedRead bool) {
+	l.noteAs(mk, at, background, skippedRead, false)
+}
+
+// noteAs is noteFrom, and with latest noteLatest's first note of mk, which
+// it files as mk's (latest): one filed by another call while this one made
+// its copy has its time moved instead, so a recording has one such entry.
+func (l *answeredLog) noteAs(mk *models.Mock, at time.Time, background string, skippedRead, latest bool) {
 	if mk == nil || mk.Name == "" {
 		return
 	}
@@ -118,6 +159,12 @@ func (l *answeredLog) noteFrom(mk *models.Mock, at time.Time, background string,
 	if g := mk.TestModeInfo.StagedSet; g != 0 && g != l.set {
 		return
 	}
+	if e := l.latest[mk.Name]; latest && e != nil && e.mock != nil {
+		if at.After(e.at) {
+			e.at = at
+		}
+		return
+	}
 	if redacts {
 		l.keepRedacting(probe, key, keyed, size)
 	}
@@ -128,6 +175,12 @@ func (l *answeredLog) noteFrom(mk *models.Mock, at time.Time, background string,
 		l.byKey = map[string][]*answeredEntry{}
 	}
 	e := &answeredEntry{mock: probe, at: at, background: background, skippedRead: skippedRead, keys: keys, size: size}
+	if latest {
+		if l.latest == nil {
+			l.latest = map[string]*answeredEntry{}
+		}
+		l.latest[mk.Name] = e
+	}
 	l.queue = append(l.queue, e)
 	l.live++
 	l.bytes += size
@@ -202,6 +255,9 @@ func (l *answeredLog) unref(e *answeredEntry) {
 
 // drop forgets e's recording and its bytes. Caller holds mu.
 func (l *answeredLog) drop(e *answeredEntry) {
+	if e.mock != nil && l.latest[e.mock.Name] == e {
+		delete(l.latest, e.mock.Name)
+	}
 	e.mock, e.refs = nil, 0
 	l.live--
 	l.bytes -= e.size
@@ -288,7 +344,7 @@ func (l *answeredLog) candidates(keys []string) []answeredEntry {
 func (l *answeredLog) reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.byKey, l.queue, l.live, l.bytes = nil, nil, 0, 0
+	l.byKey, l.queue, l.live, l.bytes, l.latest = nil, nil, 0, 0, nil
 }
 
 // fence empties the log for the test set of generation set, which from now
@@ -298,7 +354,7 @@ func (l *answeredLog) reset() {
 func (l *answeredLog) fence(set uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.byKey, l.queue, l.live, l.bytes = nil, nil, 0, 0
+	l.byKey, l.queue, l.live, l.bytes, l.latest = nil, nil, 0, 0, nil
 	l.forgetRedacting()
 	l.set = set
 }
@@ -554,6 +610,31 @@ func (h *contentHash) walk(v reflect.Value, depth int) bool {
 // noteAnswered records that the per-test recording mk answered a call now.
 func (m *MockManager) noteAnswered(mk models.Mock) {
 	m.answered.note(&mk, time.Now())
+}
+
+// noteKeptAnswer records that mk answered a call now through a door that
+// keeps it (UpdateUnFilteredMock, MarkMockAsUsed) when, under exact serving,
+// it is one of the pool's (InPool: a recording made outside every test, in
+// TestMain or at start-up), whatever its lifetime. A test's view hides such
+// a recording but for a call a keploy.yaml sessionCalls entry names exactly
+// (sharesRest), and a door that keeps it settles its answer as the tier's
+// (exactPass), so nothing else notes it: a test's identical call then
+// misses, and its miss names it (FindAnsweredEarlier) and why it was not
+// served (models.RepeatNote.OutsideTests), as it names a per-test one.
+// Such a recording may answer call after call: it is noted once a test set,
+// and each answer after that moves only when it last answered
+// (answeredLog.noteLatest). Nothing else is noted here: a test's own is
+// noted as it is served (noteExactServed), a background's as it is spent
+// (noteBackgroundSpent), and a recording no view hides is served to every
+// identical call.
+func (m *MockManager) noteKeptAnswer(mk *models.Mock) {
+	if mk == nil || m.exactView() == nil {
+		return
+	}
+	if pool, known := m.InPool(mk); !pool || !known {
+		return
+	}
+	m.answered.noteLatest(mk, time.Now())
 }
 
 // AnsweredRedacting implements integrations.AnsweredRedactingReader: since

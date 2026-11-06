@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -85,9 +86,11 @@ import (
 // of what it read reads again.
 
 // poolSlice is the names of a pool view's pool slice, as a test's view that
-// shows its declared session calls reads them (exactView.declared). Each pool
-// view's is its own, so two test views share one only when no pool view came
-// between them (sharedIdent).
+// shows its declared session calls reads them (exactView.declared). A pool
+// view that serves the names the last one served keeps its poolSlice
+// (installExactWith), so two test views with such a pool view between them
+// share one, and with it their shared part (sharedIdent): what a test view
+// shows of it is read by name alone (declaredInPool).
 type poolSlice struct{ names map[string]struct{} }
 
 // has reports whether name is one of the slice's.
@@ -131,11 +134,13 @@ type exactView struct {
 	inFlight map[string]bool
 	// pool is, while no test is open, the names of the pool slice served.
 	pool map[string]struct{}
-	// declared is, on a test view installed while keploy.yaml declares
-	// session calls (models.SessionCallsDeclared), the pool slice of the
-	// pool view before it: its recordings a declared session call names
-	// (models.Mock.DeclaredSessionCall), recorded outside every test, are
-	// shown in the test too (sharesRest). nil otherwise.
+	// declared is, on a view installed while keploy.yaml declares session
+	// calls (models.SessionCallsDeclared), the pool slice of the pool view
+	// installed last (a pool view's own): in a test, its recordings a
+	// declared session call names (models.Mock.DeclaredSessionCall),
+	// recorded outside every test, are shown too (sharesRest). A pool view
+	// shows none of them so, and carries it for its ident (sharedIdent).
+	// nil otherwise.
 	declared *poolSlice
 	// worker is the set's worker-scope mocks the run has reached the place
 	// of, by name, as ServeExactWorker last said when the view was
@@ -392,7 +397,8 @@ type exactState struct {
 	// scope's (SequenceView.Between).
 	poolCursor atomic.Pointer[string]
 	// lastPool is the pool slice of the pool view installed last (its
-	// pool): a test's view installed while keploy.yaml declares session
+	// pool; one that serves the same names as the one before keeps that
+	// one's): a test's view installed while keploy.yaml declares session
 	// calls shows those of them it holds (exactView.declared).
 	lastPool atomic.Pointer[poolSlice]
 	// pairs says the session pairs (SetPairing); claimed, the recordings a
@@ -1960,8 +1966,15 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	if v.test == "" {
 		key := v.poolKey
 		m.exact.poolCursor.Store(&key)
-		m.exact.lastPool.Store(&poolSlice{names: v.pool})
-	} else if models.SessionCallsDeclared() {
+		if last := m.exact.lastPool.Load(); last == nil || !maps.Equal(last.names, v.pool) {
+			m.exact.lastPool.Store(&poolSlice{names: v.pool})
+		}
+	}
+	// A pool view carries the slice the tests after it show too: it shows
+	// none of it in a test's way (sharesRest reads it in a test alone), but
+	// its ident is then theirs, so it leaves their shared number to the next
+	// test (sharedViews).
+	if models.SessionCallsDeclared() {
 		v.declared = m.exact.lastPool.Load()
 	}
 	w := m.exact.worker.Load()

@@ -190,6 +190,45 @@ func TestATestShowsTheDeclaredCallsOfThePoolSliceBeforeIt(t *testing.T) {
 	}
 }
 
+// With a call declared, two tests with a pool view of the same names between
+// them share their shared part, as two tests with no call declared do: one
+// number (SharedGeneration), which a parser files its index of the shared
+// reads by (integrations.SharedReads), so the second test builds none. Each
+// view files what it shows itself, so the store's count of those
+// (shownBuilds) cannot tell; the number is what is shared. A pool view of
+// other names is told apart (TestATestShowsTheDeclaredCallsOfThePoolSliceBeforeIt).
+func TestTestsWithAPoolViewOfTheSameNamesBetweenThemShareTheirSharedPart(t *testing.T) {
+	declareSessionCalls(t, declaredRule)
+	mm, ms := startupSet(t)
+	ix := &integrations.MockIndex{Keys: func(mk *models.Mock) []string {
+		if mk.Spec.HTTPReq == nil {
+			return nil
+		}
+		return []string{mk.Spec.HTTPReq.URL}
+	}}
+	mm.ServeExactPool("k", []string{"rates", "cfg"})
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	g1, _ := mm.SharedGeneration("")
+	if got := strings.Join(keyedWalk(t, mm, ix, "/echo/rates"), ","); got != "rates" {
+		t.Fatalf("T1's keyed read of the declared call shows %q; want rates", got)
+	}
+	mm.ServeExactPool("k", []string{"rates", "cfg"})
+	mm.ServeExactTest("T2", nil)
+	g2, _ := mm.SharedGeneration("")
+	if g1.View != g2.View {
+		t.Fatalf("two tests with a pool view of the same names between them got shared numbers %d and %d; want one", g1.View, g2.View)
+	}
+	if got := strings.Join(keyedWalk(t, mm, ix, "/echo/rates"), ","); got != "rates" {
+		t.Fatalf("T2's keyed read of the declared call shows %q; want rates", got)
+	}
+	// Three tests, each after a pool view of the same names: one number.
+	mm.ServeExactPool("k", []string{"cfg", "rates"})
+	mm.ServeExactTest("T3", nil)
+	if g3, _ := mm.SharedGeneration(""); g3.View != g1.View {
+		t.Fatalf("a third test after a pool view of the same names got shared number %d; want %d", g3.View, g1.View)
+	}
+}
+
 // A test opened before any pool slice was served is served no declared
 // session call: the calls it shows are those of the pool slice served
 // before it, and there is none, so neither the start-up recording nor
@@ -207,12 +246,16 @@ func TestATestOpenedBeforeAnyPoolSliceIsServedNoDeclaredCall(t *testing.T) {
 
 // Under the background rules a pool recording answers at most one call in the
 // staging; one keploy.yaml declares served to every test is not spent, and
-// answers every test's call.
+// answers every test's call, though TestMain made the call between tests
+// first.
 func TestUnderTheBackgroundRulesADeclaredPoolCallIsNotSpent(t *testing.T) {
 	declareSessionCalls(t, declaredRule)
 	mm, ms := startupSet(t)
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"rates", "cfg"}, nil)
 	mm.ServeExactPool(models.PoolKeyNone, []string{"rates", "cfg"})
+	if got := keepNamed(t, mm, "rates"); got != "rates" {
+		t.Fatalf("TestMain's call to the declared pool call between tests under the background rules: %s", got)
+	}
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
 	for i := 0; i < 2; i++ {
 		if got := keepNamed(t, mm, "rates"); got != "rates" {

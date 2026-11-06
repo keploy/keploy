@@ -30,7 +30,11 @@ func (d pooledEarlierDb) InPool(m *models.Mock) (bool, bool) { return d.pool[m.N
 // the next step keeps it too. A call keploy.yaml declares already is told
 // what the declaration serves. The same recording listed under a test, or
 // with no table sent, is an earlier test's, as before. Without the switch
-// the hint is the switch-off one.
+// the hint is the switch-off one. A call an entry covers only by a path
+// prefix is told through the real manager
+// (proxy.TestUnderTheSwitchATestsCallIdenticalToAHiddenStartUpRecordingNamesIt):
+// here the answered log is the row's, and the manager's decides which
+// recordings it holds.
 func TestARepeatOfARecordingMadeOutsideEveryTestNamesItAndHowToServeIt(t *testing.T) {
 	const addr, host = "127.0.0.1:18094", "127.0.0.1:18094"
 	const path = "/echo/rates"
@@ -52,10 +56,7 @@ func TestARepeatOfARecordingMadeOutsideEveryTestNamesItAndHowToServeIt(t *testin
 		pool     bool
 		known    bool
 		declared bool
-		// prefix declares the call by a path prefix only, which under the
-		// switch serves no recording made outside every test.
-		prefix  bool
-		outside bool
+		outside  bool
 		// background and skipped are how the store noted the earlier
 		// answer (integrations.AnsweredCall): a background spend or a
 		// skipped test's read keeps its own words.
@@ -70,9 +71,6 @@ func TestARepeatOfARecordingMadeOutsideEveryTestNamesItAndHowToServeIt(t *testin
 		{name: "switch on, declared, made outside every test", proven: true, pool: true, known: true, declared: true, outside: true,
 			want: []string{"a recording made outside every test", "keploy.yaml declares this call a session call"},
 			not:  []string{"an earlier test", "sessionCalls: ["}},
-		{name: "switch on, declared by a path prefix, made outside every test", proven: true, pool: true, known: true, prefix: true, outside: true,
-			want: []string{"a recording made outside every test", "covers this call only by a path prefix or with no method", `declare sessionCalls: [{host: "127.0.0.1:18094", method: "GET", pathPrefix: "/echo/rates"}]`},
-			not:  []string{"an earlier test", "keploy.yaml declares this call a session call"}},
 		{name: "switch on, listed under a test", proven: true, pool: false, known: true,
 			want: []string{"a recording of an earlier test of this set", "a recording another test made of it is served to that test only"},
 			not:  []string{"outside every test (in TestMain or at start-up), which already"}},
@@ -94,9 +92,6 @@ func TestARepeatOfARecordingMadeOutsideEveryTestNamesItAndHowToServeIt(t *testin
 			models.SetSessionCalls(nil)
 			if c.declared {
 				models.SetSessionCalls([]models.SessionCallRule{{Host: "127.0.0.1", Method: "GET", PathPrefix: path}})
-			}
-			if c.prefix {
-				models.SetSessionCalls([]models.SessionCallRule{{Host: "127.0.0.1", Method: "GET", PathPrefix: "/echo"}})
 			}
 			db := pooledEarlierDb{
 				earlierDb: earlierDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{near}}, answered: answeredAs(c.background, c.skipped)},
