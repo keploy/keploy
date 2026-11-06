@@ -149,9 +149,11 @@ type AgentClient struct {
 // killed part way ("failed to unregister, leaking uprobe"), leaving the
 // breakpoint in every process that maps the probed library. So the CLI stops
 // an agent by asking it, or by SIGTERM, and waits for it (gone) while its
-// teardown makes progress -- killing it only once that stops, or it has
-// detached everything and not exited, or the user presses Ctrl+C once keploy
-// has said a press stops it (stopWatch: a press answering the first offer has
+// teardown makes progress -- killing it only once that stops, or once it has
+// detached everything and not exited (a verdict only an agent whose reporter
+// beats on after its detach report, an older one, can get: a current agent's
+// detach report is its last), or the user presses Ctrl+C once keploy has
+// said a press stops it (stopWatch: a press answering the first offer has
 // it die once no teardown work in progress is making progress, one answering
 // an offer made after a press kills it at once -- an agent sudo runs as root,
 // which no kill ends at once, is waited for instead until it has exited or
@@ -2932,15 +2934,17 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 // (agentGoingAway), which got its stop some other way: it is sent SIGTERM only
 // if it has reported no teardown within agentStoppingGrace. Then it is waited
 // for while its teardown makes progress, and killed (kill) only once it has
-// stopped making any, or has detached everything and not exited -- kill(false),
-// on which it dies once no teardown work in progress is making progress -- or
-// at the user's Ctrl+C once the stop has said a press stops it, as that offer
-// says: kill(false) at a press answering the first offer, kill(true), at
-// once, at one answering an offer made after a press (stopWatch). reach is
-// what kill does where that differs (Windows, sudo): the offers say so. An
-// agent sudo runs as root (reach.noAtOnce), which no kill ends at once, is
-// waited for after a press until it has exited or halted. An agent already
-// reaped is never signalled: its pid may be another process's by now.
+// stopped making any, or, if its reporter beats on after its detach report
+// (an older agent's: a current agent's detach report is its last), has
+// detached everything and not exited -- kill(false), on which it dies once no
+// teardown work in progress is making progress -- or at the user's Ctrl+C
+// once the stop has said a press stops it, as that offer says: kill(false) at
+// a press answering the first offer, kill(true), at once, at one answering an
+// offer made after a press (stopWatch). reach is what kill does where that
+// differs (Windows, sudo): the offers say so. An agent sudo runs as root
+// (reach.noAtOnce), which no kill ends at once, is waited for after a press
+// until it has exited or halted. An agent already reaped is never signalled:
+// its pid may be another process's by now.
 func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error, kill func(now bool) error, reach killReach, read func(context.Context) (utils.TeardownProgress, bool)) {
 	ifRunning := func(f func() error) func() error {
 		return func() error {
@@ -4279,16 +4283,18 @@ var dockerStopPoll = time.Second
 // on the daemon's answer, engineCLI.ask) and waits for the container to stop
 // (`wait`) while the agent's teardown makes progress, which it reports in its
 // container (readContainerProgress). It kills it only once it has stopped
-// making any, or has detached everything and not exited -- with the
-// escalation signal (`kill --signal SIGUSR2`), on which the agent dies once no
-// teardown work in progress is making progress -- or at the user's Ctrl+C
-// once the stop has said a press stops it, as that offer says: the escalation
-// signal at a press answering the first offer, and at once (`kill`, SIGKILL)
-// at one answering an offer made after a press (stopWatch). Not `stop`, whose
-// grace period (10 s by default) ends in a SIGKILL however the teardown is
-// doing (agentRun says why that must not land in it). unanswered (the agent
-// never answered its readiness check) has SIGTERM sent again until the agent
-// reports its teardown (resendSIGTERM).
+// making any, or, if its reporter beats on after its detach report (an older
+// agent image's: a current agent's detach report is its last), has detached
+// everything and not exited -- with the escalation signal (`kill --signal
+// SIGUSR2`), on which the agent dies once no teardown work in progress is
+// making progress -- or at the user's Ctrl+C once the stop has said a press
+// stops it, as that offer says: the escalation signal at a press answering
+// the first offer, and at once (`kill`, SIGKILL) at one answering an offer
+// made after a press (stopWatch). Not `stop`, whose grace period (10 s by
+// default) ends in a SIGKILL however the teardown is doing (agentRun says why
+// that must not land in it). unanswered (the agent never answered its
+// readiness check) has SIGTERM sent again until the agent reports its
+// teardown (resendSIGTERM).
 func stopAgentContainer(logger *zap.Logger, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	logger = logger.With(zap.String("container", name))
 	cli := newEngineCLI(logger)
@@ -4303,9 +4309,10 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool, moved 
 // awaitAgentContainer waits for an agent's container that has been told to
 // stop to exit, while the agent's teardown makes progress, which it reports
 // in its container (readContainerProgress), and kills it only once it has
-// stopped making any, or has detached everything and not exited, or at the
-// user's Ctrl+C, as stopAgentContainer says. It returns once the container
-// has exited, or once it killed it at once (killedAtOnce).
+// stopped making any, or, if its reporter beats on after its detach report,
+// has detached everything and not exited, or at the user's Ctrl+C, as
+// stopAgentContainer says. It returns once the container has exited, or once
+// it killed it at once (killedAtOnce).
 func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	// kill(false) sends the agent the escalation signal, on which it dies
 	// once no teardown work in progress is making progress
@@ -4361,7 +4368,8 @@ func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unansw
 // waited for the drain (WatchAgentStop), and goes once the recording's streams
 // close. Its container is waited for while its teardown makes progress
 // (awaitAgentContainer), not for compose's grace: one that stops making
-// progress, or has detached everything and not exited, is wedged, and is
+// progress, or (an older agent image, whose reporter beats on after its
+// detach report) has detached everything and not exited, is wedged, and is
 // killed, keploy saying so at WARN (stopWatch). Compose then finishes stopping
 // the project. Nothing is sent to an agent that is already going: compose's
 // stop signal is its stop. But the agent waits, before it goes, for the
@@ -4482,6 +4490,12 @@ func (a *AgentClient) GetErrorChannel() <-chan error {
 // GetMockErrors fetches mock-not-found errors from the agent via HTTP.
 func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
 	url := fmt.Sprintf("%s/mockerrors", a.conf.Agent.AgentURI)
+	if models.SetEndRead(ctx) {
+		// A set's end read: the agent has its parsers file what they hold
+		// for a test of the set first. An agent that predates the parameter
+		// ignores it, and reads as it reads a test's end.
+		url += "?" + models.SetEndReadQuery + "=1"
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %s", err.Error())
@@ -5138,18 +5152,20 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // installs both before it serves the pool. worker is each key's worker scope
 // (models.ScopeTableReq.Worker): names of its pool slice served in a test's
 // window too. repeats are each test's repeated reads
-// (models.ScopeTableReq.RepeatReads).
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead) (retErr error) {
+// (models.ScopeTableReq.RepeatReads). notRequired is, by test, the names of
+// its list keploy's judging marked served, not required
+// (models.ScopeTableReq.NotRequired).
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p, wk, w, g, r := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, w, g, r) })
+			t, p, wk, w, g, r, nr := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, w, g, r, nr) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, Windows: windows, Given: given, RepeatReads: repeats})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

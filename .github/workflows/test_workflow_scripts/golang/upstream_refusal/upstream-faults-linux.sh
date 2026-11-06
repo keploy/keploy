@@ -50,6 +50,13 @@
 # Env: RECORD_BIN, REPLAY_BIN (default RECORD_BIN), OLD_BIN (optional). Ports:
 # 18090 (app), 18091 (upstream). Runs as a user with passwordless sudo, with
 # a JDK (javac and java) on PATH for leg 16.
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
@@ -132,7 +139,7 @@ done
 echo "== 2. keploy record =="
 # The logs are the runner user's: sudo runs keploy, not the redirect.
 # shellcheck disable=SC2024
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./faults -app $APP $UP" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "./faults -app $APP $UP" \
     --generateGithubActions=false --disable-tele > record.log 2>&1 < /dev/null &
 REC_PID=$!
 wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -172,7 +179,7 @@ replay() {
     local runs report
     runs=$(find keploy/reports -maxdepth 1 -name 'test-run-*' 2>/dev/null | wc -l)
     # shellcheck disable=SC2024
-    sudo -E env PATH="$PATH" "$1" test -c "./faults -app $APP $UP" --delay 3 \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$1" test -c "./faults -app $APP $UP" --delay 3 \
         --generateGithubActions=false --disable-tele > "$2" 2>&1 < /dev/null
     sudo chown -R "$(id -u):$(id -g)" . 2>/dev/null
     # The run's own report: a run that wrote none must not be read as the
@@ -239,7 +246,7 @@ mkdir -p "$WORK/stop" && cd "$WORK/stop" || exit 1
 UP_PID=$!
 wait_listen "$UP" "$UP_PID" || { echo "::error::the upstream did not start"; exit 1; }
 # shellcheck disable=SC2024
-sudo -E env PATH="$PATH" HELD_CALL=1 "$RECORD_BIN" record -c "$WORK/faults -app $APP $UP" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" HELD_CALL=1 "$RECORD_BIN" record -c "$WORK/faults -app $APP $UP" \
     --generateGithubActions=false --disable-tele > held_record.log 2>&1 < /dev/null &
 REC_PID=$!
 wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 held_record.log; exit 1; }
@@ -283,7 +290,7 @@ mock_record_held() {
     wait_listen "$UP" "$UP_PID" || { echo "::error::the upstream did not start"; exit 1; }
     [ "$how" = timer ] && extra=(--record-timer 30s)
     # shellcheck disable=SC2024
-    sudo -E env PATH="$PATH" HELD_CALL=1 GRACEFUL="${graceful:+1}" "$RECORD_BIN" mock record -c "$WORK/faults -app $APP $UP" --name held \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" HELD_CALL=1 GRACEFUL="${graceful:+1}" "$RECORD_BIN" mock record -c "$WORK/faults -app $APP $UP" --name held \
         --disable-tele "${extra[@]}" > record.log 2>&1 < /dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy mock record"; tail -30 record.log; exit 1; }
@@ -381,7 +388,7 @@ mock_record_gave_up() {
     UP_PID=$!
     wait_listen "$UP" "$UP_PID" || { echo "::error::the upstream did not start"; exit 1; }
     # shellcheck disable=SC2024
-    sudo -E env PATH="$PATH" "$RECORD_BIN" mock record -c "$WORK/$dir/cmd.sh" --name gaveup --disable-tele \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" mock record -c "$WORK/$dir/cmd.sh" --name gaveup --disable-tele \
         > record.log 2>&1 < /dev/null &
     REC_PID=$!
     wait "$REC_PID" 2>/dev/null

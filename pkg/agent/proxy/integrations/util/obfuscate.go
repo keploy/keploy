@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"log"
 	"regexp"
+	"regexp/syntax"
 	"sync"
+	"sync/atomic"
 )
 
 // NoiseChecker holds compiled regex patterns from Mock.Noise for efficient
@@ -83,6 +85,102 @@ func (nc *NoiseChecker) IsNoisy(value string) bool {
 		}
 	}
 	return false
+}
+
+// IsNoisyWithin reports whether a part of value matches one of the
+// patterns as IsNoisy matches a whole value: each pattern is read with the
+// anchors at its start and end dropped. A text the obfuscator redacted a
+// value in (a SQL statement, a header's "Bearer " value) holds the
+// redacted value among other text, and the pattern it wrote, anchored on
+// the redacted value alone, matches it only so.
+func (nc *NoiseChecker) IsNoisyWithin(value string) bool {
+	if nc == nil {
+		return false
+	}
+	for _, re := range nc.patterns {
+		if unanchored(re).MatchString(value) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	unanchoredMu    sync.RWMutex
+	unanchoredCache = make(map[string]*regexp.Regexp)
+	// unanchoredCompiles counts the patterns compiled without their anchors
+	// (unanchored): one a pattern, however many values and checkers read it.
+	unanchoredCompiles atomic.Int64
+)
+
+// UnanchoredCompiles is the count of patterns compiled without their
+// anchors (IsNoisyWithin) in this process: one a pattern while the cache
+// holds it, however many values and checkers read it. Rows that bound a miss
+// report's cost read it.
+func UnanchoredCompiles() int64 {
+	return unanchoredCompiles.Load()
+}
+
+// unanchored is re with the anchors at its start and end dropped (of each
+// alternative of it), bounded in a cache as getCachedRegexp's; re itself
+// when it holds none, or when it cannot be read again.
+func unanchored(re *regexp.Regexp) *regexp.Regexp {
+	pattern := re.String()
+	unanchoredMu.RLock()
+	u, found := unanchoredCache[pattern]
+	unanchoredMu.RUnlock()
+	if found {
+		return u
+	}
+	u = re
+	if parsed, err := syntax.Parse(pattern, syntax.Perl); err == nil {
+		// A pattern of anchors alone matches an empty value only: read
+		// without them it would match every text.
+		if dropped := dropEndAnchors(parsed); dropped.Op != syntax.OpEmptyMatch {
+			unanchoredCompiles.Add(1)
+			if c, err := regexp.Compile(dropped.String()); err == nil {
+				u = c
+			}
+		}
+	}
+	unanchoredMu.Lock()
+	if len(unanchoredCache) >= maxNoiseCacheSize {
+		unanchoredCache = make(map[string]*regexp.Regexp)
+	}
+	unanchoredCache[pattern] = u
+	unanchoredMu.Unlock()
+	return u
+}
+
+// dropEndAnchors drops the begin anchor that opens r and the end anchor
+// that closes it, in each alternative of an alternation and in a group.
+func dropEndAnchors(r *syntax.Regexp) *syntax.Regexp {
+	isBegin := func(op syntax.Op) bool { return op == syntax.OpBeginText || op == syntax.OpBeginLine }
+	isEnd := func(op syntax.Op) bool { return op == syntax.OpEndText || op == syntax.OpEndLine }
+	switch r.Op {
+	case syntax.OpAlternate:
+		for i, sub := range r.Sub {
+			r.Sub[i] = dropEndAnchors(sub)
+		}
+	case syntax.OpCapture:
+		r.Sub[0] = dropEndAnchors(r.Sub[0])
+	case syntax.OpConcat:
+		subs := r.Sub
+		if len(subs) > 0 && isBegin(subs[0].Op) {
+			subs = subs[1:]
+		}
+		if len(subs) > 0 && isEnd(subs[len(subs)-1].Op) {
+			subs = subs[:len(subs)-1]
+		}
+		if len(subs) == 1 {
+			return dropEndAnchors(subs[0])
+		}
+		r.Sub = subs
+		if len(subs) == 0 {
+			return &syntax.Regexp{Op: syntax.OpEmptyMatch}
+		}
+	}
+	return r
 }
 
 // IsNoisyValue reports whether value (as interface{}) matches any noise pattern.

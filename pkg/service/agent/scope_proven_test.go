@@ -443,6 +443,43 @@ func TestAnEndJudgesAgainstTheCountsAtItsBegin(t *testing.T) {
 	require.Contains(t, e.Reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
 }
 
+// A recording keploy's judging marked served, not required is not charged when
+// the test that lists it did not make its call; a mark another test's table
+// carries charges this one as before, and so does a mark on another name.
+func TestARecordingMarkedNotRequiredIsNotChargedInItsOwnTestOnly(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		marked  map[string][]string
+		charged bool
+	}{
+		{"marked in its own test", map[string][]string{"o::TestA": {"mock-1"}}, false},
+		{"marked in another test", map[string][]string{"o::TestB": {"mock-1"}}, true},
+		{"another name marked", map[string][]string{"o::TestA": {"mock-2"}}, true},
+		{"none marked", nil, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, p := wireAgent(t, models.MODE_TEST)
+			ctx := context.Background()
+			storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
+			a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+			p.served = map[string]uint64{"mock-1": 1} // answered an earlier test
+			require.NoError(t, a.SetScopeNotRequired(ctx, c.marked))
+			claimSelf(t, a)
+			_, serr := a.ProvenBegin(ctx, begin("TestA"))
+			require.Nil(t, serr)
+			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+			require.Nil(t, serr)
+			if !c.charged {
+				require.Empty(t, e.Action, "a recording marked served, not required failed its test: %s", e.Reason)
+				require.Equal(t, models.ScopeOutcomePassed, windowOf(t, a, "o::TestA").Outcome)
+				return
+			}
+			require.Equal(t, models.ScopeActionFail, e.Action)
+			require.Contains(t, e.Reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
+		})
+	}
+}
+
 // A wire operation waiting for another ends with its caller's context: the
 // CLI's final read is never stuck behind an operation it cannot see.
 func TestAWaitForTheWireEndsWithItsContext(t *testing.T) {
@@ -1668,7 +1705,18 @@ func TestAFailedTestsReasonSaysWhyEachCallMissed(t *testing.T) {
 	}
 	r = evidenceReason("t", &models.ScopeEvidence{Misses: many}, nil, time.Time{}, "")
 	require.Equal(t, 5, strings.Count(r, "missed (request_changed)"))
-	require.Contains(t, r, "and 2 more call(s) missed for a reason the learn step gave")
+	require.Contains(t, r, "and 2 more call(s) missed for a reason keploy record's full round gave")
+}
+
+// A miss of record's full round whose view a test's begin or end replaced
+// before keploy diagnosed it (view_replaced) says why in the failed test's
+// reason: its code and the line its next steps carry. With no code it read
+// only that the call had no recorded answer.
+func TestAFailedTestsReasonSaysWhyAMissWhoseViewWentMissed(t *testing.T) {
+	const gone = "keploy record's full round decided this request in test-2, and the replay ended test-2 before keploy diagnosed its miss, so no recording is named for it: keploy reads nothing of a view a test's begin or end replaced."
+	ev := &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /orders", Reason: models.MissViewReplaced, NextSteps: gone}}}
+	require.Equal(t, "keploy: POST /orders had no recorded answer.\n"+
+		"POST /orders missed (view_replaced): "+gone, evidenceReason("test-2", ev, nil, time.Time{}, ""))
 }
 
 // End to end on the agent: the test's end answers fail with the learn

@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -39,9 +42,14 @@ import (
 //	                          with hitMu as that leaf)
 //	sigMu                    (window-change signal; a LEAF — nothing is
 //	                          taken under it, and it may be taken under any)
+//	setEndMu                 (set-end registrations; a LEAF, released
+//	                          before any registration runs)
 //	swapMu  →  exact.outside.mu  →  treesMu  →  TreeDb.mu
 //	                         (prepareOutside reads the staged trees under the
 //	                          staging lock; nothing takes swapMu under it)
+//	swapMu  →  cursorMu      (a staging drops the per-test cursors and the
+//	                          recordings kept for repeats; keepOwned decides
+//	                          a recording's owner and keeps it under swapMu)
 //	swapMu  →  treesMu, carry.mu
 //	                         (fileCarryOver, under SetMocksWithWindow;
 //	                          carry.mu is a LEAF, also taken bare by
@@ -216,6 +224,24 @@ type MockManager struct {
 	// view prefixes its scope). Guarded by cursorMu, and dropped with the
 	// per-test cursors at every staging.
 	kept map[string]struct{}
+	// keptGen counts the stagings that dropped kept (resetPerTestCursors). A
+	// claim the store refuses to mark used takes back its keep only while
+	// keptGen is the one it kept in: once a staging dropped that keep, the
+	// name kept now, if any, is a later claim's. Guarded by cursorMu.
+	keptGen uint64
+	// testHookSetRead, testHookOwnerRead and testHookKeep, set only by a
+	// test before the manager is shared, run in a claim (keepOwned): the
+	// first in its set check, once that read the set generation, as it
+	// returns; the second in its owner check, once that read the open test,
+	// its window and its pool, as it returns; the third under cursorMu just
+	// before the keep. No staging may land from the first through the third.
+	// testHookMark runs in ClaimForRepeats once keepOwned kept the
+	// recording, holding no lock, before the store marks it used: a staging
+	// may land there.
+	testHookSetRead   func()
+	testHookOwnerRead func()
+	testHookKeep      func()
+	testHookMark      func()
 	// usedUp are the recordings a worker's test consumed, held for the test
 	// instead of deleted, so a run of the same test again is served them
 	// (scopedMockDb.DeleteFilteredMock); by its scope and the name. Guarded by
@@ -405,6 +431,21 @@ type MockManager struct {
 	sigMu     sync.Mutex
 	windowSig chan struct{}
 
+	// setEndFilers are the parsers' registrations to file, at a read of a
+	// test set's end, the misses of the calls they hold for a test of the set
+	// (AtSetEnd, FileAtSetEnd), in the order they were made. setEndMu guards
+	// them and is a LEAF lock: the registrations run with it released.
+	setEndMu     sync.Mutex
+	setEndFilers []setEndFiler
+	setEndNext   uint64
+	// notAtSetEnd is set on a test worker's manager (instanceServing): no
+	// set's end read asks it, so AtSetEnd registers nothing there.
+	notAtSetEnd atomic.Bool
+	// readsSetEnds is the replay session's client's word that it reads each
+	// set's end (models.OutgoingOptions.ReadsSetEnds, SetReadsSetEnds):
+	// without it AtSetEnd registers nothing.
+	readsSetEnds atomic.Bool
+
 	// stagingEpoch changes at every staging call (a SetMocksWithWindow with the
 	// models.BaseTime sentinel): a new set, or the same set staged again after
 	// an agent replacement. State a consumer builds from one staging snapshot
@@ -483,6 +524,10 @@ type MockManager struct {
 	// stored generation (bumpRevisionAll) and at Close.
 	restagedMu sync.Mutex
 	restaged   map[any]func()
+
+	// parserKept is what the parsers keep with the manager, by slot
+	// (integrations.ParserKeep): it goes with the manager.
+	parserKept sync.Map
 
 	// noConnMocks is a negative cache for GetConnectionMocks's
 	// fallback scan. A connID that returned zero connection-scoped
@@ -1543,6 +1588,39 @@ func (o mockOwner) own(in []*models.Mock) []*models.Mock {
 	return out
 }
 
+// firstRecordedStartLocked is the start of the current set's first recorded
+// test as far as the manager knows it: the earlier of the start-up cutoff
+// (SeedStartupCutoff, or the earliest window staged) and the first recorded
+// test window seeded (SeedRecordedWindows). Zero when it knows neither: an
+// off-switch mock replay seeds none. The caller holds swapMu, after a set
+// boundary's staging installed what was parked for the set.
+func (m *MockManager) firstRecordedStartLocked() time.Time {
+	first := m.firstWindowStart
+	if tw := m.testWindows.Load(); tw.Len() > 0 {
+		if s := tw.Window(0).Start; first.IsZero() || s.Before(first) {
+			first = s
+		}
+	}
+	return first
+}
+
+// bootPlaced reports whether the start-up tier a models.BaseTime staging
+// builds, which serves before any test and between tests, serves mk without
+// exact serving. Every mock but one placed at its answer
+// (models.IsAnswerPlaced) is served; that one only when its answer came
+// before the set's first recorded test began (cutoff): answered in a test, it
+// carries what that test produced, and a window that holds its answer serves
+// it (pkg.StageInWindow). With no cutoff known (zero, before every place)
+// nothing tells a start-up answer from a test's, and it is held (fail
+// closed): its parser holds the call until a window holds a recording that
+// answers it.
+func bootPlaced(mk *models.Mock, cutoff time.Time) bool {
+	if !models.IsAnswerPlaced(mk) {
+		return true
+	}
+	return models.PlaceOf(mk).Before(cutoff)
+}
+
 // setMocksWithWindowLocked is SetMocksWithWindow without the window-change
 // signal. The caller holds swapMu and owns the mocks (mockOwner).
 //
@@ -1582,6 +1660,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// GetSessionMocks returns startup+session so pre-wave-2 parsers
 	// don't notice the split.
 	var startupInit []*models.Mock
+	// startupHeld is what the startup tier this staging builds stores but
+	// does not serve without exact serving (TreeDb.held).
+	startupHeld := map[*models.Mock]struct{}{}
 
 	// Runner/Replayer's initial SetMocksWithWindow call fires with
 	// start=models.BaseTime before any test runs — to stage mocks for
@@ -1687,17 +1768,26 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// re-partitions, session mocks revert to being session-tier-only
 		// in the startup tree (which rebuilds from the real-window
 		// firstStart cutoff, not from the unfiltered input).
-		for _, mk := range filtered {
-			if mk == nil {
-				continue
+		//
+		// A mock placed at its answer (models.IsAnswerPlaced) that is not
+		// placed before the set's first recorded test (bootPlaced) is stored
+		// there as every other, and held (TreeDb.held): what the tier serves
+		// without exact serving leaves it out, since it would answer the call
+		// now with what a later test produced, and its parser holds the call
+		// until a window holds the answer. Exact serving shows it where its
+		// view places it, and every reader of the staged set (the teardown
+		// bound, the views, HasUnservedRecording) still finds it.
+		cutoff := m.firstRecordedStartLocked()
+		for _, list := range [][]*models.Mock{filtered, unfiltered} {
+			for _, mk := range list {
+				if mk == nil {
+					continue
+				}
+				startupInit = append(startupInit, mk)
+				if !bootPlaced(mk, cutoff) {
+					startupHeld[mk] = struct{}{}
+				}
 			}
-			startupInit = append(startupInit, mk)
-		}
-		for _, mk := range unfiltered {
-			if mk == nil {
-				continue
-			}
-			startupInit = append(startupInit, mk)
 		}
 	}
 	m.noteStatedLifetimes(filtered, unfiltered, explicitStartup)
@@ -1812,6 +1902,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	}
 	newStartup := NewTreeDb(customComparator)
 	newStartup.bootBuilt = !m.testFiredThisSet && !m.scopeFiredThisSet
+	newStartup.hold(startupHeld)
 	newStartupKeys := make(map[*models.Mock]models.TestModeInfo, len(startupInit)+len(explicitStartup))
 	// H4 round-2: use a TIER-LOCAL TestModeInfo copy as the startup tree
 	// key rather than mutating mk.TestModeInfo.ID in place. The same
@@ -2347,6 +2438,7 @@ func (m *MockManager) resetPerTestCursors() {
 		}
 	}
 	m.kept = nil
+	m.keptGen++
 	m.usedUp = nil
 }
 
@@ -2421,6 +2513,75 @@ func (m *MockManager) KeptForRepeats() func(key string) bool {
 	return snapshotKeys(m.kept)
 }
 
+// ClaimForRepeats keeps mk, the open test's own per-test recording, for its
+// test's byte-identical repeats and marks it used, when no consume kept it
+// yet (integrations.RepeatClaimer). It is false, keeping nothing, for a mock
+// of an earlier set, one that is not the open test's own (OwnedByOpenTest),
+// one already kept, and one the store cannot mark used (an unnamed mock).
+//
+// The mark runs after the keep, outside the staging's lock (the mark door
+// can take that lock for read itself, and a second read lock waits behind a
+// staging queued for the write lock), so a staging may land between them:
+// the store then refuses to mark the earlier staging's copy used, and the
+// claim takes back only its own keep (unkeep), never a later claim's of the
+// same name.
+func (m *MockManager) ClaimForRepeats(mk models.Mock) bool {
+	gen, ok := m.keepOwned(&mk)
+	if !ok {
+		return false
+	}
+	if m.testHookMark != nil {
+		m.testHookMark()
+	}
+	if m.MarkMockAsUsed(mk) {
+		return true
+	}
+	m.unkeep(mk.Name, gen)
+	return false
+}
+
+// keepOwned keeps mk for its test's repeats when it is of this set, the open
+// test's own, and not kept yet, and returns the kept generation (keptGen) it
+// kept in. It decides holding swapMu, which every staging holds while it
+// drops what was kept and swaps the trees and the window: no staging lands
+// from the set check's read through the keep, so a consume of one test's
+// recording that straddles the next test's staging keeps nothing for that
+// test, and a copy of the previous set's pool read before the next set's
+// fenced staging (ArmSetFence) keeps nothing for the new set.
+func (m *MockManager) keepOwned(mk *models.Mock) (uint64, bool) {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	if m.stalePooledRead(mk, m.testHookSetRead) || !m.ownedByOpenTest(mk, m.testHookOwnerRead) {
+		return 0, false
+	}
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if _, kept := m.kept[mk.Name]; kept {
+		return 0, false
+	}
+	if m.kept == nil {
+		m.kept = make(map[string]struct{})
+	}
+	if m.testHookKeep != nil {
+		m.testHookKeep()
+	}
+	m.kept[mk.Name] = struct{}{}
+	return m.keptGen, true
+}
+
+// unkeep takes back the keep of name a claim made in the kept generation
+// gen, once the store refused to mark the recording used. It decides under
+// cursorMu, which every staging holds while it drops what was kept and moves
+// keptGen: in gen the name's keep is this claim's (keepOwned keeps a name
+// once), and after a staging it is not this claim's to take back.
+func (m *MockManager) unkeep(name string, gen uint64) {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if m.keptGen == gen {
+		delete(m.kept, name)
+	}
+}
+
 // OwnedByOpenTest reports whether mk is the open test's own recording
 // (integrations.TestOwner): a test is open (IsTestWindowActive) and mk is in
 // the per-test pool served for it: under exact serving, the test's mapping
@@ -2430,8 +2591,18 @@ func (m *MockManager) KeptForRepeats() func(key string) bool {
 // staging before the first test, between tests, or a replay that opens none)
 // no mock is.
 func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
+	return m.ownedByOpenTest(mk, nil)
+}
+
+// ownedByOpenTest is OwnedByOpenTest. read, when not nil, runs once the check
+// read the open test, its window and its pool, as it returns: keepOwned's
+// test hook at the point the claim's owner is decided.
+func (m *MockManager) ownedByOpenTest(mk *models.Mock, read func()) bool {
 	if mk == nil {
 		return false
+	}
+	if read != nil {
+		defer read()
 	}
 	if v := m.exactView(); v != nil {
 		// The open test's test mocks (ServeExactTest), by name: its index
@@ -2683,7 +2854,9 @@ func (m *MockManager) NewVariableSet() {
 // currently only in-tree caller) consult this pool to serve
 // app-bootstrap traffic — Flyway migrations, ORM metadata boot,
 // HikariCP/JDBC pool warm-up queries. Pool is rebuilt by every
-// SetMocksWithWindow call using the latest firstWindowStart.
+// SetMocksWithWindow call using the latest firstWindowStart. Without exact
+// serving it leaves out what the tree holds and does not serve
+// (TreeDb.serves).
 func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 	return m.getStartupMocksIn(m.exactView())
 }
@@ -2702,7 +2875,7 @@ func (m *MockManager) getStartupMocksIn(v *exactView) ([]*models.Mock, error) {
 	}
 	results := make([]*models.Mock, 0, 32)
 	tree.rangeValues(func(v interface{}) bool {
-		if mock, ok := v.(*models.Mock); ok && mock != nil {
+		if mock, ok := v.(*models.Mock); ok && mock != nil && tree.serves(mock) {
 			results = append(results, mock)
 		}
 		return true
@@ -2741,7 +2914,7 @@ func (m *MockManager) getStartupMocksByKindIn(v *exactView, kind models.Kind) ([
 	}
 	results := make([]*models.Mock, 0, 16)
 	tree.rangeValues(func(v interface{}) bool {
-		if mock, ok := v.(*models.Mock); ok && mock != nil && mock.Kind == kind {
+		if mock, ok := v.(*models.Mock); ok && mock != nil && mock.Kind == kind && tree.serves(mock) {
 			results = append(results, mock)
 		}
 		return true
@@ -2893,6 +3066,10 @@ func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
 // repeated identical prepared-statement reads (e.g. login's username lookup,
 // register's read-back of a freshly-generated id) so each consumes the row
 // recorded at that position rather than a stale earlier-test row.
+//
+// It takes windowMu alone, for read, and never swapMu: the MySQL replayer
+// reads it under a lock of its own, also from a release a staging runs
+// while it holds swapMu (WhenRestaged), so swapMu here would deadlock.
 func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
 	// Under exact serving no recorded time narrows what a test is served:
 	// its mapping does.
@@ -3273,7 +3450,8 @@ func (m *MockManager) SessionMockHitCounts() map[string]uint64 {
 // match, across all tiers (unfiltered, filtered, startup, carry-over). It
 // reads the live trees on every call — no caching — so it stays correct as
 // the mock set is replaced between test-sets. Without exact serving it
-// returns on the first match and allocates nothing. A nil per-kind tree means
+// returns on the first match a tree serves (TreeDb.serves) and allocates
+// nothing. A nil per-kind tree means
 // no such mocks were set.
 //
 // Under exact serving (KEPLOY_PROVEN) it answers from what the open view
@@ -3317,6 +3495,9 @@ func (m *MockManager) HasMocksByKind(kind models.Kind, match func(*models.Mock) 
 			if match(mock) {
 				if v != nil {
 					matched = append(matched, mock)
+					return true
+				}
+				if !tree.serves(mock) {
 					return true
 				}
 				found = true
@@ -4047,6 +4228,16 @@ func (m *MockManager) stalePooled(mk *models.Mock) bool {
 	return g != 0 && g != m.setGen.Load()
 }
 
+// stalePooledRead is stalePooled. read, when not nil, runs once the check
+// read the set generation, as it returns: keepOwned's test hook at the point
+// the claim's set is decided.
+func (m *MockManager) stalePooledRead(mk *models.Mock, read func()) bool {
+	if read != nil {
+		defer read()
+	}
+	return m.stalePooled(mk)
+}
+
 // deleteStartupMockFrom is deleteStartupMock on tree, the startup tier the
 // caller read: a consume that read it before a staging replaced it consumes
 // from it, and is judged by it (TreeDb.bootBuilt, the generation of the mock
@@ -4311,6 +4502,150 @@ func (m *MockManager) signalWindowChange() {
 	m.windowSig = make(chan struct{})
 	m.sigMu.Unlock()
 	close(old)
+}
+
+// setEndFiler is one AtSetEnd registration.
+type setEndFiler struct {
+	id   uint64
+	kind models.Kind
+	file func(context.Context)
+}
+
+// setEndFilingBeat is how often a read of a set's end says, of a
+// registration it runs (FileAtSetEnd), that it has not returned yet
+// (watchSetEndFiling). A run files misses in-band and returns at once, or
+// once the read's context is done: a run still going after a beat holds the
+// read, and nothing else would say which parser does.
+var setEndFilingBeat = 5 * time.Second
+
+// newSetEndFilingTicker makes a watch's ticker (watchSetEndFiling), at the
+// beat: a test ticks it by hand.
+var newSetEndFilingTicker = time.NewTicker
+
+var _ integrations.SetEndFiler = (*MockManager)(nil)
+
+// SetReadsSetEnds says whether the replay session's client reads each of
+// its test sets' end with a set's end read (models.OutgoingOptions
+// .ReadsSetEnds). Proxy.Mock sets it on the run's manager alone, at each
+// session; a registration AtSetEnd took in an earlier session stays.
+func (m *MockManager) SetReadsSetEnds(reads bool) {
+	m.readsSetEnds.Store(reads)
+}
+
+// AtSetEnd implements integrations.SetEndFiler: file runs at each read of a
+// test set's end (FileAtSetEnd) until cancel. It registers nothing and says
+// !ok where no read of a set's end will run it: on a test worker's manager,
+// which no such read asks; in a session whose client makes no such read
+// (SetReadsSetEnds); on a closed manager; and for a nil file. It takes none
+// with an empty kind either: the log names the parser by it.
+func (m *MockManager) AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool) {
+	if file == nil || kind == "" || m.notAtSetEnd.Load() || !m.readsSetEnds.Load() || m.IsClosed() {
+		return func() {}, false
+	}
+	m.setEndMu.Lock()
+	defer m.setEndMu.Unlock()
+	m.setEndNext++
+	id := m.setEndNext
+	m.setEndFilers = append(m.setEndFilers, setEndFiler{id: id, kind: kind, file: file})
+	return func() {
+		m.setEndMu.Lock()
+		defer m.setEndMu.Unlock()
+		m.setEndFilers = slices.DeleteFunc(m.setEndFilers, func(f setEndFiler) bool { return f.id == id })
+	}, true
+}
+
+// FileAtSetEnd runs, once each and in the order they were made, the
+// registrations AtSetEnd held when it began, and returns once all have
+// returned: each has filed the misses of the calls its connection holds for
+// a test of the set, so a read of the misses made after it takes them. It
+// runs them with setEndMu released, so a registration may file in-band and
+// cancel itself or another. One cancelled before this read reaches it is
+// not run by it; one made while they run is not run by this read. Each is
+// handed ctx, the read's, and stops waiting once it is done. Nothing here
+// makes one return: while one runs, a warning at each beat it has not
+// returned through names its parser (watchSetEndFiling).
+//
+// The error says the read cannot take every such miss: a registration
+// panicked (recovered here, so the others still run and the read says why,
+// naming its parser, not a dropped connection), or ctx was done by the time
+// those it ran returned, and one may have returned before it filed. With
+// none run, nothing is left unfiled: nil.
+func (m *MockManager) FileAtSetEnd(ctx context.Context) error {
+	m.setEndMu.Lock()
+	filers := slices.Clone(m.setEndFilers)
+	m.setEndMu.Unlock()
+	var panicked []string
+	ran := false
+	for _, f := range filers {
+		if !m.setEndRegistered(f.id) {
+			continue
+		}
+		ran = true
+		if p := m.runSetEndFiler(ctx, f); p != nil {
+			panicked = append(panicked, fmt.Sprintf("%s: %v", f.kind, p))
+		}
+	}
+	if len(panicked) > 0 {
+		return fmt.Errorf("a parser panicked filing the calls it holds for a test of the set: %s", strings.Join(panicked, "; "))
+	}
+	if !ran {
+		return nil
+	}
+	return ctx.Err()
+}
+
+// runSetEndFiler runs one registration, recovering its panic: what it
+// panicked with, or nil.
+func (m *MockManager) runSetEndFiler(ctx context.Context, f setEndFiler) (panicked any) {
+	defer m.watchSetEndFiling(ctx, f.kind)()
+	defer func() {
+		if p := recover(); p != nil {
+			m.logger.Error("a parser panicked filing, at the test set's end read, the calls it holds for a test of the set; the read is not judged",
+				zap.String("kind", string(f.kind)), zap.Any("panic", p), zap.Stack("stack"))
+			panicked = p
+		}
+	}()
+	f.file(ctx)
+	return nil
+}
+
+// watchSetEndFiling warns, at each beat (setEndFilingBeat) until the
+// returned stop is called, that kind's registration has not returned: how
+// many beats it has run through, and whether the read's context is done by
+// then (a parser that ignores it holds the read on). It is a count of beats,
+// not a verdict: it changes nothing of the read, which waits as it would
+// without it. stop returns once the watch has ended, so no warning follows
+// it.
+func (m *MockManager) watchSetEndFiling(ctx context.Context, kind models.Kind) (stop func()) {
+	done := make(chan struct{})
+	ended := make(chan struct{})
+	beat := setEndFilingBeat
+	ticker := newSetEndFilingTicker(beat)
+	go func() {
+		defer close(ended)
+		defer ticker.Stop()
+		for beats := 1; ; beats++ {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+			m.logger.Warn(fmt.Sprintf("set-end filing for %s has not returned after %s", kind, time.Duration(beats)*beat),
+				zap.String("kind", string(kind)), zap.Int("beats", beats), zap.Duration("beat", beat),
+				zap.Bool("readContextDone", ctx.Err() != nil))
+		}
+	}()
+	return func() {
+		close(done)
+		<-ended
+	}
+}
+
+// setEndRegistered reports whether registration id is not cancelled yet.
+func (m *MockManager) setEndRegistered(id uint64) bool {
+	m.setEndMu.Lock()
+	defer m.setEndMu.Unlock()
+	return slices.ContainsFunc(m.setEndFilers, func(f setEndFiler) bool { return f.id == id })
 }
 
 // MarkMockAsUsed marks the given mock as used (consumed) without modifying

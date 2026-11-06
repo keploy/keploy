@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -55,6 +56,16 @@ func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.R
 		missText = fmt.Sprintf("%+v", *miss)
 	}
 	return resp, ok, missText, err
+}
+
+// MatchShownForTest is MatchForTest that also returns the live command as
+// the miss's report shows it (mockMiss.liveCommand), "" with no miss.
+func MatchShownForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext) (bool, string, string, error) {
+	_, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, nil, nil)
+	if miss == nil {
+		return ok, "", "", err
+	}
+	return ok, fmt.Sprintf("%+v", *miss), miss.liveCommand(req.Message, dctx), err
 }
 
 // MatchWithNoiseConfigForTest is MatchForTest with the user's noise
@@ -317,3 +328,54 @@ func checkDecodedBody(message any, statementParams int, query string, doc map[st
 	}
 	decodedBodiesChecked.Add(1)
 }
+
+// ForgetAnsweredForTest drops the places the recordings answered in a test
+// window of a store that keeps nothing left (unkeptAnswered), so a row
+// starts with none; a store that keeps its note (integrations.Keep) starts
+// with none of its own.
+func ForgetAnsweredForTest() {
+	unkeptAnswered.mu.Lock()
+	defer unkeptAnswered.mu.Unlock()
+	unkeptAnswered.held, unkeptAnswered.places = false, redactedPlaces{}
+}
+
+// AnswerForTest notes the places m redacted as answered in db's open test
+// window, as an answer does before it takes m out of db's pool
+// (updateMock).
+func AnswerForTest(db integrations.MockMemDb, m *models.Mock) {
+	answeredNote(db).add(db, placesOf(m))
+}
+
+// AnsweredShownForTest is the live statement sql as a command matched in
+// the window of start is shown by the places of the recordings that
+// answered there (answeredPlaces): redacted whole when db tells another
+// window.
+func AnsweredShownForTest(db integrations.MockMemDb, start time.Time, sql string) string {
+	return answeredPlaces(db, start).liveStatement(sql)
+}
+
+// AnsweredSlotForTest is the slot a store keeps its answered note in.
+func AnsweredSlotForTest() any { return answeredKey{} }
+
+// AnsweredNoteFreeForTest reports whether db's answered note is free: no
+// add, read or release holds it.
+func AnsweredNoteFreeForTest(db integrations.MockMemDb) bool {
+	w := answeredNote(db)
+	if !w.mu.TryLock() {
+		return false
+	}
+	w.mu.Unlock()
+	return true
+}
+
+// ForgetPlacesForTest drops every recording's places kept (placesKept), so
+// a row reads each recording of its pool again.
+func ForgetPlacesForTest() {
+	placesKept.mu.Lock()
+	defer placesKept.mu.Unlock()
+	placesKept.byKey, placesKept.bytes = map[placesDigest]keptEntry{}, 0
+}
+
+// PlacesReadsForTest is how many recordings were read for their places
+// (placesReads) since the process started.
+func PlacesReadsForTest() int64 { return placesReads.Load() }

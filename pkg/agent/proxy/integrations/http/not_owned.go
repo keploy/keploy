@@ -209,9 +209,11 @@ func init() {
 
 // markNotOwned makes report the miss of a call that is m, a recording the
 // open view does not show (notOwnedRecording): m is its closest mock, with no
-// field named as differing, since none does, and its rendered request is m's.
+// field named as differing and no diff, since none does, and its rendered
+// request is m's. The report's own diff was of the closest recording it
+// compared, another one.
 func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
-	report.ClosestMock, report.NotOwned = m.Name, true
+	report.ClosestMock, report.NotOwned, report.Diff = m.Name, true, ""
 	report.FieldDiffs, report.Differs, report.FieldReasons = nil, nil, nil
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = notOwnedNextSteps(m.Name)

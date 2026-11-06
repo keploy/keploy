@@ -217,15 +217,16 @@ func r3SendIn(t *testing.T, parent context.Context, p *Proxy, mm *MockManager, o
 }
 
 // r3SendVia is r3SendIn through the HTTP integration h: one the row keeps
-// across calls, as the agent's proxy keeps its parser.
-func r3SendVia(t *testing.T, parent context.Context, h integrations.Integrations, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
+// across calls, as the agent's proxy keeps its parser. The parser reads db:
+// the manager, or a row's view over it.
+func r3SendVia(t *testing.T, parent context.Context, h integrations.Integrations, p *Proxy, db integrations.MockMemDb, opts models.OutgoingOptions, request string) (int, string) {
 	t.Helper()
 	app, agentEnd := net.Pipe()
 	ctx := models.WithMockMismatchReporter(parent, p.sendMockNotFoundError)
 	ctx = learn.WithTracker(ctx, p.learnTracker)
 	defer app.Close()
 	go func() {
-		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, opts)
+		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, db, opts)
 		_ = agentEnd.Close()
 	}()
 	if _, err := app.Write([]byte(request)); err != nil {

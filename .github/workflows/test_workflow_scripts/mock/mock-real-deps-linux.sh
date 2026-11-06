@@ -27,6 +27,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 if ! python3 -c "import pytest, yaml" 2>/dev/null; then
@@ -170,7 +172,7 @@ CMD="python3 -m pytest -q -p no:cacheprovider test_real_deps.py"
 # record NAME LOG PROVEN: records the set, the agent's debug lines included.
 record() {
   local name="$1" log="$2" proven="$3"
-  sudo -E env PATH="$PATH" PYTHONPATH="$PYPATH" KEPLOY_PROVEN="$proven" REAL_PORT="$REAL_PORT" NAMED_PORT="$NAMED_PORT" DEP_PORT="$DEP_PORT" NAME="$NAME" OTHER="$OTHER" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" PYTHONPATH="$PYPATH" KEPLOY_PROVEN="$proven" REAL_PORT="$REAL_PORT" NAMED_PORT="$NAMED_PORT" DEP_PORT="$DEP_PORT" NAME="$NAME" OTHER="$OTHER" \
     "$RECORD_BIN" mock record -c "$CMD" --name "$name" --disable-tele --debug > "$log" 2>&1
   local rc=$?
   grep -E "[0-9]+ (passed|failed|error)" "$log" | tail -3
@@ -179,6 +181,7 @@ record() {
     tail -60 "$log"
     FAIL=1
   fi
+  verify_ran "$proven" "$log" || FAIL=1
 }
 
 # paths_of NAME: the path of each HTTP mock of the set, sorted.

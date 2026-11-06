@@ -3,11 +3,13 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	keployLog "go.keploy.io/server/v3/utils/log"
@@ -19,17 +21,20 @@ import (
 // behind at that moment.
 var execProcess = syscall.Exec
 
+// sudoVersionOf is SudoVersion; a test swaps in what a given sudo prints.
+var sudoVersionOf = SudoVersion
+
 // ReexecWithSudo re-executes the current keploy command with sudo.
 // This is used when a Docker/Docker Compose command is detected and keploy is not running as root.
 // Uses syscall.Exec to replace the current process entirely - no parent process remains.
+// The re-executed keploy gets this process's environment through sudo's
+// --preserve-env list (sudoReexecArgs), and a sudo that would not keep it is
+// refused before anything runs (sudoReexecRefusal).
 // This function never returns on success. On a failure it says why and returns
 // the error, for the caller to end the run with exit code 1 through its own
 // return: an os.Exit here skipped every deferred call of the run, the removal
 // of its temp log among them.
 func ReexecWithSudo(logger *zap.Logger) error {
-	// Get the current PATH to preserve it
-	currentPath := os.Getenv("PATH")
-
 	// Find sudo binary
 	sudoPath, err := exec.LookPath("sudo")
 	if err != nil {
@@ -45,18 +50,16 @@ func ReexecWithSudo(logger *zap.Logger) error {
 		return fmt.Errorf("find this executable: %w", err)
 	}
 
-	// Build the command: sudo -E env PATH="$PATH" keploy <original-args>
-	// -E preserves the environment
-	// env PATH="$PATH" ensures PATH is explicitly set (some sudo configs reset PATH)
-	args := []string{
-		"sudo",
-		"-E",
-		"env",
-		fmt.Sprintf("PATH=%s", currentPath),
-		keployPath,
+	if gap, ok := SudoPreserveEnvListGap(sudoVersionOf(context.Background())); ok {
+		err := sudoReexecRefusal(gap)
+		logger.Error("cannot re-execute with sudo", zap.Error(err))
+		return err
 	}
-	// Append original arguments (skip the first one which is the program name)
-	args = append(args, os.Args[1:]...)
+
+	args, unkept := sudoReexecArgs(os.Environ(), os.Getenv("PATH"), keployPath, os.Args[1:])
+	if len(unkept) > 0 {
+		logger.Warn("these environment variables do not reach the re-executed keploy: sudo's --preserve-env list cannot name a variable whose name has a comma or is not UTF-8", zap.Strings("variables", unkept))
+	}
 
 	logger.Info("Re-executing with sudo for elevated privileges as Linux Docker/cloud replay path needs root-level eBPF privileges.")
 	logger.Debug("Re-exec command", zap.Strings("args", args))
@@ -78,6 +81,67 @@ func ReexecWithSudo(logger *zap.Logger) error {
 		return fmt.Errorf("re-execute with sudo: %w", err)
 	}
 	return nil
+}
+
+// sudoReexecArgs is the command ReexecWithSudo execs: from this process's
+// environment, its PATH, its executable and its arguments,
+//
+//	sudo --preserve-env=NAME,… env PATH=<PATH> <keploy> <arguments>
+//
+// sudo resets the environment of its command. The re-executed keploy, and the
+// app and compose it runs, need the user's: a compose file's ${VAR}, the
+// app's settings, keploy's own. `sudo -E` asked for all of it, and sudo-rs
+// (Ubuntu 26.04's sudo) ignores -E ("preserving the entire environment
+// is not supported"). Both sudo and sudo-rs keep each variable a
+// --preserve-env list names wherever the sudoers rule lets the user set
+// variables (SETENV, which a rule for ALL implies), and refuse the whole
+// command loudly where it does not. So the list names every variable of the
+// environment, and their values stay in the environment, off the command line
+// that every user on the host can read.
+//
+// Left out of the list, so that both sudos give what `sudo -E` gave:
+//   - PATH: `env` sets it after sudo, where a secure_path would replace it;
+//   - USER, LOGNAME, USERNAME and every SUDO_* variable: sudo sets them, to
+//     root and to the user who ran sudo;
+//   - a name with a comma, which the list cannot carry, and a name that is not
+//     UTF-8, for which sudo-rs refuses the whole command line: returned in
+//     unkept, for the caller to say so;
+//   - a name met before, and an entry with no name.
+func sudoReexecArgs(environ []string, path, keploy string, args []string) (argv, unkept []string) {
+	var names []string
+	seen := map[string]bool{}
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		switch {
+		case name == "PATH", name == "USER", name == "LOGNAME", name == "USERNAME", strings.HasPrefix(name, "SUDO_"):
+		case strings.Contains(name, ","), !utf8.ValidString(name):
+			unkept = append(unkept, name)
+		default:
+			names = append(names, name)
+		}
+	}
+	argv = []string{"sudo"}
+	if len(names) > 0 {
+		argv = append(argv, "--preserve-env="+strings.Join(names, ","))
+	}
+	argv = append(argv, "env", "PATH="+path, keploy)
+	return append(argv, args...), unkept
+}
+
+// sudoReexecRefusal is why ReexecWithSudo does not re-execute keploy through
+// the sudo gap names, which would not keep the user's environment
+// (SudoPreserveEnvListGap), and what the user can do instead.
+func sudoReexecRefusal(gap SudoListGap) error {
+	if gap.Ignored {
+		return fmt.Errorf("keploy re-runs itself as root through sudo for this command, and names every variable of your environment for sudo to keep (--preserve-env=NAME,…). %s ignores that list (sudo-rs implements it from %s on), so the run would go on without your environment. Upgrade sudo-rs to %s or later, or run keploy as root yourself, with the variables the run needs: sudo env VAR=value … keploy …",
+			gap, gap.SinceString(), gap.SinceString())
+	}
+	return fmt.Errorf("keploy re-runs itself as root through sudo for this command, and names every variable of your environment for sudo to keep (--preserve-env=NAME,…). %s does not accept that list (sudo accepts it from %s on). Upgrade sudo to %s or later, or run keploy as root yourself: sudo -E keploy … keeps your environment on this sudo",
+		gap, gap.SinceString(), gap.SinceString())
 }
 
 // ShouldReexecWithSudo checks if keploy should re-execute itself with sudo.

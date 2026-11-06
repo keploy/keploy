@@ -402,6 +402,8 @@ type poolSvc struct {
 	order   []string
 	// worker is what workerSvc was handed.
 	worker map[string][]string
+	// notRequired is what notRequiredSvc was handed.
+	notRequired map[string][]string
 }
 
 func (s *poolSvc) SetScopeTable(_ context.Context, t map[string][]string) error {
@@ -427,6 +429,16 @@ type workerSvc struct{ *poolSvc }
 func (s workerSvc) SetScopeWorker(_ context.Context, w map[string][]string) error {
 	s.worker = w
 	s.order = append(s.order, "worker")
+	return nil
+}
+
+// notRequiredSvc is poolSvc that takes the recordings keploy's judging marked served,
+// not required, too.
+type notRequiredSvc struct{ *poolSvc }
+
+func (s notRequiredSvc) SetScopeNotRequired(_ context.Context, n map[string][]string) error {
+	s.notRequired = n
+	s.order = append(s.order, "notRequired")
 	return nil
 }
 
@@ -505,6 +517,45 @@ func TestScopeTableCarriesTheWorkerScope(t *testing.T) {
 	ps = &poolSvc{}
 	if rec := post(workerSvc{poolSvc: ps}, withWorker); rec.Code != http.StatusOK || ps.worker != nil || len(ps.order) != 0 {
 		t.Fatalf("switch off: status %d, worker %v, installed %v", rec.Code, ps.worker, ps.order)
+	}
+}
+
+// Under the switch the scope table carries, by test, the recordings
+// keploy's judging marked served, not required, installed before the pool slices; a
+// table without them installs none, so a set never keeps the previous
+// set's. An agent that cannot take them refuses a table that has some (it
+// would charge each test for them), and takes a table without. With the
+// switch off they are not read.
+func TestScopeTableCarriesTheRecordingsMarkedNotRequired(t *testing.T) {
+	post := func(svc agent.Service, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		return rec
+	}
+	marked := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"notRequired":{"o::TestA":["mock-3"]}}`
+	t.Setenv(provenswitch.Env, "1")
+	ps := &poolSvc{}
+	if rec := post(notRequiredSvc{poolSvc: ps}, marked); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !slices.Equal(ps.notRequired["o::TestA"], []string{"mock-3"}) || !slices.Equal(ps.order, []string{"windows", "notRequired", "pool"}) {
+		t.Fatalf("marked %v, installed %v; want o::TestA's mark installed before the pool", ps.notRequired, ps.order)
+	}
+	ps = &poolSvc{notRequired: map[string][]string{"o::TestA": {"stale"}}}
+	if rec := post(notRequiredSvc{poolSvc: ps}, `{"mappings":{},"pool":{}}`); rec.Code != http.StatusOK || len(ps.notRequired) != 0 || !slices.Equal(ps.order, []string{"windows", "notRequired", "pool"}) {
+		t.Fatalf("a table without marks: status %d, marked %v, installed %v; want none installed before the pool", rec.Code, ps.notRequired, ps.order)
+	}
+	if rec := post(&poolSvc{}, marked); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("an agent that cannot take marks answered %d to a table with one", rec.Code)
+	}
+	if rec := post(&poolSvc{}, `{"mappings":{},"pool":{}}`); rec.Code != http.StatusOK {
+		t.Fatalf("an agent that cannot take marks answered %d to a table without one", rec.Code)
+	}
+	t.Setenv(provenswitch.Env, "")
+	ps = &poolSvc{}
+	if rec := post(notRequiredSvc{poolSvc: ps}, marked); rec.Code != http.StatusOK || ps.notRequired != nil || len(ps.order) != 0 {
+		t.Fatalf("switch off: status %d, marked %v, installed %v", rec.Code, ps.notRequired, ps.order)
 	}
 }
 

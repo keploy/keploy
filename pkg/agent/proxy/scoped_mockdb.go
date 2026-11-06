@@ -480,6 +480,14 @@ func (s *scopedMockDb) HoldToRound(call integrations.CallRound) (integrations.Mo
 	return &c, restaged
 }
 
+// DiagnoseInCallView implements integrations.CallViewDiagnoser: this view
+// over the store DiagnoseInCallView returned for it.
+func (s *scopedMockDb) DiagnoseInCallView() integrations.MockMemDb {
+	c := *s
+	c.MockMemDb = integrations.DiagnoseInCallView(s.MockMemDb)
+	return &c
+}
+
 // HideBackgroundWhen implements integrations.BackgroundHider: this view over
 // the store HideBackgroundWhen returned for it, a held store being one
 // call's, as HoldToRound's copy is. Under exact serving scopedFor wraps no
@@ -563,6 +571,20 @@ func (s *scopedMockDb) AnswerRepeatRead(matched []*models.Mock) (integrations.Re
 	return integrations.AnswerRepeatRead(s.MockMemDb, matched)
 }
 
+// CallViewMoved forwards the held store's answer (integrations.CallViewTeller)
+// with its answered test mocks (ConsumedTestMocks): false over a store that
+// tells none.
+func (s *scopedMockDb) CallViewMoved() bool { return integrations.CallViewMoved(s.MockMemDb) }
+
+// CallViewGoneWhy forwards the held store's answer
+// (integrations.CallViewGoneTeller).
+func (s *scopedMockDb) CallViewGoneWhy() string { return integrations.CallViewGoneWhy(s.MockMemDb) }
+
+var (
+	_ integrations.CallViewTeller     = (*scopedMockDb)(nil)
+	_ integrations.CallViewGoneTeller = (*scopedMockDb)(nil)
+)
+
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
 // keeps none, so a learn step on a scoped view reads the store's account as
@@ -589,9 +611,22 @@ func (s *scopedMockDb) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool
 	return integrations.AnsweredRedacting(s.MockMemDb, kind)
 }
 
+// HasUnservedRecording forwards the store's check of an unserved recording
+// (integrations.UnservedRecordingFinder), whatever this view's allowlist
+// shows: the set holds the recording a parser's hold waits for, and each
+// window change re-reads it through the view. Over a store without the check
+// it finds none, so the parser holds no call.
+func (s *scopedMockDb) HasUnservedRecording(kind models.Kind, match func(*models.Mock) bool) (bool, error) {
+	if f, ok := s.MockMemDb.(integrations.UnservedRecordingFinder); ok {
+		return f.HasUnservedRecording(kind, match)
+	}
+	return false, nil
+}
+
 var (
 	_ integrations.AnsweredRedactingReader = (*scopedMockDb)(nil)
 	_ integrations.AnsweredFinder          = (*scopedMockDb)(nil)
+	_ integrations.UnservedRecordingFinder = (*scopedMockDb)(nil)
 	_ integrations.ExactServingReader      = (*scopedMockDb)(nil)
 	_ integrations.ExactConsumedReader     = (*scopedMockDb)(nil)
 	_ integrations.ExactServedReader       = (*scopedMockDb)(nil)
@@ -1065,6 +1100,17 @@ func (s *scopedMockDb) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock
 		return s.keep(r.GetCarryOverMocksByKind(kind))
 	}
 	return nil, nil
+}
+
+// AtSetEnd hands on the wrapped store's SetEndFiler: a scoped connection's
+// misses are filed where its store's are, so the store's set's end read is
+// its own. Over a test worker's manager, or a store without the facet, it is
+// !ok, as theirs is.
+func (s *scopedMockDb) AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool) {
+	if f, ok := s.MockMemDb.(integrations.SetEndFiler); ok {
+		return f.AtSetEnd(kind, file)
+	}
+	return func() {}, false
 }
 
 func (s *scopedMockDb) StagingEpoch() uint64 {
@@ -1551,3 +1597,11 @@ func (s *scopedMockDb) StatesLifetimes(kind models.Kind) bool {
 func (s *scopedMockDb) WhenRestaged(slot any, release func()) {
 	integrations.WhenRestaged(s.MockMemDb, slot, release)
 }
+
+// Keep implements integrations.ParserKeep: the store's, so what a parser keeps
+// through a view is the store's; nothing over a store that keeps nothing.
+func (s *scopedMockDb) Keep(slot any, mk func() any) (any, bool) {
+	return integrations.Keep(s.MockMemDb, slot, mk)
+}
+
+var _ integrations.ParserKeep = (*scopedMockDb)(nil)

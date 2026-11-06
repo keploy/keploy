@@ -8,6 +8,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -29,11 +30,9 @@ type chunkEvent struct {
 	readAt time.Time
 	// writtenAt is the timestamp at which the relay's write of this chunk
 	// to the opposite socket returned (the client may have acted on the
-	// bytes before it: exchangeSplit). Used as ResTimestampMock for the
-	// response head chunk of each exchange, which matches the "last dest
-	// chunk WrittenAt" rule from the migration spec (there is only one
-	// response chunk per mock by construction in the generic parser, so
-	// "last" == "this").
+	// bytes before it: exchangeSplit). The last answer chunk's is the
+	// exchange's ResTimestampMock, the "last dest chunk WrittenAt" rule
+	// from the migration spec.
 	writtenAt time.Time
 	// through is how far into its stream the reader was done once it had
 	// read this chunk (fakeconn.FakeConn.ReadThrough): what mergeByCapture
@@ -206,14 +205,15 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	}
 	// emit hands on the exchanges a preambleHold held (handOn).
 	emit := func(m *models.Mock) { emitV2(sess, logger, m) }
-	// leaveOutTail reports answer chunks the parser does not record as left
-	// out: chunks the server sent after the first chunk of an answer, which
-	// is the one its exchange records, and before the next request. n is how
-	// many there are (none: a no-op); they span from from, when the relay read
-	// the first of them or earlier, to when its write of the last returned
-	// (to): the times a test case that waited on them spans. Before, they were
-	// dropped with nothing left out or said, and a test case over an answer
-	// cut to its first chunk was saved as if it were whole.
+	// leaveOutTail reports answer chunks no exchange it records holds as one
+	// exchange left out: chunks the server sent after the exchange they would
+	// end was handed on (the recording's stop decided it: the rest's first
+	// chunk, as the parser takes it, and leaveOutCutTail spans each after
+	// it), or with no request before them, up to the next request. n is how
+	// many there are (none: a no-op); they span from from, when the relay
+	// read the first of them or earlier, to when its write of the last
+	// returned (to): the times a test case that waited on them spans, so it
+	// is left out, never saved over an answer cut short.
 	//
 	// Chunks after an exchange left out are the rest of it, counted and
 	// spanned with it already: reported again, they would count a mock
@@ -261,10 +261,120 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		hold.handOn(wholly, emit)
 		hold = nil
 	}
+	// An exchange is held from its answer's first chunk until its answer has
+	// ended, so that every chunk of an answer the server sent in more than one
+	// (an answer over the relay's 32 KiB read, a header and a body written
+	// apart) is recorded with it. What ends an answer is the stream's own
+	// event, never a timer: the connection's next request (the back-stop of
+	// the client case), a split, or the streams' end. Before, the exchange was
+	// handed on at its answer's first chunk and the rest left out, so the test
+	// case over it was left out too.
+	//
+	// The parser has read what it holds, so the capture's watermark and the
+	// recording's stop, which go by how far the parser has read, cannot see
+	// it: the last exchange of a pooled connection, held until a request that
+	// may never come, would miss the stop. So the hold is counted with the
+	// recording's manager (SyncMockManager.HoldExchanges, as the preamble
+	// hold's is), which the stop finds pending until it is handed on, and the
+	// stop decides it (answerStopping): once the parser has taken every chunk
+	// the merge has ready, and every answer chunk its dest reader has taken
+	// off its stream (destRead), the exchange is handed on with the answer
+	// read so far. Its answer has then ended as far as the capture shows. A
+	// chunk of it that the parser takes after that (stopDecided) is left out
+	// with its span as the parser takes it (leaveOutCutTail: the rest counted
+	// once, each chunk of it spanned), not held to the next request or the
+	// streams' end, which may come after the verdict of the test case over
+	// it: that test case is left out, never saved over the answer cut short.
+	var (
+		answerStopping <-chan struct{}
+		answerHandedOn func()
+		// deciding is set once the stop has begun while an answer is held:
+		// the loop hands it on at its next look that finds no event ready
+		// and no answer chunk on its way from the dest's reader.
+		deciding bool
+		// destRead is how far into the dest's stream the answer chunks the
+		// loop has taken go (chunkEvent.through): short of the stream's
+		// ReadThrough, its reader has taken a chunk off the stream that is
+		// still on its way to the loop (the reader's queue, the merge).
+		destRead int64
+		// stopDecided is set once the stop has decided a held answer: an
+		// answer chunk the loop takes after that with no request before it,
+		// in the recording whose stop it was (decidedBy), is the rest of an
+		// answer the stop cut short. It is cleared at the connection's next
+		// request: the merge orders numbered chunks by capture, so the rest
+		// of the answer comes before that request. A chunk it cannot place
+		// (no capture numbers) is taken as it comes, as anywhere else. A
+		// pooled connection can outlive the recording whose stop decided its
+		// answer: in a re-record on the same manager
+		// (SyncMockManager.newHoldsSession) an answer chunk with no request
+		// is held as any is, whether or not a request came first.
+		stopDecided bool
+		// decidedBy is the stop signal of the recording whose stop decided
+		// the answer (answerStopping): the manager's HoldsSession while
+		// that recording lasts.
+		decidedBy <-chan struct{}
+		// cutTailCounted is set once the first chunk of the rest of an
+		// answer the stop cut short is counted (leaveOutCutTail), and
+		// cleared with stopDecided.
+		cutTailCounted bool
+	)
+	// leaveOutCutTail leaves out ev, a chunk of the rest of an answer the
+	// stop cut short (stopDecided), with its span, as the parser takes it.
+	// That rest is one exchange lost, however many chunks it comes in: its
+	// first chunk is counted (leaveOutTail), and each after it, up to the
+	// next request, is spanned and not counted again
+	// (Session.ReportLeftOutPart). Counted per chunk, a rest in three chunks
+	// read as three exchanges lost. The rest of an exchange left out as it
+	// was handed on is counted and spanned with it (leaveOutTail).
+	leaveOutCutTail := func(ev chunkEvent) {
+		from, to := readOrWritten(ev), ev.writtenAt
+		switch {
+		case !cutTailCounted:
+			cutTailCounted = true
+			leaveOutTail(1, from, to)
+		case !flushedLeftOut:
+			sess.ReportLeftOutPart(from, to)
+		}
+	}
+	// answerOnItsWay reports whether the dest's reader has taken a chunk off
+	// its stream that the loop has not taken yet. A session with no dest
+	// stream (a row driving the loop) has none.
+	answerOnItsWay := func() bool {
+		return sess.DestStream != nil && sess.DestStream.ReadThrough() > destRead
+	}
+	holdAnswer := func() {
+		if answerHandedOn == nil {
+			answerStopping, answerHandedOn = syncMock.FromContextOrGlobal(ctx).HoldExchanges(reqTimestampMock)
+		}
+		// Read and held, its chunks are no longer pending work: an idle
+		// spell while it is held is a pooled connection's, not a hung parser.
+		sess.MockHeld()
+	}
+	answerHandOn := func() {
+		if answerHandedOn != nil {
+			answerHandedOn()
+		}
+		answerStopping, answerHandedOn, deciding = nil, nil, false
+	}
+	// A parser that leaves holding an answer (a panic the supervisor
+	// recovers) reports the exchange left out, and takes it off the stop's
+	// count.
+	defer func() {
+		if answerHandedOn == nil {
+			return
+		}
+		defer answerHandOn()
+		m := &models.Mock{Version: models.GetVersion(), Name: "mocks", Kind: models.GENERIC}
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = reqTimestampMock, resTimestampMock
+		sess.ReportLeftOut(m, leftOutHeldAnswer)
+	}()
 	flushMock := func() (leftOutFor string, leftOut bool) {
 		if len(genericRequests) == 0 || len(genericResponses) == 0 {
 			return "", false
 		}
+		// Handed on, left out, or held by the preamble hold (counted by its
+		// own), the exchange is off the answer's hold once this returns.
+		defer answerHandOn()
 		n := exchanges
 		lifetime := exchangeLifetime(n)
 		exchanges++
@@ -357,26 +467,57 @@ drain:
 		if hold != nil {
 			changes, stopping, done = hold.changes(), hold.stopping, ctx.Done()
 		}
-		var ev chunkEvent
-		select {
-		case <-changes:
-			hold.refresh()
-			if hold.outlived() {
-				release(false)
+		var (
+			ev   chunkEvent
+			open bool
+		)
+		if deciding {
+			// The stop has begun while an answer is held: the chunks the
+			// merge has ready go first, and at the first look that finds
+			// none the exchange is handed on with its answer read so far.
+			select {
+			case ev, open = <-events:
+			default:
+				if answerOnItsWay() {
+					// Taken off the stream before this look, so before
+					// the stop decides: part of the answer, not cut
+					// from it. The reader hands it on, or its stream's
+					// end.
+					ev, open = <-events
+					break
+				}
+				// An answer is held only with its exchange's request
+				// (holdAnswer), so the flush takes it, and ends deciding.
+				decidedBy = answerStopping
+				flushMock()
+				stopDecided = true
+				continue
 			}
-			continue
-		case <-stopping:
-			// The recording's stop has begun: decided with what is known.
-			release(hold.wholly())
-			continue
-		case <-done:
-			release(hold.wholly())
-			continue
-		case e, ok := <-events:
-			if !ok {
-				break drain
+		} else {
+			select {
+			case <-changes:
+				hold.refresh()
+				if hold.outlived() {
+					release(false)
+				}
+				continue
+			case <-stopping:
+				// The recording's stop has begun: decided with what is known.
+				release(hold.wholly())
+				continue
+			case <-done:
+				release(hold.wholly())
+				continue
+			case <-answerStopping:
+				// While an answer is held (else nil), the recording's
+				// stop decides it.
+				deciding = true
+				continue
+			case ev, open = <-events:
 			}
-			ev = e
+		}
+		if !open {
+			break drain
 		}
 		if ev.err != nil {
 			// End-of-stream for this side. Classify benign terminations
@@ -395,6 +536,9 @@ drain:
 		// a response with none would pair with a request.
 		if len(ev.bytes) == 0 {
 			continue
+		}
+		if ev.dir == fakeconn.FromDest {
+			destRead = ev.through
 		}
 		// The connection's life, by its chunks' recorded times: a held
 		// first exchange is the preamble once a chunk comes after the
@@ -423,17 +567,18 @@ drain:
 
 		switch ev.dir {
 		case fakeconn.FromClient:
-			// Back-stop: if the previous completed req/resp exchange
-			// was not already flushed (the common case flushes on the
-			// first response chunk below), flush it now before we
-			// start a new exchange. Mirrors the legacy encoder.
+			// The rest of an answer the stop cut short, if any, came
+			// before this request (stopDecided).
+			stopDecided, cutTailCounted = false, false
+			// The next request ends the answer held (holdAnswer): the
+			// exchange is handed on whole before a new one starts, as
+			// the legacy encoder does.
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				flushMock()
 			}
 			// Starting a brand-new exchange: leave out any orphaned
-			// response chunks from a previous multi-chunk server
-			// reply whose head chunk was already flushed (reported,
-			// with their span: leaveOutTail), and anchor the request
+			// response chunks, held with no exchange (reported, with
+			// their span: leaveOutTail), and anchor the request
 			// timestamp to THIS chunk's ReadAt so we record when
 			// bytes actually hit the relay rather than when the
 			// parser got around to pairing them.
@@ -465,34 +610,23 @@ drain:
 			reqReadAt = append(reqReadAt, ev.readAt)
 			prevChunkWasReq = true
 			if answersThis {
-				// The exchange is already complete — flush it now so
-				// the next request starts clean, exactly as it would
-				// have had the two chunks arrived in wire order. That
-				// means the HEAD chunk only, with the rest of a reply
-				// the server split across chunks left out (reported,
-				// with its span: leaveOutTail): in wire order the head
-				// flushes the exchange and the tail is orphaned, and
-				// left out the same way. Carrying the tail in as well
-				// would emit a multi-response mock this parser has
-				// never produced, and replay writes every response
-				// buffer back — so the bytes a test replays would
-				// depend on which way the relay's two goroutines
-				// happened to be scheduled.
-				heldChunks := len(genericResponses)
-				tailFrom, tailTo := resHeadAt, resTimestampMock
-				genericResponses = genericResponses[:1]
-				resTimestampMock = resHeadWrittenAt
+				// The answer is this request's, every chunk of it held:
+				// each was captured after the head, which was captured
+				// after the request. So the exchange is the one wire
+				// order makes, the request and its answer so far, held
+				// as any answered exchange is until its answer ends
+				// (holdAnswer): the bytes a test replays do not depend
+				// on which way the relay's two goroutines were
+				// scheduled.
 				if logger != nil {
 					logger.Debug("generic v2: paired a request with the response that arrived ahead of it",
 						zap.Uint32("requestConnSeq", ev.connSeq),
 						zap.Uint32("responseConnSeq", resHeadSeq),
 						zap.Time("requestReadAt", ev.readAt),
 						zap.Time("responseWrittenAt", resHeadWrittenAt),
-						zap.Int("responseChunksHeld", heldChunks),
-						zap.Int("responseChunksKept", len(genericResponses)))
+						zap.Int("responseChunksHeld", len(genericResponses)))
 				}
-				flushMock()
-				leaveOutTail(heldChunks-1, tailFrom, tailTo)
+				holdAnswer()
 				prevChunkWasReq = false
 			}
 
@@ -601,6 +735,17 @@ drain:
 					continue
 				}
 			}
+			if stopDecided && syncMock.FromContextOrGlobal(ctx).HoldsSession() == decidedBy {
+				// The rest of an answer the stop cut short (or an
+				// answer with no request, after the stop): left out
+				// with its span as the parser takes it, not held to
+				// the next request or the streams' end, which may come
+				// after the verdict of the test case over it. The
+				// decision took every request the parser had, and the
+				// next request clears the flag, so none is held here.
+				leaveOutCutTail(ev)
+				continue
+			}
 			if len(genericResponses) == 0 {
 				resHeadSeq = ev.connSeq
 				resHeadWrittenAt = ev.writtenAt
@@ -613,27 +758,23 @@ drain:
 			// multiple chunks before flush, the last wins.
 			resTimestampMock = ev.writtenAt
 
-			// Flush the moment the first response chunk for an
-			// outstanding request arrives. This makes the mock
-			// visible BEFORE the next request (which may be seconds
-			// away on a pooled connection) so the syncMock buffer
-			// can associate it with the currently-active test. The
-			// chunks the server sends after it, before the next
-			// request, are left out with their span (leaveOutTail),
-			// so a test case over an answer the mock has only the
-			// first chunk of is left out, never saved as whole.
-			if prevChunkWasReq && len(genericRequests) > 0 {
-				flushMock()
+			// An answered exchange is held until its answer ends
+			// (holdAnswer), each chunk of it appended here: at the
+			// next request, the streams' end, or as the recording's
+			// stop decides it. Chunks with no request before them
+			// are held with no exchange, and left out at the next
+			// request or the streams' end (leaveOutTail).
+			if len(genericRequests) > 0 {
+				holdAnswer()
 			}
 			prevChunkWasReq = false
 		}
 	}
 
-	// Final flush for any in-flight exchange that had at least one
-	// request and one response chunk by the time streams closed. Answer
-	// chunks still held after it have no request to answer (the flush
-	// takes an exchange with both): the tail of the answer flushed last,
-	// left out as at a next request.
+	// The streams' end ends the answer held: the exchange is handed on
+	// whole. Answer chunks still held after it have no request to answer
+	// (the flush takes an exchange with both): left out as at a next
+	// request.
 	flushMock()
 	leaveOutTail(len(genericResponses), resHeadAt, resTimestampMock)
 	// The connection has ended: the first exchange held until now is the
@@ -729,9 +870,16 @@ func order(x, y stamp) (first, known bool) {
 	return x.at.Before(y.at), true
 }
 
-// leftOutAnswerTail is the reason the parser leaves out the part of an answer
-// after the chunk its exchange records (pairChunkEvents' leaveOutTail).
-const leftOutAnswerTail = "the Generic recorder records an answer's first chunk only: the server sent this part of it after that chunk, before the next request, and it was left out"
+// leftOutAnswerTail is the reason the parser leaves out answer chunks no
+// exchange it records holds (pairChunkEvents' leaveOutTail): chunks the server
+// sent after the exchange they would end was handed on (decided at the
+// recording's stop, or cut by a split), or with no request before them.
+const leftOutAnswerTail = "the server sent this part of an answer after the Generic recorder had handed on the exchange it would end (decided at the recording's stop, or at a request it answered first), or with no request before it, and it was left out"
+
+// leftOutHeldAnswer is the reason the parser leaves out the exchange it held
+// for the rest of its answer when it stops holding it (a panic the supervisor
+// recovers).
+const leftOutHeldAnswer = "the Generic recorder stopped while it held this exchange for the rest of its answer"
 
 // readOrWritten is when the relay read ev's chunk, or when its write of it
 // returned when it has no read time.

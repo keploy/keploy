@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -306,6 +307,163 @@ func TestFullRoundVariablesDecideACallInItsOwnRound(t *testing.T) {
 			}
 			if c.db.consumed["mock-1"] || len(c.db.perTest)+len(c.db.session) != 1 {
 				t.Fatalf("the charge that missed took or changed the decline (taken %v)", c.db.consumed)
+			}
+		})
+	}
+}
+
+// ownHeldVarDb is roundVarDb under the background rules whose call's hold
+// (integrations.RoundHolder) is hold, a store of its own, and whose own
+// reads tell, unheld, the open test's own recordings owned
+// (integrations.SharedReads; none: it tells none).
+type ownHeldVarDb struct {
+	*roundVarDb
+	hold  *ownHold
+	owned []*models.Mock
+}
+
+func (d *ownHeldVarDb) RoundSnapshot(q integrations.RoundQuery) (integrations.RoundSnapshot, bool) {
+	s, ok := d.roundVarDb.RoundSnapshot(q)
+	s.Background = true
+	return s, ok
+}
+
+func (d *ownHeldVarDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return d.hold, func() bool { return false }
+}
+
+func (d *ownHeldVarDb) SharedGeneration(models.Kind) (integrations.SharedGen, bool) {
+	return integrations.SharedGen{}, false
+}
+func (d *ownHeldVarDb) SharedMocks() (perTest, session []*models.Mock, ok bool) {
+	return nil, nil, false
+}
+func (d *ownHeldVarDb) OwnedUnanswered() ([]*models.Mock, bool) { return nil, false }
+func (d *ownHeldVarDb) OwnedRecordings() (uint64, []*models.Mock, bool) {
+	return fakeOwnedView(d.owned, d.owned != nil)
+}
+func (d *ownHeldVarDb) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
+	return fakeOwnedAt(view, at)
+}
+func (d *ownHeldVarDb) StagingGeneration() uint64                  { return 1 }
+func (d *ownHeldVarDb) StagingGenerationByKind(models.Kind) uint64 { return 1 }
+func (d *ownHeldVarDb) MockSpent(string) bool                      { return false }
+
+// ownHold is varDb as a call's hold under the background rules: its session
+// tier is the set's background, which it hides from the call once the
+// call's own-call decision says the call is one of the open test's own
+// (integrations.BackgroundHider: asked at the first door a background
+// recording reaches); owned are the open test's own recordings, answered or
+// not, as its reads tell them (integrations.SharedReads), and answered
+// those that answered (integrations.ExactConsumedReader). asked counts the
+// decisions asked.
+type ownHold struct {
+	*varDb
+	owned, answered []*models.Mock
+	owns            func() bool
+	hides           bool
+	asked           int
+}
+
+func (h *ownHold) HideBackgroundWhen(owns func() bool) integrations.MockMemDb {
+	h.owns = owns
+	return h
+}
+
+func (h *ownHold) HidesBackground() bool {
+	if owns := h.owns; owns != nil {
+		h.owns = nil
+		h.asked++
+		h.hides = owns()
+	}
+	return h.hides
+}
+
+func (h *ownHold) background(name string) bool {
+	return slices.ContainsFunc(h.session, func(m *models.Mock) bool { return m.Name == name })
+}
+
+func (h *ownHold) RefusesAnswer(mk *models.Mock) bool {
+	return mk != nil && h.background(mk.Name) && h.HidesBackground()
+}
+
+func (h *ownHold) GetSessionMocks() ([]*models.Mock, error) {
+	if h.hides {
+		return nil, nil
+	}
+	return h.varDb.GetSessionMocks()
+}
+
+func (h *ownHold) UpdateUnFilteredMock(old, new *models.Mock) bool {
+	return !h.RefusesAnswer(old) && h.varDb.UpdateUnFilteredMock(old, new)
+}
+
+func (h *ownHold) Spent(mk *models.Mock) bool { return h.hides && h.background(mk.Name) }
+
+func (h *ownHold) SharedGeneration(models.Kind) (integrations.SharedGen, bool) {
+	return integrations.SharedGen{}, false
+}
+func (h *ownHold) SharedMocks() (perTest, session []*models.Mock, ok bool) { return nil, nil, false }
+func (h *ownHold) OwnedUnanswered() ([]*models.Mock, bool)                 { return nil, false }
+func (h *ownHold) OwnedRecordings() (uint64, []*models.Mock, bool) {
+	return fakeOwnedView(h.owned, h.owned != nil)
+}
+func (h *ownHold) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
+	return fakeOwnedAt(view, at)
+}
+func (h *ownHold) StagingGeneration() uint64                  { return 1 }
+func (h *ownHold) StagingGenerationByKind(models.Kind) uint64 { return 1 }
+func (h *ownHold) MockSpent(name string) bool                 { return h.hides && h.background(name) }
+func (h *ownHold) ConsumedTestMocks() []*models.Mock          { return h.answered }
+
+var (
+	_ integrations.BackgroundHider     = (*ownHold)(nil)
+	_ integrations.SharedReads         = (*ownHold)(nil)
+	_ integrations.SharedReads         = (*ownHeldVarDb)(nil)
+	_ integrations.ExactConsumedReader = (*ownHold)(nil)
+)
+
+// In record's full round the variable pass's own-call decision
+// (integrations.OwnRepeatRead) reads the call's one hold, as the variable
+// pass and the miss read it, never the store the call is held from. The
+// open test answered its own GET /items/a1, and the set's background holds
+// a recording of GET /items/r1 that binds its path's second segment, so it
+// fits GET /items/a1 too. Where the hold tells the test's own recording and
+// the store, unheld, tells none, the call is one call more than the test
+// recorded: the background never answers it, and it misses as such,
+// recorded once. Where the hold tells none and the store tells the test's
+// own, the call is no repeat of a recording its hold reads: the
+// background's recording answers it.
+func TestFullRoundsOwnCallDecisionReadsTheCallsHold(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, heldOwns := range []bool{true, false} {
+		name := map[bool]string{true: "the hold tells the test's own, the store none", false: "the store tells the test's own, the hold none"}[heldOwns]
+		t.Run(name, func(t *testing.T) {
+			own := at(onPay(varMock("mock-own", "GET", "/items/a1", "", 200, `{"own":true}`, nil)), 1)
+			bg := at(onPay(varMock("mock-bg", "GET", "/items/r1", "", 200, `{"bg":true}`, models.MockVariables{"id": bindV("r1", "url.path[1]")})), 0)
+			bg.TestModeInfo.Lifetime = models.LifetimeSession
+			hold := &ownHold{varDb: &varDb{session: []*models.Mock{bg}}}
+			db := &ownHeldVarDb{roundVarDb: &roundVarDb{varDb: &varDb{}}, hold: hold}
+			if heldOwns {
+				hold.owned, hold.answered = []*models.Mock{own}, []*models.Mock{own}
+			} else {
+				db.owned = []*models.Mock{own}
+			}
+			got := serveCall(t, openTest(), db, true, "GET", "/items/a1", "")
+			if hold.asked != 1 {
+				t.Fatalf("the call's hold was asked the own-call decision %d times; want once", hold.asked)
+			}
+			if !heldOwns {
+				if got.status != 200 || got.body != `{"bg":true}` {
+					t.Fatalf("the call got %d %q (reports %v); want the background's answer: its hold reads no recording it repeats", got.status, got.body, got.reported)
+				}
+				return
+			}
+			if got.status == 200 {
+				t.Fatalf("the call, one more than the test recorded, was answered %q by the background's recording that declares a variable", got.body)
+			}
+			if r := reportOf(t, got); r.MissKind != models.MissExtraCall || r.Recorded != 1 {
+				t.Fatalf("the call missed as %q (recorded %d); want one call more than the test recorded, recorded 1", r.MissKind, r.Recorded)
 			}
 		})
 	}

@@ -809,6 +809,35 @@ func TestTheReplayPushesTheWorkerScope(t *testing.T) {
 		"each worker: name under the key whose slice holds it, in worker:'s order; mock-0 stays TestA's")
 }
 
+// A call moved out of a keyed test's list (mapdb's MoveToWorker) is pushed
+// under the claim key of the test it left, not of the test at its place: the
+// replay hands the agent the call in that key's worker scope, which the
+// agent serves while a test process of that key holds the run. Moved under
+// no key, it sat in the slice no test process holds and was never served.
+func TestTheReplayPushesACallMovedOutOfAKeyedTestUnderItsKey(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: a::TestA\n      dir: a\n      key: a\n      mocks:\n        - name: mock-0\n    - id: b::TestB\n      dir: b\n      key: b\n      mocks:\n        - name: mock-1\n        - name: mock-2\nworker:\n    - name: mock-3\n      key: a\n"), 0o644))
+	db := mapdb.New(zap.NewNop(), keployDir, "")
+	moved, err := db.MoveToWorker(context.Background(), "set", []models.MockEntry{{Name: "mock-1", Place: "a::TestA", Owner: "b::TestB"}})
+	require.NoError(t, err)
+	require.Equal(t, []string{"mock-1"}, moved)
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}, {Name: "mock-2"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-1", "mock-2", "mock-3"), db, nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, map[string][]string{"a": {"mock-3"}, "b": {"mock-1"}}, instr.worker, "the moved call is in the worker scope of the key of the test it left")
+	require.NotContains(t, instr.pool[models.PoolKeyNone], "mock-1", "the moved call is in no slice of no key")
+	require.Contains(t, instr.pool["b"], "mock-1")
+}
+
 // Under the switch the replay hands the agent, with the table, the recorded
 // window of every test of the set from its mappings (keploy test's staging
 // sends them from its test cases): the learn step then reads another test's
@@ -975,6 +1004,50 @@ func TestTheRunsWindowsAreSplitOnEveryPath(t *testing.T) {
 func TestTheTableNamesOnlyMocksTheAgentHolds(t *testing.T) {
 	got := heldOnly(map[string][]string{"o::TestA": {"mock-0", "mock-cf"}, "o::TestB": {"mock-cf"}, "o::TestC": {}}, named("mock-0").mocks)
 	require.Equal(t, map[string][]string{"o::TestA": {"mock-0"}, "o::TestB": {}, "o::TestC": {}}, got)
+}
+
+// The agent is told, by test, the names of its own list that keploy's judging marked
+// served, not required: an unmarked entry, and a marked one the agent does
+// not hold for that test, are none.
+func TestTheTableNamesTheRecordingsMarkedNotRequiredByTest(t *testing.T) {
+	mappings := map[string][]models.MockEntry{
+		"o::TestA": {{Name: "mock-1"}, {Name: "mock-2", NotRequired: "served, not required"}},
+		"o::TestB": {{Name: "mock-3", NotRequired: "served, not required"}},
+		"o::TestC": {{Name: "mock-4"}},
+	}
+	table := map[string][]string{"o::TestA": {"mock-1", "mock-2"}, "o::TestB": {}, "o::TestC": {"mock-4"}}
+	require.Equal(t, map[string][]string{"o::TestA": {"mock-2"}}, notRequired(mappings, table))
+	require.Nil(t, notRequired(map[string][]models.MockEntry{"o::TestC": {{Name: "mock-4"}}}, table))
+}
+
+// A replay under the switch hands the agent, in the same push as the table,
+// the names of each test's own list keploy's judging marked served, not
+// required (pushProvenTable -> notRequired): without them the agent charges
+// the test for a marked call the app did not make. A test with no mark
+// sends none.
+func TestAReplayPushesTheMarkedNamesWithTheTable(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	mdb := mapdb.New(zap.NewNop(), keployDir, "")
+	ctx := context.Background()
+	require.NoError(t, mdb.UpsertBatch(ctx, "set", map[string][]models.MockEntry{
+		"orders::TestPlace": {{Name: "mock-0"}, {Name: "mock-1", NotRequired: "served, not required"}},
+		"orders::TestNone":  nil,
+	}))
+	require.NoError(t, mdb.UpsertCases(ctx, "set", map[string]models.MappedTestCase{
+		"orders::TestPlace": {At: runnerT0}, "orders::TestNone": {At: runnerT0},
+	}, nil, nil))
+	rinstr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	rcfg := instrConfig(rinstr, utils.Native, "go test -p 1 -json ./...")
+	rcfg.Path, rcfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), rinstr, named("mock-0", "mock-1"), mdb, nil, nil, rcfg).Replay(ctx))
+	require.Equal(t, []string{"mock-0", "mock-1"}, rinstr.table["orders::TestPlace"])
+	require.Equal(t, map[string][]string{"orders::TestPlace": {"mock-1"}}, rinstr.notRequired, "the replay pushes each test's marked names with the table")
 }
 
 // A test owns a test mock only if a mock its mapping lists is held and

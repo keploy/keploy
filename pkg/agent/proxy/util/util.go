@@ -245,31 +245,6 @@ func HasHTTP2HeadersFrame(buf []byte) bool {
 	}
 }
 
-// ReadWithTimeout attempts to read more data from the connection with a short timeout.
-// If data arrives within the timeout, it is returned. If the timeout expires without
-// data, an empty slice is returned with no error — this is not treated as a failure.
-func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
-	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, err
-	}
-	// Always clear the deadline so subsequent reads are not affected.
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
-
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
-	if err != nil {
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			// Timeout simply means no data was available yet — not an error.
-			return nil, nil
-		}
-		if err == io.EOF && n > 0 {
-			return buf[:n], nil
-		}
-		return nil, err
-	}
-	return buf[:n], nil
-}
-
 // DirectChunkReader is implemented by capture-layer net.Conns whose
 // wire bytes already arrive pre-framed on an internal channel (e.g. an
 // eBPF ringbuf feeder). When a conn passed to ReadBuffConn satisfies

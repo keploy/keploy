@@ -3,6 +3,8 @@ package replayer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg"
@@ -31,11 +34,32 @@ import (
 	"vitess.io/vitess/go/vt/sqlparser"
 )
 
+// memoMaxBytes bounds by size what each of the replayer's caches of
+// statements (stmtIdentityCache, querySigCache, queryShapeCache,
+// sqlLiteralsCache) keeps of one statement: its text and what it is read
+// into, together. Their keys are the statements' texts, and a statement's
+// read grows with it, with its literals most: measured, a 1 MB bulk INSERT
+// reads into a 4 MB signature, a 6 MB shape and 10 MB of literals, a 64 KB
+// statement of one-digit literals into 1.1-2.2 MB. Bounded by its count of
+// entries alone, each cache could so hold gigabytes. Now each holds at
+// most its 2048 entries of at most memoMaxBytes, 128 MB, and in its 2Q
+// ghost list the keys of up to 1024 statements it let go, 64 MB. The
+// statements the caches are for are short: an ORM statement of 300 bytes
+// and 4 literals reads into a few KB at most.
+const memoMaxBytes = 64 << 10
+
+// memoKeeps reports whether a cache of statements keeps sql, read into a
+// value of about valueBytes (memoMaxBytes). One it does not keep is read
+// again each time it is needed.
+func memoKeeps(sql string, valueBytes int) bool {
+	return len(sql)+valueBytes <= memoMaxBytes
+}
+
 // stmtIdentityCacheSize bounds stmtIdentityCache. Same reasoning as
 // querySigCacheSize below: the key is the raw SQL text and that key space is not
 // finite (a tracer mints a fresh traceparent per request), while the value is a
 // pure function of the key, so an eviction costs one re-scan and can never
-// change a match verdict.
+// change a match verdict. It keeps what memoKeeps keeps.
 const stmtIdentityCacheSize = 2048
 
 var stmtIdentityCache = newStmtIdentityCache()
@@ -69,7 +93,8 @@ func newStmtIdentityCache() *lru.TwoQueueCache[string, string] {
 // Entry cost, measured against the pinned vitess: the signature runs 3-13x the
 // length of the SQL text (it is the joined reflect type name of every AST
 // node), so a realistic entry is 0.5-1.8 KB and this cap is a few MB. Multi-KB
-// ORM statements cost proportionally more; the cap is on entries, not bytes.
+// ORM statements cost proportionally more. The cap is on entries; each entry
+// is bounded by size too (querySigKey, querySigOf).
 const querySigCacheSize = 2048
 
 var querySigCache = newQuerySigCache()
@@ -119,15 +144,47 @@ func hasPrefixFold(s, p string) bool {
 	return strings.EqualFold(s[:len(p)], p)
 }
 
+// getQueryStructureCached is getQueryStructure memoized in querySigCache,
+// the signature as querySigOf keeps it. A signature is only compared with
+// another (and written by a debug line, a long one as its digest), so a
+// statement of any size is read once, not once for each candidate it is
+// compared with, and its entry still takes at most memoMaxBytes. A text
+// over half of it is hashed for each lookup.
 func getQueryStructureCached(sql string) (string, error) {
-	if v, ok := querySigCache.Get(sql); ok {
+	key := querySigKey(sql)
+	if v, ok := querySigCache.Get(key); ok {
 		return v, nil
 	}
 	sig, err := getQueryStructure(sql)
 	if err == nil {
-		querySigCache.Add(sql, sig)
+		sig = querySigOf(sig)
+		querySigCache.Add(key, sig)
 	}
 	return sig, err
+}
+
+// querySigKey is the key querySigCache keeps sql's signature by: sql
+// itself, or, for a text longer than half of memoMaxBytes, a NUL and its
+// SHA-256 digest.
+func querySigKey(sql string) string {
+	if len(sql) <= memoMaxBytes/2 {
+		return sql
+	}
+	d := sha256.Sum256(unsafe.Slice(unsafe.StringData(sql), len(sql)))
+	return "\x00" + string(d[:])
+}
+
+// querySigOf is the signature sig as querySigCache keeps and returns it:
+// sig itself, or, for one longer than half of memoMaxBytes, "sha256:" and
+// its digest in hex. It depends on sig alone, so two signatures are equal
+// exactly when what it makes of them is. No signature begins with
+// "sha256:": it is the names of a tree's node types.
+func querySigOf(sig string) string {
+	if len(sig) <= memoMaxBytes/2 {
+		return sig
+	}
+	d := sha256.Sum256(unsafe.Slice(unsafe.StringData(sig), len(sig)))
+	return "sha256:" + hex.EncodeToString(d[:])
 }
 
 // exactDriftNextSteps is what a miss says when, under exact serving,
@@ -351,6 +408,10 @@ type matchOptions struct {
 	// examined, when set, counts the candidates the scan visits, so a test can
 	// check what a command costs without timing it.
 	examined *int
+	// placesRead, when set, counts the reads of the pool's places (logged),
+	// so a test can check that a command whose lines and report show no
+	// live statement reads none.
+	placesRead *int
 	// bodiesBuilt, when set, counts the live request bodies the command
 	// builds (strictGate.liveRequestBody).
 	bodiesBuilt *int
@@ -386,6 +447,12 @@ type matchOptions struct {
 	// refused are the copies whose consume the store refused on this
 	// command's earlier matches (matchCommand): the scan passes over them.
 	refused map[*models.Mock]struct{}
+	// restaged reports whether the replay staged a test set again after the
+	// command's mark (integrations.HoldToRound): the store, held to the
+	// mark, then reads nothing, and the pool the command was decided against
+	// cannot be read for the places its logs show it by. Nil for a store
+	// that marks no round.
+	restaged func() bool
 }
 
 // matchCommand matches one live command-phase request against the mock pool.
@@ -419,7 +486,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		own = ownCommands.Of(held, commandType(req.PacketBundle))
 		return len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 1)) > 0
 	})
-	var opts matchOptions
+	opts := matchOptions{restaged: restaged}
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
 	// A consume the store refused (integrations.ConsumeRefused: under exact
 	// serving, a test mock that already answered, perhaps on another
@@ -467,6 +534,11 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		if unheld != "" {
 			miss.nextSteps = unheld
 		}
+		// The held store reads nothing once the staging moved, and an unheld
+		// one reads nothing at all, so the pool the command was decided
+		// against cannot be read: the report redacts the command whole.
+		miss.places = miss.places.or(everyPlace)
+		miss.fieldDiffs = miss.places.fieldDiffs(miss.fieldDiffs, "")
 	}
 	if miss != nil {
 		miss.call = call
@@ -1048,6 +1120,39 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 
 	debugOn := logger.Core().Enabled(zapcore.DebugLevel)
 
+	// logged reads the places the logs and the miss's report show the live
+	// statement by: every place any recording of the pool redacted
+	// (poolPlaces), and any recording of the test that answered a call and
+	// so left the pool (answeredPlaces), so a line that compares the live
+	// statement with one candidate, or a report that names one recording,
+	// keeps hidden what another recording hid. Read once, by the first line that shows the
+	// live statement or its bound values, or by the miss. A pool that
+	// cannot be read redacts the command whole (everyPlace): one whose read
+	// fails, one a store that could not hold the command to its mark reads
+	// nothing of (integrations.UnheldWhy), and one read after the replay
+	// staged a test set again under the mark, which the held store reads
+	// nothing of (opts.restaged, checked after the read, as a staging moves
+	// before it changes what a read shows). The scan writes such lines for
+	// the commands that carry a statement alone, and reading the pool in the
+	// scan would replace the tiers it walks: with debug lines on, those
+	// commands read it here, before the scan, and no other command does.
+	logged := &logPlaces{read: func() redactedPlaces {
+		if opts.placesRead != nil {
+			*opts.placesRead++
+		}
+		if pool == nil && loadPool() != nil {
+			return everyPlace
+		}
+		answered := answeredPlaces(mockDb, winStart)
+		if integrations.UnheldWhy(mockDb) != "" || opts.restaged != nil && opts.restaged() {
+			return everyPlace
+		}
+		return poolPlaces(pool).or(answered)
+	}}
+	if debugOn && (req.Header.Type == sCOM_QUERY || req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC) {
+		logged.places()
+	}
+
 	// The names of every COM_STMT_EXECUTE mock, for the debug log only. It is a
 	// pass over the whole pool, so it runs only when the line will be written,
 	// and the line is written once per command, not once per candidate.
@@ -1469,7 +1574,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				lq = &liveLegacy
 			}
 		}
-		ok, c, id := matchQueryLive(logger, recorded, req.PacketBundle, lq, getQuery)
+		ok, c, id := matchQueryLive(logger, recorded, req.PacketBundle, lq, getQuery, logged)
 		if sameStatementOnly && !ok && c > 0 && maskSQLLiterals(id) != lq.maskedLiterals() {
 			c = 0
 		}
@@ -1678,7 +1783,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					if !seen {
 						// remove this log and if block
 						if ce := logger.Check(zap.DebugLevel, "Trying to match the mock with com-stmt-execute request"); ce != nil && actMsg != nil {
-							ce.Write(zap.String("mock_name", mock.Name), zap.Any("Req", executeForLog(actMsg)))
+							ce.Write(zap.String("mock_name", mock.Name), zap.Any("Req", executeForLog(actMsg, logged.places())))
 						}
 
 						var expectedQuery, actualQuery string
@@ -1692,10 +1797,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						actualQuery = liveExec.query
 
 						if debugOn {
-							logger.Debug("queries comparison", zap.String("expected_query", expectedQuery), zap.String("actual_query", actualQuery), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
+							logger.Debug("queries comparison", zap.String("expected_query", expectedQuery), zap.String("actual_query", logged.live(actualQuery)), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
 						}
 
-						ev.ok, ev.score, ev.queryExact = matchStmtExecuteLive(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, liveExec, liveStatementParams, mock.Name, util.NewNoiseChecker(mock.Noise))
+						ev.ok, ev.score, ev.queryExact = matchStmtExecuteLive(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, liveExec, liveStatementParams, mock.Name, util.NewNoiseChecker(mock.Noise), logged)
 						if sameStatementOnly && !ev.ok {
 							ev.score = 0
 						}
@@ -2031,7 +2136,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 	}
 	if len(lost) > 0 && matchedMock != nil {
-		return nil, false, unknownStatementsMiss(lost, matchedMock, mysqlCandidates), nil
+		miss := unknownStatementsMiss(lost, matchedMock, mysqlCandidates)
+		miss.places = logged.places().or(miss.places)
+		return nil, false, miss, nil
 	}
 
 	if opts.probed != nil {
@@ -2114,7 +2221,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							},
 						},
 					}
-					logger.Debug("Returning synthetic OK for unmocked control/DDL", zap.String("query", q))
+					if ce := logger.Check(zap.DebugLevel, "Returning synthetic OK for unmocked control/DDL"); ce != nil {
+						ce.Write(zap.String("query", logged.live(q)))
+					}
 
 					return generic, true, nil, nil
 				}
@@ -2187,9 +2296,14 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				// unmarked payload drift is a real mismatch, not a pass.
 				logger.Debug("schema-noise strict: all recorded COM_STMT_SEND_LONG_DATA candidates rejected",
 					zap.String("closest_mock", sldClosest.Name))
+				// The chunk's diffs are shown by the pool's places and those of
+				// the recordings the report names, the chunks they redacted
+				// among them.
+				places := logged.places().or(placesOf(sldClosest)).or(gate.closestPlaces)
 				return nil, false, &mockMiss{
 					closestMock:    sldClosest.Name,
-					fieldDiffs:     gate.fieldDiffs,
+					fieldDiffs:     gate.reportDiffs(places),
+					places:         places,
 					strictRejected: gate.rejected,
 					// Candidates existed and strict rejected them; leaving the
 					// count at zero would make query.go report this as a mock
@@ -2337,7 +2451,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				}
 
 				logger.Info("Synthesized PREPARE_OK for unmocked statement (likely TiDB+JDBC cachePrepStmts caching pre-record stmtIDs)",
-					zap.String("query", truncate(strings.TrimSpace(sp.Query), 200)),
+					zap.String("query", truncate(strings.TrimSpace(logged.live(sp.Query)), 200)),
 					zap.Uint32("synthetic_stmt_id", newStmtID),
 					zap.Uint16("num_params", numParams))
 				return synthetic, true, nil, nil
@@ -2350,18 +2464,20 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		} else if sp, spOk := req.Message.(*mysql.StmtPreparePacket); spOk {
 			actualQuery = sp.Query
 		}
-		if bestPartialMock != nil {
+		switch {
+		case !debugOn:
+		case bestPartialMock != nil:
 			logger.Debug("mock miss",
 				zap.String("protocol", "MySQL"),
 				zap.String("type", req.Header.Type),
-				zap.String("actual_query", truncate(actualQuery, 200)),
+				zap.String("actual_query", truncate(logged.live(actualQuery), 200)),
 				zap.String("closest_mock", bestPartialMock.Name),
 				zap.String("closest_query", truncate(bestPartialQuery, 200)))
-		} else if actualQuery != "" {
+		case actualQuery != "":
 			logger.Debug("mock miss",
 				zap.String("protocol", "MySQL"),
 				zap.String("type", req.Header.Type),
-				zap.String("actual_query", truncate(actualQuery, 200)))
+				zap.String("actual_query", truncate(logged.live(actualQuery), 200)))
 		}
 
 		bestPartialMockName := ""
@@ -2386,18 +2502,33 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		case gate.rejected > 0:
 			phase = models.MatchPhaseStrict
 		}
-		miss := &mockMiss{
-			closestQuery:   closestQuery,
-			closestMock:    bestPartialMockName,
-			fieldDiffs:     gate.fieldDiffs,
-			strictRejected: gate.rejected,
-			candidateCount: mysqlCandidates,
-			matchPhase:     phase,
+		// The report shows the live command by the pool's places, as the logs
+		// do, and those of the recordings it names: a value any recording
+		// of the pool redacted is redacted, whichever recording the report
+		// names, the nearest one that redacted nothing included.
+		closest := bestPartialMock
+		if closest == nil && gate.closestMock == "" {
+			closest = nearestMock
 		}
+		places := logged.places().or(placesOf(closest)).or(gate.closestPlaces)
+		var unknown *mockMiss
 		if len(lost) > 0 {
 			// The test's own mock may be one whose statement is lost: say so,
 			// and, when nothing else explains the miss, what to do about it.
-			unknown := unknownStatementsMiss(lost, nil, mysqlCandidates)
+			// The report names those recordings too: their places are its.
+			unknown = unknownStatementsMiss(lost, nil, mysqlCandidates)
+			places = places.or(unknown.places)
+		}
+		miss := &mockMiss{
+			closestQuery:   closestQuery,
+			closestMock:    bestPartialMockName,
+			fieldDiffs:     gate.reportDiffs(places),
+			strictRejected: gate.rejected,
+			candidateCount: mysqlCandidates,
+			matchPhase:     phase,
+			places:         places,
+		}
+		if unknown != nil {
 			miss.why = unknown.why
 			if miss.strictRejected == 0 {
 				miss.nextSteps = unknown.nextSteps
@@ -2483,7 +2614,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					logger.Debug("Recorded runtime PREP mapping with new statement ID",
 						zap.Uint32("original_stmt_id from mock ", originalStmtID),
 						zap.Uint32("new_stmt_id", prepareOkRespCopy.StatementID),
-						zap.String("query", strings.TrimSpace(sp.Query)))
+						zap.String("query", strings.TrimSpace(logged.live(sp.Query))))
 				}
 			}
 		}
@@ -2625,7 +2756,7 @@ func (lq *liveQuery) structure() (string, error) {
 // facts are kept in live, so a caller comparing one live statement with many
 // candidates derives them once. The identity is empty only when the packet
 // types differ, which returns before it is derived.
-func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *liveQuery, getQuery func(packet mysql.PacketBundle) string) (bool, int, string) {
+func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *liveQuery, getQuery func(packet mysql.PacketBundle) string, logged *logPlaces) (bool, int, string) {
 	// Match the type and return zero if the types are not equal
 	if expected.Header.Type != actual.Header.Type {
 		return false, 0, ""
@@ -2726,14 +2857,14 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 
 	// check if any of them the query is dml and other is not, then there is no match.
 	if expectedIsDML && !actualIsDML {
-		log.Debug("expected query is dml but actual is not",
-			zap.String("expected query", expectedQuery),
-			zap.String("actual query", actualQuery))
+		if ce := log.Check(zap.DebugLevel, "expected query is dml but actual is not"); ce != nil {
+			ce.Write(zap.String("expected query", expectedQuery), zap.String("actual query", logged.live(actualQuery)))
+		}
 		return false, 0, expectedQuery
 	} else if !expectedIsDML && actualIsDML {
-		log.Debug("actual query is dml but expected is not",
-			zap.String("expected query", expectedQuery),
-			zap.String("actual query", actualQuery))
+		if ce := log.Check(zap.DebugLevel, "actual query is dml but expected is not"); ce != nil {
+			ce.Write(zap.String("expected query", expectedQuery), zap.String("actual query", logged.live(actualQuery)))
+		}
 		return false, 0, expectedQuery
 	}
 
@@ -2749,16 +2880,16 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 		// only scores, and only wins when nothing matched exactly.
 		if !isSessionControlStatement(expectedQuery) && !isSessionControlStatement(actualQuery) &&
 			maskSQLLiterals(expectedQuery) == live.maskedLiterals() {
-			log.Debug("query matched with drifted inline literals",
-				zap.String("expected query", expectedQuery),
-				zap.String("actual query", actualQuery))
+			if ce := log.Check(zap.DebugLevel, "query matched with drifted inline literals"); ce != nil {
+				ce.Write(zap.String("expected query", expectedQuery), zap.String("actual query", logged.live(actualQuery)))
+			}
 			// The payload-length tie-break only ranks candidates already known to
 			// share every keyword, identifier and literal type.
 			return false, scoreQueryLiteralDrift + equalPayloadLength(expected, actual), expectedQuery
 		}
-		log.Debug("No Query is dml",
-			zap.String("expected query", expectedQuery),
-			zap.String("actual query", actualQuery))
+		if ce := log.Check(zap.DebugLevel, "No Query is dml"); ce != nil {
+			ce.Write(zap.String("expected query", expectedQuery), zap.String("actual query", logged.live(actualQuery)))
+		}
 		return false, 0, expectedQuery
 	}
 
@@ -2768,9 +2899,15 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 	// definitive match.
 	actualSignature, err := live.structure()
 	if err != nil {
-		log.Debug("failed to get actual query structure",
-			zap.String("actual Query", actualQuery),
-			zap.Error(err))
+		if ce := log.Check(zap.DebugLevel, "failed to get actual query structure"); ce != nil {
+			// The parser's error quotes the statement: it is shown only
+			// where the statement is, no place of it redacted.
+			shown, why := logged.live(actualQuery), valueRedacted
+			if shown == actualQuery {
+				why = err.Error()
+			}
+			ce.Write(zap.String("actual Query", shown), zap.String("error", why))
+		}
 		return false, 0, expectedQuery
 	}
 
@@ -2817,13 +2954,14 @@ const maskedAttributeValue = "[masked]"
 // sent unnamed) masked. The client names an attribute (a password, a
 // tenant's token), and what redacts a log goes by what a value looks like,
 // not by such a name: one only its name says is a secret was logged in the
-// clear.
-func executeForLog(p *mysql.StmtExecutePacket) *mysql.StmtExecutePacket {
+// clear. Its bound value at each place a recording redacted (places, the
+// pool's) is redacted too.
+func executeForLog(p *mysql.StmtExecutePacket, places redactedPlaces) *mysql.StmtExecutePacket {
 	if p == nil {
 		return nil
 	}
 	c := *p
-	c.Parameters = slices.Clone(p.Parameters)
+	c.Parameters = slices.Clone(places.liveParams(p.Parameters))
 	for i := range c.Parameters {
 		if c.Parameters[i].Name != "" && c.Parameters[i].Value != nil {
 			c.Parameters[i].Value = maskedAttributeValue
@@ -3052,7 +3190,7 @@ func sameParameterShape(expected, actual *mysql.StmtExecutePacket, liveStatement
 // same query (in recorded order) is served, so an INSERT-then-SELECT read-back
 // of a replay-generated id returns the row that was read back at record time.
 func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery, actualQuery string, liveStatementParams int, mockName string, nc *util.NoiseChecker) (bool, int, bool) {
-	return matchStmtExecuteLive(logger, expected, actual, expectedQuery, newLiveExecStatement(actualQuery), liveStatementParams, mockName, nc)
+	return matchStmtExecuteLive(logger, expected, actual, expectedQuery, newLiveExecStatement(actualQuery), liveStatementParams, mockName, nc, nil)
 }
 
 // liveExecStatement is what matchStmtExecuteLive derives from a live
@@ -3073,7 +3211,7 @@ func newLiveExecStatement(query string) liveExecStatement {
 
 // matchStmtExecuteLive is matchStmtExecutePacketQueryAware with the live
 // statement's facts derived once (liveExecStatement).
-func matchStmtExecuteLive(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery string, live liveExecStatement, liveStatementParams int, mockName string, nc *util.NoiseChecker) (bool, int, bool) {
+func matchStmtExecuteLive(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery string, live liveExecStatement, liveStatementParams int, mockName string, nc *util.NoiseChecker, logged *logPlaces) (bool, int, bool) {
 	matchCount := 0
 
 	// Match the type and return zero if the types are not equal
@@ -3228,7 +3366,7 @@ func matchStmtExecuteLive(logger *zap.Logger, expected, actual mysql.PacketBundl
 
 	if allParamsMatched && eq == "" {
 		if ce := logger.Check(zap.DebugLevel, "EXECUTE matched on params alone (mock has no recorded PREPARE)"); ce != nil {
-			ce.Write(zap.String("mock-name", mockName), zap.String("actual_query", truncate(aq, 200)))
+			ce.Write(zap.String("mock-name", mockName), zap.String("actual_query", truncate(logged.live(aq), 200)))
 		}
 		return true, matchCount, queryExactMatched
 	}
@@ -3578,6 +3716,16 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 	deleteMock := *matchedMock
 	if len(detectedNoise) > 0 {
 		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
+	}
+	// Once taken out it is in no later read of the pool: a miss of the
+	// test redacts what it redacted all the same (answeredPlaces). It is
+	// noted before it is taken out, so a miss whose pool read no longer
+	// holds it reads it in the note. When it is not taken out, it is still
+	// in the pool, or another call took it out and noted it too, or it was
+	// read from a pool a staging has since replaced: it is then noted in
+	// the window the store tells now, which redacts more, never less.
+	if !integrations.ExactServing(mockDb) {
+		answeredNote(mockDb).add(mockDb, placesOf(matchedMock))
 	}
 	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
@@ -4123,7 +4271,16 @@ func sqlStatementIdentity(query string) string {
 	if id == "" {
 		id = strings.TrimSpace(query)
 	}
-	stmtIdentityCache.Add(query, id)
+	if len(id) < len(query) && len(id) <= memoMaxBytes {
+		// A part of the text, or a buffer the size of it (the strip's), would
+		// hold the whole text for as long as the identity is kept: in this
+		// cache, and as a key of the others. A longer identity is kept by
+		// none (memoKeeps, querySigKey), so it is not copied.
+		id = strings.Clone(id)
+	}
+	if memoKeeps(query, len(id)) {
+		stmtIdentityCache.Add(query, id)
+	}
 	return id
 }
 

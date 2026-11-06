@@ -542,6 +542,10 @@ func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, opts models.Outgo
 	// recorded consumed and nobody drained is the previous set's, which the
 	// set's staging drops (models.OutgoingOptions.StartsTestSet).
 	opts.StartsTestSet = true
+	// keploy test reads each set's end under the proven switch
+	// (unclaimedCalls): the agent's parsers may hold a call for a later
+	// test of the set only then (models.OutgoingOptions.ReadsSetEnds).
+	opts.ReadsSetEnds = provenswitch.On()
 	if err := r.instrumentation.MockOutgoing(ctx, opts); err != nil {
 		return err
 	}
@@ -6063,9 +6067,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var realRun *models.RealRun
 	var realListed []string
 	realWhy, realUncaptured := "", ""
-	// unclaimed are the calls the application made after the set's last test
-	// that no mock answered (proven switch): no later test takes them, so
-	// they fail the set (unclaimed_calls.go).
+	// unclaimed are the calls the application made outside every test that
+	// no mock answered, and those a parser held for a later test that none
+	// answered (proven switch): no test takes them, so they fail the set
+	// (unclaimed_calls.go, before_set_calls.go).
 	var unclaimed []models.UnmatchedCall
 	unclaimedReason := ""
 	// setAnswers are the answered calls the set's end charges to the set, no
@@ -6257,10 +6262,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			realUncaptured = models.RealUncapturedLosses(realRun.Incomplete).Text()
 		}
 		// A call made after the set's last test that no mock answered is a
-		// pool miss no later test takes: it fails the set, named. A read that
-		// cannot vouch for every such call leaves the set unjudged. Only a
-		// set with a verdict to give is read: one that stopped otherwise
-		// (the app halted, the user aborted, keploy failed) keeps its status.
+		// pool miss no later test takes: it fails the set, named. A call a
+		// parser held for a later test that none answered is the set's too
+		// (filed at this read, or at its connection's end, and kept by
+		// whichever read took it: before_set_calls.go). A read that cannot
+		// vouch for every such call leaves the set unjudged. Only a set with
+		// a verdict to give is read: one that stopped otherwise (the app
+		// halted, the user aborted, keploy failed) keeps its status.
 		// And only once a test of it opened its window: before that, what
 		// the agent holds is the app's startup, which the first test's read
 		// hands over as the set's. A call made then that no mock answered
@@ -6331,13 +6339,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 			if _, stopped := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); unclaimedErr != nil && runTestSetCtx.Err() != nil && (stopped || stoppedByUser()) {
-				r.logger.Debug("the read of the calls made after the set's last test was cut short by the set's stop; the stop is its status",
+				r.logger.Debug("the read of the set's end was cut short by the set's stop; the stop is its status",
 					zap.String("test-set", testSetID), zap.Error(unclaimedErr))
 				unclaimedErr = nil
 			}
 			if unclaimedErr != nil {
-				notJudged = alsoNotJudged(notJudged, "keploy could not read every call the application made after the set's last test that no mock answered: "+unclaimedErr.Error())
-				r.logger.Error("test-set is not judged: keploy could not read every call its application made after its last test; the run goes on to the next test-set",
+				notJudged = alsoNotJudged(notJudged, "keploy could not read every call the application made after the set's last test, or that a parser held for a later test, that no mock answered: "+unclaimedErr.Error())
+				r.logger.Error("test-set is not judged: keploy could not read every call its application made after its last test, or that a parser held for a later test, that no mock answered; the run goes on to the next test-set",
 					zap.String("test-set", testSetID), zap.Int("callsRead", len(calls)), zap.Error(unclaimedErr))
 				testSetStatus = models.TestSetStatusInternalErr
 				r.markNotJudged(testSetID)
@@ -8208,6 +8216,9 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and handing it test set %q's mock.real failed: %w", testSetID, err)
 	}
 	r.realPushed.Store(true)
+	// The set's reads are its, as the set's own session said
+	// (mockOutgoingForTestSet).
+	outgoingOpts.ReadsSetEnds = provenswitch.On()
 	if err := r.instrumentation.MockOutgoing(ctx, outgoingOpts); err != nil {
 		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
 			return exitErr
@@ -9814,8 +9825,9 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 	}
 	calls, err := r.instrumentation.GetMockErrors(ctx)
 	r.keptInside.add(calls)
-	// What was missed before the set's first test is the set's, not this
-	// test's (before_set_calls.go).
+	// What was missed before the set's first test, and a call a parser held
+	// for a later test that none answered (its connection ended in this
+	// test), are the set's, not this test's (before_set_calls.go).
 	calls = r.setCalls.take(calls)
 	// An answered call is no miss: it is the test's answer (TestResult.Answers).
 	calls, answers := splitAnswers(calls)

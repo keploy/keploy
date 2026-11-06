@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 )
 
@@ -30,6 +31,14 @@ var procNetTables = []string{"/proc/self/net/tcp", "/proc/self/net/tcp6"}
 // the ports the docker command publishes, and docker forwards a published port
 // to the container's own address: a socket listening only on 127.0.0.1 or ::1
 // never sees that traffic.
+//
+// The tables it reads hold keploy's own listeners too: the app shares this
+// namespace. A port keploy's proxy, DNS server or API listens on
+// (config.KeployPorts) is answered with an error: its sockets are keploy's,
+// and the app cannot listen there. A replay given the port its tests were
+// recorded on for its proxy (a CI lane giving each phase app port P, proxy
+// P+1, DNS P+2 does) otherwise had the app listening on its recorded port
+// while it was still starting.
 func (a *Agent) AppListenAddrs(_ context.Context, port uint16) ([]netip.Addr, error) {
 	listenPort := port
 	if a.IncomingProxy != nil {
@@ -42,6 +51,9 @@ func (a *Agent) AppListenAddrs(_ context.Context, port uint16) ([]netip.Addr, er
 		if listenPort, ok = lp.AppListenPort(port); !ok {
 			return nil, fmt.Errorf("keploy's ingress forwarder holds port %d and the app's own port is not known yet", port)
 		}
+	}
+	if own := config.KeployPorts(a.config)[listenPort]; own != "" {
+		return nil, fmt.Errorf("keploy's own %s listens on port %d, so no socket there is the app's", own, listenPort)
 	}
 	var addrs []netip.Addr
 	for i, table := range procNetTables {

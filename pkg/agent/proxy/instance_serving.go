@@ -164,6 +164,8 @@ func (p *Proxy) ServeInstance(inst uint32) (agent.ExactServer, error) {
 		return nil, fmt.Errorf("test worker instance %s is served already", agent.InstanceLabel(inst))
 	}
 	wm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger.With(zap.Uint32("workerInstance", inst)))
+	// No set's end read asks a worker's manager (Proxy.FileAtSetEnd).
+	wm.notAtSetEnd.Store(true)
 	for _, st := range s.staged {
 		st.apply(wm)
 	}

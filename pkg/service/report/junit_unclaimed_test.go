@@ -74,3 +74,35 @@ func TestBuildJUnitSuites_AnUnclaimedCallNamesItsOperation(t *testing.T) {
 		}
 	}
 }
+
+// A call a parser held for a later test's recording that no test of the set
+// answered (UnmatchedCall.Held) may have been made in a test: it fails a case
+// of its own, never named as a call after the last test, and the calls made
+// outside every test keep theirs as before.
+// Mutations: held calls stay in the after-the-last-test case; the held case
+// is dropped.
+func TestBuildJUnitSuites_AHeldCallFailsACaseOfItsOwn(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	poll := models.UnmatchedCall{Protocol: "Kafka", ActualSummary: "Fetch orders", Destination: "kafka:9092", Kind: models.MissInTest, Held: true}
+	after := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /publish", Destination: "broker:9099"}
+	s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, UnclaimedCalls: []models.UnmatchedCall{poll, after}}}).Suites[0]
+	if s.Tests != 3 || s.Failures != 2 {
+		t.Fatalf("suite tests %d failures %d; want 3 and 2", s.Tests, s.Failures)
+	}
+	byName := map[string]junitTestCase{}
+	for _, c := range s.Cases {
+		byName[c.Name] = c
+	}
+	out, held := byName[junitUnclaimedCase], byName[junitHeldCase]
+	if out.Failure == nil || out.Failure.Text != "HTTP POST /publish to broker:9099" || out.Failure.Message != "a call after the last test got no recorded answer" {
+		t.Fatalf("the after-the-last-test case is %+v", out.Failure)
+	}
+	if held.Failure == nil || held.Failure.Text != "Kafka Fetch orders to kafka:9092" || strings.Contains(held.Failure.Message, "after the last test") {
+		t.Fatalf("the held case is %+v", held.Failure)
+	}
+
+	s = buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, UnclaimedCalls: []models.UnmatchedCall{poll}}}).Suites[0]
+	if s.Tests != 2 || s.Failures != 1 || s.Cases[len(s.Cases)-1].Name != junitHeldCase {
+		t.Fatalf("a set with held calls alone: tests %d failures %d cases %+v; want its held case alone", s.Tests, s.Failures, s.Cases)
+	}
+}

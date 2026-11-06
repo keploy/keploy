@@ -150,28 +150,31 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	if len(mapping.RecordedWith) > 0 {
 		newMapping.RecordedWith = mapping.RecordedWith
 	}
-	// Under the proven switch the rebuild loses nothing it does not write:
-	// each test entry keeps what it holds beside its mocks (its cases, dir,
-	// starts...), and the app starts, suites and runner sections are kept,
-	// replace-or-keep as the startup section. Without the switch the file is
-	// written as before (TestEachWriterWritesAsBeforeWithoutTheSwitch).
-	if provenswitch.On() {
-		keepEntries(newMapping, existingConfig.TestCases, mapping.TestCases)
-		if len(mapping.Suites) == 0 {
-			newMapping.Suites = existingConfig.Suites
-		} else {
-			newMapping.Suites = mapping.Suites
-		}
-		if len(mapping.Boots) == 0 {
-			newMapping.Boots = existingConfig.Boots
-		} else {
-			newMapping.Boots = mapping.Boots
-		}
-		if len(mapping.Runner) == 0 {
-			newMapping.Runner = existingConfig.Runner
-		} else {
-			newMapping.Runner = mapping.Runner
-		}
+	// The rebuild loses no field keploy writes that it does not write itself,
+	// whatever the proven switch: each test entry keeps what it holds beside
+	// its mocks (its cases, dir, starts, at, real, given, key, seed...), and
+	// the app starts, suites and runner sections are kept, replace-or-keep as
+	// the startup section. mapdb keeps every field keploy writes on a set
+	// whatever the switch; what acts on one checks the switch itself
+	// (models.MappedTestCase.At). A set keploy mock record wrote under the
+	// switch and keploy rewrote without it keeps every such field. What a hand
+	// edit added (its comments, a person's own fields) is kept only under the
+	// switch, by design (encodeOver).
+	keepEntries(newMapping, existingConfig.TestCases, mapping.TestCases)
+	if len(mapping.Suites) == 0 {
+		newMapping.Suites = existingConfig.Suites
+	} else {
+		newMapping.Suites = mapping.Suites
+	}
+	if len(mapping.Boots) == 0 {
+		newMapping.Boots = existingConfig.Boots
+	} else {
+		newMapping.Boots = mapping.Boots
+	}
+	if len(mapping.Runner) == 0 {
+		newMapping.Runner = existingConfig.Runner
+	} else {
+		newMapping.Runner = mapping.Runner
 	}
 
 	encodedData, err := db.encodeOver(newMapping, effFormat, old, headerAlways, testSetID)
@@ -195,7 +198,8 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 // keepEntries gives each test entry Insert rebuilt from the tests' mocks
 // alone the rest of its entry (models.MappedTestCase): what the caller wrote
 // for it, else what the file held for it, so a write of a test's mocks keeps
-// its cases, dir, starts, at and real. The mocks stay the rebuild's.
+// its cases, dir, starts, at, real, given, key and seed. The mocks stay the
+// rebuild's.
 func keepEntries(rebuilt *models.Mapping, onDisk, written []models.MappedTestCase) {
 	before := make(map[string]models.MappedTestCase, len(onDisk))
 	for _, e := range onDisk {
@@ -245,6 +249,9 @@ func entryOver(o, w models.MappedTestCase) models.MappedTestCase {
 	}
 	if len(w.Real) > 0 {
 		o.Real = w.Real
+	}
+	if len(w.Given) > 0 {
+		o.Given = w.Given
 	}
 	if w.Key != "" {
 		o.Key = w.Key
@@ -454,6 +461,19 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 // a worker entry placed again keeps its owner unless the move names one.
 // Without the switch no owner is written, so a move writes what it wrote
 // before entries had one.
+//
+// The entry's claim key (MockEntry.Key), under which a replay serves it
+// while a test process of that key holds the run, is the move's when it
+// names one, as with the owner. Else a mock taken out of a test's list
+// takes that test's key (MappedTestCase.Key): the key of the test process
+// the test ran in when it was recorded. Of several tests whose lists held
+// it, the first gives it, as it gives the owner when the move names none.
+// A test's key is read whatever the switch, so a move with the switch off
+// gives it as one with it on. A test with no key leaves the entry's own,
+// and a worker entry placed again keeps its own.
+// The test's key is right for a call its own process made: a caller moving
+// a call made under another claim, or before any test process claimed the
+// run, names that key on the move (models.PoolKeyNone for none).
 func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves []models.MockEntry) ([]string, error) {
 	if len(moves) == 0 {
 		return nil, nil
@@ -509,11 +529,14 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			if mv.Owner != "" {
 				mapping.Worker[i].Owner = mv.Owner
 			}
+			if mv.Key != "" {
+				mapping.Worker[i].Key = mv.Key
+			}
 			return true
 		}
 	}
 	var entry *models.MockEntry
-	owner := ""
+	owner, key := "", ""
 	for i := range mapping.TestCases {
 		kept := mapping.TestCases[i].Mocks[:0:0]
 		for _, e := range mapping.TestCases[i].Mocks {
@@ -524,7 +547,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			if entry == nil {
 				e := e
 				entry = &e
-				owner = mapping.TestCases[i].ID
+				owner, key = mapping.TestCases[i].ID, mapping.TestCases[i].Key
 			}
 		}
 		if len(kept) != len(mapping.TestCases[i].Mocks) {
@@ -537,6 +560,16 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	entry.Place = mv.Place
 	entry.Reason = mv.Reason
 	entry.Drift = mv.Drift
+	// A replay serves a worker entry only while a test process of its key
+	// holds the run, and a moved entry with none would sit in the slice no
+	// test process holds: the move's key, else the test's. A test with no
+	// key leaves the entry's own, as a move did before.
+	switch {
+	case mv.Key != "":
+		entry.Key = mv.Key
+	case key != "":
+		entry.Key = key
+	}
 	switch {
 	case mv.Owner != "":
 		entry.Owner = mv.Owner

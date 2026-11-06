@@ -623,7 +623,9 @@ func (r Raw) viewOf(live Raw) (*Raw, bool) {
 	// the set's caches by recording (setDerived, bodyStore) would hand it
 	// what they keep of the recording's: the view would read as the
 	// recording, and a word only the view holds would pass. It is read now,
-	// through its own loader where it has one, and kept by none of them.
+	// through its own loader where it has one, and kept by none of them (a
+	// view the set's store of views read, Order.viewRead, has no loader:
+	// its payload is the store's).
 	var b rawBody
 	if live.src != nil {
 		b = loadBody(live.src.name, live.src.load)

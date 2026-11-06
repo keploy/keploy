@@ -440,6 +440,13 @@ type ScopeTableReq struct {
 	// (TestModeInfo.RepeatRead). Absent when no test has one: every test
 	// is then served its exact count.
 	RepeatReads map[string][]RepeatRead `json:"repeatReads,omitempty"`
+	// NotRequired is, under the proven switch, by test ID, the names of the
+	// test's own list (Mappings) that keploy's judging marked served, not
+	// required (MockEntry.NotRequired): each answers that test as its other
+	// recordings do, and the test is not charged when its call is not made.
+	// An agent that cannot take it refuses a table that has one. Absent
+	// when no entry is marked.
+	NotRequired map[string][]string `json:"notRequired,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its

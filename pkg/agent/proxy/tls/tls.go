@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -69,25 +70,31 @@ func negotiateNextProtos(clientProtos []string, preserveH2 bool) []string {
 	}
 }
 
-// preferH2CtxKey carries the replay-side "preserve h2" hint into
+// preferH2CtxKey carries the replay-side "preserve h2" decision into
 // HandleTLSConnection without changing its signature (it is passed as a
 // function value to the ConnTLSUpgrader, so a param change would ripple).
-// The proxy sets it via WithPreferH2 on the replay handshake when the target
-// has recorded kind:Http2 mocks (OutgoingOptions.PreferH2).
+// The proxy sets it on the replay handshake (WithPreferH2For): whether the
+// destination was recorded speaking HTTP/2 (kind:Http2 mocks), or
+// OutgoingOptions.PreferH2.
 type preferH2CtxKey struct{}
 
-// WithPreferH2 marks ctx so the MITM advertises h2 (not a forced http/1.1
-// downgrade) when the client offers it. See negotiateNextProtos.
-func WithPreferH2(ctx context.Context) context.Context {
-	return context.WithValue(ctx, preferH2CtxKey{}, true)
+// WithPreferH2For marks ctx so the MITM advertises h2 (not a forced http/1.1
+// downgrade, see negotiateNextProtos) to a client that offers it when prefer,
+// handed the server name the client's ClientHello asks for ("" when it names
+// none), says so. The hello is where a connection with no CONNECT request
+// first names its host, so the offer for that host is decided there, not
+// before the handshake.
+func WithPreferH2For(ctx context.Context, prefer func(serverName string) bool) context.Context {
+	return context.WithValue(ctx, preferH2CtxKey{}, prefer)
 }
 
-func preferH2From(ctx context.Context) bool {
+// preferH2From is the decision WithPreferH2For put on ctx, nil for none.
+func preferH2From(ctx context.Context) func(serverName string) bool {
 	if ctx == nil {
-		return false
+		return nil
 	}
-	v, _ := ctx.Value(preferH2CtxKey{}).(bool)
-	return v
+	prefer, _ := ctx.Value(preferH2CtxKey{}).(func(string) bool)
+	return prefer
 }
 
 // TLSLayerHolder is a connection whose close the proxy reads before it
@@ -293,7 +300,7 @@ func ConnectTargetFrom(ctx context.Context) string {
 }
 
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
-	preserveH2 := preferH2From(ctx)
+	preferH2 := preferH2From(ctx)
 	dstIP := dstIPFrom(ctx)
 	connectTarget := ConnectTargetFrom(ctx)
 	// 1. Load this run's signing CA (generated per run; see cagen.go). It is set
@@ -327,6 +334,10 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	var certSent atomic.Bool
 	config := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			// With no decision on ctx, h2 is never preferred, and a client
+			// that does not offer h2 is not asked about (the decision reads
+			// the recorded mocks).
+			preserveH2 := preferH2 != nil && slices.Contains(hello.SupportedProtos, "h2") && preferH2(hello.ServerName)
 			nextProtos := negotiateNextProtos(hello.SupportedProtos, preserveH2)
 			logger.Debug("ALPN negotiation",
 				zap.Strings("clientProtos", hello.SupportedProtos),

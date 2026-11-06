@@ -114,6 +114,11 @@ type provenWire struct {
 	// table, models.ScopeTableReq.Worker): names of its pool slice shown in
 	// a test's window too (serveKeyWorker). nil when the table had none.
 	worker map[string][]string
+	// notRequired is, in a replay, by test ID, the names of the test's own
+	// list keploy's judging marked served, not required (the CLI's scope table,
+	// models.ScopeTableReq.NotRequired): its end does not charge the test
+	// for one it did not make (testEvidence). Empty when the table had none.
+	notRequired map[string]map[string]bool
 	// staged: the replay's mocks are staged on the proxy, which serves them
 	// exactly (exact_proven.go). Once per session, and again when the CLI
 	// sends a pool slice naming a recording the staging did not read.
@@ -634,6 +639,30 @@ func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) 
 	}
 	a.provenMu.Lock()
 	a.proven.worker = cp
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeNotRequired installs, for a replay, by test ID, the names of the
+// test's own list keploy's judging marked served, not required
+// (models.ScopeTableReq.NotRequired). They are served as the test's other
+// recordings are; a test's end does not charge it for one it did not make,
+// and only that test's (testEvidence). None leaves the set none, never the
+// previous set's.
+func (a *Agent) SetScopeNotRequired(ctx context.Context, notRequired map[string][]string) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	cp := make(map[string]map[string]bool, len(notRequired))
+	for test, names := range notRequired {
+		cp[test] = make(map[string]bool, len(names))
+		for _, n := range names {
+			cp[test][n] = true
+		}
+	}
+	a.provenMu.Lock()
+	a.proven.notRequired = cp
 	a.provenMu.Unlock()
 	return nil
 }
@@ -1839,8 +1868,18 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	}
 	a.provenMu.Lock()
 	unservable := append([]string(nil), a.proven.unservable[id]...)
+	marked := a.proven.notRequired[id]
 	a.provenMu.Unlock()
-	ev.Unconsumed = append(unconsumed, unservable...)
+	// A recording keploy's judging marked served, not required is this test's
+	// to answer, but the test is not charged when the app did not make its
+	// call. One the store refused (unservable) is still charged: nothing
+	// could have served it.
+	for _, n := range unconsumed {
+		if !marked[n] {
+			ev.Unconsumed = append(ev.Unconsumed, n)
+		}
+	}
+	ev.Unconsumed = append(ev.Unconsumed, unservable...)
 	return ev, nil
 }
 
@@ -2187,7 +2226,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	}
 	head := "keploy: " + strings.Join(what, "; ") + "."
 	if whys := missWhys(ev.Misses, before, most); len(whys) > 0 {
-		// The learn step's reasons, one line each: they are what tells an
+		// The full round's reasons, one line each: they are what tells an
 		// intended change from a flaky one.
 		head += "\n" + strings.Join(whys, "\n")
 	}
@@ -2203,11 +2242,14 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 }
 
 // missWhys are, for a failed test's reason, why its calls missed, in the
-// learn step's words (record's full round, where a miss has a Reason): one
-// line per call, "<call> missed (<reason>): <next step>", each said once,
-// at most most of them and a count of the rest. A miss made before the test
-// began is no call of the test's (before), and is not explained here. The
-// next step is evidence's (nextStepOf): no value of the call.
+// words of record's full round, where a miss has a Reason: the learn step's
+// reason, or, for a call whose view went before keploy diagnosed it
+// (models.MissViewReplaced), its next steps, which end with the line that
+// says which test ended or began, or that another view was served between
+// tests. One line per call, "<call> missed (<reason>): <next step>", each
+// said once, at most most of them and a count of the rest. A miss made before
+// the test began is no call of the test's (before), and is not explained
+// here. The next step is evidence's (nextStepOf): no value of the call.
 func missWhys(misses []models.UnmatchedCall, before func(models.UnmatchedCall) bool, most int) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -2231,7 +2273,7 @@ func missWhys(misses []models.UnmatchedCall, before func(models.UnmatchedCall) b
 		out = append(out, line)
 	}
 	if more > 0 {
-		out = append(out, fmt.Sprintf("and %d more call(s) missed for a reason the learn step gave", more))
+		out = append(out, fmt.Sprintf("and %d more call(s) missed for a reason keploy record's full round gave", more))
 	}
 	return out
 }

@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -59,11 +62,7 @@ func poolMiss(t *testing.T, h *HTTP, mode, path string, hdr map[string]string, b
 // carriesNo fails t when r carries secret anywhere it persists.
 func carriesNo(t *testing.T, r *models.MockMismatchReport, secret string) {
 	t.Helper()
-	all, err := json.Marshal(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(all), secret) {
+	if strings.Contains(persisted(t, r), secret) {
 		t.Errorf("the report carries %q:\nsummary: %s\nDiff: %s\nReceivedReq:\n%s", secret, r.ActualSummary, r.Diff, r.ReceivedReq)
 	}
 }
@@ -99,17 +98,18 @@ func TestAPoolIsReadForItsPlacesOnceARecording(t *testing.T) {
 				pool[i].Noise = []string{"^" + placeholder + "$"}
 			}
 			// And one that redacted nothing, and two that redacted the same
-			// value (one pattern, compiled once for both).
+			// value among other text (one pattern, read within both and
+			// compiled once for both).
 			pool = append(pool, recorded("plain", "/x/q9P/y", jsonHdr, `{"a":"alpha1"}`))
 			shared := fmt.Sprintf("REDACTED_shared%s%d", mode, run)
 			for _, name := range []string{"s1", "s2"} {
-				m := recorded(name, "/x/"+shared+"/"+name, jsonHdr, `{"a":"`+shared+`"}`)
+				m := recorded(name, "/x/"+shared+"/"+name, jsonHdr, `{"a":"id `+shared+`"}`)
 				m.Noise = []string{"^" + shared + "$"}
 				pool = append(pool, m)
 			}
 			core, logs := observer.New(zap.DebugLevel)
 			h := &HTTP{Logger: zap.New(core)}
-			reads, compiles := placesReads.Load(), anchorFreeCompiles.Load()
+			reads, compiles := placesReads.Load(), util.UnanchoredCompiles()
 			for c := 0; c < calls; c++ {
 				r := poolMiss(t, h, mode, "/x/"+liveSecret+"/z", jsonHdr, `{"a":"bravo2"}`, pool...)
 				carriesNo(t, r, liveSecret)
@@ -120,7 +120,7 @@ func TestAPoolIsReadForItsPlacesOnceARecording(t *testing.T) {
 			if got := placesReads.Load() - reads; got != n+2 {
 				t.Errorf("%d calls at a pool of %d recordings with patterns read %d recordings for their places, want %d", calls, n+2, got, n+2)
 			}
-			if got := anchorFreeCompiles.Load() - compiles; got != n+1 {
+			if got := util.UnanchoredCompiles() - compiles; got != n+1 {
 				t.Errorf("%d calls at a pool of recordings of %d patterns compiled %d patterns, want %d", calls, n+1, got, n+1)
 			}
 			// A recording given another request, or other patterns as many,
@@ -173,7 +173,7 @@ func TestATestsPoolOfCopiesIsReadOnceARun(t *testing.T) {
 			stored = append(stored, recorded("plain", "/x/q9P/y", jsonHdr, `{"a":"alpha1"}`))
 			core, logs := observer.New(zap.DebugLevel)
 			h := &HTTP{Logger: zap.New(core)}
-			reads, compiles := placesReads.Load(), anchorFreeCompiles.Load()
+			reads, compiles := placesReads.Load(), util.UnanchoredCompiles()
 			for test := 0; test < tests; test++ {
 				pool := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), stored, nil)
 				if len(pool) != len(stored) || slices.Contains(stored, pool[0]) {
@@ -189,7 +189,7 @@ func TestATestsPoolOfCopiesIsReadOnceARun(t *testing.T) {
 			if got := placesReads.Load() - reads; got != n {
 				t.Errorf("%d tests' pools of copies of %d recordings with patterns read %d recordings for their places, want %d", tests, n, got, n)
 			}
-			if got := anchorFreeCompiles.Load() - compiles; got != n {
+			if got := util.UnanchoredCompiles() - compiles; got != n {
 				t.Errorf("%d tests' pools of copies of recordings of %d patterns compiled %d patterns, want %d", tests, n, got, n)
 			}
 		})
@@ -318,7 +318,7 @@ func TestMissesAtOnceLeaveTheClosestRecordingsOwnPlacesAsTheyWere(t *testing.T) 
 							t.Error("the row is of reports at the closest recording orders")
 							return
 						}
-						if all, _ := json.Marshal(r); strings.Contains(string(all), liveSecret) {
+						if strings.Contains(persisted(t, r), liveSecret) {
 							t.Errorf("the report carries %q: %s", liveSecret, r.ActualSummary)
 						}
 					}
@@ -411,6 +411,124 @@ func TestAReportShowsARootStringAndANumberTheRecordingKept(t *testing.T) {
 	}
 }
 
+// A row that looks for a live value in a report reads all the report
+// persists but when the call missed (persisted). On a report whose every
+// string holds the number row's live value 9182, as its time does, it
+// reads the report's JSON field for field, but At, which it reads as no
+// time: the time does not count as carrying the value, and every other
+// field, a field added later included, is read as it persists.
+func TestARowReadsAllAReportPersistsButWhenTheCallMissed(t *testing.T) {
+	// 15:38:29.918223411 spells 9182, as the time of about one report of
+	// the number row's in 2,000 does.
+	at := time.Date(2026, 11, 5, 15, 38, 29, 918223411, time.UTC)
+	if s := persisted(t, &models.MockMismatchReport{At: at}); strings.Contains(s, "9182") {
+		t.Errorf("a row reads when the call missed: %s", s)
+	}
+	var r models.MockMismatchReport
+	setEvery(t, reflect.ValueOf(&r).Elem(), "9182")
+	r.At = at
+	report, err := json.Marshal(&r)
+	if err != nil {
+		t.Fatalf("a report with every field set does not marshal (setEvery set a value a field's type rejects): %v", err)
+	}
+	read := persisted(t, &r)
+	var got, want map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(read), &got); err != nil {
+		t.Fatalf("a row reads no report's JSON (%v): %q", err, read)
+	}
+	if err := json.Unmarshal(report, &want); err != nil {
+		t.Fatal(err)
+	}
+	// At's key, as the report's JSON names it.
+	atField, _ := reflect.TypeFor[models.MockMismatchReport]().FieldByName("At")
+	atKey, _, _ := strings.Cut(atField.Tag.Get("json"), ",")
+	if atKey == "" {
+		atKey = atField.Name
+	}
+	if !strings.Contains(string(want[atKey]), "9182") {
+		t.Fatalf("the row is of a report whose time (%s) spells 9182 in its JSON: %s", atKey, report)
+	}
+	if a, ok := got[atKey]; ok {
+		if zero, _ := json.Marshal(time.Time{}); string(a) != string(zero) {
+			t.Errorf("a row reads %s as %s, not as no time", atKey, a)
+		}
+	}
+	delete(got, atKey)
+	delete(want, atKey)
+	var differ []string
+	for k := range want {
+		if string(got[k]) != string(want[k]) {
+			differ = append(differ, k)
+		}
+	}
+	for k := range got {
+		if _, ok := want[k]; !ok {
+			differ = append(differ, k)
+		}
+	}
+	if len(differ) > 0 {
+		slices.Sort(differ)
+		t.Errorf("a row does not read the report's %v as it persists:\nread:   %s\nreport: %s", differ, read, report)
+	}
+}
+
+// setEvery sets every field of v a report's JSON holds, at any depth, to a
+// value that is not its zero: name for a string, a pointer to a value set
+// so, a list or a map of one. It leaves a field tagged json:"-" and an
+// unexported one as they are, as the JSON never holds them, except an
+// embedded struct's, whose fields the JSON holds as the report's own. It
+// fails t on a kind it cannot set, so that no field of a report is left out
+// of a row that reads them all.
+func setEvery(t *testing.T, v reflect.Value, name string) {
+	t.Helper()
+	if v.Type() == reflect.TypeOf(time.Time{}) {
+		v.Set(reflect.ValueOf(time.Date(2026, 1, 2, 3, 4, 5, 6, time.UTC)))
+		return
+	}
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString(name)
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(1)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v.SetUint(1)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(1.5)
+	case reflect.Interface:
+		if !reflect.TypeOf(name).AssignableTo(v.Type()) {
+			t.Fatalf("the row cannot set %s, a %s", name, v.Type())
+		}
+		v.Set(reflect.ValueOf(name))
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+		setEvery(t, v.Elem(), name)
+	case reflect.Slice:
+		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+		setEvery(t, v.Index(0), name)
+	case reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			setEvery(t, v.Index(i), name)
+		}
+	case reflect.Map:
+		k, e := reflect.New(v.Type().Key()).Elem(), reflect.New(v.Type().Elem()).Elem()
+		setEvery(t, k, name)
+		setEvery(t, e, name)
+		v.Set(reflect.MakeMap(v.Type()))
+		v.SetMapIndex(k, e)
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			f := v.Type().Field(i)
+			if f.Tag.Get("json") != "-" && (f.IsExported() || (f.Anonymous && f.Type.Kind() == reflect.Struct)) {
+				setEvery(t, v.Field(i), name+"."+f.Name)
+			}
+		}
+	default:
+		t.Fatalf("the row cannot set %s, a %s", name, v.Type())
+	}
+}
+
 // The places kept are bounded by the bytes they hold: past the bound, kept
 // places are dropped until new ones fit; places larger than the bound are
 // not kept; places kept again under their key are counted once.
@@ -461,31 +579,6 @@ func TestTheKeptPlacesAreBounded(t *testing.T) {
 	}
 	if (redactedPlaces{}).size(nil) <= 0 {
 		t.Error("places that hold nothing cost nothing kept")
-	}
-}
-
-// A pattern that does not compile is kept as one, and not compiled again.
-func TestAPatternThatDoesNotCompileIsCompiledOnce(t *testing.T) {
-	pat := fmt.Sprintf("^(unclosed%d$", costRun.Add(1))
-	compiles := anchorFreeCompiles.Load()
-	if first, again := anchorFree(pat), anchorFree(pat); first != nil || again != nil {
-		t.Fatal("the row is of a pattern that does not compile")
-	}
-	if got := anchorFreeCompiles.Load() - compiles; got != 1 {
-		t.Errorf("a pattern that does not compile was compiled %d times, want 1", got)
-	}
-}
-
-// The compiled patterns are bounded: a full cache is emptied.
-func TestTheAnchorFreePatternsAreBounded(t *testing.T) {
-	for i := 0; i <= maxAnchorFree; i++ {
-		_ = anchorFree(fmt.Sprintf("^bounded%d_%d$", costRun.Add(1), i))
-		anchorFreeMu.RLock()
-		n := len(anchorFreeCache)
-		anchorFreeMu.RUnlock()
-		if n > maxAnchorFree {
-			t.Fatalf("%d patterns compiled are kept, more than %d", n, maxAnchorFree)
-		}
 	}
 }
 

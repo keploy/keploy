@@ -44,6 +44,13 @@
 #
 # Needs: RECORD_BIN (the keploy binary under test), go (to build the probe),
 # python3, openssl, curl, nft, iproute2, unshare, sudo.
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -183,7 +190,7 @@ wc -l < mapped_conns.txt > mapped_conn_count.txt
 INSIDE
 chmod +x "$WORK/inside.sh"
 
-sudo -E env WORK="$WORK" RECORD_BIN="$RECORD_BIN" PATH="$PATH" unshare --net -- "$WORK/inside.sh"
+sudo env WORK="$WORK" RECORD_BIN="$RECORD_BIN" PATH="$PATH" "${SUDO_ENV[@]}" unshare --net -- "$WORK/inside.sh"
 
 cp "$WORK/record.log" "$HERE/record_logs.txt" 2>/dev/null || true
 expect "$WORK/baseline.txt" 127.0.0.1:59999 ECONNREFUSED

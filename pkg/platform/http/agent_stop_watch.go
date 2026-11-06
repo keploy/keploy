@@ -25,7 +25,11 @@ import (
 // (utils.ReportTeardownProgress), and kills it only when
 //
 //   - it has reported everything detached (utils.MarkDetachDone) and is still
-//     there a check later: nothing a kill can cut short is left; or
+//     there a check later: nothing a kill can cut short is left. That report
+//     is the agent's last: its exit, which can take the Go runtime longer
+//     than a beat (a race-detector build waits a second there for races at
+//     exit), takes no check, and is waited for as a frozen agent is (below).
+//     Only an agent whose reporter beats on after it is killed so; or
 //   - it has taken no teardown step across stallChecks consecutive checks; or
 //   - the user presses Ctrl+C while keploy waits for it, once keploy has
 //     said that a press stops it (utils.StopNowNotice): a whole

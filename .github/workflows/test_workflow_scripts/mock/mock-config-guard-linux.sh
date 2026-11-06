@@ -69,6 +69,10 @@ if [ -z "${E2E_IMAGE:-}" ]; then
   docker pull -q "$IMAGE" >/dev/null || { echo "FAIL: could not pull $IMAGE"; exit 1; }
 fi
 cp "$BIN" "$WORK/keploy" || { echo "FAIL: no keploy binary at $BIN"; exit 1; }
+# The time limit on each run (bash hang_guard.sh, in the container): its
+# KILL reads 137 by wait on GNU and uutils coreutils alike, where Ubuntu
+# 26.04's timeout(1) exits 124 for it.
+cp "$(dirname "${BASH_SOURCE[0]}")/../hang_guard.sh" "$WORK/hang_guard.sh" || exit 1
 
 # mkcase <case>: an empty repository for the case, with a throwaway HOME.
 mkcase() {
@@ -84,7 +88,7 @@ run() {
   docker run --rm --network none --memory "$mem" --memory-swap "$mem" \
     --user "$(id -u):$(id -g)" -e HOME="/work/$1/home" -e KEPLOY_PROVEN="$PROVEN" \
     -v "$WORK:/work" -w "/work/$1" "$IMAGE" \
-    timeout -s KILL "${2:-$KILL_SECONDS}" /work/keploy report --disable-tele >"$dir/out.log" 2>&1
+    bash /work/hang_guard.sh -s KILL "${2:-$KILL_SECONDS}" /work/keploy report --disable-tele >"$dir/out.log" 2>&1
   echo $? >"$dir/exit"
   echo $(($(date +%s) - start)) >"$dir/seconds"
   echo "$1: exit $(cat "$dir/exit") after $(cat "$dir/seconds")s"

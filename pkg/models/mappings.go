@@ -26,10 +26,13 @@ type MockEntry struct {
 	ReqTimestampMock string `json:"reqTimestampMock,omitempty" yaml:"reqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock string `json:"resTimestampMock,omitempty" yaml:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 	Start            string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
-	// Key is, for a start-up (pool) mock recorded under the proven switch,
-	// the key of the claim active when it was recorded: replay serves it
-	// only while a test process of that key holds the run and no test is
-	// open. Empty means PoolKeyNone.
+	// Key is, for a start-up: or worker: entry keploy mock record wrote
+	// under the proven switch, the key of the claim active when it was
+	// recorded; for a worker: entry moved out of a test's list, the key the
+	// move names, else that test's, else the entry's own
+	// (MappingDb.MoveToWorker). Replay serves it only while a test process of
+	// that key holds the run, a worker: entry in a test's window too
+	// (Mapping.Worker). Empty means PoolKeyNone.
 	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
 	// Place is, for a mock of the set's worker scope (Mapping.Worker), where
 	// in the set's run it becomes reachable: after the test case of this ID
@@ -82,6 +85,28 @@ type MockEntry struct {
 	// Owner running beside it, as judging kept it. Read and kept by each
 	// rewrite, whatever the switch.
 	Drift bool `json:"drift,omitempty" yaml:"drift,omitempty" bson:"drift,omitempty"`
+	// NotRequired says, on an entry of a test's own list, that keploy's
+	// judging (keploy mock record's, or keploy mock judge's) proved the
+	// recording served, not required, and why, in keploy's words: the test's
+	// record made the call, round F (the judging's replay of the tests its
+	// command runs) did not make it while the test ran, and the test failed
+	// on nothing else. Under keploy mock record, round F runs the code that
+	// recorded the call, so whether the app makes it while the test runs
+	// depends on more than the code (how fast an answer comes, for one);
+	// keploy mock judge runs the code as it is when it judges. The words may
+	// also name a race note: the call of the same test (the first sent, when
+	// several were), made in the round too, that the recording shows was still
+	// unanswered when this one was sent. The note is information only: a call
+	// without one is marked all the same. Under the proven switch a replay
+	// serves the recording, when the app makes the call, by the same matching
+	// as the test's other recordings, and does not charge that test, and only
+	// that test, for not making it, unless the store refused the recording,
+	// which nothing could serve. keploy writes a mark only from that judging
+	// (a pull of a published recording gives back the mark its publish
+	// carried); a replay honours any mark an entry of the test's own list
+	// carries, one edited by hand too. Read and kept by each rewrite of
+	// mappings.yaml, whatever the switch.
+	NotRequired string `json:"notRequired,omitempty" yaml:"notRequired,omitempty" bson:"not_required,omitempty"`
 }
 
 // RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
@@ -343,37 +368,47 @@ type MappedTestCase struct {
 	Dir       string              `json:"dir,omitempty" yaml:"dir,omitempty" bson:"dir,omitempty"`
 	Starts    int                 `json:"starts,omitempty" yaml:"starts,omitempty" bson:"starts,omitempty"`
 	// At is when the test began in its recording: the clock its replay runs
-	// on while it is open (design v14 §3.4). Written and read only under the
-	// proven switch; zero in recordings made before keploy kept it, and in
-	// those made without the switch.
+	// on while it is open (design v14 §3.4). keploy mock record writes it
+	// under the proven switch only, and a replay acts on it only under the
+	// switch; zero in recordings made before keploy kept it, and in those
+	// made without the switch. Read and kept by each rewrite of
+	// mappings.yaml, whatever the switch, as Key.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty" bson:"at,omitempty"`
 	// Real is the mock.real destinations the test used while it was open in
 	// its recording (design v14 §4): its replay runs on the real clock, and
-	// the verdict fails when CI never reaches one. Written and read only
-	// under the proven switch; empty in recordings made without it.
+	// the verdict fails when CI never reaches one. Written, and acted on by
+	// a replay, under the proven switch only; empty in recordings made
+	// without it. Read and kept by each rewrite, whatever the switch, as Key.
 	Real []string `json:"real,omitempty" yaml:"real,omitempty" bson:"real,omitempty"`
 	// Given is the values the test gave while it was open in its recording
 	// (POST /agent/scope/given), in the order it gave them: each replay
 	// binds the value the test gives then with the recorded one (design
-	// given-api §3). Written and read only under the proven switch; empty in
-	// recordings made without it.
+	// given-api §3). Written, and acted on by a replay, under the proven
+	// switch only; empty in recordings made without it. Read and kept by
+	// each rewrite, whatever the switch, as Key.
 	Given []GivenValue `json:"given,omitempty" yaml:"given,omitempty" bson:"given,omitempty"`
 	// Key is the key of the claim the test ran under in its recording: the
 	// test process's (POST /agent/instance). A reader who moves one of the
 	// test's calls to the set's worker: list gives the moved entry this key,
 	// so a replay serves it while that process holds the run (MockEntry.Key).
-	// Written and read only under the proven switch; empty in recordings
-	// made before keploy kept it, in those made without the switch, and for
-	// a test run under no claim.
+	// keploy mock record writes it under the proven switch only; empty in
+	// recordings made before keploy kept it, in those made without the
+	// switch, and for a test run under no claim. Read and kept by each
+	// rewrite of mappings.yaml, whatever the switch: mapdb keeps every
+	// field keploy writes on a test entry whatever the switch, and what
+	// acts on it checks the switch itself. A rewrite without the switch
+	// that dropped the key would leave a later move of the test's call no
+	// key to give.
 	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
 	// Seed is the seed the test's browser drew its random numbers from in
 	// its recording (models.ScopeWindow.Seed): each replay's begin is
 	// answered it, so the replay's pages draw what the recording's drew. It
 	// is the entry's, not derived from the test's name: an entry renamed
-	// keeps it, and a record of the test draws a new one. Written and read
-	// only under the proven switch; empty in recordings made before keploy
-	// kept it, in those made with seeding off, and for a test whose harness
-	// drives no browser.
+	// keeps it, and a record of the test draws a new one. Written, and
+	// answered by a replay, under the proven switch only; empty in
+	// recordings made before keploy kept it, in those made with seeding
+	// off, and for a test whose harness drives no browser. Read and kept by
+	// each rewrite, whatever the switch, as Key.
 	Seed string `json:"seed,omitempty" yaml:"seed,omitempty" bson:"seed,omitempty"`
 }
 
@@ -422,12 +457,12 @@ func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
 // errRecordedBegin is a test entry whose at: is not a time.
 const errRecordedBegin = "a test's recorded begin (at) is not a time: %w"
 
-// recordedBeginYAML is a test entry's at: under the proven switch. One that is
-// not a time is an error, never a reason to read the entry in another shape and
-// lose its mocks. With the switch off the entry reads as it did before keploy
-// kept the begin: at: is not read.
+// recordedBeginYAML is a test entry's at:, whatever the proven switch: a
+// writer that rewrites the file with the switch off keeps it, as it keeps the
+// entry's mocks (MappedTestCase.At). One that is not a time is an error, never
+// a reason to read the entry in another shape and lose its mocks.
 func recordedBeginYAML(node *yaml.Node) (time.Time, error) {
-	if !provenswitch.On() || !nodeHasField(node, "at") {
+	if !nodeHasField(node, "at") {
 		return time.Time{}, nil
 	}
 	var at struct {
@@ -442,12 +477,12 @@ func recordedBeginYAML(node *yaml.Node) (time.Time, error) {
 // errRecordedReal is a test entry whose real: is not a list of destinations.
 const errRecordedReal = "a test's mock.real destinations (real) are not a list of strings: %w"
 
-// recordedRealYAML is a test entry's real: under the proven switch. One that
-// is not a list of strings is an error, never a reason to read the entry
-// without it: its replay would run frozen and its verdict would not ask for
-// the destinations. With the switch off real: is not read.
+// recordedRealYAML is a test entry's real:, whatever the proven switch, as
+// recordedBeginYAML. One that is not a list of strings is an error, never a
+// reason to read the entry without it: its replay would run frozen and its
+// verdict would not ask for the destinations.
 func recordedRealYAML(node *yaml.Node) ([]string, error) {
-	if !provenswitch.On() || !nodeHasField(node, "real") {
+	if !nodeHasField(node, "real") {
 		return nil, nil
 	}
 	var r struct {
@@ -461,7 +496,7 @@ func recordedRealYAML(node *yaml.Node) ([]string, error) {
 
 // recordedRealJSON is recordedRealYAML for a JSON entry.
 func recordedRealJSON(data []byte) ([]string, error) {
-	if !provenswitch.On() || !jsonContainsField(data, "real") {
+	if !jsonContainsField(data, "real") {
 		return nil, nil
 	}
 	var r struct {
@@ -476,12 +511,12 @@ func recordedRealJSON(data []byte) ([]string, error) {
 // errRecordedGiven is a test entry whose given: is not a list of givens.
 const errRecordedGiven = "a test's given values (given) are not a list of name, value and source: %w"
 
-// recordedGivenYAML is a test entry's given: under the proven switch. One
-// that is not a list of givens is an error, never a reason to read the entry
-// without it: its replay would bind each given with no recorded value, and
-// check none. With the switch off given: is not read.
+// recordedGivenYAML is a test entry's given:, whatever the proven switch, as
+// recordedBeginYAML. One that is not a list of givens is an error, never a
+// reason to read the entry without it: its replay would bind each given with
+// no recorded value, and check none.
 func recordedGivenYAML(node *yaml.Node) ([]GivenValue, error) {
-	if !provenswitch.On() || !nodeHasField(node, "given") {
+	if !nodeHasField(node, "given") {
 		return nil, nil
 	}
 	var g struct {
@@ -495,7 +530,7 @@ func recordedGivenYAML(node *yaml.Node) ([]GivenValue, error) {
 
 // recordedGivenJSON is recordedGivenYAML for a JSON entry.
 func recordedGivenJSON(data []byte) ([]GivenValue, error) {
-	if !provenswitch.On() || !jsonContainsField(data, "given") {
+	if !jsonContainsField(data, "given") {
 		return nil, nil
 	}
 	var g struct {
@@ -511,12 +546,13 @@ func recordedGivenJSON(data []byte) ([]GivenValue, error) {
 // errRecordedKey is a test entry whose key: is not a string.
 const errRecordedKey = "a test's claim key (key) is not a string: %w"
 
-// recordedKeyYAML is a test entry's key: under the proven switch. One that
-// is not a string is an error, never a reason to read the entry without it:
-// an edit that moves the test's call to worker: would lose the key its
-// replay serves it under. With the switch off key: is not read.
+// recordedKeyYAML is a test entry's key:, whatever the proven switch: a
+// writer that rewrites the file with the switch off keeps it, as it keeps
+// the entry's mocks. One that is not a string is an error, never a reason to
+// read the entry without it: an edit that moves the test's call to worker:
+// would lose the key its replay serves it under.
 func recordedKeyYAML(node *yaml.Node) (string, error) {
-	if !provenswitch.On() || !nodeHasField(node, "key") {
+	if !nodeHasField(node, "key") {
 		return "", nil
 	}
 	var k struct {
@@ -530,7 +566,7 @@ func recordedKeyYAML(node *yaml.Node) (string, error) {
 
 // recordedKeyJSON is recordedKeyYAML for a JSON entry.
 func recordedKeyJSON(data []byte) (string, error) {
-	if !provenswitch.On() || !jsonContainsField(data, "key") {
+	if !jsonContainsField(data, "key") {
 		return "", nil
 	}
 	var k struct {
@@ -545,12 +581,12 @@ func recordedKeyJSON(data []byte) (string, error) {
 // errRecordedSeed is a test entry whose seed: is not a string.
 const errRecordedSeed = "a test's browser seed (seed) is not a string: %w"
 
-// recordedSeedYAML is a test entry's seed: under the proven switch. One that
-// is not a string is an error, never a reason to read the entry without it:
-// its replay would draw other numbers than its recording. With the switch
-// off seed: is not read.
+// recordedSeedYAML is a test entry's seed:, whatever the proven switch, as
+// recordedBeginYAML. One that is not a string is an error, never a reason to
+// read the entry without it: its replay would draw other numbers than its
+// recording.
 func recordedSeedYAML(node *yaml.Node) (string, error) {
-	if !provenswitch.On() || !nodeHasField(node, "seed") {
+	if !nodeHasField(node, "seed") {
 		return "", nil
 	}
 	var k struct {
@@ -564,7 +600,7 @@ func recordedSeedYAML(node *yaml.Node) (string, error) {
 
 // recordedSeedJSON is recordedSeedYAML for a JSON entry.
 func recordedSeedJSON(data []byte) (string, error) {
-	if !provenswitch.On() || !jsonContainsField(data, "seed") {
+	if !jsonContainsField(data, "seed") {
 		return "", nil
 	}
 	var k struct {
@@ -578,7 +614,7 @@ func recordedSeedJSON(data []byte) (string, error) {
 
 // recordedBeginJSON is recordedBeginYAML for a JSON entry.
 func recordedBeginJSON(data []byte) (time.Time, error) {
-	if !provenswitch.On() || !jsonContainsField(data, "at") {
+	if !jsonContainsField(data, "at") {
 		return time.Time{}, nil
 	}
 	var at struct {

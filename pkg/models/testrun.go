@@ -48,8 +48,10 @@ type TestReport struct {
 	// UnclaimedCalls are the calls the set's application made outside every
 	// test that no mock answered (proven switch): after its last test, a pool
 	// miss no later test takes, and before its first, as it started
-	// (UnmatchedCall.BeforeSet). They fail the set; JUnit fails a case of its
-	// own with them.
+	// (UnmatchedCall.BeforeSet); and those a parser held for a later test's
+	// recording that no test answered, wherever they were made
+	// (UnmatchedCall.Held). They fail the set; JUnit fails a case of its own
+	// with them, and another with the held ones.
 	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
 	// AppNotStopped, under the proven switch, says why keploy read the set's
 	// end with its application still running (a stack kept across test-sets,
@@ -561,6 +563,13 @@ type UnmatchedCall struct {
 	// no test's: the replay fails the set with it, naming the call, and
 	// charges no test (the read of the set's first test carries it).
 	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
+	// Held mirrors MockMismatchReport.HeldPastWindow: a parser held the call
+	// past its own window for a later test's recording, and none answered it
+	// by the set's end or its connection's end, where its miss was filed. It
+	// may have been made in a test or between two. It is the set's, no
+	// test's: whichever read takes it, the replay fails the set with it,
+	// naming it as held, and charges no test.
+	Held bool `json:"held,omitempty" yaml:"held,omitempty"`
 	// ChargedTo names, under the proven switch, the test whose end charged
 	// the call to it: the call counts against that test (CountsAgainstTest)
 	// and that test's evidence lists it. Empty for a call no test was
@@ -593,13 +602,15 @@ type UnmatchedCall struct {
 	// never answers it with the other test's recording.
 	OrderDependent bool `json:"order_dependent,omitempty" yaml:"order_dependent,omitempty"`
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
-	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
-	// record's full round, where the learn step runs, gives one; empty
-	// everywhere else, and for a call of that round no reason of judging's
-	// names: one keploy could not judge because its own store could not read
-	// a recorded answer back, one a parser's pairing found tied between
-	// recordings whose replies differ, or one call more than the test
-	// recorded (Kind and Recorded say so).
+	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall, or
+	// MissViewReplaced for a call whose view a test's begin or end, or another
+	// view served between tests, replaced before keploy diagnosed its miss (its
+	// next steps say which). Only record's full round, where the learn step
+	// runs, gives one; empty everywhere else, and for a call of that round no
+	// reason of judging's names: one keploy could not judge because its own
+	// store could not read a recorded answer back, one a parser's pairing found
+	// tied between recordings whose replies differ, or one call more than the
+	// test recorded (Kind and Recorded say so).
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 	// Concurrent is, under the proven switch, what keploy knows of the call
 	// when the test was recorded while other tests' requests were open
@@ -789,6 +800,18 @@ const (
 	// destination and shape.
 	MissUnmockedCall = "unmocked_call"
 )
+
+// MissViewReplaced is the reason of a miss of record's full round whose view
+// went before keploy diagnosed it (UnmatchedCall.Reason): keploy record's
+// full round decided the call in one view, a test's or the pool's between
+// tests (its learn step did, or the variable pass for a call a recording
+// that declares variables fits), and a test's begin or end, or another view
+// of the recordings served between tests, replaced that view first, so
+// keploy compared it with no recording and names none. Its next steps say
+// which test ended or began, or that another view was served. Judging
+// counts it as a miss (an unmocked call), and nothing of it moves a
+// recording.
+const MissViewReplaced = "view_replaced"
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it
 // served and the outgoing calls that matched none of them -- what

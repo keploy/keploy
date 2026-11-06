@@ -360,5 +360,5 @@ jobs:
         run: |
           cd go-fuzzers/mongo
           echo "::group::Keploy Report"
-          sudo -E "$REPLAY_KEPLOY_BIN" report || echo "Failed to generate report"
+          sudo "$REPLAY_KEPLOY_BIN" report || echo "Failed to generate report"
           echo "::endgroup::"

@@ -607,6 +607,17 @@ type TeardownableProxyHook interface {
 	BeforeTeardown(ctx context.Context) error
 }
 
+// SetEndFilingProxy is an optional Proxy capability: FileAtSetEnd has the
+// parsers file, in-band, the misses of the calls they hold for a test of the
+// set (integrations.SetEndFiler), and returns once they are filed. The agent
+// calls it at keploy test's read of a set's end (models.WithSetEndRead),
+// before the misses are read. Its error says that read cannot take every such
+// miss (a parser failed filing, or ctx is done): the read is then unread
+// (models.ErrUnmatchedCallsUnread).
+type SetEndFilingProxy interface {
+	FileAtSetEnd(ctx context.Context) error
+}
+
 // Proxy listens on all available interfaces and forwards traffic to the destination.
 //
 // Proxy is the stable contract; window-aware methods live on the optional
@@ -863,10 +874,12 @@ type ExactBackgroundServer interface {
 }
 
 // RecordedOfKindSetter is implemented by a proxy whose pairing (record's full
-// round) reads, beside what is staged, the set's recordings of
-// a kind the agent keeps on disk: a test's own are staged only as it opens.
-// SetRecordedOfKind sets where (src visits the on-disk mocks of a kind, in
-// recorded order, decoding one only as visit loads it; nil for none).
+// round), and whose finder of a held call's unserved recordings
+// (integrations.UnservedRecordingFinder), read, beside what is staged, the
+// set's recordings of a kind the agent keeps on disk: a test's own are staged
+// only as it opens. SetRecordedOfKind sets where (src visits the on-disk mocks
+// of a kind, in recorded order, decoding one only as visit loads it; nil for
+// none).
 type RecordedOfKindSetter interface {
 	SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error
 }
