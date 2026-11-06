@@ -5131,6 +5131,17 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 	return nil
 }
 
+// ServeExactWorkerSkipped implements agent.ExactWorkerSkippedServer
+// (exact.go).
+func (p *Proxy) ServeExactWorkerSkipped(names, skipped []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactWorkerSkipped(names, skipped)
+	return nil
+}
+
 // StageExactBackground implements agent.ExactBackgroundServer
 // (exact_background.go).
 func (p *Proxy) StageExactBackground(rules string) error {
@@ -5330,6 +5341,17 @@ func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
 	}
 	return m.ExactTestOutcome()
 }
+
+// ExactTestSkippedReads implements agent.ExactSkippedReadsReader (exact.go).
+func (p *Proxy) ExactTestSkippedReads() (string, []string) {
+	m := p.getMockManager()
+	if m == nil {
+		return "", nil
+	}
+	return m.ExactTestSkippedReads()
+}
+
+var _ agent.ExactSkippedReadsReader = (*Proxy)(nil)
 
 var (
 	_ agent.ExactServer            = (*Proxy)(nil)
@@ -6138,6 +6160,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
 					Kind:             parserErr.MissKind,
 					Recorded:         parserErr.Recorded,
+					SkippedReads:     parserErr.MismatchReport.SkippedReads,
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
@@ -6158,6 +6181,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					WriteKind:  parserErr.MismatchReport.WriteKind,
 					Source:     parserErr.MismatchReport.Source,
 					RecordedIn: parserErr.MismatchReport.RecordedIn,
+					Earlier:    parserErr.MismatchReport.Earlier,
 					Repeat:     parserErr.MismatchReport.Repeat.Clone(),
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {

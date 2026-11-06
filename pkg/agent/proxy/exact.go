@@ -29,8 +29,9 @@ import (
 //     settings, DNS). One more request identical to one a test mock already
 //     answered finds no test mock: a miss (models.MissExtraCall). Under the
 //     proven switch no worker-scope mock (below) answers it either
-//     (integrations.OwnRepeatRead); with the switch off, one the run has
-//     reached that is that request does.
+//     (integrations.OwnRepeatRead), but a skipped test's read keploy mock
+//     replay moved there (ServeExactWorkerSkipped), once; with the switch
+//     off, one the run has reached that is that request does.
 //   - While no test is open, the current key's pool slice answers, with
 //     reuse or cursor-saturate as its mocks were recorded, beside the
 //     protocol-phase mocks. Its stateful cursors are the key's own.
@@ -119,6 +120,10 @@ type exactView struct {
 	// of, by name, as ServeExactWorker last said when the view was
 	// installed: shown whether a test is open or not.
 	worker map[string]struct{}
+	// skippedReads is, of worker, the reads keploy mock replay moved there
+	// from a test its gate skips (ServeExactWorkerSkipped): each also
+	// answers a call one more than the open test's own recordings of it.
+	skippedReads map[string]struct{}
 	// poolKey is the key of that slice: its stateful cursors are its own.
 	// winStart and winEnd are, on a test view, the test's recorded window
 	// (the staging's recorded windows, by its name), where its sequences
@@ -170,6 +175,10 @@ type exactView struct {
 	// mu (MockManager.AnswerRepeatRead).
 	repeats       map[models.RepeatReadMark][]int
 	answeredAgain map[models.RepeatReadMark]bool
+	// skippedSpent are, on a test view, the skipped tests' reads
+	// (skippedReads) that answered a call in its window, in the order they
+	// did (SkippedReadsAnswered). Written under mu.
+	skippedSpent []*models.Mock
 	// spent are the staged mocks this view shows that a parser consumed
 	// through a delete door in its test, or a protocol-phase mock one
 	// evicted outside every test: gone until the view changes. The staged
@@ -526,10 +535,13 @@ func (c *exactClaims) takenByOther(epoch uint64, name, test string) bool {
 }
 
 // reachedWorker is what ServeExactWorker last said: the worker-scope mocks
-// the run has reached, and each one's position in the order it gave.
+// the run has reached, and each one's position in the order it gave; and
+// what ServeExactWorkerSkipped said of them: those that are a skipped test's
+// reads.
 type reachedWorker struct {
-	set   map[string]struct{}
-	order map[string]int
+	set          map[string]struct{}
+	order        map[string]int
+	skippedReads map[string]struct{}
 }
 
 // stagingNames is a set of mock names that belongs to one staging
@@ -1824,6 +1836,23 @@ func (m *MockManager) ServeExactPool(key string, names []string, ahead ...*model
 // shows them, whether a test is open or not (agent.ExactWorkerServer). It
 // installs no view itself: the next ServeExactTest or ServeExactPool does.
 func (m *MockManager) ServeExactWorker(names []string) {
+	m.ServeExactWorkerSkipped(names, nil)
+}
+
+// ServeExactWorkerSkipped is ServeExactWorker, with skipped the names of
+// names that keploy mock replay moved to the worker scope from a test its
+// gate skips: a read the app made once and kept (a token it looks up and
+// caches), recorded in the skipped test's window and made now in the window
+// of whichever test runs first (models.ScopeTableReq.SkippedReads). Each
+// still answers at most one call in the windows of the staging, after the
+// open test's own; unlike the rest of the worker scope, it also answers a
+// call one more than the open test's own recordings of it (heldScope's
+// background): the test that holds its own recording of the read makes the
+// skipped test's too. So a read answers at most as many calls in the windows
+// as the skipped test recorded it, by construction, and a call past them
+// misses as one more than the test recorded. A name of skipped that names
+// does not hold is no read of the worker scope.
+func (m *MockManager) ServeExactWorkerSkipped(names, skipped []string) {
 	set := make(map[string]struct{}, len(names))
 	order := make(map[string]int, len(names))
 	for _, n := range names {
@@ -1835,7 +1864,13 @@ func (m *MockManager) ServeExactWorker(names []string) {
 		}
 		set[n] = struct{}{}
 	}
-	m.exact.worker.Store(&reachedWorker{set: set, order: order})
+	reads := make(map[string]struct{}, len(skipped))
+	for _, n := range skipped {
+		if _, ok := set[n]; ok {
+			reads[n] = struct{}{}
+		}
+	}
+	m.exact.worker.Store(&reachedWorker{set: set, order: order, skippedReads: reads})
 }
 
 // installExact makes v the view, then tells every parser that keeps an index
@@ -1864,7 +1899,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	}
 	w := m.exact.worker.Load()
 	if w != nil {
-		v.worker = w.set
+		v.worker, v.skippedReads = w.set, w.skippedReads
 	}
 	// A test's view is never a staging's: a test opens once its set is staged.
 	v.staging = v.test == "" && m.exact.staging.Load()
@@ -1998,6 +2033,24 @@ func (m *MockManager) ExactTestOutcome() (test string, consumed, unconsumed []st
 	return o.test, append([]string(nil), o.consumed...), append([]string(nil), o.unconsumed...), true
 }
 
+// ExactTestSkippedReads implements agent.ExactSkippedReadsReader: under
+// exact serving, the latest test opened, open or ended (ExactTestOutcome),
+// and the reads of the tests the replay's gate skips (isSkippedRead) that
+// answered a call in its window, in the order they did. Read once the test
+// stops being served, it is final, as ExactTestOutcome is. test is "" when
+// no test has been opened this session.
+func (m *MockManager) ExactTestSkippedReads() (test string, reads []string) {
+	var o *testOutcome
+	if v := m.exact.last.Load(); v != nil {
+		v.mu.Lock()
+		o = v.outcomeLocked()
+		v.mu.Unlock()
+	} else if o = m.exact.ended.Load(); o == nil {
+		return "", nil
+	}
+	return o.test, append([]string(nil), o.skipped...)
+}
+
 // ExactTestServed is, under exact serving, the test whose view is in force
 // now: "" when none is, the pool being served, before a set's first test or
 // after a test ended (agent.ExactTestServedReader). It reads the published
@@ -2015,6 +2068,10 @@ func (m *MockManager) ExactTestServed() string {
 type testOutcome struct {
 	test                 string
 	consumed, unconsumed []string
+	// skipped are the skipped tests' reads that answered a call in the
+	// view's window (skippedSpent), in the order they did
+	// (ExactTestSkippedReads).
+	skipped []string
 }
 
 // outcomeLocked is v's outcome, v.mu held: which of its test mocks have
@@ -2032,6 +2089,9 @@ func (v *exactView) outcomeLocked() *testOutcome {
 		if !done && !v.isCand(i) && !excused[i] {
 			o.unconsumed = append(o.unconsumed, v.owned[i].Name)
 		}
+	}
+	for _, mk := range v.skippedSpent {
+		o.skipped = append(o.skipped, mk.Name)
 	}
 	return o
 }
@@ -2058,6 +2118,21 @@ func consumedTestMocksIn(v *exactView) []*models.Mock {
 }
 
 var _ integrations.ExactConsumedReader = (*MockManager)(nil)
+
+// SkippedReadsAnswered implements integrations.ExactSkippedReadsReader: the
+// skipped tests' reads that answered a call in the open test's window, in
+// the order they did; none while no test is open.
+func (m *MockManager) SkippedReadsAnswered() []*models.Mock {
+	v := m.exactView()
+	if v == nil || v.test == "" {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]*models.Mock(nil), v.skippedSpent...)
+}
+
+var _ integrations.ExactSkippedReadsReader = (*MockManager)(nil)
 
 // ServedInOpenTest implements integrations.ExactServedReader: the open
 // test's view's stamp (exactView.stamp) and every mock a parser was served
@@ -2485,6 +2560,13 @@ func (v *exactView) spendsAsPool(mk *models.Mock) bool {
 // view shows (ServeExactWorker).
 func (v *exactView) isWorker(name string) bool {
 	_, ok := v.worker[name]
+	return ok
+}
+
+// isSkippedRead reports whether name is one of the worker-scope mocks the
+// view shows that is a skipped test's read (ServeExactWorkerSkipped).
+func (v *exactView) isSkippedRead(name string) bool {
+	_, ok := v.skippedReads[name]
 	return ok
 }
 
@@ -3435,12 +3517,41 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 			return exactRefused, wait, nil
 		}
 		verdict := m.consumeOutside(mk, worker)
+		// A skipped test's read the open test's call spent is a call of
+		// that test's its own recordings do not count: its extra-call miss
+		// counts it (SkippedReadsAnswered). A skipped read is one of the
+		// worker scope's, so it is spent here only by a call read in a
+		// test's window (one read between tests spends nothing, above); a
+		// pool view's list, a call in flight as its test ended, is read by
+		// no one.
+		skipped := verdict == exactServed && v.isSkippedRead(mk.Name)
+		if skipped {
+			v.skippedSpent = append(v.skippedSpent, mk)
+		}
 		v.mu.Unlock()
 		if verdict != exactServed {
 			return verdict, nil, nil
 		}
 		m.takeLocked(integrations.Take{Mock: m.stagedRecording(mk), How: integrations.TakeSpent, Gen: v.round, Test: v.test})
-		return verdict, nil, func() { m.noteExactSpent(mk) }
+		// The spend is the background's: one of the worker scope's for the
+		// windows, else one of the pool's for the staging. A later identical
+		// call it no longer answers names it (noteBackgroundSpent). A
+		// skipped test's read is no background's: it is spent as that
+		// test's recording, and a later identical call, one past what the
+		// test recorded, stays the miss of the test that made it
+		// (noteSkippedReadSpent).
+		background := models.RepeatBackgroundPool
+		if worker {
+			background = models.RepeatBackgroundWorker
+		}
+		return verdict, nil, func() {
+			m.noteExactSpent(mk)
+			if skipped {
+				m.noteSkippedReadSpent(mk)
+				return
+			}
+			m.noteBackgroundSpent(mk, background)
+		}
 	}
 	v.mu.Lock()
 	if wait := v.closedWait(); wait != nil {

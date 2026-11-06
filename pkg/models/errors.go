@@ -278,6 +278,13 @@ type MockMismatchReport struct {
 	// made. Empty without the switch.
 	MissKind string
 	Recorded int
+	// SkippedReads names, for a MissExtraCall, the reads of tests the
+	// replay's gate skips (keploy mock replay's worker: entries,
+	// models.ScopeTableReq.SkippedReads) that answered the same call in the
+	// open test's window, in the order they did: calls of the test that
+	// Recorded does not count, which its extra-call line counts. Set by the
+	// HTTP matcher, the only one a skipped read answers.
+	SkippedReads []string
 	// Differs names the compared fields in which the call differs from the
 	// closest recording (host, header.<name>, body.<path>, ...), never a
 	// value: the reason keploy gives for a failed test names them (proven
@@ -351,6 +358,18 @@ type MockMismatchReport struct {
 	// parser fills it: it stays empty on an answer (see Answer), and on a
 	// miss the replay names the owner (UnmatchedCall.RecordedIn).
 	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// Earlier names, under the proven switch, for a call of the open test's
+	// own that changed (the test recorded the same method and path to the
+	// same destination, and no recording answered the call), the latest
+	// recording another test made of that method and path to that
+	// destination before the earliest of the test's own: an earlier test's
+	// window, which the replay passed. When that test made no such call at
+	// this replay (it was skipped), the call likely changed because that
+	// test's write is missing; judging reads the miss so. Never a recording
+	// the call is (NotOwned names that one), nor one keploy cannot place
+	// before the test's own (no request time). The replay names its owner
+	// (UnmatchedCall.EarlierIn).
+	Earlier string `json:"earlier,omitempty" yaml:"earlier,omitempty"`
 	// Mark is where the call's parser found it when the call first read the
 	// round (integrations.StampMark), under the proven switch: the miss was
 	// decided there, so the proxy says whether it was made while the set's

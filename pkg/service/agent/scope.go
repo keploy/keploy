@@ -400,7 +400,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if a.replaying() {
 			meta.given = nil
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given, Instance: meta.instance})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given, SkippedReads: meta.skippedReads, Instance: meta.instance})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -589,6 +589,9 @@ type scopeMeta struct {
 	real []models.RealUse
 	// given are the values the test gave while open, in order (ProvenGive).
 	given []models.GivenValue
+	// skippedReads are, in a replay, the skipped tests' reads that answered
+	// the test's calls while open, in order (ScopeWindow.SkippedReads).
+	skippedReads []string
 	// unread is what the test was charged while open with mocks of its
 	// whose container the Docker daemon did not answer the read of
 	// (unreadMock): its window says so as it closes.

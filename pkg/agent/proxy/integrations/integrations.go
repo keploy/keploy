@@ -550,6 +550,38 @@ func ConsumedInCallView(db MockMemDb) ([]*models.Mock, bool) {
 	return answered, true
 }
 
+// ExactSkippedReadsReader is an optional MockMemDb extension of a store that
+// serves each test its own mocks exactly (the proven switch).
+// SkippedReadsAnswered returns the reads of tests the replay's gate skips
+// (keploy mock replay's worker: entries, models.ScopeTableReq.SkippedReads)
+// that answered a call in the open test's window, in the order they did
+// (none while no test is open): calls of the test its own recordings do not
+// count, so a matcher's extra-call miss names them beside how often the test
+// recorded the call (MockMismatchReport.SkippedReads). A matcher must only
+// read them: they answer nothing.
+type ExactSkippedReadsReader interface {
+	SkippedReadsAnswered() []*models.Mock
+}
+
+// SkippedReadsInCallView is the skipped tests' reads that answered in the
+// open test's window, as db, the store a call is held to, lists them
+// (ExactSkippedReadsReader): none when the call's view moved (CallViewMoved,
+// asked after the list is read, so a view installed while it is read is
+// seen), as the list may then be another test's, which an extra-call line
+// joined with the call's answered list (ConsumedInCallView) would count as
+// this test's calls. None for a store that lists none.
+func SkippedReadsInCallView(db MockMemDb) []*models.Mock {
+	sr, ok := db.(ExactSkippedReadsReader)
+	if !ok {
+		return nil
+	}
+	reads := sr.SkippedReadsAnswered()
+	if CallViewMoved(db) {
+		return nil
+	}
+	return reads
+}
+
 // ExactServedReader is an optional MockMemDb extension of a store that
 // serves each test its own mocks exactly (the proven switch), with a served
 // observer (the learn tracker's ServedMock). ServedInOpenTest returns, of one
@@ -592,7 +624,7 @@ type ExactServedReader interface {
 
 // AnsweredFinder is an optional MockMemDb extension: of the per-test
 // recordings of kind that answered a call earlier in the test set staged now,
-// indexed under any of keys (models.RequestKeys), the one answered last that
+// and of the background's a call spent, indexed under any of keys (models.RequestKeys), the one answered last that
 // match accepts and that the open test does not own. A parser that finds no
 // mock for a call asks it whether the call repeats one an earlier test made
 // (models.RepeatNote): the cue of an application that kept the earlier
@@ -631,10 +663,16 @@ func AnsweredRedacting(db MockMemDb, kind models.Kind) ([]*models.Mock, bool) {
 }
 
 // AnsweredCall is what AnsweredFinder found: the recording, and when it
-// answered at this replay.
+// answered at this replay. Background is the scope of the set's background
+// the recording is of (models.RepeatNote.Background), empty for a test's own.
+// SkippedRead says it is the read of a test the replay's gate skips, moved
+// to the worker scope for the replay (models.RepeatNote.SkippedRead): no
+// recording of the background, so Background is empty.
 type AnsweredCall struct {
-	Mock       *models.Mock
-	AnsweredAt time.Time
+	Mock        *models.Mock
+	AnsweredAt  time.Time
+	Background  string
+	SkippedRead bool
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the

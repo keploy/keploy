@@ -62,3 +62,41 @@ func TestASanitizedMissKeepsWhereItWasRecordedAndThatItIsOrderDependent(t *testi
 		t.Fatalf("the sanitized miss lost where it was recorded or that it is order-dependent: %+v", s)
 	}
 }
+
+// NameEarlierIn names the first other test that owns the recording Earlier
+// names, and only that: a call that names none, a recording no test owns,
+// or one its own test owns too, keeps EarlierIn as it was. It reads Earlier
+// alone, never the recording the call is closest to.
+func TestNameEarlierInNamesTheFirstOtherOwner(t *testing.T) {
+	owners := MockOwners(map[string][]string{"o::TestC": {"mock-0"}, "o::TestA": {"mock-0"}, "o::TestB": {"mock-1"}, "o::TestD": {"mock-1"}, "o::TestE": {""}})
+	for _, tc := range []struct {
+		name string
+		call UnmatchedCall
+		want string
+	}{
+		{"another test's recording", UnmatchedCall{Earlier: "mock-0", ClosestMock: "mock-1"}, "o::TestA"},
+		{"no earlier recording", UnmatchedCall{ClosestMock: "mock-0", NotOwned: true}, ""},
+		{"a recording no test owns", UnmatchedCall{Earlier: "mock-9"}, ""},
+		{"a recording its own test owns too", UnmatchedCall{Earlier: "mock-1"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := tc.call
+			named := c.NameEarlierIn("o::TestB", owners)
+			if c.EarlierIn != tc.want || named != (tc.want != "") || c.RecordedIn != "" {
+				t.Fatalf("earlier in %q, named %v, recorded in %q; want %q and no recorded in", c.EarlierIn, named, c.RecordedIn, tc.want)
+			}
+		})
+	}
+}
+
+// A miss's sanitized copy keeps the earlier recording a changed call names
+// and the test that owns it, and the window a background repeat was made
+// in: names, no value, which judging reads to say why a test failed and
+// which test's window a call of the set's landed in.
+func TestASanitizedMissKeepsItsEarlierRecordingAndItsWindow(t *testing.T) {
+	c := UnmatchedCall{Protocol: "HTTP", ActualSummary: "PUT /secret", Earlier: "mock-0", EarlierIn: "o::TestA", WindowOf: "o::TestB"}
+	s := c.Sanitized()
+	if s.Earlier != "mock-0" || s.EarlierIn != "o::TestA" || s.WindowOf != "o::TestB" {
+		t.Fatalf("the sanitized miss lost its earlier recording, its test or its window: %+v", s)
+	}
+}

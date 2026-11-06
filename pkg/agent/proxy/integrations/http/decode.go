@@ -551,6 +551,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
 				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
+					report.SkippedReads = h.skippedReadsOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				}
 				// The miss was decided where the request first read the
 				// round: whether that read found a staging is told from it.
@@ -602,6 +603,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
 					earlier, repeated = repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n)
 				}
+				// A call of the test's own that changed (it is no
+				// recording made elsewhere, nor one call more than the test
+				// recorded) names the latest recording another test made of
+				// its method and path before the test's own
+				// (earlierRecording): judging reads whether the replay
+				// skipped that test, whose write the call's change then
+				// likely follows. The miss stays the test's own.
+				var earlierRec *models.Mock
+				if elsewhere == nil && !staged && n == 0 && report != nil && provenswitch.On() {
+					earlierRec = earlierRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+				}
 				// The call's view went after the call was decided: a
 				// test's begin or end replaced it before the miss was
 				// diagnosed, or while it was, between any two of the
@@ -609,6 +621,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// during them is told too, and then the miss carries
 				// nothing any of them read (viewless): no closest
 				// recording, no diff, no recording made elsewhere, no
+				// earlier test's recording of its method and path, no
 				// repeat note and no next step of a comparison, whichever
 				// view a read was of. Nor does it get its learn step's
 				// reason (learnMiss.explain): that code is judging's class
@@ -624,7 +637,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				if gone != "" {
 					viewless(report)
-					elsewhere, repeated = nil, false
+					elsewhere, repeated, earlierRec = nil, false, nil
+				}
+				if earlierRec != nil {
+					report.Earlier = earlierRec.Name
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)

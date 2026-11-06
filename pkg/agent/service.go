@@ -858,6 +858,17 @@ type ExactWorkerServer interface {
 	ServeExactWorker(names []string) error
 }
 
+// ExactWorkerSkippedServer is implemented by a proxy that serves, under
+// exact serving, a worker scope part of which keploy mock replay moved there
+// from the tests its gate skips (models.ScopeTableReq.SkippedReads):
+// ServeExactWorkerSkipped is ServeExactWorker, with skipped those names of
+// names. Each answers at most one request in the staging's windows, as the
+// rest of the worker scope does, and also a request one more than the open
+// test's own recordings of it, which the rest never answers.
+type ExactWorkerSkippedServer interface {
+	ServeExactWorkerSkipped(names, skipped []string) error
+}
+
 // ExactBackgroundServer is implemented by a proxy that serves a test set's
 // background (its worker scope and its pool) by the background rules under
 // exact serving (models.RecordedWithS12Routing, replay.RegisterS12Serving):
@@ -965,6 +976,18 @@ type ExactServer interface {
 	// not (in recorded order); final once the test stops being served. ok is
 	// false when exact serving is off.
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
+}
+
+// ExactSkippedReadsReader is an optional ExactServer capability:
+// ExactTestSkippedReads is the latest test opened, open or ended, as
+// ExactTestOutcome names it, and the reads of the tests the replay's gate
+// skips, moved to the worker scope (ExactWorkerSkippedServer), that
+// answered a call in its window, in the order they did; final once the test
+// stops being served. A replay that never loads the skipped tests'
+// recordings has no answer for those calls. test is "" when no test has
+// been opened.
+type ExactSkippedReadsReader interface {
+	ExactTestSkippedReads() (test string, reads []string)
 }
 
 // ExactTestServedReader is an optional ExactServer capability: ExactTestServed

@@ -411,3 +411,24 @@ func TestTheAnsweredLogKeepsApartSameNamedRecordingsOfOtherContent(t *testing.T)
 		})
 	}
 }
+
+// A background recording a call spent (noteBackgroundSpent) is gone from the
+// pool as a test's answered recording is, and a later call that repeats it
+// carries the secret it redacted again: the log keeps it apart beside the
+// tests' recordings (AnsweredRedacting), whatever its scope, and one that
+// redacted nothing is not kept.
+func TestASpentBackgroundRecordingThatRedactedIsKeptApart(t *testing.T) {
+	byURL(t)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	w := redactingRecording("mock-w", models.HTTP, "/token", `{"assertion":"REDACTED_abc"}`, true)
+	p := redactingRecording("mock-p", models.HTTP, "/lease", `{"lease":"REDACTED_def"}`, true)
+	plain := redactingRecording("mock-n", models.HTTP, "/plain", `{}`, false)
+	mm.noteBackgroundSpent(w, models.RepeatBackgroundWorker)
+	mm.noteBackgroundSpent(p, models.RepeatBackgroundPool)
+	mm.noteBackgroundSpent(plain, models.RepeatBackgroundWorker)
+	got, complete := mm.AnsweredRedacting(models.HTTP)
+	if names := redactingNames(got); names != "mock-w,mock-p" || !complete {
+		t.Fatalf("kept %q (complete %v); want mock-w,mock-p, complete", names, complete)
+	}
+}

@@ -1754,6 +1754,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			ReceivedReq:      call.ReceivedReq,
 			MissKind:         call.Kind,
 			Recorded:         call.Recorded,
+			SkippedReads:     call.SkippedReads,
 			Differs:          call.Differs,
 			FieldReasons:     call.FieldReasons,
 			VariablePlaces:   call.VariablePlaces,
@@ -1767,6 +1768,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			WriteKind:        call.WriteKind,
 			Source:           call.Source,
 			RecordedIn:       call.RecordedIn,
+			Earlier:          call.Earlier,
 			Repeat:           call.Repeat.Clone(),
 		},
 	}

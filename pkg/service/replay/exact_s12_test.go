@@ -318,19 +318,27 @@ func TestUnderTheSwitchATestIsJudgedForItsGenericExchanges(t *testing.T) {
 
 // A call no mock answered that is a recording its test does not own is named
 // with the first other test that owns it; one its own test owns too, one no
-// test owns, and one the parser only found near (not NotOwned), are not.
+// test owns, and one the parser only found near (not NotOwned), are not. A
+// changed call naming an earlier recording (Earlier) names its owner as
+// EarlierIn.
 func TestMarkRecordedInNamesTheTestThatOwnsTheRecording(t *testing.T) {
 	results := []models.TestResult{{TestCaseID: "test-2", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
 		{ActualSummary: "auth", ClosestMock: "mock-auth", NotOwned: true},
 		{ActualSummary: "get", ClosestMock: "mock-get", NotOwned: true},
 		{ActualSummary: "boot", ClosestMock: "mock-boot", NotOwned: true},
 		{ActualSummary: "near", ClosestMock: "mock-auth"},
+		{ActualSummary: "put", ClosestMock: "mock-get", Earlier: "mock-auth"},
 	}}}}
 	plan := &exactPlan{owned: map[string][]string{"test-3": {"mock-auth"}, "test-1": {"mock-auth"}, "test-2": {"mock-get"}, "test-4": {"mock-get"}}}
 	named := markRecordedIn(results, plan.ownersOf())
 	calls := results[0].FailureInfo.UnmatchedCalls
-	if calls[0].RecordedIn != "test-1" || calls[1].RecordedIn != "" || calls[2].RecordedIn != "" || calls[3].RecordedIn != "" || len(named) != 1 {
-		t.Fatalf("recorded_in %q %q %q %q, named %v", calls[0].RecordedIn, calls[1].RecordedIn, calls[2].RecordedIn, calls[3].RecordedIn, named)
+	if calls[0].RecordedIn != "test-1" || calls[1].RecordedIn != "" || calls[2].RecordedIn != "" || calls[3].RecordedIn != "" || calls[4].RecordedIn != "" || len(named) != 1 {
+		t.Fatalf("recorded_in %q %q %q %q %q, named %v", calls[0].RecordedIn, calls[1].RecordedIn, calls[2].RecordedIn, calls[3].RecordedIn, calls[4].RecordedIn, named)
+	}
+	// A changed call that names an earlier recording of its method and path
+	// names that recording's first owner (models.UnmatchedCall.NameEarlierIn).
+	if calls[4].EarlierIn != "test-1" || calls[3].EarlierIn != "" {
+		t.Fatalf("earlier_in %q %q; want test-1 for the call naming mock-auth as earlier, none for the near one", calls[4].EarlierIn, calls[3].EarlierIn)
 	}
 }
 
