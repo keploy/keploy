@@ -467,7 +467,10 @@ func TestAComposeUpThatAbortedBeforeTheAppStartedEndsAndIsRetried(t *testing.T) 
 // has passed. Once listNeeds is set, every list of the project answers only
 // to a caller whose cap leaves it at least that long, as a daemon slower
 // than keploy's first cap on every read does; others' it answers only once
-// their cap has passed. Once listFails is set, every list of the project
+// their cap has passed. Each list it so holds is handed to stalling, when that
+// is set, before it waits, and is counted by how its context ended: in
+// listCapped when its deadline passed, in listCanceled when its caller
+// cancelled it. Once listFails is set, every list of the project
 // fails, as a daemon's that fails for good. Its first events stream breaks
 // when the test sends on breakFirst; the stream asked for after it opens only
 // once the test closes reopen, and asked is closed as the watch asks for it.
@@ -502,6 +505,8 @@ type flakyDaemon struct {
 	failList, failAgent, failInfo bool
 	listFails, agentFails         bool
 	listNeeds                     time.Duration
+	stalling                      func(context.Context)
+	listCapped, listCanceled      int
 	streams, infoReads            int
 	agentReads, infoCapped        int
 	listErrs, agentErrs           []error
@@ -587,10 +592,20 @@ func (d *flakyDaemon) ContainerList(ctx context.Context, o container.ListOptions
 			return nil, errors.New("Error response from daemon: i/o timeout")
 		}
 		d.fmu.Lock()
-		needs := d.listNeeds
+		needs, stalling := d.listNeeds, d.stalling
 		d.fmu.Unlock()
 		if dl, ok := ctx.Deadline(); needs > 0 && (!ok || time.Until(dl) < needs) {
+			if stalling != nil {
+				stalling(ctx)
+			}
 			<-ctx.Done()
+			d.fmu.Lock()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				d.listCapped++
+			} else {
+				d.listCanceled++
+			}
+			d.fmu.Unlock()
 			return nil, ctx.Err()
 		}
 	}
@@ -2398,6 +2413,57 @@ func TestAFailedUpIsRetriedOnTheDaemonsAnswer(t *testing.T) {
 	}
 }
 
+// TestAFailedUpIsRetriedOnASlowDaemonsAnswer: no clock decides the retry of a
+// failed up. A daemon slower than each of the read's first caps is read until
+// it answers, and that answer decides: the up is retried, and ps is not asked.
+// A budget on the read would end it first and hand the decision to ps.
+func TestAFailedUpIsRetriedOnASlowDaemonsAnswer(t *testing.T) {
+	d := newAbortDaemon("tmpproj")
+	fd := &flakyDaemon{abortDaemon: d, agent: "keploy-v3-test"}
+	r := startAbortedUpRun(t, fd, "3")
+	// Armed once the up has started: listNeeds holds a list with no label
+	// filter too. Past as many caps as the failures that end a read, as a
+	// daemon slower than each of them.
+	fd.fmu.Lock()
+	fd.listNeeds = composeAbortFirstReadCap<<(composeEndReadFailures-1) + time.Second
+	fd.fmu.Unlock()
+	d.add(&abortContainer{name: "tmpproj-dep-1", service: "dep", status: "exited", exitCode: 3},
+		&abortContainer{name: "keploy-v3-test", service: keployAgentComposeService, status: "exited"},
+		&abortContainer{name: "runner", service: "runner", status: "created"})
+	if err := os.WriteFile(r.ended, nil, 0o600); err != nil {
+		t.Fatalf("could not end the stand-in up: %v", err)
+	}
+	eventually(t, "the failed up is retried", func() bool { return strings.Contains(recordedLog(t, r.argvLog), "UP-RETRIED") })
+	// The run asks ps of keploy's agent before its first up: what counts is
+	// from that up's end to the retry.
+	log := recordedLog(t, r.argvLog)
+	done, retried := strings.Index(log, "UP-DONE"), strings.Index(log, "UP-RETRIED")
+	if done < 0 || retried < done {
+		t.Fatalf("the failed up's end and its retry are not in the log, in that order\n%s", log)
+	}
+	if strings.Contains(log[done:retried], "ARG ps\n") {
+		t.Fatalf("keploy asked ps for the failed up's states: the daemon's read ended before the daemon answered\n%s", log)
+	}
+	// The retried up's own read is TestAnUpThatReportedZeroIsReadUntilTheDaemonAnswers's.
+	fd.fmu.Lock()
+	fd.listNeeds = 0
+	capped := fd.listCapped
+	fd.fmu.Unlock()
+	if capped < composeEndReadFailures {
+		t.Fatalf("%d of the project's lists ran past their cap, want at least %d: the row does not test a daemon slower than the first caps", capped, composeEndReadFailures)
+	}
+	var appErr models.AppError
+	select {
+	case appErr = <-r.ran:
+		r.ran <- appErr
+	case <-time.After(time.Minute):
+		t.Fatalf("run() did not return within a minute\n%s", recordedLog(t, r.argvLog))
+	}
+	if appErr.AppErrorType != models.ErrAppStopped {
+		t.Fatalf("the retried up exited 0, run() reported %+v", appErr)
+	}
+}
+
 // TestAFailedUpIsReadFromTheDaemonThenFromPs: the daemon's answer decides the
 // retry of a failed up, under the proven switch too, and ps is not asked then,
 // so a slow ps cannot lose it. ps decides when the daemon gave none: it may be
@@ -2480,14 +2546,30 @@ func TestAFailedUpIsReadFromTheDaemonThenFromPs(t *testing.T) {
 
 // TestARunStoppedDuringAFailedUpsReadEndsIt: on a daemon that never answers,
 // only the run's stop ends the read of a failed up, so that stop must reach
-// the read: run() returns as a stopped run, and the up is not retried.
+// the read: the list the run stops in ends on the stop, not on a deadline of
+// its own, run() returns as a stopped run, and the up is not retried.
 func TestARunStoppedDuringAFailedUpsReadEndsIt(t *testing.T) {
 	d := newAbortDaemon("tmpproj")
 	fd := &flakyDaemon{abortDaemon: d, agent: "keploy-v3-test"}
 	r := startAbortedUpRun(t, fd, "3")
+	// The run stops inside the failed up's first list whose cap has not
+	// passed, so no wait decides which ended that list. Lists capped before
+	// the stop are no part of the check.
+	var once sync.Once
+	cappedBefore := -1
 	fd.fmu.Lock()
 	fd.listNeeds = time.Hour
-	lists := fd.lists
+	fd.stalling = func(ctx context.Context) {
+		if ctx.Err() != nil {
+			return
+		}
+		once.Do(func() {
+			fd.fmu.Lock()
+			cappedBefore = fd.listCapped
+			fd.fmu.Unlock()
+			r.stop()
+		})
+	}
 	fd.fmu.Unlock()
 	// A read the stop did not reach ends here, not with the test binary.
 	t.Cleanup(func() {
@@ -2501,18 +2583,21 @@ func TestARunStoppedDuringAFailedUpsReadEndsIt(t *testing.T) {
 	if err := os.WriteFile(r.ended, nil, 0o600); err != nil {
 		t.Fatalf("could not end the stand-in up: %v", err)
 	}
-	eventually(t, "the failed up's read is under way", func() bool {
-		fd.fmu.Lock()
-		defer fd.fmu.Unlock()
-		return fd.lists > lists
-	})
-	r.stop()
 	var appErr models.AppError
 	select {
 	case appErr = <-r.ran:
 		r.ran <- appErr
 	case <-time.After(time.Minute):
 		t.Fatalf("run() did not return within a minute of its stop: the failed up's read outlives the run\n%s", recordedLog(t, r.argvLog))
+	}
+	fd.fmu.Lock()
+	before, capped, canceled := cappedBefore, fd.listCapped, fd.listCanceled
+	fd.fmu.Unlock()
+	if before < 0 {
+		t.Fatalf("the run was not stopped: no list of the failed up's read was held (run() returned %+v)", appErr)
+	}
+	if capped != before || canceled != 1 {
+		t.Fatalf("after the run's stop %d of the failed up's lists ended on a deadline and %d on the stop, want 0 and 1: the stop did not end the read", capped-before, canceled)
 	}
 	if appErr.AppErrorType != models.ErrCtxCanceled {
 		t.Fatalf("a run stopped during the read reported %+v", appErr)
