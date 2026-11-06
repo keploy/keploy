@@ -27,11 +27,19 @@ func roundTripYAML(t *testing.T, resp HTTPResp) (HTTPResp, string) {
 	return back, string(out)
 }
 
-// pieces is the body cut at its marks' offsets.
-func pieces(resp HTTPResp) []string {
+// pieces is the body cut at its marks' offsets. A recording with no marks,
+// or one whose offsets do not run in order inside its body, fails the row.
+func pieces(t *testing.T, resp HTTPResp) []string {
+	t.Helper()
+	if resp.Marks == nil {
+		t.Fatalf("no marks on %q", resp.Body)
+	}
 	var out []string
 	start := 0
 	for _, w := range resp.Marks.Writes {
+		if w.Offset < start || w.Offset > len(resp.Body) {
+			t.Fatalf("mark at %d does not fit after %d in a body of %d: %q", w.Offset, start, len(resp.Body), resp.Body)
+		}
 		out = append(out, resp.Body[start:w.Offset])
 		start = w.Offset
 	}
@@ -63,8 +71,8 @@ func TestFramesTakeTheTimeOfTheWriteThatCompletedThem(t *testing.T) {
 			t.Errorf("frame %d ts = %v, want %v", i, back.StreamBody[i].TS, want)
 		}
 	}
-	got := pieces(back)
-	want := []string{"data:a\n\n: ping\n\n", "event:x\ndata:b"}
+	got := pieces(t, back)
+	want := []string{"data:a\n\n: ping\n\n", "event:x\ndata:b\n\n"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("pieces = %q, want %q", got, want)
 	}
@@ -91,7 +99,7 @@ func TestNDJSONLinesTakeTheirWritesTime(t *testing.T) {
 	if len(back.StreamBody) != 2 || !back.StreamBody[0].TS.Equal(sec(1)) || !back.StreamBody[1].TS.Equal(sec(3)) {
 		t.Fatalf("frames = %+v:\n%s", back.StreamBody, out)
 	}
-	if got := pieces(back); strings.Join(got, "|") != "{\"n\":1}\n|{\"n\":2}" {
+	if got := pieces(t, back); strings.Join(got, "|") != "{\"n\":1}\n|{\"n\":2}" {
 		t.Errorf("pieces = %q", got)
 	}
 }
@@ -188,7 +196,7 @@ func TestAFrameEndsWithItsWholeCRLFBlankLine(t *testing.T) {
 	if len(back.StreamBody) != 2 || !back.StreamBody[0].TS.Equal(sec(2)) || !back.StreamBody[1].TS.Equal(sec(3)) {
 		t.Fatalf("frames = %+v, want frame 1 at write 2 and frame 2 at write 3:\n%s", back.StreamBody, out)
 	}
-	if got := pieces(back); strings.Join(got, "|") != "data:a\n\n|data:b" {
+	if got := pieces(t, back); strings.Join(got, "|") != "data:a\n\n|data:b\n\n" {
 		t.Errorf("pieces = %q", got)
 	}
 	if !back.Marks.Writes[0].TS.Equal(sec(2)) {
@@ -311,7 +319,8 @@ func TestLegacyFramePiecesEndAfterEachFrame(t *testing.T) {
 
 // Chunks none of which is a frame (an SSE frame with no field written, a line
 // with no raw field) have no pieces, though the body they read back as is
-// empty or one line: the answer keeps no marks.
+// empty or one line, and so ends where their no frames do: the answer keeps
+// no marks.
 func TestLegacyFramePiecesOfNoFrameAreNone(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -320,6 +329,7 @@ func TestLegacyFramePiecesOfNoFrameAreNone(t *testing.T) {
 	}{
 		{"an SSE frame with no field", []HTTPStreamChunk{{Data: []HTTPStreamDataField{{Key: " ", Value: "a"}}}}, streamBodyKindSSE},
 		{"a line with no raw field", []HTTPStreamChunk{{Data: []HTTPStreamDataField{{Key: "line", Value: "a"}}}}, streamBodyKindRaw},
+		{"a line with no field, which reads back as no body", []HTTPStreamChunk{{}}, streamBodyKindRaw},
 	} {
 		if got, ok := legacyFramePieces(tc.chunks, tc.kind); ok || got != nil {
 			t.Errorf("%s: pieces %v (%v), want none", tc.name, got, ok)

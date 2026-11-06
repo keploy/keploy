@@ -511,34 +511,9 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 		// separated by \n, and each frame ends in a blank line.
 		frames := make([]string, 0, len(chunks))
 		for _, chunk := range chunks {
-			lines := make([]string, 0, len(chunk.Data))
-			for _, field := range chunk.Data {
-				key := strings.TrimSpace(field.Key)
-				if strings.EqualFold(key, "comment") {
-					// SSE comments start with ':' and have no key prefix.
-					lines = appendSSEFieldLines(lines, ":", field.Value, false)
-					continue
-				}
-				if key == "" {
-					continue
-				}
-				// strings.ToLower rewrites every invalid byte to U+FFFD, so it
-				// must not touch a field name that is not valid UTF-8. This is
-				// reachable precisely because MarshalYAML now routes non-UTF-8
-				// chunks through here as its flat-body fallback — lower-casing
-				// them would reintroduce the silent corruption the fallback
-				// exists to avoid. SSE field names are ASCII in practice, so
-				// skipping the fold for the pathological case costs nothing.
-				name := key
-				if utf8.ValidString(name) {
-					name = strings.ToLower(name)
-				}
-				lines = appendSSEFieldLines(lines, name+":", field.Value, true)
+			if frame := sseFrame(chunk); frame != "" {
+				frames = append(frames, frame)
 			}
-			if len(lines) == 0 {
-				continue
-			}
-			frames = append(frames, strings.Join(lines, "\n"))
 		}
 		body := strings.Join(frames, "\n\n")
 		if len(frames) > 0 {
@@ -591,6 +566,37 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 func sseEndsItsLastEvent(body string) bool {
 	ends := body[len(strings.TrimRight(body, "\r\n")):]
 	return len(normalizeModelLineEndings(ends)) >= 2
+}
+
+// sseFrame is chunk as an SSE event's lines, joined by "\n", without the blank
+// line that ends the event; "" for a chunk of no line, which the body leaves
+// out.
+func sseFrame(chunk HTTPStreamChunk) string {
+	lines := make([]string, 0, len(chunk.Data))
+	for _, field := range chunk.Data {
+		key := strings.TrimSpace(field.Key)
+		if strings.EqualFold(key, "comment") {
+			// SSE comments start with ':' and have no key prefix.
+			lines = appendSSEFieldLines(lines, ":", field.Value, false)
+			continue
+		}
+		if key == "" {
+			continue
+		}
+		// strings.ToLower rewrites every invalid byte to U+FFFD, so it
+		// must not touch a field name that is not valid UTF-8. This is
+		// reachable precisely because MarshalYAML now routes non-UTF-8
+		// chunks through here as its flat-body fallback — lower-casing
+		// them would reintroduce the silent corruption the fallback
+		// exists to avoid. SSE field names are ASCII in practice, so
+		// skipping the fold for the pathological case costs nothing.
+		name := key
+		if utf8.ValidString(name) {
+			name = strings.ToLower(name)
+		}
+		lines = appendSSEFieldLines(lines, name+":", field.Value, true)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // appendSSEFieldLines appends an SSE field's lines to lines: prefix (its
