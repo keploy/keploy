@@ -560,7 +560,7 @@ func TestUnderTheSwitchAShutdownCallIsJudgedOnceTheAppIsStopped(t *testing.T) {
 				}
 				for _, l := range logs.FilterMessageSnippet("test-set failed: the application never made").All() {
 					next, _ := l.ContextMap()["next_step"].(string)
-					if derived := !tc.recorded; derived != strings.Contains(next, "marks the calls the application makes as it is stopped") {
+					if derived := !tc.recorded; derived != strings.Contains(next, "marks the calls the application makes as it is stopped") || derived != strings.Contains(next, "without --sync and with mapping on") {
 						t.Fatalf("next_step %q; the scope derived %v", next, derived)
 					}
 				}
@@ -732,6 +732,9 @@ func TestUnderTheSwitchACallAfterTheLastTestOfAnAppKeployDidNotStopGoesUnjudged(
 			if len(mocks) != 1 || mocks[0] != "mock-late" || fields["count"] != int64(1) || !strings.Contains(next, "without --sync and with mapping on") {
 				t.Fatalf("the line said %v; want mock-late named once, with the recording that marks the stop's calls as the next step", fields)
 			}
+			if reason, _ := fields["reason"].(string); !strings.Contains(reason, "--keep-app-alive keeps the application running across test-sets") {
+				t.Fatalf("the line's reason is %q; want why keploy did not stop the application: it keeps it for the next set", reason)
+			}
 		})
 	}
 }
@@ -793,6 +796,135 @@ func TestUnderTheSwitchAWorkerCallBetweenTestsOfASetWithNoMappingsIsNotTheStops(
 	}
 	if n := len(logs.FilterMessageSnippet("went unjudged").All()); n != 0 {
 		t.Fatalf("the set said %d time(s) a call went unjudged, though keploy stopped the application", n)
+	}
+}
+
+// A set with no mappings.yaml whose application keploy keeps for the next
+// set, with a worker call between two tests never made and calls recorded
+// after its last test never made: it fails on the call between the tests,
+// naming only it, and still says which of the calls after its last test
+// went unjudged. The line counts every one of them and names at most 20.
+func TestUnderTheSwitchAKeptAliveSetThatFailsStillSaysWhichCallsWentUnjudged(t *testing.T) {
+	for _, n := range []int{1, 25} {
+		t.Run(fmt.Sprintf("%d after the last test", n), func(t *testing.T) {
+			setSwitch(t, true)
+			fastWorkerWait(t)
+			h := newPartialRunHarness(t, 2, 0)
+			pinWindows(h)
+			h.replayer.config.Command = "./app"
+			stopped := make(chan struct{})
+			h.instr.stopped = stopped
+			core, logs := observer.New(zap.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-between", 1500), httpAt("mock-b", 2010)}
+			for i := 0; i < n; i++ {
+				h.mocks.filtered = append(h.mocks.filtered, httpAt(fmt.Sprintf("mock-late-%02d", i), 2500+i))
+			}
+			db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": mongoEntries("mock-a"), "test-2": mongoEntries("mock-b")})
+			if err := db.Delete(context.Background(), "test-set-0"); err != nil {
+				t.Fatal(err)
+			}
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-b", 2010)}})}
+			if got := h.runServing(t); got != models.TestSetStatusFailed {
+				t.Fatalf("set %s, want FAILED: the worker call between the tests was never made", got)
+			}
+			failed := logs.FilterMessageSnippet("test-set failed: the application never made").All()
+			if len(failed) != 1 || fmt.Sprint(failed[0].ContextMap()["mocks"]) != "[mock-between]" {
+				t.Fatalf("the set's end said %d time(s) which calls were never made (%v); want once, naming only mock-between", len(failed), logs.All())
+			}
+			said := logs.FilterMessageSnippet("went unjudged").All()
+			if len(said) != 1 {
+				t.Fatalf("the set said %d time(s) which calls went unjudged, want once", len(said))
+			}
+			fields := said[0].ContextMap()
+			mocks, _ := fields["mocks"].([]interface{})
+			if fields["count"] != int64(n) || len(mocks) != min(n, 20) || mocks[0] != "mock-late-00" {
+				t.Fatalf("the line counted %v and named %d call(s) (%v); want %d counted, %d named from mock-late-00", fields["count"], len(mocks), mocks, n, min(n, 20))
+			}
+		})
+	}
+}
+
+// A set with no mappings.yaml whose docker compose application exited on its
+// own before the set's end is APP_HALTED, and its end read nothing of the
+// application's stop (the exit took keploy's agent down with the stack). The
+// call recorded after its last test goes unjudged, and the line says that
+// the application halted, not that keploy kept it for the next set.
+func TestUnderTheSwitchACallAfterTheLastTestOfAHaltedComposeAppGoesUnjudged(t *testing.T) {
+	setSwitch(t, true)
+	fastWorkerWait(t)
+	c := &composeInstr{stopErr: fmt.Errorf("the application's container exited with code 3: %w", models.ErrAppExitedOnItsOwn)}
+	h := composeHarness(t, c)
+	h.replayer.instrumentation = mocksHeldInstr{c}
+	pinWindows(h)
+	core, logs := observer.New(zap.InfoLevel)
+	h.replayer.logger = zap.New(core)
+	h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-b", 2010), httpAt("mock-late", 2500)}
+	db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": mongoEntries("mock-a"), "test-2": mongoEntries("mock-b")})
+	if err := db.Delete(context.Background(), "test-set-0"); err != nil {
+		t.Fatal(err)
+	}
+	h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-b", 2010)}})}
+	if got := h.runServing(t); got != models.TestSetStatusAppHalted || c.stops != 1 {
+		t.Fatalf("set %s after %d stop(s), want APP_HALTED after one: the application exited on its own", got, c.stops)
+	}
+	said := logs.FilterMessageSnippet("went unjudged").All()
+	if len(said) != 1 {
+		t.Fatalf("the set said %d time(s) which calls went unjudged, want once", len(said))
+	}
+	fields := said[0].ContextMap()
+	reason, _ := fields["reason"].(string)
+	if fmt.Sprint(fields["mocks"]) != "[mock-late]" || !strings.Contains(reason, "exited on its own before the set's end: the set is APP_HALTED") || strings.Contains(reason, "across test-sets") {
+		t.Fatalf("the line named %v with the reason %q; want mock-late, and that the application halted", fields["mocks"], reason)
+	}
+}
+
+// mocksHeldInstr is a compose stack whose agent holds the mocks keploy stored
+// on it: a set with stored mocks fires its tests against it, where an agent
+// that reports none is one the bring-up replaced.
+type mocksHeldInstr struct{ *composeInstr }
+
+func (mocksHeldInstr) GetMockStats(context.Context) (models.MockStats, error) {
+	return models.MockStats{Loaded: 1}, nil
+}
+
+// An application keploy did not start (no -c, so keploy test does not
+// instrument it) has no exact plan under the switch (exactServing): a set
+// with no mappings.yaml neither waits for, requires, nor says unjudged a
+// call recorded after its last test. Never made, the set passes, saying
+// nothing of its worker scope.
+func TestUnderTheSwitchAnAppKeployDidNotStartJudgesNoCallAfterTheLastTest(t *testing.T) {
+	setSwitch(t, true)
+	fastWorkerWait(t)
+	waits := 0
+	wake := workerWake
+	workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
+		waits++
+		return wake(ctx)
+	}
+	h := newPartialRunHarness(t, 1, 0)
+	// As NewReplayer makes it with no command.
+	h.replayer.instrument = false
+	pinWindows(h)
+	core, logs := observer.New(zap.InfoLevel)
+	h.replayer.logger = zap.New(core)
+	h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-late", 1500)}
+	db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": mongoEntries("mock-a")})
+	if err := db.Delete(context.Background(), "test-set-0"); err != nil {
+		t.Fatal(err)
+	}
+	h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}})}
+	if got := h.run(t); got != models.TestSetStatusPassed || h.replayer.exact != nil {
+		t.Fatalf("set %s, exact plan %v; want PASSED with none", got, h.replayer.exact != nil)
+	}
+	if n := workerNamed(logs); n != 0 {
+		t.Fatalf("missing named %d time(s), want none", n)
+	}
+	if waited := len(logs.FilterMessageSnippet("waiting for the test set's worker scope").All()); waited != 0 || waits != 0 {
+		t.Fatalf("the set's end waited (%d line(s), %d wait(s))", waited, waits)
+	}
+	if n := len(logs.FilterMessageSnippet("went unjudged").All()); n != 0 {
+		t.Fatalf("the set said %d time(s) a call went unjudged, want none", n)
 	}
 }
 

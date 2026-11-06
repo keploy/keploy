@@ -6195,12 +6195,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// mappings.yaml marks as recorded after its last test
 		// (exactPlan.stopsDerived) as well: it says which of those went
 		// unjudged, as nothing says whether the application makes them on its
-		// own.
+		// own, and why the set's end read nothing of the application's stop
+		// (whyStopNotRead).
 		if checkWorker && workerUnread == nil {
 			workerMissing = r.exact.unansweredWorker(totalConsumedMocks.Map(), stopDrained)
 			if unjudged := r.exact.unjudgedAtStop(totalConsumedMocks.Map(), stopDrained); len(unjudged) > 0 {
-				r.logger.Warn("worker calls of this test set recorded after its last test ended went unjudged: the set has no mappings.yaml keploy record wrote to say whether the application makes them on its own or only as it is stopped, so each counts as one its stop makes, and keploy did not stop the application and read what it consumed as it stopped (it keeps the application for the next test set, or did not start it), so the set's end does not require them ("+provenswitch.Env+"=1)",
+				r.logger.Warn("worker calls of this test set recorded after its last test ended went unjudged: the set has no mappings.yaml keploy record wrote to say whether the application makes them on its own or only as it is stopped, so each counts as one its stop makes, and keploy read nothing the application consumed as it stopped, so the set's end does not require them ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID),
+					zap.String("reason", whyStopNotRead(cmdType, serveTest, composeHalted)),
 					zap.Int("count", len(unjudged)),
 					zap.Strings("mocks", unjudged[:min(len(unjudged), 20)]),
 					zap.String("next_step", "record the test set again with "+provenswitch.Env+"=1, without --sync and with mapping on: keploy record's mappings.yaml marks the calls the application makes as it is stopped, and the set's end then requires the others"))
