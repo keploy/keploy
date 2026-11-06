@@ -4507,8 +4507,20 @@ func (m *MockManager) signalWindowChange() {
 // setEndFiler is one AtSetEnd registration.
 type setEndFiler struct {
 	id   uint64
+	kind models.Kind
 	file func(context.Context)
 }
+
+// setEndFilingBeat is how often a read of a set's end says, of a
+// registration it runs (FileAtSetEnd), that it has not returned yet
+// (watchSetEndFiling). A run files misses in-band and returns at once, or
+// once the read's context is done: a run still going after a beat holds the
+// read, and nothing else would say which parser does.
+var setEndFilingBeat = 5 * time.Second
+
+// newSetEndFilingTicker makes a watch's ticker (watchSetEndFiling), at the
+// beat: a test ticks it by hand.
+var newSetEndFilingTicker = time.NewTicker
 
 var _ integrations.SetEndFiler = (*MockManager)(nil)
 
@@ -4524,16 +4536,17 @@ func (m *MockManager) SetReadsSetEnds(reads bool) {
 // test set's end (FileAtSetEnd) until cancel. It registers nothing and says
 // !ok where no read of a set's end will run it: on a test worker's manager,
 // which no such read asks; in a session whose client makes no such read
-// (SetReadsSetEnds); on a closed manager; and for a nil file.
-func (m *MockManager) AtSetEnd(file func(ctx context.Context)) (cancel func(), ok bool) {
-	if file == nil || m.notAtSetEnd.Load() || !m.readsSetEnds.Load() || m.IsClosed() {
+// (SetReadsSetEnds); on a closed manager; and for a nil file. It takes none
+// with an empty kind either: the log names the parser by it.
+func (m *MockManager) AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool) {
+	if file == nil || kind == "" || m.notAtSetEnd.Load() || !m.readsSetEnds.Load() || m.IsClosed() {
 		return func() {}, false
 	}
 	m.setEndMu.Lock()
 	defer m.setEndMu.Unlock()
 	m.setEndNext++
 	id := m.setEndNext
-	m.setEndFilers = append(m.setEndFilers, setEndFiler{id: id, file: file})
+	m.setEndFilers = append(m.setEndFilers, setEndFiler{id: id, kind: kind, file: file})
 	return func() {
 		m.setEndMu.Lock()
 		defer m.setEndMu.Unlock()
@@ -4548,13 +4561,15 @@ func (m *MockManager) AtSetEnd(file func(ctx context.Context)) (cancel func(), o
 // runs them with setEndMu released, so a registration may file in-band and
 // cancel itself or another. One cancelled before this read reaches it is
 // not run by it; one made while they run is not run by this read. Each is
-// handed ctx, the read's, and stops waiting once it is done.
+// handed ctx, the read's, and stops waiting once it is done. Nothing here
+// makes one return: while one runs, a warning at each beat it has not
+// returned through names its parser (watchSetEndFiling).
 //
 // The error says the read cannot take every such miss: a registration
 // panicked (recovered here, so the others still run and the read says why,
-// not a dropped connection), or ctx was done by the time those it ran
-// returned, and one may have returned before it filed. With none run,
-// nothing is left unfiled: nil.
+// naming its parser, not a dropped connection), or ctx was done by the time
+// those it ran returned, and one may have returned before it filed. With
+// none run, nothing is left unfiled: nil.
 func (m *MockManager) FileAtSetEnd(ctx context.Context) error {
 	m.setEndMu.Lock()
 	filers := slices.Clone(m.setEndFilers)
@@ -4566,8 +4581,8 @@ func (m *MockManager) FileAtSetEnd(ctx context.Context) error {
 			continue
 		}
 		ran = true
-		if p := m.runSetEndFiler(ctx, f.file); p != nil {
-			panicked = append(panicked, fmt.Sprint(p))
+		if p := m.runSetEndFiler(ctx, f); p != nil {
+			panicked = append(panicked, fmt.Sprintf("%s: %v", f.kind, p))
 		}
 	}
 	if len(panicked) > 0 {
@@ -4581,16 +4596,49 @@ func (m *MockManager) FileAtSetEnd(ctx context.Context) error {
 
 // runSetEndFiler runs one registration, recovering its panic: what it
 // panicked with, or nil.
-func (m *MockManager) runSetEndFiler(ctx context.Context, file func(context.Context)) (panicked any) {
+func (m *MockManager) runSetEndFiler(ctx context.Context, f setEndFiler) (panicked any) {
+	defer m.watchSetEndFiling(ctx, f.kind)()
 	defer func() {
 		if p := recover(); p != nil {
 			m.logger.Error("a parser panicked filing, at the test set's end read, the calls it holds for a test of the set; the read is not judged",
-				zap.Any("panic", p), zap.Stack("stack"))
+				zap.String("kind", string(f.kind)), zap.Any("panic", p), zap.Stack("stack"))
 			panicked = p
 		}
 	}()
-	file(ctx)
+	f.file(ctx)
 	return nil
+}
+
+// watchSetEndFiling warns, at each beat (setEndFilingBeat) until the
+// returned stop is called, that kind's registration has not returned: how
+// many beats it has run through, and whether the read's context is done by
+// then (a parser that ignores it holds the read on). It is a count of beats,
+// not a verdict: it changes nothing of the read, which waits as it would
+// without it. stop returns once the watch has ended, so no warning follows
+// it.
+func (m *MockManager) watchSetEndFiling(ctx context.Context, kind models.Kind) (stop func()) {
+	done := make(chan struct{})
+	ended := make(chan struct{})
+	beat := setEndFilingBeat
+	ticker := newSetEndFilingTicker(beat)
+	go func() {
+		defer close(ended)
+		defer ticker.Stop()
+		for beats := 1; ; beats++ {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+			m.logger.Warn(fmt.Sprintf("set-end filing for %s has not returned after %s", kind, time.Duration(beats)*beat),
+				zap.String("kind", string(kind)), zap.Int("beats", beats), zap.Duration("beat", beat),
+				zap.Bool("readContextDone", ctx.Err() != nil))
+		}
+	}()
+	return func() {
+		close(done)
+		<-ended
+	}
 }
 
 // setEndRegistered reports whether registration id is not cancelled yet.

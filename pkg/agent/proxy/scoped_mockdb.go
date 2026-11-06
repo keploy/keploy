@@ -1106,9 +1106,9 @@ func (s *scopedMockDb) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock
 // misses are filed where its store's are, so the store's set's end read is
 // its own. Over a test worker's manager, or a store without the facet, it is
 // !ok, as theirs is.
-func (s *scopedMockDb) AtSetEnd(file func(ctx context.Context)) (cancel func(), ok bool) {
+func (s *scopedMockDb) AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool) {
 	if f, ok := s.MockMemDb.(integrations.SetEndFiler); ok {
-		return f.AtSetEnd(file)
+		return f.AtSetEnd(kind, file)
 	}
 	return func() {}, false
 }

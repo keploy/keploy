@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // setEndManager is the run's manager in a session whose client reads each
@@ -25,11 +26,16 @@ func setEndManager(t *testing.T) *MockManager {
 
 func mustRegister(t *testing.T, db integrations.MockMemDb, file func(context.Context)) func() {
 	t.Helper()
+	return mustRegisterKind(t, db, models.KAFKA, file)
+}
+
+func mustRegisterKind(t *testing.T, db integrations.MockMemDb, kind models.Kind, file func(context.Context)) func() {
+	t.Helper()
 	f, ok := db.(integrations.SetEndFiler)
 	if !ok {
 		t.Fatalf("%T is not a SetEndFiler", db)
 	}
-	cancel, ok := f.AtSetEnd(file)
+	cancel, ok := f.AtSetEnd(kind, file)
 	if !ok {
 		t.Fatalf("%T refused a set-end registration", db)
 	}
@@ -119,7 +125,7 @@ func TestMockManager_AWorkersManagerRefusesSetEndRegistrations(t *testing.T) {
 	// Refused on its own account, even were its session's word handed on.
 	wm.SetReadsSetEnds(true)
 	ran := false
-	if _, ok := wm.AtSetEnd(func(context.Context) { ran = true }); ok {
+	if _, ok := wm.AtSetEnd(models.KAFKA, func(context.Context) { ran = true }); ok {
 		t.Fatal("a worker's manager took a set-end registration no read will run")
 	}
 	if err := wm.FileAtSetEnd(context.Background()); err != nil {
@@ -128,7 +134,7 @@ func TestMockManager_AWorkersManagerRefusesSetEndRegistrations(t *testing.T) {
 	if ran {
 		t.Fatal("a worker's manager ran a registration it refused")
 	}
-	if _, ok := setEndManager(t).AtSetEnd(func(context.Context) {}); !ok {
+	if _, ok := setEndManager(t).AtSetEnd(models.KAFKA, func(context.Context) {}); !ok {
 		t.Fatal("the run's manager refused a registration")
 	}
 }
@@ -154,13 +160,26 @@ func TestScopedMockDb_HandsOnTheWrappedSetEndFiler(t *testing.T) {
 		t.Fatal("a cancelled scoped registration ran")
 	}
 
+	// It hands on the kind it is handed: the run's read names that parser.
+	named := setEndManager(t)
+	kinds := []models.Kind{models.REDIS, models.MySQL}
+	for _, kind := range kinds {
+		mustRegisterKind(t, &scopedMockDb{MockMemDb: named}, kind, func(context.Context) { panic("parser bug") })
+	}
+	err := named.FileAtSetEnd(context.Background())
+	for _, kind := range kinds {
+		if err == nil || !strings.Contains(err.Error(), string(kind)+": parser bug") {
+			t.Fatalf("a %s registration made through a scoped store panicked: FileAtSetEnd said %v, want an error naming %s", kind, err, kind)
+		}
+	}
+
 	worker := setEndManager(t)
 	worker.notAtSetEnd.Store(true)
-	if _, ok := (&scopedMockDb{MockMemDb: worker}).AtSetEnd(func(context.Context) {}); ok {
+	if _, ok := (&scopedMockDb{MockMemDb: worker}).AtSetEnd(models.KAFKA, func(context.Context) {}); ok {
 		t.Fatal("a scoped store over a worker's manager took a set-end registration")
 	}
 	bare := struct{ integrations.MockMemDb }{run}
-	if _, ok := (&scopedMockDb{MockMemDb: bare}).AtSetEnd(func(context.Context) {}); ok {
+	if _, ok := (&scopedMockDb{MockMemDb: bare}).AtSetEnd(models.KAFKA, func(context.Context) {}); ok {
 		t.Fatal("a scoped store over a store without the facet took a set-end registration")
 	}
 }
@@ -204,7 +223,7 @@ func TestMockManager_TakesASetEndRegistrationOnlyWhereAReadRunsIt(t *testing.T) 
 	p := New(zap.NewNop(), nil, &config.Config{})
 	p.nsswitchData = []byte("preseeded-by-test") // Mock leaves the host's DNS alone
 	takes := func() bool {
-		_, ok := p.getMockManager().AtSetEnd(func(context.Context) {})
+		_, ok := p.getMockManager().AtSetEnd(models.KAFKA, func(context.Context) {})
 		return ok
 	}
 	if err := p.Mock(context.Background(), models.OutgoingOptions{}); err != nil {
@@ -230,30 +249,42 @@ func TestMockManager_TakesASetEndRegistrationOnlyWhereAReadRunsIt(t *testing.T) 
 	}
 
 	m := setEndManager(t)
-	if _, ok := m.AtSetEnd(nil); ok {
+	if _, ok := m.AtSetEnd(models.KAFKA, nil); ok {
 		t.Fatal("a nil file was registered")
 	}
+	if _, ok := m.AtSetEnd("", func(context.Context) { t.Error("a registration with no kind ran") }); ok {
+		t.Fatal("a registration with no kind, which the log could not name, was taken")
+	}
+	if err := m.FileAtSetEnd(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	m.Close()
-	if _, ok := m.AtSetEnd(func(context.Context) {}); ok {
+	if _, ok := m.AtSetEnd(models.KAFKA, func(context.Context) {}); ok {
 		t.Fatal("a closed manager took a registration")
 	}
 }
 
 // A registration that panics is recovered: the others still run, and the
-// read is told why it cannot take every miss. A read whose context is done
-// is told so: a registration may have returned before it filed.
+// read is told why it cannot take every miss, naming the parser that
+// panicked, as the logged panic does. A read whose context is done is told
+// so: a registration may have returned before it filed.
 func TestMockManager_FileAtSetEndSaysWhenItCannotVouch(t *testing.T) {
-	m := setEndManager(t)
+	m, logs := observedSetEndManager(t)
+	handTicked(t) // never ticked: no watch warns, so the panic is all the log holds
 	var ran []string
 	mustRegister(t, m, func(context.Context) { ran = append(ran, "a") })
-	cancelB := mustRegister(t, m, func(context.Context) { panic("parser bug") })
+	cancelB := mustRegisterKind(t, m, models.REDIS, func(context.Context) { panic("parser bug") })
 	mustRegister(t, m, func(context.Context) { ran = append(ran, "c") })
 	err := m.FileAtSetEnd(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "parser bug") {
-		t.Fatalf("a registration panicked: FileAtSetEnd said %v, want an error naming the panic", err)
+	if err == nil || !strings.Contains(err.Error(), "Redis: parser bug") || strings.Contains(err.Error(), string(models.KAFKA)) {
+		t.Fatalf("a Redis registration panicked: FileAtSetEnd said %v, want an error naming the panic and its parser alone", err)
 	}
 	if want := []string{"a", "c"}; !slices.Equal(ran, want) {
 		t.Fatalf("ran %v, want %v: a panic stops no other registration", ran, want)
+	}
+	logged := logs.AllUntimed()
+	if len(logged) != 1 || logged[0].Level != zapcore.ErrorLevel || logged[0].ContextMap()["kind"] != string(models.REDIS) || logged[0].ContextMap()["panic"] != "parser bug" {
+		t.Fatalf("a Redis registration panicked: the log holds %v, want one error, naming the panic and its parser, Redis, alone", logged)
 	}
 	cancelB()
 	done, cancel := context.WithCancel(context.Background())

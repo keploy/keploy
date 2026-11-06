@@ -1756,6 +1756,9 @@ type WindowPacer interface {
 //     nothing). A registration cancelled before a read reaches it is not run
 //     by that read; a cancel that lands as the read reaches it may not stop
 //     it, nor one whose run has begun.
+//   - kind names the parser that registers (its models.Kind): the agent's
+//     log names it, in a warning at each beat a run of file has not
+//     returned through, and in the read's error when file panics.
 //   - ok is true only where a read of the set's end will run file: the run's
 //     store, in a replay session whose client reads each set's end
 //     (models.OutgoingOptions.ReadsSetEnds: keploy test under the proven
@@ -1764,11 +1767,11 @@ type WindowPacer interface {
 //     registered, on a test worker's store, which no such read asks; in a
 //     session whose client makes none (keploy mock, keploy test without the
 //     switch or from before the read); on a closed store; and for a nil
-//     file. It is the word of the session handed to the store last when
-//     AtSetEnd is called, and a registration outlives that session: so the
-//     parser registers at each call it would hold past its own window, holds
-//     that call only when ok, and cancels that registration once the call
-//     is answered or its miss filed.
+//     file or an empty kind. It is the word of the session handed to the
+//     store last when AtSetEnd is called, and a registration outlives that
+//     session: so the parser registers at each call it would hold past its
+//     own window, holds that call only when ok, and cancels that
+//     registration once the call is answered or its miss filed.
 //   - file runs on the reading goroutine, with the read's context: it files,
 //     in-band (models.ReportMockMismatch on its connection's context, the
 //     report's HeldPastWindow set), the miss of every call its connection
@@ -1798,7 +1801,7 @@ type WindowPacer interface {
 // ended: a parser then does not hold, past its own window, a call it would
 // miss if no later window answered it, and misses it at once.
 type SetEndFiler interface {
-	AtSetEnd(file func(ctx context.Context)) (cancel func(), ok bool)
+	AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool)
 }
 
 // CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
