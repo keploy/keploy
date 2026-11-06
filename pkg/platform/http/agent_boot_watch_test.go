@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -656,62 +655,53 @@ func TestAnAgentURIWhereNothingAnswersIsGivenUpOn(t *testing.T) {
 	uri := "http://" + testnet.RefusedAddr(t, "tcp") + "/agent"
 	core, logs := observer.New(zapcore.InfoLevel)
 	a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: uri}})
-	select {
-	case err := <-a.WatchAgentStart(context.Background()):
-		if !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "nothing answers at "+uri) {
-			t.Fatalf("the watch said %v; want that nothing answers at the URI", err)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("a URI where nothing answers was waited on")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := givenUp(t, a.WatchAgentStart(ctx)); !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "nothing answers at "+uri) {
+		t.Fatalf("the watch said %v; want that nothing answers at the URI", err)
 	}
 	if logs.FilterMessageSnippet("still waiting for the keploy agent at "+uri).Len() == 0 {
 		t.Fatal("the wait said nothing while it waited")
 	}
 }
 
-// Where something takes connections at the URI (the agent, whose health check
-// answers only once its start is over, or a forward in front of it), keploy
-// waits on however long that takes, past bootSilence many times over, and
-// says now and then that it still waits, and what it found.
-func TestAnAgentURIThatTakesConnectionsIsWaitedFor(t *testing.T) {
+// An agent known only by its URI whose start makes progress, as far as it
+// shows from outside its host (a forward that comes up, a server that takes
+// connections and then answers), is waited for past
+// bootSilence many times over, each step within it, until it answers healthy;
+// and one that answers healthy is never given up on. It says now and then
+// that it still waits, and what it found.
+func TestAnAgentURIWhoseStartMakesProgressIsWaitedFor(t *testing.T) {
 	fastURILooks(t)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	// 4 looks of each kind, each a kind no look found before, under the 5
+	// of bootSilence at a second of runnable time a look: 16 looks, over 3
+	// times bootSilence.
+	var script []agentLookKind
+	for _, k := range []agentLookKind{agentRefused, agentClosed, agentHeld, agentAnswered} {
+		script = append(script, k, k, k, k)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			_ = c.Close()
-		}
-	}()
-	uri := "http://" + ln.Addr().String() + "/agent"
 	core, logs := observer.New(zapcore.InfoLevel)
-	a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: uri}})
+	n := scriptLooks(t, script, agentLook{kind: agentHealthy, status: http.StatusOK, found: "its health check answers healthy"})
+	a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: "http://127.0.0.1:1/agent"}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errs := a.WatchAgentStart(ctx)
 	deadline := time.Now().Add(30 * time.Second)
-	// 20 lines, 5 looks apart: 100 looks, 100 s of keploy's runnable time,
-	// 20 times bootSilence.
-	for logs.FilterMessageSnippet("still waiting for the keploy agent at "+uri).Len() < 20 {
+	// Then 40 looks healthy, 8 times bootSilence.
+	for n.Load() < int32(len(script)+40) {
 		select {
 		case err := <-errs:
-			t.Fatalf("an agent that takes connections was given up on: %v", err)
+			t.Fatalf("an agent whose start made progress was given up on after %d looks: %v", n.Load(), err)
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("said it still waits %d times, want 20", logs.FilterMessageSnippet("still waiting").Len())
+			t.Fatalf("the watch looked %d times", n.Load())
 		}
 		time.Sleep(time.Millisecond)
 	}
-	line := logs.FilterMessageSnippet("still waiting for the keploy agent at " + uri).All()[0]
-	if !strings.Contains(line.Message, "something takes connections there") {
-		t.Fatalf("the line says %q; want what the look found", line.Message)
+	lines := logs.FilterMessageSnippet("still waiting for the keploy agent at http://127.0.0.1:1/agent").All()
+	if len(lines) == 0 || !strings.Contains(lines[0].Message, ": scripted") {
+		t.Fatalf("said it still waits with %v; want what the look found", lines)
 	}
 }
 
@@ -878,30 +868,47 @@ func TestAStaleReadyReportDoesNotLatch(t *testing.T) {
 	}
 }
 
-// A URI where nothing takes a connection is given up on only once nothing
-// has, without a break, for bootSilence of keploy's runnable time: a
-// connection taken in between starts the count again.
-func TestAnAgentURIsSilenceCountsFromTheLastTakenConnection(t *testing.T) {
+// A look that finds a new state starts the bound again: a first taken
+// connection, between refused looks that are 3 looks apart from each other at
+// most, keeps them from adding up to the bound (5 looks). Only a new state
+// does: refused and closed in turn do add up
+// (TestAnAgentURIsReasonSaysHowLongSinceItsLastTakenConnection).
+func TestAnAgentURIsBoundCountsFromItsLastNewState(t *testing.T) {
 	fastURILooks(t)
-	// 3 looks refused, 1 taken, 3 refused, then taken for good: never 5
-	// refused in a row, at a second of runnable time a look.
-	script := []bool{false, false, false, true, false, false, false}
+	// 3 looks refused, 1 taken, 3 refused, then healthy for good: never 5
+	// looks with no new state, at a second of runnable time a look.
+	script := []agentLookKind{agentRefused, agentRefused, agentRefused, agentClosed, agentRefused, agentRefused, agentRefused}
+	n := scriptLooks(t, script, agentLook{kind: agentHealthy, status: http.StatusOK, found: "scripted"})
+	watchScripted(t, n, len(script)+20)
+}
+
+// scriptLooks makes each look at an agent known only by its URI find the
+// next of script, then then for good, and returns the count of looks.
+func scriptLooks(t *testing.T, script []agentLookKind, then agentLook) *atomic.Int32 {
+	t.Helper()
 	var n atomic.Int32
 	prev := lookAtAgent
-	lookAtAgent = func(context.Context, string) (string, bool) {
+	lookAtAgent = func(context.Context, *http.Client, string, time.Duration) agentLook {
 		i := int(n.Add(1)) - 1
 		if i < len(script) {
-			return "scripted", script[i]
+			return agentLook{kind: script[i], status: http.StatusServiceUnavailable, found: "scripted"}
 		}
-		return "scripted", true
+		return then
 	}
 	t.Cleanup(func() { lookAtAgent = prev })
+	return &n
+}
+
+// watchScripted watches an agent known only by its URI, its looks scripted,
+// for looks looks, failing if the watch gives up on it before.
+func watchScripted(t *testing.T, n *atomic.Int32, looks int) {
+	t.Helper()
 	a := New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: "http://127.0.0.1:1/agent"}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errs := a.WatchAgentStart(ctx)
 	deadline := time.Now().Add(30 * time.Second)
-	for n.Load() < int32(len(script))+20 {
+	for n.Load() < int32(looks) {
 		select {
 		case err := <-errs:
 			t.Fatalf("the URI was given up on after %d looks: %v", n.Load(), err)

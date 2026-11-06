@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -453,9 +454,9 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 	defer tick.Stop()
 	for {
 		probe, cancelProbe := context.WithTimeout(ctx, 500*time.Millisecond)
-		req, err := http.NewRequestWithContext(probe, http.MethodGet, a.conf.Agent.AgentURI+"/health", nil)
+		req, err := newAgentRequest(probe, http.MethodGet, a.conf.Agent.AgentURI+"/health", nil)
 		if err == nil {
-			if res, err := a.client.Do(req); err == nil {
+			if res, err := doAgent(&a.client, req); err == nil {
 				_ = res.Body.Close()
 				if res.StatusCode == http.StatusOK {
 					cancelProbe()
@@ -467,10 +468,10 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("keploy's agent, started again by docker compose, did not answer at %s: %w",
-				a.conf.Agent.AgentURI, ctx.Err())
+				pkg.ShownAgentURI(a.conf.Agent.AgentURI), ctx.Err())
 		case err := <-start:
 			return fmt.Errorf("keploy's agent, started again by docker compose, did not come up at %s: %w",
-				a.conf.Agent.AgentURI, err)
+				pkg.ShownAgentURI(a.conf.Agent.AgentURI), err)
 		case <-tick.C:
 		}
 	}
@@ -560,7 +561,7 @@ func (a *AgentClient) reopenStream(ctx context.Context, name, method, path strin
 		if body != nil {
 			rd = bytes.NewReader(body)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, a.conf.Agent.AgentURI+path, rd)
+		req, err := newAgentRequest(ctx, method, a.conf.Agent.AgentURI+path, rd)
 		if err != nil {
 			return nil, err
 		}
@@ -568,7 +569,7 @@ func (a *AgentClient) reopenStream(ctx context.Context, name, method, path strin
 			req.Header.Set("Content-Type", "application/json")
 		}
 		a.markDrainsAfterStop(ctx, req)
-		res, err := a.client.Do(req)
+		res, err := doAgent(&a.client, req)
 		if err == nil {
 			if err := agentStreamStatus(name, res); err != nil {
 				return nil, err

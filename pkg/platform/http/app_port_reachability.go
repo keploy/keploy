@@ -384,11 +384,11 @@ func (a *AgentClient) appListening(ctx context.Context, port uint16) appListenin
 		return appListening{}
 	}
 	url := fmt.Sprintf("%s/app/listen-addrs?port=%d", a.conf.Agent.AgentURI, port)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return appListening{}
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		a.logger.Debug("could not ask the agent where the app listens", zap.Uint16("port", port), zap.Error(err))
 		return appListening{}
