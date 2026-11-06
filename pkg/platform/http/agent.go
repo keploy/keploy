@@ -441,17 +441,13 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		return nil, fmt.Errorf("error marshaling request body for incoming request: %s", err.Error())
 	}
 
-	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/incoming", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
+	// The one request of this stream, made again for each restarted agent.
+	newRequest := a.incomingRequest(requestJSON)
+	req, err := newRequest(ctx)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for incoming request")
 		return nil, fmt.Errorf("error creating request for incoming request: %s", err.Error())
 	}
-	req.Header.Set("Content-Type", "application/json")
-	// The test cases are read with models.TestCase, which reads a body object,
-	// so a body that is not UTF-8 comes with its bytes. An agent built before
-	// body objects ignores this and writes each body as a string.
-	req.Header.Set(models.BodyEncodingHeader, models.BodyEncodingBase64)
-	a.markDrainsAfterStop(ctx, req)
 
 	// Registered before it connects; it outlives a restarted agent (see
 	// agentSession).
@@ -499,7 +495,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 				return
 			}
 			var ok bool
-			if res, ok = a.resumeStream(ctx, stream, "get incoming", http.MethodPost, "/incoming", requestJSON); !ok {
+			if res, ok = a.resumeStream(ctx, stream, "get incoming", newRequest); !ok {
 				return
 			}
 		}
@@ -507,6 +503,23 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 
 	a.logger.Debug("Successfully connected to incoming test cases stream.")
 	return tcChan, nil
+}
+
+// incomingRequest is the request of the /incoming stream, the first and each
+// one a restarted agent gets. The test cases are read with models.TestCase,
+// which reads a body object, so a body that is not UTF-8 comes with its bytes.
+// An agent built before body objects ignores the header and writes each body
+// as a string.
+func (a *AgentClient) incomingRequest(body []byte) streamRequest {
+	plain := a.streamRequestOf(http.MethodPost, "/incoming", body)
+	return func(ctx context.Context) (*http.Request, error) {
+		req, err := plain(ctx)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set(models.BodyEncodingHeader, models.BodyEncodingBase64)
+		return req, nil
+	}
 }
 
 // readIncoming hands the test cases of one incoming stream to tcChan until the
@@ -840,7 +853,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				return nil
 			}
 			var ok bool
-			if res, ok = a.resumeStream(ctx, stream, "get outgoing", http.MethodPost, "/outgoing", requestJSON); !ok {
+			if res, ok = a.resumeStream(ctx, stream, "get outgoing", a.streamRequestOf(http.MethodPost, "/outgoing", requestJSON)); !ok {
 				return nil
 			}
 		}
@@ -980,7 +993,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 				return nil
 			}
 			var ok bool
-			if res, ok = a.resumeStream(ctx, stream, "get mappings", http.MethodPost, "/mappings", nil); !ok {
+			if res, ok = a.resumeStream(ctx, stream, "get mappings", a.streamRequestOf(http.MethodPost, "/mappings", nil)); !ok {
 				return nil
 			}
 		}
@@ -4999,7 +5012,7 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 			return err
 		}
 		var ok bool
-		if resp, ok = a.resumeStream(ctx, stream, "pcap stream "+urlPath, http.MethodGet, urlPath, nil); !ok {
+		if resp, ok = a.resumeStream(ctx, stream, "pcap stream "+urlPath, a.streamRequestOf(http.MethodGet, urlPath, nil)); !ok {
 			if copyErr != nil && !errors.Is(copyErr, context.Canceled) {
 				return copyErr
 			}
