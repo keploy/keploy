@@ -2652,9 +2652,10 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 	}
 	for shape := range 8 {
 		recs, words, wlen, live := 1+r.IntN(400), 1+r.IntN(300), wordLen(), r.IntN(2) == 0
-		if shape == 0 {
+		switch shape {
+		case 0:
 			recs, words = 3000, 1
-		} else if shape == 1 {
+		case 1:
 			recs, words = 1, 1
 		}
 		tr := NewTracker()
@@ -2860,7 +2861,6 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 		for _, s := range in {
 			size += len(s)
 		}
-		in = nil
 		h1 := liveHeap()
 		x.release()
 		held := h1 - liveHeap()
@@ -2937,7 +2937,6 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 			for _, s := range in {
 				size += len(s)
 			}
-			in = nil
 			h1 := liveHeap()
 			x.release()
 			held := h1 - liveHeap()
@@ -3154,6 +3153,96 @@ func TestOutcomeCostATextWhoseFilterDidNotFitAsksTheBudgetOnceACall(t *testing.T
 		if h.setFilter() != nil {
 			t.Errorf("a text whose filter did not fit has one later in its call, once room freed; want it scanned for the rest of the call")
 		}
+	}
+}
+
+// A filter entry the set holds already, a recording's (by its id) or a
+// handed text's (by its text), is found again by a later handle with the
+// set's budget full: the same entry back, nothing more counted, and the set
+// not asked to let go of any of its caches for it.
+func TestOutcomeCostAFilterEntryTheSetHoldsIsFoundWithItsBudgetFull(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	s := dc.set
+	asked := 0
+	s.mu.Lock()
+	letGo, limit := s.budget.letGo, s.budget.limit
+	s.budget.letGo = func(need int64) { asked++; letGo(need) }
+	s.mu.Unlock()
+	used := func() int64 { s.mu.Lock(); defer s.mu.Unlock(); return s.budget.used }
+	x := newReaderIndex(dc)
+	defer x.release()
+	text := `{"ref":"a1b2c3d4","seen":"` + strings.Repeat("as served ", filterTextMin/10) + `"}`
+	for _, c := range []struct {
+		name  string
+		entry func() *filterEntry
+	}{
+		{"a recording", func() *filterEntry { return x.textOf(Raw{id: "mock-1"}).idEntry(x.filters) }},
+		{"a handed text", func() *filterEntry { return x.text(text).textEntry(x.filters) }},
+	} {
+		s.mu.Lock()
+		s.budget.limit = limit
+		s.mu.Unlock()
+		e := c.entry()
+		if e == nil {
+			t.Fatalf("%s: no filter entry within the set's budget", c.name)
+		}
+		s.mu.Lock()
+		s.budget.limit = s.budget.used
+		s.mu.Unlock()
+		u, a := used(), asked
+		again := c.entry()
+		if again != e || used() != u || asked != a {
+			t.Errorf("%s: a later handle, the set's budget full, finds its entry %v (any: %v), counts %d bytes more, and has the set let go of its caches %d times; want the entry, 0 bytes, 0 times", c.name, again == e, again != nil, used()-u, asked-a)
+		}
+	}
+}
+
+// A recording's filter entry past the set's first counts the entry (48
+// bytes), its slot in the set's map at the most a slot costs (64), and its
+// id's letters as allocated: 16 bytes for a 6-letter id, 48 for a 40-letter
+// one.
+func TestOutcomeCostARecordingsFilterEntryCountsItsIDsLetters(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	x := newReaderIndex(dc)
+	defer x.release()
+	used := func() int64 { dc.set.mu.Lock(); defer dc.set.mu.Unlock(); return dc.set.budget.used }
+	if x.textOf(Raw{id: "the-first-recording"}).idEntry(x.filters) == nil {
+		t.Fatalf("the set's first recording has no filter entry within its budget")
+	}
+	for _, c := range []struct {
+		id   string
+		want int64
+	}{{"mock-1", 48 + 64 + 16}, {strings.Repeat("r", 40), 48 + 64 + 48}} {
+		u := used()
+		e := x.textOf(Raw{id: c.id}).idEntry(x.filters)
+		if e == nil || used()-u != c.want {
+			t.Errorf("a later recording's filter entry, a %d-letter id: made %v, %d bytes counted; want %d", len(c.id), e != nil, used()-u, c.want)
+		}
+	}
+}
+
+// A handed text of filterTextMin bytes keeps a filter entry for the set; one
+// a byte shorter has none, and is scanned for each word.
+func TestOutcomeCostATextOfTheShortestLengthKeptKeepsAFilterEntry(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	x := newReaderIndex(tr.Drifts())
+	defer x.release()
+	if x.text(strings.Repeat("a", filterTextMin)).textEntry(x.filters) == nil {
+		t.Errorf("a text of %d bytes keeps no filter entry within the set's budget; want one", filterTextMin)
+	}
+	if x.text(strings.Repeat("b", filterTextMin-1)).textEntry(x.filters) != nil {
+		t.Errorf("a text of %d bytes keeps a filter entry; want none: it is scanned", filterTextMin-1)
 	}
 }
 

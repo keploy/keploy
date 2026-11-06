@@ -866,9 +866,10 @@ func mapSlotBytes(slot uintptr, ptrs bool) int64 {
 	var most int64
 	for c := int64(16); c <= 1024; c *= 2 {
 		least := 7*c/16 + 1
-		if c == 16 {
+		switch c {
+		case 16:
 			least = 9
-		} else if c == 1024 {
+		case 1024:
 			least = 7 * c / 16
 		}
 		most = max(most, (allocBytes(c/8*(8+8*int64(slot)), ptrs)+mapTableBytes+least-1)/least)
