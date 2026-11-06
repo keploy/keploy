@@ -1,13 +1,21 @@
 package learn
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"hash/maphash"
+	"index/suffixarray"
 	"io"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unsafe"
+	"weak"
 )
 
 // The reader's index: what the places before a call hold of its changed
@@ -55,26 +63,38 @@ type readerIndex struct {
 	seed               maphash.Seed
 	texts              map[uint64][]*readerEntry
 	unreadTexts        int
+	// momentAsks counts the instants holdsMoment asks byMoment of: what
+	// keeps a call's work near linear in the instants it decides.
+	momentAsks int
+	// filters are the set's filters of its recordings' words (filtersOf);
+	// nil where the call is no set's.
+	filters *setFilters
+	// past is the one entry of every text whose own entry did not fit the
+	// budget (entryOf): past it, it keeps no answer, so no text writes it.
+	past *readerEntry
 }
 
-// readerEntry is what the index keeps of one text: its words, its base64
-// runs and its instants, each kept where it fits the budget, and then the
-// text itself (counted in the budget once) to tell it from another text of
-// its hash. An entry that keeps no answer keeps no byte of its text either,
-// so a call that asks about many large recordings holds at once only what
-// fits the budget: the caller's handle holds the text while it asks (or, of
-// a recording, reads it per question), and nothing here holds it after.
+// readerEntry is what the index keeps of one text: its other declared forms,
+// its base64 runs and its instants, each kept where it fits the budget, and
+// then the text itself (counted in the budget once) to tell it from another
+// text of its hash. An entry that keeps no answer keeps no byte of its text
+// either, so a call that asks about many large recordings holds at once only
+// what fits the budget: the caller's handle holds the text while it asks (or,
+// of a recording, reads it per question), and nothing here holds it after.
 type readerEntry struct {
-	n                int
-	text             string
-	tokens           answer[[]map[string]bool]
-	runs             answer[map[string]bool]
-	spans, formSpans answer[[]instant]
-	fields           answer[fieldWords]
+	n    int
+	text string
+	// forms: the text's other declared forms (textForms past the text
+	// itself), one per line, where a word is looked for besides the text.
+	forms     answer[string]
+	runs      answer[map[string]bool]
+	spans     answer[[]instant]
+	formSpans answer[momentIndex]
+	fields    answer[fieldWords]
+	subs      answer[*suffixarray.Index]
 	// past: an answer of the text did not fit what was left of the
 	// budget, which only fills, so the entry keeps none from then on: each
-	// question is answered from the text read again, a word by a scan of
-	// it (wordIn) that builds no list of its other words.
+	// question is answered from the text read again.
 	past bool
 }
 
@@ -103,6 +123,14 @@ type readerText struct {
 	raw       *Raw
 	rawUnread bool
 	e         *readerEntry
+	// scans counts the questions contains answered by a scan of the text
+	// through this handle, before the text's suffix array.
+	scans int
+	// filter is the set's entry for the filter of the text's words
+	// (setFilter), once asked; noFilter: the text has none (textEntry,
+	// idEntry), and is scanned.
+	filter   *filterEntry
+	noFilter bool
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
@@ -111,6 +139,9 @@ func newReaderIndex(dc *DriftCache) *readerIndex {
 	x := &readerIndex{dc: dc, budget: readerBudgetBytes(), seed: maphash.MakeSeed(), texts: map[uint64][]*readerEntry{}}
 	if dc != nil {
 		x.set = dc.set
+	}
+	if x.set != nil {
+		x.filters = filtersOf(x.set)
 	}
 	return x
 }
@@ -122,22 +153,27 @@ func newReaderIndex(dc *DriftCache) *readerIndex {
 // words, then the payloads, each read again where asked for), and past the
 // budget still it counts none.
 func (x *readerIndex) claim(n int64) bool {
-	if x.used+n > x.budget {
+	if x.used+n > x.budget || x.set != nil && !setClaim(x.set, n) {
 		return false
 	}
-	if s := x.set; s != nil {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		b := s.budget
-		if need := b.used + n - b.limit; need > 0 && b.letGo != nil {
-			b.letGo(need)
-		}
-		if b.used+n > b.limit {
-			return false
-		}
-		b.used += n
-	}
 	x.used += n
+	return true
+}
+
+// setClaim counts n bytes more on s's one budget, as a tier that lets none
+// go keeps there (tier.keep): it first has the set let go of what it is past
+// its budget (budget.letGo), and past the budget still it counts none.
+func setClaim(s *setDerived, n int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.budget
+	if need := b.used + n - b.limit; need > 0 && b.letGo != nil {
+		b.letGo(need)
+	}
+	if b.used+n > b.limit {
+		return false
+	}
+	b.used += n
 	return true
 }
 
@@ -173,18 +209,51 @@ func (x *readerIndex) text(s string) *readerText { return &readerText{x: x, text
 func (x *readerIndex) textOf(r Raw) *readerText { return &readerText{x: x, raw: &r} }
 
 // entryOf is s's entry: the one of its hash and length that keeps s, or
-// that keeps nothing yet; a new one where none does.
+// that keeps nothing yet; a new one where none does, counted in the budget
+// as the index holds it (entryBytes). Where that does not fit, s has the
+// index's one entry past the budget (x.past), which keeps nothing: every
+// question of s is a scan of it, and the index holds nothing more for it.
 func (x *readerIndex) entryOf(s string) *readerEntry {
 	h := maphash.String(x.seed, s)
-	for _, e := range x.texts[h] {
+	es := x.texts[h]
+	for _, e := range es {
 		if e.n == len(s) && (e.text == s || e.text == "") {
 			return e
 		}
 	}
+	if !x.claim(entryBytes(len(x.texts), len(es))) {
+		if x.past == nil {
+			x.past = &readerEntry{past: true}
+		}
+		return x.past
+	}
 	e := &readerEntry{n: len(s)}
-	x.texts[h] = append(x.texts[h], e)
+	x.texts[h] = append(es, e)
 	return e
 }
+
+// entryBytes is what one entry more adds to an index of texts hashes whose
+// hash already has others entries: the entry, its hash's list as append
+// grows it (one more pointer, at twice its length past one), and, for a
+// new hash, its slot in the index's map (mapSlotBytes), the map's first
+// group with the first: each as the runtime allocates it (allocBytes).
+func entryBytes(texts, others int) int64 {
+	n := allocBytes(unsafe.Sizeof(readerEntry{}), true) + allocBytes(8*max(1, 2*others), true)
+	if others == 0 {
+		n += textsSlotBytes
+		if texts == 0 {
+			n += textsGroupBytes
+		}
+	}
+	return n
+}
+
+// The slot of an entry's hash in an index's map (readerIndex.texts), and
+// the map's first group.
+var (
+	textsSlotBytes  = mapSlotBytes(slotOf[uint64, []*readerEntry](), true)
+	textsGroupBytes = mapGroupBytes(slotOf[uint64, []*readerEntry](), true)
+)
 
 // read is the text, read now from its recording where the caller handed
 // one, with that recording's fields (none for a handed text), and with its
@@ -212,14 +281,18 @@ func (t *readerText) read() (string, []rawField, bool) {
 	return b.text, b.fields, true
 }
 
-// own is the bytes keeping s adds to e: its length, where e keeps no text
-// yet.
+// own is the bytes keeping s adds to e: the string as the runtime allocates
+// it (textBytes), where e keeps no text yet.
 func (e *readerEntry) own(s string) int64 {
 	if e.text == "" {
-		return int64(len(s))
+		return textBytes(s)
 	}
 	return 0
 }
+
+// textBytes is what a string the index keeps holds alive: its bytes as the
+// runtime allocates them (allocBytes).
+func textBytes(s string) int64 { return allocBytes(len(s), false) }
 
 // indexOnce is what one kind of question (slot) asks of the text: the
 // answer the entry keeps, or the one of builds from the text read now (and
@@ -285,18 +358,25 @@ func (x *readerIndex) mayKeep(e *readerEntry, s string) bool {
 	return !e.past
 }
 
-// tokens are the text's words in every declared form, by reading (isWord,
-// wordByte, idByte), read once for the call where they fit the budget, scan
-// answering past it (indexOnce).
-func (t *readerText) tokens(scan func(string, []rawField)) ([]map[string]bool, bool, bool) {
-	return indexOnce(t, func(e *readerEntry) *answer[[]map[string]bool] { return &e.tokens },
-		uncapped(func(s string, _ []rawField) []map[string]bool { return t.x.dc.rawTokens(s) }), tokensBytes, scan)
+// formsOf are s's other declared forms (textForms past s itself), one per
+// line, s being the text read now: a recording's as the set keeps them,
+// derived once for the set from s (payloadExtra: the recording is not read
+// again for them), a handed text's through the test's cache of texts
+// (rawExtra).
+func (t *readerText) formsOf(s string) string {
+	if t.raw == nil {
+		return t.x.dc.rawExtra(s)
+	}
+	now := *t.raw
+	now.src, now.rText, now.rStamps, now.rRead = nil, s, nil, true
+	return t.x.dc.payloadExtra(now)
 }
 
 // spansOf are the text's instants (instantSpans), read once for the call
 // where they fit the budget; ok false where the recording was not read.
+// They count their list as allocated (instantsBytes).
 func (t *readerText) spansOf() ([]instant, bool) {
-	v, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.spans }, uncapped(func(s string, _ []rawField) []instant { return t.x.dc.spansOf(s) }), spansBytes, nil)
+	v, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.spans }, uncapped(func(s string, _ []rawField) []instant { return t.x.dc.spansOf(s) }), instantsBytes, nil)
 	return v, ok
 }
 
@@ -316,6 +396,50 @@ func (t *readerText) textNow() (string, bool) {
 	return s, ok
 }
 
+// containsScans is how many questions of a text contains answers through
+// one handle by a scan of it before it reads the text's suffix array:
+// building one costs some tens of scans, so a text asked of a few words is
+// only scanned, and one asked of thousands (an answer of thousands of
+// instants, each changed) is scanned this often at most.
+const containsScans = 16
+
+// contains reports whether the text holds w anywhere, as strings.Contains
+// of it does: by a scan of the text read now for the handle's first
+// containsScans questions, then from the text's suffix array, built once
+// for the call where it fits what is left of the index's cap, and by a scan
+// past it (indexOnce). read is false where the recording was not read.
+func (t *readerText) contains(w string) (held, read bool) {
+	if t.scans < containsScans {
+		t.scans++
+		s, ok := t.textNow()
+		return ok && strings.Contains(s, w), ok
+	}
+	ix, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[*suffixarray.Index] { return &e.subs },
+		func(s string, _ []rawField, room int64) (*suffixarray.Index, bool) {
+			if suffixBytes(len(s)) > room {
+				return nil, false
+			}
+			return suffixarray.New([]byte(s)), true
+		}, func(ix *suffixarray.Index) int64 { return suffixBytes(len(ix.Bytes())) },
+		func(s string, _ []rawField) { held = strings.Contains(s, w) })
+	if scanned || !ok {
+		return held, ok
+	}
+	return w == "" || len(ix.Lookup([]byte(w), 1)) > 0, true
+}
+
+// suffixBytes is what the suffix array of an n-byte text holds, as the
+// runtime allocates it (allocBytes): the index, a copy of the text, and a
+// 4-byte place per byte (an int32 each: no text keploy reads passes 2 GiB).
+func suffixBytes(n int) int64 {
+	return allocBytes(unsafe.Sizeof(suffixarray.Index{}), true) + allocBytes(n, false) + allocBytes(4*int64(n), false)
+}
+
+// instantsBytes is what a list of instants holds, by its capacity.
+func instantsBytes(s []instant) int64 {
+	return allocBytes(uintptr(cap(s))*unsafe.Sizeof(instant{}), false)
+}
+
 // holdsWord reports whether the text holds w as a word in any of main's
 // readings (isWord, wordByte, idByte) and any declared form; read is false
 // where the recording was not read (held is false then).
@@ -324,46 +448,551 @@ func (t *readerText) holdsWord(w string) (held, read bool) {
 }
 
 // wordIn reports whether the text holds w as a word in any of the readings
-// rs (indices of main's readings) and any declared form: from the words the
-// entry keeps (tokens), or, past the budget, by a scan of the text read
-// now and its other declared forms (textForms, the forms main's word lists
-// read), which reads no other word of it and keeps nothing, in no cache
-// either. read is false where the recording was not read.
+// rs (indices of main's readings) and any declared form, as main's lists of
+// the text's words hold it: by a scan of the text and of its other forms
+// (formsOf), kept for the call with the text where both fit the budget; past
+// it, by a scan of the text read again and its forms (textForms) derived
+// for the question, kept by no one, not by the set either. A recording of
+// the set is first asked through the set's filter of its words (ruledOut),
+// and scanned only where the filter may hold w: a call asks a few words of
+// each of thousands of places, so a scan of each place for each word cost
+// more than all the rest of the call. read is false where the recording was
+// not read.
 func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
-	sets, scanned, ok := t.tokens(func(s string, _ []rawField) { held = heldIn(textForms(s), w, rs...) })
+	if t.ruledOut(w) {
+		return false, true
+	}
+	var text string
+	forms, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[string] { return &e.forms },
+		uncapped(func(s string, _ []rawField) string { text = s; return t.formsOf(s) }), textBytes,
+		func(s string, _ []rawField) { held = heldIn(textForms(s), w, rs...) })
 	if scanned || !ok {
 		return held, ok
 	}
-	return slices.ContainsFunc(rs, func(r int) bool { return r < len(sets) && sets[r][w] }), true
+	if t.e.forms.ok {
+		text = t.e.text
+	}
+	return heldIn([]string{text, forms}, w, rs...), true
+}
+
+// ruledOut reports whether the set's filter of t's recording (setFilter)
+// shows that no form of its text holds w as a word in any reading: a run of
+// w's letters and digits is none of its words. Where a reading holds w at a
+// place, no byte that reading reads as a word byte stands beside w there,
+// and each reading reads every letter and digit so: each run of w's letters
+// and digits is a whole run of the form's (eachWord), which the filter
+// holds. A text the caller handed and a view (no recording's identity) are
+// asked through the set's filter of their text's words, by the text itself
+// (textEntry). A w of no letter or digit, a text shorter than
+// filterTextMin, and a text the set keeps no filter of are never ruled
+// out: they are scanned.
+func (t *readerText) ruledOut(w string) bool {
+	f := t.setFilter()
+	if f == nil {
+		return false
+	}
+	filterLookups.Add(1)
+	out := false
+	eachWord(w, func(run string) { out = out || !f.has(run) })
+	return out
+}
+
+// filterLookups counts the words asked of recordings' filters (ruledOut),
+// for the rows that bound a call's work.
+var filterLookups atomic.Int64
+
+// setFilters are the filters a set keeps of its recordings' words
+// (setFilter), by recording (Raw.id), of the words of texts with no
+// recording's identity (textEntry), by the text (filterTextKey, read with
+// seeds), and the words of other tests' recordings handed to its calls
+// (outsideWords), by recording. builds, textBuilds and wordsBuilds count
+// the filters and the words read, for the rows.
+type setFilters struct {
+	mu          sync.Mutex
+	of          map[string]*filterEntry
+	builds      int
+	texts       map[filterTextKey]*filterEntry
+	seeds       [2]maphash.Seed
+	textBuilds  int
+	words       map[string][]*wordsEntry
+	wordsBuilds int
+	// lists, post, nextList and listBuilds are the set's index of its
+	// outside recordings' word lists (setLists): each list's entry, by the
+	// list (listsKey), and by word the ids of the lists that hold it.
+	// postLive is what lists and post count for the live lists, postGone
+	// what they keep counted for the slots lists let go emptied
+	// (dropLists).
+	lists      map[weak.Pointer[[]string]]*listsEntry
+	post       map[string][]int32
+	nextList   int32
+	listBuilds int
+	postLive   int64
+	postGone   int64
+	// listsGrouped: lists and post count their first groups (firstGroups).
+	listsGrouped bool
+	// runs and nextText are the set's postings of its filters' words
+	// (postRuns): by run of letters and digits, the ids of the filter
+	// entries whose text holds it, in order.
+	runs     map[string][]int32
+	nextText int32
+}
+
+// filterTextKey is a text by what it holds: its length and two hashes of
+// it by the set's two seeds, drawn at random for the set. Two texts that differ
+// share a key about once in 2^128 pairs, by chance alone: no text keploy
+// is handed can be chosen to share another's, as no one outside the set
+// reads its seeds.
+type filterTextKey struct {
+	n    int
+	a, b uint64
+}
+
+// What a filter's entry counts on the set's budget past its filter, as
+// the runtime allocates it: the entry, and its slot in the set's map of
+// them (mapSlotBytes), a recording's (setFilters.of, past its id's
+// letters) or a text's (texts), with the map's first group for the first.
+var (
+	filterEntryBytes     = allocBytes(unsafe.Sizeof(filterEntry{}), true)
+	filterIDSlotBytes    = mapSlotBytes(slotOf[string, *filterEntry](), true)
+	filterIDGroupBytes   = mapGroupBytes(slotOf[string, *filterEntry](), true)
+	filterTextSlotBytes  = mapSlotBytes(slotOf[filterTextKey, *filterEntry](), true)
+	filterTextGroupBytes = mapGroupBytes(slotOf[filterTextKey, *filterEntry](), true)
+)
+
+// filterTextMin is the shortest text with no recording's identity that a
+// set keeps a filter of (textEntry): a shorter one is scanned for each word
+// in fewer bytes than finding its filter reads (its two hashes, and the
+// set's lock).
+const filterTextMin = 256
+
+// filterEntry is one recording's filter, or one text's, built once for the
+// set (once): nil where the recording was not read then, or where the
+// filter did not fit the set's budget, and the text is scanned in each call
+// as before, never read again to build one.
+type filterEntry struct {
+	once sync.Once
+	f    wordFilter
+	// byText: the entry is a text's (textEntry), not a recording's.
+	byText bool
+	// id names the entry in the set's postings of its words (postRuns);
+	// -1 where they hold none of its words.
+	id int32
+}
+
+// setsFilters are each set's filters (filtersOf), by the set, held weakly:
+// a set the tracker let go (NewSet) takes its filters, and what they count
+// on its budget, with it.
+var setsFilters sync.Map // weak.Pointer[setDerived] -> *setFilters
+
+// filtersOf are s's filters.
+func filtersOf(s *setDerived) *setFilters {
+	k := weak.Make(s)
+	if v, ok := setsFilters.Load(k); ok {
+		return v.(*setFilters)
+	}
+	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{},
+		seeds: [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}, words: map[string][]*wordsEntry{},
+		lists: map[weak.Pointer[[]string]]*listsEntry{}, post: map[string][]int32{}, runs: map[string][]int32{}})
+	if !loaded {
+		runtime.AddCleanup(s, func(k weak.Pointer[setDerived]) { setsFilters.Delete(k) }, k)
+	}
+	return v.(*setFilters)
+}
+
+// setFilter is the set's filter of the words of t's recording: of its text
+// and of its other declared forms (textForms), as wordIn reads them, by runs
+// of letters and digits (eachWord, wordFilter), built the first time a call
+// of the set asks the recording a word, and kept for the set on its budget
+// (setClaim). A recording's identity fixes its text for the set (Raw.id), so
+// every later call asks the filter, not the text, for a word it cannot hold
+// (idEntry). A text with no recording's identity (a handed text, a view) has
+// its filter by its text (textEntry) instead. Calls asking at once wait for
+// the one building it. nil where t is in no set's call, where its text has
+// no entry, or where the entry keeps none.
+func (t *readerText) setFilter() wordFilter {
+	if t.filter == nil {
+		fs := t.x.filters
+		if fs == nil || t.noFilter {
+			return nil
+		}
+		if t.raw == nil || t.raw.id == "" {
+			t.filter = t.textEntry(fs)
+		} else {
+			t.filter = t.idEntry(fs)
+		}
+		if t.filter == nil {
+			t.noFilter = true
+			return nil
+		}
+	}
+	e := t.filter
+	e.once.Do(func() { e.f = t.buildFilter() })
+	return e.f
+}
+
+// idEntry is the set's entry for the filter of t's recording's words, by
+// its id: the one there, or one made and counted on the set's budget as the
+// set holds it (filterEntryBytes, filterIDSlotBytes, the id's letters, and
+// the map's first group for the first). nil where that does not fit.
+func (t *readerText) idEntry(fs *setFilters) *filterEntry {
+	id := t.raw.id
+	fs.mu.Lock()
+	e, first := fs.of[id], len(fs.of) == 0
+	fs.mu.Unlock()
+	if e != nil {
+		return e
+	}
+	n := filterEntryBytes + filterIDSlotBytes + allocBytes(len(id), false)
+	if first {
+		n += filterIDGroupBytes
+	}
+	return newFilterEntry(fs, t.x.set, fs.of, id, strings.Clone, n, false)
+}
+
+// newFilterEntry is m's entry at k, made where m holds none yet: n counted
+// on s's budget first (nil where it does not fit), then the entry stored
+// under key(k), fs's lock held. A call that finds the entry another call
+// made meanwhile gives its count back.
+func newFilterEntry[K comparable](fs *setFilters, s *setDerived, m map[K]*filterEntry, k K, key func(K) K, n int64, byText bool) *filterEntry {
+	if !setClaim(s, n) {
+		return nil
+	}
+	fs.mu.Lock()
+	e := m[k]
+	if e == nil {
+		e, n = &filterEntry{byText: byText}, 0
+		m[key(k)] = e
+	}
+	fs.mu.Unlock()
+	if n > 0 {
+		s.mu.Lock()
+		s.budget.used -= n
+		s.mu.Unlock()
+	}
+	return e
+}
+
+// textEntry is the set's entry for the filter of the words of t's text, t
+// having no recording's identity: a text the caller handed, or a view, which
+// round F's calls each hand anew (Raw.viewOf reads a view per call, and a
+// call's places hand their leaves' texts). Two handles of one text, in one
+// call or in two, find one entry, by the text (filterTextKey), so the set
+// builds its filter once, at the first ask, and every later call asks the
+// filter, not the text. A text shorter than filterTextMin, and a view keploy
+// could not read (the scan counts it unread), have none (nil), and are
+// scanned, as is one whose entry does not fit the set's budget (counted as
+// idEntry counts one, by filterTextSlotBytes).
+func (t *readerText) textEntry(fs *setFilters) *filterEntry {
+	s := t.text
+	if t.raw != nil {
+		b := t.raw.payload()
+		if !b.read {
+			return nil
+		}
+		s = b.text
+	}
+	if len(s) < filterTextMin {
+		return nil
+	}
+	k := filterTextKey{n: len(s), a: maphash.String(fs.seeds[0], s), b: maphash.String(fs.seeds[1], s)}
+	fs.mu.Lock()
+	e, first := fs.texts[k], len(fs.texts) == 0
+	fs.mu.Unlock()
+	if e != nil {
+		return e
+	}
+	n := filterEntryBytes + filterTextSlotBytes
+	if first {
+		n += filterTextGroupBytes
+	}
+	return newFilterEntry(fs, t.x.set, fs.texts, k, func(k filterTextKey) filterTextKey { return k }, n, true)
+}
+
+// buildFilter is the filter of t's recording's words (setFilter), or of its
+// text's (textEntry), counted on the set's budget by its bits as allocated
+// (its entry counted it with its slot); nil where the recording was not
+// read or the filter does not fit.
+func (t *readerText) buildFilter() wordFilter {
+	t.filter.id = -1
+	s, _, ok := t.read()
+	if !ok {
+		return nil
+	}
+	// Its forms derived for the build alone (textForms), as a scan past the
+	// budget derives them: the set keeps none of them for the filter.
+	forms := textForms(s)
+	n := 0
+	for _, text := range forms {
+		eachWord(text, func(string) { n++ })
+	}
+	f := newWordFilter(n)
+	for _, text := range forms {
+		eachWord(text, f.add)
+	}
+	fs := t.x.filters
+	fs.mu.Lock()
+	if t.filter.byText {
+		fs.textBuilds++
+	} else {
+		fs.builds++
+	}
+	fs.mu.Unlock()
+	if !setClaim(t.x.set, allocBytes(uintptr(cap(f))*unsafe.Sizeof(f[0]), false)) {
+		return nil
+	}
+	postRuns(fs, t.x.set, t.filter, forms)
+	return f
+}
+
+// postRuns adds e's words, each run of letters and digits of every form of
+// its text (forms), to the set's postings (setFilters.runs) under a new id,
+// counted on the set's budget as the postings hold them (postBytes): a run
+// they hold no list of yet as its slot, its letters and its id, any other
+// as one id more. e keeps id -1 past the budget. Where the filter of a
+// text may hold a word by chance, the postings name exactly the texts that
+// hold each run, so a call finds the places that may hold a word without
+// asking every place (placeIndex). Each new run's letters are copied: the
+// postings keep no text alive. A run another text posts between the count
+// and the posting takes one id, less than its count: the postings never
+// hold more than they counted, and never let a run go.
+func postRuns(fs *setFilters, s *setDerived, e *filterEntry, forms []string) {
+	seen := map[string]bool{}
+	for _, text := range forms {
+		eachWord(text, func(run string) { seen[run] = true })
+	}
+	n := int64(headerBytes)
+	fs.mu.Lock()
+	if len(fs.runs) == 0 {
+		n += mapGroupBytes(slotOf[string, []int32](), true)
+	}
+	for run := range seen {
+		n += postBytes(run, fs.runs[run] == nil)
+	}
+	fs.mu.Unlock()
+	if !setClaim(s, n) {
+		return
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	e.id = fs.nextText
+	fs.nextText++
+	for run := range seen {
+		if ids, ok := fs.runs[run]; ok {
+			fs.runs[run] = append(ids, e.id)
+		} else {
+			fs.runs[strings.Clone(run)] = []int32{e.id}
+		}
+	}
+}
+
+// postBytes is what a map of postings (setFilters.runs, post) holds for one
+// id more under w: the id, at twice its list's length (append doubles a
+// full list), and, fresh (the map holds no list of w yet), its list of one
+// id, w's slot and w's letters, each as the runtime allocates them
+// (allocBytes): the list keeps the whole 16-byte block it shares with other
+// small objects alive alone once the rest is garbage, and a run past 32 KiB
+// takes whole pages.
+//
+// A slot is its key's and its list's headers, 40 bytes, and their control
+// byte, at 7/16 of its table filled: the least a table holds just after it
+// grows or splits. A table of 1,024 slots, the most one holds, takes its
+// 41,984 bytes of groups as 6 pages (49,152 bytes), so its slot is 48
+// bytes at 7/16: 110 bytes a word, with the table's own header.
+func postBytes(w string, fresh bool) int64 {
+	if !fresh {
+		return postIDBytes
+	}
+	return allocBytes(4, false) + postSlotBytes + allocBytes(len(w), false)
+}
+
+const (
+	postIDBytes   = 8
+	postSlotBytes = 112
+)
+
+// allocBytes is what the runtime holds for one object of n bytes, the one
+// way every structure the set's budget bounds counts its allocations: n
+// rounded up to its size class (sizeClasses), and past the largest whole
+// 8 KiB pages. An object that holds pointers (ptrs) and passes 512 bytes
+// carries an 8-byte header first; one that holds none and is under 16
+// bytes shares a 16-byte block with other small objects, which it keeps
+// alive alone once they are garbage, so it counts the block. 0 bytes take
+// nothing.
+func allocBytes[N int | int64 | uintptr](n N, ptrs bool) int64 {
+	size := int64(n)
+	switch {
+	case size <= 0:
+		return 0
+	case !ptrs && size < 16:
+		return 16
+	case ptrs && size > 512 && size+8 <= sizeClasses[len(sizeClasses)-1]:
+		size += 8
+	}
+	if size > sizeClasses[len(sizeClasses)-1] {
+		return (size + pageBytes - 1) / pageBytes * pageBytes
+	}
+	i, _ := slices.BinarySearch(sizeClasses[:], size)
+	return sizeClasses[i]
+}
+
+// pageBytes is the runtime's page: an object past its largest size class
+// takes whole pages.
+const pageBytes = 8 << 10
+
+// slotOf is the size of a map[K]V's slot: its key and its value, as the
+// runtime lays them out in a group.
+func slotOf[K comparable, V any]() uintptr {
+	return unsafe.Sizeof(struct {
+		k K
+		v V
+	}{})
+}
+
+// mapHeaderBytes is a map's header (internal/runtime/maps.Map).
+const mapHeaderBytes = 48
+
+// mapGroupBytes is a map's group of 8 slots of slot bytes each, with their
+// 8 control bytes, as allocated (allocBytes): the whole of a map of up to
+// 8 entries past its header. ptrs: its keys or values hold pointers.
+func mapGroupBytes(slot uintptr, ptrs bool) int64 { return allocBytes(8+8*slot, ptrs) }
+
+// mapSlotBytes is the most one entry costs in a map grown by inserts past
+// its first group: a table of c slots (16 to 1,024, the most one holds, as
+// allocated, with its own header and the directory's pointer to it) holds
+// from just past 7/16 of them, the least just after it doubled or split
+// (7/8 full, halved), so each entry is counted at the most a table of any
+// size costs at that fill.
+func mapSlotBytes(slot uintptr, ptrs bool) int64 {
+	var most int64
+	for c := int64(16); c <= 1024; c *= 2 {
+		least := 7*c/16 + 1
+		switch c {
+		case 16:
+			least = 9
+		case 1024:
+			least = 7 * c / 16
+		}
+		most = max(most, (allocBytes(c/8*(8+8*int64(slot)), ptrs)+mapTableBytes+least-1)/least)
+	}
+	return most
+}
+
+// mapTableBytes is a table's own header and its pointer in the map's
+// directory, at the directory's least fill.
+const mapTableBytes = 48
+
+// mapBytes is what a map of n entries of slot bytes each, built by inserts
+// alone, holds: its header, its first group, and each entry at the most it
+// costs (mapSlotBytes).
+func mapBytes(n int, slot uintptr, ptrs bool) int64 {
+	b := allocBytes(mapHeaderBytes, true)
+	if n > 0 {
+		b += mapGroupBytes(slot, ptrs) + int64(n)*mapSlotBytes(slot, ptrs)
+	}
+	return b
+}
+
+// sizeClasses are the runtime's size classes (internal/runtime/gc): a small
+// object takes the least that holds it.
+var sizeClasses = [...]int64{8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320,
+	352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 896, 1024, 1152, 1280, 1408, 1536, 1792, 2048, 2304, 2688, 3072,
+	3200, 3456, 4096, 4864, 5376, 6144, 6528, 6784, 6912, 8192, 9472, 9728, 10240, 10880, 12288, 13568, 14336, 16384,
+	18432, 19072, 20480, 21760, 24576, 27264, 28672, 32768}
+
+// postID is the id the set's postings name t's text by (postRuns), its
+// filter built at the first ask (setFilter); -1 where they hold none of its
+// words: t is in no set's call, its text has no entry, or the entry's
+// words did not fit the set's budget.
+func (t *readerText) postID() int32 {
+	if t.setFilter() == nil {
+		return -1
+	}
+	return t.filter.id
+}
+
+// holdingRuns is, in order, the ids of the set's texts whose words hold
+// every run of runs (postRuns); ok false where runs is empty, which every
+// text may hold.
+func (fs *setFilters) holdingRuns(runs []string) (ids []int32, ok bool) {
+	if len(runs) == 0 {
+		return nil, false
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	lists := make([][]int32, len(runs))
+	for i, run := range runs {
+		lists[i] = fs.runs[run]
+	}
+	slices.SortFunc(lists, func(a, b []int32) int { return len(a) - len(b) })
+next:
+	for _, id := range lists[0] {
+		for _, l := range lists[1:] {
+			if _, in := slices.BinarySearch(l, id); !in {
+				continue next
+			}
+		}
+		ids = append(ids, id)
+	}
+	return ids, true
 }
 
 // heldIn reports whether one of a text's declared forms (textForms) holds w
-// as a word in any of the readings rs.
+// as a word in any of the readings rs. by: the readings of rs that read
+// every byte of w as a word byte, asked once for every form; no other
+// reading holds w as a word anywhere.
 func heldIn(forms []string, w string, rs ...int) bool {
-	return slices.ContainsFunc(forms, func(f string) bool {
-		return slices.ContainsFunc(rs, func(r int) bool { return heldBy(f, w, readings[r]) })
-	})
-}
-
-// heldBy reports whether w is a word of s as word reads it (tokensBy(s,
-// word)[w]) without reading s's other words: w stands in s, every byte of
-// it continues a word, and no byte that does stands right before or after.
-func heldBy(s, w string, word func(byte) bool) bool {
-	if w == "" {
-		return false
+	var by uint8
+	for _, r := range rs {
+		by |= 1 << r
 	}
 	for i := 0; i < len(w); i++ {
-		if !word(w[i]) {
-			return false
+		by &= wordMask[w[i]]
+	}
+	if w == "" || by == 0 {
+		return false
+	}
+	return slices.ContainsFunc(forms, func(f string) bool { return heldBy(f, w, by) })
+}
+
+// wordMask is, by byte, the readings that read it as a word byte: bit r of
+// wordMask[c] is readings[r](c), so a word's check reads a table, not a
+// function a byte.
+var wordMask = func() (m [256]uint8) {
+	for r, word := range readings {
+		for c := range 256 {
+			if word(byte(c)) {
+				m[c] |= 1 << r
+			}
 		}
 	}
+	return m
+}()
+
+// heldScans counts the scans heldBy makes of a text for a word, for the
+// rows that bound a call's work.
+var heldScans atomic.Int64
+
+// heldBy reports whether w is a word of s in any of the readings by (bits
+// of wordMask; each reads every byte of w as a word byte) as each reads it
+// (tokensBy(s, readings[r])[w]) without reading s's other words: w stands
+// in s, and no byte that reading reads as a word byte stands right before
+// or after. One scan finds each place w stands in s for every reading.
+func heldBy(s, w string, by uint8) bool {
+	heldScans.Add(1)
 	for off := 0; off <= len(s)-len(w); {
 		i := strings.Index(s[off:], w)
 		if i < 0 {
 			return false
 		}
 		i += off
-		if (i == 0 || !word(s[i-1])) && (i+len(w) == len(s) || !word(s[i+len(w)])) {
+		var around uint8
+		if i > 0 {
+			around = wordMask[s[i-1]]
+		}
+		if e := i + len(w); e < len(s) {
+			around |= wordMask[s[e]]
+		}
+		if by&^around != 0 {
 			return true
 		}
 		off = i + 1
@@ -391,26 +1020,32 @@ type fieldWords struct {
 	of map[string][]int32
 }
 
-// The sizes a field view counts: a fieldAt (two strings' headers and a
-// bool), and a word's entry in its map past its letters and its list: the
-// slot (a string's header and a slice's) doubled for the map's growth, as
-// wordBytes counts map[string]bool's. A list counts what it holds (its
-// capacity, 4 bytes an index), as append grew it.
-const (
-	fieldAtBytes   = 40
-	fieldWordBytes = 80
-)
-
+// fieldWordsBytes is what a field view holds, each part as the runtime
+// allocates it (allocBytes): its map's header and first group
+// (fieldFirstBytes), its list of fields by capacity (fieldsAtBytes), each
+// field's path and name, and each word its map slot (fieldSlotBytes), its
+// letters, and its list of fields by capacity (4 bytes an index), as append
+// grew it. fieldsWith counts a view as it builds it by the same parts.
 func fieldWordsBytes(f fieldWords) int64 {
-	n := int64(headerBytes + fieldAtBytes*cap(f.at))
+	n := fieldFirstBytes + fieldsAtBytes(cap(f.at))
 	for _, a := range f.at {
-		n += int64(len(a.path) + len(a.in))
+		n += allocBytes(len(a.path), false) + allocBytes(len(a.in), false)
 	}
 	for w, at := range f.of {
-		n += fieldWordBytes + int64(len(w)+4*cap(at))
+		n += fieldSlotBytes + allocBytes(len(w), false) + allocBytes(4*cap(at), false)
 	}
 	return n
 }
+
+// fieldsAtBytes is what a view's list of n fields' places holds.
+func fieldsAtBytes(n int) int64 { return allocBytes(uintptr(n)*unsafe.Sizeof(fieldAt{}), true) }
+
+// A view's word's slot in its map (mapSlotBytes), and the map's header and
+// first group.
+var (
+	fieldSlotBytes  = mapSlotBytes(slotOf[string, []int32](), true)
+	fieldFirstBytes = allocBytes(mapHeaderBytes, true) + mapGroupBytes(slotOf[string, []int32](), true)
+)
 
 // fieldsWith are the fields of the text that hold w as a word, in any of
 // main's readings and any declared form of the field's own text (holdsWord,
@@ -428,14 +1063,14 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 	x := t.x
 	fw, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[fieldWords] { return &e.fields },
 		func(s string, fields []rawField, room int64) (fieldWords, bool) {
-			fw, n, fits, own := fieldWords{of: map[string][]int32{}}, int64(headerBytes), room >= 0, t.e.own(s)
+			fw, n, fits, own := fieldWords{of: map[string][]int32{}}, fieldFirstBytes, room >= 0, t.e.own(s)
 			eachField(s, fields, func(f fieldAt, text string) {
 				if !fits {
 					return
 				}
 				forms, held := formsHeld(text)
 				k, ats := int32(len(fw.at)), append(fw.at, f)
-				head := int64(fieldAtBytes*(cap(ats)-cap(fw.at)) + len(f.path) + len(f.in))
+				head := fieldsAtBytes(cap(ats)) - fieldsAtBytes(cap(fw.at)) + allocBytes(len(f.path), false) + allocBytes(len(f.in), false)
 				if fits = n+head+held <= room; fits {
 					fw.at = ats
 					n += head
@@ -452,9 +1087,9 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 							}
 							w, more, grown := form[i:j], int64(0), append(l, k)
 							if !seen {
-								w, more = strings.Clone(w), fieldWordBytes+int64(len(w))
+								w, more = strings.Clone(w), fieldSlotBytes+allocBytes(len(w), false)
 							}
-							if more += 4 * int64(cap(grown)-cap(l)); n+more+held <= room {
+							if more += allocBytes(4*cap(grown), false) - allocBytes(4*cap(l), false); n+more+held <= room {
 								n += more
 								fw.of[w] = grown
 							} else {
@@ -710,7 +1345,7 @@ func (t *readerText) holdsToken(kind tokenKind, tok string) (held, read bool) {
 			runs := map[string]bool{}
 			eachB64Run(s, t.x.dc.spansOf(s), func(a, b int) bool { runs[s[a:b]] = true; return true })
 			return runs
-		}), wordsBytes, func(s string, _ []rawField) {
+		}), runsBytes, func(s string, _ []rawField) {
 			eachB64Run(s, t.x.dc.spansOf(s), func(a, b int) bool { held = s[a:b] == tok; return !held })
 		})
 	if scanned || !ok {
@@ -718,6 +1353,10 @@ func (t *readerText) holdsToken(kind tokenKind, tok string) (held, read bool) {
 	}
 	return runs[tok], true
 }
+
+// runsBytes is what a text's base64 runs hold (holdsToken): their map
+// (mapBytes), whose keys are the text's own bytes, which its entry keeps.
+func runsBytes(runs map[string]bool) int64 { return mapBytes(len(runs), slotOf[string, bool](), true) }
 
 // eachB64Run calls yield with [start, end) of each of s's base64 runs that
 // stand whole outside its instants (spans), in order, until it returns
@@ -765,22 +1404,191 @@ func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 // (byMoment), and whether one does so at a fine cut, in the text or any of
 // its declared forms, the forms main reads an instant in (holdsExact(text)
 // || holdsExact(rawExtra(text))) and holdsWord reads a word in; read as
-// holdsWord, the instants of the text and its forms from one read of it.
+// holdsWord, the instants of the text and its forms from one read of it,
+// kept in the orders momentIndex looks them up by. Past the budget each
+// question asks of every instant of the text read now, and orders none.
 func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
 	dc := t.x.dc
-	spans, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.formSpans },
-		uncapped(func(s string, _ []rawField) []instant {
-			return slices.Concat(dc.spansOf(s), dc.spansOf(dc.rawExtra(s)))
-		}), spansBytes, nil)
+	asked := func() { t.x.momentAsks++ }
+	forms := func(s string) []instant { return slices.Concat(dc.spansOf(s), dc.spansOf(dc.rawExtra(s))) }
+	ix, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[momentIndex] { return &e.formSpans },
+		uncapped(func(s string, _ []rawField) momentIndex { return newMomentIndex(forms(s)) }), momentIndexBytes,
+		func(s string, _ []rawField) {
+			for _, sp := range forms(s) {
+				if !sp.keyed {
+					continue
+				}
+				asked()
+				h, f := byMoment(sp.moment(), m)
+				held, fine = held || h, fine || f
+			}
+		})
+	if !ok {
+		return false, false, false
+	}
+	if !scanned {
+		held, fine = ix.holds(m, asked)
+	}
+	return held, fine, true
+}
+
+// momentIndex is the moments of a text's instants that name one
+// (instant.keyed), in the orders holds looks them up by, so that a
+// question asks byMoment only of the instants cutsNone cannot turn away:
+//   - odd: a time of day, or an instant in a zone not a whole number of
+//     minutes off UTC, which cutsNone turns away from no moment;
+//   - at: every other instant, by its moment (key.at);
+//   - minute: those of at whole at the minute in UTC, the only ones a value
+//     finer than them is built on (cutsNone's finer);
+//   - wall: those of at in a zone off UTC, by the wall clock they write
+//     (key.at plus their offset), the only ones a value of no zone is the
+//     wall clock of.
+type momentIndex struct {
+	moments          []moment
+	odd              []int32
+	at, minute, wall momentOrder
+}
+
+// momentOrder is some of an index's moments by a key, ascending.
+type momentOrder []orderedMoment
+
+// orderedMoment is one moment of an order: its key, and its index in
+// momentIndex.moments (i).
+type orderedMoment struct {
+	key int64
+	i   int32
+}
+
+// newMomentIndex is the index of spans' instants that name a moment.
+func newMomentIndex(spans []instant) momentIndex {
+	var ix momentIndex
+	minute := int64(time.Minute)
+	add := func(o *momentOrder, key int64, i int32) {
+		*o = append(*o, orderedMoment{key, i})
+	}
 	for _, sp := range spans {
 		if !sp.keyed {
 			continue
 		}
-		if h, f := byMoment(sp.moment(), m); h {
-			held, fine = true, fine || f
+		m := sp.moment()
+		i := int32(len(ix.moments))
+		ix.moments = append(ix.moments, m)
+		z := m.offset()
+		if m.key.day || z%minute != 0 {
+			ix.odd = append(ix.odd, i)
+			continue
+		}
+		add(&ix.at, m.key.at, i)
+		if whole(m.key.at, 0, minute) {
+			add(&ix.minute, m.key.at, i)
+		}
+		if z != 0 {
+			add(&ix.wall, m.key.at+z, i)
 		}
 	}
-	return held, fine, ok
+	for _, o := range []momentOrder{ix.at, ix.minute, ix.wall} {
+		slices.SortFunc(o, func(a, b orderedMoment) int { return cmp.Compare(a.key, b.key) })
+	}
+	return ix
+}
+
+// momentIndexBytes is what ix holds: its lists of moments and of their
+// places in the orders, each by its capacity as allocated (allocBytes).
+func momentIndexBytes(ix momentIndex) int64 {
+	n := allocBytes(uintptr(cap(ix.moments))*unsafe.Sizeof(moment{}), false) + allocBytes(4*cap(ix.odd), false)
+	for _, o := range []momentOrder{ix.at, ix.minute, ix.wall} {
+		n += allocBytes(uintptr(cap(o))*unsafe.Sizeof(orderedMoment{}), false)
+	}
+	return n
+}
+
+// holds is holdsMoment's answer of ix: whether an instant names m by
+// moment (byMoment), and whether one does so at a fine cut. asked counts
+// each instant byMoment is asked of.
+//
+// It asks first of the instants that may hold m at a fine cut: the odd
+// ones, and those that stand within a millisecond of m, as instants or one
+// as the other's wall clock. A cut finer than a millisecond moves an
+// instant by less than one, and a value finer than an instant is built
+// only on a unit longer than F's lead (cutsEach's finerUnits), so no other
+// instant holds m at a fine cut. Where none of those holds m, it asks of
+// the instants cutsNone does not turn away from m (each of its three
+// reaches, coarserReach), and the first that holds m answers. A moment of a
+// time of day, or of a zone not a whole number of minutes off UTC, which
+// cutsNone turns away from nothing, is asked of every instant.
+func (ix *momentIndex) holds(m moment, asked func()) (held, fine bool) {
+	ask := func(i int32) bool {
+		asked()
+		h, f := byMoment(ix.moments[i], m)
+		held, fine = held || h, fine || f
+		return fine
+	}
+	minute := int64(time.Minute)
+	if m.key.day || m.offset()%minute != 0 {
+		for i := range ix.moments {
+			if ask(int32(i)) {
+				break
+			}
+		}
+		return held, fine
+	}
+	at, mz, ms := m.key.at, m.offset(), int64(time.Millisecond)
+	for _, i := range ix.odd {
+		if ask(i) {
+			return held, fine
+		}
+	}
+	if ix.at.each(at, ms, ask) || !m.zoned && ix.wall.each(at, ms, ask) || held {
+		return held, fine
+	}
+	first := func(i int32) bool {
+		ask(i)
+		return held
+	}
+	unzoned := func(i int32) bool { return !ix.moments[i].zoned && first(i) }
+	reach := coarserReach(m)
+	_ = ix.at.each(at, reach, first) ||
+		!m.typed && ix.minute.each(at, nsPerDay, first) ||
+		!m.zoned && ix.wall.each(at, reach, first) ||
+		mz != 0 && ix.at.each(at+mz, 0, unzoned) ||
+		mz != 0 && !m.typed && ix.minute.each(at+mz, nsPerDay, unzoned)
+	return held, fine
+}
+
+// each calls f with each moment of o whose key stands within r of c, from
+// the first at or past c up, then down from it, until f returns true;
+// it reports whether f did.
+func (o momentOrder) each(c, r int64, f func(int32) bool) bool {
+	p, _ := slices.BinarySearchFunc(o, c, func(e orderedMoment, c int64) int { return cmp.Compare(e.key, c) })
+	for j := p; j < len(o) && o[j].key <= c+r; j++ {
+		if f(o[j].i) {
+			return true
+		}
+	}
+	for j := p - 1; j >= 0 && o[j].key >= c-r; j-- {
+		if f(o[j].i) {
+			return true
+		}
+	}
+	return false
+}
+
+// coarserReach is how far from m, an instant of a zone whole minutes off
+// UTC, an instant may stand as an instant and hold m by being cut to a
+// unit m is whole at (cutsNone's coarser): a day where m is whole at the
+// minute, else the longest unit m is whole at in UTC: one of a second or
+// less, as each unit past a second is whole minutes.
+func coarserReach(m moment) int64 {
+	if whole(m.key.at, 0, int64(time.Minute)) {
+		return nsPerDay
+	}
+	var reach int64
+	for _, d := range precisionUnits {
+		if u := int64(d); whole(m.key.at, 0, u) {
+			reach = u
+		}
+	}
+	return reach
 }
 
 // unread reports whether the call asked about a recording keploy could not
