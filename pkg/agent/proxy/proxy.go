@@ -15,6 +15,7 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -1861,6 +1862,103 @@ func (p *Proxy) replayTargetHasHTTP2Mock(sniHost string, port uint32) bool {
 	})
 }
 
+// replayOffersH2 reports whether the replay MITM offers h2 to a client that
+// offers it, on a connection to port at dstIP (nil when the destination is no
+// IP) whose CONNECT request named connectHost, or whose ClientHello named
+// serverName (SNI); "" when it named none.
+//
+// It differs from the decision made before the handshake (by the
+// connection's CONNECT host and port, else by its port alone) in two ways
+// only. A host the connection names that was recorded speaking HTTP/2 is
+// offered h2: recorded under that name (but for case and a trailing dot), or
+// under the connection's own IP. And a host it names that was recorded
+// speaking HTTP/1.1 only, at that port, is not: its recorded http/1.1 mocks
+// would never match an HTTP/2 request. Every other connection is decided as
+// before, so a client that names no host, or one the recording does not (its
+// requests carry another Host, as behind a load balancer), keeps the offer it
+// had.
+func (p *Proxy) replayOffersH2(connectHost, serverName string, dstIP net.IP, port uint32) bool {
+	host := connectHost
+	if host == "" {
+		host = serverName
+	}
+	switch {
+	case host == "":
+	case p.replayTargetHasHTTP2Mock(host, port),
+		dstIP != nil && p.replayTargetHasHTTP2Mock(dstIP.String(), port):
+		return true
+	case p.replayTargetHasHTTPMock(host, port):
+		return false
+	}
+	return p.replayTargetHasHTTP2Mock(connectHost, port)
+}
+
+// replayTargetHasHTTPMock reports whether an Http (HTTP/1.x) mock was
+// recorded for host on port (httpMockCalled). It reads what the manager
+// serves now (HasMocksByKind), so before the set's first test a host whose
+// HTTP/1.x calls were all recorded inside tests is not yet known.
+func (p *Proxy) replayTargetHasHTTPMock(host string, port uint32) bool {
+	m := p.getMockManager()
+	if m == nil {
+		return false
+	}
+	return m.HasMocksByKind(models.HTTP, func(mk *models.Mock) bool {
+		return httpMockCalled(mk, host, port)
+	})
+}
+
+// httpMockCalled reports whether an Http mock was recorded calling host: its
+// recorded destination (models.Mock.RecordedDestination) names host
+// (sameHostName), at port or at a port the recording does not say
+// (httpMockPort). It is asked of every Http mock served, on every handshake
+// that names a host not recorded speaking HTTP/2, so it compares the host
+// first and parses the mock's URL for its scheme only for a mock that names
+// host. (RecordedDestination parses the URL for the host of a mock that has
+// no Host header, as a forward proxy's client may record.)
+func httpMockCalled(mk *models.Mock, host string, port uint32) bool {
+	authority, ok := mk.RecordedDestination()
+	if !ok || !sameHostName(authorityHost(authority), host) {
+		return false
+	}
+	pt := httpMockPort(authority, mk.Spec.HTTPReq.URL)
+	return pt == 0 || int64(pt) == int64(port)
+}
+
+// authorityHost is the host an authority (host, host:port, [ipv6]:port)
+// names. One with no ':' is all host, and is read with no allocation:
+// net.SplitHostPort allocates the error it returns for an authority with no
+// port, which is how an HTTP/1.1 client sends the Host of a default port.
+func authorityHost(authority string) string {
+	if !strings.Contains(authority, ":") {
+		return authority
+	}
+	h, _ := hostPortFromAuthority(authority, "")
+	return h
+}
+
+// httpMockPort is the port an Http mock recorded calling authority (its
+// recorded destination) at rawURL says it called: the authority's own port,
+// else the default port of the URL's scheme; 0 when it says neither (a Host
+// with no port and a path-only URL, as an HTTP/1.1 client sends them).
+func httpMockPort(authority, rawURL string) int {
+	scheme := ""
+	if u, err := url.Parse(rawURL); err == nil {
+		scheme = u.Scheme
+	}
+	if _, _, err := net.SplitHostPort(authority); err != nil && scheme == "" {
+		return 0
+	}
+	_, pt := hostPortFromAuthority(authority, scheme)
+	return pt
+}
+
+// sameHostName reports whether two hosts are one name: equal but for case and
+// one trailing dot. A fully qualified name's trailing dot is kept in the
+// :authority a client sends and dropped from its SNI (crypto/tls strips it).
+func sameHostName(a, b string) bool {
+	return strings.EqualFold(strings.TrimSuffix(a, "."), strings.TrimSuffix(b, "."))
+}
+
 // http2DestMatches reports whether a recorded Http2 destination (aHost:aPort,
 // aHost lower-cased) matches the connection destination sniHost:port. A
 // discriminator unknown on either side (missing port, missing SNI/host) is not
@@ -1884,7 +1982,7 @@ func http2DestMatches(aHost string, aPort int, sniHost string, port uint32) bool
 		return false
 	}
 	hostKnown := sniHost != "" && aHost != ""
-	if hostKnown && !strings.EqualFold(aHost, sniHost) {
+	if hostKnown && !sameHostName(aHost, sniHost) {
 		return false
 	}
 	return portKnown || hostKnown
@@ -3418,15 +3516,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// h2, or their recorded http/1.1 mocks would never match. Record and
 		// http/1.1-only recordings are unaffected (PreferH2 stays false).
 		//
-		// The destination is (sniHost, port). port (destInfo.Port) is always
-		// known. sniHost is only known pre-handshake when the connection made
-		// a CONNECT request — the CONNECT-tunnel / sidecar path (connect.go); on
-		// the transparent proxyless path the SNI only becomes available inside
-		// the handshake, so sniHost is empty here and scoping falls back to
-		// port-only (best-effort — see http2DestMatches). Port already
-		// disambiguates the common mixed-session case (services on different
-		// ports); same-port-different-host disambiguation only engages where
-		// sniHost is present.
+		// The destination is (host, port). port (destInfo.Port, the CONNECT
+		// target's on that path) is always known. The host is the one the
+		// connection's CONNECT request named (the CONNECT-tunnel / sidecar
+		// path, connect.go), else the one its ClientHello names (SNI): on
+		// the transparent path that is first known inside the handshake, so
+		// the offer is decided there (pTls.WithPreferH2For, replayOffersH2).
+		// Decided before the handshake, it went by the port alone, and one
+		// :443 host recorded speaking HTTP/2 pushed every :443 host onto h2,
+		// a host recorded speaking HTTP/1.1 among them.
 		//
 		// A client that sends no SNI gets a leaf named for what this
 		// connection itself says of its destination: the host its CONNECT
@@ -3435,18 +3533,21 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// MITM on hsCtx, so nothing another connection left can name it.
 		hsCtx := withDstIPOf(pTls.WithConnectTarget(ctx, connectTargetHost), dstAddr)
 		if rule.Mode == models.MODE_TEST {
-			sniHost, _ := hostPortFromAuthority(connectTargetHost, "")
-			preferH2 := rule.OutgoingOptions.PreferH2
-			if !preferH2 {
-				preferH2 = p.replayTargetHasHTTP2Mock(sniHost, destInfo.Port)
-			}
-			if preferH2 {
-				// On hsCtx, not ctx: the destination IP set above must
-				// survive the hint.
-				hsCtx = pTls.WithPreferH2(hsCtx)
-				p.logger.Debug("replay: advertising h2 ALPN (destination has Http2 mock)",
-					zap.String("sniHost", sniHost), zap.Uint32("dstPort", destInfo.Port))
-			}
+			connectHost, _ := hostPortFromAuthority(connectTargetHost, "")
+			port, preferAll := destInfo.Port, rule.PreferH2
+			dstHost, _, _ := net.SplitHostPort(dstAddr)
+			dstIP := net.ParseIP(dstHost)
+			// On hsCtx, not ctx: the destination IP set above must survive
+			// the hint.
+			hsCtx = pTls.WithPreferH2For(hsCtx, func(serverName string) bool {
+				if !preferAll && !p.replayOffersH2(connectHost, serverName, dstIP, port) {
+					return false
+				}
+				p.logger.Debug("replay: offering h2 in the TLS ALPN",
+					zap.Bool("preferH2Option", preferAll), zap.String("connectHost", connectHost),
+					zap.String("serverName", serverName), zap.Uint32("dstPort", port))
+				return true
+			})
 		}
 		// Into its own variable, not srcConn: a failed handshake returns a
 		// nil conn, and assigning that over srcConn would hide the
