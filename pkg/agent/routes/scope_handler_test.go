@@ -575,6 +575,16 @@ func (s skippedSvc) SetScopeSkippedReads(_ context.Context, reads map[string]str
 	return s.err
 }
 
+// bothSvc is skippedSvc that takes the recordings keploy's judging marked
+// served, not required, too, as the agent does.
+type bothSvc struct{ skippedSvc }
+
+func (s bothSvc) SetScopeNotRequired(_ context.Context, n map[string][]string) error {
+	s.notRequired = n
+	s.order = append(s.order, "notRequired")
+	return nil
+}
+
 // Under the switch the scope table says which of the worker scope are the
 // reads of tests keploy mock replay's gate skips, installed with the worker
 // scope and before the pool slices, which serve it; a table without them
@@ -588,7 +598,7 @@ func TestScopeTableCarriesTheSkippedReads(t *testing.T) {
 	}
 	t.Setenv(provenswitch.Env, "1")
 	ps, skipped := &poolSvc{}, map[string]string{"stale": "o::TestOld"}
-	if rec := post(skippedSvc{workerSvc{ps}, &skipped, nil}, `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1","mock-2"]},"worker":{"o":["mock-2"]},"skipped_reads":{"mock-2":"o::TestCRUD"}}`); rec.Code != http.StatusOK {
+	if rec := post(skippedSvc{workerSvc{ps}, &skipped, nil}, `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1","mock-2"]},"worker":{"o":["mock-2"]},"skippedReads":{"mock-2":"o::TestCRUD"}}`); rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 	if !maps.Equal(skipped, map[string]string{"mock-2": "o::TestCRUD"}) || !slices.Equal(ps.order, []string{"windows", "worker", "skipped", "pool"}) {
@@ -601,8 +611,18 @@ func TestScopeTableCarriesTheSkippedReads(t *testing.T) {
 	// An agent that cannot install them refuses the table, and serves no
 	// pool from it.
 	ps = &poolSvc{}
-	if rec := post(skippedSvc{workerSvc{ps}, &skipped, errors.New("wire closed")}, `{"mappings":{},"pool":{},"skipped_reads":{"mock-2":"o::TestCRUD"}}`); rec.Code != http.StatusInternalServerError || ps.pool != nil {
+	if rec := post(skippedSvc{workerSvc{ps}, &skipped, errors.New("wire closed")}, `{"mappings":{},"pool":{},"skippedReads":{"mock-2":"o::TestCRUD"}}`); rec.Code != http.StatusInternalServerError || ps.pool != nil {
 		t.Fatalf("a failed install: status %d, pool %v; want 500 and no pool", rec.Code, ps.pool)
+	}
+	// A table that carries both a skipped test's read and a test's mark
+	// installs both, each before the pool: neither is dropped beside the
+	// other.
+	ps, skipped = &poolSvc{}, map[string]string{}
+	if rec := post(bothSvc{skippedSvc{workerSvc{ps}, &skipped, nil}}, `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1","mock-2"]},"worker":{"o":["mock-2"]},"skippedReads":{"mock-2":"o::TestCRUD"},"notRequired":{"o::TestA":["mock-3"]}}`); rec.Code != http.StatusOK {
+		t.Fatalf("both: status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !maps.Equal(skipped, map[string]string{"mock-2": "o::TestCRUD"}) || !slices.Equal(ps.notRequired["o::TestA"], []string{"mock-3"}) || !slices.Equal(ps.order, []string{"windows", "worker", "skipped", "notRequired", "pool"}) {
+		t.Fatalf("both: skipped reads %v, marked %v, installed %v; want both installed, before the pool", skipped, ps.notRequired, ps.order)
 	}
 }
 

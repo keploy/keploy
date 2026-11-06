@@ -459,7 +459,7 @@ type ScopeTableReq struct {
 	// Each name maps to the skipped test that lists it, which a test's
 	// extra-call line names (UnmatchedCall.SkippedReads). Absent from an
 	// older CLI and when the gate skips no test.
-	SkippedReads map[string]string `json:"skipped_reads,omitempty"`
+	SkippedReads map[string]string `json:"skippedReads,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its

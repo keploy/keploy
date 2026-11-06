@@ -117,7 +117,7 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]}}`,
 		`{"mappings":{"o::TestA":["mock-3","mock-4"]},"pool":{},"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-4"]}]}}`,
 		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"notRequired":{"o::TestA":["mock-3"]}}`,
-		`{"mappings":{"o::TestA":[]},"pool":{"o":["mock-2"]},"worker":{"o":["mock-2"]},"skipped_reads":{"mock-2":"o::TestCRUD"}}`,
+		`{"mappings":{"o::TestA":[]},"pool":{"o":["mock-2"]},"worker":{"o":["mock-2"]},"skippedReads":{"mock-2":"o::TestCRUD"}}`,
 	}
 	if !slices.Equal(bodies, want) {
 		t.Fatalf("posted %q, want %q", bodies, want)
@@ -170,7 +170,7 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	if err := a.session().reapply(context.Background(), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
-	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}],"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]},"worker":{"o":["mock-1"]},"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-3"]}]},"notRequired":{"o::TestA":["mock-3"]},"skipped_reads":{"mock-1":"o::TestCRUD"}}`
+	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}],"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]},"worker":{"o":["mock-1"]},"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-3"]}]},"notRequired":{"o::TestA":["mock-3"]},"skippedReads":{"mock-1":"o::TestCRUD"}}`
 	if !slices.Equal(bodies, []string{want, want}) {
 		t.Fatalf("posted %q, want the table, its windows, its givens, its worker scope, its repeated reads, its not-required marks and its skipped reads twice: %q", bodies, want)
 	}
