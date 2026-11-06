@@ -549,6 +549,63 @@ func TestUnderTheSwitchAShutdownCallIsJudgedOnceTheAppIsStopped(t *testing.T) {
 	}
 }
 
+// With the switch off nothing of that applies: a set with no mappings.yaml
+// requires none of the calls its recording made after its last test (they
+// are served, not required), and its end waits for none of them. Made or
+// never made, the set passes, naming none.
+func TestWithTheSwitchOffACallAfterTheLastTestIsServedNotRequired(t *testing.T) {
+	for _, made := range []bool{false, true} {
+		t.Run(fmt.Sprintf("made %v", made), func(t *testing.T) {
+			setSwitch(t, false)
+			fastWorkerWait(t)
+			waits := 0
+			wake := workerWake
+			workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
+				waits++
+				return wake(ctx)
+			}
+			h := newPartialRunHarness(t, 1, 0)
+			pinWindows(h)
+			h.replayer.config.Command = "./app"
+			stopped := make(chan struct{})
+			h.instr.stopped = stopped
+			core, logs := observer.New(zap.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-deregister", 3000)}
+			db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": mongoEntries("mock-a")})
+			if err := db.Delete(context.Background(), "test-set-0"); err != nil {
+				t.Fatal(err)
+			}
+			inner := consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}})
+			drained := false
+			h.replayer.hookImpl = prHooks{consumedFor: func() []models.MockState {
+				select {
+				case <-stopped:
+					if made && !drained {
+						drained = true
+						return []models.MockState{mongoAt("mock-deregister", 3000)}
+					}
+					return nil
+				default:
+					return inner()
+				}
+			}}
+			if got := h.run(t); got != models.TestSetStatusPassed {
+				t.Fatalf("set %s, want PASSED (missing named %d time(s))", got, workerNamed(logs))
+			}
+			if n := workerNamed(logs); n != 0 {
+				t.Fatalf("missing named %d time(s), want none", n)
+			}
+			if waited := len(logs.FilterMessageSnippet("waiting for the test set's worker scope").All()); waited != 0 || waits != 0 {
+				t.Fatalf("the set's end waited (%d line(s), %d wait(s))", waited, waits)
+			}
+			if said := len(logs.FilterMessageSnippet("without waiting for them").All()); said != 0 {
+				t.Fatalf("the set said %d time(s) it required a call after its last test, want none", said)
+			}
+		})
+	}
+}
+
 // failingWorkerReads fails every read of what the agent consumed once the
 // set's end has begun waiting for the worker scope (flipped by a log hook).
 type failingWorkerReads struct {
