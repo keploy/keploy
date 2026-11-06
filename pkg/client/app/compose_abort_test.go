@@ -970,7 +970,7 @@ func realClientInfo(t *testing.T, opts ...client.Opt) error {
 // not nil, counts the connections it accepted.
 func droppingDaemon(t *testing.T, accepted *atomic.Int32, answer ...byte) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "docker.sock")
+	sock := filepath.Join(testnet.SocketDir(t), "docker.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -1044,10 +1044,10 @@ func TestOnlyAFailedDialCountsTowardsAnUnreachableDaemon(t *testing.T) {
 		want bool
 	}{
 		{name: "no socket", unix: true, want: true, opts: func(t *testing.T) []client.Opt {
-			return []client.Opt{client.WithHost("unix://" + filepath.Join(t.TempDir(), "docker.sock"))}
+			return []client.Opt{client.WithHost("unix://" + filepath.Join(testnet.SocketDir(t), "docker.sock"))}
 		}},
 		{name: "a socket nobody listens on", unix: true, want: true, opts: func(t *testing.T) []client.Opt {
-			p := filepath.Join(t.TempDir(), "docker.sock")
+			p := filepath.Join(testnet.SocketDir(t), "docker.sock")
 			l, err := net.Listen("unix", p)
 			if err != nil {
 				t.Fatal(err)
@@ -1060,7 +1060,7 @@ func TestOnlyAFailedDialCountsTowardsAnUnreachableDaemon(t *testing.T) {
 			if os.Geteuid() == 0 {
 				t.Skip("root opens any socket")
 			}
-			p := filepath.Join(t.TempDir(), "docker.sock")
+			p := filepath.Join(testnet.SocketDir(t), "docker.sock")
 			l, err := net.Listen("unix", p)
 			if err != nil {
 				t.Fatal(err)
@@ -1104,7 +1104,7 @@ func TestOnlyAFailedDialCountsTowardsAnUnreachableDaemon(t *testing.T) {
 			// waits for that shutdown, so the write always comes after
 			// it, and the connection stays open until the test ends, so
 			// the client's read of the answer ends no sooner.
-			sock := filepath.Join(t.TempDir(), "docker.sock")
+			sock := filepath.Join(testnet.SocketDir(t), "docker.sock")
 			l, err := net.Listen("unix", sock)
 			if err != nil {
 				t.Fatal(err)
