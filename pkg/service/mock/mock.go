@@ -244,7 +244,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 		if stopNoticeFrom != nil {
 			exit = m.runStopNoted(stopNoticeFrom, ctx)
 		} else {
-			exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+			exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command, TestCommand: true})
 		}
 		return nil
 	})
@@ -389,7 +389,7 @@ func (m *mockService) runUntilStopNoted(parent, ctx context.Context) (runCtx con
 func (m *mockService) runStopNoted(parent, ctx context.Context) models.AppError {
 	runCtx, ran := m.runUntilStopNoted(parent, ctx)
 	defer ran()
-	return m.instrumentation.Run(runCtx, models.RunOptions{AppCommand: m.config.Command})
+	return m.instrumentation.Run(runCtx, models.RunOptions{AppCommand: m.config.Command, TestCommand: true})
 }
 
 // notifyStopBegun tells the agent the recording's stop has begun, bounded so

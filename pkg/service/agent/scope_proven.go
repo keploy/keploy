@@ -75,6 +75,9 @@ type provenWire struct {
 	skip  map[string]string
 	needs map[string][]models.ScopeNeed
 	began map[string]bool
+	// report is the file the replay writes its report to, as the project
+	// names it (models.ScopeGateReq.Report); "" when the CLI named none.
+	report string
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -668,13 +671,14 @@ func (a *Agent) SetScopeSkippedReads(ctx context.Context, reads map[string]strin
 }
 
 // evidenceText is evidenceReason with what the agent holds for it: in a
-// replay, the recordings of the calls the test never made and the skipped
-// test of each read the replay's gate skips; in a record, neither.
+// replay, the recordings of the calls the test never made, the skipped test
+// of each read the replay's gate skips, and the file the replay writes its
+// report to; in a record, none of them.
 func (a *Agent) evidenceText(id string, ev *models.ScopeEvidence, beganAt time.Time) string {
 	if !a.replaying() {
-		return evidenceReason(id, ev, nil, beganAt, nil)
+		return evidenceReason(id, ev, nil, beganAt, nil, "")
 	}
-	return evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.skippedReadTests())
+	return evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.skippedReadTests(), a.reportFile())
 }
 
 // skippedReadTests is a copy of the skipped test of each read the replay's
@@ -995,13 +999,26 @@ func (a *Agent) NoteRefusal(r models.RunRefusal) {
 
 // SetScopeSkips installs the proven gate: the tests a replay skips, by ID,
 // with their reasons, and the tests that must begin before each test that
-// needs them. nil skips nothing.
-func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
+// needs them (nil skips nothing), and the file the replay writes its report
+// to, which a failed test's reason names ("" names none).
+func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, report string) error {
 	a.provenMu.Lock()
-	a.proven.skip, a.proven.needs = maps.Clone(skip), maps.Clone(needs)
+	a.proven.skip, a.proven.needs, a.proven.report = maps.Clone(skip), maps.Clone(needs), report
 	a.provenMu.Unlock()
 	return nil
 }
+
+// reportFile is the file the replay writes its report to, as the CLI named
+// it (SetScopeSkips); "" when it named none.
+func (a *Agent) reportFile() string {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return a.proven.report
+}
+
+// Replaying reports whether the agent replays a recording (its mode is
+// test), not records one.
+func (a *Agent) Replaying() bool { return a.replaying() }
 
 func (a *Agent) replaying() bool {
 	return a.config != nil && a.config.Agent.Mode == models.MODE_TEST
@@ -2236,7 +2253,10 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 
 // evidenceReason is keploy's text for a failed test (design v14 §5.3). It
 // names calls by method, destination and URL shape (models.PathShape), never
-// by a body or a query value.
+// by a body or a query value, and every field each call differed in. It
+// states what keploy saw, and ends by naming report, the file the replay
+// writes its report to, when the CLI named one: what to do about it is the
+// end of the replay's output, which knows every test's evidence.
 // beganAt is when the test began being served: a miss filed outside every
 // test whose call was made at or after it was made as the test ended (its
 // last call in flight, filed once the test stopped being served); one made
@@ -2244,7 +2264,7 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 // included. skippedOf is, in a replay, the skipped test that lists each read
 // the replay's gate skips (SetScopeSkippedReads): an extra call's line names
 // the test of each that answered the call (extraCallText).
-func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string) string {
+func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string, report string) string {
 	var what []string
 	for _, c := range ev.Incomplete {
 		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
@@ -2277,7 +2297,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		if before(m) {
 			// Where it was made is not known: a miss is filed by the view
 			// served when it is filed, which may be after its own test.
-			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missWhyText(m, skippedOf))
+			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missWhyText(m, skippedOf, report))
 			continue
 		}
 		switch m.Kind {
@@ -2289,12 +2309,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 			}
 		case models.MissOutsideTest:
 			if !beganAt.IsZero() && !m.At.IsZero() {
-				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missWhyText(m, skippedOf))
+				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missWhyText(m, skippedOf, report))
 				continue
 			}
-			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missWhyText(m, skippedOf))
+			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missWhyText(m, skippedOf, report))
 		default:
-			what = append(what, missText(m)+" had no recorded answer"+missWhyText(m, skippedOf))
+			what = append(what, missText(m)+" had no recorded answer"+missWhyText(m, skippedOf, report))
 		}
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
@@ -2324,14 +2344,19 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	}
 	head := "keploy: " + strings.Join(what, "; ") + "."
 	if whys := missWhys(ev.Misses, before, most); len(whys) > 0 {
-		// The full round's reasons, one line each, before what to do: they
-		// are what tells an intended change from a flaky one.
-		head += "\n" + strings.Join(whys, "\n") + "\n"
-	} else {
-		head += " "
+		// The learn step's reasons, one line each: they are what tells an
+		// intended change from a flaky one.
+		head += "\n" + strings.Join(whys, "\n")
 	}
-	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, id, shellQuote(id)))
+	// The learn step's next steps can name a keploy command: a build that
+	// needs more to run it adds that here (RunnableText).
+	if report == "" {
+		return RunnableText(head)
+	}
+	if strings.Contains(head, "\n") {
+		return RunnableText(head + "\nDetails: " + report)
+	}
+	return RunnableText(head + " Details: " + report)
 }
 
 // missWhys are, for a failed test's reason, why its calls missed, in the
@@ -2369,19 +2394,6 @@ func missWhys(misses []models.UnmatchedCall, before func(models.UnmatchedCall) b
 		out = append(out, fmt.Sprintf("and %d more call(s) missed for a reason keploy record's full round gave", more))
 	}
 	return out
-}
-
-// shellQuote quotes s for a POSIX shell unless it is made of characters a
-// shell reads as one plain word.
-func shellQuote(s string) string {
-	plain := s != "" && !strings.ContainsFunc(s, func(r rune) bool {
-		return !(r == '/' || r == ':' || r == '.' || r == '_' || r == '-' || r == '+' || r == '=' || r == ',' || r == '@' ||
-			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
-	})
-	if plain {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // extraCallText says one call a test made more often than it recorded: how
@@ -2447,6 +2459,10 @@ func missText(m models.UnmatchedCall) string {
 	return s
 }
 
+// maxDiffersInline is how many differing fields a miss's reason names when
+// the run's report, which names every one, is named after it (Details:).
+const maxDiffersInline = 25
+
 // missWhyText is what a reason says after a miss's call: the fields it
 // differs in (missDiffersText), and, for a call one past a skipped test's
 // read that already answered one (models.RepeatNote.SkippedRead), that
@@ -2454,8 +2470,8 @@ func missText(m models.UnmatchedCall) string {
 // keploy mock replay moves such a read to the worker scope for the replay,
 // where it answers as many calls as its test recorded it: the call past
 // that is the test's own miss, and the line says which read it is past.
-func missWhyText(m models.UnmatchedCall, skippedOf map[string]string) string {
-	t := missDiffersText(m)
+func missWhyText(m models.UnmatchedCall, skippedOf map[string]string, report string) string {
+	t := missDiffersText(m, report)
 	if m.Repeat == nil || !m.Repeat.SkippedRead {
 		return t
 	}
@@ -2471,8 +2487,8 @@ func missWhyText(m models.UnmatchedCall, skippedOf map[string]string) string {
 // its own (models.UnmatchedCall.FieldReasons: a learned read of the
 // application's clock the call does not carry): " (body.since differs:
 // body.since was learned as ...)". Neither names a value.
-func missDiffersText(m models.UnmatchedCall) string {
-	t := differsText(models.FieldShapes(m.Differs))
+func missDiffersText(m models.UnmatchedCall, report string) string {
+	t := differsText(models.FieldShapes(m.Differs), report)
 	var whys []string
 	for _, r := range models.FieldReasonShapes(m.FieldReasons) {
 		whys = append(whys, r.Why)
@@ -2486,20 +2502,23 @@ func missDiffersText(m models.UnmatchedCall) string {
 	return strings.TrimSuffix(t, ")") + ": " + strings.Join(whys, "; ") + ")"
 }
 
-// differsText names, for a miss's reason, the fields in which the call
+// differsText names, for a miss's reason, every field in which the call
 // differed from its closest recording: " (body.amount differs)", " (host and
-// header.accept differ)", " (a, b, c and 2 more differ)"; "" for none.
-func differsText(fields []string) string {
-	const most = 3
+// header.accept differ)", " (a, b, c and d differ)"; "" for none. None is
+// left out: when two changes are in one call, the one left out could be the
+// one that matters. A call that differs in more than maxDiffersInline
+// fields, of a run whose report is named, names that many and how many more
+// the report has, so the line stays bounded.
+func differsText(fields []string, report string) string {
 	switch n := len(fields); {
+	case report != "" && n > maxDiffersInline:
+		return fmt.Sprintf(" (%s and %d more differ; all in Details)", strings.Join(fields[:maxDiffersInline], ", "), n-maxDiffersInline)
 	case n == 0:
 		return ""
 	case n == 1:
 		return " (" + fields[0] + " differs)"
-	case n <= most:
-		return " (" + strings.Join(fields[:n-1], ", ") + " and " + fields[n-1] + " differ)"
 	default:
-		return fmt.Sprintf(" (%s and %d more differ)", strings.Join(fields[:most], ", "), n-most)
+		return " (" + strings.Join(fields[:n-1], ", ") + " and " + fields[n-1] + " differ)"
 	}
 }
 

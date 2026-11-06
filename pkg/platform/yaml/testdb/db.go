@@ -894,7 +894,7 @@ func (ts *TestYaml) encodeTestCase(tc *models.TestCase, name string) (encodedTes
 func (ts *TestYaml) writeEncoded(writer *bufio.Writer, enc encodedTestCase) error {
 	// Version comment is a YAML-only concept (JSON has no comment syntax).
 	if ts.Format == yaml.FormatYAML {
-		if version := utils.GetVersionAsComment(); version != "" {
+		if version := utils.FileHead(utils.TestCaseAbout); version != "" {
 			if _, err := writer.WriteString(version); err != nil {
 				return fmt.Errorf("failed to write version comment: %w", err)
 			}

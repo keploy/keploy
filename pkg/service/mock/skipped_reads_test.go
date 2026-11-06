@@ -20,7 +20,7 @@ type gatedInstr struct {
 	skip map[string]string
 }
 
-func (g *gatedInstr) PushScopeSkips(_ context.Context, skip map[string]string, _ map[string][]models.ScopeNeed) error {
+func (g *gatedInstr) PushScopeSkips(_ context.Context, skip map[string]string, _ map[string][]models.ScopeNeed, _ string) error {
 	g.skip = skip
 	return nil
 }

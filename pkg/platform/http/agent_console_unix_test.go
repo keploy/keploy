@@ -6,10 +6,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	keployLog "go.keploy.io/server/v3/utils/log"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -76,5 +78,53 @@ func TestStartWithConsoleReportsAFailedStart(t *testing.T) {
 	cmd := exec.Command("/nonexistent/keploy-agent")
 	if console, err := startWithConsole(cmd, (*exec.Cmd).Start); err == nil || console != nil {
 		t.Fatalf("startWithConsole = %v, %v; want the start's error", console, err)
+	}
+}
+
+// TestStartWithConsoleSplitsTheAgentsLinesUnderARunLog: under keploy mock
+// replay's run log, the agent's info line goes to keploy.log and its warning
+// to the console, each cut, its last unended line too.
+func TestStartWithConsoleSplitsTheAgentsLinesUnderARunLog(t *testing.T) {
+	keployLog.SetRedactor(agentCutter{})
+	t.Cleanup(func() { keployLog.SetRedactor(nil) })
+	runLog, err := os.Create(filepath.Join(t.TempDir(), "keploy.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = runLog.Close() }()
+	_, undo := keployLog.RouteToRunLog(zap.NewNop(), runLog, true)
+	defer undo()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = w, w
+	defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
+	cmd := exec.Command("sh", "-c", `printf 'agent\tINFO\tproxy %s\nagent\tWARN\tslow %s\nlast %s' '`+plantedAgentValue+`' '`+plantedAgentValue+`' '`+plantedAgentValue+`'`)
+	console, err := startWithConsole(cmd, (*exec.Cmd).Start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	console.Exited()
+	os.Stdout, os.Stderr = oldOut, oldErr
+	_ = w.Close()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "agent\tWARN\tslow ***\nlast ***\n"; string(got) != want {
+		t.Fatalf("keploy's console got %q, want %q", got, want)
+	}
+	logged, err := os.ReadFile(runLog.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "agent\tINFO\tproxy ***\n"; string(logged) != want {
+		t.Fatalf("the run log got %q, want %q", logged, want)
 	}
 }
