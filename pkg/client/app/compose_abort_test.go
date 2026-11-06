@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -872,7 +873,7 @@ func watchAnUp(t *testing.T, a *App) {
 // error the watch reads as keploy's client cannot connect.
 func realConnectionFailure(t *testing.T) error {
 	t.Helper()
-	cli, err := client.NewClientWithOpts(client.WithHost("unix://" + filepath.Join(t.TempDir(), "docker.sock")))
+	cli, err := client.NewClientWithOpts(client.WithHost("unix://" + filepath.Join(testnet.SocketDir(t), "docker.sock")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -900,10 +901,10 @@ func TestAnAbortWatchOnADaemonKeployCannotReachLetsTheUpStart(t *testing.T) {
 		sock func(t *testing.T) string
 	}{
 		{name: "no socket at DOCKER_HOST", sock: func(t *testing.T) string {
-			return filepath.Join(t.TempDir(), "docker.sock")
+			return filepath.Join(testnet.SocketDir(t), "docker.sock")
 		}},
 		{name: "a socket nobody listens on", sock: func(t *testing.T) string {
-			p := filepath.Join(t.TempDir(), "docker.sock")
+			p := filepath.Join(testnet.SocketDir(t), "docker.sock")
 			l, err := net.Listen("unix", p)
 			if err != nil {
 				t.Fatal(err)
@@ -916,7 +917,7 @@ func TestAnAbortWatchOnADaemonKeployCannotReachLetsTheUpStart(t *testing.T) {
 			if os.Geteuid() == 0 {
 				t.Skip("root opens any socket")
 			}
-			p := filepath.Join(t.TempDir(), "docker.sock")
+			p := filepath.Join(testnet.SocketDir(t), "docker.sock")
 			l, err := net.Listen("unix", p)
 			if err != nil {
 				t.Fatal(err)

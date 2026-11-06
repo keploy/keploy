@@ -41,6 +41,9 @@
 // of a test, so a socket the code under test dropped stays open until the
 // test looks. It works on every platform.
 //
+// SocketDir gives a test a directory for its unix sockets outside its
+// t.TempDir, whose path can be too long for a socket's.
+//
 // The package is for tests only: nothing outside a _test.go file imports it.
 package testnet
 

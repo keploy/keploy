@@ -121,15 +121,6 @@ func fakeDockerForStartInDocker(t *testing.T) string {
 	return calls
 }
 
-// noDaemonHost is the engine API's socket in fakeEngineForStartInDocker: a
-// socket nobody can serve, as nothing can be made under /dev/null, which is
-// not a directory. It is not one in the test's temporary directory: a unix
-// socket's path holds at most 107 bytes, and that directory's grows with
-// GOTMPDIR (or TMPDIR) and the test's name. Past that bound the engine API's
-// client refused the path itself, startInDocker returned before its `docker
-// run`, and a row waiting for that `docker run` waited out its bound.
-const noDaemonHost = "unix:///dev/null/no-daemon.sock"
-
 // fakeEngineForStartInDocker is fakeDockerForStartInDocker's engine, with
 // docker the given script, in dir.
 func fakeEngineForStartInDocker(t *testing.T, dir, docker string) {
