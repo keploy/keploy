@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -57,12 +58,21 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 	go func() {
 		defer utils.Recover(m.logger)
 		defer close(c.done)
+		leftOut := 0
 		for tc := range incoming {
 			seen.Add(1)
 			if err := m.hooks.BeforeTestCaseInsert(persistCtx, &rec.TestCaseContext{TestCase: tc, TestSetID: name}); err != nil {
 				m.logger.Debug("BeforeTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
 			}
 			if err := m.testDB.InsertTestCase(persistCtx, tc, name, true); err != nil {
+				if errors.Is(err, models.ErrTestCaseEncode) {
+					// THIS case's body, not the storage: the store said so at
+					// ERROR, and the next case may be fine. Left out and
+					// counted, as Record drops an unencodable mock.
+					leftOut++
+					c.handled.Add(1)
+					continue
+				}
 				// Not in the recording: counted, and the run then ends as one
 				// that is not saved (Record, after closeStore).
 				utils.LogError(m.logger, err, "failed to persist test case", zap.String("case", tc.Name))
@@ -77,6 +87,11 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 			}
 			c.add(tc)
 			c.handled.Add(1)
+		}
+		if leftOut > 0 {
+			m.logger.Warn("test cases left out of the recording: their bodies cannot be stored in this format, and each is said above",
+				zap.Int("testCasesLeftOut", leftOut),
+				zap.String("next_step", "set storageFormat to yaml and record them again; the yaml encoder stores binary bodies as !!binary without loss"))
 		}
 	}()
 	return c

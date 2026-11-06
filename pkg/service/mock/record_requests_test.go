@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
@@ -794,6 +795,88 @@ func TestRecordRequests_ATestCaseTheStoreRefusedEndsAsARecordingNotSaved(t *test
 			require.Equal(t, 1, logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessage(said).Len(), "the recording not saved was not said at ERROR")
 		})
 	}
+}
+
+// binaryCaseAt is a test case with a response body the json format cannot hold.
+func binaryCaseAt(at time.Time) *models.TestCase {
+	tc := caseAt("", at)
+	tc.HTTPResp.Body = "\x08\x96\x01\xff\xfeproto"
+	return tc
+}
+
+// recordJSONCases records cases through keploy mock record --record-requests
+// into db, returning its logs, the folder it wrote and Record's error.
+func recordJSONCases(t *testing.T, db func(dir string) TestDB, cases ...*models.TestCase) (*observer.ObservedLogs, string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr.incoming = cases
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = dir
+	withRequests(cfg)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	core, logs := observer.New(zapcore.InfoLevel)
+	svc := New(zap.New(core), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	svc.(TestDBSetter).SetTestDB(db(dir))
+	return logs, dir, svc.Record(context.Background())
+}
+
+func jsonStore(dir string) TestDB { return testdb.NewWithFormat(zap.NewNop(), dir, yaml.FormatJSON) }
+
+// One test case whose body the storage format cannot hold is left out and
+// counted; the run is saved, with the others. It says nothing about the disk,
+// so the run is not ended as one the store failed: the rule for an unencodable
+// mock in the same run.
+func TestRecordRequests_ATestCaseItsFormatCannotHoldIsLeftOutAndCounted(t *testing.T) {
+	logs, dir, err := recordJSONCases(t, jsonStore,
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(15*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(25*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)))
+	require.NoError(t, err)
+	require.Zero(t, utils.ErrCode)
+	files, err := filepath.Glob(filepath.Join(dir, "set", "tests", "*.json"))
+	require.NoError(t, err)
+	require.Len(t, files, 2, "the text test cases are kept, the binary ones left out")
+	said := logs.FilterMessageSnippet("test cases left out of the recording").All()
+	require.Len(t, said, 1)
+	require.EqualValues(t, 2, said[0].ContextMap()["testCasesLeftOut"])
+}
+
+// The line is for a run that left test cases out.
+func TestRecordRequests_NothingLeftOutSaysNothingOfIt(t *testing.T) {
+	logs, _, err := recordJSONCases(t, jsonStore, caseAt("", runnerT0.Add(5*time.Millisecond)))
+	require.NoError(t, err)
+	require.Zero(t, logs.FilterMessageSnippet("test cases left out of the recording").Len())
+}
+
+// failsThirdTestDB is the real JSON store, whose disk fails the third test case
+// it is handed.
+type failsThirdTestDB struct {
+	*testdb.TestYaml
+	calls int
+}
+
+func (d *failsThirdTestDB) InsertTestCase(ctx context.Context, tc *models.TestCase, set string, enableLog bool) error {
+	if d.calls++; d.calls == 3 {
+		return errors.New("write the test case: no space left on device")
+	}
+	return d.TestYaml.InsertTestCase(ctx, tc, set, enableLog)
+}
+
+// A test case left out was dealt with, so it counts among those handled, and
+// it does not hide a real store failure beside it: that still ends the run as
+// not saved.
+func TestRecordRequests_ACaseLeftOutCountsAsHandled(t *testing.T) {
+	_, _, err := recordJSONCases(t, func(dir string) TestDB {
+		return &failsThirdTestDB{TestYaml: testdb.NewWithFormat(zap.NewNop(), dir, yaml.FormatJSON)}
+	},
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(15*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)))
+	require.ErrorContains(t, err, "1 of the 3 test cases handed to the test-case store were not written")
 }
 
 // refusesTwoTestDB is the real test-case store, whose disk refuses the first

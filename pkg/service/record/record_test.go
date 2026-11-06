@@ -491,6 +491,9 @@ type recTestDB struct {
 	// failNames fails only the named test cases, so a recording can
 	// persist some and lose others. Same construction-time rule.
 	failNames map[string]bool
+	// refuseNames refuses only the named test cases for their own payload, as
+	// the store refuses a body its format cannot hold.
+	refuseNames map[string]bool
 }
 
 func (d *recTestDB) GetAllTestSetIDs(context.Context) ([]string, error) { return nil, nil }
@@ -500,6 +503,9 @@ func (d *recTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ str
 	}
 	if d.failNames[tc.Name] {
 		return errors.New("no space left on device")
+	}
+	if d.refuseNames[tc.Name] {
+		return fmt.Errorf("%w: testdb: the response body is not valid UTF-8", models.ErrTestCaseEncode)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -647,6 +647,43 @@ func TestStart_NeverSentMockIsCountedAtTheStreamsEnd(t *testing.T) {
 	assert.Equal(t, lossNextStep(reasonEnded), lost[0].ContextMap()["next_step"])
 }
 
+// TestStart_ATestCaseTheStoreCannotHoldIsSkippedAndCounted: a test case refused
+// for its own body says nothing about the next one, so it costs the recording
+// that one test case, and the count is said when the recording ends. One binary
+// body must not end a recording, as one unencodable mock does not.
+func TestStart_ATestCaseTheStoreCannotHoldIsSkippedAndCounted(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}}, BaseRecordHooks{}, zap.New(core), func(r *Recorder) {
+		r.testDB.(*recTestDB).refuseNames = map[string]bool{"binary-1": true, "binary-2": true}
+	})
+	for _, name := range []string{"binary-1", "binary-2"} {
+		select {
+		case run.f.incoming <- &models.TestCase{Name: name, Kind: models.HTTP}:
+		case <-time.After(hangGuard):
+			t.Fatalf("recorder never consumed %s", name)
+		}
+	}
+	run.test(t, "test-3")
+	run.stop(t)
+
+	run.testDB.mu.Lock()
+	defer run.testDB.mu.Unlock()
+	assert.Equal(t, []string{"test-3"}, run.testDB.inserted)
+	said := logs.FilterMessageSnippet("recording finished without the test cases the store refused").All()
+	require.Len(t, said, 1)
+	assert.EqualValues(t, 2, said[0].ContextMap()["testCasesRefused"])
+}
+
+// TestStart_ARecordingWithNothingRefusedSaysNothingOfIt: the line is for a
+// recording that lost test cases.
+func TestStart_ARecordingWithNothingRefusedSaysNothingOfIt(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}}, BaseRecordHooks{}, zap.New(core))
+	run.test(t, "test-1")
+	run.stop(t)
+	assert.Zero(t, logs.FilterMessageSnippet("recording finished without the test cases the store refused").Len())
+}
+
 // armedClock is a ManualClock that says when a drain arms a look.
 type armedClock struct {
 	stall.ManualClock
