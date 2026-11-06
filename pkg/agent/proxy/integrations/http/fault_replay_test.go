@@ -120,9 +120,12 @@ func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 	const chunkedHead = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
 	// An event stream the upstream cut inside its second event: its client
 	// dispatched the first event alone. Its frames read back with both
-	// events ended, so replay sends the bytes the upstream sent.
+	// events ended, so replay sends the bytes the upstream sent. One reset
+	// after its second event ended: its frames read back 2 bytes short (no
+	// space after a field's ':'), and replay sends the bytes it sent.
 	const sseHead = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 40\r\n\r\n"
 	const sseCut = "data: a\n\ndata: b"
+	const sseEnded = "data: a\n\ndata: b\n\n"
 	for _, tc := range []struct {
 		name   string
 		record func(t *testing.T, c *relayedConn) seen
@@ -195,6 +198,27 @@ func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 			sent := make([]byte, len(sseHead+sseCut))
 			if _, err := io.ReadFull(app, sent); err != nil {
 				t.Fatalf("the application read %q, %v; want the head and %d body bytes before the reset", sent, err, len(sseCut))
+			}
+			s := seenAt(t, app)
+			s.got = headersInOrder(string(sent) + s.got)
+			return s
+		},
+	}, {
+		name: "an event stream reset after its second event",
+		record: func(t *testing.T, c *relayedConn) seen {
+			write(t, c.dest, c.dst, sseHead+sseEnded)
+			relayed(t, c.app, sseHead+sseEnded)
+			resetConn(t, c.dest)
+			<-c.relayDone
+			_ = c.src.Close()
+			s := seenAt(t, c.app)
+			s.got = headersInOrder(sseHead + sseEnded + s.got)
+			return s
+		},
+		app: func(t *testing.T, app net.Conn) seen {
+			sent := make([]byte, len(sseHead+sseEnded))
+			if _, err := io.ReadFull(app, sent); err != nil {
+				t.Fatalf("the application read %q, %v; want the head and %d body bytes before the reset", sent, err, len(sseEnded))
 			}
 			s := seenAt(t, app)
 			s.got = headersInOrder(string(sent) + s.got)

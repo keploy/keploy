@@ -260,6 +260,17 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 		// Content-Length (Go's JSON written with no Content-Type), is one
 		// document, kept whole, and replayed as one (recordedFramesOf).
 		format := recordedFramesOf(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type"))
+		if format == HTTPStreamSSE && !sseEndsItsLastEvent(resp.Body) {
+			// An SSE stream that ended inside its last event, before the
+			// blank line that ends it, is kept as its bytes. Its frames would
+			// read back with that event ended (streamChunksToLegacyBody), and
+			// replay would send an event its client never dispatched at
+			// record: a close-delimited body the upstream closed mid-event,
+			// or a server that never ended its last event. Kept so, replay
+			// sends the bytes as recorded, and the client drops the
+			// unfinished event as it did.
+			return nil, false
+		}
 		if chunks := splitStreamBody(format, resp.Body, resp.Timestamp); len(chunks) > 0 {
 			return chunks, true
 		}
@@ -523,9 +534,11 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 			// last event on replay (an LLM stream's "data: [DONE]"). A frame
 			// never ends in a blank line of its own (every line carries its
 			// field's name or the comment's ':'), so this is the one blank
-			// line. The frames keep no word of whether the recorded stream
-			// ended inside its last event, so one that did reads back with
-			// that event ended.
+			// line. A recording keeps a stream that ended inside its last
+			// event as its bytes, never as frames (streamChunksForYAML), so
+			// frames are of a stream that ended its last event. Frames an
+			// earlier keploy kept of one that did not carry no word of it,
+			// and read back with that event ended.
 			body += "\n\n"
 		}
 		return body
@@ -552,6 +565,17 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 		}
 		return body
 	}
+}
+
+// sseEndsItsLastEvent reports whether an SSE body ends in a blank line: two
+// line ends in a row, each "\r\n", "\n" or "\r" as the WHATWG event-stream
+// parse reads them ("\r\n\r\n", "\n\r", "\r\r" too). A client dispatches an
+// event at the blank line that ends it, and drops the one a stream ends
+// inside. Only the line ends the body ends in are read: no "\r\n" spans the
+// last other byte and them.
+func sseEndsItsLastEvent(body string) bool {
+	ends := body[len(strings.TrimRight(body, "\r\n")):]
+	return len(normalizeModelLineEndings(ends)) >= 2
 }
 
 // appendSSEFieldLines appends an SSE field's lines to lines: prefix (its

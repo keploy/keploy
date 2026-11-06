@@ -82,12 +82,11 @@ type HTTPSchema struct {
 // fault that sends the head (Fault.SendsHead) has replay send BodyBytes of the
 // body as the upstream sent them, so that body is written as those bytes and
 // never as a stream's frames. A stream's frames do not keep its bytes: an SSE
-// field's space after its ':' and its line ends are not kept, and its last
-// event reads back ended, so an event the upstream cut short, which its
-// client never dispatched at record, would be served whole. A body already
-// held as frames (read back from them: StreamBody) stays frames, never
-// rewritten as the bytes they read back as, and replay refuses its fault
-// (faultHead).
+// field's space after its ':' and its line ends are not kept, so the first
+// BodyBytes of the body they read back as are not the bytes the client read
+// at record. A body already held as frames (read back from them: StreamBody)
+// stays frames, never rewritten as the bytes they read back as, and replay
+// refuses its fault (faultHead).
 func (s HTTPSchema) MarshalYAML() (interface{}, error) {
 	type plain HTTPSchema // no MarshalYAML of its own: s's fields as tagged
 	if s.Fault != nil && s.Fault.SendsHead() {

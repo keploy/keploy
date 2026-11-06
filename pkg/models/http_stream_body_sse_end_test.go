@@ -101,6 +101,24 @@ func TestAnSSEStreamReadsBackWithItsLastEventEnded(t *testing.T) {
 			events: []string{"a", "b"},
 			want:   "data:a\n\ndata:b\n\n",
 		},
+		{
+			name:   "a blank line of a CR alone",
+			body:   "data: a\r\rdata: b\r\r",
+			events: []string{"a", "b"},
+			want:   "data:a\n\ndata:b\n\n",
+		},
+		{
+			name:   "mixed line ends",
+			body:   "data: a\r\n\ndata: b\n\r\n",
+			events: []string{"a", "b"},
+			want:   "data:a\n\ndata:b\n\n",
+		},
+		{
+			name:   "a blank line of a CR alone after a CRLF",
+			body:   "data: a\n\ndata: b\r\n\r",
+			events: []string{"a", "b"},
+			want:   "data:a\n\ndata:b\n\n",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			require.Equal(t, c.events, sseEventsDispatched(c.body), "the row's recorded stream")
@@ -114,16 +132,43 @@ func TestAnSSEStreamReadsBackWithItsLastEventEnded(t *testing.T) {
 	}
 }
 
-// A recording keeps no word of whether its stream ended inside its last
-// event: one cut before that event's blank line reads back with the event
-// ended, as a stream that ended it does. Today's limit, written down: the
-// replay sends one event more than the recorded stream's client dispatched.
-func TestAnSSEStreamCutInsideItsLastEventReadsBackWithItEnded(t *testing.T) {
-	cut := "data: a\n\ndata: b"
-	require.Equal(t, []string{"a"}, sseEventsDispatched(cut))
-	got := sseReadBack(t, cut)
-	assert.Equal(t, "data:a\n\ndata:b\n\n", got.Body)
-	assert.Equal(t, []string{"a", "b"}, sseEventsDispatched(got.Body))
+// A stream that ended inside its last event, before its blank line, is kept
+// as its bytes, never as frames, and reads back as recorded: its client
+// dropped the unfinished event at record, and drops it on replay. Its frames
+// would read back with that event ended, one event more than the client
+// dispatched (an LLM stream cut before its "data: [DONE]" ended). It stays
+// its bytes when written again.
+func TestAnSSEStreamCutInsideItsLastEventIsKeptAsItsBytes(t *testing.T) {
+	for _, c := range []struct {
+		name, wire string
+	}{
+		{"cut inside a field", "data: a\n\ndata: b"},
+		{"cut after a field's line", "data: a\n\ndata: b\n"},
+		{"cut before the blank line of its last event", "data: a\n\ndata: [DONE]"},
+		{"cut after a CRLF", "data: a\r\n\r\ndata: b\r\n"},
+		{"cut after a CR", "data: a\r\rdata: b\r"},
+		{"cut inside a comment", "data: a\n\n: keep"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, []string{"a"}, sseEventsDispatched(c.wire), "the row's recorded stream")
+			resp := HTTPResp{
+				StatusCode: 200,
+				Header:     map[string]string{"Content-Type": "text/event-stream"},
+				Body:       c.wire,
+				Timestamp:  time.Unix(1700000000, 0).UTC(),
+			}
+			out, err := yamlLib.Marshal(resp)
+			require.NoError(t, err)
+			var got HTTPResp
+			require.NoError(t, yamlLib.Unmarshal(out, &got))
+			assert.Empty(t, got.StreamBody, "a stream cut inside its last event was kept as frames:\n%s", out)
+			assert.Equal(t, c.wire, got.Body, "the body a mock replays")
+			assert.Equal(t, []string{"a"}, sseEventsDispatched(got.Body), "the events a client dispatches on replay")
+			again := throughYAML(t, got)
+			assert.Empty(t, again.StreamBody, "written again, it was kept as frames")
+			assert.Equal(t, c.wire, again.Body, "written again")
+		})
+	}
 }
 
 // Frames that carry no line (no field with a name, no comment) are no event:
