@@ -111,6 +111,16 @@ type ComposeAgentFailureReader interface {
 	ComposeAgentFailure() error
 }
 
+// ComposeEndReader is an optional Instrumentation extension for a docker
+// compose recording: what ended the project when the test command's own end
+// does not stand. Compose can report 0 for a test command it never started
+// (another of the project's services ended the project first), and that 0 is
+// no verdict: nothing ran to be recorded. appExit is the test command's exit
+// as keploy got it. nil when its own end stands. AgentClient implements it.
+type ComposeEndReader interface {
+	ComposeEndAfterReady(appExit int) error
+}
+
 // ScopePusher is an optional Instrumentation extension: Replay uses it to hand
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.

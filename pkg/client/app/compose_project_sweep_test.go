@@ -69,6 +69,12 @@ done
 for a in "$@"; do
   if [ "$a" = "ps" ]; then
     if [ "` + hang + `" = "1" ]; then while : ; do sleep 1; done; fi
+    # KEPLOY_STUB_PS_CODE: ps fails with this code, as it does on a file that
+    # needs a variable only the up's own command gave.
+    if [ -n "${KEPLOY_STUB_PS_CODE:-}" ]; then
+      echo 'required variable TAG is missing a value' >&2
+      exit "$KEPLOY_STUB_PS_CODE"
+    fi
     cat "` + errFile + `" >&2
     cat "` + psFile + `"
     exit 0

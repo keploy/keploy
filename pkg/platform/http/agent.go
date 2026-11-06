@@ -3944,9 +3944,10 @@ func (a *AgentClient) composeAgentFailure(stopped app.StoppedAgent) error {
 // as keploy's own failure; or the project stopping before compose ever
 // started the app, though compose reported 0, as the project's failure, not
 // a clean end. nil when the app's own end stands. keploy record asks it once
-// its recording is under way; appExit is the app's exit as keploy got it,
-// which stands in for the app's container when docker could not say how that
-// ended (StoppedAgent.AgentDiedAfterReady).
+// its recording is under way, and keploy mock record once its test command
+// has ended; appExit is the app's exit as keploy got it, which stands in for
+// the app's container when docker could not say how that ended
+// (StoppedAgent.AgentDiedAfterReady).
 func (a *AgentClient) ComposeEndAfterReady(appExit int) error {
 	ap, err := a.getApp()
 	if err != nil {
@@ -3969,9 +3970,10 @@ func composeEndAfterReady(stopped app.StoppedAgent, appExit int) error {
 		}
 		return fmt.Errorf("the keploy agent stopped while the app was running: %w", exit)
 	}
-	// Compose reports 0 for an app it never started, in a race (see
-	// App.run): another of the project's services failed first, and nothing
-	// ran to be recorded.
+	// Compose can report 0 for an app it never started. App.run retries such
+	// an up when a dependency's crash explains it (composeAbortReportedZero),
+	// and what comes here is one it does not: another of the project's
+	// services ended it, and nothing ran to be recorded.
 	if appExit == 0 && stopped.AppNeverStarted() {
 		return errors.New("compose never started the app (another of the project's services ended it), though it reported 0")
 	}

@@ -681,7 +681,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			// Not the user: the agent died under the test command, which is
 			// why it ended its stream early. Say why, as a run that did not
 			// finish does.
-			if cause := m.runFailure(ctx); cause != nil {
+			if cause := m.runFailure(ctx, appErr); cause != nil {
 				err = fmt.Errorf("%s: %w", stopReason, cause)
 			}
 		}
@@ -742,7 +742,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	// errgroup; under compose the agent is a service in the project, its death
 	// stops the project -- test command included, whose exit is then compose's
 	// stop and not its verdict -- and only the agent's container says so.
-	if cause := m.runFailure(ctx); cause != nil {
+	// Under compose the test command may also never have run, whatever
+	// compose reported: its container says so, and nothing was recorded.
+	if cause := m.runFailure(ctx, appErr); cause != nil {
 		if derr := m.mockDB.DiscardStagedSet(storeCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete recording", zap.String("staging", staging), zap.Error(derr))
 		}
@@ -2005,11 +2007,16 @@ func armGivenUp() {
 	utils.SetExitCodeOnce(code)
 }
 
-// runFailure is why a run the user did not stop ended: the agent's container
-// says so under compose; natively its death fails the run's own errgroup
-// (ctx). nil: nothing failed.
-func (m *mockService) runFailure(ctx context.Context) error {
+// runFailure is why a run the user did not stop ended, or nil when nothing
+// failed. Under compose the agent's container says when the agent stopped the
+// project, and the test command's when compose never started it, whatever
+// compose reported (appErr). Natively the agent's death fails the run's own
+// errgroup (ctx).
+func (m *mockService) runFailure(ctx context.Context, appErr models.AppError) error {
 	if cause := m.composeAgentFailure(); cause != nil {
+		return cause
+	}
+	if cause := m.composeEnd(appErr.ExitCode); cause != nil {
 		return cause
 	}
 	if ctx.Err() != nil {

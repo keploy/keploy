@@ -34,7 +34,10 @@
 #      container is only created, so the agent keploy sets up again is the
 #      one the app runs against from its start. The set must be judged, and
 #      pass, with no test charged agent_started_again (that kind is for an
-#      agent started again while the application ran on).
+#      agent started again while the application ran on);
+#   7. record, a file that needs a variable only the up's own command gives
+#      (--env-file): `docker compose ps` cannot load it, so every ps fails, and
+#      the retry's decision must come from the daemon.
 #
 # Env: RECORD_BIN and REPLAY_BIN (the keploy binaries under test). The agent
 # image must be loaded as ghcr.io/keploy/keploy:v3-dev
@@ -253,6 +256,17 @@ if [ "$FAIL" -ne "$before" ]; then
 else
   echo "ok: replay-proven: $how; $summary; test-set-0 $status, none charged agent_started_again"
 fi
+
+# 7. The dependency crashes on a project `docker compose ps` cannot load: the
+# file needs a variable only this up's --env-file gives. The ps of a compose
+# that loads it after all would prove nothing here.
+# shellcheck disable=SC2016 # the variable is compose's, in the file
+sed 's/image: python:3.11-slim/image: python:${PY_TAG:?}/' docker-compose.yml > needs-var.yml
+echo 'PY_TAG=3.11-slim' > needs-var.env
+if docker compose -f needs-var.yml ps >/dev/null 2>&1; then
+  fail "needs-var: docker compose ps loaded a file whose variable it was not given"
+fi
+record needs-var "docker compose -f needs-var.yml --env-file needs-var.env up"
 
 if [ "$FAIL" -ne 0 ]; then
   echo "compose-dep-retry e2e: FAILED"
