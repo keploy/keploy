@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -264,6 +265,7 @@ func (missParser) MatchType(context.Context, []byte) bool { return true }
 func (missParser) RecordOutgoing(context.Context, *integrations.RecordSession) error {
 	return nil
 }
+func (missParser) MockNoise() mocknoise.Adapter { return nil }
 func (missParser) MockOutgoing(context.Context, net.Conn, *models.ConditionalDstCfg, integrations.MockMemDb, models.OutgoingOptions) error {
 	return models.NewMockMismatchError(models.ErrNoMockMatched, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /parsed"})
 }
