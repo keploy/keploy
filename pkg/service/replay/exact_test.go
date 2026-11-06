@@ -596,9 +596,21 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: make(chan []models.MockState)}}
 		consumed := map[string]models.MockState{"w-1": {}, "w-2": {}}
 		// The shutdown's call is not waited for: the application makes it
-		// only once it is stopped.
-		if missing := <-run(r, context.Background(), plan(), consumed); missing != nil {
-			t.Fatalf("reported %v with every call made", missing)
+		// only once it is stopped. A wait that takes a wake-up waits for it,
+		// and is ended before the row fails: left running, it would take the
+		// next case's wake-ups.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := run(r, ctx, plan(), consumed)
+		select {
+		case wakes <- time.Time{}:
+			cancel()
+			<-done
+			t.Fatal("the wait took a wake-up with every call but the shutdown's made: it waits for a call the application makes only once it is stopped")
+		case missing := <-done:
+			if missing != nil {
+				t.Fatalf("reported %v with every call made", missing)
+			}
 		}
 	})
 	t.Run("a read fails", func(t *testing.T) {
