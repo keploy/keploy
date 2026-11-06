@@ -274,9 +274,11 @@ func TestAJSONRewriteNamesTheHandFieldsItDrops(t *testing.T) {
 
 // A writer outside this package (enterprise's judged mark) rewrites the
 // file with EncodeOverF as keploy's own writers do, whatever the switch: a
-// YAML file keeps a person's comment and field, its keploy line brought up
-// to this keploy, and says the comment it could not place; a JSON file
-// names the field it drops. A file no person edited says nothing.
+// YAML file keeps a person's comment and field, and its head when that
+// holds a person's comment, keploy's line brought up to this keploy, and
+// says the comment it could not place; a head of keploy's line alone is
+// left out, as MarkRecordedWith leaves it. A JSON file names the field it
+// drops. A file no person edited says nothing.
 func TestEncodeOverFWritesAndSaysAsKeploysWriters(t *testing.T) {
 	edited := strings.NewReplacer(
 		"    - id: o::TestA\n", "    # the login test\n    - id: o::TestA\n      owner_team: payments\n",
@@ -286,10 +288,15 @@ func TestEncodeOverFWritesAndSaysAsKeploysWriters(t *testing.T) {
 		var mapping models.Mapping
 		must(t, yamlLib.Unmarshal([]byte(edited), &mapping))
 		mapping.TestCases = mapping.TestCases[:1]
-		core, logs := observer.New(zapcore.WarnLevel)
-		got, err := EncodeOverF(zap.New(core), &mapping, yaml.FormatYAML, []byte(edited), "s")
+		got, err := EncodeOverF(zap.NewNop(), &mapping, yaml.FormatYAML, []byte(edited), "s")
 		must(t, err)
-		if !strings.HasPrefix(string(got), utils.GetVersionAsComment()) || !strings.Contains(string(got), "    # the login test\n    - id: o::TestA\n      owner_team: payments\n") || strings.Contains(string(got), "- id: o::TestB") {
+		if !strings.HasPrefix(string(got), "version: ") {
+			t.Fatalf("EncodeOverF kept a head of keploy's line alone:\n%s", got)
+		}
+		core, logs := observer.New(zapcore.WarnLevel)
+		got, err = EncodeOverF(zap.New(core), &mapping, yaml.FormatYAML, []byte("# a person's note\n"+edited), "s")
+		must(t, err)
+		if !strings.HasPrefix(string(got), "# a person's note\n"+utils.GetVersionAsComment()+"version: ") || !strings.Contains(string(got), "    # the login test\n    - id: o::TestA\n      owner_team: payments\n") || strings.Contains(string(got), "- id: o::TestB") {
 			t.Fatalf("EncodeOverF did not keep the hand edits of the test it keeps:\n%s", got)
 		}
 		if n := droppedSaid(t, logs); n != 1 {
