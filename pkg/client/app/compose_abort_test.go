@@ -266,10 +266,12 @@ type abortedUp struct {
 // abortedUpRun is run() of the compose-dep-retry lane's app on a daemon,
 // with the stand-in docker CLI (stubDockerCLI): the first up runs until the
 // file ended exists (only a kill ends it before), then exits firstUpCode; the
-// retried up exits 0 at once. ran gives run()'s result once it returns.
+// retried up exits 0 at once. ran gives run()'s result once it returns, and
+// stop is the run's stop.
 type abortedUpRun struct {
 	argvLog, ended string
 	ran            chan models.AppError
+	stop           context.CancelFunc
 }
 
 // startAbortedUpRun starts that run() on dc, and returns once its first up
@@ -302,6 +304,7 @@ func startAbortedUpRun(t *testing.T, dc docker.Client, firstUpCode string) abort
 		opts:            models.SetupOptions{Mode: models.MODE_RECORD},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	r.stop = cancel
 	go func() { r.ran <- a.run(ctx) }()
 	t.Cleanup(func() {
 		// The stand-in up waits for this file: one keploy did not end (its
@@ -492,6 +495,8 @@ type flakyDaemon struct {
 	breakFirst chan error
 	asked      chan struct{}
 	reopen     chan struct{}
+	// inspectFails names a container every inspect of which fails.
+	inspectFails string
 
 	fmu                           sync.Mutex
 	failList, failAgent, failInfo bool
@@ -593,6 +598,9 @@ func (d *flakyDaemon) ContainerList(ctx context.Context, o container.ListOptions
 }
 
 func (d *flakyDaemon) ContainerInspect(ctx context.Context, ref string) (container.InspectResponse, error) {
+	if ref == d.inspectFails {
+		return container.InspectResponse{}, errors.New("Error response from daemon: i/o timeout")
+	}
 	if ref == d.agent {
 		d.fmu.Lock()
 		d.agentAsks++
@@ -2428,6 +2436,9 @@ func TestAFailedUpIsReadFromTheDaemonThenFromPs(t *testing.T) {
 		}},
 		{name: "a daemon that refuses the read", wantPs: true, dc: flaky(func(d *flakyDaemon) { d.listErrs = []error{refused} })},
 		{name: "a daemon that keeps failing the read", wantPs: true, dc: flaky(func(d *flakyDaemon) { d.listFails = true })},
+		// The list gives the newest first, so dep's is the read that fails
+		// after the others answered: what they said is no answer.
+		{name: "a daemon that keeps failing one container's read", wantPs: true, dc: flaky(func(d *flakyDaemon) { d.inspectFails = "dep" })},
 		{name: "a daemon keploy cannot connect to", wantPs: true, dc: flaky(func(d *flakyDaemon) {
 			d.listErrs = slices.Repeat([]error{unreachable}, composeAbortUnreachableAsks)
 		})},
@@ -2464,6 +2475,50 @@ func TestAFailedUpIsReadFromTheDaemonThenFromPs(t *testing.T) {
 				t.Fatalf("got the services %v, want the daemon's %v", services, want)
 			}
 		})
+	}
+}
+
+// TestARunStoppedDuringAFailedUpsReadEndsIt: on a daemon that never answers,
+// only the run's stop ends the read of a failed up, so that stop must reach
+// the read: run() returns as a stopped run, and the up is not retried.
+func TestARunStoppedDuringAFailedUpsReadEndsIt(t *testing.T) {
+	d := newAbortDaemon("tmpproj")
+	fd := &flakyDaemon{abortDaemon: d, agent: "keploy-v3-test"}
+	r := startAbortedUpRun(t, fd, "3")
+	fd.fmu.Lock()
+	fd.listNeeds = time.Hour
+	lists := fd.lists
+	fd.fmu.Unlock()
+	// A read the stop did not reach ends here, not with the test binary.
+	t.Cleanup(func() {
+		fd.fmu.Lock()
+		defer fd.fmu.Unlock()
+		fd.listNeeds = 0
+	})
+	d.add(&abortContainer{name: "tmpproj-dep-1", service: "dep", status: "exited", exitCode: 3},
+		&abortContainer{name: "keploy-v3-test", service: keployAgentComposeService, status: "exited"},
+		&abortContainer{name: "runner", service: "runner", status: "created"})
+	if err := os.WriteFile(r.ended, nil, 0o600); err != nil {
+		t.Fatalf("could not end the stand-in up: %v", err)
+	}
+	eventually(t, "the failed up's read is under way", func() bool {
+		fd.fmu.Lock()
+		defer fd.fmu.Unlock()
+		return fd.lists > lists
+	})
+	r.stop()
+	var appErr models.AppError
+	select {
+	case appErr = <-r.ran:
+		r.ran <- appErr
+	case <-time.After(time.Minute):
+		t.Fatalf("run() did not return within a minute of its stop: the failed up's read outlives the run\n%s", recordedLog(t, r.argvLog))
+	}
+	if appErr.AppErrorType != models.ErrCtxCanceled {
+		t.Fatalf("a run stopped during the read reported %+v", appErr)
+	}
+	if log := recordedLog(t, r.argvLog); strings.Contains(log, "UP-RETRIED") {
+		t.Fatalf("a stopped run retried the bring-up\n%s", log)
 	}
 }
 

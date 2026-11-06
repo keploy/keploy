@@ -465,6 +465,51 @@ func TestTheStoppedContainersAreReadUntilTheDaemonAnswers(t *testing.T) {
 	}
 }
 
+// TestTheAppIsReadBesideAnAgentNobodyCouldRead: the app's read does not hang on
+// the agent's. An agent keploy got no answer about says nothing of the app, so
+// an app compose never started is still read as one, and its 0 does not stand.
+func TestTheAppIsReadBesideAnAgentNobodyCouldRead(t *testing.T) {
+	const agent, app = "keploy-v3-test", "runner"
+	busy := errdefs.System(errors.New("Error response from daemon: internal error"))
+	refused := errdefs.Forbidden(errors.New("Error response from daemon: forbidden by the socket proxy"))
+	for mode, opts := range map[string]models.SetupOptions{
+		"keploy record":      {Mode: models.MODE_RECORD},
+		"keploy mock record": {MockMode: true, Mode: models.MODE_RECORD},
+	} {
+		for _, tc := range []struct {
+			name string
+			err  error // what every read of the agent gets; "not found" when nil
+		}{
+			{name: "a daemon that keeps failing the agent's read", err: busy},
+			{name: "a refused read of the agent", err: refused},
+			{name: "an agent's container that is gone"},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				d := &busyStoppedDocker{
+					stoppedAgentDocker: &stoppedAgentDocker{states: map[string]*container.State{
+						app: {Status: "created", StartedAt: "0001-01-01T00:00:00Z"},
+					}},
+					always: map[string]error{agent: tc.err},
+				}
+				a := composeReplayApp(d)
+				a.opts = opts
+				a.readStoppedAgent(context.Background())
+				got, ok := a.StoppedAgent()
+				if !ok {
+					t.Fatal("nothing was read")
+				}
+				if got.Agent != nil {
+					t.Fatalf("the agent read as %+v, want no answer", got.Agent)
+				}
+				if !got.AppNeverStarted() {
+					t.Fatalf("AppNeverStarted() = false (App %+v, asked %d time(s)), want the app read beside the agent", got.App, d.asked(app))
+				}
+			})
+		}
+	}
+}
+
 // TestTheReplayOutcomeIsReadUntilTheDaemonAnswers: no clock decides the account
 // of a replay either. Lost to a slow daemon, a clean replay failed.
 func TestTheReplayOutcomeIsReadUntilTheDaemonAnswers(t *testing.T) {
@@ -517,9 +562,10 @@ func TestTheReplayOutcomeIsReadUntilTheDaemonAnswers(t *testing.T) {
 }
 
 // TestARunInterruptedDuringTheStoppedReadReportsNothing: the read has no end of
-// its own, so the run's stop ends it, at once, and what it had by then is not
-// reported. Half a read is a wrong one: an agent read with no app beside it
-// reads as an agent that failed.
+// its own, so the end of the ctx it is given ends it, at once, and what it had
+// by then is not reported. Half a read is a wrong one: an agent read with no
+// app beside it reads as an agent that failed. In keploy record under compose
+// that ctx ends after the agent's drain, not at the stop itself.
 func TestARunInterruptedDuringTheStoppedReadReportsNothing(t *testing.T) {
 	for _, tc := range []struct{ name, stall string }{
 		{"on the app's container", "runner"},
