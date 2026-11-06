@@ -77,6 +77,35 @@ func TestASkippedTestsReadAnswersWhicheverTestMakesIt(t *testing.T) {
 	require.Empty(t, instr2.skippedReads, "a replay that skips no test names no skipped read")
 }
 
+// A skipped test's read that keploy's judging marked served, not required
+// moves to worker: as an unmarked one does, and is marked for no test: the
+// mark is its test's own, and the read is no longer in that test's list.
+// The skipped test's write keeps its mark under its test, and a test that
+// runs keeps its marks.
+func TestASkippedTestsMarkedReadMovesToWorkerAndIsMarkedForNoTest(t *testing.T) {
+	provenOn(t)
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return map[string]string{"o::TestCRUD": "flaky: flipped"}, nil, nil
+	})
+	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestCRUD\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-pat\n          notRequired: served, not required\n        - name: mock-put\n          notRequired: served, not required\n    - id: o::TestList\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-own\n          notRequired: served, not required\n"), 0o644))
+	instr := &gatedInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	db := namedMockDB{mocks: []*models.Mock{httpMock("mock-pat", "GET"), httpMock("mock-put", "PUT"), httpMock("mock-own", "GET")}}
+	require.NoError(t, New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+
+	require.Equal(t, map[string][]string{"o": {"mock-pat"}}, instr.worker, "the skipped test's marked read answers whichever test makes it")
+	require.Equal(t, map[string]string{"mock-pat": "o::TestCRUD"}, instr.skippedReads)
+	require.Equal(t, map[string][]string{"o::TestCRUD": {"mock-put"}, "o::TestList": {"mock-own"}}, instr.notRequired, "the moved read is marked for no test; the write and the running test keep their marks")
+}
+
 // A call one past a skipped test's read (the agent's note: SkippedRead)
 // names, on the replay's receipt, the skipped test the read was moved from
 // (RepeatNote.SkippedTest), so judging can say which test the call is one
