@@ -3,6 +3,7 @@ package mocknoise
 import (
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -280,6 +281,9 @@ func TestARecordedUpsertIsServedAsRecordedForACorrelationItCannotPlace(t *testin
 	MaterializeCorrelations(m)
 	recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
 	live := []string{mongoMsg(claimRequest(liveKeyID))}
+	if len(m.Spec.Correlations) != 1 {
+		t.Fatalf("correlations = %+v, want the claim's one", m.Spec.Correlations)
+	}
 	good := m.Spec.Correlations[0]
 	for name, tc := range map[string]struct {
 		c    models.FieldCorrelation
@@ -398,11 +402,36 @@ func manyDocs(n int) string {
 	return b.String()
 }
 
+// ingestCost is what one CorrelationsFromMock of m allocates, in allocations
+// and bytes, and the correlations it gives.
+func ingestCost(m *models.Mock) (allocs, bytes uint64, got []models.FieldCorrelation) {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	got = CorrelationsFromMock(m)
+	runtime.ReadMemStats(&after)
+	return after.Mallocs - before.Mallocs, after.TotalAlloc - before.TotalAlloc, got
+}
+
+// checkIngestCost fails when reading m at ingest gives a correlation, or
+// costs more than a thousand allocations or 256 KB: a parse of these
+// 0.8-2.7 MB sections costs hundreds of thousands of allocations and over
+// 30 MB, and keeping their tens of thousands of values over 1 MB.
+func checkIngestCost(t *testing.T, name string, m *models.Mock) {
+	t.Helper()
+	allocs, bytes, got := ingestCost(m)
+	if len(got) != 0 {
+		t.Errorf("%s: correlations = %+v, want none", name, got)
+	}
+	if allocs > 1000 || bytes > 256<<10 {
+		t.Errorf("%s: %d allocations and %d bytes to read a mock that echoes no written value; a large side was parsed or its values kept", name, allocs, bytes)
+	}
+}
+
 // A read writes no value, so its answer is never parsed when the agent takes
 // the mocks in, however large; nor is a write's answer that does not hold the
 // value it wrote (a findAndModify that answers the document as it was before
-// the write). Reading the request costs a few hundred allocations, and a
-// parse of these 2.7 MB answers costs hundreds of thousands.
+// the write), whose values are only looked up, not kept.
 func TestAMongoReadsLargeAnswerIsNotParsedAtIngest(t *testing.T) {
 	docs := manyDocs(20000)
 	cursor := `{"cursor":{"firstBatch":` + docs + `,"id":{"$numberLong":"0"},"ns":"api.t"},"ok":1}`
@@ -412,15 +441,111 @@ func TestAMongoReadsLargeAnswerIsNotParsedAtIngest(t *testing.T) {
 		"a getMore":    {`{"getMore":{"$numberLong":"7"},"collection":"t","$db":"api"}`, cursor},
 		"a write answered with the document before it": {claimRequest(liveKeyID),
 			`{"lastErrorObject":{"n":1,"updatedExisting":true},"value":{"_id":"cid-1:user-1:jti-1","history":` + docs + `},"ok":1}`},
+		// The answer echoes the filter's key, so the request is read, but
+		// not the key the write set, so the answer is not parsed.
+		"a write answered with its filter's key, not the key it set": {
+			`{"findAndModify":"t","query":{"_id":"5b6f1c2e-8d3a-4f7b-9e21-000000000007"},"update":{"$set":{"key_id":"` + liveKeyID + `"}},"$db":"api"}`,
+			`{"value":{"_id":"5b6f1c2e-8d3a-4f7b-9e21-000000000007","history":` + docs + `},"ok":1}`},
 	} {
-		m := mongoMock(tc.req, tc.answer)
-		allocs := testing.AllocsPerRun(1, func() {
-			if got := CorrelationsFromMock(m); len(got) != 0 {
-				t.Errorf("%s: correlations = %+v, want none", name, got)
+		checkIngestCost(t, name, mongoMock(tc.req, tc.answer))
+	}
+	// An answer's size is all its sections': a large first section and a
+	// small last one make a large answer.
+	two := mongoMock(claimRequest(liveKeyID), "")
+	two.Spec.MongoResponses[0].Message = &models.MongoOpMessage{Sections: []string{
+		mongoMsg(`{"value":{"_id":"cid-1:user-1:jti-1","history":` + docs + `}}`), mongoMsg(`{"ok":1}`)}}
+	checkIngestCost(t, "a write answered in two sections, the large one first", two)
+}
+
+// A write that sets two minted values, of which its answer holds one (an
+// update whose answer echoes only the upserted _id, a findAndModify with a
+// projection), correlates exactly that one. The written values are read in
+// map order, so each case is read many times.
+func TestAWriteOfTwoMintedValuesCorrelatesOnlyTheOneItsAnswerHolds(t *testing.T) {
+	req := `{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{"k1":"` + recKeyID + `","k2":"` + liveKeyID + `"}},"upsert":true,"new":true}`
+	for _, answered := range []string{recKeyID, liveKeyID} {
+		m := mongoMock(req, `{"value":{"x":"`+answered+`"},"ok":1}`)
+		for i := 0; i < 200; i++ {
+			if got := CorrelationsFromMock(m); len(got) != 1 || got[0].RecordedValue != answered {
+				t.Fatalf("answer holds %s, ingest %d: correlations = %+v, want that one value", answered, i, got)
 			}
-		})
-		if allocs > 1000 {
-			t.Errorf("%s: %.0f allocations to read a mock whose request writes nothing; its answer was parsed", name, allocs)
 		}
+	}
+}
+
+// A correlation lists the answer's places in one order on every ingest, however
+// the answer's document is read.
+func TestACorrelationListsTheAnswersPlacesInOneOrder(t *testing.T) {
+	m := mongoMock(claimRequest(recKeyID), `{"lastErrorObject":{"n":1,"updatedExisting":false,"upserted":"`+recKeyID+`"},`+
+		`"value":{"_id":"cid-1:user-1:jti-1","key_id":"`+recKeyID+`","alias":"`+recKeyID+`"},"ok":1}`)
+	want := []string{"section.0.lastErrorObject.upserted", "section.0.value.alias", "section.0.value.key_id"}
+	for i := 0; i < 50; i++ {
+		if got := CorrelationsFromMock(m); len(got) != 1 || !reflect.DeepEqual(got[0].ResponsePaths, want) {
+			t.Fatalf("ingest %d: correlations = %+v, want one answered at %v", i, got, want)
+		}
+	}
+}
+
+// Every field that holds a place mongoWritten reads gets its request read,
+// whatever else the section names.
+func TestARequestIsReadForEveryFieldAWriteSets(t *testing.T) {
+	for name, req := range map[string]string{
+		"update":    `{"update":{"$set":{"token":"` + recKeyID + `"}}}`,
+		"updates":   `{"updates":[{"q":{"_id":"k"},"u":{"$set":{"token":"` + recKeyID + `"}}}]}`,
+		"documents": `{"documents":[{"token":"` + recKeyID + `"}]}`,
+	} {
+		if got := CorrelationsFromMock(mongoMock(req, `{"value":{"token":"`+recKeyID+`"},"ok":1}`)); len(got) != 1 {
+			t.Errorf("%s: correlations = %+v, want one", name, got)
+		}
+	}
+}
+
+// manyIDs is a JSON list of n quoted uuids, the ids manyDocs holds.
+func manyIDs(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `"5b6f1c2e-8d3a-4f7b-9e21-%012x"`, i)
+	}
+	return b.String()
+}
+
+// A request is parsed at ingest only when it names a place a write sets and
+// it shares a quoted value with its answer. A find's filter, however large, is
+// not parsed, even when its answer echoes the ids it filters on; nor is an
+// insert's list of documents when its answer is a count, or a count and a
+// replica set's election id, which no document holds.
+func TestALargeMongoRequestIsNotParsedUnlessItWritesAValueItsAnswerEchoes(t *testing.T) {
+	ins := `{"insert":"t","documents":` + manyDocs(20000) + `,"$db":"api"}`
+	for name, tc := range map[string]struct{ req, answer string }{
+		"a find with a large $in": {`{"find":"t","filter":{"key_id":{"$in":[` + manyIDs(20000) + `]}},"$db":"api"}`,
+			`{"cursor":{"firstBatch":[{"_id":"x","key_id":"5b6f1c2e-8d3a-4f7b-9e21-000000000007"}],"id":{"$numberLong":"0"},"ns":"api.t"},"ok":1}`},
+		"an insert answered with a count": {ins, `{"n":{"$numberInt":"20000"},"ok":{"$numberDouble":"1.0"}}`},
+		"an insert answered with a count and an election id": {ins,
+			`{"n":{"$numberInt":"20000"},"electionId":{"$oid":"7fffffff0000000000000001"},"ok":{"$numberDouble":"1.0"}}`},
+	} {
+		checkIngestCost(t, name, mongoMock(tc.req, tc.answer))
+	}
+}
+
+// A key is found after a quote escaped in a value before it, which shifts
+// which quotes open a string.
+func TestAKeyAfterAnEscapedQuoteIsACorrelation(t *testing.T) {
+	answer := strings.Replace(claimAnswer(recKeyID), `"key_id":`, `"note":"a 5\" screen","key_id":`, 1)
+	if got := CorrelationsFromMock(mongoMock(claimRequest(recKeyID), answer)); len(got) != 1 || got[0].RecordedValue != recKeyID {
+		t.Fatalf("correlations = %+v, want the key", got)
+	}
+}
+
+// The key is read in whichever answer section holds it, and named by that
+// section's index.
+func TestAKeyAnsweredInALaterSectionIsACorrelation(t *testing.T) {
+	m := mongoMock(claimRequest(recKeyID), "")
+	m.Spec.MongoResponses[0].Message = &models.MongoOpMessage{Sections: []string{mongoMsg(`{"ok":1}`), mongoMsg(claimAnswer(recKeyID))}}
+	got := CorrelationsFromMock(m)
+	if len(got) != 1 || !reflect.DeepEqual(got[0].ResponsePaths, []string{"section.1.value.key_id"}) {
+		t.Fatalf("correlations = %+v, want the key answered at section.1.value.key_id", got)
 	}
 }

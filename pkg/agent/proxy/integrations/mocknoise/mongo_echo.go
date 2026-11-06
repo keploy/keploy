@@ -74,15 +74,22 @@ func opMsgSections(msg interface{}) []string {
 // not answered, or only answered) is not a correlation, nor is a value in a
 // filter.
 //
-// The request is read first, and an answer section is parsed only when its
-// raw text holds one of the values the request wrote (mongoAnswerHolds). A
-// read (find, aggregate, getMore) writes none, so its answer, however large,
-// is never parsed here: this runs for every Mongo mock when the agent takes
-// the mocks in.
+// This runs for every Mongo mock when the agent takes the mocks in, so it
+// parses as little as it can. A request section is parsed only when its raw
+// text names a place a write sets (mongoMayWrite) and it shares a quoted
+// value with its answer (mongoSharesAValue). A read (find, aggregate, getMore),
+// however large its filter, costs a few substring searches, and a write whose
+// answer echoes none of its values (an insert's answer is a count) one pass
+// over each side with no parse. An answer
+// section is parsed only when its raw text holds one of the values the
+// request wrote (mongoAnswerHolds), so a read's answer is never parsed.
 func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 	req, resp := mongoOpMsgSections(m)
 	var written []models.FieldCorrelation
 	for i, s := range req {
+		if !mongoMayWrite(s) || !mongoSharesAValue(s, resp) {
+			continue
+		}
 		for path, vals := range mongoMsgDoc(s) {
 			if !mongoWritten(path) || len(vals) != 1 {
 				continue
@@ -139,6 +146,66 @@ func mongoRandomClass(v string) (string, bool) {
 		return "", false
 	}
 	return appRandomClass(v)
+}
+
+// mongoMayWrite reports whether a request section's raw text names a field
+// that holds the places mongoWritten reads: findAndModify's "update", an
+// update command's "updates" or an insert's "documents". The recorder writes a
+// section as compact extended JSON (a key is followed by its colon), so a
+// section that names none of them writes no value mongoWritten reads.
+func mongoMayWrite(section string) bool {
+	return strings.Contains(section, `"update":`) ||
+		strings.Contains(section, `"updates":`) ||
+		strings.Contains(section, `"documents":`)
+}
+
+// mongoSharesAValue reports whether the request section and the answer quote
+// a common value that mongoRandomClass takes. Such a value has no quote,
+// backslash or space in it, so its JSON text is the value between two
+// consecutive quotes (mongoQuoted). A value a write sets and its answer echoes
+// is always found; a value found that is not one only costs the parse.
+//
+// The smaller side's values are classified and kept, and the larger side's
+// quoted texts are only looked up, so this costs one pass over each side and
+// holds the smaller side's values: an insert of many documents answered with a
+// count, or a findAndModify answered with a large document, is not classified
+// value by value.
+func mongoSharesAValue(req string, resp []string) bool {
+	small, large := []string{req}, resp
+	n := 0
+	for _, s := range resp {
+		n += len(s)
+	}
+	if n < len(req) {
+		small, large = resp, small
+	}
+	values := make(map[string]bool)
+	mongoQuoted(small, func(v string) bool {
+		if _, random := mongoRandomClass(v); random {
+			values[v] = true
+		}
+		return false
+	})
+	if len(values) == 0 {
+		return false
+	}
+	return mongoQuoted(large, func(v string) bool { return values[v] })
+}
+
+// mongoQuoted calls f with the text between each pair of consecutive quotes in
+// the sections, and reports whether f returned true for one, where it stops.
+func mongoQuoted(sections []string, f func(string) bool) bool {
+	for _, s := range sections {
+		_, rest, more := strings.Cut(s, `"`)
+		for more {
+			var v string
+			v, rest, more = strings.Cut(rest, `"`)
+			if f(v) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mongoAnswerHolds reports whether an answer section's raw text holds one of
