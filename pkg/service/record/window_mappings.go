@@ -55,29 +55,6 @@ func (w *windowMappings) noteStop(at time.Time) {
 	w.mu.Unlock()
 }
 
-// markAtStop marks, of the worker scope, each mock placed once keploy record
-// had begun stopping the application (stopAt): its shutdown's calls, which a
-// replay requires only once it has stopped the application. A mock's place is
-// placed's (models.PlaceOf, as the window mappings read it: its answer's time
-// for a mock placed at its answer), else its request time.
-func markAtStop(worker []models.MockEntry, placed map[string]time.Time, stopAt time.Time) {
-	if stopAt.IsZero() {
-		return
-	}
-	for i := range worker {
-		at, ok := placed[worker[i].Name]
-		if !ok {
-			var err error
-			if at, err = models.ParseMockTimestamp(worker[i].ReqTimestampMock); err != nil {
-				continue
-			}
-		}
-		if !at.IsZero() && !at.Before(stopAt) {
-			worker[i].AtStop = true
-		}
-	}
-}
-
 // lostTestPrefix starts the window name of a test case the recording failed
 // to persist. No test case is named so: a test case's name is a file name.
 const lostTestPrefix = "\x00lost-"
@@ -264,7 +241,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 	// latest kept test case before it (the set's start before every one), so
 	// a replay of the kept test cases reaches it.
 	worker := keptPlaces(derived, kept)
-	markAtStop(worker, placed, stopAt)
+	models.MarkAtStop(worker, placed, stopAt)
 	routedReasons(logger, testSetID, worker, derived.Routed, kept)
 	if err := db.UpsertWorker(ctx, testSetID, worker); err != nil {
 		logger.Error("failed to save the test set's worker scope, the calls no test made, derived from the test windows",

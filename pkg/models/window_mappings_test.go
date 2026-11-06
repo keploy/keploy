@@ -565,3 +565,51 @@ func TestNewWindowedMockReadsTheOriginsProcess(t *testing.T) {
 		t.Fatalf("the mock names %q, %q; want sqs, ./sqs", w.Comm, w.Exe)
 	}
 }
+
+// The last window's end is read as DeriveWindowMappings reads windows: one
+// with no Start is left out, and one whose End is missing or before its Start
+// ends at its Start. None ends at zero, which marks no call as the stop's.
+func TestLastWindowEnd(t *testing.T) {
+	at := func(s int) time.Time { return time.Unix(1_700_000_000+int64(s), 0) }
+	for _, tc := range []struct {
+		name    string
+		windows []TestWindow
+		want    time.Time
+	}{
+		{"none", nil, time.Time{}},
+		{"no start", []TestWindow{{End: at(9)}}, time.Time{}},
+		{"the latest end, not the latest start", []TestWindow{{Start: at(1), End: at(8)}, {Start: at(3), End: at(4)}}, at(8)},
+		{"a missing end ends at its start", []TestWindow{{Start: at(1), End: at(2)}, {Start: at(5)}}, at(5)},
+		{"an end before its start ends at its start", []TestWindow{{Start: at(6), End: at(2)}}, at(6)},
+	} {
+		if got := LastWindowEnd(tc.windows); !got.Equal(tc.want) {
+			t.Errorf("%s: %v; want %v", tc.name, got, tc.want)
+		}
+	}
+	worker := []MockEntry{{Name: "w", ReqTimestampMock: FormatMockTimestamp(at(9))}}
+	MarkAtStop(worker, nil, LastWindowEnd(nil))
+	if worker[0].AtStop {
+		t.Fatal("with no window a call is marked as the stop's")
+	}
+}
+
+// MarkAtStop marks a call placed at the very moment it is given, as one
+// placed after it; one placed before it is not, and neither is one whose
+// entry's request time cannot be read and whose place is not given.
+func TestMarkAtStopFromItsMoment(t *testing.T) {
+	from := wmAt(5000)
+	worker := []MockEntry{
+		{Name: "at", ReqTimestampMock: FormatMockTimestamp(wmAt(4000))},
+		{Name: "before", ReqTimestampMock: FormatMockTimestamp(wmAt(4999))},
+		{Name: "after", ReqTimestampMock: FormatMockTimestamp(wmAt(5001))},
+		{Name: "unread", ReqTimestampMock: "not a time"},
+	}
+	MarkAtStop(worker, map[string]time.Time{"at": from}, from)
+	got := map[string]bool{}
+	for _, e := range worker {
+		got[e.Name] = e.AtStop
+	}
+	if want := map[string]bool{"at": true, "before": false, "after": true, "unread": false}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("marked %v; want %v", got, want)
+	}
+}

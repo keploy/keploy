@@ -728,7 +728,7 @@ func TestMarkAtStopReadsAMocksPlace(t *testing.T) {
 		{Name: "early", ReqTimestampMock: models.FormatMockTimestamp(winAt(2900)), ResTimestampMock: models.FormatMockTimestamp(winAt(3100))},
 		{Name: "unplaced", ReqTimestampMock: models.FormatMockTimestamp(winAt(3050))},
 	}
-	markAtStop(worker, map[string]time.Time{"held-poll": winAt(3100), "early": winAt(2900)}, stop)
+	models.MarkAtStop(worker, map[string]time.Time{"held-poll": winAt(3100), "early": winAt(2900)}, stop)
 	got := map[string]bool{}
 	for _, e := range worker {
 		got[e.Name] = e.AtStop

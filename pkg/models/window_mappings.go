@@ -376,3 +376,50 @@ func (h *windowEnds) Pop() any {
 	h.idx = h.idx[:n-1]
 	return x
 }
+
+// MarkAtStop marks, of the worker scope, each mock placed at or after from
+// (MockEntry.AtStop): the application's shutdown's calls, which a replay
+// never waits for before it stops the application. keploy record passes the
+// moment it began stopping the application. A mock's place is placed's
+// (PlaceOf, as the window mappings read it: its answer's time for a mock
+// placed at its answer), else its request time. A zero from marks none.
+func MarkAtStop(worker []MockEntry, placed map[string]time.Time, from time.Time) {
+	if from.IsZero() {
+		return
+	}
+	for i := range worker {
+		at, ok := placed[worker[i].Name]
+		if !ok {
+			var err error
+			if at, err = ParseMockTimestamp(worker[i].ReqTimestampMock); err != nil {
+				continue
+			}
+		}
+		if !at.IsZero() && !at.Before(from) {
+			worker[i].AtStop = true
+		}
+	}
+}
+
+// LastWindowEnd is when the last of windows ended, read as
+// DeriveWindowMappings reads them (a window with no Start is left out; one
+// whose End is missing or before its Start ends at its Start): zero for none.
+// A worker-scope mock placed after it was recorded after every test's
+// answer, by the application on its own or by its shutdown, which a
+// recording with no mappings.yaml does not tell apart.
+func LastWindowEnd(windows []TestWindow) time.Time {
+	var last time.Time
+	for _, w := range windows {
+		if w.Start.IsZero() {
+			continue
+		}
+		end := w.End
+		if end.IsZero() || end.Before(w.Start) {
+			end = w.Start
+		}
+		if end.After(last) {
+			last = end
+		}
+	}
+	return last
+}
