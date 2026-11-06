@@ -137,6 +137,12 @@ type Proxy struct {
 	// whenever its error capture window opens (openTestErrorCapture). Under
 	// the proven switch the parsers find it on their connection's context.
 	learnTracker *learn.Tracker
+	// serveClock tells, with the proven switch off, a call's span on the
+	// application's clock for the background check alone (learn.
+	// CallSpanOf): the managers note their serves to it, and the parsers
+	// find it on their connection's context. The learn tracker, which tells
+	// it under the switch, is fed nothing with it off.
+	serveClock *learn.ServeClock
 	// procZones reads the zone each application process writes a wall
 	// clock of no zone in, from /proc, by the connection's origin PID
 	// (learn.WithProcZone): its calls are learned and checked in it.
@@ -1074,6 +1080,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
 		logger:                    logger,
 		learnTracker:              learn.NewTracker(),
+		serveClock:                &learn.ServeClock{},
 		Port:                      opts.ProxyPort,
 		agentPort:                 opts.Agent.AgentPort,
 		IncomingProxyPort:         opts.IncomingProxyPort,
@@ -2058,6 +2065,10 @@ func (p *Proxy) setMockManager(m *MockManager) {
 	} else if provenswitch.On() {
 		// No manager serves: the tracker keeps no hold on the one it drops.
 		p.learnTracker.SetServeOwnerOf(nil)
+	} else if m != nil {
+		// With the switch off every serve is noted to the serve clock
+		// alone: a call's span for the background check.
+		m.SetServeClock(p.serveClock)
 	}
 	p.sessionMu.Lock()
 	prev := p.mockManager
@@ -2993,6 +3004,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			parserCtx = learn.WithProcZone(parserCtx, z)
 		}
+	} else {
+		// With the switch off a parser reads a call's span for the
+		// background check alone on the serve clock (learn.CallSpanOf).
+		parserCtx = learn.WithServeClock(parserCtx, p.serveClock)
 	}
 	// A handshake made under parserCtx (a parser's STARTTLS upgrade, MySQL
 	// or Postgres; opportunistic TLS) names its leaf for the IP the client
@@ -5124,6 +5139,15 @@ func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 }
 
 var _ agent.AppClockSetter = (*Proxy)(nil)
+
+// SetBackgroundClock makes the background check read, with the proven
+// switch off, the app's clock through f (agent.BackgroundClockSetter): the
+// serve clock's (learn.ServeClock.SetClock). The learn step reads none.
+func (p *Proxy) SetBackgroundClock(f func(real time.Time) (time.Time, bool)) {
+	p.serveClock.SetClock(f)
+}
+
+var _ agent.BackgroundClockSetter = (*Proxy)(nil)
 
 // SetAppClockRun makes the learn step read, through f, where the app's
 // clock's run to a real instant began (agent.AppClockRunSetter).

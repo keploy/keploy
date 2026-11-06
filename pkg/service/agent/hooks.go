@@ -54,6 +54,19 @@ type AppClockRunReader interface {
 	AppClockRunBegan(real time.Time) (time.Time, bool)
 }
 
+// BackgroundClockReader is an optional AgentHooks capability, for the
+// check that a call no recording answered is one more run of the set's
+// background work with the proven switch off (learn.CallSpanOf):
+// BackgroundAppClock is the instant the app's clock showed at the real
+// instant real, told only where the hooks know no clock of theirs is moved
+// in the run, so the app reads the real one; false otherwise (a moved
+// clock's runs are not told with the switch off, so no span is read on
+// it). The agent hands it to the proxy (coreAgent.BackgroundClockSetter);
+// the learn step reads nothing of it.
+type BackgroundClockReader interface {
+	BackgroundAppClock(real time.Time) (time.Time, bool)
+}
+
 type AgentHook struct{}
 
 func (n *AgentHook) BeforeSimulate(ctx context.Context, t time.Time, testSetID string, tcName string) error {

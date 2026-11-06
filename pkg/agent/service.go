@@ -1061,6 +1061,16 @@ type AppClockSetter interface {
 	SetAppClock(f func(real time.Time) (time.Time, bool))
 }
 
+// BackgroundClockSetter is an optional proxy capability: with the proven
+// switch off, SetBackgroundClock hands the proxy how to read the app's clock
+// at a real instant (false where the hooks cannot tell; nil for none), for
+// the check that a call no recording answered is one more run of the set's
+// background work alone (learn.CallSpanOf, learn.ServeClock). The learn
+// step reads no clock with the switch off, and is handed none here.
+type BackgroundClockSetter interface {
+	SetBackgroundClock(f func(real time.Time) (time.Time, bool))
+}
+
 // AppClockRunSetter is an optional proxy capability, beside AppClockSetter:
 // SetAppClockRun makes the learn step read, through f, the real instant
 // from which the app's clock has run as one to a real instant, as the

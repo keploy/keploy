@@ -84,6 +84,10 @@ type MockManager struct {
 	// serves in a request its parser said (integrations.ServingIn,
 	// learn.Tracker.ServedMockIn).
 	servedInObserver atomic.Pointer[func(*models.Mock, *learn.Flight)]
+	// serveClock, when set (the proven switch off), is told the instant of
+	// every serve but a protocol phase's, as the learn tracker is under the
+	// switch: a call's span for the background check (learn.CallSpanOf).
+	serveClock atomic.Pointer[learn.ServeClock]
 	// openTestEpoch, when set, says the learn tracker's open test
 	// (learn.Tracker.OpenEpoch) as a test's view is installed: the view's
 	// stamp (exactView.stamp, ServedInOpenTest).
@@ -5109,6 +5113,7 @@ func (m *MockManager) observeServed(mock *models.Mock, in *learn.Flight) {
 	if mock == nil || mock.Name == "" {
 		return
 	}
+	m.noteServe(mock)
 	if in != nil {
 		if f := m.servedInObserver.Load(); f != nil {
 			v := m.exactView()
@@ -5124,12 +5129,38 @@ func (m *MockManager) observeServed(mock *models.Mock, in *learn.Flight) {
 	}
 }
 
+// SetServeClock makes m note every serve to c from now on (nil: none),
+// with the proven switch off: a call's span for the background check
+// (learn.CallSpanOf, learn.ServeClock). The proxy sets it on every manager
+// it serves with, the switch off.
+func (m *MockManager) SetServeClock(c *learn.ServeClock) {
+	m.serveClock.Store(c)
+}
+
+// noteServe notes a serve of mock to the serve clock, where one is set
+// (SetServeClock), but not a protocol phase's (a connection's handshake):
+// the call that opened the connection read its clock before the handshake
+// was served, so the handshake starts no call's span, as the learn tracker
+// files no protocol phase's serve.
+func (m *MockManager) noteServe(mock *models.Mock) {
+	if c := m.serveClock.Load(); c != nil && !mock.IsProtocolPhase() {
+		c.Served()
+	}
+}
+
 // observeServedCopy is observeServed of a mock a door took by value: the
 // observer keeps a copy of its own, made only when there is an observer (the
 // proven switch), so the door's mock does not move to the heap without one.
 func (m *MockManager) observeServedCopy(mock models.Mock, in *learn.Flight) {
 	if mock.Name == "" {
 		return
+	}
+	// The serve clock (the switch off) reads a copy of its own, made only
+	// when it is set: reading the door's mock would move it to the heap.
+	if c := m.serveClock.Load(); c != nil {
+		if cp := mock; !cp.IsProtocolPhase() {
+			c.Served()
+		}
 	}
 	if in != nil {
 		if f := m.servedInObserver.Load(); f != nil {
