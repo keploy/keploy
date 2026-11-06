@@ -7,10 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/fatih/color"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/service/contract/consumer"
@@ -443,16 +443,18 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 			if tc == nil {
 				continue
 			}
-			// Hydrate request body from BodyRef when the body was offloaded to disk (>1MB).
+			// A request body over 1 MB is kept in a file apart from its test
+			// case, under assets/ (BodyRef). It is read only inside the
+			// recording, keployPath: a path that leads out of it, by "..", as an
+			// absolute path or through a symbolic link, is refused. A body that
+			// is refused or cannot be read is reported, and the contract
+			// describes that request without its body.
 			if tc.HTTPReq.Body == "" && tc.HTTPReq.BodyRef.Path != "" {
-				refPath, err := safeJoinWithinRoot(keployPath, tc.HTTPReq.BodyRef.Path)
-				if err != nil {
-					s.logger.Debug("skipping offloaded request body with unsafe path", zap.String("bodyRefPath", tc.HTTPReq.BodyRef.Path), zap.Error(err), zap.String("hint", "BodyRef.Path must be a relative path contained within the keploy directory"))
-				} else if data, err := os.ReadFile(refPath); err != nil {
-					s.logger.Debug("could not read offloaded request body; continuing schema inference without it", zap.String("path", refPath), zap.Error(err), zap.String("hint", "ensure the asset file exists under keploy/<test-set>/assets and is readable"))
+				if data, err := pkg.ReadRecordingFile(keployPath, tc.HTTPReq.BodyRef.Path); err != nil {
+					s.logger.Warn("could not read the request body kept apart from the test case; the contract describes that request without its body", zap.String("testSetID", testSetID), zap.String("testCase", tc.Name), zap.Error(err), zap.String("hint", "BodyRef.Path must name a readable file inside the keploy directory, such as <test-set>/assets/<test-case>/body.txt"))
 				} else {
 					tc.HTTPReq.Body = string(data)
-					s.logger.Debug("hydrated request body from BodyRef", zap.String("path", refPath), zap.Int64("size", tc.HTTPReq.BodyRef.Size))
+					s.logger.Debug("hydrated request body from BodyRef", zap.String("bodyRefPath", tc.HTTPReq.BodyRef.Path), zap.Int64("size", tc.HTTPReq.BodyRef.Size))
 				}
 			}
 			testCases = append(testCases, *tc)
@@ -489,27 +491,6 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 
 	s.logger.Info("Inferred OpenAPI contract generated", zap.String("path", outputPath))
 	return nil
-}
-
-// safeJoinWithinRoot resolves rel against root and guarantees the result stays
-// inside root. It rejects absolute paths and any traversal (via ..) that would
-// escape root, so a malformed BodyRef.Path cannot coerce os.ReadFile into
-// reading arbitrary files on disk.
-func safeJoinWithinRoot(root, rel string) (string, error) {
-	if filepath.IsAbs(rel) {
-		return "", fmt.Errorf("absolute path not allowed")
-	}
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return "", err
-	}
-	joined := filepath.Join(absRoot, rel)
-	cleaned := filepath.Clean(joined)
-	rootWithSep := absRoot + string(filepath.Separator)
-	if cleaned != absRoot && !strings.HasPrefix(cleaned, rootWithSep) {
-		return "", fmt.Errorf("resolved path %q escapes root %q", cleaned, absRoot)
-	}
-	return cleaned, nil
 }
 
 func (s *contract) DownloadTests(_ string) error {
