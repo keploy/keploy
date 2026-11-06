@@ -315,6 +315,25 @@ func TestRunPlace_TheProxyReachesATestsOpenThenItsEnd(t *testing.T) {
 	}
 }
 
+// A change runs each wait's release and keeps none: the waits of a long set
+// do not pile up on its place.
+func TestRunPlace_AChangeKeepsNoReleasedWait(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows(placeWindows())
+	released := 0
+	if _, ok := mm.IdleUntilRunPlaceChanges(mm.RunPlaceChanged(), func() func() { return func() { released++ } }); !ok {
+		t.Fatal("a wait on the place as it is was not marked")
+	}
+	mm.reachRunPlace(models.RunOpen(0), false)
+	mm.place.mu.Lock()
+	kept := len(mm.place.atChange)
+	mm.place.mu.Unlock()
+	if released != 1 || kept != 0 {
+		t.Fatalf("after a change: %d releases run, %d waits kept; want 1 and none", released, kept)
+	}
+}
+
 // The first window's open is reached as any other's.
 func TestRunPlace_TheFirstWindowsOpenIsReached(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
