@@ -317,3 +317,44 @@ func TestEncodeOverFWritesAndSaysAsKeploysWriters(t *testing.T) {
 		}
 	})
 }
+
+// A comment on an item of a plain list keploy writes (recordedWith, a test's
+// cases) stays on its item through every writer, whatever the switch: the
+// n-th old item of a value gives its comments to the n-th new one. An item
+// the rewrite no longer holds takes its comment with it, and the count says
+// so. Mutation: keep no item's comment; match items by place, not value.
+func TestAPlainListItemKeepsItsComment(t *testing.T) {
+	file := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: s\ntests:\n    - id: o::TestA\n      mock_entries:\n        - name: mock-0\n      cases:\n        - case-1 # the slow one\n        - case-2\nrecordedWith:\n    # routed by the agent\n    - s12-routing\n    - other # kept by hand\n"
+	eachSwitch(t, func(t *testing.T) {
+		for name, write := range fileWriters() {
+			dir := writeSet(t, file)
+			core, logs := observer.New(zapcore.WarnLevel)
+			must(t, write(NewWithFormat(zap.New(core), dir, "mappings", yaml.FormatYAML)))
+			got := readSet(t, dir)
+			for _, want := range []string{"- case-1 # the slow one\n", "    # routed by the agent\n    - s12-routing\n", "- other # kept by hand\n"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("%s lost %q:\n%s", name, want, got)
+				}
+			}
+			if len(logs.All()) != 0 {
+				t.Errorf("%s kept everything, yet said %v", name, logs.All())
+			}
+		}
+		m := &models.Mapping{Version: "api.keploy.io/v1beta1", Kind: models.MappingKind, TestSetID: "s", RecordedWith: []string{"other", "s12-routing", "other"}}
+		old := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: s\nrecordedWith:\n    - s12-routing # routed by the agent\n    - other # the first\n    - other # the second\n"
+		got, unkept, err := EncodeOver(m, []byte(old), nil)
+		must(t, err)
+		if want := "    - other # the first\n    - s12-routing # routed by the agent\n    - other # the second\n"; !strings.Contains(string(got), want) {
+			t.Errorf("the items' comments did not follow their values, want %q in:\n%s", want, got)
+		}
+		if unkept.Comments != 0 {
+			t.Errorf("Comments = %d with every item kept, want 0", unkept.Comments)
+		}
+		m.RecordedWith = []string{"other"}
+		got, unkept, err = EncodeOver(m, []byte(old), nil)
+		must(t, err)
+		if unkept.Comments != 2 || !strings.Contains(string(got), "- other # the first\n") {
+			t.Errorf("Comments = %d after two commented items went, want 2; file:\n%s", unkept.Comments, got)
+		}
+	})
+}

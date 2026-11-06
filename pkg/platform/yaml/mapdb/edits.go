@@ -230,7 +230,11 @@ func (m *merger) mapping(old, cur *yamlLib.Node, level, where string) bool {
 			if keepPairComments(k, resolved(v), ck, cv) {
 				changed = true
 			}
-			if sub, ok := childLevel(level, k.Value); ok && m.list(resolved(v), cv, sub, where+k.Value) {
+			if sub, ok := childLevel(level, k.Value); ok {
+				if m.list(resolved(v), cv, sub, where+k.Value) {
+					changed = true
+				}
+			} else if keepItemComments(resolved(v), cv) {
 				changed = true
 			}
 			pos = j
@@ -528,6 +532,38 @@ func pairIndex(n *yamlLib.Node, key string) int {
 		}
 	}
 	return -1
+}
+
+// keepItemComments gives each plain item of cur, a block list of values
+// keploy writes at no level of the file (recordedWith, a test's cases), the
+// comments of the old item with its value: the n-th old item of a value to
+// the n-th new one, so a value the list holds twice keeps each item's
+// comments on its own item. An old item the list no longer holds takes its
+// comments with it, and keepEdits counts them. It reports whether it gave
+// any.
+func keepItemComments(old, cur *yamlLib.Node) bool {
+	if old == nil || cur == nil || old.Kind != yamlLib.SequenceNode || cur.Kind != yamlLib.SequenceNode {
+		return false
+	}
+	byValue := map[string][]*yamlLib.Node{}
+	for _, item := range cur.Content {
+		if item.Kind == yamlLib.ScalarNode {
+			byValue[item.Value] = append(byValue[item.Value], item)
+		}
+	}
+	changed := false
+	nth := map[string]int{}
+	for _, item := range old.Content {
+		if item = resolved(item); item == nil || item.Kind != yamlLib.ScalarNode {
+			continue
+		}
+		n := nth[item.Value]
+		nth[item.Value]++
+		if n < len(byValue[item.Value]) && keepComments(item, byValue[item.Value][n]) {
+			changed = true
+		}
+	}
+	return changed
 }
 
 // keepComments gives cur the comments old has where cur has none, and
