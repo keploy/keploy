@@ -215,11 +215,40 @@ func stalledStart(quiet uint64, p utils.BootProgress) string {
 	if p.Step != "" {
 		fmt.Fprintf(&b, "; its last step: %s", p.Step)
 	}
+	writeStages(&b, p)
+	return b.String()
+}
+
+// startStepLine is what a start's wait says while the agent reports as it
+// goes (its beats move) and its start takes no new step (watchStart): its
+// last step, and the stages in progress at its last beat, each with whether
+// it made progress and its thread's state, so that a start slowed or stuck in
+// one stage names it while keploy waits. "" when the latest look did not find
+// the process running with a report read, or found one that says the start is
+// over (its server listens, or it failed): other lines, or none, say those.
+func startStepLine(cur bootLookResult) string {
+	if !cur.running || !cur.ok || cur.p.Ready || cur.p.Failed {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("still waiting for the keploy agent's start: it runs, and has taken no new step for a while")
+	if cur.p.Step != "" {
+		fmt.Fprintf(&b, "; its last step: %s", cur.p.Step)
+	}
+	writeStages(&b, cur.p)
+	return b.String()
+}
+
+// writeStages says the stages of a start in progress at its last beat
+// (p.Stages): each one's name, whether it made progress since the beat
+// before, and its thread's state and wait point where they can be read; or,
+// for a report that counts its beats without progress, that none is.
+func writeStages(b *strings.Builder, p utils.BootProgress) {
 	if len(p.Stages) == 0 {
 		if p.CountsQuiet {
 			b.WriteString("; no stage of it in progress")
 		}
-		return b.String()
+		return
 	}
 	b.WriteString("; in progress: ")
 	for i, st := range p.Stages {
@@ -227,16 +256,25 @@ func stalledStart(quiet uint64, p utils.BootProgress) string {
 			b.WriteString(", ")
 		}
 		b.WriteString(st.Name)
+		var said []string
 		switch {
 		case st.Unseen:
-			b.WriteString(" (its progress cannot be seen here)")
+			said = append(said, "its progress cannot be seen here")
+		case st.Progressing:
+			said = append(said, "making progress")
+		}
+		// A stage whose progress cannot be seen has no thread described
+		// (utils.BootStage.Unseen).
+		switch {
 		case st.State != "" && st.Wait != "":
-			fmt.Fprintf(&b, " (its thread %s, in %s)", threadState(st.State), st.Wait)
+			said = append(said, fmt.Sprintf("its thread %s, in %s", threadState(st.State), st.Wait))
 		case st.State != "":
-			fmt.Fprintf(&b, " (its thread %s)", threadState(st.State))
+			said = append(said, "its thread "+threadState(st.State))
+		}
+		if len(said) > 0 {
+			fmt.Fprintf(b, " (%s)", strings.Join(said, "; "))
 		}
 	}
-	return b.String()
 }
 
 // threadState says the kernel's state of a thread (its stat letter) in words.
@@ -696,10 +734,20 @@ type startJudgment struct {
 // stillWaitingLooks ticks since the agent's last new report (or since the
 // watch began), with what the latest look found: the look has not said
 // whether the process runs, it does not run, or it runs with no report, or
-// no new one, read. A look out past the silence bound is said once, at WARN,
-// in place of the next of those lines, with what it is out on and what keploy
-// does next (lookOutWarning). inContainer says, for those lines, whether the
-// agent runs in a container.
+// no new one, read. While its reports move (it beats) but its start takes no
+// new step, the wait is said every stepWaitLooks ticks since its last step
+// up to stepWaitBackOff of them, then every stepWaitLaterLooks
+// (stepLineDue), naming that step and the stages in progress
+// (startStepLine): a start slowed or stuck in one stage would otherwise be
+// waited on in silence, as long as that stage makes progress. Such a line is
+// said only while its reports still move: a new one read within the last
+// stepWaitLooks ticks, and since its last step. An agent whose reports stop
+// moving (a frozen process, or a stuck reporter) has no step line once
+// stepWaitLooks ticks pass with no new report, only the lines that say
+// keploy has read no new one. A look out past the silence bound is said once,
+// at WARN, in place of the next of those lines, with what it is out on and
+// what keploy does next (lookOutWarning). inContainer says, for those lines,
+// whether the agent runs in a container.
 // ended, when set, is asked of a process that does not run whether it has
 // ended for good (its container exited), and with what code: the judgment is
 // then bootExited, or bootFailed for an agent whose last report says its start
@@ -717,6 +765,7 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 	}
 	judge := newBootJudge(clk)
 	look, silence, every := bootLook, bootSilence, stillWaitingLooks
+	stepEvery, stepUntil, stepLater := stepWaitLooks, stepWaitBackOff, stepWaitLaterLooks
 	go func() {
 		// The look out ends with the watch, however the watch ends, and the
 		// watch ends only once it has: a look's funcs return only once the
@@ -777,6 +826,16 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 		// began. The wait is said every `every` of them, with what the
 		// latest look found, however long each look takes to come back.
 		waited := 0
+		// stepWaited is the ticks since the agent's start last took a step
+		// (a report whose step count keploy had not read before), or since
+		// the watch began. It runs ahead of waited only once a report has
+		// moved by its beats alone. The start is said by startStepLine only
+		// while it beats: a report moved since its last step (waited <
+		// stepWaited) and within the last stepEvery ticks (waited <
+		// stepEvery). A report that does not move at all, or has stopped
+		// moving for stepEvery ticks, is said by startWaitLine alone: its
+		// last report's stages say nothing of what it does now.
+		stepWaited := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -791,6 +850,9 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 				if l.ok {
 					if !cur.ok || l.p.Beat != cur.p.Beat || l.p.Seq != cur.p.Seq {
 						waited = 0
+					}
+					if !cur.ok || l.p.Seq != cur.p.Seq {
+						stepWaited = 0
 					}
 					cur.p, cur.ok = l.p, true
 				}
@@ -824,7 +886,14 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 				}
 				asked++
 				waited++
-				if every > 0 && waited%every == 0 {
+				stepWaited++
+				lineDue := every > 0 && waited%every == 0
+				if !lineDue && stepLineDue(stepWaited, stepEvery, stepUntil, stepLater) && waited < stepWaited && waited < stepEvery {
+					if line := startStepLine(cur); line != "" {
+						logger.Info(line, zap.Duration("waited", time.Duration(stepWaited)*look))
+					}
+				}
+				if lineDue {
 					if line := startWaitLine(cur, asking && asked >= every, inContainer, silence); line != "" {
 						if !lookSaid && clk.Runnable()-lookSince >= silence {
 							// A look out past the silence bound is said
@@ -1090,6 +1159,37 @@ var uriClock stall.Clock
 // ticks of a start's wait with no new report from the agent pass between
 // those that say what the wait is on (watchStart). A variable for tests.
 var stillWaitingLooks = 30
+
+// stepWaitLooks is how many ticks of a start's wait, while the agent reports
+// as it goes and its start takes no new step, pass between the lines that
+// name its last step and the stages in progress (watchStart, startStepLine).
+// A start takes a step every few seconds of a healthy host's time, its CA's
+// install the longest: ten ticks without one is a start slowed, or stuck, in
+// one stage, worth saying long before the wait is over. It is also how
+// recent the agent's last new report must be for that line to be said: an
+// agent beats once a second of its own runnable time, so ten ticks with no
+// new report is an agent that has stopped beating, or that the host has all
+// but stopped running, not one that runs slowly. A variable for tests; never
+// 0.
+var stepWaitLooks = 10
+
+// stepWaitBackOff is how many ticks with no new step the lines of
+// stepWaitLooks cover; from there on they come every stepWaitLaterLooks
+// ticks (stepLineDue). The first minute of a stage that does not end says
+// where it is often; a stage that goes on for minutes is said less often, so
+// that a three-minute stall in one stage says about ten lines, not
+// eighteen. Variables for tests; stepWaitLaterLooks never 0.
+var stepWaitBackOff, stepWaitLaterLooks = 60, 30
+
+// stepLineDue says whether the line for a start that beats with no new step
+// is due at the tick that makes n ticks since its last step: every `every`
+// ticks up to `until` of them, then every `later` ticks from there.
+func stepLineDue(n, every, until, later int) bool {
+	if n <= until {
+		return n%every == 0
+	}
+	return (n-until)%later == 0
+}
 
 // agentDialWait is how long one look at an agent known only by its URI waits
 // for its connection to be taken: the look's own length, not a bound on the
