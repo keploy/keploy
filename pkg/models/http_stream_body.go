@@ -456,7 +456,8 @@ func encodeStreamChunksNode(chunks []HTTPStreamChunk) *yamlLib.Node {
 // even though the YAML file now stores structured streaming data.
 //
 // For SSE bodies, each chunk becomes an SSE frame (fields joined by \n,
-// frames joined by \n\n, matching the SSE wire format).
+// each frame ended by a blank line, the last one too, matching the SSE wire
+// format).
 //
 // For all other streaming formats (NDJSON, plain text, binary), each chunk's
 // "raw" field value becomes one line.
@@ -478,7 +479,7 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 	switch kind {
 	case streamBodyKindSSE:
 		// Reconstruct SSE wire format: each frame is a block of "key:value" lines
-		// separated by \n, and frames are separated by \n\n.
+		// separated by \n, and each frame ends in a blank line.
 		frames := make([]string, 0, len(chunks))
 		for _, chunk := range chunks {
 			lines := make([]string, 0, len(chunk.Data))
@@ -510,7 +511,21 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 			}
 			frames = append(frames, strings.Join(lines, "\n"))
 		}
-		return strings.Join(frames, "\n\n")
+		body := strings.Join(frames, "\n\n")
+		if len(frames) > 0 {
+			// The last event ends in its blank line as every other does: a
+			// client dispatches an event only at the blank line after it, and
+			// drops the one a stream ends inside (the WHATWG event-stream
+			// parse), so a body that stopped at its last field would lose its
+			// last event on replay (an LLM stream's "data: [DONE]"). A frame
+			// never ends in a blank line of its own (every line carries its
+			// field's name or the comment's ':'), so this is the one blank
+			// line. The frames keep no word of whether the recorded stream
+			// ended inside its last event, so one that did reads back with
+			// that event ended.
+			body += "\n\n"
+		}
+		return body
 
 	default:
 		// NDJSON, plain text, binary — each chunk contributes one line via its "raw" field.
