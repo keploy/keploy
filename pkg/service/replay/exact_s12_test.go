@@ -632,20 +632,23 @@ func TestWithTheSwitchOffACallAfterTheLastTestIsServedNotRequired(t *testing.T) 
 // it no more than it does once keploy stops the application, does not
 // require it, made after the last test or never, and says which went
 // unjudged and why, where a set whose mappings.yaml marks the call says
-// nothing. Once keploy stops the application, what it consumed as it
-// stopped holds the call, and nothing goes unjudged.
+// nothing. A call the set's end read (one the application made before its
+// last test's own read) is not unjudged. Once keploy stops the application,
+// what it consumed as it stopped holds the call, and nothing goes unjudged.
 func TestUnderTheSwitchACallAfterTheLastTestOfAnAppKeployDidNotStopGoesUnjudged(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		recorded bool // mappings.yaml's worker scope says the call is the shutdown's
 		serve    bool // keploy keeps the application for the next set
 		late     bool // the application makes the call at the read after its last test's own
+		early    bool // the application makes the call before its last test's own read, which holds it
 		unjudged bool
 	}{
-		{"kept alive, made after the last test, the scope derived", false, true, true, true},
-		{"kept alive, never made, the scope derived", false, true, false, true},
-		{"kept alive, never made, recorded at the stop", true, true, false, false},
-		{"stopped by keploy, made as it stops, the scope derived", false, false, false, false},
+		{"kept alive, made after the last test, the scope derived", false, true, true, false, true},
+		{"kept alive, never made, the scope derived", false, true, false, false, true},
+		{"kept alive, read with the last test's calls, the scope derived", false, true, false, true, false},
+		{"kept alive, never made, recorded at the stop", true, true, false, false, false},
+		{"stopped by keploy, made as it stops, the scope derived", false, false, false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setSwitch(t, true)
@@ -697,6 +700,9 @@ func TestUnderTheSwitchACallAfterTheLastTestOfAnAppKeployDidNotStopGoesUnjudged(
 				defer mu.Unlock()
 				if reads++; reads > 1 && tc.late {
 					return []models.MockState{mongoAt("mock-late", 1500)}
+				}
+				if reads == 1 && tc.early {
+					return append(append([]models.MockState(nil), got...), mongoAt("mock-late", 1500))
 				}
 				return got
 			}}
