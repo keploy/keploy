@@ -256,7 +256,7 @@ func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 		},
 		app: appGivesUp,
 	}} {
-		t.Run(tc.name, func(t *testing.T) {
+		eitherSwitch(t, tc.name, func(t *testing.T) {
 			c := newRelayedConn(t)
 			c.start(t)
 			write(t, c.app, c.src, faultReq)
@@ -494,7 +494,7 @@ func TestReplayFault_AHeadTheMockCannotGiveIsRefused(t *testing.T) {
 		{"a body kept as one frame, a byte of it sent", models.Fault{Kind: models.FaultTruncate, BodyBytes: 1}, framedSSE("data: a"), "kept as a stream's frames"},
 		{"a body kept as a stream's frames, none of it sent", models.Fault{Kind: models.FaultReset, AfterHead: true}, framedSSE("data: a\n\ndata: b"), ""},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		eitherSwitch(t, tc.name, func(t *testing.T) {
 			f := tc.fault
 			m := faultMock(&f, tc.resp)
 			if tc.resp == nil {
@@ -539,17 +539,19 @@ func framedSSE(wire string) *models.HTTPResp {
 // whose client dispatched the first alone). Written again, the mock keeps
 // its frames, so the refusal stays.
 func TestReplayFault_ABodyKeptAsFramesIsRefused(t *testing.T) {
-	m := throughDisk(t, faultMock(&models.Fault{Kind: models.FaultReset, AfterHead: true, BodyBytes: 16}, framedSSE("data: a\n\ndata: b")))
-	if len(m.Spec.HTTPResp.StreamBody) == 0 {
-		t.Fatalf("the mock's frames were written as bytes: body %q", m.Spec.HTTPResp.Body)
-	}
-	app, returned := replaying(t, &HTTP{Logger: zap.NewNop()}, m)
-	if got := seenAt(t, app); got.got != "" {
-		t.Errorf("the application read %q; want nothing sent for a fault the mock cannot give", got.got)
-	}
-	if err := awaitReturn(t, returned); err == nil || !strings.Contains(err.Error(), "kept as a stream's frames") {
-		t.Errorf("decodeHTTP = %v; want the refusal naming the frames", err)
-	}
+	eitherSwitch(t, "a reset inside the second event", func(t *testing.T) {
+		m := throughDisk(t, faultMock(&models.Fault{Kind: models.FaultReset, AfterHead: true, BodyBytes: 16}, framedSSE("data: a\n\ndata: b")))
+		if len(m.Spec.HTTPResp.StreamBody) == 0 {
+			t.Fatalf("the mock's frames were written as bytes: body %q", m.Spec.HTTPResp.Body)
+		}
+		app, returned := replaying(t, &HTTP{Logger: zap.NewNop()}, m)
+		if got := seenAt(t, app); got.got != "" {
+			t.Errorf("the application read %q; want nothing sent for a fault the mock cannot give", got.got)
+		}
+		if err := awaitReturn(t, returned); err == nil || !strings.Contains(err.Error(), "kept as a stream's frames") {
+			t.Errorf("decodeHTTP = %v; want the refusal naming the frames", err)
+		}
+	})
 }
 
 // A recorded call that ended in a fault is no representative answer for a

@@ -14,7 +14,8 @@ import (
 // recording's body reads back: each event ended by its blank line, the last
 // one too. A test whose stream differs shows the recorded body beside that
 // one, so the diff holds the difference alone, never a blank line after the
-// last event that only the recording has. No frame is no body.
+// last event that only the recording has. No frame is no body. Under either
+// switch.
 func TestCompareHTTPStream_TheSSEBodyEndsItsLastEventAsTheRecordingDoes(t *testing.T) {
 	out, err := yamlLib.Marshal(models.HTTPResp{
 		StatusCode: 200,
@@ -28,23 +29,25 @@ func TestCompareHTTPStream_TheSSEBodyEndsItsLastEventAsTheRecordingDoes(t *testi
 	if err := yamlLib.Unmarshal(out, &recorded); err != nil || len(recorded.StreamBody) != 2 {
 		t.Fatalf("the recording did not read back as its 2 frames (%v):\n%s", err, out)
 	}
-	for _, c := range []struct {
-		name, stream, want string
-	}{
-		{"an event that differs", "data:{\"n\":1}\n\ndata:{\"n\":3}\n\n", "data:{\"n\":1}\n\ndata:{\"n\":3}\n\n"},
-		{"a stream that ended an event short", "data:{\"n\":1}\n\n", "data:{\"n\":1}\n\n"},
-		{"a stream of no event", "", ""},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			ok, body, _, err := CompareHTTPStream(recorded, strings.NewReader(c.stream), HTTPStreamConfig{Mode: HTTPStreamModeSSE}, map[string]struct{}{}, zap.NewNop())
-			if ok || err != nil {
-				t.Fatalf("CompareHTTPStream = %v, %v; want a difference", ok, err)
-			}
-			if body != c.want {
-				t.Errorf("the stream's body is %q; want %q, its events ended as the recording's %q", body, c.want, recorded.Body)
-			}
-		})
-	}
+	switchStates(t, func(t *testing.T) {
+		for _, c := range []struct {
+			name, stream, want string
+		}{
+			{"an event that differs", "data:{\"n\":1}\n\ndata:{\"n\":3}\n\n", "data:{\"n\":1}\n\ndata:{\"n\":3}\n\n"},
+			{"a stream that ended an event short", "data:{\"n\":1}\n\n", "data:{\"n\":1}\n\n"},
+			{"a stream of no event", "", ""},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				ok, body, _, err := CompareHTTPStream(recorded, strings.NewReader(c.stream), HTTPStreamConfig{Mode: HTTPStreamModeSSE}, map[string]struct{}{}, zap.NewNop())
+				if ok || err != nil {
+					t.Fatalf("CompareHTTPStream = %v, %v; want a difference", ok, err)
+				}
+				if body != c.want {
+					t.Errorf("the stream's body is %q; want %q, its events ended as the recording's %q", body, c.want, recorded.Body)
+				}
+			})
+		}
+	})
 }
 
 // A test case whose recorded stream ended inside its last event keeps its
@@ -66,21 +69,23 @@ func TestCompareHTTPStream_AStreamRecordedCutInsideItsLastEventCompares(t *testi
 	if err := yamlLib.Unmarshal(out, &recorded); err != nil || len(recorded.StreamBody) != 0 || recorded.Body != wire {
 		t.Fatalf("the recording did not read back as its bytes (%v):\n%s", err, out)
 	}
-	for _, c := range []struct {
-		name, stream string
-		ok           bool
-	}{
-		{"the stream as recorded", wire, true},
-		{"its last event differs", "data: {\"n\":1}\n\ndata: {\"n\":3}", false},
-		{"an event fewer", "data: {\"n\":1}\n\n", false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			ok, body, mismatch, err := CompareHTTPStream(recorded, strings.NewReader(c.stream), HTTPStreamConfig{Mode: HTTPStreamModeSSE}, map[string]struct{}{}, zap.NewNop())
-			if err != nil || ok != c.ok || (mismatch == nil) != c.ok {
-				t.Fatalf("CompareHTTPStream = %v, %q, %+v, %v; want ok %v", ok, body, mismatch, err, c.ok)
-			}
-		})
-	}
+	switchStates(t, func(t *testing.T) {
+		for _, c := range []struct {
+			name, stream string
+			ok           bool
+		}{
+			{"the stream as recorded", wire, true},
+			{"its last event differs", "data: {\"n\":1}\n\ndata: {\"n\":3}", false},
+			{"an event fewer", "data: {\"n\":1}\n\n", false},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				ok, body, mismatch, err := CompareHTTPStream(recorded, strings.NewReader(c.stream), HTTPStreamConfig{Mode: HTTPStreamModeSSE}, map[string]struct{}{}, zap.NewNop())
+				if err != nil || ok != c.ok || (mismatch == nil) != c.ok {
+					t.Fatalf("CompareHTTPStream = %v, %q, %+v, %v; want ok %v", ok, body, mismatch, err, c.ok)
+				}
+			})
+		}
+	})
 }
 
 // A frame after the recorded stream ended is a difference under the proven
@@ -101,20 +106,22 @@ func TestCompareHTTPStream_AFrameAfterTheRecordedStreamEndedIsShownEnded(t *test
 	if err := yamlLib.Unmarshal(out, &recorded); err != nil || len(recorded.StreamBody) != 1 {
 		t.Fatalf("the recording did not read back as its frame (%v):\n%s", err, out)
 	}
-	ok, body, mismatch, err := CompareHTTPStream(recorded, strings.NewReader("data:{\"n\":1}\n\ndata:{\"n\":2}\n\n"), HTTPStreamConfig{Mode: HTTPStreamModeSSE}, map[string]struct{}{}, zap.NewNop())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !provenswitch.On() {
-		if !ok || mismatch != nil {
-			t.Fatalf("CompareHTTPStream = %v, %+v; want a match, the read stopped at the recording's end", ok, mismatch)
+	switchStates(t, func(t *testing.T) {
+		ok, body, mismatch, err := CompareHTTPStream(recorded, strings.NewReader("data:{\"n\":1}\n\ndata:{\"n\":2}\n\n"), HTTPStreamConfig{Mode: HTTPStreamModeSSE}, map[string]struct{}{}, zap.NewNop())
+		if err != nil {
+			t.Fatal(err)
 		}
-		return
-	}
-	if ok || mismatch == nil || mismatch.ExpectedFrame != "(the recorded stream ended)" {
-		t.Fatalf("CompareHTTPStream = %v, %+v; want the frame past the recording", ok, mismatch)
-	}
-	if want := "data:{\"n\":1}\n\ndata:{\"n\":2}\n\n"; body != want {
-		t.Errorf("the stream's body is %q; want %q, its events ended as the recording's %q", body, want, recorded.Body)
-	}
+		if !provenswitch.On() {
+			if !ok || mismatch != nil {
+				t.Fatalf("CompareHTTPStream = %v, %+v; want a match, the read stopped at the recording's end", ok, mismatch)
+			}
+			return
+		}
+		if ok || mismatch == nil || mismatch.ExpectedFrame != "(the recorded stream ended)" {
+			t.Fatalf("CompareHTTPStream = %v, %+v; want the frame past the recording", ok, mismatch)
+		}
+		if want := "data:{\"n\":1}\n\ndata:{\"n\":2}\n\n"; body != want {
+			t.Errorf("the stream's body is %q; want %q, its events ended as the recording's %q", body, want, recorded.Body)
+		}
+	})
 }
