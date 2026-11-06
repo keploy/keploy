@@ -2,8 +2,14 @@ package replay
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"slices"
+	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -111,5 +117,72 @@ func TestTheMismatchReportExpectsNoAnswerTheClientNeverRead(t *testing.T) {
 	}
 	if names := reportedExpectedNames([]string{"mock-a", "mock-b"}, undelivered); len(names) != 2 {
 		t.Fatalf("a streaming test's report expects %v; want both", names)
+	}
+}
+
+// A failing streaming test whose recorded mapping names an answer the client
+// never read lists no such name on the mismatch report's expected side, under
+// either switch: the answer read and the call it made instead are listed as
+// before. The app calls mock-b in place of mock-a, so its mock set diverges
+// from its mapping, and answers the stream wrong. With the switch off, the
+// same test answered right passes and is not listed.
+func TestAFailingStreamingTestsReportExpectsNoAnswerTheClientNeverRead(t *testing.T) {
+	for _, tc := range []struct {
+		on, right bool
+	}{{false, false}, {true, false}, {false, true}} {
+		t.Run(fmt.Sprintf("switch on %v, answered right %v", tc.on, tc.right), func(t *testing.T) {
+			setSwitch(t, tc.on)
+			fastWorkerWait(t)
+			h := newPartialRunHarness(t, 1, 0)
+			pinWindows(h)
+			h.streaming("test-1")
+			h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), unreadAt("mock-unread", 1020), httpAt("mock-b", 1030)}
+			mappingFile(t, h, map[string][]models.MockEntry{"test-1": {
+				{Name: "mock-a", Kind: string(models.HTTP)},
+				{Name: "mock-unread", Kind: string(models.HTTP)},
+			}})
+			made := models.MockState{Name: "mock-b", Kind: models.HTTP, Usage: models.Deleted, Lifetime: models.LifetimePerTest,
+				ReqTimestampMock: models.FormatMockTimestamp(attrAt(1030)), ResTimestampMock: models.FormatMockTimestamp(attrAt(1031))}
+			answer := func(c *models.TestCase) *pkg.StreamingHTTPResponse {
+				code, body, header := 500, `{"ok":false}`, map[string]string{"Content-Type": "application/json"}
+				if tc.right {
+					code, body, header = c.HTTPResp.StatusCode, c.HTTPResp.Body, c.HTTPResp.Header
+				}
+				return &pkg.StreamingHTTPResponse{StatusCode: code, StatusMessage: http.StatusText(code), Header: header,
+					Reader: io.NopCloser(strings.NewReader(body)), StreamConfig: pkg.HTTPStreamConfig{Mode: pkg.HTTPStreamModeNone}}
+			}
+			h.replayer.hookImpl = nonStreamAnswerHooks{
+				prHooks: prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": {made}})},
+				answers: map[string]func(*models.TestCase) *pkg.StreamingHTTPResponse{"test-1": answer},
+			}
+			_ = h.run(t)
+			if passed := resultOf(t, h, "test-1").Status == models.TestStatusPassed; passed != tc.right {
+				t.Fatalf("the streaming test passed %v; want %v", passed, tc.right)
+			}
+			var reported []TestFailure
+			for _, f := range h.replayer.mockMismatchFailures.failures {
+				if f.TestID == "test-1" {
+					reported = append(reported, f)
+				}
+			}
+			if tc.right {
+				if len(reported) != 0 {
+					t.Fatalf("the report lists the passing test's mismatch %d time(s); want none", len(reported))
+				}
+				return
+			}
+			if len(reported) != 1 {
+				t.Fatalf("the report lists test-1's mismatch %d time(s); want once", len(reported))
+			}
+			got := reported[0]
+			if len(got.ExpectedMocks) != 1 || got.ExpectedMocks[0] != "mock-a" {
+				t.Fatalf("the report expects %v; want [mock-a], not the answer never read", got.ExpectedMocks)
+			}
+			// The harness answers each read of the window's consumption, so
+			// the call made may be listed once a read.
+			if len(got.ActualMocks) == 0 || slices.ContainsFunc(got.ActualMocks, func(n string) bool { return n != "mock-b" }) {
+				t.Fatalf("the report lists consumed %v; want mock-b, the call made", got.ActualMocks)
+			}
+		})
 	}
 }

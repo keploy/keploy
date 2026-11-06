@@ -5714,7 +5714,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.String("reason", vetoTemplateFailure),
 						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
-					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, reportedExpected, mockNames)
 				} else if len(streamUnconsumed) > 0 || streamCallsMissed > 0 || streamLostCapture {
 					reason := vetoUnconsumedTestMock
 					switch {
@@ -5732,7 +5731,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.String("reason", reason),
 						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
-					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, reportedExpected, mockNames)
 				} else if r.strictFailure() {
 					// Under the switch, or --strict-failure, a failed answer is
 					// FAILED whatever the mock set did (the verdict below): the
@@ -5744,13 +5742,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.String("reason", vetoFlagName(false, true)),
 						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
-					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, reportedExpected, mockNames)
 				} else {
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking as obsolete",
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
 						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
+				}
+				// Every failing branch above lists the mismatch, on the
+				// expected side as the report reads it.
+				if !testPass {
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, reportedExpected, mockNames)
 				}
 			}
