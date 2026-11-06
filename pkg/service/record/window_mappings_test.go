@@ -522,6 +522,41 @@ func TestStart_ProvenWindowMappingsKeepTheWindowOfATestThatFailedToPersist(t *te
 	}
 }
 
+// Through Start: a test case the store refused for its own body is lost as one
+// that failed to persist is, though the recording goes on. The call recorded
+// while it and a later-started test were open goes to no test, not to the one
+// that persisted.
+func TestStart_ProvenWindowMappingsKeepTheWindowOfARefusedTestCase(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	keepExitCode(t)
+	mockDB := &recMockDB{unencodable: map[string]bool{}}
+	run := startRecording(t, mockDB, BaseRecordHooks{}, zap.NewNop(), func(r *Recorder) {
+		r.testDB.(*recTestDB).refuseNames = map[string]bool{"refused": true}
+	})
+	run.frame(t, winMock("call", models.HTTP, "", 1210))
+	require.Eventually(t, func() bool {
+		mockDB.mu.Lock()
+		defer mockDB.mu.Unlock()
+		return len(mockDB.inserted) == 1
+	}, 10*time.Second, 10*time.Millisecond)
+	for _, tc := range []*models.TestCase{winTest("refused", 1000, 1500), winTest("kept", 1200, 1300)} {
+		select {
+		case run.f.incoming <- tc:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the recorder never took %s", tc.Name)
+		}
+	}
+	run.stop(t)
+	run.mapDB.mu.Lock()
+	defer run.mapDB.mu.Unlock()
+	if len(run.mapDB.batches) != 1 {
+		t.Fatalf("want one batch, got %v", run.mapDB.batches)
+	}
+	if got, ok := run.mapDB.batches[0]["kept"]; len(run.mapDB.batches[0]) != 1 || !ok || len(got) != 0 {
+		t.Fatalf("mapped %v; want kept with no mock: the call was recorded inside the window of the refused test case", got)
+	}
+}
+
 // A test case that came back from its insert without a name keeps its window,
 // as one that failed to persist does: the call recorded inside it goes to no
 // test rather than to a later-started one, and no entry is written under "".

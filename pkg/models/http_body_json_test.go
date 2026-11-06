@@ -388,6 +388,9 @@ func TestHTTPBodyJSONRead(t *testing.T) {
 		{name: "string that is valid base64 stays as it stands", doc: `{"method":"GET","body":"aGVsbG8="}`, want: "aGVsbG8="},
 		{name: "object", doc: `{"method":"GET","body":{"encoding":"base64","data":"` + b64 + `"}}`, want: pngBody},
 		{name: "object with space", doc: `{"method":"GET","body": {"data":"` + b64 + `", "encoding":"base64"} }`, want: pngBody},
+		// Each still names its bytes, read as encoding/json reads any object.
+		{name: "object with a field keploy does not know", doc: `{"method":"GET","body":{"encoding":"base64","data":"` + b64 + `","extra":1}}`, want: pngBody},
+		{name: "object with keys in another case", doc: `{"method":"GET","body":{"ENCODING":"base64","DATA":"` + b64 + `"}}`, want: pngBody},
 		{name: "absent keeps", doc: `{"method":"GET"}`, want: "kept"},
 		{name: "null keeps", doc: `{"method":"GET","body":null}`, want: "kept"},
 		{name: "other encoding", doc: `{"body":{"encoding":"hex","data":"00"}}`, errHas: `encoding "hex" is not one keploy reads`},
