@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
@@ -315,6 +317,248 @@ func TestReadStoppedAgentRecordsAMissingOutcome(t *testing.T) {
 	}
 	if got.OutcomeErr == nil || !strings.Contains(got.OutcomeErr.Error(), "left no "+docker.AgentOutcomeFile) {
 		t.Fatalf("OutcomeErr = %v, want one naming the missing file", got.OutcomeErr)
+	}
+	// The daemon's answer: reading it again would not change it.
+	if len(d.copied) != 1 {
+		t.Fatalf("the file was asked for %d times, want once: %v", len(d.copied), d.copied)
+	}
+}
+
+// busyStoppedDocker is stoppedAgentDocker as a busy daemon serves it, by what
+// is asked: a container's name, or stoppedOutcomeAsk for the outcome's file.
+// An ask first takes the next of script, then always; one in needs answers only
+// a caller whose cap leaves it that long, and others once their cap has passed.
+// onAsk runs with each ask's count.
+type busyStoppedDocker struct {
+	*stoppedAgentDocker
+	amu    sync.Mutex
+	script map[string][]error
+	always map[string]error
+	needs  map[string]time.Duration
+	asks   map[string]int
+	onAsk  func(what string, asks int)
+}
+
+const stoppedOutcomeAsk = "the outcome"
+
+func (d *busyStoppedDocker) ask(ctx context.Context, what string) error {
+	d.amu.Lock()
+	if d.asks == nil {
+		d.asks = map[string]int{}
+	}
+	d.asks[what]++
+	asks, err := d.asks[what], d.always[what]
+	if s := d.script[what]; len(s) > 0 {
+		err, d.script[what] = s[0], s[1:]
+	}
+	needs, onAsk := d.needs[what], d.onAsk
+	d.amu.Unlock()
+	if onAsk != nil {
+		onAsk(what, asks)
+	}
+	if err != nil {
+		return err
+	}
+	if dl, ok := ctx.Deadline(); needs > 0 && (!ok || time.Until(dl) < needs) {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (d *busyStoppedDocker) asked(what string) int {
+	d.amu.Lock()
+	defer d.amu.Unlock()
+	return d.asks[what]
+}
+
+func (d *busyStoppedDocker) ContainerInspect(ctx context.Context, name string) (container.InspectResponse, error) {
+	if err := d.ask(ctx, name); err != nil {
+		return container.InspectResponse{}, err
+	}
+	return d.stoppedAgentDocker.ContainerInspect(ctx, name)
+}
+
+func (d *busyStoppedDocker) CopyFromContainer(ctx context.Context, name, path string) (io.ReadCloser, container.PathStat, error) {
+	if err := d.ask(ctx, stoppedOutcomeAsk); err != nil {
+		return nil, container.PathStat{}, err
+	}
+	return d.stoppedAgentDocker.CopyFromContainer(ctx, name, path)
+}
+
+// TestTheStoppedContainersAreReadUntilTheDaemonAnswers: what readStoppedAgent
+// reads is the run's verdict, in keploy record and in keploy mock record, so no
+// clock ends a read: on a daemon slower than any one cap, an app compose never
+// started is still read as one, and its 0 does not stand. Only what leaves
+// nothing to wait for ends a read with no answer: a refusal, the container being
+// gone, a count of failures, a daemon keploy cannot connect to.
+func TestTheStoppedContainersAreReadUntilTheDaemonAnswers(t *testing.T) {
+	const agent, app = "keploy-v3-test", "runner"
+	busy := errdefs.System(errors.New("Error response from daemon: internal error"))
+	refused := errdefs.Forbidden(errors.New("Error response from daemon: forbidden by the socket proxy"))
+	unreachable := realConnectionFailure(t)
+	// Past three caps, whose sum is more than any budget a read had before.
+	const slow = composeAbortFirstReadCap<<2 + time.Second
+	for mode, opts := range map[string]models.SetupOptions{
+		"keploy record":      {Mode: models.MODE_RECORD},
+		"keploy mock record": {MockMode: true, Mode: models.MODE_RECORD},
+	} {
+		for _, tc := range []struct {
+			name  string
+			arm   func(*busyStoppedDocker)
+			gone  bool
+			app   int // how many times the app's container was asked for
+			agent int // and the agent's; 1 when unset
+			noApp bool
+		}{
+			{name: "both answer", app: 1},
+			{name: "an app's read past three caps", app: 4, arm: func(d *busyStoppedDocker) { d.needs = map[string]time.Duration{app: slow} }},
+			{name: "an agent's read past three caps", app: 1, agent: 4, arm: func(d *busyStoppedDocker) { d.needs = map[string]time.Duration{agent: slow} }},
+			{name: "an app's read that fails is read again", app: composeEndReadFailures, arm: func(d *busyStoppedDocker) {
+				d.script = map[string][]error{app: slices.Repeat([]error{busy}, composeEndReadFailures-1)}
+			}},
+			{name: "a daemon that keeps failing the app's read", app: composeEndReadFailures, noApp: true, arm: func(d *busyStoppedDocker) {
+				d.always = map[string]error{app: busy}
+			}},
+			{name: "a refused read of the app", app: 1, noApp: true, arm: func(d *busyStoppedDocker) { d.always = map[string]error{app: refused} }},
+			{name: "an app's container that is gone", app: 1, noApp: true, gone: true},
+			{name: "a daemon keploy cannot connect to", app: composeAbortUnreachableAsks, noApp: true, arm: func(d *busyStoppedDocker) {
+				d.always = map[string]error{app: unreachable}
+			}},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				d := &busyStoppedDocker{stoppedAgentDocker: &stoppedAgentDocker{states: map[string]*container.State{
+					agent: ended("exited", 0, "2026-09-25T12:00:00Z", "2026-09-25T12:00:10Z"),
+					app:   {Status: "created", StartedAt: "0001-01-01T00:00:00Z"},
+				}}}
+				if tc.gone {
+					delete(d.states, app)
+				}
+				if tc.arm != nil {
+					tc.arm(d)
+				}
+				a := composeReplayApp(d)
+				a.opts = opts
+				a.readStoppedAgent(context.Background())
+				got, ok := a.StoppedAgent()
+				if !ok {
+					t.Fatal("nothing was read")
+				}
+				if got.Agent == nil {
+					t.Fatal("the agent's container was not read")
+				}
+				if got.AppNeverStarted() == tc.noApp {
+					t.Fatalf("AppNeverStarted() = %v (App %+v), want %v", got.AppNeverStarted(), got.App, !tc.noApp)
+				}
+				if tc.agent == 0 {
+					tc.agent = 1
+				}
+				if asks := d.asked(agent); asks != tc.agent {
+					t.Fatalf("the agent's container was read %d time(s), want %d", asks, tc.agent)
+				}
+				if asks := d.asked(app); asks != tc.app {
+					t.Fatalf("the app's container was read %d time(s), want %d", asks, tc.app)
+				}
+			})
+		}
+	}
+}
+
+// TestTheReplayOutcomeIsReadUntilTheDaemonAnswers: no clock decides the account
+// of a replay either. Lost to a slow daemon, a clean replay failed.
+func TestTheReplayOutcomeIsReadUntilTheDaemonAnswers(t *testing.T) {
+	busy := errdefs.System(errors.New("Error response from daemon: internal error"))
+	const slow = composeAbortFirstReadCap<<2 + time.Second
+	for _, tc := range []struct {
+		name    string
+		arm     func(*busyStoppedDocker)
+		asks    int
+		wantErr string
+	}{
+		{name: "a read past three caps", asks: 4, arm: func(d *busyStoppedDocker) {
+			d.needs = map[string]time.Duration{stoppedOutcomeAsk: slow}
+		}},
+		{name: "a read that fails is read again", asks: 2, arm: func(d *busyStoppedDocker) {
+			d.script = map[string][]error{stoppedOutcomeAsk: {busy}}
+		}},
+		{name: "a daemon that keeps failing the read", asks: composeEndReadFailures, wantErr: "internal error", arm: func(d *busyStoppedDocker) {
+			d.always = map[string]error{stoppedOutcomeAsk: busy}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			outcome := []byte(`{"consumed":[{"name":"mock-1"}],"missed":[]}`)
+			d := &busyStoppedDocker{stoppedAgentDocker: &stoppedAgentDocker{
+				files:  map[string]map[string][]byte{"keploy-v3-test": {docker.AgentOutcomeFile: outcome}},
+				states: map[string]*container.State{"keploy-v3-test": ended("exited", 0, "2026-09-25T12:00:00Z", "2026-09-25T12:00:10Z")},
+			}}
+			tc.arm(d)
+			a := composeReplayApp(d)
+			a.readStoppedAgent(context.Background())
+			got, ok := a.StoppedAgent()
+			if !ok {
+				t.Fatal("nothing was read")
+			}
+			if asks := d.asked(stoppedOutcomeAsk); asks != tc.asks {
+				t.Fatalf("the outcome was read %d time(s), want %d", asks, tc.asks)
+			}
+			if tc.wantErr != "" {
+				if got.OutcomeErr == nil || !strings.Contains(got.OutcomeErr.Error(), tc.wantErr) || got.Outcome != nil {
+					t.Fatalf("Outcome %q, OutcomeErr %v, want none and the daemon's failure", got.Outcome, got.OutcomeErr)
+				}
+				return
+			}
+			if got.OutcomeErr != nil || !bytes.Equal(got.Outcome, outcome) {
+				t.Fatalf("Outcome %q, OutcomeErr %v, want the file the agent left", got.Outcome, got.OutcomeErr)
+			}
+		})
+	}
+}
+
+// TestARunInterruptedDuringTheStoppedReadReportsNothing: the read has no end of
+// its own, so the run's stop ends it, at once, and what it had by then is not
+// reported. Half a read is a wrong one: an agent read with no app beside it
+// reads as an agent that failed.
+func TestARunInterruptedDuringTheStoppedReadReportsNothing(t *testing.T) {
+	for _, tc := range []struct{ name, stall string }{
+		{"on the app's container", "runner"},
+		{"on the replay outcome", stoppedOutcomeAsk},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &busyStoppedDocker{
+				stoppedAgentDocker: &stoppedAgentDocker{
+					files: map[string]map[string][]byte{"keploy-v3-test": {docker.AgentOutcomeFile: []byte(`{}`)}},
+					states: map[string]*container.State{
+						"keploy-v3-test": ended("exited", 1, "2026-09-25T12:00:00Z", "2026-09-25T12:00:10Z"),
+						"runner":         {Status: "created"},
+					},
+				},
+				needs: map[string]time.Duration{tc.stall: time.Hour},
+			}
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			d.onAsk = func(what string, asks int) {
+				if what == tc.stall && asks == 2 {
+					stop()
+				}
+			}
+			a := composeReplayApp(d)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				a.readStoppedAgent(ctx)
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Minute):
+				stop()
+				t.Fatal("the read outlived the run's stop")
+			}
+			if got, ok := a.StoppedAgent(); ok {
+				t.Fatalf("an interrupted run reported %+v", got)
+			}
+		})
 	}
 }
 

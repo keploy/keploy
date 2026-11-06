@@ -321,6 +321,16 @@ func (m *mockService) composeAgentFailure() error {
 	return reader.ComposeAgentFailure()
 }
 
+// composeEnd is what ended a compose recording when the test command's own
+// end, appExit, does not stand, or nil. See ComposeEndReader.
+func (m *mockService) composeEnd(appExit int) error {
+	reader, ok := m.instrumentation.(ComposeEndReader)
+	if !ok || !m.isDockerCompose() {
+		return nil
+	}
+	return reader.ComposeEndAfterReady(appExit)
+}
+
 // releaseComposeApp releases the app service, which has been parked at its
 // healthcheck ever since startComposeApp brought the project up.
 //
