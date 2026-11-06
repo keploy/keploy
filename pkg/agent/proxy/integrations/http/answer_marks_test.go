@@ -124,12 +124,16 @@ func TestRecordKeepsAMarkPerWriteOfAnSSEStream(t *testing.T) {
 	// The frames read back as "data:a" (the parse took the space off): the
 	// marks are on that body, not the recorded one.
 	wantMarks(t, back.Marks, markAt(1), w(8, 1), w(16, 2), w(len(back.Body), 3))
-	for i, piece := range []string{"data:a\n\n", "data:b\n\n", "data:c"} {
+	for i, piece := range []string{"data:a\n\n", "data:b\n\n", "data:c\n\n"} {
 		start := 0
 		if i > 0 {
 			start = back.Marks.Writes[i-1].Offset
 		}
-		if got := back.Body[start:back.Marks.Writes[i].Offset]; got != piece {
+		end := back.Marks.Writes[i].Offset
+		if end < start || end > len(back.Body) {
+			t.Fatalf("mark %d at %d does not fit after %d in a body of %d: %q", i, end, start, len(back.Body), back.Body)
+		}
+		if got := back.Body[start:end]; got != piece {
 			t.Errorf("piece %d = %q, want %q", i, got, piece)
 		}
 	}

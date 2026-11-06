@@ -163,13 +163,14 @@ func marksOnFrames(resp HTTPResp, chunks []HTTPStreamChunk) ([]HTTPStreamChunk, 
 
 // legacyFramePieces is, for each of chunks, the offset in the body they read
 // back as (streamChunksToLegacyBody) where its piece ends: the frame and the
-// separator after it, the last frame at the body's end. A frame the body
-// leaves out ends where the one before it did. ok is false when the pieces do
-// not end at the body's end.
+// separator after it, the last frame at the body's end (an SSE body's with
+// the blank line that ends its last event). A frame the body leaves out ends
+// where the one before it did. ok is false when the pieces do not end at the
+// body's end.
 func legacyFramePieces(chunks []HTTPStreamChunk, kind streamBodyKind) ([]int, bool) {
-	sep := 1
+	sep, end := 1, 0
 	if kind == streamBodyKindSSE {
-		sep = 2
+		sep, end = 2, 2
 	}
 	body := streamChunksToLegacyBody(chunks, kind)
 	pieces := make([]int, len(chunks))
@@ -184,8 +185,11 @@ func legacyFramePieces(chunks []HTTPStreamChunk, kind streamBodyKind) ([]int, bo
 		}
 		pieces[i] = pos
 	}
-	// A text body whose last line is blank ends in one more newline.
-	if last < 0 || pos != len(body) && (kind == streamBodyKindSSE || pos+1 != len(body)) {
+	// An SSE body ends its last event with a blank line. A raw body ends at
+	// its last line: the frames placed here (marksOnFrames: NDJSON lines,
+	// which are never blank, and a binary body whole) never end in the blank
+	// line a text body's newline would be added for.
+	if last < 0 || pos+end != len(body) {
 		return nil, false
 	}
 	for i := range pieces {
@@ -200,13 +204,14 @@ func legacyFramePieces(chunks []HTTPStreamChunk, kind streamBodyKind) ([]int, bo
 }
 
 // legacyFrame is chunk as streamChunksToLegacyBody writes it, without the
-// separator between frames; ok is false for one it leaves out. A line is its
+// separator between frames (an SSE event without the blank line that ends
+// it); ok is false for one it leaves out. A line is its
 // raw field, which every chunk a fresh body splits into has
 // (splitStreamBody): a chunk without one is no frame here, so the pieces do
 // not end at the body's end, and the answer keeps no marks (written at once).
 func legacyFrame(chunk HTTPStreamChunk, kind streamBodyKind) (string, bool) {
 	if kind == streamBodyKindSSE {
-		frame := streamChunksToLegacyBody([]HTTPStreamChunk{chunk}, kind)
+		frame := sseFrame(chunk)
 		return frame, frame != ""
 	}
 	return chunk.ValueByKey("raw")
