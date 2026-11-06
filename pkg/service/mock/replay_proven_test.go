@@ -998,6 +998,50 @@ func TestTheTableNamesOnlyMocksTheAgentHolds(t *testing.T) {
 	require.Equal(t, map[string][]string{"o::TestA": {"mock-0"}, "o::TestB": {}, "o::TestC": {}}, got)
 }
 
+// The agent is told, by test, the names of its own list that keploy's judging marked
+// served, not required: an unmarked entry, and a marked one the agent does
+// not hold for that test, are none.
+func TestTheTableNamesTheRecordingsMarkedNotRequiredByTest(t *testing.T) {
+	mappings := map[string][]models.MockEntry{
+		"o::TestA": {{Name: "mock-1"}, {Name: "mock-2", NotRequired: "served, not required"}},
+		"o::TestB": {{Name: "mock-3", NotRequired: "served, not required"}},
+		"o::TestC": {{Name: "mock-4"}},
+	}
+	table := map[string][]string{"o::TestA": {"mock-1", "mock-2"}, "o::TestB": {}, "o::TestC": {"mock-4"}}
+	require.Equal(t, map[string][]string{"o::TestA": {"mock-2"}}, notRequired(mappings, table))
+	require.Nil(t, notRequired(map[string][]models.MockEntry{"o::TestC": {{Name: "mock-4"}}}, table))
+}
+
+// A replay under the switch hands the agent, in the same push as the table,
+// the names of each test's own list keploy's judging marked served, not
+// required (pushProvenTable -> notRequired): without them the agent charges
+// the test for a marked call the app did not make. A test with no mark
+// sends none.
+func TestAReplayPushesTheMarkedNamesWithTheTable(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	mdb := mapdb.New(zap.NewNop(), keployDir, "")
+	ctx := context.Background()
+	require.NoError(t, mdb.UpsertBatch(ctx, "set", map[string][]models.MockEntry{
+		"orders::TestPlace": {{Name: "mock-0"}, {Name: "mock-1", NotRequired: "served, not required"}},
+		"orders::TestNone":  nil,
+	}))
+	require.NoError(t, mdb.UpsertCases(ctx, "set", map[string]models.MappedTestCase{
+		"orders::TestPlace": {At: runnerT0}, "orders::TestNone": {At: runnerT0},
+	}, nil, nil))
+	rinstr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	rcfg := instrConfig(rinstr, utils.Native, "go test -p 1 -json ./...")
+	rcfg.Path, rcfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), rinstr, named("mock-0", "mock-1"), mdb, nil, nil, rcfg).Replay(ctx))
+	require.Equal(t, []string{"mock-0", "mock-1"}, rinstr.table["orders::TestPlace"])
+	require.Equal(t, map[string][]string{"orders::TestPlace": {"mock-1"}}, rinstr.notRequired, "the replay pushes each test's marked names with the table")
+}
+
 // A test owns a test mock only if a mock its mapping lists is held and
 // data-plane: a mapping of handshakes and DNS lookups alone owns none.
 func TestOwnsTestMocks(t *testing.T) {

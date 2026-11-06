@@ -85,6 +85,28 @@ type MockEntry struct {
 	// Owner running beside it, as judging kept it. Read and kept by each
 	// rewrite, whatever the switch.
 	Drift bool `json:"drift,omitempty" yaml:"drift,omitempty" bson:"drift,omitempty"`
+	// NotRequired says, on an entry of a test's own list, that keploy's
+	// judging (keploy mock record's, or keploy mock judge's) proved the
+	// recording served, not required, and why, in keploy's words: the test's
+	// record made the call, round F (the judging's replay of the tests its
+	// command runs) did not make it while the test ran, and the test failed
+	// on nothing else. Under keploy mock record, round F runs the code that
+	// recorded the call, so whether the app makes it while the test runs
+	// depends on more than the code (how fast an answer comes, for one);
+	// keploy mock judge runs the code as it is when it judges. The words may
+	// also name a race note: the call of the same test (the first sent, when
+	// several were), made in the round too, that the recording shows was still
+	// unanswered when this one was sent. The note is information only: a call
+	// without one is marked all the same. Under the proven switch a replay
+	// serves the recording, when the app makes the call, by the same matching
+	// as the test's other recordings, and does not charge that test, and only
+	// that test, for not making it, unless the store refused the recording,
+	// which nothing could serve. keploy writes a mark only from that judging
+	// (a pull of a published recording gives back the mark its publish
+	// carried); a replay honours any mark an entry of the test's own list
+	// carries, one edited by hand too. Read and kept by each rewrite of
+	// mappings.yaml, whatever the switch.
+	NotRequired string `json:"notRequired,omitempty" yaml:"notRequired,omitempty" bson:"not_required,omitempty"`
 }
 
 // RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy

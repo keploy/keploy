@@ -443,6 +443,43 @@ func TestAnEndJudgesAgainstTheCountsAtItsBegin(t *testing.T) {
 	require.Contains(t, e.Reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
 }
 
+// A recording keploy's judging marked served, not required is not charged when
+// the test that lists it did not make its call; a mark another test's table
+// carries charges this one as before, and so does a mark on another name.
+func TestARecordingMarkedNotRequiredIsNotChargedInItsOwnTestOnly(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		marked  map[string][]string
+		charged bool
+	}{
+		{"marked in its own test", map[string][]string{"o::TestA": {"mock-1"}}, false},
+		{"marked in another test", map[string][]string{"o::TestB": {"mock-1"}}, true},
+		{"another name marked", map[string][]string{"o::TestA": {"mock-2"}}, true},
+		{"none marked", nil, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, p := wireAgent(t, models.MODE_TEST)
+			ctx := context.Background()
+			storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
+			a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+			p.served = map[string]uint64{"mock-1": 1} // answered an earlier test
+			require.NoError(t, a.SetScopeNotRequired(ctx, c.marked))
+			claimSelf(t, a)
+			_, serr := a.ProvenBegin(ctx, begin("TestA"))
+			require.Nil(t, serr)
+			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+			require.Nil(t, serr)
+			if !c.charged {
+				require.Empty(t, e.Action, "a recording marked served, not required failed its test: %s", e.Reason)
+				require.Equal(t, models.ScopeOutcomePassed, windowOf(t, a, "o::TestA").Outcome)
+				return
+			}
+			require.Equal(t, models.ScopeActionFail, e.Action)
+			require.Contains(t, e.Reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
+		})
+	}
+}
+
 // A wire operation waiting for another ends with its caller's context: the
 // CLI's final read is never stuck behind an operation it cannot see.
 func TestAWaitForTheWireEndsWithItsContext(t *testing.T) {

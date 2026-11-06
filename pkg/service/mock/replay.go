@@ -1327,7 +1327,8 @@ func (m *mockService) matchNoise(name string) models.OutgoingOptions {
 // does an agent that refuses the table: nothing is served from a whole pool
 // instead. The values each test gave when it was recorded go in the same
 // request, and so do the repeated reads the registered namer names
-// (namedRepeatReads).
+// (namedRepeatReads) and the names of each test's own list marked served,
+// not required (notRequired).
 func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
@@ -1384,7 +1385,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	worker := workerSlices(mp, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp), repeats); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp), repeats, notRequired(mappings, table)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -1550,6 +1551,26 @@ func ownsTestMocks(table map[string][]string, loaded []*models.Mock) bool {
 		}
 	}
 	return false
+}
+
+// notRequired is, by test, the names of its list in table (what the agent
+// holds) whose mapping entry keploy's judging marked served, not required
+// (models.MockEntry.NotRequired); nil when none is. A mark on a name the
+// test's table does not list marks nothing: the mark is the test's own.
+func notRequired(mappings map[string][]models.MockEntry, table map[string][]string) map[string][]string {
+	var out map[string][]string
+	for test, entries := range mappings {
+		for _, e := range entries {
+			if e.NotRequired == "" || !slices.Contains(table[test], e.Name) {
+				continue
+			}
+			if out == nil {
+				out = map[string][]string{}
+			}
+			out[test] = append(out[test], e.Name)
+		}
+	}
+	return out
 }
 
 // heldOnly is table less the names the agent does not hold: a mock the set
