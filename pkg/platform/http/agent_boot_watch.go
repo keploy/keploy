@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -1109,7 +1108,7 @@ func (a *AgentClient) WatchAgentStart(ctx context.Context) <-chan error {
 // sees is noted there, and what it asks (known, the run over) is asked there.
 // over is closed once the watch has ended, with ctx or its verdict, and its
 // look with it (watchStart, watchAgentAt). Both are nil where there is no
-// watch: a client with no agent, or an agent URI that names no address.
+// watch: a client with no agent.
 func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) (errs <-chan error, over <-chan struct{}) {
 	a.mu.Lock()
 	container, run := a.agentContainer, a.run
@@ -1299,12 +1298,12 @@ const agentBodyShown = 200
 //
 // ctx ends it; so does the wait, once the agent's health check answers.
 // over is closed once it has ended, its look with it (each look is on the
-// watch's own goroutine). Both are nil for a URI that names no address.
+// watch's own goroutine). A URI its health check cannot be asked at (one
+// that names no host, or no scheme keploy can send on) is looked at all the
+// same: nothing takes a connection there, and the wait is given up on, saying
+// why, as for one where no agent is.
 func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) (errs <-chan error, over <-chan struct{}) {
 	out, ends := make(chan error, 1), make(chan struct{})
-	if agentAddr(uri) == "" {
-		return nil, nil
-	}
 	// Read here, on the caller's goroutine: the watch's outlives the wait.
 	clk, release := uriClock, func() {}
 	if clk == nil {
@@ -1363,11 +1362,12 @@ func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) (errs <-chan
 
 // agentSeen is what the looks at an agent known only by its URI have found:
 // the last look's, the last that found something take its connection, and
-// the last that got an answer.
+// the last that got an answer; and whether any found those, or a healthy
+// answer.
 type agentSeen struct {
 	looks                       int
 	last, lastTaken, lastAnswer agentLook
-	taken, answered             bool
+	taken, answered, healthy    bool
 }
 
 // note adds the look l to what has been seen.
@@ -1379,6 +1379,9 @@ func (s *agentSeen) note(l agentLook) {
 	}
 	if l.kind == agentAnswered || l.kind == agentHealthy {
 		s.answered, s.lastAnswer = true, l
+	}
+	if l.kind == agentHealthy {
+		s.healthy = true
 	}
 }
 
@@ -1394,10 +1397,16 @@ func (s *agentSeen) givenUp(uri string, silence time.Duration) error {
 		why = fmt.Sprintf("the keploy agent at %s has stopped: something took connections there, and none was taken for %s of keploy's runnable time since (%s); the last look that found something there: %s",
 			uri, silence, s.last.found, s.lastTaken.found)
 	default:
-		why = fmt.Sprintf("the keploy agent at %s never answered its health check healthy: something takes connections there, and what keploy found did not change for %s of keploy's runnable time: %s",
-			uri, silence, s.last.found)
+		did := "never answered its health check healthy"
+		if s.healthy {
+			did = "no longer answers its health check healthy"
+		}
+		why = fmt.Sprintf("the keploy agent at %s %s: something takes connections there, and what keploy found did not change for %s of keploy's runnable time: %s",
+			uri, did, silence, s.last.found)
 	}
-	if s.answered && s.lastAnswer != s.last {
+	// The last answer, unless the reason said it already: the last look
+	// that found something take its connection got it.
+	if s.answered && s.lastAnswer != s.lastTaken {
 		why += "; its last answer: " + s.lastAnswer.found
 	}
 	return fmt.Errorf("%w: %s", pkg.ErrAgentNotReady, why)
@@ -1412,23 +1421,6 @@ func shownAgentURI(uri string) string {
 		return uri
 	}
 	return u.Redacted()
-}
-
-// agentAddr is the host:port an agent URI names; "" for one that names none.
-func agentAddr(uri string) string {
-	u, err := url.Parse(uri)
-	if err != nil || u.Host == "" {
-		return ""
-	}
-	if u.Port() != "" {
-		return u.Host
-	}
-	switch u.Scheme {
-	case "https":
-		return net.JoinHostPort(u.Hostname(), "443")
-	default:
-		return net.JoinHostPort(u.Hostname(), "80")
-	}
 }
 
 // lookAtAgent is how watchAgentAt looks (lookAtAgentHealth). A variable for
@@ -1459,12 +1451,12 @@ func lookAtAgentHealth(ctx context.Context, client *http.Client, healthURL strin
 	switch {
 	case err != nil && !connected.Load():
 		return agentLook{kind: agentRefused, found: fmt.Sprintf("nothing takes a connection there yet (%v)", err)}
-	case err != nil && errors.Is(lookCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil:
+	case err != nil && errors.Is(lookCtx.Err(), context.DeadlineExceeded):
 		return agentLook{kind: agentHeld, found: fmt.Sprintf("something takes connections there and holds them with no answer to its health check for %s", wait)}
 	case err != nil:
 		return agentLook{kind: agentClosed, found: fmt.Sprintf("something takes connections there and closes them with no answer to its health check (%v)", err)}
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, agentBodyShown))
 	if res.StatusCode == http.StatusOK {
 		return agentLook{kind: agentHealthy, status: res.StatusCode, found: "its health check answers healthy"}
