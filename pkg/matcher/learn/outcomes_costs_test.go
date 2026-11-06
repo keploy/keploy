@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"hash/maphash"
 	"math/rand/v2"
+	"os"
+	"os/exec"
 	"reflect"
 	"runtime"
 	"runtime/metrics"
@@ -483,6 +485,9 @@ func TestOutcomeCostAGivenGluedInsideAWordIsAPart(t *testing.T) {
 // recordings of 1 MiB held 64 MiB for the whole call, past the set's
 // bounded store of payloads.
 func TestOutcomeCostThePlacesKeepNoRecordingsText(t *testing.T) {
+	if !aloneInAProcess(t) {
+		return
+	}
 	defer func(b int64) { bodyBudget = b }(bodyBudget)
 	bodyBudget = 1 << 20
 	const n, size = 64, 1 << 20
@@ -2153,6 +2158,9 @@ func TestOutcomeCostAnsweredAfterPlacesOnlyThePlacesThatMayHoldTheWord(t *testin
 // postings keep more than its budget. A text's runs count as the row
 // derives them: fresh runs whole, runs already posted as one id.
 func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
+	if !aloneInAProcess(t) {
+		return
+	}
 	defer func(b int64) { learnBudget = b }(learnBudget)
 	learnBudget = 1 << 30
 	text := func(k, runs int, shared bool) string {
@@ -2181,9 +2189,8 @@ func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
 	} {
 		// The set's filters made here, not through filtersOf: the earlier
 		// case's go with their set at the next collection, not at a later
-		// cleanup, inside this one's measure.
-		s := newSetDerived()
-		fs := &setFilters{runs: map[string][]int32{}, post: map[string][]int32{}}
+		// cleanup, inside this one's measure. Each copy (leastHeld) a set
+		// and filters of its own, on the same texts.
 		texts, lists := make([]string, c.texts), make([]answerLists, c.texts)
 		for k := range texts {
 			texts[k] = text(k, c.runs, c.shared)
@@ -2214,25 +2221,38 @@ func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
 				posted[w] = true
 			}
 		}
-		h0, used := liveHeap(), s.budget.used
-		for k := range texts {
-			if c.list {
-				buildLists(fs, s, &listsEntry{}, lists[k])
-			} else {
-				postRuns(fs, s, &filterEntry{}, []string{texts[k]})
+		held, counted, copies := leastHeld(t, c.name, func(copies int) (held, counted int64) {
+			ss, fss, used := make([]*setDerived, copies), make([]*setFilters, copies), make([]int64, copies)
+			for k := range copies {
+				ss[k] = newSetDerived()
+				fss[k] = &setFilters{runs: map[string][]int32{}, post: map[string][]int32{}}
+				used[k] = ss[k].budget.used
 			}
-		}
-		held, counted := liveHeap()-h0, s.budget.used-used
-		runtime.KeepAlive(s)
-		runtime.KeepAlive(fs)
+			h0 := liveHeap()
+			for i, s := range ss {
+				for k := range texts {
+					if c.list {
+						buildLists(fss[i], s, &listsEntry{}, lists[k])
+					} else {
+						postRuns(fss[i], s, &filterEntry{}, []string{texts[k]})
+					}
+				}
+			}
+			held = liveHeap() - h0
+			for k, s := range ss {
+				counted += s.budget.used - used[k]
+			}
+			runtime.KeepAlive(fss)
+			return held, counted
+		})
 		runtime.KeepAlive(texts)
 		runtime.KeepAlive(lists)
-		t.Logf("%s: the postings hold %d bytes of heap and count %d on the budget", c.name, held, counted)
-		if counted != want {
-			t.Errorf("%s: the postings count %d bytes on the budget; want %d", c.name, counted, want)
+		t.Logf("%s, as %d copies: the postings hold %d bytes of heap and count %d on the budget", c.name, copies, held, counted)
+		if counted != int64(copies)*want {
+			t.Errorf("%s: the postings count %d bytes on the budget; want %d", c.name, counted/int64(copies), want)
 		}
 		if held > counted {
-			t.Errorf("%s: the postings hold %d bytes of heap and count %d on the budget: want no more held than counted", c.name, held, counted)
+			t.Errorf("%s, as %d copies: the postings hold %d bytes of heap and count %d on the budget: want no more held than counted", c.name, copies, held, counted)
 		}
 	}
 }
@@ -2240,26 +2260,27 @@ func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
 // A posting's slot in the map of postings counts at least what the map
 // holds a word at its least fill: just after its table grows or splits,
 // 7/16 full, where a table of 1,024 slots takes its groups as whole pages.
-// Measured on the map alone (keys the words' own text, no lists), at each
-// size where it grows: 449 words in one table of 1,024 slots and 897 in
-// two hold 110 bytes a word, over the 96 a slot counted before.
+// Measured on the map alone (keys the words' own text, no lists), as
+// copies of it (leastHeld), at each size where it grows: 449 words in one
+// table of 1,024 slots and 897 in two hold 110 bytes a word, over the 96 a
+// slot counted before.
 func TestOutcomeCostAPostingsSlotCountsItsMapAtItsLeastFill(t *testing.T) {
+	if !aloneInAProcess(t) {
+		return
+	}
 	var b strings.Builder
 	for j := range 2000 {
 		fmt.Fprintf(&b, "w%d ", j)
 	}
 	words := strings.Fields(b.String())
 	for _, n := range []int{9, 15, 29, 57, 113, 225, 449, 897, 1000, 1793} {
-		h0 := liveHeap()
-		m := map[string][]int32{}
-		for _, w := range words[:n] {
-			m[w] = nil
-		}
-		held := liveHeap() - h0
-		runtime.KeepAlive(m)
-		t.Logf("%d words: the map holds %d bytes, %.1f a word; a slot counts %d", n, held, float64(held)/float64(n), postSlotBytes)
-		if held > int64(n)*postSlotBytes {
-			t.Errorf("%d words: the map holds %d bytes, %.1f a word, over the %d a slot counts", n, held, float64(held)/float64(n), postSlotBytes)
+		held, counted, copies := leastHeld(t, fmt.Sprintf("%d words", n), func(copies int) (int64, int64) {
+			return mapsHeld[string, []int32](words[:n])(copies), int64(copies*n) * postSlotBytes
+		})
+		a := float64(held) / float64(copies*n)
+		t.Logf("%d words, as %d copies: the maps hold %d bytes, %.1f a word; a slot counts %d", n, copies, held, a, postSlotBytes)
+		if held > counted {
+			t.Errorf("%d words, as %d copies: the maps hold %d bytes, %.1f a word, over the %d a slot counts", n, copies, held, a, postSlotBytes)
 		}
 	}
 }
@@ -2275,16 +2296,22 @@ var postingSink []byte
 // before. The heap's own work between the two reads (a few hundred bytes
 // in these rows) is allowed up to 4 KiB, under half a byte a list.
 func TestOutcomeCostAPostingsFirstIdCountsItsWholeBlock(t *testing.T) {
-	const n = 10000
-	lists := make([][]int32, n)
-	h0 := liveHeap()
-	for i := range lists {
-		lists[i] = []int32{int32(i)}
-		postingSink = make([]byte, 12)
+	if !aloneInAProcess(t) {
+		return
 	}
-	postingSink = nil
-	held := liveHeap() - h0
-	runtime.KeepAlive(lists)
+	const n = 10000
+	held, _ := leastOf(t, "lists of one id", func() (int64, int64) {
+		lists := make([][]int32, n)
+		h0 := liveHeap()
+		for i := range lists {
+			lists[i] = []int32{int32(i)}
+			postingSink = make([]byte, 12)
+		}
+		postingSink = nil
+		held := liveHeap() - h0
+		runtime.KeepAlive(lists)
+		return held, n * allocBytes(4, false)
+	})
 	t.Logf("%d lists of one id: %d bytes held, %.1f a list; a first id counts %d", n, held, float64(held)/n, allocBytes(4, false))
 	if held > n*allocBytes(4, false)+4096 {
 		t.Errorf("%d lists of one id hold %d bytes, %.1f a list, over the %d a first id counts", n, held, float64(held)/n, allocBytes(4, false))
@@ -2382,6 +2409,9 @@ func TestOutcomeCostEveryRunOfAHeldTokenIsPostedWhole(t *testing.T) {
 // at its live size. Every word of the live list is still found, and none
 // of a list let go.
 func TestOutcomeCostTheListsIndexHoldsNoMoreThanItCountsAfterChurn(t *testing.T) {
+	if !aloneInAProcess(t) {
+		return
+	}
 	defer func(b int64) { learnBudget = b }(learnBudget)
 	learnBudget = 1 << 30
 	for _, c := range []struct {
@@ -2399,7 +2429,6 @@ func TestOutcomeCostTheListsIndexHoldsNoMoreThanItCountsAfterChurn(t *testing.T)
 		// are under what a measure tells apart.
 		{"143 lists of the same 10 words, 142 let go", 143, 1, 10, true, false},
 	} {
-		s := newSetDerived()
 		lists := make([]answerLists, c.lists)
 		for k := range lists {
 			ws := make([]string, c.words)
@@ -2429,57 +2458,64 @@ func TestOutcomeCostTheListsIndexHoldsNoMoreThanItCountsAfterChurn(t *testing.T)
 				holders[w]++
 			}
 		}
+		for k := c.keep; k < c.lists; k++ {
+			want, live, gone = want-108-listWordsBytes(len(lists[k].words[0]))+44, live-44, gone+44
+			for _, w := range lists[k].words[0] {
+				want -= freshPostBytes(w)
+				live -= freshPostBytes(w)
+				if holders[w]--; holders[w] == 0 {
+					want, gone = want+96, gone+96
+				} else {
+					want, gone = want+8, gone+8
+				}
+			}
+			if gone > live {
+				want, gone = want-gone, 0
+			}
+		}
 		keys := make([]weak.Pointer[[]string], c.lists)
 		// What the index holds is the heap that goes with it, the lists and
 		// the set kept, past what a new index's empty maps hold.
 		newFilters := func() *setFilters {
 			return &setFilters{lists: map[weak.Pointer[[]string]]*listsEntry{}, runs: map[string][]int32{}, post: map[string][]int32{}}
 		}
-		var counted int64
-		heldB := heapOf(func() any {
-			fs := newFilters()
-			used := s.budget.used
-			for k, l := range lists {
-				keys[k], _ = listsKey(l)
-				e := &listsEntry{}
-				fs.lists[keys[k]] = e
-				e.once.Do(func() { buildLists(fs, s, e, l) })
-			}
-			for k := c.keep; k < c.lists; k++ {
-				dropLists(listsGone{set: weak.Make(s), fs: weak.Make(fs), key: keys[k]})
-				want, live, gone = want-108-listWordsBytes(len(lists[k].words[0]))+44, live-44, gone+44
-				for _, w := range lists[k].words[0] {
-					want -= freshPostBytes(w)
-					live -= freshPostBytes(w)
-					if holders[w]--; holders[w] == 0 {
-						want, gone = want+96, gone+96
-					} else {
-						want, gone = want+8, gone+8
+		// Each measure (leastOf) on a set of its own, built from nothing.
+		heldB, counted := leastOf(t, c.name, func() (int64, int64) {
+			s := newSetDerived()
+			var counted int64
+			held := heapOf(func() any {
+				fs := newFilters()
+				used := s.budget.used
+				for k, l := range lists {
+					keys[k], _ = listsKey(l)
+					e := &listsEntry{}
+					fs.lists[keys[k]] = e
+					e.once.Do(func() { buildLists(fs, s, e, l) })
+				}
+				for k := c.keep; k < c.lists; k++ {
+					dropLists(listsGone{set: weak.Make(s), fs: weak.Make(fs), key: keys[k]})
+				}
+				n := c.keep * c.words
+				if c.shared {
+					n = c.words
+				}
+				if len(fs.post) != n || len(fs.lists) != c.keep {
+					t.Errorf("%s: the index holds %d words of %d lists; want the live lists' %d of %d", c.name, len(fs.post), len(fs.lists), n, c.keep)
+				}
+				for k := range c.keep {
+					for _, w := range lists[k].words[0] {
+						if ids := fs.post[w]; !slices.Contains(ids, int32(k)) || len(ids) != c.keep && c.shared || len(ids) != 1 && !c.shared {
+							t.Errorf("%s: the index names lists %v for %q; want the live lists that hold it", c.name, ids, w)
+							break
+						}
 					}
 				}
-				if gone > live {
-					want, gone = want-gone, 0
-				}
-			}
-			n := c.keep * c.words
-			if c.shared {
-				n = c.words
-			}
-			if len(fs.post) != n || len(fs.lists) != c.keep {
-				t.Errorf("%s: the index holds %d words of %d lists; want the live lists' %d of %d", c.name, len(fs.post), len(fs.lists), n, c.keep)
-			}
-			for k := range c.keep {
-				for _, w := range lists[k].words[0] {
-					if ids := fs.post[w]; !slices.Contains(ids, int32(k)) || len(ids) != c.keep && c.shared || len(ids) != 1 && !c.shared {
-						t.Errorf("%s: the index names lists %v for %q; want the live lists that hold it", c.name, ids, w)
-						break
-					}
-				}
-			}
-			counted = s.budget.used - used
-			return fs
-		}) - heapOf(func() any { return newFilters() })
-		runtime.KeepAlive(s)
+				counted = s.budget.used - used
+				return fs
+			}) - heapOf(func() any { return newFilters() })
+			runtime.KeepAlive(s)
+			return held, counted
+		})
 		runtime.KeepAlive(lists)
 		t.Logf("%s: the index holds %d bytes of heap and counts %d on the budget (want %d; its live list counts %d)", c.name, heldB, counted, want, live)
 		if c.heap && heldB > counted {
@@ -2569,11 +2605,158 @@ func TestOutcomeCostAWordHeldOnlyInADecodedFormIsReadInASet(t *testing.T) {
 	}
 }
 
-// heldAgainstCounted fails the row where a structure the set's budget
-// bounds holds more heap than it counts: held, the heap it holds after a
-// collection, past counted by more than 5%.
-func heldAgainstCounted(t *testing.T, what string, held, counted int64) {
+// heapRowEnv names, in a copy of the test binary that a row measuring the
+// heap started (aloneInAProcess), the one row that copy runs.
+const heapRowEnv = "KEPLOY_LEARN_HEAP_ROW"
+
+// aloneInAProcess runs a row that measures the heap again, alone, in a
+// fresh copy of the test binary (runAlone), and reports whether the caller
+// is that copy: there the row goes on; here it returns, and the copy's
+// verdict is the row's. The heap a row reads is the whole process's, so
+// what any other goroutine allocates or lets go inside a measure's window
+// is charged to the structure measured: a goroutine an earlier row left
+// running, the testing package's work for rows run beside it. In a copy of
+// its own only the row allocates.
+func aloneInAProcess(t *testing.T) bool {
 	t.Helper()
+	if os.Getenv(heapRowEnv) == t.Name() {
+		return true
+	}
+	lines, passed, err := runAlone(t, t.Name())
+	if !passed {
+		t.Errorf("the row, run alone in a fresh copy of the test binary, did not pass (%v):\n%s", err, lines)
+		return false
+	}
+	t.Logf("the row, run alone in a fresh copy of the test binary, passed:\n%s", lines)
+	return false
+}
+
+// runAlone runs the row named alone in a fresh copy of the test binary, env
+// added to its environment, and gives back the copy's lines, each marked so
+// that its verdict lines are not read as this run's, and whether the copy
+// ran the row, the row passed and the copy exited cleanly. The copy starts
+// nothing, and ends by its own timeout, inside the caller's.
+func runAlone(t *testing.T, name string, env ...string) (lines string, passed bool, err error) {
+	args := []string{"-test.run=^" + name + "$", "-test.count=1", "-test.v"}
+	if d, ok := t.Deadline(); ok {
+		args = append(args, "-test.timeout="+(time.Until(d)*9/10).String())
+	}
+	cmd := exec.CommandContext(t.Context(), os.Args[0], args...)
+	cmd.Env = append(append(os.Environ(), heapRowEnv+"="+name), env...)
+	out, err := cmd.CombinedOutput()
+	ls := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	for i, l := range ls {
+		ls[i] = "| " + l
+	}
+	return strings.Join(ls, "\n"), err == nil && strings.Contains(string(out), "\n--- PASS: "+name+" ("), err
+}
+
+// aloneProbeEnv tells a copy that TestOutcomeCostARowRunAloneHasItsCopysVerdict
+// starts what its row does: fail ("fail"), fail once its output says it
+// passed ("says passed"), or run the row alone itself, as the process that
+// started it would, in a further copy that fails it ("outer").
+const aloneProbeEnv = "KEPLOY_LEARN_HEAP_ROW_PROBE"
+
+// A row run alone (aloneInAProcess) runs in a copy of its own, never in the
+// process that started it, and has the copy's verdict: it passes where the
+// copy ran it, it passed and the copy exited cleanly, and fails where the
+// copy's row failed (whatever its output says) or the copy ran no row (a
+// name that matches none).
+func TestOutcomeCostARowRunAloneHasItsCopysVerdict(t *testing.T) {
+	if aloneInAProcess(t) {
+		if os.Getenv(heapRowEnv) != t.Name() {
+			t.Fatalf("the row ran in the process that started it, not in a copy of its own")
+		}
+		switch os.Getenv(aloneProbeEnv) {
+		case "fail":
+			t.Errorf("the copy's row fails, as asked")
+		case "says passed":
+			if _, err := os.Stdout.WriteString("\n--- PASS: " + t.Name() + " (0.00s)\n"); err != nil {
+				t.Fatal(err)
+			}
+			t.Errorf("the copy's row fails, though its output says it passed")
+		case "outer":
+			t.Setenv(heapRowEnv, "")
+			t.Setenv(aloneProbeEnv, "fail")
+			aloneInAProcess(t)
+		}
+		return
+	}
+	for _, c := range []struct {
+		what, name, probe string
+		want              bool
+	}{
+		{"a copy whose row passes", t.Name(), "", true},
+		{"a copy whose row fails", t.Name(), "fail", false},
+		{"a copy that runs no row", t.Name() + "NoSuchRow", "", false},
+		{"a copy whose row fails after its output says it passed", t.Name(), "says passed", false},
+		{"a row whose own copy's row fails", t.Name(), "outer", false},
+	} {
+		lines, passed, err := runAlone(t, c.name, aloneProbeEnv+"="+c.probe)
+		if passed != c.want {
+			t.Errorf("%s: the row run alone passed: %v (%v); want %v. The copy:\n%s", c.what, passed, err, c.want, lines)
+		}
+	}
+}
+
+// heapMeasures is how many times a row measures a shape, each time built
+// from nothing. A row reads the least: what else allocates inside a
+// measure's window only adds to it, so the least measure is the truest.
+const heapMeasures = 3
+
+// heapFloor is the least heap a measure counts: a shape that counts less is
+// measured as copies of it, each built from nothing, as many as count at
+// least this, so that a few KB allocated beside the row are under 1% of
+// what it reads.
+const heapFloor = 1 << 20
+
+// leastOf is a shape's held heap, the least of heapMeasures measures, and
+// what it counts, which every measure must count alike.
+func leastOf(t *testing.T, what string, measure func() (held, counted int64)) (held, counted int64) {
+	t.Helper()
+	held, counted = measure()
+	return leastAfter(t, what, held, counted, measure)
+}
+
+// leastAfter is leastOf where the first measure, held and counted, is made.
+func leastAfter(t *testing.T, what string, held, counted int64, measure func() (held, counted int64)) (int64, int64) {
+	t.Helper()
+	for range heapMeasures - 1 {
+		h, c := measure()
+		if c != counted {
+			t.Fatalf("%s: one build counts %d bytes and another of the same shape %d", what, counted, c)
+		}
+		held = min(held, h)
+	}
+	return held, counted
+}
+
+// leastHeld measures a shape (leastOf) as copies of it, each built from
+// nothing by measure, as many as count at least heapFloor bytes, and gives
+// back the heap they hold, what they count, and how many copies they are.
+// A first build of one copy tells how many, and is the first measure where
+// one is enough.
+func leastHeld(t *testing.T, what string, measure func(copies int) (held, counted int64)) (held, counted int64, copies int) {
+	t.Helper()
+	copies = 1
+	held, counted = measure(1)
+	if counted > 0 && counted < heapFloor {
+		copies = int((heapFloor + counted - 1) / counted)
+		held, counted = measure(copies)
+	}
+	held, counted = leastAfter(t, what, held, counted, func() (int64, int64) { return measure(copies) })
+	return held, counted, copies
+}
+
+// heldAgainstCounted measures a shape (leastHeld) and fails the row where
+// a structure the set's budget bounds holds more heap than it counts:
+// held, the heap it holds after a collection, past counted by more than 5%.
+func heldAgainstCounted(t *testing.T, what string, measure func(copies int) (held, counted int64)) {
+	t.Helper()
+	held, counted, copies := leastHeld(t, what, measure)
+	if copies > 1 {
+		what = fmt.Sprintf("%s, as %d copies", what, copies)
+	}
 	t.Logf("%s: holds %d bytes, counts %d (held/counted %.3f)", what, held, counted, float64(held)/float64(max(counted, 1)))
 	if float64(held) > 1.05*float64(counted) {
 		t.Errorf("%s: holds %d bytes of heap and counts %d on the set's budget (held/counted %.3f): want at most 1.05", what, held, counted, float64(held)/float64(counted))
@@ -2615,11 +2798,13 @@ func randomWord(r *rand.Rand, i, j, n int) string {
 	if n == 36 {
 		return fmt.Sprintf("%08x-%04x-4%03x-a%03x-%012x", i, j%65536, r.IntN(4096), r.IntN(4096), r.Int64N(1<<48))
 	}
-	w := fmt.Sprintf("w%dx%d", i, j)
+	// Appended in place: a word past 32 KiB, built by concatenation, cost
+	// its length squared in copies.
+	w := fmt.Appendf(nil, "w%dx%d", i, j)
 	for len(w) < n {
-		w += strconv.Itoa(r.IntN(10))
+		w = strconv.AppendInt(w, int64(r.IntN(10)), 10)
 	}
-	return w
+	return string(w)
 }
 
 // Every structure the set's budget bounds holds no more heap than it
@@ -2629,16 +2814,21 @@ func randomWord(r *rand.Rand, i, j, n int) string {
 // shapes: a few large entries and many small ones, words of 1 to 64
 // bytes, UUIDs, runs past 32 KiB, recordings served as recorded and with a
 // view, words that other entries share. Each shape is measured on its own,
-// held as the heap its structure frees (the kept words, which a call
-// builds beside caches that stay) or takes (the postings and the lists
-// index, built alone), each read once the heap has settled (liveHeap),
-// against what it counted. A count under the heap lets a set that fills
-// its budget hold more than its budget.
+// in a process of the row's own (aloneInAProcess), as copies of it built
+// each from nothing, the least of a few measures (leastHeld), held as the
+// heap its structure frees (the kept words, which a call builds beside
+// caches that stay) or takes (the postings and the lists index, built
+// alone), each read once the heap has settled (liveHeap), against what it
+// counted. A count under the heap lets a set that fills its budget hold
+// more than its budget.
 func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) {
+	if !aloneInAProcess(t) {
+		return
+	}
 	defer func(b int64) { learnBudget = b }(learnBudget)
 	learnBudget = 1 << 30
 	r := rand.New(rand.NewPCG(76, 1))
-	wordLen := func() int {
+	wordLen := func(r *rand.Rand) int {
 		switch r.IntN(6) {
 		case 0:
 			return 36
@@ -2650,50 +2840,68 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 			return 6 + r.IntN(58)
 		}
 	}
+	// Each shape's copies (leastHeld) draw their words from rands of the
+	// shape's seed and the copy's number, the same in every measure.
+	rands := func(seed uint64, copies int) []*rand.Rand {
+		rs := make([]*rand.Rand, copies)
+		for c := range rs {
+			rs[c] = rand.New(rand.NewPCG(seed, uint64(c)))
+		}
+		return rs
+	}
 	for shape := range 8 {
-		recs, words, wlen, live := 1+r.IntN(400), 1+r.IntN(300), wordLen(), r.IntN(2) == 0
+		recs, words, wlen, live := 1+r.IntN(400), 1+r.IntN(300), wordLen(r), r.IntN(2) == 0
 		switch shape {
 		case 0:
 			recs, words = 3000, 1
 		case 1:
 			recs, words = 1, 1
 		}
-		tr := NewTracker()
-		tr.NewSet()
-		tr.Begin()
-		dc := tr.Drifts()
-		d := &decider{dr: dc}
-		fs := filtersOf(dc.set)
-		for i := range recs {
-			parts := make([]string, words)
-			for j := range parts {
-				parts[j] = randomWord(r, i, j, wlen)
+		seed := r.Uint64()
+		heldAgainstCounted(t, fmt.Sprintf("kept words, %d recordings of %d %d-byte words (a view: %v)", recs, words, wlen, live), func(copies int) (held, counted int64) {
+			trs, dcs, kept := make([]*Tracker, copies), make([]*DriftCache, copies), make([]*setFilters, copies)
+			for c, r := range rands(seed, copies) {
+				trs[c] = NewTracker()
+				trs[c].NewSet()
+				trs[c].Begin()
+				dcs[c] = trs[c].Drifts()
+				d := &decider{dr: dcs[c]}
+				kept[c] = filtersOf(dcs[c].set)
+				for i := range recs {
+					parts := make([]string, words)
+					for j := range parts {
+						parts[j] = randomWord(r, i, j, wlen)
+					}
+					name, u, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), eRecAt.Add(-time.Duration(recs-i)*time.Millisecond)
+					x := dcs[c].LazyRawOf(getAnswer(name, u, `{"v":"`+strings.Join(parts, " ")+`"}`, at), true, nil).ServedAs(i + 1)
+					if live {
+						x = x.ServedLive(RawOf(getAnswer(name, u, `{"v":"seen `+parts[0]+`"}`, at), true))
+					} else {
+						x = x.ServedAsRecorded()
+					}
+					_ = d.outsideWords(x.OfAnotherTest())
+				}
+				kept[c].mu.Lock()
+				for _, es := range kept[c].words {
+					for _, e := range es {
+						counted += e.bytes
+					}
+				}
+				kept[c].mu.Unlock()
 			}
-			name, u, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), eRecAt.Add(-time.Duration(recs-i)*time.Millisecond)
-			x := dc.LazyRawOf(getAnswer(name, u, `{"v":"`+strings.Join(parts, " ")+`"}`, at), true, nil).ServedAs(i + 1)
-			if live {
-				x = x.ServedLive(RawOf(getAnswer(name, u, `{"v":"seen `+parts[0]+`"}`, at), true))
-			} else {
-				x = x.ServedAsRecorded()
+			h1 := liveHeap()
+			for _, fs := range kept {
+				fs.mu.Lock()
+				fs.words = map[string][]*wordsEntry{}
+				fs.mu.Unlock()
 			}
-			_ = d.outsideWords(x.OfAnotherTest())
-		}
-		var counted int64
-		fs.mu.Lock()
-		for _, es := range fs.words {
-			for _, e := range es {
-				counted += e.bytes
+			held = h1 - liveHeap()
+			for _, tr := range trs {
+				tr.End()
 			}
-		}
-		fs.mu.Unlock()
-		h1 := liveHeap()
-		fs.mu.Lock()
-		fs.words = map[string][]*wordsEntry{}
-		fs.mu.Unlock()
-		held := h1 - liveHeap()
-		heldAgainstCounted(t, fmt.Sprintf("kept words, %d recordings of %d %d-byte words (a view: %v)", recs, words, wlen, live), held, counted)
-		tr.End()
-		runtime.KeepAlive(dc)
+			runtime.KeepAlive(dcs)
+			return held, counted
+		})
 	}
 	for shape := range 10 {
 		texts, runs, shared := 1+r.IntN(64), 1+r.IntN(4000), r.IntN(3) == 0
@@ -2704,34 +2912,45 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 		if shape == 0 {
 			texts, runs, long = 1, 1, false
 		}
-		in := make([]string, texts)
-		for k := range in {
-			var b strings.Builder
-			for j := range runs {
-				i := k
-				if shared {
-					i = 0
+		seed := r.Uint64()
+		heldAgainstCounted(t, fmt.Sprintf("postings, %d texts of %d runs (shared: %v, past 32 KiB: %v)", texts, runs, shared, long), func(copies int) (held, counted int64) {
+			ins, ss, fss, used := make([][]string, copies), make([]*setDerived, copies), make([]*setFilters, copies), make([]int64, copies)
+			for c, r := range rands(seed, copies) {
+				ins[c] = make([]string, texts)
+				for k := range ins[c] {
+					var b strings.Builder
+					for j := range runs {
+						i := k
+						if shared {
+							i = 0
+						}
+						n := wordLen(r)
+						if long {
+							n = 30000 + r.IntN(40000)
+						}
+						b.WriteString(randomWord(r, i, j, n))
+						b.WriteByte(' ')
+					}
+					ins[c][k] = b.String()
 				}
-				n := wordLen()
-				if long {
-					n = 30000 + r.IntN(40000)
-				}
-				b.WriteString(randomWord(r, i, j, n))
-				b.WriteByte(' ')
+				ss[c] = newSetDerived()
+				fss[c] = &setFilters{runs: map[string][]int32{}, post: map[string][]int32{}}
+				used[c] = ss[c].budget.used
 			}
-			in[k] = b.String()
-		}
-		s := newSetDerived()
-		fs := &setFilters{runs: map[string][]int32{}, post: map[string][]int32{}}
-		used, h0 := s.budget.used, liveHeap()
-		for k := range in {
-			postRuns(fs, s, &filterEntry{}, []string{in[k]})
-		}
-		held := liveHeap() - h0
-		heldAgainstCounted(t, fmt.Sprintf("postings, %d texts of %d runs (shared: %v, past 32 KiB: %v)", texts, runs, shared, long), held, s.budget.used-used)
-		runtime.KeepAlive(in)
-		runtime.KeepAlive(fs)
-		runtime.KeepAlive(s)
+			h0 := liveHeap()
+			for c := range copies {
+				for k := range ins[c] {
+					postRuns(fss[c], ss[c], &filterEntry{}, []string{ins[c][k]})
+				}
+			}
+			held = liveHeap() - h0
+			for c, s := range ss {
+				counted += s.budget.used - used[c]
+			}
+			runtime.KeepAlive(ins)
+			runtime.KeepAlive(fss)
+			return held, counted
+		})
 	}
 	for shape := range 8 {
 		n, words, shared := 1+r.IntN(20000), r.IntN(300), r.IntN(3) == 0
@@ -2742,77 +2961,104 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 			n, words = 1, 1
 		}
 		n = min(n, 300000/max(words, 1))
-		lists := make([]answerLists, n)
-		for k := range lists {
-			var ws []string
-			for j := range words {
-				i := k
-				if shared {
-					i = 0
+		seed := r.Uint64()
+		heldAgainstCounted(t, fmt.Sprintf("lists index, %d lists of %d words (shared: %v)", n, words, shared), func(copies int) (held, counted int64) {
+			lists, ss, fss, used := make([][]answerLists, copies), make([]*setDerived, copies), make([]*setFilters, copies), make([]int64, copies)
+			entries := make([][]*listsEntry, copies)
+			for c, r := range rands(seed, copies) {
+				lists[c] = make([]answerLists, n)
+				for k := range lists[c] {
+					var ws []string
+					for j := range words {
+						i := k
+						if shared {
+							i = 0
+						}
+						ws = append(ws, randomWord(r, i, j, wordLen(r)))
+					}
+					lists[c][k] = answerLists{words: [][]string{ws}}
 				}
-				ws = append(ws, randomWord(r, i, j, wordLen()))
+				ss[c] = newSetDerived()
+				fss[c] = &setFilters{lists: map[weak.Pointer[[]string]]*listsEntry{}, runs: map[string][]int32{}, post: map[string][]int32{}}
+				used[c] = ss[c].budget.used
 			}
-			lists[k] = answerLists{words: [][]string{ws}}
-		}
-		s := newSetDerived()
-		fs := &setFilters{lists: map[weak.Pointer[[]string]]*listsEntry{}, runs: map[string][]int32{}, post: map[string][]int32{}}
-		used, h0 := s.budget.used, liveHeap()
-		entries := make([]*listsEntry, n)
-		for k := range lists {
-			entries[k] = &listsEntry{}
-			buildLists(fs, s, entries[k], lists[k])
-		}
-		held := liveHeap() - h0
-		heldAgainstCounted(t, fmt.Sprintf("lists index, %d lists of %d words (shared: %v)", n, words, shared), held, s.budget.used-used)
-		runtime.KeepAlive(lists)
-		runtime.KeepAlive(entries)
-		runtime.KeepAlive(fs)
-		runtime.KeepAlive(s)
+			h0 := liveHeap()
+			for c := range copies {
+				entries[c] = make([]*listsEntry, n)
+				for k := range lists[c] {
+					entries[c][k] = &listsEntry{}
+					buildLists(fss[c], ss[c], entries[c][k], lists[c][k])
+				}
+			}
+			held = liveHeap() - h0
+			for c, s := range ss {
+				counted += s.budget.used - used[c]
+			}
+			runtime.KeepAlive(lists)
+			runtime.KeepAlive(entries)
+			runtime.KeepAlive(fss)
+			return held, counted
+		})
 	}
 	// The set's filters of its recordings' words (setFilter), by id or by
 	// text, built through a call's index, which then gives back what it
 	// counted itself: the set keeps each filter's entry, slot and bits, and
 	// its postings.
 	for shape := range 8 {
-		recs, words, wlen, byText := 1+r.IntN(600), 1+r.IntN(200), wordLen(), shape%3 == 1
+		recs, words, wlen, byText := 1+r.IntN(600), 1+r.IntN(200), wordLen(r), shape%3 == 1
 		if shape == 0 {
 			recs, words = 1, 1
 		}
-		tr := NewTracker()
-		tr.NewSet()
-		tr.Begin()
-		dc := tr.Drifts()
-		in, raws := make([]string, recs), make([]Raw, recs)
-		for i := range recs {
-			parts := make([]string, words)
-			for j := range parts {
-				parts[j] = randomWord(r, i, j, wlen)
+		seed := r.Uint64()
+		heldAgainstCounted(t, fmt.Sprintf("filters, %d recordings of %d %d-byte words (by text: %v)", recs, words, wlen, byText), func(copies int) (held, counted int64) {
+			trs, dcs, xs, used := make([]*Tracker, copies), make([]*DriftCache, copies), make([]*readerIndex, copies), make([]int64, copies)
+			ins, raws := make([][]string, copies), make([][]Raw, copies)
+			for c, r := range rands(seed, copies) {
+				trs[c] = NewTracker()
+				trs[c].NewSet()
+				trs[c].Begin()
+				dcs[c] = trs[c].Drifts()
+				ins[c], raws[c] = make([]string, recs), make([]Raw, recs)
+				for i := range recs {
+					parts := make([]string, words)
+					for j := range parts {
+						parts[j] = randomWord(r, i, j, wlen)
+					}
+					ins[c][i] = `{"v":"` + strings.Join(parts, " ") + `"}`
+					if byText {
+						ins[c][i] += strings.Repeat(" ", max(0, filterTextMin-len(ins[c][i])))
+					}
+					raws[c][i] = RawOf(getAnswer(fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), ins[c][i], eRecAt), true)
+				}
+				xs[c] = newReaderIndex(dcs[c])
+				used[c] = dcs[c].set.budget.used
 			}
-			in[i] = `{"v":"` + strings.Join(parts, " ") + `"}`
-			if byText {
-				in[i] += strings.Repeat(" ", max(0, filterTextMin-len(in[i])))
+			h0 := liveHeap()
+			for c, x := range xs {
+				for i := range recs {
+					h := x.textOf(raws[c][i])
+					if byText {
+						h = x.text(ins[c][i])
+					}
+					if h.setFilter() == nil {
+						t.Fatalf("filters, shape %d: recording %d has no filter within a 1 GiB budget", shape, i)
+					}
+				}
+				x.release()
 			}
-			raws[i] = RawOf(getAnswer(fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), in[i], eRecAt), true)
-		}
-		x := newReaderIndex(dc)
-		used, h0 := dc.set.budget.used, liveHeap()
-		for i := range recs {
-			h := x.textOf(raws[i])
-			if byText {
-				h = x.text(in[i])
+			held = liveHeap() - h0
+			for c, dc := range dcs {
+				counted += dc.set.budget.used - used[c]
 			}
-			if h.setFilter() == nil {
-				t.Fatalf("filters, shape %d: recording %d has no filter within a 1 GiB budget", shape, i)
+			runtime.KeepAlive(ins)
+			runtime.KeepAlive(raws)
+			runtime.KeepAlive(xs)
+			for _, tr := range trs {
+				tr.End()
 			}
-		}
-		x.release()
-		held := liveHeap() - h0
-		heldAgainstCounted(t, fmt.Sprintf("filters, %d recordings of %d %d-byte words (by text: %v)", recs, words, wlen, byText), held, dc.set.budget.used-used)
-		runtime.KeepAlive(in)
-		runtime.KeepAlive(raws)
-		runtime.KeepAlive(x)
-		tr.End()
-		runtime.KeepAlive(dc)
+			runtime.KeepAlive(dcs)
+			return held, counted
+		})
 	}
 	// A call's index of the texts it asks about (readerIndex): each text's
 	// entry, the text it keeps, and each answer it keeps (its instants, its
@@ -2826,46 +3072,57 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 		if shape == 0 {
 			texts, words = 1, 1
 		}
-		in := make([]string, texts)
-		toks := make([]string, texts)
-		for i := range in {
-			var b strings.Builder
-			toks[i] = base64.StdEncoding.EncodeToString([]byte(randomWord(r, i, 0, 9+r.IntN(40))))
-			fmt.Fprintf(&b, `{"id":"%s","at":"2026-11-0%dT10:%02d:%02d.%03dZ","tok":"%s","n":[`, randomWord(r, i, 0, 36), 1+r.IntN(9), r.IntN(60), r.IntN(60), r.IntN(1000), toks[i])
-			for j := range words {
-				fmt.Fprintf(&b, `{"w":"%s","t":"2026-11-02T1%d:00:0%d+05:30"},`, randomWord(r, i, j, wordLen()), r.IntN(10), r.IntN(10))
+		seed := r.Uint64()
+		size := 0
+		heldAgainstCounted(t, fmt.Sprintf("reader index, %d texts of %d words (past 32 KiB: %v)", texts, words, long), func(copies int) (held, counted int64) {
+			xs := make([]*readerIndex, copies)
+			size = 0
+			for c, r := range rands(seed, copies) {
+				in := make([]string, texts)
+				toks := make([]string, texts)
+				for i := range in {
+					var b strings.Builder
+					toks[i] = base64.StdEncoding.EncodeToString([]byte(randomWord(r, i, 0, 9+r.IntN(40))))
+					fmt.Fprintf(&b, `{"id":"%s","at":"2026-11-0%dT10:%02d:%02d.%03dZ","tok":"%s","n":[`, randomWord(r, i, 0, 36), 1+r.IntN(9), r.IntN(60), r.IntN(60), r.IntN(1000), toks[i])
+					for j := range words {
+						fmt.Fprintf(&b, `{"w":"%s","t":"2026-11-02T1%d:00:0%d+05:30"},`, randomWord(r, i, j, wordLen(r)), r.IntN(10), r.IntN(10))
+					}
+					for long && b.Len() < 30000+i%3*20000 {
+						fmt.Fprintf(&b, `"%s",`, randomWord(r, i, b.Len(), wordLen(r)))
+					}
+					b.WriteString(`0]}`)
+					in[i] = b.String()
+					if c == 0 {
+						size += len(in[i])
+					}
+				}
+				xs[c] = newReaderIndex(nil)
+				for i := range in {
+					h := xs[c].text(in[i])
+					if sp, ok := h.spansOf(); ok && len(sp) > 0 {
+						h.holdsMoment(sp[0].moment())
+					}
+					h.holdsWord("w0x0")
+					h.holdsToken(tokenB64, toks[i])
+					h.fieldsWith("w0x0")
+					for q := range containsScans + 1 {
+						h.contains(strconv.Itoa(q))
+					}
+					if h.e == nil || h.e.past || !h.e.subs.ok || !h.e.fields.ok || !h.e.runs.ok || !h.e.forms.ok || !h.e.spans.ok {
+						t.Fatalf("reader index, shape %d: text %d kept no answer of some kind within a 1 GiB budget", shape, i)
+					}
+				}
+				counted += xs[c].used
 			}
-			for long && b.Len() < 30000+i%3*20000 {
-				fmt.Fprintf(&b, `"%s",`, randomWord(r, i, b.Len(), wordLen()))
+			h1 := liveHeap()
+			for _, x := range xs {
+				x.release()
 			}
-			b.WriteString(`0]}`)
-			in[i] = b.String()
-		}
-		x := newReaderIndex(nil)
-		for i := range in {
-			h := x.text(in[i])
-			if sp, ok := h.spansOf(); ok && len(sp) > 0 {
-				h.holdsMoment(sp[0].moment())
-			}
-			h.holdsWord("w0x0")
-			h.holdsToken(tokenB64, toks[i])
-			h.fieldsWith("w0x0")
-			for q := range containsScans + 1 {
-				h.contains(strconv.Itoa(q))
-			}
-			if h.e == nil || h.e.past || !h.e.subs.ok || !h.e.fields.ok || !h.e.runs.ok || !h.e.forms.ok || !h.e.spans.ok {
-				t.Fatalf("reader index, shape %d: text %d kept no answer of some kind within a 1 GiB budget", shape, i)
-			}
-		}
-		counted, size := x.used, 0
-		for _, s := range in {
-			size += len(s)
-		}
-		h1 := liveHeap()
-		x.release()
-		held := h1 - liveHeap()
-		heldAgainstCounted(t, fmt.Sprintf("reader index, %d texts of %d words (%d bytes in all; past 32 KiB: %v)", texts, words, size, long), held, counted)
-		runtime.KeepAlive(x)
+			held = h1 - liveHeap()
+			runtime.KeepAlive(xs)
+			return held, counted
+		})
+		t.Logf("reader index, shape %d: %d bytes of text a copy", shape, size)
 	}
 	// One kind of answer at a time, on texts made so that it holds the most
 	// of what the index keeps: an answer counted below what it holds shows
@@ -2873,21 +3130,21 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 	// 32 KiB (whole pages).
 	kinds := []struct {
 		name string
-		part func(i, j int) string
+		part func(r *rand.Rand, i, j int) string
 		ask  func(h *readerText, i int)
 		kept func(e *readerEntry) bool
 	}{
-		{"instants", func(i, j int) string {
+		{"instants", func(_ *rand.Rand, i, j int) string {
 			return fmt.Sprintf("2026-%02d-%02dT%02d:%02d:%02dZ ", 1+j%12, 1+i%28, j%24, j/24%60, i%60)
 		}, func(h *readerText, _ int) { h.spansOf() }, func(e *readerEntry) bool { return e.spans.ok }},
-		{"other forms", func(i, j int) string { return fmt.Sprintf("ord-%d%%20x%%2Fcart_%d ", i, j) },
+		{"other forms", func(_ *rand.Rand, i, j int) string { return fmt.Sprintf("ord-%d%%20x%%2Fcart_%d ", i, j) },
 			func(h *readerText, _ int) { h.holdsWord("cart_0") }, func(e *readerEntry) bool { return e.forms.ok }},
-		{"base64 runs", func(i, j int) string {
+		{"base64 runs", func(_ *rand.Rand, i, j int) string {
 			return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("tok-%d-%d", i, j))) + " "
 		}, func(h *readerText, i int) {
 			h.holdsToken(tokenB64, base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("tok-%d-0", i))))
 		}, func(e *readerEntry) bool { return e.runs.ok }},
-		{"moments", func(i, j int) string {
+		{"moments", func(_ *rand.Rand, i, j int) string {
 			return fmt.Sprintf(`"t%d":"2026-%02d-%02dT%02d:%02d:%02d.%03dZ",`, j, 1+j%12, 1+i%28, j%24, j/24%60, i%60, j%1000)
 		}, func(h *readerText, _ int) {
 			// A moment the text holds, read by an index of its own: this
@@ -2896,9 +3153,9 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 				h.holdsMoment(sp[0].moment())
 			}
 		}, func(e *readerEntry) bool { return e.formSpans.ok }},
-		{"field view", func(i, j int) string { return fmt.Sprintf(`"k%d":"v%dx%d",`, j, i, j) },
+		{"field view", func(_ *rand.Rand, i, j int) string { return fmt.Sprintf(`"k%d":"v%dx%d",`, j, i, j) },
 			func(h *readerText, _ int) { h.fieldsWith("v0x0") }, func(e *readerEntry) bool { return e.fields.ok }},
-		{"suffix array", func(i, j int) string { return randomWord(r, i, j, 6+r.IntN(30)) + " " },
+		{"suffix array", func(r *rand.Rand, i, j int) string { return randomWord(r, i, j, 6+r.IntN(30)) + " " },
 			func(h *readerText, _ int) {
 				for q := range containsScans + 1 {
 					h.contains(strconv.Itoa(q))
@@ -2914,77 +3171,96 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 			case 2:
 				texts, parts = 1+r.IntN(3), 1500+r.IntN(2000)
 			}
-			in := make([]string, texts)
-			for i := range in {
-				var b strings.Builder
-				b.WriteString("{")
-				for j := range parts {
-					b.WriteString(k.part(i, j))
+			seed := r.Uint64()
+			heldAgainstCounted(t, fmt.Sprintf("reader index, %s alone, %d texts of %d parts", k.name, texts, parts), func(copies int) (held, counted int64) {
+				xs := make([]*readerIndex, copies)
+				for c, r := range rands(seed, copies) {
+					in := make([]string, texts)
+					for i := range in {
+						var b strings.Builder
+						b.WriteString("{")
+						for j := range parts {
+							b.WriteString(k.part(r, i, j))
+						}
+						b.WriteString(`"end":0}`)
+						// Its own bytes, not the builder's larger buffer.
+						in[i] = strings.Clone(b.String())
+					}
+					xs[c] = newReaderIndex(nil)
+					for i := range in {
+						h := xs[c].text(in[i])
+						k.ask(h, i)
+						if h.e == nil || h.e.past || !k.kept(h.e) {
+							t.Fatalf("reader index, %s, shape %d: text %d kept no answer within a 1 GiB budget", k.name, shape, i)
+						}
+					}
+					counted += xs[c].used
 				}
-				b.WriteString(`"end":0}`)
-				// Its own bytes, not the builder's larger buffer.
-				in[i] = strings.Clone(b.String())
-			}
-			x := newReaderIndex(nil)
-			for i := range in {
-				h := x.text(in[i])
-				k.ask(h, i)
-				if h.e == nil || h.e.past || !k.kept(h.e) {
-					t.Fatalf("reader index, %s, shape %d: text %d kept no answer within a 1 GiB budget", k.name, shape, i)
+				h1 := liveHeap()
+				for _, x := range xs {
+					x.release()
 				}
-			}
-			counted, size := x.used, 0
-			for _, s := range in {
-				size += len(s)
-			}
-			h1 := liveHeap()
-			x.release()
-			held := h1 - liveHeap()
-			heldAgainstCounted(t, fmt.Sprintf("reader index, %s alone, %d texts of %d parts (%d bytes in all)", k.name, texts, parts, size), held, counted)
-			runtime.KeepAlive(x)
+				held = h1 - liveHeap()
+				runtime.KeepAlive(xs)
+				return held, counted
+			})
 		}
 	}
 }
 
 // allocBytes is what the runtime holds for each object of a size, with
-// pointers and without: 1,000 objects of each size,
+// pointers and without: objects of each size, 1,000 a copy (leastHeld),
 // each tiny one among others that are garbage, so that it alone keeps its
-// 16-byte block, counted against the heap they hold after a collection.
+// 16-byte block, counted against the heap they hold after a collection
+// (any other against the bytes allocated for them).
 // A tiny object counts its block, which the race detector's runtime
 // (which has no tiny blocks) holds less of.
 func TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds(t *testing.T) {
+	if !aloneInAProcess(t) {
+		return
+	}
 	sizes := []int{1, 2, 7, 8, 9, 15, 16, 17, 24, 25, 100, 504, 512, 513, 520, 1000, 1024, 4096, 9000, 27000, 32760, 32761, 32768, 33000, 40960, 70000}
 	for _, ptrs := range []bool{false, true} {
 		for _, n := range sizes {
 			if ptrs && n%8 != 0 {
 				n = (n + 7) / 8 * 8
 			}
-			// The median of three measures: another allocation in one
-			// measure's window (the test's own logging) adds to it alone.
-			const count = 1000
-			var measures [3]float64
-			for m := range measures {
+			want := allocBytes(n, ptrs)
+			// An object of up to 16 bytes without pointers is made among 15
+			// that die, and read as the heap it keeps once they are gone
+			// (liveHeap); any other as the bytes the heap allocated for it
+			// (allocatedNow), which the runtime letting go of objects of
+			// its own in the window cannot lower, as it lowers the heap in
+			// use.
+			garbage := !ptrs && n <= 16
+			read := allocatedNow
+			if garbage {
+				read = liveHeap
+			}
+			total, _, copies := leastHeld(t, fmt.Sprintf("%d bytes (pointers: %v)", n, ptrs), func(copies int) (int64, int64) {
+				count := 1000 * copies
 				bs, ps := make([][]byte, count), make([][]*int, count)
-				h0 := liveHeap()
+				h0 := read()
 				for i := range count {
 					if ptrs {
 						ps[i] = make([]*int, n/8)
 						continue
 					}
 					bs[i] = make([]byte, n)
-					for range 15 * min(1, 16/n) {
-						allocSink = make([]byte, n)
+					if garbage {
+						for range 15 {
+							allocSink = make([]byte, n)
+						}
 					}
 				}
 				allocSink = nil
-				measures[m] = float64(liveHeap()-h0) / float64(count)
+				held := read() - h0
 				runtime.KeepAlive(bs)
 				runtime.KeepAlive(ps)
-			}
-			slices.Sort(measures[:])
-			held := measures[1]
-			want := allocBytes(n, ptrs)
-			t.Logf("%d bytes (pointers: %v): the runtime holds %.1f bytes each, allocBytes counts %d", n, ptrs, held, want)
+				return held, int64(count) * want
+			})
+			held := float64(total) / float64(1000*copies)
+			t.Logf("%d bytes (pointers: %v): the runtime holds %.1f bytes each of %d, allocBytes counts %d", n, ptrs, held, 1000*copies, want)
 			if held > float64(want)+0.5 || !ptrs && n < 16 && want != 16 || (ptrs || n >= 16) && held < float64(want)-0.5 {
 				t.Errorf("%d bytes (pointers: %v): the runtime holds %.1f bytes each; allocBytes counts %d", n, ptrs, held, want)
 			}
@@ -2998,6 +3274,16 @@ func TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds(t *testing.T) {
 // allocSink keeps the garbage TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds
 // makes on the heap.
 var allocSink []byte
+
+// allocStats is where allocatedNow reads the heap's stats: a variable of
+// the package, so that the read allocates nothing itself.
+var allocStats runtime.MemStats
+
+// allocatedNow is the bytes the heap has allocated so far (TotalAlloc).
+func allocatedNow() int64 {
+	runtime.ReadMemStats(&allocStats)
+	return int64(allocStats.TotalAlloc)
+}
 
 // Each text a call's index reads takes an entry, counted when it is made,
 // as the runtime allocates its parts: the entry itself, its hash's list of
@@ -3289,9 +3575,11 @@ func TestOutcomeCostTheFirstKeptWordsCountTheirMapsFirstGroup(t *testing.T) {
 // 48, 80 and 416 (the 16-slot table's fill of 9 decides the 4- and 8-byte
 // slots, the 1,024-slot table's of 448 the 48-byte one). A map of each
 // slot size built by inserts of n entries holds no more heap than that
-// counts, measured once the heap has settled: the least of three
-// measures, as another allocation in a measure's window adds to it alone.
+// counts, measured once the heap has settled, as copies of it (leastHeld).
 func TestOutcomeCostAMapHoldsNoMoreThanMapBytesCounts(t *testing.T) {
+	if !aloneInAProcess(t) {
+		return
+	}
 	for _, c := range []struct {
 		slot         uintptr
 		ptrs         bool
@@ -3316,41 +3604,46 @@ func TestOutcomeCostAMapHoldsNoMoreThanMapBytesCounts(t *testing.T) {
 	}
 	for _, n := range []int{1, 8, 9, 14, 15, 28, 29, 56, 57, 112, 113, 224, 225, 448, 449, 896, 897, 1500, most} {
 		for _, m := range []struct {
-			name string
-			slot uintptr
-			ptrs bool
-			held int64
+			name  string
+			slot  uintptr
+			ptrs  bool
+			build func(copies int) int64
 		}{
-			{"map[uint64]*int", slotOf[uint64, *int](), true, mapHeld[uint64, *int](ints[:n])},
-			{"map[string]*int", slotOf[string, *int](), true, mapHeld[string, *int](strs[:n])},
-			{"map[uint64][]*int", slotOf[uint64, []*int](), true, mapHeld[uint64, []*int](ints[:n])},
-			{"map[string][]int32", slotOf[string, []int32](), true, mapHeld[string, []int32](strs[:n])},
-			{"map[uint16]uint16", slotOf[uint16, uint16](), false, mapHeld[uint16, uint16](u16s[:n])},
-			{"map[uint32]uint32", slotOf[uint32, uint32](), false, mapHeld[uint32, uint32](u32s[:n])},
-			{"map[[5]uint64]uint64", slotOf[[5]uint64, uint64](), false, mapHeld[[5]uint64, uint64](wide[:n])},
+			{"map[uint64]*int", slotOf[uint64, *int](), true, mapsHeld[uint64, *int](ints[:n])},
+			{"map[string]*int", slotOf[string, *int](), true, mapsHeld[string, *int](strs[:n])},
+			{"map[uint64][]*int", slotOf[uint64, []*int](), true, mapsHeld[uint64, []*int](ints[:n])},
+			{"map[string][]int32", slotOf[string, []int32](), true, mapsHeld[string, []int32](strs[:n])},
+			{"map[uint16]uint16", slotOf[uint16, uint16](), false, mapsHeld[uint16, uint16](u16s[:n])},
+			{"map[uint32]uint32", slotOf[uint32, uint32](), false, mapsHeld[uint32, uint32](u32s[:n])},
+			{"map[[5]uint64]uint64", slotOf[[5]uint64, uint64](), false, mapsHeld[[5]uint64, uint64](wide[:n])},
 		} {
 			counted := mapBytes(n, m.slot, m.ptrs)
-			t.Logf("%s of %d entries: holds %d bytes, counts %d (held/counted %.3f)", m.name, n, m.held, counted, float64(m.held)/float64(counted))
-			if m.held > counted {
-				t.Errorf("%s of %d entries holds %d bytes of heap; mapBytes counts %d", m.name, n, m.held, counted)
+			held, all, copies := leastHeld(t, fmt.Sprintf("%s of %d entries", m.name, n), func(copies int) (int64, int64) {
+				return m.build(copies), int64(copies) * counted
+			})
+			t.Logf("%s of %d entries, as %d copies: holds %d bytes, counts %d (held/counted %.3f)", m.name, n, copies, held, all, float64(held)/float64(all))
+			if held > all {
+				t.Errorf("%s of %d entries, as %d copies, holds %d bytes of heap; mapBytes counts %d", m.name, n, copies, held, all)
 			}
 		}
 	}
 }
 
-// mapHeld is the heap a map built by inserts of keys holds, the least of
-// three measures.
-func mapHeld[K comparable, V any](keys []K) int64 {
-	least := int64(1 << 62)
-	for range 3 {
-		h0 := liveHeap()
-		m := map[K]V{}
+// mapsHeld builds maps by inserts of keys: the heap that copies of the
+// map hold, built each from nothing.
+func mapsHeld[K comparable, V any](keys []K) func(copies int) int64 {
+	return func(copies int) int64 {
+		ms := make([]map[K]V, copies)
 		var v V
-		for _, k := range keys {
-			m[k] = v
+		h0 := liveHeap()
+		for c := range ms {
+			ms[c] = map[K]V{}
+			for _, k := range keys {
+				ms[c][k] = v
+			}
 		}
-		least = min(least, liveHeap()-h0)
-		runtime.KeepAlive(m)
+		held := liveHeap() - h0
+		runtime.KeepAlive(ms)
+		return held
 	}
-	return least
 }
