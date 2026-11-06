@@ -189,7 +189,8 @@ func jsonBodyOf(body string) JSONBody {
 // leaves *body as it is, as decoding into a string does. An object that names
 // no encoding keploy reads, holds no data, or data that is not base64, is an
 // error: the body is not guessed at. A writer writes an object only for a body
-// that has bytes, so one with no data (absent, null or empty) is not a body.
+// that has bytes, so one whose data decodes to none (absent, null, empty, or
+// only the line ends base64 skips) is not a body.
 func readJSONBody(raw json.RawMessage, body *string, of string) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
@@ -205,12 +206,12 @@ func readJSONBody(raw json.RawMessage, body *string, of string) error {
 		if jb.Encoding != BodyEncodingBase64 {
 			return fmt.Errorf("models: %s body: encoding %q is not one keploy reads (only %q)", of, jb.Encoding, BodyEncodingBase64)
 		}
-		if jb.Data == "" {
-			return fmt.Errorf("models: %s body: a body object holds no data", of)
-		}
 		b, err := base64.StdEncoding.DecodeString(jb.Data)
 		if err != nil {
 			return fmt.Errorf("models: %s body: its %s data does not decode: %w", of, BodyEncodingBase64, err)
+		}
+		if len(b) == 0 {
+			return fmt.Errorf("models: %s body: a body object holds no data", of)
 		}
 		*body = string(b)
 		return nil

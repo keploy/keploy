@@ -399,6 +399,8 @@ func TestHTTPBodyJSONRead(t *testing.T) {
 		{name: "no data", doc: `{"body":{"encoding":"base64"}}`, errHas: "HTTPReq body: a body object holds no data"},
 		{name: "null data", doc: `{"body":{"encoding":"base64","data":null}}`, errHas: "HTTPReq body: a body object holds no data"},
 		{name: "empty data", doc: `{"body":{"encoding":"base64","data":""}}`, errHas: "HTTPReq body: a body object holds no data"},
+		{name: "data of one line end", doc: `{"body":{"encoding":"base64","data":"\n"}}`, errHas: "HTTPReq body: a body object holds no data"},
+		{name: "data of line ends", doc: `{"body":{"encoding":"base64","data":"\r\n\r\n"}}`, errHas: "HTTPReq body: a body object holds no data"},
 		{name: "bad base64", doc: `{"body":{"encoding":"base64","data":"@@@"}}`, errHas: "does not decode"},
 		{name: "object of wrong shape", doc: `{"body":{"encoding":1}}`, errHas: "HTTPReq body: json: cannot unmarshal number"},
 		{name: "other field of wrong type", doc: `{"proto_major":"one","body":"hi"}`, errHas: "proto_major"},
