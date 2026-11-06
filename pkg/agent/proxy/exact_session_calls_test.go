@@ -275,3 +275,19 @@ func TestUnderTheBackgroundRulesADeclaredPoolCallIsNotSpent(t *testing.T) {
 		t.Fatalf("an undeclared pool call under the background rules answered twice: %s", got)
 	}
 }
+
+// With no session call declared, a test's view carries no pool slice
+// (exactView.declared): tests share their shared part across pool views of
+// other names too, as they did before sessionCalls existed.
+func TestWithNoSessionCallDeclaredTestsShareTheirSharedPartAcrossPoolViews(t *testing.T) {
+	declareSessionCalls(t)
+	mm, ms := startupSet(t)
+	mm.ServeExactPool("k", []string{"rates"})
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	g1, _ := mm.SharedGeneration("")
+	mm.ServeExactPool("k", []string{"rates", "cfg"})
+	mm.ServeExactTest("T2", nil)
+	if g2, _ := mm.SharedGeneration(""); g2.View != g1.View {
+		t.Fatalf("two tests with a pool view of other names between them, and no session call declared, got shared numbers %d and %d; want one", g1.View, g2.View)
+	}
+}
