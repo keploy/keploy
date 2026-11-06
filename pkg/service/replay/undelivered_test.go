@@ -72,6 +72,44 @@ func TestAnAnswerTheClientNeverReadIsNoCallTheVerdictRequires(t *testing.T) {
 			if n := workerNamed(logs); n != 0 {
 				t.Fatalf("the set's end named a worker-scope call never made %d time(s)", n)
 			}
+			// The report's expected side, where a mapping names the answer
+			// never read, lists the answer read and not that one.
+			if tc.recorded {
+				if got.MockMismatches == nil {
+					t.Fatal("test-1 has no expected-vs-consumed report")
+				}
+				var expected []string
+				for _, m := range got.MockMismatches.ExpectedMocks {
+					expected = append(expected, m.Name)
+				}
+				if len(expected) != 1 || expected[0] != "mock-a" {
+					t.Fatalf("test-1's report expects %v; want [mock-a], not the answer never read", expected)
+				}
+			}
 		})
+	}
+}
+
+// The mismatch report never expects an answer the client never read, on
+// either replay path, whatever mapping names one: the regular path's
+// expected mocks (buildExpectedMockInfos) and a streaming test's
+// (reportedExpectedNames). Every other name it lists as before.
+func TestTheMismatchReportExpectsNoAnswerTheClientNeverRead(t *testing.T) {
+	undelivered := map[string]bool{"mock-unread": true}
+	entries := []models.MockEntry{{Name: "mock-a", Kind: string(models.HTTP)}, {Name: "mock-unread", Kind: string(models.HTTP)}, {Name: "mock-b", Kind: string(models.HTTP)}}
+	got := buildExpectedMockInfos(entries, nil, undelivered)
+	want := []models.MockMismatchMock{{Name: "mock-a", Kind: string(models.HTTP)}, {Name: "mock-b", Kind: string(models.HTTP)}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("the regular path expects %v; want %v", got, want)
+	}
+	if got := buildExpectedMockInfos(entries, nil, nil); len(got) != 3 {
+		t.Fatalf("with no answer never read the regular path expects %v; want all three", got)
+	}
+	names := reportedExpectedNames([]string{"mock-a", "mock-unread", "mock-b"}, undelivered)
+	if len(names) != 2 || names[0] != "mock-a" || names[1] != "mock-b" {
+		t.Fatalf("a streaming test's report expects %v; want [mock-a mock-b]", names)
+	}
+	if names := reportedExpectedNames([]string{"mock-a", "mock-b"}, undelivered); len(names) != 2 {
+		t.Fatalf("a streaming test's report expects %v; want both", names)
 	}
 }
