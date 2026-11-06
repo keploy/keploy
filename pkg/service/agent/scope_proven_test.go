@@ -499,6 +499,29 @@ func TestARecordingMarkedNotRequiredIsNotChargedInItsOwnTestOnly(t *testing.T) {
 	}
 }
 
+// One scope table carries the skipped tests' reads and the marks, installed
+// one after the other (the route: the reads, then the marks); neither install
+// clears the other. The marked recording is still not charged after the
+// reads are installed again, and the reads are still the skipped test's
+// after the marks are installed.
+func TestTheSkippedReadsAndTheMarksSurviveEachOthersInstall(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+	p.served = map[string]uint64{"mock-1": 1} // answered an earlier test
+	require.NoError(t, a.SetScopeSkippedReads(ctx, map[string]string{"mock-pat": "o::TestCRUD"}))
+	require.NoError(t, a.SetScopeNotRequired(ctx, map[string][]string{"o::TestA": {"mock-1"}}))
+	require.Equal(t, map[string]string{"mock-pat": "o::TestCRUD"}, a.skippedReadTests(), "installing the marks cleared the skipped reads")
+	require.NoError(t, a.SetScopeSkippedReads(ctx, map[string]string{"mock-pat": "o::TestCRUD"}))
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, "installing the skipped reads cleared the marks: %s", e.Reason)
+}
+
 // A wire operation waiting for another ends with its caller's context: the
 // CLI's final read is never stuck behind an operation it cannot see.
 func TestAWaitForTheWireEndsWithItsContext(t *testing.T) {
