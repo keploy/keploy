@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -808,6 +809,12 @@ func binaryCaseAt(at time.Time) *models.TestCase {
 // into db, returning its logs, the folder it wrote and Record's error.
 func recordJSONCases(t *testing.T, db func(dir string) TestDB, cases ...*models.TestCase) (*observer.ObservedLogs, string, error) {
 	t.Helper()
+	return recordJSONCasesWith(t, nil, db, cases...)
+}
+
+// recordJSONCasesWith is recordJSONCases with the run's record hooks.
+func recordJSONCasesWith(t *testing.T, hooks rec.RecordHooks, db func(dir string) TestDB, cases ...*models.TestCase) (*observer.ObservedLogs, string, error) {
+	t.Helper()
 	dir := t.TempDir()
 	instr := newRunnerInstr(t, sequentialMarks()...)
 	instr.incoming = cases
@@ -818,7 +825,7 @@ func recordJSONCases(t *testing.T, db func(dir string) TestDB, cases ...*models.
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
 	core, logs := observer.New(zapcore.InfoLevel)
-	svc := New(zap.New(core), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	svc := New(zap.New(core), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, hooks, cfg)
 	svc.(TestDBSetter).SetTestDB(db(dir))
 	return logs, dir, svc.Record(context.Background())
 }
@@ -882,9 +889,32 @@ func TestRecordRequests_ACaseLeftOutCountsAsNotWritten(t *testing.T) {
 		caseAt("", runnerT0.Add(50*time.Millisecond)))
 	require.ErrorContains(t, err, "2 of the 3 test cases handed to the test-case store were not written")
 	require.ErrorContains(t, err, "no space left on device")
+	require.NotZero(t, utils.ErrCode, "a run with a case left out and one the store failed exits as one that failed")
 	said := logs.FilterMessageSnippet("test cases left out of the recording").All()
 	require.Len(t, said, 1, "one left out is said as two are")
 	require.EqualValues(t, 1, said[0].ContextMap()["testCasesLeftOut"])
+}
+
+// A left-out test case is in no recording, so what runs after an insert (an
+// embedder's post-insert work) does not run for it.
+func TestRecordRequests_ACaseLeftOutRunsNoAfterInsertHook(t *testing.T) {
+	hooks := &hookSpy{}
+	_, _, err := recordJSONCasesWith(t, hooks, jsonStore,
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(15*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)))
+	require.NoError(t, err)
+	var before, after int
+	for _, call := range hooks.calls {
+		switch {
+		case strings.HasPrefix(call, "before-case "):
+			before++
+		case strings.HasPrefix(call, "after-case "):
+			after++
+		}
+	}
+	require.Equal(t, 3, before, "every case goes to the store: %v", hooks.calls)
+	require.Equal(t, 2, after, "the left-out case ran the after-insert hook: %v", hooks.calls)
 }
 
 // refusesTwoTestDB is the real test-case store, whose disk refuses the first

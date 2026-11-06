@@ -607,6 +607,9 @@ type recTelemetry struct {
 	sessionRecorded  bool
 	sessionStatus    string
 	sessionReason    string
+	// testsAndMocks counts RecordedTestAndMocks: the call says a test case
+	// was recorded, and only a stored one is.
+	testsAndMocks int
 }
 
 func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]int, metadata map[string]interface{}) {
@@ -618,7 +621,11 @@ func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]
 }
 func (tl *recTelemetry) RecordedTestCaseMock(string)  {}
 func (tl *recTelemetry) RecordedMocks(map[string]int) {}
-func (tl *recTelemetry) RecordedTestAndMocks()        {}
+func (tl *recTelemetry) RecordedTestAndMocks() {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	tl.testsAndMocks++
+}
 func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, status string, reason string) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()

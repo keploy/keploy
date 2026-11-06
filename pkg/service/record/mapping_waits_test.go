@@ -684,6 +684,7 @@ func TestStart_ATestCaseTheStoreCannotHoldIsSkippedAndCounted(t *testing.T) {
 	defer run.tele.mu.Unlock()
 	assert.Equal(t, 1, run.tele.suiteTestCount, "a refused test case was counted as recorded")
 	assert.EqualValues(t, 1, run.tele.sessionTestCount, "a refused test case was counted as recorded")
+	assert.Equal(t, 1, run.tele.testsAndMocks, "a refused test case was counted as recorded")
 }
 
 // TestStart_ARefusedTestCaseTheAgentRevokesIsNotDeleted: the store holds no such
