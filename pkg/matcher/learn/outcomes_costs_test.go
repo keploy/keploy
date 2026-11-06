@@ -3128,6 +3128,13 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 	// of what the index keeps: an answer counted below what it holds shows
 	// here, not hidden by the others' counts. Every third shape's texts pass
 	// 32 KiB (whole pages).
+	askMoment := func(h *readerText, _ int) {
+		// A moment the text holds, read by an index of its own: this
+		// one is asked of its moments alone.
+		if sp, _ := newReaderIndex(nil).text(h.text).spansOf(); len(sp) > 0 {
+			h.holdsMoment(sp[0].moment())
+		}
+	}
 	kinds := []struct {
 		name string
 		part func(r *rand.Rand, i, j int) string
@@ -3146,13 +3153,7 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 		}, func(e *readerEntry) bool { return e.runs.ok }},
 		{"moments", func(_ *rand.Rand, i, j int) string {
 			return fmt.Sprintf(`"t%d":"2026-%02d-%02dT%02d:%02d:%02d.%03dZ",`, j, 1+j%12, 1+i%28, j%24, j/24%60, i%60, j%1000)
-		}, func(h *readerText, _ int) {
-			// A moment the text holds, read by an index of its own: this
-			// one is asked of its moments alone.
-			if sp, _ := newReaderIndex(nil).text(h.text).spansOf(); len(sp) > 0 {
-				h.holdsMoment(sp[0].moment())
-			}
-		}, func(e *readerEntry) bool { return e.formSpans.ok }},
+		}, askMoment, func(e *readerEntry) bool { return e.formSpans.ok }},
 		{"field view", func(_ *rand.Rand, i, j int) string { return fmt.Sprintf(`"k%d":"v%dx%d",`, j, i, j) },
 			func(h *readerText, _ int) { h.fieldsWith("v0x0") }, func(e *readerEntry) bool { return e.fields.ok }},
 		{"suffix array", func(r *rand.Rand, i, j int) string { return randomWord(r, i, j, 6+r.IntN(30)) + " " },
@@ -3161,6 +3162,15 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 					h.contains(strconv.Itoa(q))
 				}
 			}, func(e *readerEntry) bool { return e.subs.ok }},
+		// Whole at the minute in a zone off UTC, each moment stands in all
+		// three of the index's orders: read to the millisecond in UTC, as
+		// above, in the first alone.
+		{"moments off UTC", func(_ *rand.Rand, i, j int) string {
+			return fmt.Sprintf(`"t%d":"2026-%02d-%02dT%02d:%02d:00+05:30",`, j, 1+j%12, 1+i%28, j%24, j/24%60)
+		}, askMoment, func(e *readerEntry) bool {
+			ix := e.formSpans.v
+			return e.formSpans.ok && len(ix.at) > 0 && len(ix.minute) == len(ix.at) && len(ix.wall) == len(ix.at)
+		}},
 	}
 	for _, k := range kinds {
 		for shape := range 3 {
