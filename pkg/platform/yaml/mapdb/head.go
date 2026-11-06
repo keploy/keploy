@@ -39,31 +39,46 @@ const (
 // JSON is the encoding: it has no comments, and a field a person added to
 // it is not kept, but named (jsonDropped).
 func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old []byte, doc *yamlLib.Node, h header, testSetID string) ([]byte, error) {
+	return encodeOver(db.logger, mapping, format, old, doc, h, testSetID)
+}
+
+// EncodeOverF is mapping encoded in format to replace old, testSetID's
+// mappings file before, as keploy's own writers write one and with what
+// they say on logger: a YAML file as EncodeOver writes it, with a warning
+// for each hand edit it could not keep; a JSON file with the fields keploy
+// writes, each field a person added named in a warning. A writer outside this package that rewrites the file
+// (enterprise's judged mark) writes it with this.
+func EncodeOverF(logger *zap.Logger, mapping *models.Mapping, format yaml.Format, old []byte, testSetID string) ([]byte, error) {
+	return encodeOver(logger, mapping, format, old, nil, headerAlways, testSetID)
+}
+
+// encodeOver is MappingDb.encodeOver, its warnings on logger.
+func encodeOver(logger *zap.Logger, mapping *models.Mapping, format yaml.Format, old []byte, doc *yamlLib.Node, h header, testSetID string) ([]byte, error) {
 	if format != yaml.FormatYAML {
 		if fields := jsonDropped(old); len(fields) > 0 && format == yaml.FormatJSON {
-			db.logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d field(s) a hand edit added: a JSON mappings file keeps only the fields keploy writes", len(fields)),
+			logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d field(s) a hand edit added: a JSON mappings file keeps only the fields keploy writes", len(fields)),
 				zap.String("testSetID", testSetID), zap.Strings("fields", fields),
 				zap.String("next_step", "keep a note in mappings.yaml, which keeps a field a person adds, or outside the set"))
 		}
-		return EncodeMappingF(mapping, db.logger, format)
+		return EncodeMappingF(mapping, logger, format)
 	}
 	data, unkept, err := encodeYAMLOver(mapping, old, doc, nil, h)
 	if err != nil {
-		db.logger.Error("failed to marshal mapping", zap.Error(err))
+		logger.Error("failed to marshal mapping", zap.Error(err))
 		return nil, err
 	}
 	if unkept.Comments > 0 {
-		db.logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d comment line(s) it could not place again", unkept.Comments),
+		logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d comment line(s) it could not place again", unkept.Comments),
 			zap.String("testSetID", testSetID),
 			zap.String("next_step", "keploy keeps the comment lines a mappings file starts with, comments on the keys it writes, and every field it does not know on the entries it writes; move a note to the top of the file"))
 	}
 	if len(unkept.Fields) > 0 {
-		db.logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and could not keep %d field(s) a hand edit added: each brings in more than %d YAML nodes through aliases", len(unkept.Fields), maxAliasNodes),
+		logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and could not keep %d field(s) a hand edit added: each brings in more than %d YAML nodes through aliases", len(unkept.Fields), maxAliasNodes),
 			zap.String("testSetID", testSetID), zap.Strings("fields", unkept.Fields),
 			zap.String("next_step", "write the field's value out without aliases (*name), and keploy keeps it"))
 	}
 	if len(unkept.Dropped) > 0 {
-		db.logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d field(s) a hand edit added to entries the new file does not have", len(unkept.Dropped)),
+		logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d field(s) a hand edit added to entries the new file does not have", len(unkept.Dropped)),
 			zap.String("testSetID", testSetID), zap.Strings("fields", unkept.Dropped),
 			zap.String("next_step", "the entry each field was on is gone from the file (removed, or its call recorded anew): add the field again where it belongs now"))
 	}

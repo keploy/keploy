@@ -271,3 +271,42 @@ func TestAJSONRewriteNamesTheHandFieldsItDrops(t *testing.T) {
 		}
 	})
 }
+
+// A writer outside this package (enterprise's judged mark) rewrites the
+// file with EncodeOverF as keploy's own writers do, whatever the switch: a
+// YAML file keeps a person's comment and field, its keploy line brought up
+// to this keploy, and says the comment it could not place; a JSON file
+// names the field it drops. A file no person edited says nothing.
+func TestEncodeOverFWritesAndSaysAsKeploysWriters(t *testing.T) {
+	edited := strings.NewReplacer(
+		"    - id: o::TestA\n", "    # the login test\n    - id: o::TestA\n      owner_team: payments\n",
+		"    - id: o::TestB\n", "    # gone\n    - id: o::TestB\n",
+	).Replace(keploysOwn)
+	eachSwitch(t, func(t *testing.T) {
+		var mapping models.Mapping
+		must(t, yamlLib.Unmarshal([]byte(edited), &mapping))
+		mapping.TestCases = mapping.TestCases[:1]
+		core, logs := observer.New(zapcore.WarnLevel)
+		got, err := EncodeOverF(zap.New(core), &mapping, yaml.FormatYAML, []byte(edited), "s")
+		must(t, err)
+		if !strings.HasPrefix(string(got), utils.GetVersionAsComment()) || !strings.Contains(string(got), "    # the login test\n    - id: o::TestA\n      owner_team: payments\n") || strings.Contains(string(got), "- id: o::TestB") {
+			t.Fatalf("EncodeOverF did not keep the hand edits of the test it keeps:\n%s", got)
+		}
+		if n := droppedSaid(t, logs); n != 1 {
+			t.Fatalf("EncodeOverF said it dropped %d comment line(s), want 1 (# gone): %v", n, logs.All())
+		}
+		core, logs = observer.New(zapcore.WarnLevel)
+		_, err = EncodeOverF(zap.New(core), &mapping, yaml.FormatJSON, []byte(`{"version": "api.keploy.io/v1beta1", "testSetId": "s", "team": "payments"}`), "s")
+		must(t, err)
+		said := logs.FilterMessageSnippet("a JSON mappings file").All()
+		if len(said) != 1 || fmt.Sprint(said[0].ContextMap()["fields"]) != "[team]" {
+			t.Fatalf("EncodeOverF did not name the JSON field it dropped: %v", logs.All())
+		}
+		core, logs = observer.New(zapcore.WarnLevel)
+		_, err = EncodeOverF(zap.New(core), &mapping, yaml.FormatYAML, []byte(keploysOwn), "s")
+		must(t, err)
+		if len(logs.All()) != 0 {
+			t.Fatalf("a file no person edited, yet EncodeOverF said %v", logs.All())
+		}
+	})
+}
