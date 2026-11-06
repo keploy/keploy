@@ -190,6 +190,21 @@ func TestATestShowsTheDeclaredCallsOfThePoolSliceBeforeIt(t *testing.T) {
 	}
 }
 
+// A test opened before any pool slice was served is served no declared
+// session call: the calls it shows are those of the pool slice served
+// before it, and there is none, so neither the start-up recording nor
+// another test's recording of the declared call answers in it.
+func TestATestOpenedBeforeAnyPoolSliceIsServedNoDeclaredCall(t *testing.T) {
+	declareSessionCalls(t, declaredRule)
+	mm, ms := startupSet(t)
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	for _, name := range []string{"rates", "rates-T0"} {
+		if got := keepNamed(t, mm, name); got != "a miss" {
+			t.Fatalf("a test opened before any pool slice was served %s: %s", name, got)
+		}
+	}
+}
+
 // Under the background rules a pool recording answers at most one call in the
 // staging; one keploy.yaml declares served to every test is not spent, and
 // answers every test's call.
