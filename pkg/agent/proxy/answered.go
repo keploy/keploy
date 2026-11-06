@@ -6,6 +6,7 @@ import (
 	"math"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -45,6 +46,9 @@ type answeredLog struct {
 	// latest holds, by name, the entry noteLatest made for a recording that
 	// may answer call after call, while a key's list keeps it.
 	latest map[string]*answeredEntry
+	// copies counts the probes noteAs made of a recording (answeredProbe),
+	// read by the rows that pin what an answer costs.
+	copies atomic.Uint64
 	// redacting holds, apart from the keyed entries and their bounds, every
 	// recording noted that holds a pattern (Mock.Noise: the obfuscator
 	// redacted something in it), once a name and content (redactingKey), in
@@ -119,7 +123,7 @@ func (l *answeredLog) movedLatest(mk *models.Mock, at time.Time) bool {
 		return true
 	}
 	e := l.latest[mk.Name]
-	if e == nil || e.mock == nil {
+	if e == nil {
 		return false
 	}
 	if at.After(e.at) {
@@ -148,6 +152,7 @@ func (l *answeredLog) noteAs(mk *models.Mock, at time.Time, background string, s
 		return
 	}
 	probe := answeredProbe(mk)
+	l.copies.Add(1)
 	size := answeredSize(probe, keys)
 	var key redactingKey
 	keyed := false
@@ -159,7 +164,7 @@ func (l *answeredLog) noteAs(mk *models.Mock, at time.Time, background string, s
 	if g := mk.TestModeInfo.StagedSet; g != 0 && g != l.set {
 		return
 	}
-	if e := l.latest[mk.Name]; latest && e != nil && e.mock != nil {
+	if e := l.latest[mk.Name]; latest && e != nil {
 		if at.After(e.at) {
 			e.at = at
 		}
@@ -255,7 +260,7 @@ func (l *answeredLog) unref(e *answeredEntry) {
 
 // drop forgets e's recording and its bytes. Caller holds mu.
 func (l *answeredLog) drop(e *answeredEntry) {
-	if e.mock != nil && l.latest[e.mock.Name] == e {
+	if l.latest[e.mock.Name] == e {
 		delete(l.latest, e.mock.Name)
 	}
 	e.mock, e.refs = nil, 0

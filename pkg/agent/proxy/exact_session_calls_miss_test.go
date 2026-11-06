@@ -160,3 +160,69 @@ func TestAnExtraCallsMissKeepsTheSessionCallHint(t *testing.T) {
 		t.Fatalf("the extra call's next step %q does not carry the session-call hint", r.NextSteps)
 	}
 }
+
+// noted counts the log's entries of the recording named name.
+func noted(mm *MockManager, name string) int {
+	mm.answered.mu.Lock()
+	defer mm.answered.mu.Unlock()
+	n := 0
+	for _, e := range mm.answered.queue {
+		if e.mock != nil && e.mock.Name == name {
+			n++
+		}
+	}
+	return n
+}
+
+// A door that keeps a recording (UpdateUnFilteredMock, MarkMockAsUsed) notes
+// it only when a test's view may hide it: under exact serving, one of the
+// pool's by the replay's scope table. Without exact serving no view hides
+// it, a recording the table does not put in the pool is noted where it is
+// served or spent, and an update that filed nothing answered nothing.
+func TestAKeptDoorNotesOnlyAPoolRecordingUnderExactServing(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		exact bool
+		pool  []string
+		door  func(t *testing.T, mm *MockManager, rates *models.Mock)
+		want  int
+	}{
+		{name: "the pool's, answered", exact: true, pool: []string{"mock-0"}, want: 1},
+		{name: "the pool's, marked used", exact: true, pool: []string{"mock-0"}, want: 1,
+			door: func(t *testing.T, mm *MockManager, rates *models.Mock) {
+				if !mm.MarkMockAsUsed(*rates) {
+					t.Fatalf("the start-up recording was not marked used")
+				}
+			}},
+		{name: "no exact serving", pool: []string{"mock-0"}},
+		{name: "not the pool's", exact: true, pool: []string{}},
+		{name: "an update that files nothing", exact: true, pool: []string{"mock-0"},
+			door: func(t *testing.T, mm *MockManager, rates *models.Mock) {
+				ghost := *rates
+				ghost.TestModeInfo.ID, ghost.TestModeInfo.SortOrder = 99, 99
+				next := ghost
+				if mm.UpdateUnFilteredMock(&ghost, &next) {
+					t.Fatalf("an update of a recording the trees do not hold filed it")
+				}
+			}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			declareSessionCalls(t, models.SessionCallRule{Host: "deps", Method: "GET", PathPrefix: "/echo"})
+			rates := startUpCall("mock-0", 0, "/echo/rates", "R0")
+			mm := stagedManager(t, nil, []*models.Mock{rates})
+			mm.SetPoolNames(c.pool)
+			if c.exact {
+				mm.ServeExactPool("k", []string{"mock-0"})
+			}
+			if c.door != nil {
+				c.door(t, mm, rates)
+			} else if got, r := httpMissCall(t, mm, "/echo/rates"); got != "R0" {
+				t.Fatalf("the call was answered %q (miss %+v); want R0", got, r)
+			}
+			if n := noted(mm, "mock-0"); n != c.want {
+				t.Fatalf("the log holds %d entries of the start-up recording; want %d", n, c.want)
+			}
+		})
+	}
+}

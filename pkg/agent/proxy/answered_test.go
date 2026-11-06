@@ -425,3 +425,98 @@ func TestFindAnsweredEarlierLeavesOutAPreviousSetsConsume(t *testing.T) {
 		t.Fatalf("found %v (%v), want this set's mock-2", got.Mock, ok)
 	}
 }
+
+// A recording a door keeps answers call after call (noteLatest): the log
+// holds it once, copied at its first answer alone, at the time it last
+// answered. An answer noted after a later one does not move that time back,
+// and a recording of the same name an earlier test set's staging pooled
+// moves nothing.
+func TestAnsweredLogNotesAKeptRecordingOnceAtItsLastAnswer(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	mk := keyedRecording("mock-0", models.HTTP, 0, "/echo/rates", t0)
+	mk.TestModeInfo.Lifetime = models.LifetimeSession
+	var l answeredLog
+	l.fence(2)
+	for i := 1; i <= 3; i++ {
+		l.noteLatest(mk, t0.Add(time.Duration(i)*time.Second))
+	}
+	if n := l.copies.Load(); n != 1 {
+		t.Fatalf("three answers made %d copies of the recording; want 1", n)
+	}
+	last := t0.Add(3 * time.Second)
+	at := func() time.Time {
+		t.Helper()
+		c := l.candidates([]string{"url:/echo/rates"})
+		if len(c) != 1 || l.live != 1 {
+			t.Fatalf("the log holds %d entries (%d candidates); want the recording once", l.live, len(c))
+		}
+		return c[0].at
+	}
+	if got := at(); !got.Equal(last) {
+		t.Fatalf("noted at %v; want its last answer, %v", got, last)
+	}
+	l.noteLatest(mk, t0.Add(time.Second))
+	if got := at(); !got.Equal(last) {
+		t.Fatalf("an earlier answer moved the time to %v; want %v kept", got, last)
+	}
+	old := *mk
+	old.TestModeInfo.StagedSet = 1
+	l.noteLatest(&old, t0.Add(9*time.Second))
+	if got := at(); !got.Equal(last) {
+		t.Fatalf("an earlier set's recording of the same name moved the time to %v; want %v kept", got, last)
+	}
+	// Two calls that both found no entry each note it: the second moves the
+	// first's time forward, never back, and files nothing of its own.
+	l.noteAs(mk, t0.Add(5*time.Second), "", false, true)
+	l.noteAs(mk, t0.Add(4*time.Second), "", false, true)
+	if got := at(); !got.Equal(t0.Add(5 * time.Second)) {
+		t.Fatalf("racing notes left the time at %v; want %v", got, t0.Add(5*time.Second))
+	}
+	checkAnsweredCounts(t, &l)
+	// Once the log drops it, the next answer notes it afresh.
+	l.fence(3)
+	if l.latest != nil {
+		t.Fatalf("a fence kept %d kept recordings' entries", len(l.latest))
+	}
+	l.noteLatest(mk, t0.Add(6*time.Second))
+	if got := at(); !got.Equal(t0.Add(6 * time.Second)) {
+		t.Fatalf("after a fence the recording was noted at %v; want %v", got, t0.Add(6*time.Second))
+	}
+	// Newer recordings of its key push its entry out: its next answer is
+	// noted afresh, not moved on the entry dropped.
+	for i := 1; i <= answeredPerKey; i++ {
+		l.note(keyedRecording(fmt.Sprintf("m%d", i), models.HTTP, i, "/echo/rates", t0), t0.Add(7*time.Second))
+	}
+	l.noteLatest(mk, t0.Add(8*time.Second))
+	found := false
+	for _, e := range l.candidates([]string{"url:/echo/rates"}) {
+		if e.mock.Name == "mock-0" {
+			found = e.at.Equal(t0.Add(8 * time.Second))
+		}
+	}
+	if !found {
+		t.Fatalf("after its entry was pushed out, the recording's next answer was not noted at %v", t0.Add(8*time.Second))
+	}
+	checkAnsweredCounts(t, &l)
+	// A reset forgets it too.
+	l.reset()
+	l.noteLatest(mk, t0.Add(10*time.Second))
+	if got := at(); !got.Equal(t0.Add(10 * time.Second)) {
+		t.Fatalf("after a reset the recording was noted at %v; want %v", got, t0.Add(10*time.Second))
+	}
+	// An entry of the same name noted another way, pushed out, leaves the
+	// kept recording's entry where it is.
+	l.reset()
+	l.note(keyedRecording("mock-0", models.HTTP, 0, "/echo/rates", t0), t0.Add(11*time.Second))
+	l.noteLatest(mk, t0.Add(12*time.Second))
+	for i := 1; i < answeredPerKey; i++ {
+		l.note(keyedRecording(fmt.Sprintf("m%d", i), models.HTTP, i, "/echo/rates", t0), t0.Add(13*time.Second))
+	}
+	copies := l.copies.Load()
+	l.noteLatest(mk, t0.Add(14*time.Second))
+	if n := l.copies.Load() - copies; n != 0 {
+		t.Fatalf("pushing out another entry of its name made its next answer copy it %d times; want its entry moved", n)
+	}
+	checkAnsweredCounts(t, &l)
+}
