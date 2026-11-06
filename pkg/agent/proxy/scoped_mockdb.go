@@ -585,6 +585,16 @@ var (
 	_ integrations.CallViewGoneTeller = (*scopedMockDb)(nil)
 )
 
+// SkippedReadsAnswered forwards the store's skipped tests' reads that
+// answered in the open test's window (integrations.ExactSkippedReadsReader),
+// none when it keeps none.
+func (s *scopedMockDb) SkippedReadsAnswered() []*models.Mock {
+	if sr, ok := s.MockMemDb.(integrations.ExactSkippedReadsReader); ok {
+		return sr.SkippedReadsAnswered()
+	}
+	return nil
+}
+
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
 // keeps none, so a learn step on a scoped view reads the store's account as
@@ -1100,6 +1110,17 @@ func (s *scopedMockDb) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock
 		return s.keep(r.GetCarryOverMocksByKind(kind))
 	}
 	return nil, nil
+}
+
+// AtSetEnd hands on the wrapped store's SetEndFiler: a scoped connection's
+// misses are filed where its store's are, so the store's set's end read is
+// its own. Over a test worker's manager, or a store without the facet, it is
+// !ok, as theirs is.
+func (s *scopedMockDb) AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool) {
+	if f, ok := s.MockMemDb.(integrations.SetEndFiler); ok {
+		return f.AtSetEnd(kind, file)
+	}
+	return func() {}, false
 }
 
 func (s *scopedMockDb) StagingEpoch() uint64 {

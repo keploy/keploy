@@ -67,6 +67,30 @@ func (h *HTTP) extraCallOf(ctx context.Context, input *req, mockDb integrations.
 	return max(len(matched), 1), first, matched
 }
 
+// skippedReadsOf names, for a request one more than the open test recorded
+// (extraCall), the reads of tests the replay's gate skips that answered the
+// same call in the test's window (integrations.ExactSkippedReadsReader), in
+// the order they did: each matched on its own, as the matcher judges it
+// (answeredMatch). The test made those calls too, which its recordings do
+// not count, so its extra-call line counts them (MockMismatchReport.
+// SkippedReads). None when the store keeps none, as with no gate skip, and
+// none when the call's view moved (integrations.SkippedReadsInCallView): the
+// list may then be another test's.
+func (h *HTTP) skippedReadsOf(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) []string {
+	reads := FilterHTTPMocks(integrations.SkippedReadsInCallView(mockDb))
+	if len(reads) == 0 {
+		return nil
+	}
+	dry := h.answeredMatch(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
+	var names []string
+	for _, a := range reads {
+		if dry([]*models.Mock{a}) {
+			names = append(names, a.Name)
+		}
+	}
+	return names
+}
+
 // ownCall reports whether the request is one of the open test's own calls
 // (integrations.OwnRepeatRead): whether it matches one of the test's own HTTP
 // recordings, answered or not, as the matcher judges it (answeredMatch). It

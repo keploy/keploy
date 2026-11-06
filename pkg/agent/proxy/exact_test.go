@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1461,12 +1462,14 @@ func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 }
 
 // A miss says where it was made, only under exact serving: in the open test,
-// as one call more than recorded when its matcher says so, or outside every
-// test.
+// as one call more than recorded when its matcher says so, with the skipped
+// tests' reads that answered the same call, or outside every test.
 func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 	report := func(kind string, recorded int) *models.MockMismatchReport {
 		return &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /n", MissKind: kind, Recorded: recorded}
 	}
+	skippedReport := report(models.MissExtraCall, 1)
+	skippedReport.SkippedReads = []string{"mock-skipped"}
 	cases := []struct {
 		name         string
 		arm          func(mm *MockManager)
@@ -1477,6 +1480,7 @@ func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 		{"off", func(*MockManager) {}, report("", 0), "", 0},
 		{"in test", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report("", 0), models.MissInTest, 0},
 		{"extra call", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report(models.MissExtraCall, 2), models.MissExtraCall, 2},
+		{"extra call after a skipped test's read", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, skippedReport, models.MissExtraCall, 1},
 		{"outside", func(mm *MockManager) { mm.ServeExactPool("-", nil) }, report("", 0), models.MissOutsideTest, 0},
 		// The matcher found it one more than the test recorded while the
 		// test was open; it is filed once the test's end has served the pool.
@@ -1500,6 +1504,9 @@ func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 			}
 			if got[0].Kind != tc.wantKind || got[0].Recorded != tc.wantRecorded {
 				t.Fatalf("filed %q/%d, want %q/%d", got[0].Kind, got[0].Recorded, tc.wantKind, tc.wantRecorded)
+			}
+			if !slices.Equal(got[0].SkippedReads, tc.report.SkippedReads) {
+				t.Fatalf("filed skipped reads %v, want %v", got[0].SkippedReads, tc.report.SkippedReads)
 			}
 		})
 	}

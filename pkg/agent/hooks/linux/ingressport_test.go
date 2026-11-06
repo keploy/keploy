@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 )
 
@@ -146,7 +147,7 @@ func TestTheParkListenerGoesInOnlyAsATCPListenerIntoALoadedMap(t *testing.T) {
 	if err := putListener(nil, 0, tcp); err == nil || !strings.Contains(err.Error(), "the map is not loaded") {
 		t.Fatalf("no map: %v", err)
 	}
-	unix, err := net.Listen("unix", filepath.Join(t.TempDir(), "s"))
+	unix, err := net.Listen("unix", filepath.Join(testnet.SocketDir(t), "s"))
 	if err != nil {
 		t.Fatal(err)
 	}

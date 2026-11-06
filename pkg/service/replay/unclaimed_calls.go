@@ -21,6 +21,11 @@ import (
 // proxy's hands and answered, or missed, before the read): a pool miss no
 // later test takes fails the set, naming the call.
 //
+// The same read first has the agent's parsers file the calls they hold for a
+// later test's recording that no test answered (integrations.SetEndFiler):
+// no test is left to answer them. Those are the set's, wherever they were
+// made (before_set_calls.go).
+//
 // Known limit: a call the application has not made by the time the set ends
 // (it is stopped first) is not judged. Which test such a call belongs to is
 // not recorded (design v14's gaps belong to no test), so nothing can wait for
@@ -37,10 +42,14 @@ func (r *Replayer) unclaimedCalls(ctx context.Context) (calls, answered []models
 	if r.noAgent {
 		return nil, nil, nil
 	}
-	read, err := r.instrumentation.GetMockErrors(ctx)
+	// Marked as the set's end read: the agent first has its parsers file
+	// the calls they hold for a test of the set, which no test is left to
+	// answer (models.WithSetEndRead).
+	read, err := r.instrumentation.GetMockErrors(models.WithSetEndRead(ctx))
 	r.keptInside.add(read)
 	// A set whose first test's read did not take what was missed before it
-	// (the read was cut short) hands it over here: still the set's.
+	// (the read was cut short) hands it over here: still the set's, as are
+	// the held calls the read filed (setsCall).
 	calls, answered = splitAnswers(r.setCalls.take(read))
 	return dataPlaneCalls(calls), answered, err
 }

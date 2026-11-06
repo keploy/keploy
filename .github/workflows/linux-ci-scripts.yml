@@ -44,6 +44,13 @@ name: Linux CI scripts
 # kind whole: an Http2 or HttpFault mock is not an Http one, though a
 # `^kind: Http` prefix counts it.
 #
+# And keploy-start-wait.tests.sh: await_agent_ready, the wait of a lane that
+# starts keploy record for its agent's ready line, after which the app's wait
+# starts with its full budget: the line ends it, a keploy that exits first or
+# a start past the bound fails it, and it says the step a slow start is in.
+# And save_keploy_start_evidence, which copies keploy's logs and each agent's
+# boot.json, removed when keploy exits, for the lane's upload.
+#
 # And golang/gin_mongo/golang-docker.tests.sh and
 # golang/echo_sql/golang-docker.tests.sh: the gin-mongo and echo-sql lanes of
 # golang_docker.yml, sourced by `bash -e` as their step runs them, against a
@@ -68,6 +75,8 @@ on:
       - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-start-wait.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-start-wait.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.sh'
@@ -94,6 +103,8 @@ on:
       - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-start-wait.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-start-wait.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.sh'
@@ -250,6 +261,16 @@ jobs:
 
       - name: Test mock-kinds.sh (DNS mocks beside the Http ones pass; an Http mock lost or duplicated, or another kind, fails)
         run: bash .github/workflows/test_workflow_scripts/mock-kinds.tests.sh
+
+  keploy-start-wait:
+    # Thirteen cases, about twenty seconds: the waits are real.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test keploy-start-wait.sh (the agent's ready line ends the wait; an exit or the bound fails it; the evidence is copied)
+        run: bash .github/workflows/test_workflow_scripts/keploy-start-wait.tests.sh
 
   golang-docker-lanes:
     # Forty-two cases against fakes, a few seconds in all; each is bounded

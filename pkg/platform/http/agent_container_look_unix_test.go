@@ -229,7 +229,7 @@ func TestAWaitWithNoClientMakesOneForTheEnvironment(t *testing.T) {
 // socket is not there.
 func unreachableEngine(t *testing.T) error {
 	t.Helper()
-	c, err := client.NewClientWithOpts(client.WithHost("unix://" + filepath.Join(t.TempDir(), "docker.sock")))
+	c, err := client.NewClientWithOpts(client.WithHost(noDaemonHost))
 	if err != nil {
 		t.Fatal(err)
 	}

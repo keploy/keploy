@@ -71,6 +71,18 @@ jobs:
           cd samples-python/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-linux.sh
 
+      # keploy's log and its agent's boot.json, which keploy removes when it
+      # exits: the lane copies them here when it gives up on keploy's start or
+      # the app's (keploy-start-wait.sh).
+      - name: Upload keploy's logs and start reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.app.name }}-${{ matrix.config.job }}-keploy-start
+          path: samples-python/${{ matrix.app.path }}/keploy-start-evidence/
+          if-no-files-found: ignore
+          retention-days: 7
+
       # TODO(postgres-v3 RCA): flask-secret is not postgres-touching, so
       # KEPLOY_PG_V3_LOG_BIND_VALUES + recordings upload are intentionally
       # skipped here. See django-postgres job below for the instrumented
@@ -217,5 +229,6 @@ jobs:
             samples-python/${{ matrix.app.path }}/keploy/
             samples-python/${{ matrix.app.path }}/test_logs.txt
             samples-python/${{ matrix.app.path }}/*App_*.txt
+            samples-python/${{ matrix.app.path }}/keploy-start-evidence/
           if-no-files-found: warn
           retention-days: 7

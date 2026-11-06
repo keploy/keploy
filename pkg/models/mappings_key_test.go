@@ -37,22 +37,22 @@ func TestMappedTestCaseKeyRoundTrip(t *testing.T) {
 	}
 }
 
-// Under the switch, a key: that is not a string fails the decode, never
-// reads the entry without it; with the switch off key: is not read, whatever
-// it holds, and the entry keeps its mocks.
-func TestMappedTestCaseKeyIsReadUnderTheSwitchOnly(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	var tc MappedTestCase
-	require.ErrorContains(t, yaml.Unmarshal([]byte("id: t1\nkey: [a]\nmock_entries:\n  - name: mock-0\n"), &tc), "claim key")
-	require.ErrorContains(t, json.Unmarshal([]byte(`{"id":"t1","key":{"a":1},"mock_entries":[{"name":"mock-0"}]}`), &tc), "claim key")
-	t.Setenv(provenswitch.Env, "")
-	for _, doc := range []string{"id: t1\nkey: a\nmock_entries:\n  - name: mock-0\n", "id: t1\nkey: [a]\nmock_entries:\n  - name: mock-0\n"} {
-		var tc MappedTestCase
-		require.NoError(t, yaml.Unmarshal([]byte(doc), &tc), doc)
-		require.Empty(t, tc.Key)
-		require.Equal(t, "mock-0", tc.Mocks[0].Name)
+// A key: that is not a string fails the decode, never reads the entry
+// without it, and a string one is read, whatever the switch: a writer that
+// rewrites the file with the switch off keeps each test's key.
+func TestMappedTestCaseKeyIsReadWhateverTheSwitch(t *testing.T) {
+	for _, sw := range []string{"1", ""} {
+		t.Setenv(provenswitch.Env, sw)
+		var bad MappedTestCase
+		require.ErrorContains(t, yaml.Unmarshal([]byte("id: t1\nkey: [a]\nmock_entries:\n  - name: mock-0\n"), &bad), "claim key", "switch=%q", sw)
+		require.ErrorContains(t, json.Unmarshal([]byte(`{"id":"t1","key":{"a":1},"mock_entries":[{"name":"mock-0"}]}`), &bad), "claim key", "switch=%q", sw)
+		var y MappedTestCase
+		require.NoError(t, yaml.Unmarshal([]byte("id: t1\nkey: a\nmock_entries:\n  - name: mock-0\n"), &y))
+		require.Equal(t, "a", y.Key, "switch=%q", sw)
+		require.Equal(t, "mock-0", y.Mocks[0].Name)
+		var j MappedTestCase
+		require.NoError(t, json.Unmarshal([]byte(`{"id":"t1","key":"a","mock_entries":[{"name":"mock-0"}]}`), &j))
+		require.Equal(t, "a", j.Key, "switch=%q", sw)
+		require.Equal(t, "mock-0", j.Mocks[0].Name)
 	}
-	var j MappedTestCase
-	require.NoError(t, json.Unmarshal([]byte(`{"id":"t1","key":"a","mock_entries":[{"name":"mock-0"}]}`), &j))
-	require.Empty(t, j.Key)
 }

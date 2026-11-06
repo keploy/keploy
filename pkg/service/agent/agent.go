@@ -778,6 +778,14 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	a.proven.order.tests = maps.Clone(opts.LearnTests)
 	a.provenMu.Unlock()
 
+	// A parser holds a call for a later test only where a set's end read
+	// files it (integrations.SetEndFiler), and the read files through this
+	// Proxy (GetMockErrors): one that cannot (no SetEndFilingProxy, such as
+	// a wrapper that forwards Mock alone) is told the client reads no set's
+	// end, so no parser holds a call nothing would file.
+	if _, files := a.Proxy.(coreAgent.SetEndFilingProxy); !files {
+		opts.ReadsSetEnds = false
+	}
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
 		return err
@@ -1050,9 +1058,23 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	// after it), and after the last test case to the run, as every loss
 	// after it is: this read may be the run's last.
 	a.closeDropsGap(ctx)
+	// keploy test's read of a set's end: no test of the set is left to
+	// answer a call a parser holds for one, so each such call is filed as a
+	// miss now, in-band, and this read takes it. Its connection may outlive
+	// the set's last test, and the miss it files when it ends would come
+	// after this read, which is the set's last.
+	var fileErr error
+	if models.SetEndRead(ctx) {
+		if f, ok := a.Proxy.(coreAgent.SetEndFilingProxy); ok {
+			fileErr = f.FileAtSetEnd(ctx)
+		}
+	}
 	errs, err := a.Proxy.GetMockErrors(ctx)
 	if settleErr != nil && err == nil {
 		err = fmt.Errorf("%w: keploy could not tell that every call reached it: %v", models.ErrUnmatchedCallsUnread, settleErr)
+	}
+	if fileErr != nil && err == nil {
+		err = fmt.Errorf("%w: keploy could not file every call its parsers hold for a test of the set: %v", models.ErrUnmatchedCallsUnread, fileErr)
 	}
 	if err != nil && !errors.Is(err, models.ErrUnmatchedCallsUnread) {
 		// A read that failed is answered without its list over HTTP: the

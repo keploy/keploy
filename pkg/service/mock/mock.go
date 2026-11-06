@@ -72,6 +72,12 @@ type mockService struct {
 	// pushProvenTable: the receipt names, on a test's miss that is another
 	// test's recording, that test (withRecordedIn).
 	mockOwners map[string][]string
+	// skippedReadOf is, under the proven switch, each read of a test the
+	// replay's gate skips that pushProvenTable moved to the worker scope,
+	// with that test (skippedReads' moved): the receipt names, on a miss one
+	// past such a read (models.RepeatNote.SkippedRead), its test
+	// (withSkippedTest).
+	skippedReadOf map[string]string
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil

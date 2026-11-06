@@ -1,6 +1,7 @@
 #!/bin/bash
 
 source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
+source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/keploy-start-wait.sh
 
 # Function to cleanup any remaining keploy processes
 cleanup_keploy() {
@@ -35,6 +36,7 @@ wait_for_health() {
     done
 
     echo "::error::App health endpoint did not become ready within 120 seconds for mode: $mode"
+    save_keploy_start_evidence
     cleanup_keploy
     return 1
 }
@@ -80,6 +82,12 @@ sleep 5  # Allow time for configuration changes
 send_request(){
     mode="$1"
 
+    # The app starts once keploy's agent is ready: its wait, with its full
+    # budget, starts there (keploy-start-wait.sh). keploy, in the
+    # foreground, writes its PID to ${app_name}.pid (exec_noting_pid), so a
+    # keploy that exits first fails the wait at once.
+    # Stopped as on the app's wait's failure: nothing else stops it.
+    await_agent_ready "${app_name}.txt" "@${app_name}.pid" || { cleanup_keploy; return 1; }
     # wait for app to be ready
     sleep 10
     wait_for_health "$mode" || return 1
@@ -136,10 +144,14 @@ send_request(){
 # --- Record cycles for secret endpoints (2 sets, unchanged behavior) ---
 for i in 1 2; do
     app_name="flaskSecret_${i}"
+    # Emptied and removed first: the driver waits for this run's ready line
+    # in the log, and for this run's keploy by the PID file.
+    : >"${app_name}.txt"
+    rm -f "${app_name}.pid"
     send_request "secrets" &
     request_pid=$!
     wait_for_port_free 8000 || true
-    $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
+    exec_noting_pid "${app_name}.pid" $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
     if grep "ERROR" "${app_name}.txt"; then exit 1; fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
     sleep 5
@@ -157,10 +169,14 @@ sleep 5
 
 # --- Record cycle for the new /astro endpoint (its own test set) ---
 app_name="flaskAstro"
+# Emptied and removed first: the driver waits for this run's ready line
+# in the log, and for this run's keploy by the PID file.
+: >"${app_name}.txt"
+rm -f "${app_name}.pid"
 send_request "astro" &
 request_pid=$!
 wait_for_port_free 8000 || true
-$RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
+exec_noting_pid "${app_name}.pid" $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then exit 1; fi
 if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
 sleep 5
@@ -311,10 +327,14 @@ rm -rf keploy
 
 # Record the "misc" endpoints as a new test suite
 app_name="flaskMisc"
+# Emptied and removed first: the driver waits for this run's ready line
+# in the log, and for this run's keploy by the PID file.
+: >"${app_name}.txt"
+rm -f "${app_name}.pid"
 send_request "misc" &
 request_pid=$!
 wait_for_port_free 8000 || true
-$RECORD_BIN record -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
+exec_noting_pid "${app_name}.pid" $RECORD_BIN record -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then
     echo "Error found in misc recording..."
     cat "${app_name}.txt"
@@ -337,10 +357,14 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 
 if json_pass_supported; then
     app_name="flaskMisc_json"
+    # Emptied and removed first: the driver waits for this run's ready line
+    # in the log, and for this run's keploy by the PID file.
+    : >"${app_name}.txt"
+    rm -f "${app_name}.pid"
     send_request "misc" &
     request_pid=$!
     wait_for_port_free 8000 || true
-    $RECORD_BIN record --storage-format json -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
+    exec_noting_pid "${app_name}.pid" $RECORD_BIN record --storage-format json -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
     if grep "ERROR" "${app_name}.txt"; then exit 1; fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
     sleep 5

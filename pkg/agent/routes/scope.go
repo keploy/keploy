@@ -328,6 +328,29 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a set's worker: calls in a test's window", http.StatusNotImplemented)
 			return
 		}
+		// Which of the worker scope are the reads of tests the replay's gate
+		// skips, said by every table too. An agent that cannot tell them
+		// serves them as the rest of the worker scope, failing closed: they
+		// answer no call one more than the open test recorded.
+		if rs, ok := a.svc.(scopeSkippedReadsSetter); ok {
+			if err := rs.SetScopeSkippedReads(r.Context(), req.SkippedReads); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		// The recordings keploy's judging marked served, not required, by test, before
+		// the pool is served. Every table says it, an empty one too: a set
+		// never keeps the previous set's. An agent that cannot take them
+		// refuses a table that has some: it would charge each test for them.
+		if ns, ok := a.svc.(scopeNotRequiredSetter); ok {
+			if err := ns.SetScopeNotRequired(r.Context(), req.NotRequired); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.NotRequired) > 0 {
+			http.Error(w, "this keploy agent cannot serve a recording served, not required", http.StatusNotImplemented)
+			return
+		}
 		if err := s.SetScopePool(r.Context(), req.Pool); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -358,6 +381,20 @@ type scopePoolSetter interface {
 // (models.ScopeTableReq.Worker, proven wire).
 type scopeWorkerSetter interface {
 	SetScopeWorker(ctx context.Context, worker map[string][]string) error
+}
+
+// scopeSkippedReadsSetter installs which of a replay's worker scope are the
+// reads of tests its gate skips, each with the skipped test that lists it
+// (models.ScopeTableReq.SkippedReads, proven wire).
+type scopeSkippedReadsSetter interface {
+	SetScopeSkippedReads(ctx context.Context, reads map[string]string) error
+}
+
+// scopeNotRequiredSetter installs, by test, the recordings keploy's judging
+// marked served, not required (models.ScopeTableReq.NotRequired, proven
+// wire).
+type scopeNotRequiredSetter interface {
+	SetScopeNotRequired(ctx context.Context, notRequired map[string][]string) error
 }
 
 // recordedWindowsSetter installs the recorded window of every test of the

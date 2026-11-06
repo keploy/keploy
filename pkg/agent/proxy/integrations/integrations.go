@@ -550,6 +550,38 @@ func ConsumedInCallView(db MockMemDb) ([]*models.Mock, bool) {
 	return answered, true
 }
 
+// ExactSkippedReadsReader is an optional MockMemDb extension of a store that
+// serves each test its own mocks exactly (the proven switch).
+// SkippedReadsAnswered returns the reads of tests the replay's gate skips
+// (keploy mock replay's worker: entries, models.ScopeTableReq.SkippedReads)
+// that answered a call in the open test's window, in the order they did
+// (none while no test is open): calls of the test its own recordings do not
+// count, so a matcher's extra-call miss names them beside how often the test
+// recorded the call (MockMismatchReport.SkippedReads). A matcher must only
+// read them: they answer nothing.
+type ExactSkippedReadsReader interface {
+	SkippedReadsAnswered() []*models.Mock
+}
+
+// SkippedReadsInCallView is the skipped tests' reads that answered in the
+// open test's window, as db, the store a call is held to, lists them
+// (ExactSkippedReadsReader): none when the call's view moved (CallViewMoved,
+// asked after the list is read, so a view installed while it is read is
+// seen), as the list may then be another test's, which an extra-call line
+// joined with the call's answered list (ConsumedInCallView) would count as
+// this test's calls. None for a store that lists none.
+func SkippedReadsInCallView(db MockMemDb) []*models.Mock {
+	sr, ok := db.(ExactSkippedReadsReader)
+	if !ok {
+		return nil
+	}
+	reads := sr.SkippedReadsAnswered()
+	if CallViewMoved(db) {
+		return nil
+	}
+	return reads
+}
+
 // ExactServedReader is an optional MockMemDb extension of a store that
 // serves each test its own mocks exactly (the proven switch), with a served
 // observer (the learn tracker's ServedMock). ServedInOpenTest returns, of one
@@ -592,7 +624,7 @@ type ExactServedReader interface {
 
 // AnsweredFinder is an optional MockMemDb extension: of the per-test
 // recordings of kind that answered a call earlier in the test set staged now,
-// indexed under any of keys (models.RequestKeys), the one answered last that
+// and of the background's a call spent, indexed under any of keys (models.RequestKeys), the one answered last that
 // match accepts and that the open test does not own. A parser that finds no
 // mock for a call asks it whether the call repeats one an earlier test made
 // (models.RepeatNote): the cue of an application that kept the earlier
@@ -631,10 +663,16 @@ func AnsweredRedacting(db MockMemDb, kind models.Kind) ([]*models.Mock, bool) {
 }
 
 // AnsweredCall is what AnsweredFinder found: the recording, and when it
-// answered at this replay.
+// answered at this replay. Background is the scope of the set's background
+// the recording is of (models.RepeatNote.Background), empty for a test's own.
+// SkippedRead says it is the read of a test the replay's gate skips, moved
+// to the worker scope for the replay (models.RepeatNote.SkippedRead): no
+// recording of the background, so Background is empty.
 type AnsweredCall struct {
-	Mock       *models.Mock
-	AnsweredAt time.Time
+	Mock        *models.Mock
+	AnsweredAt  time.Time
+	Background  string
+	SkippedRead bool
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the
@@ -1741,6 +1779,67 @@ type RecordedWindowsReader interface {
 type WindowPacer interface {
 	WindowChanged() <-chan struct{}
 	StagingEpoch() uint64
+}
+
+// SetEndFiler is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
+// MockManager implements it) for a parser that holds a call for a test window
+// that has not opened yet, past the call's own window: a consumer's poll whose
+// recording is placed at its answer, in a later test. Such a call is a miss
+// only once no test of the set can answer it any more, and its connection may
+// outlive the set's last test.
+//
+//   - AtSetEnd registers file, to run at each read of the set's end
+//     (models.WithSetEndRead), after the agent has settled the application's
+//     calls and before it reads the misses, until cancel (later calls do
+//     nothing). A registration cancelled before a read reaches it is not run
+//     by that read; a cancel that lands as the read reaches it may not stop
+//     it, nor one whose run has begun.
+//   - kind names the parser that registers (its models.Kind): the agent's
+//     log names it, in a warning at each beat a run of file has not
+//     returned through, and in the read's error when file panics.
+//   - ok is true only where a read of the set's end will run file: the run's
+//     store, in a replay session whose client reads each set's end
+//     (models.OutgoingOptions.ReadsSetEnds: keploy test under the proven
+//     switch, which the agent passes on only to a Proxy that files at that
+//     read, agent.SetEndFilingProxy). It is false, and nothing is
+//     registered, on a test worker's store, which no such read asks; in a
+//     session whose client makes none (keploy mock, keploy test without the
+//     switch or from before the read); on a closed store; and for a nil
+//     file or an empty kind. It is the word of the session handed to the
+//     store last when AtSetEnd is called, and a registration outlives that
+//     session: so the parser registers at each call it would hold past its
+//     own window, holds that call only when ok, and cancels that
+//     registration once the call is answered or its miss filed.
+//   - file runs on the reading goroutine, with the read's context: it files,
+//     in-band (models.ReportMockMismatch on its connection's context, the
+//     report's HeldPastWindow set), the miss of every call its connection
+//     still holds for a test of the set, and returns once they are filed, so
+//     the read takes them; or once ctx is done, and the read is then unread
+//     (models.ErrUnmatchedCallsUnread), as it is if file panics. It must not
+//     block on the connection's client.
+//   - The hook files nothing itself, and orders nothing against the
+//     connection's own end. When the connection ends, the parser files the
+//     miss of each call it still holds, in-band and HeldPastWindow set too,
+//     before it cancels their registrations; and a run of file that races
+//     that end returns only once the end's filing is pushed (both under the
+//     lock the parser holds its calls by). Otherwise a read could pass a
+//     registration the end cancelled, or a run that saw the connection gone,
+//     and read before the end's filing lands. Between the two, each call's
+//     miss is filed at most once.
+//   - The read settles the application's calls first, and waits for each
+//     request a parser holds (HoldRequest). A parser that holds a call for a
+//     later window releases that hold and marks the connection idle
+//     (MarkIdle) while it waits, or the read waits on it until its settle
+//     gives up. It calls AtSetEnd for that call before it releases the
+//     hold or marks the connection idle: a read whose settle passes once
+//     the hold is released may otherwise miss a registration made after,
+//     and the call's miss then lands after the read, unreported.
+//
+// A MockMemDb without it, or one whose AtSetEnd says !ok, never says the set
+// ended: a parser then does not hold, past its own window, a call it would
+// miss if no later window answered it, and misses it at once.
+type SetEndFiler interface {
+	AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool)
 }
 
 // CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the

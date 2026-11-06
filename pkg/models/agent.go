@@ -371,6 +371,12 @@ type ScopeWindow struct {
 	// was open (POST /agent/scope/given), in the order it gave them: in a
 	// record, the givens its mapping keeps (MappedTestCase.Given).
 	Given []GivenValue `json:"given,omitempty"`
+	// SkippedReads is, under the proven wire, in a replay, the names of the
+	// reads of tests the replay's gate skips (moved to the worker scope)
+	// that answered the test's calls while it was open, in the order they
+	// did, whatever its outcome. A replay that never loads the skipped
+	// tests' recordings has no answer for those calls.
+	SkippedReads []string `json:"skippedReads,omitempty"`
 	// Claim, under the proven wire, makes this no test's window but a claim:
 	// from Start on, the run's test process is the one that claimed it with
 	// this key (POST /agent/instance), until the next claim. A call made
@@ -440,6 +446,25 @@ type ScopeTableReq struct {
 	// (TestModeInfo.RepeatRead). Absent when no test has one: every test
 	// is then served its exact count.
 	RepeatReads map[string][]RepeatRead `json:"repeatReads,omitempty"`
+	// NotRequired is, under the proven switch, by test ID, the names of the
+	// test's own list (Mappings) that keploy's judging marked served, not
+	// required (MockEntry.NotRequired): each answers that test as its other
+	// recordings do, and the test is not charged when its call is not made.
+	// An agent that cannot take it refuses a table that has one. Absent
+	// when no entry is marked.
+	NotRequired map[string][]string `json:"notRequired,omitempty"`
+	// SkippedReads is, under the proven switch, the names of Worker that
+	// keploy mock replay moved there from the tests its gate skips: reads
+	// the app made once and kept (an HTTP GET, HEAD or OPTIONS a test
+	// recorded), made now in the window of whichever test runs first. Each
+	// answers at most one request in the staging's windows, as the rest of
+	// Worker does, and also a request one more than the open test's own
+	// recordings of it, which the rest never answers: so a read answers at
+	// most as many requests in the windows as the skipped test recorded it.
+	// Each name maps to the skipped test that lists it, which a test's
+	// extra-call line names (UnmatchedCall.SkippedReads). Absent from an
+	// older CLI and when the gate skips no test.
+	SkippedReads map[string]string `json:"skippedReads,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its

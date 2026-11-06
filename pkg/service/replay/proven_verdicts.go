@@ -615,8 +615,10 @@ func noteConsumers(consumers map[string][]string, test string, consumed []models
 // connection it opened at record time and this test opened at replay. A
 // recording its own test owns too, or none owns (one recorded between tests),
 // is named with none (models.UnmatchedCall.NameRecordedIn, which keploy mock
-// replay's receipt shares). It returns "test: call (closest mock, recorded in test)"
-// for each it named.
+// replay's receipt shares). On each miss that names an earlier recording of
+// its method and path (Earlier) it names that recording's owner too
+// (models.UnmatchedCall.NameEarlierIn). It returns "test: call (closest mock,
+// recorded in test)" for each RecordedIn it named.
 func markRecordedIn(results []models.TestResult, owners map[string][]string) []string {
 	var named []string
 	for i := range results {
@@ -626,6 +628,8 @@ func markRecordedIn(results []models.TestResult, owners map[string][]string) []s
 			if c.NameRecordedIn(r.TestCaseID, owners) {
 				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, c.Named(), c.ClosestMock, c.RecordedIn))
 			}
+			// As keploy mock replay's receipt does (withRecordedIn).
+			c.NameEarlierIn(r.TestCaseID, owners)
 		}
 	}
 	return named

@@ -123,20 +123,39 @@ func TestMappedTestCaseRefusesAGivenThatIsNotAList(t *testing.T) {
 	require.ErrorContains(t, err, "not a list")
 }
 
-// With the switch off, given: is not read, whatever it holds, so an entry
-// keeps its mocks and its shape.
-func TestMappedTestCaseWithoutTheSwitchIgnoresGiven(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
-	for _, doc := range []string{
-		"id: t1\ngiven:\n  - name: given:a\n    value: v\nmock_entries:\n  - name: mock-0\n",
-		"id: t1\ngiven: {not: a list}\nmock_entries:\n  - name: mock-0\n",
-	} {
-		var tc MappedTestCase
-		require.NoError(t, yaml.Unmarshal([]byte(doc), &tc), doc)
-		require.Nil(t, tc.Given)
-		require.Equal(t, "mock-0", tc.Mocks[0].Name)
+// A test's given: is read whatever the switch, as its key: (mapdb keeps
+// every field keploy writes on a test entry whatever the switch; a replay
+// binds the givens under the switch only). One that is not a list of givens
+// fails the decode either way.
+func TestMappedTestCaseGivenIsReadWhateverTheSwitch(t *testing.T) {
+	for _, sw := range []string{"1", ""} {
+		t.Setenv(provenswitch.Env, sw)
+		var bad MappedTestCase
+		require.ErrorContains(t, yaml.Unmarshal([]byte("id: t1\ngiven: {not: a list}\nmock_entries:\n  - name: mock-0\n"), &bad), "not a list", "switch=%q", sw)
+		require.ErrorContains(t, json.Unmarshal([]byte(`{"id":"t1","given":"x","mock_entries":[{"name":"mock-0"}]}`), &bad), "not a list", "switch=%q", sw)
+		want := []GivenValue{{Name: "given:a", Value: "v"}}
+		var y MappedTestCase
+		require.NoError(t, yaml.Unmarshal([]byte("id: t1\ngiven:\n  - name: given:a\n    value: v\nmock_entries:\n  - name: mock-0\n"), &y))
+		require.Equal(t, want, y.Given, "switch=%q", sw)
+		require.Equal(t, "mock-0", y.Mocks[0].Name)
+		var j MappedTestCase
+		require.NoError(t, json.Unmarshal([]byte(`{"id":"t1","given":[{"name":"given:a","value":"v"}],"mock_entries":[{"name":"mock-0"}]}`), &j))
+		require.Equal(t, want, j.Given, "switch=%q", sw)
+		require.Equal(t, "mock-0", j.Mocks[0].Name)
 	}
-	var tc MappedTestCase
-	require.NoError(t, json.Unmarshal([]byte(`{"id":"t1","given":"x","mock_entries":[{"name":"mock-0"}]}`), &tc))
-	require.Nil(t, tc.Given)
+}
+
+// A sanitized extra-call miss keeps the skipped tests' reads that answered
+// the same call: recording names, never a value, which the test's
+// extra-call line counts and names.
+func TestASanitizedExtraCallKeepsTheSkippedReadsItNames(t *testing.T) {
+	m := UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /x", Kind: MissExtraCall, Recorded: 1, SkippedReads: []string{"mock-1"}}
+	s := m.Sanitized()
+	if s.Recorded != 1 || len(s.SkippedReads) != 1 || s.SkippedReads[0] != "mock-1" {
+		t.Fatalf("sanitized: recorded %d, skipped reads %v; want 1 and [mock-1]", s.Recorded, s.SkippedReads)
+	}
+	s.SkippedReads[0] = "changed"
+	if m.SkippedReads[0] != "mock-1" {
+		t.Fatal("the sanitized miss shares the miss's list")
+	}
 }
