@@ -22,21 +22,40 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// watchURI watches the agent at uri, known only by its URI, and returns the
-// lines it logged at INFO and above, with what the watch said within 30 s of
-// wall time (nil when it said nothing).
+// giveUpWithin is how long of wall time a row waits for a watch at an agent
+// URI to give up on it. Under fastURILooks the watch gives up at its sixth
+// look or so (bootSilence, 5 s, at a second of runnable time a look), the
+// looks a millisecond apart: a few milliseconds of looks, or 1.3 s where each
+// look waits for an answer that never comes, its wait doubling from 20 ms
+// (the longest of these rows). Ten seconds is several times that, with room
+// for a loaded box: a wait that never gives up fails its row then, in
+// seconds, never only by the package's timeout.
+const giveUpWithin = 10 * time.Second
+
+// givenUp is what the watch sent on errs, why it gave up; t fails, saying the
+// wait did not give up, once giveUpWithin of wall time has passed with
+// nothing sent.
+func givenUp(t *testing.T, errs <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-errs:
+		return err
+	case <-time.After(giveUpWithin):
+		t.Fatalf("the wait did not give up within %s of wall time", giveUpWithin)
+		return nil
+	}
+}
+
+// watchURI watches the agent at uri, known only by its URI, which the watch
+// must give up on, and returns the lines it logged at INFO and above, with
+// why it gave up (givenUp).
 func watchURI(t *testing.T, uri string) (*observer.ObservedLogs, error) {
 	t.Helper()
 	core, logs := observer.New(zapcore.InfoLevel)
 	a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: uri}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	select {
-	case err := <-a.WatchAgentStart(ctx):
-		return logs, err
-	case <-time.After(30 * time.Second):
-		return logs, nil
-	}
+	return logs, givenUp(t, a.WatchAgentStart(ctx))
 }
 
 // acceptOnly listens on a port of its own and hands each connection it takes
@@ -157,7 +176,7 @@ func watchNeverHealthy(t *testing.T, uri string, want []string) {
 	t.Helper()
 	logs, err := watchURI(t, uri)
 	if err == nil {
-		t.Fatal("an agent that never answers healthy was waited on with no end")
+		t.Fatal("the watch of an agent that never answers healthy ended saying nothing")
 	}
 	if !errors.Is(err, pkg.ErrAgentNotReady) {
 		t.Fatalf("the watch said %v; want pkg.ErrAgentNotReady", err)
@@ -209,7 +228,7 @@ func TestAnAgentURIThatStopsIsGivenUpOnAsStopped(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	srv.Close()
-	deadline = time.Now().Add(30 * time.Second)
+	deadline = time.Now().Add(giveUpWithin)
 	for {
 		select {
 		case err := <-errs:
@@ -220,7 +239,7 @@ func TestAnAgentURIThatStopsIsGivenUpOnAsStopped(t *testing.T) {
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("an agent that stopped was waited on with no end")
+			t.Fatalf("the wait did not give up within %s of wall time on an agent that stopped", giveUpWithin)
 		}
 		clk.Advance(100 * time.Millisecond)
 		time.Sleep(time.Millisecond)
@@ -243,12 +262,9 @@ func TestAnAgentURIsSealedTokenIsNeverSaid(t *testing.T) {
 			addr := testnet.RefusedAddr(t, "tcp")
 			core, logs := observer.New(zapcore.DebugLevel)
 			a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: fmt.Sprintf(tc.uri, addr)}})
-			var err error
-			select {
-			case err = <-a.WatchAgentStart(context.Background()):
-			case <-time.After(30 * time.Second):
-				t.Fatal("a URI where nothing answers was waited on with no end")
-			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			err := givenUp(t, a.WatchAgentStart(ctx))
 			if !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "nothing answers at "+fmt.Sprintf(tc.shown, addr)+":") {
 				t.Fatalf("the watch said %v; want that nothing answers at the URI, its password shown as xxxxx", err)
 			}
@@ -326,8 +342,8 @@ func TestAnAgentURILookWaitsLongerAfterEachHeldLook(t *testing.T) {
 }
 
 // watchScriptedLooks watches an agent known only by its URI whose looks find
-// before, then then for good, and returns the count of looks, with what the
-// watch said within 30 s of wall time (nil when it said nothing).
+// before, then then for good, which the watch must give up on, and returns the
+// count of looks, with why it gave up (givenUp).
 func watchScriptedLooks(t *testing.T, before []agentLook, then agentLook) (int32, error) {
 	t.Helper()
 	var n atomic.Int32

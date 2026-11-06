@@ -655,13 +655,10 @@ func TestAnAgentURIWhereNothingAnswersIsGivenUpOn(t *testing.T) {
 	uri := "http://" + testnet.RefusedAddr(t, "tcp") + "/agent"
 	core, logs := observer.New(zapcore.InfoLevel)
 	a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: uri}})
-	select {
-	case err := <-a.WatchAgentStart(context.Background()):
-		if !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "nothing answers at "+uri) {
-			t.Fatalf("the watch said %v; want that nothing answers at the URI", err)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("a URI where nothing answers was waited on")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := givenUp(t, a.WatchAgentStart(ctx)); !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "nothing answers at "+uri) {
+		t.Fatalf("the watch said %v; want that nothing answers at the URI", err)
 	}
 	if logs.FilterMessageSnippet("still waiting for the keploy agent at "+uri).Len() == 0 {
 		t.Fatal("the wait said nothing while it waited")
