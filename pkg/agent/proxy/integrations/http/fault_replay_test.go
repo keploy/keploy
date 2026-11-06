@@ -5,10 +5,12 @@ package http
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -116,6 +118,14 @@ func awaitReturn(t *testing.T, returned <-chan error) error {
 func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 	const head = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n"
 	const chunkedHead = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+	// An event stream the upstream cut inside its second event: its client
+	// dispatched the first event alone. Its frames read back with both
+	// events ended, so replay sends the bytes the upstream sent. One reset
+	// after its second event ended: its frames read back 2 bytes short (no
+	// space after a field's ':'), and replay sends the bytes it sent.
+	const sseHead = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 40\r\n\r\n"
+	const sseCut = "data: a\n\ndata: b"
+	const sseEnded = "data: a\n\ndata: b\n\n"
 	for _, tc := range []struct {
 		name   string
 		record func(t *testing.T, c *relayedConn) seen
@@ -171,6 +181,64 @@ func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 			return s
 		},
 	}, {
+		name: "an event stream reset inside its second event",
+		record: func(t *testing.T, c *relayedConn) seen {
+			write(t, c.dest, c.dst, sseHead+sseCut)
+			relayed(t, c.app, sseHead+sseCut)
+			resetConn(t, c.dest)
+			<-c.relayDone
+			_ = c.src.Close()
+			s := seenAt(t, c.app)
+			s.got = headersInOrder(sseHead + sseCut + s.got)
+			return s
+		},
+		app: func(t *testing.T, app net.Conn) seen {
+			// Read before the reset comes: a reset drops what the
+			// application has not read.
+			sent := make([]byte, len(sseHead+sseCut))
+			if _, err := io.ReadFull(app, sent); err != nil {
+				t.Fatalf("the application read %q, %v; want the head and %d body bytes before the reset", sent, err, len(sseCut))
+			}
+			s := seenAt(t, app)
+			s.got = headersInOrder(string(sent) + s.got)
+			return s
+		},
+	}, {
+		name: "an event stream reset after its second event",
+		record: func(t *testing.T, c *relayedConn) seen {
+			write(t, c.dest, c.dst, sseHead+sseEnded)
+			relayed(t, c.app, sseHead+sseEnded)
+			resetConn(t, c.dest)
+			<-c.relayDone
+			_ = c.src.Close()
+			s := seenAt(t, c.app)
+			s.got = headersInOrder(sseHead + sseEnded + s.got)
+			return s
+		},
+		app: func(t *testing.T, app net.Conn) seen {
+			sent := make([]byte, len(sseHead+sseEnded))
+			if _, err := io.ReadFull(app, sent); err != nil {
+				t.Fatalf("the application read %q, %v; want the head and %d body bytes before the reset", sent, err, len(sseEnded))
+			}
+			s := seenAt(t, app)
+			s.got = headersInOrder(string(sent) + s.got)
+			return s
+		},
+	}, {
+		name: "an event stream cut short against its Content-Length inside its second event",
+		record: func(t *testing.T, c *relayedConn) seen {
+			write(t, c.dest, c.dst, sseHead+sseCut)
+			_ = c.dest.Close()
+			s := seenAt(t, c.app)
+			s.got = headersInOrder(s.got)
+			return s
+		},
+		app: func(t *testing.T, app net.Conn) seen {
+			s := seenAt(t, app)
+			s.got = headersInOrder(s.got)
+			return s
+		},
+	}, {
 		name: "no answer until the application gave up",
 		record: func(t *testing.T, c *relayedConn) seen {
 			s := appGivesUp(t, c.app)
@@ -188,7 +256,7 @@ func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 		},
 		app: appGivesUp,
 	}} {
-		t.Run(tc.name, func(t *testing.T) {
+		eitherSwitch(t, tc.name, func(t *testing.T) {
 			c := newRelayedConn(t)
 			c.start(t)
 			write(t, c.app, c.src, faultReq)
@@ -221,6 +289,19 @@ func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 			}
 		})
 	}
+}
+
+// headersInOrder is answer with its head's header lines sorted: replay writes
+// a recorded head's headers in an order of its own, which HTTP gives no
+// meaning, so an answer is compared by its header lines, not their order.
+func headersInOrder(answer string) string {
+	head, body, ok := strings.Cut(answer, "\r\n\r\n")
+	if !ok {
+		return answer
+	}
+	lines := strings.Split(head, "\r\n")
+	sort.Strings(lines[1:])
+	return strings.Join(lines, "\r\n") + "\r\n\r\n" + body
 }
 
 // appClosed closes the application's end and waits until the upstream reads
@@ -409,8 +490,11 @@ func TestReplayFault_AHeadTheMockCannotGiveIsRefused(t *testing.T) {
 		{"a truncate the head does not frame", models.Fault{Kind: models.FaultTruncate, BodyBytes: 5}, okHead("01234", nil), "no Content-Length or Transfer-Encoding"},
 		{"a chunked truncate", models.Fault{Kind: models.FaultTruncate, BodyBytes: 5}, okHead("5\r\n01", map[string]string{"Transfer-Encoding": "chunked"}), ""},
 		{"a reset after a head that does not frame its body", models.Fault{Kind: models.FaultReset, AfterHead: true, BodyBytes: 5}, okHead("01234", nil), ""},
+		{"a body kept as a stream's frames", models.Fault{Kind: models.FaultReset, AfterHead: true, BodyBytes: 16}, framedSSE("data: a\n\ndata: b"), "kept as a stream's frames"},
+		{"a body kept as one frame, a byte of it sent", models.Fault{Kind: models.FaultTruncate, BodyBytes: 1}, framedSSE("data: a"), "kept as a stream's frames"},
+		{"a body kept as a stream's frames, none of it sent", models.Fault{Kind: models.FaultReset, AfterHead: true}, framedSSE("data: a\n\ndata: b"), ""},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		eitherSwitch(t, tc.name, func(t *testing.T) {
 			f := tc.fault
 			m := faultMock(&f, tc.resp)
 			if tc.resp == nil {
@@ -428,6 +512,46 @@ func TestReplayFault_AHeadTheMockCannotGiveIsRefused(t *testing.T) {
 			}
 		})
 	}
+}
+
+// framedSSE is an SSE answer whose body, wire as the upstream sent it, is
+// kept as its frames, as an earlier keploy wrote a fault's body, and read
+// back from them: "data: a\n\ndata: b", cut inside its second event, reads
+// back as "data:a\n\ndata:b\n\n", 16 bytes, both events ended.
+func framedSSE(wire string) *models.HTTPResp {
+	header := map[string]string{"Content-Type": "text/event-stream", "Content-Length": "40"}
+	frames := models.StreamChunksOf(header, wire)
+	var back models.HTTPResp
+	out, err := yamlLib.Marshal(models.HTTPResp{StatusCode: 200, Header: header, StreamBody: frames})
+	if err == nil {
+		err = yamlLib.Unmarshal(out, &back)
+	}
+	if err != nil || len(back.StreamBody) != len(frames) || len(frames) == 0 {
+		panic(fmt.Sprintf("framedSSE(%q): %v, %d frames read back of %d\n%s", wire, err, len(back.StreamBody), len(frames), out))
+	}
+	return &back
+}
+
+// A fault mock an earlier keploy wrote with its body as a stream's frames is
+// refused at replay, the reason named, and nothing is sent: the frames do not
+// keep the bytes the upstream sent before its fault, and the bytes they read
+// back as are another answer (both events of a stream cut inside its second,
+// whose client dispatched the first alone). Written again, the mock keeps
+// its frames, so the refusal stays.
+func TestReplayFault_ABodyKeptAsFramesIsRefused(t *testing.T) {
+	eitherSwitch(t, "a reset inside the second event", func(t *testing.T) {
+		m := throughDisk(t, faultMock(&models.Fault{Kind: models.FaultReset, AfterHead: true, BodyBytes: 16}, framedSSE("data: a\n\ndata: b")))
+		if len(m.Spec.HTTPResp.StreamBody) == 0 {
+			t.Fatalf("the mock's frames were written as bytes: body %q", m.Spec.HTTPResp.Body)
+		}
+		app, returned := replaying(t, &HTTP{Logger: zap.NewNop()}, m)
+		if got := seenAt(t, app); got.got != "" {
+			t.Errorf("the application read %q; want nothing sent for a fault the mock cannot give", got.got)
+		}
+		if err := awaitReturn(t, returned); err == nil || !strings.Contains(err.Error(), "kept as a stream's frames") {
+			t.Errorf("decodeHTTP = %v; want the refusal naming the frames", err)
+		}
+	})
 }
 
 // A recorded call that ended in a fault is no representative answer for a

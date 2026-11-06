@@ -228,7 +228,10 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 		return cloneStreamChunks(resp.StreamBody), true
 	}
 
-	if resp.Body != "" {
+	if resp.Body != "" && !resp.bodyOnWire {
+		// A fault's body is the bytes the upstream sent before it
+		// (bodyOnWire): kept as they came, never split.
+		//
 		// A non-UTF-8 body is not a text stream, and must never reach the
 		// chunkers below.
 		//
@@ -257,6 +260,17 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 		// Content-Length (Go's JSON written with no Content-Type), is one
 		// document, kept whole, and replayed as one (recordedFramesOf).
 		format := recordedFramesOf(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type"))
+		if format == HTTPStreamSSE && !sseEndsItsLastEvent(resp.Body) {
+			// An SSE stream that ended inside its last event, before the
+			// blank line that ends it, is kept as its bytes. Its frames would
+			// read back with that event ended (streamChunksToLegacyBody), and
+			// replay would send an event its client never dispatched at
+			// record: a close-delimited body the upstream closed mid-event,
+			// or a server that never ended its last event. Kept so, replay
+			// sends the bytes as recorded, and the client drops the
+			// unfinished event as it did.
+			return nil, false
+		}
 		if chunks := splitStreamBody(format, resp.Body, resp.Timestamp); len(chunks) > 0 {
 			return chunks, true
 		}
@@ -456,7 +470,8 @@ func encodeStreamChunksNode(chunks []HTTPStreamChunk) *yamlLib.Node {
 // even though the YAML file now stores structured streaming data.
 //
 // For SSE bodies, each chunk becomes an SSE frame (fields joined by \n,
-// frames joined by \n\n, matching the SSE wire format).
+// each frame ended by a blank line, the last one too, matching the SSE wire
+// format).
 //
 // For all other streaming formats (NDJSON, plain text, binary), each chunk's
 // "raw" field value becomes one line.
@@ -478,7 +493,7 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 	switch kind {
 	case streamBodyKindSSE:
 		// Reconstruct SSE wire format: each frame is a block of "key:value" lines
-		// separated by \n, and frames are separated by \n\n.
+		// separated by \n, and each frame ends in a blank line.
 		frames := make([]string, 0, len(chunks))
 		for _, chunk := range chunks {
 			lines := make([]string, 0, len(chunk.Data))
@@ -510,7 +525,23 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 			}
 			frames = append(frames, strings.Join(lines, "\n"))
 		}
-		return strings.Join(frames, "\n\n")
+		body := strings.Join(frames, "\n\n")
+		if len(frames) > 0 {
+			// The last event ends in its blank line as every other does: a
+			// client dispatches an event only at the blank line after it, and
+			// drops the one a stream ends inside (the WHATWG event-stream
+			// parse), so a body that stopped at its last field would lose its
+			// last event on replay (an LLM stream's "data: [DONE]"). A frame
+			// never ends in a blank line of its own (every line carries its
+			// field's name or the comment's ':'), so this is the one blank
+			// line. A recording keeps a stream that ended inside its last
+			// event as its bytes, never as frames (streamChunksForYAML), so
+			// frames are of a stream that ended its last event. Frames an
+			// earlier keploy kept of one that did not carry no word of it,
+			// and read back with that event ended.
+			body += "\n\n"
+		}
+		return body
 
 	default:
 		// NDJSON, plain text, binary — each chunk contributes one line via its "raw" field.
@@ -534,6 +565,17 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 		}
 		return body
 	}
+}
+
+// sseEndsItsLastEvent reports whether an SSE body ends in a blank line: two
+// line ends in a row, each "\r\n", "\n" or "\r" as the WHATWG event-stream
+// parse reads them ("\r\n\r\n", "\n\r", "\r\r" too). A client dispatches an
+// event at the blank line that ends it, and drops the one a stream ends
+// inside. Only the line ends the body ends in are read: no "\r\n" spans the
+// last other byte and them.
+func sseEndsItsLastEvent(body string) bool {
+	ends := body[len(strings.TrimRight(body, "\r\n")):]
+	return len(normalizeModelLineEndings(ends)) >= 2
 }
 
 // appendSSEFieldLines appends an SSE field's lines to lines: prefix (its

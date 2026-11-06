@@ -128,7 +128,10 @@ func (h *HTTP) serveFault(ctx context.Context, clientConn net.Conn, stub *models
 // line and headers as recorded, Content-Length and Transfer-Encoding as the
 // upstream sent them (not worked out over the body, which is cut short), then
 // the first BodyBytes of the body as it came on the wire: never compressed or
-// rewritten here. A mock whose body holds fewer bytes than that, or a truncate
+// rewritten here. A mock whose body is kept as a stream's frames (StreamBody:
+// a recording keeps a fault's body as its bytes, HTTPSchema.MarshalYAML, and
+// one an earlier keploy wrote may hold frames), whose body holds fewer bytes
+// than that, or a truncate
 // whose head does not frame its body (no Content-Length, not chunked: the
 // application would read the cut as the body's end), is refused. A recorded
 // truncate always has one: an upstream's close ends a body its head did not
@@ -142,6 +145,9 @@ func (h *HTTP) faultHead(stub *models.Mock, fault *models.Fault) ([]byte, error)
 	resp := loaded.Spec.HTTPResp
 	if resp == nil || resp.StatusCode == 0 {
 		return nil, fmt.Errorf("http: mock %q has a fault after the head (%s) and no recorded head", name, fault)
+	}
+	if fault.BodyBytes > 0 && len(resp.StreamBody) > 0 {
+		return nil, fmt.Errorf("http: mock %q: its fault sends %d body bytes and its body is kept as a stream's frames, which do not keep the bytes the upstream sent (a field's spacing, the line ends, an event cut short); record the call again", name, fault.BodyBytes)
 	}
 	if fault.BodyBytes > int64(len(resp.Body)) {
 		return nil, fmt.Errorf("http: mock %q: its fault sends %d body bytes and its body holds %d", name, fault.BodyBytes, len(resp.Body))
