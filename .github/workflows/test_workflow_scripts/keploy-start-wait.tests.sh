@@ -5,7 +5,11 @@
 #
 #   bash .github/workflows/test_workflow_scripts/keploy-start-wait.tests.sh
 #
-# ready-later: the ready line written 2 s after the wait starts ends it, ready.
+# ready-later: the ready line written 2 s after the wait starts ends it, ready,
+#   with no warning.
+# slow-warns: an agent ready at or after KEPLOY_AGENT_READY_WARN_AFTER seconds
+#   is ready, and said in a ::warning:: that names how long it took; at 0, an
+#   agent ready at once is said too (the bound is "or more").
 # says-step: while it waits it says so, with the log's last line (the step a
 #   slow start is in).
 # cadence: it says so every KEPLOY_AGENT_WAIT_SAY_EVERY seconds, from then:
@@ -19,6 +23,22 @@
 #   failure.
 # bound: a live keploy with no ready line fails at the bound, not before nor
 #   after (it says how long it waited), and saves the evidence.
+# pidfile-waits: @FILE with no FILE yet waits as with no PID, and the ready
+#   line ends it once FILE names a live keploy.
+# pidfile-exited: FILE written later with a keploy that has exited fails then,
+#   at once, naming it, not at the bound.
+# pidfile-read-once: the PID read from FILE is kept: a FILE rewritten later
+#   does not change whose exit fails the wait.
+# exec-noting-pid: as a pipeline's element, FILE names the command's own
+#   process (exec keeps the PID), written whole, with no temp file left.
+# exec-noting-pid-refuses: in a shell's own process it refuses, fails, writes
+#   nothing and does not replace that shell.
+# exec-noting-pid-unwritable: a FILE it cannot write is said, and the command
+#   still runs.
+# lane-shape: as flask-secret and django-postgres run it, a driver in the
+#   background waits on @FILE while keploy runs in the foreground through
+#   exec_noting_pid, piped to tee: a keploy that exits with no ready line
+#   fails the driver at once; one that prints it ends the driver's wait.
 # xtrace: a caller's set -x is on again after the wait, ready or not.
 # alive: a live process is alive; a zombie, a missing pid and a pid that is
 #   not a number ("self" included) are not.
@@ -68,7 +88,7 @@ live=$!
 ( sleep 2; echo "$KEPLOY_AGENT_READY_LINE" >>"$log" ) &
 t0=$SECONDS
 if out=$(KEPLOY_AGENT_READY_BOUND=20 await_agent_ready "$log" "$live" 2>&1); then
-  if [ $((SECONDS - t0)) -ge 2 ] && grep -q "ready after" <<<"$out"; then
+  if [ $((SECONDS - t0)) -ge 2 ] && grep -q "ready after" <<<"$out" && ! grep -q "::warning::" <<<"$out"; then
     pass ready-later
   else
     fail "ready-later: returned after $((SECONDS - t0))s: $out"
@@ -164,6 +184,121 @@ elif [ ! -s "$TMP/keploy-start-evidence/ps.txt" ]; then
   fail "bound: no evidence saved"
 else
   pass bound
+fi
+
+# slow-warns
+log=$TMP/slow.txt
+: >"$log"
+( sleep 2; echo "$KEPLOY_AGENT_READY_LINE" >>"$log" ) &
+if ! out=$(KEPLOY_AGENT_READY_WARN_AFTER=1 KEPLOY_AGENT_READY_BOUND=20 await_agent_ready "$log" "$live" 2>&1); then
+  fail "slow-warns: failed: $out"
+elif ! grep -Eq "^::warning::keploy's agent was ready only after [2-9]s \(1s or more; the bound is 20s\)" <<<"$out"; then
+  fail "slow-warns: no warning naming the wait: $out"
+else
+  pass slow-warns
+fi
+echo "$KEPLOY_AGENT_READY_LINE" >"$log"
+if ! out=$(KEPLOY_AGENT_READY_WARN_AFTER=0 KEPLOY_AGENT_READY_BOUND=20 await_agent_ready "$log" "$live" 2>&1); then
+  fail "slow-warns at 0: failed: $out"
+elif ! grep -q "^::warning::keploy's agent was ready only after" <<<"$out"; then
+  fail "slow-warns at 0: an agent ready at once, at a warning bound of 0, is not said: $out"
+else
+  pass "slow-warns at 0"
+fi
+
+# pidfile-waits
+log=$TMP/pidwait.txt
+: >"$log"
+rm -f "$TMP/wait.pid"
+( sleep 1; echo "$live" >"$TMP/wait.pid"; sleep 2; echo "$KEPLOY_AGENT_READY_LINE" >>"$log" ) &
+t0=$SECONDS
+if out=$(KEPLOY_AGENT_READY_BOUND=20 await_agent_ready "$log" "@$TMP/wait.pid" 2>&1) && [ $((SECONDS - t0)) -ge 3 ]; then
+  pass pidfile-waits
+else
+  fail "pidfile-waits: after $((SECONDS - t0))s: $out"
+fi
+
+# pidfile-exited
+log=$TMP/pidgone.txt
+echo "keploy: could not start" >"$log"
+rm -f "$TMP/gone.pid"
+( sleep 2; echo "$gone" >"$TMP/gone.pid" ) &
+t0=$SECONDS
+if out=$(KEPLOY_AGENT_READY_BOUND=20 await_agent_ready "$log" "@$TMP/gone.pid" 2>&1); then
+  fail "pidfile-exited: ready: $out"
+elif [ $((SECONDS - t0)) -lt 2 ] || [ $((SECONDS - t0)) -ge 6 ]; then
+  fail "pidfile-exited: failed after $((SECONDS - t0))s, want about 2"
+elif ! grep -q "::error::keploy ($gone) exited before its agent was ready" <<<"$out"; then
+  fail "pidfile-exited: no error line naming it: $out"
+else
+  pass pidfile-exited
+fi
+
+# pidfile-read-once
+log=$TMP/pidonce.txt
+: >"$log"
+echo "$live" >"$TMP/once.pid"
+( sleep 1; echo "$gone" >"$TMP/once.pid"; sleep 2; echo "$KEPLOY_AGENT_READY_LINE" >>"$log" ) &
+if out=$(KEPLOY_AGENT_READY_BOUND=20 await_agent_ready "$log" "@$TMP/once.pid" 2>&1); then
+  pass pidfile-read-once
+else
+  fail "pidfile-read-once: failed on a FILE rewritten after its PID was read: $out"
+fi
+
+# exec-noting-pid
+rm -f "$TMP/exec.pid"
+# shellcheck disable=SC2016 # the $$ is sh's
+out=$(exec_noting_pid "$TMP/exec.pid" sh -c 'echo "$$"' | cat)
+if [ -z "$out" ] || [ "$out" != "$(cat "$TMP/exec.pid" 2>&1)" ]; then
+  fail "exec-noting-pid: the command ran as $out; FILE says $(cat "$TMP/exec.pid" 2>&1)"
+elif ls "$TMP"/exec.pid.* >/dev/null 2>&1; then
+  fail "exec-noting-pid: a temp file is left: $(ls "$TMP"/exec.pid.*)"
+else
+  pass exec-noting-pid
+fi
+
+# exec-noting-pid-refuses
+rm -f "$TMP/own.pid"
+# shellcheck disable=SC2016 # $1, $2 and $? are that shell's
+out=$(bash -c 'source "$1"; exec_noting_pid "$2" echo replaced; echo "returned $?"' sh "$DIR/keploy-start-wait.sh" "$TMP/own.pid" 2>&1)
+if ! grep -q "^returned 1$" <<<"$out" || grep -q replaced <<<"$out" || [ -e "$TMP/own.pid" ]; then
+  fail "exec-noting-pid-refuses: $out (FILE there: $([ -e "$TMP/own.pid" ] && echo yes || echo no))"
+elif ! grep -q "::error::exec_noting_pid runs only in a subshell" <<<"$out"; then
+  fail "exec-noting-pid-refuses: not said: $out"
+else
+  pass exec-noting-pid-refuses
+fi
+
+# exec-noting-pid-unwritable
+out=$(exec_noting_pid "$TMP/no-such-dir/x.pid" echo ran | cat)
+if grep -q "could not write keploy's PID to $TMP/no-such-dir/x.pid" <<<"$out" && grep -q "^ran$" <<<"$out"; then
+  pass exec-noting-pid-unwritable
+else
+  fail "exec-noting-pid-unwritable: $out"
+fi
+
+# lane-shape
+lane() { # lane NAME KEPLOY_SCRIPT: the driver's status, then its seconds
+  local app=$TMP/$1 d t0=$SECONDS
+  : >"$app.txt"
+  rm -f "$app.pid"
+  ( KEPLOY_AGENT_READY_BOUND=20 await_agent_ready "$app.txt" "@$app.pid" >"$app.out" 2>&1 ) &
+  d=$!
+  exec_noting_pid "$app.pid" bash -c "$2" 2>&1 | tee "$app.txt" >/dev/null
+  wait "$d"
+  echo "$? $((SECONDS - t0))"
+}
+read -r rc took < <(lane lane-exit 'sleep 1; echo "keploy: could not start"; exit 3')
+if [ "$rc" = 0 ] || [ "$took" -ge 5 ] || ! grep -q "exited before its agent was ready" "$TMP/lane-exit.out"; then
+  fail "lane-shape exit: driver ended $rc after ${took}s: $(cat "$TMP/lane-exit.out")"
+else
+  pass "lane-shape exit"
+fi
+read -r rc took < <(lane lane-ready "sleep 1; echo '$KEPLOY_AGENT_READY_LINE'; sleep 1")
+if [ "$rc" != 0 ] || ! grep -q "ready after" "$TMP/lane-ready.out"; then
+  fail "lane-shape ready: driver ended $rc after ${took}s: $(cat "$TMP/lane-ready.out")"
+else
+  pass "lane-shape ready"
 fi
 
 # xtrace

@@ -77,23 +77,31 @@ save_keploy_start_evidence() {
     return 0
 }
 
-# await_agent_ready LOG [PID]: waits until LOG (keploy record's output) has
-# KEPLOY_AGENT_READY_LINE. Fails, after saving the evidence
+# await_agent_ready LOG [PID | @FILE]: waits until LOG (keploy record's output)
+# has KEPLOY_AGENT_READY_LINE. Fails, after saving the evidence
 # (save_keploy_start_evidence), when PID (keploy's, if given) exits first, or
 # after KEPLOY_AGENT_READY_BOUND seconds (default 600): a start that takes
 # longer is stuck, not slow. Says every KEPLOY_AGENT_WAIT_SAY_EVERY seconds
-# (default 30) that it still waits, with LOG's
-# last line, which names the agent's step (keploy prints the step a slow start
-# is in). A lane that runs keploy in the foreground, its request driver in the
-# background, has no PID to give: it empties LOG before it starts the driver,
-# so the line is this run's.
+# (default 30) that it still waits, with LOG's last line, which names the
+# agent's step (keploy prints the step a slow start is in). An agent ready
+# only after KEPLOY_AGENT_READY_WARN_AFTER seconds or more (default 60) is
+# said in a ::warning::, so a slower start shows on the run, though the wait
+# goes on to its bound. A lane that runs keploy in the foreground, its request
+# driver in the background, gives @FILE: keploy writes its PID there as it
+# launches (exec_noting_pid), and the wait reads it from FILE once FILE names
+# one, waiting as with no PID until then. The lane removes FILE, and empties
+# LOG, before it starts the driver, so both are this run's.
 await_agent_ready() {
     local log=$1 pid=${2:-} bound=${KEPLOY_AGENT_READY_BOUND:-600}
-    local every=${KEPLOY_AGENT_WAIT_SAY_EVERY:-30}
-    local start=$SECONDS next=$every xtrace=0
+    local every=${KEPLOY_AGENT_WAIT_SAY_EVERY:-30} warn=${KEPLOY_AGENT_READY_WARN_AFTER:-60}
+    local start=$SECONDS next=$every xtrace=0 pidfile='' took
     case $- in *x*) xtrace=1; set +x ;; esac
+    case $pid in @*) pidfile=${pid#@} pid='' ;; esac
     echo "Waiting for keploy's agent to be ready (its line in $log, at most ${bound}s)"
     while ! grep -qF -- "$KEPLOY_AGENT_READY_LINE" "$log" 2>/dev/null; do
+        if [ -z "$pid" ] && [ -n "$pidfile" ]; then
+            { read -r pid <"$pidfile"; } 2>/dev/null || :
+        fi
         if [ -n "$pid" ] && ! _kse_alive "$pid"; then
             # The line can come with the exit.
             grep -qF -- "$KEPLOY_AGENT_READY_LINE" "$log" 2>/dev/null && break
@@ -116,7 +124,37 @@ await_agent_ready() {
         fi
         sleep 1
     done
-    echo "keploy's agent is ready after $((SECONDS - start))s; the app's wait starts now."
+    took=$((SECONDS - start))
+    echo "keploy's agent is ready after ${took}s; the app's wait starts now."
+    if [ "$took" -ge "$warn" ]; then
+        echo "::warning::keploy's agent was ready only after ${took}s (${warn}s or more; the bound is ${bound}s): this runner is slow, or keploy's start is slower. $log names the step each wait was in."
+    fi
     [ "$xtrace" = 1 ] && set -x
     return 0
+}
+
+# exec_noting_pid FILE CMD [ARG...]: writes this shell's PID to FILE, then runs
+# CMD in its place (exec), so FILE names CMD's process while it runs. For a
+# lane that runs keploy in the foreground, piped to tee, and its request
+# driver in the background:
+#
+#   rm -f "$app.pid"; send_request &    # which runs: await_agent_ready "$app.txt" "@$app.pid"
+#   exec_noting_pid "$app.pid" "$RECORD_BIN" record ... 2>&1 | tee "$app.txt"
+#
+# FILE is written whole (renamed into place), so the wait never reads half a
+# PID. Run it only as a pipeline's element, or in another subshell: in the
+# lane's own shell it would replace that shell, so there it refuses, and
+# fails. A FILE it cannot write is said, and CMD still runs: its driver then
+# waits as with no PID.
+exec_noting_pid() {
+    local file=$1
+    shift
+    if [ "$BASHPID" = "$$" ]; then
+        echo "::error::exec_noting_pid runs only in a subshell (a pipeline's element): here it would replace the lane's shell"
+        return 1
+    fi
+    if ! { echo "$BASHPID" >"$file.$BASHPID" && mv -f "$file.$BASHPID" "$file"; } 2>/dev/null; then
+        echo "could not write keploy's PID to $file: its driver waits for the ready line as with no PID"
+    fi
+    exec "$@"
 }
