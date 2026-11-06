@@ -78,6 +78,24 @@ type HTTPSchema struct {
 	Fault *Fault `json:"fault,omitempty" yaml:"fault,omitempty"`
 }
 
+// MarshalYAML writes s as its fields are tagged, with one rule over them: a
+// fault that sends the head (Fault.SendsHead) has replay send BodyBytes of the
+// body as the upstream sent them, so that body is written as those bytes and
+// never as a stream's frames. A stream's frames do not keep its bytes: an SSE
+// field's space after its ':' and its line ends are not kept, and its last
+// event reads back ended, so an event the upstream cut short, which its
+// client never dispatched at record, would be served whole. A body already
+// held as frames (read back from them: StreamBody) stays frames, never
+// rewritten as the bytes they read back as, and replay refuses its fault
+// (faultHead).
+func (s HTTPSchema) MarshalYAML() (interface{}, error) {
+	type plain HTTPSchema // no MarshalYAML of its own: s's fields as tagged
+	if s.Fault != nil && s.Fault.SendsHead() {
+		s.Response.bodyOnWire = true // s is a copy: the caller's is untouched
+	}
+	return plain(s), nil
+}
+
 type FormData struct {
 	Key       string   `json:"key" bson:"key" yaml:"key"`
 	Values    []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
@@ -117,6 +135,11 @@ type HTTPResp struct {
 	// HeaderLineLengths: as on HTTPReq. Recorded for a mock's response, the
 	// one recorded response keploy sends back out at replay.
 	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
+
+	// bodyOnWire: Body is the bytes the upstream sent before a fault
+	// (HTTPSchema.MarshalYAML sets it on the copy it writes), so YAML keeps
+	// it as they came, never split into frames (streamChunksForYAML).
+	bodyOnWire bool
 }
 
 // HTTPResponseHasNoBody reports whether a response carries no body whatever

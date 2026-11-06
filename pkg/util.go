@@ -2152,12 +2152,12 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 					if nextExpected == 0 {
 						// A recording of no frame, and the app sent
 						// none: nothing of the answer to compare.
-						return false, strings.Join(actualQueue, "\n\n"), nil, keptOpenWithKeepalivesOnly()
+						return false, sseBodyOf(actualQueue), nil, keptOpenWithKeepalivesOnly()
 					}
-					return true, strings.Join(actualQueue, "\n\n"), nil, ErrStreamHeldOpen
+					return true, sseBodyOf(actualQueue), nil, ErrStreamHeldOpen
 				}
 				actualQueue = append(actualQueue, frame)
-				return false, strings.Join(actualQueue, "\n\n"), trailingFrame(len(expectedQueue), frame), nil
+				return false, sseBodyOf(actualQueue), trailingFrame(len(expectedQueue), frame), nil
 			}
 			logger.Debug("received additional SSE data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
@@ -2179,7 +2179,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 				ActualFrame:   frame,
 				Reason:        reason,
 			}
-			return false, strings.Join(actualQueue, "\n\n"), mismatchInfo, nil
+			return false, sseBodyOf(actualQueue), mismatchInfo, nil
 		}
 
 		nextExpected++
@@ -2191,7 +2191,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "frame")
+		return false, sseBodyOf(actualQueue), nil, streamCut(err, nextExpected, len(expectedQueue), "frame")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -2209,10 +2209,21 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 			ActualFrame:   "(stream ended - no more frames)",
 			Reason:        fmt.Sprintf("expected %d frames but only received %d", len(expectedQueue), nextExpected),
 		}
-		return false, strings.Join(actualQueue, "\n\n"), mismatchInfo, nil
+		return false, sseBodyOf(actualQueue), mismatchInfo, nil
 	}
 
-	return true, strings.Join(actualQueue, "\n\n"), nil, nil
+	return true, sseBodyOf(actualQueue), nil, nil
+}
+
+// sseBodyOf is the body of an SSE stream of frames, as the wire carries it:
+// each frame ended by a blank line, the last one too, as a recording's body
+// reads back (models.HTTPResp: its frames each ended), so a diff of the two
+// shows no blank line that only one has. No frame is no body.
+func sseBodyOf(frames []string) string {
+	if len(frames) == 0 {
+		return ""
+	}
+	return strings.Join(frames, "\n\n") + "\n\n"
 }
 
 func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {

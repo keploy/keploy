@@ -228,7 +228,10 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 		return cloneStreamChunks(resp.StreamBody), true
 	}
 
-	if resp.Body != "" {
+	if resp.Body != "" && !resp.bodyOnWire {
+		// A fault's body is the bytes the upstream sent before it
+		// (bodyOnWire): kept as they came, never split.
+		//
 		// A non-UTF-8 body is not a text stream, and must never reach the
 		// chunkers below.
 		//
