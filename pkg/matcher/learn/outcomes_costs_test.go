@@ -3163,13 +3163,24 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 				}
 			}, func(e *readerEntry) bool { return e.subs.ok }},
 		// Whole at the minute in a zone off UTC, each moment stands in all
-		// three of the index's orders: read to the millisecond in UTC, as
-		// above, in the first alone.
+		// three of the index's orders. Read to the millisecond in UTC, as
+		// above, it stands in the first, and in the minute order too only
+		// at second 0, millisecond 0. Each text has a day and year of its
+		// own, so that each is an entry.
 		{"moments off UTC", func(_ *rand.Rand, i, j int) string {
-			return fmt.Sprintf(`"t%d":"2026-%02d-%02dT%02d:%02d:00+05:30",`, j, 1+j%12, 1+i%28, j%24, j/24%60)
+			return fmt.Sprintf(`"t%d":"%d-%02d-%02dT%02d:%02d:00+05:30",`, j, 2026+i/28, 1+j%12, 1+i%28, j%24, j/24%60)
 		}, askMoment, func(e *readerEntry) bool {
 			ix := e.formSpans.v
 			return e.formSpans.ok && len(ix.at) > 0 && len(ix.minute) == len(ix.at) && len(ix.wall) == len(ix.at)
+		}},
+		// A time of day names no day, so it stands in none of the orders:
+		// every moment is on the index's odd list, which no other shape
+		// fills.
+		{"moments of no day", func(_ *rand.Rand, i, j int) string {
+			return fmt.Sprintf(`"t%d":"%02d:%02d:%02d.%03d",`, j, j%24, j/24%60, i%60, i/60)
+		}, askMoment, func(e *readerEntry) bool {
+			ix := e.formSpans.v
+			return e.formSpans.ok && len(ix.odd) > 0 && len(ix.odd) == len(ix.moments) && len(ix.at) == 0
 		}},
 	}
 	for _, k := range kinds {
