@@ -262,10 +262,10 @@ func TestAnAgentURIThatStopsIsGivenUpOnAsStopped(t *testing.T) {
 // A token an embedder sealed into the agent's URI (k8s-proxy's
 // keploy-agent://, its password; a name would do as well) is never said, nor
 // any part of it: the watch's lines, at any level, and its reason show it as
-// xxxxx, whatever its shape. Where a raw character in the password leaves the URI unparsed, or
-// parsed with the password as something else (a path, or no host at all), the
-// errors of url.Parse and of the request that keploy says quote it, so each
-// goes through the mask.
+// xxxxx, whatever its shape. Where a raw character in the password leaves the
+// URI unparsed, or parsed with the password as something else (a path, or no
+// host at all), the errors of url.Parse and of the request that keploy says
+// quote it, so each goes through the mask.
 func TestAnAgentURIsSealedTokenIsNeverSaid(t *testing.T) {
 	cases := map[string]struct{ uri, shown string }{
 		"a URI that parses":                {"http://:s3aled-t0ken@%s/agent", "http://xxxxx@%s/agent"},
@@ -521,7 +521,7 @@ func TestEveryAgentRequestGoesThroughTheMask(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("the package's files: %v, %v", files, err)
 	}
-	raw := regexp.MustCompile(`\bhttp\.NewRequest(WithContext)?\(|\.Do\(|\b(http|[cC]lient)\.(Get|Head|Post|PostForm)\(`)
+	raw := regexp.MustCompile(`\bhttp\.NewRequest(WithContext)?\(|\.Do\(|\bhttp\.(Get|Head|Post|PostForm)\(|[cC]lient\.(Get|Head|Post|PostForm)\(`)
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") || f == "agent_request.go" {
 			continue
@@ -531,8 +531,9 @@ func TestEveryAgentRequestGoesThroughTheMask(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i, line := range strings.Split(string(src), "\n") {
-			// A sync.Once's Do takes a func; a client's, a request.
-			if raw.MatchString(line) && !strings.Contains(line, ".Do(func(") && !strings.HasPrefix(strings.TrimSpace(line), "//") {
+			// A sync.Once's Do takes a func; a client's, a request. Only
+			// the Once's is left out, so a request in its func still counts.
+			if raw.MatchString(strings.ReplaceAll(line, ".Do(func(", "")) && !strings.HasPrefix(strings.TrimSpace(line), "//") {
 				t.Errorf("%s:%d makes or sends a request outside newAgentRequest and doAgent: %s", f, i+1, strings.TrimSpace(line))
 			}
 		}

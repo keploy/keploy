@@ -3558,7 +3558,9 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 // characters it has: nothing parses the URI to decide what to hide, so one
 // that does not parse, or whose password a raw / ? or # breaks up, shows none
 // of it either, and a URI with an @ past its host shows less of itself than
-// it could. A URI with no @ has no userinfo, and is shown as it is.
+// it could. A URI with no @ has no userinfo, and is shown as it is. The scheme
+// is said as RFC 3986 reads it: a token spelled as a scheme, before a :// of
+// its own (t0ken://x@host), is not told from one, and is said.
 func ShownAgentURI(uri string) string {
 	at := strings.LastIndex(uri, "@")
 	if at < 0 {
@@ -3572,8 +3574,11 @@ func ShownAgentURI(uri string) string {
 var agentURIScheme = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*://`)
 
 // agentURIAtEndsUserinfo reports whether uri parses with a host and its one @
-// ends that host's userinfo: all that a password in it can then be is what
-// url.URL.User holds.
+// ends that host's userinfo. With a scheme, all that a password in it can then
+// be is what url.URL.User holds. With none it can be more: a request for
+// //://tok@h has the URL //tok@h, whose tok came from a path. Such a request
+// goes no further than net/http's "unsupported protocol scheme", which quotes
+// none of the URI.
 func agentURIAtEndsUserinfo(uri string) bool {
 	u, err := url.Parse(uri)
 	return err == nil && u.User != nil && strings.Count(uri, "@") == 1
