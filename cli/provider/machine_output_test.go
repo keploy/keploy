@@ -301,6 +301,9 @@ func TestMachineFormatsKeepStdoutParseable(t *testing.T) {
 // it for everyone would be a regression in the opposite direction.
 func TestTextFormatStillPrintsTheLogo(t *testing.T) {
 	t.Cleanup(log.TestOnlyResetSink)
+	// The art is the switch-off console's: under the proven switch it is left
+	// out (TestPrintLogoUnderTheSwitchKeepsTheVersionAndTheLog).
+	t.Setenv(provenswitch.Env, "")
 
 	cfg := config.New()
 	c := NewCmdConfigurator(zap.New(nil), cfg)
@@ -330,6 +333,8 @@ func TestTextFormatStillPrintsTheLogo(t *testing.T) {
 // extend. With the logger redirected, nothing may reach stdout.
 func TestPrintLogoFollowsTheLoggerSink(t *testing.T) {
 	t.Cleanup(log.TestOnlyResetSink)
+	// The art is the switch-off console's (see TestTextFormatStillPrintsTheLogo).
+	t.Setenv(provenswitch.Env, "")
 
 	// Default: the sink is stdout, so the logo lands there.
 	onStdout := captureStdout(t, func() { PrintLogo(log.PrimarySink(), true) })
