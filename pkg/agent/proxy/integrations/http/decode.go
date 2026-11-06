@@ -155,6 +155,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				header:  request.Header,
 				body:    reqBody,
 				raw:     reqBuf,
+				client:  clientConn,
 				arrived: arrived,
 			}
 
@@ -203,9 +204,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// with built-in defaults (POST /v1/traces, /ingest) as a "skip" fallback.
 			// These are live, fire-and-forget telemetry the app emits every run, not
 			// recorded dependencies — matching them falls through to the HTTP
-			// fuzzy-matcher, which shingles the large (~150–200 KB) bodies and OOMs
-			// the sidecar (measured: ~432 MB of a ~1.1 GB peak). We short-circuit
-			// BEFORE h.match:
+			// fuzzy-matcher, which reads the large (~150–200 KB) bodies against
+			// every recording of the path, for an answer no test reads. We
+			// short-circuit BEFORE h.match:
 			//   - skip:      synthesize a bare 200 (OTLP/HTTP & Pyroscope treat any
 			//                2xx as success); no mock is consulted.
 			//   - recordOne: serve ONE recorded response for (method,path)
@@ -472,6 +473,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						ok, stub, diag, err = h.matchOf(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate)
 					}
 				}
+			}
+			if errors.Is(err, errClientGone) {
+				// No one is left to answer, and a match cut short is no
+				// miss: the connection ends as if read to its end.
+				h.Logger.Debug("the client left while its call was being matched", zap.Any("metadata", utils.GetReqMeta(request)))
+				errCh <- io.EOF
+				return
 			}
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))

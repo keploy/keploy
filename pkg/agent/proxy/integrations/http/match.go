@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -40,6 +41,9 @@ type req struct {
 	header http.Header
 	body   []byte
 	raw    []byte
+	// client is the connection the call came on, watched for its end while
+	// a heavy call waits and is matched (admit); nil for none.
+	client net.Conn
 	// encoded is the body as the client sent it, before its Content-Encoding
 	// was undone into body; nil when it had none.
 	encoded []byte
@@ -126,6 +130,11 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 func (h *HTTP) matchOf(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 	ctx = context.WithValue(ctx, statefulMocksKey{}, statefulMocks)
 	ok, stub, diag, err := h.matchCascade(ctx, input, mockDb, base, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+	if errors.Is(err, context.Canceled) && ctx.Err() == nil {
+		// Only its client's end (admit) cancels a match its caller's
+		// context still runs.
+		err = errClientGone
+	}
 	if diag != nil && provenswitch.On() {
 		// Under the proven switch a miss names where the call went too
 		// (strict.go), so its report can name a destination that differs.
@@ -215,6 +224,14 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 	// on, so a recording the index still lists and the store no longer hands
 	// out is never chosen again.
 	reread := false
+	// endTurn ends the call's turn (admit), taken once, before the first pass
+	// that reads every recording's body.
+	var endTurn func()
+	defer func() {
+		if endTurn != nil {
+			endTurn()
+		}
+	}()
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
@@ -345,6 +362,12 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 				return false, nil, diag, nil
 			}
 			return true, served, nil, nil
+		}
+
+		if endTurn == nil {
+			if ctx, endTurn, err = admit(ctx, input.client, int64(len(input.body))+recordedBytes(unfilteredMocks, models.Method(input.method))); err != nil {
+				return false, nil, nil, err
+			}
 		}
 
 		// Matching process
@@ -514,7 +537,10 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 
 		h.Logger.Debug("Performing fuzzy match for req buffer")
 		// Perform fuzzy match on the request
-		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
+		isMatched, bestMatch, err := h.performFuzzyMatch(ctx, shortListed, input.body)
+		if err != nil {
+			return false, nil, nil, err
+		}
 		if isMatched {
 			if ce := h.Logger.Check(zap.DebugLevel, "fuzzy match found a matching mock"); ce != nil {
 				ce.Write(zap.String("mock name", bestMatch.Name))
@@ -1654,124 +1680,6 @@ func (h *HTTP) performBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 	}
 
 	return bodyMatched, nil
-}
-
-// findStringMatch returns the index of the closest mock string and the
-// Levenshtein distance so callers don't need to recompute it.
-func (h *HTTP) findStringMatch(req string, mockStrings []string) (int, int) {
-	minDist := int(^uint(0) >> 1)
-	bestMatch := -1
-	for idx, mock := range mockStrings {
-		if !util.IsASCII(mock) {
-			continue
-		}
-		dist := levenshtein.ComputeDistance(req, mock)
-		if dist == 0 {
-			return idx, 0
-		}
-		if dist < minDist {
-			minDist = dist
-			bestMatch = idx
-		}
-	}
-	return bestMatch, minDist
-}
-
-// jaccardBestMatch finds the mock body with the highest Jaccard similarity
-// to reqBuff. mockBodies are pre-decoded/stripped byte slices so the caller
-// controls noise handling. Returns the best index and similarity score.
-func (h *HTTP) jaccardBestMatch(mockBodies [][]byte, reqBuff []byte) (int, float64) {
-	mxSim := -1.0
-	mxIdx := -1
-	k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
-	reqShingles := util.CreateShingles(reqBuff, k)
-	for idx, body := range mockBodies {
-		mockShingles := util.CreateShingles(body, k)
-		similarity := util.JaccardSimilarity(mockShingles, reqShingles)
-		if similarity > mxSim {
-			mxSim = similarity
-			mxIdx = idx
-		}
-	}
-	return mxIdx, mxSim
-}
-
-// findBinaryMatch decodes mock bodies and delegates to jaccardBestMatch.
-func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
-	bodies := make([][]byte, len(mocks))
-	for i, mock := range mocks {
-		bodies[i], _ = decode(mock.Spec.HTTPReq.Body)
-	}
-	idx, _ := h.jaccardBestMatch(bodies, reqBuff)
-	return idx
-}
-
-// PerformFuzzyMatch performs fuzzy matching on the request body.
-// Noisy (obfuscated) values are stripped from mock bodies before computing
-// similarity so that redacted padding doesn't skew the score.
-func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
-	// Log all mock names in a single line for better readability
-	if ce := h.Logger.Check(zap.DebugLevel, "mocks under consideration for performfuzzyMatch function"); ce != nil {
-		ce.Write(zap.Strings("mock names", mockNamesOf(tcsMocks)))
-	}
-
-	encodedReq := encode(reqBuff)
-	for _, mock := range tcsMocks {
-		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
-		if string(encodedMock) == string(reqBuff) || mock.Spec.HTTPReq.Body == encodedReq {
-			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
-				ce.Write(zap.String("mock", mock.Name),
-					zap.Float64("match_percentage", 100.0),
-					zap.String("match_type", "fuzzy_exact"))
-			}
-			return true, mock
-		}
-	}
-
-	// Build mock body strings, stripping noisy values for fair comparison
-	mockStrings := make([]string, len(tcsMocks))
-	for i := range tcsMocks {
-		nc := util.NewNoiseChecker(tcsMocks[i].Noise)
-		mockStrings[i] = util.StripNoisyJSON(tcsMocks[i].Spec.HTTPReq.Body, nc)
-	}
-
-	// String-based fuzzy matching (Levenshtein distance)
-	reqStr := string(reqBuff)
-	if util.IsASCII(reqStr) {
-		idx, dist := h.findStringMatch(reqStr, mockStrings)
-		if idx != -1 {
-			maxLen := len(reqStr)
-			if len(mockStrings[idx]) > maxLen {
-				maxLen = len(mockStrings[idx])
-			}
-			pct := 0.0
-			if maxLen > 0 {
-				pct = (1.0 - float64(dist)/float64(maxLen)) * 100
-			}
-			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
-				ce.Write(zap.String("mock", tcsMocks[idx].Name),
-					zap.Float64("match_percentage", pct),
-					zap.String("match_type", "fuzzy_levenshtein"))
-			}
-			return true, tcsMocks[idx]
-		}
-	}
-
-	// Binary fuzzy matching (Jaccard similarity) with stripped mock bodies
-	mockBodies := make([][]byte, len(mockStrings))
-	for i := range mockStrings {
-		mockBodies[i] = []byte(mockStrings[i])
-	}
-	mxIdx, mxSim := h.jaccardBestMatch(mockBodies, reqBuff)
-	if mxIdx != -1 {
-		if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
-			ce.Write(zap.String("mock", tcsMocks[mxIdx].Name),
-				zap.Float64("match_percentage", mxSim*100),
-				zap.String("match_type", "fuzzy_jaccard"))
-		}
-		return true, tcsMocks[mxIdx]
-	}
-	return false, nil
 }
 
 // parseMediaTypes splits a (possibly comma-joined) Content-Type header
