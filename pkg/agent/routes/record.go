@@ -731,11 +731,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			streamWriteFailed(a.logger, r, "failed to create metadata part", err)
 			return false
 		}
-		var metadata interface{} = t
-		if bodyObjects {
-			metadata = models.TestCaseBodyObjects{TestCase: t}
-		}
-		if err := json.NewEncoder(part).Encode(metadata); err != nil {
+		if err := json.NewEncoder(part).Encode(models.TestCaseJSON(t, bodyObjects)); err != nil {
 			streamWriteFailed(a.logger, r, "failed to encode metadata", err)
 			return false
 		}

@@ -26,8 +26,8 @@ import (
 //	"body": {"encoding": "base64", "data": "iVBORw0KGgo..."}
 //
 // HTTPReq and HTTPResp read either form back into the bytes, and write JSON as
-// encoding/json always has. A writer turns a test case into
-// TestCaseBodyObjects, or a request or a response into HTTPReqBodyObject or
+// encoding/json always has. A writer encodes TestCaseJSON's answer for a test
+// case, or turns a request or a response into HTTPReqBodyObject or
 // HTTPRespBodyObject, only for a reader that asked. A body that is UTF-8 is
 // written as the string it always was in either form.
 //
@@ -75,12 +75,23 @@ type (
 	httpRespFields HTTPResp
 )
 
-// UnmarshalJSON reads h, its body in either form.
-func (h *HTTPReq) UnmarshalJSON(data []byte) error {
-	w := struct {
+// The types HTTPReq and HTTPResp are decoded through: their fields, with the
+// body left for readJSONBody. They are named because a type error in a field
+// names the struct it met it in, and an anonymous one has no name to give.
+type (
+	httpReq struct {
 		*httpReqFields
 		Body json.RawMessage `json:"body"`
-	}{httpReqFields: (*httpReqFields)(h)}
+	}
+	httpResp struct {
+		*httpRespFields
+		Body json.RawMessage `json:"body"`
+	}
+)
+
+// UnmarshalJSON reads h, its body in either form.
+func (h *HTTPReq) UnmarshalJSON(data []byte) error {
+	w := httpReq{httpReqFields: (*httpReqFields)(h)}
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
 	}
@@ -89,10 +100,7 @@ func (h *HTTPReq) UnmarshalJSON(data []byte) error {
 
 // UnmarshalJSON reads h, its body in either form.
 func (h *HTTPResp) UnmarshalJSON(data []byte) error {
-	w := struct {
-		*httpRespFields
-		Body json.RawMessage `json:"body"`
-	}{httpRespFields: (*httpRespFields)(h)}
+	w := httpResp{httpRespFields: (*httpRespFields)(h)}
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
 	}
@@ -157,6 +165,19 @@ func (v TestCaseBodyObjects) MarshalJSON() ([]byte, error) {
 	}{tc, HTTPReqBodyObject(tc.HTTPReq), HTTPRespBodyObject(tc.HTTPResp)})
 }
 
+// TestCaseJSON is what a writer encodes for tc: its TestCaseBodyObjects when
+// the reader sent BodyEncodingHeader (bodyObjects) and a body of tc is not
+// UTF-8, and tc itself otherwise. The JSON of a test case whose bodies are both
+// UTF-8 is the same either way, and tc itself is written in one pass, where a
+// MarshalJSON's output is held and copied again: writing a text test case for a
+// reader that asked costs what it always did.
+func TestCaseJSON(tc *TestCase, bodyObjects bool) interface{} {
+	if bodyObjects && tc != nil && (!utf8.ValidString(tc.HTTPReq.Body) || !utf8.ValidString(tc.HTTPResp.Body)) {
+		return TestCaseBodyObjects{TestCase: tc}
+	}
+	return tc
+}
+
 // jsonBodyOf is the JSON form of a body that is not UTF-8.
 func jsonBodyOf(body string) JSONBody {
 	return JSONBody{Encoding: BodyEncodingBase64, Data: base64.StdEncoding.EncodeToString([]byte(body))}
@@ -166,8 +187,9 @@ func jsonBodyOf(body string) JSONBody {
 // encoding/json hands them to a json.RawMessage, with no space around them: a
 // string as it stands, an object to the bytes it encodes. No body, or null,
 // leaves *body as it is, as decoding into a string does. An object that names
-// no encoding keploy reads, or holds no base64, is an error: the body is not
-// guessed at.
+// no encoding keploy reads, holds no data, or data that is not base64, is an
+// error: the body is not guessed at. A writer writes an object only for a body
+// that has bytes, so one with no data (absent, null or empty) is not a body.
 func readJSONBody(raw json.RawMessage, body *string, of string) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
@@ -182,6 +204,9 @@ func readJSONBody(raw json.RawMessage, body *string, of string) error {
 		}
 		if jb.Encoding != BodyEncodingBase64 {
 			return fmt.Errorf("models: %s body: encoding %q is not one keploy reads (only %q)", of, jb.Encoding, BodyEncodingBase64)
+		}
+		if jb.Data == "" {
+			return fmt.Errorf("models: %s body: a body object holds no data", of)
 		}
 		b, err := base64.StdEncoding.DecodeString(jb.Data)
 		if err != nil {

@@ -385,12 +385,17 @@ func TestHTTPBodyJSONRead(t *testing.T) {
 		name, doc, want, errHas string
 	}{
 		{name: "string", doc: `{"method":"GET","body":"hi"}`, want: "hi"},
+		{name: "string that is valid base64 stays as it stands", doc: `{"method":"GET","body":"aGVsbG8="}`, want: "aGVsbG8="},
 		{name: "object", doc: `{"method":"GET","body":{"encoding":"base64","data":"` + b64 + `"}}`, want: pngBody},
 		{name: "object with space", doc: `{"method":"GET","body": {"data":"` + b64 + `", "encoding":"base64"} }`, want: pngBody},
 		{name: "absent keeps", doc: `{"method":"GET"}`, want: "kept"},
 		{name: "null keeps", doc: `{"method":"GET","body":null}`, want: "kept"},
 		{name: "other encoding", doc: `{"body":{"encoding":"hex","data":"00"}}`, errHas: `encoding "hex" is not one keploy reads`},
 		{name: "no encoding", doc: `{"body":{"data":"` + b64 + `"}}`, errHas: `encoding "" is not one keploy reads`},
+		{name: "encoding in another case", doc: `{"body":{"encoding":"BASE64","data":"` + b64 + `"}}`, errHas: `encoding "BASE64" is not one keploy reads`},
+		{name: "no data", doc: `{"body":{"encoding":"base64"}}`, errHas: "HTTPReq body: a body object holds no data"},
+		{name: "null data", doc: `{"body":{"encoding":"base64","data":null}}`, errHas: "HTTPReq body: a body object holds no data"},
+		{name: "empty data", doc: `{"body":{"encoding":"base64","data":""}}`, errHas: "HTTPReq body: a body object holds no data"},
 		{name: "bad base64", doc: `{"body":{"encoding":"base64","data":"@@@"}}`, errHas: "does not decode"},
 		{name: "object of wrong shape", doc: `{"body":{"encoding":1}}`, errHas: "HTTPReq body: json: cannot unmarshal number"},
 		{name: "other field of wrong type", doc: `{"proto_major":"one","body":"hi"}`, errHas: "proto_major"},
@@ -404,9 +409,16 @@ func TestHTTPBodyJSONRead(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), c.errHas) {
 					t.Fatalf("err = %v, want one with %q", err, c.errHas)
 				}
+				if req.Body != "kept" {
+					t.Errorf("a refused body replaced the one there: %q", req.Body)
+				}
+				resp := HTTPResp{Body: "kept"}
 				respHas := strings.Replace(c.errHas, "HTTPReq", "HTTPResp", 1)
-				if err := json.Unmarshal([]byte(c.doc), &HTTPResp{}); err == nil || !strings.Contains(err.Error(), respHas) {
+				if err := json.Unmarshal([]byte(c.doc), &resp); err == nil || !strings.Contains(err.Error(), respHas) {
 					t.Fatalf("response: err = %v, want one with %q", err, respHas)
+				}
+				if resp.Body != "kept" {
+					t.Errorf("a refused response body replaced the one there: %q", resp.Body)
 				}
 				return
 			}
@@ -431,5 +443,120 @@ func TestHTTPBodyJSONRead(t *testing.T) {
 	var resp HTTPResp
 	if err := json.Unmarshal([]byte(`{"body":{"encoding":"hex"}}`), &resp); err == nil || !strings.Contains(err.Error(), "HTTPResp body") {
 		t.Errorf("response: err = %v", err)
+	}
+}
+
+// The header is the contract between releases: a reader and a writer built with
+// different spellings each fall back to strings, and the bytes are lost with no
+// error anywhere. So its name and value are pinned here as literals, not
+// through the constants every other row uses.
+func TestBodyEncodingHeaderIsItsWireName(t *testing.T) {
+	if BodyEncodingHeader != "Keploy-Body-Encoding" {
+		t.Errorf("header = %q", BodyEncodingHeader)
+	}
+	if BodyEncodingBase64 != "base64" {
+		t.Errorf("encoding = %q", BodyEncodingBase64)
+	}
+	h := http.Header{}
+	h.Set("Keploy-Body-Encoding", "base64")
+	if !ReadsBodyObjects(h) {
+		t.Error("the wire header is not read")
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(mustJSON(t, HTTPReqBodyObject{Body: "\xff"})), &obj); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]interface{}{"encoding": "base64", "data": "/w=="}; !reflect.DeepEqual(obj["body"], want) {
+		t.Errorf("body = %v, want %v", obj["body"], want)
+	}
+}
+
+func mustJSON(t *testing.T, v interface{}) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// A body too short to look like a file is still bytes: nothing about being
+// binary depends on its length.
+func TestHTTPBodyNotUTF8ShortBody(t *testing.T) {
+	for _, body := range []string{"\xff", "\x80a", "a\xc3", "\x00\xfe"} {
+		tc := binaryHTTPCase()
+		tc.HTTPReq.Body, tc.HTTPResp.Body = body, body
+		var got TestCase
+		if err := json.Unmarshal([]byte(mustJSON(t, TestCaseBodyObjects{TestCase: &tc})), &got); err != nil {
+			t.Fatalf("%q: %v", body, err)
+		}
+		if got.HTTPReq.Body != body || got.HTTPResp.Body != body {
+			t.Errorf("%q: request %q, response %q", body, got.HTTPReq.Body, got.HTTPResp.Body)
+		}
+	}
+}
+
+// A writer goes through the body objects only for a reader that asked and a
+// test case that needs one. Any other test case is handed back as it is, so
+// the plain encoder writes it in one pass.
+func TestTestCaseJSONTakesThePlainEncoderUnlessABodyNeedsAnObject(t *testing.T) {
+	for _, c := range []struct {
+		name, req, resp string
+		binary          bool
+	}{
+		{"both binary", pngBody, protoBody, true},
+		{"binary request", pngBody, "text", true},
+		{"binary response", "text", protoBody, true},
+		{"both text", "text", "\u00e9 text", false},
+		{"both empty", "", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := binaryHTTPCase()
+			tc.HTTPReq.Body, tc.HTTPResp.Body = c.req, c.resp
+
+			if v, ok := TestCaseJSON(&tc, false).(*TestCase); !ok || v != &tc {
+				t.Errorf("a reader that did not ask got %T", TestCaseJSON(&tc, false))
+			}
+
+			v := TestCaseJSON(&tc, true)
+			if c.binary {
+				if view, ok := v.(TestCaseBodyObjects); !ok || view.TestCase != &tc {
+					t.Fatalf("a reader that asked got %T, want its body objects", v)
+				}
+			} else if p, ok := v.(*TestCase); !ok || p != &tc {
+				t.Fatalf("a text test case took the second pass: %T", v)
+			}
+			var got TestCase
+			if err := json.Unmarshal([]byte(mustJSON(t, v)), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.HTTPReq.Body != c.req || got.HTTPResp.Body != c.resp {
+				t.Errorf("read back %q, %q", got.HTTPReq.Body, got.HTTPResp.Body)
+			}
+		})
+	}
+	for _, asked := range []bool{true, false} {
+		if got := mustJSON(t, TestCaseJSON(nil, asked)); got != "null" {
+			t.Errorf("nil test case, asked %v: %s", asked, got)
+		}
+	}
+}
+
+// A type error in a field other than the body says which field, in which
+// struct, as it did before these types read their own JSON. It still fails the
+// read.
+func TestHTTPBodyReadKeepsATypeErrorsFieldPath(t *testing.T) {
+	var typeErr *json.UnmarshalTypeError
+	err := json.Unmarshal([]byte(`{"proto_major":"one"}`), &HTTPReq{})
+	if !errors.As(err, &typeErr) || typeErr.Struct == "" || !strings.HasSuffix(typeErr.Field, "proto_major") {
+		t.Errorf("request: %#v", err)
+	}
+	err = json.Unmarshal([]byte(`{"status_code":"ok"}`), &HTTPResp{})
+	if !errors.As(err, &typeErr) || typeErr.Struct == "" || !strings.HasSuffix(typeErr.Field, "status_code") {
+		t.Errorf("response: %#v", err)
+	}
+	err = json.Unmarshal([]byte(`{"http_req":{"proto_major":"one"}}`), &TestCase{})
+	if err == nil || !strings.Contains(err.Error(), "httpReq.proto_major") {
+		t.Errorf("inside a test case: %v", err)
 	}
 }
