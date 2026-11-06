@@ -518,5 +518,18 @@ func TestAnsweredLogNotesAKeptRecordingOnceAtItsLastAnswer(t *testing.T) {
 	if n := l.copies.Load() - copies; n != 0 {
 		t.Fatalf("pushing out another entry of its name made its next answer copy it %d times; want its entry moved", n)
 	}
+	// A note of another door (a background's spend, with its scope) files an
+	// entry of its own beside the kept one's, never moves that one.
+	l.noteFrom(mk, t0.Add(15*time.Second), "worker", false)
+	var bg string
+	for _, e := range l.candidates([]string{"url:/echo/rates"}) {
+		if e.mock.Name == "mock-0" {
+			bg = e.background
+			break
+		}
+	}
+	if bg != "worker" {
+		t.Fatalf("a background's note of the kept recording is newest as scope %q; want an entry of its own, of worker", bg)
+	}
 	checkAnsweredCounts(t, &l)
 }
