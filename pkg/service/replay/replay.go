@@ -344,8 +344,9 @@ type runShape struct {
 	// produced a verdict.
 	stoppedEarly bool
 	// downgradedFromPassed: stoppedEarly is what turned an otherwise-PASSED set
-	// into APP_FAULT, so the status describes the partial run itself rather
-	// than something that went wrong independently.
+	// (or one FAILED only for selected test cases not on disk) into APP_FAULT,
+	// so the status describes the partial run itself rather than something
+	// that went wrong independently.
 	downgradedFromPassed bool
 	// notJudged is why an otherwise judged set is INTERNAL_ERR: evidence its
 	// verdict needs could not be read (proven switch). Empty otherwise.
@@ -358,6 +359,9 @@ type runShape struct {
 	// last test that no mock answered fail it (unclaimedCalls). Empty
 	// otherwise.
 	unclaimedWhy string
+	// notFoundWhy names the test cases the run selected that are not on
+	// disk (notFoundSetReason): each fails the set. Empty otherwise.
+	notFoundWhy string
 	// staleWhy names the tests of a set with a verdict of its own (FAILED,
 	// a partial run's APP_FAULT) that are not judged for a stale mapping
 	// (FailureInfo.MappingStale), or for learning keploy did not keep
@@ -380,18 +384,21 @@ func withUnverifiedNote(base string, shape runShape) string {
 }
 
 func describeTestSetFailure(status models.TestSetStatus, testCaseResults []models.TestResult, shape runShape) string {
-	reason := describeTestSetVerdict(status, testCaseResults, shape)
-	switch {
-	case shape.staleWhy == "":
-		return reason
-	case reason == "":
-		return shape.staleWhy
+	// The selected test cases not on disk fail the set whatever its status
+	// says of the run (a FAILED set, a partial run's APP_FAULT, an app that
+	// halted), so the reason names them first, beside the status's own.
+	var why []string
+	for _, w := range []string{shape.notFoundWhy, describeTestSetVerdict(status, testCaseResults, shape), shape.staleWhy} {
+		if w != "" {
+			why = append(why, w)
+		}
 	}
-	return reason + "; " + shape.staleWhy
+	return strings.Join(why, "; ")
 }
 
-// describeTestSetVerdict is describeTestSetFailure less the tests a set with a
-// verdict of its own does not judge for a stale mapping (runShape.staleWhy).
+// describeTestSetVerdict is describeTestSetFailure less the selected test
+// cases not on disk (runShape.notFoundWhy) and the tests a set with a verdict
+// of its own does not judge for a stale mapping (runShape.staleWhy).
 func describeTestSetVerdict(status models.TestSetStatus, testCaseResults []models.TestResult, shape runShape) string {
 	switch status {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
@@ -1549,14 +1556,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				utils.LogError(r.logger, nil, "no. of testset failure occurred during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
 				break
 			}
-			// A test case refused when its set loaded was never sent, so
-			// there is nothing to remove it for: it is kept, and said.
+			// A test case refused when its set loaded, or selected and not
+			// on disk, was never sent, so there is nothing to remove it
+			// for: it is kept, and said.
 			failedTcIDs, refusedTcIDs := mustPassDeletions(tcResults)
 			if len(refusedTcIDs) > 0 && !keptRefused {
 				keptRefused = true
-				r.logger.Warn("--must-pass keeps the test cases refused when their test set loaded: they were never sent, so they are not removed, and the set fails until they are mended",
+				r.logger.Warn("--must-pass keeps the test cases refused when their test set loaded, or selected and not in it: they were never sent, so they are not removed, and the set fails until they are mended",
 					zap.String("testSet", testSet), zap.Strings("testCaseIDs", refusedTcIDs),
-					zap.String("next_step", "do what each one's refusal in its report says (edit its placeholder, or put a half-written set back), then run keploy test again"))
+					zap.String("next_step", "do what each one's reason in its report says (edit its placeholder, put a half-written set back, or select only recorded test cases), then run keploy test again"))
 			}
 			if len(failedTcIDs) == 0 {
 				if len(refusedTcIDs) > 0 {
@@ -1578,6 +1586,17 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 			if err := r.testDB.DeleteTests(ctx, testSet, failedTcIDs); err != nil {
 				utils.LogError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
+				break
+			}
+			// The test cases removed leave the set's selection: the next
+			// attempt runs what is left of it, and does not fail them as
+			// selected and not on disk. A selection they empty leaves the
+			// set nothing to run (an empty one would run every test case
+			// on disk), so it is not run again.
+			if !r.dropDeletedFromSelection(testSet, failedTcIDs) {
+				r.logger.Warn("--must-pass removed every test case selected in this test set: it has nothing left to run, so it is not run again, and its last attempt's verdict stands",
+					zap.String("testSet", testSet), zap.Strings("removed", failedTcIDs),
+					zap.String("next_step", "select other test cases of the set in test.selectedTests in keploy.yml, or record new ones with keploy record"))
 				break
 			}
 			// after deleting rerun it maxFlakyChecks times to be sure that no further testcase fails
@@ -2357,6 +2376,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusIgnored, nil
 	}
 
+	// A test case the run selected by name that is not on disk fails, unsent,
+	// with the set: the set's Total counts it, so it gets a verdict. A set
+	// none of whose selected test cases is on disk has nothing to send, and
+	// fails without starting the application.
+	missing, selectedCount := missingSelected(r.config.Test.SelectedTests[testSetID], testCases)
+	if len(missing) > 0 {
+		rows, err := r.failMissingSelected(runTestSetCtx, testRunID, testSetID, missing)
+		if err != nil {
+			return models.TestSetStatusFailed, err
+		}
+		if len(missing) == selectedCount {
+			return models.TestSetStatusFailed, r.failSetUnrun(runTestSetCtx, testRunID, testSetID, rows, notFoundSetReason(testSetID, missing), startTime)
+		}
+	}
+
 	var conf *models.TestSet
 	if r.testSetConf != nil {
 		conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
@@ -2421,6 +2455,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var perTestRegion map[string]struct{}
 
 	testSetStatus := models.TestSetStatusPassed
+	// Each selected test case not on disk failed when the set loaded. It is
+	// counted in failure only once every test the loops score is counted
+	// (allTestsGotAVerdict): it is not a test on disk.
+	notFoundWhy := ""
+	if len(missing) > 0 {
+		testSetStatus = models.TestSetStatusFailed
+		notFoundWhy = notFoundSetReason(testSetID, missing)
+	}
 	testSetStatusByErrChan := models.TestSetStatusRunning
 	var testSetStatusByErrChanMu sync.RWMutex
 	var lastAppErr models.AppError
@@ -5880,6 +5922,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 	allTestsGotAVerdict := success+failure+obsolete == toScore
+	// The selected test cases not on disk are verdicts too, after that
+	// count: a run that leaves a test on disk unrun is a subset, however many
+	// names it selected that are not on disk.
+	failure += len(missing)
 
 	// Fold every mock consumed since the last rewind into the cross-cycle
 	// union — the final main-loop cycle's mocks and the streaming Phase 2
@@ -6125,10 +6171,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// for them, as long as the application lives and the calls keep
 		// coming; one never made fails the set below.
 		// A set that already failed is red whatever its worker scope did:
-		// nothing waits for it.
+		// nothing waits for it. One FAILED only for the test cases it
+		// selected that are not on disk is checked as it would be without
+		// them (failedForNotFoundAlone): those were never part of the run,
+		// so its worker scope still fails it, named, and then it is no
+		// partial run's APP_FAULT either (partialRunDowngrade, below).
 		// Under the background rules the set's end requires none of it
 		// (exactPlan.background): nothing waits for it.
-		checkWorker := r.exact != nil && !r.exact.background && captureOpened && testSetStatus == models.TestSetStatusPassed
+		checkWorker := r.exact != nil && !r.exact.background && captureOpened &&
+			(testSetStatus == models.TestSetStatusPassed || failedForNotFoundAlone(testSetStatus, failure, len(missing), realWhy, unclaimedReason))
 		if checkWorker {
 			workerMissing, workerUnread = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks.Map(), func(read []models.MockState) {
 				for _, m := range read {
@@ -6645,7 +6696,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// replay" with "check keploy's own logs for why the run ended early" —
 	// deleting the correct diagnosis for a plain app crash, on the most common
 	// way APP_HALTED is reached with results present.
-	partialRunDowngrade := stoppedEarly && testSetStatus == models.TestSetStatusPassed
+	//
+	// A set FAILED only for the test cases it selected that are not on disk
+	// is downgraded too: those were never part of the run, so they do not
+	// change what its stop says of it. Its reason still names them first
+	// (describeTestSetFailure), and their rows stay FAILED.
+	partialRunDowngrade := stoppedEarly && (testSetStatus == models.TestSetStatusPassed ||
+		failedForNotFoundAlone(testSetStatus, failure, len(missing), realWhy, unclaimedReason))
 	if stoppedEarly {
 		// Logged whenever the run stopped early, not only when that changed the
 		// status: a set that stopped early AND failed a test is still a set
@@ -6980,7 +7037,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, staleWhy: staleWhy}))),
+		FailureReason: withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, notFoundWhy: notFoundWhy, staleWhy: staleWhy}))),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,

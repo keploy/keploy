@@ -1088,6 +1088,14 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 	sb.WriteString(header + "\n")
 	sb.WriteString(demotedLines(test))
+	if notRun := notFoundLine(test); notRun != "" {
+		// Selected and not on disk: nothing was sent, so nothing was
+		// compared, and no status, header or body section may read as if
+		// it had been.
+		sb.WriteString(notRun)
+		sb.WriteString("\n--------------------------------------------------------------------\n")
+		return nil
+	}
 
 	// Mock-miss diagnostics FIRST: when an outgoing call had no matching
 	// mock, the response diff below is usually a downstream symptom (the app
@@ -1364,6 +1372,12 @@ func (r *Report) renderSingleFullBodyFailedTest(ctx context.Context, sb *strings
 	// Write header via printer.Sprintf (no stdout)
 	header := r.generateTestHeader(test, r.printer) // returns string via Sprintf already
 	sb.WriteString(header)
+	if notRun := notFoundLine(test); notRun != "" {
+		// Selected and not on disk: nothing was sent or compared.
+		sb.WriteString(notRun)
+		sb.WriteString("\n--------------------------------------------------------------------\n")
+		return nil
+	}
 
 	// Template variable places the answer did not satisfy: each fails the
 	// test case on its own, also where every row below is normal.
@@ -1439,6 +1453,16 @@ func demotedLines(test models.TestResult) string {
 		return ""
 	}
 	return notJudgedLines(test)
+}
+
+// notFoundLine says, under a rendered test's header, why a test case the run
+// selected by name was never run: its test set holds none of that name
+// (FailureInfo.NotFound). "" for any other test.
+func notFoundLine(test models.TestResult) string {
+	if test.FailureInfo.NotFound == "" {
+		return ""
+	}
+	return "  not run: " + test.FailureInfo.NotFound + "\n"
 }
 
 // notJudgedLines says, under a rendered test's header, why it has no verdict

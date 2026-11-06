@@ -335,6 +335,12 @@ type FailureInfo struct {
 	// on it alone, so the test has no verdict, and its test set is not
 	// judged.
 	LearningNotKept string `json:"learning_not_kept,omitempty" yaml:"learning_not_kept,omitempty"`
+	// NotFound says why a FAILED test was never run: the run selected it by
+	// name (test.selectedTests in keploy.yml, or the enterprise binary's -t
+	// set:case), and its test set holds no test case of that name ("test
+	// case <name> not found in <set>"). It has no request and no answer, and
+	// is filed under TEST_CASE_NOT_FOUND.
+	NotFound string `json:"not_found,omitempty" yaml:"not_found,omitempty"`
 }
 
 // MappingStaleRemedy is what to do about a test whose recorded mapping
@@ -1037,6 +1043,10 @@ const (
 	// half-written. The set's failure reason, and the test case's refusal in
 	// TestResult.TemplateFailures, say which files and what to do.
 	TestSetRefused FailureCategory = "TEST_SET_REFUSED"
+	// TestCaseNotFound means the run selected the test case by name and its
+	// test set holds none of that name: it failed unsent, and
+	// FailureInfo.NotFound says which.
+	TestCaseNotFound FailureCategory = "TEST_CASE_NOT_FOUND"
 )
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.
