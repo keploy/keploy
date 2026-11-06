@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.uber.org/zap"
@@ -170,13 +170,7 @@ type engineAPISocket struct {
 
 func startEngineAPISocket(t *testing.T, name string, report []byte) *engineAPISocket {
 	t.Helper()
-	// A socket's path is bounded (108 bytes): t.TempDir's names the test.
-	dir, err := os.MkdirTemp("", "kapi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "docker.sock")
+	sock := filepath.Join(testnet.SocketDir(t), "docker.sock")
 	e := &engineAPISocket{}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

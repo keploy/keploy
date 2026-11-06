@@ -134,10 +134,22 @@ jobs:
       # KEPLOY_TEST_REAL_DOCKER lets the rows that start containers on the
       # runner's daemon run (a real `docker compose` child's output kept in
       # the attach tail); a plain `go test` anywhere else skips them.
+      #
+      # GOTMPDIR, where t.TempDir() makes each test's directory, is a
+      # 70-byte directory made here. t.TempDir()'s path is GOTMPDIR, up to
+      # 64 bytes of the test's name, a random suffix and /001, and a unix
+      # socket's path holds at most 107 bytes: a row that puts a socket, or
+      # a DOCKER_HOST, in its t.TempDir() fails here, as it fails on a
+      # machine whose temporary directory is long, instead of passing under
+      # /tmp. Such a row takes its socket's directory from internal/testnet's
+      # SocketDir, made under TMPDIR. The steps after this one keep /tmp.
       - name: Running Unit Tests
         env:
           KEPLOY_TEST_REAL_DOCKER: "1"
-        run: go test ./...
+          GOTMPDIR: /tmp/keploy-go-test-a-GOTMPDIR-as-long-as-a-developer-machine-may-have
+        run: |
+          mkdir -p "$GOTMPDIR"
+          go test ./...
 
       # Most of the learn package's rows read a cache no tracker made, and
       # payloads read whole, while keploy reads a set's caches (setDerived)

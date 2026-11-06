@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -103,7 +104,7 @@ func TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
+	dir := testnet.SocketDir(t)
 	outside, own := filepath.Join(dir, "outside.sock"), filepath.Join(dir, "member.sock")
 	// Listening before the agent is registered: never a member.
 	startUnixHelper(t, "listen "+outside)
@@ -194,7 +195,7 @@ func TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Fatal(err)
 	}
-	outside := filepath.Join(t.TempDir(), "outside.sock")
+	outside := filepath.Join(testnet.SocketDir(t), "outside.sock")
 	startUnixHelper(t, "listen "+outside) // before the agent: never a member
 	h := unixReportAgent(t)
 	t.Setenv(provenswitch.Env, "1")
