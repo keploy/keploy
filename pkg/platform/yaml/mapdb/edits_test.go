@@ -171,7 +171,7 @@ func TestEncodeOver(t *testing.T) {
 	data, unkept, err := EncodeOver(m, []byte(handEdited), nil)
 	must(t, err)
 	got := string(data)
-	for _, want := range []string{utils.GetVersionAsComment() + "# Notes: TestB's mock-1 was moved back by hand, see the README.\n", "reviewed_by: agent\n", "ticket: JIRA-123\n", "note: keep this one\n", "o::TestC"} {
+	for _, want := range []string{utils.FileHead(utils.MappingsAbout) + "# Notes: TestB's mock-1 was moved back by hand, see the README.\n", "reviewed_by: agent\n", "ticket: JIRA-123\n", "note: keep this one\n", "o::TestC"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EncodeOver lost %q:\n%s", want, got)
 		}

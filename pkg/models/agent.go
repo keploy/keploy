@@ -289,7 +289,7 @@ type ScopeGateReq struct {
 	// switch, where it replaces Run.
 	Skip map[string]string `json:"skip,omitempty"`
 	// Report is the file this replay's report is written to, as the
-	// project names it (keploy/reports/<run>/replay.yaml): the reason a
+	// project names it (.keploy-run/runs/<run>/replay.yaml): the reason a
 	// failed test is given ends by naming it. Read under the proven switch;
 	// empty names none.
 	Report string `json:"report,omitempty"`
