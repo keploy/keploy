@@ -582,7 +582,8 @@ func (m *mockService) Record(ctx context.Context) error {
 	// With --record-requests, the test cases the test-case store refused
 	// (casesErr) are not in the recording either: the run is not saved, the
 	// same way, and the run says how many. Before, each was said at ERROR
-	// and left out, and the set was saved without it, exit 0.
+	// and left out, and the set was saved without it, exit 0. A case refused
+	// for its own body alone does not end the run: see captureCases.
 	casesErr := capture.notWritten()
 	if storeErr != nil && casesErr != nil {
 		storeErr = fmt.Errorf("%w; and %w", storeErr, casesErr)

@@ -842,7 +842,11 @@ func TestRecordRequests_ATestCaseItsFormatCannotHoldIsLeftOutAndCounted(t *testi
 	require.Len(t, files, 2, "the text test cases are kept, the binary ones left out")
 	said := logs.FilterMessageSnippet("test cases left out of the recording").All()
 	require.Len(t, said, 1)
+	require.Equal(t, zapcore.WarnLevel, said[0].Level, "a run that lost test cases says so above Info")
 	require.EqualValues(t, 2, said[0].ContextMap()["testCasesLeftOut"])
+	recorded := logs.FilterMessage("recorded test cases").All()
+	require.Len(t, recorded, 1)
+	require.EqualValues(t, 2, recorded[0].ContextMap()["cases"], "a case left out is no case of the recording")
 }
 
 // The line is for a run that left test cases out.
@@ -866,17 +870,21 @@ func (d *failsThirdTestDB) InsertTestCase(ctx context.Context, tc *models.TestCa
 	return d.TestYaml.InsertTestCase(ctx, tc, set, enableLog)
 }
 
-// A test case left out was dealt with, so it counts among those handled, and
-// it does not hide a real store failure beside it: that still ends the run as
-// not saved.
-func TestRecordRequests_ACaseLeftOutCountsAsHandled(t *testing.T) {
-	_, _, err := recordJSONCases(t, func(dir string) TestDB {
+// A test case left out was not written, so the count a real store failure beside
+// it ends the run with has both, of the three the store was handed. It does not
+// hide that failure: the run still ends as not saved, on the failure's error.
+func TestRecordRequests_ACaseLeftOutCountsAsNotWritten(t *testing.T) {
+	logs, _, err := recordJSONCases(t, func(dir string) TestDB {
 		return &failsThirdTestDB{TestYaml: testdb.NewWithFormat(zap.NewNop(), dir, yaml.FormatJSON)}
 	},
 		caseAt("", runnerT0.Add(5*time.Millisecond)),
 		binaryCaseAt(runnerT0.Add(15*time.Millisecond)),
 		caseAt("", runnerT0.Add(50*time.Millisecond)))
-	require.ErrorContains(t, err, "1 of the 3 test cases handed to the test-case store were not written")
+	require.ErrorContains(t, err, "2 of the 3 test cases handed to the test-case store were not written")
+	require.ErrorContains(t, err, "no space left on device")
+	said := logs.FilterMessageSnippet("test cases left out of the recording").All()
+	require.Len(t, said, 1, "one left out is said as two are")
+	require.EqualValues(t, 1, said[0].ContextMap()["testCasesLeftOut"])
 }
 
 // refusesTwoTestDB is the real test-case store, whose disk refuses the first
