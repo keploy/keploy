@@ -3552,44 +3552,78 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 
 // ShownAgentURI is uri as keploy says it, in its logs and in what it
 // reports: a password in it (a token an embedder sealed into it, as k8s-proxy
-// does in keploy-agent://) is shown as xxxxx (url.URL.Redacted). A URI that
-// does not parse, or parses with no host (scheme:rest, url.URL.Opaque), has
-// all of what comes before its last @ shown as xxxxx, from just past its
-// scheme's :// (or from its start where it has none): a password in it is
-// never shown, whatever characters it has, and a URI with an @ past its host
-// shows less of itself than it could, never its password.
+// does in keploy-agent://) is shown as xxxxx (url.URL.Redacted). A URI whose
+// @ is anything else (it does not parse, it parses with no host, or it has an
+// @ past its host: a raw / ? or # in a password ends the host early, so the
+// rest of the password reads as a path) has all of what comes before its last
+// @ shown as xxxxx, from just past its scheme's :// (or from its start where
+// it has none): a password in it is never shown, whatever characters it has,
+// and a URI with an @ past its host shows less of itself than it could, never
+// its password.
 func ShownAgentURI(uri string) string {
-	if u, err := url.Parse(uri); err == nil && u.Opaque == "" {
-		return u.Redacted()
-	}
 	at := strings.LastIndex(uri, "@")
 	if at < 0 {
 		return uri
 	}
-	if scheme, _, found := strings.Cut(uri[:at], "://"); found {
-		return scheme + "://xxxxx" + uri[at:]
+	if u, ok := agentURIWithUserinfo(uri); ok {
+		return u.Redacted()
+	}
+	if end := strings.Index(uri[:at], "://"); end > 0 && !strings.ContainsAny(uri[:end], ":/?#") {
+		return uri[:end] + "://xxxxx" + uri[at:]
 	}
 	return "xxxxx" + uri[at:]
 }
 
-// ShownAgentURIError is err, url.Parse's error for an agent URI (or a URL
-// made from one), as keploy says it: that error names the whole URI, a
-// password in it too, so its URI is shown as ShownAgentURI shows it, and a
-// bad escape in it (url.EscapeError, which names the escape, perhaps a part
-// of a password) is said with no more than that it is one. Any other error is
-// err as it is.
+// agentURIWithUserinfo is uri parsed, and whether it has a host and its one @
+// ends that host's userinfo: all that a password in it can then be is what
+// url.URL.User holds.
+func agentURIWithUserinfo(uri string) (*url.URL, bool) {
+	u, err := url.Parse(uri)
+	if err != nil || u.User == nil || strings.Count(uri, "@") != 1 {
+		return nil, false
+	}
+	return u, true
+}
+
+// ShownAgentURIError is err, an error from making or sending a request to an
+// agent URI, as keploy says it; every such error goes through it before a log
+// line or a reason says it. An error with no url.Error in it names no URI, and
+// is err as it is; so is one for a URI with no @, which has no password. Then:
+//   - url.Parse's error is said with none of its text: it names the URI, cut
+//     short at a raw # in a password, where no @ is left to show where the
+//     password ends, and its inner error quotes it too (a bad port, a bad
+//     escape). The caller says the URI itself (ShownAgentURI);
+//   - a request's error has its URI shown as ShownAgentURI shows it. Its
+//     inner error is kept only for a URI whose @ ends its userinfo, the one
+//     shape whose host and port hold nothing of a password.
 func ShownAgentURIError(err error) error {
 	var ue *url.Error
 	if !errors.As(err, &ue) {
 		return err
 	}
+	if ue.Op == "parse" {
+		return errAgentURINotParsed
+	}
+	if !strings.Contains(ue.URL, "@") {
+		return err
+	}
 	inner := ue.Err
-	var escape url.EscapeError
-	if errors.As(inner, &escape) {
-		inner = errors.New("invalid URL escape")
+	if _, ok := agentURIWithUserinfo(ue.URL); !ok {
+		inner = &agentRequestFailed{err: ue.Err}
 	}
 	return &url.Error{Op: ue.Op, URL: ShownAgentURI(ue.URL), Err: inner}
 }
+
+// errAgentURINotParsed is what ShownAgentURIError says of url.Parse's error.
+var errAgentURINotParsed = errors.New("the agent URI does not parse")
+
+// agentRequestFailed is what ShownAgentURIError says in place of a request's
+// inner error: none of err's text, while errors.Is and errors.As still read it
+// (a cancelled request stays one).
+type agentRequestFailed struct{ err error }
+
+func (e *agentRequestFailed) Error() string { return "the request failed" }
+func (e *agentRequestFailed) Unwrap() error { return e.err }
 
 // agentHealthFirstWait is how long the first agent health check waits for its
 // answer. An agent on the same host answers in well under a millisecond, and one
@@ -5545,7 +5579,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 		// is not evidence either way. Saying nothing beats crying wolf with an
 		// error that fails CI — and this attempt is deliberately NOT recorded,
 		// so a later readiness gate for the same agent tries again.
-		logger.Debug("agent authentication probe did not complete", zap.Error(err))
+		logger.Debug("agent authentication probe did not complete", zap.Error(ShownAgentURIError(err)))
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()

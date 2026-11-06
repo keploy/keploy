@@ -1287,22 +1287,24 @@ const agentBodyShown = 200
 //
 // What the looks find is the agent's progress, as far as it shows from
 // outside its host: a look that finds what no look of this wait found before
-// (another kind, another status: agentState) is a step. The wait is given up
-// on (pkg.ErrAgentNotReady) once the looks have found no new state, and the
-// last is not healthy, for bootSilence of keploy's runnable time: an agent
-// whose start makes progress is waited for however long that takes, as long
-// as each step comes within that bound, and one that never answers healthy (a
-// forward in front of nothing, an agent frozen, one that answers but never
-// healthy, or one whose answers go back and forth) is given up on, saying
-// why, as is one that stops (a look finds nothing takes a connection where
-// something took one before). keploy's runnable time accrues no faster than
-// keploy gets to run, so a box too loaded to run keploy does not run out the
-// bound either. A healthy answer is never given up on: the wait ends on it
-// (its own health check finds it).
+// (another kind, another status: agentState) is a step, and so is every
+// healthy look: healthy time is never silence. The wait is given up on
+// (pkg.ErrAgentNotReady) once the looks have found no new state and no
+// healthy answer for bootSilence of keploy's runnable time: an agent whose
+// start makes progress is waited for however long that takes, as long as each
+// step comes within that bound, and one that never answers healthy (a forward
+// in front of nothing, an agent frozen, one that answers but never healthy,
+// or one whose answers go back and forth) is given up on, saying why, as is
+// one that stops (the look that ends the wait finds nothing takes a
+// connection where something took one before). keploy's runnable time accrues
+// no faster than keploy gets to run, so a box too loaded to run keploy does
+// not run out the bound either. A look that finds it healthy never ends the
+// wait: its own health check finds that answer.
 //
 // It says every stillWaitingLooks looks that it still waits, and what it
-// found. Why it gives up is said once, by the error it sends: each caller
-// ends its run with that error, which says it.
+// found. Why it gives up it says at WARN, with the agent's URI masked, and
+// sends as its error. The WARN is the one line every caller gets: a caller may
+// say the error only at DEBUG and go on (the runner's release of the agent).
 //
 // ctx ends it; so does the wait, once the agent's health check answers.
 // over is closed once it has ended, its look with it (each look is on the
@@ -1348,12 +1350,14 @@ func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) (errs <-chan
 			}
 			wait = nextAgentLookWait(wait, l.kind == agentHeld)
 			now := clk.Runnable()
-			if !seen.states[l.state()] {
+			if !seen.states[l.state()] || l.kind == agentHealthy {
 				since = now
 			}
-			seen.note(l)
-			if l.kind != agentHealthy && now-since >= silence {
-				out <- seen.givenUp(shown, silence)
+			seen.note(l, now)
+			if now-since >= silence {
+				err := seen.givenUp(shown, silence, now)
+				a.logger.Warn("giving up on the keploy agent at "+shown, zap.Error(err))
+				out <- err
 				return
 			}
 			if looks%every == 0 {
@@ -1366,21 +1370,23 @@ func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) (errs <-chan
 }
 
 // agentSeen is what the looks at an agent known only by its URI have found:
-// the last look's, the last that found something take its connection, and
-// the last that got an answer; whether any found those, or a healthy answer;
-// and each state any found (agentState).
+// the last look's, the last that found something take its connection (and
+// when, in keploy's runnable time), and the last that got an answer; whether
+// any found those, or a healthy answer; and each state any found (agentState).
 type agentSeen struct {
 	last, lastTaken, lastAnswer agentLook
+	takenAt                     time.Duration
 	taken, answered, healthy    bool
 	states                      map[agentState]bool
 }
 
-// note adds the look l to what has been seen; s.states must not be nil.
-func (s *agentSeen) note(l agentLook) {
+// note adds the look l, taken at now of keploy's runnable time, to what has
+// been seen; s.states must not be nil.
+func (s *agentSeen) note(l agentLook, now time.Duration) {
 	s.states[l.state()] = true
 	s.last = l
 	if l.kind != agentRefused {
-		s.taken, s.lastTaken = true, l
+		s.taken, s.lastTaken, s.takenAt = true, l, now
 	}
 	if l.kind == agentAnswered || l.kind == agentHealthy {
 		s.answered, s.lastAnswer = true, l
@@ -1390,17 +1396,21 @@ func (s *agentSeen) note(l agentLook) {
 	}
 }
 
-// givenUp is why the wait for the agent at uri is given up on, the looks
-// having found no new state for silence of keploy's runnable time.
-func (s *agentSeen) givenUp(uri string, silence time.Duration) error {
+// givenUp is why the wait for the agent at uri is given up on at now of
+// keploy's runnable time, the looks having found no new state and no healthy
+// answer for silence of it. An agent that has stopped may have taken a
+// connection much later than the start of that silence (a refused look says
+// nothing new once one was refused), so the time since its last taken
+// connection is its own, from that look.
+func (s *agentSeen) givenUp(uri string, silence, now time.Duration) error {
 	var why string
 	switch {
 	case s.last.kind == agentRefused && !s.taken:
 		return fmt.Errorf("%w: nothing answers at %s: no keploy agent is there, or it has stopped; no connection was taken for %s of keploy's runnable time (%s); start the agent there, or point keploy at the one that runs (its agent URI)",
 			pkg.ErrAgentNotReady, uri, silence, s.last.found)
 	case s.last.kind == agentRefused:
-		why = fmt.Sprintf("the keploy agent at %s has stopped: something took connections there, and none was taken for %s of keploy's runnable time since (%s); the last look that found something there: %s",
-			uri, silence, s.last.found, s.lastTaken.found)
+		why = fmt.Sprintf("the keploy agent at %s has stopped: something took connections there, and none was taken for %s of keploy's runnable time since (%s); keploy found nothing new there for %s; the last look that found something there: %s",
+			uri, (now - s.takenAt).Round(time.Millisecond), s.last.found, silence, s.lastTaken.found)
 	default:
 		did := "never answered its health check healthy"
 		if s.healthy {
@@ -1437,11 +1447,11 @@ func lookAtAgentHealth(ctx context.Context, client *http.Client, healthURL strin
 	}
 	lookCtx, cancel := context.WithTimeout(httptrace.WithClientTrace(ctx, trace), wait)
 	defer cancel()
-	req, err := http.NewRequestWithContext(lookCtx, http.MethodGet, healthURL, nil)
+	req, err := newAgentRequest(lookCtx, http.MethodGet, healthURL, nil)
 	if err != nil {
-		return agentLook{kind: agentRefused, found: fmt.Sprintf("its health check cannot be asked (%v)", pkg.ShownAgentURIError(err))}
+		return agentLook{kind: agentRefused, found: fmt.Sprintf("its health check cannot be asked (%v)", err)}
 	}
-	res, err := client.Do(req)
+	res, err := doAgent(client, req)
 	switch {
 	case err != nil && !connected.Load():
 		return agentLook{kind: agentRefused, found: fmt.Sprintf("nothing takes a connection there yet (%v)", err)}

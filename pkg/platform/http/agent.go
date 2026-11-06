@@ -441,7 +441,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		return nil, fmt.Errorf("error marshaling request body for incoming request: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/incoming", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
+	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/incoming", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for incoming request")
 		return nil, fmt.Errorf("error creating request for incoming request: %s", err.Error())
@@ -453,7 +453,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 	// agentSession).
 	stream := a.session().openStream()
 	conn := stream.connect(ctx)
-	res, err := a.client.Do(req.WithContext(conn.ctx))
+	res, err := doAgent(&a.client, req.WithContext(conn.ctx))
 	if err != nil {
 		stream.close()
 		return nil, fmt.Errorf("failed to get incoming: %s", err.Error())
@@ -784,7 +784,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("error marshaling request body for mock outgoing: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/outgoing", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
+	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/outgoing", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return nil, fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -796,7 +796,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	// agentSession).
 	stream := a.session().openStream()
 	conn := stream.connect(ctx)
-	res, err := a.client.Do(req.WithContext(conn.ctx))
+	res, err := doAgent(&a.client, req.WithContext(conn.ctx))
 	if err != nil {
 		stream.close()
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
@@ -900,7 +900,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 
 	a.logger.Debug("Connecting to mappings stream...")
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/mappings", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/mappings", a.conf.Agent.AgentURI), nil)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mappings")
 		return nil, fmt.Errorf("error creating request for mappings: %s", err.Error())
@@ -912,7 +912,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 	// agentSession).
 	stream := a.session().openStream()
 	conn := stream.connect(ctx)
-	res, err := a.client.Do(req.WithContext(conn.ctx))
+	res, err := doAgent(&a.client, req.WithContext(conn.ctx))
 	if err != nil {
 		stream.close()
 		return nil, fmt.Errorf("failed to get mappings response: %s", err.Error())
@@ -1041,7 +1041,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	}
 
 	// mock outgoing request
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/mock", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
+	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/mock", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -1049,7 +1049,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	req.Header.Set("Content-Type", "application/json")
 
 	// Make the HTTP request
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return fmt.Errorf("failed to send request for mockOutgoing: %s", err.Error())
 	}
@@ -1236,14 +1236,14 @@ func (a *AgentClient) callHook(ctx context.Context, endpoint string, payload any
 	}
 	hctx, stop := a.whileAgentRuns(ctx)
 	defer stop()
-	req, err := http.NewRequestWithContext(hctx, http.MethodPost, a.conf.Agent.AgentURI+endpoint, bytes.NewReader(body))
+	req, err := newAgentRequest(hctx, http.MethodPost, a.conf.Agent.AgentURI+endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	ended := make(chan bool, 1)
 	go a.sayHookWait(endpoint, ended, hookNoticeAfter, hookStillWaitingEvery)
-	resp, err := a.client.Do(req)
+	resp, err := doAgent(&a.client, req)
 	ended <- err == nil
 	if err != nil {
 		if errors.Is(context.Cause(hctx), errAgentExited) {
@@ -1394,11 +1394,11 @@ const storeMocksEncodingProbeTimeout = 30 * time.Second
 func (a *AgentClient) storeMocksEncoding(ctx context.Context) string {
 	ctx, cancel := context.WithTimeout(ctx, storeMocksEncodingProbeTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.Agent.AgentURI), nil)
 	if err != nil {
 		return ""
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		a.logger.Debug("could not ask the agent whether it takes compressed mocks; sending them uncompressed", zap.Error(err))
 		return ""
@@ -1566,7 +1566,7 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 		_ = pw.Close()
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+	req, err := newAgentRequest(ctx, http.MethodPost,
 		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI), pr)
 	if err != nil {
 		// The transport never took ownership of pr, so nothing else will ever
@@ -1584,7 +1584,7 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 		req.Header.Set("Content-Encoding", encoding)
 	}
 
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, sent, fmt.Errorf("send request for storemocks: %s", err.Error())
 	}
@@ -1788,14 +1788,14 @@ func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilt
 		return nil, false, fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/updatemockparams", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
+	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/updatemockparams", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for updatemockparams")
 		return nil, false, fmt.Errorf("error creating request for update mock params: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
 	}
@@ -1836,14 +1836,14 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState,
 	// Create the URL with query parameters
 	url := fmt.Sprintf("%s/consumedmocks", a.conf.Agent.AgentURI)
 	// Create a new GET request with the query parameter
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %s", err.Error())
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request for mockOutgoing: %s", err.Error())
 	}
@@ -1879,11 +1879,11 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState,
 // of it consumption. An agent that cannot say (404, 501) learned none: nil.
 func (a *AgentClient) GetLearnedElsewhere(ctx context.Context) ([]models.MockState, error) {
 	url := fmt.Sprintf("%s/mock/learned-elsewhere", a.conf.Agent.AgentURI)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %s", err.Error())
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ask keploy's agent what it learned from calls made in other windows: %s", err.Error())
 	}
@@ -1914,14 +1914,14 @@ func (a *AgentClient) GetLearnedElsewhere(ctx context.Context) ([]models.MockSta
 // consume the state that the end-of-run outcome report and --strict depend on.
 func (a *AgentClient) GetServedMocks(ctx context.Context) (map[string]models.MockState, error) {
 	url := fmt.Sprintf("%s/mock/served", a.conf.Agent.AgentURI)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %s", err.Error())
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request for served mocks: %s", err.Error())
 	}
@@ -1957,14 +1957,14 @@ func (a *AgentClient) GetServedMocks(ctx context.Context) (map[string]models.Moc
 // of zero.
 func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error) {
 	url := fmt.Sprintf("%s/mock/stats", a.conf.Agent.AgentURI)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
 		return models.MockStats{}, fmt.Errorf("failed to create request: %s", err.Error())
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return models.MockStats{}, fmt.Errorf("failed to send request for mock stats: %s", err.Error())
 	}
@@ -2007,11 +2007,11 @@ func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error
 // models.ErrPIDMapRefusalsUnsupported, which is "unknown", not "none".
 func (a *AgentClient) GetPIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error) {
 	url := fmt.Sprintf("%s/pidmaps", a.conf.Agent.AgentURI)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return models.PIDMapRefusals{}, fmt.Errorf("failed to create request: %w", err)
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return models.PIDMapRefusals{}, fmt.Errorf("failed to ask the agent for refused PID map inserts: %w", err)
 	}
@@ -2071,11 +2071,11 @@ type lossesAnswer struct {
 // getCaptureLossesAndAgent is GetCaptureLossesAndAgent's exchange, unbounded.
 func (a *AgentClient) getCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error) {
 	url := fmt.Sprintf("%s/capturelosses", a.conf.Agent.AgentURI)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create request: %w", err)
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to ask the agent for its capture losses: %w", err)
 	}
@@ -2111,11 +2111,11 @@ func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.Cap
 // unbounded.
 func (a *AgentClient) getUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
 	url := fmt.Sprintf("%s/capturelosses/uncharged", a.conf.Agent.AgentURI)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ask the agent for the capture losses no test was charged with: %w", err)
 	}
@@ -2150,11 +2150,11 @@ func (a *AgentClient) TakeOwnedCaptureLosses(ctx context.Context) ([]models.Owne
 // takeOwnedCaptureLosses is TakeOwnedCaptureLosses's exchange, unbounded.
 func (a *AgentClient) takeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error) {
 	url := fmt.Sprintf("%s/capturelosses/owned", a.conf.Agent.AgentURI)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	req, err := newAgentRequest(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to take the capture losses a cut-short end owned from the agent: %w", err)
 	}
@@ -2828,7 +2828,7 @@ func (a *AgentClient) requestAgentStop() error {
 	stopCtx, cancel := context.WithTimeout(context.Background(), agentStopRequestTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(stopCtx, http.MethodPost, fmt.Sprintf("%s/stop", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(stopCtx, http.MethodPost, fmt.Sprintf("%s/stop", a.conf.Agent.AgentURI), nil)
 	if err != nil {
 		return err
 	}
@@ -2839,7 +2839,7 @@ func (a *AgentClient) requestAgentStop() error {
 	// ("server closed idle connection") with an agent that was not going
 	// away, and that agent was signalled at once.
 	client := a.ownConnection()
-	res, err := client.Do(req)
+	res, err := doAgent(&client, req)
 	if err != nil {
 		return err
 	}
@@ -3346,11 +3346,11 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 // transport failure or a status other than 200 is an error: the header of
 // such an answer says nothing about the agent.
 func (a *AgentClient) readAgentSwitch(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.Agent.AgentURI), nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to build the agent health request: %w", err)
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return "", err
 	}
@@ -3447,11 +3447,11 @@ func relaxPerfEventParanoid() error {
 // returned bytes are a PEM certificate — public material, never the private key.
 func (a *AgentClient) fetchAgentCA(ctx context.Context) ([]byte, error) {
 	url := fmt.Sprintf("%s/ca", a.conf.Agent.AgentURI)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build CA request: %w", err)
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to request the agent CA: %w", err)
 	}
@@ -3579,7 +3579,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if host := kdocker.PresetAgentIP(a.conf); host != "" {
 		opts.AgentURI = fmt.Sprintf("http://%s:%d/agent", host, agentPort)
 		a.logger.Info("addressing the agent by its pinned container address, not loopback",
-			zap.String("agentURI", opts.AgentURI))
+			zap.String("agentURI", pkg.ShownAgentURI(opts.AgentURI)))
 	} else {
 		opts.AgentURI = fmt.Sprintf("http://localhost:%d/agent", agentPort)
 	}
@@ -4483,13 +4483,13 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 		// ignores it, and reads as it reads a test's end.
 		url += "?" + models.SetEndReadQuery + "=1"
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get mock errors: %s", err.Error())
 	}
@@ -4537,13 +4537,13 @@ func (a *AgentClient) openTestErrorCapture(ctx context.Context, carry bool) erro
 	if carry {
 		url += "?carry=1"
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	req, err := newAgentRequest(ctx, "POST", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return fmt.Errorf("failed to begin test error capture: %s", err.Error())
 	}
@@ -4581,11 +4581,11 @@ func (a *AgentClient) BacklogBefore(ctx context.Context, before time.Time) (mode
 	reqCtx, cancel := context.WithTimeout(ctx, agentBacklogProbeTimeout)
 	defer cancel()
 	url := fmt.Sprintf("%s/record/pending?before=%d", a.conf.Agent.AgentURI, before.UnixNano())
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	req, err := newAgentRequest(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return models.AgentBacklog{}, err
 	}
-	resp, err := a.client.Do(req)
+	resp, err := doAgent(&a.client, req)
 	if err != nil {
 		return models.AgentBacklog{}, err
 	}
@@ -4626,14 +4626,14 @@ func (a *AgentClient) EndRecordingStreams(ctx context.Context, token string) err
 	if a.conf.Agent.AgentURI == "" {
 		return errors.New("no agent to end the streams of")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+models.StreamEndPath+"?token="+neturl.QueryEscape(token), nil)
+	req, err := newAgentRequest(ctx, http.MethodPost, a.conf.Agent.AgentURI+models.StreamEndPath+"?token="+neturl.QueryEscape(token), nil)
 	if err != nil {
 		return err
 	}
 	// A round's end cancels this request once the streams are read to their
 	// markers, which the agent sends just before it answers (ownConnection).
 	client := a.ownConnection()
-	resp, err := client.Do(req)
+	resp, err := doAgent(&client, req)
 	if err != nil {
 		return err
 	}
@@ -4690,14 +4690,14 @@ func (a *AgentClient) WatchAgentStop(ctx context.Context) <-chan struct{} {
 // the agent said a stop reached it; neither answered nor an error from an
 // agent without the route.
 func (a *AgentClient) awaitStopNotice(ctx context.Context) (answered bool, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+models.StopNoticePath, nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.Agent.AgentURI+models.StopNoticePath, nil)
 	if err != nil {
 		return false, err
 	}
 	// Held open beside the run's requests, and cancelled as the run ends
 	// (ownConnection).
 	client := a.ownConnection()
-	resp, err := client.Do(req)
+	resp, err := doAgent(&client, req)
 	if err != nil {
 		return false, err
 	}
@@ -4739,11 +4739,11 @@ func (a *AgentClient) NotifyStopBegun(ctx context.Context) error {
 	if a.conf.Agent.AgentURI == "" {
 		return nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/stop-begun", nil)
+	req, err := newAgentRequest(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/stop-begun", nil)
 	if err != nil {
 		return err
 	}
-	resp, err := a.client.Do(req)
+	resp, err := doAgent(&a.client, req)
 	if err != nil {
 		return err
 	}
@@ -4779,13 +4779,13 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 	reqCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, "POST", url, nil)
+	req, err := newAgentRequest(reqCtx, "POST", url, nil)
 	if err != nil {
 		a.logger.Debug("failed to create graceful shutdown request", zap.Error(err))
 		return err
 	}
 
-	resp, err := a.client.Do(req)
+	resp, err := doAgent(&a.client, req)
 	if err != nil {
 		// Don't log as error since this might fail during shutdown
 		a.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
@@ -4886,12 +4886,12 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 			}
 		}
 
-		req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+		req, err := newAgentRequest(ctx, "POST", url, nil)
 		if err != nil {
 			return err
 		}
 
-		resp, err := a.client.Do(req)
+		resp, err := doAgent(&a.client, req)
 		if err == nil {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			_, _ = io.Copy(io.Discard, resp.Body)
@@ -4961,7 +4961,7 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 // spurious errors at recording stop.
 func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile string, mode os.FileMode, appendable bool) error {
 	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, urlPath)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("build pcap stream request: %w", err)
 	}
@@ -4971,12 +4971,12 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 	stream := a.session().openStream()
 	defer stream.close()
 	conn := stream.connect(ctx)
-	resp, err := a.client.Do(req.WithContext(conn.ctx))
+	resp, err := doAgent(&a.client, req.WithContext(conn.ctx))
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil
 		}
-		return fmt.Errorf("dial %s: %w", url, err)
+		return fmt.Errorf("dial %s: %w", pkg.ShownAgentURI(url), err)
 	}
 	resp.Body = conn.body(resp.Body)
 	for n := 1; ; n++ {
@@ -4987,7 +4987,7 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 			ext := filepath.Ext(dstFile)
 			path = fmt.Sprintf("%s.%d%s", strings.TrimSuffix(dstFile, ext), n, ext)
 		}
-		copyErr, err := a.copyPcapStream(resp, url, path, flags, mode)
+		copyErr, err := a.copyPcapStream(resp, pkg.ShownAgentURI(url), path, flags, mode)
 		if errors.Is(err, errNoPcapStream) {
 			return nil
 		}
@@ -5007,26 +5007,27 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 // errNoPcapStream is an agent with no pcap stream to serve: capture is off.
 var errNoPcapStream = errors.New("the agent serves no pcap stream")
 
-// copyPcapStream writes one pcap stream response to path. It returns how the
-// copy ended, and an error when there was nothing to copy into a file
+// copyPcapStream writes one pcap stream response to path, shownURL being the
+// stream's URL as keploy says it (pkg.ShownAgentURI). It returns how the copy
+// ended, and an error when there was nothing to copy into a file
 // (errNoPcapStream when capture is off).
-func (a *AgentClient) copyPcapStream(resp *http.Response, url, path string, flags int, mode os.FileMode) (copyErr, err error) {
+func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, path string, flags int, mode os.FileMode) (copyErr, err error) {
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil && !errors.Is(cerr, context.Canceled) {
-			a.logger.Debug("failed to close pcap stream body", zap.String("url", url), zap.Error(cerr))
+			a.logger.Debug("failed to close pcap stream body", zap.String("url", shownURL), zap.Error(cerr))
 		}
 	}()
 
 	switch resp.StatusCode {
 	case http.StatusNotFound, http.StatusServiceUnavailable:
 		a.logger.Debug("agent reports no pcap stream available; capture likely off",
-			zap.String("url", url))
+			zap.String("url", shownURL))
 		return nil, errNoPcapStream
 	case http.StatusOK:
 		// fall through to the long copy below
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("stream %s: status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("stream %s: status %d: %s", shownURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	out, err := os.OpenFile(path, flags, mode)
@@ -5041,10 +5042,10 @@ func (a *AgentClient) copyPcapStream(resp *http.Response, url, path string, flag
 	}()
 
 	a.logger.Debug("pcap stream connected",
-		zap.String("url", url), zap.String("path", path))
+		zap.String("url", shownURL), zap.String("path", path))
 	written, copyErr := io.Copy(out, resp.Body)
 	a.logger.Debug("pcap stream ended",
-		zap.String("url", url),
+		zap.String("url", shownURL),
 		zap.String("path", path),
 		zap.Int64("bytes", written),
 		zap.Error(copyErr))
@@ -5065,11 +5066,11 @@ func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow
 		// the read is the one keploy made before the switch.
 		url += "?final=1"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create scope-windows request: %w", err)
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get scope windows: %w", err)
 	}
@@ -5108,12 +5109,12 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 	if err != nil {
 		return fmt.Errorf("failed to marshal the set table: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return fmt.Errorf("failed to push the set table: %w", err)
 	}
@@ -5158,12 +5159,12 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create scope-table request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return fmt.Errorf("failed to push scope table: %w", err)
 	}
@@ -5197,12 +5198,12 @@ func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests' recorded begins: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/replay/clock", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/replay/clock", a.conf.Agent.AgentURI), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return fmt.Errorf("failed to send the agent the tests' recorded begins: %w", err)
 	}
@@ -5232,12 +5233,12 @@ func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]str
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create scope-table request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return fmt.Errorf("failed to push scope table: %w", err)
 	}
@@ -5270,12 +5271,12 @@ func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason st
 	if err != nil {
 		return fmt.Errorf("failed to marshal the scope gate: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.Agent.AgentURI), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create the scope-gate request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return fmt.Errorf("failed to push the scope gate: %w", err)
 	}
@@ -5309,12 +5310,12 @@ func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests to skip: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.Agent.AgentURI), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create the scope-gate request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return fmt.Errorf("failed to push the tests to skip: %w", err)
 	}
@@ -5340,11 +5341,11 @@ func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string
 // during a `--on-miss record` replay session. The CLI appends them to the set.
 func (a *AgentClient) DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error) {
 	url := fmt.Sprintf("%s/mock/captured", a.conf.Agent.AgentURI)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create captured-mocks request: %w", err)
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get captured mocks: %w", err)
 	}
@@ -6073,11 +6074,11 @@ func (a *AgentClient) restoreShortfall(ctx context.Context, name string) (proble
 }
 
 func (a *AgentClient) GetIDPairs(ctx context.Context) (map[string]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/ids", nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/ids", nil)
 	if err != nil {
 		return nil, err
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, err
 	}
@@ -6099,11 +6100,11 @@ func (a *AgentClient) TestVariables(ctx context.Context) ([]models.VariableBindi
 	if a.conf.Agent.AgentURI == "" {
 		return nil, errors.New("keploy has no agent to read the test's variables from")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/variables", nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/variables", nil)
 	if err != nil {
 		return nil, err
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return nil, err
 	}

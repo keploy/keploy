@@ -868,13 +868,15 @@ func TestAStaleReadyReportDoesNotLatch(t *testing.T) {
 	}
 }
 
-// A URI where nothing takes a connection is given up on only once nothing
-// has, without a break, for bootSilence of keploy's runnable time: a
-// connection taken in between starts the count again.
-func TestAnAgentURIsSilenceCountsFromTheLastTakenConnection(t *testing.T) {
+// A look that finds a new state starts the bound again: a first taken
+// connection, between refused looks that are 3 looks apart from each other at
+// most, keeps them from adding up to the bound (5 looks). Only a new state
+// does: refused and closed in turn do add up
+// (TestAnAgentURIsReasonSaysHowLongSinceItsLastTakenConnection).
+func TestAnAgentURIsBoundCountsFromItsLastNewState(t *testing.T) {
 	fastURILooks(t)
 	// 3 looks refused, 1 taken, 3 refused, then healthy for good: never 5
-	// refused in a row, at a second of runnable time a look.
+	// looks with no new state, at a second of runnable time a look.
 	script := []agentLookKind{agentRefused, agentRefused, agentRefused, agentClosed, agentRefused, agentRefused, agentRefused}
 	n := scriptLooks(t, script, agentLook{kind: agentHealthy, status: http.StatusOK, found: "scripted"})
 	watchScripted(t, n, len(script)+20)
