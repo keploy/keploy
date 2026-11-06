@@ -260,15 +260,16 @@ func TestAnAgentURIThatStopsIsGivenUpOnAsStopped(t *testing.T) {
 }
 
 // A token an embedder sealed into the agent's URI (k8s-proxy's
-// keploy-agent://, its password) is never said, nor any part of it: the
-// watch's lines, at any level, and its reason show it as xxxxx, whatever its
-// shape. Where a raw character in the password leaves the URI unparsed, or
+// keploy-agent://, its password; a name would do as well) is never said, nor
+// any part of it: the watch's lines, at any level, and its reason show it as
+// xxxxx, whatever its shape. Where a raw character in the password leaves the URI unparsed, or
 // parsed with the password as something else (a path, or no host at all), the
 // errors of url.Parse and of the request that keploy says quote it, so each
 // goes through the mask.
 func TestAnAgentURIsSealedTokenIsNeverSaid(t *testing.T) {
 	cases := map[string]struct{ uri, shown string }{
-		"a URI that parses":                {"http://:s3aled-t0ken@%s/agent", "http://:xxxxx@%s/agent"},
+		"a URI that parses":                {"http://:s3aled-t0ken@%s/agent", "http://xxxxx@%s/agent"},
+		"a token as its name":              {"http://s3aled-t0ken@%s/agent", "http://xxxxx@%s/agent"},
 		"a URI that does not parse":        {"keploy-agent://:s3aled%%zzt0ken@%s/agent", "keploy-agent://xxxxx@%s/agent"},
 		"no host part":                     {"agent:s3aled-t0ken@%s/agent", "xxxxx@%s/agent"},
 		"a raw / in the password":          {"keploy-agent://:s3aled/t0ken@%s/agent", "keploy-agent://xxxxx@%s/agent"},
@@ -310,13 +311,15 @@ func TestAnAgentURIsSealedTokenIsNeverSaid(t *testing.T) {
 
 // socketLooks makes each look at the URI a real one (lookAtAgentHealth), on
 // the real socket at(i) names for look i (from 0), and returns the count of
-// looks.
+// looks. Each look ends when its socket refuses, answers or closes; its wait
+// is far past that, so a starved box cannot run a look out of time and make
+// it find a state its socket did not show.
 func socketLooks(t *testing.T, at func(i int) string) *atomic.Int32 {
 	t.Helper()
 	var n atomic.Int32
 	prev := lookAtAgent
-	lookAtAgent = func(ctx context.Context, c *http.Client, _ string, w time.Duration) agentLook {
-		return lookAtAgentHealth(ctx, c, at(int(n.Add(1))-1)+"/health", w)
+	lookAtAgent = func(ctx context.Context, c *http.Client, _ string, _ time.Duration) agentLook {
+		return lookAtAgentHealth(ctx, c, at(int(n.Add(1))-1)+"/health", time.Minute)
 	}
 	t.Cleanup(func() { lookAtAgent = prev })
 	return &n
@@ -501,7 +504,7 @@ func TestAFrozenAgentAtItsReleaseIsSaidAtWarn(t *testing.T) {
 	if !errors.Is(err, pkg.ErrAgentNotReady) {
 		t.Fatalf("the release ended with %v; want pkg.ErrAgentNotReady", err)
 	}
-	said := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("giving up on the keploy agent at http://:xxxxx@" + host).All()
+	said := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("giving up on the keploy agent at http://xxxxx@" + host).All()
 	if len(said) != 1 || !strings.Contains(fmt.Sprint(said[0].ContextMap()["error"]), "scripted: holds them with no answer") {
 		t.Fatalf("logged %v; want one WARN that says why, its URI masked", logs.All())
 	}
@@ -518,7 +521,7 @@ func TestEveryAgentRequestGoesThroughTheMask(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("the package's files: %v, %v", files, err)
 	}
-	raw := regexp.MustCompile(`\bhttp\.NewRequest(WithContext)?\(|\.Do\(req|[cC]lient\.(Get|Head|Post|PostForm)\(`)
+	raw := regexp.MustCompile(`\bhttp\.NewRequest(WithContext)?\(|\.Do\(|\b(http|[cC]lient)\.(Get|Head|Post|PostForm)\(`)
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") || f == "agent_request.go" {
 			continue
@@ -528,7 +531,8 @@ func TestEveryAgentRequestGoesThroughTheMask(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i, line := range strings.Split(string(src), "\n") {
-			if raw.MatchString(line) && !strings.HasPrefix(strings.TrimSpace(line), "//") {
+			// A sync.Once's Do takes a func; a client's, a request.
+			if raw.MatchString(line) && !strings.Contains(line, ".Do(func(") && !strings.HasPrefix(strings.TrimSpace(line), "//") {
 				t.Errorf("%s:%d makes or sends a request outside newAgentRequest and doAgent: %s", f, i+1, strings.TrimSpace(line))
 			}
 		}
@@ -555,7 +559,7 @@ func TestTheWaitForARestartedAgentNeverSaysTheURIsPassword(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), tc.within)
 			defer cancel()
 			err := clientFor("http://:s3aled-t0ken@" + addr + "/agent").awaitAgentAnswers(ctx)
-			if err == nil || !strings.Contains(err.Error(), tc.want+" http://:xxxxx@"+addr+"/agent") || strings.Contains(err.Error(), "s3aled") {
+			if err == nil || !strings.Contains(err.Error(), tc.want+" http://xxxxx@"+addr+"/agent") || strings.Contains(err.Error(), "s3aled") {
 				t.Fatalf("the wait said %v; want %q, its URI masked", err, tc.want)
 			}
 		})
@@ -576,8 +580,8 @@ func TestThePcapStreamNeverSaysTheURIsPassword(t *testing.T) {
 	t.Cleanup(srv.Close)
 	host := strings.TrimPrefix(srv.URL, "http://")
 	cases := map[string]struct{ addr, path, want string }{
-		"the agent cannot be dialled": {refused, "/pcap", "dial http://:xxxxx@" + refused + "/agent/pcap"},
-		"the stream answers an error": {host, "/pcap", "stream http://:xxxxx@" + host + "/agent/pcap: status 500"},
+		"the agent cannot be dialled": {refused, "/pcap", "dial http://xxxxx@" + refused + "/agent/pcap"},
+		"the stream answers an error": {host, "/pcap", "stream http://xxxxx@" + host + "/agent/pcap: status 500"},
 		"the agent has no stream":     {host, "/none", ""},
 	}
 	for name, tc := range cases {
@@ -589,7 +593,7 @@ func TestThePcapStreamNeverSaysTheURIsPassword(t *testing.T) {
 			case tc.want == "" && err != nil,
 				tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
 				t.Fatalf("the stream said %v; want %q", err, tc.want)
-			case tc.want == "" && logs.FilterField(zap.String("url", "http://:xxxxx@"+tc.addr+"/agent"+tc.path)).Len() == 0:
+			case tc.want == "" && logs.FilterField(zap.String("url", "http://xxxxx@"+tc.addr+"/agent"+tc.path)).Len() == 0:
 				t.Fatalf("logged %v; want a line with the stream's URL masked", logs.All())
 			}
 			said := fmt.Sprint(err, logs.All())

@@ -80,7 +80,7 @@ func TestSetupTestSetNeverSaysTheAgentURIsPassword(t *testing.T) {
 	if err == nil {
 		setup.cleanup()
 	}
-	if err == nil || !strings.Contains(err.Error(), "keploy-agent at keploy-agent://:xxxxx@"+addr+"/agent did not come up") || strings.Contains(err.Error(), "s3aled") {
+	if err == nil || !strings.Contains(err.Error(), "keploy-agent at keploy-agent://xxxxx@"+addr+"/agent did not come up") || strings.Contains(err.Error(), "s3aled") {
 		t.Fatalf("setupTestSet = %v; want the agent that did not come up, its URI masked", err)
 	}
 }

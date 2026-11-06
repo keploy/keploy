@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,15 +22,18 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// An agent URI is said with no password in it (a token an embedder sealed
-// into it, as k8s-proxy does in keploy-agent://), whatever its shape: one
-// that parses, its one @ ending its host's userinfo, shows the password as
-// xxxxx; any other with an @ shows all of what comes before its last @ as
-// xxxxx, past its scheme's ://; one with no @ is shown as it is.
+// An agent URI is said with no part of its userinfo in it (a token an
+// embedder sealed into it, as k8s-proxy does in keploy-agent://, or a name),
+// whatever its shape: all of what comes before its last @ is shown as xxxxx,
+// past a scheme's ://. One with no @ is shown as it is.
 func TestShownAgentURI(t *testing.T) {
 	cases := map[string]struct{ uri, want string }{
-		"parses":                               {"http://:s3aled-t0ken@host:1/agent", "http://:xxxxx@host:1/agent"},
-		"parses, with no password":             {"http://host:1/agent", "http://host:1/agent"},
+		"a password":                           {"http://:s3aled-t0ken@host:1/agent", "http://xxxxx@host:1/agent"},
+		"a name and a password":                {"http://u:s3aled-t0ken@host:1/agent", "http://xxxxx@host:1/agent"},
+		"a name alone":                         {"http://s3aled-t0ken@host:1/agent", "http://xxxxx@host:1/agent"},
+		"a name with an escape in it":          {"agent://s3aled%4191378@host:1/agent", "agent://xxxxx@host:1/agent"},
+		"an @ in the name":                     {"http://s3aled%40t0ken@host:1/agent", "http://xxxxx@host:1/agent"},
+		"no userinfo":                          {"http://host:1/agent", "http://host:1/agent"},
 		"does not parse (a bad escape)":        {"keploy-agent://:s3aled%zzt0ken@host:1/agent", "keploy-agent://xxxxx@host:1/agent"},
 		"does not parse, an @ in its password": {"keploy-agent://u:s3aled%zz@t0ken@host:1/agent", "keploy-agent://xxxxx@host:1/agent"},
 		"no host part (scheme:rest)":           {"agent:s3aled-t0ken@host:1", "xxxxx@host:1"},
@@ -40,12 +44,19 @@ func TestShownAgentURI(t *testing.T) {
 		"a raw # in its password":              {"http://u:s3aled#t0ken@host:1/agent", "http://xxxxx@host:1/agent"},
 		"two @ in its userinfo":                {"http://u:s3aled@t0ken@host:1/agent", "http://xxxxx@host:1/agent"},
 		"userinfo, and an @ past its host":     {"http://u:s3aled@host:1/x@y", "http://xxxxx@y"},
-		"a :// in the password, no host part":  {"agent:s3aled://t0ken@host:1", "xxxxx@host:1"},
-		"a / before a :// in the password":     {"a/b://s3aled@host:1", "xxxxx@host:1"},
-		"a ? before a :// in the password":     {"a?b://s3aled@host:1", "xxxxx@host:1"},
-		"a # before a :// in the password":     {"a#b://s3aled@host:1", "xxxxx@host:1"},
 		"an @, then a / in its password":       {"http://:s3@aled/t0ken@host:1/agent", "http://xxxxx@host:1/agent"},
-		"nothing before its ://":               {"://s3aled@host:1", "xxxxx@host:1"},
+		// What comes before a :// that is no scheme's is said by nothing.
+		"a :// in the password, no host part": {"agent:s3aled://t0ken@host:1", "xxxxx@host:1"},
+		"a / before a :// in the password":    {"a/b://s3aled@host:1", "xxxxx@host:1"},
+		"a ? before a :// in the password":    {"a?b://s3aled@host:1", "xxxxx@host:1"},
+		"a # before a :// in the password":    {"a#b://s3aled@host:1", "xxxxx@host:1"},
+		"an @ before a :// in the password":   {"s3aled@b://t0ken@host:1", "xxxxx@host:1"},
+		"a % before a :// in the password":    {"s3aled%41://t0ken@host:1", "xxxxx@host:1"},
+		"a space before a :// in the name":    {"s3 aled://t0ken@host:1", "xxxxx@host:1"},
+		"a digit first, no scheme":            {"1a://s3aled@host:1", "xxxxx@host:1"},
+		"nothing before its ://":              {"://s3aled@host:1", "xxxxx@host:1"},
+		// Each character a scheme can have.
+		"a scheme of every kind of character": {"Ab1+.-://s3aled@host:1", "Ab1+.-://xxxxx@host:1"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -116,7 +127,8 @@ func TestShownAgentURIErrorOfARequest(t *testing.T) {
 		uri  string
 		want string
 	}{
-		"its @ ends its userinfo": {"http://u:s3aled@host:1/agent/health", `Get "http://u:xxxxx@host:1/agent/health": ` + dial.Error()},
+		"its @ ends its userinfo": {"http://u:s3aled@host:1/agent/health", `Get "http://xxxxx@host:1/agent/health": ` + dial.Error()},
+		"a token as its name":     {"http://s3aled@host:1/agent/health", `Get "http://xxxxx@host:1/agent/health": ` + dial.Error()},
 		"no host part":            {"agent:s3aled-t0ken@host:1/agent/health", `Get "xxxxx@host:1/agent/health": the request failed`},
 		"digits, then a /":        {"http://:123/s3aled@host:1/agent/health", `Get "http://xxxxx@host:1/agent/health": the request failed`},
 		"digits, then a #":        {"http://:123#s3aled@host:1/agent/health", `Get "http://xxxxx@host:1/agent/health": the request failed`},
@@ -135,6 +147,12 @@ func TestShownAgentURIErrorOfARequest(t *testing.T) {
 				t.Fatalf("%v is no url.Error of a GET", got)
 			}
 		})
+	}
+	// A URI that does not parse has no @ known to end its userinfo: url.Parse
+	// reads none of it, should a request's error ever name one.
+	bad := &url.Error{Op: "Get", URL: "http://u:s3aled%zz@host:1/agent/health", Err: dial}
+	if got, want := ShownAgentURIError(bad).Error(), `Get "http://xxxxx@host:1/agent/health": the request failed`; got != want {
+		t.Fatalf("ShownAgentURIError said %q; want %q", got, want)
 	}
 	// Shown twice, it says the same.
 	once := ShownAgentURIError(doError(t, "agent:s3aled-t0ken@host:1/agent/health", dial))
@@ -159,6 +177,87 @@ func TestShownAgentURIErrorLeavesTheRestAsTheyAre(t *testing.T) {
 	}
 }
 
+// failsNamingItsURL is a transport that fails as a dial does, its error
+// saying each part of the request's URL that an inner error can say.
+type failsNamingItsURL struct{}
+
+var errDialFailed = errors.New("connect: connection refused")
+
+func (failsNamingItsURL) RoundTrip(r *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("dial tcp %s: %w (path %s, fragment %s, query %s)", r.URL.Host, errDialFailed, r.URL.Path, r.URL.Fragment, r.URL.RawQuery)
+}
+
+// For userinfo of any raw characters, in every shape of agent URI, no mark of
+// it is said: not by ShownAgentURI, not by the error of a URI that does not
+// parse, and not by a request's error, from a transport that says all of the
+// request's URL or from one that has no such scheme. What a request's error
+// hides, errors.Is still reads. The seed is fixed: a run that fails fails again.
+func TestNoPartOfAnAgentURIsUserinfoIsEverSaid(t *testing.T) {
+	marks := []string{"s3aled", "t0ken", "91378"}
+	marked := func(s string) bool {
+		for _, m := range marks {
+			if strings.Contains(s, m) {
+				return true
+			}
+		}
+		return false
+	}
+	parts := append([]string{"/", "?", "#", "@", ":", "%zz", "%41", " ", "[", "]", "://", "\\", "\n", "\t", ";", "&", "=", "+", ",", "*", "~", "%", "!", "$", "'", "(", ")"}, marks...)
+	shapes := []string{
+		"http://USERINFO@127.0.0.1:1/agent", "keploy-agent://USERINFO@127.0.0.1:1/agent", "HTTP://USERINFO@127.0.0.1:1/agent",
+		"http://:USERINFO@127.0.0.1:1/agent", "http://u:USERINFO@127.0.0.1:1/agent", "http://u:USERINFO@127.0.0.1:1",
+		"keploy-agent://:USERINFO@127.0.0.1:1/agent", "keploy-agent://u:USERINFO@host.example:1/agent", "https://u:USERINFO@[::1]:1/agent",
+		"agent:USERINFO@127.0.0.1:1/agent", ":USERINFO@127.0.0.1:1/agent",
+	}
+	// This transport has no registered schemes, and is sent only URIs of a
+	// scheme it does not have: it never dials.
+	noSuchScheme := &http.Transport{}
+	r := rand.New(rand.NewSource(20261106))
+	said, requests := 0, 0
+	for said < 20000 {
+		var b strings.Builder
+		for range 1 + r.Intn(6) {
+			b.WriteString(parts[r.Intn(len(parts))])
+		}
+		if !marked(b.String()) {
+			continue
+		}
+		said++
+		uri := strings.Replace(shapes[r.Intn(len(shapes))], "USERINFO", b.String(), 1) + "/health"
+		if got := ShownAgentURI(uri); marked(got) {
+			t.Fatalf("ShownAgentURI(%q) = %q, with a part of its userinfo", uri, got)
+		}
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, uri, nil)
+		if err != nil {
+			if got := ShownAgentURIError(err).Error(); marked(got) {
+				t.Fatalf("the parse error of %q was said as %q, with a part of its userinfo", uri, got)
+			}
+			continue
+		}
+		requests++
+		client := http.Client{Transport: failsNamingItsURL{}}
+		_, err = client.Do(req) //nolint:bodyclose // this transport never answers.
+		got := ShownAgentURIError(err)
+		if marked(got.Error()) {
+			t.Fatalf("the request error of %q was said as %q, with a part of its userinfo", uri, got)
+		}
+		if !errors.Is(got, errDialFailed) {
+			t.Fatalf("%v no longer wraps the request's own error, for %q", got, uri)
+		}
+		if req.URL.Scheme == "http" || req.URL.Scheme == "https" {
+			continue
+		}
+		client = http.Client{Transport: noSuchScheme}
+		_, err = client.Do(req) //nolint:bodyclose // no scheme of this URI can be sent.
+		if got := ShownAgentURIError(err).Error(); marked(got) {
+			t.Fatalf("the request error of %q was said as %q, with a part of its userinfo", uri, got)
+		}
+	}
+	if requests == 0 {
+		t.Fatal("no URI parsed, so no request's error was read")
+	}
+}
+
 // keploy's check of an agent's control plane says the agent's URI as shown,
 // and each of the errors its probe can end in goes through the mask.
 func TestTheControlPlaneCheckNeverSaysTheAgentURIsPassword(t *testing.T) {
@@ -169,6 +268,7 @@ func TestTheControlPlaneCheckNeverSaysTheAgentURIsPassword(t *testing.T) {
 	addr := srv.Listener.Addr().String()
 	cases := map[string]struct{ uri, line string }{
 		"the agent refuses the wrong token": {"http://:s3aled-t0ken@" + addr + "/agent", "agent control-plane authentication verified"},
+		"a token as its name":               {"http://s3aled-t0ken@" + addr + "/agent", "agent control-plane authentication verified"},
 		"the URI does not parse":            {"keploy-agent://:s3aled/t0ken@" + addr + "/agent", "could not build the agent authentication probe"},
 		"the probe does not complete":       {"agent:s3aled-t0ken@" + addr + "/agent", "agent authentication probe did not complete"},
 	}
@@ -199,7 +299,7 @@ func TestNoLineSaysAnAgentURIUnmasked(t *testing.T) {
 	raw := regexp.MustCompile(`zap\.(String|Any)\("[^"]*",\s*[\w.]*(AgentURI|agentURI|url|uri)\)|^\s*[\w.]*\.AgentURI,\s`)
 	checked := 0
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") || !agentLine(filepath.ToSlash(path)) {
 			return err
 		}
 		src, err := os.ReadFile(path)
@@ -208,7 +308,7 @@ func TestNoLineSaysAnAgentURIUnmasked(t *testing.T) {
 		}
 		checked++
 		for i, line := range strings.Split(string(src), "\n") {
-			if raw.MatchString(line) && !strings.Contains(line, "ShownAgentURI(") && agentLine(path) {
+			if raw.MatchString(line) && !strings.Contains(line, "ShownAgentURI(") {
 				t.Errorf("%s:%d says an agent URI as it is: %s", path, i+1, strings.TrimSpace(line))
 			}
 		}
@@ -219,8 +319,9 @@ func TestNoLineSaysAnAgentURIUnmasked(t *testing.T) {
 	}
 }
 
-// agentLine reports whether the source at path talks to the agent: what its
-// zap fields call a url or a uri elsewhere is another service's.
+// agentLine reports whether the source at path (forward slashes on every OS)
+// talks to the agent: what its zap fields call a url or a uri elsewhere is
+// another service's.
 func agentLine(path string) bool {
 	for _, dir := range []string{"platform/http/", "service/record/", "service/mock/", "service/replay/", "service/runner/"} {
 		if strings.HasPrefix(path, dir) {
@@ -255,6 +356,10 @@ func TestAgentHealthTickerNeverSaysTheAgentURIsPassword(t *testing.T) {
 			uri:     "http://:s3aled-t0ken@" + srv.Listener.Addr().String() + "/agent",
 			healthy: true,
 			mustLog: []string{"Checking agent health", "agent health check ran out of time", "not checking the control-plane authentication"},
+		},
+		"a token as its name": {
+			uri:     "http://s3aled-t0ken@127.0.0.1:1/agent",
+			mustLog: []string{"Checking agent health"},
 		},
 		"a URI that does not parse": {
 			uri:     "keploy-agent://:s3aled%zzt0ken@127.0.0.1:1/agent",

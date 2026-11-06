@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -3551,49 +3552,44 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 }
 
 // ShownAgentURI is uri as keploy says it, in its logs and in what it
-// reports: a password in it (a token an embedder sealed into it, as k8s-proxy
-// does in keploy-agent://) is shown as xxxxx (url.URL.Redacted). A URI whose
-// @ is anything else (it does not parse, it parses with no host, or it has an
-// @ past its host: a raw / ? or # in a password ends the host early, so the
-// rest of the password reads as a path) has all of what comes before its last
-// @ shown as xxxxx, from just past its scheme's :// (or from its start where
-// it has none): a password in it is never shown, whatever characters it has,
-// and a URI with an @ past its host shows less of itself than it could, never
-// its password.
+// reports: all of what comes before its last @ is shown as xxxxx, past its
+// scheme's :// where it has one. That is all of its userinfo, a name as much
+// as a password (k8s-proxy seals a token into keploy-agent://), whatever
+// characters it has: nothing parses the URI to decide what to hide, so one
+// that does not parse, or whose password a raw / ? or # breaks up, shows none
+// of it either, and a URI with an @ past its host shows less of itself than
+// it could. A URI with no @ has no userinfo, and is shown as it is.
 func ShownAgentURI(uri string) string {
 	at := strings.LastIndex(uri, "@")
 	if at < 0 {
 		return uri
 	}
-	if u, ok := agentURIWithUserinfo(uri); ok {
-		return u.Redacted()
-	}
-	if end := strings.Index(uri[:at], "://"); end > 0 && !strings.ContainsAny(uri[:end], ":/?#") {
-		return uri[:end] + "://xxxxx" + uri[at:]
-	}
-	return "xxxxx" + uri[at:]
+	return agentURIScheme.FindString(uri) + "xxxxx" + uri[at:]
 }
 
-// agentURIWithUserinfo is uri parsed, and whether it has a host and its one @
+// agentURIScheme is a URI's scheme, as RFC 3986 spells one, and its ://: all
+// that ShownAgentURI says of what comes before the URI's last @.
+var agentURIScheme = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*://`)
+
+// agentURIAtEndsUserinfo reports whether uri parses with a host and its one @
 // ends that host's userinfo: all that a password in it can then be is what
 // url.URL.User holds.
-func agentURIWithUserinfo(uri string) (*url.URL, bool) {
+func agentURIAtEndsUserinfo(uri string) bool {
 	u, err := url.Parse(uri)
-	if err != nil || u.User == nil || strings.Count(uri, "@") != 1 {
-		return nil, false
-	}
-	return u, true
+	return err == nil && u.User != nil && strings.Count(uri, "@") == 1
 }
 
 // ShownAgentURIError is err, an error from making or sending a request to an
 // agent URI, as keploy says it; every such error goes through it before a log
 // line or a reason says it. An error with no url.Error in it names no URI, and
-// is err as it is; so is one for a URI with no @, which has no password. Then:
-//   - url.Parse's error is said with none of its text: it names the URI, cut
-//     short at a raw # in a password, where no @ is left to show where the
-//     password ends, and its inner error quotes it too (a bad port, a bad
-//     escape). The caller says the URI itself (ShownAgentURI);
-//   - a request's error has its URI shown as ShownAgentURI shows it. Its
+// is err as it is. One with a url.Error in it:
+//   - url.Parse's is said with none of its text, with or without an @: it
+//     names the URI, cut short at a raw # in a password, where no @ is left to
+//     show where the password ends, and its inner error quotes it too (a bad
+//     port, a bad escape). The caller says the URI itself (ShownAgentURI);
+//   - a request's, for a URI with no @, is err as it is: that URI has no
+//     userinfo;
+//   - any other request's has its URI shown as ShownAgentURI shows it. Its
 //     inner error is kept only for a URI whose @ ends its userinfo, the one
 //     shape whose host and port hold nothing of a password.
 func ShownAgentURIError(err error) error {
@@ -3608,7 +3604,7 @@ func ShownAgentURIError(err error) error {
 		return err
 	}
 	inner := ue.Err
-	if _, ok := agentURIWithUserinfo(ue.URL); !ok {
+	if !agentURIAtEndsUserinfo(ue.URL) {
 		inner = &agentRequestFailed{err: ue.Err}
 	}
 	return &url.Error{Op: ue.Op, URL: ShownAgentURI(ue.URL), Err: inner}

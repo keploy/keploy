@@ -19,8 +19,9 @@ func newAgentRequest(ctx context.Context, method, url string, body io.Reader) (*
 }
 
 // doAgent is client.Do for a request to the agent. Its error goes through
-// keploy's mask: net/http takes out only what url.URL.User holds, and a URI
-// with a raw character in its password keeps that password elsewhere in it.
+// keploy's mask: net/http takes out only the password url.URL.User holds, so
+// it says a name, and a URI with a raw character in its password keeps that
+// password elsewhere in it.
 func doAgent(client *http.Client, req *http.Request) (*http.Response, error) {
 	res, err := client.Do(req)
 	return res, pkg.ShownAgentURIError(err)
