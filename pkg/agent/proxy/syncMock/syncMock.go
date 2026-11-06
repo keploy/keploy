@@ -615,7 +615,8 @@ type SyncMockManager struct {
 	// heldOldest is the earliest end (UnixNano) of a test case the recorder's
 	// stream holds for its verdict (NoteHeld); 0 when none.
 	heldOldest atomic.Int64
-	// onDrop is told of each mock the outChan capacity path drops (OnDrop).
+	// onDrop is told of each mock the outChan capacity path drops, but an
+	// answer the client never read (OnDrop).
 	onDrop atomic.Pointer[func(*models.Mock)]
 	// sending holds the request time of each mock taken out of the buffer
 	// (or handed straight on) whose send to outChan has not finished. A mock
@@ -1158,6 +1159,14 @@ func (m *SyncMockManager) send(mock *models.Mock, owner string, done func(bool))
 // recordDroppedTCFor; 0 for a delivery): what a done records for the drop is
 // revoked only if that is still the current channel's.
 func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(delivered bool, epoch uint64)) {
+	if mock.IsUndelivered() {
+		// An answer the client never read is no test's to lose: no replay
+		// serves it and no mapping lists it (mapsTo). So its drop, on any
+		// path below or from the queue, records no owner, and OnDrop is not
+		// told of it (toldDropped): it suppresses no test case, by name or
+		// by the span it was requested in.
+		owner = ""
+	}
 	tell := func(delivered bool, epoch uint64) {
 		m.handedOn.Add(1)
 		if done != nil {
@@ -1409,9 +1418,14 @@ func (m *SyncMockManager) outCloseStallBound() time.Duration {
 	return min(outCloseStall, m.outStallBound())
 }
 
-// toldDropped tells OnDrop's fn of a dropped mock. Called with no lock held:
-// the hook may take locks of its own.
+// toldDropped tells OnDrop's fn of a dropped mock, but not of an answer the
+// client never read (models.Mock.IsUndelivered): no replay serves it and no
+// test requires it, so its loss leaves out no test case. Called with no lock
+// held: the hook may take locks of its own.
 func (m *SyncMockManager) toldDropped(mock *models.Mock) {
+	if mock.IsUndelivered() {
+		return
+	}
 	if fn := m.onDrop.Load(); fn != nil {
 		(*fn)(mock)
 	}
@@ -1453,7 +1467,9 @@ func (m *SyncMockManager) dropOut(mock *models.Mock, owner string, epoch uint64,
 // consumer stalled: send). The test cases that used such a
 // mock lack it: a capture whose test cases are not named (proxyless, a
 // DaemonSet) cannot find them by owner, as WasMockDroppedForTC does, and
-// leaves out those that ran while the mock was requested instead. fn must not
+// leaves out those that ran while the mock was requested instead. A dropped
+// answer the client never read (models.Mock.IsUndelivered) is not told: no
+// test case used it, so none is left out for it. fn must not
 // block. A drop of a given-up queue is told on its drainer, whose lane reads
 // queued until it has told every drop: fn must not wait for OutQueued or
 // OutQueuedTo to read false, nor call CloseOutChan, which waits for that
@@ -2041,7 +2057,9 @@ func attributedReusable(mock *models.Mock) bool {
 // (models.Mock.IsUndelivered), which no replay serves, so no test makes the
 // call it recorded, under either switch. That one is owned, named, sent and
 // pruned as its window's other mocks are; only the mappings leave it out
-// (withMapped, withLate, noteSentClaimedLocked).
+// (withMapped, withLate, noteSentClaimedLocked), and a drop of its send
+// records no owner and is not told to OnDrop, so it suppresses no test case
+// (sendFor, toldDropped).
 func mapsTo(mock *models.Mock) bool {
 	return !mock.IsUndelivered()
 }
