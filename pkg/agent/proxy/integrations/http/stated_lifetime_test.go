@@ -85,8 +85,11 @@ func TestMissOnAStatedRecordingTellsHowToShareACall(t *testing.T) {
 		off      = "If another test recorded this call"
 		on       = "If the application made this call outside every test (in TestMain or at start-up)"
 		declared = "keploy.yaml declares this call a session call, which serves a recording of it made outside every test"
+		prefix   = "A keploy.yaml sessionCalls entry covers this call only by a path prefix or with no method"
 	)
 	decl := []models.SessionCallRule{{Host: "auth.example.com", Method: "POST", PathPrefix: "/oauth"}}
+	exact := []models.SessionCallRule{{Host: "auth.example.com", Method: "POST", PathPrefix: "/oauth/token"}}
+	anyMethod := []models.SessionCallRule{{Host: "auth.example.com", PathPrefix: "/oauth/token"}}
 	for _, tc := range []struct {
 		name string
 		pool []*models.Mock
@@ -100,7 +103,10 @@ func TestMissOnAStatedRecordingTellsHowToShareACall(t *testing.T) {
 		{"stated recording", []*models.Mock{stated}, nil, false, nil, off},
 		{"stated recording, proven switch on", []*models.Mock{stated}, nil, true, nil, on},
 		{"stated recording, call declared", []*models.Mock{stated}, nil, false, decl, off},
-		{"stated recording, call declared, proven switch on", []*models.Mock{stated}, nil, true, decl, declared},
+		{"stated recording, call declared exactly", []*models.Mock{stated}, nil, false, exact, off},
+		{"stated recording, call declared by a path prefix, proven switch on", []*models.Mock{stated}, nil, true, decl, prefix},
+		{"stated recording, call declared exactly, proven switch on", []*models.Mock{stated}, nil, true, exact, declared},
+		{"stated recording, call's path declared for any method, proven switch on", []*models.Mock{stated}, nil, true, anyMethod, prefix},
 		{"stated recording, another call declared, proven switch on", []*models.Mock{stated}, nil, true,
 			[]models.SessionCallRule{{Host: "auth.example.com", Method: "GET"}}, on},
 		{"recording made before", []*models.Mock{legacy}, nil, false, nil, none},
@@ -126,15 +132,15 @@ func TestMissOnAStatedRecordingTellsHowToShareACall(t *testing.T) {
 			report := h.buildHTTPMismatchReport(reqToHost("POST", "/oauth/token", "auth.example.com"), nil, db, tc.pool, nil, nil,
 				&matchDiag{phase: models.MatchPhaseSchema, candidates: len(tc.pool)})
 			snippet := strings.Contains(report.NextSteps, `sessionCalls: [{host: "auth.example.com", method: "POST", pathPrefix: "/oauth/token"}]`)
-			for _, hint := range []string{off, on, declared} {
+			for _, hint := range []string{off, on, declared, prefix} {
 				if got := strings.Contains(report.NextSteps, hint); got != (hint == tc.want) {
 					t.Fatalf("hint %q present %v, want %v:\n%s", hint, got, hint == tc.want, report.NextSteps)
 				}
 			}
-			if want := tc.want == off || tc.want == on; snippet != want {
+			if want := tc.want == off || tc.want == on || tc.want == prefix; snippet != want {
 				t.Fatalf("declaration snippet present %v, want %v:\n%s", snippet, want, report.NextSteps)
 			}
-			if tc.want == on && !strings.Contains(report.NextSteps, "a recording another test made of it is served to that test only, declared or not") {
+			if (tc.want == on || tc.want == prefix) && !strings.Contains(report.NextSteps, "A recording another test made of it is served to that test only, declared or not") && !strings.Contains(report.NextSteps, "a recording another test made of it is served to that test only, declared or not") {
 				t.Fatalf("the switch's hint does not say another test's recording stays that test's:\n%s", report.NextSteps)
 			}
 		})

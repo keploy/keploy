@@ -106,8 +106,8 @@ type RepeatNote struct {
 	// scope table under the proven switch (its startup: recordings among
 	// them), which answered a call at this replay. Unlike Background it
 	// moves no charge: a test is served such a recording only for a call
-	// keploy.yaml's sessionCalls declare, so a call it made that is no
-	// such call stays its miss.
+	// a keploy.yaml sessionCalls entry names exactly, by its method and
+	// whole path, so a call it made that is no such call stays its miss.
 	OutsideTests bool `json:"outside_tests,omitempty" yaml:"outside_tests,omitempty"`
 	// Hint is the parser's word on how the call could be served to its
 	// test (HTTP: what keploy.yaml's sessionCalls serve), which the note's
@@ -274,7 +274,7 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 	case n.Background != "":
 		b.WriteString("keploy does not answer a second call with that recording, which could hide a bug; a call the application makes on its own schedule (a timer, a janitor's sweep) is made as often as the replay's timing allows. ")
 	case n.OutsideTests:
-		b.WriteString("keploy does not answer it with that recording: a test is served a recording made outside every test only for a call keploy.yaml's sessionCalls declare, and an answer given otherwise could hide a bug. ")
+		b.WriteString("keploy does not answer it with that recording: a test is served a recording made outside every test only for a call a keploy.yaml sessionCalls entry names exactly, by its method and whole path, and an answer given otherwise could hide a bug. ")
 	default:
 		b.WriteString("keploy does not answer it with the earlier test's recording, which could hide a bug. ")
 	}

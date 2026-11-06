@@ -131,6 +131,31 @@ func TestAStartUpCallNoRuleDeclaresIsNotServedInATest(t *testing.T) {
 	}
 }
 
+// Under the switch a rule serves a test a start-up recording only of a call
+// it names exactly, by its method and whole path: one that covers the call
+// by a path prefix only, or with no method, serves it between tests alone,
+// as with no rule, though it makes the recording session (DeriveLifetime),
+// so that no recording is served in a test to a call no one declared.
+func TestAStartUpCallARuleCoversOnlyByPrefixIsNotServedInATest(t *testing.T) {
+	for _, rule := range []models.SessionCallRule{
+		{Host: "127.0.0.1", Method: "GET", PathPrefix: "/echo"},
+		{Host: "127.0.0.1", PathPrefix: "/echo/rates"},
+	} {
+		t.Run(rule.Method+rule.PathPrefix, func(t *testing.T) {
+			declareSessionCalls(t, rule)
+			mm, ms := startupSet(t)
+			if ms["rates"].TestModeInfo.Lifetime != models.LifetimeSession {
+				t.Fatalf("the rule does not make the start-up recording session: %v", ms["rates"].TestModeInfo.Lifetime)
+			}
+			mm.ServeExactPool("k", []string{"rates", "cfg"})
+			mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+			if got := keepNamed(t, mm, "rates"); got != "a miss" {
+				t.Fatalf("a start-up call the rule covers only by prefix was served in a test: %s", got)
+			}
+		})
+	}
+}
+
 // A test's view shows the declared calls of the pool slice served before it
 // opened: after a pool view of another key, whose slice holds none, the next
 // test is served none, and its shared part is told apart from the last

@@ -2370,11 +2370,14 @@ func viewless(r *models.MockMismatchReport) {
 // a call misses it though another test, or the application outside every
 // test, recorded it. Without the proven switch a declared call is served to
 // every test from any test's recording of it; under the switch from a
-// recording made outside every test only (in TestMain or at start-up), and
-// another test's recording of it stays that test's. Under the switch, a call
-// keploy.yaml declares already is told what the declaration serves. places
-// are the report's (poolPlaces): the path prefix it names stops before the
-// first segment a recording of the pool redacted (redactedPlaces.pathPrefix).
+// recording made outside every test only (in TestMain or at start-up), of a
+// call a keploy.yaml entry names exactly, by its method and whole path
+// (models.SessionCallDeclared), and another test's recording of it stays
+// that test's. Under the switch, a call an entry names is told what the
+// declaration serves, and one an entry covers only by a path prefix or with
+// no method the exact entry to declare. places are the report's
+// (poolPlaces): a path the hint names stops before the first segment a
+// recording of the pool redacted (redactedPlaces.pathPrefix).
 func sessionCallHint(request *http.Request, places redactedPlaces, proven bool) string {
 	host := request.Host
 	if host == "" && request.URL != nil {
@@ -2390,13 +2393,31 @@ func sessionCallHint(request *http.Request, places redactedPlaces, proven bool) 
 		return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]), or record again with '%s' so this test records it.",
 			host, request.Method, path, record)
 	}
-	// The rule reads the call's real path; the hint names only the prefix
-	// the report may show.
-	if models.SessionCallDeclared(request.Method, host, request.URL.Path) {
+	// The rules read the call's real path; the hint names only the part of
+	// it the report may show.
+	covered, named := models.SessionCallDeclared(request.Method, host, request.URL.Path)
+	entry := exactSessionCall(host, request.Method, path, strings.Contains(places.decodedPath(request.URL.EscapedPath()), valueRedacted))
+	switch {
+	case named:
 		return fmt.Sprintf("keploy.yaml declares this call a session call, which serves a recording of it made outside every test (in TestMain or at start-up) to every test; a recording another test made of it is served to that test only. Record again with '%s' so this test records it.", record)
+	case covered:
+		return fmt.Sprintf("A keploy.yaml sessionCalls entry covers this call only by a path prefix or with no method. Under the proven switch a recording made outside every test (in TestMain or at start-up) is served to every test only for a call an entry names exactly, by its method and whole path, so that no recording is served to a call no one declared: to serve this one so, declare %s. A recording another test made of it is served to that test only, declared or not. Or record again with '%s' so this test records it.",
+			entry, record)
 	}
-	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If the application made this call outside every test (in TestMain or at start-up) and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve that recording to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]); a recording another test made of it is served to that test only, declared or not. Or record again with '%s' so this test records it.",
-		host, request.Method, path, record)
+	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If the application made this call outside every test (in TestMain or at start-up) and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve that recording to every test (%s); a recording another test made of it is served to that test only, declared or not. Or record again with '%s' so this test records it.",
+		entry, record)
+}
+
+// exactSessionCall is the keploy.yaml sessionCalls entry that names a call
+// of method to host exactly, as a hint shows it: path is the call's path up
+// to the first segment a recording redacted, and cut says one did, so the
+// entry's pathPrefix is said to go on with the rest of the call's path,
+// which the hint does not show.
+func exactSessionCall(host, method, path string, cut bool) string {
+	if cut {
+		return fmt.Sprintf("sessionCalls: [{host: %q, method: %q, pathPrefix: the call's whole path}], a path that begins %q and goes on with segments a recording redacted, which keploy does not show", host, method, path)
+	}
+	return fmt.Sprintf("sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]", host, method, path)
 }
 
 // statesHTTPLifetimes reports whether the recording being replayed states its

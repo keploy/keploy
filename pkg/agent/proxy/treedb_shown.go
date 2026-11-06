@@ -171,7 +171,7 @@ func (v *exactView) showsStaticRest(mk *models.Mock) bool {
 
 // sharesRest is what the view shows of a mock that is not protocol-phase, its
 // own apart: one of the reached worker scope; in a test, one of the pool
-// under the background rules, or one a declared session call covers
+// under the background rules, or one a declared session call names
 // (declaredInPool); between tests, one of the pool slice served.
 func (v *exactView) sharesRest(mk *models.Mock) bool {
 	if v.isWorker(mk.Name) {
@@ -189,7 +189,8 @@ func (v *exactView) sharesRest(mk *models.Mock) bool {
 
 // declaredInPool reports whether mk, in a test's view, is a recording made
 // outside every test (the pool slice served before the test opened) that
-// keploy.yaml's sessionCalls declare served to every test
+// a keploy.yaml sessionCalls entry names exactly, by its method and whole
+// path, served to every test
 // (models.Mock.DeclaredSessionCall). Every test of the run is served it,
 // whatever test opened: a call the app makes once at start-up and caches
 // (a token, a configuration read) that a test makes again. Another test's

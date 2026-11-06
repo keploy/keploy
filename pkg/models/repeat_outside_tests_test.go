@@ -15,7 +15,7 @@ func TestARepeatNoteNamesARecordingMadeOutsideEveryTest(t *testing.T) {
 	outside := &RepeatNote{Mock: "mock-0", OutsideTests: true, Hint: hint, ReplayGapSeconds: 0.5}
 	for _, n := range []*RepeatNote{outside, func() *RepeatNote { c := outside.Clone(); c.Test = "rates::TestQuote"; return c }()} {
 		got := n.Explain("keploy mock record")
-		for _, w := range []string{"identical to mock-0, a recording made outside every test (in TestMain or at start-up)", "only for a call keploy.yaml's sessionCalls declare"} {
+		for _, w := range []string{"identical to mock-0, a recording made outside every test (in TestMain or at start-up)", "only for a call a keploy.yaml sessionCalls entry names exactly, by its method and whole path"} {
 			if !strings.Contains(got, w) {
 				t.Errorf("Explain (test %q) = %q, want it to say %q", n.Test, got, w)
 			}

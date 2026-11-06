@@ -133,7 +133,7 @@ type exactView struct {
 	pool map[string]struct{}
 	// declared is, on a test view installed while keploy.yaml declares
 	// session calls (models.SessionCallsDeclared), the pool slice of the
-	// pool view before it: its recordings a declared session call covers
+	// pool view before it: its recordings a declared session call names
 	// (models.Mock.DeclaredSessionCall), recorded outside every test, are
 	// shown in the test too (sharesRest). nil otherwise.
 	declared *poolSlice
@@ -2619,7 +2619,7 @@ func (v *exactView) inBackgroundPool(mk *models.Mock) bool {
 // under the background rules, in a test or between tests: one answers at
 // most one call in the staging, through whichever door a parser consumes it
 // (exactConsumeIn). An async lane's recording keeps today's rules, and so
-// does one keploy.yaml's sessionCalls declare served to every test
+// does one a keploy.yaml sessionCalls entry names served to every test
 // (models.Mock.DeclaredSessionCall): spent once, it would answer one test.
 func (v *exactView) spendsAsPool(mk *models.Mock) bool {
 	return v.bg.inPool(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync() && !mk.DeclaredSessionCall()
