@@ -121,7 +121,7 @@ func nodeEdited(n *yamlLib.Node) bool {
 // ("" for a value under one of its keys), holds is a hand edit or holds
 // one (holdsEdits); n itself its caller checks (nodeEdited).
 func levelEdited(n *yamlLib.Node, level string) bool {
-	if level == "" || n.Kind != yamlLib.MappingNode {
+	if level == "" {
 		for _, c := range n.Content {
 			if nodeEdited(c) || levelEdited(c, "") {
 				return true
