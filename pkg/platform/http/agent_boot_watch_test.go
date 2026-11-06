@@ -670,16 +670,17 @@ func TestAnAgentURIWhereNothingAnswersIsGivenUpOn(t *testing.T) {
 
 // An agent known only by its URI whose start makes progress, as far as it
 // shows from outside its host (a forward that comes up, a server that takes
-// connections and then answers, an answer that changes), is waited for past
+// connections and then answers), is waited for past
 // bootSilence many times over, each step within it, until it answers healthy;
 // and one that answers healthy is never given up on. It says now and then
 // that it still waits, and what it found.
 func TestAnAgentURIWhoseStartMakesProgressIsWaitedFor(t *testing.T) {
 	fastURILooks(t)
-	// 4 looks of each kind, under the 5 of bootSilence at a second of
-	// runnable time a look: 20 looks, 4 times bootSilence.
+	// 4 looks of each kind, each a kind no look found before, under the 5
+	// of bootSilence at a second of runnable time a look: 16 looks, over 3
+	// times bootSilence.
 	var script []agentLookKind
-	for _, k := range []agentLookKind{agentRefused, agentClosed, agentHeld, agentAnswered, agentClosed} {
+	for _, k := range []agentLookKind{agentRefused, agentClosed, agentHeld, agentAnswered} {
 		script = append(script, k, k, k, k)
 	}
 	core, logs := observer.New(zapcore.InfoLevel)

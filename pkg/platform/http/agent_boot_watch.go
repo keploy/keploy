@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
-	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -1258,15 +1257,22 @@ type agentLook struct {
 	found string
 }
 
-// changedFrom reports whether l found something else than last did: a look
-// of another kind, or an answer of another status. That is the progress an
-// agent known only by its URI shows from outside its host (a forward that
-// comes up, a server that begins to answer, an answer that changes); a look
-// that finds what the last found shows none, whatever its detail (a port of
-// the connection, a time in the body).
-func (l agentLook) changedFrom(last agentLook) bool {
-	return l.kind != last.kind || l.status != last.status
+// agentState is what a look found, as far as it can be a step of the
+// agent's start: the look's kind, and its answer's status. A look that finds
+// a state no look of the wait found before is the progress an agent known
+// only by its URI shows from outside its host (a forward that comes up, a
+// server that begins to answer, an answer of a status it never gave); one
+// that finds a state found before shows none, whatever its detail (a port of
+// the connection, a time in the body), and however many other states came
+// in between: an agent whose answers go back and forth (503, 502, 503...)
+// makes no progress. A wait has only so many states to find, so steps cannot
+// put off its end for good.
+type agentState struct {
+	kind   agentLookKind
+	status int
 }
+
+func (l agentLook) state() agentState { return agentState{kind: l.kind, status: l.status} }
 
 // agentBodyShown is how much of an answer's body a look keeps to say it.
 const agentBodyShown = 200
@@ -1280,21 +1286,23 @@ const agentBodyShown = 200
 // healthy; a healthy one (agentLookKind).
 //
 // What the looks find is the agent's progress, as far as it shows from
-// outside its host: a look that finds something else than the last (another
-// kind, another status: agentLook.changedFrom) is a step. The wait is given up
-// on (pkg.ErrAgentNotReady) once the looks have found the same, other than
-// healthy, for bootSilence of keploy's runnable time: an agent whose start
-// makes progress is waited for however long that takes, as long as each step
-// comes within that bound, and one that never answers healthy (a forward in
-// front of nothing, an agent frozen, or one that answers but never healthy)
-// is given up on, saying why, as is one that stops (a look finds nothing
-// takes a connection where something took one before). keploy's runnable
-// time accrues no faster than keploy gets to run, so a box too loaded to run
-// keploy does not run out the bound either. A healthy answer is never given
-// up on: the wait ends on it (its own health check finds it).
+// outside its host: a look that finds what no look of this wait found before
+// (another kind, another status: agentState) is a step. The wait is given up
+// on (pkg.ErrAgentNotReady) once the looks have found no new state, and the
+// last is not healthy, for bootSilence of keploy's runnable time: an agent
+// whose start makes progress is waited for however long that takes, as long
+// as each step comes within that bound, and one that never answers healthy (a
+// forward in front of nothing, an agent frozen, one that answers but never
+// healthy, or one whose answers go back and forth) is given up on, saying
+// why, as is one that stops (a look finds nothing takes a connection where
+// something took one before). keploy's runnable time accrues no faster than
+// keploy gets to run, so a box too loaded to run keploy does not run out the
+// bound either. A healthy answer is never given up on: the wait ends on it
+// (its own health check finds it).
 //
 // It says every stillWaitingLooks looks that it still waits, and what it
-// found, and logs why at WARN when it gives up.
+// found. Why it gives up is said once, by the error it sends: each caller
+// ends its run with that error, which says it.
 //
 // ctx ends it; so does the wait, once the agent's health check answers.
 // over is closed once it has ended, its look with it (each look is on the
@@ -1315,16 +1323,15 @@ func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) (errs <-chan
 	// scheme the embedder registered on it (k8s-proxy's keploy-agent://)
 	// through the round tripper it registered (ownConnections).
 	client := &http.Client{Transport: ownConnections(http.DefaultTransport)}
-	healthURL, shown := uri+"/health", shownAgentURI(uri)
+	healthURL, shown := uri+"/health", pkg.ShownAgentURI(uri)
 	go func() {
 		defer close(ends)
 		defer release()
 		tick := time.NewTicker(look)
 		defer tick.Stop()
 		var (
-			// seen: what the last look found, the last that found
-			// something take its connection, and the last answer.
-			seen  agentSeen
+			// seen: what the looks found (agentSeen).
+			seen  = agentSeen{states: map[agentState]bool{}}
 			since time.Duration
 			looks int
 		)
@@ -1341,14 +1348,12 @@ func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) (errs <-chan
 			}
 			wait = nextAgentLookWait(wait, l.kind == agentHeld)
 			now := clk.Runnable()
-			if seen.looks == 0 || l.changedFrom(seen.last) {
+			if !seen.states[l.state()] {
 				since = now
 			}
 			seen.note(l)
 			if l.kind != agentHealthy && now-since >= silence {
-				err := seen.givenUp(shown, silence)
-				a.logger.Warn("giving up on the keploy agent at "+shown, zap.Error(err))
-				out <- err
+				out <- seen.givenUp(shown, silence)
 				return
 			}
 			if looks%every == 0 {
@@ -1362,17 +1367,17 @@ func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) (errs <-chan
 
 // agentSeen is what the looks at an agent known only by its URI have found:
 // the last look's, the last that found something take its connection, and
-// the last that got an answer; and whether any found those, or a healthy
-// answer.
+// the last that got an answer; whether any found those, or a healthy answer;
+// and each state any found (agentState).
 type agentSeen struct {
-	looks                       int
 	last, lastTaken, lastAnswer agentLook
 	taken, answered, healthy    bool
+	states                      map[agentState]bool
 }
 
-// note adds the look l to what has been seen.
+// note adds the look l to what has been seen; s.states must not be nil.
 func (s *agentSeen) note(l agentLook) {
-	s.looks++
+	s.states[l.state()] = true
 	s.last = l
 	if l.kind != agentRefused {
 		s.taken, s.lastTaken = true, l
@@ -1386,7 +1391,7 @@ func (s *agentSeen) note(l agentLook) {
 }
 
 // givenUp is why the wait for the agent at uri is given up on, the looks
-// having found what the last found for silence of keploy's runnable time.
+// having found no new state for silence of keploy's runnable time.
 func (s *agentSeen) givenUp(uri string, silence time.Duration) error {
 	var why string
 	switch {
@@ -1401,7 +1406,7 @@ func (s *agentSeen) givenUp(uri string, silence time.Duration) error {
 		if s.healthy {
 			did = "no longer answers its health check healthy"
 		}
-		why = fmt.Sprintf("the keploy agent at %s %s: something takes connections there, and what keploy found did not change for %s of keploy's runnable time: %s",
+		why = fmt.Sprintf("the keploy agent at %s %s: something takes connections there, and keploy found nothing new there for %s of keploy's runnable time: %s",
 			uri, did, silence, s.last.found)
 	}
 	// The last answer, unless the reason said it already: the last look
@@ -1410,17 +1415,6 @@ func (s *agentSeen) givenUp(uri string, silence time.Duration) error {
 		why += "; its last answer: " + s.lastAnswer.found
 	}
 	return fmt.Errorf("%w: %s", pkg.ErrAgentNotReady, why)
-}
-
-// shownAgentURI is uri as keploy says it: a password in it (a token an
-// embedder sealed into it, as k8s-proxy does in keploy-agent://) shown as
-// xxxxx (url.URL.Redacted).
-func shownAgentURI(uri string) string {
-	u, err := url.Parse(uri)
-	if err != nil {
-		return uri
-	}
-	return u.Redacted()
 }
 
 // lookAtAgent is how watchAgentAt looks (lookAtAgentHealth). A variable for
@@ -1445,7 +1439,7 @@ func lookAtAgentHealth(ctx context.Context, client *http.Client, healthURL strin
 	defer cancel()
 	req, err := http.NewRequestWithContext(lookCtx, http.MethodGet, healthURL, nil)
 	if err != nil {
-		return agentLook{kind: agentRefused, found: fmt.Sprintf("its health check cannot be asked (%v)", err)}
+		return agentLook{kind: agentRefused, found: fmt.Sprintf("its health check cannot be asked (%v)", pkg.ShownAgentURIError(err))}
 	}
 	res, err := client.Do(req)
 	switch {

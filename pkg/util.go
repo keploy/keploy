@@ -3550,6 +3550,47 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 	return err
 }
 
+// ShownAgentURI is uri as keploy says it, in its logs and in what it
+// reports: a password in it (a token an embedder sealed into it, as k8s-proxy
+// does in keploy-agent://) is shown as xxxxx (url.URL.Redacted). A URI that
+// does not parse, or parses with no host (scheme:rest, url.URL.Opaque), has
+// all of what comes before its last @ shown as xxxxx, from just past its
+// scheme's :// (or from its start where it has none): a password in it is
+// never shown, whatever characters it has, and a URI with an @ past its host
+// shows less of itself than it could, never its password.
+func ShownAgentURI(uri string) string {
+	if u, err := url.Parse(uri); err == nil && u.Opaque == "" {
+		return u.Redacted()
+	}
+	at := strings.LastIndex(uri, "@")
+	if at < 0 {
+		return uri
+	}
+	if scheme, _, found := strings.Cut(uri[:at], "://"); found {
+		return scheme + "://xxxxx" + uri[at:]
+	}
+	return "xxxxx" + uri[at:]
+}
+
+// ShownAgentURIError is err, url.Parse's error for an agent URI (or a URL
+// made from one), as keploy says it: that error names the whole URI, a
+// password in it too, so its URI is shown as ShownAgentURI shows it, and a
+// bad escape in it (url.EscapeError, which names the escape, perhaps a part
+// of a password) is said with no more than that it is one. Any other error is
+// err as it is.
+func ShownAgentURIError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	inner := ue.Err
+	var escape url.EscapeError
+	if errors.As(inner, &escape) {
+		inner = errors.New("invalid URL escape")
+	}
+	return &url.Error{Op: ue.Op, URL: ShownAgentURI(ue.URL), Err: inner}
+}
+
 // agentHealthFirstWait is how long the first agent health check waits for its
 // answer. An agent on the same host answers in well under a millisecond, and one
 // that is not up yet refuses the connection at once, so this keeps the local case
@@ -3647,7 +3688,7 @@ func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 			cancel()
 			if next := nextAgentHealthWait(wait, timedOut); next != wait {
 				logger.Debug("agent health check ran out of time; the next one waits longer",
-					zap.String("agentURI", agentURI), zap.Duration("waited", wait), zap.Duration("next_wait", next))
+					zap.String("agentURI", ShownAgentURI(agentURI)), zap.Duration("waited", wait), zap.Duration("next_wait", next))
 				wait = next
 			}
 			if header == nil {
@@ -3676,11 +3717,11 @@ func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 // other than 200, whose headers say nothing about the agent.
 func agentHealthAnswer(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) http.Header {
 	healthURL := fmt.Sprintf("%s/health", agentURI)
-	logger.Debug("Checking agent health", zap.String("url", healthURL))
+	logger.Debug("Checking agent health", zap.String("url", ShownAgentURI(healthURL)))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
-		logger.Debug("Failed to create health check request", zap.Error(err))
+		logger.Debug("Failed to create health check request", zap.Error(ShownAgentURIError(err)))
 		return nil
 	}
 
@@ -5481,7 +5522,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 	launch, launched := token.Launched(agentURI)
 	if !launched {
 		logger.Debug("not checking the control-plane authentication of an agent this process did not launch",
-			zap.String("agent", agentURI))
+			zap.String("agent", ShownAgentURI(agentURI)))
 		return
 	}
 	key := fmt.Sprintf("%s#%d", agentURI, launch)
@@ -5491,7 +5532,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agentURI+token.ProbePath, nil)
 	if err != nil {
-		logger.Debug("could not build the agent authentication probe", zap.Error(err))
+		logger.Debug("could not build the agent authentication probe", zap.Error(ShownAgentURIError(err)))
 		return
 	}
 	// Wrong by construction, and a bare client: a request carrying the real
@@ -5514,7 +5555,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 	controlPlaneProbed.Store(key, struct{}{})
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		logger.Debug("agent control-plane authentication verified", zap.String("agent", agentURI))
+		logger.Debug("agent control-plane authentication verified", zap.String("agent", ShownAgentURI(agentURI)))
 		return
 	}
 

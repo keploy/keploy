@@ -396,7 +396,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			if gCtx.Err() != nil {
 				return nil, gCtx.Err()
 			}
-			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", r.config.Agent.AgentURI, err)
+			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", keployPkg.ShownAgentURI(r.config.Agent.AgentURI), err)
 		case ready, ok := <-agentReadyCh:
 			if !ok || !ready {
 				cancel()
