@@ -1852,7 +1852,7 @@ type ScopeSkipPusher interface {
 var replayReport string
 
 // ReportReplayTo names the file this process's replay writes its report to,
-// as the project names it (keploy/reports/<run>/replay.yaml): under the proven
+// as the project names it (.keploy-run/runs/<run>/replay.yaml): under the proven
 // switch the agent ends a failed test's reason with it. A wrapping build
 // (enterprise) that writes the report calls it before the replay runs; ""
 // names none.
