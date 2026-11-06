@@ -245,7 +245,7 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 	if f == nil {
 		return false
 	}
-	gave := ", which record's full round sent and gave the application as recorded, byte for byte, while the value changed"
+	gave := ", which record's full round sent and gave the application as recorded, while the value changed"
 	switch {
 	case x.AsRecorded():
 	case x.Live():
