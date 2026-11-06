@@ -380,11 +380,10 @@ func TestTheSetsEndRequiresTheCallsMarkedAfterTheLastTestWithoutWaiting(t *testi
 		p.bootSeen, p.stopsDerived = true, derived
 		p.begin("test-1")
 		consumed := map[string]models.MockState{"w-made": {Name: "w-made"}}
-		if got := p.awaitedWorker(consumed); !reflect.DeepEqual(got, []string{"w-boot"}) {
-			t.Fatalf("derived %v: the wait waits for %v; want [w-boot]", derived, got)
-		}
+		// What the wait before the stop waits for (awaitWorkerScope), and
+		// what the end of an application keploy did not stop requires.
 		if got := p.unansweredWorker(consumed, false); !reflect.DeepEqual(got, []string{"w-boot"}) {
-			t.Fatalf("derived %v: the end of an application keploy did not stop requires %v; want [w-boot]", derived, got)
+			t.Fatalf("derived %v: before the stop the end requires %v; want [w-boot]", derived, got)
 		}
 		if got := p.unansweredWorker(consumed, true); !reflect.DeepEqual(got, []string{"w-boot", "w-late"}) {
 			t.Fatalf("derived %v: once the application was stopped the end requires %v; want [w-boot w-late]", derived, got)
@@ -405,11 +404,11 @@ func TestTheSetsEndRequiresTheCallsMarkedAfterTheLastTestWithoutWaiting(t *testi
 		}
 	}
 	var none *exactPlan
-	if none.awaitedWorker(nil) != nil || none.stopsDerivedWhy([]string{"w"}) != "" || none.unjudgedAtStop(nil, false) != nil {
+	if none.stopsDerivedWhy([]string{"w"}) != "" || none.unjudgedAtStop(nil, false) != nil {
 		t.Fatal("no plan waits for nothing and says nothing")
 	}
 	bg := &exactPlan{background: true, stopsDerived: true, worker: []models.MockEntry{{Name: "w"}, {Name: "w-late", AtStop: true}}, bootSeen: true}
-	if bg.awaitedWorker(nil) != nil || bg.unjudgedAtStop(nil, false) != nil {
+	if bg.unansweredWorker(nil, false) != nil || bg.unjudgedAtStop(nil, false) != nil {
 		t.Fatal("under the background rules the wait waits for nothing and nothing goes unjudged")
 	}
 }

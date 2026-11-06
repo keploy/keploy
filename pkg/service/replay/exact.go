@@ -296,38 +296,17 @@ func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState, stopp
 	return p.unansweredWorkerOf(consumed, stopped)
 }
 
-// awaitedWorker is what the set's end waits for before keploy stops the
-// application (awaitWorkerScope): unansweredWorker before the stop, less
-// every call marked as one the stop may make (MockEntry.AtStop), a derived
-// mark included: the application may make it only once it is stopped.
-func (p *exactPlan) awaitedWorker(consumed map[string]models.MockState) []string {
-	if p == nil || p.background {
-		return nil
-	}
-	return p.owedWorker(consumed, false, true)
-}
-
 // unansweredWorkerOf is the worker-scope recordings today's rule requires by
 // the set's end that consumed holds none of (unansweredWorker), whatever rules
 // serve the set.
 func (p *exactPlan) unansweredWorkerOf(consumed map[string]models.MockState, stopped bool) []string {
-	return p.owedWorker(consumed, stopped, false)
-}
-
-// owedWorker is unansweredWorkerOf, read before the stop when waiting (the
-// wait leaves out every call marked at the stop: awaitedWorker).
-func (p *exactPlan) owedWorker(consumed map[string]models.MockState, stopped, waiting bool) []string {
 	if p == nil {
 		return nil
 	}
-	// A call marked at the stop is left out by the wait, and by the end's
-	// read of an application keploy did not stop, a derived mark as a
-	// recorded one.
-	skipAtStop := waiting || !stopped
 	var out []string
 	for _, e := range p.worker {
 		switch {
-		case p.idle[e.Name], e.AtStop && skipAtStop:
+		case p.idle[e.Name], e.AtStop && !stopped:
 			continue
 		case e.Place == "" && !p.bootSeen, e.Place != "" && !p.begun[e.Place]:
 			continue
@@ -1182,7 +1161,7 @@ var workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
 
 // awaitWorkerScope waits, at the set's end and before its application is
 // stopped, until every worker-scope mock the set's end requires answered by
-// then has answered (exactPlan.awaitedWorker, those the recording made
+// then has answered (exactPlan.unansweredWorker, those the recording made
 // before its stop; D3): a worker makes its calls in its own time, after the
 // last test as well. It never waits for a call marked as one the stop may
 // make (MockEntry.AtStop), a mark derived for a set with no mappings.yaml
@@ -1197,7 +1176,7 @@ var workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
 // the wait with its error: what the worker scope answered is then not known,
 // and the set is not judged.
 func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consumed map[string]models.MockState, add func([]models.MockState)) ([]string, error) {
-	missing := plan.awaitedWorker(consumed)
+	missing := plan.unansweredWorker(consumed, false)
 	if len(missing) == 0 {
 		return nil, nil
 	}
@@ -1220,7 +1199,7 @@ func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consum
 			return missing, err
 		}
 		add(read)
-		now := plan.awaitedWorker(consumed)
+		now := plan.unansweredWorker(consumed, false)
 		if len(now) == 0 {
 			return nil, nil
 		}
@@ -1260,7 +1239,7 @@ func (p *exactPlan) unjudgedAtStop(consumed map[string]models.MockState, stopped
 	if stopped || p == nil || p.background {
 		return nil
 	}
-	return p.derivedAtStop(p.owedWorker(consumed, true, false))
+	return p.derivedAtStop(p.unansweredWorkerOf(consumed, true))
 }
 
 // derivedAtStop is, in the order of names, those of names marked as calls
