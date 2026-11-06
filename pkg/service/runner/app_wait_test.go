@@ -93,6 +93,9 @@ func (d oneCaseDB) GetTestCase(context.Context, string, string) (*models.TestCas
 	return &tc, nil
 }
 
+// Root: the case keeps no file beside it.
+func (oneCaseDB) Root() string { return "" }
+
 // appWaitInstr is an agent that accepts every call and has served no mock.
 type appWaitInstr struct{ setupInstr }
 

@@ -81,6 +81,10 @@ type Service interface {
 // Implemented by go.keploy.io/server/v3/pkg/platform/yaml/testdb.TestYaml.
 type TestCaseDB interface {
 	GetTestCase(ctx context.Context, testSetID string, testCaseName string) (*models.TestCase, error)
+	// Root is the recording's directory: a test case names the files kept
+	// beside it (a large body, a form part) from there, and they are read
+	// only inside it (keployPkg.ReadRecordingFile).
+	Root() string
 }
 
 // Instrumentation is the agent/proxy control surface needed for mock loading.

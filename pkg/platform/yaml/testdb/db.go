@@ -1043,6 +1043,13 @@ func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
 	}
 	return nil
 }
+
+// Root is the directory the test cases are written under: the files kept
+// beside a test case (a large body, a form part) are named relative to it.
+func (ts *TestYaml) Root() string {
+	return ts.TcsPath
+}
+
 func (ts *TestYaml) ChangePath(path string) {
 
 	ts.TcsPath = path
