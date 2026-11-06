@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -30,17 +31,38 @@ func CorrelationsFromMock(m *models.Mock) []models.FieldCorrelation {
 	if m == nil || m.Spec.HTTPReq == nil || m.Spec.HTTPResp == nil {
 		return nil
 	}
+	// An answer with no body (a 204) echoes nothing, so its request, however
+	// large, is not parsed either.
+	if strings.TrimSpace(m.Spec.HTTPResp.Body) == "" {
+		return nil
+	}
 	reqFlat := flattenJSONBody(m.Spec.HTTPReq.Body)
-	respFlat := flattenJSONBody(m.Spec.HTTPResp.Body)
-	if len(reqFlat) == 0 || len(respFlat) == 0 {
+
+	// The request is read first, and the answer only for the app-random values
+	// the request writes. This runs for every HTTP mock at replay start: an
+	// answer to a call that writes none, or whose raw text cannot hold one, is
+	// never parsed, so a large answer costs a few raw scans, not a parse and a
+	// flatten of the whole document.
+	written := make(map[string]string) // app-random request value → its class
+	for _, vals := range reqFlat {
+		for _, v := range vals {
+			if class, ok := appRandomClass(v); ok {
+				written[v] = class
+			}
+		}
+	}
+	if len(written) == 0 || !answerMayHold(m.Spec.HTTPResp.Body, written) {
 		return nil
 	}
 
-	// Index response scalar values → the body paths that carry them.
-	respByValue := make(map[string][]string, len(respFlat))
-	for path, vals := range respFlat {
+	// Index the answer's scalar values the request wrote → the body paths that
+	// carry them. Other values are never looked up, so they are not kept.
+	respByValue := make(map[string][]string, len(written))
+	for path, vals := range flattenJSONBody(m.Spec.HTTPResp.Body) {
 		for _, v := range vals {
-			respByValue[v] = append(respByValue[v], "body."+path)
+			if _, ok := written[v]; ok {
+				respByValue[v] = append(respByValue[v], "body."+path)
+			}
 		}
 	}
 
@@ -48,11 +70,7 @@ func CorrelationsFromMock(m *models.Mock) []models.FieldCorrelation {
 	seen := make(map[string]struct{})
 	for path, vals := range reqFlat {
 		for _, v := range vals {
-			class, ok := appRandomClass(v)
-			if !ok {
-				continue
-			}
-			respPaths, echoed := respByValue[v]
+			respPaths, echoed := respByValue[v] // only written values are indexed
 			if !echoed {
 				continue
 			}
@@ -67,7 +85,7 @@ func CorrelationsFromMock(m *models.Mock) []models.FieldCorrelation {
 				RequestPath:   reqPath,
 				ResponsePaths: rp,
 				RecordedValue: v,
-				ValueClass:    class,
+				ValueClass:    written[v],
 			})
 		}
 	}
@@ -87,6 +105,54 @@ func flattenJSONBody(body string) map[string][]string {
 		return nil
 	}
 	return matcher.Flatten(j)
+}
+
+// answerMayHold reports, from a JSON answer's raw text and without parsing
+// it, whether the answer can carry a string equal to one of the written
+// values. False only when it cannot: a written value is a run of the
+// characters [0-9A-Za-z_-] with at most whitespace around it (appRandomClass),
+// and JSON writes each of those characters either as itself or as a \u
+// escape. So an answer whose text holds no written run, and escapes none of
+// those characters, holds no written value.
+func answerMayHold(body string, written map[string]string) bool {
+	for v := range written {
+		if strings.Contains(body, strings.TrimSpace(v)) {
+			return true
+		}
+	}
+	return escapesAValueChar(body)
+}
+
+// escapesAValueChar reports whether body holds a \uXXXX escape of a character
+// an app-random value is made of. Encoders write those characters as
+// themselves, so this is rare; an escaped backslash before a u counts too,
+// which only makes the answer be parsed.
+func escapesAValueChar(body string) bool {
+	for rest := body; ; {
+		i := strings.Index(rest, `\u`)
+		if i < 0 {
+			return false
+		}
+		rest = rest[i+2:]
+		if len(rest) < 4 {
+			return false
+		}
+		// Not four hex digits reads as 0, which is not a value character.
+		r, _ := strconv.ParseUint(rest[:4], 16, 16)
+		if isValueChar(rune(r)) {
+			return true
+		}
+	}
+}
+
+// isValueChar reports whether r is one of [0-9A-Za-z_-], the characters every
+// value appRandomClass accepts is made of. answerMayHold is exact only while
+// that holds and while JSON writes none of them with a short escape such as
+// the one for '/'. A test parses the class regexes and fails when one can
+// match any other character; two more put runes and pairs of characters into
+// a value of each class and fail when appRandomClass then accepts any other.
+func isValueChar(r rune) bool {
+	return r == '-' || r == '_' || ('0' <= r && r <= '9') || ('A' <= r && r <= 'Z') || ('a' <= r && r <= 'z')
 }
 
 var (
