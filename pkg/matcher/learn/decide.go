@@ -177,7 +177,8 @@ func (l Landed) String() string {
 // VarPlace; read it through AddressOf), and the instant a client test
 // began at in its recording (RecBegan: the tracker's recorded begin, zero
 // where none is known), which the test's own value must precede where no
-// window tells it.
+// window tells it, and the test the call trails (Trails; the zero Trail:
+// none).
 type Input struct {
 	Drifts    *DriftCache
 	Drift     []string
@@ -198,6 +199,29 @@ type Input struct {
 	Scope     func(mock string) Scope
 	Landed    Landed
 	PlaceOf   func(l Leaf, answer bool) (string, bool)
+	Trails    Trail
+}
+
+// Trail is the test a call trails: keploy record marked the call's
+// recording trailing it (models.MockEntry.Trails), on proof that the call
+// carries a value that test's own call sent and was recorded after that
+// test ended (a call the application makes for a test once it has
+// answered it, such as a clean-up it runs in the background). Test names
+// the test, and Mocks the recordings of its own list. The places those
+// recordings left the run (an earlier test's, Earlier.Run) are the call's
+// own scope, and a value one sent is bound there as the run's variable,
+// which a replay keeps past the test's end; every other earlier test's
+// place stays outside the call's scope (inScope). A Trail that names no
+// test trails none, nor does the zero Trail.
+type Trail struct {
+	Test  string
+	Mocks []string
+}
+
+// trails reports whether mock is a recording of the test the call trails
+// (Input.Trails).
+func (in Input) trails(mock string) bool {
+	return in.Trails.Test != "" && slices.Contains(in.Trails.Mocks, mock)
 }
 
 // AddressOf is the address of l, a leaf of the call's request (answer

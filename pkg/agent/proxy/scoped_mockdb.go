@@ -1033,6 +1033,14 @@ func (s *scopedMockDb) InPool(m *models.Mock) (bool, bool) {
 	return integrations.InPool(s.MockMemDb, m)
 }
 
+// TrailOf forwards integrations.TrailedTests: the test a recording trails
+// by the replay's scope table is the store's, whatever view a worker reads.
+func (s *scopedMockDb) TrailOf(mock string) learn.Trail {
+	return integrations.TrailOf(s.MockMemDb, mock)
+}
+
+var _ integrations.TrailedTests = (*scopedMockDb)(nil)
+
 // RecordedWindowIndex forwards integrations.RecordedWindowIndex.
 func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
 	if w, ok := s.MockMemDb.(integrations.RecordedWindowIndex); ok {

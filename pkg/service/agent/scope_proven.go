@@ -111,6 +111,11 @@ type provenWire struct {
 	// table, models.ScopeTableReq.Worker): names of its pool slice shown in
 	// a test's window too (serveKeyWorker). nil when the table had none.
 	worker map[string][]string
+	// trails is, in a replay, the test each worker-scope recording trails
+	// (the CLI's scope table, models.ScopeTableReq.Trails), which
+	// SetScopePool hands the proxy with the table's tests. nil when the
+	// table had none.
+	trails map[string]string
 	// notRequired is, in a replay, by test ID, the names of the test's own
 	// list keploy's judging marked served, not required (the CLI's scope table,
 	// models.ScopeTableReq.NotRequired): its end does not charge the test
@@ -621,7 +626,35 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 			return err
 		}
 	}
+	// The test each worker recording trails, read with the tests above.
+	a.provenMu.Lock()
+	trails := maps.Clone(a.proven.trails)
+	a.provenMu.Unlock()
+	if ts, ok := a.Proxy.(coreAgent.PoolTrailsSetter); ok {
+		if err := ts.SetPoolTrails(trails); err != nil {
+			return err
+		}
+	}
 	return a.applyPool(ctx)
+}
+
+// SetScopeTrails installs the test each worker-scope recording trails for a
+// replay (models.ScopeTableReq.Trails), which the pool slices sent next hand
+// the proxy (SetScopePool): its learn step reads such a call's scope by it.
+// None leaves the set none, never the previous set's. A proxy that cannot
+// learn by it refuses one: the CLI judges the calls on it.
+func (a *Agent) SetScopeTrails(ctx context.Context, trails map[string]string) error {
+	if _, ok := a.Proxy.(coreAgent.PoolTrailsSetter); !ok && len(trails) > 0 {
+		return errors.New("this keploy agent's proxy cannot learn a worker: call that trails an earlier test")
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.trails = maps.Clone(trails)
+	a.provenMu.Unlock()
+	return nil
 }
 
 // SetScopeWorker installs each key's worker scope for a replay

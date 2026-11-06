@@ -5015,6 +5015,20 @@ func (p *Proxy) SetPoolNames(names []string, owners map[string]string, tests map
 	})
 }
 
+var _ agent.PoolTrailsSetter = (*Proxy)(nil)
+
+// SetPoolTrails implements agent.PoolTrailsSetter: the test each
+// worker-scope recording trails, on the mock manager
+// (MockManager.SetPoolTrails).
+func (p *Proxy) SetPoolTrails(trails map[string]string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolTrails(trails)
+	return nil
+}
+
 // learnBoundary runs step (the learn tracker's Begin, End or NewSet) on the
 // proxy's learn tracker through the mock manager it holds
 // (MockManager.LearnBoundary): holding the manager's round lock, so a learn

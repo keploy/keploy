@@ -455,8 +455,9 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 //
 // Each move's Reason (MockEntry.Reason, under the proven switch: why judging
 // moved it, and its undo) is written on the entry as given: the entry's line
-// is the last placement's. So is its Drift (MockEntry.Drift: the move rests on
-// its owner's quarantine). Under the switch a mock taken out of a test's list
+// is the last placement's. So are its Drift (MockEntry.Drift: the move rests
+// on its owner's quarantine) and its Trails (MockEntry.Trails: the earlier
+// test whose call it trails, which only the move that proved it names). Under the switch a mock taken out of a test's list
 // names that test as its Owner (MockEntry.Owner), unless the move names one;
 // a worker entry placed again keeps its owner unless the move names one.
 // Without the switch no owner is written, so a move writes what it wrote
@@ -526,6 +527,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			mapping.Worker[i].Place = mv.Place
 			mapping.Worker[i].Reason = mv.Reason
 			mapping.Worker[i].Drift = mv.Drift
+			mapping.Worker[i].Trails = mv.Trails
 			if mv.Owner != "" {
 				mapping.Worker[i].Owner = mv.Owner
 			}
@@ -560,6 +562,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	entry.Place = mv.Place
 	entry.Reason = mv.Reason
 	entry.Drift = mv.Drift
+	entry.Trails = mv.Trails
 	// A replay serves a worker entry only while a test process of its key
 	// holds the run, and a moved entry with none would sit in the slice no
 	// test process holds: the move's key, else the test's. A test with no

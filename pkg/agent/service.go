@@ -1049,6 +1049,16 @@ type PoolNamesSetter interface {
 	SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error
 }
 
+// PoolTrailsSetter is implemented by a proxy whose learn step reads a
+// worker-scope call that trails an earlier test in that test's scope
+// (integrations.TrailedTests): SetPoolTrails installs, of keploy mock
+// replay's scope table under the proven switch, the test each worker-scope
+// recording trails (models.ScopeTableReq.Trails), with the table's tests
+// (PoolNamesSetter).
+type PoolTrailsSetter interface {
+	SetPoolTrails(trails map[string]string) error
+}
+
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
 // is ServeExactPool that also answers, while no test is open, the next test's
 // mocks that were in flight when it began (ahead, models.ExactServing.Ahead),

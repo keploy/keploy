@@ -522,6 +522,65 @@ func TestScopeTableCarriesTheWorkerScope(t *testing.T) {
 	}
 }
 
+// trailsSvc is workerSvc that also takes the test each worker recording
+// trails (scopeTrailsSetter).
+type trailsSvc struct {
+	workerSvc
+	trails *map[string]string
+	err    error
+}
+
+func (s trailsSvc) SetScopeTrails(_ context.Context, tr map[string]string) error {
+	if s.err != nil {
+		return s.err
+	}
+	*s.trails = tr
+	s.order = append(s.order, "trails")
+	return nil
+}
+
+// Under the switch the scope table carries the test each worker recording
+// trails, installed with the worker scope, before the pool slices; a table
+// without trails installs none, so a set never keeps the previous set's. An
+// agent that cannot learn by them refuses a table that has some, and takes a
+// table without. With the switch off they are not read.
+func TestScopeTableCarriesTheTrails(t *testing.T) {
+	post := func(svc agent.Service, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		return rec
+	}
+	withTrails := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-2"]},"worker":{"o":["mock-2"]},"trails":{"mock-2":"o::TestA"}}`
+	t.Setenv(provenswitch.Env, "1")
+	ps, got := &poolSvc{}, map[string]string{}
+	if rec := post(trailsSvc{workerSvc{ps}, &got, nil}, withTrails); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !maps.Equal(got, map[string]string{"mock-2": "o::TestA"}) || !slices.Equal(ps.order, []string{"windows", "worker", "trails", "pool"}) {
+		t.Fatalf("trails %v, installed %v; want them installed after the worker scope, before the pool", got, ps.order)
+	}
+	ps, got = &poolSvc{}, map[string]string{"stale": "o::TestA"}
+	if rec := post(trailsSvc{workerSvc{ps}, &got, nil}, `{"mappings":{},"pool":{}}`); rec.Code != http.StatusOK || len(got) != 0 || !slices.Equal(ps.order, []string{"windows", "worker", "trails", "pool"}) {
+		t.Fatalf("a table without trails: status %d, trails %v, installed %v; want none installed", rec.Code, got, ps.order)
+	}
+	ps = &poolSvc{}
+	if rec := post(trailsSvc{workerSvc{ps}, &got, errors.New("refused")}, withTrails); rec.Code != http.StatusInternalServerError || len(ps.order) != 2 {
+		t.Fatalf("an agent that could not install the trails answered %d and installed %v; want 500 before the pool", rec.Code, ps.order)
+	}
+	if rec := post(workerSvc{&poolSvc{}}, withTrails); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("an agent without trails answered %d to a table with some", rec.Code)
+	}
+	if rec := post(workerSvc{&poolSvc{}}, `{"mappings":{},"pool":{},"worker":{"o":["mock-2"]}}`); rec.Code != http.StatusOK {
+		t.Fatalf("an agent without trails answered %d to a table without any", rec.Code)
+	}
+	t.Setenv(provenswitch.Env, "")
+	ps, got = &poolSvc{}, nil
+	if rec := post(trailsSvc{workerSvc{ps}, &got, nil}, withTrails); rec.Code != http.StatusOK || got != nil || len(ps.order) != 0 {
+		t.Fatalf("switch off: status %d, trails %v, installed %v", rec.Code, got, ps.order)
+	}
+}
+
 // Under the switch the scope table carries, by test, the recordings
 // keploy's judging marked served, not required, installed before the pool slices; a
 // table without them installs none, so a set never keeps the previous
