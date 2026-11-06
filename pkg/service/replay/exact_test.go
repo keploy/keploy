@@ -363,6 +363,91 @@ func TestTheSetsEndRequiresTheWorkerScopeItsRunReached(t *testing.T) {
 	}
 }
 
+// A set with no mappings.yaml marks as the stop's the worker-scope calls
+// recorded after its last test ended (stopsDerived): nothing says whether the
+// application made them on its own or as keploy record stopped it. The wait
+// before the stop leaves them out, as it leaves out the ones keploy record
+// marked; unlike those, the end requires them whether or not keploy stopped
+// the application.
+func TestTheSetsEndRequiresTheCallsMarkedAfterTheLastTestWithoutWaiting(t *testing.T) {
+	for _, derived := range []bool{false, true} {
+		p := newExactPlan(nil, []models.MockEntry{
+			{Name: "w-boot"}, {Name: "w-late", Place: "test-1", AtStop: true},
+		}, []*models.Mock{{Name: "w-boot"}, {Name: "w-late"}})
+		p.bootSeen, p.stopsDerived = true, derived
+		p.begin("test-1")
+		if got := p.awaitedWorker(nil); !reflect.DeepEqual(got, []string{"w-boot"}) {
+			t.Fatalf("derived %v: the wait waits for %v; want [w-boot]", derived, got)
+		}
+		want := []string{"w-boot"}
+		if derived {
+			want = []string{"w-boot", "w-late"}
+		}
+		if got := p.unansweredWorker(nil, false); !reflect.DeepEqual(got, want) {
+			t.Fatalf("derived %v: the end of an application keploy did not stop requires %v; want %v", derived, got, want)
+		}
+		if got := p.unansweredWorker(nil, true); !reflect.DeepEqual(got, []string{"w-boot", "w-late"}) {
+			t.Fatalf("derived %v: once the application was stopped the end requires %v; want [w-boot w-late]", derived, got)
+		}
+		why := p.stopsDerivedWhy([]string{"w-boot", "w-late"})
+		if derived != strings.Contains(why, "1 of them were recorded after the set's last test ended") || p.stopsDerivedWhy([]string{"w-boot"}) != "" {
+			t.Fatalf("derived %v: the failure says %q", derived, why)
+		}
+	}
+	var none *exactPlan
+	if none.awaitedWorker(nil) != nil || none.stopsDerivedWhy([]string{"w"}) != "" {
+		t.Fatal("no plan waits for nothing and says nothing")
+	}
+	bg := &exactPlan{background: true, worker: []models.MockEntry{{Name: "w"}}, bootSeen: true}
+	if bg.awaitedWorker(nil) != nil {
+		t.Fatal("under the background rules the wait waits for nothing")
+	}
+}
+
+// A set with no mappings.yaml derives its worker scope from its windows, and
+// marks as the stop's each call of it recorded after its last test ended: by
+// its request, or its answer for one placed at its answer (a poll answered as
+// the application was stopped). One recorded before the last test, though
+// after another test, is not marked; nor is any, with no window to end.
+func TestTheWindowsMarkTheWorkerCallsAfterTheLastTest(t *testing.T) {
+	unregister := models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Name == "w-held" })
+	t.Cleanup(unregister)
+	at := func(name string, req, res int) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "mocks", models.MetadataLifetimeKey: models.MetadataLifetimePerTest},
+			ReqTimestampMock: attrAt(req), ResTimestampMock: attrAt(res),
+		}}
+	}
+	cases := []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(1000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(1100)}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(2000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(2100)}},
+	}
+	stored := []*models.Mock{at("w-between", 1500, 1510), at("w-held", 2050, 2600), at("w-late", 2500, 2510)}
+	// A document the decoders skipped, built with no place: read by its
+	// request time.
+	skipped := []models.WindowedMock{{Name: "w-unread", Kind: models.HTTP, At: attrAt(2700), TestMock: true}}
+	core, logs := observer.New(zap.InfoLevel)
+	r := &Replayer{logger: zap.New(core)}
+	_, worker := r.windowOwnership("test-set-0", cases, "no mappings.yaml", skipped, stored)
+	got := map[string]bool{}
+	for _, e := range worker {
+		got[e.Name] = e.AtStop
+	}
+	if want := map[string]bool{"w-between": false, "w-held": true, "w-late": true, "w-unread": true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("marked %v; want %v", got, want)
+	}
+	said := logs.FilterMessageSnippet("owns the calls recorded inside its own window").All()
+	if len(said) != 1 || said[0].ContextMap()["workerMocksAfterTheLastTest"] != int64(3) {
+		t.Fatalf("said %v; want one line counting 3 worker calls after the last test", said)
+	}
+	_, worker = r.windowOwnership("test-set-0", []*models.TestCase{{Name: "grpc-less", Kind: models.GENERIC}}, "no mappings.yaml", nil, stored)
+	for _, e := range worker {
+		if e.AtStop {
+			t.Fatalf("with no window %s is marked as the stop's", e.Name)
+		}
+	}
+}
+
 // A worker-scope entry naming a mock the agent does not hold is required all
 // the same, as a test case's own entry is: a recorded call never made fails
 // the set. One of a kind no assertion covers (DNS) is not, nor is a
@@ -443,6 +528,24 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 			case missing := <-done:
 				if len(missing) != 0 {
 					t.Fatalf("every call was made, yet %v were reported", missing)
+				}
+				return
+			}
+		}
+	})
+	t.Run("every call made, a stop call marked for a set with no mappings.yaml", func(t *testing.T) {
+		reads := make(chan []models.MockState, 4)
+		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
+		p := plan()
+		p.stopsDerived = true
+		done := run(r, context.Background(), p, map[string]models.MockState{})
+		reads <- []models.MockState{{Name: "w-1"}, {Name: "w-2"}}
+		for {
+			select {
+			case wakes <- time.Time{}:
+			case missing := <-done:
+				if len(missing) != 0 || readErr != nil {
+					t.Fatalf("every call but the stop's was made, yet %v were reported (%v): the wait waited for the stop's", missing, readErr)
 				}
 				return
 			}

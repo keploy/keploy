@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -459,67 +460,92 @@ func TestUnderTheSwitchABootCallIsNotRequiredOfAnAppKeployDidNotStart(t *testing
 // the worker scope is judged with it. One the recording made as keploy record
 // stopped its application (MockEntry.AtStop) is not waited for before the
 // stop, and is required once the application is stopped: never made, the set
-// fails, naming it.
+// fails, naming it. A set with no mappings.yaml (its windows give its worker
+// scope) does not say which calls the stop made: one recorded after its last
+// test ended is not waited for either, so it replays as fast as with
+// mappings.yaml, background serving enabled or not, and is required all the
+// same: never made, the set fails, saying why.
 func TestUnderTheSwitchAShutdownCallIsJudgedOnceTheAppIsStopped(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		recorded bool // mappings.yaml's worker scope says the call is the shutdown's
-		made     bool
-		want     models.TestSetStatus
-	}{
-		{"made as it stops, the scope derived", false, true, models.TestSetStatusPassed},
-		{"made as it stops, recorded at the stop", true, true, models.TestSetStatusPassed},
-		{"never made, recorded at the stop", true, false, models.TestSetStatusFailed},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			setSwitch(t, true)
-			fastWorkerWait(t)
-			h := newPartialRunHarness(t, 1, 0)
-			pinWindows(h)
-			h.replayer.config.Command = "./app"
-			stopped := make(chan struct{})
-			h.instr.stopped = stopped
-			core, logs := observer.New(zap.InfoLevel)
-			h.replayer.logger = zap.New(core)
-			h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-deregister", 3000)}
-			db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": mongoEntries("mock-a")})
-			if tc.recorded {
-				if err := db.UpsertWorker(context.Background(), "test-set-0", []models.MockEntry{
-					{Name: "mock-deregister", Kind: string(models.HTTP), Place: "test-1", AtStop: true},
-				}); err != nil {
-					t.Fatal(err)
+	for _, s12 := range []bool{false, true} {
+		for _, tc := range []struct {
+			name     string
+			recorded bool // mappings.yaml's worker scope says the call is the shutdown's
+			made     bool
+			want     models.TestSetStatus
+		}{
+			{"made as it stops, the scope derived", false, true, models.TestSetStatusPassed},
+			{"made as it stops, recorded at the stop", true, true, models.TestSetStatusPassed},
+			{"never made, recorded at the stop", true, false, models.TestSetStatusFailed},
+			{"never made, the scope derived", false, false, models.TestSetStatusFailed},
+		} {
+			t.Run(fmt.Sprintf("background serving %v, %s", s12, tc.name), func(t *testing.T) {
+				setSwitch(t, true)
+				enableS12(t, &s12)
+				fastWorkerWait(t)
+				waits := 0
+				wake := workerWake
+				workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
+					waits++
+					return wake(ctx)
 				}
-			} else {
-				// No worker scope recorded: the replay derives it from the
-				// windows, which do not say what was the shutdown's.
-				if err := db.Delete(context.Background(), "test-set-0"); err != nil {
-					t.Fatal(err)
-				}
-			}
-			inner := consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}})
-			drained := false
-			h.replayer.hookImpl = prHooks{consumedFor: func() []models.MockState {
-				select {
-				case <-stopped:
-					if tc.made && !drained {
-						drained = true
-						return []models.MockState{mongoAt("mock-deregister", 3000)}
+				h := newPartialRunHarness(t, 1, 0)
+				pinWindows(h)
+				h.replayer.config.Command = "./app"
+				stopped := make(chan struct{})
+				h.instr.stopped = stopped
+				core, logs := observer.New(zap.InfoLevel)
+				h.replayer.logger = zap.New(core)
+				h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-deregister", 3000)}
+				db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": mongoEntries("mock-a")})
+				if tc.recorded {
+					if err := db.UpsertWorker(context.Background(), "test-set-0", []models.MockEntry{
+						{Name: "mock-deregister", Kind: string(models.HTTP), Place: "test-1", AtStop: true},
+					}); err != nil {
+						t.Fatal(err)
 					}
-					return nil
-				default:
-					return inner()
+				} else {
+					// No mappings.yaml: the replay derives the worker scope
+					// from the windows, which do not say what was the
+					// shutdown's.
+					if err := db.Delete(context.Background(), "test-set-0"); err != nil {
+						t.Fatal(err)
+					}
 				}
-			}}
-			if got := h.run(t); got != tc.want {
-				t.Fatalf("set %s, want %s (missing named %d time(s))", got, tc.want, workerNamed(logs))
-			}
-			if want := map[models.TestSetStatus]int{models.TestSetStatusPassed: 0, models.TestSetStatusFailed: 1}[tc.want]; workerNamed(logs) != want {
-				t.Fatalf("missing named %d time(s), want %d", workerNamed(logs), want)
-			}
-			if waited := len(logs.FilterMessageSnippet("waiting for the test set's worker scope").All()); tc.recorded && waited != 0 {
-				t.Fatalf("the set's end waited %d time(s) for a call the recording made at its stop", waited)
-			}
-		})
+				inner := consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}})
+				drained := false
+				h.replayer.hookImpl = prHooks{consumedFor: func() []models.MockState {
+					select {
+					case <-stopped:
+						if tc.made && !drained {
+							drained = true
+							return []models.MockState{mongoAt("mock-deregister", 3000)}
+						}
+						return nil
+					default:
+						return inner()
+					}
+				}}
+				if got := h.run(t); got != tc.want {
+					t.Fatalf("set %s, want %s (missing named %d time(s))", got, tc.want, workerNamed(logs))
+				}
+				if want := map[models.TestSetStatus]int{models.TestSetStatusPassed: 0, models.TestSetStatusFailed: 1}[tc.want]; workerNamed(logs) != want {
+					t.Fatalf("missing named %d time(s), want %d", workerNamed(logs), want)
+				}
+				if waited := len(logs.FilterMessageSnippet("waiting for the test set's worker scope").All()); waited != 0 || waits != 0 {
+					t.Fatalf("the set's end waited (%d line(s), %d wait(s)) for a call the application makes only as it is stopped", waited, waits)
+				}
+				said := logs.FilterMessageSnippet("without waiting for them").All()
+				if want := map[bool]int{true: 1}[!tc.recorded && !tc.made]; len(said) != want {
+					t.Fatalf("the failure said %d time(s) the set has no mappings.yaml to tell the stop's calls apart, want %d", len(said), want)
+				}
+				for _, l := range logs.FilterMessageSnippet("test-set failed: the application never made").All() {
+					next, _ := l.ContextMap()["next_step"].(string)
+					if derived := !tc.recorded; derived != strings.Contains(next, "marks the calls the application makes as it is stopped") {
+						t.Fatalf("next_step %q; the scope derived %v", next, derived)
+					}
+				}
+			})
+		}
 	}
 }
 

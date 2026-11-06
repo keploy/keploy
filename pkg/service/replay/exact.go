@@ -123,6 +123,14 @@ type exactPlan struct {
 	// returned is, by mock, the owner a drift move's recording was given
 	// back to (returnStaleMoves): its quarantine no longer applies.
 	returned map[string]string
+	// stopsDerived: the worker scope's at-stop marks (MockEntry.AtStop) are
+	// derived, not recorded: the set has no mappings.yaml keploy record
+	// wrote, so its windows give its worker scope, and each call of it
+	// recorded after its last test ended is marked (windowOwnership). Such a
+	// call may be one the application makes in its own time, so the set's
+	// end requires it whether or not keploy stopped the application; as one
+	// it may make only as it is stopped, it is never waited for.
+	stopsDerived bool
 }
 
 // noteAhead fills p.ahead from what each test case of cases owns: its mapped
@@ -272,7 +280,9 @@ func (p *exactPlan) takeWorker(counted, rearm []models.MockState) ([]models.Mock
 // beginning it makes none due, begun), but for the ones whose answer is idle
 // (D3, D4). One the recording made as keploy record stopped the application
 // (MockEntry.AtStop) is required only once keploy has stopped this set's
-// application and read what it consumed as it stopped (stopped).
+// application and read what it consumed as it stopped (stopped); one marked
+// so because no mappings.yaml says which calls the stop made (stopsDerived)
+// is required either way.
 func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState, stopped bool) []string {
 	// Under the background rules the set's end requires none: what a
 	// background call answered is judged by record's judging,
@@ -284,17 +294,38 @@ func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState, stopp
 	return p.unansweredWorkerOf(consumed, stopped)
 }
 
+// awaitedWorker is what the set's end waits for before keploy stops the
+// application (awaitWorkerScope): unansweredWorker before the stop, less
+// every call marked as one the stop may make (MockEntry.AtStop), a derived
+// mark included: the application may make it only once it is stopped.
+func (p *exactPlan) awaitedWorker(consumed map[string]models.MockState) []string {
+	if p == nil || p.background {
+		return nil
+	}
+	return p.owedWorker(consumed, false, true)
+}
+
 // unansweredWorkerOf is the worker-scope recordings today's rule requires by
 // the set's end that consumed holds none of (unansweredWorker), whatever rules
 // serve the set.
 func (p *exactPlan) unansweredWorkerOf(consumed map[string]models.MockState, stopped bool) []string {
+	return p.owedWorker(consumed, stopped, false)
+}
+
+// owedWorker is unansweredWorkerOf, read before the stop when waiting (the
+// wait leaves out every call marked at the stop: awaitedWorker).
+func (p *exactPlan) owedWorker(consumed map[string]models.MockState, stopped, waiting bool) []string {
 	if p == nil {
 		return nil
 	}
+	// A call marked at the stop is left out by the wait, and by the end's
+	// read of an application keploy did not stop, unless its mark is
+	// derived: nothing says the stop made it.
+	skipAtStop := waiting || (!stopped && !p.stopsDerived)
 	var out []string
 	for _, e := range p.worker {
 		switch {
-		case p.idle[e.Name], e.AtStop && !stopped:
+		case p.idle[e.Name], e.AtStop && skipAtStop:
 			continue
 		case e.Place == "" && !p.bootSeen, e.Place != "" && !p.begun[e.Place]:
 			continue
@@ -654,12 +685,33 @@ func (r *Replayer) windowOwnershipOf(testSetID string, cases []*models.TestCase,
 		out[tc.ID] = tc.Mocks
 		mapped += len(tc.Mocks)
 	}
+	// No mappings.yaml says which calls keploy record's stop made
+	// (MockEntry.AtStop): each worker-scope call recorded after the set's last
+	// test ended may be one, so each is marked as one. The set's end never
+	// waits for it, and requires it by its end all the same (exactPlan.
+	// stopsDerived), the stop's drain included.
+	// A mock with no place (one built without it) is read by its request
+	// time, as the derivation places it.
+	placed := make(map[string]time.Time, len(mocks))
+	for _, m := range mocks {
+		if !m.Place.IsZero() {
+			placed[m.Name] = m.Place
+		}
+	}
+	models.MarkAtStop(derived.Worker, placed, models.LastWindowEnd(windows))
+	atStop := 0
+	for _, e := range derived.Worker {
+		if e.AtStop {
+			atStop++
+		}
+	}
 	r.logger.Info("under KEPLOY_PROVEN each test case of this test set owns the calls recorded inside its own window, as keploy record maps a recording made under the switch",
 		zap.String("testSetID", testSetID),
 		zap.String("reason", why),
 		zap.Int("numTests", len(out)),
 		zap.Int("ownedMocks", mapped),
 		zap.Int("workerMocks", len(derived.Worker)),
+		zap.Int("workerMocksAfterTheLastTest", atStop),
 		zap.String("next_step", "record the test set again under KEPLOY_PROVEN for a mappings.yaml keploy record writes"))
 	if n := len(derived.Concurrent); n > 0 {
 		r.logger.Warn("some tests of this test set were recorded while another test's request was still open: a call recorded while two tests were open is owned by the test whose request came first, which may not be the test that made it",
@@ -1128,10 +1180,13 @@ var workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
 
 // awaitWorkerScope waits, at the set's end and before its application is
 // stopped, until every worker-scope mock the set's end requires answered by
-// then has answered (exactPlan.unansweredWorker, those the recording made
+// then has answered (exactPlan.awaitedWorker, those the recording made
 // before its stop; D3): a worker makes its calls in its own time, after the
-// last test as well. It reads what the agent consumed meanwhile into
-// consumed (through add), as the set's end reads it. It returns those still
+// last test as well. It never waits for a call marked as one the stop may
+// make (MockEntry.AtStop), a mark derived for a set with no mappings.yaml
+// included: an application makes such a call only once it is stopped. It
+// reads what the agent consumed meanwhile into consumed (through add), as the
+// set's end reads it. It returns those still
 // unanswered when the run stops waiting: the set's own context ends (its
 // application exited, or the user stopped it), or none of them answers
 // across workerStallLimit wake-ups in a row. The wake-ups count the
@@ -1140,7 +1195,7 @@ var workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
 // the wait with its error: what the worker scope answered is then not known,
 // and the set is not judged.
 func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consumed map[string]models.MockState, add func([]models.MockState)) ([]string, error) {
-	missing := plan.unansweredWorker(consumed, false)
+	missing := plan.awaitedWorker(consumed)
 	if len(missing) == 0 {
 		return nil, nil
 	}
@@ -1163,7 +1218,7 @@ func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consum
 			return missing, err
 		}
 		add(read)
-		now := plan.unansweredWorker(consumed, false)
+		now := plan.awaitedWorker(consumed)
 		if len(now) == 0 {
 			return nil, nil
 		}
@@ -1177,6 +1232,32 @@ func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consum
 			return missing, nil
 		}
 	}
+}
+
+// stopsDerivedWhy says, of missing (the worker-scope calls the set's end
+// found unanswered), how many are marked as ones the stop may make only
+// because no mappings.yaml says which calls keploy record's stop made
+// (stopsDerived), and what keploy did with them: "" for none.
+func (p *exactPlan) stopsDerivedWhy(missing []string) string {
+	if p == nil || !p.stopsDerived {
+		return ""
+	}
+	marked := map[string]bool{}
+	for _, e := range p.worker {
+		if e.AtStop {
+			marked[e.Name] = true
+		}
+	}
+	n := 0
+	for _, name := range missing {
+		if marked[name] {
+			n++
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d of them were recorded after the set's last test ended, and the set has no mappings.yaml keploy record wrote to say whether the application made them on its own or as keploy record stopped it, so keploy required them by the set's end, what the application consumed as keploy stopped it included, without waiting for them", n)
 }
 
 // workerWhy says what a set's end found of its worker scope: the calls its

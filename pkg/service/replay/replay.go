@@ -2697,6 +2697,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			expectedTestMockMappings = r.planShares(testSetID, expectedTestMockMappings)
 			r.exact.background = s12Background
 			r.exact.returned = returnedMoves
+			r.exact.stopsDerived = fromWindows
 			// The set's start is reached only when keploy starts its
 			// application for it: an application kept alive from an earlier
 			// set, or one keploy does not start, booted before this set.
@@ -6190,7 +6191,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// the worker scope is judged again with it, the calls the recording
 		// made as keploy record stopped its application included
 		// (MockEntry.AtStop), which nothing waited for. A set whose app
-		// keploy did not stop requires none of those.
+		// keploy did not stop requires none of those keploy record marked;
+		// those a set with no mappings.yaml marks, as recorded after its last
+		// test (exactPlan.stopsDerived), it requires either way.
 		if checkWorker && workerUnread == nil {
 			workerMissing = r.exact.unansweredWorker(totalConsumedMocks.Map(), stopDrained)
 		}
@@ -6297,10 +6300,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testSetStatus = models.TestSetStatusInternalErr
 				r.markNotJudged(testSetID)
 			} else if len(workerMissing) > 0 {
-				unclaimedReason = workerWhy(workerMissing)
+				derivedWhy := r.exact.stopsDerivedWhy(workerMissing)
+				unclaimedReason = workerWhy(workerMissing) + derivedWhy
+				next := "if the application no longer makes these calls on its own, record the test set again"
+				if derivedWhy != "" {
+					next = "record the test set again with " + provenswitch.Env + "=1: keploy record's mappings.yaml marks the calls the application makes as it is stopped, and the set's end then waits for the others"
+				}
 				r.logger.Error("test-set failed: "+unclaimedReason+" ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID), zap.Strings("mocks", workerMissing),
-					zap.String("next_step", "if the application no longer makes these calls on its own, record the test set again"))
+					zap.String("next_step", next))
 				if testSetStatus == models.TestSetStatusPassed {
 					testSetStatus = models.TestSetStatusFailed
 				}
