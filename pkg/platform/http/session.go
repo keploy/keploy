@@ -519,13 +519,13 @@ func mockParamsStep(params models.MockFilterParams) string {
 
 // resumeStream is called when a stream's connection ended. Once the session
 // is set up on a restarted agent, it makes the stream's request again, the
-// same method, path and body, on a new connection, and returns its response.
+// same request (newRequest), on a new connection, and returns its response.
 // A stream that cannot reconnect waits for the next agent compose starts. It
 // reports false when the stream is over (see awaitRestart).
-func (a *AgentClient) resumeStream(ctx context.Context, stream *sessionStream, name, method, path string, body []byte) (*http.Response, bool) {
+func (a *AgentClient) resumeStream(ctx context.Context, stream *sessionStream, name string, newRequest streamRequest) (*http.Response, bool) {
 	for stream.awaitRestart(ctx) {
 		conn := stream.connect(ctx)
-		res, err := a.reopenStream(conn.ctx, name, method, path, body)
+		res, err := a.reopenStream(conn.ctx, name, newRequest)
 		if err == nil {
 			res.Body = conn.body(res.Body)
 			stream.caughtUp(conn)
@@ -553,10 +553,15 @@ var (
 	reopenBackoff = 500 * time.Millisecond
 )
 
-// reopenStream makes a stream's request again: see resumeStream.
-func (a *AgentClient) reopenStream(ctx context.Context, name, method, path string, body []byte) (*http.Response, error) {
-	var lastErr error
-	for attempt := 1; attempt <= reopenRetries; attempt++ {
+// streamRequest makes a stream's request on ctx, a new one each time. A
+// reopened stream calls the same one, so all a stream asks of its agent is
+// asked again of the agent that replaces it.
+type streamRequest func(ctx context.Context) (*http.Request, error)
+
+// streamRequestOf is the streamRequest of a stream that sends only its method,
+// path and body.
+func (a *AgentClient) streamRequestOf(method, path string, body []byte) streamRequest {
+	return func(ctx context.Context) (*http.Request, error) {
 		var rd io.Reader
 		if body != nil {
 			rd = bytes.NewReader(body)
@@ -569,6 +574,18 @@ func (a *AgentClient) reopenStream(ctx context.Context, name, method, path strin
 			req.Header.Set("Content-Type", "application/json")
 		}
 		a.markDrainsAfterStop(ctx, req)
+		return req, nil
+	}
+}
+
+// reopenStream makes a stream's request again: see resumeStream.
+func (a *AgentClient) reopenStream(ctx context.Context, name string, newRequest streamRequest) (*http.Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= reopenRetries; attempt++ {
+		req, err := newRequest(ctx)
+		if err != nil {
+			return nil, err
+		}
 		res, err := doAgent(&a.client, req)
 		if err == nil {
 			if err := agentStreamStatus(name, res); err != nil {

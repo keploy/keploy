@@ -518,6 +518,13 @@ func NewMockMismatchError(err error, report *MockMismatchReport) error {
 // skipped and counted; everything else stays fatal.
 var ErrMockEncode = errors.New("mock encode failure")
 
+// ErrTestCaseEncode marks a test case the store refuses for THIS test case's
+// own payload, a body its storage format cannot hold, rather than for the
+// storage environment. As with ErrMockEncode, the failure says nothing about
+// the next test case, so a recording skips and counts this one and goes on;
+// every other insert error stays what it was.
+var ErrTestCaseEncode = errors.New("test case encode failure")
+
 // AgentRunUnfinishedError says keploy's agent did not finish its end of a run
 // (its after-test-run hook failed, or the agent was gone) under the proven
 // switch: as an enterprise agent's does when it could not write the row of a

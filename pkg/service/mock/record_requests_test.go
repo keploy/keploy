@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
@@ -794,6 +796,125 @@ func TestRecordRequests_ATestCaseTheStoreRefusedEndsAsARecordingNotSaved(t *test
 			require.Equal(t, 1, logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessage(said).Len(), "the recording not saved was not said at ERROR")
 		})
 	}
+}
+
+// binaryCaseAt is a test case with a response body the json format cannot hold.
+func binaryCaseAt(at time.Time) *models.TestCase {
+	tc := caseAt("", at)
+	tc.HTTPResp.Body = "\x08\x96\x01\xff\xfeproto"
+	return tc
+}
+
+// recordJSONCases records cases through keploy mock record --record-requests
+// into db, returning its logs, the folder it wrote and Record's error.
+func recordJSONCases(t *testing.T, db func(dir string) TestDB, cases ...*models.TestCase) (*observer.ObservedLogs, string, error) {
+	t.Helper()
+	return recordJSONCasesWith(t, nil, db, cases...)
+}
+
+// recordJSONCasesWith is recordJSONCases with the run's record hooks.
+func recordJSONCasesWith(t *testing.T, hooks rec.RecordHooks, db func(dir string) TestDB, cases ...*models.TestCase) (*observer.ObservedLogs, string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr.incoming = cases
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = dir
+	withRequests(cfg)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	core, logs := observer.New(zapcore.InfoLevel)
+	svc := New(zap.New(core), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, hooks, cfg)
+	svc.(TestDBSetter).SetTestDB(db(dir))
+	return logs, dir, svc.Record(context.Background())
+}
+
+func jsonStore(dir string) TestDB { return testdb.NewWithFormat(zap.NewNop(), dir, yaml.FormatJSON) }
+
+// One test case whose body the storage format cannot hold is left out and
+// counted; the run is saved, with the others. It says nothing about the disk,
+// so the run is not ended as one the store failed: the rule for an unencodable
+// mock in the same run.
+func TestRecordRequests_ATestCaseItsFormatCannotHoldIsLeftOutAndCounted(t *testing.T) {
+	logs, dir, err := recordJSONCases(t, jsonStore,
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(15*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(25*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)))
+	require.NoError(t, err)
+	require.Zero(t, utils.ErrCode)
+	files, err := filepath.Glob(filepath.Join(dir, "set", "tests", "*.json"))
+	require.NoError(t, err)
+	require.Len(t, files, 2, "the text test cases are kept, the binary ones left out")
+	said := logs.FilterMessageSnippet("test cases left out of the recording").All()
+	require.Len(t, said, 1)
+	require.Equal(t, zapcore.WarnLevel, said[0].Level, "a run that lost test cases says so above Info")
+	require.EqualValues(t, 2, said[0].ContextMap()["testCasesLeftOut"])
+	recorded := logs.FilterMessage("recorded test cases").All()
+	require.Len(t, recorded, 1)
+	require.EqualValues(t, 2, recorded[0].ContextMap()["cases"], "a case left out is no case of the recording")
+}
+
+// The line is for a run that left test cases out.
+func TestRecordRequests_NothingLeftOutSaysNothingOfIt(t *testing.T) {
+	logs, _, err := recordJSONCases(t, jsonStore, caseAt("", runnerT0.Add(5*time.Millisecond)))
+	require.NoError(t, err)
+	require.Zero(t, logs.FilterMessageSnippet("test cases left out of the recording").Len())
+}
+
+// failsThirdTestDB is the real JSON store, whose disk fails the third test case
+// it is handed.
+type failsThirdTestDB struct {
+	*testdb.TestYaml
+	calls int
+}
+
+func (d *failsThirdTestDB) InsertTestCase(ctx context.Context, tc *models.TestCase, set string, enableLog bool) error {
+	if d.calls++; d.calls == 3 {
+		return errors.New("write the test case: no space left on device")
+	}
+	return d.TestYaml.InsertTestCase(ctx, tc, set, enableLog)
+}
+
+// A test case left out was not written, so the count a real store failure beside
+// it ends the run with has both, of the three the store was handed. It does not
+// hide that failure: the run still ends as not saved, on the failure's error.
+func TestRecordRequests_ACaseLeftOutCountsAsNotWritten(t *testing.T) {
+	logs, _, err := recordJSONCases(t, func(dir string) TestDB {
+		return &failsThirdTestDB{TestYaml: testdb.NewWithFormat(zap.NewNop(), dir, yaml.FormatJSON)}
+	},
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(15*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)))
+	require.ErrorContains(t, err, "2 of the 3 test cases handed to the test-case store were not written")
+	require.ErrorContains(t, err, "no space left on device")
+	require.NotZero(t, utils.ErrCode, "a run with a case left out and one the store failed exits as one that failed")
+	said := logs.FilterMessageSnippet("test cases left out of the recording").All()
+	require.Len(t, said, 1, "one left out is said as two are")
+	require.EqualValues(t, 1, said[0].ContextMap()["testCasesLeftOut"])
+}
+
+// A left-out test case is in no recording, so what runs after an insert (an
+// embedder's post-insert work) does not run for it.
+func TestRecordRequests_ACaseLeftOutRunsNoAfterInsertHook(t *testing.T) {
+	hooks := &hookSpy{}
+	_, _, err := recordJSONCasesWith(t, hooks, jsonStore,
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(15*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)))
+	require.NoError(t, err)
+	var before, after int
+	for _, call := range hooks.calls {
+		switch {
+		case strings.HasPrefix(call, "before-case "):
+			before++
+		case strings.HasPrefix(call, "after-case "):
+			after++
+		}
+	}
+	require.Equal(t, 3, before, "every case goes to the store: %v", hooks.calls)
+	require.Equal(t, 2, after, "the left-out case ran the after-insert hook: %v", hooks.calls)
 }
 
 // refusesTwoTestDB is the real test-case store, whose disk refuses the first

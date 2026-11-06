@@ -563,7 +563,7 @@ func TestStreamsEndOutsideCompose(t *testing.T) {
 // The packet capture goes on after a restart: the traffic in a capture file of
 // its own (each a valid capture), the key log in the same file.
 func TestPcapStreamsReconnectToARestartedAgent(t *testing.T) {
-	client, _ := newRestartingClient(t, true)
+	client, agent := newRestartingClient(t, true)
 	s := client.session()
 	dir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -600,6 +600,15 @@ func TestPcapStreamsReconnectToARestartedAgent(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the pcap streams did not end with the run")
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	calls := map[string]int{}
+	for _, call := range agent.order {
+		calls[call]++
+	}
+	if calls["GET /agent/pcap/traffic"] != 2 || calls["GET /agent/pcap/keylog"] != 2 {
+		t.Fatalf("the pcap streams were not each opened by GET, then reopened by GET: %q", agent.order)
 	}
 }
 

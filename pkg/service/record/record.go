@@ -1615,6 +1615,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	var newTestSetID string
 	var err error
 	var testCount = 0
+	// refusedTestCount counts the test cases the store refused for their own
+	// payload (models.ErrTestCaseEncode), said when the recording ends. Under
+	// insertedMu, as testCount is.
+	var refusedTestCount = 0
 	var mockCountMap = make(map[string]int)
 	// droppedMockCount / droppedMockKinds are the missing half of mockCountMap,
 	// which only ever counts successes. A mock whose own payload cannot be
@@ -2088,6 +2092,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		 */
 		insertedMu.Lock()
 		testCountSnapshot := testCount
+		refusedSnapshot := refusedTestCount
 		insertedMu.Unlock()
 
 		totalMocks := 0
@@ -2135,6 +2140,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					zap.Any("byKind", droppedKindSnapshot),
 					zap.String("testSetID", newTestSetID),
 					zap.String("next_step", "check byKind: an unencodable payload is a parser/encoder bug worth reporting; drops during shutdown are usually I/O and re-recording recovers them"))
+			}
+			if refusedSnapshot > 0 {
+				r.logger.Warn("recording finished without the test cases the store refused: their bodies cannot be stored in this format, and each is said above",
+					zap.Int("testCasesRefused", refusedSnapshot),
+					zap.String("testSetID", newTestSetID),
+					zap.String("next_step", "set storageFormat to yaml and record them again; the yaml encoder stores binary bodies as !!binary without loss"))
 			}
 			suiteMeta := map[string]interface{}{
 				"host-domains": domainSet.ToSlice(),
@@ -2670,6 +2681,15 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			unreachablePorts.check(ctx, testCase)
 			if err != nil {
 				windowMaps.addLostTest(testCase)
+				if errors.Is(err, models.ErrTestCaseEncode) {
+					// THIS test case's body, not the storage: the store said so
+					// at ERROR, and the next test case may be fine. As for an
+					// unencodable mock, one such body must not end the recording.
+					insertedMu.Lock()
+					refusedTestCount++
+					insertedMu.Unlock()
+					continue
+				}
 				if ctx.Err() != nil {
 					// Once shutdown has begun nothing reads insertTestErrChan:
 					// Start's select has already returned, and this loop keeps
