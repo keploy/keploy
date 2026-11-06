@@ -256,8 +256,10 @@ func (r *Runner) executeAndCompare(ctx context.Context, tc *models.TestCase, ser
 	tcCopy.HTTPReq = httpReq
 
 	// Sent as written: one test case run alone has no test set's template
-	// values, which belong to a replay of the whole set (pkg/templates).
-	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{})
+	// values, which belong to a replay of the whole set (pkg/templates). The
+	// files kept beside the test case are read from its testdb's directory,
+	// not the process's working directory.
+	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{KeployPath: r.testCaseDB.Root()})
 	if err != nil {
 		return false, models.RespCompare{}, err
 	}

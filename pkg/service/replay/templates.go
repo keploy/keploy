@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
@@ -794,11 +794,10 @@ func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *
 			add(prefix+k, rec[k], live[k])
 		}
 	}
+	// A file kept beside the test case is read only inside its recording,
+	// as the replay sends it (pkg.ReadRecordingFile).
 	read := func(path string) (string, error) {
-		if keployPath != "" && !filepath.IsAbs(path) {
-			path = filepath.Join(keployPath, path)
-		}
-		b, err := os.ReadFile(path)
+		b, err := pkg.ReadRecordingFile(keployPath, path)
 		return string(b), err
 	}
 	// numbered names the n-th part (from 0) of a name: the name, then

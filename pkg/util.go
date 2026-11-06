@@ -357,9 +357,12 @@ type SimulationConfig struct {
 	// Unbounded: no clock bounds the app's answer, and APITimeout is not
 	// applied. The replay sets it under the proven switch when the user set
 	// no apiTimeout of their own (config.Test.APITimeoutSet, rule 15).
-	Unbounded       bool
-	RequestTimeout  time.Duration
-	ConfigPort      uint32
+	Unbounded      bool
+	RequestTimeout time.Duration
+	ConfigPort     uint32
+	// KeployPath is the recording's directory, the root the test case's
+	// files (a body or a form part kept beside it) are named from and read
+	// inside (ReadRecordingFile). With none, such a file is not read.
 	KeployPath      string
 	ConfigHost      string
 	URLReplacements map[string]string
@@ -629,22 +632,17 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
 
-	// If the request body was offloaded to an asset file (>1MB), load it back
+	// A body kept beside the test case (over 1 MB) is read back from its
+	// recording, cfg.KeployPath, and only from inside it (ReadRecordingFile).
 	if tc.HTTPReq.BodyRef.Path != "" {
-		bodyRefPath := tc.HTTPReq.BodyRef.Path
-		// Resolve relative paths against keployPath so assets work even if
-		// the keploy directory has been moved since recording.
-		if cfg.KeployPath != "" && !filepath.IsAbs(bodyRefPath) {
-			bodyRefPath = filepath.Join(cfg.KeployPath, bodyRefPath)
-		}
-		bodyData, readErr := os.ReadFile(bodyRefPath)
+		bodyData, readErr := ReadRecordingFile(cfg.KeployPath, tc.HTTPReq.BodyRef.Path)
 		if readErr != nil {
-			utils.LogError(logger, readErr, "failed to read request body from asset file", zap.String("path", bodyRefPath))
+			utils.LogError(logger, readErr, "failed to read the request body kept beside the test case")
 			return nil, readErr
 		}
 		reqBody = bodyData
 		logger.Debug("loaded request body from asset file",
-			zap.String("path", bodyRefPath),
+			zap.String("path", tc.HTTPReq.BodyRef.Path),
 			zap.Int("size", len(bodyData)))
 	}
 
@@ -654,13 +652,9 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			for j, value := range form.Values {
 				if value == "" && j < len(form.Paths) && form.Paths[j] != "" {
 					formPath := form.Paths[j]
-					if cfg.KeployPath != "" && !filepath.IsAbs(formPath) {
-						formPath = filepath.Join(cfg.KeployPath, formPath)
-					}
-					valData, readErr := os.ReadFile(formPath)
+					valData, readErr := ReadRecordingFile(cfg.KeployPath, formPath)
 					if readErr != nil {
-						utils.LogError(logger, readErr, "failed to read form value from asset file",
-							zap.String("path", formPath),
+						utils.LogError(logger, readErr, "failed to read the form value kept beside the test case",
 							zap.String("key", form.Key))
 						return nil, readErr
 					}
@@ -693,18 +687,14 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				zap.Int("paths", len(field.Paths)),
 			)
 			for _, path := range field.Paths {
-				// Resolve relative paths against keployPath
-				resolvedPath := path
-				if cfg.KeployPath != "" && !filepath.IsAbs(path) {
-					resolvedPath = filepath.Join(cfg.KeployPath, path)
-				}
-				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", field.Key))
-				file, ferr := os.Open(resolvedPath)
+				// Read from the recording, and only inside it (OpenRecordingFile).
+				logger.Debug("multipart file path", zap.String("path", path), zap.String("field", field.Key))
+				file, ferr := OpenRecordingFile(cfg.KeployPath, path)
 				if ferr != nil {
-					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", resolvedPath))
+					utils.LogError(logger, ferr, "failed to open the multipart file kept beside the test case", zap.String("field", field.Key))
 					return nil, ferr
 				}
-				part, perr := writer.CreateFormFile(field.Key, filepath.Base(resolvedPath))
+				part, perr := writer.CreateFormFile(field.Key, filepath.Base(path))
 				if perr != nil {
 					file.Close()
 					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))

@@ -143,12 +143,14 @@ func TestSimulateHTTP_MultipartRebuildWithPaths_314(t *testing.T) {
 	ctx := context.Background()
 	logger := zap.NewNop()
 
-	tempFile, err := os.CreateTemp("", "keploy-multipart-test-*.txt")
+	// The file is kept in the recording, and named from its directory: a
+	// test case's file is read only there (ReadRecordingFile).
+	recording := t.TempDir()
+	tempFile, err := os.CreateTemp(recording, "keploy-multipart-test-*.txt")
 	require.NoError(t, err)
 	_, err = tempFile.WriteString("file-data")
 	require.NoError(t, err)
 	require.NoError(t, tempFile.Close())
-	defer os.Remove(tempFile.Name())
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		contentType := r.Header.Get("Content-Type")
@@ -223,13 +225,13 @@ func TestSimulateHTTP_MultipartRebuildWithPaths_314(t *testing.T) {
 				},
 				{
 					Key:   "upload",
-					Paths: []string{tempFile.Name()},
+					Paths: []string{filepath.Base(tempFile.Name())},
 				},
 			},
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 10})
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 10, KeployPath: recording})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
