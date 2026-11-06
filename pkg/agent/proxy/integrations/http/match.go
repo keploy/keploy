@@ -2326,11 +2326,24 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // just the lowest-Levenshtein path. If httpMocks is nil, it fetches from
 // mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
 func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
-	r, places := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
-	if r != nil && statesHTTPLifetimes(mockDb, httpMocks) {
-		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + sessionCallHint(request, places, provenswitch.On()))
+	r, hint := h.buildHTTPMismatchReportHinted(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+	if hint != "" {
+		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + hint)
 	}
 	return r
+}
+
+// buildHTTPMismatchReportHinted is buildHTTPMismatchReport with the hint for
+// a call shared across tests (sessionCallHint) apart, not yet in the next
+// steps: "" when the recording does not state its HTTP mocks' lifetimes. A
+// repeat note keeps it (markRepeat), so the hint outlives the note's own
+// next step.
+func (h *HTTP) buildHTTPMismatchReportHinted(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (*models.MockMismatchReport, string) {
+	r, places := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+	if r == nil || !statesHTTPLifetimes(mockDb, httpMocks) {
+		return r, ""
+	}
+	return r, sessionCallHint(request, places, provenswitch.On())
 }
 
 // viewless makes r the miss of a call whose view a test's begin or end

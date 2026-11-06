@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // repeatOfAnswered is, for a request no mock answered, the per-test recording
@@ -109,7 +110,12 @@ func sameRequest(diffs []strictField) bool {
 // step names both (models.RepeatNote.ExplainMiss). The replay measures the
 // gaps at record and the cause they support at the set's end (markRepeatOf),
 // from the set's recordings, which the agent does not hold.
-func markRepeat(report *models.MockMismatchReport, a integrations.AnsweredCall) {
+//
+// outside says a is a recording made outside every test
+// (models.RepeatNote.OutsideTests), and hint is the miss's word on serving
+// the call to its test (sessionCallHint), which the note keeps so that the
+// replay's rewrite of the next step (markRepeatOf) keeps it too.
+func markRepeat(report *models.MockMismatchReport, a integrations.AnsweredCall, outside bool, hint string) {
 	m := a.Mock
 	if !report.NotOwned {
 		report.ClosestMock = m.Name
@@ -118,5 +124,21 @@ func markRepeat(report *models.MockMismatchReport, a integrations.AnsweredCall) 
 	}
 	report.Repeat = models.NewRepeatNote(m.Name, a.AnsweredAt, m.Spec.ReqTimestampMock, report.At)
 	report.Repeat.Background, report.Repeat.SkippedRead = a.Background, a.SkippedRead
+	report.Repeat.OutsideTests = outside && a.Background == "" && !a.SkippedRead
+	report.Repeat.Hint = hint
 	report.NextSteps = report.Repeat.ExplainMiss(report.NotOwned, report.ClosestMock, "", mismatch.RecordCommand())
+}
+
+// madeOutsideTests reports whether db says a, an earlier answered recording,
+// is one made outside every test: one no test lists, by keploy mock replay's
+// scope table (integrations.InPool), known only once the replay sent it.
+// Under the proven switch alone: without it a test is served such a
+// recording as it is between tests, so the note's word on why it was not
+// (models.RepeatNote.OutsideTests) would not hold.
+func madeOutsideTests(db integrations.MockMemDb, a integrations.AnsweredCall) bool {
+	if a.Mock == nil || !provenswitch.On() {
+		return false
+	}
+	pool, known := integrations.InPool(db, a.Mock)
+	return pool && known
 }

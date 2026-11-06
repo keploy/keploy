@@ -101,6 +101,18 @@ type RepeatNote struct {
 	// than that test recorded. Empty while it is not known: the agent knows
 	// the recording, and the replay names the test at the end of the set.
 	SkippedTest string `json:"skipped_test,omitempty" yaml:"skipped_test,omitempty"`
+	// OutsideTests says Mock is a recording made outside every test (in
+	// TestMain or at start-up): one no test lists, by keploy mock replay's
+	// scope table under the proven switch (its startup: recordings among
+	// them), which answered a call at this replay. Unlike Background it
+	// moves no charge: a test is served such a recording only for a call
+	// keploy.yaml's sessionCalls declare, so a call it made that is no
+	// such call stays its miss.
+	OutsideTests bool `json:"outside_tests,omitempty" yaml:"outside_tests,omitempty"`
+	// Hint is the parser's word on how the call could be served to its
+	// test (HTTP: what keploy.yaml's sessionCalls serve), which the note's
+	// explanation ends with. Empty for none.
+	Hint string `json:"hint,omitempty" yaml:"hint,omitempty"`
 }
 
 // The scopes of the set's background a note's recording can be of
@@ -226,6 +238,12 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 			fmt.Fprintf(&b, " (consumed by test %s)", n.Test)
 		}
 		b.WriteString(". ")
+	case n.OutsideTests:
+		b.WriteString(", a recording made outside every test (in TestMain or at start-up), which already answered a call at this replay")
+		if n.Test != "" {
+			fmt.Fprintf(&b, " (consumed by test %s)", n.Test)
+		}
+		b.WriteString(". ")
 	case n.Test != "":
 		fmt.Fprintf(&b, ", the recording that already answered test %s's call at this replay. ", n.Test)
 	default:
@@ -255,10 +273,15 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 		b.WriteString("keploy does not answer a call past what the skipped test recorded, which could hide a bug: the call is this test's. ")
 	case n.Background != "":
 		b.WriteString("keploy does not answer a second call with that recording, which could hide a bug; a call the application makes on its own schedule (a timer, a janitor's sweep) is made as often as the replay's timing allows. ")
+	case n.OutsideTests:
+		b.WriteString("keploy does not answer it with that recording: a test is served a recording made outside every test only for a call keploy.yaml's sessionCalls declare, and an answer given otherwise could hide a bug. ")
 	default:
 		b.WriteString("keploy does not answer it with the earlier test's recording, which could hide a bug. ")
 	}
 	fmt.Fprintf(&b, "To make the test independent of timing, record it with that cache disabled or its span longer than the replay ('%s'), or make the call in every test that needs it.", recordCmd)
+	if n.Hint != "" {
+		b.WriteString(" " + n.Hint)
+	}
 	return b.String()
 }
 
@@ -378,7 +401,9 @@ func (n *RepeatNote) Brief(unmade bool) string {
 		return ""
 	}
 	s := "identical to mock " + n.Mock
-	if n.Test != "" {
+	if n.OutsideTests {
+		s += ", made outside every test, which answered a call"
+	} else if n.Test != "" {
 		s += ", which answered test " + n.Test + "'s call"
 	} else {
 		s += ", which answered an earlier test's call"
