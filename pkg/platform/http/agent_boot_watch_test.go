@@ -2034,45 +2034,125 @@ func TestAStartThatBeatsBeforeItsFirstStepIsSaidFromItsFirstReport(t *testing.T)
 // A report that does not move at all is said by the line that says keploy
 // has read no new one (startWaitLine), every stillWaitingLooks ticks, and
 // never by the line for a start that beats with no new step: its agent may
-// not run at all. And a start whose reports stop moving has one line at a
-// tick, never two, where both are due: here the reports beat to the 5th
-// tick and then stop, so at the 11th tick six ticks have passed with no new
-// report (stillWaitingLooks) and ten with no new step (stepWaitLooks).
+// not run at all. A report that stops moving (a frozen agent, or a stuck
+// reporter) is said by the step line only while its last new report is
+// within stepWaitLooks ticks, and from then on by the no-new-report line
+// alone: its last report's "making progress" says nothing of what it does
+// now. The rows check every tick, each line's tick and words; those over 200
+// ticks run at keploy's own cadence (the package's stillWaitingLooks,
+// stepWaitLooks, stepWaitBackOff and stepWaitLaterLooks). Each look is
+// answered as it begins (inBubble), the nth tick's look reading the nth
+// report, which the watch takes after that tick's lines.
 func TestAReportThatDoesNotMoveIsNeverSaidAsAStepWait(t *testing.T) {
 	look, silence, every, stepEvery := bootLook, bootSilence, stillWaitingLooks, stepWaitLooks
 	t.Cleanup(func() { bootLook, bootSilence, stillWaitingLooks, stepWaitLooks = look, silence, every, stepEvery })
 	const still = "still waiting for the keploy agent: its process runs, and keploy has read no new report of its start since its last"
-	t.Run("never moves", func(t *testing.T) {
-		bootLook, bootSilence, stillWaitingLooks, stepWaitLooks = time.Second, time.Hour, 30, 10
-		inBubble(t, func(t *testing.T) {
-			core, logs := observer.New(zapcore.InfoLevel)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			read := func(context.Context) (utils.BootProgress, bool) {
-				return utils.BootProgress{Seq: 2, Beat: 7, CountsQuiet: true, Step: "the hooks' load began"}, true
+	const step = "still waiting for the keploy agent's start: it runs, and has taken no new step for a while; its last step: the CA's install began; in progress: the CA's install (making progress; its thread running or waiting to run)"
+	// lines fails unless the watch says, at each tick up to the last, the
+	// line want has for that tick, word for word and saying it has waited
+	// the ticks want has for it, and no other.
+	type line struct {
+		msg    string
+		waited int
+	}
+	lines := func(t *testing.T, read func(context.Context) (utils.BootProgress, bool), last int, want map[int]line) {
+		t.Helper()
+		core, logs := observer.New(zapcore.InfoLevel)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		judged := watchStart(ctx, zap.New(core), read, alwaysRunning, nil, false, false)
+		start := time.Now()
+		n := 0
+		for tick := 1; tick <= last; tick++ {
+			tickTo(start, tick)
+			w, due := want[tick]
+			if !due {
+				saidCount(t, logs, judged, tick, n, "with no line due at this tick")
+				continue
 			}
-			judged := watchStart(ctx, zap.New(core), read, alwaysRunning, nil, false, false)
-			start := time.Now()
-			tickTo(start, 30)
-			saidCount(t, logs, judged, 30, 0, "with the report not moved, before a no-new-report line is due")
-			tickTo(start, 31)
-			saysExactly(t, saidBy(t, logs, judged, 31, 1, zapcore.InfoLevel, still, "thirty ticks since the first report"), 31, still)
+			n++
+			e := saidBy(t, logs, judged, tick, n, zapcore.InfoLevel, w.msg, "with a line due at this tick")
+			saysExactly(t, e, tick, w.msg)
+			if got := waitedOf(e); got != time.Duration(w.waited)*bootLook {
+				t.Fatalf("the line at tick %d says it waited %v; want %v", tick, got, time.Duration(w.waited)*bootLook)
+			}
+		}
+	}
+	// beatsTo reads the CA's install's step, at the 1st report, beating with
+	// each report up to the lastth and not after.
+	beatsTo := func(last uint64) func(context.Context) (utils.BootProgress, bool) {
+		var reads atomic.Uint64
+		return func(context.Context) (utils.BootProgress, bool) {
+			return utils.BootProgress{Seq: 2, Beat: min(reads.Add(1), last), CountsQuiet: true, Step: "the CA's install began",
+				Stages: []utils.BootStage{{Name: "the CA's install", Progressing: true, State: "R"}}}, true
+		}
+	}
+	// stillFrom is the no-new-report lines of a report last moved at the
+	// moved-th tick's look, to the last tick: one every stillWaitingLooks
+	// ticks since, each saying it has waited that long.
+	stillFrom := func(want map[int]line, moved, last int) map[int]line {
+		for w := stillWaitingLooks; moved+w <= last; w += stillWaitingLooks {
+			want[moved+w] = line{still, w}
+		}
+		return want
+	}
+	t.Run("never moves", func(t *testing.T) {
+		bootLook, bootSilence = time.Second, time.Hour
+		inBubble(t, func(t *testing.T) {
+			read := func(context.Context) (utils.BootProgress, bool) {
+				return utils.BootProgress{Seq: 2, Beat: 7, CountsQuiet: true, Step: "the CA's install began",
+					Stages: []utils.BootStage{{Name: "the CA's install", Progressing: true, State: "R"}}}, true
+			}
+			// Counted from the first report, read at the 1st tick: no line
+			// but the no-new-report one, at 31, 61, ... 181.
+			lines(t, read, 200, stillFrom(map[int]line{}, 1, 200))
 		})
 	})
-	t.Run("stops moving", func(t *testing.T) {
+	t.Run("never moves, at a cadence that backs off at once", func(t *testing.T) {
+		// Step lines due every four ticks from the first, sooner than ten
+		// with no new report: a report read before is no beat however soon
+		// the line is due.
+		bootLook, bootSilence = time.Second, time.Hour
+		backOff, later := stepWaitBackOff, stepWaitLaterLooks
+		stepWaitBackOff, stepWaitLaterLooks = 0, 4
+		t.Cleanup(func() { stepWaitBackOff, stepWaitLaterLooks = backOff, later })
+		inBubble(t, func(t *testing.T) {
+			read := func(context.Context) (utils.BootProgress, bool) {
+				return utils.BootProgress{Seq: 2, Beat: 7, CountsQuiet: true, Step: "the CA's install began",
+					Stages: []utils.BootStage{{Name: "the CA's install", Progressing: true, State: "R"}}}, true
+			}
+			lines(t, read, 70, stillFrom(map[int]line{}, 1, 70))
+		})
+	})
+	t.Run("stops moving after a step line", func(t *testing.T) {
+		bootLook, bootSilence = time.Second, time.Hour
+		inBubble(t, func(t *testing.T) {
+			// It beats to the 11th report: the step line ten ticks after
+			// the step, at the 11th tick, then none, though one is due at
+			// 21 to 61 and every thirty from 91; the no-new-report line
+			// every thirty ticks from the 11th.
+			lines(t, beatsTo(11), 200, stillFrom(map[int]line{11: {step, 10}}, 11, 200))
+		})
+	})
+	t.Run("stops moving before a step line", func(t *testing.T) {
+		bootLook, bootSilence = time.Second, time.Hour
+		inBubble(t, func(t *testing.T) {
+			// It beats to the 5th report: the step line at the 11th tick
+			// comes six ticks after its last beat, within the ten that
+			// line covers; none from the 15th tick on, when ten have
+			// passed with no new report. The no-new-report line every
+			// thirty ticks from the 5th.
+			lines(t, beatsTo(5), 200, stillFrom(map[int]line{11: {step, 10}}, 5, 200))
+		})
+	})
+	t.Run("both due at one tick", func(t *testing.T) {
+		// One line at a tick, never two, where both are due: the reports
+		// beat to the 5th tick and then stop, so at the 11th tick six ticks
+		// have passed with no new report (stillWaitingLooks) and ten with no
+		// new step (stepWaitLooks).
 		bootLook, bootSilence, stillWaitingLooks, stepWaitLooks = time.Second, time.Hour, 6, 10
 		inBubble(t, func(t *testing.T) {
-			core, logs := observer.New(zapcore.InfoLevel)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			var reads atomic.Uint64
-			read := func(context.Context) (utils.BootProgress, bool) {
-				return utils.BootProgress{Seq: 2, Beat: min(reads.Add(1), 5), CountsQuiet: true, Step: "the hooks' load began"}, true
-			}
-			judged := watchStart(ctx, zap.New(core), read, alwaysRunning, nil, false, false)
-			start := time.Now()
-			tickTo(start, 11)
-			saysExactly(t, saidBy(t, logs, judged, 11, 1, zapcore.InfoLevel, still, "six ticks since the last new report, ten since the last step"), 11, still)
+			lines(t, beatsTo(5), 11, map[int]line{11: {still, 6}})
 		})
 	})
 }

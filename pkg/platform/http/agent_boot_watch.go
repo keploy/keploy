@@ -738,9 +738,13 @@ type startJudgment struct {
 // new step, the wait is said every stepWaitLooks ticks since its last step
 // up to stepWaitBackOff of them, then every stepWaitLaterLooks
 // (stepLineDue), naming that step and the stages in progress
-// (startStepLine): a start slowed
-// or stuck in one stage would otherwise be waited on in silence, as long as
-// that stage makes progress. A look out past the silence bound is said once,
+// (startStepLine): a start slowed or stuck in one stage would otherwise be
+// waited on in silence, as long as that stage makes progress. Such a line is
+// said only while its reports still move: a new one read within the last
+// stepWaitLooks ticks, and since its last step. An agent whose reports stop
+// moving (a frozen process, or a stuck reporter) has no step line once
+// stepWaitLooks ticks pass with no new report, only the lines that say
+// keploy has read no new one. A look out past the silence bound is said once,
 // at WARN, in place of the next of those lines, with what it is out on and
 // what keploy does next (lookOutWarning). inContainer says, for those lines,
 // whether the agent runs in a container.
@@ -825,9 +829,12 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 		// stepWaited is the ticks since the agent's start last took a step
 		// (a report whose step count keploy had not read before), or since
 		// the watch began. It runs ahead of waited only once a report has
-		// moved by its beats alone: the start then runs and is said by
-		// startStepLine; a report that does not move at all is said by
-		// startWaitLine, as before.
+		// moved by its beats alone. The start is said by startStepLine only
+		// while it beats: a report moved since its last step (waited <
+		// stepWaited) and within the last stepEvery ticks (waited <
+		// stepEvery). A report that does not move at all, or has stopped
+		// moving for stepEvery ticks, is said by startWaitLine alone: its
+		// last report's stages say nothing of what it does now.
 		stepWaited := 0
 		for {
 			select {
@@ -881,7 +888,7 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 				waited++
 				stepWaited++
 				lineDue := every > 0 && waited%every == 0
-				if !lineDue && stepLineDue(stepWaited, stepEvery, stepUntil, stepLater) && waited < stepWaited {
+				if !lineDue && stepLineDue(stepWaited, stepEvery, stepUntil, stepLater) && waited < stepWaited && waited < stepEvery {
 					if line := startStepLine(cur); line != "" {
 						logger.Info(line, zap.Duration("waited", time.Duration(stepWaited)*look))
 					}
@@ -1158,8 +1165,12 @@ var stillWaitingLooks = 30
 // name its last step and the stages in progress (watchStart, startStepLine).
 // A start takes a step every few seconds of a healthy host's time, its CA's
 // install the longest: ten ticks without one is a start slowed, or stuck, in
-// one stage, worth saying long before the wait is over. A variable for tests;
-// never 0.
+// one stage, worth saying long before the wait is over. It is also how
+// recent the agent's last new report must be for that line to be said: an
+// agent beats once a second of its own runnable time, so ten ticks with no
+// new report is an agent that has stopped beating, or that the host has all
+// but stopped running, not one that runs slowly. A variable for tests; never
+// 0.
 var stepWaitLooks = 10
 
 // stepWaitBackOff is how many ticks with no new step the lines of
