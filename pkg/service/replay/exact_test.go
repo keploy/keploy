@@ -513,14 +513,24 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 		}()
 		return out
 	}
+	// wake drives one wake-up of the wait: a wait that ended before it fails
+	// the row, as it no longer takes its wake-ups.
+	wake := func(t *testing.T, done <-chan []string, before string) {
+		t.Helper()
+		select {
+		case wakes <- time.Time{}:
+		case missing := <-done:
+			t.Fatalf("the wait ended before %s, reporting %v (%v)", before, missing, readErr)
+		}
+	}
 
 	t.Run("every call made", func(t *testing.T) {
 		reads := make(chan []models.MockState, 4)
 		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
 		done := run(r, context.Background(), plan(), map[string]models.MockState{})
 		reads <- []models.MockState{{Name: "w-1"}}
-		wakes <- time.Time{} // w-1 answers
-		wakes <- time.Time{} // a slow worker: nothing this time, under the limit
+		wake(t, done, "w-1 answered")
+		wake(t, done, "a slow worker's wake-up with nothing answered, under the limit")
 		reads <- []models.MockState{{Name: "w-2"}}
 		for {
 			select {
@@ -556,9 +566,9 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
 		done := run(r, context.Background(), plan(), map[string]models.MockState{})
 		reads <- []models.MockState{{Name: "w-1"}}
-		wakes <- time.Time{} // w-1 answers: progress
+		wake(t, done, "w-1 answered")
 		for i := 0; i < 3; i++ {
-			wakes <- time.Time{}
+			wake(t, done, fmt.Sprintf("its stall's wake-up %d", i+1))
 		}
 		if missing := <-done; !reflect.DeepEqual(missing, []string{"w-2"}) {
 			t.Fatalf("reported %v; want [w-2]", missing)
@@ -585,7 +595,7 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 	t.Run("a read fails", func(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: make(chan []models.MockState), err: errors.New("the agent did not answer")}}
 		done := run(r, context.Background(), plan(), map[string]models.MockState{})
-		wakes <- time.Time{}
+		wake(t, done, "its read")
 		<-done
 		if readErr == nil {
 			t.Fatal("a failed read was not returned: the calls would be reported as never made")
