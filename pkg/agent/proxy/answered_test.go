@@ -612,3 +612,69 @@ func TestTheAnsweredLogPushesOutTheLeastRecentlyAnswered(t *testing.T) {
 	}
 	checkAnsweredCounts(t, &l)
 }
+
+// A kept recording answered again at the same clock reading as its last
+// answer (a coarse clock) still moves to the back of the bound's queue: what
+// was noted between the two answers is pushed out first, and answers at one
+// reading leave the queue bounded. An answer at an earlier reading moves
+// neither its time nor its place.
+func TestAKeptRecordingAnsweredAtTheSameReadingMovesToTheBack(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	big := func(name string, i int, url string) *models.Mock {
+		m := keyedRecording(name, models.HTTP, i, url, t0)
+		m.Spec.HTTPReq.Body = strings.Repeat("b", answeredMaxEntryBytes/4)
+		return m
+	}
+	kept := big("mock-0", 0, "/echo/rates")
+	kept.TestModeInfo.Lifetime = models.LifetimeSession
+	var l answeredLog
+	l.fence(2)
+	held := func(url string) bool { return len(l.candidates([]string{"url:" + url})) > 0 }
+	limit := 8 * answeredMaxBytes / (answeredMaxEntryBytes / 4)
+	n := 0
+	note := func() {
+		t.Helper()
+		if n > limit {
+			t.Fatalf("%d newer keys noted, %d bytes held: no byte bound", n, l.bytes)
+		}
+		l.note(big(fmt.Sprintf("k%d", n), n+3, fmt.Sprintf("/k%d", n)), t0)
+		n++
+	}
+	l.noteLatest(kept, t0)
+	l.note(big("old", 1, "/old"), t0)
+	l.noteLatest(kept, t0)
+	for held("/old") {
+		if !held("/echo/rates") {
+			t.Fatalf("after %d newer keys the kept recording, answered again at old's clock reading, was pushed out before old", n)
+		}
+		note()
+	}
+	if !held("/echo/rates") {
+		t.Fatal("the byte bound pushed out the kept recording with old, though it answered again after old")
+	}
+	// A test that makes the call again and again within one clock reading:
+	// the places it leaves are shed as it goes.
+	for i := 0; i < 10000; i++ {
+		l.noteLatest(kept, t0)
+	}
+	if len(l.queue) > 2*l.live+64+1 {
+		t.Fatalf("a kept recording answered 10000 times at one clock reading queues %d places for %d entries", len(l.queue), l.live)
+	}
+	checkAnsweredCounts(t, &l)
+	l = answeredLog{}
+	l.fence(2)
+	l.noteLatest(kept, t0)
+	l.note(big("later", 2, "/later"), t0)
+	l.noteLatest(kept, t0.Add(-time.Second))
+	if e := l.latest[kept.Name]; e == nil || !e.at.Equal(t0) {
+		t.Fatalf("an answer at an earlier reading moved the kept recording's time: %+v", e)
+	}
+	for held("/echo/rates") {
+		if !held("/later") {
+			t.Fatal("an answer at an earlier reading moved the kept recording behind a note filed after its last answer")
+		}
+		note()
+	}
+	checkAnsweredCounts(t, &l)
+}

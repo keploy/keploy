@@ -105,8 +105,9 @@ func TestUnderTheSwitchATestsCallIdenticalToAHiddenStartUpRecordingNamesIt(t *te
 }
 
 // A start-up recording answers TestMain's calls again and again: the manager
-// notes it once, and each answer after that moves only when it last
-// answered, so a later test's miss measures its gap from the last answer.
+// notes it once, and each answer after that moves the time it last answered
+// (and its place in the bound's queue), so a later test's miss measures its
+// gap from the last answer.
 func TestAStartUpRecordingThatAnswersAgainIsNotedOnceAtItsLastAnswer(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	declareSessionCalls(t, models.SessionCallRule{Host: "deps", Method: "GET", PathPrefix: "/echo"})

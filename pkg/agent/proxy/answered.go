@@ -150,10 +150,12 @@ func (l *answeredLog) movedLatest(mk *models.Mock, at time.Time) bool {
 }
 
 // touch moves e's time to at and e to the back of the queue, the place of
-// the entry answered last, when at is later than its time; an answer noted
-// after a later one moves nothing. Caller holds mu.
+// the entry answered last, unless at is earlier than its time: an answer
+// noted after a later one moves nothing, and one at the same clock reading
+// (a coarse clock) still moves e behind what was noted between the two.
+// Caller holds mu.
 func (l *answeredLog) touch(e *answeredEntry, at time.Time) {
-	if !at.After(e.at) {
+	if at.Before(e.at) {
 		return
 	}
 	e.at = at
@@ -655,9 +657,10 @@ func (m *MockManager) noteAnswered(mk models.Mock) {
 // (exactPass), so nothing else notes it: a test's identical call then
 // misses, and its miss names it (FindAnsweredEarlier) and why it was not
 // served (models.RepeatNote.OutsideTests), as it names a per-test one.
-// Such a recording may answer call after call: it is noted once a test set,
-// and each answer after that moves only when it last answered
-// (answeredLog.noteLatest). Nothing else is noted here: a test's own is
+// Such a recording may answer call after call: it is noted at its first
+// answer of a test set, and while the log keeps that entry each answer after
+// it moves the entry's time and its place in the bound's queue, unless noted
+// at an earlier time (answeredLog.noteLatest). Nothing else is noted here: a test's own is
 // noted as it is served (noteExactServed), a background's as it is spent
 // (noteBackgroundSpent), and a recording no view hides is served to every
 // identical call.
