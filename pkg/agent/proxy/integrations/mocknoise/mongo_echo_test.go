@@ -909,24 +909,27 @@ func correlateMeasured(req, resp string) (corrs int, kept int64, lines int) {
 }
 
 // Only a written place that holds a value that looks minted is charged to the
-// bound: a claim that also writes many plain values, under long names or at
-// many places, keeps its correlation and logs nothing.
+// bound: a claim that also writes many plain values (strings, numbers,
+// booleans or nulls), under long names or at many places, keeps its
+// correlation and logs nothing.
 func TestPlainWrittenValuesAreNotChargedToTheBound(t *testing.T) {
 	switchOff(t)
 	name := strings.Repeat("n", 32<<10)
-	var plain []string
-	for i := 0; i < 600; i++ { // 600 x 32 KB = 19.7 MB if charged
-		plain = append(plain, fmt.Sprintf(`"%s%04d":"ACTIVE"`, name, i))
-	}
-	req := strings.Replace(claimRequest(recKeyID), `"$set":{`, `"$set":{`+strings.Join(plain, ",")+`,`, 1)
-	if c, _, lines := correlateMeasured(req, claimAnswer(recKeyID)); c != 1 || lines != 0 {
-		t.Fatalf("a claim with 600 plain fields under 32 KB names: corrs=%d lines=%d, want 1 and 0", c, lines)
+	for _, lit := range []string{`"ACTIVE"`, "7", "true", "null", "1.5e3"} {
+		var plain []string
+		for i := 0; i < 600; i++ { // 600 x 32 KB = 19.7 MB if charged
+			plain = append(plain, fmt.Sprintf(`"%s%04d":%s`, name, i, lit))
+		}
+		req := strings.Replace(claimRequest(recKeyID), `"$set":{`, `"$set":{`+strings.Join(plain, ",")+`,`, 1)
+		if c, _, lines := correlateMeasured(req, claimAnswer(recKeyID)); c != 1 || lines != 0 {
+			t.Fatalf("a claim with 600 fields of %s under 32 KB names: corrs=%d lines=%d, want 1 and 0", lit, c, lines)
+		}
 	}
 	var orderLines []string
 	for i := 0; i < 100000; i++ { // 300,000 plain scalars at three paths
 		orderLines = append(orderLines, fmt.Sprintf(`{"sku":"SKU-%06d","qty":%d,"price":"12.50"}`, i, i%7))
 	}
-	req = strings.Replace(claimRequest(recKeyID), `"$set":{`, `"$set":{"lines":[`+strings.Join(orderLines, ",")+`],`, 1)
+	req := strings.Replace(claimRequest(recKeyID), `"$set":{`, `"$set":{"lines":[`+strings.Join(orderLines, ",")+`],`, 1)
 	if c, _, lines := correlateMeasured(req, claimAnswer(recKeyID)); c != 1 || lines != 0 {
 		t.Fatalf("a claim with 100,000 order lines: corrs=%d lines=%d, want 1 and 0", c, lines)
 	}
@@ -969,19 +972,22 @@ func TestShortPlacesAtTheBoundKeepUnderTheCeiling(t *testing.T) {
 	}
 }
 
-// The allocator rounds a path just over 32 KB up to 40 KB, the most it rounds,
-// so minted values written under such a path keep the most of any mock that
-// fits the bound. The most that fit keep no more than the stated 20 MiB, and
-// one more gives no correlation and one line. The ceiling is a number, not the
-// constants, so a larger bound fails this row.
-func TestTheWorstRoundingKeepsUnderTheCeiling(t *testing.T) {
+// The allocator rounds a path just over 32 KB up to 40 KB, the most it rounds
+// a path, so a place written under such a path keeps the most for what it is
+// charged. One minted value written at as many such places as fit keeps more
+// than many values written once there, since one value needs one answer place
+// and each value needs its own: about 510 places fit, and keep no more than the
+// stated 20 MiB. One more place gives no correlation and one line. The ceiling
+// is a number, not the constants, so a larger bound fails this row.
+func TestOneValueAtTheWorstRoundingKeepsUnderTheCeiling(t *testing.T) {
 	if raceDetector {
 		t.Skip("allocation bounds do not hold under the race detector")
 	}
 	switchOff(t)
 	name := strings.Repeat("n", 32769-len("section.0.update.$set.")-len(".00000000"))
+	key := func(int) string { return recKeyID }
 	build := func(n int) (string, string) {
-		return setUnder(name, keyFields(n, mintedKey)), answerUnder("a", keyFields(n, mintedKey))
+		return setUnder(name, keyFields(n, key)), answerUnder("a", keyFields(1, key))
 	}
 	lo, hi := 1, 2000
 	for lo < hi {
@@ -992,12 +998,19 @@ func TestTheWorstRoundingKeepsUnderTheCeiling(t *testing.T) {
 			hi = mid - 1
 		}
 	}
-	c, kept, lines := correlateMeasured(build(lo))
-	t.Logf("%d values under a path of 32,769 bytes fit: corrs=%d kept=%.2f MB (%.4f of 20 MiB) lines=%d", lo, c, float64(kept)/1e6, float64(kept)/float64(20<<20), lines)
-	if ceiling := int64(20 << 20); kept > ceiling || lines != 0 {
-		t.Fatalf("%d values under a path of 32,769 bytes keep %d bytes and log %d lines, want at most %d and none", lo, kept, lines, ceiling)
+	req, resp := build(lo)
+	c, kept, lines := correlateMeasured(req, resp)
+	t.Logf("one value at %d places under a path of 32,769 bytes fits, in a mock of %d bytes: corrs=%d kept=%d (%.4f of 20 MiB) lines=%d", lo, len(req)+len(resp), c, kept, float64(kept)/float64(20<<20), lines)
+	if c != lo || lines != 0 {
+		t.Fatalf("one value at %d places under a path of 32,769 bytes: corrs=%d lines=%d, want %d and 0", lo, c, lines, lo)
+	}
+	if ceiling := int64(20 << 20); kept > ceiling {
+		t.Fatalf("one value at %d places under a path of 32,769 bytes keeps %d bytes, want at most %d", lo, kept, ceiling)
+	}
+	if lo < 500 || lo > 520 {
+		t.Fatalf("one value fits at %d places under a path of 32,769 bytes, want about 510", lo)
 	}
 	if c, _, lines := correlateMeasured(build(lo + 1)); c != 0 || lines != 1 {
-		t.Fatalf("%d values under a path of 32,769 bytes: corrs=%d lines=%d, want 0 and 1", lo+1, c, lines)
+		t.Fatalf("one value at %d places under a path of 32,769 bytes: corrs=%d lines=%d, want 0 and 1", lo+1, c, lines)
 	}
 }
