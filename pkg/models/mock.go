@@ -519,11 +519,17 @@ type MockSpec struct {
 // echoed in that mock's RESPONSE, so replay can reproduce an app-minted value
 // (UUID / nonce / idempotency key) the dependency reflects back. On replay the
 // matcher matches the request field by presence + ValueClass (not value),
-// binds the live value, and renders it into each ResponsePath of the served
-// response. Paths use the kind-agnostic dotted vocabulary of ReqBodyNoise
-// (body.<path>, header.<name>, url.query.<name>). RecordedValue is the value as
-// recorded (never a live/secret value) and ValueClass names its shape
-// (e.g. "uuid", "hex", "nonce") for the presence/type match.
+// binds the live value, and replaces RecordedValue with it in the served
+// response. RecordedValue is the value as recorded (never a live/secret value)
+// and ValueClass names its shape (e.g. "uuid", "hex", "nonce") for the
+// presence/type match.
+//
+// An HTTP mock's paths use the dotted vocabulary of ReqBodyNoise (body.<path>,
+// header.<name>, url.query.<name>). A Mongo mock's are section.<i>.<path>,
+// where i is the OP_MSG section's index. ResponsePaths says where the recording
+// answered the value, for a reader: the render goes by RecordedValue, and no
+// replay reads it. A Mongo list holds at most a few places of a value, on the
+// value's first correlation, and is empty on the value's others.
 type FieldCorrelation struct {
 	RequestPath   string   `json:"requestPath" yaml:"request_path" bson:"request_path"`
 	ResponsePaths []string `json:"responsePaths" yaml:"response_paths" bson:"response_paths"`
