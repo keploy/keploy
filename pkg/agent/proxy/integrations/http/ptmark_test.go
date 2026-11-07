@@ -1,6 +1,9 @@
 package http
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
 
 // A recordOne mark given back (ptMark.giveBack) unsets what its take set, as
 // it was before, and nothing a later take set.
@@ -61,4 +64,30 @@ func TestPtMark_GiveBackUnsetsWhatItsTakeSet(t *testing.T) {
 		var none *ptMark
 		none.giveBack()
 	})
+}
+
+// A mark is given back under its recorder's lock: give-backs and takes of one
+// key at once, from many connections, race on nothing (-race reads it), and
+// once every mark is given back the endpoint keeps nothing.
+func TestPtMark_GiveBacksAndTakesAtOnceShareTheRecordersLock(t *testing.T) {
+	const key = "GET pay.example:80/charge"
+	p := &ptRecorder{}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		status := 200
+		if i%2 == 1 {
+			status = 503
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 500; j++ {
+				p.take(key, status).giveBack()
+			}
+		}()
+	}
+	wg.Wait()
+	if !p.shouldRecord(key, 500) {
+		t.Error("an error after every mark was given back was not taken: a give-back at once with a take left a mark set")
+	}
 }

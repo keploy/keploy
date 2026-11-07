@@ -247,7 +247,6 @@ func (p *ptRecorder) shouldRecord(key string, statusCode int) bool {
 // can unset it.
 type ptMark struct {
 	p      *ptRecorder
-	key    string
 	st     *ptSeenState
 	set2xx bool
 	setAny bool
@@ -258,16 +257,14 @@ type ptMark struct {
 // not one, and the endpoint's next call is recorded in its place, where the
 // mark would skip it as a duplicate of a mock no recording holds. What a take
 // after it set stays: a 2xx kept after a lost warmup error stands. A key
-// evicted since holds nothing of it. Nil-safe.
+// evicted since left its state behind, so unsetting it changes nothing the
+// recorder reads. Nil-safe.
 func (k *ptMark) giveBack() {
 	if k == nil {
 		return
 	}
 	k.p.mu.Lock()
 	defer k.p.mu.Unlock()
-	if k.p.seen[k.key] != k.st {
-		return
-	}
 	if k.set2xx {
 		k.st.recorded2xx = false
 	}
@@ -309,7 +306,7 @@ func (p *ptRecorder) take(key string, statusCode int) *ptMark {
 	if st.recorded2xx {
 		return nil
 	}
-	mark := &ptMark{p: p, key: key, st: st}
+	mark := &ptMark{p: p, st: st}
 	if isSuccessStatus(statusCode) {
 		mark.set2xx = true
 		mark.setAny = !st.recordedAny
