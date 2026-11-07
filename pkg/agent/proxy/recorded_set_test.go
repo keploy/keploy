@@ -37,6 +37,16 @@ func rangedNames(t *testing.T, db integrations.MockMemDb) ([]string, bool) {
 	return names, whole
 }
 
+// diskListed registers kind, until t ends, as one whose parser holds a call
+// while the set holds an unserved recording of it (models.RegisterAnswerPlaced,
+// matching no mock, so none is placed at its answer), as the Redis parser
+// registers its kind: the agent's on-disk store lists it in either switch
+// mode (diskListsKind), so the set as recorded can tell its whole set.
+func diskListed(t *testing.T, kind models.Kind) {
+	t.Helper()
+	t.Cleanup(models.RegisterAnswerPlaced(kind, func(*models.Mock) bool { return false }))
+}
+
 // The staged set as recorded is what the trees hold and what the agent keeps
 // on disk, each once, whatever the open test's window shows: a test's own
 // window holds one of the set's per-test recordings, and the range visits
@@ -44,6 +54,7 @@ func rangedNames(t *testing.T, db integrations.MockMemDb) ([]string, bool) {
 // the agent gave no on-disk source tells no whole set, and visits nothing:
 // its trees may hold one window's. A connection's view forwards it.
 func TestTheRecordedSetIsTheTreesAndTheDiskEachOnce(t *testing.T) {
+	diskListed(t, models.HTTP)
 	now := time.Now()
 	early := r3Mock("t-early", now, "GET", "/a", "", `{"a":1}`)
 	late := r3Mock("t-late", now.Add(time.Minute), "GET", "/b", "", `{"b":1}`)
@@ -107,6 +118,7 @@ func TestTheRecordedSetIsTheTreesAndTheDiskEachOnce(t *testing.T) {
 // and nothing once the replay staged the set again: the set staged after
 // its mark never decides what its recordings are.
 func TestAHeldCallIsToldNoSetStagedAfterItsMark(t *testing.T) {
+	diskListed(t, models.HTTP)
 	for _, view := range []bool{false, true} {
 		store, stage, want := heldGenerationStore(t, view)
 		mm := managerOf(store)
@@ -143,11 +155,12 @@ func managerOf(db integrations.MockMemDb) *MockManager {
 	return db.(*MockManager)
 }
 
-// With the switch off too, the agent's on-disk store reads a kind's mocks
-// (DiskMocks.RangeKind), so a manager whose source it is tells the whole
-// set: a set kept on disk under keploy test's default window is read as
-// recorded in both switch modes.
+// With the switch off too, the agent's on-disk store reads the mocks of a
+// kind placed at its answer (DiskMocks.RangeKind), as Redis is, so a manager
+// whose source it is tells the whole set: a set kept on disk under keploy
+// test's default window is read as recorded in both switch modes.
 func TestTheOnDiskSetIsReadByKindInEitherSwitchMode(t *testing.T) {
+	diskListed(t, models.HTTP)
 	for _, on := range []bool{false, true} {
 		provenswitch.Pin(on)
 		now := time.Now()
@@ -178,6 +191,49 @@ func TestTheOnDiskSetIsReadByKindInEitherSwitchMode(t *testing.T) {
 	}
 }
 
+// Without the switch the agent's on-disk store lists only the kinds placed at
+// their answer (diskListsKind), so it ranges none of another kind's
+// recordings: the set as recorded tells no whole set of that kind, never one
+// that lacks its on-disk recordings, and visits nothing, so its parser
+// decides from its reads. Under the switch the disk lists every kind, and
+// the same set is whole.
+func TestAKindTheDiskDoesNotListIsToldNoWholeSet(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		got, whole := func() ([]string, bool) {
+			provenswitch.Pin(on)
+			defer provenswitch.Unpin()
+			now := time.Now()
+			early := r3Mock("t-early", now, "GET", "/a", "", `{"a":1}`)
+			late := r3Mock("t-late", now.Add(time.Minute), "GET", "/b", "", `{"b":1}`)
+			disk, err := NewDiskMocks(zap.NewNop())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = disk.Close() }()
+			for _, m := range []*models.Mock{early, late} {
+				if err := disk.Add(m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			disk.Finalize()
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			mm.SetRecordedOfKind(disk.RangeKind)
+			mm.SetMocksWithWindow([]*models.Mock{early}, nil, now.Add(-time.Second), now.Add(time.Second))
+			return rangedNames(t, mm)
+		}()
+		if on {
+			if want := []string{"t-early", "t-late"}; !whole || !reflect.DeepEqual(got, want) {
+				t.Fatalf("switch on: the range told whole %v and visited %v; want the whole set %v", whole, got, want)
+			}
+			continue
+		}
+		if whole || got != nil {
+			t.Fatalf("switch off, a kind the disk does not list: the range told whole %v and visited %v; want neither", whole, got)
+		}
+	}
+}
+
 // setSource is a set's on-disk source of HTTP recordings: names, each its own
 // recording.
 func setSource(names ...string) func(models.Kind, func(string, func() (*models.Mock, error)) bool) error {
@@ -203,6 +259,7 @@ func setSource(names ...string) func(models.Kind, func(string, func() (*models.M
 // with the trees it builds, and the range reads both as one staging left
 // them.
 func TestARangeBeforeTheNextSetIsStagedRangesTheSetStaged(t *testing.T) {
+	diskListed(t, models.HTTP)
 	now := time.Now()
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
@@ -240,6 +297,7 @@ func TestARangeBeforeTheNextSetIsStagedRangesTheSetStaged(t *testing.T) {
 // alone: the staging changes the trees and installs the source under swapMu,
 // and the range reads them together under it.
 func TestRangesInterleavedWithStagingsEachSeeOneSet(t *testing.T) {
+	diskListed(t, models.HTTP)
 	now := time.Now()
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)

@@ -253,14 +253,8 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		placeTsNano: placeNano(models.PlaceOf(m)), off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
-	// Record's full round pairs by kind (RangeKind), under the proven
-	// switch: every replay under the switch keeps the index (a name per
-	// on-disk mock), so that one can. Without the switch it lists only the
-	// kinds whose parser holds a call while the set still holds an unserved
-	// recording of it (models.AnswerPlacedKind), which reads them by kind,
-	// as does a parser of the staged set as recorded
-	// (integrations.RecordedSetRanger).
-	if provenswitch.On() || models.AnswerPlacedKind(m.Kind) {
+	// Listed by kind (RangeKind) for the kinds diskListsKind names.
+	if diskListsKind(m.Kind) {
 		if d.byKind == nil {
 			d.byKind, d.kindOf = make(map[models.Kind][]string), make(map[string]models.Kind)
 		}
@@ -801,6 +795,19 @@ func (d *DiskMocks) RangeKeys(kind models.Kind, keys []string, visit func(name s
 		}
 	}
 	return nil
+}
+
+// diskListsKind reports whether the on-disk store lists kind's mocks by kind
+// (Add, RangeKind). Record's full round pairs by kind under the proven switch:
+// every replay under the switch keeps the index (a name per on-disk mock), so
+// that one can. Without the switch it lists only the kinds whose parser holds
+// a call while the set still holds an unserved recording of it
+// (models.AnswerPlacedKind), which reads them by kind. The set as recorded
+// (MockManager.RangeRecordedSet) tells a whole set only for a kind this
+// names, so a kind the disk does not list is never told whole with its
+// on-disk recordings missing.
+func diskListsKind(kind models.Kind) bool {
+	return provenswitch.On() || models.AnswerPlacedKind(kind)
 }
 
 // RangeKind calls visit, in recorded order (request time), with each on-disk

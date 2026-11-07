@@ -579,6 +579,16 @@ func TestAStoreSeedsTheProxyWithThePortsItsRecordingReached(t *testing.T) {
 	}
 }
 
+// diskListed registers kind, until t ends, as one whose parser holds a call
+// while the set holds an unserved recording of it (models.RegisterAnswerPlaced,
+// matching no mock, so none is placed at its answer), as the Redis parser
+// registers its kind: the agent's on-disk store lists it by kind in either
+// switch mode.
+func diskListed(t *testing.T, kind models.Kind) {
+	t.Helper()
+	t.Cleanup(models.RegisterAnswerPlaced(kind, func(*models.Mock) bool { return false }))
+}
+
 // ofKindProxy is a recordingProxy that takes the set's recordings of a kind
 // (coreAgent.RecordedOfKindSetter).
 type ofKindProxy struct {
@@ -593,11 +603,13 @@ func (p *ofKindProxy) SetRecordedOfKind(src func(kind models.Kind, visit func(na
 }
 
 // With the switch off, each staging hands the proxy the on-disk store's
-// recordings of a kind (integrations.RecordedSetRanger): a test's call reads
-// its own window, and the source still ranges the whole set, those of the
-// other tests and of the startup band included.
+// recordings of a kind it lists by kind, one placed at its answer, as Redis
+// is (integrations.RecordedSetRanger): a test's call reads its own window,
+// and the source still ranges the whole set, those of the other tests and of
+// the startup band included.
 func TestEveryStagingHandsTheProxyTheSetAsRecorded(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "0")
+	diskListed(t, models.HTTP)
 	a, rp, _ := stagingStore(t)
 	p := &ofKindProxy{recordingProxy: rp}
 	a.Proxy = p
@@ -650,6 +662,7 @@ func TestEveryMockKeepsItsPlaceInTheSetWhicheverTierHoldsIt(t *testing.T) {
 		t.Run("KEPLOY_PROVEN="+sw, func(t *testing.T) {
 			t.Setenv("KEPLOY_PROVEN", sw)
 			t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+			diskListed(t, models.HTTP)
 			var filtered []*models.Mock
 			want := map[string]uint32{}
 			for i, resident := range []bool{false, true, false, true, false} {
