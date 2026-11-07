@@ -456,12 +456,35 @@ func processUrlencodedBody(body []map[string]interface{}) string {
 func processFormdataBody(body []map[string]interface{}) []models.FormData {
 	form := []models.FormData{}
 	for _, formData := range body {
-		form = append(form, models.FormData{
-			Key:    formData["key"].(string),
-			Values: []string{formData["value"].(string)},
-		})
+		key, _ := formData["key"].(string)
+		entry := models.FormData{Key: key}
+		if formData["type"] == "file" {
+			entry.Paths = stringValues(formData["src"])
+		} else {
+			entry.Values = append(stringValues(formData["value"]), stringValues(formData["values"])...)
+		}
+		form = append(form, entry)
 	}
 	return form
+}
+
+// stringValues reads a form-data field that Postman writes as a string or a list
+// of strings, and keploy's own export writes as a list.
+func stringValues(v interface{}) []string {
+	switch v := v.(type) {
+	case string:
+		return []string{v}
+	case []interface{}:
+		values := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				values = append(values, s)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
 }
 
 func constructResponse(res PostmanResponse) models.HTTPResp {
