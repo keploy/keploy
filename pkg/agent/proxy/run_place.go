@@ -199,23 +199,23 @@ func (m *MockManager) allEnded(i int, test string, members []string) bool {
 	return true
 }
 
-// placeSchedule is the schedule the run's place is among: the set's
-// recorded test windows (SeedRecordedWindows), else those seeded for the
-// place alone (SeedRunPlaceWindows); nil where the replay seeded neither.
+// placeSchedule is the schedule the run's place is among: those seeded for
+// the place (SeedRunPlaceWindows), else the set's recorded test windows
+// (SeedRecordedWindows); nil where the replay seeded neither.
 func (m *MockManager) placeSchedule() *models.WindowSchedule {
-	if s := m.testWindows.Load(); s != nil {
+	if s := m.placeWindows.Load(); s != nil {
 		return s
 	}
-	return m.placeWindows.Load()
+	return m.testWindows.Load()
 }
 
-// SeedRunPlaceWindows installs the recorded window of every test of the set
-// a replay serves for the run's place alone: a replay that seeds no recorded
-// windows (SeedRecordedWindows), keploy mock replay with the proven switch
-// off, whose windows nothing else reads, so a parser, the learn step and
-// the window release rules behave as before. Parked at a set boundary until
-// the set's staging installs it, as SeedRecordedWindows' are; none leaves
-// the set none.
+// SeedRunPlaceWindows installs the window of every test of the set a replay
+// serves for the run's place alone: keploy mock replay's, read as
+// models.RunWindows says, as its recorded windows (SeedRecordedWindows, under
+// the proven switch) do not end at its tests' ends. Nothing else reads them,
+// so a parser, the learn step and the window release rules behave as before.
+// Parked at a set boundary until the set's staging installs it, as
+// SeedRecordedWindows' are; none leaves the set none.
 func (m *MockManager) SeedRunPlaceWindows(ws []models.TestWindow) {
 	var s *models.WindowSchedule
 	if len(ws) > 0 {
@@ -232,8 +232,8 @@ func (m *MockManager) SeedRunPlaceWindows(ws []models.TestWindow) {
 }
 
 // ReachRunTest notes that the replay began test (open) or ended it (!open):
-// keploy mock replay's scope begin and end with the proven switch off, which
-// serves no exact view to move the place (serveExactTest, ServeExactPool).
+// keploy mock replay's scope begin and end, which with the proven switch off
+// serve no exact view to move the place (serveExactTest, ServeExactPool).
 func (m *MockManager) ReachRunTest(test string, open bool) { m.reachTest(test, open) }
 
 // EndRunTest notes that the replay has ended test: it has the test's answer,

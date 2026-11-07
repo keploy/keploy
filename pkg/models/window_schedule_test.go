@@ -266,3 +266,36 @@ func TestWindowSchedule_AMergedTestRunsInItsMergedWindow(t *testing.T) {
 		t.Errorf("Of(c) = %+v, %v", w, ok)
 	}
 }
+
+// keploy mock replay's windows do not end at their tests' ends: for the run's
+// place each runs up to the next one's start and the last has no end, in
+// Start order, a merged window keeping its tests. An End past the next start
+// (windows that were not merged) stays. None stays none.
+func TestRunWindowsRunUpToTheNextStart(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	in := []TestWindow{
+		{TestCase: "c", Start: at(30), End: at(31)},
+		{Tests: []string{"a", "b"}, Start: at(10), End: at(12)},
+		{TestCase: "d", Start: at(20), End: at(35)},
+	}
+	got := RunWindows(in)
+	if in[0].TestCase != "c" || !in[0].End.Equal(at(31)) {
+		t.Fatalf("the windows it was given changed: %v", in)
+	}
+	if len(got) != 3 || len(got[0].Tests) != 2 || got[1].TestCase != "d" || got[2].TestCase != "c" {
+		t.Fatalf("windows %v, want them in Start order", got)
+	}
+	if want := at(20).Add(-time.Nanosecond); !got[0].End.Equal(want) {
+		t.Errorf("first ends at %v, want %v", got[0].End, want)
+	}
+	if !got[1].End.Equal(at(35)) {
+		t.Errorf("an End past the next start became %v", got[1].End)
+	}
+	if !got[2].End.After(at(1 << 32)) {
+		t.Errorf("the last ends at %v, want past any recording", got[2].End)
+	}
+	if got := RunWindows(nil); len(got) != 0 {
+		t.Errorf("none: %v", got)
+	}
+}

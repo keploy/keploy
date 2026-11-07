@@ -84,6 +84,13 @@ func stageMock(name, path string, at time.Time) *models.Mock {
 	}
 }
 
+// answeredAt gives m the answer's time at, written in one write: its one mark.
+func answeredAt(m *models.Mock, at time.Time) *models.Mock {
+	m.Spec.ResTimestampMock = at
+	m.Spec.HTTPResp.Marks = &models.HTTPAnswerMarks{Head: at, Writes: []models.HTTPAnswerWrite{{Offset: len(m.Spec.HTTPResp.Body), TS: at}}}
+	return m
+}
+
 func stageSessionMock(name, path string) *models.Mock {
 	m := stageMock(name, path, stageT0.Add(-time.Minute))
 	m.Spec.Metadata = map[string]string{"type": "config"}

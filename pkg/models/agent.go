@@ -416,10 +416,11 @@ type ScopeTableReq struct {
 	// from the set's mappings (the test's recorded begin and its own
 	// recordings), so the learn step tells a test's own recordings from
 	// another test's (integrations.TestWindows). With the switch off,
-	// keploy mock replay sends them too, derived the same way, for the run's
-	// place alone (models.RunPlace): an answer recorded in a later window
-	// than its call is written once the replay reaches it. Absent from an
-	// older CLI and from a set with no test: the agent then knows none.
+	// keploy mock replay sends them too, derived the same way. Under either
+	// switch the agent reads them for the run's place (models.RunPlace) as
+	// RunWindows says: an answer recorded in a later test than its call is
+	// written once the replay reaches that test. Absent from an older CLI
+	// and from a set with no test: the agent then knows none.
 	Windows []TestWindow `json:"windows,omitempty"`
 	// Given is, under the proven switch, the values each test gave when it
 	// was recorded (MappedTestCase.Given), by test ID: a replay's given is

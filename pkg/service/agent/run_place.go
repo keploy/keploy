@@ -2,22 +2,22 @@ package agent
 
 import (
 	"context"
-	"slices"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// SetRunPlaceWindows installs, for keploy mock replay with the proven switch
-// off, the recorded window of every test of the set it serves
-// (models.ScopeTableReq.Windows), for the run's place alone
-// (coreAgent.RunPlaceSeeder): an answer recorded in a later window than its
-// call is written once the replay reaches that window. Nothing else reads
-// them: a parser, the learn step and the window release rules behave as
-// before. None leaves the set none, and its answers are written at once.
+// SetRunPlaceWindows installs, for keploy mock replay under either switch,
+// the recorded window of every test of the set it serves
+// (models.ScopeTableReq.Windows), read as models.RunWindows says, for the
+// run's place alone (coreAgent.RunPlaceSeeder): an answer recorded in a later
+// test than its call is written once the replay reaches that test. Nothing
+// else reads them: a parser, the learn step and the window release rules
+// behave as before. None leaves the set none, and its answers are written at
+// once.
 func (a *Agent) SetRunPlaceWindows(_ context.Context, ws []models.TestWindow) error {
 	if s, ok := a.Proxy.(coreAgent.RunPlaceSeeder); ok {
-		s.SeedRunPlaceWindows(slices.Clone(ws))
+		s.SeedRunPlaceWindows(models.RunWindows(ws))
 	}
 	return nil
 }

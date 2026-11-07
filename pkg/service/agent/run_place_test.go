@@ -59,6 +59,21 @@ func (h *holdSeen) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func()
 // its answer due at once.
 func heldCall(t *testing.T, mm *proxyPkg.MockManager, path string) <-chan string {
 	t.Helper()
+	db, out := sendCall(mm, path)
+	select {
+	case <-db.held:
+	case a := <-out:
+		t.Fatalf("GET %s: the application read %q before the parser held an answer", path, a)
+	case <-time.After(10 * time.Second):
+		t.Fatalf("GET %s: the parser held no answer", path)
+	}
+	return out
+}
+
+// sendCall sends GET path through the real HTTP parser and returns its store,
+// and, once the application has read the whole answer, the recording that
+// answered it ("" for none).
+func sendCall(mm *proxyPkg.MockManager, path string) (*holdSeen, <-chan string) {
 	db := &holdSeen{MockManager: mm, held: make(chan struct{})}
 	out := make(chan string, 1)
 	app, agentEnd := net.Pipe()
@@ -80,14 +95,7 @@ func heldCall(t *testing.T, mm *proxyPkg.MockManager, path string) <-chan string
 		}
 		out <- got
 	}()
-	select {
-	case <-db.held:
-	case a := <-out:
-		t.Fatalf("GET %s: the application read %q before the parser held an answer", path, a)
-	case <-time.After(10 * time.Second):
-		t.Fatalf("GET %s: the parser held no answer", path)
-	}
-	return out
+	return db, out
 }
 
 // notYet fails the test when the application has its answer.
@@ -113,19 +121,20 @@ func written(t *testing.T, got <-chan string, want, what string) {
 }
 
 // keploy mock replay with the proven switch off: the scope table's recorded
-// windows give the run's place the set's windows, and each test's begin and
-// end move it. A call made in Test1 whose answer was recorded in Test2's
-// window is matched in Test1 and written at Test2's begin, not before; one
-// whose answer was recorded in the gap after Test1 is written at Test1's
-// end. A test with no mapping moves the place too.
+// windows give the run's place the set's windows, and each test's begin
+// moves it. A call made in Test1 whose answer was recorded in Test2's window
+// is matched in Test1 and written at Test2's begin, not before. One whose
+// answer was recorded after Test1's last recording, before Test2 began, is
+// Test1's (models.RunWindows): a test's last answer lies there, and the test
+// cannot end without it. A test with no mapping moves the place too.
 func TestMockReplayWritesAnAnswerAtItsRecordedPlaceWithTheSwitchOff(t *testing.T) {
 	t.Cleanup(models.RegisterAnswerRelease(models.HTTP, placeRelease))
 	slow := stageMock("mock-slow", "/slow", stageT0)
-	slow.Spec.ResTimestampMock = stageT0.Add(5 * time.Second)
+	answeredAt(slow, stageT0.Add(5*time.Second))
 	gap := stageMock("mock-gap", "/gap", stageT0.Add(500*time.Millisecond))
-	gap.Spec.ResTimestampMock = stageT0.Add(3 * time.Second)
+	answeredAt(gap, stageT0.Add(3*time.Second))
 	late := stageMock("mock-late", "/late", stageT0.Add(5*time.Second))
-	late.Spec.ResTimestampMock = stageT0.Add(9 * time.Second)
+	answeredAt(late, stageT0.Add(9*time.Second))
 	a, p := newStageReplay(t,
 		[]*models.Mock{slow, gap, late, stageMock("mock-b", "/b", stageT0.Add(4*time.Second))},
 		nil,
@@ -139,11 +148,11 @@ func TestMockReplayWritesAnAnswerAtItsRecordedPlaceWithTheSwitchOff(t *testing.T
 	}
 
 	scopeBegin(t, a, "Test1")
-	slowGot, gapGot := heldCall(t, p.mm, "/slow"), heldCall(t, p.mm, "/gap")
+	slowGot := heldCall(t, p.mm, "/slow")
 	notYet(t, slowGot, "Test2's answer during Test1")
-	notYet(t, gapGot, "the answer recorded after Test1, during Test1")
+	_, gapGot := sendCall(p.mm, "/gap")
+	written(t, gapGot, "mock-gap", "a test's own last answer, during that test")
 	scopeEnd(t, a, "Test1")
-	written(t, gapGot, "mock-gap", "at Test1's end")
 	notYet(t, slowGot, "Test2's answer after Test1's end")
 	// A begin keploy refuses (a worker pid with no marks) opens nothing.
 	if err := a.BeginScope(context.Background(), "Test2", 4242); err == nil {
@@ -169,7 +178,7 @@ func TestMockReplayWritesAnAnswerAtItsRecordedPlaceWithTheSwitchOff(t *testing.T
 func TestTheSetsEndReadWritesAnAnswerOfATestTheRunNeverReached(t *testing.T) {
 	t.Cleanup(models.RegisterAnswerRelease(models.HTTP, placeRelease))
 	late := stageMock("mock-late", "/late", stageT0.Add(500*time.Millisecond))
-	late.Spec.ResTimestampMock = stageT0.Add(9 * time.Second)
+	answeredAt(late, stageT0.Add(9*time.Second))
 	a, p := newStageReplay(t, []*models.Mock{late, stageMock("mock-b", "/b", stageT0.Add(4*time.Second))}, nil,
 		map[string][]string{"Test1": {"mock-late"}, "Test2": {"mock-b"}})
 	if err := a.SetRunPlaceWindows(context.Background(), []models.TestWindow{

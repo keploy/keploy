@@ -24,26 +24,29 @@ func noteWrite(writes *[]respWrite, end int, at time.Time) {
 	*writes = append(*writes, respWrite{end: end, at: at})
 }
 
-// answerMarks is the marks of an answer the relay wrote to the client in
-// more than one write (models.HTTPAnswerMarks): the time of the write that
-// completed its head, then, for each write, the offset in the body as kept
-// (de-chunked and decompressed, bodyLen long) it ended at, and its time. A
-// compressed body is decoded write by write, so an offset is what the bytes
-// written so far decode to.
+// answerMarks is the marks of an answer the relay wrote to the client
+// (models.HTTPAnswerMarks): the time of the write that completed its head,
+// then, for each write, the offset in the body as kept (de-chunked and
+// decompressed, bodyLen long) it ended at, and its time. A compressed body is
+// decoded write by write, so an offset is what the bytes written so far
+// decode to.
 //
-// It is nil for an answer written in one write, which ResTimestampMock
-// places, one whose head and whole body went out in its last write, and one
-// it cannot place write by write: a write with no time, a body whose framing
-// or encoding does not read back to bodyLen bytes. Such an answer is written
-// as one, as a recording with no marks is.
-func answerMarks(resp []byte, writes []respWrite, reqMethod string, encoding string, bodyLen int) *models.HTTPAnswerMarks {
-	if len(writes) < 2 {
+// It is nil for an answer it cannot place write by write: a write with no
+// time, a body whose framing or encoding does not read back to bodyLen bytes.
+// Such an answer is written at once, as a recording with no marks is.
+func answerMarks(resp []byte, writes []respWrite, encoding string, bodyLen int) *models.HTTPAnswerMarks {
+	if len(writes) == 0 {
 		return nil
 	}
 	for _, w := range writes {
 		if w.at.IsZero() {
 			return nil
 		}
+	}
+	if len(writes) == 1 {
+		// One write ends the body, whatever its framing.
+		at := writes[0].at
+		return &models.HTTPAnswerMarks{Head: at, Writes: []models.HTTPAnswerWrite{{Offset: bodyLen, TS: at}}}
 	}
 	head, bodyStart, _, ok := messageHead(resp, true)
 	if !ok {
@@ -104,10 +107,6 @@ func answerMarks(resp []byte, writes []respWrite, reqMethod string, encoding str
 		}
 		marks.Writes = append(marks.Writes, models.HTTPAnswerWrite{Offset: decoded[i], TS: w.at})
 		prev = decoded[i]
-	}
-	if len(marks.Writes) == 1 && marks.Writes[0].TS.Equal(marks.Head) {
-		// Head and body went out together: ResTimestampMock places them.
-		return nil
 	}
 	return marks
 }

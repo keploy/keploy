@@ -304,7 +304,8 @@ func TestRecordV2_ResponseCutShortOtherwiseIsNotRecorded(t *testing.T) {
 }
 
 // Whole responses record the same mock whether or not the stream ended with
-// the client closing: the flag changes only what does not parse whole.
+// the client closing: the flag changes only what does not parse whole, and
+// the marks of an answer it reads as read in part (TestRecordMarksAWholeAnswerOnlyAsTheClientReadItAll).
 func TestRecordV2_WholeResponsesAreRecordedAlike(t *testing.T) {
 	t.Parallel()
 	for name, resp := range map[string]string{
@@ -322,6 +323,7 @@ func TestRecordV2_WholeResponsesAreRecordedAlike(t *testing.T) {
 		if err != nil || plain == nil {
 			t.Fatalf("%s: mock %v, err %v", name, plain, err)
 		}
+		read.Spec.HTTPResp.Marks, plain.Spec.HTTPResp.Marks = nil, nil
 		if !reflect.DeepEqual(read.Spec.HTTPResp, plain.Spec.HTTPResp) {
 			t.Errorf("%s: recorded %+v with the client's close, %+v without", name, read.Spec.HTTPResp, plain.Spec.HTTPResp)
 		}

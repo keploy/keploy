@@ -140,10 +140,9 @@ type HTTPResp struct {
 	// it as they came, never split into frames (streamChunksForYAML).
 	bodyOnWire bool
 
-	// Marks: when each part of a mock's answer reached the application, for
-	// one the proxy wrote in more than one write (HTTPAnswerMarks). Replay
-	// writes each part at its recorded place. Nil for an answer written in
-	// one write, and in a recording older than the marks.
+	// Marks: when each part of a mock's answer reached the application
+	// (HTTPAnswerMarks). Replay writes each part at its recorded place. Nil
+	// in a recording older than the marks, whose answer is written at once.
 	Marks *HTTPAnswerMarks `json:"marks,omitempty" yaml:"marks,omitempty"`
 }
 

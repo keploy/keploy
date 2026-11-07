@@ -49,7 +49,9 @@ func RunEnd(i int) int { return 2*i + 2 }
 
 // AnswerRelease reports whether a piece of an answer recorded at at is due at
 // the run's place. It is called whenever the place changes while a piece
-// waits, must be cheap, and must not block.
+// waits, must be cheap, and must not block. It must be monotone in time: what
+// is due at a moment is due at every earlier one, so an answer whose last
+// byte is due is due whole.
 type AnswerRelease func(place RunPlace, at time.Time) bool
 
 // RegisterAnswerRelease declares, for answers of kind, when a recorded piece

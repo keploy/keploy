@@ -1279,10 +1279,10 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered,
 		table[testName] = names
 	}
 	// Every test's recorded window, as under the switch, for the run's
-	// place alone: an answer recorded in a later window than its call is
-	// written once the replay reaches it. A test's recorded begin (at:) is
-	// read only under the switch, so each window starts at its test's first
-	// recording.
+	// place alone: an answer recorded in a later test than its call is
+	// written once the replay reaches that test (models.RunWindows). A
+	// test's recorded begin (at:) is read only under the switch, so each
+	// window starts at its test's first recording.
 	windows := recordedTestWindows(nil, table, decoded)
 	if err := pusher.PushScopeTable(ctx, table, windows); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
