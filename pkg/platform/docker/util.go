@@ -408,26 +408,20 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		extraArgWords += " " + w
 	}
-	// Skip publishing the proxy port when it's zero. Docker rejects
-	// `-p 0:0` outright, so a caller that intentionally sets
-	// ProxyPort=0 (e.g. to run the agent without a listening proxy
-	// socket) would fail the whole docker-run alias build otherwise.
-	//
-	// Published to the host's loopback only, like the agent port: the
-	// application reaches the proxy through the agent's network namespace
-	// (`--network=container:<keploy container>`, see pkg/client/app), not
-	// through this publish, so there is nothing for the other host interfaces
-	// to serve but the interception point itself.
-	proxyPortStr := ""
-	if opts.ProxyPort != 0 {
-		proxyPortStr = " -p 127.0.0.1:" + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort)
-	}
+	// The proxy's port is not published, as the DNS server's is not: the
+	// application reaches both through the agent's network namespace
+	// (`--network=container:<keploy container>`, see pkg/client/app), and the
+	// agent binds them there, moving off one another socket holds
+	// (agent.letProxyPortsMove). A publish would claim the port on the host
+	// too, where two runs started together on the configured ports collided
+	// ("port is already allocated"), and would name a port the proxy may have
+	// moved off.
 	switch osName {
 	case "linux":
 
 		alias := linuxDockerClient(os.Geteuid() == 0, passToken) + " container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
-			proxyPortStr + appPortsStr +
+			appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE" + agentSecurityOptFlags() + " " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + rootSuffix(conf)
@@ -497,7 +491,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 				agentPortPublish(opts.AgentPort) +
-				proxyPortStr + appPortsStr +
+				appPortsStr +
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
@@ -554,7 +548,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
-			proxyPortStr + appPortsStr +
+			appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
@@ -626,7 +620,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
 			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 				agentPortPublish(opts.AgentPort) +
-				proxyPortStr + appPortsStr +
+				appPortsStr +
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
@@ -682,7 +676,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
-			proxyPortStr + appPortsStr +
+			appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +

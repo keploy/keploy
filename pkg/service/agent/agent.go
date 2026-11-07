@@ -976,13 +976,13 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 // joins, is not empty when the agent starts: on a user-defined network, as
 // every compose stack's is, Docker's embedded DNS resolver listens in it on
 // 127.0.0.11, on a TCP and a UDP port the kernel drew from the namespace's
-// ephemeral range (32768-60999) before the agent ran. The CLI checks its
-// ports in its own namespace and cannot see them, and their holder, dockerd,
-// is in another PID namespace, so the agent cannot name it. A --proxy-port or
-// --dns-port in that range met one of them now and then, and the agent failed
-// its start. The app reaches the proxy and the DNS server through the hooks'
-// redirect, never through the port the CLI publishes for the proxy, so a
-// moved port serves it as the one the CLI chose would have.
+// ephemeral range (32768-60999) before the agent ran. The CLI cannot see
+// them from its own namespace, and their holder, dockerd, is in another PID
+// namespace, so the agent cannot name it. A --proxy-port or --dns-port in
+// that range met one of them now and then, and the agent failed its start.
+// The app reaches the proxy and the DNS server through the hooks' redirect,
+// and the CLI publishes neither on the host, so a moved port serves it as the
+// configured one would have.
 func (a *Agent) letProxyPortsMove() {
 	setter, ok := a.Hooks.(coreAgent.ProxyPortsSetter)
 	if !ok || coreAgent.EbpfProxyPortOverride != 0 {

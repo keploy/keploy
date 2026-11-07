@@ -15,13 +15,14 @@ import (
 // (agent.ProxyPortsSetter). Unset, a taken port fails the start, naming what
 // holds it.
 //
-// The CLI that starts an agent checks that the ports it hands it are free
-// (utils.EnsureAvailablePorts), but cannot keep them free until the agent
-// binds them: two runs started together both found the default ports free,
-// and the second agent failed to bind them. In Docker it checks them in its
-// own network namespace, not the agent container's, where Docker's embedded
-// DNS resolver already holds a TCP and a UDP port of the ephemeral range. The
-// bind is the only check that cannot be overtaken.
+// The CLI that starts a Linux agent hands it the configured ports unchecked
+// (AgentClient.proxyPorts): a check there could not keep them free until the
+// agent binds them, nor see a Docker agent's network namespace, where
+// Docker's embedded DNS resolver already holds a TCP and a UDP port of the
+// ephemeral range. Two runs started together both found the default ports
+// free, and the second agent failed to bind them; or one found the other's
+// check holding one for a moment, and moved it with no line said. The bind is
+// the only check that cannot be overtaken.
 func (p *Proxy) SetPortMover(move func(proxyPort, dnsPort uint32) error) {
 	p.portMover = move
 }

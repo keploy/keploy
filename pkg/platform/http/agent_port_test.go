@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 )
@@ -42,7 +43,7 @@ func TestSetupPicksADockerAgentsPortAsAContainersPort(t *testing.T) {
 		{utils.FromContainer, "container"},
 	} {
 		picked = nil
-		a := &AgentClient{logger: zap.NewNop()}
+		a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{}}
 		err := a.Setup(context.Background(), "app", models.SetupOptions{CommandType: string(c.kind)})
 		if !errors.Is(err, stop) || len(picked) != 1 || picked[0] != c.want {
 			t.Fatalf("%s: Setup returned %v after picking %v; want the %s picker's port, once", c.kind, err, picked, c.want)

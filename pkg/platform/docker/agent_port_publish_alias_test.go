@@ -64,17 +64,14 @@ func TestGetAlias_LinuxPublishesAgentPortToHostLoopbackOnly(t *testing.T) {
 		t.Errorf("linux getAlias also published the agent control port on all host interfaces (%q).\ngot: %s", unrestricted, alias)
 	}
 
-	// The proxy port is scoped the same way. It is the interception point for
-	// the application's outgoing dependency calls, and the application reaches
-	// it through the agent's network namespace (the app container is started
-	// with --network=container:<keploy container>, see pkg/client/app), not
-	// through this publish.
-	wantProxy := fmt.Sprintf("-p 127.0.0.1:%d:%d", opts.ProxyPort, opts.ProxyPort)
-	if !strings.Contains(alias, wantProxy) {
-		t.Errorf("linux getAlias must publish the proxy port to the host's loopback only (want %q).\ngot: %s", wantProxy, alias)
-	}
-	if unrestrictedProxy := fmt.Sprintf("-p %d:%d", opts.ProxyPort, opts.ProxyPort); strings.Contains(alias, unrestrictedProxy) {
-		t.Errorf("linux getAlias also published the proxy port on all host interfaces (%q).\ngot: %s", unrestrictedProxy, alias)
+	// The proxy's port is not published: the application reaches it through
+	// the agent's network namespace (the app container is started with
+	// --network=container:<keploy container>, see pkg/client/app), where the
+	// agent binds it and moves off one another socket holds. A publish
+	// claimed it on the host too, where two runs started together on the
+	// configured ports collided ("port is already allocated").
+	if proxy := fmt.Sprintf("%d:%d", opts.ProxyPort, opts.ProxyPort); strings.Contains(alias, proxy) {
+		t.Errorf("linux getAlias published the proxy port (%q).\ngot: %s", proxy, alias)
 	}
 }
 

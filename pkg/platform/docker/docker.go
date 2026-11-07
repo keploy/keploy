@@ -878,27 +878,15 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		// port in the first place.
 		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.AgentPort, opts.AgentPort))
 	}
-	if opts.ProxyPort != 0 {
-		// Host loopback only, for the same reason as the agent port above.
-		//
-		// The proxy is the interception point for the application's outgoing
-		// dependency calls: reaching it means being able to drive mock
-		// matching and to see what a recorded dependency answers. The app does
-		// not need this publish to get there — it runs in the agent's own
-		// network namespace (`network_mode: service:keploy-agent`, set in
-		// modifyAppService) and reaches the proxy over that namespace's
-		// loopback. The DNS port, used exactly the same way, is not published
-		// at all, which is the clearest evidence the publish was never what
-		// made interception work.
-		//
-		// It dates from the agent/client split, where it was introduced as a
-		// copy of the agent port's `%d:%d` line; the agent port has since been
-		// narrowed and this one had not been. An agent that finds this port
-		// taken in its namespace (by Docker's embedded DNS resolver) moves its
-		// proxy to a free one (agent.letProxyPortsMove), and this publish
-		// then names a port the proxy does not listen on.
-		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.ProxyPort, opts.ProxyPort))
-	}
+	// The proxy's port is not published, as the DNS server's is not. The
+	// proxy is the interception point for the application's outgoing
+	// dependency calls, and the app reaches it over the loopback of the
+	// agent's network namespace, which it runs in (`network_mode:
+	// service:keploy-agent`, set in modifyAppService), where the agent binds
+	// it and moves off it when another socket holds it
+	// (agent.letProxyPortsMove). A publish claimed the port on the host too:
+	// two runs started together on the configured ports collided there, and
+	// after a move it named a port the proxy did not listen on.
 
 	ports = append(ports, opts.AppPorts...)
 
