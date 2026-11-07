@@ -358,3 +358,44 @@ func TestAMovedReadTrailsNoTestAndATrailStaysBesideIt(t *testing.T) {
 	require.Equal(t, map[string]string{"mock-pat": "o::TestCRUD"}, instr.skippedReads, "the moved read alone is a skipped test's read")
 	require.Equal(t, map[string]string{"mock-bg": "o::TestCRUD"}, instr.trails, "the worker recording alone trails a test: a moved read trails none")
 }
+
+// A skipped test the left-out source names keeps its reads: CI's replay
+// holds none of its recordings (a wrapping build's pull leaves them out), so
+// a replay that is to show what CI will do serves them to no test, and the
+// next test that makes the read misses as it does in CI. The gate still
+// skips it, a skipped test the source does not name still moves its read,
+// and a name the skip source did not skip changes nothing.
+func TestASkippedTestTheLeftOutSourceNamesKeepsItsReadsForNoTest(t *testing.T) {
+	provenOn(t)
+	skip := map[string]string{"o::TestCRUD": "flaky: flipped", "o::TestBig": "too large"}
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return skip, nil, nil
+	})
+	var asked []ScopeGateRequest
+	RegisterScopeLeftOutSource(func(_ context.Context, req ScopeGateRequest) map[string]bool {
+		asked = append(asked, req)
+		return map[string]bool{"o::TestBig": true, "o::TestList": true}
+	})
+	t.Cleanup(func() { RegisterScopeSkipSource(nil); RegisterScopeLeftOutSource(nil) })
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestBig\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-token\n        - name: mock-big\n    - id: o::TestCRUD\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-pat\n    - id: o::TestList\n      dir: o\n      key: o\n      mock_entries:\n        - name: mock-own\n"), 0o644))
+	instr := &gatedInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	db := namedMockDB{mocks: []*models.Mock{httpMock("mock-token", "GET"), httpMock("mock-big", "PUT"), httpMock("mock-pat", "GET"), httpMock("mock-own", "GET")}}
+	require.NoError(t, New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+
+	require.Equal(t, skip, instr.skip, "the gate still skips the left-out test")
+	require.Len(t, asked, 1, "the left-out source is asked once per replay")
+	require.Equal(t, "set", asked[0].Set)
+	require.Equal(t, []string{"mock-token", "mock-big"}, instr.table["o::TestBig"], "the left-out test keeps its read, served to no test")
+	require.Empty(t, instr.table["o::TestCRUD"], "a skipped test the source does not name still moves its read")
+	require.Equal(t, []string{"mock-own"}, instr.table["o::TestList"], "a name the skip source did not skip changes nothing")
+	require.Equal(t, map[string][]string{"o": {"mock-pat"}}, instr.worker, "only the read of the skipped test that is not left out answers whichever test makes it")
+	require.Equal(t, map[string]string{"mock-pat": "o::TestCRUD"}, instr.skippedReads, "the agent is told of no read of the left-out test")
+}

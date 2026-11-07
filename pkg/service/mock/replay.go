@@ -357,9 +357,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//    calls can narrow the served pool per test (best-effort / optional;
 	//    under the proven switch each test is judged by it, so required).
 	//    The gate's skips are read first, once: the table serves the reads
-	//    of the tests it skips to whichever test makes them (skippedReads).
+	//    of the tests it skips to whichever test makes them (skippedReads),
+	//    but for those whose recordings no test is served (leftOut).
 	skips := readScopeSkips(ctx, name, digest, m.config.Path)
-	if err := m.pushScopeTable(ctx, name, filtered, unfiltered, decoded, skips.skip); err != nil {
+	if err := m.pushScopeTable(ctx, name, filtered, unfiltered, decoded, skips.moving()); err != nil {
 		return err
 	}
 	if provenswitch.On() {
@@ -1334,7 +1335,8 @@ func (m *mockService) matchNoise(name string) models.OutgoingOptions {
 // request, and so do the repeated reads the registered namer names
 // (namedRepeatReads) and the names of each test's own list marked served,
 // not required (notRequired). The reads of each test the gate skips are the
-// worker scope's for this replay (skippedReads), so they answer whichever
+// worker scope's for this replay (skippedReads), but for a test whose
+// recordings no test is served (ScopeLeftOutSource), so they answer whichever
 // test now makes them, and the agent is told which they are
 // (models.ScopeTableReq.SkippedReads): each also answers a call one more than
 // the open test's own recordings of it, which the rest of the worker scope
@@ -1978,6 +1980,26 @@ func RegisterScopeSkipSource(fn ScopeSkipSource) {
 	scopeSkipSource = fn
 }
 
+// ScopeLeftOutSource names, of the tests the skip source skips
+// (ScopeSkipSource), each one whose recordings the replay serves to no test,
+// as a replay that does not hold them would: CI's replay of the set holds
+// none of them (a wrapping build's pull leaves out the recordings of the
+// tests it skips), so a run that is to show what CI will do must not let a
+// read of theirs answer another test (skippedReads moves none of them). The
+// gate still skips each. It is asked once per replay, right after the skip
+// source and only when that one answered; a name the skip source did not
+// skip changes nothing.
+type ScopeLeftOutSource func(ctx context.Context, req ScopeGateRequest) map[string]bool
+
+var scopeLeftOutSource ScopeLeftOutSource
+
+// RegisterScopeLeftOutSource installs the left-out source, read with the
+// skip source. A nil fn removes it: every skipped test's reads then answer
+// whichever test makes them.
+func RegisterScopeLeftOutSource(fn ScopeLeftOutSource) {
+	scopeLeftOutSource = fn
+}
+
 // ScopeSkipPusher is an optional Instrumentation extension: under the proven
 // switch, Replay hands the agent the tests to skip with it.
 type ScopeSkipPusher interface {
@@ -1986,26 +2008,48 @@ type ScopeSkipPusher interface {
 
 // scopeSkips is the proven gate a replay read from its skip source
 // (ScopeSkipSource): read is false when the switch is off or no source is
-// installed, and err is the source's.
+// installed, and err is the source's. leftOut is what the left-out source
+// (ScopeLeftOutSource) named.
 type scopeSkips struct {
-	read  bool
-	skip  map[string]string
-	needs map[string][]models.ScopeNeed
-	err   error
+	read    bool
+	skip    map[string]string
+	needs   map[string][]models.ScopeNeed
+	leftOut map[string]bool
+	err     error
+}
+
+// moving is the tests of skip whose reads the table moves (skippedReads):
+// every one but those leftOut names, whose recordings no test is served.
+func (g scopeSkips) moving() map[string]string {
+	if len(g.leftOut) == 0 {
+		return g.skip
+	}
+	out := make(map[string]string, len(g.skip))
+	for t, why := range g.skip {
+		if !g.leftOut[t] {
+			out[t] = why
+		}
+	}
+	return out
 }
 
 // readScopeSkips reads the proven gate of the replay of set name, once per
-// replay: the table (skippedReads) and the agent's gate (pushSkips) are
-// handed the same list.
+// replay: the agent's gate (pushSkips) is handed the list, and the table
+// (skippedReads) the part of it whose reads move (scopeSkips.moving).
 func readScopeSkips(ctx context.Context, name, digest, path string) scopeSkips {
 	if !provenswitch.On() || scopeSkipSource == nil {
 		return scopeSkips{}
 	}
-	skip, needs, err := scopeSkipSource(ctx, ScopeGateRequest{Set: name, MocksDigest: digest, Path: path})
+	req := ScopeGateRequest{Set: name, MocksDigest: digest, Path: path}
+	skip, needs, err := scopeSkipSource(ctx, req)
 	if err != nil {
 		return scopeSkips{read: true, err: err}
 	}
-	return scopeSkips{read: true, skip: skip, needs: needs}
+	g := scopeSkips{read: true, skip: skip, needs: needs}
+	if scopeLeftOutSource != nil {
+		g.leftOut = scopeLeftOutSource(ctx, req)
+	}
+	return g
 }
 
 // pushScopeSkips hands the agent the proven gate, under the proven switch and
