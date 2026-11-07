@@ -570,8 +570,9 @@ func TestEveryLineOfKeploysFileKeepsAComment(t *testing.T) {
 // their order, and a comment above the first key of a file written as {...}
 // is that key's: it is kept, and it is a hand edit, so a file holding nothing
 // else is not taken for keploy's own, keploy's line beside a note there
-// included. Mutation: stop the head at a marker; take every comment on the
-// first key for the head; take one that starts with keploy's line for it.
+// included, and a blank line between two of its lines stays. Mutation: stop
+// the head at a marker or a directive; take every comment on the first key
+// for the head; take one that starts with keploy's line for it.
 func TestACommentAroundTheFirstKeyIsKept(t *testing.T) {
 	const body = "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: s\n"
 	const flow = "{\n  # a note\n  version: api.keploy.io/v1beta1,\n  kind: TestMocksMapping,\n  test_set_id: s\n}\n"
@@ -581,6 +582,7 @@ func TestACommentAroundTheFirstKeyIsKept(t *testing.T) {
 			"both sides of a marker":        {"# one\n---\n# two\n" + body, "# one\n# two\nversion: "},
 			"after a marker":                {"---\n# two\n" + body, "# two\nversion: "},
 			"around a directive":            {"# one\n%YAML 1.1\n---\n# two\n" + body, "# one\n# two\nversion: "},
+			"a blank line past a directive": {"# one\n%YAML 1.1\n---\n\n# two\n" + body, "# one\n\n# two\nversion: "},
 			"marker and a comment beyond":   {"# one\n---\n# two\n" + strings.Replace(body, "kind: TestMocksMapping\n", "kind: TestMocksMapping # k\n", 1), "# one\n# two\nversion: "},
 			"on the marker line":            {"--- # a note\n" + body, utils.GetVersionAsComment() + "# a note\nversion: "},
 			"a {...} file":                  {flow, utils.GetVersionAsComment() + "# a note\nversion: "},
