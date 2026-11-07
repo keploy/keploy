@@ -486,6 +486,11 @@ func TestAMongoReadsLargeAnswerIsNotParsedAtIngest(t *testing.T) {
 		"a write answered with its filter's key, not the key it set": {
 			`{"findAndModify":"t","query":{"_id":"5b6f1c2e-8d3a-4f7b-9e21-000000000007"},"update":{"$set":{"key_id":"` + liveKeyID + `"}},"$db":"api"}`,
 			`{"value":{"_id":"5b6f1c2e-8d3a-4f7b-9e21-000000000007","history":` + docs + `},"ok":1}`},
+		// A longer string that holds the key the write set is not that key,
+		// so the answer is not parsed either.
+		"a write answered with the key it set inside a longer string": {
+			`{"findAndModify":"t","query":{"_id":"5b6f1c2e-8d3a-4f7b-9e21-000000000007"},"update":{"$set":{"key_id":"` + liveKeyID + `"}},"$db":"api"}`,
+			`{"value":{"_id":"5b6f1c2e-8d3a-4f7b-9e21-000000000007","note":"was ` + liveKeyID + `","history":` + docs + `},"ok":1}`},
 	} {
 		checkIngestCost(t, name, mongoMock(tc.req, tc.answer))
 	}
@@ -615,5 +620,106 @@ func TestAKeyWrittenInALaterRequestSectionBindsOnlyThere(t *testing.T) {
 	}
 	if got := RenderMongoEchoes(m.Spec.Correlations, []string{mongoMsg(claimRequest(liveKeyID)), first}, recorded); got != recorded {
 		t.Fatalf("the live key in section 0 must not bind: served %q", got.Sections)
+	}
+}
+
+// A serve replaces a recorded value where the detector named it: a whole
+// string scalar of a section it reads. The same text inside a number, a longer
+// string or a key is not that value and stays, so the answer stays a document
+// the parser can encode; so does a section the detector does not read.
+func TestAnEchoIsRenderedOnlyWhereItIsAWholeStringScalar(t *testing.T) {
+	switchOff(t)
+	const rec, live = "234567890123456789e1", "abcdef0123456789abcd"
+	req := func(k string) string {
+		return `{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{"n":1234567890123456789e10,"k":"` + k + `"}},"new":true}`
+	}
+	answer := func(k string) string {
+		return `{"value":{"n":1234567890123456789e10,"k":"` + k + `","url":"/keys/` + rec + `/use","` + rec + `":1},"ok":1}`
+	}
+	unframed := `{ SectionSingle identifier: documents , msgs [ {"k":"` + rec + `"} ] }`
+	invalid := mongoMsg(`{"k":"` + rec + `"`)
+	m := mongoMock(req(rec), "")
+	m.Spec.MongoResponses[0].Message = &models.MongoOpMessage{Sections: []string{mongoMsg(answer(rec)), unframed, invalid}}
+	MaterializeCorrelations(m)
+	if len(m.Spec.Correlations) != 1 {
+		t.Fatalf("correlations = %+v, want one", m.Spec.Correlations)
+	}
+	recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
+	got := RenderMongoEchoes(m.Spec.Correlations, []string{mongoMsg(req(live))}, recorded)
+	want := []string{mongoMsg(answer(live)), unframed, invalid}
+	if !reflect.DeepEqual(got.Sections, want) {
+		t.Fatalf("served %q\nwant %q", got.Sections, want)
+	}
+	if doc, ok := mongoMsgJSON(got.Sections[0]); !ok {
+		t.Fatalf("the served section is not a document: %q", doc)
+	}
+}
+
+// A value written at many places and answered at many is listed once, on the
+// first of its correlations, so it costs about the places themselves: a list on
+// each correlation is places squared, on the mock and on every copy of it, and
+// these 2,000 places would cost 64 MB each time. Its answer is still rendered
+// at every place, and a place that writes another live value still refuses it.
+func TestAValueWrittenAndAnsweredAtManyPlacesIsListedOnce(t *testing.T) {
+	switchOff(t)
+	const n = 2000
+	fields := func(k string) string {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `"f%04d":"%s"`, i, k)
+		}
+		return b.String()
+	}
+	req := func(f string) string {
+		return `{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{"perms":{` + f + `}}},"new":true,"$db":"api"}`
+	}
+	answer := func(k string) string { return `{"value":{"_id":"k","perms":{` + fields(k) + `}},"ok":1}` }
+	m := mongoMock(req(fields(recKeyID)), answer(recKeyID))
+	_, bytes, got := ingestCost(m)
+	if len(got) != n {
+		t.Fatalf("%d correlations, want one per place", len(got))
+	}
+	if got[0].RequestPath != "section.0.update.$set.perms.f0000" || len(got[0].ResponsePaths) != n ||
+		got[0].ResponsePaths[0] != "section.0.value.perms.f0000" || got[0].ResponsePaths[n-1] != "section.0.value.perms.f1999" {
+		t.Fatalf("the first correlation is at %s, answered at %d places", got[0].RequestPath, len(got[0].ResponsePaths))
+	}
+	for _, c := range got[1:] {
+		if len(c.ResponsePaths) != 0 {
+			t.Fatalf("%s lists %d places again", c.RequestPath, len(c.ResponsePaths))
+		}
+	}
+	if limit := uint64(4 << 20); !raceDetector && bytes > limit {
+		t.Errorf("ingest: %d bytes, want at most %d", bytes, limit)
+	}
+	recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
+	served := RenderMongoEchoes(got, []string{mongoMsg(req(fields(liveKeyID)))}, recorded)
+	if want := mongoMsg(answer(liveKeyID)); served.Sections[0] != want {
+		t.Fatalf("not every place is rendered: served %.200q", served.Sections[0])
+	}
+	last := strings.Replace(fields(liveKeyID), `"f1999":"`+liveKeyID, `"f1999":"0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0`, 1)
+	if served := RenderMongoEchoes(got, []string{mongoMsg(req(last))}, recorded); served != recorded {
+		t.Fatalf("a place with no list did not refuse the value: served %.200q", served.Sections[0])
+	}
+}
+
+// Several values, each written at two places, each list their answer's places
+// on their own first correlation, whichever order the walk found them in.
+func TestEachValueListsItsAnswersPlacesOnItsFirstCorrelation(t *testing.T) {
+	const a, b = "0123456789abcdef0123", "fedcba9876543210fedc"
+	m := mongoMock(`{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{"p":"`+b+`","q":"`+a+`","r":"`+b+`","s":"`+a+`"}},"new":true}`,
+		`{"value":{"y":"`+a+`","z":"`+b+`","x":"`+a+`"},"ok":1}`)
+	want := []models.FieldCorrelation{
+		{RequestPath: "section.0.update.$set.p", ResponsePaths: []string{"section.0.value.z"}, RecordedValue: b, ValueClass: "hex"},
+		{RequestPath: "section.0.update.$set.q", ResponsePaths: []string{"section.0.value.x", "section.0.value.y"}, RecordedValue: a, ValueClass: "hex"},
+		{RequestPath: "section.0.update.$set.r", RecordedValue: b, ValueClass: "hex"},
+		{RequestPath: "section.0.update.$set.s", RecordedValue: a, ValueClass: "hex"},
+	}
+	for i := 0; i < 50; i++ {
+		if got := CorrelationsFromMock(m); !reflect.DeepEqual(got, want) {
+			t.Fatalf("ingest %d: correlations = %+v\nwant %+v", i, got, want)
+		}
 	}
 }

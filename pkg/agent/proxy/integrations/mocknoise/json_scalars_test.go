@@ -54,6 +54,7 @@ func TestJSONScalarsGivesFlattensPathsAndValues(t *testing.T) {
 		`{"s":"a 5\" screen","t":"x\\","u":"\u00e9\n","v":"é","w":"","x":0,"y":-0.5,"z":1E+21}`,
 		`{"a":{"b":{"c":{"d":"e"}}},"a2":[{"b":"c"},{"b":"d"},{"x":"y"}]}`,
 		`[{"a":1},{"a":2}]`,
+		`{"":{"a":1},"b":{"":{"c":2}}}`,
 		"{\"a\":1\t,\"b\":2\r,\"c\":3\n,\"d\":[4 ,5\t,6\r,7\n]}",
 		`"a lone string"`,
 		`12345`,
@@ -70,7 +71,8 @@ func TestJSONScalarsGivesFlattensPathsAndValues(t *testing.T) {
 
 // refMongoCorrelations is the detector as a full parse gives it, with no gate
 // and no walk: each request section flattened, its written places that hold
-// one random value kept, and each answer section flattened for their values.
+// one random value kept, and each answer section flattened for their values,
+// listed on the first correlation of each value.
 func refMongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 	doc := func(section string) map[string][]string {
 		body, ok := strings.CutPrefix(section, mongoMsgPrefix)
@@ -106,13 +108,19 @@ func refMongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 	}
 	var out []models.FieldCorrelation
 	for _, c := range written {
-		if places := answered[c.RecordedValue]; len(places) > 0 {
-			c.ResponsePaths = append([]string(nil), places...)
-			sort.Strings(c.ResponsePaths)
+		if len(answered[c.RecordedValue]) > 0 {
 			out = append(out, c)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RequestPath < out[j].RequestPath })
+	listed := make(map[string]bool)
+	for i := range out {
+		if v := out[i].RecordedValue; !listed[v] {
+			listed[v] = true
+			out[i].ResponsePaths = append([]string(nil), answered[v]...)
+			sort.Strings(out[i].ResponsePaths)
+		}
+	}
 	return out
 }
 
@@ -240,6 +248,83 @@ func TestTheMongoDetectorFindsWhatAFullParseFinds(t *testing.T) {
 	}
 	if found < 500 {
 		t.Fatalf("only %d of the mocks have a correlation: the generator no longer reaches the detector", found)
+	}
+}
+
+// jsonReplaceStrings replaces a whole string scalar and nothing else, and keeps
+// every byte around it: the same text in a key, a number or a longer string
+// stays, and a value longer or shorter than the one it replaces fits.
+func TestJSONReplaceStringsReplacesOnlyAWholeStringScalar(t *testing.T) {
+	repl := map[string]string{"abc1": "zz", "123e4": "longer-than-it-was", "swap1": "swap2", "swap2": "swap1"}
+	same := func(doc string) [2]string { return [2]string{doc, doc} }
+	for _, c := range [][2]string{
+		{`"abc1"`, `"zz"`},
+		{`{"a":"abc1"}`, `{"a":"zz"}`},
+		{`["abc1","abc1"]`, `["zz","zz"]`},
+		{" {\t\"a\" : [ \"abc1\" ,\n\"abc1\" ] , \"b\" : \"abc1\" } \n", " {\t\"a\" : [ \"zz\" ,\n\"zz\" ] , \"b\" : \"zz\" } \n"},
+		{`{"a":"abc1","b":"123e4","c":"abc1","d":1}`, `{"a":"zz","b":"longer-than-it-was","c":"zz","d":1}`},
+		{`{"abc1":1,"x":"abc1"}`, `{"abc1":1,"x":"zz"}`},
+		{`{"n":123e4,"s":"123e4"}`, `{"n":123e4,"s":"longer-than-it-was"}`},
+		{`{"x":"swap1","y":"swap2"}`, `{"x":"swap2","y":"swap1"}`},
+		same(`{"a":"pre-abc1","b":"abc1-post","c":"\"abc1\"","d":"abc1\n"}`),
+		same(`{"abc1":{"abc1":["x"]}}`),
+		same(`{"a":"","b":0,"c":true,"d":null,"e":[],"f":{}}`),
+		same(`123e4`),
+	} {
+		var b strings.Builder
+		jsonReplaceStrings(&b, c[0], repl)
+		if b.String() != c[1] {
+			t.Errorf("%q: got %q, want %q", c[0], b.String(), c[1])
+		}
+	}
+}
+
+// replaceParsed is jsonReplaceStrings on a parsed document.
+func replaceParsed(v interface{}, repl map[string]string) interface{} {
+	switch x := v.(type) {
+	case string:
+		if r, ok := repl[x]; ok {
+			return r
+		}
+	case []interface{}:
+		for i := range x {
+			x[i] = replaceParsed(x[i], repl)
+		}
+	case map[string]interface{}:
+		for k := range x {
+			x[k] = replaceParsed(x[k], repl)
+		}
+	}
+	return v
+}
+
+// On generated documents of every shape the detector reads, the replace gives
+// a valid document, and it is the document a parse with the same strings
+// replaced gives.
+func TestJSONReplaceStringsGivesWhatAParseGives(t *testing.T) {
+	g := &mockGen{r: rand.New(rand.NewSource(11)), pool: []string{recKeyID, liveKeyID, "0123456789abcdef0123", "aB3dE5gH7jK9mN1pQ3sT5vX"}}
+	repl := map[string]string{recKeyID: "fedcba9876543210fedc", "0123456789abcdef0123": liveKeyID}
+	changed := 0
+	for i := 0; i < 20000; i++ {
+		doc := g.object(3)
+		var b strings.Builder
+		jsonReplaceStrings(&b, doc, repl)
+		var got, want interface{}
+		if err := json.Unmarshal([]byte(b.String()), &got); err != nil {
+			t.Fatalf("%q gave %q: %v", doc, b.String(), err)
+		}
+		if err := json.Unmarshal([]byte(doc), &want); err != nil {
+			t.Fatalf("%q: %v", doc, err)
+		}
+		if want = replaceParsed(want, repl); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%q gave %q, a parse gives %v", doc, b.String(), want)
+		}
+		if b.String() != doc {
+			changed++
+		}
+	}
+	if changed < 500 {
+		t.Fatalf("only %d of the documents changed: the generator no longer reaches the replace", changed)
 	}
 }
 

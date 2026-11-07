@@ -84,10 +84,16 @@ func opMsgSections(msg interface{}) []string {
 // value with its answer (mongoSharesAValue). A read (find, aggregate, getMore)
 // costs a few substring searches, and a write whose answer echoes none of its
 // values (an insert's answer is a count) one pass over each side. An answer
-// section is read only when its raw text holds one of the values the request
-// wrote (mongoAnswerHolds). A section that is read is walked (jsonScalars),
-// never parsed into a document: what is kept is the written places that hold
-// a random value and the answer's places of those values.
+// section is read only when it quotes one of the values the request wrote
+// (mongoAnswerHolds). A section that is read is walked (jsonScalars), never
+// parsed into a document: what is kept is the written places that hold a
+// random value and the answer's places of those values.
+//
+// A value written at several places is a correlation per place, and the
+// answer's places of that value are listed once, on the first of them. The
+// others only say that the live request must write the same value there
+// (RenderMongoEchoes), so a value written at n places and answered at k costs
+// n+k entries, on the mock and on each copy of it, not n*k.
 func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 	req, resp := mongoOpMsgSections(m)
 	var written []models.FieldCorrelation
@@ -97,12 +103,15 @@ func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 		}
 		written = append(written, mongoWrites(i, s)...)
 	}
+	if len(written) == 0 {
+		return nil
+	}
 	answered := make(map[string][]string, len(written))
 	for _, c := range written {
 		answered[c.RecordedValue] = nil
 	}
 	for j, s := range resp {
-		if !mongoAnswerHolds(s, written) {
+		if !mongoAnswerHolds(s, answered) {
 			continue
 		}
 		doc, ok := mongoMsgJSON(s)
@@ -118,15 +127,16 @@ func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 	}
 	var out []models.FieldCorrelation
 	for _, c := range written {
-		places := answered[c.RecordedValue]
-		if len(places) == 0 {
-			continue
+		if len(answered[c.RecordedValue]) > 0 {
+			out = append(out, c)
 		}
-		c.ResponsePaths = append([]string(nil), places...)
-		sort.Strings(c.ResponsePaths)
-		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RequestPath < out[j].RequestPath })
+	for i := range out {
+		v := out[i].RecordedValue
+		out[i].ResponsePaths, answered[v] = answered[v], nil
+		sort.Strings(out[i].ResponsePaths)
+	}
 	return out
 }
 
@@ -249,17 +259,16 @@ func mongoQuoted(sections []string, f func(string) bool) bool {
 	return false
 }
 
-// mongoAnswerHolds reports whether an answer section's raw text holds one of
-// the written values. mongoRandomClass took each only when its JSON text is
-// the value itself, so a section whose text does not hold a value does not
-// answer it, and it is not parsed.
-func mongoAnswerHolds(section string, written []models.FieldCorrelation) bool {
-	for _, c := range written {
-		if strings.Contains(section, c.RecordedValue) {
-			return true
-		}
-	}
-	return false
+// mongoAnswerHolds reports whether an answer section quotes one of the written
+// values, the keys of answered. mongoRandomClass took each only when its JSON
+// text is the value itself, so a section that does not quote a value does not
+// answer it, and it is not read. This is one pass over the section, however
+// many values were written.
+func mongoAnswerHolds(section string, answered map[string][]string) bool {
+	return mongoQuoted([]string{section}, func(v string) bool {
+		_, ok := answered[v]
+		return ok
+	})
 }
 
 // RenderMongoEchoes returns the answer a recorded Mongo write serves to the
@@ -277,9 +286,13 @@ func mongoAnswerHolds(section string, written []models.FieldCorrelation) bool {
 // answer was before correlations. resp itself is never changed: a changed
 // answer is a copy, so a pooled recording stays as recorded.
 //
+// A value is replaced where it is a whole string scalar of an answer section
+// the detector reads, which is every place the detector named for it. The same
+// text inside a number, a longer string or a key is not that value, and stays.
+//
 // This runs on every serve of a mock with correlations, so the live request
-// is walked (jsonScalars) once, not parsed, and only its values at the
-// correlations' places are kept.
+// and the answer are walked (jsonScalars) once, not parsed, and only the live
+// request's values at the correlations' places are kept.
 func RenderMongoEchoes(corrs []models.FieldCorrelation, liveSections []string, resp *models.MongoOpMessage) *models.MongoOpMessage {
 	if resp == nil || len(corrs) == 0 {
 		return resp
@@ -327,25 +340,35 @@ func RenderMongoEchoes(corrs []models.FieldCorrelation, liveSections []string, r
 		}
 		bound[c.RecordedValue] = v
 	}
-	recorded := make([]string, 0, len(bound))
+	renders := make(map[string]string, len(bound))
 	for r, v := range bound {
 		if !refused[r] && v != r {
-			recorded = append(recorded, r)
+			renders[r] = v
 		}
 	}
-	if len(recorded) == 0 {
+	if len(renders) == 0 {
 		return resp
 	}
-	sort.Strings(recorded)
-	pairs := make([]string, 0, 2*len(recorded))
-	for _, r := range recorded {
-		pairs = append(pairs, r, bound[r])
-	}
-	rep := strings.NewReplacer(pairs...)
 	out := *resp
 	out.Sections = make([]string, len(resp.Sections))
 	for j, s := range resp.Sections {
-		out.Sections[j] = rep.Replace(s)
+		out.Sections[j] = mongoRenderSection(s, renders)
 	}
 	return &out
+}
+
+// mongoRenderSection returns an answer section with each string scalar that
+// renders keys replaced by the live value it gives. A section the detector
+// does not read names no place, and is returned as it is.
+func mongoRenderSection(section string, renders map[string]string) string {
+	doc, ok := mongoMsgJSON(section)
+	if !ok {
+		return section
+	}
+	var b strings.Builder
+	b.Grow(len(section))
+	b.WriteString(mongoMsgPrefix)
+	jsonReplaceStrings(&b, doc, renders)
+	b.WriteString(mongoMsgSuffix)
+	return b.String()
 }
