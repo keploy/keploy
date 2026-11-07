@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
-	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -20,44 +18,16 @@ var _ async.AsyncAware = (*HTTP)(nil)
 // SetAsyncEngine stores the shared engine (setter injection).
 func (h *HTTP) SetAsyncEngine(e *async.Engine) { h.asyncEngine = e }
 
-// MatchesLane matches host + path globs (path.Match) from lane.Match against
-// the mock's recorded request URL.
+// MatchesLane matches the lane's host and path globs, pathRegex and query
+// (async.MatchesHTTPLane, the reading of an "http" lane the HTTP/2 parser
+// shares) against the mock's request: its Host header, its URL's path, its
+// query.
 func (h *HTTP) MatchesLane(m *models.Mock, lane models.AsyncLane) bool {
 	if m == nil || m.Spec.HTTPReq == nil {
 		return false
 	}
 	host, p := hostAndPath(m.Spec.HTTPReq)
-	matched := false
-	if hg := lane.Match["host"]; hg != "" {
-		matched = true
-		if ok, _ := path.Match(hg, host); !ok {
-			return false
-		}
-	}
-	// pathRegex, when set, is the path check (a regex alternative to the glob
-	// match.path — for URLs a glob can't express, e.g. numeric-id segments).
-	// Reuses pkg/matcher's cached, fail-closed regex helper.
-	if pr := lane.Match["pathRegex"]; pr != "" {
-		matched = true
-		if ok, _ := matcher.MatchesAnyRegex(p, []string{pr}); !ok {
-			return false
-		}
-	} else if pg := lane.Match["path"]; pg != "" {
-		matched = true
-		if ok, _ := path.Match(pg, p); !ok {
-			return false
-		}
-	}
-	if len(lane.MatchQuery) > 0 {
-		matched = true
-		q := queryOf(m.Spec.HTTPReq)
-		for k, v := range lane.MatchQuery {
-			if q.Get(k) != v {
-				return false
-			}
-		}
-	}
-	return matched
+	return async.MatchesHTTPLane(lane, host, p, func() url.Values { return queryOf(m.Spec.HTTPReq) })
 }
 
 // queryOf returns the request's query params, URLParams-first (the recorded

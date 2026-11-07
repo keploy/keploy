@@ -283,22 +283,48 @@ func (e *Engine) CompletedForTest() int {
 	return e.completed
 }
 
-// LaneFor returns the lane a live request routes to, by asking each lane's
-// parser. Lanes are tried in caller-declared order (as passed to NewEngine)
-// so the FIRST declared matching lane always wins, deterministically.
+// LaneFor returns the lane a live request routes to, by asking the parsers
+// that serve each lane's type (lanePars). Lanes are tried in caller-declared
+// order (as passed to NewEngine) so the FIRST declared matching lane always
+// wins, deterministically.
 func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 	for _, lane := range e.laneOrder {
-		// Guard the e.parsers read (RegisterParser writes it under e.mu), same
-		// as Decide — so every e.parsers access is locked. MatchesLane runs
-		// unlocked (it only reads the immutable lane + the request mock).
-		e.mu.Lock()
-		p := e.parsers[lane.BaseType()]
-		e.mu.Unlock()
-		if p != nil && p.MatchesLane(m, lane) {
-			return lane, true
+		// MatchesLane runs unlocked (it only reads the immutable lane + the
+		// request mock).
+		for _, p := range e.lanePars(lane) {
+			if p.MatchesLane(m, lane) {
+				return lane, true
+			}
 		}
 	}
 	return models.AsyncLane{}, false
+}
+
+// lanePars is every parser that serves lane's type (LaneParsers): the one
+// registered under it, and each other that declares it (LaneTyper), as an
+// "http" lane is served by the HTTP/1 and the HTTP/2 parser. The e.parsers
+// read is guarded (RegisterParser writes it under e.mu).
+func (e *Engine) lanePars(lane models.AsyncLane) []AsyncParser {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return LaneParsers(lane.BaseType(), e.parsers)
+}
+
+// parserFor is the parser that serves live for lane: the first of the lane
+// type's parsers whose matcher takes live, which speaks live's protocol and
+// so judges its shape and builds its keep-alive; else the lane type's own
+// (nil when no parser serves it).
+func (e *Engine) parserFor(lane models.AsyncLane, live *models.Mock) AsyncParser {
+	ps := e.lanePars(lane)
+	for _, p := range ps {
+		if p.MatchesLane(live, lane) {
+			return p
+		}
+	}
+	if len(ps) > 0 {
+		return ps[0]
+	}
+	return nil
 }
 
 // Decide returns the recorded response currently in effect for the lane — the
@@ -316,22 +342,25 @@ func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 // is the correct model — TestNonPollServesReselectableCurrentEpoch pins this so a
 // future change can't regress it silently. Only the throttle hold below is gated
 // to poll lanes; unchanged in scope from the pre-value-epoch engine is nothing.
+//
+// A poll is held whatever answers it, the keep-alive included: a poll lane with
+// nothing recorded (a watch whose long-poll was still open when recording
+// stopped) is as much a poll as one with a value, and its client, answered at
+// once, polls again at once, without pause, for the whole replay
+// (TestAPollLaneWithNothingRecordedHoldsItsKeepAlive). The parser that answers
+// is the one that serves live's protocol (parserFor).
 func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models.Mock) (*models.Mock, []byte, error) {
+	p := e.parserFor(lane, live)
 	e.mu.Lock()
-	p := e.parsers[lane.BaseType()]
-	s := e.streams[lane.Name]
-	if s == nil || len(s.epochs) == 0 {
-		e.mu.Unlock()
-		return e.keepAlive(p, lane)
-	}
 	if lane.IsPoll() {
 		e.holdThrottle(ctx, lane.ThrottleDuration()) // pace + wake-early; holds e.mu
 	}
-	// Re-read the stream: holdThrottle released e.mu, and a Load for the next
-	// test-set may have replaced e.streams while this poll was parked. The
-	// captured pointer would serve the PREVIOUS set's timeline against the
-	// rewound counter — i.e. its boot value — instead of keep-aliving.
-	s = e.streams[lane.Name]
+	// Read the stream only now: holdThrottle released e.mu, and a Load for the
+	// next test-set may have replaced e.streams while this poll was parked. A
+	// pointer captured before the hold would serve the PREVIOUS set's timeline
+	// against the rewound counter — i.e. its boot value — instead of
+	// keep-aliving.
+	s := e.streams[lane.Name]
 	if s == nil || len(s.epochs) == 0 {
 		e.mu.Unlock()
 		return e.keepAlive(p, lane)
