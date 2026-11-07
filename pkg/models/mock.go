@@ -166,6 +166,14 @@ type Mock struct {
 	// that worker's test only (ScopeWindow.Instance). 0 for none. Like
 	// SourcePID it only travels, to keploy record, and is never stored.
 	Instance uint32 `json:"-" yaml:"-" bson:"-"`
+	// OutsideRequests says the agent knows no incoming request was open while
+	// this call ran, so no request made it: it is the app's own background
+	// work, such as a poll on a timer. Only an agent that can tell sets it;
+	// false means "not known", never "a request's", so a mock from an agent
+	// that does not set it is taken for a request's. Like SourcePID it only
+	// travels, to the recorder, and is never stored; it sits in that field's
+	// padding, so a Mock is no bigger for it.
+	OutsideRequests bool `json:"-" yaml:"-" bson:"-"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -1253,6 +1261,7 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 	// And the test worker it came from, which record charges it by.
 	c.Instance, c.EndedInstance = m.Instance, m.EndedInstance
+	c.OutsideRequests = m.OutsideRequests
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {

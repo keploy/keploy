@@ -28,6 +28,9 @@ import (
 // because it forwards the client's original HTTP/2 handshake directly to the app
 // without creating a separate gRPC session.
 func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, _ string, synchronous, mapping bool) error {
+	// Before any of its calls reaches the app: they open no window.
+	syncMock.FromContextOrGlobal(ctx).NoteWindowlessIngress()
+
 	// Close connections on ctx cancellation to unblock all goroutines.
 	// This ensures no goroutine leaks during shutdown/StopIngress. ctx is
 	// the ingress's, so the close is registered for this call's life only:
