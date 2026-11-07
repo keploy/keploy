@@ -46,25 +46,24 @@ func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]str
 		}
 	}
 	oroot := docRoot(od)
-	if oroot != nil && oroot.Kind == yamlLib.MappingNode && !holdsEdits(od, oroot) {
-		return data, Unkept{}
+	fileHead := ""
+	if oroot != nil && oroot.Kind == yamlLib.MappingNode {
+		fileHead = takeFileHead(oroot, old)
+		if !holdsEdits(od, oroot) {
+			return data, Unkept{}
+		}
 	}
 	// Each comment line old holds, its head's included: what the result
 	// and the head do not hold is dropped, and counted.
-	before := commentLines(od, nil)
+	before := commentLines(&yamlLib.Node{HeadComment: fileHead}, commentLines(od, nil))
+	kept := headComments(old)
 	var nd yamlLib.Node
 	if oroot == nil || oroot.Kind != yamlLib.MappingNode || yamlLib.Unmarshal(data, &nd) != nil {
-		return data, Unkept{Comments: uncounted(before, headComments(old))}
+		return data, Unkept{Comments: uncounted(before, kept)}
 	}
 	nroot := docRoot(&nd)
 	if nroot == nil || nroot.Kind != yamlLib.MappingNode {
-		return data, Unkept{Comments: uncounted(before, headComments(old))}
-	}
-	// YAML hangs the comment a file starts with on the document or on its
-	// first key: it is the file's head, never that key's.
-	od.HeadComment = ""
-	if len(oroot.Content) > 0 {
-		oroot.Content[0].HeadComment = ""
+		return data, Unkept{Comments: uncounted(before, kept)}
 	}
 	m := &merger{renames: renames, matched: map[*yamlLib.Node]bool{}, kept: map[*yamlLib.Node]bool{}, seen: map[*yamlLib.Node]bool{}}
 	changed := m.mapping(oroot, nroot, models.MappingLevelTop, "")
@@ -77,7 +76,6 @@ func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]str
 		changed = true
 	}
 	unkept := Unkept{Fields: m.lost, Dropped: m.dropped}
-	kept := headComments(old)
 	if changed {
 		enc, err := yamlLib.Marshal(&nd)
 		if err != nil {
@@ -90,23 +88,38 @@ func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]str
 	return data, unkept
 }
 
+// takeFileHead takes the comment above the first key of root, the mapping of
+// old, a mapping file's bytes, off that key and is that comment, when it is
+// keploy's line or the file's head holds it (headComments): YAML hangs the
+// comment a file starts with on its first key, and it is the file's, not that
+// key's. A comment the head does not hold (inside a mapping the file writes
+// as {...}) stays on the key, and it is "". Keploy's line alone, on every file
+// keploy wrote, costs no read of old.
+func takeFileHead(root *yamlLib.Node, old []byte) string {
+	if len(root.Content) == 0 || root.Content[0].HeadComment == "" {
+		return ""
+	}
+	first := root.Content[0]
+	c := first.HeadComment
+	lone := strings.HasPrefix(c, versionLine) && !strings.Contains(c, "\n")
+	if !lone && uncounted(commentLines(&yamlLib.Node{HeadComment: c}, nil), headComments(old)) > 0 {
+		return ""
+	}
+	first.HeadComment = ""
+	return c
+}
+
 // holdsEdits reports whether doc, a mapping file's document, and root, its
-// mapping, hold what a hand edit adds: a comment past the file's head
-// (commentHead keeps the head, which YAML hangs on the document and on the
-// first key), a key keploy does not know at a level of the file
-// (models.MappingKeys), an alias, which can bring an item of one level into
-// another, or a merge key (<<): keploy writes none of them. A file keploy
-// wrote holds none, and keepEdits keeps nothing of it: its rewrite is the
-// encoding as it is.
+// mapping, the file's head off it (takeFileHead), hold what a hand edit
+// adds: a comment past the file's head (commentHead keeps the head, which
+// YAML hangs on the document and on the first key), a key keploy does not
+// know at a level of the file (models.MappingKeys), an alias, which can bring
+// an item of one level into another, or a merge key (<<): keploy writes none
+// of them. A file keploy wrote holds none, and keepEdits keeps nothing of it:
+// its rewrite is the encoding as it is.
 func holdsEdits(doc, root *yamlLib.Node) bool {
 	if doc.LineComment != "" || doc.FootComment != "" || nodeEdited(root) {
 		return true
-	}
-	if len(root.Content) > 0 {
-		first := root.Content[0]
-		head := first.HeadComment
-		first.HeadComment = ""
-		defer func() { first.HeadComment = head }()
 	}
 	return levelEdited(root, models.MappingLevelTop)
 }
@@ -234,7 +247,7 @@ func (m *merger) mapping(old, cur *yamlLib.Node, level, where string) bool {
 				if m.list(resolved(v), cv, sub, where+k.Value) {
 					changed = true
 				}
-			} else if keepItemComments(resolved(v), cv) {
+			} else if keepPlainComments(resolved(v), cv, m.plainMatch(level, k.Value)) {
 				changed = true
 			}
 			pos = j
@@ -326,6 +339,17 @@ func (m *merger) list(old, cur *yamlLib.Node, itemLevel, where string) bool {
 		}
 	}
 	return changed
+}
+
+// plainMatch is what names an old value under key, at level, in the new
+// file (keepPlainComments): a test's case_mocks list its mocks by name, so
+// each goes by entryMatch, and a comment never moves to another call that
+// holds the name now; any other value is itself.
+func (m *merger) plainMatch(level, key string) func(string) (string, bool) {
+	if level == models.MappingLevelTest && key == "case_mocks" {
+		return m.entryMatch
+	}
+	return func(v string) (string, bool) { return v, true }
 }
 
 // entryMatch is the name of the mock an old entry naming mock name names in
@@ -534,17 +558,45 @@ func pairIndex(n *yamlLib.Node, key string) int {
 	return -1
 }
 
-// keepItemComments gives each plain item of cur, a block list of values
-// keploy writes at no level of the file (recordedWith, a test's cases), the
-// comments of the old item with its value: the n-th old item of a value to
-// the n-th new one, so a value the list holds twice keeps each item's
-// comments on its own item. An old item the list no longer holds takes its
-// comments with it, and keepEdits counts them. It reports whether it gave
-// any.
-func keepItemComments(old, cur *yamlLib.Node) bool {
-	if old == nil || cur == nil || old.Kind != yamlLib.SequenceNode || cur.Kind != yamlLib.SequenceNode {
+// keepPlainComments gives cur, the value of a key keploy writes at no level
+// of the file, the comments of old, the value it was: each key of a plain map
+// (a test's case_mocks, case_steps) keeps those of its pair, wherever the
+// encoding puts it, and each list under it those of its items
+// (keepItemComments), whose values match names in the new file. A key the
+// map no longer holds takes its comments with it, and keepEdits counts them.
+// It reports whether it gave any.
+func keepPlainComments(old, cur *yamlLib.Node, match func(string) (string, bool)) bool {
+	switch {
+	case old == nil || old.Kind != cur.Kind:
 		return false
+	case old.Kind == yamlLib.SequenceNode:
+		return keepItemComments(old, cur, match)
 	}
+	changed := false
+	for _, p := range pairsOf(old) {
+		j := pairIndex(cur, p[0].Value)
+		if j < 0 {
+			continue
+		}
+		v, ck, cv := resolved(p[1]), cur.Content[2*j], cur.Content[2*j+1]
+		if keepPairComments(p[0], v, ck, cv) {
+			changed = true
+		}
+		if keepPlainComments(v, cv, match) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// keepItemComments gives each plain item of cur, a block list of values
+// keploy writes at no level of the file (recordedWith, a test's cases, a
+// case's mocks), the comments of the old item whose value match names it:
+// the n-th old item of a value to the n-th new one, so a value the list holds
+// twice keeps each item's comments on its own item. An old item the list no
+// longer holds, or that match names nothing, takes its comments with it, and
+// keepEdits counts them. It reports whether it gave any.
+func keepItemComments(old, cur *yamlLib.Node, match func(string) (string, bool)) bool {
 	byValue := map[string][]*yamlLib.Node{}
 	for _, item := range cur.Content {
 		if item.Kind == yamlLib.ScalarNode {
@@ -557,9 +609,13 @@ func keepItemComments(old, cur *yamlLib.Node) bool {
 		if item = resolved(item); item == nil || item.Kind != yamlLib.ScalarNode {
 			continue
 		}
-		n := nth[item.Value]
-		nth[item.Value]++
-		if n < len(byValue[item.Value]) && keepComments(item, byValue[item.Value][n]) {
+		value, ok := match(item.Value)
+		if !ok {
+			continue
+		}
+		n := nth[value]
+		nth[value]++
+		if n < len(byValue[value]) && keepComments(item, byValue[value][n]) {
 			changed = true
 		}
 	}

@@ -80,6 +80,7 @@ func TestAFileKeployWroteHoldsNoHandEdit(t *testing.T) {
 	holds := func(file string) bool {
 		var doc yamlLib.Node
 		must(t, yamlLib.Unmarshal([]byte(file), &doc))
+		takeFileHead(docRoot(&doc), []byte(file))
 		return holdsEdits(&doc, docRoot(&doc))
 	}
 	eachSwitch(t, func(t *testing.T) {
@@ -98,6 +99,9 @@ func TestAFileKeployWroteHoldsNoHandEdit(t *testing.T) {
 	}
 	if !holds("{version: api.keploy.io/v1beta1, kind: TestMocksMapping, test_set_id: s} # set s\n") {
 		t.Errorf("a comment after a flow mapping file is not seen as a hand edit")
+	}
+	if !holds("{\n  # a note\n  version: api.keploy.io/v1beta1,\n  kind: TestMocksMapping,\n  test_set_id: s\n}\n") {
+		t.Errorf("a comment on the first key of a flow mapping file is not seen as a hand edit")
 	}
 	for name, edit := range map[string][2]string{
 		"a comment on a test":         {"    - id: o::TestA\n", "    # the login test\n    - id: o::TestA\n"},
@@ -355,6 +359,194 @@ func TestAPlainListItemKeepsItsComment(t *testing.T) {
 		must(t, err)
 		if unkept.Comments != 2 || !strings.Contains(string(got), "- other # the first\n") {
 			t.Errorf("Comments = %d after two commented items went, want 2; file:\n%s", unkept.Comments, got)
+		}
+	})
+}
+
+// caseMapsFile holds a comment at every level of a test's case_mocks and
+// case_steps: on each map, on a case, on an item of a case's list, after
+// the list, and after a step. Its cases are written out of the encoding's
+// order: a comment stays on its case wherever the encoding puts the case.
+const caseMapsFile = `version: api.keploy.io/v1beta1
+kind: TestMocksMapping
+test_set_id: s
+tests:
+    - id: o::TestA
+      mock_entries:
+        - name: mock-0
+          kind: Http
+        - name: mock-1
+          kind: Http
+      cases:
+        - case-1
+        - case-2
+      # the map of cases
+      case_mocks: # after the key
+        # the fast case
+        case-2:
+            - mock-1
+        # the slow case
+        case-1: # after the case
+            # before the mock
+            - mock-0 # the login call
+            - mock-1 # the first read
+            - mock-1 # the second read
+            # after the mocks
+      case_steps: # after the steps key
+        case-2: step-b
+        # first step
+        case-1: step-a # after the step
+`
+
+// Every level of a test's case_mocks and case_steps keeps its comments
+// through every writer, whatever the switch: nothing is dropped, and keploy
+// says nothing. Mutation: keep no comment under a plain map; no comment on
+// its keys; none on the lists under it.
+func TestCaseMapsKeepTheirComments(t *testing.T) {
+	eachSwitch(t, func(t *testing.T) {
+		for name, write := range fileWriters() {
+			dir := writeSet(t, caseMapsFile)
+			core, logs := observer.New(zapcore.WarnLevel)
+			must(t, write(NewWithFormat(zap.New(core), dir, "mappings", yaml.FormatYAML)))
+			got := readSet(t, dir)
+			for _, want := range []string{
+				"      # the map of cases\n      case_mocks: # after the key\n",
+				"        # the slow case\n        case-1: # after the case\n            # before the mock\n            - mock-0 # the login call\n            - mock-1 # the first read\n            - mock-1 # the second read\n            # after the mocks\n",
+				"        # the fast case\n        case-2:\n            - mock-1\n",
+				"      case_steps: # after the steps key\n",
+				"        # first step\n        case-1: step-a # after the step\n",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("%s lost %q:\n%s", name, want, got)
+				}
+			}
+			if n := textDroppedComments([]byte(caseMapsFile), []byte(got)); n != 0 || len(logs.All()) != 0 {
+				t.Errorf("%s dropped %d comment line(s) and said %v:\n%s", name, n, logs.All(), got)
+			}
+		}
+	})
+}
+
+// A case the rewrite no longer holds takes its comments with it, and the
+// count says so; a comment never moves to another case or another list. A
+// case's list names its mocks: a comment follows its mock through a rename,
+// and stays off a call that holds the name now (EncodeOver's renames), as a
+// note on a mock entry does. Mutation: match a case's mocks by their old
+// names; count a mock renames lacks.
+func TestACaseMapCommentStaysOnItsOwnCaseAndMock(t *testing.T) {
+	eachSwitch(t, func(t *testing.T) {
+		decode := func() *models.Mapping {
+			var m models.Mapping
+			must(t, yamlLib.Unmarshal([]byte(caseMapsFile), &m))
+			return &m
+		}
+		m := decode()
+		delete(m.TestCases[0].CaseMocks, "case-1")
+		delete(m.TestCases[0].CaseSteps, "case-1")
+		got, unkept, err := EncodeOver(m, []byte(caseMapsFile), nil)
+		must(t, err)
+		if n := textDroppedComments([]byte(caseMapsFile), got); unkept.Comments != n || n != 9 {
+			t.Errorf("Comments = %d, %d gone, want the 9 of the gone case:\n%s", unkept.Comments, n, got)
+		}
+		if !strings.Contains(string(got), "        # the fast case\n        case-2:\n") {
+			t.Errorf("the case that stayed lost its comment:\n%s", got)
+		}
+
+		m = decode()
+		m.TestCases[0].CaseMocks["case-1"] = []string{"mock-0", "mock-3", "mock-3"}
+		m.TestCases[0].CaseMocks["case-2"] = []string{"mock-3"}
+		got, unkept, err = EncodeOver(m, []byte(caseMapsFile), map[string]string{"mock-0": "mock-0", "mock-1": "mock-3"})
+		must(t, err)
+		if want := "            - mock-0 # the login call\n            - mock-3 # the first read\n            - mock-3 # the second read\n"; !strings.Contains(string(got), want) || unkept.Comments != 0 {
+			t.Errorf("Comments = %d; the comments did not follow the renamed mock, want %q in:\n%s", unkept.Comments, want, got)
+		}
+
+		m = decode()
+		got, unkept, err = EncodeOver(m, []byte(caseMapsFile), map[string]string{"mock-0": "mock-0"})
+		must(t, err)
+		if strings.Contains(string(got), "the first read") || strings.Contains(string(got), "the second read") {
+			t.Errorf("a comment moved to the call that holds mock-1 now:\n%s", got)
+		}
+		if !strings.Contains(string(got), "- mock-0 # the login call\n") || unkept.Comments != 3 {
+			t.Errorf("Comments = %d, want the 3 on the mock not carried:\n%s", unkept.Comments, got)
+		}
+	})
+}
+
+// Each line of the file keploy writes with every field it writes keeps a
+// comment above it and one after it through every writer, whatever the
+// switch: no key or item of the file is a place a comment is lost. A line
+// the rewrite removes takes its comments with it, and keploy says how many.
+// A field keploy adds to the file with a value of a new shape fails here
+// until a comment on it stays.
+func TestEveryLineOfKeploysFileKeepsAComment(t *testing.T) {
+	var above, after, both strings.Builder
+	for i, line := range strings.Split(strings.TrimSuffix(writerFixtures["full"], "\n"), "\n") {
+		if i == 0 {
+			continue // keploy's line
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+		fmt.Fprintf(&above, "%s# above %d\n%s\n", indent, i, line)
+		fmt.Fprintf(&after, "%s # after %d\n", line, i)
+		fmt.Fprintf(&both, "%s# above %d\n%s # after %d\n", indent, i, line, i)
+	}
+	removes := map[string]int{
+		"ApplyShares":       1,  // the mock_entries: of the test it took its one mock from
+		"UpsertBoots":       18, // startup: and its entry, and the boot it replaced
+		"UpsertConcurrency": 8,  // the group it replaced, and the three fields its shared entry lacks
+		"UpsertWorker":      13, // the worker entry it replaced
+	}
+	eachSwitch(t, func(t *testing.T) {
+		for _, row := range []struct {
+			shape, file string
+			perLine     int
+		}{{"above", above.String(), 1}, {"after", after.String(), 1}, {"both", both.String(), 2}} {
+			for name, write := range fileWriters() {
+				dir := writeSet(t, row.file)
+				core, logs := observer.New(zapcore.WarnLevel)
+				must(t, write(NewWithFormat(zap.New(core), dir, "mappings", yaml.FormatYAML)))
+				got := readSet(t, dir)
+				if n := textDroppedComments([]byte(row.file), []byte(got)); n != removes[name]*row.perLine || droppedSaid(t, logs) != n {
+					t.Errorf("%s lost %d comment line(s) of the file with a comment %s each line, want %d, and said %d:\n%s", name, n, row.shape, removes[name]*row.perLine, droppedSaid(t, logs), got)
+				}
+			}
+		}
+	})
+}
+
+// The comment a file starts with is kept whatever YAML hangs it on: lines on
+// both sides of a document marker or a directive are the file's head, in
+// their order, and a comment above the first key of a file written as {...}
+// is that key's: it is kept, and it is a hand edit, so a file holding nothing
+// else is not taken for keploy's own. Mutation: stop the head at a marker;
+// take every comment on the first key for the head.
+func TestACommentAroundTheFirstKeyIsKept(t *testing.T) {
+	const body = "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: s\n"
+	const flow = "{\n  # a note\n  version: api.keploy.io/v1beta1,\n  kind: TestMocksMapping,\n  test_set_id: s\n}\n"
+	eachSwitch(t, func(t *testing.T) {
+		m := &models.Mapping{Version: "api.keploy.io/v1beta1", Kind: models.MappingKind, TestSetID: "s"}
+		for name, row := range map[string]struct{ old, want string }{
+			"both sides of a marker":      {"# one\n---\n# two\n" + body, "# one\n# two\nversion: "},
+			"after a marker":              {"---\n# two\n" + body, "# two\nversion: "},
+			"around a directive":          {"# one\n%YAML 1.1\n---\n# two\n" + body, "# one\n# two\nversion: "},
+			"marker and a comment beyond": {"# one\n---\n# two\n" + strings.Replace(body, "kind: TestMocksMapping\n", "kind: TestMocksMapping # k\n", 1), "# one\n# two\nversion: "},
+			"on the marker line":          {"--- # a note\n" + body, utils.GetVersionAsComment() + "# a note\nversion: "},
+			"a {...} file":                {flow, utils.GetVersionAsComment() + "# a note\nversion: "},
+			"a {...} file under a head":   {"# one\n" + flow, "# one\n# a note\nversion: "},
+		} {
+			got, unkept, err := EncodeOver(m, []byte(row.old), nil)
+			must(t, err)
+			if !strings.HasPrefix(string(got), row.want) {
+				t.Errorf("%s: want the file to start %q:\n%s", name, row.want, got)
+			}
+			if n := textDroppedComments([]byte(row.old), got); n != 0 || unkept.Comments != 0 {
+				t.Errorf("%s: %d comment line(s) gone, Comments = %d, want 0:\n%s", name, n, unkept.Comments, got)
+			}
+			again, _, err := EncodeOver(m, got, nil)
+			must(t, err)
+			if string(again) != string(got) {
+				t.Errorf("%s: a second rewrite changed the file:\n%s\nto:\n%s", name, got, again)
+			}
 		}
 	})
 }
