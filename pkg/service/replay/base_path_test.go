@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -469,6 +471,12 @@ func newBasePathRunOf(t *testing.T, basePath string, template map[string]interfa
 	t.Helper()
 	cfg := &config.Config{}
 	cfg.Path = t.TempDir()
+	// --must-pass backs a test set up before it deletes from it, and deletes
+	// nothing when the backup fails, so the set has a directory on disk as a
+	// recorded set does.
+	if err := os.MkdirAll(filepath.Join(cfg.Path, "test-set-0"), 0755); err != nil {
+		t.Fatalf("create the test set's directory: %v", err)
+	}
 	cfg.Test.BasePath = basePath
 	// What config/default.go sets, which a bare config.Config does not.
 	cfg.Test.Host = "localhost"

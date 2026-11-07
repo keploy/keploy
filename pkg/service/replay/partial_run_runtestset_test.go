@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -615,6 +617,12 @@ func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
 	}
 	cfg := &config.Config{}
 	cfg.Path = t.TempDir()
+	// --must-pass backs a test set up before it deletes from it, and deletes
+	// nothing when the backup fails, so the set has a directory on disk as a
+	// recorded set does.
+	if err := os.MkdirAll(filepath.Join(cfg.Path, "test-set-0"), 0755); err != nil {
+		t.Fatalf("create the test set's directory: %v", err)
+	}
 	// The readiness gate polls for HealthPollTimeout, which defaults to THREE
 	// minutes. With it left at the default, a host where the probe cannot reach
 	// the stand-in listener burns the whole prTimeout per test and then fails
