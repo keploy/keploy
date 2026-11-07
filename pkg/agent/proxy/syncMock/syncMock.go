@@ -627,6 +627,22 @@ type SyncMockManager struct {
 	// span narrow is the recorder's responsibility. Spans has its own lock.
 	orphans Spans
 
+	// sharedLoss is the span the current recording leaves its test cases out
+	// over since it lost a mock that any of them may need (servedToAnyTest)
+	// on the way out (leaveOutAfter): open in orphans from that mock's
+	// request, the earliest such loss's, until the recording ends
+	// (SetOutputChannel). sentTCs is the test cases its stream sent since
+	// (SendingTestCase), the last maxSentTCs of them, by name: such a loss
+	// revokes those whose window reaches past the lost mock's request, sent
+	// before it. sentUnnamedThrough is the latest window end among those
+	// sent before the last maxSentTCs, which it can no longer name. Guarded
+	// by sharedLossMu, taken under outChanMu or alone, and under which only
+	// orphans' own lock and droppedMu are taken.
+	sharedLossMu       sync.Mutex
+	sharedLoss         sharedLoss
+	sentTCs            []sentTC
+	sentUnnamedThrough time.Time
+
 	// watermark says when a test case's verdict is final (settle.go); nil
 	// when nothing can tell.
 	watermark atomic.Pointer[watermarkBox]
@@ -832,6 +848,9 @@ func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
 	m.pendingRevokes = nil
 	m.revokeEpoch.Store(epoch)
 	m.droppedMu.Unlock()
+	// After the epoch: a drop of the last recording's that read it before
+	// has opened its span already, and one that reads it now opens none.
+	m.endSharedLoss()
 	// The new session's holds are told of its own stop, not the last one's
 	// (HoldExchanges): a hold from before keeps the channel it took.
 	m.newHoldsSession()
@@ -1072,6 +1091,71 @@ func (m *SyncMockManager) dropLogger() *zap.Logger {
 // per manager would queue it once per app when that consumer stalls.
 const outQueueMaxBytes int64 = 64 << 20
 
+// outQueueSharedRoom is the part of outQueueMaxBytes that only a mock no test
+// owns and a replay serves to any test (servedToAnyTest) may fill: a test's
+// own mock is dropped once the queue holds outQueueMaxBytes less this, and
+// its test left out by name. So a session's or a connection's mock (a
+// handshake, a config read) queued behind a backlog of tests' mocks still
+// finds room: losing it would cost every test recorded after it, losing one
+// of theirs costs one test. The process's bound is the same either way.
+const outQueueSharedRoom int64 = 16 << 20
+
+// servedToAnyTest reports whether mock, sent for owner, is one no test owns
+// and a replay serves to any test of its recording: a session's or a
+// connection's (attributedReusable), or one of the start-up window's
+// (IsStartup: every mock before the first request), which a replay serves
+// from its start-up tier. A test that needs it may be any recorded after its
+// request, so its loss cannot be left out by name. An answer the client
+// never read serves no test.
+func servedToAnyTest(mock *models.Mock, owner string) bool {
+	return owner == "" && !mock.IsUndelivered() && (mock.TestModeInfo.IsStartup || attributedReusable(mock))
+}
+
+// queueBound is the bytes the out queue may hold with mock, sent for owner,
+// queued: outQueueMaxBytes for a mock any test may need, less
+// outQueueSharedRoom for any other.
+func queueBound(mock *models.Mock, owner string) int64 {
+	if servedToAnyTest(mock, owner) {
+		return outQueueMaxBytes
+	}
+	return outQueueMaxBytes - outQueueSharedRoom
+}
+
+// sharedLoss is a recording's span of left-out test cases since it lost a
+// mock any of them may need (leaveOutAfter): from that mock's request until
+// close ends it.
+type sharedLoss struct {
+	from  time.Time
+	close func()
+}
+
+// sentTC is a test case the recording's stream sent, by name and its
+// window's end (SendingTestCase).
+type sentTC struct {
+	name string
+	end  time.Time
+}
+
+// maxSentTCs bounds the test cases a recording names as sent
+// (SendingTestCase), so a long recording's list stays in memory's bound
+// (no more than a few hundred KB): past it the older half is let go, and
+// the latest window end among them kept (sentUnnamedThrough), which a loss
+// says it can no longer revoke past.
+const maxSentTCs = maxDroppedTCNames
+
+// leftOut is what a loss of a mock any test may need left out
+// (leaveOutAfter), for sayLeftOutAfter; the zero value when it left out
+// none. from is the span's start (the lost mock's request), revoked the
+// test cases the stream had sent before the loss whose window reaches past
+// from, revoked by name, and unnamedThrough, when not zero, the latest
+// window end of one sent before the last maxSentTCs that reaches past from:
+// those it cannot name, so they may stay recorded without the mock.
+type leftOut struct {
+	from           time.Time
+	revoked        int
+	unnamedThrough time.Time
+}
+
 // processOutQueued is what every manager of the process holds queued
 // (outQueueBytes, summed): moved under each manager's outQueueMu with its own.
 var processOutQueued atomic.Int64
@@ -1211,7 +1295,7 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 		// orphaned TC is suppressed instead of reaching replay mock-less.
 		// Before, this drop was neither counted nor said.
 		epoch := m.revokeEpoch.Load() // the read lock holds it
-		n := m.countDrop(mock, owner, epoch, string(MockDroppedOutputClosed))
+		n, _ := m.countDrop(mock, owner, epoch, string(MockDroppedOutputClosed))
 		m.outChanMu.RUnlock()
 		m.sayDrop(mock, string(MockDroppedOutputClosed), n)
 		m.toldDropped(mock)
@@ -1257,13 +1341,16 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 	// its size (the parser holds it already), else a mock past the bound, or
 	// one sized at it (mockSize's cap), could never wait at all. A drainer's
 	// mock in hand is not counted: it is out of the queue.
+	// A test's own mock leaves the last outQueueSharedRoom of the bound to
+	// the mocks any test may need (queueBound).
 	lane := m.out
-	if (len(lane.queue) > 0 || lane.inHand) && processOutQueued.Load()+size > outQueueMaxBytes {
+	if (len(lane.queue) > 0 || lane.inHand) && processOutQueued.Load()+size > queueBound(mock, owner) {
 		epoch := lane.epoch
 		m.outQueueMu.Unlock()
-		n := m.countDrop(mock, owner, epoch, string(MockDroppedOutputFull))
+		n, left := m.countDrop(mock, owner, epoch, string(MockDroppedOutputFull))
 		m.outChanMu.RUnlock()
 		m.sayDrop(mock, string(MockDroppedOutputFull), n)
+		m.sayLeftOutAfter(mock, string(MockDroppedOutputFull), n, left)
 		m.toldDropped(mock)
 		tell(false, epoch)
 		return MockDroppedOutputFull
@@ -1469,28 +1556,163 @@ func (m *SyncMockManager) toldDropped(mock *models.Mock) {
 // only if epoch, the drop's, is still the current channel's. Called with no
 // lock held: a caller under outChanMu counts under it and says after it.
 func (m *SyncMockManager) dropOut(mock *models.Mock, owner string, epoch uint64, why string) {
-	m.sayDrop(mock, why, m.countDrop(mock, owner, epoch, why))
+	n, left := m.countDrop(mock, owner, epoch, why)
+	m.sayDrop(mock, why, n)
+	m.sayLeftOutAfter(mock, why, n, left)
 }
 
-// countDrop counts a drop and records its owner, and returns its place among
-// the drops of its cause, for sayDrop: 0 for an unread answer, whose drop takes
+// countDrop counts a drop and records its owner, or, for a mock with none
+// that any test may need, leaves out the test cases after it (leaveOutAfter,
+// whose report it returns, for sayLeftOutAfter). It returns the drop's place
+// among the drops of its cause, for sayDrop: 0 for an unread answer, whose drop takes
 // no sample (outChanClosedDrops). Every mock on its way out was counted added
 // (AddMock, SendConfigMock), and is no longer: the report does not say a mock
 // it dropped was added (SessionDrops).
-func (m *SyncMockManager) countDrop(mock *models.Mock, owner string, epoch uint64, why string) uint64 {
+func (m *SyncMockManager) countDrop(mock *models.Mock, owner string, epoch uint64, why string) (n uint64, left leftOut) {
 	m.dropCount.Add(1)
 	m.totalAdded.Add(-1)
 	m.nameDrop(mock, why)
 	if owner != "" {
 		m.recordDroppedTCFor(owner, epoch)
 	}
+	left = m.leaveOutAfter(mock, owner, epoch, why)
 	switch {
 	case mock.IsUndelivered():
-		return 0
+		return 0, left
 	case why == string(MockDroppedOutputClosed):
-		return m.outChanClosedDrops.Add(1)
+		return m.outChanClosedDrops.Add(1), left
 	}
-	return m.overflowDrops.Add(1)
+	return m.overflowDrops.Add(1), left
+}
+
+// leaveOutAfter leaves out every test case of the current recording whose
+// window reaches past mock's request, once mock, which any of them may need
+// and none owns (servedToAnyTest), was dropped on its way out: a replay of one
+// that needs it would find no mock, a false failure no one can act on. Those
+// that came before it did not use it. It opens an orphan span
+// (WasMockOrphanedInWindow) from that request, or from now for a mock with no
+// request time, which the recording's end closes (SetOutputChannel); an
+// earlier loss's span covers a later one. The span reaches the test cases
+// checked from now on; those the stream sent already (SendingTestCase) whose
+// window reaches past the request it revokes by name (recordDroppedTCFor): a
+// client that reads revokes deletes them. Opened and revoked under the lock
+// SendingTestCase checks the span and notes a test case under, so none is
+// sent between the two. A drop for an older recording's
+// channel (epoch, the drop's, is no longer the current) leaves out none of
+// this one's, and a closed output's none: no test is recorded after it. It
+// reports what it left out when this drop opened the span, or moved it
+// earlier, else the zero leftOut.
+func (m *SyncMockManager) leaveOutAfter(mock *models.Mock, owner string, epoch uint64, why string) leftOut {
+	if why == string(MockDroppedOutputClosed) || !servedToAnyTest(mock, owner) {
+		return leftOut{}
+	}
+	from := mock.Spec.ReqTimestampMock
+	if from.IsZero() {
+		from = time.Now()
+	}
+	m.sharedLossMu.Lock()
+	defer m.sharedLossMu.Unlock()
+	if epoch != m.revokeEpoch.Load() {
+		return leftOut{}
+	}
+	if m.sharedLoss.close != nil && !from.Before(m.sharedLoss.from) {
+		return leftOut{}
+	}
+	old := m.sharedLoss.close
+	m.sharedLoss = sharedLoss{from: from, close: m.orphans.Open(from)}
+	if old != nil {
+		old()
+	}
+	left := leftOut{from: from}
+	// What is kept ended before from: a later loss moves the span only
+	// earlier, so it may still need it.
+	kept := m.sentTCs[:0]
+	for _, tc := range m.sentTCs {
+		if tc.end.Before(from) {
+			kept = append(kept, tc)
+			continue
+		}
+		m.recordDroppedTCFor(tc.name, epoch)
+		left.revoked++
+	}
+	clear(m.sentTCs[len(kept):])
+	m.sentTCs = kept
+	if !m.sentUnnamedThrough.Before(from) {
+		left.unnamedThrough = m.sentUnnamedThrough
+	}
+	return left
+}
+
+// SendingTestCase reports whether the recording's stream may send the test
+// case named name, whose window ends at end, and if so notes it sent: a loss
+// of a mock any test may need, requested before end, revokes it by name
+// (leaveOutAfter). It reports false once such a loss's span reaches end: the
+// stream leaves the test case out. The stream asks last, once no other
+// check leaves it out, so that only test cases it sends are noted. A zero end
+// is read as now, the latest the window can have ended. Nil-safe: a nil
+// manager lets every test case through.
+func (m *SyncMockManager) SendingTestCase(name string, end time.Time) bool {
+	if m == nil {
+		return true
+	}
+	if end.IsZero() {
+		end = time.Now()
+	}
+	m.sharedLossMu.Lock()
+	defer m.sharedLossMu.Unlock()
+	if m.sharedLoss.close != nil && !end.Before(m.sharedLoss.from) {
+		return false
+	}
+	if len(m.sentTCs) == maxSentTCs {
+		// Let the older half go at once, so the cap costs a copy per
+		// maxSentTCs/2 test cases, not one per test case.
+		half := maxSentTCs / 2
+		for _, tc := range m.sentTCs[:half] {
+			if tc.end.After(m.sentUnnamedThrough) {
+				m.sentUnnamedThrough = tc.end
+			}
+		}
+		k := copy(m.sentTCs, m.sentTCs[half:])
+		clear(m.sentTCs[k:])
+		m.sentTCs = m.sentTCs[:k]
+	}
+	m.sentTCs = append(m.sentTCs, sentTC{name: name, end: end})
+	return true
+}
+
+// endSharedLoss ends the span of test cases a recording leaves out for a mock
+// it lost (leaveOutAfter), and lets go the test cases its stream sent: a new
+// recording's are neither left out nor revoked for it.
+func (m *SyncMockManager) endSharedLoss() {
+	m.sharedLossMu.Lock()
+	defer m.sharedLossMu.Unlock()
+	if m.sharedLoss.close != nil {
+		m.sharedLoss.close()
+	}
+	m.sharedLoss = sharedLoss{}
+	m.sentTCs, m.sentUnnamedThrough = nil, time.Time{}
+}
+
+// sayLeftOutAfter says, at ERROR, that the recording leaves out every test
+// case from left.from on for mock, the n-th drop of why (leaveOutAfter), and
+// how many its stream had sent it revoked; nothing for the zero leftOut.
+// Never called under outChanMu.
+func (m *SyncMockManager) sayLeftOutAfter(mock *models.Mock, why string, n uint64, left leftOut) {
+	if left.from.IsZero() {
+		return
+	}
+	fields := append(dropFields(mock, n, why),
+		zap.String("left_out_from", left.from.Format(time.RFC3339Nano)),
+		zap.Int("revoked_sent", left.revoked),
+		zap.Bool("client_deletes_revoked", m.revokeCapable.Load()))
+	if !left.unnamedThrough.IsZero() {
+		fields = append(fields, zap.String("unnamed_sent_through", left.unnamedThrough.Format(time.RFC3339Nano)),
+			zap.Int("sent_named_max", maxSentTCs),
+			zap.String("unnamed_sent", "test cases the stream sent before the last sent_named_max it names, whose window ended after left_out_from and by unnamed_sent_through, are not revoked and may stay recorded without the mock"))
+	}
+	m.dropLogger().Error("syncMock: a mock that any test of the recording may need (a session's, a connection's or a start-up one) was dropped on its way out of the agent: the recording leaves out every test case whose window reaches past its request, and revokes those its stream sent already (revoked_sent), as a replay of one that needs it would find no mock",
+		append(fields,
+			zap.String("next_step", "re-record once the client that reads the agent's mocks keeps up with the app's traffic: its CPU, its disk, its network to the agent"))...)
 }
 
 // sayDrop says the n-th drop of its cause, naming the mock and why: the first

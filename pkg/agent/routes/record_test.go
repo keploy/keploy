@@ -186,3 +186,40 @@ func TestHandleIncoming_ChecksAGRPCTestCaseByItsOwnWindow(t *testing.T) {
 		t.Fatalf("streamed %v, want only [clean]", got)
 	}
 }
+
+// A test case the stream sent before a mock any test of the recording may
+// need (a session's) is lost on its way out, whose window reaches past that
+// mock's request (it began before it and ended after), is revoked by name: the span the loss opens reaches only
+// the test cases checked after it. One checked after the loss that has no
+// window to check is left out: it may need the mock.
+func TestHandleIncoming_ALostSessionMockRevokesTheTestCasesSentBeforeIt(t *testing.T) {
+	mgr := syncmgr.Get()
+	mgr.SetWatermark(nil)
+	mgr.SetRevokeCapable(true)
+	t.Cleanup(func() { mgr.SetRevokeCapable(false) })
+	start := newStretch()
+	tcs := make(chan *models.TestCase, 1)
+	names := streamOf(t, openStream(t, tcs))
+	mgr.SetOutputChannel(make(chan *models.Mock)) // a consumer that takes nothing
+	// A new channel ends the recording: the loss's span closes with it.
+	t.Cleanup(func() { mgr.SetOutputChannel(make(chan *models.Mock, 1)) })
+
+	tcs <- &models.TestCase{Name: "sent-before-the-loss", Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{Timestamp: start.Add(-time.Second)}, HTTPResp: models.HTTPResp{Timestamp: start.Add(time.Second)}}
+	if name, ok := nextStreamed(t, names); !ok || name != "sent-before-the-loss" {
+		t.Fatalf("streamed %q (open %v), want the test case before the loss", name, ok)
+	}
+	shared := &models.Mock{Kind: models.Kind("Kafka"), ConnectionID: "lost-session",
+		Spec: models.MockSpec{Metadata: map[string]string{"type": "config"}, ReqTimestampMock: start, ResTimestampMock: start.Add(time.Millisecond)}}
+	shared.DeriveLifetime()
+	mgr.SendConfigMock(shared)
+	mgr.CloseOutChan() // given up once the consumer took nothing for the close's bound
+	if !mgr.WasMockDroppedForTC("sent-before-the-loss") {
+		t.Fatal("a test case sent before the session's mock was lost, whose window reaches past its request, was not revoked")
+	}
+	tcs <- &models.TestCase{Name: "no-window-after-the-loss", Kind: models.HTTP}
+	close(tcs)
+	if name, ok := nextStreamed(t, names); ok {
+		t.Fatalf("streamed %q after the loss, want none", name)
+	}
+}
