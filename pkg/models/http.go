@@ -341,9 +341,10 @@ func (h *HTTPResp) UnmarshalBSON(data []byte) error {
 	return nil
 }
 
-// decodeBSONTimestamp handles the two on-disk shapes for HTTP timestamps:
-// the new RFC3339Nano string (preserves nanoseconds) and the legacy BSON
-// DateTime (millisecond int64). An absent/null value decodes to the zero time.
+// decodeBSONTimestamp handles the two on-disk shapes for HTTP and gRPC
+// timestamps: the new RFC3339Nano string (preserves nanoseconds) and the
+// legacy BSON DateTime (millisecond int64), read in UTC as the driver reads a
+// date. An absent/null value decodes to the zero time.
 func decodeBSONTimestamp(v bson.RawValue) (time.Time, error) {
 	switch v.Type {
 	case 0, bson.TypeNull, bson.TypeUndefined:
@@ -359,7 +360,7 @@ func decodeBSONTimestamp(v bson.RawValue) (time.Time, error) {
 		if !ok {
 			return time.Time{}, fmt.Errorf("expected DateTime, got malformed value")
 		}
-		return bson.DateTime(dt).Time(), nil
+		return bson.DateTime(dt).Time().UTC(), nil
 	default:
 		return time.Time{}, fmt.Errorf("unsupported BSON type %v for timestamp", v.Type)
 	}
