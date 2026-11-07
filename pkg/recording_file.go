@@ -3,6 +3,8 @@ package pkg
 import (
 	"fmt"
 	"os"
+
+	"go.keploy.io/server/v3/utils"
 )
 
 // A test case keeps a part of its request that is too large to hold in a file
@@ -20,13 +22,16 @@ import (
 // and so is every path when no root is known: nothing is read then, and the
 // working directory is never the root. A stored test case can therefore not
 // make the machine that replays it send a file from elsewhere.
+//
+// root itself is opened from the project (utils.OpenRecordingDir): a keploy
+// folder the repository carries as a link out of the project is refused too.
 
 // openRecordingRoot opens root, the recording's directory, for path.
 func openRecordingRoot(root, path string) (*os.Root, error) {
 	if root == "" {
 		return nil, fmt.Errorf("the recording's file %q is read only inside its recording, and no recording directory was given", path)
 	}
-	r, err := os.OpenRoot(root)
+	r, err := utils.OpenRecordingDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("open the recording directory %q to read its file %q: %w", root, path, err)
 	}

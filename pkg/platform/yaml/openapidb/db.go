@@ -42,6 +42,10 @@ func (ts *OpenAPIYaml) GetTestCasesSchema(ctx context.Context, testSetID string,
 	if err != nil {
 		return nil, err
 	}
+	if err := schemaFolderInside(root); err != nil {
+		utils.LogError(ts.logger, err, "failed to open the folder of test schemas")
+		return nil, err
+	}
 	// Only a set folder that does not exist means no tests. One that is
 	// there but cannot be opened (permission denied, an I/O error, a
 	// symlink loop, not a directory) is an error: reading it as empty would
@@ -94,6 +98,10 @@ func (ts *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 	if err != nil {
 		return nil, err
 	}
+	if err := schemaFolderInside(root); err != nil {
+		utils.LogError(ts.logger, err, "failed to open the folder of mock schemas")
+		return nil, err
+	}
 
 	// Only a schema file that does not exist means no mocks. One that is
 	// there but cannot be looked at (permission denied, an I/O error, a
@@ -132,6 +140,24 @@ func (ts *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 	}
 
 	return tcsMocks, nil
+}
+
+// schemaFolderInside refuses root, a folder schemas are read in, when it leads
+// out of the project: it is opened as utils.OpenRecordingDir opens it, so a
+// keploy folder, a schema folder or a folder in it (./keploy/schema/tests,
+// Download/Mocks/<service>) that links out of the folder it is in is refused
+// with why, before anything in it is read. The schemas themselves are then
+// read inside root (outOfSchemas). A root that is not there is no schemas,
+// and is left to the readers to say so.
+func schemaFolderInside(root string) error {
+	r, err := utils.OpenRecordingDir(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("a schema is read only inside the project, and the folder %q leads out of it: %w", root, err)
+	}
+	return r.Close()
 }
 
 // outOfSchemas says how to have a schema read that was refused, err, because

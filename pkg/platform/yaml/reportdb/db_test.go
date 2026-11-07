@@ -80,7 +80,12 @@ func TestGetReportRefusesNonRegular(t *testing.T) {
 			}()
 			select {
 			case err := <-done:
-				if !errors.Is(err, safeyaml.ErrNotRegular) {
+				// A link to /dev/zero is a link out of the recording, refused
+				// before anything is opened; a FIFO in it is no regular file.
+				if name == "devzero" && (err == nil || !strings.Contains(err.Error(), "only inside")) {
+					t.Fatalf("GetReport on a %s report = %v, want it refused as outside the recording", name, err)
+				}
+				if name != "devzero" && !errors.Is(err, safeyaml.ErrNotRegular) {
 					t.Fatalf("GetReport on a %s report = %v, want ErrNotRegular", name, err)
 				}
 			case <-time.After(5 * time.Second):
@@ -196,9 +201,9 @@ func TestGetReportReadsAReportPast128MiB(t *testing.T) {
 	}
 }
 
-// A report whose file, or whose test run's folder, leads out of the reports
-// folder is refused, with why, and what it leads to is left as it was.
-func TestAReportIsWrittenOnlyInsideTheReportsFolder(t *testing.T) {
+// A report whose file, or whose test run's folder, leads out of the recording
+// is refused, with why, and what it leads to is left as it was.
+func TestAReportIsWrittenOnlyInsideTheRecording(t *testing.T) {
 	ctx := context.Background()
 	link := func(t *testing.T, target, path string) {
 		t.Helper()
@@ -216,12 +221,12 @@ func TestAReportIsWrittenOnlyInsideTheReportsFolder(t *testing.T) {
 	refused := func(t *testing.T, err error) {
 		t.Helper()
 		if err == nil || !strings.Contains(err.Error(), "only inside its recording") {
-			t.Fatalf("InsertReport: %v, want it refused as outside the reports folder", err)
+			t.Fatalf("InsertReport: %v, want it refused as outside the recording", err)
 		}
 	}
 	t.Run("the report's file links out", func(t *testing.T) {
 		base := t.TempDir()
-		root := filepath.Join(base, "reports")
+		root := filepath.Join(base, "keploy", "reports")
 		out := filepath.Join(base, "outside.yaml")
 		if err := os.WriteFile(out, []byte("KEEP ME\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -238,7 +243,7 @@ func TestAReportIsWrittenOnlyInsideTheReportsFolder(t *testing.T) {
 	})
 	t.Run("the run's folder links out", func(t *testing.T) {
 		base := t.TempDir()
-		root := filepath.Join(base, "reports")
+		root := filepath.Join(base, "keploy", "reports")
 		out := filepath.Join(base, "outside")
 		if err := os.MkdirAll(out, 0o755); err != nil {
 			t.Fatal(err)
@@ -250,4 +255,83 @@ func TestAReportIsWrittenOnlyInsideTheReportsFolder(t *testing.T) {
 			t.Fatalf("the report left %v (%v) outside the folder", entries, err)
 		}
 	})
+}
+
+// The reports folder is a folder of the recording, not a recording of its
+// own: a keploy/reports that a cloned repository carries as a link out of
+// keploy, to elsewhere in the project or out of it, is refused, with why, by
+// every write and read of a report, and by the listing of test runs. Nothing
+// is written where it leads, and no report there is read. A keploy folder
+// that links out of the project takes its reports folder with it, and is
+// refused too.
+func TestAReportsFolderThatLinksOutIsRefused(t *testing.T) {
+	ctx := context.Background()
+	// plant makes base/project/keploy and links reports, or keploy itself,
+	// to a folder holding a report of test-run-0 that names OUTSIDE-SECRET.
+	plant := func(t *testing.T, linkKeploy bool, target func(base string) string) (keploy, out string) {
+		t.Helper()
+		base := t.TempDir()
+		out = target(base)
+		if err := os.MkdirAll(filepath.Join(out, "test-run-0"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(out, "test-run-0", "set-report.yaml"), []byte("name: OUTSIDE-SECRET\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		keploy = filepath.Join(base, "project", "keploy")
+		at, to := filepath.Join(keploy, "reports"), out
+		if linkKeploy {
+			// keploy -> the folder; its reports folder is the one out there.
+			at, to = keploy, filepath.Dir(out)
+			if err := os.Rename(out, filepath.Join(to, "reports")); err != nil {
+				t.Fatal(err)
+			}
+			out = filepath.Join(to, "reports")
+		}
+		if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rel, err := filepath.Rel(filepath.Dir(at), to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(rel, at); err != nil {
+			t.Skipf("cannot make a symbolic link here: %v", err)
+		}
+		if b, err := os.ReadFile(filepath.Join(keploy, "reports", "test-run-0", "set-report.yaml")); err != nil || !strings.Contains(string(b), "OUTSIDE-SECRET") {
+			t.Fatalf("the link does not reach the report: %q, %v", b, err)
+		}
+		return keploy, out
+	}
+	for name, tc := range map[string]struct {
+		linkKeploy bool
+		target     func(base string) string
+	}{
+		"reports out of the project": {target: func(base string) string { return filepath.Join(base, "outside") }},
+		"reports out of keploy":      {target: func(base string) string { return filepath.Join(base, "project", "elsewhere") }},
+		"keploy out of the project":  {linkKeploy: true, target: func(base string) string { return filepath.Join(base, "outside", "x") }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			keploy, out := plant(t, tc.linkKeploy, tc.target)
+			db := New(zap.NewNop(), filepath.Join(keploy, "reports"))
+			refused := func(what string, err error) {
+				t.Helper()
+				if err == nil || !strings.Contains(err.Error(), "only inside") {
+					t.Fatalf("%s: %v, want it refused as outside the recording", what, err)
+				}
+			}
+			refused("InsertReport", db.InsertReport(ctx, "test-run-1", "set", &models.TestReport{}))
+			refused("UpdateReport", db.UpdateReport(ctx, "test-run-1", map[string]int{"covered": 1}))
+			if _, err := os.Lstat(filepath.Join(out, "test-run-1")); !os.IsNotExist(err) {
+				t.Fatalf("a report was written where the link leads: %v", err)
+			}
+			got, err := db.GetReport(ctx, "test-run-0", "set")
+			if err == nil || (got != nil && got.Name == "OUTSIDE-SECRET") {
+				t.Fatalf("GetReport read the report the link leads to: %+v, %v", got, err)
+			}
+			refused("GetReport", err)
+			ids, err := db.GetAllTestRunIDs(ctx)
+			refused(fmt.Sprintf("GetAllTestRunIDs (listed %v)", ids), err)
+		})
+	}
 }

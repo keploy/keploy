@@ -147,8 +147,8 @@ func symlink(t *testing.T, target, link string) {
 
 // A test set or mock set that is a symbolic link to a folder inside the
 // folder of schemas is read through the link, as the sets beside it are, and
-// so is a service folder that is one, which is the folder its sets are read
-// in. keploy used to pass over every link without a word, and validate
+// so is a service folder under Download/Mocks that is a link to a folder
+// there, which is the folder its sets are read in. keploy used to pass over every link without a word, and validate
 // checked nothing against the set behind it. A regular file beside the sets,
 // or a link to one, is still no set.
 func TestGetAllSchemas_ASymlinkedSetIsRead(t *testing.T) {
@@ -167,8 +167,7 @@ func TestGetAllSchemas_ASymlinkedSetIsRead(t *testing.T) {
 	writeSchema(t, filepath.Join(mocks, "svc", "test-set-0"), "schema", "svc-0")
 	writeSchema(t, filepath.Join(mocks, "svc", "real-set"), "schema", "svc-1")
 	symlink(t, "real-set", filepath.Join(mocks, "svc", "test-set-1"))
-	writeSchema(t, filepath.Join(root, "shared", "service", "test-set-0"), "schema", "linked-0")
-	symlink(t, filepath.Join(root, "shared", "service"), filepath.Join(mocks, "linked-svc"))
+	symlink(t, "svc", filepath.Join(mocks, "linked-svc"))
 	if err := os.WriteFile(filepath.Join(mocks, "svc", "notes.txt"), []byte("not a set\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +192,7 @@ func TestGetAllSchemas_ASymlinkedSetIsRead(t *testing.T) {
 		}
 		sets = append(sets, m.Service+"/"+m.TestSetID+"="+title)
 	}
-	want := "linked-svc/test-set-0=linked-0 svc/real-set=svc-1 svc/test-set-0=svc-0 svc/test-set-1=svc-1"
+	want := "linked-svc/real-set=svc-1 linked-svc/test-set-0=svc-0 linked-svc/test-set-1=svc-1 svc/real-set=svc-1 svc/test-set-0=svc-0 svc/test-set-1=svc-1"
 	if strings.Join(sets, " ") != want {
 		t.Fatalf("GetAllDownloadedMocksSchemas read %v; want %s", sets, want)
 	}

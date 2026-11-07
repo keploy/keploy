@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -30,6 +31,12 @@ import (
 //
 // An empty root is the working directory: the files are then at paths
 // relative to it, and are read inside it.
+//
+// root itself is opened from the project (utils.OpenRecordingDir), so a
+// keploy folder that is a link out of the project is refused as well. Every
+// store is rooted at the recording, not at a folder in it (a report under
+// keploy/reports has keploy as its root), so a folder in the recording that
+// links out is a link out of the root, and refused.
 //
 // What changes the recording keeps to the same rule, for the same reason: a
 // linked mocks.yaml would otherwise have `keploy record` add to any file the
@@ -86,6 +93,44 @@ func ReadRecordingFileAny(ctx context.Context, logger *zap.Logger, root, path, n
 	return nil, "", fs.ErrNotExist
 }
 
+// ReadRecordingFileAnyBounded is ReadFileAnyBounded for a file of the
+// recording at root, read inside it (see above): the preferred format's file,
+// else the other's, as a regular file of at most limit bytes (safeyaml). Only
+// a file that is not there passes on to the other format; a link out of the
+// recording is refused, not passed over.
+func ReadRecordingFileAnyBounded(ctx context.Context, root, path, name string, preferred Format, limit int64) ([]byte, Format, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	for _, f := range [2]Format{preferred, otherFormat(preferred)} {
+		filePath := filepath.Join(path, name+"."+f.FileExtension())
+		data, err := readBounded(root, filePath, limit)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return data, f, nil
+	}
+	return nil, "", fs.ErrNotExist
+}
+
+// readBounded reads path, a file of the recording at root, inside it, as
+// safeyaml.ReadFileIn reads it. A file that is not there is only that.
+func readBounded(root, path string, limit int64) ([]byte, error) {
+	r, rel, err := recordingRoot(root, path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	data, err := safeyaml.ReadFileIn(r, rel, limit)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("the recording's file %q is read only inside its recording %q: %w", rel, root, err)
+	}
+	return data, err
+}
+
 // NewRecordingMockReaderF is NewMockReaderF for a mock file of the recording
 // at root: path is a directory under root, and the file is opened inside root
 // (see above).
@@ -125,7 +170,7 @@ func recordingRoot(root, path string) (*os.Root, string, error) {
 	if err != nil {
 		return nil, "", changeRefused(root, path, err)
 	}
-	r, err := os.OpenRoot(dir)
+	r, err := utils.OpenRecordingDir(dir)
 	if err != nil {
 		return nil, "", changeRefused(root, rel, err)
 	}

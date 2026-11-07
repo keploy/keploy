@@ -80,7 +80,7 @@ func TestCopyDirFollowsNoLinkOutOfAFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeLink(t, secret, filepath.Join(src, "linked.yaml"))
-	requireOnlyInside(t, "CopyDir from a link", CopyDir(src, dst, false, zap.NewNop()))
+	requireOnlyInside(t, "CopyDir from a link", CopyDir(src, src, dst, false, zap.NewNop()))
 	if _, err := os.Stat(filepath.Join(dst, "linked.yaml")); !os.IsNotExist(err) {
 		t.Fatalf("CopyDir copied the file outside its folder: %v", err)
 	}
@@ -98,9 +98,64 @@ func TestCopyDirFollowsNoLinkOutOfAFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeLink(t, kept, filepath.Join(dst2, "doc.yaml"))
-	requireOnlyInside(t, "CopyDir onto a link", CopyDir(src2, dst2, false, zap.NewNop()))
+	requireOnlyInside(t, "CopyDir onto a link", CopyDir(src2, src2, dst2, false, zap.NewNop()))
 	if got, err := os.ReadFile(kept); err != nil || string(got) != "KEEP ME\n" {
 		t.Fatalf("the file outside holds %q (%v)", got, err)
+	}
+}
+
+// A folder CopyDir copies is read only inside the checkout it comes with: the
+// copied folder itself, a link out of the checkout, is refused, and nothing
+// it leads to is copied. A folder link that stays inside the checkout, and a
+// file link into another of its folders, are copied.
+func TestCopyDirCopiesNoFolderThatLinksOutOfItsCheckout(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "id_rsa"), []byte("SECRET-OUTSIDE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(base, "VirtualCPR", "svc")
+	set := filepath.Join(checkout, "keploy", "test-set-0")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// keploy/test-set-0/tests -> ../../../../outside
+	if err := os.Symlink(filepath.Join("..", "..", "..", "..", "outside"), filepath.Join(set, "tests")); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(set, "tests", "id_rsa")); err != nil || string(b) != "SECRET-OUTSIDE" {
+		t.Fatalf("the link does not reach the file outside: %q, %v", b, err)
+	}
+	dst := filepath.Join(base, "Download", "Tests", "svc")
+	requireOnlyInside(t, "CopyDir of a folder that links out", CopyDir(checkout, filepath.Join(set, "tests"), dst, false, zap.NewNop()))
+	if _, err := os.Stat(filepath.Join(dst, "id_rsa")); !os.IsNotExist(err) {
+		t.Fatalf("CopyDir copied a file from outside the checkout: %v", err)
+	}
+
+	// Inside the checkout, links keep working.
+	real := filepath.Join(checkout, "keploy", "test-set-1", "tests")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "test-1.yaml"), []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	set2 := filepath.Join(checkout, "keploy", "test-set-2")
+	if err := os.MkdirAll(set2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "test-set-1", "tests"), filepath.Join(set2, "tests")); err != nil {
+		t.Fatal(err)
+	}
+	dst2 := filepath.Join(base, "Download", "Tests", "svc2")
+	if err := CopyDir(checkout, filepath.Join(set2, "tests"), dst2, false, zap.NewNop()); err != nil {
+		t.Fatalf("CopyDir of a folder that links inside its checkout: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dst2, "test-1.yaml")); err != nil || string(b) != "inside" {
+		t.Fatalf("the copy holds %q (%v), want the file inside", b, err)
 	}
 }
 

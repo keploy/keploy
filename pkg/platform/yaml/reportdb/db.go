@@ -4,7 +4,9 @@ package reportdb
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -32,6 +34,10 @@ type TestReport struct {
 	tests  map[string]map[string][]models.TestResult
 	m      sync.Mutex
 	Logger *zap.Logger
+	// Path is the reports folder, <keploy>/reports. Its files are read and
+	// written inside the recording, the folder Path is in (recording), not
+	// inside Path: a reports folder that a cloned repository carries as a link
+	// out of the recording is then a link out, and refused with why.
 	Path   string
 	Name   string
 	Format yaml.Format
@@ -58,7 +64,19 @@ func (fe *TestReport) ClearTestCaseResults(_ context.Context, testRunID string, 
 	fe.tests[testRunID] = make(map[string][]models.TestResult)
 }
 
+// recording is the recording the reports folder is in: the root its files are
+// read and written inside (see Path).
+func (fe *TestReport) recording() string {
+	return filepath.Dir(fe.Path)
+}
+
+// GetAllTestRunIDs lists the test runs in the reports folder, once the folder
+// is known to lie inside the recording: one that links out is refused, with
+// why, rather than listed.
 func (fe *TestReport) GetAllTestRunIDs(ctx context.Context) ([]string, error) {
+	if _, err := yaml.StatInRecording(fe.recording(), fe.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
 	return yaml.ReadSessionIndices(ctx, fe.Path, fe.Logger, yaml.ModeDir)
 }
 
@@ -102,7 +120,7 @@ func (fe *TestReport) readReport(ctx context.Context, testRunID string, testSetI
 	// file of the repository keploy runs in, so it is read as a regular file
 	// of at most limit bytes: a cloned repo could otherwise point it at
 	// /dev/zero or a FIFO.
-	data, detected, err := yaml.ReadFileAnyBounded(ctx, path, reportName, fe.Format, limit)
+	data, detected, err := yaml.ReadRecordingFileAnyBounded(ctx, fe.recording(), path, reportName, fe.Format, limit)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to read the test-set report", zap.String("reportName", reportName), zap.String("session", filepath.Base(path)))
 		return nil, err
@@ -142,7 +160,7 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 		data = append([]byte(utils.GetVersionAsComment()), data...)
 	}
 
-	err = yaml.WriteRecordingFileF(ctx, fe.Logger, fe.Path, reportPath, testReport.Name, data, false, fe.Format)
+	err = yaml.WriteRecordingFileF(ctx, fe.Logger, fe.recording(), reportPath, testReport.Name, data, false, fe.Format)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to write the report", zap.String("session", filepath.Base(reportPath)))
 		return err
@@ -208,7 +226,7 @@ func (fe *TestReport) UpdateReport(ctx context.Context, testRunID string, covera
 		return fmt.Errorf("%s failed to marshal coverage document. error: %s", utils.Emoji, err.Error())
 	}
 
-	err = yaml.WriteRecordingFileF(ctx, fe.Logger, fe.Path, reportPath, "coverage", data, false, fe.Format)
+	err = yaml.WriteRecordingFileF(ctx, fe.Logger, fe.recording(), reportPath, "coverage", data, false, fe.Format)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to write the coverage report", zap.String("session", filepath.Base(reportPath)))
 		return err

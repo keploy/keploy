@@ -1726,13 +1726,14 @@ type PermissionError struct {
 	IsRead   bool // true if it's a read permission issue, false if write
 }
 
-// AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
-// AddToGitIgnore adds ignoreString to path's .gitignore. The file is opened
-// inside path (os.Root): keploy/.gitignore comes with a cloned repository, so
-// one that links out of path is refused, with why, and what it leads to is
-// not written. A link that stays inside path is followed.
+// AddToGitIgnore adds ignoreString to path's .gitignore, if it is not there
+// yet. The file is opened inside path, and path from the project
+// (OpenRecordingDir): keploy/.gitignore comes with a cloned repository, so
+// one that links out of path, or a path that links out of the project, is
+// refused, with why, and what it leads to is not written. A link that stays
+// inside is followed.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
-	root, err := os.OpenRoot(path)
+	root, err := OpenRecordingDir(path)
 	if err != nil {
 		return fmt.Errorf("error opening the folder of the .gitignore file: %w", err)
 	}

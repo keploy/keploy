@@ -371,11 +371,12 @@ func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, file
 	return nil
 }
 
-// CopyFile copies a single file from src to dst. Each is opened inside its own
-// folder, so a src or a dst that links out of it is refused: what it leads to
-// is neither copied nor written (see recording.go).
-func CopyFile(src, dst string, rename bool, logger *zap.Logger) error {
-	srcFile, err := OpenInRecording(filepath.Dir(src), src)
+// CopyFile copies a single file from src, a file under srcRoot, to dst. src is
+// opened inside srcRoot, and dst inside its own folder, so a src that links
+// out of srcRoot, or a dst that links out of its folder, is refused: what it
+// leads to is neither copied nor written (see recording.go).
+func CopyFile(srcRoot, src, dst string, rename bool, logger *zap.Logger) error {
+	srcFile, err := OpenInRecording(srcRoot, src)
 
 	if err != nil {
 		return err
@@ -412,18 +413,29 @@ func CopyFile(src, dst string, rename bool, logger *zap.Logger) error {
 	return dstFile.Chmod(srcInfo.Mode())
 }
 
-// CopyDir recursively copies a directory tree, attempting to preserve permissions
-func CopyDir(srcDir, destDir string, rename bool, logger *zap.Logger) error {
+// CopyDir recursively copies srcDir, a folder under srcRoot, to destDir,
+// attempting to preserve permissions. srcRoot is the checkout the folder comes
+// with (another service's, in a contract download): srcDir, every folder in
+// it and every file it copies are read only inside srcRoot (see
+// recording.go), so a folder or a file that links out of the checkout, the
+// copied folder itself included, is refused with why, and what it leads to is
+// not copied.
+func CopyDir(srcRoot, srcDir, destDir string, rename bool, logger *zap.Logger) error {
+	dir, err := OpenInRecording(srcRoot, srcDir)
+	if err != nil {
+		return err
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
+		return err
+	}
 	// Ensure the destination directory exists
 	if _, err := os.Stat(destDir); os.IsNotExist(err) {
 		err := os.MkdirAll(destDir, os.ModePerm)
 		if err != nil {
 			return err
 		}
-	}
-	entries, err := os.ReadDir(srcDir)
-	if err != nil {
-		return err
 	}
 
 	for _, entry := range entries {
@@ -440,12 +452,12 @@ func CopyDir(srcDir, destDir string, rename bool, logger *zap.Logger) error {
 			if err != nil {
 				return err
 			}
-			err = CopyDir(srcPath, destPath, rename, logger)
+			err = CopyDir(srcRoot, srcPath, destPath, rename, logger)
 			if err != nil {
 				return err
 			}
 		} else {
-			err = CopyFile(srcPath, destPath, rename, logger)
+			err = CopyFile(srcRoot, srcPath, destPath, rename, logger)
 			if err != nil {
 				return err
 			}
