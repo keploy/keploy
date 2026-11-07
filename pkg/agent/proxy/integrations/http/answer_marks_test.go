@@ -334,6 +334,40 @@ func TestRecordMarksAWholeAnswerOnlyAsTheClientReadItAll(t *testing.T) {
 	}
 }
 
+// An answer a fault ended before its body did keeps no marks: a reset before
+// its head was whole, which records no answer, and one after its head, which
+// records the bytes on the wire and then the fault. Replay writes either as
+// the fault says, at once.
+func TestRecordKeepsNoMarksForAFaultBeforeTheBodyEnded(t *testing.T) {
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	resp, writes := wholeInTwoWrites()
+	head := []byte("HTTP/1.1 200 OK\r\nContent-Le")
+	for _, c := range []struct {
+		name string
+		m    *FinalHTTP
+	}{
+		{"a reset before the head was whole", &FinalHTTP{Resp: head,
+			RespWrites: []respWrite{{end: len(head), at: markAt(1)}},
+			Fault:      &models.Fault{Kind: models.FaultReset}}},
+		{"a reset after the head, the body cut", &FinalHTTP{Resp: resp[:len(resp)-1], RespWrites: writes[:1],
+			Fault: &models.Fault{Kind: models.FaultReset, AfterHead: true}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.m.Req, c.m.ReqTimestampMock, c.m.ResTimestampMock = []byte(marksReq), markAt(0), markAt(2)
+			mock, err := h.buildHTTPMock(c.m, 80, "marks-conn", models.OutgoingOptions{})
+			if err != nil || mock == nil {
+				t.Fatalf("buildHTTPMock = (%v, %v)", mock, err)
+			}
+			if mock.Spec.Fault == nil {
+				t.Fatal("precondition: the mock keeps no fault")
+			}
+			if r := mock.Spec.HTTPResp; r != nil && r.Marks != nil {
+				t.Errorf("marks = %+v, want none", r.Marks)
+			}
+		})
+	}
+}
+
 // The terminal chunk of an NDJSON stream, written later than its last line,
 // keeps its own mark at the body's end.
 func TestRecordKeepsTheTerminalChunksOwnMark(t *testing.T) {
