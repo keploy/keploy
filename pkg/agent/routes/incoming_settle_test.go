@@ -490,6 +490,9 @@ func TestHandleIncoming_ATestCaseLetGoUnsettledIsWarnedWhenTheClientEndsTheStrea
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Before srv.Close, which waits for the handler: a row that fails
+	// before it ends the stream would hang there instead.
+	defer resp.Body.Close()
 	names := streamOf(t, resp)
 
 	start := newStretch().Add(time.Second)
@@ -522,7 +525,9 @@ func TestHandleIncoming_ATestCaseLetGoUnsettledIsWarnedWhenTheClientEndsTheStrea
 // not a warning that the stream broke at the end of a recording that went as
 // it should.
 func TestHandleIncoming_AClientEndingTheStreamUnderTrafficIsAnOrdinaryEnd(t *testing.T) {
-	core, logs := observer.New(zapcore.DebugLevel)
+	// INFO and up, all the row reads: under steady traffic, a DEBUG entry
+	// per test case would be kept without bound.
+	core, logs := observer.New(zapcore.InfoLevel)
 	tcs := make(chan *models.TestCase) // the ingress's: never closed
 	a := &Agent{logger: zap.New(core), svc: incomingSvc{tc: tcs}}
 	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
@@ -532,6 +537,9 @@ func TestHandleIncoming_AClientEndingTheStreamUnderTrafficIsAnOrdinaryEnd(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Before srv.Close, which waits for the handler: a row that fails
+	// before it ends the stream would hang there instead.
+	defer resp.Body.Close()
 	names := streamOf(t, resp)
 
 	// Steady traffic after the stop.
