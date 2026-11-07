@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -127,15 +128,20 @@ func TestUnderTheSwitchAHealthURLAnsweringSoonIsFoundSoon(t *testing.T) {
 	}
 }
 
-// readyWake wakes 10 ms after the wait begins, then every readyWakeEvery:
-// never sooner (no busy loop), and never growing back toward a second.
+// readyWake wakes 10 ms after the wait begins, then about every 100 ms
+// (readyWakeEvery), and never grows back toward a second. Each wake-up comes
+// at least 100 ms after the one before was taken, so twelve take 1.11 s at
+// least (no busy loop): the reader's own delays can bring two closer than
+// that, never the twelve. The bounds are times, not multiples of
+// readyWakeEvery, so a pace outside about 100-150 ms fails this row.
 func TestReadyWakeSoonThenOnceEachInterval(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	begin := time.Now()
 	wake, stop := readyWake(ctx)
 	defer stop()
 	var gaps []time.Duration
-	last := time.Now()
+	last := begin
 	for i := 0; i < 12; i++ {
 		select {
 		case <-wake:
@@ -149,13 +155,32 @@ func TestReadyWakeSoonThenOnceEachInterval(t *testing.T) {
 	if gaps[0] >= 40*time.Millisecond {
 		t.Fatalf("the first wake-up came %v in, want about 10 ms (gaps %v)", gaps[0], gaps)
 	}
+	if took := last.Sub(begin); took < 1110*time.Millisecond {
+		t.Fatalf("twelve wake-ups came within %v, want 1.11 s at least: 10 ms, then 100 ms at least after each (gaps %v)", took, gaps)
+	}
 	later := slices.Clone(gaps[1:])
 	slices.Sort(later)
-	if later[0] < readyWakeEvery*9/10 {
-		t.Fatalf("two wake-ups came %v apart, want %v at least (gaps %v)", later[0], readyWakeEvery, gaps)
+	if median := later[len(later)/2]; median >= 150*time.Millisecond {
+		t.Fatalf("the wake-ups came %v apart, want about 100 ms (gaps %v)", median, gaps)
 	}
-	if median := later[len(later)/2]; median >= readyWakeEvery*3/2 {
-		t.Fatalf("the wake-ups came %v apart, want about %v (gaps %v)", median, readyWakeEvery, gaps)
+}
+
+// Stopping readyWake ends its goroutine, which closes the wake-up channel,
+// even when it is stopped holding a wake-up nobody took: a wait that ended
+// with its context still live leaves no goroutine or timer behind it.
+func TestReadyWakeEndsWhenStopped(t *testing.T) {
+	wake, stop := readyWake(context.Background())
+	// Past its first wake-up, 10 ms in, and past the next one's time: it
+	// holds a wake-up this row never takes.
+	time.Sleep(200 * time.Millisecond)
+	stop()
+	select {
+	case _, ok := <-wake:
+		if ok {
+			t.Fatal("readyWake handed a wake-up after it was stopped: stopped while it held one, it waits on that one's taking")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("readyWake's channel is still open 5 s after it was stopped: its goroutine never ends")
 	}
 }
 
@@ -169,8 +194,8 @@ func TestUnderTheSwitchAnAppListeningLateIsFoundWithinAWakeUp(t *testing.T) {
 		a := &timedAgent{up: up}
 		a.begin = time.Now()
 		ready, took, _ := waitedFor(t, provenReadiness{cfg: testCfg(), agent: a, host: "localhost", port: "8080", listen: 8080}, nil)
-		if !ready || took >= up+2*readyWakeEvery {
-			t.Fatalf("ready %v after %v, want ready within about %v of its listen at %v", ready, took, readyWakeEvery, up)
+		if !ready || took >= up+250*time.Millisecond {
+			t.Fatalf("ready %v after %v, want ready within about %v (100 ms) of its listen at %v", ready, took, readyWakeEvery, up)
 		}
 	}
 }
@@ -207,6 +232,33 @@ func TestReadyStallLimitFallsAtItsTime(t *testing.T) {
 	}
 	if took < limit-readyWakeEvery || took >= limit+time.Second {
 		t.Fatalf("not judged after %v, want at about %v: the limit counts wake-ups, %v apart", took, limit, readyWakeEvery)
+	}
+	if !strings.Contains(r.why, "across 5 wake-ups of keploy's watchdog (about 500ms, one each 100ms)") {
+		t.Fatalf("not judged as %q, want the limit said as its count and its time", r.why)
+	}
+}
+
+// The line a wait that goes on says gives how long the application made no
+// progress and when it is not judged as times, not only as wake-up counts.
+func TestUnderTheSwitchTheStatusLineSaysItsTimes(t *testing.T) {
+	wake := manualWake(t)
+	stallLimit(t, 6)
+	was := readyStatusEvery
+	readyStatusEvery = 4
+	t.Cleanup(func() { readyStatusEvery = was })
+	core, logs := observer.New(zapcore.InfoLevel)
+	res := startWait(provenReadiness{logger: zap.New(core), cfg: testCfg(), agent: &fakeAgent{answers: []models.AppReadiness{{}}}, host: "localhost", port: "8080", listen: 8080})
+	if r := wakeUntil(t, wake, res, 20); r.ready {
+		t.Fatalf("wait = %+v, want not judged: the application made no progress", r)
+	}
+	said := logs.FilterMessageSnippet("still waiting for the application").All()
+	if len(said) != 1 {
+		t.Fatalf("said it was waiting %d times, want once, at the fourth wake-up", len(said))
+	}
+	f := said[0].ContextMap()
+	if f["wakeUpsWithNoProgress"] != int64(4) || f["noProgressFor"] != 4*readyWakeEvery ||
+		f["notJudgedAt"] != int64(6) || f["notJudgedAfter"] != 6*readyWakeEvery {
+		t.Fatalf("said %v, want 4 wake-ups with no progress, %v, and not judged at 6, %v", f, 4*readyWakeEvery, 6*readyWakeEvery)
 	}
 }
 

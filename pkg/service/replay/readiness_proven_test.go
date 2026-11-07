@@ -61,11 +61,14 @@ type fakeAgent struct {
 	// block, when set, holds every call until the caller gives up on it: an
 	// agent that never answers.
 	block bool
+	// blockAfter, with block, answers that many calls first: an agent that
+	// stops answering.
+	blockAfter int
 }
 
 func (f *fakeAgent) AppReadiness(ctx context.Context, since uint64) (models.AppReadiness, error) {
 	f.mu.Lock()
-	if f.block {
+	if f.block && f.calls >= f.blockAfter {
 		f.calls++
 		f.mu.Unlock()
 		<-ctx.Done()
@@ -1208,8 +1211,43 @@ func TestUnderTheSwitchAnAgentThatNeverAnswersIsAStallSaidSo(t *testing.T) {
 			t.Fatal("the wait did not end: a wedged agent hangs it")
 		}
 	}
-	if r.ready || !strings.Contains(r.why, "has not answered its last read, in flight across 4 wake-ups") || a.count() != 1 {
+	if r.ready || !strings.Contains(r.why, "has not answered its last read, in flight across 4 wake-ups of keploy's watchdog (about 400ms, one each 100ms)") || a.count() != 1 {
 		t.Fatalf("wait = %+v after %d reads, want not judged at the fourth wake-up (three weighed with no answer), the one read still in flight", r, a.count())
+	}
+}
+
+// A read begun at a later wake-up that never answers says how long that read
+// has been in flight, not how long the wait has: the first read answered at
+// the wait's start, the second, begun at the first wake-up, is in flight
+// across the three after it.
+func TestUnderTheSwitchAReadThatStopsAnsweringSaysItsOwnTime(t *testing.T) {
+	wake := manualWake(t)
+	stallLimit(t, 3)
+	a := &fakeAgent{answers: []models.AppReadiness{{}}, block: true, blockAfter: 1}
+	res := startWait(provenReadiness{logger: zap.NewNop(), cfg: testCfg(), agent: a, host: "localhost", port: "8080", listen: 8080})
+	readsWeighed(t, res, 0)
+	select {
+	case wake <- struct{}{}:
+	case r := <-res:
+		t.Fatalf("wait = %+v before its first wake-up, want it waiting", r)
+	}
+	for deadline := time.Now().Add(30 * time.Second); a.count() < 2; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the wait never read the agent at its first wake-up")
+		}
+	}
+	var r waitResult
+	for done := false; !done; {
+		select {
+		case r = <-res:
+			done = true
+		case wake <- struct{}{}:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the wait did not end: a wedged agent hangs it")
+		}
+	}
+	if r.ready || !strings.Contains(r.why, "has not answered its last read, in flight across 3 wake-ups of keploy's watchdog (about 300ms, one each 100ms)") || a.count() != 2 {
+		t.Fatalf("wait = %+v after %d reads, want not judged at the fourth wake-up, the read begun at the first still in flight across the three after it", r, a.count())
 	}
 }
 
@@ -1466,7 +1504,8 @@ func TestUnderTheSwitchTheListenPortWaitsForDockersAnswer(t *testing.T) {
 }
 
 // When the agent cannot watch and a health URL decides, the stall says so,
-// not that the application listened nowhere and made no progress.
+// and the limit as its count and its time, not that the application listened
+// nowhere and made no progress.
 func TestUnderTheSwitchAnUnwatchedStallSaysTheAgentCannotTell(t *testing.T) {
 	wake := manualWake(t)
 	stallLimit(t, 2)
@@ -1487,8 +1526,8 @@ func TestUnderTheSwitchAnUnwatchedStallSaysTheAgentCannotTell(t *testing.T) {
 			t.Fatal("the wait did not end")
 		}
 	}
-	if r.ready || !strings.Contains(r.why, "keploy's agent cannot tell when the application listens") || strings.Contains(r.why, "it listens on") {
-		t.Fatalf("wait = %+v, want not judged, saying the agent cannot tell", r)
+	if r.ready || !strings.Contains(r.why, "across 2 wake-ups of keploy's watchdog (about 200ms, one each 100ms); keploy's agent cannot tell when the application listens") || strings.Contains(r.why, "it listens on") {
+		t.Fatalf("wait = %+v, want not judged, saying the agent cannot tell, and the limit as 2 wake-ups, 200ms", r)
 	}
 }
 
