@@ -119,7 +119,7 @@ func activeCADER() []byte {
 
 // generateRunCA mints a fresh, self-signed MITM CA for one run.
 //
-// ECDSA P-256 matches the leaf key type cfssl mints (CertForClient) and the
+// ECDSA P-256 matches the leaf key type mintLeaf mints (CertForClient) and the
 // retired static CA, so nothing downstream has to learn a new algorithm. The
 // validity window is deliberately wide — NotBefore 20 years in the past,
 // NotAfter 10 years ahead — because enterprise time-freezing replays past
