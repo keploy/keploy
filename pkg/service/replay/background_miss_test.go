@@ -97,6 +97,51 @@ func TestTheStagingCallNamesTheSetsBackgroundRecordings(t *testing.T) {
 	}
 }
 
+// A run's prune keeps the set's background recordings, consumed or not: no test
+// owns one, so nothing else keeps it, and the next run reads a call's miss
+// against it. Neither section's mock leaves, and a name of neither is not kept.
+func TestThePruneKeepsTheSetsBackgroundRecordings(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.mappingDB = &shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{
+		Worker:  []models.MockEntry{{Name: "poll-1"}},
+		Startup: []models.MockEntry{{Name: "boot-1"}},
+	}}
+	h.replayer.config.Test.RemoveUnusedMocks = true
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("status %q, want PASSED", status)
+	}
+	if got := h.mocks.pruneCalls(); got != 1 {
+		t.Fatalf("%d prunes, want 1", got)
+	}
+	kept := h.mocks.kept
+	if _, ok := kept["poll-1"]; !ok {
+		t.Fatalf("the prune's keep-set %v drops the worker: recording", kept)
+	}
+	if _, ok := kept["boot-1"]; !ok {
+		t.Fatalf("the prune's keep-set %v drops the startup: recording", kept)
+	}
+	if len(kept) != 2 {
+		t.Fatalf("the prune's keep-set %v holds more than the set's background recordings", kept)
+	}
+}
+
+// A background recording a passing test consumed keeps what that run learned:
+// keeping it does not replace its state.
+func TestThePruneKeepsAConsumedBackgroundRecordingsState(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.mappingDB = &shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{
+		Worker: []models.MockEntry{{Name: "poll-1"}},
+	}}
+	h.replayer.hookImpl = prHooks{consumed: []models.MockState{{Name: "poll-1", ReqBodyNoise: map[string][]string{"filter.at": {}}}}}
+	h.replayer.config.Test.RemoveUnusedMocks = true
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("status %q, want PASSED", status)
+	}
+	if got := h.mocks.kept["poll-1"]; len(got.ReqBodyNoise) != 1 {
+		t.Fatalf("the prune's keep-set holds %+v for the consumed recording; its learned noise is gone", got)
+	}
+}
+
 // The background recordings are the file's worker: and startup: mocks; under
 // the proven switch the worker scope is the one the run serves (a stale move
 // returned to its test is that test's again). A store that reads only the
