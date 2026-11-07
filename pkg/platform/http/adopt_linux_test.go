@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -1861,7 +1862,9 @@ func TestTheReaperReapsUnderTheLockAReadOfTheChildrenHolds(t *testing.T) {
 // zombieLeaderEnv makes this test binary, started with it set to a file's
 // path (memBeat), a process whose main thread exits while another runs on,
 // writing a count to that file as it runs: its stat says Z, as ps says Zl,
-// and it runs.
+// and it runs. It runs until it is killed or that path is gone, which ends
+// it with the test's process: ownerEnv cannot, as its own init sets that to
+// its own pid.
 const zombieLeaderEnv = "KEPLOY_TEST_MAIN_THREAD_EXITS"
 
 func init() {
@@ -1873,7 +1876,13 @@ func init() {
 	runtime.LockOSThread()
 	go func() {
 		for n := 1; ; n++ {
-			_ = os.WriteFile(beat, []byte(strconv.Itoa(n)), 0o644)
+			// Only a path that is gone ends it. Left to run, it would write
+			// into the file of whichever process next takes the test's pid
+			// and holds that descriptor. Any other error passes: one that
+			// ended it would pass for the stop having stopped it.
+			if err := os.WriteFile(beat, []byte(strconv.Itoa(n)), 0o644); errors.Is(err, fs.ErrNotExist) {
+				os.Exit(0)
+			}
 			time.Sleep(20 * time.Millisecond)
 		}
 	}()
@@ -1890,16 +1899,17 @@ func init() {
 
 // memBeat returns the path of an empty file in memory (a memfd) that only the
 // test holds, for a daemon zombieLeaderEnv starts to write its count to while
-// the test runs. It is opened through /proc, as heldPipe's pipe is. A file on
-// disk would not do: a write to it, on a disk that others keep busy, can hold
-// the daemon's one running thread in the kernel (D, its writeback throttled
-// in rq_qos_wait) for longer than the stop's bound in these tests. A virtual
-// disk beside two fsync writers completed none of the 98 requests it had in
-// flight for half a second. The stop takes a disk that stands still for its
-// bound for dead (utils.ExitClock) and kills the daemon at twice the bound;
-// where the disk stands still for a bound more, it finds the kernel still
-// holding the daemon, and says so, rightly. A disk's stall is not what these
-// tests are about.
+// the test runs. It is opened through /proc, as heldPipe's pipe is, so its
+// path goes with the test's process, however that ends, and the daemon then
+// ends too (zombieLeaderEnv). A file on disk would not do: a write to it, on
+// a disk that others keep busy, can hold the daemon's one running thread in
+// the kernel (D, its writeback throttled in rq_qos_wait) for longer than the
+// stop's bound in these tests. A virtual disk beside two fsync writers
+// completed none of the 98 requests it had in flight for half a second. The
+// stop takes a disk that stands still for its bound for dead (utils.ExitClock)
+// and kills the daemon at twice the bound; where the disk stands still for a
+// bound more, it finds the kernel still holding the daemon, and says so,
+// rightly. A disk's stall is not what these tests are about.
 func memBeat(t *testing.T) string {
 	t.Helper()
 	fd, err := unix.MemfdCreate("beat", unix.MFD_CLOEXEC)
