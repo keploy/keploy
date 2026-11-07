@@ -1150,16 +1150,46 @@ func (r *Replayer) noteOwnsNothing(testSetID string) {
 
 // workerStallLimit is the count of wake-ups in a row, with none of the set's
 // worker-scope mocks answered, after which the set's end stops waiting for
-// them (awaitWorkerScope): the end count's watchdog's (design v14's lead
-// decision, 600). It counts wake-ups, not seconds: a starved replay starves
-// its watchdog equally, so load alone cannot trip it.
-var workerStallLimit = 600
+// them (awaitWorkerScope). It counts wake-ups, not seconds: a starved replay
+// starves its watchdog equally, so load alone cannot trip it. At
+// workerWakeAfter's delays, 6000 wake-ups span about 600 s, as long as the
+// end count's watchdog (design v14's lead decision: 600 wake-ups a second
+// apart).
+var workerStallLimit = 6000
 
-// workerWake is how the wait for the worker scope wakes: once a second. A
-// test replaces it.
-var workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
-	t := time.NewTicker(time.Second)
-	return t.C, t.Stop
+// workerWakeFirst is how soon the wait for the worker scope first reads what
+// the agent consumed, and workerWakeMost the longest it sleeps between two
+// reads. A worker call answered as the set's last test ends (a consumer's
+// poll answered just after it) is read within about workerWakeFirst, and one
+// answered later in the wait at most workerWakeMost after its answer, not at
+// the next whole second. A read is one request to the agent, which hands
+// back only what was consumed since the read before.
+const (
+	workerWakeFirst = 10 * time.Millisecond
+	workerWakeMost  = 100 * time.Millisecond
+)
+
+// workerWakeAfter is how long the wait for the worker scope sleeps before its
+// n-th wake-up, from 0: workerWakeFirst, twice as long at each wake-up after
+// it, at most workerWakeMost.
+func workerWakeAfter(n int) time.Duration {
+	d := workerWakeFirst
+	for ; n > 0 && d < workerWakeMost; n-- {
+		d *= 2
+	}
+	return min(d, workerWakeMost)
+}
+
+// workerWake is how the wait for the worker scope wakes: next is its next
+// wake-up, which comes workerWakeAfter(n) after the wait asks for it, n the
+// count of wake-ups it asked for before. A test replaces it.
+var workerWake = func(context.Context) (func() <-chan time.Time, func()) {
+	n := 0
+	return func() <-chan time.Time {
+		d := workerWakeAfter(n)
+		n++
+		return time.After(d)
+	}, func() {}
 }
 
 // awaitWorkerScope waits, at the set's end and before its application is
@@ -1185,14 +1215,14 @@ func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consum
 	}
 	r.logger.Info("waiting for the test set's worker scope: the calls the application makes on its own that no test owns, which its recording made by the set's end ("+provenswitch.Env+"=1)",
 		zap.Int("calls", len(missing)), zap.Strings("mocks", missing[:min(len(missing), 20)]))
-	wake, stop := workerWake(ctx)
+	next, stop := workerWake(ctx)
 	defer stop()
 	stalls := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return missing, nil
-		case <-wake:
+		case <-next():
 		}
 		read, err := r.hookImpl.GetConsumedMocks(ctx)
 		if err != nil {

@@ -260,9 +260,9 @@ func fastWorkerWait(t *testing.T) {
 	prevLimit, prevWake := workerStallLimit, workerWake
 	t.Cleanup(func() { workerStallLimit, workerWake = prevLimit, prevWake })
 	workerStallLimit = 1
-	workerWake = func(context.Context) (<-chan time.Time, func()) {
+	workerWake = func(context.Context) (func() <-chan time.Time, func()) {
 		tk := time.NewTicker(time.Millisecond)
-		return tk.C, tk.Stop
+		return func() <-chan time.Time { return tk.C }, tk.Stop
 	}
 }
 
@@ -490,7 +490,7 @@ func TestUnderTheSwitchAShutdownCallIsJudgedOnceTheAppIsStopped(t *testing.T) {
 				fastWorkerWait(t)
 				waits := 0
 				wake := workerWake
-				workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
+				workerWake = func(ctx context.Context) (func() <-chan time.Time, func()) {
 					waits++
 					return wake(ctx)
 				}
@@ -580,7 +580,7 @@ func TestWithTheSwitchOffACallAfterTheLastTestIsServedNotRequired(t *testing.T) 
 			fastWorkerWait(t)
 			waits := 0
 			wake := workerWake
-			workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
+			workerWake = func(ctx context.Context) (func() <-chan time.Time, func()) {
 				waits++
 				return wake(ctx)
 			}
@@ -655,7 +655,7 @@ func TestUnderTheSwitchACallAfterTheLastTestOfAnAppKeployDidNotStopGoesUnjudged(
 			fastWorkerWait(t)
 			waits := 0
 			wake := workerWake
-			workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
+			workerWake = func(ctx context.Context) (func() <-chan time.Time, func()) {
 				waits++
 				return wake(ctx)
 			}
@@ -898,7 +898,7 @@ func TestUnderTheSwitchAnAppKeployDidNotStartJudgesNoCallAfterTheLastTest(t *tes
 	fastWorkerWait(t)
 	waits := 0
 	wake := workerWake
-	workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
+	workerWake = func(ctx context.Context) (func() <-chan time.Time, func()) {
 		waits++
 		return wake(ctx)
 	}
