@@ -11,7 +11,7 @@ import (
 // is stored as a BSON date: milliseconds, in UTC. A gRPC test case read back
 // from Mongo then has both ends of its window up to 1 ms early, so a mock the
 // app made in the last millisecond before its response falls out of the
-// window (the miss http.go describes), and the case's zone is lost.
+// window (the miss http.go describes), and the case's UTC offset is lost.
 //
 // Every other field keeps the shape the driver's default gives it: the
 // shadow structs inline the type's own fields (grpcReqFields, a copy of the
@@ -41,7 +41,13 @@ func (r GrpcReq) MarshalBSON() ([]byte, error) {
 }
 
 // UnmarshalBSON reads the request, its Timestamp as text or as a BSON date.
+// A null request reads as the zero GrpcReq, as the driver's default does: the
+// driver passes a null or undefined value here as no bytes.
 func (r *GrpcReq) UnmarshalBSON(data []byte) error {
+	if len(data) == 0 {
+		*r = GrpcReq{}
+		return nil
+	}
 	var raw grpcReqBSONReader
 	if err := bson.Unmarshal(data, &raw); err != nil {
 		return err
@@ -73,7 +79,13 @@ func (r GrpcResp) MarshalBSON() ([]byte, error) {
 }
 
 // UnmarshalBSON reads the response, its Timestamp as text or as a BSON date.
+// A null response reads as the zero GrpcResp, as the driver's default does: the
+// driver passes a null or undefined value here as no bytes.
 func (r *GrpcResp) UnmarshalBSON(data []byte) error {
+	if len(data) == 0 {
+		*r = GrpcResp{}
+		return nil
+	}
 	var raw grpcRespBSONReader
 	if err := bson.Unmarshal(data, &raw); err != nil {
 		return err

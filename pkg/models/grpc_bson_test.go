@@ -11,8 +11,8 @@ import (
 )
 
 // A gRPC test case read back from Mongo keeps its request and response
-// times to the nanosecond, in their own zone, as an HTTP one does. Before,
-// they were BSON dates: milliseconds, in UTC.
+// times to the nanosecond, with their UTC offset, as an HTTP one does.
+// Before, they were BSON dates: milliseconds, in UTC.
 
 var ist = time.FixedZone("IST", 5*3600+1800)
 
@@ -53,7 +53,7 @@ func sameInstantAndOffset(t *testing.T, what string, got, want time.Time) {
 func reqWithoutTime(r GrpcReq) GrpcReq    { r.Timestamp = time.Time{}; return r }
 func respWithoutTime(r GrpcResp) GrpcResp { r.Timestamp = time.Time{}; return r }
 
-func TestGrpcBSONKeepsNanosecondsAndZone(t *testing.T) {
+func TestGrpcBSONKeepsNanosecondsAndOffset(t *testing.T) {
 	req, resp := bsonGrpcReq(), bsonGrpcResp()
 
 	// As api-server stores a test case (a document holding the TestCase) and
@@ -273,5 +273,61 @@ func TestGrpcBSONRefusesWhatItCannotRead(t *testing.T) {
 		} else if c.timestamp && !strings.Contains(err.Error(), "GrpcResp.UnmarshalBSON timestamp") {
 			t.Errorf("response with %s: error %q does not name the timestamp", c.name, err)
 		}
+	}
+}
+
+// A stored request or response that is null (or undefined) reads as the zero
+// value, as the driver's default does for a struct, and the rest of the
+// document still reads. The driver hands UnmarshalBSON no bytes for it.
+// The targets start filled, so a read that leaves the old value fails.
+func TestBSONReadsANullRequestOrResponseAsZero(t *testing.T) {
+	for _, empty := range []struct {
+		name  string
+		value interface{}
+	}{{"null", nil}, {"undefined", bson.Undefined{}}} {
+		t.Run(empty.name, func(t *testing.T) {
+			filled := func() (TestCase, TestResult) {
+				httpReq := HTTPReq{Method: "GET", URL: "http://x/", Timestamp: bsonGrpcReq().Timestamp}
+				httpResp := HTTPResp{StatusCode: 200, Body: "ok", Timestamp: bsonGrpcResp().Timestamp}
+				return TestCase{Name: "old", HTTPReq: httpReq, HTTPResp: httpResp, GrpcReq: bsonGrpcReq(), GrpcResp: bsonGrpcResp()},
+					TestResult{Name: "old", Req: httpReq, Res: httpResp, GrpcReq: bsonGrpcReq(), GrpcRes: bsonGrpcResp()}
+			}
+
+			caseDoc, err := bson.Marshal(bson.D{
+				{Key: "name", Value: "n"},
+				{Key: "http_req", Value: empty.value},
+				{Key: "http_resp", Value: empty.value},
+				{Key: "grpcReq", Value: empty.value},
+				{Key: "grpcResp", Value: empty.value},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc, _ := filled()
+			if err := bson.Unmarshal(caseDoc, &tc); err != nil {
+				t.Fatalf("test case with its request and response %s: %v", empty.name, err)
+			}
+			if !reflect.DeepEqual(tc, TestCase{Name: "n"}) {
+				t.Errorf("test case with its request and response %s read as %+v, want only its name", empty.name, tc)
+			}
+
+			resultDoc, err := bson.Marshal(bson.D{
+				{Key: "name", Value: "n"},
+				{Key: "req", Value: empty.value},
+				{Key: "res", Value: empty.value},
+				{Key: "grpcreq", Value: empty.value},
+				{Key: "grpcres", Value: empty.value},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, tr := filled()
+			if err := bson.Unmarshal(resultDoc, &tr); err != nil {
+				t.Fatalf("test result with its request and response %s: %v", empty.name, err)
+			}
+			if !reflect.DeepEqual(tr, TestResult{Name: "n"}) {
+				t.Errorf("test result with its request and response %s read as %+v, want only its name", empty.name, tr)
+			}
+		})
 	}
 }

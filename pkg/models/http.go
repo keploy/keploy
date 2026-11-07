@@ -231,8 +231,14 @@ func (h HTTPReq) MarshalBSON() ([]byte, error) {
 
 // UnmarshalBSON reads HTTPReq, accepting either the new RFC3339Nano string
 // timestamp or the legacy BSON DateTime (millisecond) shape for backward
-// compatibility with records written before MarshalBSON landed.
+// compatibility with records written before MarshalBSON landed. A null
+// request reads as the zero HTTPReq, as the driver's default does: the driver
+// passes a null or undefined value here as no bytes.
 func (h *HTTPReq) UnmarshalBSON(data []byte) error {
+	if len(data) == 0 {
+		*h = HTTPReq{}
+		return nil
+	}
 	var raw httpReqBSONReader
 	if err := bson.Unmarshal(data, &raw); err != nil {
 		return err
@@ -312,7 +318,13 @@ func (h HTTPResp) MarshalBSON() ([]byte, error) {
 	})
 }
 
+// UnmarshalBSON — see the HTTPReq version above. A null response reads as
+// the zero HTTPResp.
 func (h *HTTPResp) UnmarshalBSON(data []byte) error {
+	if len(data) == 0 {
+		*h = HTTPResp{}
+		return nil
+	}
 	var raw httpRespBSONReader
 	if err := bson.Unmarshal(data, &raw); err != nil {
 		return err
