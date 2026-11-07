@@ -23,7 +23,9 @@ const maxAliasNodes = 10000
 // keepEdits the document it decoded its mapping from (decodeInto), and
 // decodes no mappings.json it wrote last again (encodeOver): a recording
 // rewrites the file on every batch, so its rewrite parses it once. Rows
-// hold that.
+// hold that. It is counted in every build, not behind a test hook: one
+// atomic add beside a parse of a whole file costs nothing a rewrite can
+// measure, and a hook would put a branch of its own on the same path.
 var extraParses atomic.Int64
 
 // keepEdits is data, a mapping encoded anew, with what a hand edit added to
@@ -100,26 +102,30 @@ func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]str
 }
 
 // takeFileHead takes off the first key of root, the mapping of doc, old's
-// document, the lines of the comment above that key that are the file's
-// head, and is those lines: YAML hangs the comment a file starts with on
-// its document, its mapping and its first key, and that comment is the
-// file's, which encodeOver writes as the head (commentHead), not the key's.
-// A line is the head's when the head holds it and the comments of doc and
-// root do not, each line known as headLine knows it and counted as often as
-// it appears; keploy's line is keploy's, which a writer puts where it
-// always did (header), and is taken wherever it is. So no line is written
-// by both the head and the first key, and a rewrite of a file a rewrite
-// wrote changes nothing. A line the head does not hold (after a document
-// marker's comment, inside a mapping the file writes as {...}) stays on the
-// key. Keploy's line alone, on every file keploy wrote, costs no read of
-// old.
+// document, the lines of its comments that are the file's head, and is
+// those lines: YAML hangs the comment a file starts with on its document,
+// its mapping and its first key, and that comment is the file's, which
+// encodeOver writes as the head (commentHead), not the key's. On the key it
+// hangs them above it (its HeadComment), and below it (its FootComment) the
+// comment block between a document marker or a directive and a blank line,
+// so both are read. A line is the head's when the head holds it and the
+// comments of doc and root do not, each line known as headLine knows it and
+// counted as often as it appears; keploy's line is keploy's, which a writer
+// puts where it always did (header), and is taken wherever it is on the
+// key. So no line is written by both the head and the first key, and a
+// rewrite of a file a rewrite wrote changes nothing. A line the head does
+// not hold (after a document marker's own comment, inside a mapping the
+// file writes as {...}, below the key) stays on the key. Keploy's line
+// alone, on every file keploy wrote, costs no read of old.
 func takeFileHead(doc, root *yamlLib.Node, old []byte) string {
-	if len(root.Content) == 0 || root.Content[0].HeadComment == "" {
+	if len(root.Content) == 0 {
 		return ""
 	}
 	first := root.Content[0]
-	c := first.HeadComment
-	if strings.HasPrefix(c, versionLine) && !strings.Contains(c, "\n") {
+	if first.HeadComment == "" && first.FootComment == "" {
+		return ""
+	}
+	if c := first.HeadComment; first.FootComment == "" && strings.HasPrefix(c, versionLine) && !strings.Contains(c, "\n") {
 		first.HeadComment = ""
 		return c
 	}
@@ -130,20 +136,28 @@ func takeFileHead(doc, root *yamlLib.Node, old []byte) string {
 	for _, l := range strings.Split(doc.HeadComment+"\n"+root.HeadComment, "\n") {
 		held[headLine(l)]--
 	}
-	var took, left []string
-	for _, l := range strings.Split(c, "\n") {
-		switch n := headLine(l); {
-		case n == versionLine:
-		case held[n] > 0:
-			held[n]--
-		default:
-			left = append(left, l)
-			continue
+	var took []string
+	take := func(c string) string {
+		var left []string
+		for _, l := range strings.Split(c, "\n") {
+			switch n := headLine(l); {
+			case n == versionLine:
+			case held[n] > 0:
+				held[n]--
+			default:
+				left = append(left, l)
+				continue
+			}
+			took = append(took, l)
 		}
-		took = append(took, l)
+		// A blank line left at either end of what stays on the key is
+		// dropped: the head writes its own. One between two lines that
+		// stay stays, so a line taken from between them leaves the blank
+		// lines on both its sides.
+		return strings.Trim(strings.Join(left, "\n"), "\n")
 	}
-	// A blank line beside a line the head took is the head's.
-	first.HeadComment = strings.Trim(strings.Join(left, "\n"), "\n")
+	first.HeadComment = take(first.HeadComment)
+	first.FootComment = take(first.FootComment)
 	return strings.Join(took, "\n")
 }
 
