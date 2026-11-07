@@ -231,8 +231,14 @@ func (h HTTPReq) MarshalBSON() ([]byte, error) {
 
 // UnmarshalBSON reads HTTPReq, accepting either the new RFC3339Nano string
 // timestamp or the legacy BSON DateTime (millisecond) shape for backward
-// compatibility with records written before MarshalBSON landed.
+// compatibility with records written before MarshalBSON landed. A null
+// request reads as the zero HTTPReq, as the driver's default does: the driver
+// passes a null or undefined value here as no bytes.
 func (h *HTTPReq) UnmarshalBSON(data []byte) error {
+	if len(data) == 0 {
+		*h = HTTPReq{}
+		return nil
+	}
 	var raw httpReqBSONReader
 	if err := bson.Unmarshal(data, &raw); err != nil {
 		return err
@@ -312,7 +318,13 @@ func (h HTTPResp) MarshalBSON() ([]byte, error) {
 	})
 }
 
+// UnmarshalBSON — see the HTTPReq version above. A null response reads as
+// the zero HTTPResp.
 func (h *HTTPResp) UnmarshalBSON(data []byte) error {
+	if len(data) == 0 {
+		*h = HTTPResp{}
+		return nil
+	}
 	var raw httpRespBSONReader
 	if err := bson.Unmarshal(data, &raw); err != nil {
 		return err
@@ -341,9 +353,10 @@ func (h *HTTPResp) UnmarshalBSON(data []byte) error {
 	return nil
 }
 
-// decodeBSONTimestamp handles the two on-disk shapes for HTTP timestamps:
-// the new RFC3339Nano string (preserves nanoseconds) and the legacy BSON
-// DateTime (millisecond int64). An absent/null value decodes to the zero time.
+// decodeBSONTimestamp handles the two on-disk shapes for HTTP and gRPC
+// timestamps: the new RFC3339Nano string (preserves nanoseconds) and the
+// legacy BSON DateTime (millisecond int64), read in UTC as the driver reads a
+// date. An absent/null value decodes to the zero time.
 func decodeBSONTimestamp(v bson.RawValue) (time.Time, error) {
 	switch v.Type {
 	case 0, bson.TypeNull, bson.TypeUndefined:
@@ -359,7 +372,7 @@ func decodeBSONTimestamp(v bson.RawValue) (time.Time, error) {
 		if !ok {
 			return time.Time{}, fmt.Errorf("expected DateTime, got malformed value")
 		}
-		return bson.DateTime(dt).Time(), nil
+		return bson.DateTime(dt).Time().UTC(), nil
 	default:
 		return time.Time{}, fmt.Errorf("unsupported BSON type %v for timestamp", v.Type)
 	}
