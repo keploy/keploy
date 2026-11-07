@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -398,3 +399,18 @@ func TestGetGitHubRelease_RefusesAnythingButARelease(t *testing.T) {
 		t.Errorf("getGitHubRelease = %+v, %v; want the release with its asset digest", got, err)
 	}
 }
+
+func TestMakeDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "testdir", "nested")
+	if err := makeDirectory(dir); err != nil {
+		t.Fatalf("makeDirectory failed: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat on created directory failed: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected directory, got file")
+	}
+}
+

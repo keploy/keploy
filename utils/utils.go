@@ -928,9 +928,9 @@ func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	return path
 }
 
-// makeDirectory creates a directory if not exists with all user access
+// makeDirectory creates a directory if not exists with standard permissions (0o755)
 func makeDirectory(path string) error {
-	err := os.MkdirAll(path, 0777)
+	err := os.MkdirAll(path, 0o755)
 	if err != nil {
 		return err
 	}
