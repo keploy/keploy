@@ -117,3 +117,48 @@ func TestRunPlace_OpenTestRecordingsKeepWhatACallTook(t *testing.T) {
 		}
 	})
 }
+
+// A staging of no test closes the last one's recordings: after a set's
+// staging that follows a test's window, and after a test's scope ends
+// (SetScopeMocks with open false), no test is open, so a call then reads
+// none of the last test's recordings as its own.
+func TestRunPlace_AStagingOfNoTestLeavesNoOpenTestRecordings(t *testing.T) {
+	names := func(ms []*models.Mock) []string {
+		var out []string
+		for _, m := range ms {
+			out = append(out, m.Name)
+		}
+		return out
+	}
+	bothSwitches(t, func(t *testing.T, proven bool) {
+		sw := ""
+		if proven {
+			sw = "1"
+		}
+		t.Setenv(provenswitch.Env, sw)
+		a := placedMock("mock-a", "/a", placeAt(2), placeAt(3))
+		b := placedMock("mock-b", "/b", placeAt(22), placeAt(23))
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SeedRecordedWindows(placeWindows())
+		ws := placeWindows()
+
+		mm.SetMocksWithWindow([]*models.Mock{a, b}, nil, ws[0].Start, ws[0].End)
+		if got := names(mm.OpenTestRecordings()); len(got) != 1 || got[0] != "mock-a" {
+			t.Fatalf("precondition: test-1's window: %v, want [mock-a]", got)
+		}
+		mm.SetMocksWithWindow([]*models.Mock{a, b}, nil, models.BaseTime, placeAt(3600))
+		if got := mm.OpenTestRecordings(); len(got) != 0 {
+			t.Fatalf("a set's staging after test-1's window: %v, want none", names(got))
+		}
+
+		mm.SetScopeMocks([]*models.Mock{b}, nil, true)
+		if got := names(mm.OpenTestRecordings()); len(got) != 1 || got[0] != "mock-b" {
+			t.Fatalf("precondition: an open scope: %v, want [mock-b]", got)
+		}
+		mm.SetScopeMocks([]*models.Mock{a, b}, nil, false)
+		if got := mm.OpenTestRecordings(); len(got) != 0 {
+			t.Fatalf("after the scope ended: %v, want none", names(got))
+		}
+	})
+}

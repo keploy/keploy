@@ -69,6 +69,37 @@ func TestHeldAnswer_IdenticalCallsOfOneTestAreAnsweredInIt(t *testing.T) {
 	}
 }
 
+// Two identical calls of one test, as above, and a third, different call
+// recorded after them and answered inside the test: the open test's
+// recordings the held one could be a twin of are then the identical one and
+// the different one. The matcher judges each of them, so the identical one
+// still counts, and the call the test waits for is answered while it runs,
+// whichever recording the first call takes.
+func TestHeldAnswer_IdenticalCallsBesideAnotherCallAreAnsweredInIt(t *testing.T) {
+	for _, bgFirst := range []bool{true, false} {
+		bothSwitches(t, func(t *testing.T, proven bool) {
+			bgReq, fgReq := placeAt(2), placeAt(1)
+			if bgFirst {
+				bgReq, fgReq = placeAt(1), placeAt(2)
+			}
+			s := stagePlacedSet(t, proven, placeWindows(),
+				placedMock("mock-bg", "/same", bgReq, placeAt(45)),
+				placedMock("mock-fg", "/same", fgReq, placeAt(3)),
+				placedMock("mock-other", "/other", placeAt(4), placeAt(5)))
+			s.open(t, "test-1", "mock-bg", "mock-fg", "mock-other")
+			a := placedAnswered(t, s.call(t, "/same"), "the first identical call")
+			b := placedAnswered(t, s.call(t, "/same"), "the second identical call")
+			got := []string{a, b}
+			slices.Sort(got)
+			if !slices.Equal(got, []string{"mock-bg", "mock-fg"}) {
+				t.Fatalf("the two calls read %q, want each recording once", got)
+			}
+			placedWritten(t, s.call(t, "/other"), "mock-other", "the other call")
+			s.end(t, "test-1")
+		})
+	}
+}
+
 // Two identical calls of one test whose answers both came after the test on
 // record: the test waited for neither, so whichever call takes whichever
 // recording, each answer is held to its own place, test-3.
