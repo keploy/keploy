@@ -123,9 +123,9 @@ func TestAStartUpRecordingThatAnswersAgainIsNotedOnceAtItsLastAnswer(t *testing.
 	}
 	mm.answered.mu.Lock()
 	n, at := 0, time.Time{}
-	for _, e := range mm.answered.queue {
-		if e.mock != nil && e.mock.Name == "mock-0" {
-			n, at = n+1, e.at
+	for _, q := range mm.answered.queue {
+		if q.own() && q.e.mock.Name == "mock-0" {
+			n, at = n+1, q.e.at
 		}
 	}
 	mm.answered.mu.Unlock()
@@ -166,8 +166,8 @@ func noted(mm *MockManager, name string) int {
 	mm.answered.mu.Lock()
 	defer mm.answered.mu.Unlock()
 	n := 0
-	for _, e := range mm.answered.queue {
-		if e.mock != nil && e.mock.Name == name {
+	for _, q := range mm.answered.queue {
+		if q.own() && q.e.mock.Name == name {
 			n++
 		}
 	}

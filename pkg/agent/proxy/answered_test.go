@@ -533,3 +533,82 @@ func TestAnsweredLogNotesAKeptRecordingOnceAtItsLastAnswer(t *testing.T) {
 	}
 	checkAnsweredCounts(t, &l)
 }
+
+// The byte bound pushes out the recording that answered least recently: a
+// kept recording that answers again (noteLatest) moves to the back of the
+// queue, so one noted after its first answer and before its last goes
+// before it (whichever path notes the answer), and while it answers between
+// the notes of newer keys it stays however many those push out. Once it
+// answers no more it goes in its turn. The queue it leaves its places in
+// stays bounded (compact), also when it answers on its own call after call.
+func TestTheAnsweredLogPushesOutTheLeastRecentlyAnswered(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	big := func(name string, i int, url string) *models.Mock {
+		m := keyedRecording(name, models.HTTP, i, url, t0)
+		m.Spec.HTTPReq.Body = strings.Repeat("b", answeredMaxEntryBytes/4)
+		return m
+	}
+	kept := big("mock-0", 0, "/echo/rates")
+	kept.TestModeInfo.Lifetime = models.LifetimeSession
+	var l answeredLog
+	l.fence(2)
+	held := func(url string) bool { return len(l.candidates([]string{"url:" + url})) > 0 }
+	at := time.Duration(0)
+	answer := func() {
+		at += time.Second
+		l.noteLatest(kept, t0.Add(at))
+	}
+	answer()
+	l.note(big("old", 1, "/old"), t0.Add(at))
+	// Its second answer as a call that found no entry files it: another call
+	// filed one first (noteAs), and this one moves it.
+	at += time.Second
+	l.noteAs(kept, t0.Add(at), "", false, true)
+	limit := 8 * answeredMaxBytes / (answeredMaxEntryBytes / 4)
+	n := 0
+	note := func() {
+		t.Helper()
+		if n > limit {
+			t.Fatalf("%d newer keys noted, %d bytes held: no byte bound", n, l.bytes)
+		}
+		l.note(big(fmt.Sprintf("k%d", n), n+2, fmt.Sprintf("/k%d", n)), t0.Add(at))
+		n++
+	}
+	for held("/old") {
+		if !held("/echo/rates") {
+			t.Fatalf("after %d newer keys the kept recording, answered after old, was pushed out before it", n)
+		}
+		note()
+	}
+	if !held("/echo/rates") {
+		t.Fatal("the byte bound pushed out the kept recording with old, though it answered after old")
+	}
+	for first := n; held("/k0") || n < first+limit/4; {
+		answer()
+		note()
+		if !held("/echo/rates") {
+			t.Fatalf("a kept recording answering between the notes of %d newer keys was pushed out", n)
+		}
+		if l.bytes > answeredMaxBytes {
+			t.Fatalf("the log holds %d bytes, over its bound %d", l.bytes, answeredMaxBytes)
+		}
+		if len(l.queue) > 2*l.live+64+1 {
+			t.Fatalf("a kept recording answered %d times queues %d places for %d entries", n, len(l.queue), l.live)
+		}
+	}
+	checkAnsweredCounts(t, &l)
+	// A test that makes the call again and again, with nothing else noted
+	// between: the places it leaves are shed as it goes.
+	for i := 0; i < 10000; i++ {
+		answer()
+	}
+	if len(l.queue) > 2*l.live+64+1 {
+		t.Fatalf("a kept recording answered 10000 times on its own queues %d places for %d entries", len(l.queue), l.live)
+	}
+	checkAnsweredCounts(t, &l)
+	for held("/echo/rates") {
+		note()
+	}
+	checkAnsweredCounts(t, &l)
+}
