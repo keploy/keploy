@@ -139,6 +139,10 @@ type FinalHTTP struct {
 	// is in fact unfinished: its body cut short of its framing, or a
 	// close-delimited body the upstream reset or the client gave up on.
 	Fault *models.Fault
+	// recordOne is the recordOne mark buildHTTPMock took for the mock it
+	// built (ptRecorder.take), or nil: given back if the recording loses the
+	// mock as it is handed over (emitV2).
+	recordOne *ptMark
 }
 
 // MatchType determines if the outgoing network call is HTTP by checking for
@@ -444,9 +448,12 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 
 	// recordOne dedup, committed only now that a mock is actually being emitted:
 	// keep the first 2xx per (scope,method,host,port,path,queryKeys), drop the rest.
-	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
-		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
-		return nil
+	var recordOne *ptMark
+	if ptRecordOne && h.ptRecorder != nil {
+		if recordOne = h.ptRecorder.take(ptKey, respParsed.StatusCode); recordOne == nil {
+			h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+			return nil
+		}
 	}
 
 	// Recorded, not passed through: under the proven switch the connection's
@@ -466,7 +473,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		// Route HTTP mocks through the sync manager. The manager uses its
 		// internal first-request state to decide whether to buffer or forward
 		// mocks for correct time-window based association.
-		mgr.AddMock(newMock)
+		// A representative the manager drops is not one (ptMark.giveBack).
+		if mgr.AddMock(newMock).Dropped() {
+			recordOne.giveBack()
+		}
 		return nil
 	}
 

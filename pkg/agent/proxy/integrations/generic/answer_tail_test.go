@@ -226,16 +226,20 @@ func (c *endsAsHandedOver) Err() error {
 
 // An exchange the session leaves out as the parser hands it on at the stop
 // (the channel full, or the mock refused as the context ends) is counted once,
-// over its own span: the answer chunks after it are the rest of it. Before,
-// its tail was counted as a second mock left out.
+// over its own span: the answer chunks after it, which come after it was
+// handed on (a split: the request after it flushes it), are the rest of it.
+// Before, its tail was counted as a second mock left out. The exchange after
+// it is handed on at the stop: left out for the full channel, or taken by the
+// manager, which buffers it.
 func TestV2_AnExchangeLeftOutAsItIsHandedOnIsCountedOnceWithItsTail(t *testing.T) {
 	for _, c := range []struct {
 		name                 string
 		refused, viaSyncMock bool
+		leftOut              int64
 	}{
-		{name: "channel full at the stop"},
-		{name: "refused at the stop", refused: true},
-		{name: "refused at the stop/viaSyncMock", refused: true, viaSyncMock: true},
+		{name: "channel full at the stop", leftOut: 2},
+		{name: "refused at the stop", refused: true, leftOut: 2},
+		{name: "refused at the stop/viaSyncMock", refused: true, viaSyncMock: true, leftOut: 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ended, cancel := context.WithCancel(context.Background())
@@ -254,9 +258,11 @@ func TestV2_AnExchangeLeftOutAsItIsHandedOnIsCountedOnceWithItsTail(t *testing.T
 			}
 			asked := time.Unix(1000, 0)
 			evs := []chunkEvent{
-				clientChunk("q0", 1, asked),
-				destChunk("r0", 2, time.Unix(1001, 0)),
-				destChunk("r0-tail", 3, time.Unix(1002, 0)),
+				clientChunk("HELLO", 1, asked),
+				clientChunk("PING", 4, asked.Add(4*time.Second)),
+				destChunk("hello-reply", 2, asked.Add(2*time.Second)),
+				destChunk("hello-tail", 3, asked.Add(3*time.Second)),
+				destChunk("pong", 5, asked.Add(5*time.Second)),
 			}
 			events := make(chan chunkEvent, len(evs))
 			for _, ev := range evs {
@@ -266,8 +272,8 @@ func TestV2_AnExchangeLeftOutAsItIsHandedOnIsCountedOnceWithItsTail(t *testing.T
 			if err := pairChunkEvents(events, sess, logger); err != nil {
 				t.Fatalf("pairChunkEvents returned error: %v", err)
 			}
-			if n := mgr.MocksLeftOut(); n != 1 {
-				t.Fatalf("the manager counts %d mock(s) left out, want the exchange once, its tail with it", n)
+			if n := mgr.MocksLeftOut(); n != c.leftOut {
+				t.Fatalf("the manager counts %d mock(s) left out, want %d: the exchange once, its tail with it", n, c.leftOut)
 			}
 			if over, _ := spans.Overlaps(asked, asked); !over {
 				t.Fatal("a test case over the exchange is not left out")
