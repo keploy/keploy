@@ -817,7 +817,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				continue
 			}
 			for header, exp := range hm {
-				act, ok := actualResponse.Header[header]
+				act, ok := answerHeader(actualResponse.Header, header)
 				if !ok || act != exp {
 					pass = false
 					logger.Error("header_equal assertion failed",
@@ -836,7 +836,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				continue
 			}
 			for header, exp := range hm {
-				act, ok := actualResponse.Header[header]
+				act, ok := answerHeader(actualResponse.Header, header)
 				if !ok || !strings.Contains(act, exp) {
 					pass = false
 					logger.Error("header_contains assertion failed",
@@ -854,7 +854,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			case []interface{}:
 				for _, item := range v {
 					hdr := fmtSprint234(item)
-					if _, ok := actualResponse.Header[hdr]; !ok {
+					if _, ok := answerHeader(actualResponse.Header, hdr); !ok {
 						pass = false
 						logger.Error("header_exists assertion failed", zap.String("header", hdr))
 					}
@@ -863,7 +863,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			// a map[string]… where the keys are header names
 			case map[string]interface{}:
 				for hdr := range v {
-					if _, ok := actualResponse.Header[hdr]; !ok {
+					if _, ok := answerHeader(actualResponse.Header, hdr); !ok {
 						pass = false
 						logger.Error("header_exists assertion failed", zap.String("header", hdr))
 					}
@@ -872,7 +872,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			case map[models.AssertionType]interface{}:
 				for kt := range v {
 					hdr := string(kt)
-					if _, ok := actualResponse.Header[hdr]; !ok {
+					if _, ok := answerHeader(actualResponse.Header, hdr); !ok {
 						pass = false
 						logger.Error("header_exists assertion failed", zap.String("header", hdr))
 					}
@@ -892,7 +892,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				continue
 			}
 			for header, pattern := range hm {
-				act, ok := actualResponse.Header[header]
+				act, ok := answerHeader(actualResponse.Header, header)
 				if !ok {
 					pass = false
 					logger.Error("header_matches: header not found", zap.String("header", header))
@@ -958,6 +958,22 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 	}
 
 	return pass, res
+}
+
+// answerHeader looks up a header of the answer by name, ignoring case, as
+// HTTP header names are case-insensitive. The answer's map is keyed by Go's
+// canonical form (X-Request-Id), so an assertion that names X-Request-ID or
+// content-type would otherwise miss a header the answer carries.
+func answerHeader(header map[string]string, name string) (string, bool) {
+	if v, ok := header[name]; ok {
+		return v, true
+	}
+	for k, v := range header {
+		if strings.EqualFold(k, name) {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // supportedAssertions names the assertions AssertionMatch judges.
