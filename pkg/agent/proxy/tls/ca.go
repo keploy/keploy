@@ -29,9 +29,9 @@ import (
 	cfsslLog "github.com/cloudflare/cfssl/log"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
-	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/lru"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	nssbundle "golang.org/x/crypto/x509roots/fallback/bundle"
@@ -1923,7 +1923,7 @@ var setLogLevelOnce sync.Once
 // N concurrent CONNECT tunnels to the same host cause N parallel cert generations,
 // saturating CPU in resource-constrained environments (e.g., K8s pods).
 var (
-	certCache     *expirable.LRU[string, *tls.Certificate]
+	certCache     *lru.Expirable[string, *tls.Certificate]
 	certCacheOnce sync.Once
 )
 
@@ -1964,9 +1964,9 @@ const (
 	certCacheTTL     = 24 * time.Hour
 )
 
-func getCertCache() *expirable.LRU[string, *tls.Certificate] {
+func getCertCache() *lru.Expirable[string, *tls.Certificate] {
 	certCacheOnce.Do(func() {
-		certCache = expirable.NewLRU[string, *tls.Certificate](certCacheMaxSize, nil, certCacheTTL)
+		certCache = lru.NewExpirable[string, *tls.Certificate](certCacheMaxSize, nil, certCacheTTL)
 	})
 	return certCache
 }

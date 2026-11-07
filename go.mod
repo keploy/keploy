@@ -31,7 +31,6 @@ require (
 	github.com/google/nftables v0.3.0
 	github.com/google/uuid v1.6.0
 	github.com/gopacket/gopacket v1.4.0
-	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/invopop/yaml v0.3.1
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/k0kubun/pp/v3 v3.2.0
@@ -130,6 +129,7 @@ require (
 	github.com/h2non/filetype v1.1.3 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jmoiron/sqlx v1.4.0 // indirect
