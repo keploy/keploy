@@ -50,7 +50,8 @@ import (
 //   - a set whose first test says nowhere it dials: the same.
 //
 // No ceiling: what ends a wait that never sees its event is the watchdog. It
-// wakes once a second and counts the wake-ups in a row at which the
+// wakes soon after the wait begins, then less often, at most once a second
+// (readyWake), and counts the wake-ups in a row at which the
 // application made no progress: no listen, connect, process fork or exec by
 // its processes (in a container, its main process and what that starts; a
 // docker exec or a healthcheck is not the application), and, until it
@@ -67,16 +68,31 @@ import (
 // after the event.
 
 // readyStallLimit is the watchdog's count of wake-ups in a row with no
-// progress (design v14's lead decision: 600).
+// progress (design v14's lead decision: 600). At readyWake's delays, 600
+// wake-ups span about 594 s.
 var readyStallLimit = 600
 
-// readyWake is how the watchdog wakes; a test replaces it.
+// readyWakeFirst is how soon after the wait begins the watchdog first wakes,
+// and readyWakeMost the longest it sleeps between two wake-ups. Each wake-up
+// reads the agent and probes again: an application that listens a few
+// milliseconds after keploy started it is found then, not at the next whole
+// second.
+const (
+	readyWakeFirst = 10 * time.Millisecond
+	readyWakeMost  = time.Second
+)
+
+// readyWake is how the watchdog wakes: readyWakeFirst after the wait begins,
+// then after a pause twice the last one each time, at most readyWakeMost,
+// timed from when the wait took the last wake-up. A test replaces it.
 var readyWake = func(ctx context.Context) (<-chan struct{}, func()) {
-	t := time.NewTicker(time.Second)
 	ch := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(ch)
+		next := readyWakeFirst
+		t := time.NewTimer(next)
+		defer t.Stop()
 		for {
 			select {
 			case <-t.C:
@@ -87,6 +103,8 @@ var readyWake = func(ctx context.Context) (<-chan struct{}, func()) {
 				case <-done:
 					return
 				}
+				next = min(2*next, readyWakeMost)
+				t.Reset(next)
 			case <-ctx.Done():
 				return
 			case <-done:
@@ -94,7 +112,7 @@ var readyWake = func(ctx context.Context) (<-chan struct{}, func()) {
 			}
 		}
 	}()
-	return ch, func() { t.Stop(); close(done) }
+	return ch, func() { close(done) }
 }
 
 // readinessReader is what the wait asks keploy's agent
@@ -239,11 +257,16 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 	probes := make(chan probeResult, 1)
 	probing := false
 	lastProbe := ""
+	// wakes counts the watchdog's wake-ups, and probeFrom and readFrom
+	// their count when the probe and the read in flight began: 0 for the
+	// first look, begun at the wait's start, however many wake-ups came
+	// while it was in flight.
+	wakes, probeFrom, readFrom := 0, 0, 0
 	startProbe := func() {
 		if probing || (health == "" && !p.dial) {
 			return
 		}
-		probing = true
+		probing, probeFrom = true, wakes
 		go func() {
 			if health != "" {
 				ok, what := answers(pctx, health, healthAny)
@@ -264,7 +287,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		if p.agent == nil || reading {
 			return
 		}
-		reading, readWakes = true, 0
+		reading, readWakes, readFrom = true, 0, wakes
 		if p.tally != nil {
 			p.tally.started.Add(1)
 		}
@@ -280,10 +303,23 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 
 	var last, mark, said progressMark
 	var st models.AppReadiness
+	// firstSt is the first look's answer, the read begun at the wait's
+	// start, once in. atFirstLook says it found the application listening
+	// where the first test dials: a kept-alive one is ready at the first
+	// look (afterEvent's atOnce), whatever wake-ups and reads came before
+	// docker said which port that is (resolve).
+	var firstSt *models.AppReadiness
+	atFirstLook := func() bool {
+		if firstSt == nil {
+			return false
+		}
+		_, ok := p.listened(*firstSt)
+		return ok
+	}
 	read, first := false, true
 	restarts0 := p.since.restarts
 	lastErr := ""
-	stalls, wakes := 0, 0
+	stalls := 0
 	// pending: the last wake-up waits on its read's answer to be weighed.
 	pending := false
 	// weigh counts a wake-up as progress or not, by the latest read's
@@ -347,9 +383,12 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 			lastErr = r.err.Error()
 		default:
 			st, lastErr, read = r.st, "", true
+			if readFrom == 0 {
+				firstSt = &r.st
+			}
 			if health == "" && resolved {
 				if port, ok := p.listened(st); ok {
-					ready, why := p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), first && wakes == 0)
+					ready, why := p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), atFirstLook())
 					return ready, why, true
 				}
 			}
@@ -389,7 +428,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		}
 		if health == "" && !p.dial && read {
 			if port, ok := p.listened(st); ok {
-				ready, why = p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), wakes == 0)
+				ready, why = p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), atFirstLook())
 				return ready, why, true
 			}
 		}
@@ -420,7 +459,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		case r := <-probes:
 			probing = false
 			if r.ok {
-				return p.afterEvent(ctx, r.what, wakes == 0)
+				return p.afterEvent(ctx, r.what, probeFrom == 0)
 			}
 			lastProbe = r.what // the next probe at the next wake-up
 		case r := <-reads:

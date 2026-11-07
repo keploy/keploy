@@ -3639,6 +3639,11 @@ const (
 	agentHealthMaxWait   = 30 * time.Second
 )
 
+// agentHealthFirstLook is how soon after its start the agent health check
+// first looks: an agent up a few milliseconds after keploy started it is found
+// then, not at the first whole checkInterval (agentHealthTicker).
+const agentHealthFirstLook = 10 * time.Millisecond
+
 // nextAgentHealthWait is how long the next agent health check waits: twice the
 // last wait when that check ran out of time, up to agentHealthMaxWait, and the
 // same wait otherwise. Only a check that timed out says the answer needs longer
@@ -3659,8 +3664,10 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 	return 2 * wait
 }
 
-// AgentHealthTicker checks the agent's health endpoint every checkInterval
-// until an answer finds it healthy, sends true on agentReadyCh, and returns. It
+// AgentHealthTicker checks the agent's health endpoint until an answer finds
+// it healthy, sends true on agentReadyCh, and returns. It checks
+// agentHealthFirstLook after it starts, then after a pause twice the last one
+// each time, at most checkInterval. It
 // returns when ctx ends too, and closes agentReadyCh either way, so a receive
 // that gets false means ctx ended first.
 //
@@ -3702,12 +3709,19 @@ func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentU
 }
 
 // agentHealthTicker is the loop of the two above: it checks the agent's health
-// every checkInterval until an answer finds it healthy, hands that answer's
-// headers to ready, which reports whether it delivered them (false when ctx
-// ended first), and returns; or it returns when ctx ends.
+// until an answer finds it healthy, hands that answer's headers to ready, which
+// reports whether it delivered them (false when ctx ended first), and returns;
+// or it returns when ctx ends. The first check comes agentHealthFirstLook
+// after the start, and each pause after it is twice the last one, at most
+// checkInterval, timed from the start of the check before (one that took
+// longer is followed at once): an agent up a few milliseconds after keploy
+// started it is found then, and one slow to start is checked about once every
+// checkInterval, as a ticker of checkInterval would, after a few quicker
+// checks.
 func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, checkInterval time.Duration, ready func(http.Header) bool) {
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
+	pause := agentHealthFirstLook
+	timer := time.NewTimer(pause)
+	defer timer.Stop()
 
 	// No client-wide timeout: each check waits as long as `wait` (below).
 	client := &http.Client{}
@@ -3717,7 +3731,8 @@ func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
+			began := time.Now()
 			checkCtx, cancel := context.WithTimeout(ctx, wait)
 			header := agentHealthAnswer(checkCtx, logger, client, agentURI)
 			timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
@@ -3728,6 +3743,8 @@ func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 				wait = next
 			}
 			if header == nil {
+				pause = min(2*pause, checkInterval)
+				timer.Reset(time.Until(began.Add(pause)))
 				continue
 			}
 			if ready(header) {
