@@ -3,6 +3,8 @@ package replay
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -333,7 +335,7 @@ func (r *Replayer) exactServing() bool {
 // mappings.yaml with no source is trusted as recorded: one keploy test wrote
 // before it said so cannot be told from keploy record's.
 func (r *Replayer) provenMappings(ctx context.Context, testSetID string) (map[string][]models.MockEntry, []models.MockEntry, string, error) {
-	mappings, worker, _, _, why, err := r.provenMappingsOf(ctx, testSetID)
+	mappings, worker, _, _, why, _, err := r.provenMappingsOf(ctx, testSetID)
 	return mappings, worker, why, err
 }
 
@@ -342,18 +344,18 @@ func (r *Replayer) provenMappings(ctx context.Context, testSetID string) (map[st
 // and what it says keploy record recorded the set with
 // (models.Mapping.RecordedWith): none for a set with no such mark, and for
 // one whose ownership its test windows give.
-func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[string][]models.MockEntry, []models.MockEntry, *setConcurrency, []string, string, error) {
+func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[string][]models.MockEntry, []models.MockEntry, *setConcurrency, []string, string, *models.Mapping, error) {
 	const absent = "the test set has no mappings.yaml"
 	if r.mappingDB == nil {
-		return map[string][]models.MockEntry{}, nil, nil, nil, absent, nil
+		return map[string][]models.MockEntry{}, nil, nil, nil, absent, nil, nil
 	}
 	if mr, ok := r.mappingDB.(mappingReader); ok {
 		m, err := mr.GetMapping(ctx, testSetID)
 		if err != nil {
-			return nil, nil, nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
+			return nil, nil, nil, nil, "", nil, fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
 		}
 		if m != nil && m.Source == models.MappingSourceKeployTest {
-			return map[string][]models.MockEntry{}, nil, nil, nil, "the test set's mappings.yaml was written by keploy test, from what a replay consumed, not by keploy record", nil
+			return map[string][]models.MockEntry{}, nil, nil, nil, "the test set's mappings.yaml was written by keploy test, from what a replay consumed, not by keploy record", m, nil
 		}
 		mappings := map[string][]models.MockEntry{}
 		var worker []models.MockEntry
@@ -367,16 +369,16 @@ func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[
 			conc = concurrencyOf(m.Groups, mappings, m.Shared)
 			recordedWith = m.RecordedWith
 		}
-		return mappings, worker, conc, recordedWith, absent, nil
+		return mappings, worker, conc, recordedWith, absent, m, nil
 	}
 	mappings, _, err := r.mappingDB.Get(ctx, testSetID)
 	if err != nil {
-		return nil, nil, nil, nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
+		return nil, nil, nil, nil, "", nil, fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
 	}
 	if mappings == nil {
 		mappings = map[string][]models.MockEntry{}
 	}
-	return mappings, nil, nil, nil, absent, nil
+	return mappings, nil, nil, nil, absent, nil, nil
 }
 
 // s12Serves reports, under the proven switch (the caller's), whether background
@@ -1301,4 +1303,176 @@ func (p *exactPlan) derivedAtStop(names []string) []string {
 // recording made that the application never did.
 func workerWhy(missing []string) string {
 	return fmt.Sprintf("the application never made %d of the calls the test set's worker scope recorded (the calls no test owns: %s)", len(missing), strings.Join(missing[:min(len(missing), 20)], ", "))
+}
+
+// refuseUnknownMappingMocks checks whether the test set's mappings file names
+// mocks that the recording does not have (e.g. from a hand-edit typo).
+// Under the proven switch, a set whose mapping lists an absent mock is refused
+// before any test runs or mocks are stored on the agent, reporting where the
+// mapping names it and what to do.
+func (r *Replayer) refuseUnknownMappingMocks(ctx context.Context, testSetID string, mp *models.Mapping, worker []models.MockEntry, filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, skipped skippedDocs) error {
+	if mp == nil {
+		return nil
+	}
+	have := make(map[string]bool, len(filtered)+len(unfiltered)+len(lookup)+len(skipped.kinds))
+	for _, m := range filtered {
+		if m != nil && m.Name != "" {
+			have[m.Name] = true
+		}
+	}
+	for _, m := range unfiltered {
+		if m != nil && m.Name != "" {
+			have[m.Name] = true
+		}
+	}
+	for n := range lookup {
+		have[n] = true
+	}
+	for n := range skipped.kinds {
+		have[n] = true
+	}
+	if sm, ok := r.mockDB.(interface {
+		SkippedMocks(context.Context, string) (string, map[string]models.SkippedMock)
+	}); ok {
+		_, unread := sm.SkippedMocks(ctx, testSetID)
+		for n := range unread {
+			have[n] = true
+		}
+	}
+
+	var unknown []string
+	seen := make(map[string]bool)
+	for _, e := range worker {
+		if e.Name != "" && !have[e.Name] && !seen[e.Name] {
+			seen[e.Name] = true
+			unknown = append(unknown, e.Name)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return r.refuseUnknownMocks(ctx, testSetID, mp, unknown)
+}
+
+// refuseUnknownMocks is the refusal of a set whose mappings.yaml names mocks
+// (unknown) its recording does not have: each with where the file names it
+// (models.Mapping.MockPlaces), and what to do, for a hand edit and for a
+// recording that lost them alike.
+func (r *Replayer) refuseUnknownMocks(ctx context.Context, name string, mp *models.Mapping, unknown []string) error {
+	places := mp.MockPlaces()
+	sort.Strings(unknown)
+	dir := "keploy"
+	if r.config != nil && r.config.Path != "" {
+		d := filepath.Base(r.config.Path)
+		if d != "." && d != "/" && d != "" {
+			dir = d
+		}
+	}
+	var file string
+	var unread map[string]models.SkippedMock
+	if sm, ok := r.mockDB.(interface {
+		SkippedMocks(context.Context, string) (string, map[string]models.SkippedMock)
+	}); ok {
+		file, unread = sm.SkippedMocks(ctx, name)
+	} else {
+		unread = map[string]models.SkippedMock{}
+	}
+	if file == "" && r.config != nil && r.config.Path != "" {
+		for _, ext := range []string{"mocks.gob", "mocks.yaml", "mocks.json"} {
+			p := filepath.Join(r.config.Path, name, ext)
+			if info, err := os.Stat(p); err == nil && info.Mode().IsRegular() {
+				file = p
+				break
+			}
+		}
+	}
+	mocks := "mocks.yaml"
+	if file != "" {
+		mocks = filepath.Base(file)
+	}
+	mappings := "mappings.yaml"
+	if r.config != nil && r.config.Path != "" {
+		for _, f := range []string{"mappings.yaml", "mappings.json"} {
+			if info, err := os.Stat(filepath.Join(r.config.Path, name, f)); err == nil && info.Mode().IsRegular() {
+				mappings = f
+				break
+			}
+		}
+	}
+	var absent, unchecked, skipped []string
+	var cutShort, edited, newer, connFailure, fault, yamlOnly bool
+	for _, n := range unknown {
+		where := ""
+		if w := places[n]; len(w) > 0 {
+			where = " (under " + strings.Join(w, ", ") + ")"
+		}
+		d, ok := unread[n]
+		switch {
+		case unread == nil:
+			unchecked = append(unchecked, n+where)
+		case !ok:
+			absent = append(absent, n+where)
+		case d.Why == models.MockSkipCutShort && d.Cause != "":
+			cutShort = true
+			skipped = append(skipped, fmt.Sprintf("%s%s, the file's last line, which has no newline and whose spec does not decode (%s): keploy reads it as a write cut short", n, where, d.Cause))
+		case d.Why == models.MockSkipCutShort:
+			cutShort = true
+			skipped = append(skipped, n+where+", the file's last document, whose last line has no newline: keploy reads it as a write cut short")
+		case d.Why == models.MockSkipNoKind:
+			edited = true
+			skipped = append(skipped, n+where+", which has no kind")
+		case d.Why == models.MockSkipConnFailure:
+			connFailure = true
+			skipped = append(skipped, n+where+", a connection failure this keploy cannot replay")
+		case d.Why == models.MockSkipFault:
+			fault = true
+			skipped = append(skipped, n+where+", a call whose fault this keploy cannot enact")
+		case d.Why == models.MockSkipYAMLOnlyKind:
+			yamlOnly = true
+			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which keploy reads only from a YAML mock file", n, where, d.Kind))
+		default:
+			edited, newer = true, true
+			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which this keploy cannot read", n, where, d.Kind))
+		}
+	}
+	var why, fix []string
+	if len(skipped) > 0 {
+		why = append(why, fmt.Sprintf("%s/%s/%s has mocks %s/%s/%s names that this keploy skips: %s",
+			dir, name, mocks, dir, name, mappings, strings.Join(skipped, "; ")))
+		if cutShort {
+			if filepath.Ext(mocks) == ".json" {
+				fix = append(fix, fmt.Sprintf("If you saved %s by hand, give its last line the spec keploy wrote and end the line with a newline", mocks))
+			} else {
+				fix = append(fix, fmt.Sprintf("If you saved %s by hand, end it with a newline once its last mock is whole", mocks))
+			}
+		}
+		if edited {
+			fix = append(fix, fmt.Sprintf("If you edited %s, give each mock this keploy cannot read back the kind and spec keploy wrote", mocks))
+		}
+		if newer {
+			fix = append(fix, "If a newer keploy or keploy enterprise recorded them, upgrade keploy or use keploy enterprise")
+		}
+		if connFailure {
+			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a connection failure, upgrade keploy to replay it; if you edited one in %s, give it back the fields keploy wrote", mocks))
+		}
+		if fault {
+			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a call's fault, upgrade keploy to replay it; if you edited one in %s, give its fault back the fields keploy wrote", mocks))
+		}
+		if yamlOnly {
+			fix = append(fix, fmt.Sprintf("Keploy reads a mock of such a kind only from a YAML mock file, and one with a \"-\" in its kind only with keploy enterprise: record the set again in YAML, not as %s", mocks))
+		}
+	}
+	if len(absent) > 0 {
+		why = append(why, fmt.Sprintf("%s/%s/%s names mocks %s/%s/%s does not have: %s",
+			dir, name, mappings, dir, name, mocks, strings.Join(absent, ", ")))
+		fix = append(fix, fmt.Sprintf("If you edited %s, correct those names", mappings))
+	}
+	if len(unchecked) > 0 {
+		why = append(why, fmt.Sprintf("%s/%s/%s names mocks the replay did not read from %s/%s/%s: %s",
+			dir, name, mappings, dir, name, mocks, strings.Join(unchecked, ", ")))
+		fix = append(fix, fmt.Sprintf("Check that %s has each of them, and that keploy can read it", mocks))
+	}
+	return fmt.Errorf("keploy cannot judge each test case of %s: %s. %s; otherwise record the set again",
+		name, strings.Join(why, "; "), strings.Join(fix, ". "))
 }
