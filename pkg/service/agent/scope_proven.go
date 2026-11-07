@@ -2503,13 +2503,15 @@ func missWhyText(m models.UnmatchedCall, skippedOf map[string]string) string {
 // (differsText), with why a replay refused each it refused for a reason of
 // its own (models.UnmatchedCall.FieldReasons: a learned read of the
 // application's clock the call does not carry): " (body.since differs:
-// body.since was learned as ...)". Neither names a value.
+// body.since was learned as ...)", a few of them and how many more
+// (models.NamedWhys). Neither names a value.
 func missDiffersText(m models.UnmatchedCall) string {
 	t := differsText(models.FieldShapes(m.Differs))
 	var whys []string
 	for _, r := range models.FieldReasonShapes(m.FieldReasons) {
 		whys = append(whys, r.Why)
 	}
+	whys = models.NamedWhys(whys)
 	switch {
 	case len(whys) == 0:
 		return t

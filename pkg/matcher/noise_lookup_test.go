@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"slices"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -23,6 +24,50 @@ func TestNoiseLookup(t *testing.T) {
 	} {
 		if got := l.Covers(tc.path, tc.value, tc.scalar); got != tc.want {
 			t.Errorf("Covers(%q, %q) = %v, want %v", tc.path, tc.value, got, tc.want)
+		}
+	}
+}
+
+// Entry names the entry Covers reads for a leaf by the run of the leaf's
+// path it matches, in the path's case, and gives its patterns: the entry a
+// hint tells the user to edit, which may name the leaf by its last field or
+// its array. keploy.yml's keys arrive lowercased (viper lowercases map
+// keys), so the key the entry is held by would name "requestid" for an API
+// field "requestId", a key keploy.yml does not spell so.
+func TestNoiseLookupEntry(t *testing.T) {
+	l := NewNoiseLookup(map[string][]string{"qty": {`^\d{3}$`}, "ids": {`^\d$`}, "order.qty": {`^1$`}, "ts": {}, "requestid": {`^r-`}, "user.authcode": {`^a`}, "Mixed": {`^m`}})
+	for _, tc := range []struct {
+		path, key string
+		pats      []string
+		ok        bool
+	}{
+		{"item.qty", "qty", []string{`^\d{3}$`}, true}, // by its last field
+		{"item.Qty", "Qty", []string{`^\d{3}$`}, true}, // in the path's case
+		{"ids[]", "ids", []string{`^\d$`}, true},       // by its array
+		{"ids[].x", "ids", []string{`^\d$`}, true},     // what lies under it
+		{"order.qty", "order.qty", []string{`^1$`}, true},
+		{"ts", "ts", []string{}, true},
+		{"name", "", []string{}, false},
+		{"requestId", "requestId", []string{`^r-`}, true},
+		{"meta.requestId", "requestId", []string{`^r-`}, true},
+		{"items[].requestId", "requestId", []string{`^r-`}, true},
+		{"requestIdx", "", []string{}, false},
+		{"xrequestId", "", []string{}, false},
+		{"User.authCode", "User.authCode", []string{`^a`}, true}, // a run of two fields
+		{"a.User.authCode.b", "User.authCode", []string{`^a`}, true},
+		{"mixed", "mixed", []string{`^m`}, true}, // the configuration's case is not the path's
+		// The first run the entry names, as Covers finds it.
+		{"requestID.requestId", "requestID", []string{`^r-`}, true},
+		{"prequestId.requestId", "requestId", []string{`^r-`}, true},
+		{"xRequestId.requestId", "requestId", []string{`^r-`}, true}, // never from inside a name
+		{"RequestIdx.requestId", "requestId", []string{`^r-`}, true}, // nor to inside one
+	} {
+		key, pats, ok := l.Entry(tc.path)
+		if key != tc.key || !slices.Equal(pats, tc.pats) || ok != tc.ok {
+			t.Errorf("Entry(%q) = %q, %q, %v; want %q, %q, %v", tc.path, key, pats, ok, tc.key, tc.pats, tc.ok)
+		}
+		if pats, ok := l.Patterns(tc.path); !slices.Equal(pats, tc.pats) || ok != tc.ok {
+			t.Errorf("Patterns(%q) = %q, %v; want %q, %v", tc.path, pats, ok, tc.pats, tc.ok)
 		}
 	}
 }

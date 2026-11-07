@@ -2,7 +2,9 @@ package http
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -248,6 +250,47 @@ func TestStrictNoisePatternMissWarnsItsReason(t *testing.T) {
 	said := logs.FilterMessage("a keploy.yml noise pattern does not excuse a field").All()
 	if len(said) != 1 || !strings.Contains(said[0].ContextMap()["reason"].(string), `"^1$"`) {
 		t.Fatalf("warnings %+v; want one naming the pattern", said)
+	}
+}
+
+// However many places of a field keploy.yml's patterns refuse, the miss
+// warns once for the field, with the one reason its report gives it
+// (fieldReasons): an array of 3000 elements, each outside the patterns on
+// both sides, is one line of under 600 bytes, where each element was one
+// line before (566 KB in all).
+func TestStrictNoisePatternMissWarnsOncePerField(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	ids := func(c string, length func(int) int) string {
+		values := make([]string, 3000)
+		for i := range values {
+			values[i] = strconv.Quote(strings.Repeat(c, length(i)))
+		}
+		return `{"ids":[` + strings.Join(values, ",") + `]}`
+	}
+	json := map[string]string{"Content-Type": "application/json"}
+	rec := recorded("m", "/x", json, ids("r", func(i int) int { return i%50 + 2 }))
+	in := sent("/x", json, ids("l", func(i int) int { return (i/50)%60 + 2 }))
+	core, logs := observer.New(zap.WarnLevel)
+	h := &HTTP{Logger: zap.New(core)}
+	ok, _, _, err := h.match(context.Background(), in, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.ProvenFlakyHeaderNoise(), map[string][]string{"ids": {`^\d$`}}, nil, true, false, false, true, true)
+	if err != nil || ok {
+		t.Fatalf("match ok=%v err=%v; want the elements outside the pattern refused", ok, err)
+	}
+	if n := logs.FilterMessage("a learned read of the application's clock does not hold").Len(); n != 0 {
+		t.Fatalf("a pattern's reason was said as a clock read %d times", n)
+	}
+	said := logs.FilterMessage("a keploy.yml noise pattern does not excuse a field").All()
+	if len(said) != 1 {
+		t.Fatalf("%d warnings; want one for the field", len(said))
+	}
+	fields := said[0].ContextMap()
+	size := len(said[0].Message)
+	for k, v := range fields {
+		size += len(k) + len(fmt.Sprint(v))
+	}
+	want := "keploy.yml's noise lets body.ids[] vary only within \"^\\\\d$\"; the live values (a string of 2 bytes, a string of 3 bytes, a string of 4 bytes and 2850 more) and the recorded values (a string of 2 bytes, a string of 3 bytes, a string of 4 bytes and 2820 more) are outside it, so it is compared"
+	if fields["field"] != "body.ids[]" || fields["reason"] != want || size > 600 {
+		t.Fatalf("the warning is %d bytes: %v; want under 600, of field body.ids[] with reason %q", size, fields, want)
 	}
 }
 

@@ -53,23 +53,60 @@ func (l NoiseLookup) Covers(path, value string, scalar bool) bool {
 // Covers reads it, and whether an entry does: none for an entry that excuses
 // every value. A reason names them; Covers decides.
 func (l NoiseLookup) Patterns(path string) ([]string, bool) {
-	regs, noisy := l.idx.matchWholeFields(strings.ToLower(path))
-	out := make([]string, len(regs))
-	for i, re := range regs {
-		out[i] = re.String()
+	_, pats, ok := l.Entry(path)
+	return pats, ok
+}
+
+// Entry is Patterns with the entry that names the leaf at path, named by
+// the run of whole fields of path it matches (wholeFieldsRun), so in path's
+// own case: the noise configuration's keys are read without case, and
+// keploy.yml's arrive lowercased (viper lowercases map keys), so the key an
+// entry is held by would name, for "requestId", a key keploy.yml does not
+// spell so. A hint names the entry to edit, which may name the leaf by its
+// last field alone ("qty" for "order.qty") or name the array it is an
+// element of ("ids" for "ids[]").
+func (l NoiseLookup) Entry(path string) (key string, patterns []string, ok bool) {
+	e, noisy := l.idx.entryWholeFields(strings.ToLower(path))
+	if !noisy {
+		return "", []string{}, false
 	}
-	return out, noisy
+	return wholeFieldsRun(path, e.keyLower), regexpTexts(e.regexps), true
+}
+
+// wholeFieldsRun is the first run of whole fields of path that entry,
+// lowercase, names (namesWholeFields), as path writes it. Lowercasing maps
+// each rune alone, and no rune to or from ".", "[" or "]", so a run
+// namesWholeFields finds in the lowercased path is one here; were there
+// none, "" would name the entry by the path (mismatch.PatternMiss.Entry).
+func wholeFieldsRun(path, entry string) string {
+	for i := 0; i < len(path); i++ {
+		if i > 0 && path[i-1] != '.' {
+			continue
+		}
+		for end := i + 1; end <= len(path); end++ {
+			if (end == len(path) || path[end] == '.' || strings.HasPrefix(path[end:], "[]")) && strings.ToLower(path[i:end]) == entry {
+				return path[i:end]
+			}
+		}
+	}
+	return ""
 }
 
 // matchWholeFields is match with entries naming whole fields (namesWholeFields):
 // the first, most specific, entry that does wins.
 func (ni noiseIndex) matchWholeFields(keyLower string) (regs []*regexp.Regexp, isNoisy bool) {
+	e, ok := ni.entryWholeFields(keyLower)
+	return e.regexps, ok
+}
+
+// entryWholeFields is the entry matchWholeFields reads.
+func (ni noiseIndex) entryWholeFields(keyLower string) (noiseEntry, bool) {
 	for _, e := range ni.entries {
 		if namesWholeFields(keyLower, e.keyLower) {
-			return e.regexps, true
+			return e, true
 		}
 	}
-	return nil, false
+	return noiseEntry{}, false
 }
 
 // namesWholeFields reports whether entry occurs in path as a run of whole

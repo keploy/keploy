@@ -2513,6 +2513,22 @@ func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
 	bare := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}}})
 	require.Equal(t, since, bare.NextSteps)
 
+	// However many fields a replay refused, the test's reason and the
+	// next step name the first three reasons and count the rest, so each
+	// stays small.
+	var many []models.FieldReason
+	for i := 0; i < 60; i++ {
+		f := "header.x-f" + strconv.Itoa(i)
+		many = append(many, models.FieldReason{Field: f, Why: "keploy.yml's noise lets " + f + " vary only within \"^x$\"; the live value (a string of 2 bytes) is outside it, so it is compared"})
+	}
+	whys := many[0].Why + "; " + many[1].Why + "; " + many[2].Why + "; and 57 more reasons"
+	sixty := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", FieldReasons: many}}}, nil, time.Time{})
+	require.Contains(t, sixty, "GET /x had no recorded answer ("+whys+")")
+	require.NotContains(t, sixty, many[3].Why)
+	capped := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: "re-record the test", FieldReasons: many})
+	require.Equal(t, "re-record the test ("+whys+")", capped.NextSteps)
+	require.Len(t, capped.FieldReasons, 60, "the evidence keeps every reason; the text names a few")
+
 	// A Postgres miss's place names (bind.$N, literal.N) are positions, not
 	// values: its why reaches the test's reason, with the place it names.
 	bound := "bind.$1 was learned as clock, a read of the application's clock, and the call sends no value there: it changed"
