@@ -1930,6 +1930,28 @@ type RunPlacer interface {
 	ClaimHold(name string) bool
 }
 
+// SetFollower is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
+// MockManager implements it) for a parser that keeps what the application wrote
+// across a test set's tests and reads the whole set's recordings to do it.
+//
+//   - RecordingsReadable is the staging epoch (WindowPacer.StagingEpoch) whose
+//     recordings RecordedBeforeReader reads whole. Between a staging and the
+//     wiring of the agent's on-disk store that reader answers from the trees
+//     alone, with no error, so a parser reads it only once this equals the
+//     staging epoch. The gap is a staging's own few steps.
+//   - TestCycle counts the times a test of the staging opened again
+//     (--retry-passing-test): a parser that keeps state across tests rewinds it
+//     as the replay rewinds consumed mocks. A new staging counts from zero.
+//   - ExcuseRecording takes the recording name out of its test's outcome, so
+//     the test is not told a call was left unmade: the parser's own ledger
+//     answered that call in another test or between tests, and holds the set
+//     to it. It lasts for the staging.
+type SetFollower interface {
+	RecordingsReadable() uint64
+	TestCycle() uint64
+	ExcuseRecording(name string)
+}
+
 // CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
 // agent's MockManager implements it) for a parser whose kind registered a
 // carry-over predicate (models.RegisterCarryOver). It returns, in recorded

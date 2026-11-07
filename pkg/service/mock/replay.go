@@ -280,6 +280,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// A session of its own: what an agent kept from an earlier one
 		// recorded consumed is that session's.
 		StartsTestSet:             true,
+		RedisDrawn:                m.config.Redis.DrawnKeys(),
 		Rules:                     m.config.BypassRules,
 		MongoPassword:             m.config.Test.MongoPassword,
 		SQLDelay:                  time.Duration(m.config.Test.Delay) * time.Second,

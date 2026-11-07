@@ -293,6 +293,11 @@ func (a *Agent) readUnstagedFromDisk() error {
 			return fmt.Errorf("set the test set's recording times: %w", err)
 		}
 	}
+	if rr, ok := a.Proxy.(coreAgent.RecordingsReadableMarker); ok {
+		if err := rr.MarkRecordingsReadable(); err != nil {
+			return fmt.Errorf("say the test set's recordings can be read: %w", err)
+		}
+	}
 	return nil
 }
 

@@ -963,6 +963,14 @@ type RecordedBeforeSetter interface {
 	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
 }
 
+// RecordingsReadableMarker is implemented by a proxy whose parsers read the
+// whole staged set (integrations.SetFollower): MarkRecordingsReadable, called
+// once the agent has set where the set's on-disk recordings are read, says they
+// can all be read now.
+type RecordingsReadableMarker interface {
+	MarkRecordingsReadable() error
+}
+
 // LearnSetWarmer is implemented by a proxy whose learn step reads the staged
 // set's recordings before its tests' calls do: WarmLearnSet, called once the
 // set is staged and its on-disk recordings are set (RecordedBeforeSetter),
