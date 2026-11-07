@@ -106,6 +106,8 @@ worker:
       reason: sent before o::TestA began
       owner: o::TestA
       drift: true
+      trails: o::TestA
+      notRequired: never read
 source: keploy-test
 groups:
     - id: g1
