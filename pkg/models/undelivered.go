@@ -12,8 +12,11 @@ package models
 // that decides what a test or the worker scope requires (the derived
 // mappings, the mappings keploy mock record and a --sync recording write, the
 // replay's plan, the agent's exact view of a test's own mocks); no test is
-// judged for it (the per-test assertion); and the prune of unused mocks keeps
-// it, as nothing ever consumes it. It stays a data-plane mock to every site
+// judged for it (the per-test assertion); the prune of unused mocks keeps
+// it, as nothing ever consumes it; and its loss on the way to the recording,
+// a drop or a session that leaves it out, leaves out no test case (syncMock's
+// OnDrop is not told of it; supervisor's ReportLeftOut records no span for
+// it). It stays a data-plane mock to every site
 // that serves or matches (IsProtocolPhase does not read the tag), so no path
 // that serves protocol-phase mocks ever takes it for one.
 const MetadataUndeliveredKey = "undelivered"

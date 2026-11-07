@@ -1223,8 +1223,12 @@ func ResetLeftOutWarningsForTest() { leftOutWarns.Reset() }
 // counted and logged, with spanRecorded false, and its next_step says that no
 // test case was left out for it. So a span handed to RecordOrphanWindow, and
 // so to a Session.Orphans the caller implements, always has a start and never
-// ends before it. A nil m is reported as a mock with no times: the flag it was
-// left out for has been taken, so it must still be counted. Nil-safe.
+// ends before it. An answer the client never read (models.Mock.IsUndelivered)
+// gets no span either: no replay serves it and no test case needs it, so its
+// loss leaves out none. It is counted and logged the same way, with
+// spanRecorded false and a next_step that says so (leftOutUnreadNextStep). A
+// nil m is reported as a mock with no times: the flag it was left out for has
+// been taken, so it must still be counted. Nil-safe.
 func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 	if s == nil {
 		return
@@ -1232,7 +1236,8 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 	if m == nil {
 		m = &models.Mock{}
 	}
-	spanned := s.spanLeftOut(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+	unread := m.IsUndelivered()
+	spanned := !unread && s.spanLeftOut(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	s.manager().NoteMockLeftOut()
 	if s.OnPendingCleared != nil {
 		s.OnPendingCleared()
@@ -1252,7 +1257,11 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 	if held > 0 {
 		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
 	}
-	s.Logger.Warn(LeftOutWarnMsg, append(fields, zap.String("next_step", leftOutNextStep(class, spanned)))...)
+	next := leftOutNextStep(class, spanned)
+	if unread {
+		next = leftOutUnreadNextStep(class)
+	}
+	s.Logger.Warn(LeftOutWarnMsg, append(fields, zap.String("next_step", next))...)
 }
 
 // ReportLeftOutPart reports a part of an exchange already reported left out
@@ -1556,25 +1565,41 @@ func leftOutClass(cause string) string {
 // parser got to the exchange lacks the mock. With none (a mock with no request
 // time), none is left out for it, and each one lacks the mock (ReportLeftOut).
 func leftOutNextStep(class string, spanned bool) string {
-	next := "the app's traffic is unaffected. Test cases recorded over this exchange that were not saved yet when the agent " +
-		"parsed it are left out of the recording; one saved before then (this connection's parser was behind the " +
-		"traffic) lacks this mock, and its replay fails with no_mocks. "
 	if !spanned {
-		next = "the app's traffic is unaffected. This mock carries no request time, so no span was recorded for it and no " +
+		return "the app's traffic is unaffected. This mock carries no request time, so no span was recorded for it and no " +
 			"test case is left out for it: each test case recorded over this exchange lacks this mock, and its replay " +
-			"fails with no_mocks. "
+			"fails with no_mocks. " + leftOutKnob(class)
 	}
+	return "the app's traffic is unaffected. Test cases recorded over this exchange that were not saved yet when the agent " +
+		"parsed it are left out of the recording; one saved before then (this connection's parser was behind the " +
+		"traffic) lacks this mock, and its replay fails with no_mocks. " + leftOutKnob(class)
+}
+
+// leftOutUnreadNextStep is ReportLeftOut's next_step for an answer the client
+// never read (models.Mock.IsUndelivered) left out for a cause of class: no
+// replay serves it and no test case needs it, so no span was recorded for it,
+// and no test case is left out for it or lacks it.
+func leftOutUnreadNextStep(class string) string {
+	return "the app's traffic is unaffected. This mock is an answer the client never read (tagged undelivered): no " +
+		"replay serves it and no test case needs it, so no span was recorded for it, and no test case is left out " +
+		"for it or lacks it. " + leftOutKnob(class)
+}
+
+// leftOutKnob is the part of a left-out mock's next_step that fits the class
+// of its cause (leftOutClass): why it could not be recorded, and the setting to
+// change, if any.
+func leftOutKnob(class string) string {
 	switch class {
 	case leftOutMemoryPressure:
-		return next + "reason=memory_pressure: the agent ran short of memory and dropped capture; give it more memory " +
+		return "reason=memory_pressure: the agent ran short of memory and dropped capture; give it more memory " +
 			"(raise --memory-limit), or lower the recorded traffic (enable sampling, reduce request concurrency)"
 	case leftOutPerConnCap:
-		return next + "reason=per_conn_cap: this connection's capture buffer was full, so its parser was a full buffer " +
+		return "reason=per_conn_cap: this connection's capture buffer was full, so its parser was a full buffer " +
 			"behind the traffic, and the mock left out is the next one it parsed, which can be from an exchange before " +
 			"the lost chunk: test cases over it may have been saved already. Raise " +
 			"record.recordBuffer.maxMemoryPerConnection (env KEPLOY_RECORD_MAX_MEMORY_PER_CONN)"
 	case leftOutDesynced:
-		return next + "reason=desynced: this connection lost a chunk earlier, to per_conn_cap or memory_pressure, and its " +
+		return "reason=desynced: this connection lost a chunk earlier, to per_conn_cap or memory_pressure, and its " +
 			"parser cannot re-align after a hole, so its capture stopped there in that direction: every later chunk in it " +
 			"is refused, and each mock its parser still emits after a refused chunk is left out, including ones from " +
 			"exchanges captured whole before the loss. The setting to change is that loss's (its left-out WARN and the " +
@@ -1582,22 +1607,22 @@ func leftOutNextStep(class string, spanned bool) string {
 			"per_conn_cap, raise record.recordBuffer.maxMemoryPerConnection (env KEPLOY_RECORD_MAX_MEMORY_PER_CONN); for " +
 			"memory_pressure, give the agent more memory (raise --memory-limit)"
 	case leftOutUnansweredCause:
-		return next + "The request these bytes answer was in flight when the capture of this already open connection " +
+		return "The request these bytes answer was in flight when the capture of this already open connection " +
 			"began (the recording started, a TLS hook attached, or the agent restarted, while it was sent), so it was never " +
 			"captured: there is no setting to change, and the connection's later exchanges are recorded each with its own answer"
 	case leftOutReset:
-		return next + "reason=http2 stream reset: the call was reset (RST_STREAM) before it completed, so there is no " +
+		return "reason=http2 stream reset: the call was reset (RST_STREAM) before it completed, so there is no " +
 			"whole exchange to record, and a replay cannot reproduce the reset; the capture lost nothing. The reason " +
 			"says who reset the call, with the code, and which half of it had not ended. A client's CANCEL is usually " +
 			"its deadline: raise it and re-record. A server's reset is a call it failed or abandoned: its logs say why"
 	case leftOutClientClosed:
-		return next + "reason=the client closed partway: the app closed the connection before it had read the whole " +
+		return "reason=the client closed partway: the app closed the connection before it had read the whole " +
 			"response (its timeout, a cancelled call, or it wanted only the start; or its process exited, or the " +
 			"recording's stop closed it, with the call in flight), so there is no whole exchange to " +
 			"record, and a replay cannot reproduce the cut; the capture lost nothing. If the call timed out, raise the " +
 			"app's timeout for it and re-record"
 	}
-	return next + "Re-run with --debug to see each mock left out and why it could not be recorded"
+	return "Re-run with --debug to see each mock left out and why it could not be recorded"
 }
 
 // enforceReqMonotonic clamps m.Spec.ReqTimestampMock to at least
