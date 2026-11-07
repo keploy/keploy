@@ -240,7 +240,7 @@ func WriteFileInRecording(root, path string, data []byte, perm fs.FileMode) erro
 func MkdirAllInRecording(root, path string, perm fs.FileMode) error {
 	if root != "" {
 		if err := utils.MkdirRecordingDir(root, perm); err != nil {
-			return err
+			return changeRefused(root, path, err)
 		}
 	}
 	return changeInRecording(root, path, func(r *os.Root, rel string) error {
