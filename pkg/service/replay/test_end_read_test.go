@@ -2,6 +2,8 @@ package replay
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"slices"
 	"sync"
 	"testing"
@@ -47,6 +49,68 @@ func (h endReadHooks) GetConsumedMocks(ctx context.Context) ([]models.MockState,
 		h.reads.note("consumed set end")
 	}
 	return h.prHooks.GetConsumedMocks(ctx)
+}
+
+// namedReads notes the test each read of the misses names ("" for none).
+type namedReads struct {
+	Instrumentation
+	mu    sync.Mutex
+	tests []string
+}
+
+func (r *namedReads) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	test, _ := models.TestEndRead(ctx)
+	r.mu.Lock()
+	r.tests = append(r.tests, test)
+	r.mu.Unlock()
+	return r.Instrumentation.GetMockErrors(ctx)
+}
+
+// A streamed test's read of its misses names it too: it is made on a path of
+// its own, after the stream is compared.
+func TestRunTestSet_AStreamedTestsReadNamesItsTest(t *testing.T) {
+	const line = `{"n":1}`
+	app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
+		mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
+			a.record(r)
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, line+"\n")
+		})
+	})
+	h := newTmplHarness(t, &tmplConf{}, []*models.TestCase{
+		tmplCase(1, app.addr, "GET", "/events", nil, "", models.HTTPResp{
+			StatusCode: 200, StatusMessage: "OK",
+			Header:     map[string]string{"Content-Type": "application/x-ndjson"},
+			Body:       line,
+			StreamBody: []models.HTTPStreamChunk{{Data: []models.HTTPStreamDataField{{Key: "raw", Value: line}}}},
+		}),
+	}, nil)
+	reads := &namedReads{Instrumentation: h.r.instrumentation}
+	h.r.instrumentation = reads
+	h.run(t)
+	if len(app.sent("GET", "/events")) != 1 {
+		t.Fatal("precondition: the streamed test was not sent")
+	}
+	reads.mu.Lock()
+	defer reads.mu.Unlock()
+	if !slices.Contains(reads.tests, "test-1") {
+		t.Fatalf("the replay's reads named %q, want test-1", reads.tests)
+	}
+}
+
+// A test's early exit reads its misses through attachMockErrors: that read
+// names the test too.
+func TestAttachMockErrors_NamesItsTest(t *testing.T) {
+	h := newPartialRunHarness(t, 1, 0)
+	reads := &namedReads{Instrumentation: h.instr}
+	h.replayer.instrumentation = reads
+	h.replayer.attachMockErrors(context.Background(), "test-set-0", "test-9", &models.TestResult{})
+	reads.mu.Lock()
+	defer reads.mu.Unlock()
+	if !slices.Equal(reads.tests, []string{"test-9"}) {
+		t.Fatalf("the read named %q, want test-9", reads.tests)
+	}
 }
 
 // Each test's read of its misses names the test whose end it is, with the
