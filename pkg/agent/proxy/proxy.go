@@ -400,6 +400,12 @@ type Proxy struct {
 	// replaced, by ResetRecordedDNSMocks.
 	nodataRelayLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
 
+	// unansweredForwardLogged dedupes the WARN for a query no upstream
+	// answered (logUnansweredForward) to once per (name,qtype) every 30
+	// minutes; the rest are Debug. Same shape, lifetime and reset as
+	// nodataRelayLogged.
+	unansweredForwardLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
+
 	// The DNS servers, set by startDNSServers before anything serves or
 	// stops them.
 	tcpDNS, udpDNS *dnsServer
@@ -1103,6 +1109,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		dnsCache:                  newDNSCache(),
 		recordedDNSMocks:          newRecordedDNSMocksCache(),
 		nodataRelayLogged:         newNodataRelayLogCache(),
+		unansweredForwardLogged:   newNodataRelayLogCache(),
 		mysqlPorts:                newMysqlPortRegistry(),
 		// dnsForwardTimeout is the per-forward deadline for upstream DNS
 		// exchanges. 2 s is long enough to absorb a single UDP retransmit
@@ -1634,16 +1641,16 @@ func (p *Proxy) GetIntegrations() map[integrations.IntegrationType]integrations.
 
 // ResetRecordedDNSMocks clears the per-session DNS deduplication trackers.
 // This should be called when starting a new recording session so DNS mocks are
-// recorded fresh, and so the once-per-(name,qtype) NODATA relay notice is
-// re-surfaced for the new session instead of being suppressed by state left
-// over from the previous one.
+// recorded fresh, and so the once-per-(name,qtype) notices (the NODATA relay
+// and the unanswered upstream forward) are re-surfaced for the new session
+// instead of being suppressed by state left over from the previous one.
 //
 // Purges in place rather than reallocating. expirable.NewLRU with a non-zero
 // TTL starts a janitor goroutine whose done channel is never closed (see the
 // note in hashicorp/golang-lru v2's expirable_lru.go), and that goroutine
 // captures the cache — so every replacement cache would strand a goroutine
-// AND pin the discarded entries beyond the reach of the GC. Purge keeps both
-// trackers at one allocation for the process lifetime, and avoids swapping a
+// AND pin the discarded entries beyond the reach of the GC. Purge keeps the
+// trackers at one allocation each for the process lifetime, and avoids swapping a
 // pointer that the DNS handler goroutines read concurrently.
 func (p *Proxy) ResetRecordedDNSMocks() {
 	if p.recordedDNSMocks != nil {
@@ -1651,6 +1658,9 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 	}
 	if p.nodataRelayLogged != nil {
 		p.nodataRelayLogged.Purge()
+	}
+	if p.unansweredForwardLogged != nil {
+		p.unansweredForwardLogged.Purge()
 	}
 	p.logger.Debug("DNS deduplication trackers reset")
 }
