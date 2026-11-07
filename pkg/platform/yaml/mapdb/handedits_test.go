@@ -435,9 +435,9 @@ func TestCaseMapsKeepTheirComments(t *testing.T) {
 // A case the rewrite no longer holds takes its comments with it, and the
 // count says so; a comment never moves to another case or another list. A
 // case's list names its mocks: a comment follows its mock through a rename,
-// and stays off a call that holds the name now (EncodeOver's renames), as a
-// note on a mock entry does. Mutation: match a case's mocks by their old
-// names; count a mock renames lacks.
+// and stays off a call that holds the name now (EncodeOver's renames), or an
+// entry with no name, as a note on a mock entry does. Mutation: match a
+// case's mocks by their old names; count a mock renames lacks; look one up.
 func TestACaseMapCommentStaysOnItsOwnCaseAndMock(t *testing.T) {
 	eachSwitch(t, func(t *testing.T) {
 		decode := func() *models.Mapping {
@@ -486,13 +486,24 @@ func TestACaseMapCommentStaysOnItsOwnCaseAndMock(t *testing.T) {
 		if !strings.Contains(string(got), "- mock-0 # the login call\n") || unkept.Comments != 3 {
 			t.Errorf("Comments = %d, want the 3 on the mock not carried:\n%s", unkept.Comments, got)
 		}
+
+		// A mock not carried names no entry of the new file, not even one
+		// keploy writes with no name.
+		m = decode()
+		m.TestCases[0].CaseMocks["case-1"] = append(m.TestCases[0].CaseMocks["case-1"], "")
+		got, unkept, err = EncodeOver(m, []byte(caseMapsFile), map[string]string{"mock-0": "mock-0"})
+		must(t, err)
+		if strings.Contains(string(got), "the first read") || unkept.Comments != 3 {
+			t.Errorf("Comments = %d, want the 3 on the mock not carried, none on the entry with no name:\n%s", unkept.Comments, got)
+		}
 	})
 }
 
 // A value or a whole file a person wrote in another shape than keploy writes
 // holds nothing a comment can stay on: the comment is counted, and never lands
 // on an item or a key of keploy's value. Mutation: walk old and new of
-// different kinds; read a file that holds no mapping as one with no edits.
+// different kinds; read a list as a mapping, whose pairs of keploy's keys
+// leave its last item unread and the file taken for one with no edits.
 func TestACommentOnAValueOfAnotherShapeIsCounted(t *testing.T) {
 	const test = "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: s\ntests:\n    - id: o::TestA\n"
 	eachSwitch(t, func(t *testing.T) {
@@ -502,7 +513,7 @@ func TestACommentOnAValueOfAnotherShapeIsCounted(t *testing.T) {
 		for name, old := range map[string]string{
 			"a map where keploy writes a list":  test + "      cases:\n        case-1: a # a note\n        case-2: b\n",
 			"a list where keploy writes a map":  test + "      case_mocks:\n        - case-1 # a note\n",
-			"a list where keploy writes a file": "- a # a note\n- b\n",
+			"a list where keploy writes a file": "- version\n- kind\n- test_set_id # a note\n",
 		} {
 			got, unkept, err := EncodeOver(m, []byte(old), nil)
 			must(t, err)
