@@ -598,9 +598,6 @@ func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 	if err := os.Remove(gone); err != nil {
 		t.Skipf("this system keeps a working directory from being removed: %v", err)
 	}
-	if _, err := os.Getwd(); err == nil {
-		t.Skip("this system still reads a working directory that was removed")
-	}
 
 	core, logs := observer.New(zapcore.InfoLevel)
 	c := NewCmdConfigurator(zap.New(core), config.New())
