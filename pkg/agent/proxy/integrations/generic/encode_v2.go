@@ -218,9 +218,13 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// Chunks after an exchange left out are the rest of it, counted and
 	// spanned with it already: reported again, they would count a mock
 	// twice, and span time its test cases need not span. That holds for an
-	// exchange flushMock leaves out (the capture's incomplete flag) and for
+	// exchange flushMock leaves out (the capture's incomplete flag), for
 	// one the session leaves out as flushMock hands it on (emitV2: refused,
-	// or the channel full, at the stop). A held exchange (preambleHold) the
+	// or the channel full, at the stop), and for one the session's manager
+	// drops as it is handed on (the output closed, or at its byte bound),
+	// which it counted and the session spanned. Memory pressure is not among them: every Generic
+	// mock derives as the session's, which it keeps. A held exchange
+	// (preambleHold) the
 	// session leaves out as the hold hands it on is counted apart from its
 	// tail: counted once more, its span only wider (fail-closed).
 	var flushedLeftOut bool
@@ -901,11 +905,12 @@ const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange r
 // it. Before, every exchange recorded after the stop was refused, with a
 // Debug line only. A mock refused all the same (the context ended between
 // this check and EmitMock's own) is left out with its reason, counted and
-// spanned, never dropped with nothing said. It returns whether m was left
-// out, by the session (EmitMockOutcome) or here.
-func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) (leftOut bool) {
+// spanned, never dropped with nothing said. It returns whether m was lost:
+// left out, by the session or here, or dropped by the session's manager as it
+// was handed over (EmitMockOutcome), which counted it.
+func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) (lost bool) {
 	atStop := sess.Ctx != nil && sess.Ctx.Err() != nil
-	leftOut, err := sess.EmitMockOutcome(m, atStop)
+	lost, err := sess.EmitMockOutcome(m, atStop)
 	if err != nil {
 		if logger != nil {
 			logger.Debug("generic v2: the session refused a mock as its context ended", zap.Error(err))
@@ -913,7 +918,7 @@ func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) (leftO
 		sess.ReportLeftOut(m, leftOutRefusedAtStop)
 		return true
 	}
-	return leftOut
+	return lost
 }
 
 // readStream pumps Chunks from one FakeConn onto its direction's events, out,

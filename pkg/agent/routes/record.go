@@ -584,6 +584,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// life. None is ever taken back, so this session's are what that count
 	// grows by from here.
 	mocksLeftOutBefore := syncmgr.Get().MocksLeftOut()
+	// The manager's drop counts are of its life too, and it outlives a
+	// session: what they grew by is this session's, so a drop at one
+	// session's stop is not reported as the next one's loss.
+	_, pressureDroppedBefore, addedBefore, _ := syncmgr.Get().GetDropStats()
+	capacityDroppedBefore := syncmgr.Get().DropCount()
 	// The requests the ingress did not record because the memory guard had
 	// paused recording (NoteNotRecordedUnderPressure), counted the same way.
 	notRecordedBefore := syncmgr.Get().NotRecordedUnderPressure()
@@ -952,7 +957,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			zap.Int("orphan_ranges_total", orphanRecorded),
 			zap.Int("orphan_spans_closed", orphanClosed),
 			zap.Int("orphan_ranges_still_open", orphanOpen),
-			zap.Int64("mocks_dropped_by_pressure", finalDropped),
+			zap.Int64("mocks_dropped_by_pressure", finalDropped-pressureDroppedBefore),
 			// Requests the ingress did not record because the memory guard
 			// had paused recording when they came (the WARN above names
 			// their connections).
@@ -994,8 +999,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// recording stopped is in the orphan spans above, not
 			// here: it was never parsed into mocks to count.
 			zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()-mocksLeftOutBefore),
-			zap.Int64("mocks_added_successfully", finalAdded),
-			zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
+			zap.Int64("mocks_added_successfully", finalAdded-addedBefore),
+			zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()-capacityDroppedBefore),
 			zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
 			zap.Int("tcs_released_unsettled", tcsUnsettled),
 			zap.Uint64("tcs_left_out_in_flight", leftOutInFlight),

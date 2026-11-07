@@ -96,12 +96,11 @@ func TestCapacityDropOnClosedChannelRecordsOwner(t *testing.T) {
 	if !mgr.WasMockDroppedForTC("test-closed") {
 		t.Fatalf("a send to a closed outChan must record the owning TC for suppression")
 	}
-	// The closed-channel path is an early return, not the budget branch, so
-	// DropCount() (budget drops only) stays 0 — the owner ledger is the
-	// signal here. Pin that contract explicitly: a closed-channel drop must
-	// NOT touch the send-budget drop counter.
-	if got := mgr.DropCount(); got != 0 {
-		t.Fatalf("closed-channel drop is an early return, not the budget branch: expected DropCount()==0, got %d", got)
+	// A closed channel's drop is a capacity drop as the others are: counted
+	// (DropCount, the record summary's mocks_dropped_capacity) and said.
+	// Before, it was neither: a mock lost there left no trace but its owner.
+	if got := mgr.DropCount(); got != 1 {
+		t.Fatalf("a send to a closed outChan counted %d drops; want 1", got)
 	}
 	if mgr.WasMockDroppedForTC("test-other") {
 		t.Fatalf("closed-channel drop must not record an unrelated TC")

@@ -923,9 +923,10 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 //     cancels AFTER the AddMock call starts, AddMock runs to completion
 //     (buffers the mock, or hands it to the manager's out queue, which
 //     never blocks it) and EmitMock returns nil. AddMock may also
-//     drop the mock under backpressure/memory-pause without signalling
-//     the caller — the drop is recorded on the manager's drop counter
-//     instead. This is a deliberate asymmetry: the syncMock manager
+//     drop the mock as it is handed over (memory pressure, the output
+//     closed or at its byte bound): the manager counts it and says which
+//     mock and why, and EmitMockOutcome tells the caller (lost), but
+//     EmitMock returns nil for it, as the mock was not refused. This is a deliberate asymmetry: the syncMock manager
 //     owns its own lifecycle so best-effort delivery with ctx-probe
 //     on entry is the cleanest fit; forcing ctx through would
 //     require threading it into every AddMock call site in the legacy
@@ -978,14 +979,26 @@ func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
 }
 
 // EmitMockOutcome is EmitMock, or EmitMockOnShutdown when shutdown is set,
-// saying also whether the session left m out (ReportLeftOut) instead of
-// handing it on: for the capture's incomplete flag (LeaveOutIfIncomplete), or
-// at shutdown for a full channel (LeftOutChannelFullAtStop). A mock refused
-// (err set) is neither handed on nor left out: what to do with it is the
-// caller's. A parser that reports the rest of an exchange as left out unless
-// the exchange itself was left out asks this, so it counts the exchange
-// once.
-func (s *Session) EmitMockOutcome(m *models.Mock, shutdown bool) (leftOut bool, err error) {
+// saying also whether m was lost instead of taken by the recording: the
+// session left it out (ReportLeftOut), for the capture's incomplete flag
+// (LeaveOutIfIncomplete) or at shutdown for a full channel
+// (LeftOutChannelFullAtStop), or the session's manager dropped it as it was
+// handed over (syncMock.SyncMockManager.AddMock's MockDrop: memory pressure,
+// the output closed or at its byte bound), which the manager counts and says,
+// naming the mock and why. Either way m is counted once, and the test cases
+// over it are left out: a mock the manager dropped is not counted again as
+// left out, and the session spans it, unless memory pressure's spans cover it
+// already or the client never read it. A mock refused (err set) is
+// neither taken nor lost: what to do with it is the caller's. A parser that
+// says it kept a mock says so only when this says it was not lost, and one
+// that reports the rest of an exchange as left out unless the exchange itself
+// was lost asks this, so it counts the exchange once.
+//
+// So not lost means taken, and no more: what befalls m after (a drop on its way
+// out, memory pressure letting it go) is decided after this returns, and a
+// claim to have kept m holds as of the hand-over (syncMock.MockDrop says what
+// the manager counts and says of each).
+func (s *Session) EmitMockOutcome(m *models.Mock, shutdown bool) (lost bool, err error) {
 	return s.emitMockCore(m, shutdown)
 }
 
@@ -1094,11 +1107,24 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 				}
 			}
 		}
-		mgr.AddMock(m)
+		drop := mgr.AddMock(m)
+		// Pending work is cleared for a mock the manager dropped too: the
+		// parser has consumed its input.
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}
-		return false, nil
+		if !drop.Dropped() {
+			return false, nil
+		}
+		// Counted and said by the manager, and lost to the caller
+		// (EmitMockOutcome). A drop for the output has no owner yet, so
+		// nothing else leaves out the test cases over it: spanned here, as
+		// a mock left out is. Pressure's own spans cover its drops, and an
+		// answer the client never read costs no test case.
+		if drop != syncMock.MockDroppedUnderPressure && !m.IsUndelivered() {
+			s.spanLeftOut(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+		}
+		return true, nil
 	}
 
 	if s.Mocks == nil {

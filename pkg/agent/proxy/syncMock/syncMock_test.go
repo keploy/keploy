@@ -942,13 +942,14 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 		t.Errorf("first-drop Error missing LOSSY wording: %q", first.Message)
 	}
 
-	// Now drive dropCount up to the next sampler milestone (1024)
+	// Now drive overflowDrops, what an overflow is sampled on, up to the
+	// next sampler milestone (1024)
 	// without a drained send per drop, then walk
 	// sendToOutChan once more to fire the n==1024 branch. The
 	// emitted message must be the TERSE default — without "LOSSY"
 	// — so the sampled telemetry doesn't drown a stuck consumer's
 	// goroutine in the long actionable string.
-	mgr.dropCount.Store(sendDropSampleRate - 1) // next Add brings n to 1024
+	mgr.overflowDrops.Store(sendDropSampleRate - 1) // next Add brings n to 1024
 	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
 	waitOutQueue(t, mgr)
 	if logs.Len() != 2 {
