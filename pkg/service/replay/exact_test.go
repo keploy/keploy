@@ -501,7 +501,9 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 	t.Cleanup(func() { workerStallLimit, workerWake = prevLimit, prevWake })
 	workerStallLimit = 3
 	wakes := make(chan time.Time)
-	workerWake = func(context.Context) (<-chan time.Time, func()) { return wakes, func() {} }
+	workerWake = func(context.Context) (func() <-chan time.Time, func()) {
+		return func() <-chan time.Time { return wakes }, func() {}
+	}
 	plan := func() *exactPlan {
 		p := newExactPlan(nil, []models.MockEntry{{Name: "w-1"}, {Name: "w-2"}, {Name: "w-shutdown", AtStop: true}},
 			[]*models.Mock{{Name: "w-1"}, {Name: "w-2"}, {Name: "w-shutdown"}})
@@ -622,6 +624,94 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 			t.Fatal("a failed read was not returned: the calls would be reported as never made")
 		}
 	})
+}
+
+// A worker call answered as the set's last test ends (a consumer's poll sent
+// in the last test and answered just after it) ends the set's end's wait for
+// the worker scope soon after, not at the next whole second: the wait reads
+// what the agent consumed first after workerWakeFirst. The row uses the real
+// wake-ups; a wait that still took a second's tick before its first read
+// takes 1 s here.
+func TestTheSetsEndReadsAWorkerCallAnsweredAsItsWaitBeginsSoon(t *testing.T) {
+	p := newExactPlan(nil, []models.MockEntry{{Name: "w-poll"}}, []*models.Mock{{Name: "w-poll"}})
+	p.bootSeen = true
+	reads := make(chan []models.MockState, 1)
+	reads <- []models.MockState{{Name: "w-poll"}}
+	r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
+	consumed := map[string]models.MockState{}
+	done := make(chan []string, 1)
+	began := time.Now()
+	go func() {
+		missing, _ := r.awaitWorkerScope(context.Background(), p, consumed, func(read []models.MockState) {
+			for _, m := range read {
+				consumed[m.Name] = m
+			}
+		})
+		done <- missing
+	}()
+	select {
+	case missing := <-done:
+		if len(missing) != 0 {
+			t.Fatalf("the call was answered, yet %v were reported", missing)
+		}
+		if took := time.Since(began); took >= 900*time.Millisecond {
+			t.Fatalf("the wait took %v for a call answered before its first read: it read first at a second's tick", took)
+		}
+	case <-time.After(900 * time.Millisecond):
+		t.Fatal("the wait had not ended 900 ms after it began, for a call answered before its first read: it reads first at a second's tick")
+	}
+}
+
+// The wait for the worker scope wakes first after workerWakeFirst, then twice
+// as long each time, at most a second: a call answered soon is read soon, and
+// a wait that goes on reads once a second, as it did. Its stall limit still
+// spans almost ten minutes of wake-ups.
+func TestTheWorkerScopesWakeUpsDoubleToASecond(t *testing.T) {
+	if got := workerWakeAfter(0); got != workerWakeFirst || got > 50*time.Millisecond {
+		t.Fatalf("the first wake-up comes after %v; want workerWakeFirst (%v), well under a second", got, workerWakeFirst)
+	}
+	prev := workerWakeAfter(0)
+	for n := 1; n <= 2000; n++ {
+		d := workerWakeAfter(n)
+		if want := min(2*prev, time.Second); d != want {
+			t.Fatalf("wake-up %d comes after %v, after %v before it; want %v", n, d, prev, want)
+		}
+		prev = d
+	}
+	if prev != time.Second {
+		t.Fatalf("a long wait wakes every %v; want once a second", prev)
+	}
+	var span time.Duration
+	for n := 0; n < 600; n++ {
+		span += workerWakeAfter(n)
+	}
+	if span < 590*time.Second {
+		t.Fatalf("600 wake-ups span %v; want almost ten minutes (the stall limit's)", span)
+	}
+}
+
+// The real wake-ups of one wait double as the wait takes them: once the wait
+// has taken those under a second, the next is a second away, not
+// workerWakeFirst. A wait that did not count them would read every
+// workerWakeFirst, and its stall limit would span seconds, not minutes.
+func TestTheWorkerScopesRealWakeUpsDoubleAsTheWaitTakesThem(t *testing.T) {
+	next, stop := workerWake(context.Background())
+	defer stop()
+	for n := 0; workerWakeAfter(n) < time.Second; n++ {
+		if n == 16 {
+			t.Fatalf("wake-up %d still comes %v after the one before: the wake-ups do not double to a second", n, workerWakeAfter(n))
+		}
+		select {
+		case <-next():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("wake-up %d had not come 5 s after the wait asked for it", n)
+		}
+	}
+	select {
+	case <-next():
+		t.Fatal("the wake-up after those under a second came within 500 ms: the wake-ups are not counted")
+	case <-time.After(500 * time.Millisecond):
+	}
 }
 
 // The set's retry cycles, and a streaming pass run out of recorded order,
