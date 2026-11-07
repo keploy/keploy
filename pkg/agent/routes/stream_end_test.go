@@ -121,7 +121,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// summary, which the handler defers, reads them: the handler logs
 		// the marker's flush on its own goroutine, and this hook runs there.
 		// The summary must say what the marker said (the counts are read
-		// once), not these too.
+		// once), not these too: a mock dropped then among them.
 		var markerSeen int
 		core = zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
 			if e.Message == streamEndMarkerSent {
@@ -129,6 +129,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 				syncmgr.Get().NoteNotHandedOn()
 				syncmgr.Get().NoteUnnamedCallerConn()
 				syncmgr.Get().NoteTLSRelayedConn(8443)
+				loseMockForOutput("after-marker")
 			}
 			return nil
 		})
@@ -260,10 +261,17 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 			"tcs_not_handed_on":                2,
 			"connections_from_unnamed_callers": 2,
 			"connections_relayed_tls":          2,
+			"mocks_dropped_capacity":           1,
 		} {
 			if got := sumLine[name]; got != want {
 				t.Errorf("the summary says %s=%v, want %d", name, got, want)
 			}
+		}
+		if named := fmt.Sprint(sumLine["mocks_dropped_named"]); strings.Contains(named, "after-marker") || !strings.Contains(named, "marker-output") {
+			t.Errorf("the summary names %s, want the mocks the marker named and not one dropped after it", named)
+		}
+		if got := fields(models.MocksDroppedSaid)["for_the_output"]; got != uint64(1) {
+			t.Errorf("the warning of mocks dropped says %v for the output, want the marker's 1", got)
 		}
 		warn := fields("agent: some requests were not recorded: the agent was short of memory when they came, and the memory guard had paused recording; each connection's requests after the pause are recorded")
 		if got := fmt.Sprint(warn["requests"], " ", warn["requests_during_pauses"], " ", warn["connections"]); got != "3 2 2" {

@@ -16,7 +16,8 @@ import (
 // the mark would skip it for recordedDNSMocksTTL as a duplicate of an answer
 // no recording holds. The manager's output is closed, as at a recording's
 // end, so it drops every mock: a question asked again records a mock again
-// (one more drop) only if its mark was given back.
+// (one more drop) only if its mark was given back. Only the dropped answer's
+// question is given back: a question whose answer was taken stays held.
 func TestDNS_AnAnswerTheManagerDropsGivesItsQuestionBack(t *testing.T) {
 	for _, synchronous := range []bool{false, true} {
 		name := "sent at once (SendConfigMock)"
@@ -58,6 +59,13 @@ func TestDNS_AnAnswerTheManagerDropsGivesItsQuestionBack(t *testing.T) {
 			ask(gone, mc)
 			if got := mgr.DropCount(); got != before+2 {
 				t.Fatalf("the question asked again after its answer was dropped made %d mocks, want 1: the dropped answer kept its mark, and the recording holds no answer for it", got-before-1)
+			}
+			// The give-back lets go of the dropped answer's question alone:
+			// the answer taken before still holds its own.
+			before = mgr.DropCount()
+			ask(kept, mc)
+			if got := mgr.DropCount(); got != before {
+				t.Fatalf("a question whose answer was taken, asked again after another question's answer was given back, made %d mocks, want none: the give-back let go of every question", got-before)
 			}
 		})
 	}
