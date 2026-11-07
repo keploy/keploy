@@ -1154,10 +1154,11 @@ const leftOutWarnEvery = 10 * time.Second
 // leftOutCause, or past maxOpenKinds causes by leftOutClass.
 var leftOutWarns = NewWarnLimiters(leftOutWarnEvery)
 
-// ResetLeftOutWarningsForTest forgets every left-out WARN let through and
-// held back so far, so a test in another package (a parser's) can count the
-// ones it causes: the limit is process-wide. Production code never calls it.
-func ResetLeftOutWarningsForTest() { leftOutWarns.Reset() }
+// ResetLeftOutWarningsForTest forgets every left-out WARN, and every tunnel
+// WARN (ReportTunnel), let through and held back so far, so a test in another
+// package (a parser's) can count the ones it causes: the limits are
+// process-wide. Production code never calls it.
+func ResetLeftOutWarningsForTest() { leftOutWarns.Reset(); tunnelWarns.Reset() }
 
 // ReportLeftOut reports m as a mock left out of the recording, for reason: an
 // exchange its connection could not record. It has five callers, and each
@@ -1290,6 +1291,66 @@ func (s *Session) spanLeftOut(start, end time.Time) bool {
 	}
 	s.RecordOrphanWindow(start, end)
 	return true
+}
+
+// tunnelWarnEvery is how often ReportTunnel's WARN may be logged for each
+// host.
+const tunnelWarnEvery = 10 * time.Second
+
+// tunnelWarns limits ReportTunnel's WARN, process-wide, keyed by the tunnel's
+// host, or, past the hosts AllowOr keeps apart, by tunnelWarnOverflow.
+var tunnelWarns = NewWarnLimiters(tunnelWarnEvery)
+
+// tunnelWarnOverflow is the kind tunnelWarns limits a host under once it
+// keeps no more hosts apart.
+const tunnelWarnOverflow = "tunnel"
+
+// TunnelWarnMsg is ReportTunnel's line, at WARN, and at Debug for one the
+// limit holds back or one reported as the recording stops. Exported for a
+// parser's tests.
+const TunnelWarnMsg = "a CONNECT opened a tunnel on a recorded connection: the calls through the tunnel are not recorded"
+
+// tunnelNextStep is ReportTunnel's next_step. It promises the test cases' fate
+// only where it holds: keploy's proxy follows a connection whose parser has
+// returned, and leaves out the test cases recorded while it carries traffic
+// (syncMock.UnrecordedConn); a capture that does not follow it saves them.
+const tunnelNextStep = "the app's traffic is unaffected. From the CONNECT's 2xx answer on, the connection carries the " +
+	"tunnel's own protocol (TLS to the host, most often), which is no HTTP/1 exchange, so its recording ends at that " +
+	"answer and no call through the tunnel is recorded as a mock. keploy's proxy leaves out the test cases recorded " +
+	"while the connection carries the tunnel's traffic; a capture that does not follow the connection once its " +
+	"parser has returned saves them without these mocks, and their replay fails with no_mocks. keploy's proxy " +
+	"records the calls through a tunnel when the CONNECT is its connection's first request, as an app using an " +
+	"HTTP proxy sends it"
+
+// ReportTunnel reports that the connection's recording ends at a CONNECT's
+// 2xx, which opened a tunnel to host (the CONNECT's request-target): the
+// calls the tunnel carries are no HTTP/1 exchange its parser can record, and
+// it returns there, so a connection reports it once. It is logged at WARN once
+// per tunnelWarnEvery for each host, process-wide, with how many of that
+// host's were held back since the last such WARN (sameWarningsHeldBack), and
+// each one held back at Debug: a call that is not recorded must not be
+// silent, and an app that opens a tunnel per call must not log a line per
+// call. As the recording itself stops (RecordingStopping), the connection is
+// torn down with it, and no span opens for what it carries after: it is
+// logged at Debug, and the limit is not spent on it. Nil-safe.
+func (s *Session) ReportTunnel(host string) {
+	if s == nil || s.Logger == nil {
+		return
+	}
+	fields := []zap.Field{zap.String("connID", s.ClientConnID), zap.String("host", host)}
+	if s.RecordingStopping() {
+		s.Logger.Debug(TunnelWarnMsg, append(fields, zap.Bool("recordingStopping", true))...)
+		return
+	}
+	ok, held, _ := tunnelWarns.AllowOr(host, tunnelWarnOverflow)
+	if !ok {
+		s.Logger.Debug(TunnelWarnMsg, fields...)
+		return
+	}
+	if held > 0 {
+		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
+	}
+	s.Logger.Warn(TunnelWarnMsg, append(fields, zap.String("next_step", tunnelNextStep))...)
 }
 
 // ReportStoppedOn reports the exchange a parser stops on, as it returns
@@ -1482,6 +1543,36 @@ const (
 		"(its hooks do not say how the application released the connection), so keploy cannot tell a whole answer from a cut one"
 )
 
+// LeftOutCloseNotRead is the reason an HTTP/1 recorder leaves an exchange out
+// for whose response's body ends where the upstream closes the connection (no
+// Content-Length, not chunked), when its read did not end at that close: the
+// response is not known to be whole, and no fault is known to record it with.
+// The stream was closed under the read (the supervisor's abort), or ended with
+// no side's end (the relay ends the stream so at the recording's stop, and
+// when its read of a side fails otherwise, as at a TLS record cut short), or
+// at the upstream's reset once the recording's stop had begun, which is not
+// the close that ends such a body. In an observe-only capture
+// (Opts.SkipTLSMITM), with no relay to see the upstream's close, it is a
+// stream that ended without the connection's end marked on it
+// (Session.EndedWithConnection): a capture whose close can overtake its
+// stream's tail does not mark it, so no close-delimited body such a capture
+// carries is recorded. Recorded as far as it came, replay would serve a
+// complete-looking shorter response. The text before its colon is its cause,
+// of class leftOutCloseNotRead.
+const LeftOutCloseNotRead = leftOutCloseNotReadCause + ": the response's body ends at that close, and its read ended before it"
+
+// leftOutCloseNotReadCause is LeftOutCloseNotRead's cause (leftOutCause).
+const leftOutCloseNotReadCause = "the upstream's close was not read"
+
+// LeftOutReadAborted is the reason an HTTP/1 recorder leaves an exchange out
+// whose response's stream the session closed under its read (the supervisor's
+// abort, once the parser's context has ended or the parser is retired) before
+// the response's end, as its Content-Length, its chunked framing or its head's
+// end sets it, came: what was read does not parse whole because the read was
+// cut there, which is no decode error, and it is not known to be whole.
+const LeftOutReadAborted = "the response's read was aborted partway through it: keploy closed the connection's capture " +
+	"before the response's end came"
+
 // maxLeftOutCause is the longest cause leftOutCause keeps of a reason.
 const maxLeftOutCause = 64
 
@@ -1537,6 +1628,9 @@ const (
 	// leftOutClientClosed is an exchange whose client closed the connection
 	// partway through the response (LeftOutClientClosedPartway).
 	leftOutClientClosed = "client_closed"
+	// leftOutCloseNotRead is an exchange whose response's body ends at the
+	// upstream's close, which its read did not reach (LeftOutCloseNotRead).
+	leftOutCloseNotRead = "close_not_read"
 	leftOutOther        = "other"
 )
 
@@ -1550,6 +1644,8 @@ func leftOutClass(cause string) string {
 		return leftOutReset
 	case LeftOutClientClosedPartway:
 		return leftOutClientClosed
+	case leftOutCloseNotReadCause:
+		return leftOutCloseNotRead
 	}
 	return leftOutOther
 }
@@ -1621,6 +1717,14 @@ func leftOutKnob(class string) string {
 			"recording's stop closed it, with the call in flight), so there is no whole exchange to " +
 			"record, and a replay cannot reproduce the cut; the capture lost nothing. If the call timed out, raise the " +
 			"app's timeout for it and re-record"
+	case leftOutCloseNotRead:
+		return next + "reason=the upstream's close was not read: the response has no Content-Length and is not chunked, " +
+			"so only the upstream's close ends its body, and its read ended before that close (the recording stopped, " +
+			"the upstream reset the connection, keploy's read of it broke or was aborted, or, in an observe-only " +
+			"capture, the capture's stream ended without the connection's end marked on it), so the body is not known " +
+			"to be whole and the exchange was left out to keep the recording true. No setting changes this: an " +
+			"exchange whose upstream closes the connection after the whole body is recorded where the capture sees " +
+			"that close, as keploy's proxy does, and an observe-only capture only where it marks the connection's end"
 	}
 	return "Re-run with --debug to see each mock left out and why it could not be recorded"
 }
