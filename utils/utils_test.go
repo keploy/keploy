@@ -35,6 +35,26 @@ func TestContainerNameFromDockerRun(t *testing.T) {
 	}
 }
 
+func TestEnsureRmBeforeName(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{"space form", "docker run --name my-app image", "docker run --rm --name my-app image"},
+		{"equals form", "docker run --name=my-app image", "docker run --rm --name=my-app image"},
+		{"rm after name", "docker run --name=my-app --rm image", "docker run --name=my-app --rm image"},
+		{"no name", "docker run image", "docker run image"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EnsureRmBeforeName(tc.cmd); got != tc.want {
+				t.Fatalf("EnsureRmBeforeName(%q) = %q, want %q", tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
+
 // GetAvailablePort must not hand back a port from the kernel's local port
 // range.
 //
