@@ -258,12 +258,15 @@ func TestAMockAnyTestMayNeedDroppedForTheOutputClosedLeavesOutNone(t *testing.T)
 	m := New(zap.New(core))
 	m.SetOutputChannel(make(chan *models.Mock, 1))
 	m.CloseOutChan()
-	at := time.Now()
+	at := time.Now().Add(-time.Minute)
 	if got := sendNow(m, sharedAt(t, "c1", at), ""); got != MockDroppedOutputClosed {
 		t.Fatalf("a session's mock after the close: %q, want %q", got, MockDroppedOutputClosed)
 	}
 	if leftOutAfter(m, at) || leftOutLines(logs) != 0 {
 		t.Fatal("a drop for the output closed left out the test cases after it")
+	}
+	if !m.SendingTestCase("after", at.Add(time.Second)) {
+		t.Fatal("a test case checked after a drop for the output closed was left out")
 	}
 }
 
@@ -411,7 +414,7 @@ func TestALossSaysTheSentTestCasesItCanNoLongerName(t *testing.T) {
 	t.Run("one past them", func(t *testing.T) {
 		m, said := sentThenLost(t, at, append(ends, at.Add(time.Second))...)
 		if got := revokesQueued(m); len(got) != half+1 || got[0] != fmt.Sprintf("tc-%d", half) {
-			t.Fatalf("revoked %d from %v, want the %d still named from tc-%d", len(got), got[:1], half+1, half)
+			t.Fatalf("revoked %d from %v, want the %d still named from tc-%d", len(got), got[:min(1, len(got))], half+1, half)
 		}
 		want := ends[0].Format(time.RFC3339Nano)
 		if said == nil || said["unnamed_sent_through"] != want || said["sent_named_max"] != int64(maxSentTCs) {
@@ -428,6 +431,40 @@ func TestALossSaysTheSentTestCasesItCanNoLongerName(t *testing.T) {
 			t.Fatalf("the ERROR says %v, want no unnamed_sent_through", said)
 		}
 	})
+}
+
+// A later loss with an earlier request moves the span to it and ends the one
+// it replaces, and a new recording ends the span: the new recording's test
+// cases are not left out for a mock the last one lost.
+func TestANewRecordingEndsTheSpanOfTheLastOnesLoss(t *testing.T) {
+	m := New(nil)
+	_, clk := fullLane(t, m)
+	at := time.Now().Add(-time.Minute)
+	for _, req := range []time.Time{at, at.Add(-2 * time.Second)} {
+		lost := make(chan bool, 1)
+		m.send(sharedAt(t, "c1", req), "", func(d bool) { lost <- !d })
+		waitClockPending(t, clk)
+		clk.Advance(time.Hour) // the consumer took nothing for the bound
+		if !<-lost {
+			t.Fatal("a mock no consumer took was delivered")
+		}
+	}
+	if _, _, open := m.OrphanRangeCount(); open != 1 {
+		t.Fatalf("%d spans open after two losses, want only the one from the earlier request", open)
+	}
+	m.SetOutputChannel(make(chan *models.Mock, 1)) // a new recording
+	if _, _, open := m.OrphanRangeCount(); open != 0 {
+		t.Fatalf("%d spans of the last recording's losses still open in the new one", open)
+	}
+	time.Sleep(2 * time.Millisecond)
+	start := time.Now()
+	time.Sleep(2 * time.Millisecond)
+	if left, _ := m.WasMockOrphanedInWindow(start, time.Now()); left {
+		t.Fatal("a test case of the new recording was left out for a mock the last one lost")
+	}
+	if !m.SendingTestCase("new-0", time.Now()) {
+		t.Fatal("the new recording's stream left out a test case for the last one's loss")
+	}
 }
 
 // A nil manager lets every test case through.
