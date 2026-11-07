@@ -191,11 +191,15 @@ func anyMapped(maps chan models.TestMockMapping) map[string]bool {
 // out none for it either. The answer read beside it, dropped the same way,
 // suppresses its test case, by name and by its span, as before. Every drop
 // path: the output channel already closed, the byte bound of what waits
-// behind another, and a full channel whose consumer stalls.
+// behind another, a full channel whose consumer stalls, and AddMock after the
+// channel closed (a connection that hands its last answer over at the
+// recording's teardown). AddMock takes no owner, so on that path the answer
+// read is told and leaves out the test cases inside its span, and none is
+// suppressed by name.
 func TestADroppedAnswerTheClientNeverReadSuppressesNoTestCase(t *testing.T) {
 	eachProvenSwitch(t, func(t *testing.T) {
 		for _, unread := range []bool{true, false} {
-			for _, path := range []string{"channel closed", "byte bound", "consumer stalled"} {
+			for _, path := range []string{"channel closed", "byte bound", "consumer stalled", addedAfterClose} {
 				at := time.Now().Add(-time.Second)
 				mk := unreadAt(at, unread)
 				mk.Spec.ResTimestampMock = at.Add(500 * time.Millisecond) // a long poll's span
@@ -207,8 +211,8 @@ func TestADroppedAnswerTheClientNeverReadSuppressesNoTestCase(t *testing.T) {
 						mgr.RecordOrphanWindow(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 					})
 				})
-				if got := mgr.WasMockDroppedForTC("test-7"); got == unread {
-					t.Fatalf("unread %v, %s: test-7 suppressed %v; want it suppressed only for an answer read", unread, path, got)
+				if got, want := mgr.WasMockDroppedForTC("test-7"), !unread && path != addedAfterClose; got != want {
+					t.Fatalf("unread %v, %s: test-7 suppressed %v; want %v", unread, path, got, want)
 				}
 				if n := told.Load(); (n == 0) != unread {
 					t.Fatalf("unread %v, %s: OnDrop told %d times; want it told only of an answer read", unread, path, n)
@@ -222,12 +226,27 @@ func TestADroppedAnswerTheClientNeverReadSuppressesNoTestCase(t *testing.T) {
 	})
 }
 
+// addedAfterClose is droppedOn's path for a mock AddMock is handed after
+// CloseOutChan.
+const addedAfterClose = "AddMock after close"
+
 // droppedOn has a manager, its OnDrop wired by wire, drop mock, sent for
-// owner, on path, and returns the manager once every send is done.
+// owner (or handed to AddMock, which takes no owner), on path, and returns
+// the manager once every send is done.
 func droppedOn(t *testing.T, path string, mock *models.Mock, owner string, wire func(*SyncMockManager)) *SyncMockManager {
 	t.Helper()
 	var mgr *SyncMockManager
 	switch path {
+	case addedAfterClose:
+		mgr = &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+		wire(mgr)
+		mgr.SetOutputChannel(make(chan *models.Mock, 1))
+		mgr.CloseOutChan()
+		before := mgr.outChanClosedDrops.Load()
+		mgr.AddMock(mock)
+		if got := mgr.outChanClosedDrops.Load() - before; got != 1 {
+			t.Fatalf("%s: AddMock counted %d drops on the closed channel; want 1", path, got)
+		}
 	case "channel closed":
 		mgr = &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
 		wire(mgr)
