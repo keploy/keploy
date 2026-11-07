@@ -337,6 +337,32 @@ func TestLegacyFramePiecesOfNoFrameAreNone(t *testing.T) {
 	}
 }
 
+// Frames whose pieces stop short of the body they read back as have no
+// pieces: a line with no raw field after a frame, which the body reads back
+// by its first field, and a last raw line that is blank, which the body ends
+// with one newline more. The answer keeps no marks, so none of them points
+// into the wrong bytes.
+func TestLegacyFramePiecesThatStopShortOfTheBodyAreNone(t *testing.T) {
+	raw := func(v string) HTTPStreamChunk {
+		return HTTPStreamChunk{Data: []HTTPStreamDataField{{Key: "raw", Value: v}}}
+	}
+	for _, tc := range []struct {
+		name   string
+		chunks []HTTPStreamChunk
+		body   string
+	}{
+		{"a line with no raw field after a frame", []HTTPStreamChunk{raw("a"), {Data: []HTTPStreamDataField{{Key: "line", Value: "b"}}}}, "a\nb"},
+		{"a blank last line", []HTTPStreamChunk{raw("a"), raw("")}, "a\n\n"},
+	} {
+		if body := streamChunksToLegacyBody(tc.chunks, streamBodyKindRaw); body != tc.body {
+			t.Fatalf("%s: body %q, want %q", tc.name, body, tc.body)
+		}
+		if got, ok := legacyFramePieces(tc.chunks, streamBodyKindRaw); ok || got != nil {
+			t.Errorf("%s: pieces %v (%v), want none", tc.name, got, ok)
+		}
+	}
+}
+
 // A chunk before the first frame has no bytes of the body: its piece ends at
 // the body's start, not after a separator.
 func TestLegacyFramePiecesBeforeTheFirstFrameEndAtTheStart(t *testing.T) {
