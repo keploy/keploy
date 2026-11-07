@@ -1765,8 +1765,12 @@ func Hash(data []byte) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
+// cdIntoOneThatExists is what a user does about a working directory that is
+// gone.
+const cdIntoOneThatExists = "cd into a directory that exists and run keploy again"
+
 // GetLastDirectory is the name of the directory keploy runs in. It fails once
-// that directory is gone, on every platform.
+// that directory is gone, on every platform, in the same words.
 func GetLastDirectory() (string, error) {
 	return lastDirectory(os.Getwd)
 }
@@ -1774,10 +1778,14 @@ func GetLastDirectory() (string, error) {
 func lastDirectory(getwd func() (string, error)) (string, error) {
 	// Get the current working directory
 	dir, err := getwd()
-	if err != nil {
-		return "", err
+	if err == nil {
+		err = confirmWorkingDirectory(dir)
 	}
-	if err := confirmWorkingDirectory(dir); err != nil {
+	// Linux's Getwd fails here, and on macOS the stat of its answer does.
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("the working directory is gone: %w; %s", err, cdIntoOneThatExists)
+	}
+	if err != nil {
 		return "", err
 	}
 
@@ -1798,7 +1806,7 @@ func confirmWorkingDirectory(dir string) error {
 		var there os.FileInfo
 		there, err = os.Stat(dir)
 		if err == nil && !os.SameFile(here, there) {
-			return fmt.Errorf("the working directory is gone: %s is another directory now", dir)
+			return fmt.Errorf("the working directory is gone: %s is another directory now; %s", dir, cdIntoOneThatExists)
 		}
 	}
 	if errors.Is(err, os.ErrPermission) {

@@ -612,8 +612,8 @@ func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 
 	const refusal = "failed to get the last directory for appName"
 	err := c.Validate(context.Background(), cmd)
-	if err == nil || !strings.HasPrefix(err.Error(), refusal) {
-		t.Fatalf("Validate = %v, want %q", err, refusal)
+	if err == nil || !strings.HasPrefix(err.Error(), refusal) || !strings.Contains(err.Error(), "the working directory is gone: ") {
+		t.Fatalf("Validate = %v, want %q, saying the working directory is gone", err, refusal)
 	}
 	var said []string
 	n := 0

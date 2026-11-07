@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,17 @@ func removeWorkingDirectory(t *testing.T) string {
 	return gone
 }
 
+// wantGone fails unless err says, in the words every platform gives, that the
+// working directory is gone and what to do about it.
+func wantGone(t *testing.T, err error) {
+	t.Helper()
+	for _, want := range []string{"the working directory is gone: ", "; cd into a directory that exists and run keploy again"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to say %q", err, want)
+		}
+	}
+}
+
 func TestGetLastDirectory(t *testing.T) {
 	t.Run("the directory it runs in", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "app")
@@ -43,7 +55,7 @@ func TestGetLastDirectory(t *testing.T) {
 	t.Run("Getwd's own refusal is the one it gives", func(t *testing.T) {
 		refused := errors.New("getwd refused")
 		got, err := lastDirectory(func() (string, error) { return "", refused })
-		if !errors.Is(err, refused) {
+		if !errors.Is(err, refused) || strings.Contains(err.Error(), "gone") {
 			t.Fatalf("lastDirectory() = %q, %v, want %v", got, err, refused)
 		}
 	})
@@ -83,12 +95,16 @@ func TestGetLastDirectory(t *testing.T) {
 
 	t.Run("a directory removed is refused, $PWD or not", func(t *testing.T) {
 		removeWorkingDirectory(t)
-		if got, err := GetLastDirectory(); err == nil {
-			t.Fatalf("GetLastDirectory() = %q with $PWD on a removed directory, want an error", got)
+		_, err := GetLastDirectory()
+		wantGone(t, err)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("err = %v with $PWD on a removed directory, want it to be os.ErrNotExist", err)
 		}
 		t.Setenv("PWD", "")
-		if got, err := GetLastDirectory(); err == nil {
-			t.Fatalf("GetLastDirectory() = %q with no $PWD, want an error", got)
+		_, err = GetLastDirectory()
+		wantGone(t, err)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("err = %v with no $PWD, want it to be os.ErrNotExist", err)
 		}
 	})
 
@@ -97,17 +113,18 @@ func TestGetLastDirectory(t *testing.T) {
 		if err := os.Mkdir(gone, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if got, err := GetLastDirectory(); err == nil {
-			t.Fatalf("GetLastDirectory() = %q, want an error", got)
-		}
+		_, err := GetLastDirectory()
+		wantGone(t, err)
 	})
 
 	// What macOS's Getwd answers, which no real directory makes Linux's answer:
 	// there Getwd itself fails, and the rows above end before the check.
 	t.Run("Getwd's answer leads nowhere", func(t *testing.T) {
 		gone := removeWorkingDirectory(t)
-		if got, err := lastDirectory(answer(gone)); err == nil {
-			t.Fatalf("lastDirectory() = %q, want an error", got)
+		_, err := lastDirectory(answer(gone))
+		wantGone(t, err)
+		if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), gone) {
+			t.Fatalf("err = %v, want os.ErrNotExist on %s", err, gone)
 		}
 	})
 	t.Run("Getwd's answer leads to another directory", func(t *testing.T) {
@@ -115,8 +132,10 @@ func TestGetLastDirectory(t *testing.T) {
 		if err := os.Mkdir(gone, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if got, err := lastDirectory(answer(gone)); err == nil {
-			t.Fatalf("lastDirectory() = %q, want an error", got)
+		_, err := lastDirectory(answer(gone))
+		wantGone(t, err)
+		if !strings.Contains(err.Error(), gone+" is another directory now") {
+			t.Fatalf("err = %v, want it to say %s is another directory now", err, gone)
 		}
 	})
 
