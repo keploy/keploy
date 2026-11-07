@@ -251,6 +251,7 @@ func (f *prInstr) RunsAppProcess() bool { return true }
 type prInstr struct {
 	mu                sync.Mutex
 	updateCalls       int
+	runs              int // how many times the application was started
 	failUpdateFromNth int // 0 = never fail
 	recentAppLogs     string
 	// stopAppAfterNUpdates makes the stand-in application exit part-way through
@@ -324,6 +325,9 @@ func (f *prInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) 
 // report the app as having exited, and the set lands on APP_HALTED no matter
 // what the tests did — which would mask the very status this file asserts on.
 func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	f.mu.Lock()
+	f.runs++
+	f.mu.Unlock()
 	if f.stopped != nil {
 		defer close(f.stopped)
 	}
@@ -350,6 +354,13 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 			AppLogs:      "panic: runtime error: out of memory\n",
 		}
 	}
+}
+
+// runCalls is how many times the application was started.
+func (f *prInstr) runCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.runs
 }
 func (f *prInstr) GetErrorChannel() <-chan error                                 { return make(chan error) }
 func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) { return f.errs() }

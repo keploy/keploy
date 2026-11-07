@@ -658,15 +658,23 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 		}
 		results = append(results, *res)
 	}
+	return true, r.failSetUnrun(ctx, testRunID, testSetID, results, why.Error(), started)
+}
+
+// failSetUnrun writes the FAILED report of a test set keploy fails without
+// running any of its test cases, and counts it in the run's summary. results
+// are the set's rows, each FAILED, unsent and graded HIGH, and written to the
+// store already; why is the set's failure reason.
+func (r *Replayer) failSetUnrun(ctx context.Context, testRunID, testSetID string, results []models.TestResult, why string, started time.Time) error {
 	timeTaken := time.Since(started)
 	report := &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,
 		Status:        string(models.TestSetStatusFailed),
-		FailureReason: why.Error(),
-		Failure:       len(testCases),
-		Total:         len(testCases),
-		HighRisk:      len(testCases),
+		FailureReason: why,
+		Failure:       len(results),
+		Total:         len(results),
+		HighRisk:      len(results),
 		Tests:         results,
 		TimeTaken:     timeTaken.String(),
 		CmdUsed:       r.config.Test.CmdUsed,
@@ -675,7 +683,7 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	r.noteSetEnd(report)
 	if err := r.reportDB.InsertReport(ctx, testRunID, testSetID, report); err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
-		return true, err
+		return err
 	}
 	r.completeTestReportMu.Lock()
 	r.completeTestReport[testSetID] = TestReportVerdict{
@@ -689,18 +697,20 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	r.totalTestFailed += report.Failure
 	r.totalTestTimeTaken += timeTaken
 	r.completeTestReportMu.Unlock()
-	return true, nil
+	return nil
 }
 
 // mustPassDeletions splits the failed test cases of a run in two for
-// --must-pass: those it removes, and those refused when their set loaded
-// (every template failure a refusal), which were never sent and are kept.
+// --must-pass: those it removes, and those never sent, which are kept: those
+// refused when their set loaded (every template failure a refusal), and
+// those selected that are not on disk (notFoundUnsent), with nothing to
+// remove.
 func mustPassDeletions(results []models.TestResult) (deletable, refused []string) {
 	for _, res := range results {
 		if res.Status != models.TestStatusFailed {
 			continue
 		}
-		if refusedUnsent(res) {
+		if refusedUnsent(res) || notFoundUnsent(res) {
 			refused = append(refused, res.TestCaseID)
 			continue
 		}

@@ -565,6 +565,11 @@ func failureOf(t models.TestResult, proven bool) *junitFailure {
 		// Refused when its set loaded: nothing was sent or asserted.
 		msg = "test case refused when its test set loaded, not sent"
 	}
+	if t.FailureInfo.NotFound != "" {
+		// Selected and not on disk: nothing was sent or asserted.
+		msg = "selected test case not found in its test set, not run"
+		parts = append(parts, "not run: "+t.FailureInfo.NotFound)
+	}
 	if t.FailureInfo.Risk != "" && t.FailureInfo.Risk != models.None {
 		msg = fmt.Sprintf("%s [%s-RISK]", msg, t.FailureInfo.Risk)
 	}
