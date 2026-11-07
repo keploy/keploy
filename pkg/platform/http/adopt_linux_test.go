@@ -1859,9 +1859,9 @@ func TestTheReaperReapsUnderTheLockAReadOfTheChildrenHolds(t *testing.T) {
 }
 
 // zombieLeaderEnv makes this test binary, started with it set to a file's
-// path, a process whose main thread exits while another runs on, writing a
-// count to that file as it runs: its stat says Z, as ps says Zl, and it
-// runs.
+// path (memBeat), a process whose main thread exits while another runs on,
+// writing a count to that file as it runs: its stat says Z, as ps says Zl,
+// and it runs.
 const zombieLeaderEnv = "KEPLOY_TEST_MAIN_THREAD_EXITS"
 
 func init() {
@@ -1877,14 +1877,39 @@ func init() {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}()
+	// Until the other thread wrote its first count: it runs.
 	for {
-		if _, err := os.Stat(beat); err == nil {
+		if fi, err := os.Stat(beat); err == nil && fi.Size() > 0 {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
 	// The main thread alone exits (exit, not exit_group).
 	_, _, _ = syscall.RawSyscall(syscall.SYS_EXIT, 0, 0, 0)
+}
+
+// memBeat returns the path of an empty file in memory (a memfd) that only the
+// test holds, for a daemon zombieLeaderEnv starts to write its count to while
+// the test runs. It is opened through /proc, as heldPipe's pipe is. A file on
+// disk would not do: a write to it, on a disk that others keep busy, can hold
+// the daemon's one running thread in the kernel (D, its writeback throttled
+// in rq_qos_wait) for longer than the stop's bound in these tests. A virtual
+// disk beside two fsync writers completed none of the 98 requests it had in
+// flight for half a second. The stop takes a disk that stands still for its
+// bound for dead (utils.ExitClock) and kills the daemon at twice the bound;
+// where the disk stands still for a bound more, it finds the kernel still
+// holding the daemon, and says so, rightly. A disk's stall is not what these
+// tests are about.
+func memBeat(t *testing.T) string {
+	t.Helper()
+	fd, err := unix.MemfdCreate("beat", unix.MFD_CLOEXEC)
+	if err != nil {
+		t.Fatalf("memfd_create: %v", err)
+	}
+	f := os.NewFile(uintptr(fd), "beat")
+	// Open, so its path names it, until the test ends.
+	t.Cleanup(func() { _ = f.Close() })
+	return fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), fd)
 }
 
 // beatOf is the count a process zombieLeaderEnv started wrote last; -1 where
@@ -1928,7 +1953,7 @@ func TestAStopStopsADaemonWhoseMainThreadExited(t *testing.T) {
 	if err := os.WriteFile(bin, self, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	beat := filepath.Join(dir, "beat")
+	beat := memBeat(t)
 	// No collection (a stop of the world would wait for ever on the main
 	// thread, which holds a P it never gives back), and Ps to spare.
 	pid := daemonize(t, `exec env `+zombieLeaderEnv+`="$1" GOGC=off GOMAXPROCS=4 "$2" -test.run=^$`, beat, bin)
