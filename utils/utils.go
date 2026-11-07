@@ -1765,9 +1765,26 @@ func Hash(data []byte) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
+// cdIntoOneThatExists is what a user does about a working directory that is
+// gone.
+const cdIntoOneThatExists = "cd into a directory that exists and run keploy again"
+
+// GetLastDirectory is the name of the directory keploy runs in. It fails once
+// that directory is gone, on every platform, in the same words.
 func GetLastDirectory() (string, error) {
+	return lastDirectory(os.Getwd)
+}
+
+func lastDirectory(getwd func() (string, error)) (string, error) {
 	// Get the current working directory
-	dir, err := os.Getwd()
+	dir, err := getwd()
+	if err == nil {
+		err = confirmWorkingDirectory(dir)
+	}
+	// Linux's Getwd fails here, and on macOS the stat of its answer does.
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("the working directory is gone: %w; %s", err, cdIntoOneThatExists)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -1775,6 +1792,27 @@ func GetLastDirectory() (string, error) {
 	// Extract the base (last directory)
 	lastDir := filepath.Base(dir)
 	return lastDir, nil
+}
+
+// confirmWorkingDirectory fails unless dir, os.Getwd's answer, still leads to
+// the directory the process is in. Getwd does not say so itself: on Linux it
+// fails once the directory is removed, but macOS's getcwd goes on answering the
+// path the directory last had, which by then leads nowhere or to a newer
+// directory of that name. A path this user may not walk, as under `sudo -u`
+// below a private directory, says nothing of the kind, and is let through.
+func confirmWorkingDirectory(dir string) error {
+	here, err := os.Stat(".")
+	if err == nil {
+		var there os.FileInfo
+		there, err = os.Stat(dir)
+		if err == nil && !os.SameFile(here, there) {
+			return fmt.Errorf("the working directory is gone: %s is another directory now; %s", dir, cdIntoOneThatExists)
+		}
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return nil
+	}
+	return err
 }
 
 func IsFileEmpty(filePath string) (bool, error) {
