@@ -88,7 +88,7 @@ func TestGetAlias_LinuxPublishesAgentPortToHostLoopbackOnly(t *testing.T) {
 // second, unrestricted "-p <port>:<port>" — which re-exposes the control plane
 // while leaving a presence check green. So also require that no arm builds a
 // "-p" fragment of its own. That is exact here: the only other publishes in
-// getAlias (proxy and app ports) are assembled before the switch.
+// getAlias (app ports) are assembled before the switch.
 func TestGetAlias_EveryPlatformBranchPublishesAgentPortViaHelper(t *testing.T) {
 	t.Parallel()
 
@@ -107,7 +107,7 @@ func TestGetAlias_EveryPlatformBranchPublishesAgentPortViaHelper(t *testing.T) {
 
 		for _, stmt := range list {
 			if lit, ok := stmtAssignsAliasFromLiteralContaining(stmt, "-p "); ok {
-				t.Errorf("%s: this getAlias platform branch builds its own %q publish fragment instead of using agentPortPublish. Proxy and app ports are assembled before the switch, so an arm has no reason to; a second publish here would re-expose the agent control plane on every host interface while agentPortPublish is still called", pos, lit)
+				t.Errorf("%s: this getAlias platform branch builds its own %q publish fragment instead of using agentPortPublish. App ports are assembled before the switch, so an arm has no reason to; a second publish here would re-expose the agent control plane on every host interface while agentPortPublish is still called", pos, lit)
 			}
 		}
 	})

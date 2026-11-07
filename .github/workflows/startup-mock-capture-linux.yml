@@ -17,8 +17,10 @@ name: Startup Mock Capture Regression (Linux)
 # the configured ports unchecked, and an agent that finds its port taken
 # moves off it, naming the holder, and tells its hooks. Each run's mocks must
 # hold its own app's DNS names and upstream calls, and none of the other
-# run's; with UDP 26789 held, both agents must move their DNS servers, naming
-# its holder.
+# run's, and a proxy or DNS server off its configured port must be on one its
+# agent said it moved to. With one run started once the other's agent
+# listens, its agent must move both; with UDP 26789 held, both agents must
+# move their DNS servers, naming its holder.
 on:
   workflow_call:
     inputs:
