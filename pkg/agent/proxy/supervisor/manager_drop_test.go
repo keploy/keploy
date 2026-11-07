@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,5 +125,84 @@ func TestAnUnreadAnswerTheManagerDropsSpansNothing(t *testing.T) {
 		if over || len(spans.got) != 0 {
 			t.Fatalf("orphans %v: an unread answer spanned (manager %v, caller %v); want no span", viaOrphans, over, spans.got)
 		}
+	}
+}
+
+// A mock the manager drops for its output, closed or at its byte bound, has
+// nothing else to leave out a test case over it: the session spans it over
+// its own times, request to response, where the session's spans go
+// (Session.Orphans), as a mock left out is. Its parser has consumed its input,
+// so the session's pending work is cleared (OnPendingCleared), as for a mock
+// taken: left armed, the hang watchdog would abort the connection once it
+// idles. Memory pressure's own spans cover its drops, which span nothing here.
+func TestAMockTheManagerDropsIsSpannedOverItsTimesAndClearsPendingWork(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*testing.T, *syncMock.SyncMockManager)
+		drop syncMock.MockDrop
+		span bool
+	}{
+		{"output closed", func(_ *testing.T, m *syncMock.SyncMockManager) {
+			m.SetOutputChannel(make(chan *models.Mock, 1))
+			m.CloseOutChan()
+		}, syncMock.MockDroppedOutputClosed, true},
+		{"byte bound", func(t *testing.T, m *syncMock.SyncMockManager) {
+			ch := make(chan *models.Mock) // nothing reads it yet: its consumer stalls
+			m.SetOutputChannel(ch)
+			t.Cleanup(func() {
+				go func() {
+					for range ch {
+					}
+				}()
+				m.CloseOutChan()
+			})
+			// The first in the drainer's hand, the next behind it: a mock
+			// past the bound behind them is dropped.
+			for range 2 {
+				f := &models.Mock{Kind: models.Kind("Kafka"), Name: "filler"}
+				f.Spec.ReqTimestampMock = time.Now()
+				if d := m.AddMock(f); d.Dropped() {
+					t.Fatalf("setup: a filler was dropped: %q", d)
+				}
+			}
+		}, syncMock.MockDroppedOutputFull, true},
+		{"memory pressure", func(_ *testing.T, m *syncMock.SyncMockManager) {
+			m.SetOutputChannel(make(chan *models.Mock, 1))
+			m.SetMemoryPressure(true)
+		}, syncMock.MockDroppedUnderPressure, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := syncMock.New(zap.NewNop())
+			tc.set(t, mgr)
+			spans := &rawSpans{}
+			cleared := 0
+			s := &Session{RouteMocksViaSyncMock: true, Mgr: mgr, Logger: zap.NewNop(), Ctx: context.Background(), ClientConnID: "conn-8",
+				Orphans: spans, OnPendingCleared: func() { cleared++ }}
+			m := &models.Mock{Kind: models.Kind("Kafka"), Name: "fetch"}
+			if tc.drop == syncMock.MockDroppedOutputFull {
+				m.Spec.HTTPResp = &models.HTTPResp{Body: strings.Repeat("x", 64<<20)}
+			}
+			m.Spec.ReqTimestampMock = time.Now()
+			m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(3 * time.Millisecond)
+			req, res := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+			drops := mgr.DropCount()
+			lost, err := s.EmitMockOutcome(m, false)
+			if !lost || err != nil {
+				t.Fatalf("lost %v, err %v; want it lost", lost, err)
+			}
+			if tc.drop != syncMock.MockDroppedUnderPressure && mgr.DropCount() != drops+1 {
+				t.Fatalf("setup: the manager counted %d drops for the output, want 1 (%s)", mgr.DropCount()-drops, tc.drop)
+			}
+			if cleared != 1 {
+				t.Fatalf("pending work cleared %d times, want once: the parser consumed the dropped mock's input", cleared)
+			}
+			want := [][2]time.Time{{req, res}}
+			if !tc.span {
+				want = nil
+			}
+			if fmt.Sprint(spans.got) != fmt.Sprint(want) {
+				t.Fatalf("spanned %v, want %v", spans.got, want)
+			}
+		})
 	}
 }

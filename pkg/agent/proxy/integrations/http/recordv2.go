@@ -300,7 +300,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			}
 			fault = partAnswerFault(sess)
 		}
-		mock, err := h.buildHTTPMock(&FinalHTTP{
+		final := &FinalHTTP{
 			Req:              finalReq,
 			Resp:             finalResp,
 			ReqTimestampMock: reqTs,
@@ -308,7 +308,8 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			ReqClock:         reqClock,
 			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
 			Fault:            fault,
-		}, destPort, sess.ClientConnID, sess.Opts)
+		}
+		mock, err := h.buildHTTPMock(final, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to build mock")
@@ -327,7 +328,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			// (on another goroutine, meanwhile): that mark is the
 			// next exchange's, whose mock would then be recorded with
 			// nothing reporting it.
-			emitV2(sess, logger, mock)
+			if emitV2(sess, logger, mock) {
+				final.recordOne.giveBack()
+			}
 		} else {
 			// Nothing recorded for this exchange (a passthrough), so a mark
 			// set during it must not leave out the next exchange's mock.
@@ -461,7 +464,9 @@ func (h *HTTP) recordFault(ctx context.Context, sess *supervisor.Session, logger
 	}
 	noteFaultRecorded(logger, mock)
 	integrations.CallServed(ctx)
-	emitV2(sess, logger, mock)
+	if emitV2(sess, logger, mock) {
+		m.recordOne.giveBack()
+	}
 	return nil
 }
 
@@ -476,16 +481,22 @@ const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange r
 // same, as the context ends between the check and its own, is left out and
 // said so (leftOutRefusedAtStop), not dropped: EmitMock refuses a mock only
 // for its context's end, after which the recording goes on with
-// EmitMockOnShutdown.
-func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) {
+// EmitMockOnShutdown. It returns whether m was lost: left out, by the session
+// or here, or dropped by the session's manager as it was handed over
+// (EmitMockOutcome), which counted it. A recordOne representative lost so is
+// not one: its caller gives its mark back (ptMark.giveBack).
+func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) (lost bool) {
 	if c := sess.Ctx; c != nil && c.Err() != nil {
-		_ = sess.EmitMockOnShutdown(m)
-		return
+		lost, _ = sess.EmitMockOutcome(m, true)
+		return lost
 	}
-	if err := sess.EmitMock(m); err != nil {
+	lost, err := sess.EmitMockOutcome(m, false)
+	if err != nil {
 		logger.Debug("V2 HTTP record: the session refused a mock as its context ended", zap.Error(err))
 		sess.ReportLeftOut(m, leftOutRefusedAtStop)
+		return true
 	}
+	return lost
 }
 
 // faultNoted makes noteFaultRecorded's note once per process.
@@ -1082,9 +1093,13 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 	}
 	// recordOne dedup, committed only now that a mock is actually being emitted.
-	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
-		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
-		return nil, nil
+	// It is m's (FinalHTTP.recordOne), given back if the recording loses the
+	// mock as it is handed over.
+	if ptRecordOne && h.ptRecorder != nil {
+		if m.recordOne = h.ptRecorder.take(ptKey, respParsed.StatusCode); m.recordOne == nil {
+			h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+			return nil, nil
+		}
 	}
 	return mock, nil
 }
@@ -1105,13 +1120,15 @@ func (h *HTTP) buildFaultAfterHead(m *FinalHTTP, req *http.Request, resp *http.R
 	raw := m.Resp[bodyStart:]
 	fault := *m.Fault
 	fault.BodyBytes = int64(len(raw))
-	mock, err := h.buildHTTPMock(&FinalHTTP{
+	noAnswer := &FinalHTTP{
 		Req:              m.Req,
 		ReqTimestampMock: m.ReqTimestampMock,
 		ResTimestampMock: m.ResTimestampMock,
 		ReqClock:         m.ReqClock,
 		Fault:            &models.Fault{Kind: models.FaultEOF},
-	}, destPort, connID, opts)
+	}
+	mock, err := h.buildHTTPMock(noAnswer, destPort, connID, opts)
+	m.recordOne = noAnswer.recordOne
 	if mock == nil || err != nil {
 		return mock, err
 	}

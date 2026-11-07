@@ -965,36 +965,16 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 	}
 }
 
-// TestSendToOutChanDropSampling validates the sampling rule:
-// the first drop logs, and subsequent drops only log every
-// sendDropSampleRate entries. Without the sampling, a stuck
-// consumer would flood the log and further starve the producer
-// — the specific anti-pattern the windows-redirector work
-// surfaced. Uses direct atomic writes to avoid a drained send per
-// drop in the test.
+// An overflow's drops are said at ERROR for the first and every
+// sendDropSampleRate-th of a session, the rest at Debug (sayDrop): a stuck
+// consumer's goroutine must not drown in its own logging.
 func TestSendToOutChanDropSampling(t *testing.T) {
 	t.Parallel()
-
-	mgr := &SyncMockManager{
-		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
-	}
 	core, logs := observer.New(zap.ErrorLevel)
-	mgr.SetLogger(zap.New(core))
-
-	// Simulate the drop counter hitting values around the
-	// sampling boundary without paying the per-drop wall-clock
-	// cost. We reach directly into dropCount because the whole
-	// point of this test is the logging cadence, not the send
-	// path's timing.
-	for i := uint64(1); i <= 2050; i++ {
-		n := mgr.dropCount.Add(1)
-		if n == 1 || n%sendDropSampleRate == 0 {
-			mgr.dropLogger().Error("test-sampled-drop",
-				zap.Uint64("dropsSoFar", n),
-			)
-		}
+	mgr := New(zap.New(core))
+	for range 2*sendDropSampleRate + 2 {
+		mgr.dropOut(&models.Mock{Kind: models.HTTP, ConnectionID: "c"}, "", 0, string(MockDroppedOutputFull))
 	}
-
 	// Expected emits: n=1, n=1024, n=2048 → 3 entries.
 	if got := logs.Len(); got != 3 {
 		t.Fatalf("expected 3 sampled drop logs (n=1, 1024, 2048), got %d", got)

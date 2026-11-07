@@ -1524,16 +1524,22 @@ func sampled(n uint64) bool {
 	return n != 0 && (n == 1 || n%sendDropSampleRate == 0)
 }
 
-// dropFields are what a line of a drop says: which mock, and why.
+// dropFields are what a line of a drop says: which mock, and why. Its request
+// time is a string, as the summary names it (nameDrop): the agent's logger
+// encodes a zap.Time with its banner.
 func dropFields(mock *models.Mock, n uint64, why string) []zap.Field {
-	return []zap.Field{
+	fields := []zap.Field{
 		zap.Uint64("dropsSoFar", n),
 		zap.String("why", why),
 		zap.String("mock_kind", string(mock.Kind)),
 		zap.String("connID", mock.ConnectionID),
 		zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
-		zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
+		zap.String("mock_req_ts", mock.Spec.ReqTimestampMock.Format(time.RFC3339Nano)),
 	}
+	if mock.Spec.DNSReq != nil {
+		fields = append(fields, zap.String("dns_question", dnsQuestion(mock)))
+	}
+	return fields
 }
 
 // OnDrop has fn told of every mock dropped on its way to outChan: on the
@@ -1911,8 +1917,9 @@ const (
 	// output was closed (CloseOutChan: the recording had ended), or, sent at
 	// once, before one was set (AddMock buffers a mock until one is).
 	MockDroppedOutputClosed MockDrop = "the recording's mock output was closed (the recording had ended) or not set"
-	// MockDroppedOutputFull is a mock sent at once (before the first request)
-	// that found the mocks queued for the consumer at their byte bound.
+	// MockDroppedOutputFull is a mock sent at once (by AddMock before the
+	// first request, or by SendConfigMock at any time) that found the mocks
+	// queued for the consumer at their byte bound.
 	MockDroppedOutputFull MockDrop = "the mocks queued for the consumer already hold their byte bound"
 )
 
@@ -1963,8 +1970,20 @@ func (m *SyncMockManager) nameDrop(mock *models.Mock, why string) {
 	if len(m.dropNames) >= dropNamesMax {
 		return
 	}
-	m.dropNames = append(m.dropNames, string(mock.Kind)+" mock of connection "+mock.ConnectionID+
-		", asked at "+mock.Spec.ReqTimestampMock.Format(time.RFC3339Nano)+": "+why)
+	what := string(mock.Kind) + " mock"
+	if q := mock.Spec.DNSReq; q != nil {
+		what += " of question " + dnsQuestion(mock)
+	}
+	if mock.ConnectionID != "" {
+		what += " of connection " + mock.ConnectionID
+	}
+	m.dropNames = append(m.dropNames, what+", asked at "+mock.Spec.ReqTimestampMock.Format(time.RFC3339Nano)+": "+why)
+}
+
+// dnsQuestion is the question a DNS mock answers, its name and type: a DNS
+// mock has no connection to name it by.
+func dnsQuestion(mock *models.Mock) string {
+	return mock.Spec.DNSReq.Name + " " + mock.Spec.Metadata["qtype"]
 }
 
 // DropMark is where a manager's drop counts stood as a recording session
@@ -2173,14 +2192,18 @@ func (m *SyncMockManager) outChanStatus() (bound, closed bool) {
 // (name, qtype) dedupe key and wants every unique query mocked the
 // first time it's seen, regardless of whether the first app request
 // has already fired. Shares the same outChanMu guard as AddMock so
-// DNS sends also stay safe against proxy shutdown.
-func (m *SyncMockManager) SendConfigMock(mock *models.Mock) {
+// DNS sends also stay safe against proxy shutdown. It returns the drop, as
+// AddMock does, for a mock dropped at once (the output closed, or at its
+// byte bound), counted and said: a caller that holds its question as
+// recorded lets go of it (DNS: dnsRecordDedupe.giveBack). A nil manager has
+// no output, and drops it (MockDroppedOutputClosed).
+func (m *SyncMockManager) SendConfigMock(mock *models.Mock) MockDrop {
 	if m == nil {
-		return
+		return MockDroppedOutputClosed
 	}
 	m.totalAdded.Add(1)
 	m.noteSending(mock)
-	m.send(mock, "", func(bool) { m.sent(mock) })
+	return m.send(mock, "", func(bool) { m.sent(mock) })
 }
 
 // CloseOutChan flushes any still-attributable buffered mocks and then
