@@ -1205,7 +1205,7 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 	}
 	refused := func(t *testing.T, what string, err error) {
 		t.Helper()
-		if err == nil || !(strings.Contains(err.Error(), "path escapes from parent") || strings.Contains(err.Error(), "only inside")) {
+		if err == nil || (!strings.Contains(err.Error(), "path escapes from parent") && !strings.Contains(err.Error(), "only inside")) {
 			t.Fatalf("%s: %v, want it refused as outside the recording", what, err)
 		}
 	}
