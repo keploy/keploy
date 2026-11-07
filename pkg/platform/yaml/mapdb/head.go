@@ -3,7 +3,9 @@ package mapdb
 import (
 	"bytes"
 	"fmt"
+	"hash/maphash"
 	"strings"
+	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -37,8 +39,22 @@ const (
 // word. A file that holds no hand edit is written as keploy always wrote
 // it: the encoding, with keploy's line where the writer always put it (h).
 // JSON is the encoding: it has no comments, and a field a person added to
-// it is not kept, but named (jsonDropped).
+// it is not kept, but named (jsonDropped), unless old is the file this db
+// last encoded for the set, which holds none.
 func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old []byte, doc *yamlLib.Node, h header, testSetID string) ([]byte, error) {
+	if format == yaml.FormatJSON {
+		// old that is the file this db last encoded for the set, byte for
+		// byte, holds only the fields keploy writes: naming the fields a
+		// person added would decode it whole again on every flush of a
+		// recording, which rewrites the file on each batch.
+		if !db.jsonWritten.is(testSetID, old) {
+			warnJSONDropped(db.logger, old, testSetID)
+		}
+		// data is nil when the encoding fails, and no file holds that.
+		data, err := EncodeMappingF(mapping, db.logger, format)
+		db.jsonWritten.set(testSetID, data)
+		return data, err
+	}
 	return encodeOver(db.logger, mapping, format, old, doc, h, testSetID)
 }
 
@@ -58,12 +74,8 @@ func EncodeOverF(logger *zap.Logger, mapping *models.Mapping, format yaml.Format
 
 // encodeOver is MappingDb.encodeOver, its warnings on logger.
 func encodeOver(logger *zap.Logger, mapping *models.Mapping, format yaml.Format, old []byte, doc *yamlLib.Node, h header, testSetID string) ([]byte, error) {
-	if format != yaml.FormatYAML {
-		if fields := jsonDropped(old); len(fields) > 0 && format == yaml.FormatJSON {
-			logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d field(s) a hand edit added: a JSON mappings file keeps only the fields keploy writes", len(fields)),
-				zap.String("testSetID", testSetID), zap.Strings("fields", fields),
-				zap.String("next_step", "keep a note in mappings.yaml, which keeps a field a person adds, or outside the set"))
-		}
+	if format == yaml.FormatJSON {
+		warnJSONDropped(logger, old, testSetID)
 		return EncodeMappingF(mapping, logger, format)
 	}
 	data, unkept, err := encodeYAMLOver(mapping, old, doc, nil, h)
@@ -87,6 +99,40 @@ func encodeOver(logger *zap.Logger, mapping *models.Mapping, format yaml.Format,
 			zap.String("next_step", "the entry each field was on is gone from the file (removed, or its call recorded anew): add the field again where it belongs now"))
 	}
 	return data, nil
+}
+
+// warnJSONDropped says on logger which fields a person added to old,
+// testSetID's mappings.json before a rewrite, the rewrite drops: a JSON
+// mappings file keeps only the fields keploy writes (jsonDropped).
+func warnJSONDropped(logger *zap.Logger, old []byte, testSetID string) {
+	if fields := jsonDropped(old); len(fields) > 0 {
+		logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d field(s) a hand edit added: a JSON mappings file keeps only the fields keploy writes", len(fields)),
+			zap.String("testSetID", testSetID), zap.Strings("fields", fields),
+			zap.String("next_step", "keep a note in mappings.yaml, which keeps a field a person adds, or outside the set"))
+	}
+}
+
+// writtenFiles is, per test set, the file a MappingDb last encoded for it,
+// as its hash (hash/maphash, seeded per process), so a file is known as
+// keploy's own without keeping its bytes. Its zero value is empty.
+type writtenFiles struct {
+	sums sync.Map // test set ID -> uint64
+}
+
+// writtenSeed seeds the hashes of writtenFiles.
+var writtenSeed = maphash.MakeSeed()
+
+// set records data as the file encoded for testSetID.
+func (w *writtenFiles) set(testSetID string, data []byte) {
+	w.sums.Store(testSetID, maphash.Bytes(writtenSeed, data))
+}
+
+// is reports whether data is, byte for byte, the file last encoded for
+// testSetID: false for a set none was encoded for.
+func (w *writtenFiles) is(testSetID string, data []byte) bool {
+	v, _ := w.sums.Load(testSetID)
+	sum, ok := v.(uint64)
+	return ok && sum == maphash.Bytes(writtenSeed, data)
 }
 
 // decodeInto decodes data, a mapping file's bytes in format, into m, and
@@ -205,7 +251,7 @@ func commentHead(data []byte) []byte {
 			head.WriteString(strings.Repeat("\n", blanks))
 		}
 		blanks = 0
-		if bytes.HasPrefix(t, []byte(versionLine)) {
+		if headLine(string(t)) == versionLine {
 			head.WriteString(utils.GetVersionAsComment())
 			continue
 		}
@@ -219,22 +265,44 @@ func commentHead(data []byte) []byte {
 	return head.Bytes()
 }
 
-// headComments is the lines of the head commentHead keeps of data, each
-// trimmed: the comment lines data starts with, which a rewrite keeps.
+// headLine is a comment line of a mapping file as keploy knows it wherever
+// it reads one, from the file's bytes (commentHead) or from the comments
+// YAML hangs on its nodes (takeFileHead, commentLines): without the white
+// space around it, which a line's place in the file adds (YAML keeps a
+// line's trailing white space, not its indent), and keploy's "# Generated by
+// Keploy" line whatever the keploy that wrote it, versionLine. So a line
+// commentHead writes is the line YAML reads back from what it wrote.
+func headLine(l string) string {
+	l = strings.TrimSpace(l)
+	if strings.HasPrefix(l, versionLine) {
+		return versionLine
+	}
+	return l
+}
+
+// headComments is the lines of the head commentHead keeps of data, each as
+// keploy knows it (headLine): the comment lines data starts with, which a
+// rewrite keeps; keploy's line among them as versionLine.
 func headComments(data []byte) []string {
-	return strings.Split(strings.TrimSpace(string(commentHead(data))), "\n")
+	var out []string
+	for _, l := range strings.Split(string(commentHead(data)), "\n") {
+		if l = headLine(l); l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // commentLines adds to out the comment lines of the YAML node n and of the
-// nodes under it, each trimmed, without keploy's "# Generated by Keploy"
-// line.
+// nodes under it, each as keploy knows it (headLine), without keploy's
+// "# Generated by Keploy" line.
 func commentLines(n *yamlLib.Node, out []string) []string {
 	if n == nil {
 		return out
 	}
 	for _, c := range []string{n.HeadComment, n.LineComment, n.FootComment} {
 		for _, l := range strings.Split(c, "\n") {
-			if l = strings.TrimSpace(l); strings.HasPrefix(l, "#") && !strings.HasPrefix(l, versionLine) {
+			if l = headLine(l); strings.HasPrefix(l, "#") && l != versionLine {
 				out = append(out, l)
 			}
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/models"
 	yamlLib "gopkg.in/yaml.v3"
@@ -15,6 +16,15 @@ import (
 // says so (keepEdits' lost). A field written out without aliases is kept
 // whatever its size.
 const maxAliasNodes = 10000
+
+// extraParses counts the parses of a whole old mapping file a rewrite makes
+// past the writer's own decode: keepEdits' own, of a file its writer did not
+// hand it parsed, and jsonDropped's. Each writer of a MappingDb hands
+// keepEdits the document it decoded its mapping from (decodeInto), and
+// decodes no mappings.json it wrote last again (encodeOver): a recording
+// rewrites the file on every batch, so its rewrite parses it once. Rows
+// hold that.
+var extraParses atomic.Int64
 
 // keepEdits is data, a mapping encoded anew, with what a hand edit added to
 // old, the file it replaces, that the encoding lacks: each key old has and
@@ -40,6 +50,7 @@ func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]str
 		if len(old) == 0 {
 			return data, Unkept{}
 		}
+		extraParses.Add(1)
 		od = &yamlLib.Node{}
 		if yamlLib.Unmarshal(old, od) != nil {
 			return data, Unkept{}
@@ -48,7 +59,7 @@ func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]str
 	oroot := docRoot(od)
 	fileHead := ""
 	if oroot != nil && oroot.Kind == yamlLib.MappingNode {
-		fileHead = takeFileHead(oroot, old)
+		fileHead = takeFileHead(od, oroot, old)
 		if !holdsEdits(od, oroot) {
 			return data, Unkept{}
 		}
@@ -88,25 +99,52 @@ func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]str
 	return data, unkept
 }
 
-// takeFileHead takes the comment above the first key of root, the mapping of
-// old, a mapping file's bytes, off that key and is that comment, when it is
-// keploy's line or the file's head holds it (headComments): YAML hangs the
-// comment a file starts with on its first key, and it is the file's, not that
-// key's. A comment the head does not hold (inside a mapping the file writes
-// as {...}) stays on the key, and it is "". Keploy's line alone, on every file
-// keploy wrote, costs no read of old.
-func takeFileHead(root *yamlLib.Node, old []byte) string {
+// takeFileHead takes off the first key of root, the mapping of doc, old's
+// document, the lines of the comment above that key that are the file's
+// head, and is those lines: YAML hangs the comment a file starts with on
+// its document, its mapping and its first key, and that comment is the
+// file's, which encodeOver writes as the head (commentHead), not the key's.
+// A line is the head's when the head holds it and the comments of doc and
+// root do not, each line known as headLine knows it and counted as often as
+// it appears; keploy's line is keploy's, which a writer puts where it
+// always did (header), and is taken wherever it is. So no line is written
+// by both the head and the first key, and a rewrite of a file a rewrite
+// wrote changes nothing. A line the head does not hold (after a document
+// marker's comment, inside a mapping the file writes as {...}) stays on the
+// key. Keploy's line alone, on every file keploy wrote, costs no read of
+// old.
+func takeFileHead(doc, root *yamlLib.Node, old []byte) string {
 	if len(root.Content) == 0 || root.Content[0].HeadComment == "" {
 		return ""
 	}
 	first := root.Content[0]
 	c := first.HeadComment
-	lone := strings.HasPrefix(c, versionLine) && !strings.Contains(c, "\n")
-	if !lone && uncounted(commentLines(&yamlLib.Node{HeadComment: c}, nil), headComments(old)) > 0 {
-		return ""
+	if strings.HasPrefix(c, versionLine) && !strings.Contains(c, "\n") {
+		first.HeadComment = ""
+		return c
 	}
-	first.HeadComment = ""
-	return c
+	held := map[string]int{}
+	for _, l := range headComments(old) {
+		held[l]++
+	}
+	for _, l := range strings.Split(doc.HeadComment+"\n"+root.HeadComment, "\n") {
+		held[headLine(l)]--
+	}
+	var took, left []string
+	for _, l := range strings.Split(c, "\n") {
+		switch n := headLine(l); {
+		case n == versionLine:
+		case held[n] > 0:
+			held[n]--
+		default:
+			left = append(left, l)
+			continue
+		}
+		took = append(took, l)
+	}
+	// A blank line beside a line the head took is the head's.
+	first.HeadComment = strings.Trim(strings.Join(left, "\n"), "\n")
+	return strings.Join(took, "\n")
 }
 
 // holdsEdits reports whether doc, a mapping file's document, and root, its
@@ -738,8 +776,12 @@ func docRoot(d *yamlLib.Node) *yamlLib.Node {
 // JSON rewrite writes only the fields keploy knows, so each is dropped, and
 // keploy says so. nil for no old, and for old that does not decode.
 func jsonDropped(old []byte) []string {
+	if len(old) == 0 {
+		return nil
+	}
+	extraParses.Add(1)
 	var doc any
-	if len(old) == 0 || json.Unmarshal(old, &doc) != nil {
+	if json.Unmarshal(old, &doc) != nil {
 		return nil
 	}
 	var out []string

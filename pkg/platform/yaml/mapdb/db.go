@@ -22,6 +22,9 @@ type MappingDb struct {
 	path        string
 	MapFileName string
 	Format      yaml.Format
+	// jsonWritten is the mappings.json files this db last encoded, per
+	// test set (encodeOver).
+	jsonWritten writtenFiles
 }
 
 func New(logger *zap.Logger, path string, mapFileName string) *MappingDb {
