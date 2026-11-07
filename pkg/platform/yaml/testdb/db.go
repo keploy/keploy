@@ -316,7 +316,7 @@ func (ts *TestYaml) GetTestCase(ctx context.Context, testSetID string, testCaseN
 	}
 	// Auto-detect format on read so replay works even when StorageFormat
 	// differs from the format the testcase was originally recorded in.
-	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, testPath, testCaseName, ts.Format)
+	data, detected, err := yaml.ReadRecordingFileAny(ctx, ts.logger, ts.TcsPath, testPath, testCaseName, ts.Format)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read test case %q: %w", testCaseName, err)
 	}
@@ -459,7 +459,7 @@ func (ts *TestYaml) TestCaseFiles(ctx context.Context, testSetID string) ([]yaml
 	})
 	out := make([]yaml.File, 0, len(refs))
 	for _, ref := range refs {
-		data, err := yaml.ReadFileF(ctx, ts.logger, dir, ref.name, ref.format)
+		data, err := yaml.ReadRecordingFileF(ctx, ts.logger, ts.TcsPath, dir, ref.name, ref.format)
 		if err != nil {
 			return nil, err
 		}
@@ -581,7 +581,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 	for _, ref := range refs {
 		name, fileFormat := ref.name, ref.format
 
-		data, err := yaml.ReadFileF(ctx, ts.logger, TestPath, name, fileFormat)
+		data, err := yaml.ReadRecordingFileF(ctx, ts.logger, ts.TcsPath, TestPath, name, fileFormat)
 		if err != nil {
 			utils.LogError(ts.logger, err, "failed to read the testcase")
 			return nil, err
@@ -1070,7 +1070,7 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	// Read whichever format the testcase was recorded in.
-	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, tcsPath, testCaseID, ts.Format)
+	data, detected, err := yaml.ReadRecordingFileAny(ctx, ts.logger, ts.TcsPath, tcsPath, testCaseID, ts.Format)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to read the testcase")
 		return err

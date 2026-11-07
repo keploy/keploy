@@ -29,7 +29,7 @@ func httpDocJSON(name, kind, path string) string {
 // readDocs is every document MockFileReader returns of the set's mock file.
 func readDocs(t *testing.T, dir string, format yaml.Format) []MockFileDoc {
 	t.Helper()
-	fr, err := NewMockFileReader(context.Background(), nil, filepath.Join(dir, pruneSet), "mocks", format)
+	fr, err := NewMockFileReader(context.Background(), nil, dir, filepath.Join(dir, pruneSet), "mocks", format)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestAGobSetIsReadAsTheReplayReadsIt(t *testing.T) {
 	if err := os.WriteFile(gobPath, buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewMockFileReader(context.Background(), nil, filepath.Join(dir, pruneSet), "mocks", yaml.FormatYAML); !errors.Is(err, ErrGobMockFile) || !strings.Contains(err.Error(), gobPath) {
+	if _, err := NewMockFileReader(context.Background(), nil, dir, filepath.Join(dir, pruneSet), "mocks", yaml.FormatYAML); !errors.Is(err, ErrGobMockFile) || !strings.Contains(err.Error(), gobPath) {
 		t.Fatalf("the reader must not read the YAML file a replay of a gob set never reads: %v", err)
 	}
 	served, listed := readSetOracle(t, dir, yaml.FormatYAML)

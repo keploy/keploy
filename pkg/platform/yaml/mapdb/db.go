@@ -68,7 +68,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	effFormat := db.Format
 	if exists {
 		effFormat = detected
-		data, err := os.ReadFile(filepath.Join(mappingPath, fileName+"."+effFormat.FileExtension()))
+		data, err := yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to read existing mapping file", zap.String("path", mappingPath))
 			return err
@@ -341,7 +341,7 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	effFormat := db.Format
 	if exists {
 		effFormat = detected
-		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to read mapping file for upsert",
 				zap.String("testSetID", testSetID))
@@ -431,7 +431,7 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -495,7 +495,7 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	if err != nil || !exists {
 		return nil, err
 	}
-	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	fileData, err := yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 	if err != nil {
 		return nil, err
 	}
@@ -612,7 +612,7 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 	if !exists {
 		return fmt.Errorf("mark %s as recorded with %s: the set has no mappings file", testSetID, feature)
 	}
-	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	fileData, err := yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 	if err != nil {
 		return err
 	}
@@ -649,7 +649,7 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -684,7 +684,7 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -834,7 +834,7 @@ func (db *MappingDb) decodeMapping(ctx context.Context, testSetID string) (*mode
 		fileName = "mappings"
 	}
 
-	fileData, detected, err := yaml.ReadFileAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	fileData, detected, err := yaml.ReadRecordingFileAny(ctx, db.logger, db.path, mappingPath, fileName, db.Format)
 	if err != nil {
 		if os.IsNotExist(err) {
 			db.logger.Debug("Mapping file does not exist",
@@ -1022,7 +1022,7 @@ func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, must
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}

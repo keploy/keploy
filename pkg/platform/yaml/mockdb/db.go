@@ -424,7 +424,7 @@ func (st *pruneStats) recordPruned(mock *models.Mock, debugEnabled bool) {
 func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, format yaml.Format, verdict *pruneVerdict) (pruneStats, error) {
 	var st pruneStats
 	ext := "." + format.FileExtension()
-	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, format)
+	reader, err := yaml.NewRecordingMockReaderF(ctx, ys.Logger, ys.MockPath, path, mockFileName, format)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
 		return st, err
@@ -574,7 +574,7 @@ func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *p
 	// the gob path is the one most likely to hit ~10^5-mock test sets, so
 	// skipping the allocation when the log is a no-op matters more here.
 	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
-	err = forEachGobMock(gobPath, func(mock *models.Mock) error {
+	err = forEachGobMock(ys.MockPath, gobPath, func(mock *models.Mock) error {
 		// The gob stream has no per-line reader watching ctx, so a very
 		// large set checks it every ctxCheckEvery mocks.
 		if err := ctxErrEvery(ctx, st.total); err != nil {
@@ -708,8 +708,13 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 			utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before noise persistence", zap.String("path", gobPath))
 			return nil, err
 		}
+		// eachGob streams the file's mocks to fn, read inside the recording,
+		// for both passes.
+		eachGob := func(fn func(mock *models.Mock) error) error {
+			return forEachGobMock(ys.MockPath, gobPath, fn)
+		}
 		scanned, changes := 0, false
-		err := forEachGobMock(gobPath, func(mock *models.Mock) error {
+		err := eachGob(func(mock *models.Mock) error {
 			if err := ctxErrEvery(ctx, scanned); err != nil {
 				return err
 			}
@@ -732,7 +737,7 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		}
 		defer rw.discard()
 		total := 0
-		err = forEachGobMock(gobPath, func(mock *models.Mock) error {
+		err = eachGob(func(mock *models.Mock) error {
 			if err := ctxErrEvery(ctx, total); err != nil {
 				return err
 			}
@@ -761,7 +766,7 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 	// eachDoc streams the file's documents to fn, closing the file before
 	// it returns.
 	eachDoc := func(fn func(doc fileDoc) error) error {
-		reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
+		reader, err := yaml.NewRecordingMockReaderF(ctx, ys.Logger, ys.MockPath, path, mockFileName, detectedFormat)
 		if err != nil {
 			return err
 		}
@@ -1441,7 +1446,7 @@ func createTempBeside(path, pattern string) (*os.File, error) {
 // not carried, which is said. Any other read error keeps the file as it was.
 func (ys *MockYaml) gobCarryOverLocked(filePath, tmpPath string) error {
 	carried := 0
-	cut, err := forEachGobMockCut(filePath, func(m *models.Mock) error {
+	cut, err := forEachGobMockCut(ys.MockPath, filePath, func(m *models.Mock) error {
 		carried++
 		return ys.gobEnc.Encode(gobKinded(m))
 	})
@@ -1685,18 +1690,19 @@ func (ys *MockYaml) gobFilePathSnapshot() string {
 	return p
 }
 
-// readGobMocks decodes every mock in a mocks.gob file (see forEachGobMock).
+// readGobMocks decodes every mock in a mocks.gob file (see forEachGobMock),
+// read inside the file's own directory.
 // On a decode error it returns the mocks decoded before it with the error.
 func readGobMocks(path string) ([]*models.Mock, error) {
-	out, _, err := readGobMocksCut(path)
+	out, _, err := readGobMocksCut(filepath.Dir(path), path)
 	return out, err
 }
 
 // readGobMocksCut is readGobMocks that also says whether the file ended
 // part-way through a mock (see forEachGobMockCut).
-func readGobMocksCut(path string) ([]*models.Mock, bool, error) {
+func readGobMocksCut(root, path string) ([]*models.Mock, bool, error) {
 	var out []*models.Mock
-	cut, err := forEachGobMockCut(path, func(m *models.Mock) error {
+	cut, err := forEachGobMockCut(root, path, func(m *models.Mock) error {
 		out = append(out, m)
 		return nil
 	})
@@ -2021,7 +2027,7 @@ func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string,
 		connFailures := 0
 		var deps models.MockDepsCheck
 		// One mock at a time: a visiting read keeps none of them.
-		cut, err := forEachGobMockCut(gobPath, func(mock *models.Mock) error {
+		cut, err := forEachGobMockCut(ys.MockPath, gobPath, func(mock *models.Mock) error {
 			if mock.Kind == models.ConnectionFailure {
 				// gob has no per-kind decoder: a connection failure is
 				// validated here, as DecodeMocks and DecodeMocksJSON validate
@@ -2087,7 +2093,7 @@ func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string,
 	// Auto-detect the mocks file's format (may be yaml or json regardless
 	// of the currently-configured StorageFormat) so replay keeps working
 	// across format switches.
-	reader, err := yaml.NewMockReaderAny(ctx, ys.Logger, path, mockFileName, ys.Format)
+	reader, err := yaml.NewRecordingMockReaderAny(ctx, ys.Logger, ys.MockPath, path, mockFileName, ys.Format)
 	if err != nil {
 		if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
 			if visit != nil {

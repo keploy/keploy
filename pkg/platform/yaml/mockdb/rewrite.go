@@ -537,16 +537,19 @@ func (rw *mockFileRewriter) discard() {
 // usefully append to an existing mocks.gob from a fresh encoder — the new
 // encoder's type table will conflict. Readers that need to merge multiple
 // sessions must read each file independently.
-func forEachGobMock(path string, fn func(*models.Mock) error) error {
-	_, err := forEachGobMockCut(path, fn)
+//
+// path is a file of the recording at root, and is opened only inside it
+// (yaml.OpenInRecording).
+func forEachGobMock(root, path string, fn func(*models.Mock) error) error {
+	_, err := forEachGobMockCut(root, path, fn)
 	return err
 }
 
 // forEachGobMockCut is forEachGobMock that also says whether the stream ended
 // part-way through a mock (cut): the file was cut, as an interrupted write
 // leaves it, and that last mock was not read.
-func forEachGobMockCut(path string, fn func(*models.Mock) error) (cut bool, err error) {
-	f, err := os.Open(path)
+func forEachGobMockCut(root, path string, fn func(*models.Mock) error) (cut bool, err error) {
+	f, err := yaml.OpenInRecording(root, path)
 	if err != nil {
 		return false, err
 	}

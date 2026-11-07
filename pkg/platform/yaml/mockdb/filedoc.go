@@ -69,20 +69,21 @@ var ErrGobMockFile = errors.New("a replay reads the set's mocks from its gob moc
 
 // NewMockFileReader opens the mock file name (no extension) in dir that a
 // replay of the set reads, with preferred the configured format: the file
-// in that format, else the one in the other (yaml.NewMockReaderAny). When
+// in that format, else the one in the other, opened only inside root, the
+// recording's directory dir is under (yaml.NewRecordingMockReaderAny). When
 // dir has name.gob, which a replay reads before either, the error wraps
 // ErrGobMockFile and names it (see MockYaml.SkippedMocks for what a replay
 // skips of one). logger takes what the replay's read logs for each document
 // it skips; nil discards it. Otherwise the error is the open's (wrapping
 // fs.ErrNotExist when there is no such file).
-func NewMockFileReader(ctx context.Context, logger *zap.Logger, dir, name string, preferred yaml.Format) (*MockFileReader, error) {
+func NewMockFileReader(ctx context.Context, logger *zap.Logger, root, dir, name string, preferred yaml.Format) (*MockFileReader, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	if gobPath := filepath.Join(dir, name+".gob"); gobFileReadFirst(gobPath) {
 		return nil, fmt.Errorf("%w: %s", ErrGobMockFile, gobPath)
 	}
-	r, err := yaml.NewMockReaderAny(ctx, logger, dir, name, preferred)
+	r, err := yaml.NewRecordingMockReaderAny(ctx, logger, root, dir, name, preferred)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +188,7 @@ func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string,
 	defer lock.RUnlock()
 	out := map[string]models.SkippedMock{}
 	if gobPath := filepath.Join(path, mockFileName+".gob"); gobFileReadFirst(gobPath) {
-		mocks, _, err := readGobMocksCut(gobPath)
+		mocks, _, err := readGobMocksCut(ys.MockPath, gobPath)
 		if err != nil {
 			return gobPath, nil
 		}
@@ -201,7 +202,7 @@ func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string,
 		}
 		return gobPath, out
 	}
-	fr, err := NewMockFileReader(ctx, nil, path, mockFileName, ys.Format)
+	fr, err := NewMockFileReader(ctx, nil, ys.MockPath, path, mockFileName, ys.Format)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", out // no mock file: the read skips nothing
 	}
