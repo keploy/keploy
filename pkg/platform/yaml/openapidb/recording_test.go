@@ -48,15 +48,93 @@ func TestSchemasAreReadOnlyInsideTheRecording(t *testing.T) {
 	for _, testPath := range []string{"", root} {
 		tcs, err := db.GetTestCasesSchema(ctx, "set", testPath)
 		refused(t, "GetTestCasesSchema", err)
+		if !strings.Contains(err.Error(), copyHint) {
+			t.Fatalf("GetTestCasesSchema: %v, want it to name the copy", err)
+		}
 		if len(tcs) != 0 {
 			t.Fatalf("GetTestCasesSchema read %d schemas", len(tcs))
 		}
 	}
 	mocks, err := db.GetMocksSchemas(ctx, "mockset", root, "mocks")
 	refused(t, "GetMocksSchemas", err)
+	if !strings.Contains(err.Error(), copyHint) {
+		t.Fatalf("GetMocksSchemas: %v, want it to name the copy", err)
+	}
 	if len(mocks) != 0 {
 		t.Fatalf("GetMocksSchemas read %d schemas", len(mocks))
 	}
+}
+
+// copyHint is what a schema refused for leading out of the schema folder adds
+// to why: the fix, a copy of the set in the folder.
+const copyHint = "copy the set into it"
+
+// A schema refused because it leads out of the schema folder says how to have
+// it read: copy the set into the folder. A refusal with nothing to copy, or
+// for a link that stays inside, does not say so.
+func TestASchemaThatLeadsOutSaysToCopyTheSetIn(t *testing.T) {
+	ctx := context.Background()
+	write := func(t *testing.T, path, data string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hint := func(t *testing.T, what string, err error, want bool) {
+		t.Helper()
+		refused(t, what, err)
+		if got := strings.Contains(err.Error(), copyHint); got != want {
+			t.Fatalf("%s: %v: names the copy %v, want %v", what, err, got, want)
+		}
+	}
+	t.Run("a test's schema that links out", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "schema")
+		write(t, filepath.Join(base, "outside.yaml"), "openapi: 3.0.0\n")
+		linkTo(t, filepath.Join(base, "outside.yaml"), filepath.Join(root, "set", "test-1.yaml"))
+		_, err := New(zap.NewNop(), root).GetTestCasesSchema(ctx, "set", "")
+		hint(t, "GetTestCasesSchema", err, true)
+	})
+	t.Run("a test set folder that links out", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "schema")
+		write(t, filepath.Join(base, "shared", "set", "test-1.yaml"), "openapi: 3.0.0\n")
+		linkTo(t, filepath.Join(base, "shared", "set"), filepath.Join(root, "set"))
+		_, err := New(zap.NewNop(), root).GetTestCasesSchema(ctx, "set", root)
+		hint(t, "GetTestCasesSchema", err, true)
+	})
+	t.Run("a mock set folder that links out", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "schema")
+		write(t, filepath.Join(base, "shared", "mockset", "mocks.yaml"), "openapi: 3.0.0\n")
+		linkTo(t, filepath.Join(base, "shared", "mockset"), filepath.Join(root, "mockset"))
+		_, err := New(zap.NewNop(), root).GetMocksSchemas(ctx, "mockset", root, "mocks")
+		hint(t, "GetMocksSchemas", err, true)
+	})
+	t.Run("a link out to nothing", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "schema")
+		linkTo(t, filepath.Join(base, "missing.yaml"), filepath.Join(root, "set", "test-1.yaml"))
+		_, err := New(zap.NewNop(), root).GetTestCasesSchema(ctx, "set", "")
+		hint(t, "GetTestCasesSchema", err, false)
+	})
+	t.Run("an absolute link to a schema inside", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "schema")
+		inside := filepath.Join(root, "other", "test-1.yaml")
+		write(t, inside, "openapi: 3.0.0\n")
+		if err := os.MkdirAll(filepath.Join(root, "set"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(inside, filepath.Join(root, "set", "test-1.yaml")); err != nil {
+			t.Skipf("cannot make a symbolic link here: %v", err)
+		}
+		_, err := New(zap.NewNop(), root).GetTestCasesSchema(ctx, "set", "")
+		hint(t, "GetTestCasesSchema", err, false)
+	})
 }
 
 // A schema is written only inside the recording: an append onto a schema
