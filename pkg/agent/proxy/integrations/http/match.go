@@ -1609,8 +1609,18 @@ func (h *HTTP) exactBodyMatch(body []byte, schemaMatched []*models.Mock, held fu
 // bodyMatch reports whether the call's body reqBody has every top-level key
 // of mock's recorded body. A reqBody that does not read as a JSON object is
 // logged redacted by logPlaces(mock).
+//
+// A recorded body that is a JSON array is read at its elements instead
+// (arrayBodyMatch): a batch call, a JSON-RPC batch and a JSON Patch all send
+// an array, and a value changing in one of them is what the fuzzy comparison
+// after this step weighs, so the shape step reads it rather than refusing the
+// call (#5037).
 func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte, logPlaces func(*models.Mock) redactedPlaces) (bool, error) {
 	mockBody := []byte(mock.Spec.HTTPReq.Body)
+	if strings.HasPrefix(strings.TrimSpace(string(mockBody)), "[") {
+		return h.arrayBodyMatch(mock, mockBody, reqBody, logPlaces)
+	}
+
 	var mockData map[string]any
 	var reqData map[string]any
 	err := json.Unmarshal(mockBody, &mockData)
@@ -1627,24 +1637,79 @@ func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte, logPlaces func(*mode
 		return false, err
 	}
 
-	for key := range mockData {
-		_, exists := reqData[key]
-		if !exists {
+	return bodyShapeHolds(mockData, reqData), nil
+}
+
+// arrayBodyMatch is bodyMatch for a recorded body that is a JSON array: the
+// request has to be an array at least as long, and each recorded element has
+// to hold at its index. A request of another shape is logged redacted by
+// logPlaces(mock) and does not match.
+func (h *HTTP) arrayBodyMatch(mock *models.Mock, mockBody, reqBody []byte, logPlaces func(*models.Mock) redactedPlaces) (bool, error) {
+	var mockArray []any
+	if err := json.Unmarshal(mockBody, &mockArray); err != nil {
+		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.String("Req", string(mockBody)))
+		return false, err
+	}
+
+	var reqArray []any
+	if err := json.Unmarshal(reqBody, &reqArray); err != nil {
+		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.String("Req", redactBody(string(reqBody), "", logPlaces(mock))))
+		return false, nil
+	}
+
+	if len(reqArray) < len(mockArray) {
+		return false, nil
+	}
+	for i, element := range mockArray {
+		if !bodyShapeHolds(element, reqArray[i]) {
 			return false, nil
 		}
 	}
 	return true, nil
 }
 
+// bodyShapeHolds says whether req carries every key mock states, at the place
+// mock states it: an object's keys are each in req, as this step has always
+// read them, and an array's elements are in req at the same index with the
+// request at least as long. A value that is neither states no key, so it asks
+// nothing of req.
+func bodyShapeHolds(mock, req any) bool {
+	switch m := mock.(type) {
+	case map[string]any:
+		r, ok := req.(map[string]any)
+		if !ok {
+			return false
+		}
+		for key := range m {
+			if _, exists := r[key]; !exists {
+				return false
+			}
+		}
+		return true
+	case []any:
+		r, ok := req.([]any)
+		if !ok || len(r) < len(m) {
+			return false
+		}
+		for i, element := range m {
+			if !bodyShapeHolds(element, r[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return true
+}
+
 // PerformBodyMatch Perform body match for JSON data. The caller hands no
-// pool, so a reqBody that does not read as a JSON object is logged redacted
+// pool, so a reqBody that does not read as JSON is logged redacted
 // whole (unreadPlaces): any of its values may be one a recording redacted.
 func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Mock, reqBody []byte) ([]*models.Mock, error) {
 	return h.performBodyMatch(ctx, schemaMatched, reqBody, func(*models.Mock) redactedPlaces { return unreadPlaces() })
 }
 
-// performBodyMatch is PerformBodyMatch, a reqBody that does not read as a
-// JSON object logged redacted by logPlaces of the recording it was compared
+// performBodyMatch is PerformBodyMatch, a reqBody that does not read as JSON
+// logged redacted by logPlaces of the recording it was compared
 // with.
 func (h *HTTP) performBodyMatch(ctx context.Context, schemaMatched []*models.Mock, reqBody []byte, logPlaces func(compared *models.Mock) redactedPlaces) ([]*models.Mock, error) {
 	h.Logger.Debug("Performing schema match for body")
@@ -1662,8 +1727,8 @@ func (h *HTTP) performBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 
 		ok, err := h.bodyMatch(mock, reqBody, logPlaces)
 		if err != nil {
-			h.Logger.Error("failed to do schema matching on request body", zap.Error(err))
-			break
+			h.Logger.Error("failed to do schema matching on request body, skipping this mock", zap.Error(err))
+			continue
 		}
 
 		if ok {
