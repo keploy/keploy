@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // CorrelationsFromMock detects request→response value echoes on an HTTP mock: a
@@ -28,13 +29,14 @@ import (
 // distinct calls. Scope: JSON request and response BODIES of an HTTP mock,
 // and the values a Mongo write's answer echoes (mongoCorrelations). An HTTP
 // mock's headers, URL query and non-JSON bodies are not read: a value there
-// is matched as recorded.
-func CorrelationsFromMock(m *models.Mock) []models.FieldCorrelation {
+// is matched as recorded. logger takes the line a Mongo mock with too many
+// places to read gives (mongoCorrelations).
+func CorrelationsFromMock(logger *zap.Logger, m *models.Mock) []models.FieldCorrelation {
 	if m == nil {
 		return nil
 	}
 	if m.Kind == models.Mongo {
-		return mongoCorrelations(m)
+		return mongoCorrelations(logger, m)
 	}
 	if m.Spec.HTTPReq == nil || m.Spec.HTTPResp == nil {
 		return nil
@@ -228,11 +230,11 @@ func hasMixedEntropy(s string) bool {
 // decides nothing there. The learn step writes an echo as a variable of its
 // call instead (models.MockVariable.Echo), from what changed between the
 // recording and its replay.
-func MaterializeCorrelations(m *models.Mock) {
+func MaterializeCorrelations(logger *zap.Logger, m *models.Mock) {
 	if m == nil || len(m.Spec.Correlations) > 0 || provenswitch.On() {
 		return
 	}
-	if c := CorrelationsFromMock(m); len(c) > 0 {
+	if c := CorrelationsFromMock(logger, m); len(c) > 0 {
 		m.Spec.Correlations = c
 	}
 }

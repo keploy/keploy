@@ -1248,13 +1248,13 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	for _, m := range storage.filtered {
 		if m != nil {
 			m.DeriveLifetime()
-			mocknoise.MaterializeCorrelations(m)
+			mocknoise.MaterializeCorrelations(a.logger, m)
 		}
 	}
 	for _, m := range storage.unfiltered {
 		if m != nil {
 			m.DeriveLifetime()
-			mocknoise.MaterializeCorrelations(m)
+			mocknoise.MaterializeCorrelations(a.logger, m)
 		}
 	}
 
@@ -1429,7 +1429,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		}
 		mock := &m
 		mock.DeriveLifetime()
-		mocknoise.MaterializeCorrelations(mock)
+		mocknoise.MaterializeCorrelations(a.logger, mock)
 		if proven {
 			tally.Add(mock)
 			storage.dests.add(mock)

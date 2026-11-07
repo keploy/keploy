@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // A Mongo correlation names its places by the OP_MSG section that holds them:
@@ -22,6 +23,36 @@ const (
 	mongoMsgPrefix = "{ SectionSingle msg: "
 	mongoMsgSuffix = " }"
 )
+
+// What the detector keeps of one mock is bounded. A place keeps its whole path,
+// so places times path length, not the mock's size, is what they cost, and the
+// correlations stay on the mock for the whole replay.
+const (
+	// mongoKeepBytes is what the places of one mock may cost, written and
+	// answered together: 16 MiB, the largest document Mongo stores. A claim
+	// keeps a few hundred bytes; with field names of ordinary length this is
+	// about 100,000 places. The heap may hold a quarter more, as the allocator
+	// rounds a path just over 32 KB up to 40 KB.
+	mongoKeepBytes = 16 << 20
+	// mongoPlaceCost is what a place costs besides its path's text: the
+	// correlation or list entry that holds it, the value and the section's name.
+	mongoPlaceCost = 128
+	// mongoAnswerPlaces is how many places of a value's answer are listed. The
+	// detector needs one, to know the value is answered. The render needs none
+	// (RenderMongoEchoes goes by the value and RequestPath), so the list only
+	// shows a reader where the answer holds the value.
+	mongoAnswerPlaces = 4
+)
+
+// mongoKeep is what the detector may still keep of one mock, in bytes. Below
+// zero, the mock holds more than it may keep.
+type mongoKeep int
+
+// take charges a place with a path of n bytes, and reports whether it fits.
+func (k *mongoKeep) take(n int) bool {
+	*k -= mongoKeep(n + mongoPlaceCost)
+	return *k >= 0
+}
 
 // mongoMsgJSON returns the extended JSON document of an OP_MSG body section,
 // and false for any other section (a document sequence, a section the
@@ -87,21 +118,42 @@ func opMsgSections(msg interface{}) []string {
 // section is read only when it quotes one of the values the request wrote
 // (mongoAnswerHolds). A section that is read is walked (jsonScalars), never
 // parsed into a document: what is kept is the written places that hold a
-// random value and the answer's places of those values.
+// random value and a few of the answer's places of those values.
 //
-// A value written at several places is a correlation per place, and the
-// answer's places of that value are listed once, on the first of them. The
-// others only say that the live request must write the same value there
-// (RenderMongoEchoes), so a value written at n places and answered at k costs
-// n+k entries, on the mock and on each copy of it, not n*k.
-func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
+// A value written at several places is a correlation per place, and at most
+// mongoAnswerPlaces of the answer's places of that value are listed, once, on
+// the first of them. The others only say that the live request must write the
+// same value there (RenderMongoEchoes), so a value written at n places costs n
+// entries, on the mock and on each copy of it, however often it is answered.
+//
+// A mock whose places cost more than mongoKeepBytes has no correlation at all,
+// and one line says so: a list that left a place out could bind a value the
+// live request writes at that place otherwise. Such a mock is served as
+// recorded, as a mock with no echo is, so what reads its answer sees the
+// recorded value and a test that needs the live one fails.
+func mongoCorrelations(logger *zap.Logger, m *models.Mock) []models.FieldCorrelation {
+	keep := mongoKeep(mongoKeepBytes)
+	out := mongoEchoes(m, &keep)
+	if keep >= 0 {
+		return out
+	}
+	req, resp := mongoOpMsgSections(m)
+	logger.Warn("a Mongo mock holds too many places to read its echoes: its answer is served as recorded, so a value the application mints is not rendered into it",
+		zap.String("mock", m.Name), zap.Int("sectionBytes", mongoTextLen(req)+mongoTextLen(resp)), zap.Int("boundBytes", mongoKeepBytes))
+	return nil
+}
+
+// mongoEchoes is mongoCorrelations' detection. Each place it keeps is charged
+// to keep, which it leaves below zero when they cost too much, and what it
+// returns then is not all there is.
+func mongoEchoes(m *models.Mock, keep *mongoKeep) []models.FieldCorrelation {
 	req, resp := mongoOpMsgSections(m)
 	var written []models.FieldCorrelation
 	for i, s := range req {
 		if !mongoMayWrite(s) || !mongoSharesAValue(s, resp) {
 			continue
 		}
-		written = append(written, mongoWrites(i, s)...)
+		written = append(written, mongoWrites(i, s, keep)...)
 	}
 	if len(written) == 0 {
 		return nil
@@ -120,7 +172,7 @@ func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 		}
 		jsonScalars(doc, func(path []byte, text string) {
 			v := jsonStringText(text)
-			if places, ok := answered[v]; ok {
+			if places, ok := answered[v]; ok && len(places) < mongoAnswerPlaces && keep.take(len(path)) {
 				answered[v] = append(places, mongoSectionPlace+strconv.Itoa(j)+"."+string(path))
 			}
 		})
@@ -152,8 +204,9 @@ type mongoWrite struct {
 // other, as correlations whose answer places are still to be found. A first
 // walk of the section keeps the places that hold such a value; a second
 // counts every value at them, so a place that holds several (the key_id of
-// each document an insert writes) is not taken.
-func mongoWrites(i int, section string) []models.FieldCorrelation {
+// each document an insert writes) is not taken. Each place the first walk keeps
+// is charged to keep, and one that does not fit is not kept.
+func mongoWrites(i int, section string, keep *mongoKeep) []models.FieldCorrelation {
 	doc, ok := mongoMsgJSON(section)
 	if !ok {
 		return nil
@@ -164,7 +217,7 @@ func mongoWrites(i int, section string) []models.FieldCorrelation {
 			return
 		}
 		v := jsonStringText(text)
-		if class, ok := mongoRandomClass(v); ok {
+		if class, ok := mongoRandomClass(v); ok && keep.take(len(path)) {
 			places[string(path)] = &mongoWrite{value: v, class: class}
 		}
 	})
@@ -223,11 +276,7 @@ func mongoMayWrite(section string) bool {
 // value by value.
 func mongoSharesAValue(req string, resp []string) bool {
 	small, large := []string{req}, resp
-	n := 0
-	for _, s := range resp {
-		n += len(s)
-	}
-	if n < len(req) {
+	if mongoTextLen(resp) < len(req) {
 		small, large = resp, small
 	}
 	values := make(map[string]bool)
@@ -241,6 +290,15 @@ func mongoSharesAValue(req string, resp []string) bool {
 		return false
 	}
 	return mongoQuoted(large, func(v string) bool { return values[v] })
+}
+
+// mongoTextLen is the size of the sections' text.
+func mongoTextLen(sections []string) int {
+	n := 0
+	for _, s := range sections {
+		n += len(s)
+	}
+	return n
 }
 
 // mongoQuoted calls f with the text between each pair of consecutive quotes in

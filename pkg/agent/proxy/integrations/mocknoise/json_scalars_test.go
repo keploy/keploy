@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // flattenOfScalars is what matcher.Flatten gives for doc, built from the
@@ -122,6 +123,35 @@ func refMongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 		}
 	}
 	return out
+}
+
+// sameCorrelations reports whether the detector's correlations are the ones a
+// full parse gives, which lists every answer place of a value where the
+// detector lists as many as it keeps.
+func sameCorrelations(got, want []models.FieldCorrelation) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		g, w := got[i], want[i]
+		if len(g.ResponsePaths) != min(mongoAnswerPlaces, len(w.ResponsePaths)) {
+			return false
+		}
+		places := make(map[string]int)
+		for _, p := range w.ResponsePaths {
+			places[p]++
+		}
+		for _, p := range g.ResponsePaths {
+			if places[p]--; places[p] < 0 {
+				return false
+			}
+		}
+		g.ResponsePaths, w.ResponsePaths = nil, nil
+		if !reflect.DeepEqual(g, w) {
+			return false
+		}
+	}
+	return true
 }
 
 // mockGen makes Mongo mocks of the shapes the detector reads: findAndModify,
@@ -237,8 +267,8 @@ func TestTheMongoDetectorFindsWhatAFullParseFinds(t *testing.T) {
 	found := 0
 	for i := 0; i < 20000; i++ {
 		m := g.mock()
-		got, want := mongoCorrelations(m), refMongoCorrelations(m)
-		if !reflect.DeepEqual(got, want) {
+		got, want := mongoCorrelations(zap.NewNop(), m), refMongoCorrelations(m)
+		if !sameCorrelations(got, want) {
 			t.Fatalf("mock %d: detector %+v, full parse %+v\nrequest %q\nanswer %q", i, got, want,
 				m.Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections, m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage).Sections)
 		}
@@ -335,7 +365,7 @@ func TestANumberIsNotReadAsAString(t *testing.T) {
 	m := mongoMock(`{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{"n":1234567890123456789e10,"k":"`+hex+`"}},"new":true}`,
 		`{"value":{"n":1234567890123456789e10,"k":"`+hex+`"},"ok":1}`)
 	want := []models.FieldCorrelation{{RequestPath: "section.0.update.$set.k", ResponsePaths: []string{"section.0.value.k"}, RecordedValue: hex, ValueClass: "hex"}}
-	if got := CorrelationsFromMock(m); !reflect.DeepEqual(got, want) {
+	if got := CorrelationsFromMock(zap.NewNop(), m); !reflect.DeepEqual(got, want) {
 		t.Fatalf("correlations = %+v\nwant %+v", got, want)
 	}
 }

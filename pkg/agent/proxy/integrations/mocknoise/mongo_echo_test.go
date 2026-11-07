@@ -9,6 +9,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 const (
@@ -49,7 +51,7 @@ func claimAnswer(keyID string) string {
 // twice, written and answered, so it is the one correlation; the filter's
 // key, the clock-read times, the owner and the scopes are not.
 func TestAMongoUpsertsEchoedMintedKeyIsACorrelation(t *testing.T) {
-	got := CorrelationsFromMock(mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID)))
+	got := CorrelationsFromMock(zap.NewNop(), mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID)))
 	want := []models.FieldCorrelation{{
 		RequestPath:   "section.0.update.$set.key_id",
 		ResponsePaths: []string{"section.0.value.key_id"},
@@ -79,7 +81,7 @@ func TestAMongoValueSeenOnceOrInAFilterIsNotACorrelation(t *testing.T) {
 			`{"value":{"_id":1,"state":"ACTIVE"},"ok":1}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := CorrelationsFromMock(mongoMock(tc.req, tc.resp)); len(got) != 0 {
+			if got := CorrelationsFromMock(zap.NewNop(), mongoMock(tc.req, tc.resp)); len(got) != 0 {
 				t.Fatalf("want no correlation, got %+v", got)
 			}
 		})
@@ -91,16 +93,16 @@ func TestAMongoValueSeenOnceOrInAFilterIsNotACorrelation(t *testing.T) {
 func TestAMongoUpdateAndInsertWritePlacesAreRead(t *testing.T) {
 	upd := mongoMock(`{"update":"t","updates":[{"q":{"_id":"k"},"u":{"$set":{"token":"`+recKeyID+`"}},"upsert":true}]}`,
 		`{"n":1,"upserted":[{"index":0,"_id":"`+recKeyID+`"}],"ok":1}`)
-	if got := CorrelationsFromMock(upd); len(got) != 1 || got[0].RequestPath != "section.0.updates.u.$set.token" {
+	if got := CorrelationsFromMock(zap.NewNop(), upd); len(got) != 1 || got[0].RequestPath != "section.0.updates.u.$set.token" {
 		t.Fatalf("update: correlations = %+v, want one at section.0.updates.u.$set.token", got)
 	}
 	ins := mongoMock(`{"insert":"t","documents":[{"_id":"`+recKeyID+`"}]}`, `{"n":1,"inserted":"`+recKeyID+`","ok":1}`)
-	if got := CorrelationsFromMock(ins); len(got) != 1 || got[0].RequestPath != "section.0.documents._id" {
+	if got := CorrelationsFromMock(zap.NewNop(), ins); len(got) != 1 || got[0].RequestPath != "section.0.documents._id" {
 		t.Fatalf("insert: correlations = %+v, want one at section.0.documents._id", got)
 	}
 	q := mongoMock(`{"update":"t","updates":[{"q":{"_id":"`+recKeyID+`"},"u":{"$set":{"n":1}}}]}`,
 		`{"n":1,"upserted":[{"index":0,"_id":"`+recKeyID+`"}],"ok":1}`)
-	if got := CorrelationsFromMock(q); len(got) != 0 {
+	if got := CorrelationsFromMock(zap.NewNop(), q); len(got) != 0 {
 		t.Fatalf("update filter: want no correlation, got %+v", got)
 	}
 }
@@ -113,13 +115,13 @@ func TestAMongoPlaceWithSeveralValuesIsNotACorrelation(t *testing.T) {
 	m := mongoMock(`{"update":"t","updates":[{"q":{"_id":"a"},"u":{"$set":{"token":"`+recKeyID+`"}},"upsert":true},`+
 		`{"q":{"_id":"b"},"u":{"$set":{"token":"`+other+`"}},"upsert":true}]}`,
 		`{"n":2,"upserted":[{"index":0,"_id":"`+recKeyID+`"},{"index":1,"_id":"`+other+`"}],"ok":1}`)
-	if got := CorrelationsFromMock(m); len(got) != 0 {
+	if got := CorrelationsFromMock(zap.NewNop(), m); len(got) != 0 {
 		t.Fatalf("want no correlation, got %+v", got)
 	}
 	// Every value at the place counts, whatever it is and wherever it comes.
 	list := mongoMock(`{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{"keys":[5,"`+recKeyID+`"]}},"new":true}`,
 		`{"value":{"keys":[5,"`+recKeyID+`"]},"ok":1}`)
-	if got := CorrelationsFromMock(list); len(got) != 0 {
+	if got := CorrelationsFromMock(zap.NewNop(), list); len(got) != 0 {
 		t.Fatalf("a number before the key: want no correlation, got %+v", got)
 	}
 }
@@ -137,7 +139,7 @@ func TestAMongoMockOfAnotherShapeHasNoCorrelation(t *testing.T) {
 	query := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
 	query.Spec.MongoRequests[0].Message = &models.MongoOpQuery{}
 	for name, m := range map[string]*models.Mock{"two requests": two, "two answers": twoAnswers, "a document sequence": seq, "an OP_QUERY": query} {
-		if got := CorrelationsFromMock(m); len(got) != 0 {
+		if got := CorrelationsFromMock(zap.NewNop(), m); len(got) != 0 {
 			t.Errorf("%s: want no correlation, got %+v", name, got)
 		}
 	}
@@ -151,7 +153,7 @@ func claimServed(t *testing.T, liveReq string) (served, recorded *models.MongoOp
 	t.Helper()
 	switchOff(t)
 	m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
-	MaterializeCorrelations(m)
+	MaterializeCorrelations(zap.NewNop(), m)
 	if len(m.Spec.Correlations) != 1 {
 		t.Fatalf("materialized correlations = %+v, want one", m.Spec.Correlations)
 	}
@@ -194,7 +196,7 @@ func TestARecordedUpsertIsServedAsRecordedWhenTheLiveWriteDoesNotBind(t *testing
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
-			MaterializeCorrelations(m)
+			MaterializeCorrelations(zap.NewNop(), m)
 			recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
 			sections := []string{mongoMsg(live)}
 			if live == "" {
@@ -215,7 +217,7 @@ func TestARecordedValueWrittenTwiceBindsOnlyOneLiveValue(t *testing.T) {
 		return `{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{"key_id":"` + a + `","alias":"` + b + `"}},"upsert":true,"new":true}`
 	}
 	m := mongoMock(two(recKeyID, recKeyID), `{"value":{"key_id":"`+recKeyID+`"},"ok":1}`)
-	MaterializeCorrelations(m)
+	MaterializeCorrelations(zap.NewNop(), m)
 	if len(m.Spec.Correlations) != 2 {
 		t.Fatalf("correlations = %+v, want two", m.Spec.Correlations)
 	}
@@ -239,7 +241,7 @@ func TestARecordedValueWrittenTwiceBindsOnlyOneLiveValue(t *testing.T) {
 func TestAMongoEchoIsNotDetectedUnderTheProvenSwitch(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
-	MaterializeCorrelations(m)
+	MaterializeCorrelations(zap.NewNop(), m)
 	if len(m.Spec.Correlations) != 0 {
 		t.Fatalf("correlations under the switch = %+v, want none", m.Spec.Correlations)
 	}
@@ -272,10 +274,10 @@ func TestAMongoSectionNotFramedAsABodyIsNotRead(t *testing.T) {
 // would correlate.
 func TestAMongoSectionThatIsNotValidJSONIsNotRead(t *testing.T) {
 	switchOff(t)
-	if got := CorrelationsFromMock(mongoMock(claimRequest(recKeyID)+` x`, claimAnswer(recKeyID))); len(got) != 0 {
+	if got := CorrelationsFromMock(zap.NewNop(), mongoMock(claimRequest(recKeyID)+` x`, claimAnswer(recKeyID))); len(got) != 0 {
 		t.Errorf("a request that is not JSON: correlations = %+v, want none", got)
 	}
-	if got := CorrelationsFromMock(mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID)+` x`)); len(got) != 0 {
+	if got := CorrelationsFromMock(zap.NewNop(), mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID)+` x`)); len(got) != 0 {
 		t.Errorf("an answer that is not JSON: correlations = %+v, want none", got)
 	}
 	if served, recorded := claimServed(t, claimRequest(liveKeyID)+` x`); served != recorded {
@@ -289,7 +291,7 @@ func TestAMongoSectionThatIsNotValidJSONIsNotRead(t *testing.T) {
 func TestARecordedUpsertBindsOnlyAtAWrittenPlaceOfASection(t *testing.T) {
 	switchOff(t)
 	m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
-	MaterializeCorrelations(m)
+	MaterializeCorrelations(zap.NewNop(), m)
 	if len(m.Spec.Correlations) != 1 {
 		t.Fatalf("correlations = %+v, want the claim's one", m.Spec.Correlations)
 	}
@@ -318,7 +320,7 @@ func TestARecordedUpsertBindsOnlyAtAWrittenPlaceOfASection(t *testing.T) {
 func TestARecordedUpsertIsServedAsRecordedForACorrelationItCannotPlace(t *testing.T) {
 	switchOff(t)
 	m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
-	MaterializeCorrelations(m)
+	MaterializeCorrelations(zap.NewNop(), m)
 	recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
 	live := []string{mongoMsg(claimRequest(liveKeyID))}
 	if len(m.Spec.Correlations) != 1 {
@@ -364,7 +366,7 @@ func writeTwice(keyID, alias string) string {
 func TestARecordedValueRefusedAtOnePlaceIsNotBoundAtAnother(t *testing.T) {
 	switchOff(t)
 	m := mongoMock(writeTwice(recKeyID, `"`+recKeyID+`"`), `{"value":{"key_id":"`+recKeyID+`"},"ok":1}`)
-	MaterializeCorrelations(m)
+	MaterializeCorrelations(zap.NewNop(), m)
 	if len(m.Spec.Correlations) != 2 || m.Spec.Correlations[0].RequestPath != "section.0.update.$set.alias" {
 		t.Fatalf("correlations = %+v, want alias and key_id", m.Spec.Correlations)
 	}
@@ -406,7 +408,7 @@ func TestAMintedHexOrNonceKeyIsAnsweredWithTheLiveKey(t *testing.T) {
 		"nonce": {"AbC123dEf456GhI789jKl0", "ZyX987wVu654TsR321qPo0"},
 	} {
 		m := mongoMock(claimRequest(keys[0]), claimAnswer(keys[0]))
-		MaterializeCorrelations(m)
+		MaterializeCorrelations(zap.NewNop(), m)
 		if len(m.Spec.Correlations) != 1 || m.Spec.Correlations[0].ValueClass != class {
 			t.Fatalf("%s: correlations = %+v, want one of class %s", class, m.Spec.Correlations, class)
 		}
@@ -422,7 +424,7 @@ func TestAMintedHexOrNonceKeyIsAnsweredWithTheLiveKey(t *testing.T) {
 // or a newline, so the answer's text does not hold the key as it is.
 func TestAMintedKeyWithSpaceAroundItIsNotACorrelation(t *testing.T) {
 	for name, key := range map[string]string{"a newline after it": recKeyID + `\n`, "a space before it": " " + recKeyID} {
-		if got := CorrelationsFromMock(mongoMock(claimRequest(key), claimAnswer(key))); len(got) != 0 {
+		if got := CorrelationsFromMock(zap.NewNop(), mongoMock(claimRequest(key), claimAnswer(key))); len(got) != 0 {
 			t.Errorf("%s: correlations = %+v, want none", name, got)
 		}
 	}
@@ -448,7 +450,7 @@ func ingestCost(m *models.Mock) (allocs, bytes uint64, got []models.FieldCorrela
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	got = CorrelationsFromMock(m)
+	got = CorrelationsFromMock(zap.NewNop(), m)
 	runtime.ReadMemStats(&after)
 	return after.Mallocs - before.Mallocs, after.TotalAlloc - before.TotalAlloc, got
 }
@@ -511,7 +513,7 @@ func TestAWriteOfTwoMintedValuesCorrelatesOnlyTheOneItsAnswerHolds(t *testing.T)
 	for _, answered := range []string{recKeyID, liveKeyID} {
 		m := mongoMock(req, `{"value":{"x":"`+answered+`"},"ok":1}`)
 		for i := 0; i < 200; i++ {
-			if got := CorrelationsFromMock(m); len(got) != 1 || got[0].RecordedValue != answered {
+			if got := CorrelationsFromMock(zap.NewNop(), m); len(got) != 1 || got[0].RecordedValue != answered {
 				t.Fatalf("answer holds %s, ingest %d: correlations = %+v, want that one value", answered, i, got)
 			}
 		}
@@ -525,7 +527,7 @@ func TestACorrelationListsTheAnswersPlacesInOneOrder(t *testing.T) {
 		`"value":{"_id":"cid-1:user-1:jti-1","key_id":"`+recKeyID+`","alias":"`+recKeyID+`"},"ok":1}`)
 	want := []string{"section.0.lastErrorObject.upserted", "section.0.value.alias", "section.0.value.key_id"}
 	for i := 0; i < 50; i++ {
-		if got := CorrelationsFromMock(m); len(got) != 1 || !reflect.DeepEqual(got[0].ResponsePaths, want) {
+		if got := CorrelationsFromMock(zap.NewNop(), m); len(got) != 1 || !reflect.DeepEqual(got[0].ResponsePaths, want) {
 			t.Fatalf("ingest %d: correlations = %+v, want one answered at %v", i, got, want)
 		}
 	}
@@ -541,7 +543,7 @@ func TestARequestIsReadForEveryFieldAWriteSets(t *testing.T) {
 		// An update may be an aggregation pipeline (MongoDB 4.2+).
 		"a pipeline update": `{"update":[{"$set":{"token":"` + recKeyID + `"}}]}`,
 	} {
-		if got := CorrelationsFromMock(mongoMock(req, `{"value":{"token":"`+recKeyID+`"},"ok":1}`)); len(got) != 1 {
+		if got := CorrelationsFromMock(zap.NewNop(), mongoMock(req, `{"value":{"token":"`+recKeyID+`"},"ok":1}`)); len(got) != 1 {
 			t.Errorf("%s: correlations = %+v, want one", name, got)
 		}
 	}
@@ -581,7 +583,7 @@ func TestALargeMongoRequestIsNotParsedUnlessItWritesAValueItsAnswerEchoes(t *tes
 // which quotes open a string.
 func TestAKeyAfterAnEscapedQuoteIsACorrelation(t *testing.T) {
 	answer := strings.Replace(claimAnswer(recKeyID), `"key_id":`, `"note":"a 5\" screen","key_id":`, 1)
-	if got := CorrelationsFromMock(mongoMock(claimRequest(recKeyID), answer)); len(got) != 1 || got[0].RecordedValue != recKeyID {
+	if got := CorrelationsFromMock(zap.NewNop(), mongoMock(claimRequest(recKeyID), answer)); len(got) != 1 || got[0].RecordedValue != recKeyID {
 		t.Fatalf("correlations = %+v, want the key", got)
 	}
 }
@@ -596,10 +598,23 @@ func TestAKeyAnsweredInALaterSectionIsACorrelation(t *testing.T) {
 	} {
 		m := mongoMock(claimRequest(recKeyID), "")
 		m.Spec.MongoResponses[0].Message = &models.MongoOpMessage{Sections: []string{mongoMsg(first), mongoMsg(claimAnswer(recKeyID))}}
-		got := CorrelationsFromMock(m)
+		got := CorrelationsFromMock(zap.NewNop(), m)
 		if len(got) != 1 || !reflect.DeepEqual(got[0].ResponsePaths, []string{"section.1.value.key_id"}) {
 			t.Errorf("%s: correlations = %+v, want the key answered at section.1.value.key_id", name, got)
 		}
+	}
+}
+
+// A key answered in a later section is rendered there, not only found there.
+func TestAKeyAnsweredInALaterSectionIsRendered(t *testing.T) {
+	switchOff(t)
+	m := mongoMock(claimRequest(recKeyID), "")
+	recorded := &models.MongoOpMessage{Sections: []string{mongoMsg(`{"ok":1}`), mongoMsg(claimAnswer(recKeyID))}}
+	m.Spec.MongoResponses[0].Message = recorded
+	MaterializeCorrelations(zap.NewNop(), m)
+	served := RenderMongoEchoes(m.Spec.Correlations, []string{mongoMsg(claimRequest(liveKeyID))}, recorded)
+	if want := []string{mongoMsg(`{"ok":1}`), mongoMsg(claimAnswer(liveKeyID))}; !reflect.DeepEqual(served.Sections, want) {
+		t.Fatalf("served %q, want %q", served.Sections, want)
 	}
 }
 
@@ -610,7 +625,7 @@ func TestAKeyWrittenInALaterRequestSectionBindsOnlyThere(t *testing.T) {
 	first := mongoMsg(`{"ok":1}`)
 	m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
 	m.Spec.MongoRequests[0].Message = &models.MongoOpMessage{Sections: []string{first, mongoMsg(claimRequest(recKeyID))}}
-	MaterializeCorrelations(m)
+	MaterializeCorrelations(zap.NewNop(), m)
 	if len(m.Spec.Correlations) != 1 || m.Spec.Correlations[0].RequestPath != "section.1.update.$set.key_id" {
 		t.Fatalf("correlations = %+v, want the key at section.1.update.$set.key_id", m.Spec.Correlations)
 	}
@@ -640,7 +655,7 @@ func TestAnEchoIsRenderedOnlyWhereItIsAWholeStringScalar(t *testing.T) {
 	invalid := mongoMsg(`{"k":"` + rec + `"`)
 	m := mongoMock(req(rec), "")
 	m.Spec.MongoResponses[0].Message = &models.MongoOpMessage{Sections: []string{mongoMsg(answer(rec)), unframed, invalid}}
-	MaterializeCorrelations(m)
+	MaterializeCorrelations(zap.NewNop(), m)
 	if len(m.Spec.Correlations) != 1 {
 		t.Fatalf("correlations = %+v, want one", m.Spec.Correlations)
 	}
@@ -682,9 +697,9 @@ func TestAValueWrittenAndAnsweredAtManyPlacesIsListedOnce(t *testing.T) {
 	if len(got) != n {
 		t.Fatalf("%d correlations, want one per place", len(got))
 	}
-	if got[0].RequestPath != "section.0.update.$set.perms.f0000" || len(got[0].ResponsePaths) != n ||
-		got[0].ResponsePaths[0] != "section.0.value.perms.f0000" || got[0].ResponsePaths[n-1] != "section.0.value.perms.f1999" {
-		t.Fatalf("the first correlation is at %s, answered at %d places", got[0].RequestPath, len(got[0].ResponsePaths))
+	if got[0].RequestPath != "section.0.update.$set.perms.f0000" || !reflect.DeepEqual(got[0].ResponsePaths, []string{
+		"section.0.value.perms.f0000", "section.0.value.perms.f0001", "section.0.value.perms.f0002", "section.0.value.perms.f0003"}) {
+		t.Fatalf("the first correlation is at %s, answered at %v", got[0].RequestPath, got[0].ResponsePaths)
 	}
 	for _, c := range got[1:] {
 		if len(c.ResponsePaths) != 0 {
@@ -718,8 +733,161 @@ func TestEachValueListsItsAnswersPlacesOnItsFirstCorrelation(t *testing.T) {
 		{RequestPath: "section.0.update.$set.s", RecordedValue: a, ValueClass: "hex"},
 	}
 	for i := 0; i < 50; i++ {
-		if got := CorrelationsFromMock(m); !reflect.DeepEqual(got, want) {
+		if got := CorrelationsFromMock(zap.NewNop(), m); !reflect.DeepEqual(got, want) {
 			t.Fatalf("ingest %d: correlations = %+v\nwant %+v", i, got, want)
 		}
+	}
+}
+
+// mintedKey is the i-th of many different minted keys.
+func mintedKey(i int) string { return fmt.Sprintf("5b6f1c2e-8d3a-4f7b-9e21-%012x", i) }
+
+// keyFields is an object's members: n fields of the same length, the i-th
+// holding key(i).
+func keyFields(n int, key func(int) string) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `"%08x":"%s"`, i, key(i))
+	}
+	return b.String()
+}
+
+func setUnder(name, fields string) string {
+	return `{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{"` + name + `":{` + fields + `}}},"new":true,"$db":"api"}`
+}
+
+func answerUnder(name, fields string) string {
+	return `{"value":{"_id":"k","` + name + `":{` + fields + `}},"ok":1}`
+}
+
+// A long field name is what makes a place cost much more than the text that
+// holds it, and many places make a mock's correlations many. The first five of
+// these mocks cost gigabytes if every place keeps its path (the fifth over
+// 27 GB, in 14 MB), though few are needed: an answer's places are capped per
+// value, and what remains is bounded. So a mock keeps at most the bound and the
+// allocator's rounding of a path just over 32 KB up to 40 KB, the most it
+// rounds, and ingest allocates a small multiple of the bound and of the mock's
+// size. Field names of ordinary length reach the bound only with tens of
+// thousands of values.
+func TestAMockKeepsNoMoreThanTheBound(t *testing.T) {
+	if raceDetector {
+		t.Skip("allocation bounds do not hold under the race detector")
+	}
+	switchOff(t)
+	key := func(int) string { return recKeyID }
+	array := func(name string, n int) string {
+		return `{"value":{"_id":"k","key_id":"` + recKeyID + `","` + name + `":[` + strings.TrimSuffix(strings.Repeat(`"`+recKeyID+`",`, n), ",") + `]},"ok":1}`
+	}
+	name32k, name64k, name1m := strings.Repeat("n", 32<<10), strings.Repeat("n", 64<<10), strings.Repeat("n", 1<<20)
+	for _, tc := range []struct {
+		name      string
+		req, resp string
+		corrs     int
+	}{
+		{"a 1 MB name over 2,000 copies of a key (1.1 MB)", claimRequest(recKeyID), array(name1m, 2000), 1},
+		{"a 64 KB name over 30,000 fields that hold a key (1.6 MB)", claimRequest(recKeyID),
+			`{"value":{"_id":"k","key_id":"` + recKeyID + `","` + name64k + `":{` + keyFields(30000, key) + `}},"ok":1}`, 1},
+		{"30,000 keys written under a 64 KB name, each answered (3.1 MB)",
+			setUnder(name64k, keyFields(30000, mintedKey)), answerUnder("a", keyFields(30000, mintedKey)), 0},
+		{"30,000 keys answered under a 64 KB name (3.1 MB)",
+			setUnder("a", keyFields(30000, mintedKey)), answerUnder(name64k, keyFields(30000, mintedKey)), 0},
+		{"a 64 KB name over 370,000 copies of a key (14 MB)", claimRequest(recKeyID), array(name64k, 370000), 1},
+		{"500 keys written under a 32 KB name, each answered (0.08 MB)", setUnder(name32k, keyFields(500, mintedKey)), answerUnder("a", keyFields(500, mintedKey)), 500},
+		{"50,000 keys, each answered (5 MB)", setUnder("a", keyFields(50000, mintedKey)), answerUnder("a", keyFields(50000, mintedKey)), 50000},
+		{"300,000 keys, each answered (30 MB)", setUnder("a", keyFields(300000, mintedKey)), answerUnder("a", keyFields(300000, mintedKey)), 0},
+		{"a key at 100,000 places, answered at them (10 MB)", setUnder("a", keyFields(100000, key)), answerUnder("a", keyFields(100000, key)), 100000},
+	} {
+		m := mongoMock(tc.req, tc.resp)
+		size := uint64(len(tc.req) + len(tc.resp))
+		var before, after, held runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		got := CorrelationsFromMock(zap.NewNop(), m)
+		runtime.ReadMemStats(&after)
+		runtime.GC()
+		runtime.ReadMemStats(&held)
+		if len(got) != tc.corrs {
+			t.Fatalf("%s: %d correlations, want %d", tc.name, len(got), tc.corrs)
+		}
+		if kept, limit := int64(held.HeapAlloc)-int64(before.HeapAlloc), int64(mongoKeepBytes/4*5); kept > limit {
+			t.Fatalf("%s: keeps %d bytes, want at most %d", tc.name, kept, limit)
+		}
+		if allocated, limit := after.TotalAlloc-before.TotalAlloc, 8*mongoKeepBytes+4*size; allocated > limit {
+			t.Fatalf("%s: ingest allocates %d bytes, want at most %d", tc.name, allocated, limit)
+		}
+		runtime.KeepAlive(got)
+	}
+}
+
+// A mock whose places cost more than the bound has no correlation at all, not
+// the ones that fitted: a list with a place left out would bind a value the
+// live request writes there otherwise. It says so in one line, and it is served
+// as recorded, as if it echoed nothing.
+func TestAMockOverTheBoundIsServedAsRecordedAndSaysSoOnce(t *testing.T) {
+	switchOff(t)
+	const n = 400
+	name := strings.Repeat("n", 32<<10) // 400 places under it cost 13 MB: one side fits, two do not
+	keys, live := keyFields(n, mintedKey), keyFields(n, func(i int) string { return mintedKey(i + n) })
+	twoSections := mongoMock("", answerUnder("a", keys))
+	twoSections.Spec.MongoRequests[0].Message = &models.MongoOpMessage{Sections: []string{mongoMsg(setUnder(name, keys)), mongoMsg(setUnder(name, keys))}}
+	for desc, m := range map[string]*models.Mock{
+		"written and answered under long names": mongoMock(setUnder(name, keys), answerUnder(name, keys)),
+		"written in two sections":               twoSections,
+		"written only under a longer name":      mongoMock(setUnder(name+name, keys), answerUnder("a", keys)),
+		"answered only under a longer name":     mongoMock(setUnder("a", keys), answerUnder(name+name, keys)),
+		"several values at each written place": mongoMock(`{"findAndModify":"t","update":{"$set":{`+strings.ReplaceAll(keyFields(n, func(int) string { return "" }), `":""`, name+name+`":["`+recKeyID+`","`+liveKeyID+`"]`)+`}}}`,
+			answerUnder("a", `"b":"`+recKeyID+`"`)),
+	} {
+		core, logs := observer.New(zap.WarnLevel)
+		MaterializeCorrelations(zap.New(core), m)
+		if len(m.Spec.Correlations) != 0 {
+			t.Errorf("%s: %d correlations, want none", desc, len(m.Spec.Correlations))
+		}
+		req, resp := mongoOpMsgSections(m)
+		if lines := logs.AllUntimed(); len(lines) != 1 {
+			t.Errorf("%s: %d lines, want one: %+v", desc, len(lines), lines)
+		} else if f := lines[0].ContextMap(); f["mock"] != m.Name || f["sectionBytes"] != int64(mongoTextLen(req)+mongoTextLen(resp)) || f["boundBytes"] != int64(mongoKeepBytes) {
+			t.Errorf("%s: the line says %v", desc, f)
+		}
+		recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
+		if served := RenderMongoEchoes(m.Spec.Correlations, []string{mongoMsg(setUnder(name, live))}, recorded); served != recorded {
+			t.Errorf("%s: not served as recorded", desc)
+		}
+	}
+}
+
+// The bound counts every place, written and answered, with what each costs
+// besides its path, up to its last byte: a mock that spends all of it keeps its
+// correlations, and one byte more loses them all.
+func TestTheBoundFallsBetweenTwoBytes(t *testing.T) {
+	switchOff(t)
+	name := strings.Repeat("n", 4<<10)
+	written := len("update.$set."+name+".00000000") + mongoPlaceCost
+	answered := len("value.") + mongoPlaceCost
+	places := (mongoKeepBytes - answered) / written
+	rest := mongoKeepBytes - answered - places*written // the answer's field name spends this
+	req := setUnder(name, keyFields(places, func(int) string { return recKeyID }))
+	for _, tc := range []struct{ nameLen, corrs, lines int }{{rest, places, 0}, {rest + 1, 0, 1}} {
+		core, logs := observer.New(zap.WarnLevel)
+		got := CorrelationsFromMock(zap.New(core), mongoMock(req, `{"value":{"`+strings.Repeat("a", tc.nameLen)+`":"`+recKeyID+`"},"ok":1}`))
+		if len(got) != tc.corrs || logs.Len() != tc.lines {
+			t.Errorf("an answer's name of %d bytes: %d correlations and %d lines, want %d and %d", tc.nameLen, len(got), logs.Len(), tc.corrs, tc.lines)
+		}
+	}
+}
+
+func TestAPlaceFitsTheBoundUpToItsLastByte(t *testing.T) {
+	keep := mongoKeep(10 + mongoPlaceCost)
+	if !keep.take(10) || keep != 0 {
+		t.Fatalf("a place of exactly what is left does not fit: %d left", keep)
+	}
+	if keep.take(0) {
+		t.Fatalf("a place fits with nothing left: %d left", keep)
+	}
+	if keep = mongoKeep(10 + mongoPlaceCost); keep.take(11) {
+		t.Fatalf("a place one byte over what is left fits: %d left", keep)
 	}
 }
