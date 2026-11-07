@@ -245,30 +245,33 @@ func TestGrpcBSONZeroTimestamp(t *testing.T) {
 }
 
 // A timestamp that is neither text keploy wrote nor a date fails the read,
-// and so does a document that is not one, rather than reading as no time.
+// and so does a field the type cannot hold, rather than reading as no time
+// or an empty message.
 func TestGrpcBSONRefusesWhatItCannotRead(t *testing.T) {
-	bad := map[string][]byte{}
-	for name, ts := range map[string]interface{}{"text that is no time": "11/07/2026 10:15", "a number": int32(7)} {
-		data, err := bson.Marshal(bson.D{{Key: "body", Value: bson.D{{Key: "decodeddata", Value: "abc"}}}, {Key: "timestamp", Value: ts}})
+	for _, c := range []struct {
+		name      string
+		doc       bson.D
+		timestamp bool // the error names the timestamp
+	}{
+		{"text that is no time", bson.D{{Key: "timestamp", Value: "11/07/2026 10:15"}}, true},
+		{"a number for a time", bson.D{{Key: "timestamp", Value: int32(7)}}, true},
+		{"text for a message", bson.D{{Key: "body", Value: "abc"}, {Key: "timestamp", Value: "2026-11-07T10:15:30Z"}}, false},
+	} {
+		data, err := bson.Marshal(c.doc)
 		if err != nil {
 			t.Fatal(err)
 		}
-		bad[name] = data
-	}
-	bad["no document"] = []byte{0x05, 0x00}
-
-	for name, data := range bad {
 		var req GrpcReq
-		if err := req.UnmarshalBSON(data); err == nil {
-			t.Errorf("request with %s: read with no error, as %+v", name, req)
-		} else if name != "no document" && !strings.Contains(err.Error(), "GrpcReq.UnmarshalBSON timestamp") {
-			t.Errorf("request with %s: error %q does not name the timestamp", name, err)
+		if err := bson.Unmarshal(data, &req); err == nil {
+			t.Errorf("request with %s: read with no error, as %+v", c.name, req)
+		} else if c.timestamp && !strings.Contains(err.Error(), "GrpcReq.UnmarshalBSON timestamp") {
+			t.Errorf("request with %s: error %q does not name the timestamp", c.name, err)
 		}
 		var resp GrpcResp
-		if err := resp.UnmarshalBSON(data); err == nil {
-			t.Errorf("response with %s: read with no error, as %+v", name, resp)
-		} else if name != "no document" && !strings.Contains(err.Error(), "GrpcResp.UnmarshalBSON timestamp") {
-			t.Errorf("response with %s: error %q does not name the timestamp", name, err)
+		if err := bson.Unmarshal(data, &resp); err == nil {
+			t.Errorf("response with %s: read with no error, as %+v", c.name, resp)
+		} else if c.timestamp && !strings.Contains(err.Error(), "GrpcResp.UnmarshalBSON timestamp") {
+			t.Errorf("response with %s: error %q does not name the timestamp", c.name, err)
 		}
 	}
 }
