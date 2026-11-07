@@ -222,11 +222,11 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// one the session leaves out as flushMock hands it on (emitV2: refused,
 	// or the channel full, at the stop), and for one the session's manager
 	// drops as it is handed on (the output closed, or at its byte bound),
-	// which it counted and the session spanned. Memory pressure is not among them: every Generic
-	// mock derives as the session's, which it keeps. A held exchange
-	// (preambleHold) the
-	// session leaves out as the hold hands it on is counted apart from its
-	// tail: counted once more, its span only wider (fail-closed).
+	// which it counted and the session spanned. Memory pressure is not among
+	// them: every Generic mock derives as the session's, which it keeps. A
+	// held exchange (preambleHold) the session leaves out, or its manager
+	// drops, as the hold hands it on is counted apart from its tail: counted
+	// once more, its span only wider (fail-closed).
 	var flushedLeftOut bool
 	leaveOutTail := func(n int, from, to time.Time) {
 		if n == 0 || flushedLeftOut {

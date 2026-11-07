@@ -401,12 +401,16 @@ type SyncMockManager struct {
 
 	// dropCount tracks capacity drops (dropOut): the output closed or never
 	// set (send, and AddMock once it is closed), the out queue's byte bound
-	// reached, or its consumer stalled (send). Sampled to an Error so customers
+	// reached, or its consumer stalled (send). Sampled (sayDrop) so customers
 	// get a loud signal without the log-flood anti-pattern. Using
 	// the typed atomic.Uint64 wrapper removes the 32-bit-alignment
 	// footgun that a bare uint64 + sync/atomic.AddUint64 would carry
 	// if this struct ever got embedded or reordered.
 	dropCount atomic.Uint64
+	// droppedTCsRecorded counts the names droppedTCNames took, over the
+	// manager's life. The set's size stops growing at its bound, so what a
+	// session lost is read from this (DropsSince).
+	droppedTCsRecorded atomic.Int64
 
 	// out is the current channel's lane (outLane): the mocks a full outChan
 	// has not taken yet, in order, and its drainer. outOld holds the lanes of
@@ -494,7 +498,9 @@ type SyncMockManager struct {
 	// pressureDropped / totalAdded track mocks dropped vs added under memory
 	// pressure. Both are atomic so they can be read without holding m.mu.
 	pressureDropped atomic.Int64
-	totalAdded      atomic.Int64
+	// totalAdded is the mocks taken (AddMock, SendConfigMock), less those
+	// dropped since for pressure or for the output (SessionDrops.Added).
+	totalAdded atomic.Int64
 	// notRecorded counts the requests an ingress did not record because the
 	// memory guard had paused recording (NoteNotRecordedUnderPressure).
 	notRecorded notRecordedUnderPressure
@@ -533,10 +539,20 @@ type SyncMockManager struct {
 	// is said of a drop (sayDrop): the mocks dropped for an output closed or
 	// never set, and those dropped for a full one. Sampled apart, so a drop at
 	// a recording's stop does not take the first ERROR a real overflow is
-	// owed, in this session or the next on the same manager. An unread answer
-	// is in dropCount alone: its loss costs no test case, and takes no sample.
+	// owed, and each from its session's opening (StartDropSession), so every
+	// session is told of its first. An unread answer is in dropCount alone:
+	// its loss costs no test case, and takes no sample. pressureSampled is
+	// the same for memory pressure's drops, which pressureDropped counts over
+	// the manager's life.
 	outChanClosedDrops atomic.Uint64
 	overflowDrops      atomic.Uint64
+	pressureSampled    atomic.Uint64
+
+	// dropNames names the first dropNamesMax mocks dropped since the session
+	// opened (StartDropSession), for its summary (DropsSince). dropNamesMu is
+	// a leaf lock: countDrop takes it under outChanMu.
+	dropNamesMu sync.Mutex
+	dropNames   []string
 
 	// pressure holds every span during which memory pressure was active: one
 	// opens on the false→true transition in SetMemoryPressure (closePressure
@@ -1070,7 +1086,8 @@ const outChanStall = 30 * time.Second
 // than this.
 const outCloseStall = 5 * time.Second
 
-// sendDropSampleRate controls Warn emission under sustained overflow.
+// sendDropSampleRate controls how often a drop is said aloud (sampled) under
+// sustained overflow.
 // Emitting per-drop under a stuck consumer would flood the log and
 // further starve the very goroutine we're trying to let catch up —
 // the same anti-pattern the Windows redirector hit. Sample every Nth
@@ -1449,9 +1466,13 @@ func (m *SyncMockManager) dropOut(mock *models.Mock, owner string, epoch uint64,
 
 // countDrop counts a drop and records its owner, and returns its place among
 // the drops of its cause, for sayDrop: 0 for an unread answer, whose drop takes
-// no sample (outChanClosedDrops).
+// no sample (outChanClosedDrops). Every mock on its way out was counted added
+// (AddMock, SendConfigMock), and is no longer: the report does not say a mock
+// it dropped was added (SessionDrops).
 func (m *SyncMockManager) countDrop(mock *models.Mock, owner string, epoch uint64, why string) uint64 {
 	m.dropCount.Add(1)
+	m.totalAdded.Add(-1)
+	m.nameDrop(mock, why)
 	if owner != "" {
 		m.recordDroppedTCFor(owner, epoch)
 	}
@@ -1471,16 +1492,15 @@ func (m *SyncMockManager) countDrop(mock *models.Mock, owner string, epoch uint6
 // queue at once, so the fields are built only for a line that is logged. A
 // closed output is said at WARN, which a recording's stop is free to log, where
 // an overflow is an ERROR. Never called under outChanMu: a log write blocked on
-// I/O would hold up every path through it. The record summary's
-// mocks_dropped_capacity counts every drop.
+// I/O would hold up every path through it.
 func (m *SyncMockManager) sayDrop(mock *models.Mock, why string, n uint64) {
-	const closedMsg = "syncMock: a mock was handed on after the recording's mock output had closed, or while none was set, and dropped"
+	const closedMsg = "syncMock: a mock was handed on after the recording's mock output had closed, or while none was set, and dropped: the recording does not hold it"
 	closed := why == string(MockDroppedOutputClosed)
 	level, msg := zapcore.DebugLevel, "syncMock: mock dropped on its way out of the agent"
 	switch {
-	case n == 0 || (n != 1 && n%sendDropSampleRate != 0):
+	case !sampled(n):
 	case closed && n == 1:
-		level, msg = zapcore.WarnLevel, closedMsg+", on the FIRST such drop — mock recording is now LOSSY for this session; subsequent ones are said at Debug except for the per-1024 sampled line, and mocks_dropped_capacity in the recording's summary counts them all."
+		level, msg = zapcore.WarnLevel, closedMsg+"; the session's first such drop: later ones are said at Debug except for the per-1024 sampled line"
 	case closed:
 		level, msg = zapcore.WarnLevel, closedMsg
 	case n == 1:
@@ -1492,16 +1512,28 @@ func (m *SyncMockManager) sayDrop(mock *models.Mock, why string, n uint64) {
 	if ce == nil {
 		return
 	}
-	ce.Write(
+	ce.Write(append(dropFields(mock, n, why),
+		zap.Duration("stall_bound", m.outStallBound()),
+		zap.Int64("queue_bound_bytes", outQueueMaxBytes),
+	)...)
+}
+
+// sampled reports whether the n-th drop of a kind in a session is said aloud:
+// the first and every sendDropSampleRate-th. 0, an unread answer's, never is.
+func sampled(n uint64) bool {
+	return n != 0 && (n == 1 || n%sendDropSampleRate == 0)
+}
+
+// dropFields are what a line of a drop says: which mock, and why.
+func dropFields(mock *models.Mock, n uint64, why string) []zap.Field {
+	return []zap.Field{
 		zap.Uint64("dropsSoFar", n),
 		zap.String("why", why),
 		zap.String("mock_kind", string(mock.Kind)),
 		zap.String("connID", mock.ConnectionID),
 		zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
 		zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
-		zap.Duration("stall_bound", m.outStallBound()),
-		zap.Int64("queue_bound_bytes", outQueueMaxBytes),
-	)
+	}
 }
 
 // OnDrop has fn told of every mock dropped on its way to outChan: on the
@@ -1760,6 +1792,7 @@ func (m *SyncMockManager) recordDroppedTCFor(name string, epoch uint64) {
 		return
 	}
 	m.droppedTCNames[name] = struct{}{}
+	m.droppedTCsRecorded.Add(1)
 	m.droppedTCOrder = append(m.droppedTCOrder, name)
 	if len(m.droppedTCOrder) > maxDroppedTCNames {
 		delete(m.droppedTCNames, m.droppedTCOrder[0])
@@ -1815,8 +1848,9 @@ func (m *SyncMockManager) WasMockDroppedForTC(name string) bool {
 	return ok
 }
 
-// DroppedTCCount returns the number of distinct test cases that lost a mock to
-// a capacity drop. Exposed for the session-summary log in routes/record.go.
+// DroppedTCCount returns how many test cases the set of those lost by name
+// holds: the manager's, bounded at maxDroppedTCNames. What a session lost is
+// DropsSince's.
 func (m *SyncMockManager) DroppedTCCount() int {
 	if m == nil {
 		return 0
@@ -1835,19 +1869,34 @@ func (m *SyncMockManager) DroppedTCCount() int {
 //   - a drop on its way out (its consumer stalled, the queue's byte bound at a
 //     flush, the output closed as it is sent) is counted in DropCount and said
 //     (dropOut), its owner recorded when its send names one
-//     (WasMockDroppedForTC), and OnDrop told;
+//     (WasMockDroppedForTC), and OnDrop told, but of an unread answer, which
+//     costs no test case;
 //   - memory pressure letting go of a buffered or held mock is counted in
 //     GetDropStats' pressureDropped and said (reportPressureDrop);
 //   - a reaper's cleanup (a duplicate test's mocks, a mock outside any window)
-//     is no loss to the recording, and is counted apart (dropTally).
+//     is no loss to the recording, and is tallied apart (dropTally);
+//   - a mock let go with a window given up (LostToHoldBound), or owed to a test
+//     case of a recording that has ended (owedLetGo, goneLetGo), is tallied
+//     apart too: it costs a test case only through a kept verdict on its
+//     request, which Window.Keep warns of and counts as that test case.
 //
-// Said is the first and every sendDropSampleRate-th of each count, naming the
-// mock and why, and the rest at Debug: the summary counts them all.
+// Said is the first and every sendDropSampleRate-th of each of the first two
+// kinds in a session, naming the mock and why, and the rest at Debug. The
+// session's report (DropsSince) counts them all, and names the first
+// dropNamesMax. The last two kinds stay among the mocks it reports as added.
 //
-// A limit: a mock AddMock drops for its output has no owner yet, and AddMock
-// spans nothing. A session spans it (supervisor.Session's EmitMock and
-// EmitMockOutcome); for a parser that calls AddMock itself only OnDrop can
-// leave out a test case for it, and a build that sets none leaves out none.
+// Limits of that report. The agent's stop closes the output after a draining
+// client's stream has ended, so a mock dropped for the closed output then is
+// said, and reaches no report: the report is already written. A mock AddMock
+// drops for its output has no owner, so no test case is left out by name. A
+// session spans it (supervisor.Session's EmitMock and EmitMockOutcome), which
+// reaches a test case only while one overlaps it: AddMock drops one only before
+// the first request or after the close, so a test case that needs a session's
+// mock dropped before the first request is recorded without it, and what tells
+// is the drop's ERROR and the report. A parser that calls AddMock itself spans
+// nothing, as a span would reach the same few test cases, and OnDrop tells a
+// build that sets one. The span is the session's, not the manager's, because a
+// session can send its spans elsewhere (Session.Orphans).
 type MockDrop string
 
 const (
@@ -1859,8 +1908,8 @@ const (
 	// out (WasPressureActiveInWindow).
 	MockDroppedUnderPressure MockDrop = "its request was made while the memory guard had paused recording; the recording leaves out the test cases that overlap the pause"
 	// MockDroppedOutputClosed is a mock handed over once the recording's mock
-	// output was closed (CloseOutChan: the recording had ended), or before
-	// one was set.
+	// output was closed (CloseOutChan: the recording had ended), or, sent at
+	// once, before one was set (AddMock buffers a mock until one is).
 	MockDroppedOutputClosed MockDrop = "the recording's mock output was closed (the recording had ended) or not set"
 	// MockDroppedOutputFull is a mock sent at once (before the first request)
 	// that found the mocks queued for the consumer at their byte bound.
@@ -1875,30 +1924,116 @@ func (d MockDrop) Dropped() bool { return d != MockTaken }
 // spans need not cover it: the window that may own it is given up instead.
 const heldLetGo = "the agent was short of memory and let go of the mocks it held for the requests in flight; a kept request among them is left out"
 
-// reportPressureDrop says that memory pressure dropped mock, for why, the
-// manager's n-th such drop: at WARN for the first and every
-// sendDropSampleRate-th, as dropOut says its drops, at Debug for the rest.
-// Each names the mock and why; the record summary's mocks_dropped_by_pressure
-// counts them all. Called with no lock held.
-func (m *SyncMockManager) reportPressureDrop(mock *models.Mock, n int64, why string) {
+// reportPressureDrop counts that memory pressure dropped mock, for why, and
+// says it: at WARN for the session's first and every sendDropSampleRate-th, as
+// dropOut says its drops, at Debug for the rest, and an unread answer's always
+// at Debug, taking no sample, as it costs no test case. Each names the mock and
+// why. Called with no lock held.
+func (m *SyncMockManager) reportPressureDrop(mock *models.Mock, why string) {
+	m.pressureDropped.Add(1)
+	m.nameDrop(mock, why)
+	var n uint64
+	if !mock.IsUndelivered() {
+		n = m.pressureSampled.Add(1)
+	}
 	level := zapcore.DebugLevel
-	if n == 1 || uint64(n)%sendDropSampleRate == 0 {
+	if sampled(n) {
 		level = zapcore.WarnLevel
 	}
 	// Checked first: a pressure tick can let go of a whole buffer, while the
 	// agent is short of memory, and most of it is not logged.
-	ce := m.dropLogger().Check(level, "syncMock: memory pressure dropped a mock; mocks_dropped_by_pressure in the recording's summary counts every such mock")
+	ce := m.dropLogger().Check(level, "syncMock: memory pressure dropped a mock: the recording does not hold it")
 	if ce == nil {
 		return
 	}
-	ce.Write(
-		zap.Int64("dropsSoFar", n),
-		zap.String("why", why),
-		zap.String("mock_kind", string(mock.Kind)),
-		zap.String("connID", mock.ConnectionID),
-		zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
-		zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
-	)
+	ce.Write(dropFields(mock, n, why)...)
+}
+
+// dropNamesMax bounds the mocks a recording's summary names: it is one log
+// line, and a pressure tick can let go of a whole buffer. Its counts have them
+// all.
+const dropNamesMax = 16
+
+// nameDrop names mock, dropped for why, for its session's summary, while the
+// summary has room. Every drop passes here, an unread answer's too: its parser
+// may have said it kept it, and this is the report of what became of it.
+func (m *SyncMockManager) nameDrop(mock *models.Mock, why string) {
+	m.dropNamesMu.Lock()
+	defer m.dropNamesMu.Unlock()
+	if len(m.dropNames) >= dropNamesMax {
+		return
+	}
+	m.dropNames = append(m.dropNames, string(mock.Kind)+" mock of connection "+mock.ConnectionID+
+		", asked at "+mock.Spec.ReqTimestampMock.Format(time.RFC3339Nano)+": "+why)
+}
+
+// DropMark is where a manager's drop counts stood as a recording session
+// opened (StartDropSession).
+type DropMark struct {
+	added, pressure, testCases int64
+	capacity                   uint64
+}
+
+// SessionDrops is what a recording session's summary reports of the mocks its
+// manager took and dropped (DropsSince).
+type SessionDrops struct {
+	// Added is the mocks taken and not dropped since, for pressure or the
+	// output: a mock is not reported both added and dropped, but for a drop
+	// landing as these are read, each on its own. MockDrop says what else
+	// stays in it.
+	Added int64
+	// Pressure is the mocks dropped for memory pressure, as they were handed
+	// over or after.
+	Pressure int64
+	// Capacity is the mocks dropped for the output: closed or never set, at
+	// its byte bound, or its consumer stalled.
+	Capacity uint64
+	// TestCases is the test cases lost by name (WasMockDroppedForTC): the
+	// owner of a Capacity drop, or one revoked (RevokeTestCase). A name
+	// already in the set, from this session or an earlier one, is not counted
+	// again.
+	TestCases int64
+	// Named is the first dropNamesMax of those dropped, each with why.
+	Named []string
+}
+
+// StartDropSession marks where the drop counts stand, forgets the mocks named
+// so far, and starts their sampling over: the counts are of the manager's life
+// and it outlives a session, so a session reports what they grow by while it
+// is open, and is told of its first drop of each kind. Called as a recording's
+// incoming stream opens (routes/record.go). The names and the sampling are the
+// manager's, not a stream's: a stream opened while another is open takes them
+// over, and the first reports its counts with fewer names. So does a drop on a
+// replaced lane (SetOutputChannel), which lands in the session open when it
+// gives up.
+func (m *SyncMockManager) StartDropSession() DropMark {
+	m.dropNamesMu.Lock()
+	m.dropNames = nil
+	m.dropNamesMu.Unlock()
+	m.outChanClosedDrops.Store(0)
+	m.overflowDrops.Store(0)
+	m.pressureSampled.Store(0)
+	return DropMark{
+		added:     m.totalAdded.Load(),
+		pressure:  m.pressureDropped.Load(),
+		capacity:  m.dropCount.Load(),
+		testCases: m.droppedTCsRecorded.Load(),
+	}
+}
+
+// DropsSince reports what the counts grew by since mark, and the mocks named
+// since. Added stops at 0: this session can drop mocks an earlier one added.
+func (m *SyncMockManager) DropsSince(mark DropMark) SessionDrops {
+	d := SessionDrops{
+		Added:     max(m.totalAdded.Load()-mark.added, 0),
+		Pressure:  m.pressureDropped.Load() - mark.pressure,
+		Capacity:  m.dropCount.Load() - mark.capacity,
+		TestCases: m.droppedTCsRecorded.Load() - mark.testCases,
+	}
+	m.dropNamesMu.Lock()
+	defer m.dropNamesMu.Unlock()
+	d.Named = append(d.Named, m.dropNames...)
+	return d
 }
 
 // AddMock takes mock from its parser: buffered for the test window that owns
@@ -1933,7 +2068,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) MockDrop {
 	m.mu.Lock()
 	if m.lostToPressureLocked(mock) {
 		m.mu.Unlock()
-		m.reportPressureDrop(mock, m.pressureDropped.Add(1), string(MockDroppedUnderPressure))
+		m.reportPressureDrop(mock, string(MockDroppedUnderPressure))
 		return MockDroppedUnderPressure
 	}
 	// Mock is being kept — count it as successfully added.
@@ -2043,6 +2178,7 @@ func (m *SyncMockManager) SendConfigMock(mock *models.Mock) {
 	if m == nil {
 		return
 	}
+	m.totalAdded.Add(1)
 	m.noteSending(mock)
 	m.send(mock, "", func(bool) { m.sent(mock) })
 }
@@ -2922,15 +3058,15 @@ func (m *SyncMockManager) oweUnclaimedLocked(from time.Time) {
 // window owns one: one resolved over it took it (ResolveKept, ResolveRange).
 // The rest is dropped and counted in t (if not nil): as the cleanup each was
 // held instead of, or, when a window was given up (givenUp), as let go with
-// it, the loss a kept verdict on it would reveal. Returns how many were
-// dropped. Caller holds mu.
-func (m *SyncMockManager) dropHeldLocked(n int, t *dropTally, givenUp bool) (dropped int) {
+// it, the loss a kept verdict on it would reveal. Returns the mocks dropped.
+// Caller holds mu.
+func (m *SyncMockManager) dropHeldLocked(n int, t *dropTally, givenUp bool) (dropped []*models.Mock) {
 	for _, h := range m.held[:n] {
 		if h.owner != nil {
 			m.owed = append(m.owed, owedMock{mock: h.mock, to: h.owner})
 			continue
 		}
-		dropped++
+		dropped = append(dropped, h.mock)
 		switch {
 		case t == nil:
 		case givenUp:
@@ -3363,13 +3499,7 @@ func (m *SyncMockManager) giveUpForPressureLocked() (dropped []*models.Mock, gav
 		m.windowLeftLocked(w)
 	}
 	m.noteOldestLocked()
-	for _, h := range m.held[:n] {
-		if h.owner == nil { // one with an owner is owed to it (dropHeldLocked)
-			dropped = append(dropped, h.mock)
-		}
-	}
-	m.dropHeldLocked(n, nil, true)
-	return dropped, gaveUp
+	return m.dropHeldLocked(n, nil, true), gaveUp
 }
 
 // reportGivenUp logs the windows given up, for diagnosis. It is not a loss
@@ -3999,13 +4129,13 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 		}
 	}
 	m.mu.Unlock() // NEVER hold mu while logging — logging inside a lock causes a deadlock under I/O pressure (see BUG 5: 70-minute CI hang)
-	// Dropped, so no longer added: the summary has each mock in one field.
+	// Dropped, so no longer added (SessionDrops).
 	m.totalAdded.Add(-int64(len(wiped) + len(heldGone)))
 	for _, mk := range wiped {
-		m.reportPressureDrop(mk, m.pressureDropped.Add(1), string(MockDroppedUnderPressure))
+		m.reportPressureDrop(mk, string(MockDroppedUnderPressure))
 	}
 	for _, mk := range heldGone {
-		m.reportPressureDrop(mk, m.pressureDropped.Add(1), heldLetGo)
+		m.reportPressureDrop(mk, heldLetGo)
 	}
 	m.reportGivenUp(pressureGaveUp, LostToMemoryPressure)
 	if heldDropped > 0 {

@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,6 +171,8 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// TLS unread.
 		syncmgr.Get().NoteTLSRelayedConn(8443)
 		syncmgr.Get().NoteTLSRelayedConn(8443)
+		// Mocks this session dropped after their parsers handed them over.
+		loseMockEachWay(t, "marker")
 		// The ingress requests of this session: one before its pause, two
 		// during it, one after.
 		memoryguard.IngressRequest()
@@ -215,6 +218,12 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		}
 		if want := (models.PressureSkipSummary{Requests: 3, Connections: 2}); sum.NotRecordedUnderPressure != want {
 			t.Fatalf("the marker says a pause cost %+v, want %+v", sum.NotRecordedUnderPressure, want)
+		}
+		// Its client says this when the agent's own log may not reach the
+		// user: so the mocks are named here, not only counted.
+		if d := sum.MocksDropped; d.ByPressure != 1 || d.Capacity != 1 || len(d.Named) != 2 ||
+			!strings.Contains(d.Named[0], "marker-output") {
+			t.Fatalf("the marker says %+v of the mocks dropped, want this session's, named", d)
 		}
 		if sum.NotHandedOn != 2 {
 			t.Fatalf("the marker says %d test cases were not handed on, want this session's 2", sum.NotHandedOn)

@@ -926,8 +926,9 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 //     drop the mock as it is handed over (memory pressure, the output
 //     closed or at its byte bound): the manager counts it and says which
 //     mock and why, and EmitMockOutcome tells the caller (lost), but
-//     EmitMock returns nil for it, as the mock was not refused. This is a deliberate asymmetry: the syncMock manager
-//     owns its own lifecycle so best-effort delivery with ctx-probe
+//     EmitMock returns nil for it, as the mock was not refused. This is
+//     a deliberate asymmetry: the syncMock manager owns its own
+//     lifecycle so best-effort delivery with ctx-probe
 //     on entry is the cleanest fit; forcing ctx through would
 //     require threading it into every AddMock call site in the legacy
 //     record path too.
@@ -985,14 +986,15 @@ func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
 // (LeftOutChannelFullAtStop), or the session's manager dropped it as it was
 // handed over (syncMock.SyncMockManager.AddMock's MockDrop: memory pressure,
 // the output closed or at its byte bound), which the manager counts and says,
-// naming the mock and why. Either way m is counted once, and the test cases
-// over it are left out: a mock the manager dropped is not counted again as
-// left out, and the session spans it, unless memory pressure's spans cover it
-// already or the client never read it. A mock refused (err set) is
-// neither taken nor lost: what to do with it is the caller's. A parser that
-// says it kept a mock says so only when this says it was not lost, and one
-// that reports the rest of an exchange as left out unless the exchange itself
-// was lost asks this, so it counts the exchange once.
+// naming the mock and why. Either way m is counted once, and spanned: a mock
+// the manager dropped is not counted again as left out, and the session spans
+// it as it spans one left out, unless memory pressure's spans cover it already
+// or the client never read it. A span leaves out only the test cases that
+// overlap it (syncMock.MockDrop says what that leaves). A mock refused (err
+// set) is neither taken nor lost: what to do with it is the caller's. A parser
+// that says it kept a mock says so only when this says it was not lost, and
+// one that reports the rest of an exchange as left out unless the exchange
+// itself was lost asks this, so it counts the exchange once.
 //
 // So not lost means taken, and no more: what befalls m after (a drop on its way
 // out, memory pressure letting it go) is decided after this returns, and a
@@ -1118,9 +1120,10 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 		}
 		// Counted and said by the manager, and lost to the caller
 		// (EmitMockOutcome). A drop for the output has no owner yet, so
-		// nothing else leaves out the test cases over it: spanned here, as
-		// a mock left out is. Pressure's own spans cover its drops, and an
-		// answer the client never read costs no test case.
+		// nothing else leaves out a test case over it: spanned here, as a
+		// mock left out is, and here so it goes where the session's spans
+		// go (RecordOrphanWindow). Pressure's own spans cover its drops,
+		// and an answer the client never read costs no test case.
 		if drop != syncMock.MockDroppedUnderPressure && !m.IsUndelivered() {
 			s.spanLeftOut(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 		}
