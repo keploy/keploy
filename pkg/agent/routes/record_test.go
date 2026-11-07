@@ -223,3 +223,44 @@ func TestHandleIncoming_ALostSessionMockRevokesTheTestCasesSentBeforeIt(t *testi
 		t.Fatalf("streamed %q after the loss, want none", name)
 	}
 }
+
+// A test case the stream sent before a test's mock no test owns (the async
+// capture's, requested after the recording's first request) is lost on its
+// way out, whose window overlaps that mock's call, is revoked by name: the
+// stream gives the manager its window's start as well as its end. One sent
+// after the loss whose window ends before the call is sent.
+func TestHandleIncoming_ALostAsyncMockRevokesTheTestCaseSentOverItsCall(t *testing.T) {
+	mgr := syncmgr.Get()
+	mgr.SetWatermark(nil)
+	mgr.SetRevokeCapable(true)
+	t.Cleanup(func() { mgr.SetRevokeCapable(false) })
+	start := newStretch()
+	mgr.StartRecordSession()
+	mgr.OpenWindow(start.Add(-2*time.Second), nil).Close()
+	tcs := make(chan *models.TestCase, 1)
+	names := streamOf(t, openStream(t, tcs))
+	mgr.SetOutputChannel(make(chan *models.Mock)) // a consumer that takes nothing
+	t.Cleanup(func() { mgr.SetOutputChannel(make(chan *models.Mock, 1)) })
+
+	tcs <- &models.TestCase{Name: "sent-over-its-call", Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{Timestamp: start.Add(-time.Second)}, HTTPResp: models.HTTPResp{Timestamp: start.Add(time.Second)}}
+	if name, ok := nextStreamed(t, names); !ok || name != "sent-over-its-call" {
+		t.Fatalf("streamed %q (open %v), want the test case before the loss", name, ok)
+	}
+	lost := &models.Mock{Kind: models.Kind("Kafka"), ConnectionID: "lost-async",
+		Spec: models.MockSpec{ReqTimestampMock: start.Add(-500 * time.Millisecond), ResTimestampMock: start.Add(-400 * time.Millisecond)}}
+	lost.DeriveLifetime()
+	if got := mgr.AddMock(lost); got != syncmgr.MockTaken {
+		t.Fatalf("the async capture's mock: %q, want it queued", got)
+	}
+	mgr.CloseOutChan() // given up once the consumer took nothing for the close's bound
+	if !mgr.WasMockDroppedForTC("sent-over-its-call") {
+		t.Fatal("a test case sent before a test's mock no test owns was lost, whose window overlaps its call, was not revoked")
+	}
+	tcs <- &models.TestCase{Name: "ended-before-the-call", Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{Timestamp: start.Add(-1500 * time.Millisecond)}, HTTPResp: models.HTTPResp{Timestamp: start.Add(-time.Second)}}
+	close(tcs)
+	if name, ok := nextStreamed(t, names); !ok || name != "ended-before-the-call" {
+		t.Fatalf("streamed %q (open %v), want the test case that ended before the lost call", name, ok)
+	}
+}

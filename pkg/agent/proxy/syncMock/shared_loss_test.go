@@ -19,7 +19,7 @@ func sharedAt(t *testing.T, conn string, at time.Time) *models.Mock {
 	m := addMockTo(conn, true)
 	m.DeriveLifetime()
 	m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(time.Millisecond)
-	if !servedToAnyTest(m, "") {
+	if !attributedReusable(m) {
 		t.Fatalf("setup: a session's mock with no owner is not served to any test (lifetime %v)", m.TestModeInfo.Lifetime)
 	}
 	return m
@@ -265,7 +265,7 @@ func TestAMockAnyTestMayNeedDroppedForTheOutputClosedLeavesOutNone(t *testing.T)
 	if leftOutAfter(m, at) || leftOutLines(logs) != 0 {
 		t.Fatal("a drop for the output closed left out the test cases after it")
 	}
-	if !m.SendingTestCase("after", at.Add(time.Second)) {
+	if !m.SendingTestCase("after", time.Time{}, at.Add(time.Second)) {
 		t.Fatal("a test case checked after a drop for the output closed was left out")
 	}
 }
@@ -281,7 +281,7 @@ func sentThenLost(t *testing.T, at time.Time, ends ...time.Time) (*SyncMockManag
 	m.SetRevokeCapable(true)
 	_, clk := fullLane(t, m)
 	for i, end := range ends {
-		if !m.SendingTestCase(fmt.Sprintf("tc-%d", i), end) {
+		if !m.SendingTestCase(fmt.Sprintf("tc-%d", i), time.Time{}, end) {
 			t.Fatalf("tc-%d was left out with no mock lost", i)
 		}
 	}
@@ -330,10 +330,10 @@ func TestALossRevokesTheTestCasesSentBeforeItThatReachPastItsRequest(t *testing.
 	if said == nil || said["revoked_sent"] != int64(2) || said["client_deletes_revoked"] != true || said["unnamed_sent_through"] != nil {
 		t.Fatalf("the ERROR says %v, want revoked_sent 2, client_deletes_revoked true and no unnamed_sent_through", said)
 	}
-	if m.SendingTestCase("after-reaches-past", at.Add(time.Second)) || m.SendingTestCase("after-no-end", time.Time{}) {
+	if m.SendingTestCase("after-reaches-past", time.Time{}, at.Add(time.Second)) || m.SendingTestCase("after-no-end", time.Time{}, time.Time{}) {
 		t.Fatal("a test case checked after the loss whose window reaches past its request was sent")
 	}
-	if !m.SendingTestCase("after-ended-before", at.Add(-time.Second)) {
+	if !m.SendingTestCase("after-ended-before", time.Time{}, at.Add(-time.Second)) {
 		t.Fatal("a test case checked after the loss that ended before its request was left out")
 	}
 	// A later loss, requested earlier, revokes those sent since that reach
@@ -361,7 +361,7 @@ func TestALossRevokesNoTestCaseOfAnOlderRecording(t *testing.T) {
 	m.SetRevokeCapable(true)
 	m.SetOutputChannel(make(chan *models.Mock, 1))
 	for i := 0; i <= maxSentTCs; i++ { // one past the names it keeps
-		m.SendingTestCase(fmt.Sprintf("old-%d", i), at.Add(time.Second))
+		m.SendingTestCase(fmt.Sprintf("old-%d", i), time.Time{}, at.Add(time.Second))
 	}
 	_, clk := fullLane(t, m) // a new recording
 	lost := make(chan bool, 1)
@@ -462,7 +462,7 @@ func TestANewRecordingEndsTheSpanOfTheLastOnesLoss(t *testing.T) {
 	if left, _ := m.WasMockOrphanedInWindow(start, time.Now()); left {
 		t.Fatal("a test case of the new recording was left out for a mock the last one lost")
 	}
-	if !m.SendingTestCase("new-0", time.Now()) {
+	if !m.SendingTestCase("new-0", time.Time{}, time.Now()) {
 		t.Fatal("the new recording's stream left out a test case for the last one's loss")
 	}
 }
@@ -470,7 +470,7 @@ func TestANewRecordingEndsTheSpanOfTheLastOnesLoss(t *testing.T) {
 // A nil manager lets every test case through.
 func TestANilManagerSendsEveryTestCase(t *testing.T) {
 	var m *SyncMockManager
-	if !m.SendingTestCase("tc", time.Now()) {
+	if !m.SendingTestCase("tc", time.Time{}, time.Now()) {
 		t.Fatal("a nil manager left a test case out")
 	}
 }
