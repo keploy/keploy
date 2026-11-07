@@ -5192,6 +5192,13 @@ func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock)
 
 var _ agent.RecordedBeforeSetter = (*Proxy)(nil)
 
+// MarkRecordingsReadable implements agent.RecordingsReadableMarker (exact_set_follow.go).
+func (p *Proxy) MarkRecordingsReadable() error {
+	return p.stageOn("recordingsReadable", func(m *MockManager) { m.MarkRecordingsReadable() })
+}
+
+var _ agent.RecordingsReadableMarker = (*Proxy)(nil)
+
 // lastRecorded is the latest instant a recording's request can be read at
 // (time.Time.UnixNano's last): every recording is recorded before it.
 var lastRecorded = time.Unix(0, math.MaxInt64)

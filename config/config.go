@@ -53,6 +53,9 @@ type Config struct {
 	// a recording made outside every test (in TestMain or at start-up), of
 	// a call it names exactly: its method, and the whole path as pathPrefix.
 	SessionCalls []models.SessionCallRule `json:"sessionCalls,omitempty" yaml:"sessionCalls,omitempty" mapstructure:"sessionCalls"`
+	// Redis declares, for a Redis the app writes in the run, the key shapes
+	// that hold a word the app drew itself, such as a job's uuid.
+	Redis RedisConfig `json:"redis,omitempty" yaml:"redis,omitempty" mapstructure:"redis"`
 	// MysqlPorts pins destination ports to the MySQL parser, skipping
 	// auto-detection for them; a non-empty list replaces the built-in
 	// defaults (3306, 4000). The defaults are only a hint (a client that
@@ -466,6 +469,27 @@ type Normalize struct {
 // accept and warns, so an over-generous value can never fail a run that would
 // otherwise pass.
 const DefaultHealthPollTimeout = 3 * time.Minute
+
+// RedisConfig is keploy.yaml's redis block.
+type RedisConfig struct {
+	Drawn []RedisDrawnPlace `json:"drawn,omitempty" yaml:"drawn,omitempty" mapstructure:"drawn"`
+}
+
+// RedisDrawnPlace is one key shape: literal text, {draw} where a word the app
+// drew stands (32 hex digits or a dashed uuid) and {same} where a word must
+// equal the recording's, as in rq:job:{draw}.
+type RedisDrawnPlace struct {
+	Key string `json:"key" yaml:"key" mapstructure:"key"`
+}
+
+// DrawnKeys is the declared key shapes.
+func (c RedisConfig) DrawnKeys() []string {
+	keys := make([]string, 0, len(c.Drawn))
+	for _, p := range c.Drawn {
+		keys = append(keys, p.Key)
+	}
+	return keys
+}
 
 type Test struct {
 	SelectedTests     map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`

@@ -706,6 +706,33 @@ func (s *scopedMockDb) RangeRecordedBefore(t time.Time, visit func(*models.Mock)
 	return errNoRecordedBefore
 }
 
+// RecordingsReadable forwards the store's readable epoch (integrations.SetFollower);
+// 0, no epoch, over a store that keeps none.
+func (s *scopedMockDb) RecordingsReadable() uint64 {
+	if f, ok := s.MockMemDb.(integrations.SetFollower); ok {
+		return f.RecordingsReadable()
+	}
+	return 0
+}
+
+// TestCycle forwards the store's count of tests opened again
+// (integrations.SetFollower).
+func (s *scopedMockDb) TestCycle() uint64 {
+	if f, ok := s.MockMemDb.(integrations.SetFollower); ok {
+		return f.TestCycle()
+	}
+	return 0
+}
+
+// ExcuseRecording forwards to the store (integrations.SetFollower).
+func (s *scopedMockDb) ExcuseRecording(name string) {
+	if f, ok := s.MockMemDb.(integrations.SetFollower); ok {
+		f.ExcuseRecording(name)
+	}
+}
+
+var _ integrations.SetFollower = (*scopedMockDb)(nil)
+
 // errNoRecordedBefore is a scoped view's answer over a store that cannot read
 // every recording made before an instant.
 var errNoRecordedBefore = errors.New("the mock store cannot read every recording made before an instant")

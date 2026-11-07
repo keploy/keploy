@@ -165,6 +165,9 @@ type exactView struct {
 	cand []bool
 	// claims is the manager's claims on the shared recordings.
 	claims *exactClaims
+	// follow says which of the view's recordings a parser answered for
+	// elsewhere (integrations.SetFollower); nil on a view no test serves.
+	follow *setFollow
 	// bg is the set's background under the background rules (ServeExactBackground)
 	// when the view was installed; nil for today's rules.
 	bg *backgroundState
@@ -419,6 +422,8 @@ type exactState struct {
 	kept    keptOverlay
 	claimed stagingNames
 	ofKind  recordedOfKindSource
+	// follow is what a parser that follows a set reads of it (SetFollower).
+	follow setFollow
 	// begun is the mocks the tests begun in the current staging own
 	// (StagedOwnerBegun); named, those a miss's diagnosis named
 	// (FindStagedNotOwned), each once.
@@ -1533,6 +1538,7 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	if m.exact.beforeInstall != nil {
 		m.exact.beforeInstall()
 	}
+	m.exact.follow.opened(m.stagingEpoch.Load(), test)
 	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned)+len(cands))}
 	if w, ok := m.testWindows.Load().Of(test); ok {
 		v.winStart, v.winEnd = w.Start, w.End
@@ -1548,6 +1554,7 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		}
 	}
 	v.claims = &m.exact.claims
+	v.follow = &m.exact.follow
 	v.consumed = make([]bool, len(v.owned))
 	v.repeats = v.repeatReads(m.provingNoise())
 	for _, name := range ahead {
@@ -2166,7 +2173,7 @@ func (v *exactView) outcomeLocked() *testOutcome {
 	}
 	excused := v.oneFewerLocked()
 	for i, done := range v.consumed {
-		if !done && !v.isCand(i) && !excused[i] {
+		if !done && !v.isCand(i) && !excused[i] && !v.follow.excused(v.owned[i].Name) {
 			o.unconsumed = append(o.unconsumed, v.owned[i].Name)
 		}
 	}

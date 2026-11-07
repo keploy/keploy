@@ -128,6 +128,10 @@ type OutgoingOptions struct {
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
+	// RedisDrawn lists the Redis key shapes keploy.yaml declares as holding a
+	// word the app drew in this run (redis.drawn), handed on for the Redis
+	// parser; nothing here judges them.
+	RedisDrawn []string
 	// DisableStatefulMocks turns OFF cursor-consumption of stateful data-plane
 	// mocks. Default (false) = ON: repeated identical dependency requests are
 	// served successive recorded responses in record order (then saturate on the
