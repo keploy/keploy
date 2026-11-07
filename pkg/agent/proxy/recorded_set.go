@@ -11,14 +11,16 @@ import (
 // shows of them (a test's window, a consume, exact serving's view). With no
 // on-disk source staged, whole is false and nothing is visited: the agent
 // hands one as it stages a set it keeps on disk (Agent.stageMocks), and the
-// trees of a set it keeps resident may hold only the open test's window.
+// trees of a set it keeps resident may hold only the open test's window. So
+// it is for a kind the agent's on-disk store does not list (diskListsKind),
+// which that source ranges none of.
 //
 // The trees and the source are read together under swapMu, as one staging
 // installed them (installRecordedOfKindLocked): the agent hands a set's
 // source before it stages that set, so a read between the two still ranges
 // the set staged, never its trees with the next set's on-disk recordings.
 func (m *MockManager) RangeRecordedSet(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) (bool, error) {
-	if m.closed.Load() {
+	if m.closed.Load() || !diskListsKind(kind) {
 		return false, nil
 	}
 	m.swapMu.RLock()
