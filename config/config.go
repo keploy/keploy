@@ -49,6 +49,9 @@ type Config struct {
 	// several tests need though only one recorded it misses in the others;
 	// declaring it here serves it to every test, without recording again.
 	// Each rule names a host, and optionally a method and a path prefix.
+	// Under the proven switch (KEPLOY_PROVEN) a rule serves every test only
+	// a recording made outside every test (in TestMain or at start-up), of
+	// a call it names exactly: its method, and the whole path as pathPrefix.
 	SessionCalls []models.SessionCallRule `json:"sessionCalls,omitempty" yaml:"sessionCalls,omitempty" mapstructure:"sessionCalls"`
 	// MysqlPorts pins destination ports to the MySQL parser, skipping
 	// auto-detection for them; a non-empty list replaces the built-in

@@ -16,6 +16,12 @@ import (
 // declaring it in keploy.yaml (sessionCalls) serves it to every test,
 // without recording again.
 //
+// Under the proven switch (KEPLOY_PROVEN) a test is served, of the calls a
+// rule declares, only a recording made outside every test (in TestMain or at
+// start-up), and only of a call the rule names exactly: Method set and
+// PathPrefix the call's whole path (names). Another test's recording of it
+// stays that test's.
+//
 // Host is required; Method and PathPrefix narrow the rule when set.
 type SessionCallRule struct {
 	// Host is the upstream's host, compared case-insensitively. Without a port
@@ -63,6 +69,14 @@ func (r SessionCallRule) matches(method, host, path string) bool {
 	return path == r.PathPrefix || strings.HasPrefix(path, r.PathPrefix+"/")
 }
 
+// names reports whether the rule names a call of method to host and path
+// exactly: it states the method, and its PathPrefix is the call's whole path,
+// on a host it matches. Under the proven switch only such a rule serves a
+// test a recording made outside every test (Mock.DeclaredSessionCall).
+func (r SessionCallRule) names(method, host, path string) bool {
+	return r.Method != "" && r.PathPrefix == path && r.matches(method, host, path)
+}
+
 func sessionCallHostMatches(rule, host string) bool {
 	if strings.EqualFold(rule, host) {
 		return true
@@ -80,6 +94,9 @@ func sessionCallHostMatches(rule, host string) bool {
 
 var sessionCalls atomic.Pointer[[]SessionCallRule]
 
+// sessionCallsOn is whether the rules SetSessionCalls installed last are any.
+var sessionCallsOn atomic.Bool
+
 // SetSessionCalls installs the process's declared session calls (keploy.yaml
 // sessionCalls), which DeriveLifetime applies to every HTTP and HTTP/2 mock
 // it derives per-test from then on. The keploy CLI installs them from its
@@ -88,7 +105,69 @@ var sessionCalls atomic.Pointer[[]SessionCallRule]
 func SetSessionCalls(rules []SessionCallRule) {
 	cp := append([]SessionCallRule(nil), rules...)
 	sessionCalls.Store(&cp)
+	sessionCallsOn.Store(len(cp) > 0)
 	mockRulesChanged()
+}
+
+// SessionCallsDeclared reports whether the process declares any session call
+// (SetSessionCalls).
+func SessionCallsDeclared() bool { return sessionCallsOn.Load() }
+
+// DeclaredSessionCall reports whether m is an HTTP or HTTP/2 call its
+// recorder stated per-test that a declared session call (SetSessionCalls,
+// keploy.yaml sessionCalls) names exactly, by its method and its whole path
+// (SessionCallRule.names). Under the proven switch a test is served such a
+// call from a recording made outside every test (exactView.sharesRest); a
+// rule that covers it only by a path prefix, or with no method, does not
+// serve it there, so that no recording is served to a path or method no
+// one declared. DeriveLifetime gives a stated per-test call any rule covers
+// LifetimeSession, but it stays a data-plane recording (IsProtocolPhase
+// reads the stated lifetime).
+func (m *Mock) DeclaredSessionCall() bool {
+	if m == nil {
+		return false
+	}
+	lt, ok := statedLifetime(m)
+	return ok && lt == LifetimePerTest && namedSessionCall(m)
+}
+
+// SessionCallDeclared says how the declared session calls (SetSessionCalls)
+// declare a call of method to host and path, a live call, as a miss's hint
+// reads it: covered, when a rule covers it (by a path prefix too), and
+// named, when a rule names it exactly (SessionCallRule.names), which alone
+// serves it to a test under the proven switch. An empty path is the root,
+// "/", as httpCallOf reads a recording's.
+func SessionCallDeclared(method, host, path string) (covered, named bool) {
+	rules := sessionCalls.Load()
+	if rules == nil {
+		return false, false
+	}
+	if path == "" {
+		path = "/"
+	}
+	return rulesCover(*rules, method, host, path), rulesName(*rules, method, host, path)
+}
+
+// rulesName reports whether one of rules names a call of method to host and
+// path exactly (SessionCallRule.names).
+func rulesName(rules []SessionCallRule, method, host, path string) bool {
+	for _, r := range rules {
+		if r.names(method, host, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// rulesCover reports whether one of rules covers a call of method to host and
+// path.
+func rulesCover(rules []SessionCallRule, method, host, path string) bool {
+	for _, r := range rules {
+		if r.matches(method, host, path) {
+			return true
+		}
+	}
+	return false
 }
 
 // declaredSessionCall reports whether m is an HTTP or HTTP/2 call a declared
@@ -99,15 +178,18 @@ func declaredSessionCall(m *Mock) bool {
 		return false
 	}
 	method, host, path, ok := httpCallOf(m)
-	if !ok {
+	return ok && rulesCover(*rules, method, host, path)
+}
+
+// namedSessionCall reports whether m is an HTTP or HTTP/2 call a declared
+// session call names exactly (SessionCallRule.names).
+func namedSessionCall(m *Mock) bool {
+	rules := sessionCalls.Load()
+	if rules == nil {
 		return false
 	}
-	for _, r := range *rules {
-		if r.matches(method, host, path) {
-			return true
-		}
-	}
-	return false
+	method, host, path, ok := httpCallOf(m)
+	return ok && rulesName(*rules, method, host, path)
 }
 
 // httpCallOf is the method, upstream host and path of an HTTP or HTTP/2 mock's

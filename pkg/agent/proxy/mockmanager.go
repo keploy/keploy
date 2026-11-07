@@ -3914,6 +3914,12 @@ func (m *MockManager) updateUnFilteredTier(old *models.Mock, new *models.Mock) b
 		}
 	}
 
+	// One of the pool's, of any lifetime, answered a call, which a test's
+	// view may hide (noteKeptAnswer).
+	if updatedGlobal {
+		m.noteKeptAnswer(new)
+	}
+
 	// Bump revisions accurately:
 	// - global only if the global tree changed
 	// - per-kind only for kinds whose per-kind tree changed
@@ -4725,9 +4731,13 @@ func (m *MockManager) markUsedTier(mock models.Mock) bool {
 		return false
 	}
 	// A per-test recording this door keeps (HTTP's stateful one, kept for
-	// its test's repeats) answered a call too (FindAnsweredEarlier).
+	// its test's repeats) answered a call too (FindAnsweredEarlier), and so
+	// did one of the pool's of any other lifetime, which a test's view may
+	// hide (noteKeptAnswer).
 	if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
 		m.noteAnswered(mock)
+	} else {
+		m.noteKeptAnswer(&mock)
 	}
 	return true
 }

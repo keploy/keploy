@@ -556,7 +556,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
 				}
-				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
+				report, hint := h.buildHTTPMismatchReportHinted(request, input.body, db, nil, headerNoise, bodyNoise, diag)
+				if hint != "" {
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + hint)
+				}
 				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
 					report.SkippedReads = h.skippedReadsOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
@@ -663,7 +666,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
 				}
 				if repeated {
-					markRepeat(report, earlier)
+					markRepeat(report, earlier, madeOutsideTests(db, earlier), hint)
 				}
 				if gone != "" && (lmiss == nil || !lmiss.moved) {
 					report.Reason = models.MissViewReplaced

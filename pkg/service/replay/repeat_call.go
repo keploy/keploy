@@ -329,7 +329,10 @@ func earlierConsumer(tests []string, test string) string {
 func repeatLine(test string, c *models.UnmatchedCall) string {
 	n := c.Repeat
 	by := n.Test
-	if by == "" {
+	switch {
+	case n.OutsideTests:
+		by = "a call outside every test"
+	case by == "":
 		by = "an earlier test"
 	}
 	when := "earlier"

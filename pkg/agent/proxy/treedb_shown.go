@@ -171,7 +171,8 @@ func (v *exactView) showsStaticRest(mk *models.Mock) bool {
 
 // sharesRest is what the view shows of a mock that is not protocol-phase, its
 // own apart: one of the reached worker scope; in a test, one of the pool
-// under the background rules; between tests, one of the pool slice served.
+// under the background rules, or one a declared session call names
+// (declaredInPool); between tests, one of the pool slice served.
 func (v *exactView) sharesRest(mk *models.Mock) bool {
 	if v.isWorker(mk.Name) {
 		return true
@@ -180,10 +181,22 @@ func (v *exactView) sharesRest(mk *models.Mock) bool {
 		// Under the background rules the pool answers in a test too,
 		// after the test's own and the worker scope (keep); an async
 		// lane's recording keeps today's rules.
-		return v.bg.inPool(mk.Name) && !mk.IsAsync()
+		return v.declaredInPool(mk) || v.bg.inPool(mk.Name) && !mk.IsAsync()
 	}
 	_, ok := v.pool[mk.Name]
 	return ok
+}
+
+// declaredInPool reports whether mk, in a test's view, is a recording made
+// outside every test (the pool slice served before the test opened) that
+// a keploy.yaml sessionCalls entry names exactly, by its method and whole
+// path, served to every test
+// (models.Mock.DeclaredSessionCall). Every test of the run is served it,
+// whatever test opened: a call the app makes once at start-up and caches
+// (a token, a configuration read) that a test makes again. Another test's
+// recording of it is that test's alone.
+func (v *exactView) declaredInPool(mk *models.Mock) bool {
+	return v.declared.has(mk.Name) && mk.DeclaredSessionCall()
 }
 
 // unspentNow reports whether mk is neither spent in the view nor consumed
@@ -215,22 +228,28 @@ func (v *exactView) extraLocked(db *TreeDb, ix *integrations.MockIndex, key stri
 		return s.extra
 	}
 	shownBuilds.Add(1)
-	var pool map[string]struct{}
+	var pool, declared map[string]struct{}
 	if v.test != "" {
 		if v.bg != nil {
 			pool = v.bg.pool
+		}
+		if v.declared != nil {
+			declared = v.declared.names
 		}
 	} else {
 		pool = v.pool
 	}
 	var extra []keyedEntry
-	if looks := len(v.worker) + len(pool); looks < len(p.rest) {
+	if looks := len(v.worker) + len(pool) + len(declared); looks < len(p.rest) {
 		keyedExamined.Add(uint64(looks))
 		var pos []int
 		for name := range v.worker {
 			pos = append(pos, p.byName[name]...)
 		}
 		for name := range pool {
+			pos = append(pos, p.byName[name]...)
+		}
+		for name := range declared {
 			pos = append(pos, p.byName[name]...)
 		}
 		slices.Sort(pos)
