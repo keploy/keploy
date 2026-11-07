@@ -247,7 +247,7 @@ func (m *merger) mapping(old, cur *yamlLib.Node, level, where string) bool {
 				if m.list(resolved(v), cv, sub, where+k.Value) {
 					changed = true
 				}
-			} else if keepPlainComments(resolved(v), cv, m.plainMatch(level, k.Value)) {
+			} else if keepPlainComments(resolved(v), cv, m.plainMatch(k.Value)) {
 				changed = true
 			}
 			pos = j
@@ -341,12 +341,13 @@ func (m *merger) list(old, cur *yamlLib.Node, itemLevel, where string) bool {
 	return changed
 }
 
-// plainMatch is what names an old value under key, at level, in the new
-// file (keepPlainComments): a test's case_mocks list its mocks by name, so
-// each goes by entryMatch, and a comment never moves to another call that
-// holds the name now; any other value is itself.
-func (m *merger) plainMatch(level, key string) func(string) (string, bool) {
-	if level == models.MappingLevelTest && key == "case_mocks" {
+// plainMatch is what names an old value under key in the new file
+// (keepPlainComments): a test's case_mocks list its mocks by name, so each
+// goes by entryMatch, and a comment never moves to another call that holds
+// the name now; any other value is itself. Keploy writes case_mocks at no
+// other level: there the key is a person's, and mapping copies it whole.
+func (m *merger) plainMatch(key string) func(string) (string, bool) {
+	if key == "case_mocks" {
 		return m.entryMatch
 	}
 	return func(v string) (string, bool) { return v, true }
