@@ -387,7 +387,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		// waited out the whole of it for one that had stopped.
 		agentCtx, cancel := context.WithCancel(gCtx)
 		agentReadyCh := make(chan bool, 1)
-		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh)
 		agentStart := r.instrumentation.WatchAgentStart(agentCtx)
 		select {
 		case <-gCtx.Done():

@@ -2848,7 +2848,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			defer cancel()
 
 			agentReadyCh := make(chan bool, 1)
-			go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
+			go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh)
 			agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
 			// The wait ends when the agent answers healthy, when its start
