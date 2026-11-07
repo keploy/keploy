@@ -118,6 +118,42 @@ func TestWholeBodyKeepsItsMarks(t *testing.T) {
 	}
 }
 
+// An SSE body kept as the bytes the upstream sent, never split into frames,
+// keeps its marks as they are, for they index those bytes: a stream that
+// ended inside its last event, and a fault's body sent before the fault.
+func TestAnSSEBodyKeptAsItsBytesKeepsItsMarks(t *testing.T) {
+	sse := map[string]string{"Content-Type": "text/event-stream"}
+	marks := func() *HTTPAnswerMarks {
+		return &HTTPAnswerMarks{Head: sec(1), Writes: []HTTPAnswerWrite{{Offset: 9, TS: sec(2)}, {Offset: 16, TS: sec(3)}}}
+	}
+	check := func(name string, back HTTPResp, out string) {
+		t.Helper()
+		if back.Body != "data: a\n\ndata: b" || len(back.StreamBody) != 0 {
+			t.Fatalf("%s: body %q, frames %+v, want the bytes as sent:\n%s", name, back.Body, back.StreamBody, out)
+		}
+		if got := pieces(t, back); strings.Join(got, "|") != "data: a\n\n|data: b" || !back.Marks.Head.Equal(sec(1)) ||
+			!back.Marks.Writes[0].TS.Equal(sec(2)) || !back.Marks.Writes[1].TS.Equal(sec(3)) {
+			t.Errorf("%s: pieces %q, marks %+v", name, got, back.Marks)
+		}
+	}
+
+	cut, out := roundTripYAML(t, HTTPResp{StatusCode: 200, Header: sse, Body: "data: a\n\ndata: b", Marks: marks()})
+	check("a stream that ended inside its last event", cut, out)
+
+	raw, err := yamlLib.Marshal(HTTPSchema{
+		Response: HTTPResp{StatusCode: 200, Header: sse, Body: "data: a\n\ndata: b", Marks: marks()},
+		Fault:    &Fault{Kind: FaultReset, AfterHead: true, BodyBytes: 16},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fault HTTPSchema
+	if err := yamlLib.Unmarshal(raw, &fault); err != nil {
+		t.Fatal(err)
+	}
+	check("a fault's body", fault.Response, string(raw))
+}
+
 // A stream whose frames the marks cannot place (a line too long for the
 // frames' parse, which keeps the body as one frame) keeps no marks: replay
 // writes it at once.
