@@ -276,6 +276,71 @@ func TestV2_AnExchangeLeftOutAsItIsHandedOnIsCountedOnceWithItsTail(t *testing.T
 	}
 }
 
+// An exchange the session's manager drops as the parser hands it on (the
+// output closed) is counted once, by the manager: the answer chunks after it
+// are the rest of it, not a mock left out. Before, the parser could not tell
+// the drop, and counted its tail as a second mock lost. The same chunks of an
+// exchange the manager takes report that tail, so the count tells the two
+// apart. Memory pressure keeps every Generic mock (each derives as the
+// session's), so its exchange is one taken.
+func TestV2_AnExchangeTheManagerDropsIsCountedOnceWithItsTail(t *testing.T) {
+	for _, c := range []struct {
+		name               string
+		set                func(*syncMock.SyncMockManager)
+		leftOut            int64
+		pressure, capacity int
+		spanAt             time.Duration
+	}{
+		{"output closed", func(m *syncMock.SyncMockManager) { m.CloseOutChan() }, 0, 0, 2, 0},
+		{"taken", func(*syncMock.SyncMockManager) {}, 1, 0, 0, 3 * time.Second},
+		{"memory pressure keeps a Generic mock", func(m *syncMock.SyncMockManager) { m.SetMemoryPressure(true) }, 1, 0, 0, 3 * time.Second},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ended, cancel := context.WithCancel(context.Background())
+			cancel()
+			mgr := syncMock.New(nil)
+			mgr.SetOutputChannel(make(chan *models.Mock, 4))
+			c.set(mgr)
+			logger := zaptest.NewLogger(t)
+			spans := &syncMock.Spans{}
+			sess := &supervisor.Session{Logger: logger, Ctx: ended, ClientConnID: "test-client-conn",
+				Mgr: mgr, Orphans: spans, RouteMocksViaSyncMock: true}
+			asked := time.Now()
+			// A split: the request after it flushes the first exchange, so
+			// the tail of its answer comes after it was handed on.
+			evs := []chunkEvent{
+				clientChunk("HELLO", 1, asked),
+				clientChunk("PING", 4, asked.Add(4*time.Second)),
+				destChunk("hello-reply", 2, asked.Add(2*time.Second)),
+				destChunk("hello-tail", 3, asked.Add(3*time.Second)),
+				destChunk("pong", 5, asked.Add(5*time.Second)),
+			}
+			events := make(chan chunkEvent, len(evs))
+			for _, ev := range evs {
+				events <- ev
+			}
+			close(events)
+			if err := pairChunkEvents(events, sess, logger); err != nil {
+				t.Fatalf("pairChunkEvents returned error: %v", err)
+			}
+			if n := mgr.MocksLeftOut(); n != c.leftOut {
+				t.Fatalf("%d mock(s) left out, want %d", n, c.leftOut)
+			}
+			// Not counted is not forgotten. An exchange dropped is spanned
+			// over its own times, as one left out is, its tail with it; of one
+			// taken, only the tail is missing, so only the tail is spanned.
+			at := asked.Add(c.spanAt)
+			if over, _ := spans.Overlaps(at, at); !over {
+				t.Fatalf("a test case at %v into the exchange is not left out", c.spanAt)
+			}
+			_, pressure, _, _ := mgr.GetDropStats()
+			if pressure != int64(c.pressure) || mgr.DropCount() != uint64(c.capacity) {
+				t.Fatalf("pressure drops %d, capacity drops %d; want %d, %d", pressure, mgr.DropCount(), c.pressure, c.capacity)
+			}
+		})
+	}
+}
+
 // pairLeavingOutTheFirst runs evs through the exchange state machine with the
 // first exchange it records left out: for the capture's incomplete flag as it
 // is flushed (holed), or else at the stop, as it is handed on to a channel that
