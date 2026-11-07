@@ -49,8 +49,8 @@ func TestWriteFileF_ReplacingAFileWritesNoWiderTempFile(t *testing.T) {
 	var seen []os.FileMode
 	orig := newReplaceTemp
 	t.Cleanup(func() { newReplaceTemp = orig })
-	newReplaceTemp = func(dir, fileName string, perm os.FileMode) (*os.File, error) {
-		f, err := orig(dir, fileName, perm)
+	newReplaceTemp = func(root, dir, fileName string, perm os.FileMode) (*os.File, error) {
+		f, err := orig(root, dir, fileName, perm)
 		if err == nil {
 			if info, serr := f.Stat(); serr == nil {
 				seen = append(seen, info.Mode().Perm())

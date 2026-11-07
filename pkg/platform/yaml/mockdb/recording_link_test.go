@@ -179,7 +179,7 @@ func TestAChangeToASetsMockFileReadsItOnlyInsideTheRecording(t *testing.T) {
 				if cerr := ys.Close(); err == nil {
 					err = cerr
 				}
-				requireRefusedMocks(t, "InsertMock onto the set's gob file", err, root, file)
+				requireWriteRefused(t, "InsertMock onto the set's gob file", err)
 				requireLinkKept(t, "InsertMock onto the set's gob file", file, out, raw)
 			}
 		})

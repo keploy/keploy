@@ -733,7 +733,7 @@ func TestUpdateMocks_AFailedPruneLeavesTheMocksFileWhole(t *testing.T) {
 		name    string
 		raw     string
 		ctx     func() context.Context
-		replace func(logger *zap.Logger, src, dst string) error
+		replace func(logger *zap.Logger, root, src, dst string) error
 	}{
 		{name: "a document does not parse", raw: "---\nversion: [unterminated\n"},
 		{name: "a document does not decode", raw: "---\nversion: api.keploy.io/v1beta1\nkind: Http\nname: mock-bad\nspec: 3\n"},
@@ -743,7 +743,7 @@ func TestUpdateMocks_AFailedPruneLeavesTheMocksFileWhole(t *testing.T) {
 			// file open): yaml.ReplaceFile then puts the original back and
 			// fails — see its tests for that fallback.
 			name: "the new file cannot be put in place",
-			replace: func(_ *zap.Logger, src, dst string) error {
+			replace: func(_ *zap.Logger, _, src, dst string) error {
 				return &os.LinkError{Op: "rename", Old: src, New: dst, Err: errors.New("sharing violation")}
 			},
 		},
@@ -757,7 +757,7 @@ func TestUpdateMocks_AFailedPruneLeavesTheMocksFileWhole(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.replace != nil {
-				defer func(r func(*zap.Logger, string, string) error) { replaceFile = r }(replaceFile)
+				defer func(r func(*zap.Logger, string, string, string) error) { replaceFile = r }(replaceFile)
 				replaceFile = tc.replace
 			}
 			ctx := context.Background()
@@ -808,8 +808,8 @@ func TestUpdateMocks_AnOriginalLeftAsideIsNotAFailedPrune(t *testing.T) {
 		}
 		return os.Rename(from, to)
 	}
-	defer func(r func(*zap.Logger, string, string) error) { replaceFile = r }(replaceFile)
-	replaceFile = func(logger *zap.Logger, src, dst string) error {
+	defer func(r func(*zap.Logger, string, string, string) error) { replaceFile = r }(replaceFile)
+	replaceFile = func(logger *zap.Logger, _, src, dst string) error {
 		return yaml.ReplaceFileWith(logger, rename, src, dst)
 	}
 

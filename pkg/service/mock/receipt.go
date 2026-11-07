@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
+	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -621,13 +622,15 @@ func MocksFile(keployDir, set string) string {
 	return ""
 }
 
-// MocksDigest is the sha256 of the set's mocks file, "" when it has none.
+// MocksDigest is the sha256 of the set's mocks file, "" when it has none or
+// it cannot be read inside the recording: a digest of a file a link out leads
+// to would name something the recording does not hold.
 func MocksDigest(keployDir, set string) string {
 	p := MocksFile(keployDir, set)
 	if p == "" {
 		return ""
 	}
-	f, err := os.Open(p)
+	f, err := setfile.OpenInRecording(keployDir, p)
 	if err != nil {
 		return ""
 	}

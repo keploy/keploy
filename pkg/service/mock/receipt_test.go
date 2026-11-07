@@ -1115,3 +1115,33 @@ func TestBypassListWritesAnIPv6HostInBrackets(t *testing.T) {
 	})
 	require.Equal(t, []string{"[::1]:27017", "[::1]:5432", "localhost:8200", ":6379", "api.internal/v1", "10.0.0.1", "/health"}, got)
 }
+
+// A set's digest names what the recording holds: a mocks file that links out
+// of it has none, and one that links inside it has that file's.
+func TestMocksDigestStaysInsideTheRecording(t *testing.T) {
+	base := t.TempDir()
+	keployDir := filepath.Join(base, "keploy")
+	for _, set := range []string{"out", "in", "real"} {
+		if err := os.MkdirAll(filepath.Join(keployDir, set), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(base, "outside.yaml"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keployDir, "real", "mocks.yaml"), []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "..", "outside.yaml"), filepath.Join(keployDir, "out", "mocks.yaml")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..", "real", "mocks.yaml"), filepath.Join(keployDir, "in", "mocks.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if got := MocksDigest(keployDir, "out"); got != "" {
+		t.Fatalf("a mocks file that links out has the digest %q", got)
+	}
+	if got, want := MocksDigest(keployDir, "in"), MocksDigest(keployDir, "real"); got == "" || got != want {
+		t.Fatalf("a link inside the recording has the digest %q, want %q", got, want)
+	}
+}

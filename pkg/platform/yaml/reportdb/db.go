@@ -142,7 +142,7 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 		data = append([]byte(utils.GetVersionAsComment()), data...)
 	}
 
-	err = yaml.WriteFileF(ctx, fe.Logger, reportPath, testReport.Name, data, false, fe.Format)
+	err = yaml.WriteRecordingFileF(ctx, fe.Logger, fe.Path, reportPath, testReport.Name, data, false, fe.Format)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to write the report", zap.String("session", filepath.Base(reportPath)))
 		return err
@@ -208,7 +208,7 @@ func (fe *TestReport) UpdateReport(ctx context.Context, testRunID string, covera
 		return fmt.Errorf("%s failed to marshal coverage document. error: %s", utils.Emoji, err.Error())
 	}
 
-	err = yaml.WriteFileF(ctx, fe.Logger, reportPath, "coverage", data, false, fe.Format)
+	err = yaml.WriteRecordingFileF(ctx, fe.Logger, fe.Path, reportPath, "coverage", data, false, fe.Format)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to write the coverage report", zap.String("session", filepath.Base(reportPath)))
 		return err

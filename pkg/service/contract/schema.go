@@ -36,15 +36,15 @@ func validateSchema(openapi models.OpenAPI) error {
 
 // setDirs lists the folders in dir that the contract commands read as sets
 // or services: each entry that is a directory, or a symbolic link to one,
-// among those named (named nil: every entry). The callers only read what
-// setDirs lists -- the schemas validate checks, and the sources of a download
-// in another service's checkout -- so a link is followed as a set's own
-// files already are: the readers of a set follow links, and following a link
-// to the set reaches nothing a link to a file inside it did not. A set or
-// service shared in by a link is still one to read. An entry that is a link
-// keploy cannot follow (its target missing, a loop, one it may not look at)
-// is an error, not one to pass over: it may well be a set, and passing over
-// it would check nothing against it. A regular file is no set, and is passed
+// among those named (named nil: every entry). A link is listed, never passed
+// over, so nothing is left unchecked without a word. What reads the schemas
+// validate checks keeps to the folder they are kept in (openapidb): a link
+// that stays inside it is read, and one that leads out of it is refused, with
+// why, and fails the command. A download copies a set from another service's
+// checkout, whose folders a link may lead to. An entry that is a link keploy
+// cannot follow (its target missing, a loop, one it may not look at) is an
+// error, not one to pass over: it may well be a set, and passing over it
+// would check nothing against it. A regular file is no set, and is passed
 // over as before.
 func setDirs(dir string, named func(string) bool) ([]string, error) {
 	entries, err := os.ReadDir(dir)

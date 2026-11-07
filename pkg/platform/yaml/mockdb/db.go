@@ -95,6 +95,11 @@ type MockYaml struct {
 	// global — see useGobFormat.
 	MockFormat string
 
+	// OpenMockFile opens a set's mock file to write it, inside the
+	// recording: yaml.OpenFileInRecording when nil. A test stands a disk
+	// that fails behind it.
+	OpenMockFile func(root, path string, flag int, perm os.FileMode) (*os.File, error)
+
 	// Async gob writer: background goroutine drains gobQueue and
 	// encodes to a persistent *os.File + bufio + gob.Encoder. Parser
 	// goroutines never block on disk or gob encoding. Sync fallback
@@ -282,8 +287,16 @@ func getMockFileLock(lockKey string) *sync.RWMutex {
 	return &mockFileLockStripes[hasher.Sum32()%mockFileLockStripeCount]
 }
 
-func resolveMockFileMode(targetPath string) (os.FileMode, error) {
-	info, err := os.Stat(targetPath)
+// openMockFile opens path, a set's mock file, to write it (OpenMockFile).
+func (ys *MockYaml) openMockFile(path string, flag int, perm os.FileMode) (*os.File, error) {
+	if ys.OpenMockFile != nil {
+		return ys.OpenMockFile(ys.MockPath, path, flag, perm)
+	}
+	return yaml.OpenFileInRecording(ys.MockPath, path, flag, perm)
+}
+
+func resolveMockFileMode(root, targetPath string) (os.FileMode, error) {
+	info, err := yaml.StatInRecording(root, targetPath)
 	if err == nil {
 		return info.Mode().Perm(), nil
 	}
@@ -302,9 +315,9 @@ var (
 	mergeReqBodyNoise = learn.MergeReqBodyNoise
 )
 
-// replaceFile puts a rewritten mock file in place (yaml.ReplaceFile); tests
+// replaceFile puts a rewritten mock file in place (yaml.ReplaceFileInRecording); tests
 // swap it to make the replace fail.
-var replaceFile = yaml.ReplaceFile
+var replaceFile = yaml.ReplaceFileInRecording
 
 // UpdateMocks prunes unused mocks from the mock file and keeps required ones.
 //
@@ -431,7 +444,7 @@ func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, fo
 	}
 	defer reader.Close()
 
-	rw := newMockFileRewriter(ys.Logger, path, mockFileName, format)
+	rw := newMockFileRewriter(ys.Logger, ys.MockPath, path, mockFileName, format)
 	defer rw.discard()
 
 	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
@@ -564,7 +577,7 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 // the pass is a first one to do again (pruneStats.again).
 func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *pruneVerdict) (pruneStats, error) {
 	var st pruneStats
-	rw, err := newGobFileRewriter(gobPath)
+	rw, err := newGobFileRewriter(ys.MockPath, gobPath)
 	if err != nil {
 		return st, err
 	}
@@ -731,7 +744,7 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		if !changes {
 			return nil, nil
 		}
-		rw, err := newGobFileRewriter(gobPath)
+		rw, err := newGobFileRewriter(ys.MockPath, gobPath)
 		if err != nil {
 			return nil, err
 		}
@@ -809,7 +822,7 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		return nil, nil
 	}
 
-	rw := newMockFileRewriter(ys.Logger, path, mockFileName, detectedFormat)
+	rw := newMockFileRewriter(ys.Logger, ys.MockPath, path, mockFileName, detectedFormat)
 	defer rw.discard()
 	total := 0
 	if err := eachDoc(func(doc fileDoc) error {
@@ -992,14 +1005,14 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 
 	// CreateFileF picks the right extension for `effFormat` so the json pass
 	// writes .json and the yaml pass writes .yaml.
-	isFileEmpty, err := yaml.CreateFileF(ctx, ys.Logger, mockPath, mockFileName, effFormat)
+	isFileEmpty, err := yaml.CreateRecordingFileF(ctx, ys.Logger, ys.MockPath, mockPath, mockFileName, effFormat)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to create file", zap.String("path directory", mockPath), zap.String("file", mockFileName))
 		return err
 	}
 
 	filePath := filepath.Join(mockPath, mockFileName+"."+effFormat.FileExtension())
-	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, os.ModePerm)
+	file, err := ys.openMockFile(filePath, os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("failed to open mock file for append: %w", err)
 	}
@@ -1351,7 +1364,7 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 		// counted as such (gobQueued less gobWritten).
 		ys.gobFinishFileLocked()
 	}
-	if err := os.MkdirAll(mockPath, 0o777); err != nil {
+	if err := yaml.MkdirAllInRecording(ys.MockPath, mockPath, 0o777); err != nil {
 		return fmt.Errorf("mkdir mock dir: %w", err)
 	}
 	filePath := filepath.Join(mockPath, mockFileName+".gob")
@@ -1368,19 +1381,19 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 	// (keploy mock replay --on-miss record) or comes back to a set it left
 	// (another test set's mocks in between, a Close in between) then wiped
 	// the mocks the set held: the recorded set was gone.
-	carry, err := gobFileHoldsData(filePath)
+	carry, err := gobFileHoldsData(ys.MockPath, filePath)
 	if err != nil {
 		return err
 	}
 	open := filePath
 	var f *os.File
 	if carry {
-		f, err = createTempBeside(filePath, ".append.*.tmp")
+		f, err = createTempBeside(ys.MockPath, filePath, ".append.*.tmp")
 		if err != nil {
 			return fmt.Errorf("start a gob stream beside %s to add to it: %w", filePath, err)
 		}
 		open = f.Name()
-	} else if f, err = os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666); err != nil {
+	} else if f, err = ys.openMockFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666); err != nil {
 		return fmt.Errorf("open gob mock file: %w", err)
 	}
 	ys.gobFile = f
@@ -1406,8 +1419,8 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 
 // gobFileHoldsData says whether path is a file with something in it, which
 // a writer opening it must keep. An absent or empty file holds nothing.
-func gobFileHoldsData(path string) (bool, error) {
-	info, err := os.Stat(path)
+func gobFileHoldsData(root, path string) (bool, error) {
+	info, err := yaml.StatInRecording(root, path)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
@@ -1420,18 +1433,18 @@ func gobFileHoldsData(path string) (bool, error) {
 // createTempBeside creates a temp file in path's directory, named after it
 // with pattern, with path's permissions (os.CreateTemp alone makes it 0600,
 // which would narrow the file it replaces).
-func createTempBeside(path, pattern string) (*os.File, error) {
+func createTempBeside(root, path, pattern string) (*os.File, error) {
 	mode := os.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
+	if info, err := yaml.StatInRecording(root, path); err == nil {
 		mode = info.Mode().Perm()
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+pattern)
+	f, err := yaml.CreateTempInRecording(root, filepath.Dir(path), filepath.Base(path)+pattern, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(f.Name(), mode); err != nil {
+	if err := f.Chmod(mode); err != nil {
 		_ = f.Close()
-		_ = os.Remove(f.Name())
+		_ = yaml.RemoveInRecording(root, f.Name())
 		return nil, err
 	}
 	return f, nil
@@ -1467,10 +1480,10 @@ func (ys *MockYaml) gobCarryOverLocked(filePath, tmpPath string) error {
 		return fmt.Errorf("close the carried mocks: %w", err)
 	}
 	ys.gobFile = nil
-	if err := replaceFile(ys.Logger, tmpPath, filePath); err != nil {
+	if err := replaceFile(ys.Logger, ys.MockPath, tmpPath, filePath); err != nil {
 		return fmt.Errorf("put the carried mocks in place: %w", err)
 	}
-	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, 0)
+	f, err := ys.openMockFile(filePath, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		// The file is whole, with every mock it held; the writer cannot add
 		// to it.
@@ -1493,7 +1506,7 @@ func (ys *MockYaml) gobAbandonLocked(path string, temp bool) {
 		_ = ys.gobFile.Close()
 	}
 	if temp {
-		_ = os.Remove(path)
+		_ = yaml.RemoveInRecording(ys.MockPath, path)
 	}
 	ys.gobFile = nil
 	ys.gobBufw = nil
@@ -2383,7 +2396,7 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 			utils.LogError(ys.Logger, err, "failed to validate mock path for delete", zap.String("at_path", candidate))
 			return err
 		}
-		if err := os.Remove(validated); err != nil && !os.IsNotExist(err) {
+		if err := yaml.RemoveInRecording(ys.MockPath, validated); err != nil && !os.IsNotExist(err) {
 			utils.LogError(ys.Logger, err, "failed to delete stale mock file during refresh; check that the file is not read-only and that the current user owns the mocks output directory, ensure no other keploy process or editor has an open handle on it, then retry — missing files are tolerated, only permission/ownership errors surface here", zap.String("path", validated))
 			return err
 		}
@@ -2452,9 +2465,12 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 	wasStaged := make([]bool, len(stagingVariants))
 	anyStaged := false
 	for i, sv := range stagingVariants {
-		if _, err := os.Stat(sv); err == nil {
+		_, err := yaml.StatInRecording(ys.MockPath, sv)
+		if err == nil {
 			wasStaged[i] = true
 			anyStaged = true
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("not promoting staged set %q, so %q is left untouched: %w", stagingID, targetID, err)
 		}
 	}
 	// Guard: never wipe the target based on an empty staging set.
@@ -2462,7 +2478,7 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 		return fmt.Errorf("nothing staged to promote for %q; leaving %q untouched", stagingID, targetID)
 	}
 
-	if err := os.MkdirAll(targetDir, 0o777); err != nil {
+	if err := yaml.MkdirAllInRecording(ys.MockPath, targetDir, 0o777); err != nil {
 		return fmt.Errorf("creating target set dir %q: %w", targetDir, err)
 	}
 
@@ -2484,7 +2500,7 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 		if !wasStaged[i] {
 			continue
 		}
-		if err := os.Rename(stagingVariants[i], targetVariants[i]); err != nil {
+		if err := yaml.RenameInRecording(ys.MockPath, stagingVariants[i], targetVariants[i]); err != nil {
 			return fmt.Errorf("promoting staged mock file %q over %q: %w", stagingVariants[i], targetVariants[i], err)
 		}
 	}
@@ -2499,7 +2515,7 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 		if verr != nil {
 			return fmt.Errorf("validating stale target mock path %q: %w", targetVariants[i], verr)
 		}
-		if rmErr := os.Remove(validated); rmErr != nil && !os.IsNotExist(rmErr) {
+		if rmErr := yaml.RemoveInRecording(ys.MockPath, validated); rmErr != nil && !os.IsNotExist(rmErr) {
 			return fmt.Errorf("removing stale target mock file %q: %w", validated, rmErr)
 		}
 	}

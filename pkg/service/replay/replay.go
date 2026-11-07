@@ -34,6 +34,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/pkg/templates"
@@ -9474,14 +9475,14 @@ func (r *Replayer) createBackup(testSetID string) error {
 		return fmt.Errorf("source directory for backup does not exist: %s", srcPath)
 	}
 
-	if err := os.MkdirAll(backupDestPath, 0755); err != nil {
+	if err := yaml.MkdirAllInRecording(r.config.Path, backupDestPath, 0755); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
 
 	err := r.copyDirContents(srcPath, backupDestPath)
 	if err != nil {
 		// Clean up the failed backup attempt
-		_ = os.RemoveAll(backupDestPath)
+		_ = yaml.RemoveAllInRecording(r.config.Path, backupDestPath)
 		return fmt.Errorf("failed to copy contents for backup: %w", err)
 	}
 
@@ -9489,7 +9490,10 @@ func (r *Replayer) createBackup(testSetID string) error {
 	return nil
 }
 
-// copyDirContents recursively copies contents from src to dst, excluding the .backup directory.
+// copyDirContents recursively copies contents from src to dst, excluding the
+// .backup directory. Both are in the recording, and each file is read and
+// written inside it: a file or a folder that links out of it is refused, not
+// copied into the backup.
 func (r *Replayer) copyDirContents(src, dst string) error {
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -9505,13 +9509,13 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 			continue
 		}
 
-		fileInfo, err := os.Stat(srcPath)
+		fileInfo, err := yaml.StatInRecording(r.config.Path, srcPath)
 		if err != nil {
 			return err
 		}
 
 		if fileInfo.IsDir() {
-			if err := os.MkdirAll(dstPath, fileInfo.Mode()); err != nil {
+			if err := yaml.MkdirAllInRecording(r.config.Path, dstPath, fileInfo.Mode().Perm()); err != nil {
 				return err
 			}
 			if err := r.copyDirContents(srcPath, dstPath); err != nil {
@@ -9519,13 +9523,13 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 			}
 		} else {
 			// It's a file, copy it.
-			srcFile, err := os.Open(srcPath)
+			srcFile, err := yaml.OpenInRecording(r.config.Path, srcPath)
 			if err != nil {
 				return err
 			}
 			defer srcFile.Close()
 
-			dstFile, err := os.Create(dstPath)
+			dstFile, err := yaml.OpenFileInRecording(r.config.Path, dstPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 			if err != nil {
 				return err
 			}
@@ -9535,7 +9539,7 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 				return err
 			}
 
-			if err := os.Chmod(dstPath, fileInfo.Mode()); err != nil {
+			if err := dstFile.Chmod(fileInfo.Mode()); err != nil {
 				return err
 			}
 		}

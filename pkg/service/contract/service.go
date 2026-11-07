@@ -26,6 +26,6 @@ type MockDB interface {
 type OpenAPIDB interface {
 	GetTestCasesSchema(ctx context.Context, testSetID string, testPath string) ([]*models.OpenAPI, error)
 	GetMocksSchemas(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.OpenAPI, error)
-	WriteSchema(ctx context.Context, logger *zap.Logger, outputPath, name string, openapi models.OpenAPI, isAppend bool) error
+	WriteSchema(ctx context.Context, logger *zap.Logger, root, outputPath, name string, openapi models.OpenAPI, isAppend bool) error
 	ChangePath(path string)
 }
