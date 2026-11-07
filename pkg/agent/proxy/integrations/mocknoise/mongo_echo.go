@@ -1,6 +1,8 @@
 package mocknoise
 
 import (
+	"bytes"
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,7 +13,7 @@ import (
 // A Mongo correlation names its places by the OP_MSG section that holds them:
 // "section.<i>.<path>", where i is the section's index in the recorded
 // request (RequestPath) or answer (ResponsePaths) and path is the
-// matcher.Flatten path inside that section's document.
+// jsonScalars path inside that section's document.
 const mongoSectionPlace = "section."
 
 // mongoMsgPrefix and mongoMsgSuffix frame a recorded OP_MSG body section:
@@ -21,19 +23,21 @@ const (
 	mongoMsgSuffix = " }"
 )
 
-// mongoMsgDoc returns the flattened document of an OP_MSG body section, or
-// nil for any other section (a document sequence, a section the recorder
-// could not write as JSON).
-func mongoMsgDoc(section string) map[string][]string {
+// mongoMsgJSON returns the extended JSON document of an OP_MSG body section,
+// and false for any other section (a document sequence, a section the
+// recorder could not write as JSON) and for one that is not valid JSON, which
+// is not read. The check copies the section's text once, and allocates
+// nothing else.
+func mongoMsgJSON(section string) (string, bool) {
 	body, ok := strings.CutPrefix(section, mongoMsgPrefix)
 	if !ok {
-		return nil
+		return "", false
 	}
 	body, ok = strings.CutSuffix(body, mongoMsgSuffix)
 	if !ok {
-		return nil
+		return "", false
 	}
-	return flattenJSONBody(body)
+	return body, json.Valid([]byte(body))
 }
 
 // mongoWritten reports whether path is a place whose value the application
@@ -42,10 +46,10 @@ func mongoMsgDoc(section string) map[string][]string {
 // ("documents.<field>"). A command's filter (findAndModify's query, an
 // update's q) is not one: a value there is the key of a lookup, and a lookup
 // of another key must not be answered with this recording.
-func mongoWritten(path string) bool {
-	return strings.HasPrefix(path, "update.") ||
-		strings.HasPrefix(path, "updates.u.") ||
-		strings.HasPrefix(path, "documents.")
+func mongoWritten(path []byte) bool {
+	return bytes.HasPrefix(path, []byte("update.")) ||
+		bytes.HasPrefix(path, []byte("updates.u.")) ||
+		bytes.HasPrefix(path, []byte("documents."))
 }
 
 // mongoOpMsgSections returns the sections of a Mongo mock's one request and
@@ -75,14 +79,15 @@ func opMsgSections(msg interface{}) []string {
 // filter.
 //
 // This runs for every Mongo mock when the agent takes the mocks in, so it
-// parses as little as it can. A request section is parsed only when its raw
+// reads as little as it can. A request section is read only when its raw
 // text names a place a write sets (mongoMayWrite) and it shares a quoted
-// value with its answer (mongoSharesAValue). A read (find, aggregate, getMore),
-// however large its filter, costs a few substring searches, and a write whose
-// answer echoes none of its values (an insert's answer is a count) one pass
-// over each side with no parse. An answer
-// section is parsed only when its raw text holds one of the values the
-// request wrote (mongoAnswerHolds), so a read's answer is never parsed.
+// value with its answer (mongoSharesAValue). A read (find, aggregate, getMore)
+// costs a few substring searches, and a write whose answer echoes none of its
+// values (an insert's answer is a count) one pass over each side. An answer
+// section is read only when its raw text holds one of the values the request
+// wrote (mongoAnswerHolds). A section that is read is walked (jsonScalars),
+// never parsed into a document: what is kept is the written places that hold
+// a random value and the answer's places of those values.
 func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 	req, resp := mongoOpMsgSections(m)
 	var written []models.FieldCorrelation
@@ -90,20 +95,7 @@ func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 		if !mongoMayWrite(s) || !mongoSharesAValue(s, resp) {
 			continue
 		}
-		for path, vals := range mongoMsgDoc(s) {
-			if !mongoWritten(path) || len(vals) != 1 {
-				continue
-			}
-			class, ok := mongoRandomClass(vals[0])
-			if !ok {
-				continue
-			}
-			written = append(written, models.FieldCorrelation{
-				RequestPath:   mongoSectionPlace + strconv.Itoa(i) + "." + path,
-				RecordedValue: vals[0],
-				ValueClass:    class,
-			})
-		}
+		written = append(written, mongoWrites(i, s)...)
 	}
 	answered := make(map[string][]string, len(written))
 	for _, c := range written {
@@ -113,13 +105,16 @@ func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 		if !mongoAnswerHolds(s, written) {
 			continue
 		}
-		for path, vals := range mongoMsgDoc(s) {
-			for _, v := range vals {
-				if places, ok := answered[v]; ok {
-					answered[v] = append(places, mongoSectionPlace+strconv.Itoa(j)+"."+path)
-				}
-			}
+		doc, ok := mongoMsgJSON(s)
+		if !ok {
+			continue
 		}
+		jsonScalars(doc, func(path []byte, text string) {
+			v := jsonStringText(text)
+			if places, ok := answered[v]; ok {
+				answered[v] = append(places, mongoSectionPlace+strconv.Itoa(j)+"."+string(path))
+			}
+		})
 	}
 	var out []models.FieldCorrelation
 	for _, c := range written {
@@ -132,6 +127,52 @@ func mongoCorrelations(m *models.Mock) []models.FieldCorrelation {
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RequestPath < out[j].RequestPath })
+	return out
+}
+
+// A mongoWrite is a place of a request section that a write sets to a value
+// mongoRandomClass takes, and the number of values the section holds there.
+type mongoWrite struct {
+	value, class string
+	values       int
+}
+
+// mongoWrites returns the places of request section i that a write sets
+// (mongoWritten) to one value, a string mongoRandomClass takes, and to no
+// other, as correlations whose answer places are still to be found. A first
+// walk of the section keeps the places that hold such a value; a second
+// counts every value at them, so a place that holds several (the key_id of
+// each document an insert writes) is not taken.
+func mongoWrites(i int, section string) []models.FieldCorrelation {
+	doc, ok := mongoMsgJSON(section)
+	if !ok {
+		return nil
+	}
+	places := make(map[string]*mongoWrite)
+	jsonScalars(doc, func(path []byte, text string) {
+		if !mongoWritten(path) || places[string(path)] != nil {
+			return
+		}
+		v := jsonStringText(text)
+		if class, ok := mongoRandomClass(v); ok {
+			places[string(path)] = &mongoWrite{value: v, class: class}
+		}
+	})
+	jsonScalars(doc, func(path []byte, _ string) {
+		if w := places[string(path)]; w != nil {
+			w.values++
+		}
+	})
+	var out []models.FieldCorrelation
+	for path, w := range places {
+		if w.values == 1 {
+			out = append(out, models.FieldCorrelation{
+				RequestPath:   mongoSectionPlace + strconv.Itoa(i) + "." + path,
+				RecordedValue: w.value,
+				ValueClass:    w.class,
+			})
+		}
+	}
 	return out
 }
 
@@ -221,24 +262,6 @@ func mongoAnswerHolds(section string, written []models.FieldCorrelation) bool {
 	return false
 }
 
-// mongoPlace splits a Mongo correlation place into its section index and the
-// path inside that section.
-func mongoPlace(place string) (int, string, bool) {
-	rest, ok := strings.CutPrefix(place, mongoSectionPlace)
-	if !ok {
-		return 0, "", false
-	}
-	idx, path, _ := strings.Cut(rest, ".")
-	if path == "" {
-		return 0, "", false
-	}
-	i, err := strconv.Atoi(idx)
-	if err != nil || i < 0 {
-		return 0, "", false
-	}
-	return i, path, true
-}
-
 // RenderMongoEchoes returns the answer a recorded Mongo write serves to the
 // live request liveSections, with each value the recording wrote and its
 // answer echoed (corrs, from CorrelationsFromMock) replaced by the value the
@@ -249,12 +272,38 @@ func mongoPlace(place string) (int, string, bool) {
 //
 // A value is replaced only when every place the recording wrote it holds, in
 // the live request, one value of the same class (mongoRandomClass) that differs
-// from the recorded one. Otherwise that value is left as recorded, which is
-// what the answer was before correlations. resp itself is never changed: a
-// changed answer is a copy, so a pooled recording stays as recorded.
+// from the recorded one, and each such place is one a write sets
+// (mongoWritten). Otherwise that value is left as recorded, which is what the
+// answer was before correlations. resp itself is never changed: a changed
+// answer is a copy, so a pooled recording stays as recorded.
+//
+// This runs on every serve of a mock with correlations, so the live request
+// is walked (jsonScalars) once, not parsed, and only its values at the
+// correlations' places are kept.
 func RenderMongoEchoes(corrs []models.FieldCorrelation, liveSections []string, resp *models.MongoOpMessage) *models.MongoOpMessage {
 	if resp == nil || len(corrs) == 0 {
 		return resp
+	}
+	live := make(map[string]*[]string, len(corrs)) // a correlation's place → the live JSON texts there
+	for _, c := range corrs {
+		live[c.RequestPath] = new([]string)
+	}
+	for i, s := range liveSections {
+		doc, ok := mongoMsgJSON(s)
+		if !ok {
+			continue
+		}
+		place := []byte(mongoSectionPlace + strconv.Itoa(i) + ".")
+		n := len(place)
+		jsonScalars(doc, func(path []byte, text string) {
+			if !mongoWritten(path) {
+				return
+			}
+			place = append(place[:n], path...)
+			if texts := live[string(place)]; texts != nil {
+				*texts = append(*texts, text)
+			}
+		})
 	}
 	bound := make(map[string]string)
 	refused := make(map[string]bool)
@@ -262,20 +311,12 @@ func RenderMongoEchoes(corrs []models.FieldCorrelation, liveSections []string, r
 		if c.RecordedValue == "" {
 			continue
 		}
-		i, path, ok := mongoPlace(c.RequestPath)
-		if !ok {
-			refused[c.RecordedValue] = true
-			continue
-		}
-		var vals []string
-		if i < len(liveSections) {
-			vals = mongoMsgDoc(liveSections[i])[path]
-		}
+		vals := *live[c.RequestPath]
 		if len(vals) != 1 {
 			refused[c.RecordedValue] = true
 			continue
 		}
-		v := vals[0]
+		v := jsonStringText(vals[0])
 		if class, ok := mongoRandomClass(v); !ok || class != c.ValueClass {
 			refused[c.RecordedValue] = true
 			continue

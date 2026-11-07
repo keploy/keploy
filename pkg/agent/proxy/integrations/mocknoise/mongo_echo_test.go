@@ -116,6 +116,12 @@ func TestAMongoPlaceWithSeveralValuesIsNotACorrelation(t *testing.T) {
 	if got := CorrelationsFromMock(m); len(got) != 0 {
 		t.Fatalf("want no correlation, got %+v", got)
 	}
+	// Every value at the place counts, whatever it is and wherever it comes.
+	list := mongoMock(`{"findAndModify":"t","query":{"_id":"k"},"update":{"$set":{"keys":[5,"`+recKeyID+`"]}},"new":true}`,
+		`{"value":{"keys":[5,"`+recKeyID+`"]},"ok":1}`)
+	if got := CorrelationsFromMock(list); len(got) != 0 {
+		t.Fatalf("a number before the key: want no correlation, got %+v", got)
+	}
 }
 
 // A mock that is not one OP_MSG request and answer, or whose sections are not
@@ -239,36 +245,70 @@ func TestAMongoEchoIsNotDetectedUnderTheProvenSwitch(t *testing.T) {
 	}
 }
 
-// Only a section framed as the recorder frames a body section is read: bare
-// JSON, a body with no closing frame, and a frame with no body (the
-// prefix and suffix share its space) are not, and none of them panics.
+// Only a section framed as the recorder frames a body section, around valid
+// JSON, is read: bare JSON, a body with no closing frame, a frame with no
+// body (the prefix and suffix share its space) and a body with text after its
+// document are not, and none of them panics.
 func TestAMongoSectionNotFramedAsABodyIsNotRead(t *testing.T) {
 	for name, section := range map[string]string{
 		"bare JSON":                    claimRequest(recKeyID) + mongoMsgSuffix,
 		"a body with no closing frame": mongoMsgPrefix + claimRequest(recKeyID),
 		"a frame with no body":         "{ SectionSingle msg: }",
+		"text after the document":      mongoMsg(claimRequest(recKeyID) + ` x`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if doc := mongoMsgDoc(section); doc != nil {
-				t.Fatalf("read %v from %q", doc, section)
+			if doc, ok := mongoMsgJSON(section); ok {
+				t.Fatalf("read %q from %q", doc, section)
 			}
 		})
 	}
-	if doc := mongoMsgDoc(mongoMsg(claimRequest(recKeyID))); len(doc["update.$set.key_id"]) != 1 {
-		t.Fatalf("a framed body section must be read: %v", doc)
+	if doc, ok := mongoMsgJSON(mongoMsg(claimRequest(recKeyID))); !ok || doc != claimRequest(recKeyID) {
+		t.Fatalf("a framed body section must be read: %q %v", doc, ok)
 	}
 }
 
-// A correlation place names a section by its index and a path inside it;
-// any other place is refused.
-func TestAMongoCorrelationPlaceIsASectionIndexAndAPath(t *testing.T) {
-	if i, path, ok := mongoPlace("section.2.update.$set.key_id"); !ok || i != 2 || path != "update.$set.key_id" {
-		t.Fatalf("mongoPlace = %d %q %v", i, path, ok)
+// A section that is not valid JSON is not read on either side, nor in the
+// live request: here a document with text after it, whose document alone
+// would correlate.
+func TestAMongoSectionThatIsNotValidJSONIsNotRead(t *testing.T) {
+	switchOff(t)
+	if got := CorrelationsFromMock(mongoMock(claimRequest(recKeyID)+` x`, claimAnswer(recKeyID))); len(got) != 0 {
+		t.Errorf("a request that is not JSON: correlations = %+v, want none", got)
 	}
-	for _, place := range []string{"0.update.$set.key_id", "body.key_id", "section.x.key_id", "section.0", "section.0.", "section.-1.key_id"} {
-		if i, path, ok := mongoPlace(place); ok {
-			t.Errorf("mongoPlace(%q) = %d %q, want refused", place, i, path)
+	if got := CorrelationsFromMock(mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID)+` x`)); len(got) != 0 {
+		t.Errorf("an answer that is not JSON: correlations = %+v, want none", got)
+	}
+	if served, recorded := claimServed(t, claimRequest(liveKeyID)+` x`); served != recorded {
+		t.Errorf("a live request that is not JSON: served %q, want the recorded answer itself", served.Sections)
+	}
+}
+
+// A correlation binds only at a place named as the detector names one: a
+// section's index and, inside it, the path of a place a write sets. A place
+// named any other way, and a filter's place, are served as recorded.
+func TestARecordedUpsertBindsOnlyAtAWrittenPlaceOfASection(t *testing.T) {
+	switchOff(t)
+	m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
+	MaterializeCorrelations(m)
+	if len(m.Spec.Correlations) != 1 {
+		t.Fatalf("correlations = %+v, want the claim's one", m.Spec.Correlations)
+	}
+	recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
+	live := []string{mongoMsg(claimRequest(liveKeyID))}
+	if got := RenderMongoEchoes(m.Spec.Correlations, live, recorded); got == recorded || !strings.Contains(got.Sections[0], liveKeyID) {
+		t.Fatalf("the claim's own place must bind: served %q", got.Sections)
+	}
+	for _, place := range []string{"0.update.$set.key_id", "body.update.$set.key_id", "section.x.update.$set.key_id", "section.0",
+		"section.0.", "section.-1.update.$set.key_id", "section.00.update.$set.key_id", "section.0.update.$set.key_id.x"} {
+		c := models.FieldCorrelation{RequestPath: place, RecordedValue: recKeyID, ValueClass: "uuid"}
+		if got := RenderMongoEchoes([]models.FieldCorrelation{c}, live, recorded); got != recorded {
+			t.Errorf("place %q: served %q, want the recorded answer itself", place, got.Sections)
 		}
+	}
+	filter := models.FieldCorrelation{RequestPath: "section.0.query.key_id", RecordedValue: recKeyID, ValueClass: "uuid"}
+	lookup := []string{mongoMsg(`{"findAndModify":"web_session_tokens","query":{"key_id":"` + liveKeyID + `"},"update":{"$set":{"n":1}},"$db":"api"}`)}
+	if got := RenderMongoEchoes([]models.FieldCorrelation{filter}, lookup, recorded); got != recorded {
+		t.Errorf("a filter's place: served %q, want the recorded answer itself", got.Sections)
 	}
 }
 
@@ -493,6 +533,8 @@ func TestARequestIsReadForEveryFieldAWriteSets(t *testing.T) {
 		"update":    `{"update":{"$set":{"token":"` + recKeyID + `"}}}`,
 		"updates":   `{"updates":[{"q":{"_id":"k"},"u":{"$set":{"token":"` + recKeyID + `"}}}]}`,
 		"documents": `{"documents":[{"token":"` + recKeyID + `"}]}`,
+		// An update may be an aggregation pipeline (MongoDB 4.2+).
+		"a pipeline update": `{"update":[{"$set":{"token":"` + recKeyID + `"}}]}`,
 	} {
 		if got := CorrelationsFromMock(mongoMock(req, `{"value":{"token":"`+recKeyID+`"},"ok":1}`)); len(got) != 1 {
 			t.Errorf("%s: correlations = %+v, want one", name, got)
@@ -540,12 +582,38 @@ func TestAKeyAfterAnEscapedQuoteIsACorrelation(t *testing.T) {
 }
 
 // The key is read in whichever answer section holds it, and named by that
-// section's index.
+// section's index, whether the answer is smaller than its request (its values
+// are the ones classified) or larger (its values are only looked up).
 func TestAKeyAnsweredInALaterSectionIsACorrelation(t *testing.T) {
-	m := mongoMock(claimRequest(recKeyID), "")
-	m.Spec.MongoResponses[0].Message = &models.MongoOpMessage{Sections: []string{mongoMsg(`{"ok":1}`), mongoMsg(claimAnswer(recKeyID))}}
-	got := CorrelationsFromMock(m)
-	if len(got) != 1 || !reflect.DeepEqual(got[0].ResponsePaths, []string{"section.1.value.key_id"}) {
-		t.Fatalf("correlations = %+v, want the key answered at section.1.value.key_id", got)
+	for name, first := range map[string]string{
+		"a small answer": `{"ok":1}`,
+		"a large answer": `{"ok":1,"note":"` + strings.Repeat("x", 4096) + `"}`,
+	} {
+		m := mongoMock(claimRequest(recKeyID), "")
+		m.Spec.MongoResponses[0].Message = &models.MongoOpMessage{Sections: []string{mongoMsg(first), mongoMsg(claimAnswer(recKeyID))}}
+		got := CorrelationsFromMock(m)
+		if len(got) != 1 || !reflect.DeepEqual(got[0].ResponsePaths, []string{"section.1.value.key_id"}) {
+			t.Errorf("%s: correlations = %+v, want the key answered at section.1.value.key_id", name, got)
+		}
+	}
+}
+
+// A key written in a later section of the request is named by that section's
+// index, and only the live request's same section binds it.
+func TestAKeyWrittenInALaterRequestSectionBindsOnlyThere(t *testing.T) {
+	switchOff(t)
+	first := mongoMsg(`{"ok":1}`)
+	m := mongoMock(claimRequest(recKeyID), claimAnswer(recKeyID))
+	m.Spec.MongoRequests[0].Message = &models.MongoOpMessage{Sections: []string{first, mongoMsg(claimRequest(recKeyID))}}
+	MaterializeCorrelations(m)
+	if len(m.Spec.Correlations) != 1 || m.Spec.Correlations[0].RequestPath != "section.1.update.$set.key_id" {
+		t.Fatalf("correlations = %+v, want the key at section.1.update.$set.key_id", m.Spec.Correlations)
+	}
+	recorded := m.Spec.MongoResponses[0].Message.(*models.MongoOpMessage)
+	if got := RenderMongoEchoes(m.Spec.Correlations, []string{first, mongoMsg(claimRequest(liveKeyID))}, recorded); got == recorded || !strings.Contains(got.Sections[0], liveKeyID) {
+		t.Fatalf("the live key in section 1 must bind: served %q", got.Sections)
+	}
+	if got := RenderMongoEchoes(m.Spec.Correlations, []string{mongoMsg(claimRequest(liveKeyID)), first}, recorded); got != recorded {
+		t.Fatalf("the live key in section 0 must not bind: served %q", got.Sections)
 	}
 }
