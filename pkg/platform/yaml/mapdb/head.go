@@ -177,8 +177,9 @@ func encodeYAMLOver(mapping *models.Mapping, old []byte, doc *yamlLib.Node, rena
 // nil when data starts with no comment, or with none but keploy's line: that
 // line is keploy's, not a hand edit, and a writer puts it where it always
 // did (header), so a file no person edited is written as keploy always wrote
-// it. A document marker (---) or a directive (%YAML) before them is skipped:
-// the writer writes neither. It reads data no further than its head.
+// it. A document marker (---) or a directive (%YAML) among them is skipped:
+// the writer writes neither, and YAML hangs the comments on both its sides
+// on the first key. It reads data no further than its head.
 func commentHead(data []byte) []byte {
 	var head bytes.Buffer
 	blanks := 0
@@ -194,7 +195,7 @@ func commentHead(data []byte) []byte {
 			blanks++
 			continue
 		}
-		if head.Len() == 0 && (string(t) == "---" || t[0] == '%') {
+		if string(t) == "---" || t[0] == '%' {
 			continue
 		}
 		if t[0] != '#' {
