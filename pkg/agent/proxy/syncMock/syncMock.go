@@ -274,6 +274,11 @@ type SyncMockManager struct {
 	// open[0]. A per-test mock requested at or after its start may be one of
 	// theirs, so no reaper drops it (see held). Guarded by mu.
 	open windowHeap
+	// lastWindowEnd is when the latest window ended, and windowlessIngress
+	// that this agent's ingress also takes requests that open no window
+	// (stampOutsideRequestsLocked). Guarded by mu.
+	lastWindowEnd     time.Time
+	windowlessIngress bool
 	// stopFound is the windows of the requests in flight that began by the
 	// instant a recording stops at (NoteStop), less those that ended since:
 	// the requests its stop found in flight. They stay the stopping
@@ -1831,6 +1836,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	if mock != nil && (!m.firstReqSeen || m.resolvedTestCount < models.StartupMockTestCaseWindow) {
 		mock.TestModeInfo.IsStartup = true
 	}
+	m.stampOutsideRequestsLocked(mock)
 
 	// Decide forward vs buffer vs drop under a single snapshot of
 	// (outChan, outChanClosed). The trio has three legal outcomes:
@@ -2376,8 +2382,8 @@ func (c LossCause) String() string {
 // recording's while that drains, and is given up once it has ended
 // (EndStoppedRecording): it is no request of the next one (LostToStop).
 //
-// Only HTTP/1 ingress opens windows (the incoming proxy here, and the
-// enterprise eBPF parser). gRPC capture (CaptureGRPC) opens none and resolves
+// Only the incoming proxy's HTTP/1 ingress opens windows. gRPC capture
+// (CaptureGRPC) opens none and resolves
 // its window only in sync mode, so a gRPC call is not covered: one that outlives
 // the stale horizon while other requests are decided can still lose the mocks
 // it made early on.
@@ -2712,6 +2718,7 @@ func (m *SyncMockManager) endWindowLocked(w *Window, t *dropTally, givenUp bool)
 		heap.Remove(&m.open, w.idx)
 		m.noteOldestLocked()
 		m.windowLeftLocked(w)
+		m.lastWindowEnd = time.Now()
 	}
 	if _, found := m.stopFound[w]; found && !givenUp {
 		// Ended: no request a stop found in flight any more. One given up
