@@ -117,7 +117,7 @@ func ReadRecordingFileAnyBounded(ctx context.Context, root, path, name string, p
 }
 
 // readBounded reads path, a file of the recording at root, inside it, as
-// safeyaml.ReadFileIn reads it. A file that is not there is only that.
+// safeyaml.ReadFileIn reads it.
 func readBounded(root, path string, limit int64) ([]byte, error) {
 	r, rel, err := recordingRoot(root, path)
 	if err != nil {
@@ -125,10 +125,12 @@ func readBounded(root, path string, limit int64) ([]byte, error) {
 	}
 	defer func() { _ = r.Close() }()
 	data, err := safeyaml.ReadFileIn(r, rel, limit)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err != nil {
+		// Wrapped, a file that is not there is still fs.ErrNotExist to
+		// errors.Is.
 		return nil, fmt.Errorf("the recording's file %q is read only inside its recording %q: %w", rel, root, err)
 	}
-	return data, err
+	return data, nil
 }
 
 // NewRecordingMockReaderF is NewMockReaderF for a mock file of the recording

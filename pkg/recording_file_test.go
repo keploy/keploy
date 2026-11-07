@@ -291,3 +291,58 @@ func TestARecordingDirectoryThatCannotBeOpenedIsSaid(t *testing.T) {
 		}
 	}
 }
+
+// The recording's directory is opened from the project: a keploy folder a
+// cloned repository carries as a link out of the project, by ".." or to an
+// absolute path, is refused with why, and no file a test case names is read
+// from where it leads. A keploy folder that links inside the project is read.
+func TestAKeployFolderThatLinksOutOfTheProjectIsNotReadFrom(t *testing.T) {
+	const rel = "test-set-0/assets/test-1/body.txt"
+	for _, how := range []string{"up", "absolute", "inside"} {
+		base := t.TempDir()
+		target := filepath.Join(base, "outside")
+		if how == "inside" {
+			target = filepath.Join(base, "project", "recordings")
+		}
+		writeAt := filepath.Join(target, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(writeAt), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(writeAt, []byte("SECRET-"+how), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(base, "project"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		keploy := filepath.Join(base, "project", "keploy")
+		to := target
+		switch how {
+		case "up":
+			to = filepath.Join("..", "outside")
+		case "inside":
+			to = "recordings"
+		}
+		if err := os.Symlink(to, keploy); err != nil {
+			t.Skipf("cannot make a symbolic link here: %v", err)
+		}
+		b, rerr := ReadRecordingFile(keploy, rel)
+		f, oerr := OpenRecordingFile(keploy, rel)
+		if f != nil {
+			_ = f.Close()
+		}
+		if how == "inside" {
+			if rerr != nil || oerr != nil || string(b) != "SECRET-inside" {
+				t.Fatalf("a keploy folder linking inside the project: %q, %v, %v; want it read", b, rerr, oerr)
+			}
+			continue
+		}
+		for _, err := range []error{rerr, oerr} {
+			if err == nil || !strings.Contains(err.Error(), "open the recording directory") || !strings.Contains(err.Error(), "only inside") {
+				t.Fatalf("%s: a keploy folder that links out of the project: %v; want it refused with why", how, err)
+			}
+		}
+		if len(b) != 0 {
+			t.Fatalf("%s: read %q from outside the project", how, b)
+		}
+	}
+}

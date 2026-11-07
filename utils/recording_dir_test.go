@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -84,8 +83,14 @@ func TestOpenRecordingDirIsAnchoredAtTheProject(t *testing.T) {
 		}
 	}
 
-	if _, err := OpenRecordingDir(filepath.Join(project, "missing")); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("a keploy folder that is not there: %v, want it not there", err)
+	if _, err := OpenRecordingDir(filepath.Join(project, "missing")); !os.IsNotExist(err) {
+		t.Errorf("a keploy folder that is not there: %v, want it not there (os.IsNotExist)", err)
+	}
+	// The file system's root is in no folder: it is opened as it is.
+	if r, err := OpenRecordingDir(filepath.VolumeName(project) + string(filepath.Separator)); err != nil {
+		t.Errorf("the file system's root: %v, want it opened", err)
+	} else {
+		_ = r.Close()
 	}
 
 	// Relative: from the working directory, one folder at a time.
@@ -165,5 +170,13 @@ func TestMkdirRecordingDirMakesNothingOutsideTheProject(t *testing.T) {
 	}
 	if err := MkdirRecordingDir(filepath.Join("inside", "a", "b"), 0o755); err != nil {
 		t.Fatalf("a folder that is there already: %v", err)
+	}
+	// A mode as os.Stat gives a folder's (with fs.ModeDir) is taken as its
+	// permission bits, as os.MkdirAll takes it.
+	if err := MkdirRecordingDir(filepath.Join("inside", "c"), fs.ModeDir|0o750); err != nil {
+		t.Fatalf("a folder's mode with its type bits: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(project, "real", "c")); err != nil || !info.IsDir() {
+		t.Fatalf("the folder was not made from a mode with its type bits: %v", err)
 	}
 }
