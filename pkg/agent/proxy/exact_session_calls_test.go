@@ -190,6 +190,31 @@ func TestATestShowsTheDeclaredCallsOfThePoolSliceBeforeIt(t *testing.T) {
 	}
 }
 
+// A pool view of other names, as many as the last one's, replaces the pool
+// slice a test shows: after a pool view of cfg alone, T2 is not served the
+// start-up rates recording that only T1's pool slice held, and its shared
+// part is told apart from T1's. This is `go test ./...` across packages,
+// where each test binary's TestMain makes its own start-up recording.
+func TestAPoolViewOfOtherNamesOfTheSameCountReplacesTheDeclaredSlice(t *testing.T) {
+	declareSessionCalls(t, declaredRule)
+	mm, ms := startupSet(t)
+	mm.ServeExactPool("k1", []string{"rates"})
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	if got := keepNamed(t, mm, "rates"); got != "rates" {
+		t.Fatalf("T1 after a pool slice holding rates: %s; want rates", got)
+	}
+	g1, _ := mm.SharedGeneration("")
+	mm.ServeExactPool("k2", []string{"cfg"})
+	mm.ServeExactTest("T2", nil)
+	g2, _ := mm.SharedGeneration("")
+	if got := keepNamed(t, mm, "rates"); got != "a miss" {
+		t.Fatalf("T2 after a pool slice of cfg alone was served the declared rates recording: %s", got)
+	}
+	if g1.View == g2.View {
+		t.Fatalf("two tests showing different declared calls share shared number %d", g1.View)
+	}
+}
+
 // With a call declared, two tests with a pool view of the same names between
 // them share their shared part, as two tests with no call declared do: one
 // number (SharedGeneration), which a parser files its index of the shared
