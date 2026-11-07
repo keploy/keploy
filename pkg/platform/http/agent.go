@@ -3537,11 +3537,92 @@ var hostPort, containerPort = utils.GetAvailablePort, utils.GetAvailableContaine
 // UDP port before the agent starts. The agent cannot move its server off a
 // taken port, as it moves its proxy's: the CLI reaches it through the
 // publish, and the agent's start would fail.
-func agentPortFor(docker bool) (uint32, error) {
+//
+// It is never one of keep, the ports the agent's proxy and DNS server are
+// handed: those are not bound yet, so a free one could be drawn.
+func agentPortFor(docker bool, keep ...uint32) (uint32, error) {
+	pick := hostPort
 	if docker {
-		return containerPort()
+		pick = containerPort
 	}
-	return hostPort()
+	// Bounded, as utils.EnsureAvailablePorts is: a few draws miss a set this
+	// small, and an exhausted pool is an error rather than a hang.
+	for i := 0; i < 16; i++ {
+		port, err := pick()
+		if err != nil {
+			return 0, err
+		}
+		if !slices.Contains(keep, port) {
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("failed to find a port for the agent other than its proxy's and DNS server's %v", keep)
+}
+
+// agentPorts picks the ports a new agent's server (agentPortFor), proxy and
+// DNS server (proxyPorts) listen on.
+func (a *AgentClient) agentPorts(docker bool) (agentPort, proxyPort, dnsPort uint32, err error) {
+	if agentPort, err = agentPortFor(docker, a.conf.ProxyPort, a.conf.DNSPort); err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to find available port for agent: %w", err)
+	}
+	if proxyPort, dnsPort, err = a.proxyPorts(docker, agentPort); err != nil {
+		return 0, 0, 0, err
+	}
+	return agentPort, proxyPort, dnsPort, nil
+}
+
+// agentRunsOnLinux says whether a native agent, one Setup starts as a process
+// on this host, runs on Linux.
+var agentRunsOnLinux = runtime.GOOS == "linux"
+
+// proxyPorts picks the ports Setup hands a new agent's proxy and DNS server:
+// the configured ones (--proxy-port, --dns-port), as they are.
+//
+// A Linux agent, native or in its Docker container, binds them itself and
+// moves off one another socket holds, naming the holder, before it says it is
+// ready (agent.letProxyPortsMove): that bind is the only check nothing can
+// overtake. The CLI used to check them first, with a TCP listener it opened
+// and closed, and draw others when it could not bind one, saying so only at
+// Debug. Two records started together then each found the other's check
+// holding a port for a moment, and handed their agents moved ports with no
+// line; the check could not see a port held over UDP only, which the DNS
+// server binds too, nor, for a Docker agent, the container's network
+// namespace, where the agent binds.
+//
+// A native agent elsewhere (macOS, Windows) cannot move a port once its hooks
+// are loaded, and a taken port would fail its start: there the CLI still
+// draws another for a port it finds taken, and says so.
+func (a *AgentClient) proxyPorts(docker bool, agentPort uint32) (proxyPort, dnsPort uint32, err error) {
+	proxyPort, dnsPort = a.conf.ProxyPort, a.conf.DNSPort
+	if docker || agentRunsOnLinux {
+		return proxyPort, dnsPort, nil
+	}
+	// Exclude the ports already handed out in this setup: none of them is
+	// bound yet, so a later draw could otherwise return one of them.
+	if proxyPort, err = a.portOrMove("proxy", proxyPort, agentPort); err != nil {
+		return 0, 0, err
+	}
+	if dnsPort, err = a.portOrMove("DNS server", dnsPort, agentPort, proxyPort); err != nil {
+		return 0, 0, err
+	}
+	return proxyPort, dnsPort, nil
+}
+
+// availablePort is utils.EnsureAvailablePorts, for portOrMove.
+var availablePort = utils.EnsureAvailablePorts
+
+// portOrMove is port where the CLI can bind it, and otherwise a free port
+// other than exclude (utils.EnsureAvailablePorts), with the move said as the
+// agent says its own.
+func (a *AgentClient) portOrMove(server string, port uint32, exclude ...uint32) (uint32, error) {
+	moved, err := availablePort(port, exclude...)
+	if err != nil {
+		return 0, fmt.Errorf("failed to find a port for the %s: %w", server, err)
+	}
+	if moved != port {
+		a.logger.Warn(fmt.Sprintf("the %s's %s; the %s listens on port %d instead", server, utils.PortTaken(port), server, moved))
+	}
+	return moved, nil
 }
 
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
@@ -3553,24 +3634,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// container.
 	a.forgetAgentContainer()
 
-	agentPort, err := agentPortFor(isDockerCmd)
+	agentPort, proxyPort, dnsPort, err := a.agentPorts(isDockerCmd)
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to find available port for agent")
-		return err
-	}
-
-	// Check and allocate available ports for proxy and DNS
-	// Exclude the ports already handed out in this setup: none of them is bound
-	// yet, so a later draw could otherwise legitimately return one of them.
-	proxyPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, agentPort) // check if the proxy port provided by user is unused
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to ensure available ports for proxy")
-		return err
-	}
-
-	dnsPort, err := utils.EnsureAvailablePorts(a.conf.DNSPort, agentPort, proxyPort) // check if the dns port provided by user is unused
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to ensure available ports for DNS")
+		utils.LogError(a.logger, err, "failed to find the agent's ports")
 		return err
 	}
 
@@ -3591,8 +3657,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// mapping is simply absent and every connection to loopback is refused).
 	//
 	// Only the HOST is taken from the caller. The port is this function's to
-	// choose (EnsureAvailablePorts may move it), so a caller that pinned one
-	// would be describing an agent that does not exist.
+	// choose (agentPortFor draws it), so a caller that pinned one would be
+	// describing an agent that does not exist.
 	if host := kdocker.PresetAgentIP(a.conf); host != "" {
 		opts.AgentURI = fmt.Sprintf("http://%s:%d/agent", host, agentPort)
 		a.logger.Info("addressing the agent by its pinned container address, not loopback",

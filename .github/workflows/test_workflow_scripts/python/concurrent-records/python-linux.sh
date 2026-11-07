@@ -1,9 +1,12 @@
 #!/bin/bash
 # Two `keploy record` runs started together on one host, on the default
-# ports. Each CLI checks its ports free before its agent binds them, and both
-# could find them free; the second agent then failed to bind. Now the agent's
-# bind is the check: an agent whose port is taken when it binds it binds
-# another, says so naming the holder, and tells its hooks before it is ready.
+# ports. Each CLI used to check its ports free before its agent bound them:
+# both could find them free and the second agent failed to bind, or one found
+# the other's check holding a port for a moment and handed its agent another
+# with no line said. Now each CLI hands its agent the configured ports, and
+# the agent's bind is the check: an agent whose port is taken when it binds
+# it binds another, says so naming the holder, and tells its hooks before it
+# is ready.
 #
 # On every request each app resolves a DNS name of its own run's and calls an
 # upstream on a path of its own run's (app.py). In every round each run must
@@ -13,13 +16,13 @@
 # the other run's, would lose its names or put them in the other run's mocks.
 #
 # Rounds:
-# - "together": the runs as reported. Whether the CLI's check or the agent's
-#   bind finds the other run's port taken depends on how their starts
-#   interleave; either way both runs must record. The moves are printed.
-# - "dns-held": the same, with a process holding UDP 26789 only. The CLI
-#   checks the port over TCP and finds it free, so each agent finds it taken
-#   at its bind, every time: both must move their DNS servers, naming that
-#   process, and their apps' DNS must still reach their own moved servers.
+# - "together": the runs as reported. Which agent finds the other's port
+#   taken at its bind depends on how their starts interleave; either way both
+#   runs must record. The moves are printed.
+# - "dns-held": the same, with a process holding UDP 26789 only. Each CLI
+#   hands its agent 26789, so each agent finds it taken at its bind: both
+#   must move their DNS servers, naming that process, and their apps' DNS
+#   must still reach their own moved servers.
 
 # keploy runs under sudo, which hands it only the variables its command line
 # names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
