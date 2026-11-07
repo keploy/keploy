@@ -3250,6 +3250,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// re-registration repeats the exact same outgoing options. See
 		// ensureAgentHoldsStoredMocks.
 		outgoingOpts := models.OutgoingOptions{
+			RedisDrawn:                r.config.Redis.DrawnKeys(),
 			Rules:                     r.config.BypassRules,
 			MongoPassword:             r.config.Test.MongoPassword,
 			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
@@ -3450,6 +3451,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = beginSession(runTestSetCtx, models.OutgoingOptions{
+			RedisDrawn:                r.config.Redis.DrawnKeys(),
 			Rules:                     r.config.BypassRules,
 			MongoPassword:             r.config.Test.MongoPassword,
 			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
