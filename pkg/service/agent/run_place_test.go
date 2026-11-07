@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,14 +35,35 @@ func placeRelease(p models.RunPlace, t time.Time) bool {
 	return anchor <= p.Reached
 }
 
-// heldCall sends GET path through the real HTTP parser and returns, once the
+// holdSeen is a manager as the HTTP parser's store, which says when the
+// parser first waits on the run's place: it holds an answer it matched.
+type holdSeen struct {
+	*proxyPkg.MockManager
+	held chan struct{}
+	once sync.Once
+}
+
+func (h *holdSeen) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (func(), bool) {
+	release, ok := h.MockManager.IdleUntilRunPlaceChanges(changed, mark)
+	if ok {
+		h.once.Do(func() { close(h.held) })
+	}
+	return release, ok
+}
+
+// heldCall sends GET path through the real HTTP parser, waits until the
+// parser holds the answer of the recording it matched, and returns, once the
 // application has read the whole answer, the recording that answered it
-// ("" for none).
-func heldCall(mm *proxyPkg.MockManager, path string) <-chan string {
+// ("" for none). A row moves the run's place only after the hold: a parser
+// that read the call after a move would match it in a later test, or find
+// its answer due at once.
+func heldCall(t *testing.T, mm *proxyPkg.MockManager, path string) <-chan string {
+	t.Helper()
+	db := &holdSeen{MockManager: mm, held: make(chan struct{})}
 	out := make(chan string, 1)
 	app, agentEnd := net.Pipe()
 	go func() {
-		_ = httpparser.New(zap.NewNop()).MockOutgoing(context.Background(), agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
+		_ = httpparser.New(zap.NewNop()).MockOutgoing(context.Background(), agentEnd, &models.ConditionalDstCfg{}, db, models.OutgoingOptions{})
 		_ = agentEnd.Close()
 	}()
 	go func() {
@@ -58,6 +80,13 @@ func heldCall(mm *proxyPkg.MockManager, path string) <-chan string {
 		}
 		out <- got
 	}()
+	select {
+	case <-db.held:
+	case a := <-out:
+		t.Fatalf("GET %s: the application read %q before the parser held an answer", path, a)
+	case <-time.After(10 * time.Second):
+		t.Fatalf("GET %s: the parser held no answer", path)
+	}
 	return out
 }
 
@@ -110,7 +139,7 @@ func TestMockReplayWritesAnAnswerAtItsRecordedPlaceWithTheSwitchOff(t *testing.T
 	}
 
 	scopeBegin(t, a, "Test1")
-	slowGot, gapGot := heldCall(p.mm, "/slow"), heldCall(p.mm, "/gap")
+	slowGot, gapGot := heldCall(t, p.mm, "/slow"), heldCall(t, p.mm, "/gap")
 	notYet(t, slowGot, "Test2's answer during Test1")
 	notYet(t, gapGot, "the answer recorded after Test1, during Test1")
 	scopeEnd(t, a, "Test1")
@@ -124,7 +153,7 @@ func TestMockReplayWritesAnAnswerAtItsRecordedPlaceWithTheSwitchOff(t *testing.T
 	scopeBegin(t, a, "Test2")
 	written(t, slowGot, "mock-slow", "at Test2's begin")
 
-	lateGot := heldCall(p.mm, "/late")
+	lateGot := heldCall(t, p.mm, "/late")
 	notYet(t, lateGot, "Test3's answer during Test2")
 	scopeEnd(t, a, "Test2")
 	notYet(t, lateGot, "Test3's answer after Test2's end")
@@ -151,7 +180,7 @@ func TestTheSetsEndReadWritesAnAnswerOfATestTheRunNeverReached(t *testing.T) {
 		t.Fatal(err)
 	}
 	scopeBegin(t, a, "Test1")
-	got := heldCall(p.mm, "/late")
+	got := heldCall(t, p.mm, "/late")
 	scopeEnd(t, a, "Test1")
 	scopeBegin(t, a, "Test2")
 	scopeEnd(t, a, "Test2")

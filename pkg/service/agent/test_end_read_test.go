@@ -145,7 +145,7 @@ func TestKeployTestWritesAnAnswerAtItsTestsEndReadWithTheSwitchOff(t *testing.T)
 	mm.SetMocksWithWindow(mocks, nil, models.BaseTime, time.Now())
 
 	mm.SetMocksWithWindow(mocks, nil, ws[0].Start, ws[0].End)
-	gapGot, lateGot := heldCall(mm, "/gap"), heldCall(mm, "/late")
+	gapGot, lateGot := heldCall(t, mm, "/gap"), heldCall(t, mm, "/late")
 	notYet(t, gapGot, "the answer recorded after Test1, while Test1 runs")
 	for _, read := range []context.Context{ctx, models.WithTestEndRead(ctx, "no-such-test")} {
 		if _, err := a.GetMockErrors(read); err != nil {
