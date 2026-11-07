@@ -209,25 +209,30 @@ func TestDownloadMakesNoFolderOutsideTheProject(t *testing.T) {
 
 // Download/Tests is the folder a download writes into, the project's own: a
 // link in it that stays inside it is followed, as every link that stays
-// inside its folder is. Here one service's schema folder leads to another
-// folder in Download/Tests, and its HTTP tests are copied there.
+// inside its folder is. Here one service's schema folder, and a folder its
+// schema tests are copied into, lead to another folder in Download/Tests, and
+// its HTTP and schema tests are copied there.
 func TestDownloadTestsFollowsALinkThatStaysInsideDownloadTests(t *testing.T) {
 	base := t.TempDir()
 	mkfile(t, filepath.Join(base, "VirtualCPR", "svc", "keploy", "test-set-0", "tests", "test-1.yaml"), "kind: Http\n")
-	if err := os.MkdirAll(filepath.Join(base, "VirtualCPR", "svc", "keploy", "schema", "tests"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// The service's schema tests are copied into Download/Tests/svc too.
+	mkfile(t, filepath.Join(base, "VirtualCPR", "svc", "keploy", "schema", "tests", "contracts", "c.yaml"), "kind: Contract\n")
 	s := contractIn(t, base, config.Mappings{Self: "me", ServicesMapping: map[string][]string{"svc": {"http://svc"}}})
 	tests := filepath.Join(base, "project", "Download", "Tests")
 	if err := os.MkdirAll(filepath.Join(tests, "shared"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	mklink(t, filepath.Join("..", "shared"), filepath.Join(tests, "svc", "schema"))
+	mklink(t, filepath.Join("..", "shared"), filepath.Join(tests, "svc", "contracts"))
 	if err := s.DownloadTests(""); err != nil {
 		t.Fatalf("DownloadTests through a link inside Download/Tests: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tests, "shared", "test-set-0", "test-1.yaml"))
 	if err != nil || string(got) != "kind: Http\n" {
 		t.Fatalf("the HTTP test where the link leads = %q, %v; want it copied there", got, err)
+	}
+	got, err = os.ReadFile(filepath.Join(tests, "shared", "c.yaml"))
+	if err != nil || string(got) != "kind: Contract\n" {
+		t.Fatalf("the schema test where the link leads = %q, %v; want it copied there", got, err)
 	}
 }
