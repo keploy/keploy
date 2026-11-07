@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -187,6 +188,12 @@ func TestInstallJavaCA_BackwardCompat_NoJavaIsNoop(t *testing.T) {
 	// return nil without attempting any keytool call.
 	t.Setenv("PATH", "/nonexistent-path-for-test")
 	t.Setenv("JAVA_HOME", "") // defensive — don't let host JAVA_HOME leak
+	// On macOS IsJavaInstalled asks /usr/libexec/java_home, which finds an
+	// installed JDK or JRE whatever PATH says: there an empty PATH hides
+	// nothing, and installJavaCA goes on to look for the java it found.
+	if util.IsJavaInstalled() {
+		t.Skip("Java is found without PATH here (macOS's java_home): an empty PATH cannot hide it")
+	}
 
 	logger := zaptest.NewLogger(t)
 	err := installJavaCA(context.Background(), logger, "/tmp/doesnt-matter.crt")
