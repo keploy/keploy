@@ -4,7 +4,6 @@ package contract
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 
@@ -484,7 +483,7 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 		return err
 	}
 
-	if err := os.MkdirAll(keployPath, 0o755); err != nil {
+	if err := utils.MkdirRecordingDir(keployPath, 0o755); err != nil {
 		utils.LogError(s.logger, err, "failed to create keploy directory", zap.String("path", keployPath))
 		return err
 	}
@@ -525,7 +524,7 @@ func (s *contract) DownloadTests(_ string) error {
 		testsPath := filepath.Join(checkout, "keploy", "schema", "tests")
 		// Copy this dir to the target path
 		serviceFolder := filepath.Join(targetPath, service)
-		if err := yaml.CopyDir(checkout, testsPath, serviceFolder, false, s.logger); err != nil {
+		if err := yaml.CopyDir(checkout, testsPath, targetPath, serviceFolder, false, s.logger); err != nil {
 			utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", testsPath))
 			return err
 		}
@@ -540,7 +539,7 @@ func (s *contract) DownloadTests(_ string) error {
 		}
 		for _, testSetID := range testSetIDs {
 			// Copy the directory to the target path
-			if err := yaml.CopyDir(checkout, filepath.Join(keployTestsPath, testSetID, "tests"), filepath.Join(serviceFolder, "schema", testSetID), false, s.logger); err != nil {
+			if err := yaml.CopyDir(checkout, filepath.Join(keployTestsPath, testSetID, "tests"), targetPath, filepath.Join(serviceFolder, "schema", testSetID), false, s.logger); err != nil {
 				utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", filepath.Join(keployTestsPath, testSetID, "tests")))
 				return err
 			}
@@ -635,7 +634,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 		fmt.Println(serviceColor("=========================================="))
 
 		// Copy the mock files from the source directory to the target directory
-		if err := yaml.CopyDir(checkout, mocksSourcePath, serviceFolder, true, s.logger); err != nil {
+		if err := yaml.CopyDir(checkout, mocksSourcePath, targetPath, serviceFolder, true, s.logger); err != nil {
 			utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", mocksSourcePath))
 			return err
 		}

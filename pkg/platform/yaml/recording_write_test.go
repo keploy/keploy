@@ -80,7 +80,7 @@ func TestCopyDirFollowsNoLinkOutOfAFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeLink(t, secret, filepath.Join(src, "linked.yaml"))
-	requireOnlyInside(t, "CopyDir from a link", CopyDir(src, src, dst, false, zap.NewNop()))
+	requireOnlyInside(t, "CopyDir from a link", CopyDir(src, src, dst, dst, false, zap.NewNop()))
 	if _, err := os.Stat(filepath.Join(dst, "linked.yaml")); !os.IsNotExist(err) {
 		t.Fatalf("CopyDir copied the file outside its folder: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestCopyDirFollowsNoLinkOutOfAFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeLink(t, kept, filepath.Join(dst2, "doc.yaml"))
-	requireOnlyInside(t, "CopyDir onto a link", CopyDir(src2, src2, dst2, false, zap.NewNop()))
+	requireOnlyInside(t, "CopyDir onto a link", CopyDir(src2, src2, dst2, dst2, false, zap.NewNop()))
 	if got, err := os.ReadFile(kept); err != nil || string(got) != "KEEP ME\n" {
 		t.Fatalf("the file outside holds %q (%v)", got, err)
 	}
@@ -130,7 +130,7 @@ func TestCopyDirCopiesNoFolderThatLinksOutOfItsCheckout(t *testing.T) {
 		t.Fatalf("the link does not reach the file outside: %q, %v", b, err)
 	}
 	dst := filepath.Join(base, "Download", "Tests", "svc")
-	requireOnlyInside(t, "CopyDir of a folder that links out", CopyDir(checkout, filepath.Join(set, "tests"), dst, false, zap.NewNop()))
+	requireOnlyInside(t, "CopyDir of a folder that links out", CopyDir(checkout, filepath.Join(set, "tests"), dst, dst, false, zap.NewNop()))
 	if _, err := os.Stat(filepath.Join(dst, "id_rsa")); !os.IsNotExist(err) {
 		t.Fatalf("CopyDir copied a file from outside the checkout: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestCopyDirCopiesNoFolderThatLinksOutOfItsCheckout(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst2 := filepath.Join(base, "Download", "Tests", "svc2")
-	if err := CopyDir(checkout, filepath.Join(set2, "tests"), dst2, false, zap.NewNop()); err != nil {
+	if err := CopyDir(checkout, filepath.Join(set2, "tests"), dst2, dst2, false, zap.NewNop()); err != nil {
 		t.Fatalf("CopyDir of a folder that links inside its checkout: %v", err)
 	}
 	if b, err := os.ReadFile(filepath.Join(dst2, "test-1.yaml")); err != nil || string(b) != "inside" {
@@ -502,5 +502,53 @@ func TestATempNameTakenIsPassedOver(t *testing.T) {
 	tempNumber = func() uint32 { return 1 }
 	if _, err := CreateTempInRecording(root, root, "a.*.tmp", 0o600); !errors.Is(err, fs.ErrExist) {
 		t.Fatalf("no free name: %v, want fs.ErrExist", err)
+	}
+}
+
+// A recording's folders are made from the project: with a keploy folder the
+// repository carries as a link out of the project, MkdirAllInRecording, and
+// CopyDir's destination, are refused, with why, and no folder, not even an
+// empty one, is made where the link leads.
+func TestNoFolderIsMadeThroughALinkOutOfTheProject(t *testing.T) {
+	project := t.TempDir()
+	outside := t.TempDir()
+	keploy := filepath.Join(project, "keploy")
+	if err := os.Symlink(outside, keploy); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	err := MkdirAllInRecording(keploy, filepath.Join(keploy, "test-set-1", "assets"), 0o755)
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("MkdirAllInRecording: %v, want it refused", err)
+	}
+	src := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "sub", "a.yaml"), []byte("a: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = CopyDir(src, src, keploy, filepath.Join(keploy, "copy"), false, zap.NewNop())
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("CopyDir: %v, want it refused", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where the link leads", len(entries))
+	}
+
+	// A sub-folder of the copy that is there as a link out is not made
+	// through either.
+	dest := filepath.Join(project, "copy")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dest, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	err = CopyDir(src, src, project, dest, false, zap.NewNop())
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("CopyDir into a sub-folder that links out: %v, want it refused", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where the sub-folder leads", len(entries))
 	}
 }

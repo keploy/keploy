@@ -123,3 +123,47 @@ func TestOpenRecordingDirIsAnchoredAtTheProject(t *testing.T) {
 		}
 	}
 }
+
+// MkdirRecordingDir makes a recording's folders as OpenRecordingDir opens
+// them: a link on the way that leads out of the project is refused, and no
+// folder, not even an empty one, is made where it leads. A link that stays
+// inside is followed.
+func TestMkdirRecordingDirMakesNothingOutsideTheProject(t *testing.T) {
+	project := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(project, "keploy")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	if err := MkdirRecordingDir(filepath.Join(project, "keploy"), 0o755); err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("an absolute keploy link out: %v, want it refused", err)
+	}
+	t.Chdir(project)
+	if err := MkdirRecordingDir(filepath.Join("keploy", "test-set-1", "assets"), 0o755); err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("a relative path through a keploy link out: %v, want it refused", err)
+	}
+	if err := os.Symlink(filepath.Join("..", filepath.Base(outside)), "Download"); err != nil {
+		t.Fatal(err)
+	}
+	if err := MkdirRecordingDir(filepath.Join("Download", "Tests"), 0o755); err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("a relative link that climbs out: %v, want it refused", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where the links lead", len(entries))
+	}
+
+	if err := os.MkdirAll("real", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", "inside"); err != nil {
+		t.Fatal(err)
+	}
+	if err := MkdirRecordingDir(filepath.Join("inside", "a", "b"), 0o755); err != nil {
+		t.Fatalf("a link that stays inside: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(project, "real", "a", "b")); err != nil || !info.IsDir() {
+		t.Fatalf("the folder was not made through the link inside: %v", err)
+	}
+	if err := MkdirRecordingDir(filepath.Join("inside", "a", "b"), 0o755); err != nil {
+		t.Fatalf("a folder that is there already: %v", err)
+	}
+}

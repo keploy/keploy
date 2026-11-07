@@ -123,3 +123,26 @@ func TestDownloadMocksWritesOnlyUnderDownload(t *testing.T) {
 		t.Fatalf("DownloadMocks with a linked serviceMappings.yaml: %v, want it refused", err)
 	}
 }
+
+// The Download folder keploy fills is made in the project only: one the
+// repository carries as a link out of the project is refused, with why, and
+// no folder, not even an empty one, is made where it leads.
+func TestDownloadMakesNoFolderOutsideTheProject(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := contractIn(t, base, config.Mappings{Self: "me", ServicesMapping: map[string][]string{"other": {"http://other"}}})
+	mklink(t, filepath.Join("..", "outside"), filepath.Join(base, "project", "Download"))
+	if err := s.DownloadTests(""); err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("DownloadTests with Download linking out: %v, want it refused", err)
+	}
+	if err := s.DownloadMocks(ctx, ""); err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("DownloadMocks with Download linking out: %v, want it refused", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where Download leads", len(entries))
+	}
+}

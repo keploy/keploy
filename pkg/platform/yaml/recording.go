@@ -232,10 +232,12 @@ func WriteFileInRecording(root, path string, data []byte, perm fs.FileMode) erro
 }
 
 // MkdirAllInRecording is os.MkdirAll inside root (see above). root itself is
-// made when it is not there: the first recording has none yet.
+// made when it is not there, the first recording has none yet, from the
+// project as utils.MkdirRecordingDir makes it: a link on its way that leads
+// out of the project is refused, and no folder is made where it leads.
 func MkdirAllInRecording(root, path string, perm fs.FileMode) error {
 	if root != "" {
-		if err := os.MkdirAll(root, perm); err != nil {
+		if err := utils.MkdirRecordingDir(root, perm); err != nil {
 			return err
 		}
 	}

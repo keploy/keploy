@@ -319,14 +319,14 @@ func ReadDir(path string, _ fs.FileMode) (*os.File, error) {
 	return dir, err
 }
 
-// CreateDir to create a directory if it doesn't exist
+// CreateDir makes path, a folder keploy writes in the project, if it is not
+// there, from the project as utils.MkdirRecordingDir makes it: a folder on its
+// way the repository carries as a link that leads out of the project is
+// refused, with why, and nothing is made where it leads.
 func CreateDir(path string, logger *zap.Logger) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		err := os.MkdirAll(path, os.ModePerm)
-		if err != nil {
-			utils.LogError(logger, err, "failed to create directory", zap.String("directory", path))
-			return err
-		}
+	if err := utils.MkdirRecordingDir(path, os.ModePerm); err != nil {
+		utils.LogError(logger, err, "failed to create directory", zap.String("directory", path))
+		return err
 	}
 	return nil
 }
@@ -371,11 +371,11 @@ func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, file
 	return nil
 }
 
-// CopyFile copies a single file from src, a file under srcRoot, to dst. src is
-// opened inside srcRoot, and dst inside its own folder, so a src that links
-// out of srcRoot, or a dst that links out of its folder, is refused: what it
-// leads to is neither copied nor written (see recording.go).
-func CopyFile(srcRoot, src, dst string, rename bool, logger *zap.Logger) error {
+// CopyFile copies a single file from src, a file under srcRoot, to dst, a file
+// under destRoot. src is opened inside srcRoot, and dst inside destRoot, so a
+// src that links out of srcRoot, or a dst that links out of destRoot, is
+// refused: what it leads to is neither copied nor written (see recording.go).
+func CopyFile(srcRoot, src, destRoot, dst string, rename bool, logger *zap.Logger) error {
 	srcFile, err := OpenInRecording(srcRoot, src)
 
 	if err != nil {
@@ -390,7 +390,7 @@ func CopyFile(srcRoot, src, dst string, rename bool, logger *zap.Logger) error {
 	if rename {
 		dst = generateSchemaName(dst)
 	}
-	dstFile, err := OpenFileInRecording(filepath.Dir(dst), dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
+	dstFile, err := OpenFileInRecording(destRoot, dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
 		return err
 	}
@@ -419,8 +419,12 @@ func CopyFile(srcRoot, src, dst string, rename bool, logger *zap.Logger) error {
 // it and every file it copies are read only inside srcRoot (see
 // recording.go), so a folder or a file that links out of the checkout, the
 // copied folder itself included, is refused with why, and what it leads to is
-// not copied.
-func CopyDir(srcRoot, srcDir, destDir string, rename bool, logger *zap.Logger) error {
+// not copied. destDir, a folder under destRoot (the folder keploy downloads
+// into, in a contract download), every folder made in it and every file
+// written are made only inside destRoot, and destRoot from the project
+// (MkdirAllInRecording), so none is made or written through a link that leads
+// out.
+func CopyDir(srcRoot, srcDir, destRoot, destDir string, rename bool, logger *zap.Logger) error {
 	dir, err := OpenInRecording(srcRoot, srcDir)
 	if err != nil {
 		return err
@@ -430,12 +434,9 @@ func CopyDir(srcRoot, srcDir, destDir string, rename bool, logger *zap.Logger) e
 	if err != nil {
 		return err
 	}
-	// Ensure the destination directory exists
-	if _, err := os.Stat(destDir); os.IsNotExist(err) {
-		err := os.MkdirAll(destDir, os.ModePerm)
-		if err != nil {
-			return err
-		}
+	// Ensure the destination directory exists.
+	if err := MkdirAllInRecording(destRoot, destDir, os.ModePerm); err != nil {
+		return err
 	}
 
 	for _, entry := range entries {
@@ -448,16 +449,16 @@ func CopyDir(srcRoot, srcDir, destDir string, rename bool, logger *zap.Logger) e
 		}
 
 		if info.IsDir() {
-			err = os.MkdirAll(destPath, info.Mode())
+			err = MkdirAllInRecording(destRoot, destPath, info.Mode().Perm())
 			if err != nil {
 				return err
 			}
-			err = CopyDir(srcRoot, srcPath, destPath, rename, logger)
+			err = CopyDir(srcRoot, srcPath, destRoot, destPath, rename, logger)
 			if err != nil {
 				return err
 			}
 		} else {
-			err = CopyFile(srcRoot, srcPath, destPath, rename, logger)
+			err = CopyFile(srcRoot, srcPath, destRoot, destPath, rename, logger)
 			if err != nil {
 				return err
 			}

@@ -25,13 +25,45 @@ import (
 // written: without this, a keploy folder linking to ../.. would have keploy
 // read, upload and write files of the user's from outside the project.
 func OpenRecordingDir(dir string) (*os.Root, error) {
+	return openRecordingDir(dir, false, 0)
+}
+
+// MkdirRecordingDir is os.MkdirAll for such a folder: each folder is made, if
+// it is not there, only inside the one before it, from the project, as
+// OpenRecordingDir opens them, so a link on the way that leads out is refused
+// with why, and nothing is made where it leads, not even an empty folder.
+// Only the project itself, the folder OpenRecordingDir opens dir from, is
+// made as os.MkdirAll makes it.
+func MkdirRecordingDir(dir string, perm fs.FileMode) error {
+	r, err := openRecordingDir(dir, true, perm)
+	if err != nil {
+		return err
+	}
+	return r.Close()
+}
+
+func openRecordingDir(dir string, mkdir bool, perm fs.FileMode) (*os.Root, error) {
 	base, names := recordingDirSteps(dir)
+	perm = perm.Perm() // os.Root.Mkdir takes only these bits
+	if mkdir {
+		if err := os.MkdirAll(base, perm); err != nil {
+			return nil, err
+		}
+	}
 	r, err := os.OpenRoot(base)
 	if err != nil {
 		return nil, err
 	}
 	at := base
 	for _, name := range names {
+		if mkdir {
+			// A name that is there already, a link too, is left as it is
+			// for OpenRoot to judge: Mkdir makes nothing through a link.
+			if err := r.Mkdir(name, perm); err != nil && !errors.Is(err, fs.ErrExist) {
+				_ = r.Close()
+				return nil, fmt.Errorf("the folder %q is made only inside %q: %w", name, at, err)
+			}
+		}
 		next, err := r.OpenRoot(name)
 		_ = r.Close()
 		if errors.Is(err, fs.ErrNotExist) {

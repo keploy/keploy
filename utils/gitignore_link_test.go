@@ -50,3 +50,29 @@ func TestAddToGitIgnoreStaysInsideTheFolder(t *testing.T) {
 		t.Fatalf("the entry was not written through the link: %q (%v)", got, err)
 	}
 }
+
+// The folder of the .gitignore is opened from the project: a keploy folder
+// the repository carries as a link out of the project is refused, and the
+// .gitignore where it leads is neither made nor written.
+func TestAddToGitIgnoreRefusesAKeployFolderThatLinksOut(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	outside := filepath.Join(base, "outside")
+	for _, d := range []string{project, outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, target := range map[string]string{"keploy": filepath.Join("..", "outside"), "abs": outside} {
+		if err := os.Symlink(target, filepath.Join(project, name)); err != nil {
+			t.Skipf("cannot make a symbolic link here: %v", err)
+		}
+		err := AddToGitIgnore(zap.NewNop(), filepath.Join(project, name), "/reports/")
+		if err == nil || !strings.Contains(err.Error(), "only inside") {
+			t.Fatalf("%s: AddToGitIgnore: %v, want it refused", name, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(outside, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf("a .gitignore was made where the link leads: %v", err)
+	}
+}
