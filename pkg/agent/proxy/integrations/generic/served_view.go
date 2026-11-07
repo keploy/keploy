@@ -3,7 +3,6 @@ package generic
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -57,19 +56,28 @@ func sentAsRecorded(m *models.Mock, sent [][]byte) bool {
 	return newSentRequest(sent).isRecorded(m.Spec.GenericRequests, nil, true)
 }
 
+// recordedAnswerKey names, among m's views (learn.Tracker.ServedMockLive),
+// the one every serve of m gave: F answers with m's recorded answer whole,
+// so every serve gave the application one answer, whatever bytes its
+// request sent.
+const recordedAnswerKey = "recorded"
+
 // servedView is F's view of m, which F served to the request sent with m's
 // recorded answer (stateServed): m with the request as the application sent
 // it, its bytes as one piece in the form the recorder keeps a piece
 // (encodePayload: text as it is, other bytes base64), and the key that names
-// it among m's views: those bytes, hashed. Two serves of m whose requests
-// sent the same bytes, in whatever pieces they were read, gave the same
-// view. What a set keeps of it is the request, never the answer.
+// it among m's views: the answer F gave, never the request it answered
+// (recordedAnswerKey). Every serve of m is one view, the first one's, so a
+// request the application makes anew on every call (a nonce, a timestamp,
+// a signature) fills no more of the views a set keeps of m than one; each
+// request's bytes named a view of their own before, and a serve past the
+// views a set keeps was read as one keploy could not read, which refused
+// every changed value of a later call that may stand there.
 func servedView(m *models.Mock, sent [][]byte) (func() (*models.Mock, error), string) {
 	req := bytes.Join(sent, nil)
-	sum := sha256.Sum256(req)
 	return func() (*models.Mock, error) {
 		v := m.ShallowCopy()
 		v.Spec.GenericRequests = []models.Payload{encodePayload(req, models.FromClient)}
 		return v, nil
-	}, string(sum[:])
+	}, recordedAnswerKey
 }

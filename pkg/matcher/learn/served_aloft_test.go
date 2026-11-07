@@ -252,7 +252,7 @@ func TestASourceToldAsRecordedAndServedAfterTheCallArrivedStaysAsRecorded(t *tes
 		t.Fatalf("the serve told as recorded, claimed after the call arrived, is read as %+v; want as recorded", x)
 	}
 	got := classifyF(t, "50", "7", nil, append(eStartup(), x), nil)
-	if got.Kind != KindNoise || !strings.Contains(got.Why, "which record's full round sent and gave the application as recorded, byte for byte, while the value changed") {
+	if got.Kind != KindNoise || !strings.Contains(got.Why, "which record's full round sent and gave the application as recorded, while the value changed") {
 		t.Errorf("FALSE RED: 50 beside VARCHAR(50) F served as recorded after the call arrived, 7 in F: %s (%q); want noise naming mock-5", got.Kind, got.Why)
 	}
 }

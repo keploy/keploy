@@ -2852,9 +2852,8 @@ func (h *HTTP) renderLearned(rec *models.Mock, name string, p pairing) (*models.
 
 // learnedView is how F answered m where the learn step paired it with p
 // (renderLearned): the answer as rendered from m's recorded one, read back
-// where a rule reads it, and the values it rendered, which name it among
-// m's views (answerKey); nil, "" where p rendered none, whose serve gave
-// the recorded answer whole.
+// where a rule reads it; none where p rendered none, whose serve gave the
+// recorded answer whole.
 func (h *HTTP) learnedView(m *models.Mock, p pairing) answerView {
 	if len(p.vars) == 0 {
 		return answerView{}
@@ -2867,7 +2866,6 @@ func (h *HTTP) learnedView(m *models.Mock, p pairing) answerView {
 			}
 			return out, nil
 		},
-		key: valuesKey(p.values),
 	}
 }
 
@@ -2951,7 +2949,7 @@ func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Moc
 	case answerAsRecorded(recorded.Spec.HTTPResp, served.Spec.HTTPResp):
 		e.View, e.ViewKey = servedLiveView(m, in)
 	case av.render != nil:
-		e.View, e.ViewKey = servedView(m, in, av)
+		e.View, e.ViewKey = servedView(m, in, av, served.Spec.HTTPResp)
 	}
 	return e, true
 }

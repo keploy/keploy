@@ -135,20 +135,21 @@ type Earlier struct {
 	// reads it: the leaves are the exchange's.
 	Payload Raw
 	// AsRecorded: the adapter that served the exchange says F served it as
-	// recorded, byte for byte: the application sent its request as
-	// recorded, every part of it, and F gave it the recorded answer, every
-	// part of it (no variable, template value or clock stamp of F's own),
-	// as Raw.ServedAsRecorded says it. Every Seen then holds its leaf's
-	// recorded value (servedAsRecorded). false says nothing: what F gave
-	// the application there is read from Seen alone, and a later call reads
-	// the recording as one whose view no adapter stated (Raw.viewUnstated).
+	// recorded: the application sent its request as recorded, every part of
+	// it, and F gave it the recorded answer, every part of it (no variable,
+	// template value or clock stamp of F's own), as Raw.ServedAsRecorded
+	// says it. Every Seen then holds its leaf's recorded value
+	// (servedAsRecorded). false says nothing: what F gave the application
+	// there is read from Seen alone, and a later call reads the recording as
+	// one whose view no adapter stated (Raw.viewUnstated).
 	AsRecorded bool
 	// View, where the adapter that served the exchange knows F's view of it
 	// whole and it may be another than the recording (the application sent
 	// another request; F gave it the recorded answer), gives that view: the
 	// recording as F's application sent its request and F answered it
 	// (Tracker.ServedMockLive, read where a later call's rule reads it), and
-	// ViewKey names it among the recording's views. Read only where AsRecorded
+	// ViewKey names it among the recording's views by the answer F gave
+	// there, never by the request. Read only where AsRecorded
 	// is not borne out (servedAsRecorded): the view a later call of the set
 	// reads the recording with (Order.ServedView). nil says nothing.
 	View    func() (*models.Mock, error)
@@ -490,15 +491,17 @@ func (r Raw) WithServed(served bool) Raw {
 }
 
 // ServedAsRecorded is r, which F served (ServedIn, WithServed), as served
-// unchanged: the application sent its request byte for byte as recorded (no
-// part of it learned as noise or bound as a variable in F) and F gave it the
-// recorded answer byte for byte (no variable, template value or clock stamp
-// of F's own in it). An adapter says it only where it knows both. Under the
-// rule a copy follows its source (ClassifyFollowing) only such a recording
-// shows what F sent and gave the application there: a word of it F gave
-// (follows.excusedRaw), and a source the call's value moved away from while
-// it did not move (appearedIn). Of a Raw F did not serve it says nothing,
-// and keploy then reads that F gave nothing there (fail closed).
+// unchanged: the application sent its request as recorded (no part of it
+// learned as noise or bound as a variable in F) and F gave it the recorded
+// answer (no variable, template value or clock stamp of F's own in it),
+// packet for packet, but for the values the replay copies from the live
+// request or numbers itself (Tracker.ServedMockAsRecorded). An adapter
+// says it only where it knows both. Under the rule a copy follows its
+// source (ClassifyFollowing) only such a recording shows what F sent and
+// gave the application there: a word of it F gave (follows.excusedRaw),
+// and a source the call's value moved away from while it did not move
+// (appearedIn). Of a Raw F did not serve it says nothing, and keploy then
+// reads that F gave nothing there (fail closed).
 func (r Raw) ServedAsRecorded() Raw {
 	r.asRecorded = r.served
 	return r
@@ -3728,14 +3731,15 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 // round, ClassifyFollowing), a raw mock F served unchanged (Raw.AsRecorded)
 // whose payload holds a word of the recorded value (the value whole, or a
 // word of what it lost), but not the value F saw, is no place the value
-// came from: F sent and gave the application that payload byte for byte as
-// recorded, and the value moved, while a copy moves with its source. The
-// search goes on past it (fol.refuted names the first such place, which a
-// value learned as noise names: follows.refute); the word rule then reads
-// its words as the rule reads every word both runs gave (follows.excusedRaw,
-// followed). A place F did not serve, or served changed, or whose payload
-// holds the value F saw too, stays where the value came from. A leaf F
-// served as recorded (Seen.Live) is no place either way: it did not drift.
+// came from: F sent and gave the application that payload as recorded
+// (Raw.ServedAsRecorded), and the value moved, while a copy moves with its
+// source. The search goes on past it (fol.refuted names the first such
+// place, which a value learned as noise names: follows.refute); the word
+// rule then reads its words as the rule reads every word both runs gave
+// (follows.excusedRaw, followed). A place F did not serve, or served
+// changed, or whose payload holds the value F saw too, stays where the
+// value came from. A leaf F served as recorded (Seen.Live) is no place
+// either way: it did not drift.
 // A leaf that held the recorded value whole is the value's source only where
 // it held the value F saw too: one F saw hold another value is set aside the
 // same way, and named so (follows.refuteSeen). A value the test gave keploy

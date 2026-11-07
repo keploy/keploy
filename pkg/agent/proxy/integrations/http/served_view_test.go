@@ -134,9 +134,10 @@ func TestAnExchangeIsSaidServedAsRecordedOnlyWhereRequestAndAnswerAreTheRecordin
 // F's view of an exchange it served with the recorded answer whole is the
 // recording as the application sent its request: its method, URL, query,
 // headers and body as sent, the recorded answer as recorded (one parked on
-// disk read back). Its key is the same for two requests the view holds the
-// same, and another where any part differs, so a set keeps one view of a
-// recording served the same way again and each other one beside it.
+// disk read back). Its key names what F gave, the recorded answer: the
+// same for every request F answered so, whatever part of it differs, so a
+// set keeps one view of a recording F answered whole however often, each
+// request signed anew (the first one's).
 func TestAServedExchangesViewIsTheRequestTheApplicationSentWithTheRecordedAnswer(t *testing.T) {
 	m := learnRecorded("mock-4", 0, "POST", "/v1/orders?page=1", `{"item":"book"}`, map[string]string{"X-Trace": "t-1"}, `{"id":"o-1"}`)
 	in := live("POST", "/v1/orders?page=2", `{"item":"pen"}`, map[string]string{"X-Trace": "t-2"})
@@ -162,8 +163,8 @@ func TestAServedExchangesViewIsTheRequestTheApplicationSentWithTheRecordedAnswer
 		"another query":   live("POST", "/v1/orders?page=3", `{"item":"pen"}`, map[string]string{"X-Trace": "t-2"}),
 		"one more header": live("POST", "/v1/orders?page=2", `{"item":"pen"}`, map[string]string{"X-Trace": "t-2", "X-Extra": "e"}),
 	} {
-		if _, k := servedLiveView(m, other); k == key {
-			t.Errorf("%s: keyed as the first request's view", name)
+		if _, k := servedLiveView(m, other); k != key {
+			t.Errorf("%s: keyed apart from the first request's view; want one key: F gave both the recorded answer", name)
 		}
 	}
 }
@@ -258,7 +259,18 @@ func TestATemplatedServesViewIsTheAnswerFRendered(t *testing.T) {
 		return pairing{vars: vars, values: map[string]variables.Binding{"key": {Name: "key", Value: v, Recorded: "k-1"}}}
 	}
 	in := live("POST", "/v1/charges", `{"key":"k-29"}`, nil)
-	load, key := servedView(m, in, h.learnedView(m, p("k-29")))
+	given := func(av answerView) *models.HTTPResp {
+		out, err := av.render(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out.Spec.HTTPResp
+	}
+	served := func(in *req, v string) (func() (*models.Mock, error), string) {
+		av := h.learnedView(m, p(v))
+		return servedView(m, in, av, given(av))
+	}
+	load, key := served(in, "k-29")
 	v, err := load()
 	if err != nil || v.Spec.HTTPResp.Body != `{"idempotency_key":"k-29"}` || v.Spec.HTTPReq.Body != `{"key":"k-29"}` {
 		t.Fatalf("view %+v %v; want the live request and the answer rendered with k-29", v, err)
@@ -269,11 +281,17 @@ func TestATemplatedServesViewIsTheAnswerFRendered(t *testing.T) {
 	if _, k := servedLiveView(m, in); k == key {
 		t.Fatal("the templated view shares its key with the recorded answer's view of the same request")
 	}
-	if _, k := servedView(m, in, h.learnedView(m, p("k-30"))); k == key {
+	if _, k := served(in, "k-30"); k == key {
 		t.Fatal("two answers rendered with different values share a key")
 	}
-	if _, k := servedView(m, in, h.learnedView(m, p("k-29"))); k != key {
+	if _, k := served(in, "k-29"); k != key {
 		t.Fatal("the same values render the same view under another key")
+	}
+	if _, k := served(live("POST", "/v1/charges", `{"key":"k-29","note":"n-2"}`, map[string]string{"X-Trace": "t-9"}), "k-29"); k != key {
+		t.Fatal("the same answer given to another request is keyed as another view")
+	}
+	if _, k := servedView(m, in, h.learnedView(m, p("k-29")), nil); k != "" {
+		t.Fatalf("a serve with no answer named keyed %q; want none (a view keploy cannot read)", k)
 	}
 	if av := h.learnedView(m, pairing{}); av.render != nil {
 		t.Fatal("a pairing that learned no variable renders no view of its own")
@@ -284,8 +302,8 @@ func TestATemplatedServesViewIsTheAnswerFRendered(t *testing.T) {
 // (writtenView) is the answer av renders, then written: a learned variable's
 // value and the caller's change both stand in it, where av renders none the
 // recorded answer written, and the recording itself is never written. Its
-// key is not av's: a serve of the same request with av's answer unwritten
-// names another view.
+// key names the written answer: a serve of the same request with av's
+// answer unwritten gave another answer, and names another view.
 func TestAWrittenViewIsTheAnswerRenderedThenWritten(t *testing.T) {
 	rec := learnRecorded("mock-2", time.Second, "POST", "/v1/receive", `{"key":"k-1"}`, nil, `{"idempotency_key":"k-1","count":"9"}`)
 	replaced := func(m *models.Mock, old, new string) *models.Mock {
@@ -296,7 +314,8 @@ func TestAWrittenViewIsTheAnswerRenderedThenWritten(t *testing.T) {
 		return c
 	}
 	written := func(m *models.Mock) *models.Mock { return replaced(m, `"9"`, `"77"`) }
-	rendered := answerView{render: func(m *models.Mock) (*models.Mock, error) { return replaced(m, "k-1", "k-2"), nil }, key: "k-2"}
+	rendered := answerView{render: func(m *models.Mock) (*models.Mock, error) { return replaced(m, "k-1", "k-2"), nil }}
+	in := live("POST", "/v1/receive", `{"key":"k-2"}`, nil)
 	for _, tc := range []struct {
 		name string
 		av   answerView
@@ -313,8 +332,17 @@ func TestAWrittenViewIsTheAnswerRenderedThenWritten(t *testing.T) {
 		if rec.Spec.HTTPResp.Body != `{"idempotency_key":"k-1","count":"9"}` {
 			t.Fatalf("%s: the recording was written: %s", tc.name, rec.Spec.HTTPResp.Body)
 		}
-		if wv.key == tc.av.key {
-			t.Fatalf("%s: the written view's key is av's (%q): a serve of the same request with the answer unwritten would share it", tc.name, wv.key)
+		unwritten := rec.Spec.HTTPResp
+		if tc.av.render != nil {
+			r, err := tc.av.render(rec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			unwritten = r.Spec.HTTPResp
+		}
+		_, wk := servedView(rec, in, wv, got.Spec.HTTPResp)
+		if _, k := servedView(rec, in, tc.av, unwritten); k == wk {
+			t.Fatalf("%s: the written answer's view shares its key with the unwritten answer's: two answers, one view", tc.name)
 		}
 	}
 }

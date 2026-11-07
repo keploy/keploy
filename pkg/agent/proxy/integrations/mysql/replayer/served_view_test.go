@@ -71,7 +71,10 @@ func statementCtx(id uint32, query string) *wire.DecodeContext {
 // as the application sent it and the answer F writes): a query sent as
 // recorded, an EXECUTE of a statement this connection prepared under
 // another id than record's, and a PREPARE F answers with this connection's
-// next id. A later call of the set then reads the recording with that view:
+// next id, which is the recording: that id is F's own count of the
+// connection's statements, not part of what F gave, so a later call holding
+// it is learned. A later call of the set then reads the recording with that
+// view:
 // a changed value that holds no word of it is learned; one that holds a
 // word only the live command or F's answer held there is refused, naming
 // the recording at that place. Before, the matcher's consume numbered the
@@ -103,8 +106,8 @@ func TestEveryMySQLCommandServeStatesTheViewItGave(t *testing.T) {
 		{"a close under this connection's statement id, the id only it sent", "close", "4242", false, "as record's full round gave it"},
 		{"a long data chunk under this connection's statement id, a fresh value", "longdata", fresh, false, ""},
 		{"a long data chunk under this connection's statement id, the id only it sent", "longdata", "4242", false, "as record's full round gave it"},
-		{"a prepare answered with this connection's statement id, a fresh value", "prepare", fresh, false, ""},
-		{"a prepare answered with this connection's statement id, the id only F's answer held", "prepare", "4242", false, "as record's full round gave it"},
+		{"a prepare answered with this connection's statement id, a fresh value", "prepare", fresh, true, ""},
+		{"a prepare answered with this connection's statement id, that id", "prepare", "4242", true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var (
@@ -181,5 +184,85 @@ func TestAMySQLServeStatesNothingWithTheSwitchOff(t *testing.T) {
 	}
 	if ok, _ := resp.Message.(*mysql.StmtPrepareOkPacket); ok == nil || ok.StatementID != 4242 {
 		t.Fatalf("the PREPARE was answered with %+v; want this connection's next statement id, 4242", resp.Message)
+	}
+}
+
+// A poller on Go's database/sql over go-sql-driver/mysql, with
+// interpolateParams off (its default), prepares its query anew on every call
+// that has arguments, executes it and closes it, all on one connection. F
+// answers each PREPARE from the one recorded prepare with this connection's
+// next statement id (matchCommandWith), and each EXECUTE and CLOSE under
+// that id. That id is F's own count of the connection's statements, not
+// part of what F gave the application: the prepares are one view of the
+// recording, the recording itself, and a later call's fresh value is
+// learned. Before, each statement id named a view of its own, the fifth was
+// past the views a set keeps of the recording (four), and the later call
+// refused every changed value as one that may stand where keploy could not
+// read what it gave the application.
+func TestADatabaseSQLPollerPreparingOneStatementAnewIsOneView(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	const (
+		polls      = 16
+		path       = "body.ref"
+		recorded   = "82"
+		fresh      = "9f3e"
+		query      = "SELECT v FROM kv WHERE id = ?"
+		cannotRead = "where keploy could not read what it gave the application"
+	)
+	at := diffBase.Add(time.Millisecond)
+	prep := diffPrepareMock("prep", "c1", query, 1, at)
+	exec := diffMock("exec", "c1", []mysql.Request{executeReq(1, "7")}, at.Add(time.Millisecond), models.LifetimeSession, "mocks")
+	closing := diffMock("close", "c1", []mysql.Request{closeReq(1)}, at.Add(2*time.Millisecond), models.LifetimeSession, "mocks")
+	closing.Spec.MySQLResponses = nil
+	tracker := learn.NewTracker()
+	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetServedObserver(tracker.ServedMock)
+	mm.SetServedInObserver(tracker.ServedMockIn)
+	mm.SetMocksWithWindow(nil, []*models.Mock{prep, exec, closing}, models.BaseTime, time.Now().Add(time.Hour))
+	dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: map[uint32]string{}, NextStmtID: 1}
+	tracker.Begin()
+	in := tracker.Lift()
+	ctx := learn.WithTracker(context.Background(), tracker)
+	ctx = integrations.WithRequestHolder(context.WithValue(ctx, models.ClientConnectionIDKey, "c1"), aloft{in})
+	ids := map[uint32]bool{}
+	for i := 0; i < polls; i++ {
+		resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), prepareReq(query), mm, dctx)
+		if err != nil || !ok || resp.Payload != prep.Name {
+			t.Fatalf("PREPARE %d was not answered from %s: ok=%v err=%v miss=%s", i, prep.Name, ok, err, miss)
+		}
+		id := resp.Message.(*mysql.StmtPrepareOkPacket).StatementID
+		ids[id] = true
+		for _, live := range []mysql.Request{executeReq(id, "7"), closeReq(id)} {
+			if _, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), live, mm, dctx); err != nil || !ok {
+				t.Fatalf("poll %d's %s under statement id %d was not answered: ok=%v err=%v miss=%s", i, live.Header.Type, id, ok, err, miss)
+			}
+		}
+	}
+	in.Land()
+	tracker.End()
+	if len(ids) != polls {
+		t.Fatalf("F numbered %d statement ids for %d prepares; want one for each, as the replay numbers them", len(ids), polls)
+	}
+	tracker.Begin()
+	order := tracker.Placed().Order
+	rec := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: recorded}}}
+	now := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: fresh}}}
+	for _, m := range []*models.Mock{prep, exec, closing} {
+		first, last := order.Of(m)
+		r := order.ServedView(m, learn.RawOf(m, true).ServedIn(first, last))
+		got := learn.Classify(learn.NewDriftCache(), []string{path}, now, rec, time.Now(), nil, []learn.Raw{r}, nil)
+		if len(got) != 1 {
+			t.Fatalf("%d verdicts; want one", len(got))
+		}
+		if got[0].Kind == learn.KindUnaccounted {
+			t.Fatalf("FALSE RED: the later call's fresh value refused after %d polls at %s (%q, past the views a set keeps: %v); want it learned: no word of it stands in what F gave",
+				polls, m.Name, got[0].Why, strings.Contains(got[0].Why, cannotRead))
+		}
+	}
+	first, last := order.Of(prep)
+	if r := order.ServedView(prep, learn.RawOf(prep, true).ServedIn(first, last)); !r.AsRecorded() {
+		t.Fatalf("%s read as recorded %v, with a view %v; want as recorded: every PREPARE was the recorded one, answered with the recorded answer but for F's statement id",
+			prep.Name, r.AsRecorded(), r.Live())
 	}
 }
