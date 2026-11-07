@@ -90,9 +90,7 @@ func recordingDirSteps(dir string) (string, []string) {
 		}
 		return parent, []string{filepath.Base(clean)}
 	}
-	if clean == "." {
-		return clean, nil
-	}
+	// "." is a step of its own, which opens the working directory again.
 	parts := strings.Split(clean, string(filepath.Separator))
 	up := 0
 	for up < len(parts) && parts[up] == ".." {

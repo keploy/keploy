@@ -335,3 +335,21 @@ func TestAReportsFolderThatLinksOutIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// A reports folder that is not there yet lists no test runs, and no error:
+// first with no recording at all, then in a recording with no reports yet.
+func TestAMissingReportsFolderListsNoTestRuns(t *testing.T) {
+	keploy := filepath.Join(t.TempDir(), "keploy")
+	db := New(zap.NewNop(), filepath.Join(keploy, "reports"))
+	for _, recorded := range []bool{false, true} {
+		if recorded {
+			if err := os.MkdirAll(keploy, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ids, err := db.GetAllTestRunIDs(context.Background())
+		if err != nil || len(ids) != 0 {
+			t.Fatalf("GetAllTestRunIDs (keploy folder there: %v) = %v, %v; want none, nil", recorded, ids, err)
+		}
+	}
+}

@@ -552,3 +552,57 @@ func TestNoFolderIsMadeThroughALinkOutOfTheProject(t *testing.T) {
 		t.Fatalf("made %d entries where the sub-folder leads", len(entries))
 	}
 }
+
+// A recording named from the working directory, keploy/test-set-1, is made
+// one folder at a time from there too: when keploy is a link out of the
+// project, the set's folder is refused, and not made where the link leads.
+func TestNoFolderIsMadeWhereARelativeRecordingLinksOut(t *testing.T) {
+	project := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(project, "keploy")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	t.Chdir(project)
+	set := filepath.Join("keploy", "test-set-1")
+	err := MkdirAllInRecording(set, filepath.Join(set, "tests"), 0o755)
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("MkdirAllInRecording: %v, want it refused", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where the keploy link leads", len(entries))
+	}
+}
+
+// A link inside the folder being copied, or inside the copy, that crosses
+// from one of its sub-folders to another is followed: only a link out of the
+// whole folder is refused.
+func TestCopyDirFollowsALinkInsideAcrossItsSubFolders(t *testing.T) {
+	src := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "set", "tests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "shared.yaml"), []byte("shared: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// src/set/tests/a.yaml -> ../../shared.yaml, a file of src outside set.
+	if err := os.Symlink(filepath.Join("..", "..", "shared.yaml"), filepath.Join(src, "set", "tests", "a.yaml")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	dest := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dest, "set"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dest, "kept"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// dest/set/tests -> ../kept, a folder of dest outside set.
+	if err := os.Symlink(filepath.Join("..", "kept"), filepath.Join(dest, "set", "tests")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyDir(src, src, dest, dest, false, zap.NewNop()); err != nil {
+		t.Fatalf("CopyDir: %v, want the links inside followed", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dest, "kept", "a.yaml")); err != nil || string(got) != "shared: 1\n" {
+		t.Fatalf("dest/kept/a.yaml holds %q (%v), want the shared file's text", got, err)
+	}
+}

@@ -265,3 +265,30 @@ func TestAGeneratedSchemaIsWrittenOnlyInsideTheRecording(t *testing.T) {
 		t.Fatalf("the schema left %v (%v) outside the recording", entries, err)
 	}
 }
+
+// pinnedPathDB is a testdb that keeps reading its own recording when the
+// contract points it at another path.
+type pinnedPathDB struct{ *testdb.TestYaml }
+
+func (pinnedPathDB) ChangePath(string) {}
+
+// The contract's keploy folder is made from the project, one folder at a
+// time: a path named from the working directory that is a link out of it is
+// refused, and no keploy folder is made where the link leads.
+func TestTheContractMakesNoFolderOutsideTheProject(t *testing.T) {
+	db, _ := recordLargeBody(t)
+	project := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(project, "app")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	t.Chdir(project)
+	s := &contract{logger: zap.NewNop(), testDB: pinnedPathDB{db}, config: &config.Config{Path: "app"}}
+	err := s.GenerateFromTests(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("GenerateFromTests: %v, want it refused", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where the link leads", len(entries))
+	}
+}

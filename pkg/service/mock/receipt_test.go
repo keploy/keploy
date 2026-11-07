@@ -1190,6 +1190,9 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 	// else.
 	untouched := func(t *testing.T, outside string) {
 		t.Helper()
+		if sets, err := os.ReadDir(outside); err != nil || len(sets) != 1 || sets[0].Name() != "set" {
+			t.Fatalf("outside holds %v (%v), want only the planted set", sets, err)
+		}
 		entries, err := os.ReadDir(filepath.Join(outside, "set"))
 		if err != nil || len(entries) != 3 {
 			t.Fatalf("outside holds %v (%v), want only the three planted receipts", entries, err)
@@ -1219,6 +1222,11 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 		writeReceipt(zap.NewNop(), keployDir, Receipt{Set: "set", OnMiss: "fail"})
 		writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Tests: []TestReceipt{{Name: "t1"}}})
 		writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set"}, []models.ScopeWindow{{Name: "t1"}})
+		// A run that named no tests removes the set's stale file, and a
+		// record's results for a new set make its folder.
+		writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set"})
+		writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set"}, nil)
+		writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set2"}, []models.ScopeWindow{{Name: "t1"}})
 	}
 
 	t.Run("a receipt that links out", func(t *testing.T) {
@@ -1243,5 +1251,28 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 		read(t, keployDir)
 		write(keployDir)
 		untouched(t, outside)
+	})
+	// keploy/.gitignore that links out is not read as the recording's: the
+	// receipts' entries are then added to it, which is refused with why.
+	t.Run("a .gitignore that links out", func(t *testing.T) {
+		outside, keployDir := layout(t)
+		gi := filepath.Join(outside, "gitignore")
+		all := strings.Join(receiptIgnore, "\n") + "\n"
+		if err := os.WriteFile(gi, []byte(all), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		symlink(t, filepath.Join("..", "..", "outside", "gitignore"), filepath.Join(keployDir, ".gitignore"))
+		core, logs := observer.New(zapcore.DebugLevel)
+		ignoreReceipts(zap.New(core), keployDir)
+		said := logs.FilterMessage("failed to git-ignore the replay receipt").All()
+		if len(said) != len(receiptIgnore) {
+			t.Fatalf("said %d times that an entry could not be added, want %d: %v", len(said), len(receiptIgnore), logs.All())
+		}
+		if why := fmt.Sprint(said[0].ContextMap()["error"]); !strings.Contains(why, "only inside") && !strings.Contains(why, "path escapes from parent") {
+			t.Fatalf("said %q, want it refused as outside the recording", why)
+		}
+		if b, err := os.ReadFile(gi); err != nil || string(b) != all {
+			t.Fatalf("the file the link leads to holds %q (%v)", b, err)
+		}
 	})
 }
