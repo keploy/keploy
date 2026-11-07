@@ -336,7 +336,7 @@ func TestInsertMock_TheFilePutInTheSetsPlaceHoldsItsMocks(t *testing.T) {
 	defer func(r func(*zap.Logger, string, string) error) { replaceFile = r }(replaceFile)
 	saved := replaceFile
 	replaceFile = func(l *zap.Logger, src, dst string) error {
-		ms, _, err := readGobMocksCut(src)
+		ms, _, err := readGobMocksCut(filepath.Dir(src), src)
 		if err != nil {
 			t.Errorf("the file put in the set's place does not read: %v", err)
 		}

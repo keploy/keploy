@@ -470,7 +470,12 @@ func ReadFileF(ctx context.Context, logger *zap.Logger, path, name string, forma
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the file: %v", err)
 	}
+	return readOpenFile(ctx, logger, file, filePath)
+}
 
+// readOpenFile reads file, opened at filePath, to its end or until ctx is
+// done, and closes it.
+func readOpenFile(ctx context.Context, logger *zap.Logger, file *os.File, filePath string) ([]byte, error) {
 	defer func() {
 		if err := file.Close(); err != nil {
 			utils.LogError(logger, err, "failed to close file", zap.String("file", filePath))
