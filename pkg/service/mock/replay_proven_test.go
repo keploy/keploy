@@ -1077,14 +1077,18 @@ func TestAReplayPushesTheMarkedNamesWithTheTable(t *testing.T) {
 }
 
 // A test owns a test mock only if a mock its mapping lists is held and
-// data-plane: a mapping of handshakes and DNS lookups alone owns none.
+// data-plane: a mapping of handshakes, DNS lookups and answers the client
+// never read alone owns none.
 func TestOwnsTestMocks(t *testing.T) {
 	data := &models.Mock{Name: "mock-0", Kind: models.HTTP}
 	cfg := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"type": "config"}}}
 	dns := &models.Mock{Name: "mock-2", Kind: models.DNS}
-	loaded := []*models.Mock{data, cfg, dns}
+	unread := &models.Mock{Name: "mock-3", Kind: models.Kind("Kafka"), Spec: models.MockSpec{Metadata: map[string]string{"type": "mocks"}}}
+	unread.MarkUndelivered()
+	loaded := []*models.Mock{data, cfg, dns, unread}
 	require.True(t, ownsTestMocks(map[string][]string{"o::TestA": {"mock-1", "mock-0"}}, loaded))
 	require.False(t, ownsTestMocks(map[string][]string{"o::TestA": {"mock-1", "mock-2"}, "o::TestB": {}}, loaded))
+	require.False(t, ownsTestMocks(map[string][]string{"o::TestA": {"mock-3"}, "o::TestB": {"mock-1"}}, loaded))
 	require.False(t, ownsTestMocks(map[string][]string{}, loaded))
 }
 

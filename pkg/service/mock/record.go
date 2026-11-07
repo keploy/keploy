@@ -1273,10 +1273,15 @@ type capturedMock struct {
 	end  time.Time
 	boot bool
 	// protocol: protocol-phase under the proven switch (models.Mock.IsProtocolPhase),
-	// so in no test's mapping and in the pool.
+	// or, under either, an answer the client never read
+	// (models.Mock.IsUndelivered), which no replay serves: so in no test's
+	// mapping and in the pool.
 	protocol bool
-	start    string
-	ref      string
+	// unread: an answer the client never read (models.Mock.IsUndelivered),
+	// so, under either switch, among no case's mocks either (correlateCases).
+	unread bool
+	start  string
+	ref    string
 	// instance is the keploy instance (a test worker's) the call's
 	// connection was stamped with (models.Mock.Instance): only a window of
 	// that worker's (ScopeWindow.Instance) holds it. 0 for none.
@@ -1292,8 +1297,11 @@ func capturedOf(mk *models.Mock) capturedMock {
 	typ := mk.Spec.Metadata["type"]
 	// Under the proven switch a protocol-phase mock is the pool's, never
 	// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
-	protocol := provenswitch.On() && mk.IsProtocolPhase()
-	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef}
+	// So is an answer the client never read, under either switch: no test
+	// makes the call it recorded.
+	unread := mk.IsUndelivered()
+	protocol := provenswitch.On() && mk.IsProtocolPhase() || unread
+	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, unread: unread, start: mk.Start, ref: mk.StartRef}
 }
 
 // stagingSetID returns the staging set name record captures into while recording
@@ -1446,7 +1454,8 @@ func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []un
 }
 
 // dataPlane is the captured mocks less the protocol-phase ones (none
-// without the proven switch): only data-plane mocks go in a test's mapping.
+// without the proven switch) and the answers the client never read
+// (capturedMock.protocol): only data-plane mocks go in a test's mapping.
 func dataPlane(mocks []capturedMock) []capturedMock {
 	out := mocks[:0:0]
 	for _, mk := range mocks {
@@ -1458,6 +1467,8 @@ func dataPlane(mocks []capturedMock) []capturedMock {
 }
 
 // correlateCases lists each flow's test cases by the window their request fell in; a case outside every window stays unmapped.
+// A case's mocks are the calls made in its span but the boot ones and the
+// answers the client never read (capturedMock.unread), which no replay serves.
 func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, steps []models.ScopeWindow) map[string]models.MappedTestCase {
 	byTest := make(map[string]models.MappedTestCase)
 	spans := make(map[string]models.ScopeWindow, len(cases))
@@ -1475,7 +1486,7 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 	var own []capturedMock
 	at := make(map[string]time.Time, len(mocks))
 	for _, mk := range mocks {
-		if !mk.boot {
+		if !mk.boot && !mk.unread {
 			own = append(own, mk)
 			at[mk.name] = mk.ts
 		}

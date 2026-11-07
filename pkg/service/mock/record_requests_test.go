@@ -1214,3 +1214,54 @@ func TestAMappingListsDataPlaneMocksOnly(t *testing.T) {
 	require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0"}, {Name: "mock-1"}, {Name: "mock-2"}}}, correlateScopes(windows, dataPlane(mocks)))
 	require.Empty(t, startupMocks(windows, mocks, nil))
 }
+
+// An answer the client never read (models.Mock.IsUndelivered), made inside a
+// test, is in no test's mapping under either switch: no replay serves it, so
+// no test makes the call it recorded. It goes to the pool (startup:), which
+// requires none, while the answer the client read beside it is the test's.
+func TestAMappingListsNoAnswerTheClientNeverRead(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{{Name: "o::TestA", Start: at(0), End: at(100)}}
+	mock := func(name string, ms int, unread bool) *models.Mock {
+		m := &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"type": "HTTP_CLIENT"}, ReqTimestampMock: at(ms)}}
+		if unread {
+			m.MarkUndelivered()
+		}
+		return m
+	}
+	for _, on := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, on)
+			mocks := []capturedMock{capturedOf(mock("mock-0", 10, false)), capturedOf(mock("mock-1", 20, true))}
+			require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0", Kind: "Http"}}}, correlateScopes(windows, dataPlane(mocks)))
+			require.Equal(t, []models.MockEntry{{Name: "mock-1", Kind: "Http"}}, startupMocks(windows, mocks, nil))
+			// With a runner's starts (classify), filed by its start's worker
+			// and by its own pid alike.
+			tests := []models.ScopeWindow{{Name: "o::TestA", Start: at(0), End: at(100), PID: 10}}
+			starts := []models.ScopeWindow{{App: true, Ref: "s1", Name: "app#1", Dir: "/r", Program: "app", N: 1, Ready: at(5), Worker: 10}}
+			var withStarts []capturedMock
+			for _, c := range mocks {
+				byStart, byPID := c, c
+				byStart.name, byStart.ref = c.name+"@s1", "s1"
+				byPID.pid = 10
+				withStarts = append(withStarts, byStart, byPID)
+			}
+			plan := classify(tests, starts, []models.SuiteSpan{{Dir: "/r", Start: at(0), End: at(200)}}, withStarts)
+			require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0@s1", Kind: "Http", Start: "app#1"}, {Name: "mock-0", Kind: "Http"}}}, plan.tests)
+			// A case's mocks list it on neither path either: correlateCases
+			// reads every mock in the case's span, with starts (perTest) and
+			// without (every mock recorded).
+			cases := []capturedMock{{name: "case-1", ts: at(5), end: at(30)}}
+			for path, owned := range map[string][]capturedMock{"with starts": plan.perTest, "without starts": mocks} {
+				var listed []string
+				for _, tc := range correlateCases(windows, owned, cases, nil) {
+					listed = append(listed, tc.CaseMocks["case-1"]...)
+				}
+				require.NotEmpty(t, listed, "%s: the case's mocks", path)
+				for _, n := range listed {
+					require.NotContains(t, n, "mock-1", "%s: a case's mocks list an answer the client never read", path)
+				}
+			}
+		})
+	}
+}

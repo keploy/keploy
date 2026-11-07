@@ -2564,6 +2564,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// (excludedFromTestMockAssertion): a test owns every data-plane mock its
 	// mapping lists, whatever tier DeriveLifetime gives it.
 	reusableMockNames := make(map[string]bool)
+	// undeliveredMockNames marks the answers the client never read
+	// (models.Mock.IsUndelivered), which no replay serves: the report's
+	// expected side leaves them out (buildExpectedMockInfos,
+	// reportedExpectedNames), whatever mapping names one.
+	undeliveredMockNames := make(map[string]bool)
 	// mockLookup maps a mock's name to its summary, protocol and target, for
 	// the report: the per-test and session mocks as recorded. Built as the
 	// mocks are loaded (loadTestSetMocks), or below, before the tests run,
@@ -2574,6 +2579,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			mockKindByName[m.Name] = m.Kind
 			if excludedFromTestMockAssertion(m) {
 				reusableMockNames[m.Name] = true
+			}
+			if m.IsUndelivered() {
+				undeliveredMockNames[m.Name] = true
 			}
 		}
 	}
@@ -4848,7 +4856,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// missing expectation for any name that appears in both
 					// sections. Report-only — MockMismatches does not drive the
 					// pass/fail or obsolescence verdict.
-					expectedMockInfos := dropStartupMockInfos(buildExpectedMockInfos(expectedMocks, mockKindByName), startupMockNames)
+					expectedMockInfos := dropStartupMockInfos(buildExpectedMockInfos(expectedMocks, mockKindByName, undeliveredMockNames), startupMockNames)
 					actualMockInfos := dropStartupMockInfos(buildActualMockInfos(perTestConsumed, perTestConsumedKnown), startupMockNames)
 
 					// FIRST WRITER of models.Result.DepResult
@@ -5734,20 +5742,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.Strings("mockNames", mockNames))
 
 			if mockSetMismatch {
+				reportedExpected := reportedExpectedNames(expectedMocks, undeliveredMockNames)
 				if testPass {
 					r.logger.Debug("mock mapping mismatch ignored because streaming testcase passed",
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
-						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
 				} else if len(streamTemplateFailures) > 0 {
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
 						zap.String("reason", vetoTemplateFailure),
-						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
-					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
 				} else if len(streamUnconsumed) > 0 || streamCallsMissed > 0 || streamLostCapture {
 					reason := vetoUnconsumedTestMock
 					switch {
@@ -5763,9 +5771,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
 						zap.String("reason", reason),
-						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
-					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
 				} else if r.strictFailure() {
 					// Under the switch, or --strict-failure, a failed answer is
 					// FAILED whatever the mock set did (the verdict below): the
@@ -5775,16 +5782,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
 						zap.String("reason", vetoFlagName(false, true)),
-						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
-					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
 				} else {
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking as obsolete",
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
-						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
-					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
+				}
+				// Every failing branch above lists the mismatch, on the
+				// expected side as the report reads it.
+				if !testPass {
+					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, reportedExpected, mockNames)
 				}
 			}
 
@@ -10162,15 +10172,17 @@ func isMockSubset(actual []string, expected []string) bool {
 // resolution order is non-deterministic, and connection failures, which
 // nothing consumes at replay yet) are filtered out both at the entry level and
 // via the mockKindByName lookup; listed here they would only ever show as
-// spurious "expected, not consumed" entries. Resolves an empty Kind by looking
-// up mockKindByName so the consumer always gets a kind label when one is
-// available.
+// spurious "expected, not consumed" entries. So are the answers the client
+// never read (undelivered: models.Mock.IsUndelivered), which no replay serves,
+// when a mapping names one (a hand edit, or another writer). Resolves an empty
+// Kind by looking up mockKindByName so the consumer always gets a kind label
+// when one is available.
 //
 // Extracted from RunTestSet for unit-testability.
-func buildExpectedMockInfos(expectedMocks []models.MockEntry, mockKindByName map[string]models.Kind) []models.MockMismatchMock {
+func buildExpectedMockInfos(expectedMocks []models.MockEntry, mockKindByName map[string]models.Kind, undelivered map[string]bool) []models.MockMismatchMock {
 	out := make([]models.MockMismatchMock, 0, len(expectedMocks))
 	for _, m := range expectedMocks {
-		if isUnassertedMockEntry(m, mockKindByName) {
+		if isUnassertedMockEntry(m, mockKindByName) || undelivered[m.Name] {
 			continue
 		}
 		resolvedKind := m.Kind
@@ -10302,6 +10314,21 @@ func newStreamingTest(testCase *models.TestCase, mappings map[string][]models.Mo
 		names[i] = m.Name
 	}
 	return streamingTest{testCase: &tcCopy, expectedMocks: names}
+}
+
+// reportedExpectedNames is expected, a streaming test's expected mock names,
+// as the mismatch report lists them: without the answers the client never
+// read (undelivered: models.Mock.IsUndelivered), which no replay serves, so
+// the report would name one as expected and not consumed. Only the report
+// reads it; the mock-set check reads expected as it is.
+func reportedExpectedNames(expected []string, undelivered map[string]bool) []string {
+	out := make([]string, 0, len(expected))
+	for _, name := range expected {
+		if !undelivered[name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // settledVerdict is one case's final result, held for the TestCaseReporter.

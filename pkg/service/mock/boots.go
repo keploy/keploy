@@ -36,13 +36,11 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 				continue
 			}
 			entry.Start = s.Name
-			out.tests[test] = append(out.tests[test], entry)
-			out.perTest = append(out.perTest, mk)
+			out.inTest(test, entry, mk)
 			continue
 		}
 		if test := testAt(tests, mk.pid, mk.instance, mk.ts); test != "" {
-			out.tests[test] = append(out.tests[test], entry)
-			out.perTest = append(out.perTest, mk)
+			out.inTest(test, entry, mk)
 			continue
 		}
 		dir := suiteAt(suites, mk.ts)
@@ -101,4 +99,17 @@ func suiteAt(suites []models.SuiteSpan, at time.Time) string {
 		}
 	}
 	return best
+}
+
+// inTest files mk, captured in test's window, as that test's: in its
+// mapping, unless it is a protocol mock (capturedMock.protocol: under the
+// proven switch a protocol-phase one, and under either an answer the client
+// never read), which, as in correlateScopes' dataPlane, no test's mapping
+// lists; and among the mocks its cases are correlated with, which
+// correlateCases reads as the path without starts does.
+func (p *bootPlan) inTest(test string, entry models.MockEntry, mk capturedMock) {
+	if !mk.protocol {
+		p.tests[test] = append(p.tests[test], entry)
+	}
+	p.perTest = append(p.perTest, mk)
 }

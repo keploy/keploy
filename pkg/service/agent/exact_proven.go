@@ -421,7 +421,9 @@ func (a *Agent) openExactTest(es coreAgent.ExactServer, test string, owned []*mo
 }
 
 // testMocks is the test mocks among a test's mapped names: the data-plane
-// mocks, each once, in recorded order (by request time; a mapping lists a
+// mocks but the answers the client never read (models.Mock.OutsideTestScopes:
+// a mapping written before the tag, or by another writer, may list one, and
+// no replay serves it), each once, in recorded order (by request time; a mapping lists a
 // test's mocks in recorded order, which keeps ties, and an undated mock
 // before the dated ones).
 func testMocks(names []string, byName map[string]*models.Mock) []*models.Mock {
@@ -429,7 +431,7 @@ func testMocks(names []string, byName map[string]*models.Mock) []*models.Mock {
 	seen := make(map[string]bool, len(names))
 	for _, n := range names {
 		mk := byName[n]
-		if mk == nil || seen[n] || mk.IsProtocolPhase() {
+		if mk == nil || seen[n] || mk.OutsideTestScopes() {
 			continue
 		}
 		seen[n] = true

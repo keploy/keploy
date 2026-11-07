@@ -51,8 +51,9 @@ type ClientMockStorage struct {
 	// (variables this keploy cannot follow, followable): each was logged as
 	// it was refused. A mapping that lists one owns nothing for it, and the
 	// call it recorded misses (mocksByName). The value says whether the mock
-	// is a test mock (data-plane): one is a recorded call its test is judged
-	// for (refusedOf).
+	// is a test mock (data-plane, and no answer the client never read:
+	// models.Mock.OutsideTestScopes): one is a recorded call its test is
+	// judged for (refusedOf).
 	refused map[string]bool
 	// statements is the set's statement catalog, read from diskMocks once
 	// when it is built (DiskMocks.LoadStatements) and seeded on the proxy when
@@ -1548,7 +1549,7 @@ func (s *ClientMockStorage) noteRefused(mock *models.Mock) {
 	if s.refused == nil {
 		s.refused = map[string]bool{}
 	}
-	s.refused[mock.Name] = !mock.IsProtocolPhase()
+	s.refused[mock.Name] = !mock.OutsideTestScopes()
 }
 
 // maxStreamPresize bounds the slice capacity pre-allocated from a /storemocks
