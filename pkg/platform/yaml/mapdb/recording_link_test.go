@@ -85,3 +85,84 @@ func TestASetsMappingsAreReadOnlyInsideTheRecording(t *testing.T) {
 		t.Fatalf("GetMapping with a link inside: %+v, %v", m, err)
 	}
 }
+
+// linkOut makes a relative link at path to target, which need not exist.
+func linkOut(t *testing.T, target, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(filepath.Dir(path), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rel, path); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+}
+
+// A mappings file that links to nothing, out of the recording, is refused
+// like any other link out: the write leaves the link as it is, and a set
+// folder that links out gets no file, and loses none.
+func TestASetsMappingsAreWrittenOnlyInsideTheRecording(t *testing.T) {
+	ctx := context.Background()
+	refused := func(t *testing.T, what string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "only inside its recording") {
+			t.Fatalf("%s: %v, want it refused as outside the recording", what, err)
+		}
+	}
+	byTest := map[string][]models.MockEntry{"t1": {{Name: "mock-0"}}}
+	t.Run("a link to nothing", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "keploy")
+		file := filepath.Join(root, "set", "mappings.yaml")
+		linkOut(t, filepath.Join(base, "nothing.yaml"), file)
+		db := New(zap.NewNop(), root, "")
+		refused(t, "UpsertBatch", db.UpsertBatch(ctx, "set", byTest))
+		if info, err := os.Lstat(file); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link is gone: %v, %v", info, err)
+		}
+		if _, err := os.Lstat(filepath.Join(base, "nothing.yaml")); !os.IsNotExist(err) {
+			t.Fatalf("the write created the file the link names: %v", err)
+		}
+	})
+	t.Run("a set folder that links out", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "keploy")
+		out := filepath.Join(base, "outside")
+		if err := os.MkdirAll(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		linkOut(t, out, filepath.Join(root, "set"))
+		db := New(zap.NewNop(), root, "")
+		for _, c := range []struct {
+			name string
+			call func() error
+		}{
+			{"Insert", func() error { return db.Insert(ctx, &models.Mapping{TestSetID: "set"}) }},
+			{"UpsertBatch", func() error { return db.UpsertBatch(ctx, "set", byTest) }},
+			{"UpsertWorker", func() error { return db.UpsertWorker(ctx, "set", []models.MockEntry{{Name: "mock-0"}}) }},
+			{"UpsertConcurrency", func() error {
+				return db.UpsertConcurrency(ctx, "set", []models.ConcurrencyGroup{{ID: "g", Tests: []string{"t1"}}}, nil)
+			}},
+			{"UpsertBoots", func() error { return db.UpsertBoots(ctx, "set", []models.BootSpec{{}}) }},
+			{"UpsertCases", func() error {
+				return db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"t1": {}}, nil, nil)
+			}},
+		} {
+			refused(t, c.name, c.call())
+			if entries, err := os.ReadDir(out); err != nil || len(entries) != 0 {
+				t.Fatalf("%s left %v (%v) outside the recording", c.name, entries, err)
+			}
+		}
+		kept := filepath.Join(out, "mappings.yaml")
+		if err := os.WriteFile(kept, []byte("KEEP ME\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		refused(t, "Delete", db.Delete(ctx, "set"))
+		if _, err := os.Stat(kept); err != nil {
+			t.Fatalf("Delete removed the file outside the recording: %v", err)
+		}
+	})
+}

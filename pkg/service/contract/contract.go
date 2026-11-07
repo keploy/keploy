@@ -222,6 +222,12 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 }
 
 // GenerateMocksSchemas generates mock schemas based on the provided services and mappings.
+// writeSchema writes a schema file in dir, a folder of keploy's schema folder,
+// inside the recording (s.config.Path).
+func (s *contract) writeSchema(ctx context.Context, dir, name string, openapi models.OpenAPI, isAppend bool) error {
+	return s.openAPIDB.WriteSchema(ctx, s.logger, s.config.Path, filepath.Join(s.config.Path, "schema", dir), name, openapi, isAppend)
+}
+
 func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, mappings map[string][]string) error {
 
 	// Retrieve all test set IDs from the test database.
@@ -294,7 +300,7 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 						}
 
 						// Write the OpenAPI document to the specified directory.
-						err = s.openAPIDB.WriteSchema(ctx, s.logger, filepath.Join(s.config.Path, "schema", "mocks", service, testSetID), "mocks", openapi, isAppend)
+						err = s.writeSchema(ctx, filepath.Join("mocks", service, testSetID), "mocks", openapi, isAppend)
 						if err != nil {
 							utils.LogError(s.logger, err, "failed to write the OpenAPI schema")
 							return err
@@ -353,7 +359,7 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 				return err
 			}
 			// Save it using the OpenAPIDB
-			err = s.openAPIDB.WriteSchema(ctx, s.logger, filepath.Join(s.config.Path, "schema", "tests", testSetID), tc.Name, openapi, false)
+			err = s.writeSchema(ctx, filepath.Join("tests", testSetID), tc.Name, openapi, false)
 			if err != nil {
 				utils.LogError(s.logger, err, "failed to write the OpenAPI schema")
 				return err
@@ -484,7 +490,7 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 	}
 
 	outputPath := filepath.Join(keployPath, "contract.yaml")
-	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+	if err := yaml.WriteFileInRecording(keployPath, outputPath, data, 0o644); err != nil {
 		utils.LogError(s.logger, err, "failed to write inferred OpenAPI schema", zap.String("path", outputPath))
 		return err
 	}

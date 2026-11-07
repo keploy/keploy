@@ -195,3 +195,59 @@ func TestGetReportReadsAReportPast128MiB(t *testing.T) {
 		t.Fatalf("GetReport read %d tests, not the %d written", len(got.Tests), tests)
 	}
 }
+
+// A report whose file, or whose test run's folder, leads out of the reports
+// folder is refused, with why, and what it leads to is left as it was.
+func TestAReportIsWrittenOnlyInsideTheReportsFolder(t *testing.T) {
+	ctx := context.Background()
+	link := func(t *testing.T, target, path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rel, err := filepath.Rel(filepath.Dir(path), target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(rel, path); err != nil {
+			t.Skipf("cannot make a symbolic link here: %v", err)
+		}
+	}
+	refused := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "only inside its recording") {
+			t.Fatalf("InsertReport: %v, want it refused as outside the reports folder", err)
+		}
+	}
+	t.Run("the report's file links out", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "reports")
+		out := filepath.Join(base, "outside.yaml")
+		if err := os.WriteFile(out, []byte("KEEP ME\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		file := filepath.Join(root, "test-run-0", "set-report.yaml")
+		link(t, out, file)
+		refused(t, New(zap.NewNop(), root).InsertReport(ctx, "test-run-0", "set", &models.TestReport{}))
+		if got, err := os.ReadFile(out); err != nil || string(got) != "KEEP ME\n" {
+			t.Fatalf("the file outside holds %q (%v)", got, err)
+		}
+		if info, err := os.Lstat(file); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link is gone: %v, %v", info, err)
+		}
+	})
+	t.Run("the run's folder links out", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "reports")
+		out := filepath.Join(base, "outside")
+		if err := os.MkdirAll(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		link(t, out, filepath.Join(root, "test-run-0"))
+		refused(t, New(zap.NewNop(), root).InsertReport(ctx, "test-run-0", "set", &models.TestReport{}))
+		refused(t, New(zap.NewNop(), root).UpdateReport(ctx, "test-run-0", map[string]int{"covered": 1}))
+		if entries, err := os.ReadDir(out); err != nil || len(entries) != 0 {
+			t.Fatalf("the report left %v (%v) outside the folder", entries, err)
+		}
+	})
+}

@@ -249,7 +249,7 @@ func (ts *TestYaml) nextSlugIndex(tcsPath, slug string) (int, error) {
 
 // replaceFile puts a written test case in place of its file
 // (yaml.ReplaceFile); tests swap it to make the replace fail.
-var replaceFile = yaml.ReplaceFile
+var replaceFile = yaml.ReplaceFileInRecording
 
 type tcsInfo struct {
 	name string
@@ -560,7 +560,7 @@ func (ts *TestYaml) ReplaceFiles(ctx context.Context, files []yaml.File) error {
 	// The recordings the group replaces, named before it is stored, for
 	// the re-key rule (rekey.go).
 	rks := ts.beginRekeys(files)
-	if err := replaceFiles(ts.logger, files); err != nil {
+	if err := replaceFiles(ts.logger, ts.TcsPath, files); err != nil {
 		return err
 	}
 	for _, k := range rks {
@@ -734,7 +734,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	defer func() {
 		if reservedPlaceholder && !writeSucceeded {
 			placeholder := filepath.Join(tcsPath, tcsName+"."+ts.Format.FileExtension())
-			if rmErr := os.Remove(placeholder); rmErr != nil && !os.IsNotExist(rmErr) {
+			if rmErr := yaml.RemoveInRecording(ts.TcsPath, placeholder); rmErr != nil && !os.IsNotExist(rmErr) {
 				// This is a secondary failure during error handling —
 				// the primary upsert error is already returned to the
 				// caller. Surface the cleanup miss at Debug so it
@@ -777,11 +777,11 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("invalid testcase path: %w", err)
 	}
 
-	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
+	if err := yaml.MkdirAllInRecording(ts.TcsPath, tcsPath, 0o755); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create tests directory: %w", err)
 	}
 
-	tmpFile, err := os.CreateTemp(tcsPath, tcsName+"*"+ext+".tmp")
+	tmpFile, err := yaml.CreateTempInRecording(ts.TcsPath, tcsPath, tcsName+"*"+ext+".tmp", 0o600)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -790,7 +790,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	defer func() {
 		if cleanup {
 			tmpFile.Close()
-			os.Remove(tmpPath)
+			_ = yaml.RemoveInRecording(ts.TcsPath, tmpPath)
 		}
 	}()
 
@@ -837,8 +837,8 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	//
 	// outPath carries the configured ts.Format extension (yaml or
 	// json), so this works equally for both storage formats.
-	if err := replaceFile(ts.logger, tmpPath, outPath); err != nil {
-		os.Remove(tmpPath)
+	if err := replaceFile(ts.logger, ts.TcsPath, tmpPath, outPath); err != nil {
+		_ = yaml.RemoveInRecording(ts.TcsPath, tmpPath)
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to replace the testcase file with its temp file: %w", err)
 	}
 
@@ -979,7 +979,7 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 		return "", fmt.Errorf("validate testcase directory: %w", err)
 	}
 	tcsPath = validatedPath
-	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
+	if err := yaml.MkdirAllInRecording(ts.TcsPath, tcsPath, 0o755); err != nil {
 		return "", fmt.Errorf("create testcase directory: %w", err)
 	}
 	var lastName string
@@ -997,7 +997,7 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 		// correct outcome — the placeholder is bound to a particular
 		// {name, format} pair.
 		target := filepath.Join(tcsPath, name+"."+ts.Format.FileExtension())
-		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		f, err := yaml.OpenFileInRecording(ts.TcsPath, target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err == nil {
 			// Surface any Close error to the caller — on networked
 			// filesystems (NFS, SMB) Close is when some writes are
@@ -1005,7 +1005,7 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 			// proceed. Remove the half-reserved file first so a
 			// retry picks a fresh name rather than EEXIST-looping.
 			if closeErr := f.Close(); closeErr != nil {
-				_ = os.Remove(target)
+				_ = yaml.RemoveInRecording(ts.TcsPath, target)
 				return "", fmt.Errorf("close reserved testcase file %q: %w", name, closeErr)
 			}
 			return name, nil
@@ -1025,7 +1025,7 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 	for _, testCaseID := range testCaseIDs {
-		err := yaml.DeleteFileF(ctx, ts.logger, path, testCaseID, ts.Format)
+		err := yaml.DeleteRecordingFileF(ts.logger, ts.TcsPath, path, testCaseID, ts.Format)
 		if err != nil {
 			ts.logger.Error("failed to delete the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
 			return err
@@ -1036,7 +1036,7 @@ func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseI
 
 func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
 	path := filepath.Join(ts.TcsPath, testSetID)
-	err := yaml.DeleteDir(ctx, ts.logger, path)
+	err := yaml.DeleteRecordingDir(ts.logger, ts.TcsPath, path)
 	if err != nil {
 		ts.logger.Error("failed to delete the testset", zap.String("testset id", testSetID))
 		return err
@@ -1131,7 +1131,7 @@ func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, tes
 			return err
 		}
 		out = append(out, '\n')
-		if err := yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, out, false, detected); err != nil {
+		if err := yaml.WriteRecordingFileF(ctx, ts.logger, ts.TcsPath, tcsPath, testCaseID, out, false, detected); err != nil {
 			utils.LogError(ts.logger, err, "failed to write testcase file")
 			return err
 		}
@@ -1149,7 +1149,7 @@ func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, tes
 		utils.LogError(ts.logger, err, "failed to marshal the testcase")
 		return err
 	}
-	err = yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, data, false, detected)
+	err = yaml.WriteRecordingFileF(ctx, ts.logger, ts.TcsPath, tcsPath, testCaseID, data, false, detected)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to write testcase file")
 		return err
@@ -1184,13 +1184,13 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 	// 1. Offload large request body (>1MB) to assets directory
 	if len(tc.HTTPReq.Body) > LargeBodyThreshold {
 		assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName)
-		if err := os.MkdirAll(assetDir, 0o755); err != nil {
+		if err := yaml.MkdirAllInRecording(ts.TcsPath, assetDir, 0o755); err != nil {
 			utils.LogError(ts.logger, err, "failed to create assets directory for body", zap.String("path", assetDir))
 			return err
 		}
 		bodyPath := filepath.Join(assetDir, "body.txt")
 		bodyBytes := []byte(tc.HTTPReq.Body)
-		if err := os.WriteFile(bodyPath, bodyBytes, 0o644); err != nil {
+		if err := yaml.WriteFileInRecording(ts.TcsPath, bodyPath, bodyBytes, 0o644); err != nil {
 			utils.LogError(ts.logger, err, "failed to write request body asset", zap.String("path", bodyPath))
 			return err
 		}
@@ -1251,13 +1251,13 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 							formKey = "form"
 						}
 						assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName, formKey)
-						if err := os.MkdirAll(assetDir, 0o755); err != nil {
+						if err := yaml.MkdirAllInRecording(ts.TcsPath, assetDir, 0o755); err != nil {
 							utils.LogError(ts.logger, err, "failed to create assets directory for form value", zap.String("path", assetDir))
 							return err
 						}
 						fileName := fmt.Sprintf("value_%d.txt", j)
 						destPath := filepath.Join(assetDir, fileName)
-						if err := os.WriteFile(destPath, []byte(value), 0o644); err != nil {
+						if err := yaml.WriteFileInRecording(ts.TcsPath, destPath, []byte(value), 0o644); err != nil {
 							utils.LogError(ts.logger, err, "failed to write large form value asset", zap.String("path", destPath))
 							return err
 						}
@@ -1287,7 +1287,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				formKey = "form"
 			}
 			assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName, formKey)
-			if err := os.MkdirAll(assetDir, 0o755); err != nil {
+			if err := yaml.MkdirAllInRecording(ts.TcsPath, assetDir, 0o755); err != nil {
 				utils.LogError(ts.logger, err, "failed to create assets directory", zap.String("path", assetDir))
 				return err
 			}
@@ -1317,7 +1317,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 							utils.LogError(ts.logger, err, "failed to open temp asset file", zap.String("path", srcPath))
 							return err
 						}
-						output, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+						output, err := yaml.OpenFileInRecording(ts.TcsPath, destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 						if err != nil {
 							input.Close()
 							utils.LogError(ts.logger, err, "failed to create asset file", zap.String("path", destPath))
@@ -1347,7 +1347,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				} else if j < len(form.FileContents) && form.FileContents[j] != nil {
 					// Case 1b: File content travelled with the test case (captured
 					// in another process, e.g. the DaemonSet agent)
-					if err := os.WriteFile(destPath, form.FileContents[j], 0o644); err != nil {
+					if err := yaml.WriteFileInRecording(ts.TcsPath, destPath, form.FileContents[j], 0o644); err != nil {
 						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
 						return err
 					}
@@ -1355,7 +1355,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				} else if j < len(form.Values) {
 					// Case 2: File content is in Values (legacy/text fallback)
 					content := []byte(form.Values[j])
-					if err := os.WriteFile(destPath, content, 0o644); err != nil {
+					if err := yaml.WriteFileInRecording(ts.TcsPath, destPath, content, 0o644); err != nil {
 						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
 						return err
 					}

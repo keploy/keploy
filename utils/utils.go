@@ -1727,12 +1727,20 @@ type PermissionError struct {
 }
 
 // AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
+// AddToGitIgnore adds ignoreString to path's .gitignore. The file is opened
+// inside path (os.Root): keploy/.gitignore comes with a cloned repository, so
+// one that links out of path is refused, with why, and what it leads to is
+// not written. A link that stays inside path is followed.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
-	gitignorePath := path + "/.gitignore"
-
-	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
+	root, err := os.OpenRoot(path)
 	if err != nil {
-		return fmt.Errorf("error opening or creating .gitignore file: %v", err)
+		return fmt.Errorf("error opening the folder of the .gitignore file: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	file, err := root.OpenFile(".gitignore", os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return fmt.Errorf("the .gitignore file is written only inside %q: %w", path, err)
 	}
 
 	defer func() {

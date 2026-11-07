@@ -31,13 +31,11 @@ func New(logger *zap.Logger, openAPIPath string) *OpenAPIYaml {
 	}
 }
 func (ts *OpenAPIYaml) GetTestCasesSchema(ctx context.Context, testSetID string, testPath string) ([]*models.OpenAPI, error) {
-	var path string
-	if testPath == "" {
-		path = filepath.Join(ts.OpenAPIPath, testSetID)
-
-	} else {
-		path = filepath.Join(testPath, testSetID)
+	root := testPath
+	if root == "" {
+		root = ts.OpenAPIPath
 	}
+	path := filepath.Join(root, testSetID)
 
 	tcs := []*models.OpenAPI{}
 	TestPath, err := yaml.ValidatePath(path)
@@ -66,7 +64,7 @@ func (ts *OpenAPIYaml) GetTestCasesSchema(ctx context.Context, testSetID string,
 	for _, j := range files {
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		data, err := yaml.ReadFile(ctx, ts.logger, TestPath, name)
+		data, err := yaml.ReadRecordingFileF(ctx, ts.logger, root, TestPath, name, yaml.FormatYAML)
 		if err != nil {
 			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
 			return nil, err
@@ -89,7 +87,8 @@ func (ts *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 
 	var tcsMocks = make([]*models.OpenAPI, 0)
 
-	path := filepath.Join(mockPath, testSetID)
+	root := mockPath
+	path := filepath.Join(root, testSetID)
 	mockPath, err := yaml.ValidatePath(path + "/" + mockFileName + ".yaml")
 	if err != nil {
 		return nil, err
@@ -106,7 +105,7 @@ func (ts *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 	}
 	if err == nil {
 		var mockYamls []*models.OpenAPI
-		data, err := yaml.ReadFile(ctx, ts.logger, path, mockFileName)
+		data, err := yaml.ReadRecordingFileF(ctx, ts.logger, root, path, mockFileName, yaml.FormatYAML)
 		if err != nil {
 			utils.LogError(ts.logger, err, "failed to read the mocks from config yaml", zap.String("session", filepath.Base(path)))
 			return nil, err
@@ -138,14 +137,16 @@ func (ts *OpenAPIYaml) ChangePath(path string) {
 	ts.OpenAPIPath = path
 }
 
-func (ts *OpenAPIYaml) WriteSchema(ctx context.Context, logger *zap.Logger, outputPath, name string, openapi models.OpenAPI, isAppend bool) error {
+// WriteSchema writes a schema file, name, in outputPath, a folder of the
+// recording at root (see yaml.WriteRecordingFileF).
+func (ts *OpenAPIYaml) WriteSchema(ctx context.Context, logger *zap.Logger, root, outputPath, name string, openapi models.OpenAPI, isAppend bool) error {
 	openapiYAML, err := yamlLib.Marshal(openapi)
 	if err != nil {
 		return err
 	}
-	_, err = os.Stat(outputPath)
+	_, err = yaml.StatInRecording(root, outputPath)
 	if os.IsNotExist(err) {
-		err = os.MkdirAll(outputPath, os.ModePerm)
+		err = yaml.MkdirAllInRecording(root, outputPath, os.ModePerm)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create directory", zap.String("directory", outputPath))
 			return err
@@ -153,7 +154,7 @@ func (ts *OpenAPIYaml) WriteSchema(ctx context.Context, logger *zap.Logger, outp
 		logger.Info("Directory created", zap.String("directory", outputPath))
 	}
 
-	err = yaml.WriteFile(ctx, logger, outputPath, name, openapiYAML, isAppend)
+	err = yaml.WriteRecordingFileF(ctx, logger, root, outputPath, name, openapiYAML, isAppend, yaml.FormatYAML)
 	if err != nil {
 		utils.LogError(logger, err, "failed to write OpenAPI YAML to a file", zap.String("outputPath", outputPath), zap.String("name", name))
 		return err

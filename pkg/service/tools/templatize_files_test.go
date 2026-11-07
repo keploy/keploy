@@ -255,7 +255,7 @@ type refusingRenames struct {
 }
 
 func (r refusingRenames) ReplaceFiles(_ context.Context, files []setfile.File) error {
-	return setfile.ReplaceFilesWith(zap.NewNop(), setfile.ReplaceHooks{Rename: func(src, dst string) error {
+	return setfile.ReplaceFilesWith(zap.NewNop(), r.TcsPath, setfile.ReplaceHooks{Rename: func(src, dst string) error {
 		if r.refuse(src) {
 			return &os.LinkError{Op: "rename", Old: src, New: dst, Err: errors.New("sharing violation")}
 		}
@@ -384,7 +384,7 @@ type killingStore struct {
 
 func (k killingStore) ReplaceFiles(_ context.Context, files []setfile.File) error {
 	count := 0
-	return setfile.ReplaceFilesWith(zap.NewNop(), setfile.ReplaceHooks{Step: func() {
+	return setfile.ReplaceFilesWith(zap.NewNop(), k.TcsPath, setfile.ReplaceHooks{Step: func() {
 		if count++; count == k.n {
 			panic(killedRun{})
 		}

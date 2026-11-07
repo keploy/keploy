@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/openapidb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -219,5 +220,48 @@ func TestTheContractReadsNoRequestBodyOutsideItsRecording(t *testing.T) {
 				t.Fatalf("no warning named test-1 of test-set-0 and said %q was refused as escaping the recording; logged:\n%v", path, logs.All())
 			}
 		})
+	}
+}
+
+// The contract is written only inside the recording: a keploy/contract.yaml
+// that links out is refused, with why, and what it leads to is kept.
+func TestTheContractIsWrittenOnlyInsideTheRecording(t *testing.T) {
+	db, tmp := recordLargeBody(t)
+	out := filepath.Join(tmp, "outside.txt")
+	if err := os.WriteFile(out, []byte("KEEP ME\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "outside.txt"), filepath.Join(tmp, "keploy", "contract.yaml")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	s := &contract{logger: zap.NewNop(), testDB: db, config: &config.Config{Path: filepath.Join(tmp, "keploy")}}
+	err := s.GenerateFromTests(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "only inside its recording") {
+		t.Fatalf("GenerateFromTests: %v, want it refused as outside the recording", err)
+	}
+	if got, err := os.ReadFile(out); err != nil || string(got) != "KEEP ME\n" {
+		t.Fatalf("the file outside holds %q (%v)", got, err)
+	}
+}
+
+// A generated schema is written only inside the recording: a keploy/schema
+// folder that links out is refused, with why, and gets nothing.
+func TestAGeneratedSchemaIsWrittenOnlyInsideTheRecording(t *testing.T) {
+	db, tmp := recordLargeBody(t)
+	root := filepath.Join(tmp, "keploy")
+	out := filepath.Join(tmp, "outside-schema")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "outside-schema"), filepath.Join(root, "schema")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	s := &contract{logger: zap.NewNop(), testDB: db, openAPIDB: openapidb.New(zap.NewNop(), filepath.Join(root, "schema")), config: &config.Config{Path: root}}
+	err := s.GenerateTestsSchemas(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "only inside its recording") {
+		t.Fatalf("GenerateTestsSchemas: %v, want it refused as outside the recording", err)
+	}
+	if entries, err := os.ReadDir(out); err != nil || len(entries) != 0 {
+		t.Fatalf("the schema left %v (%v) outside the recording", entries, err)
 	}
 }

@@ -201,7 +201,7 @@ func TestAGroupOfFilesReKeysEachTestCaseItRewrites(t *testing.T) {
 	p1, p2 := filepath.Join(dir, "set-1", "tests", "t1.yaml"), filepath.Join(dir, "set-1", "tests", "t2.yaml")
 
 	prev := replaceFiles
-	replaceFiles = func(*zap.Logger, []yamlLib.File) error { return errSharingViolation }
+	replaceFiles = func(*zap.Logger, string, []yamlLib.File) error { return errSharingViolation }
 	if err := ts.ReplaceFiles(t.Context(), group("?x=1")); !errors.Is(err, errSharingViolation) {
 		t.Fatalf("ReplaceFiles: %v", err)
 	}
@@ -287,7 +287,8 @@ func TestAFailedWriteReKeysNothing(t *testing.T) {
 }
 
 // A file of a group that lies outside the store's keploy directory is no
-// test case of it, and is not re-keyed.
+// test case of it: the group is refused, with why, the file is left as it
+// was, and nothing is re-keyed.
 func TestAGroupFileOutsideTheStoreIsNotReKeyed(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	dir, other := t.TempDir(), t.TempDir()
@@ -301,8 +302,15 @@ func TestAGroupFileOutsideTheStoreIsNotReKeyed(t *testing.T) {
 	}
 	r := &fakeRekeyer{}
 	useRekeyer(t, r)
-	if err := ts.ReplaceFiles(t.Context(), []yamlLib.File{f}); err != nil {
+	before, err := os.ReadFile(f.Path)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err := ts.ReplaceFiles(t.Context(), []yamlLib.File{f}); err == nil || !strings.Contains(err.Error(), "only inside its recording") {
+		t.Fatalf("ReplaceFiles of a file outside the store: %v, want it refused", err)
+	}
+	if after, err := os.ReadFile(f.Path); err != nil || string(after) != string(before) {
+		t.Fatalf("the file outside the store changed: %q (%v)", after, err)
 	}
 	if got := r.told(); len(got) != 0 {
 		t.Fatalf("a file outside the store was re-keyed: %v", got)

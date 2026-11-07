@@ -187,7 +187,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		utils.LogError(db.logger, err, "failed to encode mapping", zap.String("testSetID", testSetID))
 		return err
 	}
-	err = yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	err = yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to write mapping file", zap.String("path", mappingPath))
 		return err
@@ -396,7 +396,7 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 		return err
 	}
 
-	err = yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	err = yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to write mapping file during upsert",
 			zap.String("testSetID", testSetID))
@@ -444,7 +444,7 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 	if err != nil {
 		return err
 	}
-	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	return yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 }
 
 // MoveToWorker bakes recordings into the set's worker scope
@@ -519,7 +519,7 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	if err != nil {
 		return nil, err
 	}
-	if err := yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat); err != nil {
+	if err := yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat); err != nil {
 		return nil, err
 	}
 	return moved, nil
@@ -628,7 +628,7 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 	if err != nil {
 		return err
 	}
-	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	return yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 }
 
 // workerAt is when a worker-scope entry's request was recorded, for its
@@ -663,7 +663,7 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 	if err != nil {
 		return err
 	}
-	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	return yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 }
 
 // UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
@@ -750,7 +750,7 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	if err != nil {
 		return err
 	}
-	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	return yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 }
 
 func mergeMaps[V any](existing, incoming map[string]V) map[string]V {
@@ -813,7 +813,7 @@ func (db *MappingDb) Delete(_ context.Context, testSetID string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if err := yaml.RemoveInRecording(db.path, path); err != nil && !os.IsNotExist(err) {
 			utils.LogError(db.logger, err, "failed to delete the mapping file", zap.String("path", path))
 			return err
 		}
@@ -1037,5 +1037,5 @@ func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, must
 	if err != nil {
 		return err
 	}
-	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	return yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 }

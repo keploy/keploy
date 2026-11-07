@@ -371,9 +371,11 @@ func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, file
 	return nil
 }
 
-// CopyFile copies a single file from src to dst
+// CopyFile copies a single file from src to dst. Each is opened inside its own
+// folder, so a src or a dst that links out of it is refused: what it leads to
+// is neither copied nor written (see recording.go).
 func CopyFile(src, dst string, rename bool, logger *zap.Logger) error {
-	srcFile, err := os.Open(src)
+	srcFile, err := OpenInRecording(filepath.Dir(src), src)
 
 	if err != nil {
 		return err
@@ -387,7 +389,7 @@ func CopyFile(src, dst string, rename bool, logger *zap.Logger) error {
 	if rename {
 		dst = generateSchemaName(dst)
 	}
-	dstFile, err := os.Create(dst)
+	dstFile, err := OpenFileInRecording(filepath.Dir(dst), dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
 		return err
 	}
@@ -403,16 +405,11 @@ func CopyFile(src, dst string, rename bool, logger *zap.Logger) error {
 	}
 
 	// Ensure the copied file has the same permissions as the original file
-	srcInfo, err := os.Stat(src)
+	srcInfo, err := srcFile.Stat()
 	if err != nil {
 		return err
 	}
-	err = os.Chmod(dst, srcInfo.Mode())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return dstFile.Chmod(srcInfo.Mode())
 }
 
 // CopyDir recursively copies a directory tree, attempting to preserve permissions
