@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,9 +152,10 @@ func TestEachDropIsSaidAndSampled(t *testing.T) {
 	t.Run("memory pressure", func(t *testing.T) {
 		core, logs := observer.New(zapcore.DebugLevel)
 		m := New(zap.New(core))
-		for _, n := range []int64{1, 2, int64(sendDropSampleRate)} {
+		for _, n := range []uint64{1, 2, sendDropSampleRate} {
 			mock := addMockTo("p", false)
-			m.reportPressureDrop(mock, n, string(MockDroppedUnderPressure))
+			m.pressureSampled.Store(n - 1)
+			m.reportPressureDrop(mock, string(MockDroppedUnderPressure))
 			want := zapcore.DebugLevel
 			if n != 2 {
 				want = zapcore.WarnLevel
@@ -178,8 +180,8 @@ func TestEachDropIsSaidAndSampled(t *testing.T) {
 			if !strings.Contains(e.Message, "mock output had closed, or while none was set") || strings.Contains(e.Message, "overflow") {
 				t.Fatalf("closed drop %d said %q; want it said as a closed output's", i, e.Message)
 			}
-			if strings.Contains(e.Message, "LOSSY") != (i == 0) {
-				t.Fatalf("closed drop %d said %q; want LOSSY on the first alone", i, e.Message)
+			if strings.Contains(e.Message, "first such drop") != (i == 0) || strings.Contains(e.Message, "LOSSY") {
+				t.Fatalf("closed drop %d said %q; want the first called so, and none LOSSY: a call the app makes as the recording ends costs it nothing", i, e.Message)
 			}
 		}
 	})
@@ -236,9 +238,10 @@ func TestPressureLettingGoOfATakenMockIsCountedAndSaid(t *testing.T) {
 		m.holdLocked(heldMock{mock: held})
 		m.holdLocked(heldMock{mock: owed, owner: &resolvedWindow{}})
 		m.mu.Unlock()
+		_, _, addedBefore, _ := m.GetDropStats()
 		m.SetMemoryPressure(true)
-		if _, dropped, _, _ := m.GetDropStats(); dropped != 1 {
-			t.Fatalf("pressure drops %d; want the held mock counted, the one owed to its window not", dropped)
+		if _, dropped, added, _ := m.GetDropStats(); dropped != 1 || added != addedBefore-1 {
+			t.Fatalf("pressure drops %d, added %d of %d; want the held mock counted and no longer added, the one owed to its window not", dropped, added, addedBefore)
 		}
 		if !namedDrop(logs, zapcore.WarnLevel, held, MockDrop(heldLetGo)) {
 			t.Fatalf("no WARN names the held mock pressure let go: %v", logs.All())
@@ -351,5 +354,179 @@ func TestADropIsSaidWithTheOutputLockReleased(t *testing.T) {
 		if said == 0 || held != 0 {
 			t.Fatalf("closed %v: %d lines said, %d of them under outChanMu", closed, said, held)
 		}
+	}
+}
+
+// noDrops fails t unless d is what a session that took and dropped nothing
+// reports.
+func noDrops(t *testing.T, d SessionDrops) {
+	t.Helper()
+	if d.Added != 0 || d.Pressure != 0 || d.Capacity != 0 || len(d.Named) != 0 {
+		t.Fatalf("a session that took and dropped nothing reports %+v", d)
+	}
+}
+
+// A session reports what its manager took and dropped from its opening on, and
+// names what it dropped with why: the manager outlives a session, so a drop at
+// one session's stop is not the next one's loss. A mock dropped is in its
+// count alone, not also among those added.
+func TestASessionReportsItsOwnDrops(t *testing.T) {
+	m := New(zap.NewNop())
+	session := func(prefix string) (pressure, closed *models.Mock) {
+		t.Helper()
+		m.SetOutputChannel(make(chan *models.Mock, 4))
+		if got := m.AddMock(addMockTo(prefix+"-kept", true)); got != MockTaken {
+			t.Fatalf("%s: a session's mock: %q, want it taken", prefix, got)
+		}
+		m.SetMemoryPressure(true)
+		pressure = addMockTo(prefix+"-pressure", false)
+		if got := m.AddMock(pressure); got != MockDroppedUnderPressure {
+			t.Fatalf("%s: a mock of the pause: %q", prefix, got)
+		}
+		m.SetMemoryPressure(false)
+		m.CloseOutChan()
+		closed = addMockTo(prefix+"-closed", false)
+		if got := m.AddMock(closed); got != MockDroppedOutputClosed {
+			t.Fatalf("%s: a mock after the close: %q", prefix, got)
+		}
+		return pressure, closed
+	}
+	session("earlier")
+	mark := m.StartDropSession()
+	noDrops(t, m.DropsSince(mark))
+
+	pressure, closed := session("now")
+	got := m.DropsSince(mark)
+	if got.Added != 1 || got.Pressure != 1 || got.Capacity != 1 {
+		t.Fatalf("the session reports %+v, want the 1 kept as added and each drop in its count alone", got)
+	}
+	if len(got.Named) != 2 {
+		t.Fatalf("named %q, want this session's 2 drops", got.Named)
+	}
+	for i, want := range []struct {
+		mock *models.Mock
+		why  MockDrop
+	}{{pressure, MockDroppedUnderPressure}, {closed, MockDroppedOutputClosed}} {
+		for _, part := range []string{string(want.mock.Kind), want.mock.ConnectionID, string(want.why),
+			want.mock.Spec.ReqTimestampMock.Format(time.RFC3339Nano)} {
+			if !strings.Contains(got.Named[i], part) {
+				t.Fatalf("named %q, want it to say %q", got.Named[i], part)
+			}
+		}
+	}
+	noDrops(t, m.DropsSince(m.StartDropSession()))
+}
+
+// The report names the first dropNamesMax drops and counts them all: it is one
+// log line. A mock sent without AddMock (a DNS mock) is counted added and
+// dropped as any other, so one kept beside the drops still reports as added.
+func TestTheReportNamesTheFirstDropsAndCountsThemAll(t *testing.T) {
+	m := New(zap.NewNop()) // no output set: what is sent is dropped
+	mark := m.StartDropSession()
+	if got := m.AddMock(addMockTo("kept", true)); got != MockTaken {
+		t.Fatalf("a mock buffered with no output set: %q", got)
+	}
+	const drops = dropNamesMax + 4
+	for i := range drops {
+		m.SendConfigMock(addMockTo("c"+strconv.Itoa(i), true))
+	}
+	got := m.DropsSince(mark)
+	if got.Capacity != drops || got.Added != 1 {
+		t.Fatalf("the report counts %+v, want %d dropped and the 1 kept added", got, drops)
+	}
+	if len(got.Named) != dropNamesMax || !strings.Contains(got.Named[0], "c0,") {
+		t.Fatalf("named %q, want the first %d", got.Named, dropNamesMax)
+	}
+	got.Named[0] = "changed by its reader"
+	if again := m.DropsSince(mark).Named[0]; !strings.Contains(again, "c0,") {
+		t.Fatalf("the report handed out the manager's own names: %q", again)
+	}
+}
+
+// A session can drop a mock an earlier one added: what it reports as added
+// stops at 0, it does not go negative.
+func TestASessionsAddedStopsAtZero(t *testing.T) {
+	m := New(zap.NewNop())
+	if got := m.AddMock(addMockTo("earlier", true)); got != MockTaken {
+		t.Fatalf("a mock buffered with no output set: %q", got)
+	}
+	mark := m.StartDropSession()
+	m.dropOut(addMockTo("earlier", true), "", 0, string(MockDroppedOutputClosed))
+	if got := m.DropsSince(mark); got.Added != 0 || got.Capacity != 1 {
+		t.Fatalf("the session reports %+v, want 1 dropped and none added", got)
+	}
+}
+
+// Each session is told of its first drop of each kind aloud, whatever an
+// earlier session on the same manager dropped: the sampling starts over with
+// it, as the FIRST line's "for this session" says.
+func TestEachSessionIsToldOfItsFirstDrop(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	m := New(zap.New(core))
+	loseOneOfEach := func() {
+		m.dropOut(addMockTo("closed", false), "", 0, string(MockDroppedOutputClosed))
+		m.dropOut(addMockTo("full", false), "", 0, string(MockDroppedOutputFull))
+		m.reportPressureDrop(addMockTo("pressure", false), string(MockDroppedUnderPressure))
+	}
+	aloud := func() (warns, errs int) {
+		return logs.FilterLevelExact(zapcore.WarnLevel).Len(), logs.FilterLevelExact(zapcore.ErrorLevel).Len()
+	}
+	loseOneOfEach()
+	loseOneOfEach()
+	if w, e := aloud(); w != 2 || e != 1 {
+		t.Fatalf("two drops of each kind said %d WARN and %d ERROR, want the first of each aloud: 2 and 1", w, e)
+	}
+	m.StartDropSession()
+	loseOneOfEach()
+	if w, e := aloud(); w != 4 || e != 2 {
+		t.Fatalf("the next session's first drops brought it to %d WARN and %d ERROR, want 4 and 2", w, e)
+	}
+}
+
+// A session reports the test cases its own drops cost by name, not those an
+// earlier session's did: the set is of the manager's life.
+func TestASessionReportsItsOwnTestCasesDropped(t *testing.T) {
+	m := New(zap.NewNop())
+	drop := func(tc string) {
+		m.dropOut(addMockTo("c", false), tc, m.revokeEpoch.Load(), string(MockDroppedOutputFull))
+	}
+	drop("earlier")
+	mark := m.StartDropSession()
+	drop("now")
+	if got := m.DropsSince(mark).TestCases; got != 1 {
+		t.Fatalf("the session reports %d test cases dropped, want its 1", got)
+	}
+	// The set stops growing at its bound, and a session still counts its own.
+	for i := range maxDroppedTCNames {
+		m.recordDroppedTCFor("filler-"+strconv.Itoa(i), m.revokeEpoch.Load())
+	}
+	mark = m.StartDropSession()
+	drop("past-the-bound")
+	if got := m.DropsSince(mark).TestCases; got != 1 {
+		t.Fatalf("a session past the set's bound reports %d test cases dropped, want its 1", got)
+	}
+}
+
+// An unread answer memory pressure drops costs no test case: it is said at
+// Debug and takes no sample, so the session's first drop that may cost one is
+// said aloud. It is counted and named like any other: its parser may have said
+// it kept it.
+func TestAnUnreadAnswerTakesNoSampleFromPressure(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	m := New(zap.New(core))
+	mark := m.StartDropSession()
+	unread := addMockTo("unread", false)
+	unread.MarkUndelivered()
+	m.reportPressureDrop(unread, string(MockDroppedUnderPressure))
+	if namedDrop(logs, zapcore.WarnLevel, unread, MockDroppedUnderPressure) {
+		t.Fatalf("an unread answer's drop was said at WARN: %v", logs.All())
+	}
+	lost := addMockTo("lost", false)
+	m.reportPressureDrop(lost, string(MockDroppedUnderPressure))
+	if !namedDrop(logs, zapcore.WarnLevel, lost, MockDroppedUnderPressure) {
+		t.Fatalf("the first drop after an unread answer's was not said at WARN: %v", logs.All())
+	}
+	if got := m.DropsSince(mark); got.Pressure != 2 || len(got.Named) != 2 {
+		t.Fatalf("the report says %+v, want both counted and named", got)
 	}
 }

@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -115,5 +116,34 @@ func TestTheClientSaysASessionThatLostOnlyTLSConnections(t *testing.T) {
 	said := logs.FilterMessage(tlsRelayedConnsSaid).All()
 	if len(said) != 1 || said[0].Level != zapcore.WarnLevel || said[0].ContextMap()["connections"] != uint64(2) {
 		t.Fatalf("a session that lost only TLS connections was said %v, want once at WARN with its 2 connections", said)
+	}
+}
+
+// A session that dropped mocks, of either kind alone, is said by the client at
+// WARN with its counts and the mocks named: for an agent it did not start this
+// is where the user learns which. One that dropped none says nothing of it.
+func TestTheClientSaysASessionThatDroppedMocks(t *testing.T) {
+	for _, d := range []models.MockDropSummary{
+		{ByPressure: 2, Named: []string{"a Kafka mock"}},
+		{Capacity: 3, Named: []string{"a Kafka mock"}},
+	} {
+		core, logs := observer.New(zapcore.InfoLevel)
+		a := &AgentClient{logger: zap.New(core)}
+		a.sayAgentSummary(models.StreamEndSummary{MocksDropped: d})
+		said := logs.FilterMessage(models.MocksDroppedSaid).All()
+		if len(said) != 1 || said[0].Level != zapcore.WarnLevel {
+			t.Fatalf("a session that dropped %+v was said %v, want once at WARN", d, said)
+		}
+		f := said[0].ContextMap()
+		if f["by_memory_pressure"] != d.ByPressure || f["for_the_output"] != d.Capacity ||
+			fmt.Sprint(f["first_dropped"]) != "[a Kafka mock]" {
+			t.Fatalf("a session that dropped %+v was said with %v", d, f)
+		}
+	}
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := &AgentClient{logger: zap.New(core)}
+	a.sayAgentSummary(models.StreamEndSummary{})
+	if n := logs.FilterMessage(models.MocksDroppedSaid).Len(); n != 0 {
+		t.Fatalf("a session that dropped nothing was said %d times", n)
 	}
 }

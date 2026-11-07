@@ -585,10 +585,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// grows by from here.
 	mocksLeftOutBefore := syncmgr.Get().MocksLeftOut()
 	// The manager's drop counts are of its life too, and it outlives a
-	// session: what they grew by is this session's, so a drop at one
-	// session's stop is not reported as the next one's loss.
-	_, pressureDroppedBefore, addedBefore, _ := syncmgr.Get().GetDropStats()
-	capacityDroppedBefore := syncmgr.Get().DropCount()
+	// session: what they grow by from here is this session's.
+	dropMark := syncmgr.Get().StartDropSession()
 	// The requests the ingress did not record because the memory guard had
 	// paused recording (NoteNotRecordedUnderPressure), counted the same way.
 	notRecordedBefore := syncmgr.Get().NotRecordedUnderPressure()
@@ -611,20 +609,23 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	tlsRelayedBefore := syncmgr.Get().StartTLSRelayedSession()
 	// sessionLost reads, once, what this session lost to its ingress stopping
 	// (NoteNotHandedOn), to callers the agent could not name
-	// (NoteUnnamedCallerConn) and to TLS connections relayed unread
-	// (NoteTLSRelayedConn): the end marker, the summary and its warnings say
+	// (NoteUnnamedCallerConn), to TLS connections relayed unread
+	// (NoteTLSRelayedConn) and to mocks dropped as their parsers handed them
+	// over or after (DropsSince): the end marker, the summary and its warnings say
 	// the same counts, whichever of them reads first. The handler's own
 	// goroutine calls it (the marker, and the summary it defers).
 	var lostRead bool
 	var notHandedOnLost, unnamedLost, tlsRelayedLost uint64
-	sessionLost := func() (notHandedOn, unnamed, tlsRelayed uint64) {
+	var mocksDropped syncmgr.SessionDrops
+	sessionLost := func() (notHandedOn, unnamed, tlsRelayed uint64, drops syncmgr.SessionDrops) {
 		if !lostRead {
 			lostRead = true
 			notHandedOnLost = syncmgr.Get().NotHandedOn() - notHandedOnBefore
 			unnamedLost = syncmgr.Get().UnnamedCallerConns() - unnamedBefore
 			tlsRelayedLost = syncmgr.Get().TLSRelayedConns() - tlsRelayedBefore
+			mocksDropped = syncmgr.Get().DropsSince(dropMark)
 		}
-		return notHandedOnLost, unnamedLost, tlsRelayedLost
+		return notHandedOnLost, unnamedLost, tlsRelayedLost, mocksDropped
 	}
 	// The ingress requests that come during the memory guard's pauses, from
 	// here: counted by the order of events (the request count read at each
@@ -866,7 +867,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// end left unsent.
 	endedBy := "client"
 	summarize := func() {
-		_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
 		orphanRecorded, orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
 		pressureRecorded, pressureSpans := syncmgr.Get().PressureRangeCount()
 		// Suppression protects replay from test cases whose mocks
@@ -910,7 +910,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		}
 		// Read once (sessionLost): the warnings, the summary and the end
 		// marker say the same.
-		notHandedOn, unnamedConns, tlsRelayedConns := sessionLost()
+		notHandedOn, unnamedConns, tlsRelayedConns, drops := sessionLost()
+		if drops.Pressure > 0 || drops.Capacity > 0 {
+			// The manager says the first of each kind and every 1024th as
+			// they come; this is the session's count, and which they were.
+			a.logger.Warn(models.MocksDroppedSaid,
+				zap.Int64("by_memory_pressure", drops.Pressure),
+				zap.Uint64("for_the_output", drops.Capacity),
+				zap.Strings("first_dropped", drops.Named))
+		}
 		if notHandedOn > 0 {
 			// The app served each, and the ingress stopped before its test
 			// case reached this stream: the manager warns of the first and
@@ -957,7 +965,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			zap.Int("orphan_ranges_total", orphanRecorded),
 			zap.Int("orphan_spans_closed", orphanClosed),
 			zap.Int("orphan_ranges_still_open", orphanOpen),
-			zap.Int64("mocks_dropped_by_pressure", finalDropped-pressureDroppedBefore),
+			zap.Int64("mocks_dropped_by_pressure", drops.Pressure),
 			// Requests the ingress did not record because the memory guard
 			// had paused recording when they came (the WARN above names
 			// their connections).
@@ -999,9 +1007,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// recording stopped is in the orphan spans above, not
 			// here: it was never parsed into mocks to count.
 			zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()-mocksLeftOutBefore),
-			zap.Int64("mocks_added_successfully", finalAdded-addedBefore),
-			zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()-capacityDroppedBefore),
-			zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
+			zap.Int64("mocks_added_successfully", drops.Added),
+			zap.Uint64("mocks_dropped_capacity", drops.Capacity),
+			// Which mocks those two dropped, and why: the session's first
+			// few. Each count has them all.
+			zap.Strings("mocks_dropped_named", drops.Named),
+			zap.Int64("tcs_dropped_capacity", drops.TestCases),
 			zap.Int("tcs_released_unsettled", tcsUnsettled),
 			zap.Uint64("tcs_left_out_in_flight", leftOutInFlight),
 			// Served by the app and never handed to this stream: the
@@ -1076,7 +1087,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return
 			}
-			notHandedOn, unnamedConns, tlsRelayedConns := sessionLost()
+			notHandedOn, unnamedConns, tlsRelayedConns, drops := sessionLost()
 			if err := json.NewEncoder(part).Encode(models.StreamEndSummary{
 				TestCasesSent:       tcsSentSoFar,
 				TestCasesSuppressed: tcsSuppressedSoFar,
@@ -1090,6 +1101,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				TLSRelayedConns:    tlsRelayedConns,
 				Unsettled:          tcsUnsettled,
 				MassSuppressed:     massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
+				MocksDropped: models.MockDropSummary{
+					ByPressure: drops.Pressure,
+					Capacity:   drops.Capacity,
+					Named:      drops.Named,
+				},
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return
