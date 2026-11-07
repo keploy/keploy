@@ -1131,6 +1131,24 @@ func (s *scopedMockDb) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark fu
 	return func() {}, false
 }
 
+// OpenTestRecordings is the wrapped store's: a parser reads it for the
+// recordings a call could have been answered with in its test, so more of
+// them only makes it hold less. ClaimHold of a wrapped store without the
+// facet claims nothing: no parser holds over it.
+func (s *scopedMockDb) OpenTestRecordings() []*models.Mock {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.OpenTestRecordings()
+	}
+	return nil
+}
+
+func (s *scopedMockDb) ClaimHold(name string) bool {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.ClaimHold(name)
+	}
+	return false
+}
+
 // The carry-over tier is a read tier like the others, so it goes through keep().
 func (s *scopedMockDb) GetCarryOverMocks() ([]*models.Mock, error) {
 	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {

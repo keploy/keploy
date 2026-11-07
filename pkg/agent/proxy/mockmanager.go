@@ -1992,6 +1992,10 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		})
 	}
 
+	// What the test is staged with (OpenTestRecordings), kept before its
+	// tier is published.
+	m.stageRunTest(filteredForTree)
+
 	// Build both remaining tiers before publishing anything: building stamps
 	// tree IDs and sort orders, and one staged mock can sit in more than one
 	// tier (startup and session during BaseTime staging), so stamping after

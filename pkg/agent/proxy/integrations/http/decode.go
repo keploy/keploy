@@ -785,8 +785,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// An answer recorded later than the run's place now is written
 			// as the run reaches each part's recorded place (heldAnswerOf,
 			// writeHeld): the call was matched and consumed above, in its
-			// own test.
-			if held, err := h.heldAnswerOf(stub, request, mockDb, repeat); err != nil {
+			// own test. Whether the call could have been answered with
+			// another of its test's recordings is the matcher's dry
+			// judgement, as an extra call's is (answeredMatch).
+			same := func(twins []*models.Mock) bool {
+				return h.answeredMatch(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)(twins)
+			}
+			if held, err := h.heldAnswerOf(stub, request, mockDb, repeat, same); err != nil {
 				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
 				return

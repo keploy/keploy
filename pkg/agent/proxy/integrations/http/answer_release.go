@@ -30,6 +30,15 @@ import (
 // that test ended without. A recording with no marks says no such thing
 // (models.HTTPAnswerMarks) and is never held, nor is a recording the run has
 // not reached: its call came ahead of its place, so it has no place to keep.
+//
+// A mark speaks for its recording's call, not for the call the replay gives
+// it to. Of two identical calls of one test, the one the test waited for and
+// one it did not, either can reach the proxy first and take either
+// recording. So a recording is held only while no other recording of its
+// test that the call matches, served or not, may be one its test waited for
+// (awaitedTwin), and only at its first serve: an answer served again (a
+// stateful cursor saturated on it, integrations.RunPlacer.ClaimHold) is of a
+// call that was not on record.
 
 // heldAnswer is a matched answer whose write waits for the run's place.
 type heldAnswer struct {
@@ -56,14 +65,16 @@ type heldPiece struct {
 // matched, as it must be held at the run's place now, or nil when it is
 // written at once, as before: no release is registered for HTTP, the store
 // tells no run place, the serve is not the first of a per-test recording (a
-// session or connection recording, an answer served again: repeat), its
-// recording kept no marks or is one the run has not reached, or its last byte
-// is due already, and with it every part of it (a release is monotone in
-// time). All that is read of the mock alone, so an answer not held is built
-// once, by its write. stub is the serve's: the match loaded its response
-// (claim), which an answer kept apart by the agent's disk store has in Spec
-// from then on.
-func (h *HTTP) heldAnswerOf(stub *models.Mock, call *http.Request, db integrations.MockMemDb, repeat bool) (*heldAnswer, error) {
+// session or connection recording, an answer served again: repeat, or a
+// recording held before under the staging), its recording kept no marks or
+// is one the run has not reached, its last byte is due already, and with it
+// every part of it (a release is monotone in time), or the call may be one
+// its test waits for (awaitedTwin; same is the matcher's dry judgement of
+// the call against other recordings). All that is read of the mock alone,
+// so an answer not held is built once, by its write. stub is the serve's:
+// the match loaded its response (claim), which an answer kept apart by the
+// agent's disk store has in Spec from then on.
+func (h *HTTP) heldAnswerOf(stub *models.Mock, call *http.Request, db integrations.MockMemDb, repeat bool, same func([]*models.Mock) bool) (*heldAnswer, error) {
 	release, ok := models.AnswerReleaseOf(models.HTTP)
 	if !ok || repeat || stub.Spec.HTTPResp == nil || stub.Spec.HTTPResp.Marks == nil {
 		return nil, nil
@@ -79,12 +90,43 @@ func (h *HTTP) heldAnswerOf(stub *models.Mock, call *http.Request, db integratio
 	if release(place, stub.Spec.ResTimestampMock) || !release(place, stub.Spec.ReqTimestampMock) {
 		return nil, nil
 	}
+	if awaitedTwin(stub, placer.OpenTestRecordings(), place, release, same) || !placer.ClaimHold(stub.Name) {
+		return nil, nil
+	}
 	a, err := h.planHeld(stub, call)
 	if err != nil {
 		return nil, err
 	}
 	a.release, a.placer, a.staging = release, placer, place.Staging
 	return a, nil
+}
+
+// awaitedTwin reports whether the open test has, served or not, another
+// HTTP recording than stub, among recs (RunPlacer.OpenTestRecordings), that
+// the call matches (same) and whose answer its test may have waited for: one
+// heldAt does not hold at place, so its answer reached the application
+// inside the test, or keploy cannot tell (no marks, or a response the
+// agent's disk store keeps apart). The call may then be the one its test
+// waits on, whichever recording the matcher gave it, and holding stub's
+// answer could hold the test until its timeout. A nil same cannot tell, so
+// any such recording counts.
+func awaitedTwin(stub *models.Mock, recs []*models.Mock, place models.RunPlace, release models.AnswerRelease, same func([]*models.Mock) bool) bool {
+	var twins []*models.Mock
+	for _, m := range recs {
+		if m == nil || m.Name == stub.Name || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || heldAt(m, place, release) {
+			continue
+		}
+		twins = append(twins, m)
+	}
+	return len(twins) > 0 && (same == nil || same(twins))
+}
+
+// heldAt reports whether heldAnswerOf holds m's answer at place, as m alone
+// tells it: a per-test recording with marks whose call the run has reached
+// and whose last byte is not due.
+func heldAt(m *models.Mock, place models.RunPlace, release models.AnswerRelease) bool {
+	return m.Spec.HTTPResp != nil && m.Spec.HTTPResp.Marks != nil && m.TestModeInfo.Lifetime == models.LifetimePerTest &&
+		release(place, m.Spec.ReqTimestampMock) && !release(place, m.Spec.ResTimestampMock)
 }
 
 // planHeld splits stub's answer, its response in its Spec with its marks,

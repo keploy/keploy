@@ -1888,12 +1888,24 @@ type SetEndFiler interface {
 //     or found nothing due and marked it idle again, it is busy. release
 //     is the mark's release, for a wait that ends otherwise (the
 //     connection's context); a release runs at most once.
+//   - OpenTestRecordings is every recording the open test was staged with,
+//     served or not: under exact serving the test's own, else the per-test
+//     recordings of the window its staging opened (a keploy mock replay's
+//     scope: the test's whole pool). None while no test's are staged. A
+//     parser reads it to find the recordings a call could have been
+//     answered with in its test, whichever of them earlier calls took.
+//   - ClaimHold reports whether the named recording's answer may be held:
+//     true the first time it is asked for that recording under the place's
+//     Staging, false from then on, for an answer served again (a stateful
+//     cursor saturated on it), whose call was not on record.
 //
 // A MockMemDb without it holds nothing: write at once.
 type RunPlacer interface {
 	RunPlace() models.RunPlace
 	RunPlaceChanged() <-chan struct{}
 	IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (release func(), ok bool)
+	OpenTestRecordings() []*models.Mock
+	ClaimHold(name string) bool
 }
 
 // CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the

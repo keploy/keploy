@@ -61,7 +61,7 @@ func registerStandIn(t *testing.T) {
 }
 
 // placedDb is a store that tells the run's place (integrations.RunPlacer),
-// moved by the row.
+// moved by the row. Its open test is staged with the recordings it holds.
 type placedDb struct {
 	*mockMemDb
 	mu    sync.Mutex
@@ -69,6 +69,28 @@ type placedDb struct {
 	sig   chan struct{}
 	// waits are the idle marks' releases of the waits on the next move.
 	waits []func()
+	// claimed are the recordings held, by staging (ClaimHold).
+	claimed map[uint64]map[string]bool
+}
+
+func (d *placedDb) OpenTestRecordings() []*models.Mock { return d.mocks }
+
+func (d *placedDb) ClaimHold(name string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.claimed == nil {
+		d.claimed = map[uint64]map[string]bool{}
+	}
+	at := d.claimed[d.place.Staging]
+	if at == nil {
+		at = map[string]bool{}
+		d.claimed[d.place.Staging] = at
+	}
+	if at[name] {
+		return false
+	}
+	at[name] = true
+	return true
 }
 
 func newPlacedDb(mocks ...*models.Mock) *placedDb {
@@ -447,10 +469,10 @@ func TestHeldAnswer_ARepeatIsNotHeld(t *testing.T) {
 	registerStandIn(t)
 	h := &HTTP{Logger: zap.NewNop()}
 	db := newPlacedDb()
-	if a, err := h.heldAnswerOf(singleAnswer(t, releaseAt(45)), releaseRequest(t, releaseCall), db, true); err != nil || a != nil {
+	if a, err := h.heldAnswerOf(singleAnswer(t, releaseAt(45)), releaseRequest(t, releaseCall), db, true, nil); err != nil || a != nil {
 		t.Fatalf("repeat: held %v, %v", a, err)
 	}
-	if a, err := h.heldAnswerOf(singleAnswer(t, releaseAt(45)), releaseRequest(t, releaseCall), db, false); err != nil || a == nil {
+	if a, err := h.heldAnswerOf(singleAnswer(t, releaseAt(45)), releaseRequest(t, releaseCall), db, false, nil); err != nil || a == nil {
 		t.Fatalf("first serve: held %v, %v; want held", a, err)
 	}
 }
@@ -641,7 +663,7 @@ func TestHeldAnswer_AMockWithNoAnswerIsNotHeld(t *testing.T) {
 				t.Errorf("heldAnswerOf panicked on a mock with no answer: %v", r)
 			}
 		}()
-		return h.heldAnswerOf(m, releaseRequest(t, releaseCall), newPlacedDb(), false)
+		return h.heldAnswerOf(m, releaseRequest(t, releaseCall), newPlacedDb(), false, nil)
 	}()
 	if err != nil || a != nil {
 		t.Fatalf("held %v, %v; want nil, nil", a, err)
@@ -685,7 +707,7 @@ func TestHeldAnswer_AnAnswerDueAtItsCallIsNotHeld(t *testing.T) {
 	h := &HTTP{Logger: zap.NewNop()}
 	db := newPlacedDb()
 	db.reach(models.RunOpen(2))
-	if a, err := h.heldAnswerOf(sseMock(t, releaseAt(25), releaseAt(45), ""), releaseRequest(t, releaseCall), db, false); err != nil || a != nil {
+	if a, err := h.heldAnswerOf(sseMock(t, releaseAt(25), releaseAt(45), ""), releaseRequest(t, releaseCall), db, false, nil); err != nil || a != nil {
 		t.Fatalf("every part due at the call: held %v, %v; want it served as before", a, err)
 	}
 }
@@ -790,7 +812,7 @@ func TestHeldAnswer_ADueAnswerIsBuiltOnce(t *testing.T) {
 	h := &HTTP{Logger: zap.NewNop()}
 	m := singleAnswer(t, releaseAt(5))
 	m.MarkPooled()
-	if a, err := h.heldAnswerOf(m, releaseRequest(t, releaseCall), newPlacedDb(), false); err != nil || a != nil {
+	if a, err := h.heldAnswerOf(m, releaseRequest(t, releaseCall), newPlacedDb(), false, nil); err != nil || a != nil {
 		t.Fatalf("held %v, %v; it is due", a, err)
 	}
 	if _, err := h.buildMockResponseBytes(m); err != nil {
@@ -812,7 +834,7 @@ func TestHeldAnswer_ACallAheadOfItsRecordingIsNotHeld(t *testing.T) {
 	h := &HTTP{Logger: zap.NewNop()}
 	m := singleAnswer(t, releaseAt(45))
 	m.Spec.ReqTimestampMock = releaseAt(42)
-	if a, err := h.heldAnswerOf(m, releaseRequest(t, releaseCall), newPlacedDb(), false); err != nil || a != nil {
+	if a, err := h.heldAnswerOf(m, releaseRequest(t, releaseCall), newPlacedDb(), false, nil); err != nil || a != nil {
 		t.Fatalf("a call in test-1 matched test-3's recording: held %v, %v, and test-1 waits for it", a, err)
 	}
 }

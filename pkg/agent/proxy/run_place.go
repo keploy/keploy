@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -31,6 +33,12 @@ type runPlace struct {
 	// atChange are the idle marks' releases of the parsers that wait for the
 	// next change (IdleUntilRunPlaceChanges): the change runs them.
 	atChange []func()
+	// claimed names the recordings whose answers were held under gen
+	// (ClaimHold).
+	claimed map[string]bool
+	// staged is what the open test was staged with (OpenTestRecordings),
+	// set by each staging before any call reads it.
+	staged atomic.Pointer[[]*models.Mock]
 }
 
 // RunPlace is the run's place now (integrations.RunPlacer): the anchor it
@@ -113,7 +121,7 @@ func (m *MockManager) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark fun
 func (m *MockManager) beginRunPlace() {
 	m.place.mu.Lock()
 	m.place.gen++
-	m.place.reached, m.place.setEnd, m.place.ended = 0, false, nil
+	m.place.reached, m.place.setEnd, m.place.ended, m.place.claimed = 0, false, nil, nil
 	release := m.signalRunPlaceLocked()
 	m.place.mu.Unlock()
 	runAll(release)
@@ -247,3 +255,42 @@ func (m *MockManager) EndRunTest(test string) { m.reachTest(test, false) }
 // the read settles the calls the written answer makes, and takes their
 // misses.
 func (m *MockManager) EndRunSet() { m.reachRunPlace(0, true) }
+
+// ClaimHold reports whether the named recording's answer may be held
+// (integrations.RunPlacer): true the first time under the place's staging,
+// false from then on.
+func (m *MockManager) ClaimHold(name string) bool {
+	m.place.mu.Lock()
+	defer m.place.mu.Unlock()
+	if m.place.claimed[name] {
+		return false
+	}
+	if m.place.claimed == nil {
+		m.place.claimed = map[string]bool{}
+	}
+	m.place.claimed[name] = true
+	return true
+}
+
+// OpenTestRecordings is every recording the open test was staged with,
+// served or not (integrations.RunPlacer): under exact serving the open
+// test's own, else what the last staging kept for its test (stageRunTest).
+func (m *MockManager) OpenTestRecordings() []*models.Mock {
+	if v := m.exactView(); v != nil && v.test != "" {
+		return v.owned
+	}
+	if p := m.place.staged.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// stageRunTest keeps, for OpenTestRecordings, the per-test tier a staging
+// builds (perTest): a test's window's own recordings, or a test's scope's
+// whole per-test pool (SetScopeMocks); none for a set's staging and the pool
+// between tests. A copy, kept whichever of them a call takes later. Called
+// by the staging, before any call can read it.
+func (m *MockManager) stageRunTest(perTest []*models.Mock) {
+	staged := slices.Clone(perTest)
+	m.place.staged.Store(&staged)
+}
