@@ -736,13 +736,12 @@ func (s *placeSvc) SetRunPlaceWindows(_ context.Context, ws []models.TestWindow)
 	return nil
 }
 
-// With the switch off, keploy mock replay's scope table carries every test's
-// recorded window for the run's place alone: the agent installs them there
-// (a merged window's tests included), and never as the set's recorded
-// windows. A table without them installs none, so a set never reads the
-// previous one's. Under the switch, and for a per-start table, they are not
-// the place's.
-func TestScopeTableGivesTheRunPlaceItsWindowsWithTheSwitchOff(t *testing.T) {
+// keploy mock replay's scope table carries every test's recorded window for
+// the run's place, under either switch: the agent installs them there (a
+// merged window's tests included), with the switch off never as the set's
+// recorded windows. A table without them installs none, so a set never reads
+// the previous one's. A per-start table's are not the place's.
+func TestScopeTableGivesTheRunPlaceItsWindows(t *testing.T) {
 	post := func(svc *placeSvc, body string) {
 		t.Helper()
 		rec := httptest.NewRecorder()
@@ -776,7 +775,7 @@ func TestScopeTableGivesTheRunPlaceItsWindowsWithTheSwitchOff(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	svc = &placeSvc{poolSvc: &poolSvc{}}
 	post(svc, `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}]}`)
-	if svc.placedCalls != 0 || len(svc.windows) != 1 {
-		t.Fatalf("switch on: the place got %v (%d calls), the set %v", svc.placed, svc.placedCalls, svc.windows)
+	if svc.placedCalls != 1 || len(svc.placed) != 1 || len(svc.windows) != 1 {
+		t.Fatalf("switch on: the place got %v (%d calls), the set %v; want both", svc.placed, svc.placedCalls, svc.windows)
 	}
 }

@@ -34,12 +34,13 @@ import (
 //
 // A recording is charged to the test whose scope holds its place (record's
 // correlateScopes), so the window ends at its recordings' last place, never
-// at an answer's time, which can come after the scope's end: an answer is
-// stamped once the relay's write of it to the application returns, and the
-// application can end its test, and make its next call, before that. Read
-// by its answer, the window of a set's last test held the driver's
-// endSessions the app sent as it disconnected after that test (a pool
-// recording), and the replay missed it, outside every test.
+// at an answer's time, which can come after the scope's end: the relay stamps
+// an answer as it writes it, whenever the upstream sends it, and a test need
+// not wait for it. Read by its answer, the window of a set's last test held
+// the driver's endSessions the app sent as it disconnected after that test (a
+// pool recording), and the replay missed it, outside every test. So a
+// window's End is not its test's end: the run's place reads these windows as
+// models.RunWindows says.
 //
 // Windows that overlap or touch (tests run in parallel) are one window named
 // by no test: the agent places a moment in the earliest-starting window that

@@ -9,10 +9,15 @@ import (
 
 // HTTPAnswerMarks is when each part of a recorded HTTP answer reached the
 // application: the time of the write that completed its head, then one mark
-// per write the proxy made of its body. A recording keeps marks only for an
-// answer the proxy wrote in more than one write (a stream, a chunked body, a
-// slow body); an answer written in one write has its one time in the mock's
-// ResTimestampMock, and keeps none.
+// per write the proxy made of its body. An answer written in one write keeps
+// one mark, at its head's time.
+//
+// Marks are what lets a replay hold an answer. The relay stamps each write
+// before it makes it, so a part marked after a test's end is one that test
+// did not wait for. A recording with no marks may be older than that stamp:
+// its ResTimestampMock was taken after the write returned, and can fall after
+// the end of the test that waited for the answer, so nothing tells that
+// test's own answer from a later one, and replay writes it at once.
 //
 // The offsets index the body as the response holds it (HTTPResp.Body): its
 // bytes de-chunked and decompressed. A recording that keeps the body as

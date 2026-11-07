@@ -158,7 +158,7 @@ func TestRunPlace_AMergedWindowEndsAtItsLastTestsEnd(t *testing.T) {
 // place alone: they place the run, and nothing else reads them (the learn
 // step's testWindows stay unset). Seeded at a set boundary they wait for
 // the set's staging, and a set that seeds none has none, not the previous
-// set's. A set's recorded windows (SeedRecordedWindows) come first.
+// set's.
 func TestRunPlace_WindowsSeededForThePlaceAlone(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	mm.ResetForReplaySession()
@@ -207,13 +207,6 @@ func TestRunPlace_WindowsSeededForThePlaceAlone(t *testing.T) {
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
 	if p := mm.RunPlace(); p.Windows != nil {
 		t.Fatalf("an aborted set's parked windows reached the next set: %d", p.Windows.Len())
-	}
-
-	// A set's recorded windows are the place's when it has both.
-	mm.SeedRunPlaceWindows(placeWindows())
-	mm.SeedRecordedWindows(placeWindows()[:2])
-	if got := mm.RunPlace().Windows.Len(); got != 2 {
-		t.Fatalf("the place reads %d windows, want the recorded 2", got)
 	}
 }
 
@@ -370,5 +363,23 @@ func TestRunPlace_AWaitOnNoChannelMarksNothing(t *testing.T) {
 	marked := 0
 	if _, waits := mm.IdleUntilRunPlaceChanges(nil, func() func() { marked++; return func() { marked-- } }); waits || marked != 0 {
 		t.Fatalf("waits %v, marked %d; want no wait and nothing marked", waits, marked)
+	}
+}
+
+// keploy mock replay seeds the set's recorded windows, under the switch, and
+// the place's own: the place reads its own, the recorded ones where it has
+// none (keploy test). The set's recorded windows stay what they were for the
+// learn step.
+func TestRunPlace_ReadsItsOwnWindowsOverTheRecordedOnes(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	recorded := placeWindows()
+	mm.SeedRecordedWindows(recorded)
+	if got := mm.RunPlace().Windows; got.Len() != len(recorded) || !got.Window(0).End.Equal(recorded[0].End) {
+		t.Fatalf("with none of its own, the place reads %d windows", got.Len())
+	}
+	mm.SeedRunPlaceWindows(models.RunWindows(recorded))
+	got := mm.RunPlace().Windows
+	if !got.Window(0).End.After(recorded[0].End) {
+		t.Fatalf("the place reads the recorded window, ending at %v", got.Window(0).End)
 	}
 }

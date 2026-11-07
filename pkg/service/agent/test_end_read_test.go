@@ -124,9 +124,9 @@ func TestKeployTestWritesAnAnswerAtItsTestsEndReadWithTheSwitchOff(t *testing.T)
 	t.Setenv(provenswitch.Env, "")
 	t.Cleanup(models.RegisterAnswerRelease(models.HTTP, placeRelease))
 	gap := stageMock("mock-gap", "/gap", stageT0.Add(500*time.Millisecond))
-	gap.Spec.ResTimestampMock = stageT0.Add(3 * time.Second)
+	answeredAt(gap, stageT0.Add(3*time.Second))
 	late := stageMock("mock-late", "/late", stageT0.Add(600*time.Millisecond))
-	late.Spec.ResTimestampMock = stageT0.Add(9 * time.Second)
+	answeredAt(late, stageT0.Add(9*time.Second))
 	mocks := []*models.Mock{gap, late}
 	ws := []models.TestWindow{
 		{TestCase: "Test1", Start: stageT0, End: stageT0.Add(time.Second)},

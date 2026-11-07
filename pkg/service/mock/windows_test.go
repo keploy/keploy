@@ -364,3 +364,45 @@ func TestScopeTableCarriesTheRecordedWindowsWithTheSwitchOff(t *testing.T) {
 		t.Fatalf("table %v", p.table)
 	}
 }
+
+// The run's place reads a set's windows so that a test's own answers lie in
+// its own window, the last test's too: built from what recordedTestWindows
+// gives, under the switch (each test's recorded begin) and with it off (its
+// first recording). An answer recorded in a later test lies in that test's.
+func TestRunWindowsHoldEachAnswerInTheTestOfItsMoment(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	decoded := []*models.Mock{
+		windowMock("a-1", t0, 11, 12),
+		windowMock("a-2", t0, 14, 15),
+		windowMock("a-late", t0, 13, 24),
+		windowMock("b-1", t0, 22, 23),
+		windowMock("c-1", t0, 32, 33),
+		windowMock("c-2", t0, 34, 36),
+	}
+	table := map[string][]string{"o::TestA": {"a-1", "a-2", "a-late"}, "o::TestB": {"b-1"}, "o::TestC": {"c-1", "c-2"}}
+	begun := &models.Mapping{TestCases: []models.MappedTestCase{
+		{ID: "o::TestA", At: t0.Add(10 * time.Second)}, {ID: "o::TestB", At: t0.Add(20 * time.Second)}, {ID: "o::TestC", At: t0.Add(30 * time.Second)},
+	}}
+	for name, mp := range map[string]*models.Mapping{"switch on": begun, "switch off": nil} {
+		t.Run(name, func(t *testing.T) {
+			s := models.NewWindowSchedule(models.RunWindows(recordedTestWindows(mp, table, decoded)))
+			for _, c := range []struct {
+				mock string
+				test string
+			}{
+				{"a-1", "o::TestA"}, {"a-2", "o::TestA"}, {"a-late", "o::TestB"}, {"b-1", "o::TestB"}, {"c-1", "o::TestC"}, {"c-2", "o::TestC"},
+			} {
+				var res time.Time
+				for _, m := range decoded {
+					if m.Name == c.mock {
+						res = m.Spec.ResTimestampMock
+					}
+				}
+				want, ok := s.IndexOfTest(c.test)
+				if got := s.IndexOf(res); !ok || got != want {
+					t.Errorf("the answer of %s lies in window %d, want %s's, %d", c.mock, got, c.test, want)
+				}
+			}
+		})
+	}
+}

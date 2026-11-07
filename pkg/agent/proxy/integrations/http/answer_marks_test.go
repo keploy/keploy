@@ -169,31 +169,39 @@ func TestAnswerMarksReadsTheBodyAsKept(t *testing.T) {
 	head := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n"
 	resp := []byte(head + "okEXTRA")
 	writes := []respWrite{{end: len(head), at: markAt(1)}, {end: len(resp), at: markAt(2)}}
-	wantMarks(t, answerMarks(resp, writes, "GET", "", 2), markAt(1), w(2, 2))
-	if m := answerMarks(resp, writes, "GET", "", 3); m != nil {
+	wantMarks(t, answerMarks(resp, writes, "", 2), markAt(1), w(2, 2))
+	if m := answerMarks(resp, writes, "", 3); m != nil {
 		t.Errorf("a body kept at another length: marks = %+v, want none", m)
 	}
 }
 
-// An answer the upstream sent in one write keeps no marks: its
-// ResTimestampMock places it. Nor does one whose head and whole body went
-// out in the same last write, after a head split in two.
-func TestRecordKeepsNoMarksForAnAnswerInOneWrite(t *testing.T) {
+// An answer the upstream sent in one write keeps one mark, at its head's
+// time: marks are what lets replay hold an answer. So does one whose head and
+// whole body went out in the same last write, after a head split in two, and
+// one in one write whose body is framed or compressed, which is not decoded
+// again to say where its one write ended.
+func TestRecordKeepsOneMarkForAnAnswerInOneWrite(t *testing.T) {
 	one := recordWrites(t, marksReq, []string{"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"}, []time.Time{markAt(1)})
-	if one.Spec.HTTPResp.Marks != nil {
-		t.Errorf("one write: marks = %+v, want none", one.Spec.HTTPResp.Marks)
-	}
+	wantMarks(t, one.Spec.HTTPResp.Marks, markAt(1), w(2, 1))
 	split := recordWrites(t, marksReq, []string{"HTTP/1.1 200 OK\r\n", "Content-Length: 2\r\n\r\nok"}, []time.Time{markAt(1), markAt(2)})
-	if split.Spec.HTTPResp.Marks != nil {
-		t.Errorf("head split, body with its end: marks = %+v, want none", split.Spec.HTTPResp.Marks)
+	wantMarks(t, split.Spec.HTTPResp.Marks, markAt(2), w(2, 2))
+	framed := recordWrites(t, marksReq, []string{"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + chunk("ok") + "0\r\n\r\n"}, []time.Time{markAt(1)})
+	wantMarks(t, framed.Spec.HTTPResp.Marks, markAt(1), w(2, 1))
+	raw := []byte("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc")
+	wantMarks(t, answerMarks(raw, []respWrite{{end: len(raw), at: markAt(1)}}, "gzip", 9), markAt(1), w(9, 1))
+	if m := answerMarks(raw, nil, "", 3); m != nil {
+		t.Errorf("no writes: marks = %+v, want none", m)
 	}
-	out, err := yamlLib.Marshal(one.Spec.HTTPResp)
-	if err != nil {
-		t.Fatal(err)
+}
+
+// A close-delimited answer (no Content-Length, not chunked) keeps a mark per
+// write, as its body is what the relay wrote until the connection closed.
+func TestRecordMarksAnAnswerTheConnectionsCloseEnds(t *testing.T) {
+	m := recordWrites(t, marksReq, []string{"HTTP/1.1 200 OK\r\n\r\nab", "cd"}, []time.Time{markAt(1), markAt(2)})
+	if m.Spec.HTTPResp.Body != "abcd" {
+		t.Fatalf("body %q", m.Spec.HTTPResp.Body)
 	}
-	if strings.Contains(string(out), "marks") {
-		t.Errorf("a recording with no marks writes a marks key:\n%s", out)
-	}
+	wantMarks(t, m.Spec.HTTPResp.Marks, markAt(1), w(2, 1), w(4, 2))
 }
 
 // A write the capture gave no time keeps no marks at all: a part with no
@@ -205,6 +213,13 @@ func TestRecordKeepsNoMarksForAWriteWithNoTime(t *testing.T) {
 	}, []time.Time{markAt(1), {}})
 	if m.Spec.HTTPResp.Marks != nil {
 		t.Errorf("marks = %+v, want none", m.Spec.HTTPResp.Marks)
+	}
+	out, err := yamlLib.Marshal(m.Spec.HTTPResp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "marks") {
+		t.Errorf("a recording with no marks writes a marks key:\n%s", out)
 	}
 }
 
@@ -276,7 +291,7 @@ func TestAnswerMarksReadsChunksCutAnywhere(t *testing.T) {
 		{end: b + 13, at: markAt(4)}, // the end of that size line: nothing more
 		{end: len(resp), at: markAt(5)},
 	}
-	marks := answerMarks([]byte(resp), cuts, "GET", "", 10)
+	marks := answerMarks([]byte(resp), cuts, "", 10)
 	wantMarks(t, marks, markAt(1), w(2, 2), w(5, 3), w(10, 5))
 }
 

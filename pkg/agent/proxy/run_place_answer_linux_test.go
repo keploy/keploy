@@ -8,7 +8,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +47,7 @@ func placedRelease(p models.RunPlace, t time.Time) bool {
 func placedMock(name, target string, req, res time.Time) *models.Mock {
 	m := r3Mock(name, req, "GET", target, "", name)
 	m.Spec.ResTimestampMock = res
+	m.Spec.HTTPResp.Marks = &models.HTTPAnswerMarks{Head: res, Writes: []models.HTTPAnswerWrite{{Offset: len(m.Spec.HTTPResp.Body), TS: res}}}
 	m.TestModeInfo = models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}
 	return m
 }
@@ -288,5 +292,54 @@ func TestHeldAnswer_LeavesItsConnectionSettledAndItsCallItsTests(t *testing.T) {
 			t.Fatalf("idle marks left after the answer was written: %d", n)
 		}
 		s.end(t, "test-2")
+	})
+}
+
+// An answer of 8 KiB or more, which the agent's disk store keeps apart from
+// its mock, is held as any other, part by part: its marks come back with its
+// response, which the match loads before it consumes the call (claim).
+func TestHeldAnswer_KeptApartByTheDiskStoreIsHeldByItsMarks(t *testing.T) {
+	bothSwitches(t, func(t *testing.T, proven bool) {
+		big := placedMock("mock-big", "/big", placeAt(2), placeAt(45))
+		body := strings.Repeat("x", spilledBodyBytes)
+		marks := &models.HTTPAnswerMarks{Head: placeAt(3), Writes: []models.HTTPAnswerWrite{{Offset: 100, TS: placeAt(3)}, {Offset: len(body), TS: placeAt(45)}}}
+		big.Spec.HTTPResp.Body, big.Spec.HTTPResp.Marks = body, marks
+		big.Spec.HTTPResp.Header["Content-Length"] = strconv.Itoa(len(body))
+
+		disk, err := NewDiskMocks(zap.NewNop())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = disk.Close() })
+		if err := disk.Add(big); err != nil {
+			t.Fatal(err)
+		}
+		disk.Finalize()
+		window, err := disk.LoadWindow(placeAt(0), placeAt(10))
+		if err != nil || len(window) != 1 {
+			t.Fatalf("LoadWindow = (%d mocks, %v)", len(window), err)
+		}
+		if window[0].Spec.HTTPResp != nil || !window[0].HasSpilledResponse() {
+			t.Fatal("precondition: the store must keep the response apart")
+		}
+		loaded := window[0].ShallowCopy()
+		if err := loaded.HydrateResponse(); err != nil {
+			t.Fatal(err)
+		}
+		if got := loaded.Spec.HTTPResp.Marks; !reflect.DeepEqual(got.Writes[1].Offset, len(body)) || !got.Head.Equal(marks.Head) || !got.End().Equal(marks.End()) || len(got.Writes) != 2 {
+			t.Fatalf("marks read back %+v, want %+v", got, marks)
+		}
+
+		s := stagePlacedSet(t, proven, placeWindows(), window...)
+		s.open(t, "test-1", "mock-big")
+		got := s.call(t, "/big")
+		placedNotYet(t, got, "test-3's part in test-1")
+		s.end(t, "test-1")
+		s.open(t, "test-2")
+		placedNotYet(t, got, "test-3's part in test-2")
+		s.end(t, "test-2")
+		s.open(t, "test-3")
+		placedWritten(t, got, body, "at test-3's open")
+		s.end(t, "test-3")
 	})
 }

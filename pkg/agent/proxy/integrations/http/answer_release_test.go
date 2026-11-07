@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"io"
 	"net"
 	"net/http"
@@ -158,7 +160,8 @@ const releaseCall = "GET /job HTTP/1.1\r\nHost: api.example\r\n\r\n"
 func heldMock(t *testing.T, req time.Time, resp string, res time.Time) *models.Mock {
 	t.Helper()
 	h := &HTTP{Logger: zap.NewNop()}
-	m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(releaseCall), Resp: []byte(resp), ReqTimestampMock: req, ResTimestampMock: res}, 80, "c", models.OutgoingOptions{})
+	m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(releaseCall), Resp: []byte(resp), ReqTimestampMock: req, ResTimestampMock: res,
+		RespWrites: []respWrite{{end: len(resp), at: res}}}, 80, "c", models.OutgoingOptions{})
 	if err != nil || m == nil {
 		t.Fatalf("buildHTTPMock = (%v, %v)", m, err)
 	}
@@ -402,11 +405,16 @@ func TestHeldAnswer_TheSetsEndAndANewStagingWriteTheRest(t *testing.T) {
 	}
 }
 
-// Row 7: a stream recorded before the marks is written at once; row 11: so is
-// an answer of a session recording, one served again, one over a store that
-// tells no place, and every answer when no release is registered.
+// Row 7: a recording older than the marks is written at once, a stream or a
+// single answer, wherever its time falls: it may be that of a test's own call,
+// stamped after its test's end, and that test cannot end until it is written.
+// Row 11: so is an answer of a session recording, one served again, one over
+// a store that tells no place, and every answer when no release is registered.
 func TestHeldAnswer_WrittenAtOnce(t *testing.T) {
 	old := heldMock(t, releaseAt(5), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 8\r\n\r\ndata:a\n\n", releaseAt(45))
+	old.Spec.HTTPResp.Marks = nil
+	oldSingle := singleAnswer(t, releaseAt(45))
+	oldSingle.Spec.HTTPResp.Marks = nil
 	session := singleAnswer(t, releaseAt(45))
 	session.TestModeInfo.Lifetime = models.LifetimeSession
 	for _, tc := range []struct {
@@ -415,6 +423,7 @@ func TestHeldAnswer_WrittenAtOnce(t *testing.T) {
 		register bool
 	}{
 		{"a stream with no marks", func() integrations.MockMemDb { return newPlacedDb(old) }, true},
+		{"a single answer with no marks", func() integrations.MockMemDb { return newPlacedDb(oldSingle) }, true},
 		{"a session recording", func() integrations.MockMemDb { return newPlacedDb(session) }, true},
 		{"a store that tells no place", func() integrations.MockMemDb {
 			return &mockMemDb{mocks: []*models.Mock{singleAnswer(t, releaseAt(45))}, updateUnFilteredReturn: true}
@@ -523,6 +532,37 @@ func TestHeldAnswer_MarksThatDoNotFitAreNone(t *testing.T) {
 		if got := marksFit(&models.HTTPAnswerMarks{Writes: tc.writes}, tc.n); got != tc.fit {
 			t.Errorf("marksFit(%v, %d) = %v, want %v", tc.writes, tc.n, got, tc.fit)
 		}
+	}
+}
+
+// A head written apart from the body's one write goes out at its own time, so
+// the answer goes in parts, though it has one.
+func TestHeldAnswer_AHeadBeforeItsOneBodyWriteGoesOutFirst(t *testing.T) {
+	h := &HTTP{Logger: zap.NewNop()}
+	m := singleAnswer(t, releaseAt(45))
+	m.Spec.HTTPResp.Marks.Head = releaseAt(5)
+	a, err := h.planHeld(m, releaseRequest(t, releaseCall))
+	if err != nil || a == nil {
+		t.Fatalf("planHeld = %v, %v", a, err)
+	}
+	if !a.chunked || !a.headAt.Equal(releaseAt(5)) || len(a.pieces) != 1 || !a.pieces[0].at.Equal(releaseAt(45)) {
+		t.Fatalf("held chunked %v, head at %v, %d pieces; want the head at %v, the body at %v", a.chunked, a.headAt, len(a.pieces), releaseAt(5), releaseAt(45))
+	}
+}
+
+// A body rewritten since it was recorded no longer fits its marks: the answer
+// goes out whole at its last mark, which still says when it reached the
+// application.
+func TestHeldAnswer_MarksThatDoNotFitWriteItWhole(t *testing.T) {
+	h := &HTTP{Logger: zap.NewNop()}
+	m := sseMock(t, releaseAt(25), releaseAt(45), "")
+	m.Spec.HTTPResp.Body = "rewritten"
+	a, err := h.planHeld(m, releaseRequest(t, releaseCall))
+	if err != nil || a == nil {
+		t.Fatalf("planHeld = %v, %v", a, err)
+	}
+	if a.chunked || len(a.pieces) != 0 || !a.headAt.Equal(releaseAt(45)) || !bytes.HasSuffix(a.head, []byte("rewritten")) {
+		t.Fatalf("held chunked %v, %d pieces, at %v, head %q; want it whole at %v", a.chunked, len(a.pieces), a.headAt, a.head, releaseAt(45))
 	}
 }
 
@@ -738,5 +778,90 @@ func TestHeldAnswer_TheTerminalWriteEndsTheBodyOnce(t *testing.T) {
 	}
 	if got := readFor(app, quiet); got != "" {
 		t.Fatalf("after the body's end: %q", got)
+	}
+}
+
+// A due answer costs one build, as with no release registered: whether it is
+// held is asked of the mock, with nothing of it built, so an answer served
+// once does not read as served again (keptAnswers).
+func TestHeldAnswer_ADueAnswerIsBuiltOnce(t *testing.T) {
+	ownKeptAnswers(t)
+	registerStandIn(t)
+	h := &HTTP{Logger: zap.NewNop()}
+	m := singleAnswer(t, releaseAt(5))
+	m.MarkPooled()
+	if a, err := h.heldAnswerOf(m, releaseRequest(t, releaseCall), newPlacedDb(), false); err != nil || a != nil {
+		t.Fatalf("held %v, %v; it is due", a, err)
+	}
+	if _, err := h.buildMockResponseBytes(m); err != nil {
+		t.Fatal(err)
+	}
+	if n := keptAnswers.builds.Load(); n != 1 {
+		t.Fatalf("%d builds, want 1", n)
+	}
+	if n := keptAnswers.held.Load(); n != 0 {
+		t.Fatalf("%d bytes kept of an answer served once", n)
+	}
+}
+
+// A call that came ahead of its recording's place (the strict window opted
+// out: a test's call can match a later test's recording) has no recorded order
+// to keep: a test waits for its own call, so its answer is written at once.
+func TestHeldAnswer_ACallAheadOfItsRecordingIsNotHeld(t *testing.T) {
+	registerStandIn(t)
+	h := &HTTP{Logger: zap.NewNop()}
+	m := singleAnswer(t, releaseAt(45))
+	m.Spec.ReqTimestampMock = releaseAt(42)
+	if a, err := h.heldAnswerOf(m, releaseRequest(t, releaseCall), newPlacedDb(), false); err != nil || a != nil {
+		t.Fatalf("a call in test-1 matched test-3's recording: held %v, %v, and test-1 waits for it", a, err)
+	}
+}
+
+// A chunked answer's digest headers are of the bytes it sends, as a whole
+// answer's are (bodydigest.Apply): the application's client checks them.
+func TestHeldAnswer_APartedAnswersDigestsAreOfWhatItSends(t *testing.T) {
+	h := &HTTP{Logger: zap.NewNop()}
+	m := sseMock(t, releaseAt(25), releaseAt(45), "")
+	m.Spec.Metadata[models.MetadataBodyDigestsKey] = "content-md5=content-md5"
+	m.Spec.HTTPResp.Header["Content-MD5"] = "recorded"
+	a, err := h.planHeld(m, releaseRequest(t, releaseCall))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := md5.Sum([]byte(m.Spec.HTTPResp.Body))
+	want := "Content-Md5: " + base64.StdEncoding.EncodeToString(sum[:]) + "\r\n"
+	if !strings.Contains(strings.ReplaceAll(string(a.head), "Content-MD5", "Content-Md5"), want) {
+		t.Fatalf("head %q, want %q", a.head, want)
+	}
+}
+
+// repeatedDb is placedDb with the open test's recordings of a call answered
+// already (integrations.ExactConsumedReader), and a store that answers one
+// more call of it than its test recorded (integrations.RepeatReadAnswerer).
+type repeatedDb struct {
+	*placedDb
+	answered []*models.Mock
+	asked    atomic.Int32
+}
+
+func (d *repeatedDb) ConsumedTestMocks() []*models.Mock { return d.answered }
+
+func (d *repeatedDb) AnswerRepeatRead(matched []*models.Mock) (integrations.RepeatReadAnswer, bool) {
+	d.asked.Add(1)
+	return integrations.RepeatReadAnswer{Mock: matched[0], Test: "test-1", Recorded: len(matched)}, true
+}
+
+// A read answered once more than its test recorded it is an answer served
+// again: the parser writes it at once, though its recording's answer is held
+// (the serve's repeat, not only heldAnswerOf's reading of it).
+func TestHeldAnswer_ARepeatedReadIsWrittenAtOnce(t *testing.T) {
+	registerStandIn(t)
+	db := &repeatedDb{placedDb: newPlacedDb(), answered: []*models.Mock{singleAnswer(t, releaseAt(45))}}
+	app, _ := serveHeld(t, db, nil)
+	if got := readUntil(app, `{"state":"done"}`, 5*time.Second); !strings.HasSuffix(got, `{"state":"done"}`) {
+		t.Fatalf("the read once more: %q, want the recorded answer at once", got)
+	}
+	if db.asked.Load() == 0 {
+		t.Fatal("the store was not asked to answer it")
 	}
 }

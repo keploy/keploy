@@ -23,6 +23,13 @@ import (
 // of its answer waits until the replay's run reaches or passes the moment that
 // part reached the application on record. Nothing is ever written later than
 // the run's place allows, and every hold ends at the set's end.
+//
+// A hold is never one a test's own end waits for, as that test could then
+// never end. A part's mark says its test did not wait for it: a mark is
+// stamped before the relay's write, so one after the test's end is of a part
+// that test ended without. A recording with no marks says no such thing
+// (models.HTTPAnswerMarks) and is never held, nor is a recording the run has
+// not reached: its call came ahead of its place, so it has no place to keep.
 
 // heldAnswer is a matched answer whose write waits for the run's place.
 type heldAnswer struct {
@@ -49,11 +56,16 @@ type heldPiece struct {
 // matched, as it must be held at the run's place now, or nil when it is
 // written at once, as before: no release is registered for HTTP, the store
 // tells no run place, the serve is not the first of a per-test recording (a
-// session or connection recording, an answer served again: repeat), or every
-// part of it is due already.
+// session or connection recording, an answer served again: repeat), its
+// recording kept no marks or is one the run has not reached, or its last byte
+// is due already, and with it every part of it (a release is monotone in
+// time). All that is read of the mock alone, so an answer not held is built
+// once, by its write. stub is the serve's: the match loaded its response
+// (claim), which an answer kept apart by the agent's disk store has in Spec
+// from then on.
 func (h *HTTP) heldAnswerOf(stub *models.Mock, call *http.Request, db integrations.MockMemDb, repeat bool) (*heldAnswer, error) {
 	release, ok := models.AnswerReleaseOf(models.HTTP)
-	if !ok || repeat || stub.Spec.HTTPResp == nil {
+	if !ok || repeat || stub.Spec.HTTPResp == nil || stub.Spec.HTTPResp.Marks == nil {
 		return nil, nil
 	}
 	if stub.TestModeInfo.Lifetime != models.LifetimePerTest {
@@ -64,83 +76,51 @@ func (h *HTTP) heldAnswerOf(stub *models.Mock, call *http.Request, db integratio
 		return nil, nil
 	}
 	place := placer.RunPlace()
-	if place.SetEnd {
+	if release(place, stub.Spec.ResTimestampMock) || !release(place, stub.Spec.ReqTimestampMock) {
 		return nil, nil
-	}
-	stub, err := withResponse(stub)
-	if err != nil {
-		return nil, err
 	}
 	a, err := h.planHeld(stub, call)
-	if err != nil || a == nil {
+	if err != nil {
 		return nil, err
-	}
-	if a.dueBy(func(t time.Time) bool { return release(place, t) }) {
-		return nil, nil
 	}
 	a.release, a.placer, a.staging = release, placer, place.Staging
 	return a, nil
 }
 
-// dueBy reports whether the head and every piece are due by due.
-func (a *heldAnswer) dueBy(due func(time.Time) bool) bool {
-	if !due(a.headAt) {
-		return false
-	}
-	for _, p := range a.pieces {
-		if !due(p.at) {
-			return false
-		}
-	}
-	return true
-}
-
-// planHeld splits stub's answer, its response in its Spec (withResponse),
+// planHeld splits stub's answer, its response in its Spec with its marks,
 // into what is written when:
-//   - an answer whose recording kept marks (models.HTTPAnswerMarks: the proxy
-//     wrote it in more than one write) has its head at Marks.Head and each
-//     write's part at its own time, sent chunked;
-//   - one with no marks that is a stream (SSE, NDJSON, multipart, or kept as
-//     frames) is not held: a recording older than the marks says when its
-//     whole body ended, not when its frames came, and holding its first frames
-//     to its end would hold past what record did;
-//   - any other is written whole at ResTimestampMock, when its last byte
-//     reached the application.
+//   - an answer that went out in one write, or that cannot go in parts, whole
+//     at its last mark;
+//   - any other with its head at Marks.Head and each write's part at its own
+//     time, sent chunked.
 //
-// Marks that do not fit the body served (its length differs: a body rewritten
-// since) are read as no marks. A call older than HTTP/1.1 cannot take a
-// chunked answer: its answer is written whole at its last mark. The call is
-// the application's request now, not the recorded one: it is the
+// It cannot go in parts when its marks do not fit the body served (its length
+// differs: a body rewritten since), when it has no body by rule, and when the
+// call is older than HTTP/1.1, which cannot take a chunked answer. The call
+// is the application's request now, not the recorded one: it is the
 // application's client that reads the answer.
 func (h *HTTP) planHeld(stub *models.Mock, call *http.Request) (*heldAnswer, error) {
 	resp := stub.Spec.HTTPResp
 	marks := resp.Marks
-	if marks != nil && !marksFit(marks, len(resp.Body)) {
-		marks = nil
-	}
 	method := ""
 	if req := stub.Spec.HTTPReq; req != nil {
 		method = string(req.Method)
 	}
 	http11 := call != nil && call.ProtoAtLeast(1, 1)
-	if marks == nil && streamed(resp) {
-		return nil, nil
-	}
-	if marks == nil || !http11 || responseHasNoBody(method, resp.StatusCode) {
-		at := stub.Spec.ResTimestampMock
-		if marks != nil {
-			at = marks.Writes[len(marks.Writes)-1].TS
-		}
-		if at.IsZero() {
-			return nil, nil
-		}
+	if !http11 || wentOutWhole(marks) || !marksFit(marks, len(resp.Body)) || responseHasNoBody(method, resp.StatusCode) {
 		whole, err := h.buildMockResponseBytes(stub)
 		if err != nil {
 			return nil, err
 		}
-		return &heldAnswer{head: whole, headAt: at}, nil
+		return &heldAnswer{head: whole, headAt: marks.End()}, nil
 	}
 	return h.chunkedAnswer(stub, marks)
+}
+
+// wentOutWhole reports whether marks are of an answer that went out in one
+// write, its head with its body.
+func wentOutWhole(marks *models.HTTPAnswerMarks) bool {
+	return len(marks.Writes) == 1 && marks.Writes[0].TS.Equal(marks.Head)
 }
 
 // marksFit reports whether marks' writes end, in order, inside a body of n
@@ -157,18 +137,6 @@ func marksFit(marks *models.HTTPAnswerMarks, n int) bool {
 		prev = w.Offset
 	}
 	return prev == n
-}
-
-// streamed reports whether resp is a stream (models.HTTPStreamOf).
-func streamed(resp *models.HTTPResp) bool {
-	contentType := ""
-	for k, v := range resp.Header {
-		if strings.EqualFold(k, "Content-Type") {
-			contentType = v
-			break
-		}
-	}
-	return models.HTTPStreamOf(contentType, len(resp.StreamBody) > 0) != models.HTTPStreamNone
 }
 
 // chunkedAnswer is stub's answer with its head at marks.Head and each write's
