@@ -118,7 +118,7 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 
 	for _, variable := range variables {
 		// Skip disabled variables
-		if variable["disabled"] != nil && variable["disabled"].(bool) {
+		if disabled, ok := variable["disabled"].(bool); ok && disabled {
 			continue
 		}
 
@@ -428,7 +428,11 @@ func constructRequest(req *PostmanRequest, variables map[string]string) models.H
 func extractHeaders(headers []map[string]interface{}) map[string]string {
 	headersMap := make(map[string]string)
 	for _, header := range headers {
-		headersMap[header["key"].(string)] = header["value"].(string)
+		key, okKey := header["key"].(string)
+		value, okVal := header["value"].(string)
+		if okKey && okVal {
+			headersMap[key] = value
+		}
 	}
 	return headersMap
 }
@@ -438,28 +442,38 @@ func extractURL(url interface{}) string {
 	case string:
 		return v
 	case map[string]interface{}:
-		url := v["raw"].(string)
-		return url
+		if raw, ok := v["raw"].(string); ok {
+			return raw
+		}
+		return ""
 	default:
 		return ""
 	}
 }
 
 func processUrlencodedBody(body []map[string]interface{}) string {
-	keyValues := []string{}
+	var keyValues []string
 	for _, item := range body {
-		keyValues = append(keyValues, item["key"].(string)+"="+item["value"].(string))
+		key, okKey := item["key"].(string)
+		value, okVal := item["value"].(string)
+		if okKey && okVal {
+			keyValues = append(keyValues, key+"="+value)
+		}
 	}
 	return strings.Join(keyValues, "&")
 }
 
 func processFormdataBody(body []map[string]interface{}) []models.FormData {
-	form := []models.FormData{}
+	var form []models.FormData
 	for _, formData := range body {
-		form = append(form, models.FormData{
-			Key:    formData["key"].(string),
-			Values: []string{formData["value"].(string)},
-		})
+		key, okKey := formData["key"].(string)
+		value, okVal := formData["value"].(string)
+		if okKey && okVal {
+			form = append(form, models.FormData{
+				Key:    key,
+				Values: []string{value},
+			})
+		}
 	}
 	return form
 }
