@@ -277,10 +277,11 @@ func (t *appTail) add(line string, limit int) {
 		copy(grown, buf)
 		buf = grown
 	}
-	// Otherwise line and its "\n" fit in the free room, or the line or the
-	// buffer is past limit. That is not reached (addLocked cuts the line to
-	// under limit, and trim keeps the buffer within limit); were it reached,
-	// append would grow the buffer itself, and trim would bring it back.
+	// Otherwise line and its "\n" fit in the free room (the common path), or
+	// the line is at or past limit, or the text the buffer holds is past it.
+	// Those last two are not reached (addLocked cuts the line to under limit,
+	// and trim keeps the buffer within limit); were they reached, any growth
+	// would be append's own, and trim would bring it back.
 	buf = append(buf, line...)
 	t.buf = append(buf, '\n')
 }
