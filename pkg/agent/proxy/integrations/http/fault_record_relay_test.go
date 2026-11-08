@@ -657,10 +657,13 @@ func TestBuildHTTPMock_FaultOnlyOnAnUnfinishedAnswer(t *testing.T) {
 	if err != nil || m == nil || m.Spec.Fault != nil || m.Spec.HTTPResp.StatusCode != 200 {
 		t.Errorf("a whole answer with no body (Content-Length: 0) and a reset after it: %v, %v; want the answer, no fault", m, err)
 	}
+	// A head whose lines end at a bare LF ends where net/http's reader ends
+	// it (messageHead), so the body's bytes are known as a CRLF head's are.
 	bareLF := "HTTP/1.1 200 OK\nContent-Length: 20\n\n0123456789"
-	if m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(faultReq), Resp: []byte(bareLF),
-		Fault: &models.Fault{Kind: models.FaultTruncate}}, 80, "c", models.OutgoingOptions{}); err == nil {
-		t.Errorf("a cut-short answer whose head has bare LFs recorded as %+v; want an error: its body's bytes are not known", m.Spec)
+	m, err = h.buildHTTPMock(&FinalHTTP{Req: []byte(faultReq), Resp: []byte(bareLF),
+		Fault: &models.Fault{Kind: models.FaultTruncate}}, 80, "c", models.OutgoingOptions{})
+	if err != nil || m == nil || m.Spec.Fault == nil || m.Spec.HTTPResp.StatusCode != 200 || m.Spec.HTTPResp.Body != "0123456789" {
+		t.Errorf("a cut-short answer whose head has bare LFs: %v, %v; want its 10 body bytes and the fault", m, err)
 	}
 }
 

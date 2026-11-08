@@ -54,8 +54,8 @@ func TestParseHeadersReadsAFoldedLineAsTheFieldBefore(t *testing.T) {
 			head: "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length\r\nX-A: b\r\n\r\n", cl: -1, refused: true, goRefuses: true},
 		{name: "the last line with no colon is refused",
 			head: "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length\r\n\r\n", cl: -1, refused: true, goRefuses: true},
-		{name: "an empty line before the section's end is refused", cl: -1, refused: true,
-			head: "HTTP/1.1 200 OK\r\nX-A: b\r\n\r\nContent-Length: 5\r\n\r\n"},
+		{name: "the first empty line ends the section, as net/http's reader ends it", cl: -1,
+			head: "HTTP/1.1 200 OK\r\nX-A: b\n\nContent-Length: 5\r\n\r\n"},
 		{name: "an unfolded section is read as before",
 			head: "POST /a HTTP/1.1\r\nHost: up\r\ncontent-length: 3\r\nX-A: b\r\n\r\n", cl: 3},
 	} {

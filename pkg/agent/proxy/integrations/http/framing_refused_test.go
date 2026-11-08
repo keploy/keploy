@@ -100,8 +100,8 @@ var netHTTPFramingRows = []struct {
 		refused: true, client: "refuses", server: "400"},
 	{name: "a tab before the colon of a field that frames nothing", version: "1.1", fields: "X-A\t: b\r\nContent-Length: 5\r\n",
 		refused: true, client: "refuses", server: "400"},
-	{name: "an empty line before the section's end", version: "1.1", fields: "X-A: b\n\nContent-Length: 5\r\n",
-		refused: true, client: `reads "Content-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n"`, server: "400"},
+	{name: "a bare LF empty line ends the section", version: "1.1", fields: "X-A: b\n\nContent-Length: 5\r\n",
+		cl: -1, client: `reads "Content-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n"`, server: "400"},
 	{name: "a Trailer that names a framing field", version: "1.1", fields: "Transfer-Encoding: chunked\r\nTrailer: X-A, content-length\r\n",
 		refused: true, client: "refuses", server: "400"},
 	{name: "a Trailer that names the Trailer", version: "1.1", fields: "Transfer-Encoding: chunked\r\nTrailer: Trailer\r\n",
@@ -145,8 +145,15 @@ func TestParseHeadersFramesOnlyAsNetHTTPFrames(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			resp := "HTTP/" + row.version + " 200 OK\r\n" + row.fields + "\r\n"
 			req := "POST /a HTTP/" + row.version + "\r\n" + row.fields + "Host: up\r\n\r\n"
-			for i, head := range []string{resp, req} {
-				cl, chunked, err := parseHeaders([]byte(head), i == 0)
+			for i, msg := range []string{resp, req} {
+				// The header section messageHead finds, as readRequestV2 and
+				// readResponseWrites read it.
+				section, _, _, ok := messageHead([]byte(msg+body), i == 0)
+				if !ok {
+					t.Fatalf("messageHead(%q) found no header section", msg+body)
+				}
+				head := string(section)
+				cl, chunked, err := parseHeaders(section, i == 0)
 				if refusedFraming(err) != row.refused || err != nil && !refusedFraming(err) {
 					t.Fatalf("parseHeaders(%q): %v, want refused %v", head, err, row.refused)
 				}

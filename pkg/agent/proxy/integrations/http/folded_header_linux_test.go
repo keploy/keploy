@@ -16,6 +16,7 @@ import (
 func TestRecordThroughTheRelayFramesAFoldedHeaderAsTheClientDoes(t *testing.T) {
 	type exchange struct {
 		path string
+		req  string   // the request as the app writes it ("": a GET of path)
 		resp []string // each element written once the app has the one before
 	}
 	for _, row := range []struct {
@@ -41,6 +42,20 @@ func TestRecordThroughTheRelayFramesAFoldedHeaderAsTheClientDoes(t *testing.T) {
 				{path: "/a", resp: []string{"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-A: b\r\n Content-Length: 10\r\n\r\nhello"}},
 				{path: "/b", resp: []string{"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nworld"}},
 			}},
+		// Lines that end at a bare LF: net/http's reader ends the section at
+		// the first empty line, "\n" alone, and so must keploy's. Looking for
+		// "\r\n\r\n", it read the first message on to the close, and lost
+		// the exchanges after it, and a client's first one too.
+		{name: "a server that ends its lines with a bare LF, on a keep-alive connection",
+			exchanges: []exchange{
+				{path: "/a", resp: []string{"HTTP/1.1 200 OK\nContent-Length: 5\n\nhello"}},
+				{path: "/b", resp: []string{"HTTP/1.1 200 OK\r\nX-A: b\nContent-Length: 5\r\n\nworld"}},
+			}},
+		{name: "a client that ends its lines with a bare LF, on a keep-alive connection",
+			exchanges: []exchange{
+				{path: "/a", req: "GET /a HTTP/1.1\nHost: up\n\n", resp: []string{"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"}},
+				{path: "/b", req: "GET /b HTTP/1.1\r\nHost: up\n\r\n", resp: []string{"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nworld"}},
+			}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			c := newRelayedConn(t)
@@ -49,7 +64,10 @@ func TestRecordThroughTheRelayFramesAFoldedHeaderAsTheClientDoes(t *testing.T) {
 			var clientRead []string
 			var sent int // what the server has written
 			for i, ex := range row.exchanges {
-				raw := "GET " + ex.path + " HTTP/1.1\r\nHost: up\r\n\r\n"
+				raw := ex.req
+				if raw == "" {
+					raw = "GET " + ex.path + " HTTP/1.1\r\nHost: up\r\n\r\n"
+				}
 				req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
 				if err != nil {
 					t.Fatal(err)

@@ -305,7 +305,7 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 		utils.LogError(h.Logger, err, "failed to read the response's framing")
 		return fmt.Errorf("failed to handle chunked response: %w", err)
 	}
-	if responseHasNoBody(reqMethod, status) {
+	if framedHeadOnly(reqMethod, status) {
 		return nil // no body, whatever the headers say
 	}
 

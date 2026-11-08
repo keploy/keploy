@@ -17,7 +17,6 @@ type framing struct {
 	noBody    bool // a response that has no body whatever its fields say
 	length    int  // -1: none (a response's body runs to the close)
 	chunked   bool
-	upgraded  bool // net/http's: a 101 (Switching Protocols) final response
 }
 
 // keployRequestFraming is the framing readRequestV2 gives msg, a request from
@@ -40,7 +39,8 @@ func keployRequestFraming(msg []byte) framing {
 
 // keployResponseFraming is the framing readResponseWrites gives msg, the
 // answer to a method request from its first byte: its final header section,
-// past the interim 1xx responses messageHead frames by their blank lines.
+// past the interim 1xx responses messageHead frames by their blank lines, a
+// 101's as its head alone (framedHeadOnly).
 func keployResponseFraming(msg []byte, method string) framing {
 	head, bodyStart, status, ok := messageHead(msg, true)
 	if !ok {
@@ -50,7 +50,7 @@ func keployResponseFraming(msg []byte, method string) framing {
 	if err != nil {
 		return framing{refused: true, bodyStart: bodyStart}
 	}
-	if responseHasNoBody(method, status) {
+	if framedHeadOnly(method, status) {
 		return framing{bodyStart: bodyStart, noBody: true}
 	}
 	return framing{bodyStart: bodyStart, length: cl, chunked: chunked}
@@ -100,7 +100,6 @@ func netHTTPResponseFraming(msg []byte, method string) (f framing, keployRefuses
 		return framing{refused: true}, false
 	}
 	f.bodyStart = len(msg) - r.Len() - br.Buffered()
-	f.upgraded = resp.StatusCode == http.StatusSwitchingProtocols
 	switch {
 	case method == http.MethodHead || resp.StatusCode/100 == 1 || resp.StatusCode == 204 || resp.StatusCode == 304:
 		f.noBody = true
@@ -143,20 +142,53 @@ func sharedFramingFails(section []byte, major, minor int) bool {
 }
 
 // checkFraming fails t unless keploy's framing of msg is net/http's: the same
-// refusal, and for a message both frame the same body start and the same
-// framing. keploy refuses as well a message keployRefuses names, and one
-// whose header section net/http ends elsewhere than messageHead does.
+// refusal, and for a message both frame the same body start (both end its
+// header section at the same empty line) and the same framing. keploy refuses
+// as well a message keployRefuses names.
 func checkFraming(t *testing.T, msg []byte, got, want framing, keployRefuses bool) {
 	t.Helper()
-	if !want.refused && (keployRefuses || want.bodyStart != got.bodyStart) {
+	if !want.refused && keployRefuses {
 		want = framing{refused: true, bodyStart: got.bodyStart}
 	}
 	if got.refused || want.refused {
 		got.bodyStart, want.bodyStart = 0, 0
 	}
-	want.upgraded = false
 	if got != want {
 		t.Fatalf("framing of %q: keploy %+v, net/http %+v", msg, got, want)
+	}
+}
+
+// lineReaderSectionEnd is the offset just past the header section msg starts
+// with as net/textproto's line reader ends it, or -1 while it has not ended:
+// past the start line and the lines after it up to the first one its reader
+// reads as empty. It drops only the CR right before a line's LF, so a line
+// that starts with a CR and holds more ("\rX-A: b", "\r\r") is none.
+func lineReaderSectionEnd(msg []byte) int {
+	br := bufio.NewReaderSize(bytes.NewReader(msg), len(msg)+16)
+	tp := textproto.NewReader(br)
+	if _, err := tp.ReadLine(); err != nil { // the start line
+		return -1
+	}
+	for {
+		line, err := tp.ReadLine()
+		if err != nil {
+			return -1
+		}
+		if line == "" {
+			return len(msg) - br.Buffered()
+		}
+	}
+}
+
+// checkSectionEnd fails t unless headerSectionEnd ends the header section msg
+// starts with where net/textproto's line reader ends it (lineReaderSectionEnd),
+// for a message either reader refuses too: checkFraming compares no body
+// start of a refused message, and keploy frames an interim by its blank lines
+// whatever its fields.
+func checkSectionEnd(t *testing.T, msg []byte) {
+	t.Helper()
+	if got, want := headerSectionEnd(msg), lineReaderSectionEnd(msg); got != want {
+		t.Fatalf("headerSectionEnd(%q) = %d; net/textproto's line reader ends that section at %d", msg, got, want)
 	}
 }
 
@@ -184,6 +216,11 @@ func fuzzSeeds(response bool) [][]byte {
 		"Content-Length: 5\r\nbogus\r\n Content-Length: 7\r\n",
 		"Expect: 100-continue\r\nContent-Length: 5\r\n",
 		"Content-Length: 5\r\nTransfer-Encoding: chunked\r\nTrailer: X-A\r\n",
+		"X-A: b\nContent-Length: 5\n",
+		"X-A: b\n\nContent-Length: 5\r\n",
+		"Content-Length: 5\r\n\r\r\n",
+		"\rContent-Length: 5\r\n",
+		"Transfer-Encoding: chunked\r\n \n",
 	} {
 		if response {
 			seeds = append(seeds, []byte("HTTP/1.1 200 OK\r\n"+s+"\r\n"+body))
@@ -198,11 +235,20 @@ func fuzzSeeds(response bool) [][]byte {
 			"HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
 			"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + body,
 			"HTTP/1.1 103 Early Hints\r\nbogus\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+			"HTTP/1.1 103 Early Hints\r\n\rLink: </a>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
 			"HTTP/1.0 200 OK\r\n\r\nhello",
 			"HTTP/1.1 200\r\nContent-Length: 5\r\n\r\nhello",
 			"HTTP/1.1 2000 OK\r\nContent-Length: 5\r\n\r\nhello",
 			"\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
 			"HTTP/1.1 100 Continue\r\n\r\n\r\n\r\n",
+			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n\x81\x05hello",
+			"HTTP/1.1 101 Switching Protocols\r\nContent-Length: 5\r\nUpgrade: echo\r\n\r\nhello",
+			"HTTP/1.1 101 Switching Protocols\nTransfer-Encoding: chunked\nUpgrade: echo\n\n" + body,
+			"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\n\r\n",
+			"HTTP/1.1 200 OK\nContent-Length: 5\n\nhello",
+			"HTTP/1.1 100 Continue\n\nHTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\n" + body,
+			"HTTP/1.0 200 OK\n\nhello",
+			"\n\nHTTP/1.1 200 OK\nContent-Length: 5\n\nhello",
 		} {
 			seeds = append(seeds, []byte(s))
 		}
@@ -212,6 +258,10 @@ func fuzzSeeds(response bool) [][]byte {
 			"GET http://a/b?c HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",
 			"CONNECT a:443 HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello",
 			"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+			"GET / HTTP/1.1\nHost: a\n\n",
+			"\n\nPOST /a HTTP/1.1\nHost: a\nContent-Length: 5\n\nhello",
+			"POST /a HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\n\n" + body,
+			"GET /ws HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n\x81\x05hello",
 		} {
 			seeds = append(seeds, []byte(s))
 		}
@@ -220,19 +270,22 @@ func fuzzSeeds(response bool) [][]byte {
 }
 
 // FuzzRequestFraming holds keploy's framing of a request to net/http's
-// ReadRequest's, over any bytes: the seeds are every oracle row.
+// ReadRequest's, and the end of its first header section to net/textproto's,
+// over any bytes: the seeds are every oracle row.
 func FuzzRequestFraming(f *testing.F) {
 	for _, s := range fuzzSeeds(false) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, msg []byte) {
+		checkSectionEnd(t, msg)
 		want, keployRefuses := netHTTPRequestFraming(msg)
 		checkFraming(t, msg, keployRequestFraming(msg), want, keployRefuses)
 	})
 }
 
 // FuzzResponseFraming holds keploy's framing of a response to net/http's
-// client's, over any bytes, as the answer to a GET or to a HEAD.
+// client's, as the answer to a GET or to a HEAD, and the end of its first
+// header section to net/textproto's, over any bytes.
 func FuzzResponseFraming(f *testing.F) {
 	for _, s := range fuzzSeeds(true) {
 		f.Add(s, false)
@@ -243,15 +296,8 @@ func FuzzResponseFraming(f *testing.F) {
 		if head {
 			method = http.MethodHead
 		}
+		checkSectionEnd(t, msg)
 		want, keployRefuses := netHTTPResponseFraming(msg, method)
-		got := keployResponseFraming(msg, method)
-		if want.upgraded && !got.refused {
-			// net/http hands the connection of a 101 (Switching Protocols)
-			// over to the upgraded protocol, and keploy reads its body as a
-			// 200's: the upgrade decides that, not the header section, so
-			// only the reading of the section is held here.
-			want.noBody, want.length, want.chunked = got.noBody, got.length, got.chunked
-		}
-		checkFraming(t, msg, got, want, keployRefuses)
+		checkFraming(t, msg, keployResponseFraming(msg, method), want, keployRefuses)
 	})
 }

@@ -201,6 +201,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		respWrites := []respWrite{{end: len(finalResp), at: firstRespChunk.WrittenAt}}
 
 		gotLastWritten, err := h.readResponseWrites(sess.DestStream, &finalResp, requestMethod(finalReq), &respWrites)
+		// A 101 (Switching Protocols) is the connection's last HTTP message:
+		// the protocol it switched to carries the rest (passUpgradeThrough).
+		_, _, status, _ := messageHead(finalResp, true)
+		upgraded := status == http.StatusSwitchingProtocols
 		// The stream ended before readResponseV2 found the response's end.
 		// Where keploy relays the connection it has read all the server sent,
 		// so that is the server's doing, unless the relay ended the stream
@@ -335,7 +339,38 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			// set during it must not leave out the next exchange's mock.
 			sess.MarkMockComplete()
 		}
+		if upgraded {
+			passUpgradeThrough(sess)
+			return nil
+		}
 	}
+}
+
+// passUpgradeThrough reads what sess's streams carry after a 101 (Switching
+// Protocols) to their ends, and records none of it: from the 101's head on,
+// the connection carries the protocol it switched to (a WebSocket's frames),
+// both ways, and no HTTP message. The relay forwards those bytes as it
+// forwards every byte. Read here, the client's are no request the parser left
+// unread, so no test case is left out over them, and the capture holds none
+// of them for no one. keploy read the server's as the 101's body, to the
+// connection's close, and only then recorded the 101: at the recording's
+// stop, partway through that "body", the exchange was left out.
+func passUpgradeThrough(sess *supervisor.Session) {
+	dest := make(chan struct{})
+	go func() {
+		defer close(dest)
+		for {
+			if _, err := sess.DestStream.ReadChunk(); err != nil {
+				return
+			}
+		}
+	}()
+	for {
+		if _, err := sess.ClientStream.ReadChunk(); err != nil {
+			break
+		}
+	}
+	<-dest
 }
 
 // noAnswerFault is the fault a call ended in that got no byte of an answer, as
@@ -642,15 +677,22 @@ func (h *HTTP) readResponseWrites(stream *fakeconn.FakeConn, finalResp *[]byte, 
 	}
 
 	// 2. Parse the final response's headers for body framing. The answer to
-	// a HEAD, a 204 and a 304 have no body whatever the headers say, but
-	// net/http reads their framing fields too, and refuses the ones it
-	// refuses.
+	// a HEAD, a 204, a 304 and a 101 are their head alone whatever the
+	// headers say (framedHeadOnly), but net/http reads their framing fields
+	// too, and refuses the ones it refuses.
 	head, bodyStart, status, _ := messageHead(*finalResp, true)
 	contentLength, chunked, err := parseHeaders(head, true)
 	if err != nil {
 		return lastWr, err
 	}
-	if responseHasNoBody(reqMethod, status) {
+	if framedHeadOnly(reqMethod, status) {
+		// What came after the head in its read is no part of the response
+		// (a 101's: the switched-to protocol's), and the write that completed
+		// the head ends at the head's end.
+		*finalResp = (*finalResp)[:bodyStart]
+		for i := range *writes {
+			(*writes)[i].end = min((*writes)[i].end, bodyStart)
+		}
 		return lastWr, nil
 	}
 

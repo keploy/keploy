@@ -34,9 +34,9 @@ import (
 //   - a name that is empty or holds a byte that is not a token byte or a
 //     space (a tab before the colon is one);
 //   - a value byte that is a control byte other than a tab (a CR left in a
-//     line, a NUL) or DEL;
-//   - an empty line before the end of head (a bare "\n\n"): net/http's header
-//     section ends there, and its body starts where keploy's does not.
+//     line, a NUL) or DEL.
+//
+// The section ends at its first empty line, as messageHead ends head there.
 func headerFields(head []byte, each func(name, value []byte)) error {
 	var name, value []byte
 	field := false // name and value are a field, not yet given to each
@@ -56,10 +56,7 @@ func headerFields(head []byte, each func(name, value []byte)) error {
 		line, rest, _ = bytes.Cut(rest, []byte("\n"))
 		line = bytes.TrimSuffix(line, []byte("\r"))
 		if len(line) == 0 {
-			if len(rest) > 0 {
-				return fmt.Errorf("%w: an empty line before the header section's end", errFramingRefused)
-			}
-			break
+			break // the empty line that ends the section
 		}
 		if line[0] == ' ' || line[0] == '\t' {
 			if !field {

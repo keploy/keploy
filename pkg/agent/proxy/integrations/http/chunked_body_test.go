@@ -687,31 +687,37 @@ func TestTransferEncodingOverridesContentLength(t *testing.T) {
 }
 
 // A 101 Switching Protocols (WebSocket) ends the HTTP exchange but not the
-// connection: what follows is the other protocol. The V2 record path reads it
-// to the close as one response, as before, instead of taking the upgraded
-// stream for the next HTTP request.
-func TestReadResponseV2ReadsAnUpgradedConnectionToItsClose(t *testing.T) {
+// connection: what follows is the other protocol. net/http frames the 101 as
+// its head alone, and so does the V2 record path: it returns at the head's
+// end, the switched-to protocol's bytes in the head's read cut off, and its
+// writes end there. It read them as the 101's body, to the connection's close.
+func TestReadResponseV2FramesA101AsItsHeadAlone(t *testing.T) {
+	const head = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
-	stream, send, closeStream := makeStream(t, fakeconn.FromDest, 8)
-	now := time.Now()
-	head := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
-	send([]byte("\x81\x05hello"), now, now)
-	finalResp := []byte(head) // the first chunk, already read by recordV2
+	stream, send, _ := makeStream(t, fakeconn.FromDest, 8)
+	first, second := time.Now(), time.Now().Add(time.Millisecond)
+	send([]byte(head[20:]+"\x81\x05hello"), second, second) // the head's end, and a frame
+	finalResp := []byte(head[:20])                          // the first chunk, already read by recordV2
+	writes := []respWrite{{end: 20, at: first}}
 	done := make(chan error, 1)
-	go func() { _, err := h.readResponseV2(stream, &finalResp, "GET"); done <- err }()
+	go func() { _, err := h.readResponseWrites(stream, &finalResp, "GET", &writes); done <- err }()
 	select {
 	case err := <-done:
-		t.Fatalf("readResponseV2 returned (%v) at the 101's head, with the connection still open", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	closeStream()
-	select {
-	case <-done:
+		if err != nil {
+			t.Fatalf("readResponseWrites = %v at the 101's head", err)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("readResponseV2 did not return at the close")
+		t.Fatal("readResponseWrites did not return at the 101's head: it waits on the switched-to protocol's bytes")
 	}
-	if string(finalResp) != head+"\x81\x05hello" {
-		t.Fatalf("finalResp = %q", finalResp)
+	if string(finalResp) != head {
+		t.Fatalf("finalResp = %q, want the 101's head alone", finalResp)
+	}
+	if len(writes) != 2 || writes[0].end != 20 || writes[1].end != len(head) {
+		t.Fatalf("writes = %+v, want the second to end at the head's end, %d", writes, len(head))
+	}
+	marks := answerMarks(finalResp, writes, "", 0)
+	if marks == nil || !marks.Head.Equal(second) || len(marks.Writes) != 1 || marks.Writes[0].Offset != 0 {
+		t.Fatalf("answerMarks = %+v, want the head at the second write, and no body", marks)
 	}
 }
 

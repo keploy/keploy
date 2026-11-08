@@ -268,20 +268,22 @@ func contentLengthValue(v string) (int, error) {
 // 103 Early Hints or an unsolicited 100 Continue can precede the final response
 // in the same read, and has no body). It returns that section (start line and
 // header fields), the offset of the body after it, the response status (0 for
-// a request), and ok=false while that section has not fully arrived. The
-// empty lines before a request line (emptyLinesBefore) are skipped: two of
-// them in front of the next request are no empty header section.
+// a request), and ok=false while that section has not fully arrived. A
+// section ends where net/http's reader ends it (headerSectionEnd), at a bare
+// LF line end too. The empty lines before a request line (emptyLinesBefore)
+// are skipped: two of them in front of the next request are no empty header
+// section.
 func messageHead(msg []byte, response bool) (head []byte, bodyStart int, status int, ok bool) {
 	pos := 0
 	if !response {
 		pos = emptyLinesBefore(msg)
 	}
 	for {
-		i := bytes.Index(msg[pos:], []byte("\r\n\r\n"))
-		if i < 0 {
+		end := headerSectionEnd(msg[pos:])
+		if end < 0 {
 			return nil, 0, 0, false
 		}
-		head, bodyStart = msg[pos:pos+i+4], pos+i+4
+		head, bodyStart = msg[pos:pos+end], pos+end
 		if !response {
 			return head, bodyStart, 0, true
 		}
@@ -292,6 +294,33 @@ func messageHead(msg []byte, response bool) (head []byte, bodyStart int, status 
 		}
 		return head, bodyStart, status, true
 	}
+}
+
+// headerSectionEnd is the offset just past the empty line that ends the header
+// section msg starts with, or -1 while that line has not arrived. Lines end at
+// an LF, the one CR before it dropped, as net/textproto's reader ends them, so
+// the section is its first line (the start line) and the lines after it up to
+// the first empty one: "\r\n" or a bare "\n". A server that ends its lines
+// with a bare LF sends a section net/http's client reads: looking for
+// "\r\n\r\n", keploy read on past it, into the body and the responses after
+// it, to the connection's close.
+func headerSectionEnd(msg []byte) int {
+	i := bytes.IndexByte(msg, '\n') // the start line's end
+	for i >= 0 {
+		rest := msg[i+1:]
+		if len(rest) > 0 && rest[0] == '\n' {
+			return i + 2
+		}
+		if len(rest) > 1 && rest[0] == '\r' && rest[1] == '\n' {
+			return i + 3
+		}
+		j := bytes.IndexByte(rest, '\n')
+		if j < 0 {
+			return -1
+		}
+		i += 1 + j
+	}
+	return -1
 }
 
 // finalResponse is resp from its final response on, framed by blank lines: the
@@ -317,21 +346,21 @@ func finalResponse(resp []byte) []byte {
 // caller reads it as far as it goes.
 func responseAsRead(resp []byte) []byte {
 	for {
-		i := bytes.Index(resp, []byte("\r\n\r\n"))
-		if i < 0 {
+		end := headerSectionEnd(resp)
+		if end < 0 {
 			break
 		}
-		if pUtil.IsInterimStatus(responseStatus(resp[:i+4])) {
-			resp = resp[i+4:] // an interim response: the final one follows
+		if pUtil.IsInterimStatus(responseStatus(resp[:end])) {
+			resp = resp[end:] // an interim response: the final one follows
 			continue
 		}
 		return resp // its whole header section
 	}
-	end := bytes.LastIndex(resp, []byte("\r\n"))
+	end := bytes.LastIndexByte(resp, '\n')
 	if end < 0 {
 		return resp
 	}
-	return append(resp[:end+2:end+2], '\r', '\n')
+	return append(resp[:end+1:end+1], '\r', '\n')
 }
 
 // responseStatus is the status code of an HTTP/1.x response head, or 0 when
@@ -357,6 +386,18 @@ func responseStatus(head []byte) int {
 // interim 1xx, 204 or 304.
 func responseHasNoBody(reqMethod string, status int) bool {
 	return models.HTTPResponseHasNoBody(reqMethod, status)
+}
+
+// framedHeadOnly reports whether net/http's reader frames a final response as
+// its head alone, whatever its fields say: one with no body by rule
+// (responseHasNoBody), and a 101 (Switching Protocols), after whose head the
+// connection carries the protocol it switched to, both ways, which net/http's
+// client hands the connection over to. Their framing fields are read all the
+// same (parseHeaders), and refused as net/http refuses them. keploy read a
+// 101's Content-Length or chunked body off the switched-to protocol's bytes,
+// and with neither field read them as its body to the connection's close.
+func framedHeadOnly(reqMethod string, status int) bool {
+	return responseHasNoBody(reqMethod, status) || status == http.StatusSwitchingProtocols
 }
 
 // startsWithInterimResponse reports whether resp begins with an interim 1xx
