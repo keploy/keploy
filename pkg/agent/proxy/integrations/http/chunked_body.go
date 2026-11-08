@@ -254,10 +254,13 @@ var errBadContentLength = errors.New("the Content-Length field value does not pa
 // value, which is the app's bytes (a client can send anything there), and it
 // reached the agent's log at Error (HandleChunkedRequests,
 // handleChunkedResponses) and the stopped-on reason of a recording
-// (readRequestV2, readResponseV2).
+// (readRequestV2, readResponseV2). A value past math.MaxInt is no length
+// either: the compare before the conversion is the bound, one CodeQL's
+// integer-conversion check reads as such (a bitSize below 64 given to strconv
+// is not).
 func contentLengthValue(v string) (int, error) {
-	n, err := strconv.ParseUint(v, 10, strconv.IntSize-1) // an int's range
-	if err != nil {
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil || n > math.MaxInt {
 		return 0, fmt.Errorf("%w (a %d-byte value)", errBadContentLength, len(v))
 	}
 	return int(n), nil

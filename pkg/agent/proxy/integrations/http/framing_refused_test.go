@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -76,7 +78,8 @@ var netHTTPFramingRows = []struct {
 	{name: "a chunked coding beside a length", version: "1.1", fields: "Content-Length: 5\r\nTransfer-Encoding: chunked\r\n",
 		cl: -1, chunked: true, client: `reads "hello"`, server: `200 "hello"`},
 	{name: "white space before the colon of a field that frames nothing", version: "1.1", fields: "X-A : b\r\nContent-Length: 5\r\n",
-		cl: 5, client: `reads "5\r\nhe"`, server: "400"}, {name: "a length of 2^63", version: "1.1", fields: "Content-Length: 9223372036854775808\r\n",
+		cl: 5, client: `reads "5\r\nhe"`, server: "400"},
+	{name: "a length of 2^63", version: "1.1", fields: "Content-Length: 9223372036854775808\r\n",
 		refused: true, client: "refuses", server: "400"},
 	{name: "a length of 2^64-1", version: "1.1", fields: "Content-Length: 18446744073709551615\r\n",
 		refused: true, client: "refuses", server: "400"},
@@ -408,5 +411,44 @@ func TestRecordV2FramesAZeroLengthAsALength(t *testing.T) {
 	}
 	if want := "GET /a -> 200 \"\"\nGET /b -> 200 \"world\""; strings.Join(got, "\n") != want {
 		t.Fatalf("recorded\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.ReplaceAll(want, "\n", "\n  "))
+	}
+}
+
+// contentLengthValue takes every length an int holds, math.MaxInt the largest,
+// and refuses the one past it and all those past that, on 64-bit and 32-bit
+// alike. Its error names the value by its length only.
+func TestContentLengthValueTakesAnIntAndNothingPastIt(t *testing.T) {
+	for _, c := range []struct {
+		v    string
+		want int
+		ok   bool
+	}{
+		{v: "0", ok: true},
+		{v: "5", want: 5, ok: true},
+		{v: strconv.Itoa(math.MaxInt), want: math.MaxInt, ok: true},
+		{v: strconv.FormatUint(uint64(math.MaxInt)+1, 10)},
+		{v: "18446744073709551615"}, // the largest uint64
+		{v: "18446744073709551616"}, // past a uint64
+		{v: "+5"},
+		{v: "-5"},
+		{v: ""},
+	} {
+		n, err := contentLengthValue(c.v)
+		if c.ok {
+			if err != nil || n != c.want {
+				t.Errorf("contentLengthValue(%q) = (%d, %v), want (%d, <nil>)", c.v, n, err, c.want)
+			}
+			continue
+		}
+		if !errors.Is(err, errBadContentLength) || n != 0 {
+			t.Errorf("contentLengthValue(%q) = (%d, %v), want (0, %v)", c.v, n, err, errBadContentLength)
+			continue
+		}
+		if want := fmt.Sprintf("(a %d-byte value)", len(c.v)); !strings.HasSuffix(err.Error(), want) {
+			t.Errorf("contentLengthValue(%q): error %q does not end %q", c.v, err, want)
+		}
+		if c.v != "" && strings.Contains(err.Error(), c.v) {
+			t.Errorf("contentLengthValue(%q): error %q names the value", c.v, err)
+		}
 	}
 }
