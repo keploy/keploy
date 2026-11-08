@@ -1798,6 +1798,11 @@ func (m *SyncMockManager) endSharedLoss() {
 	m.firstSent.Store(nil)
 }
 
+// sharedLossMsg opens the ERROR that says a loss of a mock any test of the
+// recording may need (sayLeftOutAfter); what it says of the test cases sent
+// already follows.
+const sharedLossMsg = "syncMock: a mock that any test of the recording may need (a session's, a connection's or a start-up one) (or one with no request time) was dropped on its way out of the agent: the recording leaves out every test case whose window reaches past its request that its stream has not sent"
+
 // sayLeftOutAfter says, at ERROR, that the recording leaves out every test
 // case from left.from on for mock, the n-th drop of why (leaveOutAfter), and
 // how many its stream had sent it revoked; nothing for the zero leftOut.
@@ -1821,10 +1826,11 @@ func (m *SyncMockManager) sayLeftOutAfter(mock *models.Mock, why string, n uint6
 				zap.String("next_step", "re-record once the client that reads the agent's mocks keeps up with the app's traffic: its CPU, its disk, its network to the agent"))...)
 		return
 	}
+	deletes := m.revokeCapable.Load()
 	fields := append(dropFields(mock, n, why),
 		zap.String("left_out_from", left.from.Format(time.RFC3339Nano)),
 		zap.Int("revoked_sent", left.revoked),
-		zap.Bool("client_deletes_revoked", m.revokeCapable.Load()))
+		zap.Bool("client_deletes_revoked", deletes))
 	if left.from.Equal(beforeAnyRequest) {
 		fields = append(fields, zap.String("no_request_time", "the mock has no request time, so any test case of the recording may need it: every one is left out"))
 	}
@@ -1834,7 +1840,14 @@ func (m *SyncMockManager) sayLeftOutAfter(mock *models.Mock, why string, n uint6
 			zap.Int("sent_named_max", maxSentTCs),
 			zap.String("unnamed_sent", "test cases the stream sent and no longer names (it names the latest sent by window start, between sent_named_min and sent_named_max of them), whose window ended after left_out_from and by unnamed_sent_through, are not revoked and may stay recorded without the mock"))
 	}
-	m.dropLogger().Error("syncMock: a mock that any test of the recording may need (a session's, a connection's or a start-up one) (or one with no request time) was dropped on its way out of the agent: the recording leaves out every test case whose window reaches past its request, and revokes those its stream sent already (revoked_sent), as a replay of one that needs it would find no mock",
+	// The test cases the stream sent already are the client's to delete: one
+	// that did not negotiate the revoke (an older CLI, or a consumer with no
+	// revoke frame) is sent none, and keeps them (SetRevokeCapable).
+	msg := sharedLossMsg + ", and revokes those its stream sent already (revoked_sent), as a replay of one that needs it would find no mock"
+	if !deletes {
+		msg = sharedLossMsg + ", but those its stream sent already (revoked_sent) stay recorded without it, as the client that reads the stream cannot delete them: they may fail at replay with no matching mock"
+	}
+	m.dropLogger().Error(msg,
 		append(fields,
 			zap.String("next_step", "re-record once the client that reads the agent's mocks keeps up with the app's traffic: its CPU, its disk, its network to the agent"))...)
 }

@@ -2,6 +2,7 @@ package manager
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -322,9 +323,17 @@ func TestAMockAnyTestMayNeedDroppedForTheOutputClosedLeavesOutNone(t *testing.T)
 // says what the loss left out (nil when none said it).
 func sentThenLost(t *testing.T, at time.Time, ends ...time.Time) (*SyncMockManager, map[string]interface{}) {
 	t.Helper()
+	m, said, _ := sentThenLostTo(t, true, at, ends...)
+	return m, said
+}
+
+// sentThenLostTo is sentThenLost for a client that negotiated the revoke
+// (capable) or did not, and returns the ERROR's message too.
+func sentThenLostTo(t *testing.T, capable bool, at time.Time, ends ...time.Time) (*SyncMockManager, map[string]interface{}, string) {
+	t.Helper()
 	core, logs := observer.New(zapcore.DebugLevel)
 	m := New(zap.New(core))
-	m.SetRevokeCapable(true)
+	m.SetRevokeCapable(capable)
 	_, clk := fullLane(t, m)
 	for i, end := range ends {
 		if !m.SendingTestCase(fmt.Sprintf("tc-%d", i), time.Time{}, end) {
@@ -339,10 +348,35 @@ func sentThenLost(t *testing.T, at time.Time, ends ...time.Time) (*SyncMockManag
 	}
 	for _, e := range logs.All() {
 		if f := e.ContextMap(); f["left_out_from"] != nil && e.Level == zapcore.ErrorLevel {
-			return m, f
+			return m, f, e.Message
 		}
 	}
-	return m, nil
+	return m, nil, ""
+}
+
+// A client that did not negotiate the revoke is sent no revoke frame, so the
+// test cases the stream sent before a loss stay recorded: the ERROR says so,
+// and does not say they are revoked. Those checked after it are still left
+// out. The same loss to a client that negotiated it says they are revoked.
+func TestALossSaysTheSentTestCasesStayWhenTheClientCannotDeleteThem(t *testing.T) {
+	at := time.Now().Add(-time.Minute)
+	m, said, msg := sentThenLostTo(t, false, at, at.Add(time.Second), time.Time{})
+	if got := revokesQueued(m); len(got) != 0 {
+		t.Fatalf("queued %v to revoke for a client that cannot delete them", got)
+	}
+	if said == nil || said["revoked_sent"] != int64(2) || said["client_deletes_revoked"] != false {
+		t.Fatalf("the ERROR says %v, want revoked_sent 2 and client_deletes_revoked false", said)
+	}
+	if !strings.Contains(msg, "stay recorded without it") || strings.Contains(msg, "revokes those") {
+		t.Fatalf("the ERROR says %q: it must say the sent test cases stay recorded, not that they are revoked", msg)
+	}
+	if m.SendingTestCase("after", time.Time{}, at.Add(time.Second)) {
+		t.Fatal("a test case checked after the loss whose window reaches past its request was sent")
+	}
+	_, _, msg = sentThenLostTo(t, true, at, at.Add(time.Second))
+	if !strings.Contains(msg, "revokes those its stream sent already") || strings.Contains(msg, "stay recorded") {
+		t.Fatalf("the ERROR to a client that deletes revoked test cases says %q", msg)
+	}
 }
 
 // revokesQueued reports the names m queued to revoke on its stream.
