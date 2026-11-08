@@ -52,17 +52,18 @@ func (r *Replayer) readsSetEndOff() bool {
 // file each call they hold for a later test of the set that none answered,
 // and the read takes it. It reports the set's held calls, those this read
 // took and those an earlier test's read kept as the set's (setCalls), as
-// the set's, naming no test, and changes no verdict: with the switch off a
-// miss fails nothing. A call the application made after the set's last test
+// the set's, naming no test, and returns them for the set's report
+// (models.TestReport.SetHeldCalls). It changes no verdict: with the switch
+// off a miss fails nothing. A call the application made after the set's last test
 // that no mock answered, no held one, is no test's: it is said at WARN, as
 // the agent said it when the next set's first test began. A read that could
 // not take every such call marks the set's misses unattributed
 // (noteUnattributed). The read is bounded as the read of what was consumed
 // is (setEndDrainBudget).
-func (r *Replayer) setEndOff(ctx context.Context, testSetID string) {
+func (r *Replayer) setEndOff(ctx context.Context, testSetID string) (held []models.UnmatchedCall) {
 	// A miss is the agent's to report. A base path has none, and no mocks.
 	if r.noAgent {
-		return
+		return nil
 	}
 	readCtx, cancel := context.WithTimeout(ctx, setEndDrainBudget)
 	defer cancel()
@@ -70,7 +71,7 @@ func (r *Replayer) setEndOff(ctx context.Context, testSetID string) {
 	after := dataPlaneCalls(r.setCalls.take(read))
 	// With the switch off the set's calls are held ones only: the agent
 	// marks a call made before the set's first test only under the switch.
-	held := r.setCalls.failing()
+	held = r.setCalls.failing()
 	for _, c := range held {
 		r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, "", c)
 	}
@@ -84,6 +85,7 @@ func (r *Replayer) setEndOff(ctx context.Context, testSetID string) {
 		r.logger.Warn("could not read every call the application made after the test set's last test, or that keploy held for a later test of the set, that no mock answered; a held call may be missing from the set's mismatch summary",
 			zap.String("test-set", testSetID), zap.Int("callsRead", len(read)), zap.Error(err))
 	}
+	return held
 }
 
 // logHeldOff says, at WARN, each of the set's held calls (setEndOff): with

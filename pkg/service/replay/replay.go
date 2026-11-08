@@ -6159,6 +6159,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// read where the set's own misses are, at the end of a set that is
 	// judged; a set that ends otherwise has neither.
 	var setAnswers []models.UnmatchedCall
+	// setHeld are, with the proven switch off, the calls a parser held for a
+	// later test of the set that none answered, which the set's end reports
+	// as the set's (setEndOff). They fail nothing (TestReport.SetHeldCalls);
+	// under the switch they are in unclaimed.
+	var setHeld []models.UnmatchedCall
 	// workerMissing: under the proven switch, the set's worker-scope calls
 	// its run reached the place of that the application never made
 	// (awaitWorkerScope); workerUnread, why keploy could not read what they
@@ -6533,7 +6538,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Then the set's end read of the misses: the agent's parsers first
 		// file each call they hold for a later test of the set that none
 		// answered, and the read takes it (setEndOff).
-		r.setEndOff(ctx, testSetID)
+		setHeld = r.setEndOff(ctx, testSetID)
 	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
@@ -7095,6 +7100,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		AppNotStopped:       appNotStopped,
 		Proven:              provenswitch.On(),
 		SetAnswers:          setAnswers,
+		SetHeldCalls:        setHeld,
 	}
 	r.noteSetEnd(testReport)
 

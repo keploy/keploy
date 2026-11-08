@@ -248,3 +248,67 @@ func TestRunTestSet_SwitchOffReadsTheMissesAfterWhatWasConsumed(t *testing.T) {
 		t.Fatalf("the set's end reads were %v; want what was consumed, then the misses, last", order)
 	}
 }
+
+// With the switch off, the set's report holds each of its held calls in
+// SetHeldCalls, the set's, whichever read took it: a user who reads only the
+// report file sees it. The list is absent when the set holds none, and the
+// verdict is the same either way: the set passes, no test is charged with the
+// call, and nothing lands in UnclaimedCalls. Under the switch the call fails
+// the set in UnclaimedCalls, and SetHeldCalls stays empty.
+func TestRunTestSet_SwitchOffWritesTheSetsHeldCallsInItsReport(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		reads []func() ([]models.UnmatchedCall, error)
+		held  int
+	}{
+		{"filed by the set's end read", []func() ([]models.UnmatchedCall, error){nil, nil, heldRead}, 1},
+		{"taken by a test's read", []func() ([]models.UnmatchedCall, error){nil, heldRead, nil}, 1},
+		{"none held, a call after the last test", []func() ([]models.UnmatchedCall, error){nil, nil, afterLast}, 0},
+		{"none at all", nil, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, _ := offRun(t, 2, c.reads...)
+			if status := h.run(t); status != models.TestSetStatusPassed {
+				t.Fatalf("status %s, want PASSED: a held call fails nothing with the switch off", status)
+			}
+			rep := h.report.report
+			if rep.Status != string(models.TestSetStatusPassed) || rep.FailureReason != "" {
+				t.Fatalf("the report says %s (%q); want PASSED, no reason", rep.Status, rep.FailureReason)
+			}
+			if len(rep.SetHeldCalls) != c.held {
+				t.Fatalf("the report's set_held_calls %+v; want %d", rep.SetHeldCalls, c.held)
+			}
+			if c.held == 0 && rep.SetHeldCalls != nil {
+				t.Fatalf("the report's set_held_calls is %#v, not absent", rep.SetHeldCalls)
+			}
+			for _, call := range rep.SetHeldCalls {
+				if !call.Held || call.ActualSummary != "Fetch orders" {
+					t.Fatalf("set_held_calls holds %+v; want the held poll", call)
+				}
+			}
+			if len(rep.UnclaimedCalls) != 0 {
+				t.Fatalf("the report's unclaimed_calls %+v; with the switch off a held call is not there", rep.UnclaimedCalls)
+			}
+			for _, r := range rep.Tests {
+				if r.Status != models.TestStatusPassed || len(r.FailureInfo.UnmatchedCalls) != 0 {
+					t.Fatalf("test %s is %s with %+v; the held call is no test's", r.TestCaseID, r.Status, r.FailureInfo.UnmatchedCalls)
+				}
+			}
+		})
+	}
+	t.Run("switch on", func(t *testing.T) {
+		provenOn(t, true)
+		h := newPartialRunHarness(t, 3, 0)
+		h.instr.mockErrorsFor = misses(nil, heldRead)
+		if status := h.run(t); status != models.TestSetStatusFailed {
+			t.Fatalf("status %s, want FAILED: under the switch a held call no test answered fails the set", status)
+		}
+		rep := h.report.report
+		if rep.SetHeldCalls != nil {
+			t.Fatalf("the report's set_held_calls %+v under the switch; want it absent", rep.SetHeldCalls)
+		}
+		if len(rep.UnclaimedCalls) != 1 || !rep.UnclaimedCalls[0].Held {
+			t.Fatalf("the report's unclaimed_calls %+v; want the held poll", rep.UnclaimedCalls)
+		}
+	})
+}

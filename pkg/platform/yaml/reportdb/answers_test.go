@@ -98,3 +98,54 @@ func TestAReportHoldsNoKernelPid(t *testing.T) {
 		})
 	}
 }
+
+// A switch-off report's held calls (SetHeldCalls) are written under
+// set_held_calls and read back whole, without the kernel pid that travels
+// with a call; a report with none writes no such key.
+func TestAReportsHeldCallsRoundTrip(t *testing.T) {
+	held := models.UnmatchedCall{Protocol: "Kafka", ActualSummary: "Fetch orders", Destination: "kafka:9092",
+		Kind: models.MissInTest, Held: true, Source: &models.Origin{Comm: "consumer", Exe: "./consumer"}}
+	unnamed := held
+	unnamed.Source = &models.Origin{Unnamed: models.UnnamedPIDNamespace, PID: 2912345}
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		key := map[yaml.Format]string{yaml.FormatYAML: "set_held_calls:", yaml.FormatJSON: `"setHeldCalls"`}[format]
+		t.Run(format.FileExtension(), func(t *testing.T) {
+			ctx := context.Background()
+			for _, calls := range [][]models.UnmatchedCall{{held, unnamed}, nil} {
+				dir := t.TempDir()
+				want := goldenReport()
+				want.Proven, want.UnclaimedCalls = false, nil
+				want.SetHeldCalls = calls
+				if err := NewWithFormat(zap.NewNop(), dir, format).InsertReport(ctx, "test-run-0", "test-set-0", &want); err != nil {
+					t.Fatal(err)
+				}
+				raw, err := os.ReadFile(filepath.Join(dir, "test-run-0", "test-set-0-report."+format.FileExtension()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if has := strings.Contains(string(raw), key); has != (calls != nil) {
+					t.Fatalf("with %d held calls the %s report holds %s: %v\n%s", len(calls), format.FileExtension(), key, has, raw)
+				}
+				if strings.Contains(string(raw), "2912345") {
+					t.Fatalf("the %s report holds the kernel pid:\n%s", format.FileExtension(), raw)
+				}
+				got, err := NewWithFormat(zap.NewNop(), dir, format).GetReport(ctx, "test-run-0", "test-set-0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if calls == nil {
+					if got.SetHeldCalls != nil {
+						t.Fatalf("a report with no held calls read back with %+v", got.SetHeldCalls)
+					}
+					continue
+				}
+				if len(got.SetHeldCalls) != 2 || !reflect.DeepEqual(got.SetHeldCalls[0], held) || got.SetHeldCalls[1].Source != nil || !got.SetHeldCalls[1].Held {
+					t.Fatalf("the set's held calls read back as %+v; want %+v and the unnamed one without its pid", got.SetHeldCalls, calls)
+				}
+				if want.SetHeldCalls[1].Source != unnamed.Source {
+					t.Fatal("writing the report edited the replay's report")
+				}
+			}
+		})
+	}
+}

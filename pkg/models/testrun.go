@@ -70,6 +70,13 @@ type TestReport struct {
 	// before its first test or after its last. They never fail
 	// the set, nor land in UnclaimedCalls. Absent when there is none.
 	SetAnswers []UnmatchedCall `json:"setAnswers,omitempty" yaml:"set_answers,omitempty"`
+	// SetHeldCalls are, with the proven switch off, the calls a parser held
+	// for a later test's recording that no test of the set answered
+	// (UnmatchedCall.Held), which the set's end charged to the set, no
+	// test: filed at its end read, or when their connection ended. They
+	// never fail the set, nor land in UnclaimedCalls (under the switch they
+	// do, and fail it). Absent when there is none.
+	SetHeldCalls []UnmatchedCall `json:"setHeldCalls,omitempty" yaml:"set_held_calls,omitempty"`
 }
 
 // CaptureVerificationStatus is the outcome of checking that the agent tracked
