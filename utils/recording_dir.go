@@ -35,11 +35,19 @@ func OpenRecordingDir(dir string) (*os.Root, error) {
 // Only the project itself, the folder OpenRecordingDir opens dir from, is
 // made as os.MkdirAll makes it.
 func MkdirRecordingDir(dir string, perm fs.FileMode) error {
-	r, err := openRecordingDir(dir, true, perm)
+	r, err := MkdirOpenRecordingDir(dir, perm)
 	if err != nil {
 		return err
 	}
 	return r.Close()
+}
+
+// MkdirOpenRecordingDir makes dir as MkdirRecordingDir does and returns it
+// opened as OpenRecordingDir opens it, in one pass: each folder is opened as
+// it is made or found, so the folder returned is the one that was checked,
+// and no link put on the way after the check is followed.
+func MkdirOpenRecordingDir(dir string, perm fs.FileMode) (*os.Root, error) {
+	return openRecordingDir(dir, true, perm)
 }
 
 func openRecordingDir(dir string, mkdir bool, perm fs.FileMode) (*os.Root, error) {

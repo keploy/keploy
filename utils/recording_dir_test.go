@@ -180,3 +180,61 @@ func TestMkdirRecordingDirMakesNothingOutsideTheProject(t *testing.T) {
 		t.Fatalf("the folder was not made from a mode with its type bits: %v", err)
 	}
 }
+
+// MkdirOpenRecordingDir makes a recording's folder and returns it open, in
+// one pass: what is written through the folder it returns lands in the folder
+// made inside the project, one that was there already is opened as it is, and
+// a link on the way that leads out is refused, with no folder returned and
+// nothing made where it leads.
+func TestMkdirOpenRecordingDirOpensTheFolderItMakes(t *testing.T) {
+	project := t.TempDir()
+	outside := t.TempDir()
+	t.Chdir(project)
+
+	writeThrough := func(dir, name string) error {
+		r, err := MkdirOpenRecordingDir(dir, 0o755)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = r.Close() }()
+		return r.WriteFile(name, []byte("x"), 0o644)
+	}
+	if err := writeThrough(filepath.Join("keploy", "test-set-1", "assets"), "f"); err != nil {
+		t.Fatalf("a new folder: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(project, "keploy", "test-set-1", "assets", "f")); err != nil {
+		t.Fatalf("the file was not written in the folder made: %v", err)
+	}
+	if err := writeThrough(filepath.Join("keploy", "test-set-1", "assets"), "g"); err != nil {
+		t.Fatalf("a folder that is there already: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(project, "keploy", "test-set-1", "assets", "g")); err != nil {
+		t.Fatalf("the file was not written in the folder that was there: %v", err)
+	}
+	if err := writeThrough(filepath.Join(project, "keploy"), "h"); err != nil {
+		t.Fatalf("an absolute keploy folder: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(project, "keploy", "h")); err != nil {
+		t.Fatalf("the file was not written in the absolute keploy folder: %v", err)
+	}
+
+	if err := os.Symlink(filepath.Join("..", filepath.Base(outside)), "Download"); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	if r, err := MkdirOpenRecordingDir(filepath.Join("Download", "Tests"), 0o755); err == nil || r != nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("a relative link that climbs out: root %v, %v; want no root and a refusal", r, err)
+	}
+	linked := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(linked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(linked, "keploy")); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := MkdirOpenRecordingDir(filepath.Join(linked, "keploy"), 0o755); err == nil || r != nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("an absolute keploy link out: root %v, %v; want no root and a refusal", r, err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where the links lead", len(entries))
+	}
+}
