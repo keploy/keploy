@@ -442,3 +442,57 @@ func TestAStartUpLossWhoseAppTheNodeLostTrackOfIsReReadAtOnce(t *testing.T) {
 		t.Fatalf("the read whose app the node lost track of re-read %v, want it once", got)
 	}
 }
+
+// A recording that is over is let go (ForgetDestination): the node keeps no
+// list for it, and a start-up mock that still names it finds no first test
+// case, so it counts as one any test may need (fail closed), while another
+// recording's first stands. Its losses re-read on a revoke go with it.
+func TestAForgottenRecordingKeepsNoFirstAndItsStartUpMocksCountAsShared(t *testing.T) {
+	node, appA, appB, _ := nodeManagers(t)
+	t0 := time.Now().Add(-time.Hour)
+	sendTo(t, node, appA, "A", "a-1", t0, t0.Add(time.Second))
+	sendTo(t, node, appB, "B", "b-1", t0, t0.Add(time.Second))
+	node.dropOut(appStartupAt("a-boot", "A", t0.Add(5*time.Second)), "", node.revokeEpoch.Load(), string(MockDroppedOutputFull))
+	node.ForgetDestination("A")
+	node.sharedLossMu.Lock()
+	_, listKept := node.sentTCs.lists["A"]
+	_, lossKept := node.startupLost["A"]
+	node.sharedLossMu.Unlock()
+	if listKept || lossKept {
+		t.Fatalf("the forgotten recording's state is kept: sent list %v, start-up loss %v", listKept, lossKept)
+	}
+	if node.firstSentOf("A") != nil {
+		t.Fatal("the forgotten recording still has a first test case")
+	}
+	if !node.servedToAnyTest(appStartupAt("a-conn", "A", t0.Add(5*time.Second)), "") {
+		t.Fatal("a start-up mock naming a forgotten recording, after its old first, counts as a test's")
+	}
+	if node.firstSentOf("B") == nil || node.servedToAnyTest(appStartupAt("b-conn", "B", t0.Add(5*time.Second)), "") {
+		t.Fatal("forgetting A's recording moved B's first test case")
+	}
+}
+
+// A recording let go (ForgetDestination) takes its count of test cases with
+// it: a mock that still names it is a start-up one again (fail closed),
+// while another recording's count stands.
+func TestAForgottenRecordingsMocksAreTaggedStartUpAgain(t *testing.T) {
+	own := "A"
+	m := New(nil)
+	m.SetOutputChannel(make(chan *models.Mock, 8))
+	m.SetDestinationOf(appOf, func() string { return own })
+	now := time.Now()
+	pastWindow(m, now.Add(-2*time.Second))
+	own = "B"
+	pastWindow(m, now.Add(-time.Second))
+	m.ForgetDestination("A")
+	for _, tc := range []struct {
+		app  string
+		want bool
+	}{{"A", true}, {"B", false}} {
+		mk := appMockAt("c-"+tc.app, tc.app, now)
+		m.AddMock(mk)
+		if mk.TestModeInfo.IsStartup != tc.want {
+			t.Fatalf("after A was let go, app %s's mock is tagged start-up %v, want %v", tc.app, mk.TestModeInfo.IsStartup, tc.want)
+		}
+	}
+}

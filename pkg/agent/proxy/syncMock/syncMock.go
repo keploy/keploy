@@ -704,7 +704,8 @@ type SyncMockManager struct {
 	// resolved kept (ResolveRange), as resolvedTestCount counts them all. A
 	// manager whose mocks go to several recordings tags a mock start-up by
 	// its own destination's count (startupLocked). Guarded by mu; cleared as
-	// a recording starts (StartRecordSession).
+	// a recording starts (StartRecordSession), and one destination's as its
+	// recording is let go (ForgetDestination).
 	destTCs map[string]int
 
 	// copies is, per copy key a kind's replay serves its mocks by
@@ -1265,6 +1266,27 @@ func (m *SyncMockManager) SetDestinationOf(of func(*models.Mock) string, own fun
 		return
 	}
 	m.destOf.Store(&destinations{of: of, own: own})
+}
+
+// ForgetDestination lets go what the manager keeps of dest's recording: the
+// test cases sent to it (SendTestCaseOf), its first, the start-up mock it
+// lost that a revoke may re-read, and the count of its test cases the
+// manager resolved (destTCs). Call it once dest's recording is over, when
+// no test case will be sent to it again, so a manager whose mocks go to many
+// recordings over its life (SetDestinationOf) holds only the live ones'. A
+// mock that still names dest finds no first test case, and counts as one any
+// test may need (servedToAnyTest), and is tagged start-up again: fail
+// closed. Test cases already sent to dest are no longer revoked by a later
+// loss: its stream is over.
+func (m *SyncMockManager) ForgetDestination(dest string) {
+	m.mu.Lock()
+	delete(m.destTCs, dest)
+	m.mu.Unlock()
+	m.sharedLossMu.Lock()
+	defer m.sharedLossMu.Unlock()
+	delete(m.sentTCs.lists, dest)
+	delete(m.startupLost, dest)
+	m.noteFirstSentLocked()
 }
 
 // mockDest names the destination whose recording mock goes to (destOf), ""
