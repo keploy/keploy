@@ -1100,6 +1100,21 @@ func (r *Recorder) RegisterCleanup(fn func() error) {
 	r.cleanupMu.Unlock()
 }
 
+// testCaseDeleter is what deletes a saved test case of a set: the store's
+// DeleteTests, which the record TestDB interface leaves out (enterprise
+// implements that interface).
+type testCaseDeleter interface {
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+}
+
+// savedTestCaseDeleter is the recording's store as a testCaseDeleter, reached
+// by assertion; ok is false for a store that cannot delete a test case it
+// saved, so a revoke from the agent cannot be applied to it.
+func (r *Recorder) savedTestCaseDeleter() (testCaseDeleter, bool) {
+	td, ok := r.testDB.(testCaseDeleter)
+	return td, ok
+}
+
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, hooks RecordHooks, config *config.Config) Service {
 	if hooks == nil {
 		hooks = BaseRecordHooks{}
@@ -2043,10 +2058,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		if len(toDelete) > 0 {
 			// DeleteTests is on the concrete *testdb.TestYaml but NOT on the record
 			// TestDB interface (enterprise implements that interface; don't break it).
-			// Reach it by runtime assertion; degrade to a warning if unavailable.
-			if td, ok := r.testDB.(interface {
-				DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
-			}); ok {
+			// Reach it by runtime assertion (savedTestCaseDeleter); degrade to a
+			// warning if unavailable.
+			if td, ok := r.savedTestCaseDeleter(); ok {
 				deleted := 0
 				for _, n := range toDelete {
 					if err := td.DeleteTests(ctx, newTestSetID, []string{n}); err != nil {
@@ -3276,6 +3290,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		return FrameChan{}, fmt.Errorf("failed to hand keploy's agent mock.real: %w", err)
 	}
 
+	_, canDelete := r.savedTestCaseDeleter()
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 		Rules:                     r.config.BypassRules,
 		MongoPassword:             r.config.Test.MongoPassword,
@@ -3297,7 +3312,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// control frame: it diverts such a frame into a revoke set and deletes
 		// those deferred-orphan test cases at finalize instead of persisting it
 		// as a mock. The agent emits revoke frames ONLY when this is true.
-		SupportsDroppedRevoke: true,
+		// Only a store that can delete a test case it saved can apply one
+		// (savedTestCaseDeleter): with any other, a revoked test case stays
+		// in the set, so the agent is told the client cannot delete, and
+		// says that the test cases it sent stay instead of that they were
+		// revoked.
+		SupportsDroppedRevoke: canDelete,
 	})
 	if err != nil {
 
