@@ -68,8 +68,10 @@ func resetReq() mysql.Request {
 // result set and an EXECUTE with a binary one, each ended by the OK that
 // replaces EOF, and any other command with an OK packet. A form after the
 // status changes that: ".eof" ends the result set with an EOF, ".old" with
-// an EOF of the protocol before 4.1 (it has no status), and ".pkt" answers
-// with a bare EOF packet (as COM_SET_OPTION is).
+// an EOF of the protocol before 4.1 (it has no status), ".bad" with an OK
+// whose affected rows are not zero (no EOF, and no OK that replaces one: its
+// status is not read), and ".pkt" answers with a bare EOF packet (as
+// COM_SET_OPTION is).
 func connAnswer(m *models.Mock) {
 	i := strings.LastIndex(m.Name, "/")
 	if i < 0 {
@@ -91,6 +93,8 @@ func connAnswer(m *models.Mock) {
 		end = []byte{0x05, 0, 0, 3, 0xfe, 0, 0, byte(status), byte(status >> 8)}
 	case "old":
 		end = []byte{0x01, 0, 0, 3, 0xfe}
+	case "bad":
+		end = []byte{0x07, 0, 0, 3, 0xfe, 1, 0, byte(status), byte(status >> 8), 0, 0}
 	case "pkt":
 		resp.Message = &mysql.EOFPacket{Header: 0xfe, StatusFlags: status}
 		return
@@ -617,6 +621,33 @@ func TestConnectionRuleResetBringsBackTheDefaultAutocommit(t *testing.T) {
 	}
 }
 
+// A reset ends the open transaction's binding with it: the read after it is
+// outside every transaction (autocommit is on after it, as the reset's
+// recorded answer says, or, with none, as the greeting said), though the
+// transaction's read before it bound the connection the next read was
+// recorded on too.
+func TestConnectionRuleEndsTheBindingAtAReset(t *testing.T) {
+	for _, reset := range []string{"reset/on", ""} {
+		t.Run(reset, func(t *testing.T) {
+			recs := []connRec{
+				{"a-ord", "cA", "SELECT * FROM orders WHERE id = 7", 800 * time.Microsecond, 0},
+				{"b-count", "cB", "SELECT COUNT(*) FROM orders", 1500 * time.Microsecond, 0},
+				{"a-count", "cA", "SELECT COUNT(*) FROM orders", 2500 * time.Microsecond, 0},
+			}
+			if reset != "" {
+				recs = append(recs, connRec{reset, "cA", "reset", 1000 * time.Microsecond, 0})
+			}
+			on := uint16(0x0002)
+			checkConnSession(t, &on, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
+				{"L1", "START TRANSACTION", "*"},
+				{"L1", "SELECT * FROM orders WHERE id = 7", "a-ord"},
+				{"L1", "reset", "*"},
+				{"L1", "SELECT COUNT(*) FROM orders", "b-count"},
+			}}})
+		})
+	}
+}
+
 // A session whose init_connect turns autocommit off (the greeting and the
 // login said it was on: the server sends them before it runs init_connect)
 // is in a transaction from its first read, as that read's answer says (the
@@ -625,8 +656,9 @@ func TestConnectionRuleResetBringsBackTheDefaultAutocommit(t *testing.T) {
 // answer says no transaction is open binds nothing. So does a command
 // answered with a bare EOF packet. Inside a transaction begun by START with
 // autocommit on, a read whose answer says the transaction is open binds as
-// any other. An EOF of the protocol before 4.1 has no status: the read is
-// outside every transaction, as the greeting said.
+// any other. An EOF of the protocol before 4.1 has no status, nor has a
+// terminator of another shape: the read is outside every transaction, as
+// the greeting said.
 func TestConnectionRuleReadsTheTransactionFromEachAnswer(t *testing.T) {
 	const cust = "SELECT * FROM customers WHERE id = 'a'"
 	for _, c := range []struct {
@@ -641,6 +673,7 @@ func TestConnectionRuleReadsTheTransactionFromEachAnswer(t *testing.T) {
 		{"a-exec/tx.eof", "exec:a", false, "a-count"},
 		{"a-cust/on", cust, false, "b-count"},
 		{"a-cust/tx.old", cust, false, "b-count"},
+		{"a-cust/tx.bad", cust, false, "b-count"},
 		{"a-cust/on+tx", cust, true, "a-count"},
 	} {
 		t.Run(c.first, func(t *testing.T) {
@@ -665,8 +698,10 @@ func TestConnectionRuleReadsTheTransactionFromEachAnswer(t *testing.T) {
 // A server whose global autocommit is off begins every session with it off,
 // as its greeting's status says: the session is in a transaction from its
 // first statement, so the first read binds though its answer carries no
-// status (as an ERR's does not), and a reset nothing recorded answered
-// brings that autocommit back. Greeted with autocommit on, neither binds.
+// status (as an ERR's does not); a COMMIT before it (nothing recorded
+// answered it: its OK is keploy's) begins the next transaction at once, so
+// the read after it binds too; and a reset nothing recorded answered brings
+// that autocommit back. Greeted with autocommit on, none binds.
 func TestConnectionRuleReadsTheGreetingsAutocommit(t *testing.T) {
 	recs := []connRec{
 		{"on/on", "cA", "SET autocommit = 1", 300 * time.Microsecond, 0},
@@ -677,17 +712,22 @@ func TestConnectionRuleReadsTheGreetingsAutocommit(t *testing.T) {
 	for _, c := range []struct {
 		name     string
 		greeting uint16
-		reset    bool
+		first    string
 		count    string
 	}{
-		{"off", 0x0000, false, "a-count"},
-		{"on", 0x0002, false, "b-count"},
-		{"off, reset", 0x0000, true, "a-count"},
-		{"on, reset", 0x0002, true, "b-count"},
+		{"off", 0x0000, "", "a-count"},
+		{"on", 0x0002, "", "b-count"},
+		{"off, commit", 0x0000, "commit", "a-count"},
+		{"on, commit", 0x0002, "commit", "b-count"},
+		{"off, reset", 0x0000, "reset", "a-count"},
+		{"on, reset", 0x0002, "reset", "b-count"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var calls []connCall
-			if c.reset {
+			switch c.first {
+			case "commit":
+				calls = append(calls, connCall{"L1", "COMMIT", "*"})
+			case "reset":
 				calls = append(calls,
 					connCall{"L1", "SET autocommit = 1", "on/on"},
 					connCall{"L1", "reset", "*"})
