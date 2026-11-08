@@ -1080,6 +1080,24 @@ func TestConnectionRuleAnswersTheFirstWaitingRecording(t *testing.T) {
 	}}})
 }
 
+// The test's own EXECUTE that waited for the bound connection outranks a
+// definitive match the test does not own, here one recorded before every
+// test on no test's connection, which a walk of the whole pool also meets:
+// the window's FIFO pick lists no definitive match, so it does not bring the
+// waiting one back.
+func TestConnectionRuleRanksTheWaitingExecuteAboveAnUnownedDefinitiveMatch(t *testing.T) {
+	recs := []connRec{
+		{"o-exec", "cO", "exec:x", 100 * time.Microsecond, -1},
+		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
+		{"b-exec", "cB", "exec:x", 1100 * time.Microsecond, 0},
+	}
+	checkConnSet(t, recs, []connTest{{500 * time.Microsecond, 4 * time.Millisecond, []connCall{
+		{"L1", "START TRANSACTION", "*"},
+		{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+		{"L1", "exec:x", "b-exec"},
+	}}})
+}
+
 // A command recorded on the bound connection at the same time as the
 // transaction's latest command (a coarse clock) is its next command.
 func TestConnectionRuleTakesTheBoundConnectionsCommandAtTheSameTime(t *testing.T) {
