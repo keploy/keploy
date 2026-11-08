@@ -549,10 +549,11 @@ func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, opts models.Outgo
 	// recorded consumed and nobody drained is the previous set's, which the
 	// set's staging drops (models.OutgoingOptions.StartsTestSet).
 	opts.StartsTestSet = true
-	// keploy test reads each set's end under the proven switch
-	// (unclaimedCalls): the agent's parsers may hold a call for a later
-	// test of the set only then (models.OutgoingOptions.ReadsSetEnds).
-	opts.ReadsSetEnds = provenswitch.On()
+	// keploy test reads each set's end of the misses under the proven
+	// switch (unclaimedCalls), and with it off wherever it reads the set's
+	// end at all (readsSetEnds): the agent's parsers may hold a call for a
+	// later test of the set only then (models.OutgoingOptions.ReadsSetEnds).
+	opts.ReadsSetEnds = r.readsSetEnds()
 	if err := r.instrumentation.MockOutgoing(ctx, opts); err != nil {
 		return err
 	}
@@ -6507,13 +6508,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// is taken for a test that consumed nothing. A read that fails leaves no
 	// test an empty entry (the mapping write). The next set's setup drain no
 	// longer reads this set's tail as its own.
-	if !provenswitch.On() && r.instrument && r.mocksDependencies() {
+	if r.readsSetEndOff() {
 		drainCtx, cancelDrain := context.WithTimeout(ctx, setEndDrainBudget)
 		// Marked as the set's end read: the agent first moves the run's
 		// place to the set's end, so an answer recorded after the set's last
 		// test that ran is written now, not at the next set's staging
-		// (models.WithSetEndRead). It is the switch-off run's last read of
-		// the set; under the switch unclaimedCalls makes that read.
+		// (models.WithSetEndRead). The switch-off run's read of the misses
+		// at the set's end follows it; under the switch unclaimedCalls makes
+		// that read.
 		late, lateErr := r.hookImpl.GetConsumedMocks(models.WithSetEndRead(drainCtx))
 		cancelDrain()
 		if lateErr != nil {
@@ -6528,6 +6530,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			carryAttr.keepWhateverTheVerdict(passingTotalConsumedMocks, "", late)
 			carryAttr.mapDrained(actualTestMockMappings, late)
 		}
+		// Then the set's end read of the misses: the agent's parsers first
+		// file each call they hold for a later test of the set that none
+		// answered, and the read takes it (setEndOff).
+		r.setEndOff(ctx, testSetID)
 	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
@@ -8383,7 +8389,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	r.realPushed.Store(true)
 	// The set's reads are its, as the set's own session said
 	// (mockOutgoingForTestSet).
-	outgoingOpts.ReadsSetEnds = provenswitch.On()
+	outgoingOpts.ReadsSetEnds = r.readsSetEnds()
 	if err := r.instrumentation.MockOutgoing(ctx, outgoingOpts); err != nil {
 		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
 			return exitErr

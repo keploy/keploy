@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -57,32 +58,55 @@ func TestRunTestSet_OnlyTheSetsEndReadIsMarked(t *testing.T) {
 }
 
 // keploy test tells its agent, at each set's session and at a repair's
-// re-registration of it, that it reads each set's end only under the proven
-// switch, where it makes that read (unclaimedCalls): an agent's parsers hold
-// a call for a later test of the set only then.
-func TestTheSessionSaysItReadsSetEndsOnlyUnderTheSwitch(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		provenOn(t, on)
-		f := &latchInstr{}
-		r := &Replayer{logger: zap.NewNop(), instrumentation: f}
-		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err != nil {
-			t.Fatal(err)
-		}
-		if f.opts.ReadsSetEnds != on {
-			t.Fatalf("switch %v: the set's session said ReadsSetEnds=%v", on, f.opts.ReadsSetEnds)
-		}
+// re-registration of it, that it reads each set's end wherever it makes that
+// read: under the proven switch (unclaimedCalls), and with it off where an
+// agent serves the set's mocks (setEndOff). An agent's parsers hold a call
+// for a later test of the set only then.
+func TestTheSessionSaysItReadsSetEndsWhereItReadsThem(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		on, instrument, noAgent bool
+		mocking, globalPassThru bool
+		want                    bool
+	}{
+		{name: "switch on", on: true, want: true},
+		{name: "switch on, mocks served", on: true, instrument: true, mocking: true, want: true},
+		{name: "switch off, mocks served", instrument: true, mocking: true, want: true},
+		{name: "switch off, no mocking", instrument: true},
+		{name: "switch off, global passthrough", instrument: true, mocking: true, globalPassThru: true},
+		{name: "switch off, no agent", instrument: true, mocking: true, noAgent: true},
+		{name: "switch off, not instrumented", mocking: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provenOn(t, tc.on)
+			cfg := &config.Config{}
+			cfg.Test.Mocking = tc.mocking
+			cfg.Record.GlobalPassthrough = tc.globalPassThru
+			f := &latchInstr{}
+			r := &Replayer{logger: zap.NewNop(), instrumentation: f, config: cfg, instrument: tc.instrument, noAgent: tc.noAgent}
+			if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if f.opts.ReadsSetEnds != tc.want {
+				t.Fatalf("the set's session said ReadsSetEnds=%v, want %v", f.opts.ReadsSetEnds, tc.want)
+			}
 
-		rf := &rearmInstr{storeTakesEffect: true}
-		filtered, unfiltered, consumed, cases := rearmSessionArgs()
-		if err := newRearmReplayer(rf).ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
-			t.Fatal(err)
-		}
-		rf.mu.Lock()
-		reads := rf.outgoingOpts.ReadsSetEnds
-		rf.mu.Unlock()
-		if reads != on {
-			t.Fatalf("switch %v: the repair's re-registration said ReadsSetEnds=%v", on, reads)
-		}
+			// A repair runs only for an instrumented run.
+			rf := &rearmInstr{storeTakesEffect: true}
+			rr := newRearmReplayer(rf)
+			rr.config, rr.noAgent = cfg, tc.noAgent
+			want := tc.want || (!tc.on && !tc.instrument && tc.mocking && !tc.noAgent && !tc.globalPassThru)
+			filtered, unfiltered, consumed, cases := rearmSessionArgs()
+			if err := rr.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
+				t.Fatal(err)
+			}
+			rf.mu.Lock()
+			reads := rf.outgoingOpts.ReadsSetEnds
+			rf.mu.Unlock()
+			if reads != want {
+				t.Fatalf("the repair's re-registration said ReadsSetEnds=%v, want %v", reads, want)
+			}
+		})
 	}
 }
 

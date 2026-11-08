@@ -1006,10 +1006,10 @@ func (a *Agent) letProxyPortsMove() {
 
 func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	// keploy test's read of what was consumed after a set's last test, with
-	// the proven switch off, which reads no misses there: every answer held
-	// for a later place of the set is due (coreAgent.RunSetEnder). It files
-	// nothing: no parser holds a call for a set whose client reads no set's
-	// end (models.OutgoingOptions.ReadsSetEnds).
+	// the proven switch off: every answer held for a later place of the set
+	// is due (coreAgent.RunSetEnder). It files nothing: the set's end read
+	// of the misses that follows it (GetMockErrors) files what the parsers
+	// hold for a test of the set.
 	if models.SetEndRead(ctx) {
 		if e, ok := a.Proxy.(coreAgent.RunSetEnder); ok {
 			e.EndRunSet()

@@ -24,9 +24,10 @@ import (
 // A call a parser held past its own window for a later test's recording that
 // none answered (models.UnmatchedCall.Held) is the set's too: its miss is
 // filed at the set's end read, or at its connection's end, which may fall in
-// any test's window. Whichever read takes it, it fails the set, named as
-// held, and charges no test: the test open when its connection ended did not
-// make it.
+// any test's window. Whichever read takes it, it charges no test (the test
+// open when its connection ended did not make it): under the proven switch
+// it fails the set, named as held; with the switch off the set's end reports
+// it as the set's and changes no verdict (set_end_off.go).
 
 // setCalls are the calls of the set RunTestSet is running that no mock
 // answered and that are the set's, no test's (setsCall): a read hands them
