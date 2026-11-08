@@ -852,6 +852,12 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		return errors.New(errMsg)
 	}
 
+	if f := cmd.Flags().Lookup("test-run"); cmd.Name() == "normalize" && f != nil {
+		if err := viper.BindPFlag("normalize.testReport", f); err != nil {
+			return err
+		}
+	}
+
 	// 4) Use provided configPath and convert to absolute path
 	configPath, err := cmd.Flags().GetString("config-path")
 	if err != nil {

@@ -22,8 +22,8 @@ type lastUpdatedContextKey struct{}
 func (t *Tools) Normalize(ctx context.Context) error {
 	ctx = t.addLastUpdatedToContext(ctx)
 
-	var testRun string
-	if t.config.Normalize.TestRun == "" {
+	testRun := t.config.Normalize.TestRun
+	if testRun == "" {
 		testRunIDs, err := t.reportDB.GetAllTestRunIDs(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
