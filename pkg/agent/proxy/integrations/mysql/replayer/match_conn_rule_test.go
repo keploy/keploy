@@ -329,6 +329,56 @@ func TestConnectionRuleAnswersEachTransactionWithItsOwnRead(t *testing.T) {
 	checkConnSet(t, recs, tests)
 }
 
+// The tests of TestConnectionRuleAnswersEachTransactionWithItsOwnRead, with
+// both transactions reading one customer first, and another customer's read
+// recorded inside the later test's window. The later test's read (on cB) was
+// recorded inside both windows, the earlier test's (on cA) after the later
+// test ended. keploy test replays the earlier test first: its read follows
+// START, so it binds nothing yet and takes the first exact match in its
+// window, the later test's. The later test's window then holds no recording
+// of its read but z-cust, which a score pick would serve. Its read is
+// answered with a recording of its own text, the earlier test's: the two are
+// reads of one customer, so either answers with the same bytes. Exact
+// serving answers each test with its own.
+func TestConnectionRuleAnswersTheLaterTestsFirstReadWithItsOwnText(t *testing.T) {
+	recs := []connRec{
+		{"a-start", "cA", "START TRANSACTION", 500 * time.Microsecond, 0},
+		{"b-start", "cB", "START TRANSACTION", 2100 * time.Microsecond, 1},
+		{"z-cust", "cZ", "SELECT * FROM customers WHERE id = 'z'", 2150 * time.Microsecond, 1},
+		{"b-cust", "cB", "SELECT * FROM customers WHERE id = 'c'", 2200 * time.Microsecond, 1},
+		{"b-upd", "cB", "UPDATE products SET n = n - 1 WHERE id = 'y'", 2300 * time.Microsecond, 1},
+		{"b-ins", "cB", "INSERT INTO orders VALUES ('b')", 2400 * time.Microsecond, 1},
+		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'c'", 6000 * time.Microsecond, 0},
+		{"a-upd", "cA", "UPDATE products SET n = n - 1 WHERE id = 'x'", 6100 * time.Microsecond, 0},
+		{"a-ins", "cA", "INSERT INTO orders VALUES ('a')", 6200 * time.Microsecond, 0},
+	}
+	tx := func(cust, p, o string) []connCall {
+		return []connCall{
+			{"L1", "START TRANSACTION", "*"},
+			{"L1", "SELECT * FROM customers WHERE id = 'c'", cust},
+			{"L1", "UPDATE products SET n = n - 1 WHERE id = '" + p + "'", o + "-upd"},
+			{"L1", "INSERT INTO orders VALUES ('" + o + "')", o + "-ins"},
+			{"L1", "COMMIT", "*"},
+		}
+	}
+	window := func(cust0, cust1 string) []connTest {
+		return []connTest{
+			{0, 10 * time.Millisecond, tx(cust0, "x", "a")},
+			{2 * time.Millisecond, 5 * time.Millisecond, tx(cust1, "y", "b")},
+		}
+	}
+	checkConnSet(t, recs, window("*", "*"), modeTest, modeTestScan)
+	for _, mode := range []string{modeTest, modeTestScan} {
+		got := replayConnSet(t, nil, recs, window("*", "*"), mode)
+		for i := range got {
+			if a := got[i][1]; a != "a-cust" && a != "b-cust" {
+				t.Errorf("%s: test %d's read of customer 'c' was answered with %s; want a recording of that read", mode, i, a)
+			}
+		}
+	}
+	checkConnSet(t, recs, window("a-cust", "b-cust"), modeExact, modeExactInTime)
+}
+
 // Every transaction sends START TRANSACTION, so the recording that answers
 // it says nothing of which transaction is open, and binds nothing: here the
 // first START recorded is the transaction on cA's, which read the product
