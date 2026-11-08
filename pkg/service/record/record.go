@@ -2584,8 +2584,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// (recording stop) or when the agent's HTTP server closes the
 	// response. Any error is logged but never fails the recording.
 	if r.config.Record.CapturePackets {
-		destDir := filepath.Join(r.config.Path, newTestSetID)
-		if err := os.MkdirAll(destDir, 0o755); err != nil {
+		destDir, err := pcapDir(r.config.Path, newTestSetID)
+		if err != nil {
 			r.logger.Warn("failed to create test-set dir for pcap stream; continuing without pcap",
 				zap.String("destDir", destDir), zap.Error(err))
 		} else {
@@ -3702,4 +3702,14 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+// pcapDir makes the folder a record's packet capture is streamed to, the test
+// set's, <keploy folder>/<set>, and returns it. It is made only inside the
+// project, each folder inside the one before (utils.MkdirRecordingDir): a
+// keploy folder that is a link out of the project is refused with why, and
+// no folder is made where it leads.
+func pcapDir(keployDir, set string) (string, error) {
+	destDir := filepath.Join(keployDir, set)
+	return destDir, utils.MkdirRecordingDir(destDir, 0o755)
 }
