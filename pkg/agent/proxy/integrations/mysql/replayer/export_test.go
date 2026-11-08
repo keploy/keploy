@@ -379,3 +379,28 @@ func ForgetPlacesForTest() {
 // PlacesReadsForTest is how many recordings were read for their places
 // (placesReads) since the process started.
 func PlacesReadsForTest() int64 { return placesReads.Load() }
+
+// TxControlForTest is txControlOf's verdict on req: "begin", "end" or "none".
+func TxControlForTest(req mysql.Request) string {
+	switch txControlOf(req) {
+	case txBegin:
+		return "begin"
+	case txEnd:
+		return "end"
+	}
+	return "none"
+}
+
+// MatchBoundForTest is MatchCommandForTest that keeps the live connection's
+// transaction and its binding as matchCommand does (bindAfter), so a test can
+// check that the full scan answers a bound transaction as the first pass does.
+func MatchBoundForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, fullScan bool) (*mysql.Response, bool, string, error) {
+	var served servedRecording
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, nil, nil, matchOptions{fullScan: fullScan, served: &served})
+	bindAfter(dctx, req, served)
+	missText := ""
+	if miss != nil {
+		missText = fmt.Sprintf("%+v", *miss)
+	}
+	return resp, ok, missText, err
+}

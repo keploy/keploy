@@ -453,6 +453,9 @@ type matchOptions struct {
 	// cannot be read for the places its logs show it by. Nil for a store
 	// that marks no round.
 	restaged func() bool
+	// served, when set, is written with the recording the command was
+	// answered with, for the connection rule (bindAfter).
+	served *servedRecording
 }
 
 // matchCommand matches one live command-phase request against the mock pool.
@@ -486,7 +489,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		own = ownCommands.Of(held, commandType(req.PacketBundle))
 		return len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 1)) > 0
 	})
-	opts := matchOptions{restaged: restaged}
+	var served servedRecording
+	opts := matchOptions{restaged: restaged, served: &served}
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
 	// A consume the store refused (integrations.ConsumeRefused: under exact
 	// serving, a test mock that already answered, perhaps on another
@@ -548,6 +552,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			miss.extraCall = len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 0))
 		}
 	}
+	// Only a command matchCommandWith answered with a recording wrote served.
+	bindAfter(decodeCtx, req, served)
 	return resp, ok, miss, err
 }
 
@@ -681,6 +687,16 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			return integrations.OwnedByOpenTest(mockDb, mk)
 		}
 		return windowActive && mockInCurrentWindow(mk)
+	}
+	// bound is, inside a live transaction, the recording that answered its
+	// latest command (the connection rule: connbind.go). An exact match the
+	// open test owns that was not recorded on bound's connection after it
+	// waits (waitsForBound): it answers only when the walk finds no exact
+	// match the test owns that was, and outranks every exact match it does
+	// not own.
+	bound := boundRecording(decodeCtx, winStart, testsOwn)
+	waitsForBound := func(mk *models.Mock) bool {
+		return bound != nil && testsOwn(mk) && !onBound(bound, mk)
 	}
 
 	// recordedInATestsWindow reports whether a recording was made inside the
@@ -1489,6 +1505,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		queryExactResp *mysql.Response
 		queryExactMock *models.Mock
 
+		// queryWaitingResp/Mock and execWaitingResp/Mock are the first exact
+		// match of a COM_QUERY, and the first definitive match of a
+		// COM_STMT_EXECUTE, that waited for the bound connection
+		// (waitsForBound).
+		queryWaitingResp, execWaitingResp *mysql.Response
+		queryWaitingMock, execWaitingMock *models.Mock
+
 		// unknownStatements are the COM_STMT_EXECUTE mocks recorded inside
 		// the current test window whose statement the pool cannot name: the
 		// recorder kept no query on them, and no PREPARE of theirs is in the
@@ -1693,11 +1716,22 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							}
 							continue
 						}
-						if windowActive && !mockInCurrentWindow(mock) {
+						switch {
+						case windowActive && !mockInCurrentWindow(mock):
 							if queryExactMock == nil {
 								queryExactResp, queryExactMock = &mock.Spec.MySQLResponses[0], mock
 							}
-						} else {
+						case waitsForBound(mock):
+							if queryWaitingMock == nil {
+								queryWaitingResp, queryWaitingMock = &mock.Spec.MySQLResponses[0], mock
+							}
+						case queryWaitingMock != nil && !testsOwn(mock):
+							// Under exact serving the walk reads the open
+							// test's own recordings first: an exact match it
+							// does not own ranks below the one it owns that
+							// waited.
+							matchedResp, matchedMock, queryMatched = queryWaitingResp, queryWaitingMock, true
+						default:
 							matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 						}
 					} else {
@@ -1875,6 +1909,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							if paramsOnlyMock == nil {
 								paramsOnlyResp, paramsOnlyMock = &mock.Spec.MySQLResponses[0], mock
 							}
+						case inWindow && waitsForBound(mock):
+							if execWaitingMock == nil {
+								execWaitingResp, execWaitingMock = &mock.Spec.MySQLResponses[0], mock
+							}
 						case inWindow:
 							matchedResp, matchedMock, stmtMatched = &mock.Spec.MySQLResponses[0], mock, true
 						case recordedInATestsWindow(mock):
@@ -1952,6 +1990,14 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 		if walkErr != nil {
 			return nil, false, nil, walkErr
+		}
+		// The walk found no exact match the open test owns on the bound
+		// connection: the first one that waited answers.
+		if !queryMatched && queryWaitingMock != nil {
+			matchedResp, matchedMock, queryMatched = queryWaitingResp, queryWaitingMock, true
+		}
+		if !stmtMatched && execWaitingMock != nil {
+			matchedResp, matchedMock, stmtMatched = execWaitingResp, execWaitingMock, true
 		}
 		settled := queryMatched || stmtMatched ||
 			// See firstPass: the window's FIFO candidate, and its match on the
@@ -2630,6 +2676,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		written = nil
 	}
 	stateServed(ctx, matchedMock, &req.PacketBundle, written)
+	if opts.served != nil {
+		*opts.served = servedRecording{mock: matchedMock, own: testsOwn(matchedMock), window: winStart}
+	}
 
 	if debugOn {
 		logger.Debug("matched command with the mock", zap.String("mock", matchedMock.Name))
