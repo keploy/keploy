@@ -353,13 +353,17 @@ func tailPattern(from, n int) []byte {
 // the limit, or just what the text needs when that is more. Each case is at
 // an edge of one of those choices, from a state addLocked reaches (the line
 // under the limit, the buffer within it), with sizes past 256 so append's own
-// growth would show; the last is outside that and only keeps the text.
+// growth would show. The cases left to append are outside that: a line of the
+// limit or a buffer past it is not grown by hand, and gets just the buffer
+// append alone would give it, so no size there is a sum add made.
 func TestAppTailAddSizesEachBufferFromTheRoomLeft(t *testing.T) {
-	const limit = 4096
+	const limit, asAppendGrows = 4096, -1
 	for _, c := range []struct {
 		name                 string
 		held, capacity, line int
-		wantCap              int // 0: any buffer that holds the text
+		// wantCap 0: any buffer that holds the text; asAppendGrows: the
+		// buffer append alone grows the held one to.
+		wantCap int
 	}{
 		{"an empty line to an empty tail", 0, 0, 0, 1},
 		{"a line that fills the free room", 1000, 1024, 23, 1024},
@@ -373,19 +377,30 @@ func TestAppTailAddSizesEachBufferFromTheRoomLeft(t *testing.T) {
 		{"a buffer twice which is one past the limit", 2049, 2049, 0, limit},
 		{"a buffer of the limit grows past it to just what the text needs", limit, limit, 0, limit + 1},
 		{"the longest line to a full buffer", limit, limit, limit - 1, 2 * limit},
-		{"a line of the limit, which addLocked never passes", 0, 0, limit, 0},
+		{"a buffer of the limit with room for the line keeps its buffer", limit, limit + 10, 9, limit + 10},
+		{"a line one under the limit to an empty tail", 0, 0, limit - 1, limit},
+		{"a line of the limit, which addLocked never passes, is left to append", 0, 0, limit, asAppendGrows},
+		{"a line of the limit to a held text is left to append", 100, 200, limit, asAppendGrows},
+		{"a buffer one past the limit, which trim never leaves, is left to append", limit + 1, limit + 1, 0, asAppendGrows},
+		{"a buffer one past the limit with room for the line keeps its buffer", limit + 1, limit + 3, 1, limit + 3},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			buf := make([]byte, c.held, c.capacity)
 			copy(buf, tailPattern(0, c.held))
 			tl := &appTail{buf: buf}
+			wantCap := c.wantCap
+			if wantCap == asAppendGrows {
+				held := make([]byte, c.held, c.capacity)
+				copy(held, buf)
+				wantCap = cap(append(append(held, tailPattern(c.held, c.line)...), '\n'))
+			}
 			tl.add(string(tailPattern(c.held, c.line)), limit)
 			want := append(tailPattern(0, c.held+c.line), '\n')
 			if !bytes.Equal(tl.buf, want) {
 				t.Fatalf("holds %d bytes that are not the %d of the text and the line", len(tl.buf), len(want))
 			}
-			if c.wantCap != 0 && cap(tl.buf) != c.wantCap {
-				t.Fatalf("a %d-byte buffer holds the %d bytes; want %d", cap(tl.buf), len(tl.buf), c.wantCap)
+			if wantCap != 0 && cap(tl.buf) != wantCap {
+				t.Fatalf("a %d-byte buffer holds the %d bytes; want %d", cap(tl.buf), len(tl.buf), wantCap)
 			}
 		})
 	}

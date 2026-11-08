@@ -258,16 +258,16 @@ func (s *appTails) evictOldestLocked() {
 // line is weighed against the buffer's free room, and then both lengths
 // against limit, before any sum is made, so every size below is plainly made
 // of values limit bounds (CodeQL's allocation-size check needs to see that;
-// the caller keeping them within limit is not enough for it).
+// the caller keeping them within limit is not enough for it). The weighing is
+// an if, not the cases of a switch: CodeQL takes a bound from an if's
+// condition, but since 2.27.4 not from an expressionless switch's case.
 func (t *appTail) add(line string, limit int) {
 	buf := t.buf
-	switch {
-	case len(line) < cap(buf)-len(buf):
-		// line and its "\n" fit in the free room.
-	case len(buf) <= limit && len(line) < limit:
-		// The buffer is grown by hand, to twice its size held to limit, or
-		// to need when that is more, so append's own growth never takes
-		// more. need is at most twice limit.
+	if len(line) >= cap(buf)-len(buf) && len(buf) <= limit && len(line) < limit {
+		// line and its "\n" do not fit in the free room. The buffer is
+		// grown by hand, to twice its size held to limit, or to need when
+		// that is more, so append's own growth never takes more. need is at
+		// most twice limit.
 		need := len(buf) + len(line) + 1
 		c := twiceHeldTo(cap(buf), limit)
 		if c < need {
@@ -276,11 +276,11 @@ func (t *appTail) add(line string, limit int) {
 		grown := make([]byte, len(buf), c)
 		copy(grown, buf)
 		buf = grown
-	default:
-		// Not reached: addLocked cuts the line to under limit, and trim
-		// keeps the buffer within limit. Were it reached, append would
-		// grow the buffer itself, and trim would bring it back.
 	}
+	// Otherwise line and its "\n" fit in the free room, or the line or the
+	// buffer is past limit. That is not reached (addLocked cuts the line to
+	// under limit, and trim keeps the buffer within limit); were it reached,
+	// append would grow the buffer itself, and trim would bring it back.
 	buf = append(buf, line...)
 	t.buf = append(buf, '\n')
 }
