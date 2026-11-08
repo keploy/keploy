@@ -1874,7 +1874,7 @@ func (m *SyncMockManager) SendingTestCase(name string, start, end time.Time) boo
 	return true
 }
 
-// sendingTestCaseOfMu is held by SendingTestCaseOf while it holds its
+// sendingTestCaseOfMu is held by SendTestCaseOf while it holds its
 // managers' sharedLossMu: every other path takes one manager's alone, so no
 // two callers can each hold one the other waits for.
 var sendingTestCaseOfMu sync.Mutex
@@ -1887,8 +1887,20 @@ var sendingTestCaseOfMu sync.Mutex
 // test case noted sent but never sent would stand as the recording's first,
 // and a start-up mock lost after it would not count as one any test may
 // need). Nil and repeated managers are skipped; with none left, it lets the
-// test case through.
+// test case through. A stream that may refuse the test case once asked (a
+// full queue) sends it through SendTestCaseOf instead.
 func SendingTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Time) bool {
+	return SendTestCaseOf(mgrs, name, start, end, nil)
+}
+
+// SendTestCaseOf is SendingTestCaseOf for a stream that may refuse the test
+// case: when each of mgrs may send it, it calls send, under their locks, and
+// notes the test case sent in each only when send reports it queued, so a
+// test case its stream refused is noted by none, and no loss checked between
+// the two finds it. send must not block, nor call into these managers. It
+// reports whether the test case was sent, false when one of mgrs left it
+// out (send is then not called) or send refused it. A nil send queues it.
+func SendTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Time, send func() bool) bool {
 	ms := make([]*SyncMockManager, 0, len(mgrs))
 	for _, m := range mgrs {
 		if m != nil && !slices.Contains(ms, m) {
@@ -1911,6 +1923,9 @@ func SendingTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Tim
 		if m.leavesOutLocked(start, end) {
 			return false
 		}
+	}
+	if send != nil && !send() {
+		return false
 	}
 	for _, m := range ms {
 		m.noteSentLocked(m.sentName(name, rawStart), start, end)
