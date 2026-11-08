@@ -203,13 +203,22 @@ func relayed(t *testing.T, r net.Conn, b string) {
 // end closes both peers and returns what recordV2 recorded.
 func (c *relayedConn) end(t *testing.T) []*models.Mock {
 	t.Helper()
+	mocks, err := c.endErr(t)
+	if err != nil {
+		t.Fatalf("recordV2 = %v", err)
+	}
+	return mocks
+}
+
+// endErr is end for a connection recordV2 may stop on: it returns the mocks
+// recorded and what recordV2 returned.
+func (c *relayedConn) endErr(t *testing.T) ([]*models.Mock, error) {
+	t.Helper()
 	_ = c.app.Close()
 	_ = c.dest.Close()
+	var err error
 	select {
-	case err := <-c.done:
-		if err != nil {
-			t.Fatalf("recordV2 = %v", err)
-		}
+	case err = <-c.done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("recordV2 did not return within 10s of the connection's end")
 	}
@@ -219,7 +228,7 @@ func (c *relayedConn) end(t *testing.T) []*models.Mock {
 		case m := <-c.mocks:
 			mocks = append(mocks, m)
 		default:
-			return mocks
+			return mocks, err
 		}
 	}
 }

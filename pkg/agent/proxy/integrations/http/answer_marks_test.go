@@ -176,10 +176,10 @@ func TestAnswerMarksReadsTheBodyAsKept(t *testing.T) {
 }
 
 // A Content-Length that is no length, or a negative one, is framing
-// answerMarks does not read: the answer keeps no marks, and reading it never
-// panics. No answer recordV2 records carries one, since Go's reader, which
-// reads the answer before its marks are read, refuses such a head: this is
-// answerMarks' own guard.
+// answerMarks does not read (parseHeaders refuses it): the answer keeps no
+// marks, and reading it never panics. No answer recordV2 records carries one,
+// since Go's reader, which reads the answer before its marks are read, refuses
+// such a head: this is answerMarks' own guard.
 func TestAnswerMarksReadsNoLengthItCannot(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -189,6 +189,8 @@ func TestAnswerMarksReadsNoLengthItCannot(t *testing.T) {
 		{"a negative length on a 304", "HTTP/1.1 304 Not Modified\r\nContent-Length: -5\r\n\r\n", 0},
 		{"a length of -1 on a 304", "HTTP/1.1 304 Not Modified\r\nContent-Length: -1\r\n\r\n", 0},
 		{"a length that is no number on a 304", "HTTP/1.1 304 Not Modified\r\nContent-Length: x5\r\n\r\n", 0},
+		{"a signed length", "HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello", 5},
+		{"a length written with white space before its colon", "HTTP/1.1 200 OK\r\nContent-Length : 5\r\n\r\nhello", 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := []byte(tc.resp)
@@ -214,6 +216,11 @@ func TestAnswerMarksKeepsAZeroLength(t *testing.T) {
 	resp := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 	writes := []respWrite{{end: 20, at: markAt(1)}, {end: len(resp), at: markAt(2)}}
 	wantMarks(t, answerMarks(resp, writes, "", 0), markAt(2), w(0, 2))
+	// The bytes after it are no part of its body.
+	next := append(resp[:len(resp):len(resp)], "HTTP/1.1"...)
+	if m := answerMarks(next, []respWrite{{end: len(resp), at: markAt(1)}, {end: len(next), at: markAt(2)}}, "", 0); m == nil {
+		t.Errorf("answerMarks(%q) kept no marks for a zero length", next)
+	}
 }
 
 // A header line folded onto the one before it is part of that field, as Go's
@@ -236,7 +243,14 @@ func TestAnswerMarksReadsAFoldedLineAsTheFieldBefore(t *testing.T) {
 			[]string{"HTTP/1.1 200 OK\r\nConnection: close\r\nX-A: b\r\n", " Content-Length: -5\r\n\r\nhello"}, 200, "hello", []models.HTTPAnswerWrite{w(5, 2)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := recordWrites(t, marksReq, tc.pieces, []time.Time{markAt(1), markAt(2)})
+			m := func() *models.Mock {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("recordV2 panicked: %v", r)
+					}
+				}()
+				return recordWrites(t, marksReq, tc.pieces, []time.Time{markAt(1), markAt(2)})
+			}()
 			resp := m.Spec.HTTPResp
 			if resp.StatusCode != tc.status || resp.Body != tc.body {
 				t.Errorf("recorded %d %q, want %d %q", resp.StatusCode, resp.Body, tc.status, tc.body)

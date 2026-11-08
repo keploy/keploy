@@ -70,24 +70,21 @@ func answerMarks(resp []byte, writes []respWrite, encoding string, bodyLen int) 
 		ends[i] = w.end - bodyStart
 	}
 	wire := resp[bodyStart:]
-	contentLength, transferEncoding := parseHeaders(head)
+	contentLength, chunked, err := parseHeaders(head, true)
+	if err != nil {
+		return nil // framing net/http does not read as keploy would
+	}
 	var decoded []int
 	switch {
-	case strings.Contains(strings.ToLower(transferEncoding), "chunked"):
+	case chunked:
 		var data []byte
 		if decoded, data, ok = dechunkedAt(wire, ends); !ok {
 			return nil
 		}
 		wire = data
-	case contentLength != "":
-		// A length that does not read as one, or a negative one, is framing
-		// this does not read. Bytes after the declared length are no part
-		// of the body.
-		n, err := contentLengthValue(contentLength)
-		if err != nil || n < 0 {
-			return nil
-		}
-		n = min(n, len(wire))
+	case contentLength >= 0:
+		// Bytes after the declared length are no part of the body.
+		n := min(contentLength, len(wire))
 		wire = wire[:n]
 		decoded = make([]int, len(ends))
 		for i, e := range ends {

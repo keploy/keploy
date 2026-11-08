@@ -22,7 +22,17 @@ func TestRecordThroughTheRelayFramesAFoldedHeaderAsTheClientDoes(t *testing.T) {
 		name      string
 		exchanges []exchange
 		closeDest bool // the server closes after the last response
+		// refused: net/http's client reads the response by a framing keploy's
+		// would not give it, so the connection is passed through whole and
+		// nothing is recorded.
+		refused bool
 	}{
+		{name: "a Content-Length with a space before its colon, the body read to the close",
+			exchanges: []exchange{{path: "/a", resp: []string{"HTTP/1.1 200 OK\r\nContent-Length : 5\r\n\r\n", "hello world"}}},
+			closeDest: true, refused: true},
+		{name: "a chunked HTTP/1.0 response, the body read to the close",
+			exchanges: []exchange{{path: "/a", resp: []string{"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", "5\r\nhello\r\n0\r\n\r\n"}}},
+			closeDest: true, refused: true},
 		{name: "a folded negative Content-Length, the body read to the close",
 			exchanges: []exchange{{path: "/a", resp: []string{"HTTP/1.1 200 OK\r\nX-A: b\r\n Content-Length: -5\r\n\r\n", "hello"}}},
 			closeDest: true},
@@ -74,9 +84,27 @@ func TestRecordThroughTheRelayFramesAFoldedHeaderAsTheClientDoes(t *testing.T) {
 				}
 				clientRead = append(clientRead, fmt.Sprintf("GET %s -> %d %q", ex.path, resp.StatusCode, body))
 			}
+			mocks, err := c.endErr(t)
+			if refused := refusedFraming(err); refused != row.refused || err != nil && !refused {
+				t.Fatalf("recordV2 = %v, want its framing refused %v", err, row.refused)
+			}
 			var got []string
-			for _, m := range c.end(t) {
+			for _, m := range mocks {
 				got = append(got, fmt.Sprintf("%s %s -> %d %q", m.Spec.HTTPReq.Method, m.Spec.HTTPReq.URL, m.Spec.HTTPResp.StatusCode, m.Spec.HTTPResp.Body))
+			}
+			if row.refused {
+				// The client read every byte the server sent after the head.
+				var sentBody string
+				for _, b := range row.exchanges[0].resp[1:] {
+					sentBody += b
+				}
+				if want := fmt.Sprintf("GET /a -> 200 %q", sentBody); len(clientRead) != 1 || clientRead[0] != want {
+					t.Fatalf("the client read %q, want %q", clientRead, want)
+				}
+				if len(got) != 0 {
+					t.Fatalf("recorded\n  %s\nwant nothing: the client read\n  %s", strings.Join(got, "\n  "), strings.Join(clientRead, "\n  "))
+				}
+				return
 			}
 			if strings.Join(got, "\n") != strings.Join(clientRead, "\n") {
 				t.Fatalf("recorded\n  %s\nthe client read\n  %s", strings.Join(got, "\n  "), strings.Join(clientRead, "\n  "))

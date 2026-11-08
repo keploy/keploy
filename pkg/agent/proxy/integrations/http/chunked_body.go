@@ -5,11 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"strconv"
-	"strings"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"golang.org/x/net/http/httpguts"
 )
 
 // errMalformedChunkedBody is returned when a chunked message body does not
@@ -183,7 +184,7 @@ func chunkedEndRefused(resp, refused []byte) ([]byte, bool) {
 	// framing. Chunked framing is readResponseV2's test: parseHeaders drops a
 	// Content-Length beside it.
 	head, bodyStart, _, _ := messageHead(resp, true)
-	if _, transferEncoding := parseHeaders(head); !strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+	if _, chunked, _ := parseHeaders(head, true); !chunked { // nor is a refused framing
 		return nil, false
 	}
 	msg := append(resp[:len(resp):len(resp)], refused...)
@@ -242,21 +243,24 @@ func parseChunkSize(line []byte) (int, error) {
 }
 
 // errBadContentLength is returned for a Content-Length field value that does
-// not parse as a length: not a decimal number, or one too large for an int.
+// not parse as a length: not decimal digits alone (a sign, a list, nothing),
+// or one too large for an int.
 var errBadContentLength = errors.New("the Content-Length field value does not parse as a decimal length")
 
-// contentLengthValue parses a Content-Length field value. Its error names the
+// contentLengthValue parses a Content-Length field value as net/http does
+// (RFC 9110 §8.6: 1*DIGIT): "+5" and "-5", which strconv.Atoi takes, are no
+// length, and net/http refuses a message that carries one. Its error names the
 // value by its length only, as parseChunkSize's do: strconv's error quotes the
 // value, which is the app's bytes (a client can send anything there), and it
 // reached the agent's log at Error (HandleChunkedRequests,
 // handleChunkedResponses) and the stopped-on reason of a recording
 // (readRequestV2, readResponseV2).
 func contentLengthValue(v string) (int, error) {
-	n, err := strconv.Atoi(v)
+	n, err := strconv.ParseUint(v, 10, strconv.IntSize-1) // an int's range
 	if err != nil {
 		return 0, fmt.Errorf("%w (a %d-byte value)", errBadContentLength, len(v))
 	}
-	return n, nil
+	return int(n), nil
 }
 
 // messageHead finds the header section that governs msg's body: the request's
@@ -395,41 +399,70 @@ func dropEmptyLinesBeforeRequest(req *[]byte) int {
 
 // awaitsContinue reports whether the client that sent req is waiting for a 100
 // (Continue) before it sends the request's body (RFC 9110 §10.1.1): req holds
-// the request's whole header section, which carries "Expect: 100-continue"
-// (expectsContinue) and frames a body, and none of that body has arrived. A
-// client that sends its body without waiting for the 100 — many do, and the
-// RFC lets them — is not waiting for one, and a proxy that answers it anyway
-// and then blocks for more bytes waits for bytes that are already in req.
+// the request's whole header section, which a server answers with a 100
+// (expectsContinue) and which frames a body, and none of that body has
+// arrived. A client that sends its body without waiting for the 100 — many do,
+// and the RFC lets them — is not waiting for one, and a proxy that answers it
+// anyway and then blocks for more bytes waits for bytes that are already in
+// req.
 func awaitsContinue(req []byte) bool {
 	head, bodyStart, _, ok := messageHead(req, false)
 	if !ok || bodyStart < len(req) || !expectsContinue(head) {
 		return false
 	}
-	contentLength, transferEncoding := parseHeaders(head)
-	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
-		return true
-	}
-	n, err := strconv.Atoi(contentLength)
-	return err == nil && n > 0
+	contentLength, chunked, _ := parseHeaders(head, false) // expectsContinue refused a refused framing
+	return chunked || contentLength > 0
 }
 
-// expectsContinue reports whether the request's header section carries
-// "Expect: 100-continue" — the field name and the expectation compared without
-// regard to case (RFC 9110 §5.1, §10.1.1), and only in the header section, not
-// in a body line that happens to read like one. Its fields are read as
-// headerFields reads them: an "Expect: 100-continue" on a folded line is part
-// of the field before it, which a server that joins it (net/http's) reads no
-// expectation in.
-func expectsContinue(req []byte) bool {
-	head, _, _, ok := messageHead(req, false)
-	if !ok {
-		head = req // the header section so far
+// expectsContinue reports whether head, a request's header section, is one
+// net/http's server answers with a 100 (Continue) once its body is read, as
+// its server decides (server.go): a request it reads (parseHeaders frames it,
+// and it has a Host field, but for CONNECT, a valid one, and no field name
+// with a space), of HTTP/1.1 or a later HTTP/1.x (it sends no 1xx to an
+// HTTP/1.0 client, RFC 9110 §15.2), whose first Expect field holds the token
+// 100-continue (hasToken: one element of a list, in any case). A later Expect
+// field is not read. Its fields are read as headerFields reads them: an
+// "Expect: 100-continue" on a folded line is part of the field before it.
+func expectsContinue(head []byte) bool {
+	major, minor, method, ok := startLine(head, false)
+	if !ok || major != 1 || minor < 1 {
+		return false
 	}
-	found := false
-	headerFields(head, func(name, value []byte) {
-		if bytes.EqualFold(name, []byte("Expect")) && bytes.EqualFold(value, []byte("100-continue")) {
-			found = true
+	if _, _, err := parseHeaders(head, false); err != nil {
+		return false
+	}
+	var expect, host []byte
+	expects, hosts, spaced := 0, 0, false
+	_ = headerFields(head, func(name, value []byte) { // parseHeaders read it whole
+		switch {
+		case bytes.IndexByte(name, ' ') >= 0:
+			spaced = true // net/http's server refuses the request
+		case asciiEqualFold(name, "expect"):
+			if expects == 0 {
+				expect = value
+			}
+			expects++
+		case asciiEqualFold(name, "host"):
+			host = value
+			hosts++
 		}
 	})
-	return found
+	if spaced || hosts == 0 && method != http.MethodConnect || hosts == 1 && !httpguts.ValidHostHeader(string(host)) {
+		return false
+	}
+	return hasToken(expect, "100-continue")
+}
+
+// hasToken reports whether token, in lower case, is an element of v, a list
+// whose elements a space, a tab or a comma bound, compared without regard to
+// ASCII case: net/http's test of an Expect value (header.go's hasToken).
+func hasToken(v []byte, token string) bool {
+	boundary := func(c byte) bool { return c == ' ' || c == ',' || c == '\t' }
+	for sp := 0; sp+len(token) <= len(v); sp++ {
+		end := sp + len(token)
+		if (sp == 0 || boundary(v[sp-1])) && (end == len(v) || boundary(v[end])) && asciiEqualFold(v[sp:end], token) {
+			return true
+		}
+	}
+	return false
 }
