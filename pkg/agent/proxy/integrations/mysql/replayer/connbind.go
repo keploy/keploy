@@ -126,9 +126,15 @@ func boundRecording(d *wire.DecodeContext, window time.Time, owns func(*models.M
 }
 
 // onBound reports whether mk was recorded on bound's connection, at or after
-// bound: the transaction's next command as recorded.
+// bound: the transaction's next command as recorded. Bound itself is never
+// read again: the consume that served it took it out of the pool or filed a
+// fresh copy over it (updateMock). A reusable one's copy is on bound's
+// connection at bound's time, so it answers the transaction's repeat of its
+// command when the walk reads no later recording on the connection first;
+// the pool files that copy after every other recording (its sort order is
+// stamped anew), so the walk reads a later one first.
 func onBound(bound, mk *models.Mock) bool {
-	return mk != bound && mk.Spec.Metadata["connID"] == bound.Spec.Metadata["connID"] &&
+	return mk.Spec.Metadata["connID"] == bound.Spec.Metadata["connID"] &&
 		!mk.Spec.ReqTimestampMock.Before(bound.Spec.ReqTimestampMock)
 }
 

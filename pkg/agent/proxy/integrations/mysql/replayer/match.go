@@ -691,12 +691,14 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// bound is, inside a live transaction, the recording that answered its
 	// latest command (the connection rule: connbind.go). An exact match the
 	// open test owns that was not recorded on bound's connection after it
-	// waits (waitsForBound): it answers only when the walk finds no exact
-	// match the test owns that was, and outranks every exact match it does
-	// not own.
+	// waits (waitsForBound, read only of the test's own): it answers only
+	// when the walk finds no exact match the test owns that was, and
+	// outranks every exact match the test does not own, which is a fallback
+	// (a COM_QUERY's queryExactMock; an EXECUTE's definitive match the test
+	// does not own is one already).
 	bound := boundRecording(decodeCtx, winStart, testsOwn)
 	waitsForBound := func(mk *models.Mock) bool {
-		return bound != nil && testsOwn(mk) && !onBound(bound, mk)
+		return bound != nil && !onBound(bound, mk)
 	}
 
 	// recordedInATestsWindow reports whether a recording was made inside the
@@ -1721,16 +1723,19 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							if queryExactMock == nil {
 								queryExactResp, queryExactMock = &mock.Spec.MySQLResponses[0], mock
 							}
+						case exactServing && !testsOwn(mock):
+							// Under exact serving an exact match the open
+							// test does not own is kept as the fallback too:
+							// it ranks below every exact match the test owns,
+							// in whatever order the store lists them (the
+							// connection rule's ranking holds on it).
+							if queryExactMock == nil {
+								queryExactResp, queryExactMock = &mock.Spec.MySQLResponses[0], mock
+							}
 						case waitsForBound(mock):
 							if queryWaitingMock == nil {
 								queryWaitingResp, queryWaitingMock = &mock.Spec.MySQLResponses[0], mock
 							}
-						case queryWaitingMock != nil && !testsOwn(mock):
-							// Under exact serving the walk reads the open
-							// test's own recordings first: an exact match it
-							// does not own ranks below the one it owns that
-							// waited.
-							matchedResp, matchedMock, queryMatched = queryWaitingResp, queryWaitingMock, true
 						default:
 							matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 						}
@@ -2014,6 +2019,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			// the live query above the rest.
 			(keyedExec && (defExecMock != nil || paramsOnlyMockWindow != nil ||
 				fallbacks.windowPick() != nil || fallbacks.anyPick() != nil)) ||
+			// So has the keyed pass of a COM_QUERY compared every recording
+			// of its text: the exact match it kept as the fallback (under
+			// exact serving, one the open test does not own) outranks every
+			// candidate left unread.
+			(keyedPass && req.Header.Type == sCOM_QUERY && queryExactMock != nil) ||
 			// The CLOSE pass scored every recorded CLOSE.
 			(req.Header.Type == sCOM_STMT_CLOSE && matchedMock != nil)
 		if !firstPass || settled {

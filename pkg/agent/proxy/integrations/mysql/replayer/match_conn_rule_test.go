@@ -3,11 +3,13 @@ package replayer_test
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models"
@@ -72,14 +74,64 @@ func connPool(recs []connRec) (pool []*models.Mock, byTest map[int][]*models.Moc
 	return pool, byTest
 }
 
+// recordedOrderStore is a MockManager under exact serving that hands the
+// matcher every recording it shows in one list, in recorded order: the
+// open test's own among the rest, where the MockManager lists them first.
+// The connection rule ranks them by what they are, whatever the order.
+type recordedOrderStore struct{ *proxy.MockManager }
+
+func (s recordedOrderStore) GetPerTestMocksInWindow() ([]*models.Mock, error) { return nil, nil }
+
+func (s recordedOrderStore) GetSessionMocks() ([]*models.Mock, error) {
+	own, err := s.MockManager.GetPerTestMocksInWindow()
+	if err != nil {
+		return nil, err
+	}
+	session, err := s.MockManager.GetSessionMocks()
+	if err != nil {
+		return nil, err
+	}
+	var all []*models.Mock
+	for _, m := range append(own, session...) {
+		if !slices.Contains(all, m) {
+			all = append(all, m)
+		}
+	}
+	slices.SortStableFunc(all, func(a, b *models.Mock) int {
+		return a.Spec.ReqTimestampMock.Compare(b.Spec.ReqTimestampMock)
+	})
+	return all, nil
+}
+
+// The modes a connection-rule set is replayed in (checkConnSet).
+const (
+	modeTest        = "keploy test"
+	modeTestScan    = "keploy test, full scan"
+	modeExact       = "exact serving"
+	modeExactInTime = "exact serving, recorded order"
+)
+
+// connLive is a live connection's context and decode state, its statement 1
+// prepared as connStmt.
+func connLive(live string) (context.Context, *wire.DecodeContext) {
+	return context.WithValue(context.Background(), models.ClientConnectionIDKey, live), &wire.DecodeContext{
+		PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{},
+		StmtIDToQuery:      map[uint32]string{1: connStmt},
+		NextStmtID:         100,
+	}
+}
+
 // replayConnSet replays tests in order against recs, as keploy test does
 // (each test's window staged as the agent stages it) or under exact serving
-// (each test's mapping is the recordings it owns), with fullScan the whole
-// pool scanned for every command. It returns what each call was answered
-// with, "miss" for none. Each live connection keeps its state across tests,
-// as an app's pool does.
-func replayConnSet(t *testing.T, recs []connRec, tests []connTest, exact, fullScan bool) [][]string {
+// (each test's mapping is the recordings it owns), with a full scan the whole
+// pool scanned for every command (modeTestScan, and modeExactInTime, which
+// reads it in recorded order: recordedOrderStore). It returns what each call
+// was answered with, "miss" for none. Each live connection keeps its state
+// across tests, as an app's pool does.
+func replayConnSet(t *testing.T, recs []connRec, tests []connTest, mode string) [][]string {
 	t.Helper()
+	exact := mode == modeExact || mode == modeExactInTime
+	fullScan := mode == modeTestScan || mode == modeExactInTime
 	pool, byTest := connPool(recs)
 	var mm *proxy.MockManager
 	var side *diffSide
@@ -91,6 +143,10 @@ func replayConnSet(t *testing.T, recs []connRec, tests []connTest, exact, fullSc
 		mm = side.mm
 	}
 	t.Cleanup(mm.Close)
+	var db integrations.MockMemDb = mm
+	if mode == modeExactInTime {
+		db = recordedOrderStore{mm}
+	}
 	ctxs, dctxs := map[string]context.Context{}, map[string]*wire.DecodeContext{}
 	var got [][]string
 	for i, tc := range tests {
@@ -102,20 +158,15 @@ func replayConnSet(t *testing.T, recs []connRec, tests []connTest, exact, fullSc
 		var answers []string
 		for _, c := range tc.calls {
 			if dctxs[c.live] == nil {
-				ctxs[c.live] = context.WithValue(context.Background(), models.ClientConnectionIDKey, c.live)
-				dctxs[c.live] = &wire.DecodeContext{
-					PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{},
-					StmtIDToQuery:      map[uint32]string{1: connStmt},
-					NextStmtID:         100,
-				}
+				ctxs[c.live], dctxs[c.live] = connLive(c.live)
 			}
 			var resp *mysql.Response
 			var ok bool
 			var err error
 			if fullScan {
-				resp, ok, _, err = replayer.MatchBoundForTest(ctxs[c.live], zap.NewNop(), connReq(c.sql), mm, dctxs[c.live], true)
+				resp, ok, _, err = replayer.MatchBoundForTest(ctxs[c.live], zap.NewNop(), connReq(c.sql), db, dctxs[c.live], true)
 			} else {
-				resp, ok, _, err = replayer.MatchWithEngineForTest(ctxs[c.live], zap.NewNop(), connReq(c.sql), mm, dctxs[c.live], nil)
+				resp, ok, _, err = replayer.MatchWithEngineForTest(ctxs[c.live], zap.NewNop(), connReq(c.sql), db, dctxs[c.live], nil)
 			}
 			if err != nil {
 				t.Fatalf("test %d, %q on %s: %v", i, c.sql, c.live, err)
@@ -137,10 +188,10 @@ func replayConnSet(t *testing.T, recs []connRec, tests []connTest, exact, fullSc
 func checkConnSet(t *testing.T, recs []connRec, tests []connTest, modes ...string) {
 	t.Helper()
 	if len(modes) == 0 {
-		modes = []string{"keploy test", "keploy test, full scan", "exact serving"}
+		modes = []string{modeTest, modeTestScan, modeExact, modeExactInTime}
 	}
 	for _, mode := range modes {
-		got := replayConnSet(t, recs, tests, mode == "exact serving", mode == "keploy test, full scan")
+		got := replayConnSet(t, recs, tests, mode)
 		for i, tc := range tests {
 			for j, c := range tc.calls {
 				if c.want != "*" && got[i][j] != c.want {
@@ -308,7 +359,7 @@ func TestConnectionRuleKeepsTheTestsOwnAboveThePool(t *testing.T) {
 		// The rule ranks the test's own recordings only: of the recordings
 		// made outside every test, the first answers, as before.
 		{"L1", "SELECT * FROM products WHERE id = 'z'", "pool-z-b"},
-	}}}, "exact serving")
+	}}}, modeExact, modeExactInTime)
 }
 
 // COMMIT and ROLLBACK end the binding: a command after them, outside every
@@ -369,8 +420,8 @@ func TestConnectionRuleKeepsTheBindingAcrossOtherAnswers(t *testing.T) {
 }
 
 // A recording the bound connection made as a reusable one (it answers again)
-// does not answer the transaction's next command twice: the next command as
-// recorded is a later recording on that connection.
+// does not answer the transaction's next command twice while the connection
+// recorded a later one: the next command as recorded is that one.
 func TestConnectionRuleTakesTheNextRecordingNotTheBoundAgain(t *testing.T) {
 	recs := []connRec{
 		{"a-x1", "cA", "SELECT rate FROM fx", 1000 * time.Microsecond, -1},
@@ -380,13 +431,135 @@ func TestConnectionRuleTakesTheNextRecordingNotTheBoundAgain(t *testing.T) {
 		{"L1", "START TRANSACTION", "*"},
 		{"L1", "SELECT rate FROM fx", "a-x1"},
 		{"L1", "SELECT rate FROM fx", "a-x2"},
-	}}}, "keploy test", "keploy test, full scan")
+	}}}, modeTest, modeTestScan)
 	// The same statement sent with a comment: not a byte-identical repeat.
 	checkConnSet(t, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
 		{"L1", "START TRANSACTION", "*"},
 		{"L1", "SELECT rate FROM fx", "a-x1"},
 		{"L1", "/* again */ SELECT rate FROM fx", "a-x2"},
-	}}}, "keploy test", "keploy test, full scan")
+	}}}, modeTest, modeTestScan)
+}
+
+// A reusable recording the bound connection made once answers its
+// transaction's repeat of the command again, over the read another test's
+// transaction made on another connection, which that test is left.
+func TestConnectionRuleAnswersTheBoundReusableRecordingAgain(t *testing.T) {
+	recs := []connRec{
+		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 900 * time.Microsecond, 0},
+		{"a-x1", "cA", "SELECT rate FROM fx", 1000 * time.Microsecond, -1},
+		{"b-x", "cB", "SELECT rate FROM fx", 1100 * time.Microsecond, 0},
+	}
+	checkConnSet(t, recs, []connTest{
+		{0, 4 * time.Millisecond, []connCall{
+			{"L1", "START TRANSACTION", "*"},
+			{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+			{"L1", "SELECT rate FROM fx", "a-x1"},
+			{"L1", "SELECT rate FROM fx", "a-x1"},
+			{"L1", "COMMIT", "*"},
+		}},
+		{1050 * time.Microsecond, 2 * time.Millisecond, []connCall{
+			{"L2", "SELECT rate FROM fx", "b-x"},
+		}},
+	}, modeTest, modeTestScan)
+}
+
+// Under exact serving an exact match the open test does not own ranks below
+// every one it owns, inside a bound transaction the one on the bound
+// connection first, in whatever order the store lists them: the test that
+// owns it is left it. In keploy test, of the EXECUTEs, a definitive
+// match the test does not own ranks below the test's own recording of the
+// statement with another parameter (the FIFO candidate); exact serving
+// answers neither (sameStatementOnly).
+func TestConnectionRuleRanksTheTestsOwnAboveAnotherTestsMatch(t *testing.T) {
+	recs := []connRec{
+		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
+		{"o-sel", "cB", "SELECT * FROM products WHERE id = 'x'", 1100 * time.Microsecond, 1},
+		{"a-sel", "cA", "SELECT * FROM products WHERE id = 'x'", 1200 * time.Microsecond, 0},
+		{"o-sel2", "cB", "SELECT * FROM products WHERE id = 'y'", 1300 * time.Microsecond, 1},
+		{"c-sel2", "cC", "SELECT * FROM products WHERE id = 'y'", 1400 * time.Microsecond, 0},
+		{"a-w", "cA", "SELECT * FROM products WHERE id = 'w'", 1500 * time.Microsecond, 0},
+		{"o-w", "cB", "SELECT * FROM products WHERE id = 'w'", 6 * time.Millisecond, 1},
+	}
+	checkConnSet(t, recs, []connTest{
+		{0, 4 * time.Millisecond, []connCall{
+			{"L1", "START TRANSACTION", "*"},
+			{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+			{"L1", "SELECT * FROM products WHERE id = 'x'", "a-sel"},
+			{"L1", "SELECT * FROM products WHERE id = 'y'", "c-sel2"},
+			{"L1", "COMMIT", "*"},
+		}},
+		{5 * time.Millisecond, 9 * time.Millisecond, []connCall{
+			{"L2", "SELECT * FROM products WHERE id = 'x'", "o-sel"},
+			{"L2", "SELECT * FROM products WHERE id = 'y'", "o-sel2"},
+			// Outside a transaction too: the read the earlier test left.
+			{"L2", "SELECT * FROM products WHERE id = 'w'", "o-w"},
+		}},
+	}, modeExact, modeExactInTime)
+	execs := []connRec{
+		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
+		{"a-fifo", "cA", "exec:y", 1200 * time.Microsecond, 0},
+		{"o-exec", "cB", "exec:x", 6 * time.Millisecond, 1},
+	}
+	checkConnSet(t, execs, []connTest{
+		{0, 4 * time.Millisecond, []connCall{
+			{"L1", "START TRANSACTION", "*"},
+			{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+			{"L1", "exec:x", "a-fifo"},
+			{"L1", "COMMIT", "*"},
+		}},
+		{5 * time.Millisecond, 9 * time.Millisecond, []connCall{
+			{"L2", "exec:x", "o-exec"},
+		}},
+	}, modeTest, modeTestScan)
+}
+
+// sessionReads counts the matcher's reads of the whole session tier, which
+// its full scan makes (loadPool).
+type sessionReads struct {
+	*proxy.MockManager
+	n *int
+}
+
+func (s sessionReads) GetSessionMocks() ([]*models.Mock, error) {
+	*s.n++
+	return s.MockManager.GetSessionMocks()
+}
+
+// Under exact serving the keyed pass of a command compares every recording of
+// its text: when the open test owns none, the first it does not own answers
+// there, inside a bound transaction too, with no scan of the whole pool.
+func TestConnectionRuleAnswersAnotherTestsMatchWithoutAFullScan(t *testing.T) {
+	pool, byTest := connPool([]connRec{
+		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
+		{"pool-sel", "cB", "SELECT * FROM products WHERE id = 'x'", 7 * time.Millisecond, -1},
+	})
+	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetMocksWithWindow(nil, pool, models.BaseTime, time.Now().Add(time.Hour))
+	mm.ServeExactTest("T0", byTest[0])
+	reads := 0
+	db := sessionReads{mm, &reads}
+	ctx, dctx := connLive("L1")
+	for _, c := range []connCall{
+		{"L1", "START TRANSACTION", "*"},
+		{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+		{"L1", "SELECT * FROM products WHERE id = 'x'", "pool-sel"},
+	} {
+		reads = 0
+		resp, ok, _, err := replayer.MatchWithEngineForTest(ctx, zap.NewNop(), connReq(c.sql), db, dctx, nil)
+		if err != nil {
+			t.Fatalf("%q: %v", c.sql, err)
+		}
+		if c.want == "*" {
+			continue
+		}
+		if !ok || resp == nil || resp.Payload != c.want {
+			t.Fatalf("%q was answered with %v (ok %v); want %s", c.sql, resp, ok, c.want)
+		}
+		if reads != 0 {
+			t.Errorf("%q read the whole session tier %d times; want none (the keyed pass settles it)", c.sql, reads)
+		}
+	}
 }
 
 // A recording that names no connection binds nothing: the transaction's
