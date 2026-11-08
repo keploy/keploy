@@ -274,10 +274,13 @@ type SyncMockManager struct {
 	// open[0]. A per-test mock requested at or after its start may be one of
 	// theirs, so no reaper drops it (see held). Guarded by mu.
 	open windowHeap
-	// lastWindowEnd is when the latest window ended, and windowlessIngress
-	// that this agent's ingress also takes requests that open no window
+	// lastWindowEnd is when the latest window ended, givenUpInFlight how
+	// many windows were given up while their requests are still in flight
+	// (noteGivenUpInFlightLocked), and windowlessIngress that this agent's
+	// ingress also takes requests that open no window
 	// (stampOutsideRequestsLocked). Guarded by mu.
 	lastWindowEnd     time.Time
+	givenUpInFlight   int
 	windowlessIngress bool
 	// stopFound is the windows of the requests in flight that began by the
 	// instant a recording stops at (NoteStop), less those that ended since:
@@ -2288,9 +2291,11 @@ type Window struct {
 	// lostOnce, which drops it once it has told it.
 	lost     func(LossCause) (takeBack func())
 	lostOnce sync.Once
-	// kept, givenUp, cause, told, toldEpoch and takeBack are guarded by m.mu.
-	// kept: Claim (or Keep) claimed it, so it is never given up. givenUp: it
-	// was given up, for cause (fitHoldLocked, giveUpForPressureLocked). told:
+	// kept, givenUp, inFlight, cause, told, toldEpoch and takeBack are
+	// guarded by m.mu. kept: Claim (or Keep) claimed it, so it is never given
+	// up. givenUp: it was given up, for cause (fitHoldLocked,
+	// giveUpForPressureLocked). inFlight: given up, its request has not ended
+	// yet (noteGivenUpInFlightLocked). told:
 	// Keep told its loss, and Replaced has not taken it back; toldEpoch is
 	// the manager's lossEpoch then (the loss is on the tallies open then,
 	// which are those still open whose epoch is no later), and takeBack is
@@ -2298,6 +2303,7 @@ type Window struct {
 	// one 112 B allocation.
 	kept      bool
 	givenUp   bool
+	inFlight  bool
 	told      bool
 	cause     LossCause
 	toldEpoch uint64
@@ -2714,11 +2720,17 @@ func (w *Window) Close() {
 // to a resolved kept window and no window still open claims any more goes to
 // it (oweUnclaimedLocked). Caller holds mu.
 func (m *SyncMockManager) endWindowLocked(w *Window, t *dropTally, givenUp bool) {
-	if w.idx >= 0 {
+	switch {
+	case w.idx >= 0:
 		heap.Remove(&m.open, w.idx)
 		m.noteOldestLocked()
 		m.windowLeftLocked(w)
 		m.lastWindowEnd = time.Now()
+		if givenUp {
+			m.noteGivenUpInFlightLocked(w)
+		}
+	case w.inFlight:
+		m.givenUpEndedLocked(w)
 	}
 	if _, found := m.stopFound[w]; found && !givenUp {
 		// Ended: no request a stop found in flight any more. One given up
@@ -3254,6 +3266,7 @@ func (m *SyncMockManager) giveUpForPressureLocked() (dropped int, gaveUp []*Wind
 		w.givenUp, w.cause = true, LostToMemoryPressure
 		heap.Remove(&m.open, w.idx)
 		m.windowLeftLocked(w)
+		m.noteGivenUpInFlightLocked(w)
 	}
 	m.noteOldestLocked()
 	return m.dropHeldLocked(n, nil, true), gaveUp

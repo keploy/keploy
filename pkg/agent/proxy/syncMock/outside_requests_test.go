@@ -151,3 +151,82 @@ func TestOutsideRequestsNilMockAndManagerAreSafe(t *testing.T) {
 	var none *SyncMockManager
 	none.NoteWindowlessIngress()
 }
+
+// A request given up while it is in flight (by memory pressure, by the hold's
+// budget, or across its recording's stop) is still running: its window has
+// left the open ones, but a call it makes before it ends is no background
+// work. Nothing is marked until it ends; once it has, a later call is.
+func TestOutsideRequestsAGivenUpRequestCountsUntilItEnds(t *testing.T) {
+	for _, way := range []string{"memory pressure", "the hold's budget", "its recording's stop"} {
+		t.Run(way, func(t *testing.T) {
+			mgr := openWindowManager(make(chan *models.Mock, 64), make(chan models.TestMockMapping, 64))
+			endedWindow(t, mgr)
+			start := time.Now().Add(-time.Second)
+			w := mgr.OpenWindow(start, nil)
+			mgr.AddMock(httpMockAt(start.Add(time.Millisecond)))
+			switch way {
+			case "memory pressure":
+				mgr.DeleteMocksStrictlyBefore(time.Now()) // held for it
+				if heldCount(mgr) == 0 {
+					t.Fatal("fixture: nothing held for the request")
+				}
+				mgr.SetMemoryPressure(true)
+				mgr.SetMemoryPressure(false)
+			case "the hold's budget":
+				for i := 0; i < 5; i++ {
+					mk := httpMockAt(start.Add(time.Duration(2+i) * time.Millisecond))
+					mk.Spec.HTTPResp = &models.HTTPResp{Body: megaBody}
+					mgr.AddMock(mk)
+				}
+				mgr.DeleteMocksStrictlyBefore(time.Now())
+			case "its recording's stop":
+				mgr.BacklogBefore(time.Now())
+				mgr.EndStoppedRecording()
+			}
+			if w.Keep() {
+				t.Fatal("fixture: the request was not given up")
+			}
+			if n := mgr.OpenWindows(); n != 0 {
+				t.Fatalf("fixture: %d windows still open, want 0", n)
+			}
+			later := time.Now().Add(time.Second)
+			if addCall(mgr, later, later.Add(time.Millisecond)) {
+				t.Fatal("a call made while a given-up request is still in flight is marked outside every request")
+			}
+			during := time.Now()
+			w.Close()
+			ended := time.Now()
+			if addCall(mgr, during, during.Add(time.Millisecond)) {
+				t.Fatal("a call the given-up request made before it ended, handed over after, is marked outside every request")
+			}
+			if !addCall(mgr, ended.Add(2*time.Second), ended.Add(3*time.Second)) {
+				t.Fatal("a call made after the given-up request ended is not marked")
+			}
+		})
+	}
+}
+
+// A given-up request's end is counted once: its window ended again does not
+// hide another given-up request still in flight.
+func TestOutsideRequestsAGivenUpRequestEndsOnce(t *testing.T) {
+	mgr := openWindowManager(make(chan *models.Mock, 64), make(chan models.TestMockMapping, 64))
+	endedWindow(t, mgr)
+	start := time.Now().Add(-time.Second)
+	a, b := mgr.OpenWindow(start, nil), mgr.OpenWindow(start.Add(time.Millisecond), nil)
+	mgr.AddMock(httpMockAt(start.Add(2 * time.Millisecond)))
+	mgr.DeleteMocksStrictlyBefore(time.Now()) // held for them
+	mgr.SetMemoryPressure(true)
+	mgr.SetMemoryPressure(false)
+	if a.Keep() || b.Keep() {
+		t.Fatal("fixture: memory pressure did not give both requests up")
+	}
+	a.Close()
+	mgr.mu.Lock()
+	mgr.endWindowLocked(a, &dropTally{}, false)
+	mgr.mu.Unlock()
+	later := time.Now().Add(time.Second)
+	if addCall(mgr, later, later.Add(time.Millisecond)) {
+		t.Fatal("a call made while a given-up request is still in flight is marked, after another's end was counted twice")
+	}
+	b.Close()
+}
