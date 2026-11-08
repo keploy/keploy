@@ -164,6 +164,11 @@ func NewRecordingMockReaderAny(ctx context.Context, logger *zap.Logger, root, pa
 
 // recordingRoot opens root and says where path is inside it.
 func recordingRoot(root, path string) (*os.Root, string, error) {
+	return recordingRootBy(root, path, utils.OpenRecordingDir)
+}
+
+// recordingRootBy is recordingRoot with root opened by open.
+func recordingRootBy(root, path string, open func(dir string) (*os.Root, error)) (*os.Root, string, error) {
 	dir := root
 	if dir == "" {
 		dir = "."
@@ -172,7 +177,7 @@ func recordingRoot(root, path string) (*os.Root, string, error) {
 	if err != nil {
 		return nil, "", changeRefused(root, path, err)
 	}
-	r, err := utils.OpenRecordingDir(dir)
+	r, err := open(dir)
 	if err != nil {
 		return nil, "", changeRefused(root, rel, err)
 	}
@@ -235,17 +240,22 @@ func WriteFileInRecording(root, path string, data []byte, perm fs.FileMode) erro
 
 // MkdirAllInRecording is os.MkdirAll inside root (see above). root itself is
 // made when it is not there, the first recording has none yet, from the
-// project as utils.MkdirRecordingDir makes it: a link on its way that leads
-// out of the project is refused, and no folder is made where it leads.
+// project as utils.MkdirOpenRecordingDir makes it: a link on its way that
+// leads out of the project is refused, and no folder is made where it leads.
+// root is made and opened in that one pass, so path is made inside the root
+// that was checked. An empty root is the working directory, there already.
 func MkdirAllInRecording(root, path string, perm fs.FileMode) error {
-	if root != "" {
-		if err := utils.MkdirRecordingDir(root, perm); err != nil {
-			return changeRefused(root, path, err)
-		}
-	}
-	return changeInRecording(root, path, func(r *os.Root, rel string) error {
-		return r.MkdirAll(rel, perm)
+	r, rel, err := recordingRootBy(root, path, func(dir string) (*os.Root, error) {
+		return utils.MkdirOpenRecordingDir(dir, perm)
 	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Close() }()
+	if err := r.MkdirAll(rel, perm); err != nil {
+		return changeRefused(root, rel, err)
+	}
+	return nil
 }
 
 // ChmodInRecording is os.Chmod inside root (see above).
