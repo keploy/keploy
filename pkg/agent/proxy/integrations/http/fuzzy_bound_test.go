@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"runtime"
-	"runtime/metrics"
 	"slices"
 	"strconv"
 	"strings"
@@ -204,16 +203,6 @@ func heapNow() uint64 {
 	runtime.GC()
 	runtime.ReadMemStats(&ms)
 	return ms.HeapAlloc
-}
-
-// liveHeap is the heap a collection forced here found live. HeapAlloc read
-// after it also counts what other goroutines allocated since, which on a
-// loaded machine can be several of a ranking's recordings.
-func liveHeap() uint64 {
-	runtime.GC()
-	s := []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
-	metrics.Read(s)
-	return s[0].Value.Uint64()
 }
 
 // onRanking is an HTTP that calls begun, once, on the ranking's own goroutine
@@ -877,8 +866,8 @@ func TestAPairSharingItsEndsIsRankedOnWhatDiffers(t *testing.T) {
 }
 
 // heapAtEachRead is a context whose Err, which a ranking asks before it reads
-// each recording, notes the heap left live there, where a ranking that holds
-// one recording at a time holds none.
+// each recording, notes the heap left there (heapLeft), where a ranking that
+// holds one recording at a time holds none.
 type heapAtEachRead struct {
 	context.Context
 	live []uint64
@@ -889,12 +878,30 @@ func (c *heapAtEachRead) Err() error {
 	return nil
 }
 
-// heapLeft is the heap live after two collections: the first leaves what a
-// sync.Pool keeps (json's encoder keeps its last buffer, a body's size), the
-// second frees it.
+// heapLeft is the heap allocated after two collections: the first leaves
+// what a sync.Pool keeps (json's encoder keeps its last buffer, a body's
+// size), the second frees it. It is HeapAlloc once the second collection's
+// sweep is done: the objects that collection marked, each counted once. The
+// bytes a collection marked (/gc/heap/live:bytes) are no such count: two GC
+// workers that reach one object at once may both count it, races the runtime
+// calls benign. A 4 MB body that several stacks or recordings point to, as
+// the row's request and its recordings' body are, was then counted twice: a
+// whole copy over the bound where the ranking held none; a small object
+// counted twice at the overhead's reading left a copy measured just under
+// its size. Either count takes in what another goroutine allocates
+// meanwhile: the row measures before its ranking starts, and then on the
+// ranking's own goroutine, so nothing else of note does (the test goroutine's
+// time.After timer is a few hundred bytes against a 2 MB half-copy margin).
+//
+// HeapAlloc is off too, by far less: with several Ps it holds, now and then,
+// up to 7 KiB of sudogs that the runtime caches and the next collection
+// drops, so two readings of one heap differ by up to 7 KiB. A copy's check
+// (one < size) has 8 KiB of room: a copy is size bytes and a few of JSON,
+// which take 513 pages, 4202496 bytes. That leaves about 1 KiB of margin,
+// and a tighter check of a copy's size would fail rankings that hold nothing.
 func heapLeft() uint64 {
 	runtime.GC()
-	return liveHeap()
+	return heapNow()
 }
 
 // A ranking holds one recording at a time, by its shingles and by Levenshtein
