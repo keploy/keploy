@@ -18,9 +18,14 @@ import (
 // points.
 const oNoFollow = syscall.O_NOFOLLOW
 
+// openat is unix.Openat. A row stands in for it to interrupt an open.
+var openat = unix.Openat
+
 // openNoFollowIn is os.OpenFile of name, one path element, in the folder dir,
 // with O_NOFOLLOW: a symbolic link at name is refused (ELOOP), never followed,
-// in one call. os.Root.OpenFile would follow one whose target is in dir.
+// in one call. os.Root.OpenFile would follow one whose target is in dir. An
+// open a signal interrupts (EINTR, which some file systems return even for a
+// restartable call) is made again, as os.OpenFile does.
 func openNoFollowIn(dir *os.Root, name string, flag int, perm os.FileMode) (*os.File, error) {
 	path := filepath.Join(dir.Name(), name)
 	d, err := dir.Open(".")
@@ -28,24 +33,14 @@ func openNoFollowIn(dir *os.Root, name string, flag int, perm os.FileMode) (*os.
 		return nil, err
 	}
 	defer func() { _ = d.Close() }()
-	rc, err := d.SyscallConn()
-	if err != nil {
-		return nil, err
-	}
-	fd := -1
-	var openErr error
-	if err := rc.Control(func(dirfd uintptr) {
-		for {
-			fd, openErr = unix.Openat(int(dirfd), name, flag|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(perm.Perm()))
-			if openErr != unix.EINTR {
-				return
-			}
+	dirfd := int(d.Fd())
+	for {
+		fd, err := openat(dirfd, name, flag|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(perm.Perm()))
+		if err == nil {
+			return os.NewFile(uintptr(fd), path), nil
 		}
-	}); err != nil {
-		return nil, err
+		if err != unix.EINTR {
+			return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+		}
 	}
-	if openErr != nil {
-		return nil, &fs.PathError{Op: "open", Path: path, Err: openErr}
-	}
-	return os.NewFile(uintptr(fd), path), nil
 }

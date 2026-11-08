@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 )
 
@@ -298,5 +299,61 @@ func TestATestSetFileIsOnlyANameInItsFolder(t *testing.T) {
 	}
 	if b, err := readTestSetFile(dir, "test-1.yaml"); err != nil || string(b) != "a\n" {
 		t.Errorf("readTestSetFile(test-1.yaml) = %q, %v", b, err)
+	}
+}
+
+// A test set file's open that a signal interrupts (EINTR) is made again, as
+// os.OpenFile's is: the file is read, by the second try.
+func TestAnInterruptedTestSetFileOpenIsMadeAgain(t *testing.T) {
+	folder := t.TempDir()
+	if err := os.WriteFile(filepath.Join(folder, "test-1.yaml"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.OpenRoot(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	plain, tries := openat, 0
+	openat = func(dirfd int, name string, flags int, mode uint32) (int, error) {
+		tries++
+		if tries == 1 {
+			return -1, unix.EINTR
+		}
+		return plain(dirfd, name, flags, mode)
+	}
+	t.Cleanup(func() { openat = plain })
+	if b, err := readTestSetFile(dir, "test-1.yaml"); err != nil || string(b) != "a\n" {
+		t.Fatalf("readTestSetFile after an interrupted open = %q, %v; want it read", b, err)
+	}
+	if tries != 2 {
+		t.Errorf("the open was tried %d times; want 2 (once interrupted, once made)", tries)
+	}
+}
+
+// A test set's folder keploy may search but not read: listing it, or opening
+// a file in it, fails with the reason, permission denied, not a stand-in.
+func TestATestSetFolderThatCannotBeReadSaysWhy(t *testing.T) {
+	folder := t.TempDir()
+	if err := os.WriteFile(filepath.Join(folder, "test-1.yaml"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.OpenRoot(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	if err := os.Chmod(folder, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(folder, 0o755) })
+	if _, err := os.ReadDir(folder); err == nil {
+		t.Skipf("this process (euid %d) can still read a mode-0300 folder, so the permission error cannot be made here", os.Geteuid())
+	}
+	if ents, err := readRootDir(dir); !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("readRootDir of a folder that cannot be read = %v, %v; want permission denied", ents, err)
+	}
+	if b, err := readTestSetFile(dir, "test-1.yaml"); !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("readTestSetFile in a folder that cannot be read = %q, %v; want permission denied", b, err)
 	}
 }
