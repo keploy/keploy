@@ -1353,6 +1353,20 @@ func (a *Agent) wireAppClock() {
 	r, reads := ActiveHooks.(AppClockReader)
 	_, own := ActiveHooks.(*AgentHook)
 	realClock := !reads && own && provenswitch.On()
+	// With the switch off the learn step reads no clock, and is handed none
+	// below, as before. The background check alone reads a call's span
+	// then (coreAgent.BackgroundClockSetter): on the real clock where the
+	// hooks say no clock is moved (BackgroundClockReader), or are this
+	// build's own, which move none; hooks that say neither hand it none.
+	if bs, ok := a.Proxy.(coreAgent.BackgroundClockSetter); ok && !provenswitch.On() {
+		var f func(time.Time) (time.Time, bool)
+		if br, tells := ActiveHooks.(BackgroundClockReader); tells {
+			f = br.BackgroundAppClock
+		} else if own {
+			f = realAppClock
+		}
+		bs.SetBackgroundClock(f)
+	}
 	if rs, ok := a.Proxy.(coreAgent.AppClockRunSetter); ok {
 		var run func(time.Time) (time.Time, bool)
 		if rr, tells := ActiveHooks.(AppClockRunReader); tells && reads {
@@ -2310,6 +2324,13 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	copy(originalUnfiltered, storage.unfiltered)
 	disk := storage.diskMocks
 	storage.mu.RUnlock()
+
+	// The staging call (recordedSetShape populated, as for the cursors'
+	// reset above) hands the proxy the set's background recordings, read
+	// from every mock held for the set, served or not.
+	if !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
+		a.seedBackgroundRecordings(params, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk)
+	}
 
 	// On WindowedProxy the agent filter runs non-strict (SetMocksWithWindow does
 	// the authoritative strict enforcement); env override still applies inside.

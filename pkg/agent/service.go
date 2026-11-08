@@ -771,6 +771,17 @@ type RunSetEnder interface {
 	EndRunSet()
 }
 
+// BackgroundRecordingsSeeder is the optional extension implemented by proxies
+// whose mock manager can be handed the set's background recordings as it is
+// staged (models.MockFilterParams.BackgroundMocks), read-only, each with its
+// recorded span, for a parser to tell a miss is one more run of one of them
+// (integrations.BackgroundRecordingReader). An agent whose proxy lacks it
+// seeds nothing, and every miss stays its test's, as before. nil clears the
+// previous set's.
+type BackgroundRecordingsSeeder interface {
+	SeedBackgroundRecordings(recs []models.BackgroundRecording)
+}
+
 // StatefulCursorResetter is the optional extension implemented by proxies whose
 // mock manager keeps per-request cursors for stateful dependency replay (serving
 // successive recorded responses in record order). The agent calls it once per
@@ -1048,6 +1059,16 @@ type ExactTestGiver interface {
 // (learn.Tracker.CallWindow).
 type AppClockSetter interface {
 	SetAppClock(f func(real time.Time) (time.Time, bool))
+}
+
+// BackgroundClockSetter is an optional proxy capability: with the proven
+// switch off, SetBackgroundClock hands the proxy how to read the app's clock
+// at a real instant (false where the hooks cannot tell; nil for none), for
+// the check that a call no recording answered is one more run of the set's
+// background work alone (learn.CallSpanOf, learn.ServeClock). The learn
+// step reads no clock with the switch off, and is handed none here.
+type BackgroundClockSetter interface {
+	SetBackgroundClock(f func(real time.Time) (time.Time, bool))
 }
 
 // AppClockRunSetter is an optional proxy capability, beside AppClockSetter:

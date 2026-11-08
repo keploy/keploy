@@ -84,6 +84,10 @@ type MockManager struct {
 	// serves in a request its parser said (integrations.ServingIn,
 	// learn.Tracker.ServedMockIn).
 	servedInObserver atomic.Pointer[func(*models.Mock, *learn.Flight)]
+	// serveClock, when set (the proven switch off), is told the instant of
+	// every serve but a protocol phase's, as the learn tracker is under the
+	// switch: a call's span for the background check (learn.CallSpanOf).
+	serveClock atomic.Pointer[learn.ServeClock]
 	// openTestEpoch, when set, says the learn tracker's open test
 	// (learn.Tracker.OpenEpoch) as a test's view is installed: the view's
 	// stamp (exactView.stamp, ServedInOpenTest).
@@ -409,6 +413,14 @@ type MockManager struct {
 	// keploy test session's windows would otherwise decide whose a later
 	// keploy mock replay's recordings are, over its scope table.
 	testWindows atomic.Pointer[models.WindowSchedule]
+	// background is the current set's background recordings by kind
+	// (SeedBackgroundRecordings, BackgroundRecordings). Like testWindows, a
+	// seed at a set boundary is parked (backgroundSeeded) until that set's
+	// staging call installs it with the trees it describes, and a set that
+	// seeds none has none, not the previous one's: names are unique only
+	// within a set. Stored under swapMu, read lock-free.
+	background       atomic.Pointer[map[models.Kind][]models.BackgroundRecording]
+	backgroundSeeded *map[models.Kind][]models.BackgroundRecording
 	// repeatNoise is the header noise the session's matcher compares the
 	// set's calls with, which proves a test's repeated reads
 	// (SetRepeatReadNoise); nil, none, until the session sets it.
@@ -861,6 +873,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.windowsSeeded = nil
 	m.testWindowsSeeded = nil
 	m.placeWindowsSeeded = nil
+	m.backgroundSeeded = nil
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -1760,6 +1773,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// The run's place's too (SeedRunPlaceWindows).
 			m.placeWindows.Store(m.placeWindowsSeeded)
 			m.placeWindowsSeeded = nil
+			m.background.Store(m.backgroundSeeded)
+			m.backgroundSeeded = nil
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -4477,6 +4492,50 @@ func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 	m.recordedWindows.Store(s)
 }
 
+// SeedBackgroundRecordings installs the set's background recordings
+// (models.MockFilterParams.BackgroundMocks, as the agent resolves them), by
+// kind, in recorded order: at once, or at a set boundary when that set's
+// staging call installs its trees (see testWindows). Read-only: never served,
+// never consumed. nil or empty installs none.
+func (m *MockManager) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
+	var byKind *map[models.Kind][]models.BackgroundRecording
+	if len(recs) > 0 {
+		kinds := map[models.Kind][]models.BackgroundRecording{}
+		for _, r := range recs {
+			if r.Mock != nil {
+				kinds[r.Mock.Kind] = append(kinds[r.Mock.Kind], r)
+			}
+		}
+		for _, list := range kinds {
+			slices.SortStableFunc(list, func(a, b models.BackgroundRecording) int {
+				return a.Mock.Spec.ReqTimestampMock.Compare(b.Mock.Spec.ReqTimestampMock)
+			})
+		}
+		byKind = &kinds
+	}
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	if m.boundaryPending {
+		m.backgroundSeeded = byKind
+		return
+	}
+	m.background.Store(byKind)
+}
+
+// BackgroundRecordings returns the current set's background recordings of
+// kind (integrations.BackgroundRecordingReader), in recorded order, whatever
+// the open view shows; nil when the set has none. The slice and its mocks
+// are shared: a caller reads them and changes nothing.
+func (m *MockManager) BackgroundRecordings(kind models.Kind) []models.BackgroundRecording {
+	byKind := m.background.Load()
+	if byKind == nil {
+		return nil
+	}
+	return (*byKind)[kind]
+}
+
+var _ integrations.BackgroundRecordingReader = (*MockManager)(nil)
+
 // RecordedWindows returns the current set's recorded test windows, or nil when
 // the replayer sent none (mock replay, an older CLI, SetFilteredMocks-only
 // callers) or no kind registered a carry-over predicate: consumers then treat
@@ -5054,6 +5113,7 @@ func (m *MockManager) observeServed(mock *models.Mock, in *learn.Flight) {
 	if mock == nil || mock.Name == "" {
 		return
 	}
+	m.noteServe(mock)
 	if in != nil {
 		if f := m.servedInObserver.Load(); f != nil {
 			v := m.exactView()
@@ -5069,12 +5129,38 @@ func (m *MockManager) observeServed(mock *models.Mock, in *learn.Flight) {
 	}
 }
 
+// SetServeClock makes m note every serve to c from now on (nil: none),
+// with the proven switch off: a call's span for the background check
+// (learn.CallSpanOf, learn.ServeClock). The proxy sets it on every manager
+// it serves with, the switch off.
+func (m *MockManager) SetServeClock(c *learn.ServeClock) {
+	m.serveClock.Store(c)
+}
+
+// noteServe notes a serve of mock to the serve clock, where one is set
+// (SetServeClock), but not a protocol phase's (a connection's handshake):
+// the call that opened the connection read its clock before the handshake
+// was served, so the handshake starts no call's span, as the learn tracker
+// files no protocol phase's serve.
+func (m *MockManager) noteServe(mock *models.Mock) {
+	if c := m.serveClock.Load(); c != nil && !mock.IsProtocolPhase() {
+		c.Served()
+	}
+}
+
 // observeServedCopy is observeServed of a mock a door took by value: the
 // observer keeps a copy of its own, made only when there is an observer (the
 // proven switch), so the door's mock does not move to the heap without one.
 func (m *MockManager) observeServedCopy(mock models.Mock, in *learn.Flight) {
 	if mock.Name == "" {
 		return
+	}
+	// The serve clock (the switch off) reads a copy of its own, made only
+	// when it is set: reading the door's mock would move it to the heap.
+	if c := m.serveClock.Load(); c != nil {
+		if cp := mock; !cp.IsProtocolPhase() {
+			c.Served()
+		}
 	}
 	if in != nil {
 		if f := m.servedInObserver.Load(); f != nil {
