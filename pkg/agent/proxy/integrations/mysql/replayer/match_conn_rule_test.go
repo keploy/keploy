@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1033,6 +1034,167 @@ func TestConnectionRuleVisitsMainsCandidates(t *testing.T) {
 			if !ok || resp == nil || !strings.HasPrefix(resp.Payload, c.want) || (c.want != "poll-" && resp.Payload != c.want) {
 				t.Fatalf("n=%d %q was answered with %v (ok %v); want %s", n, c.sql, resp, ok, c.want)
 			}
+		}
+	}
+}
+
+// staleWindowStore is recordedOrderStore still reporting a test window
+// under exact serving, the window keploy test staged before it began. The
+// matcher zeroes a window read under exact serving.
+type staleWindowStore struct {
+	recordedOrderStore
+	start, end time.Time
+}
+
+func (s staleWindowStore) CurrentTestWindow() (time.Time, time.Time) { return s.start, s.end }
+
+// Under exact serving no recorded time narrows what a test is served, so of
+// the exact matches the open test does not own the first one the store
+// lists answers, also when the store still reports a window: a later
+// recording made inside that window does not outrank it, on the first pass
+// (the path a replay takes) or on the full scan. Read with the window, the
+// first pass read the window's recordings alone and answered the later one.
+func TestConnectionRuleAnswersTheFirstUnownedMatchUnderAStaleWindow(t *testing.T) {
+	const sel = "SELECT * FROM products WHERE id = 'x'"
+	for _, fullScan := range []bool{false, true} {
+		pool, _ := connPool([]connRec{
+			{"x-early", "cA", sel, 500 * time.Microsecond, -1},
+			{"x-late", "cB", sel, 2000 * time.Microsecond, -1},
+		})
+		mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SetMocksWithWindow(nil, pool, models.BaseTime, time.Now().Add(time.Hour))
+		mm.ServeExactTest("T0", nil)
+		db := staleWindowStore{recordedOrderStore{mm}, diffBase.Add(time.Millisecond), diffBase.Add(4 * time.Millisecond)}
+		ctx, dctx := connLive("L1")
+		resp, ok, _, err := replayer.MatchBoundForTest(ctx, zap.NewNop(), connReq(sel), db, dctx, fullScan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok || resp == nil || resp.Payload != "x-early" {
+			t.Errorf("full scan %v: %q was answered with %v (ok %v); want x-early, the first exact match the store lists", fullScan, sel, resp, ok)
+		}
+	}
+}
+
+// A transaction's command matched while the store still reports a window
+// binds the transaction as one matched in none: its next command, read with
+// no window reported, is answered on the bound connection. Bound in the
+// window the store reported, the binding was dropped there, and the first
+// exact match the test owns, recorded on another connection, answered.
+func TestConnectionRuleKeepsABindingMadeUnderAStaleWindow(t *testing.T) {
+	const sel = "SELECT * FROM products WHERE id = 'x'"
+	for _, fullScan := range []bool{false, true} {
+		pool, byTest := connPool([]connRec{
+			{"a-start", "cA", "START TRANSACTION", 500 * time.Microsecond, 0},
+			{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 600 * time.Microsecond, 0},
+			{"b-sel", "cB", sel, 700 * time.Microsecond, 0},
+			{"a-sel", "cA", sel, 800 * time.Microsecond, 0},
+		})
+		mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SetMocksWithWindow(nil, pool, models.BaseTime, time.Now().Add(time.Hour))
+		mm.ServeExactTest("T0", byTest[0])
+		stale := staleWindowStore{recordedOrderStore{mm}, diffBase.Add(time.Millisecond), diffBase.Add(4 * time.Millisecond)}
+		ctx, dctx := connLive("L1")
+		for _, c := range []struct {
+			db        integrations.MockMemDb
+			sql, want string
+		}{
+			{recordedOrderStore{mm}, "START TRANSACTION", "a-start"},
+			{stale, "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+			{recordedOrderStore{mm}, sel, "a-sel"},
+		} {
+			resp, ok, _, err := replayer.MatchBoundForTest(ctx, zap.NewNop(), connReq(c.sql), c.db, dctx, fullScan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ok || resp == nil || resp.Payload != c.want {
+				t.Errorf("full scan %v: %q was answered with %v (ok %v); want %s", fullScan, c.sql, resp, ok, c.want)
+			}
+		}
+	}
+}
+
+// beginStore is recordedOrderStore as a command matched in the instant
+// exact serving begins reads it: the first of its reads of exact serving
+// and the test window sees the store before (no exact serving, the window
+// keploy test staged), and every later read sees it after (exact serving,
+// and MockManager.CurrentTestWindow zero). MockManager answers both from
+// one view it swaps in once and never out, so that is every order a
+// command racing the swap can read.
+type beginStore struct {
+	recordedOrderStore
+	start, end time.Time
+	mu         sync.Mutex
+	begun      bool
+}
+
+// before reports whether this read is the first, the one that sees the store
+// before exact serving begins.
+func (s *beginStore) before() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	first := !s.begun
+	s.begun = true
+	return first
+}
+
+func (s *beginStore) ExactServing() bool {
+	if s.before() {
+		return false
+	}
+	return s.recordedOrderStore.ExactServing()
+}
+
+func (s *beginStore) CurrentTestWindow() (time.Time, time.Time) {
+	if s.before() {
+		return s.start, s.end
+	}
+	return s.recordedOrderStore.CurrentTestWindow()
+}
+
+// A transaction's command matched in the instant exact serving begins binds
+// the transaction: its next read is answered on the bound connection, on
+// the first pass and on the full scan. Read exact serving first, the command
+// read it off and then no window, a state the store never held: no recording
+// was the test's own, the command bound nothing, and the next read was
+// answered with the first exact match the test owns, recorded on another
+// connection (b-sel).
+func TestConnectionRuleBindsATransactionMatchedAsExactServingBegins(t *testing.T) {
+	const sel = "SELECT * FROM products WHERE id = 'x'"
+	for _, fullScan := range []bool{false, true} {
+		pool, byTest := connPool([]connRec{
+			{"a-start", "cA", "START TRANSACTION", 500 * time.Microsecond, 0},
+			{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 600 * time.Microsecond, 0},
+			{"b-sel", "cB", sel, 700 * time.Microsecond, 0},
+			{"a-sel", "cA", sel, 800 * time.Microsecond, 0},
+		})
+		mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SetMocksWithWindow(nil, pool, models.BaseTime, time.Now().Add(time.Hour))
+		mm.ServeExactTest("T0", byTest[0])
+		begin := &beginStore{recordedOrderStore: recordedOrderStore{mm}, start: diffBase.Add(time.Millisecond), end: diffBase.Add(4 * time.Millisecond)}
+		ctx, dctx := connLive("L1")
+		for i, c := range []struct{ sql, want string }{
+			{"START TRANSACTION", "a-start"},
+			{"SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+			{sel, "a-sel"},
+		} {
+			var db integrations.MockMemDb = recordedOrderStore{mm}
+			if i == 1 {
+				db = begin
+			}
+			resp, ok, _, err := replayer.MatchBoundForTest(ctx, zap.NewNop(), connReq(c.sql), db, dctx, fullScan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ok || resp == nil || resp.Payload != c.want {
+				t.Errorf("full scan %v: %q was answered with %v (ok %v); want %s", fullScan, c.sql, resp, ok, c.want)
+			}
+		}
+		if !begin.begun {
+			t.Fatalf("full scan %v: the command matched as exact serving began read neither exact serving nor the window", fullScan)
 		}
 	}
 }
