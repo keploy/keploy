@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -25,6 +26,9 @@ func init() {
 		Initializer: New,
 		Priority:    100,
 	})
+	// A recording that loses a handshake or a COM_QUIT on its way out keeps
+	// the test cases its replay serves from another copy, or from none.
+	syncMock.RegisterServedByCopy(models.MySQL, replayer.ServedByCopy)
 }
 
 type MySQL struct {

@@ -73,7 +73,7 @@ func TestOnlyAMockBeforeTheFirstTestCaseIsOneOfTheStartUpWindows(t *testing.T) {
 	if m.servedToAnyTest(asyncAt("c1", t0.Add(-time.Second)), "test-1") {
 		t.Fatal("a mock a test owns is read as one any test may need")
 	}
-	if got := m.queueBound(asyncAt("c1", t0.Add(time.Second)), ""); got != outQueueMaxBytes-outQueueSharedRoom {
+	if got := m.queueBound(asyncAt("c1", t0.Add(time.Second)), "", m.revokeEpoch.Load()); got != outQueueMaxBytes-outQueueSharedRoom {
 		t.Fatalf("the bound of a test's mock no test owns is %d, want the room left for shared mocks kept (%d)", got, outQueueMaxBytes-outQueueSharedRoom)
 	}
 	m.SetOutputChannel(make(chan *models.Mock, 1))

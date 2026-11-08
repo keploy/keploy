@@ -664,6 +664,12 @@ type SyncMockManager struct {
 	// sharedLossMu as sent changes, read without it.
 	firstSent atomic.Pointer[time.Time]
 
+	// copies is, per copy key a kind's replay serves its mocks by
+	// (ServedByCopy), the earliest request of a mock of it the current
+	// recording's consumer took: a mock no test owns whose copy it holds is
+	// needed by no test (neededByNone).
+	copies heldCopies
+
 	// watermark says when a test case's verdict is final (settle.go); nil
 	// when nothing can tell.
 	watermark atomic.Pointer[watermarkBox]
@@ -1156,10 +1162,11 @@ func (m *SyncMockManager) beforeFirstTestCase(req time.Time) bool {
 }
 
 // queueBound is the bytes the out queue may hold with mock, sent for owner,
-// queued: outQueueMaxBytes for a mock any test may need, less
-// outQueueSharedRoom for any other.
-func (m *SyncMockManager) queueBound(mock *models.Mock, owner string) int64 {
-	if m.servedToAnyTest(mock, owner) {
+// queued on the channel of epoch: outQueueMaxBytes for a mock any test may
+// need, less outQueueSharedRoom for any other, and for one the recording's
+// consumer took a copy of already (neededByNone): no test needs it.
+func (m *SyncMockManager) queueBound(mock *models.Mock, owner string, epoch uint64) int64 {
+	if m.servedToAnyTest(mock, owner) && !m.neededByNone(mock, epoch) {
 		return outQueueMaxBytes
 	}
 	return outQueueMaxBytes - outQueueSharedRoom
@@ -1358,12 +1365,20 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 			return false
 		}
 	}
-	m.outQueueMu.Lock()
-	if trySend() {
+	// sent ends a send that trySend delivered, under outQueueMu and
+	// outChanMu's read lock, which it lets go: the recording's consumer took
+	// mock (noteDelivered).
+	sent := func() MockDrop {
+		epoch := m.out.epoch
 		m.outQueueMu.Unlock()
 		m.outChanMu.RUnlock()
+		m.noteDelivered(mock, epoch)
 		tell(true, 0)
 		return MockTaken
+	}
+	m.outQueueMu.Lock()
+	if trySend() {
+		return sent()
 	}
 	m.outQueueMu.Unlock()
 	// Sized outside outQueueMu: the walk is up to mockSizeNodes values for a
@@ -1372,10 +1387,7 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 	size := mockSize(mock)
 	m.outQueueMu.Lock()
 	if trySend() { // the drainer ended, or the consumer took, meanwhile
-		m.outQueueMu.Unlock()
-		m.outChanMu.RUnlock()
-		tell(true, 0)
-		return MockTaken
+		return sent()
 	}
 	// The bound is on what waits behind another: a mock with nothing before
 	// it (no mock queued or in the drainer's hand: inHand) is queued whatever
@@ -1385,7 +1397,7 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 	// A test's own mock leaves the last outQueueSharedRoom of the bound to
 	// the mocks any test may need (queueBound).
 	lane := m.out
-	if (len(lane.queue) > 0 || lane.inHand) && processOutQueued.Load()+size > m.queueBound(mock, owner) {
+	if (len(lane.queue) > 0 || lane.inHand) && processOutQueued.Load()+size > m.queueBound(mock, owner, lane.epoch) {
 		epoch := lane.epoch
 		m.outQueueMu.Unlock()
 		n, left := m.countDrop(mock, owner, epoch, string(MockDroppedOutputFull))
@@ -1443,6 +1455,7 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 		lane.bytes -= q.size
 		lane.inHand = true
 		processOutQueued.Add(-q.size)
+		epoch := lane.epoch
 		m.outQueueMu.Unlock()
 
 		if !m.deliverQueued(lane.ch, q.mock, &meter, &closing) {
@@ -1451,6 +1464,7 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 			continue
 		}
 		meter.Reset() // the consumer took one
+		m.noteDelivered(q.mock, epoch)
 		m.handedOn.Add(1)
 		if q.done != nil {
 			q.done(true, 0)
@@ -1641,13 +1655,15 @@ func (m *SyncMockManager) countDrop(mock *models.Mock, owner string, epoch uint6
 // SendingTestCase checks the span and notes a test case under, so none is
 // sent between the two. A drop for an older recording's
 // channel (epoch, the drop's, is no longer the current) leaves out none of
-// this one's, and a closed output's none: no test is recorded after it. It
+// this one's, and a closed output's none: no test is recorded after it. Nor
+// does a mock no test needs (neededByNone): its kind's replay answers its call
+// with no mock, or from a copy the recording's consumer took already. It
 // reports what it left out when this drop opened the span, or moved it
 // earlier, else the zero leftOut. Any other mock no test owns, lost so, was
 // the test's whose window it was requested in: leaveOutOver leaves out those
 // that overlap its call instead.
 func (m *SyncMockManager) leaveOutAfter(mock *models.Mock, owner string, epoch uint64, why string) leftOut {
-	if why == string(MockDroppedOutputClosed) || owner != "" || mock.IsUndelivered() {
+	if why == string(MockDroppedOutputClosed) || owner != "" || mock.IsUndelivered() || m.neededByNone(mock, epoch) {
 		return leftOut{}
 	}
 	if !m.servedToAnyTest(mock, owner) {
