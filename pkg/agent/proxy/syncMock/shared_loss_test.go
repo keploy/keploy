@@ -53,9 +53,25 @@ func fullLane(t *testing.T, m *SyncMockManager) (chan *models.Mock, *stall.Manua
 	clk := &stall.ManualClock{}
 	m.outClock, m.outStall = clk, time.Hour
 	m.SetOutputChannel(ch)
-	m.send(&models.Mock{Name: "in-hand"}, "", nil)
+	m.send(inHandMock(), "", nil)
 	waitClockPending(t, clk)
 	return ch, clk
+}
+
+// inHandMock is a mock whose loss leaves out no test case: an answer the
+// client never read (IsUndelivered), which serves no test.
+func inHandMock() *models.Mock {
+	return &models.Mock{Name: "in-hand", Spec: models.MockSpec{Metadata: map[string]string{models.MetadataUndeliveredKey: models.MetadataUndelivered}}}
+}
+
+// lostByName reports whether m holds name as lost by name, for whichever
+// channel's recording lost it (WasMockDroppedForTC reads only the current
+// one's).
+func lostByName(m *SyncMockManager, name string) bool {
+	m.droppedMu.Lock()
+	defer m.droppedMu.Unlock()
+	_, ok := m.droppedTCNames[name]
+	return ok
 }
 
 // queueAt sets the process's queue at n bytes until the test ends. Not
@@ -177,24 +193,54 @@ func TestAMockAnyTestMayNeedLostAtTheBoundLeavesOutTheTestsAfterIt(t *testing.T)
 	}
 }
 
-// A mock any test may need with no request time leaves out the test cases
-// from its loss on.
-func TestAMockAnyTestMayNeedWithNoRequestTimeLeavesOutFromItsLoss(t *testing.T) {
-	m := New(nil)
+// A mock with no request time, lost, is one any test may need (fail
+// closed): no test's window can be shown to hold it, so it may have been
+// requested before any of them. Every test case of the recording is left
+// out, those sent before the loss revoked, whatever their window, and the
+// ERROR says why.
+func TestAMockWithNoRequestTimeLeavesOutEveryTestCase(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	m := New(zap.New(core))
+	m.SetRevokeCapable(true)
 	fullLane(t, m)
 	queueAt(t, outQueueMaxBytes)
-	mk := sharedAt(t, "c1", time.Now())
-	mk.Spec.ReqTimestampMock = time.Time{}
 	before := time.Now()
+	if !m.SendingTestCase("sent-before", before.Add(-2*time.Second), before.Add(-time.Second)) {
+		t.Fatal("setup: a test case was left out with no mock lost")
+	}
+	for _, owned := range []bool{true, false} {
+		mk := addMockTo("c1", owned)
+		mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock = time.Time{}, time.Time{}
+		if !m.servedToAnyTest(mk, "") {
+			t.Fatalf("a mock with no request time (a session's: %v) is not one any test may need", owned)
+		}
+	}
+	mk := addMockTo("c1", false)
+	mk.Spec.ReqTimestampMock = time.Time{}
 	if got := sendNow(m, mk, ""); got != MockDroppedOutputFull {
-		t.Fatalf("a session's mock at the bound: %q, want %q", got, MockDroppedOutputFull)
+		t.Fatalf("a mock at the bound: %q, want %q", got, MockDroppedOutputFull)
+	}
+	if got := revokesQueued(m); len(got) != 1 || got[0] != "sent-before" {
+		t.Fatalf("revoked %v, want the test case sent before the loss", got)
 	}
 	after := time.Now()
 	if left, _ := m.WasMockOrphanedInWindow(after, after); !left {
 		t.Fatal("a test case after the loss was not left out")
 	}
-	if left, _ := m.WasMockOrphanedInWindow(before.Add(-2*time.Second), before.Add(-time.Second)); left {
-		t.Fatal("a test case before the loss was left out")
+	if left, _ := m.WasMockOrphanedInWindow(before.Add(-2*time.Second), before.Add(-time.Second)); !left {
+		t.Fatal("a test case before the loss was kept: the mock may have been requested before it")
+	}
+	if m.SendingTestCase("checked-after", before.Add(-2*time.Second), before.Add(-time.Second)) {
+		t.Fatal("a test case checked after the loss was sent")
+	}
+	said := false
+	for _, e := range logs.All() {
+		if f := e.ContextMap(); e.Level == zapcore.ErrorLevel && f["no_request_time"] != nil {
+			said = f["left_out_from"] == beforeAnyRequest.Format(time.RFC3339Nano)
+		}
+	}
+	if !said {
+		t.Fatal("no ERROR says the mock had no request time and every test case is left out")
 	}
 }
 
@@ -322,10 +368,10 @@ func TestALossRevokesTheTestCasesSentBeforeItThatReachPastItsRequest(t *testing.
 		t.Fatal("a test case that ended before the lost mock's request was revoked")
 	}
 	m.sharedLossMu.Lock()
-	named := len(m.sentTCs)
+	named := len(m.sentTCs.tcs)
 	m.sharedLossMu.Unlock()
 	if named != 1 {
-		t.Fatalf("%d test cases still named after the loss, want only tc-0: a revoked one is let go", named)
+		t.Fatalf("%d test cases still named after the loss, want only tc-0: a revoked one is taken out", named)
 	}
 	if said == nil || said["revoked_sent"] != int64(2) || said["client_deletes_revoked"] != true || said["unnamed_sent_through"] != nil {
 		t.Fatalf("the ERROR says %v, want revoked_sent 2, client_deletes_revoked true and no unnamed_sent_through", said)
@@ -412,13 +458,18 @@ func TestALossSaysTheSentTestCasesItCanNoLongerName(t *testing.T) {
 		}
 	})
 	t.Run("one past them", func(t *testing.T) {
+		// Each window here starts at its end (sentThenLost sends no start).
+		// The half let go is the one that started first: tc-half on, at
+		// at+1s. The first half sent, which started later, stays named,
+		// with the one past them, at at+1s too and ahead of them by start.
 		m, said := sentThenLost(t, at, append(ends, at.Add(time.Second))...)
-		if got := revokesQueued(m); len(got) != half+1 || got[0] != fmt.Sprintf("tc-%d", half) {
-			t.Fatalf("revoked %d from %v, want the %d still named from tc-%d", len(got), got[:min(1, len(got))], half+1, half)
+		got := revokesQueued(m)
+		if len(got) != half+1 || got[0] != fmt.Sprintf("tc-%d", maxSentTCs) || got[half] != "tc-0" {
+			t.Fatalf("revoked %d from %v, want the %d still named: tc-%d, then tc-%d down to tc-0", len(got), got[:min(1, len(got))], half+1, maxSentTCs, half-1)
 		}
-		want := ends[0].Format(time.RFC3339Nano)
-		if said == nil || said["unnamed_sent_through"] != want || said["sent_named_max"] != int64(maxSentTCs) {
-			t.Fatalf("the ERROR says %v, want unnamed_sent_through %s and sent_named_max %d", said, want, maxSentTCs)
+		want := ends[half].Format(time.RFC3339Nano)
+		if said == nil || said["unnamed_sent_through"] != want || said["sent_named_max"] != int64(maxSentTCs) || said["sent_named_min"] != int64(half) {
+			t.Fatalf("the ERROR says %v, want unnamed_sent_through %s, sent_named_min %d and sent_named_max %d", said, want, half, maxSentTCs)
 		}
 	})
 	t.Run("a request after every one let go", func(t *testing.T) {

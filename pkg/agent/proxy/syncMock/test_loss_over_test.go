@@ -18,35 +18,40 @@ func asyncAt(conn string, at time.Time) *models.Mock {
 	return startupAt(conn, at)
 }
 
-// openedAt opens and closes a window of m's at start, as an ingress does for
-// a request it may capture: the recording's first request time is then noted.
-func openedAt(m *SyncMockManager, start time.Time) {
-	m.OpenWindow(start, nil).Close()
+// sentFirstAt has m's stream send a test case whose window is [start,
+// start]: the recording's first test case is then known.
+func sentFirstAt(m *SyncMockManager, start time.Time) {
+	m.SendingTestCase(fmt.Sprintf("first-%d", start.UnixNano()), start, start)
 }
 
 // A mock no test owns is one any test may need only if it is a session's or a
-// connection's, or one of the start-up window's (IsStartup) requested before
-// the recording's first request (the earliest window opened), or that may have
-// been: no window opened yet, or it has no request time. IsStartup alone,
-// which the async capture's mocks all carry, does not make it one. The earliest window counts, whatever the order windows
-// open in, and a new recording forgets the last one's.
-func TestOnlyAMockBeforeTheFirstRequestIsOneOfTheStartUpWindows(t *testing.T) {
+// connection's, one with no request time, or one of the start-up window's
+// (IsStartup) requested before the recording's first test case (the earliest
+// window start among those its stream sent and did not revoke), or that may
+// have been: none was sent yet. IsStartup alone, which the async capture's
+// mocks all carry, does not make one. The earliest test case counts,
+// whatever the order they are sent in, and a new recording forgets the last
+// one's.
+func TestOnlyAMockBeforeTheFirstTestCaseIsOneOfTheStartUpWindows(t *testing.T) {
 	m := New(nil)
 	t0 := time.Now().Add(-time.Minute)
 	if !m.servedToAnyTest(asyncAt("c1", t0.Add(time.Second)), "") {
-		t.Fatal("a mock no test owns, sent before any window opened, is not one any test may need")
+		t.Fatal("a mock no test owns, sent before any test case was, is not one any test may need")
 	}
-	openedAt(m, t0.Add(2*time.Second))
-	openedAt(m, t0)
-	openedAt(m, t0.Add(3*time.Second))
+	sentFirstAt(m, t0.Add(2*time.Second))
+	if !m.servedToAnyTest(asyncAt("c1", t0.Add(time.Second)), "") {
+		t.Fatal("a mock requested before the first test case sent is not one any test may need")
+	}
+	sentFirstAt(m, t0)
+	sentFirstAt(m, t0.Add(3*time.Second))
 	if m.servedToAnyTest(asyncAt("c1", t0.Add(time.Second)), "") {
-		t.Fatal("a mock requested after the earliest window opened is read as one any test may need")
+		t.Fatal("a mock requested after the earliest test case sent is read as one any test may need")
 	}
 	if m.servedToAnyTest(asyncAt("c1", t0), "") {
-		t.Fatal("a mock requested as the first window opened is read as one any test may need")
+		t.Fatal("a mock requested as the first test case began is read as one any test may need")
 	}
 	if !m.servedToAnyTest(asyncAt("c1", t0.Add(-time.Nanosecond)), "") {
-		t.Fatal("a mock requested before the first window opened is not one any test may need")
+		t.Fatal("a mock requested before the first test case is not one any test may need")
 	}
 	noTime := asyncAt("c1", t0)
 	noTime.Spec.ReqTimestampMock = time.Time{}
@@ -58,8 +63,12 @@ func TestOnlyAMockBeforeTheFirstRequestIsOneOfTheStartUpWindows(t *testing.T) {
 	if m.servedToAnyTest(notStartup, "") {
 		t.Fatal("a mock AddMock did not tag as the start-up window's is read as one any test may need")
 	}
+	notStartup.Spec.ReqTimestampMock = time.Time{}
+	if !m.servedToAnyTest(notStartup, "") {
+		t.Fatal("a mock no test owns with no request time is not read as one any test may need")
+	}
 	if !m.servedToAnyTest(sharedAt(t, "c1", t0.Add(time.Second)), "") {
-		t.Fatal("a session's mock after the first request is not one any test may need")
+		t.Fatal("a session's mock after the first test case is not one any test may need")
 	}
 	if m.servedToAnyTest(asyncAt("c1", t0.Add(-time.Second)), "test-1") {
 		t.Fatal("a mock a test owns is read as one any test may need")
@@ -67,9 +76,9 @@ func TestOnlyAMockBeforeTheFirstRequestIsOneOfTheStartUpWindows(t *testing.T) {
 	if got := m.queueBound(asyncAt("c1", t0.Add(time.Second)), ""); got != outQueueMaxBytes-outQueueSharedRoom {
 		t.Fatalf("the bound of a test's mock no test owns is %d, want the room left for shared mocks kept (%d)", got, outQueueMaxBytes-outQueueSharedRoom)
 	}
-	m.StartRecordSession()
+	m.SetOutputChannel(make(chan *models.Mock, 1))
 	if !m.servedToAnyTest(asyncAt("c1", t0.Add(time.Second)), "") {
-		t.Fatal("a new recording reads the last one's first request as its own")
+		t.Fatal("a new recording reads the last one's first test case as its own")
 	}
 }
 
@@ -82,7 +91,7 @@ func TestATestsMockNoTestOwnsLostAtTheBoundLeavesOutOnlyTheTestsOverIt(t *testin
 	m := New(zap.New(core))
 	fullLane(t, m)
 	t0 := time.Now().Add(-time.Minute)
-	openedAt(m, t0)
+	sentFirstAt(m, t0)
 	queueAt(t, outQueueMaxBytes-outQueueSharedRoom)
 	at := t0.Add(10 * time.Second)
 	mk := asyncAt("c1", at)
@@ -119,7 +128,7 @@ func TestATestsMockNoTestOwnsAnsweredBeforeItsRequestSpansItsRequest(t *testing.
 	m.SetRevokeCapable(true)
 	fullLane(t, m)
 	t0 := time.Now().Add(-time.Minute)
-	openedAt(m, t0)
+	sentFirstAt(m, t0)
 	queueAt(t, outQueueMaxBytes)
 	at := t0.Add(10 * time.Second)
 	if !m.SendingTestCase("sent-from-its-request", at, at.Add(time.Second)) {
@@ -149,7 +158,7 @@ func TestATestsMockNoTestOwnsGivenUpRevokesTheSentTestCasesOverIt(t *testing.T) 
 		m.SetRevokeCapable(true)
 		_, clk := fullLane(t, m)
 		t0 := time.Now().Add(-time.Minute)
-		openedAt(m, t0)
+		sentFirstAt(m, t0)
 		at := t0.Add(10 * time.Second)
 		for name, w := range map[string][2]time.Time{
 			"ended-before":  {at.Add(-2 * time.Second), at.Add(-time.Second)},
@@ -177,10 +186,10 @@ func TestATestsMockNoTestOwnsGivenUpRevokesTheSentTestCasesOverIt(t *testing.T) 
 			t.Fatalf("revoked %v, want over and no-start", revokesQueued(m))
 		}
 		m.sharedLossMu.Lock()
-		named := len(m.sentTCs)
+		named := len(m.sentTCs.tcs)
 		m.sharedLossMu.Unlock()
-		if named != 2 {
-			t.Fatalf("%d test cases still named after the loss, want 2: a revoked one is let go", named)
+		if named != 3 {
+			t.Fatalf("%d test cases still named after the loss, want 3: a revoked one is taken out", named)
 		}
 		if m.SendingTestCase("checked-after", at, at.Add(time.Millisecond)) {
 			t.Fatal("a test case over the given-up mock's call, checked after it, was sent")
@@ -191,7 +200,7 @@ func TestATestsMockNoTestOwnsGivenUpRevokesTheSentTestCasesOverIt(t *testing.T) 
 		m.SetRevokeCapable(true)
 		_, clk := fullLane(t, m)
 		t0 := time.Now().Add(-time.Minute)
-		openedAt(m, t0)
+		sentFirstAt(m, t0)
 		at := t0.Add(10 * time.Second)
 		lost := make(chan bool, 1)
 		m.send(asyncAt("c1", at), "", func(d bool) { lost <- !d })
@@ -221,7 +230,7 @@ func TestATestsMockNoTestOwnsLostSaysTheSentTestCasesItCanNoLongerName(t *testin
 	m := New(zap.New(core))
 	fullLane(t, m)
 	t0 := time.Now().Add(-time.Minute)
-	openedAt(m, t0)
+	sentFirstAt(m, t0)
 	queueAt(t, outQueueMaxBytes)
 	at := t0.Add(10 * time.Second)
 	for i := 0; i <= maxSentTCs; i++ {
@@ -274,7 +283,7 @@ func TestATestCaseWithNoOrABackwardWindowIsCheckedAtItsEnd(t *testing.T) {
 	m := New(nil)
 	fullLane(t, m)
 	t0 := time.Now().Add(-time.Minute)
-	openedAt(m, t0)
+	sentFirstAt(m, t0)
 	queueAt(t, outQueueMaxBytes)
 	at := t0.Add(10 * time.Second)
 	mk := asyncAt("c1", at)
@@ -295,7 +304,7 @@ func TestAnOwnedMockOrAnUnreadAnswerLostSpansNoCall(t *testing.T) {
 	m := New(nil)
 	fullLane(t, m)
 	t0 := time.Now().Add(-time.Minute)
-	openedAt(m, t0)
+	sentFirstAt(m, t0)
 	queueAt(t, outQueueMaxBytes)
 	at := t0.Add(10 * time.Second)
 	owned := asyncAt("c1", at)
@@ -327,7 +336,9 @@ func TestTheLostCallsSpansJoinTheCheckedOnesFirst(t *testing.T) {
 	m := New(nil)
 	fullLane(t, m)
 	t0 := time.Now().Add(-time.Hour)
-	openedAt(m, t0)
+	// The first test case sent ends before every loss, so none revokes it:
+	// the recording's first stays known, and each loss is a test's.
+	sentFirstAt(m, t0.Add(-time.Minute))
 	queueAt(t, outQueueMaxBytes)
 	lose := func(at time.Time) {
 		mk := asyncAt("c1", at)

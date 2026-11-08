@@ -191,13 +191,14 @@ func TestHandleIncoming_ChecksAGRPCTestCaseByItsOwnWindow(t *testing.T) {
 // need (a session's) is lost on its way out, whose window reaches past that
 // mock's request (it began before it and ended after), is revoked by name: the span the loss opens reaches only
 // the test cases checked after it. One checked after the loss that has no
-// window to check is left out: it may need the mock.
+// window to check is left out: it may need the mock. In a late stretch: the
+// loss leaves the test cases out until the recording ends, at the real now.
 func TestHandleIncoming_ALostSessionMockRevokesTheTestCasesSentBeforeIt(t *testing.T) {
 	mgr := syncmgr.Get()
 	mgr.SetWatermark(nil)
 	mgr.SetRevokeCapable(true)
 	t.Cleanup(func() { mgr.SetRevokeCapable(false) })
-	start := newStretch()
+	start := newLateStretch()
 	tcs := make(chan *models.TestCase, 1)
 	names := streamOf(t, openStream(t, tcs))
 	mgr.SetOutputChannel(make(chan *models.Mock)) // a consumer that takes nothing
@@ -225,7 +226,7 @@ func TestHandleIncoming_ALostSessionMockRevokesTheTestCasesSentBeforeIt(t *testi
 }
 
 // A test case the stream sent before a test's mock no test owns (the async
-// capture's, requested after the recording's first request) is lost on its
+// capture's, requested after the first test case the stream sent) is lost on its
 // way out, whose window overlaps that mock's call, is revoked by name: the
 // stream gives the manager its window's start as well as its end. One sent
 // after the loss whose window ends before the call is sent.
@@ -236,7 +237,6 @@ func TestHandleIncoming_ALostAsyncMockRevokesTheTestCaseSentOverItsCall(t *testi
 	t.Cleanup(func() { mgr.SetRevokeCapable(false) })
 	start := newStretch()
 	mgr.StartRecordSession()
-	mgr.OpenWindow(start.Add(-2*time.Second), nil).Close()
 	tcs := make(chan *models.TestCase, 1)
 	names := streamOf(t, openStream(t, tcs))
 	mgr.SetOutputChannel(make(chan *models.Mock)) // a consumer that takes nothing

@@ -68,6 +68,23 @@ func newStretch() time.Time {
 	return stretchesEnd.Add(-time.Duration(stretchesTaken.Add(1)) * stretchLen)
 }
 
+// lateStretchesTaken counts the late stretches taken (newLateStretch).
+var lateStretchesTaken atomic.Int64
+
+// lateStretchesEnd is where the first late stretch ends: far after the
+// spans the past-the-cap row records from stretchesEnd on.
+var lateStretchesEnd = stretchesEnd.Add(1000 * time.Hour)
+
+// newLateStretch returns the start of a late stretch no other test or run
+// has taken, before every late one taken so far, for a test whose span
+// reaches to the real now: a recording that lost a mock any test may need
+// leaves its test cases out from that mock's request until it ends, at the
+// real now. Such a span covers only the late stretches taken before it,
+// whose tests are done, and no stretch nor the past-the-cap row's spans.
+func newLateStretch() time.Time {
+	return lateStretchesEnd.Add(-time.Duration(lateStretchesTaken.Add(1)) * stretchLen)
+}
+
 // streamWait bounds how long a test waits for the next test case of a
 // HandleIncoming stream, or its end: a regression that leaves a test case out
 // fails the test rather than hanging the package until its timeout.

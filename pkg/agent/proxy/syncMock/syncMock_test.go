@@ -973,7 +973,7 @@ func TestSendToOutChanDropSampling(t *testing.T) {
 	core, logs := observer.New(zap.ErrorLevel)
 	mgr := New(zap.New(core))
 	for range 2*sendDropSampleRate + 2 {
-		mgr.dropOut(&models.Mock{Kind: models.HTTP, ConnectionID: "c"}, "", 0, string(MockDroppedOutputFull))
+		mgr.dropOut(&models.Mock{Kind: models.HTTP, ConnectionID: "c", Spec: models.MockSpec{ReqTimestampMock: time.Now()}}, "", 0, string(MockDroppedOutputFull))
 	}
 	// Expected emits: n=1, n=1024, n=2048 → 3 entries.
 	if got := logs.Len(); got != 3 {
