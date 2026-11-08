@@ -128,12 +128,14 @@ func TestCopyMockParamsSharesNothing(t *testing.T) {
 		TotalConsumedMocks: map[string]models.MockState{"a": {}},
 		MockMapping:        []string{"m1"},
 		RecordedWindows:    []models.TestWindow{{}},
+		BackgroundMocks:    []string{"worker-1"},
 	}
 	c, _ := copyMockParams(params)
 	params.TotalConsumedMocks["b"] = models.MockState{}
 	params.MockMapping[0] = "changed"
 	params.RecordedWindows[0].Start = time.Now()
-	if len(c.TotalConsumedMocks) != 1 || c.MockMapping[0] != "m1" || !c.RecordedWindows[0].Start.IsZero() {
+	params.BackgroundMocks[0] = "changed"
+	if len(c.TotalConsumedMocks) != 1 || c.MockMapping[0] != "m1" || !c.RecordedWindows[0].Start.IsZero() || c.BackgroundMocks[0] != "worker-1" {
 		t.Fatalf("the copy changed with the original: %+v", c)
 	}
 }
