@@ -234,6 +234,38 @@ func TestANodeManagerOfOneRecordingReapsAtThePruneHorizon(t *testing.T) {
 	}
 }
 
+// Until the recording's first request is signalled, a manager of one
+// recording tags every mock it takes a start-up one, however many test cases
+// it has resolved: a capture that resolves kept windows and never signals it
+// leaves every mock in the start-up tier. Once it is signalled, past the
+// window, a mock is not tagged. A node's manager of one recording tags them
+// the same.
+func TestAMockIsStartUpUntilTheFirstRequestIsSignalledThoughTheWindowIsPast(t *testing.T) {
+	for _, tc := range oneRecording {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(nil)
+			m.SetOutputChannel(make(chan *models.Mock, 4))
+			tc.set(m)
+			now := time.Now()
+			for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+				at := now.Add(-time.Second + time.Duration(i)*time.Millisecond)
+				m.ResolveRange(at, at, fmt.Sprintf("test-%d", i), true, false)
+			}
+			mk := appMockAt("c", "", now)
+			m.AddMock(mk)
+			if !mk.TestModeInfo.IsStartup {
+				t.Fatalf("%d test cases resolved and no first request signalled: the mock is not tagged start-up", models.StartupMockTestCaseWindow)
+			}
+			m.SetFirstRequestSignaled()
+			mk = appMockAt("c", "", now)
+			m.AddMock(mk)
+			if mk.TestModeInfo.IsStartup {
+				t.Fatal("past the window with the first request signalled, the mock is tagged start-up")
+			}
+		})
+	}
+}
+
 // A node's manager counts the start-up window of the recording its own
 // requests go to (app A's): past it, A's mock is not a start-up one, while
 // app B's, whose requests it does not resolve, is, and still counts as one
