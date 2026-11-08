@@ -36,10 +36,20 @@ type sentList struct {
 	// unnamedFirst and unnamedThrough; halved once some were let go.
 	letGo, halved                bool
 	unnamedFirst, unnamedThrough time.Time
-	// firstUnknown is set when a test case it no longer names may have been
-	// revoked (forget): it may have been the earliest of those let go, so the
-	// recording's first test case is no longer known (first).
+	// firstLetGo is the name of the test case at unnamedFirst, the one it
+	// does not name that started first: "" for one sent with no name, which
+	// no revoke names. Only its revoke can move the first of those it does
+	// not name.
+	firstLetGo string
+	// firstUnknown is set once a revoke the client applies took out the
+	// test case at unnamedFirst (forget): the first of those it does not
+	// name is no longer known, so the recording's first test case is known
+	// only to be no later than the first it still names (first).
 	firstUnknown bool
+	// keptFirst is the earliest start of a test case taken out by a revoke
+	// the client does not apply (it cannot delete): it stays in the
+	// recording, so it still counts toward the first. Zero when none.
+	keptFirst time.Time
 }
 
 // add notes the test case named name, whose window is [start, end] (start
@@ -47,7 +57,7 @@ type sentList struct {
 // is one it does not name (unnamed): a loss over its window says so.
 func (l *sentList) add(name string, start, end time.Time) {
 	if name == "" {
-		l.noteUnnamed(start, end)
+		l.noteUnnamed("", start, end)
 		return
 	}
 	if len(l.tcs) == maxSentTCs {
@@ -70,7 +80,7 @@ func (l *sentList) add(name string, start, end time.Time) {
 func (l *sentList) letGoHalf() {
 	half := len(l.tcs) / 2
 	for _, tc := range l.tcs[:half] {
-		l.noteUnnamed(tc.start, tc.end)
+		l.noteUnnamed(tc.name, tc.start, tc.end)
 		delete(l.byName, tc.name)
 	}
 	l.halved = true
@@ -79,11 +89,12 @@ func (l *sentList) letGoHalf() {
 	l.tcs = l.tcs[:k]
 }
 
-// noteUnnamed notes a test case sent whose window is [start, end] as one
-// it does not name: let go, or sent with no name.
-func (l *sentList) noteUnnamed(start, end time.Time) {
+// noteUnnamed notes the test case named name ("" for none), sent with the
+// window [start, end], as one it does not name: let go, or sent with no
+// name.
+func (l *sentList) noteUnnamed(name string, start, end time.Time) {
 	if !l.letGo || start.Before(l.unnamedFirst) {
-		l.unnamedFirst = start
+		l.unnamedFirst, l.firstLetGo = start, name
 	}
 	if !l.letGo || end.After(l.unnamedThrough) {
 		l.unnamedThrough = end
@@ -101,7 +112,9 @@ func (l *sentList) from(t time.Time) int {
 // revokeReaching takes out every test case named whose window ends at or
 // after from, and those whose window starts after to, when to is not zero,
 // are kept: it hands each one taken out to revoke, and returns how many.
-func (l *sentList) revokeReaching(from, to time.Time, revoke func(name string)) int {
+// applied says whether the client deletes them: one that cannot keeps them
+// in the recording, so they still count toward its first (keptFirst).
+func (l *sentList) revokeReaching(from, to time.Time, applied bool, revoke func(name string)) int {
 	lo, hi := l.from(from), len(l.tcs)
 	if !to.IsZero() {
 		hi = sort.Search(len(l.tcs), func(k int) bool { return l.tcs[k].start.After(to) })
@@ -114,6 +127,9 @@ func (l *sentList) revokeReaching(from, to time.Time, revoke func(name string)) 
 			continue
 		}
 		delete(l.byName, tc.name)
+		if !applied {
+			l.keep(tc.start)
+		}
 		revoke(tc.name)
 	}
 	n := hi - k
@@ -126,19 +142,24 @@ func (l *sentList) revokeReaching(from, to time.Time, revoke func(name string)) 
 }
 
 // forget takes out the test case named name, revoked by name for a cause
-// of its own (its own mock dropped, its window given up): it is not sent,
-// so it is not the recording's first. One it no longer names may have been
-// let go, which it cannot tell from one never sent: then the recording's
-// first test case is no longer known.
-func (l *sentList) forget(name string) {
+// of its own (its own mock dropped, its window given up). When the client
+// deletes it (applied), it is not in the recording, so it is not its first;
+// a client that cannot keeps it, and it still counts toward the first
+// (keptFirst). A name it does not hold was let go or never sent, which it
+// cannot tell apart: it moves the first only when it is the one let go
+// that started first (firstLetGo), and the first is then no longer known.
+func (l *sentList) forget(name string, applied bool) {
 	start, ok := l.byName[name]
 	if !ok {
-		if l.halved {
+		if applied && name != "" && name == l.firstLetGo {
 			l.firstUnknown = true
 		}
 		return
 	}
 	delete(l.byName, name)
+	if !applied {
+		l.keep(start)
+	}
 	for i := sort.Search(len(l.tcs), func(k int) bool { return !l.tcs[k].start.Before(start) }); i < len(l.tcs) && l.tcs[i].start.Equal(start); i++ {
 		if l.tcs[i].name == name {
 			l.tcs = slices.Delete(l.tcs, i, i+1)
@@ -147,19 +168,38 @@ func (l *sentList) forget(name string) {
 	}
 }
 
-// first reports the earliest window start among the test cases sent and
-// not revoked, and false when it knows none: none was sent, or one let go
-// may have been revoked since.
-func (l *sentList) first() (time.Time, bool) {
-	switch {
-	case l.firstUnknown:
-		return time.Time{}, false
-	case l.letGo && (len(l.tcs) == 0 || l.unnamedFirst.Before(l.tcs[0].start)):
-		return l.unnamedFirst, true
-	case len(l.tcs) > 0:
-		return l.tcs[0].start, true
+// keep notes start as that of a revoked test case the client keeps
+// (keptFirst).
+func (l *sentList) keep(start time.Time) {
+	if l.keptFirst.IsZero() || start.Before(l.keptFirst) {
+		l.keptFirst = start
 	}
-	return time.Time{}, false
+}
+
+// first reports the earliest window start among the test cases sent and
+// still in the recording (not revoked, or revoked and kept by the client),
+// with ok false when it knows none: none was sent, or the first of those it
+// does not name was revoked (firstUnknown) and it holds no other. exact is
+// false when the first is known only to be no later than at: the earliest
+// test case it still names or the client kept, which is sent and still in
+// the recording, so a mock requested at or after at is not before the
+// first, and one requested before it may be.
+func (l *sentList) first() (at time.Time, ok, exact bool) {
+	pick := func(t time.Time) {
+		if !ok || t.Before(at) {
+			at, ok = t, true
+		}
+	}
+	if l.letGo && !l.firstUnknown {
+		pick(l.unnamedFirst)
+	}
+	if len(l.tcs) > 0 {
+		pick(l.tcs[0].start)
+	}
+	if !l.keptFirst.IsZero() {
+		pick(l.keptFirst)
+	}
+	return at, ok, !l.firstUnknown
 }
 
 // unnamedReaching reports the latest window end of a test case let go that

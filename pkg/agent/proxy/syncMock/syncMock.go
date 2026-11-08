@@ -677,10 +677,13 @@ type SyncMockManager struct {
 	startupLost lostStartup
 
 	// firstSent is the earliest window start among the test cases the
-	// current recording's stream sent and did not revoke (sentList.first), nil
-	// while it knows none: a replay serves a mock requested before it from
-	// its start-up tier, to any test (servedToAnyTest). Stored under
-	// sharedLossMu as sent changes, read without it.
+	// current recording's stream sent that are still in the recording
+	// (sentList.first): not revoked, or revoked and kept by a client that
+	// cannot delete them. Once that is not known, it is a bound the first is
+	// no later than; nil while it knows none. A replay serves a mock
+	// requested before it from its start-up tier, to any test
+	// (servedToAnyTest). Stored under sharedLossMu as sent changes, read
+	// without it.
 	firstSent atomic.Pointer[time.Time]
 
 	// copies is, per copy key a kind's replay serves its mocks by
@@ -1170,8 +1173,9 @@ func (m *SyncMockManager) servedToAnyTest(mock *models.Mock, owner string) bool 
 }
 
 // beforeFirstTestCase reports whether req is before the earliest window
-// start among the test cases the recording's stream sent and did not revoke
-// (firstSent), or may be: it knows none. A window that became no test case
+// start among the test cases the recording's stream sent that are still in
+// the recording (firstSent), or may be: it knows none, or req is before the
+// bound it knows the first by (sentList.first). A window that became no test case
 // (an exchange keploy's filters or its sampling left out, or a test case
 // left out) does not count: the replay's start-up tier reaches the first
 // test case the recording holds, so until one is sent every start-up mock
@@ -1245,11 +1249,14 @@ type lostStartup struct {
 
 // rereadLoss is a lostStartup re-read as one any test may need, the
 // recording's first test case that moved past its request (firstNow, zero
-// when none is known), and what the re-read left out (openSharedLocked).
+// when none is known; firstBound when it is known only to be no later than
+// firstNow: sentList.first), and what the re-read left out
+// (openSharedLocked).
 type rereadLoss struct {
-	fields   []zap.Field
-	firstNow time.Time
-	left     leftOut
+	fields     []zap.Field
+	firstNow   time.Time
+	firstBound bool
+	left       leftOut
 }
 
 // processOutQueued is what every manager of the process holds queued
@@ -1749,7 +1756,7 @@ func (m *SyncMockManager) openSharedLocked(from time.Time, epoch uint64) leftOut
 	// What is kept ended before from: a later loss moves the span only
 	// earlier, so it may still need it.
 	left := leftOut{from: from}
-	left.revoked = m.sentTCs.revokeReaching(from, time.Time{}, func(name string) { m.recordDroppedTCFor(name, epoch) })
+	left.revoked = m.sentTCs.revokeReaching(from, time.Time{}, m.revokeCapable.Load(), func(name string) { m.recordDroppedTCFor(name, epoch) })
 	left.unnamedThrough = m.sentTCs.unnamedReaching(from)
 	m.noteFirstSentLocked()
 	return left
@@ -1769,22 +1776,20 @@ func (m *SyncMockManager) openSharedLocked(from time.Time, epoch uint64) leftOut
 // loss's (openSharedLocked) cannot move it past the kept one's request r
 // before the span's start: a test case that started by r and was sent
 // either ended before r, so before the span, or overlaps r's call, so its
-// loss revoked it or left it out, or it was let go, which no revoke takes
-// out.
+// loss revoked it or left it out (one a client that cannot delete keeps
+// still counts toward the first), or it was let go, which a loss's revokes
+// do not take out.
 func (m *SyncMockManager) rereadStartupLocked(epoch uint64) *rereadLoss {
 	s := m.startupLost
 	if s.req.IsZero() || !m.beforeFirstTestCase(s.req) {
 		return nil
 	}
-	var first time.Time
-	if f := m.firstSent.Load(); f != nil {
-		first = *f
-	}
+	first, _, exact := m.sentTCs.first()
 	left := m.openSharedLocked(s.req, epoch)
 	if left.from.IsZero() {
 		return nil
 	}
-	return &rereadLoss{fields: s.fields, firstNow: first, left: left}
+	return &rereadLoss{fields: s.fields, firstNow: first, firstBound: !exact, left: left}
 }
 
 // leaveOutOver leaves out every test case of the current recording whose
@@ -1821,7 +1826,8 @@ func (m *SyncMockManager) leaveOutOver(mock *models.Mock, epoch uint64, why stri
 		return leftOut{}
 	}
 	m.lostOver.Record(from, to)
-	revoked := m.sentTCs.revokeReaching(from, to, func(name string) { m.recordDroppedTCFor(name, epoch) })
+	deletes := m.revokeCapable.Load()
+	revoked := m.sentTCs.revokeReaching(from, to, deletes, func(name string) { m.recordDroppedTCFor(name, epoch) })
 	m.noteFirstSentLocked()
 	if mock.TestModeInfo.IsStartup && (m.startupLost.req.IsZero() || from.Before(m.startupLost.req)) {
 		m.startupLost = lostStartup{req: from, fields: lostFields(mock, why)}
@@ -1831,7 +1837,7 @@ func (m *SyncMockManager) leaveOutOver(mock *models.Mock, epoch uint64, why stri
 		m.perTestUnnamed++
 		left = leftOut{from: from, unnamedThrough: unnamed, perTest: m.perTestUnnamed}
 	}
-	if revoked > 0 && !m.revokeCapable.Load() {
+	if revoked > 0 && !deletes {
 		m.perTestKept++
 		m.perTestKeptSent += uint64(revoked)
 		left.from, left.revoked, left.kept, left.keptSent = from, revoked, m.perTestKept, m.perTestKeptSent
@@ -1949,7 +1955,7 @@ func (m *SyncMockManager) noteSentLocked(name string, start, end time.Time) {
 // revoked (sentList.first) as firstSent, nil when it knows none, if it moved.
 // Called under sharedLossMu, as sent changes.
 func (m *SyncMockManager) noteFirstSentLocked() {
-	first, ok := m.sentTCs.first()
+	first, ok, _ := m.sentTCs.first()
 	if !ok {
 		m.firstSent.Store(nil)
 		return
@@ -1997,11 +2003,14 @@ func (m *SyncMockManager) sayLeftOutAfter(mock *models.Mock, why string, n uint6
 		first := "none known"
 		if !r.firstNow.IsZero() {
 			first = r.firstNow.Format(time.RFC3339Nano)
+			if r.firstBound {
+				first = "no later than " + first
+			}
 		}
 		// Clipped: the kept fields' spare room is not written.
 		m.saySharedLoss(append(slices.Clip(r.fields),
 			zap.String("first_test_case_now", first),
-			zap.String("reread", "a start-up mock lost earlier as a test's: revokes since moved the recording's first test case (first_test_case_now) past its request, so a replay of the recording as it stands would serve it to any test from its start-up tier")), r.left)
+			zap.String("reread", "a start-up mock lost earlier as a test's: revokes the client applies since moved, or may have moved, the recording's first test case (first_test_case_now; 'no later than' when only a bound is known) past its request, so a replay of the recording as it stands would serve it to any test from its start-up tier")), r.left)
 	}
 	if left.from.IsZero() {
 		return
@@ -2446,7 +2455,7 @@ func (m *SyncMockManager) revokeTC(name string, epoch uint64) leftOut {
 	if epoch != m.revokeEpoch.Load() {
 		return leftOut{}
 	}
-	m.sentTCs.forget(name)
+	m.sentTCs.forget(name, m.revokeCapable.Load())
 	m.noteFirstSentLocked()
 	return leftOut{reread: m.rereadStartupLocked(epoch)}
 }

@@ -229,13 +229,17 @@ func TestHandleIncoming_ALostSessionMockRevokesTheTestCasesSentBeforeIt(t *testi
 // capture's, requested after the first test case the stream sent) is lost on its
 // way out, whose window overlaps that mock's call, is revoked by name: the
 // stream gives the manager its window's start as well as its end. One sent
-// after the loss whose window ends before the call is sent.
+// after the loss whose window ends before the call is sent. In a late
+// stretch: the loss revokes the only test case sent, so the start-up mock is
+// then one before the recording's first test case, re-read as one any test
+// may need, and leaves the test cases out from its request until the
+// recording ends, at the real now.
 func TestHandleIncoming_ALostAsyncMockRevokesTheTestCaseSentOverItsCall(t *testing.T) {
 	mgr := syncmgr.Get()
 	mgr.SetWatermark(nil)
 	mgr.SetRevokeCapable(true)
 	t.Cleanup(func() { mgr.SetRevokeCapable(false) })
-	start := newStretch()
+	start := newLateStretch()
 	mgr.StartRecordSession()
 	tcs := make(chan *models.TestCase, 1)
 	names := streamOf(t, openStream(t, tcs))

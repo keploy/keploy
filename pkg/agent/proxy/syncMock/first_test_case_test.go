@@ -86,17 +86,21 @@ func TestAStartUpReadInAWindowThatBecameNoTestCaseIsOneAnyTestMayNeed(t *testing
 	}
 }
 
-// A test case revoked after it was sent, for a cause of its own (a mock it
-// owns dropped, its window given up), is not the recording's first: a
-// start-up read between its start and the next test case's is then one any
-// test may need. One revoked that it no longer names (it let go of it at the
-// cap) may have been the first: then every start-up mock is one any test may
-// need until the recording ends. A test case taken out by a loss, whose
-// mock it was, moves the first on as well.
+// A test case revoked after it was sent to a client that deletes it, for a
+// cause of its own (a mock it owns dropped, its window given up), is not
+// the recording's first: a start-up read between its start and the next
+// test case's is then one any test may need. The one it let go of at the
+// cap that started first, revoked once it no longer names it, may have
+// been the first: the first is then known only by the earliest it still
+// names, and with none named every start-up mock is one any test may need
+// until the recording ends. A test case taken out by a loss, whose mock it
+// was, moves the first on as well. (A client that cannot delete keeps a
+// revoked test case, which stays the first: TestAKeptRevokeDoesNotMoveTheFirst.)
 func TestARevokedTestCaseIsNotTheRecordingsFirst(t *testing.T) {
 	t0 := time.Now().Add(-time.Hour)
 	read := asyncAt("c1", t0.Add(1500*time.Millisecond))
 	sendTwo := func(m *SyncMockManager) {
+		m.SetRevokeCapable(true)
 		m.SendingTestCase("a", t0, t0.Add(time.Second))
 		m.SendingTestCase("b", t0.Add(2*time.Second), t0.Add(3*time.Second))
 		if m.servedToAnyTest(read, "") {
@@ -288,7 +292,9 @@ func TestALossFindsALongTestCaseSentLongBefore(t *testing.T) {
 // once, and keeps the earliest start and the latest end among them, which
 // need not be the last let go's: the recording's first test case is still
 // known, and a loss before that end says it cannot name them. A revoke by
-// name of one it let go makes the first unknown (fail closed).
+// name of one it let go moves the first only when that one started first:
+// the first is then known only to be no later than the earliest it still
+// names (fail closed).
 func TestTheSentListLetsGoTheHalfThatStartedFirst(t *testing.T) {
 	var l sentList
 	t0 := time.Now().Add(-time.Hour)
@@ -311,9 +317,9 @@ func TestTheSentListLetsGoTheHalfThatStartedFirst(t *testing.T) {
 	if _, ok := l.byName["tc-0"]; !ok {
 		t.Fatal("the test case that started last of those sent first was let go")
 	}
-	first, ok := l.first()
-	if want := t0.Add(time.Millisecond); !ok || !first.Equal(want) {
-		t.Fatalf("first %v (%v), want %v, the earliest start let go", first, ok, want)
+	first, ok, exact := l.first()
+	if want := t0.Add(time.Millisecond); !ok || !exact || !first.Equal(want) {
+		t.Fatalf("first %v (%v, exact %v), want %v, the earliest start let go", first, ok, exact, want)
 	}
 	if got, want := l.unnamedReaching(t0.Add(time.Minute)), t0.Add(100*time.Millisecond+time.Hour); !got.Equal(want) {
 		t.Fatalf("unnamed reaching %v, want %v, the latest end let go", got, want)
@@ -321,13 +327,19 @@ func TestTheSentListLetsGoTheHalfThatStartedFirst(t *testing.T) {
 	if got := l.unnamedReaching(t0.Add(2 * time.Hour)); !got.IsZero() {
 		t.Fatalf("unnamed reaching %v past every end let go, want none", got)
 	}
-	l.forget("tc-0")
-	if first, ok := l.first(); !ok || !first.Equal(t0.Add(time.Millisecond)) {
-		t.Fatalf("revoking one still named moved the first to %v (%v)", first, ok)
+	l.forget("tc-0", true)
+	if first, ok, exact := l.first(); !ok || !exact || !first.Equal(t0.Add(time.Millisecond)) {
+		t.Fatalf("revoking one still named moved the first to %v (%v, exact %v)", first, ok, exact)
 	}
-	l.forget(fmt.Sprintf("tc-%d", maxSentTCs-1))
-	if _, ok := l.first(); ok {
-		t.Fatal("a revoke of one let go left the first known")
+	// Let go, but not the first: tc-(maxSentTCs-2) started 2 ms in.
+	l.forget(fmt.Sprintf("tc-%d", maxSentTCs-2), true)
+	if first, ok, exact := l.first(); !ok || !exact || !first.Equal(t0.Add(time.Millisecond)) {
+		t.Fatalf("revoking one let go that did not start first moved the first to %v (%v, exact %v)", first, ok, exact)
+	}
+	l.forget(fmt.Sprintf("tc-%d", maxSentTCs-1), true)
+	first, ok, exact = l.first()
+	if want := l.tcs[0].start; !ok || exact || !first.Equal(want) {
+		t.Fatalf("after a revoke of the first one let go: first %v (%v, exact %v), want a bound at %v, the earliest it still names", first, ok, exact, want)
 	}
 }
 
