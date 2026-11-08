@@ -158,7 +158,7 @@ func (s recordedOrderStore) GetSessionMocks() ([]*models.Mock, error) {
 	if err != nil {
 		return nil, err
 	}
-	session, err := s.MockManager.GetSessionMocks()
+	session, err := s.MockManager.GetSessionMocks() //nolint:staticcheck // SA1019: the matcher reads the pool's session tier through it (loadPool).
 	if err != nil {
 		return nil, err
 	}

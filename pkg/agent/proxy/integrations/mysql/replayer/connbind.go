@@ -182,7 +182,11 @@ func answeredStatus(mk *models.Mock) (status uint16, ok bool) {
 // warnings), which hold the status at the same place. ok is false for
 // another packet (an EOF of the protocol before 4.1 has no status).
 func terminatorStatus(t *mysql.GenericResponse) (status uint16, ok bool) {
-	if t == nil || !mysqlutils.IsOKReplacingEOF(t.Data) && !(mysqlutils.IsEOFPacket(t.Data) && len(t.Data) >= 9) {
+	if t == nil {
+		return 0, false
+	}
+	eof41 := mysqlutils.IsEOFPacket(t.Data) && len(t.Data) >= 9
+	if !eof41 && !mysqlutils.IsOKReplacingEOF(t.Data) {
 		return 0, false
 	}
 	return binary.LittleEndian.Uint16(t.Data[7:9]), true
