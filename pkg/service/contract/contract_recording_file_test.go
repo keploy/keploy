@@ -292,3 +292,21 @@ func TestTheContractMakesNoFolderOutsideTheProject(t *testing.T) {
 		t.Fatalf("made %d entries where the link leads", len(entries))
 	}
 }
+
+// A project with no keploy folder yet gets one: the contract's keploy folder
+// is made, from the project, and the contract is written in it.
+func TestAFirstContractMakesItsKeployFolder(t *testing.T) {
+	db, _ := recordLargeBody(t)
+	project := t.TempDir()
+	s := &contract{logger: zap.NewNop(), testDB: pinnedPathDB{db}, config: &config.Config{Path: project}}
+	if err := s.GenerateFromTests(context.Background()); err != nil {
+		t.Fatalf("GenerateFromTests: %v", err)
+	}
+	out, err := os.ReadFile(filepath.Join(project, "keploy", "contract.yaml"))
+	if err != nil {
+		t.Fatalf("read the contract: %v", err)
+	}
+	if !strings.Contains(string(out), "/users") {
+		t.Fatalf("the contract names no /users path:\n%s", out)
+	}
+}

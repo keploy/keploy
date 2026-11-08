@@ -483,13 +483,20 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 		return err
 	}
 
-	if err := utils.MkdirRecordingDir(keployPath, 0o755); err != nil {
+	// The keploy folder is made, if it is not there, and opened from the
+	// project in one pass, and the contract is written in the folder that was
+	// checked: a link on the way, or a contract.yaml, that leads out of the
+	// recording is refused, and nothing is made or written where it leads.
+	root, err := utils.MkdirOpenRecordingDir(keployPath, 0o755)
+	if err != nil {
 		utils.LogError(s.logger, err, "failed to create keploy directory", zap.String("path", keployPath))
 		return err
 	}
+	defer func() { _ = root.Close() }()
 
 	outputPath := filepath.Join(keployPath, "contract.yaml")
-	if err := yaml.WriteFileInRecording(keployPath, outputPath, data, 0o644); err != nil {
+	if err := root.WriteFile("contract.yaml", data, 0o644); err != nil {
+		err = fmt.Errorf("the contract %q is written only inside its recording %q: %w", "contract.yaml", keployPath, err)
 		utils.LogError(s.logger, err, "failed to write inferred OpenAPI schema", zap.String("path", outputPath))
 		return err
 	}
