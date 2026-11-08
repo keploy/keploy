@@ -111,9 +111,18 @@ func openText(dc *DriftCache, out *[]textReading, at variables.Address, rec, liv
 	readRaw(dc, out, at, rec, live, [2]int{})
 }
 
-// withStep is at with st after its steps, naming the opened text whole.
+// withStep is at with st after its steps, naming the opened text whole, in
+// a slice of its own sized to hold them.
+//
+// at holds fewer than maxDecodeLevels steps: readLeaf and openText add one
+// only below that depth. The check says so where CodeQL's allocation-size
+// check can see it, so the size is plainly bounded; were it not to hold,
+// append would size the slice itself, to the same steps.
 func withStep(at variables.Address, st variables.Step) variables.Address {
-	steps := make([]variables.Step, 0, len(at.Steps)+1)
+	var steps []variables.Step
+	if len(at.Steps) < maxDecodeLevels {
+		steps = make([]variables.Step, 0, len(at.Steps)+1)
+	}
 	return variables.Address{Place: at.Place, Steps: append(append(steps, at.Steps...), st), Word: -1}
 }
 
