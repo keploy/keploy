@@ -1850,23 +1850,90 @@ func (m *SyncMockManager) SendingTestCase(name string, start, end time.Time) boo
 	if m == nil {
 		return true
 	}
+	start, end = sendingWindow(start, end)
+	m.sharedLossMu.Lock()
+	defer m.sharedLossMu.Unlock()
+	if m.leavesOutLocked(start, end) {
+		return false
+	}
+	m.noteSentLocked(name, start, end)
+	return true
+}
+
+// sendingTestCaseOfMu is held by SendingTestCaseOf while it holds its
+// managers' sharedLossMu: every other path takes one manager's alone, so no
+// two callers can each hold one the other waits for.
+var sendingTestCaseOfMu sync.Mutex
+
+// SendingTestCaseOf is SendingTestCase for a test case whose mocks may come
+// from any of mgrs, as a DaemonSet runtime's channel takes its own manager's
+// and the node-default manager's: the stream may send it only if each of
+// them may, and then it is noted sent in each. It holds all their locks at
+// once, so a test case one of them leaves out is noted sent by none (a
+// test case noted sent but never sent would stand as the recording's first,
+// and a start-up mock lost after it would not count as one any test may
+// need). Nil and repeated managers are skipped; with none left, it lets the
+// test case through.
+func SendingTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Time) bool {
+	ms := make([]*SyncMockManager, 0, len(mgrs))
+	for _, m := range mgrs {
+		if m != nil && !slices.Contains(ms, m) {
+			ms = append(ms, m)
+		}
+	}
+	start, end = sendingWindow(start, end)
+	sendingTestCaseOfMu.Lock()
+	defer sendingTestCaseOfMu.Unlock()
+	for _, m := range ms {
+		m.sharedLossMu.Lock()
+	}
+	defer func() {
+		for _, m := range ms {
+			m.sharedLossMu.Unlock()
+		}
+	}()
+	for _, m := range ms {
+		if m.leavesOutLocked(start, end) {
+			return false
+		}
+	}
+	for _, m := range ms {
+		m.noteSentLocked(name, start, end)
+	}
+	return true
+}
+
+// sendingWindow is a test case's window as SendingTestCase reads it: a zero
+// end as now, the latest the window can have ended, and a zero start, or one
+// after end, as end.
+func sendingWindow(start, end time.Time) (time.Time, time.Time) {
 	if end.IsZero() {
 		end = time.Now()
 	}
 	if start.IsZero() || start.After(end) {
 		start = end
 	}
-	m.sharedLossMu.Lock()
-	defer m.sharedLossMu.Unlock()
+	return start, end
+}
+
+// leavesOutLocked reports whether the recording leaves out a test case whose
+// window is [start, end]: a loss of a mock any test may need, requested no
+// later than end, or the span of a lost test's mock no test owns over the
+// window (SendingTestCase). Called under sharedLossMu.
+func (m *SyncMockManager) leavesOutLocked(start, end time.Time) bool {
 	if m.sharedLoss.close != nil && !end.Before(m.sharedLoss.from) {
-		return false
+		return true
 	}
-	if over, _ := m.lostOver.Overlaps(start, end); over {
-		return false
-	}
+	over, _ := m.lostOver.Overlaps(start, end)
+	return over
+}
+
+// noteSentLocked notes the test case named name, whose window is [start,
+// end], sent by the recording's stream (SendingTestCase). Called under
+// sharedLossMu.
+func (m *SyncMockManager) noteSentLocked(name string, start, end time.Time) {
 	m.sentTCs.add(name, start, end)
 	m.noteFirstSentLocked()
-	return true
 }
 
 // noteFirstSentLocked stores the recording's first test case sent and not
