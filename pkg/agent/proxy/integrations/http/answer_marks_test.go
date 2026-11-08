@@ -508,6 +508,24 @@ func TestDechunkedAtReadsAChunkTheWireEndsWith(t *testing.T) {
 	}
 }
 
+// A chunked answer's chunks are read as long as their size lines say, past
+// what a signed 8-bit and a 16-bit size can hold: a 0x80-byte chunk and a
+// 0x10000-byte one are read whole, and the answer keeps a mark per write at
+// its offset in the de-chunked body.
+func TestDechunkedAtReadsChunksWiderThanSixteenBits(t *testing.T) {
+	a, b := strings.Repeat("a", 0x80), strings.Repeat("b", 0x10000)
+	wire := chunk(a) + chunk(b) + "0\r\n\r\n"
+	ends := []int{len(chunk(a)), len(chunk(a)) + len(chunk(b)), len(wire)}
+	decoded, data, ok := dechunkedAt([]byte(wire), ends)
+	if !ok || string(data) != a+b || fmt.Sprint(decoded) != fmt.Sprint([]int{0x80, 0x10080, 0x10080}) {
+		t.Fatalf("dechunkedAt = %v, %d bytes, %v; want [128 65664 65664], 65664 bytes, true", decoded, len(data), ok)
+	}
+	head := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+	resp := []byte(head + wire)
+	writes := []respWrite{{end: len(head) + ends[0], at: markAt(1)}, {end: len(head) + ends[1], at: markAt(2)}, {end: len(resp), at: markAt(3)}}
+	wantMarks(t, answerMarks(resp, writes, "", len(a)+len(b)), markAt(1), w(0x80, 1), w(0x10080, 2), w(0x10080, 3))
+}
+
 // decodedAt is, at each cut of a compressed body, what a client decoding as
 // it reads had of it; a body its decoder refuses before the last cut does
 // not decode, and does not panic.
