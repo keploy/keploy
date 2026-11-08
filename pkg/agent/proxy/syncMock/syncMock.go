@@ -475,6 +475,11 @@ type SyncMockManager struct {
 	// reserved Kind=RevokedTests control frame never receives one. atomic so
 	// the send path can read it without taking a lock.
 	revokeCapable atomic.Bool
+	// revokeByRequest is set (SetRevokeByRequest) when the client also finds
+	// a revoked test case sent with no name by its request time
+	// (OutgoingOptions.SupportsRevokeByRequest): the stream then notes such
+	// a test case sent under the name a revoke gives it (sentName).
+	revokeByRequest atomic.Bool
 
 	// pendingRevokes is the FIFO of dropped-TC names still to be emitted to the
 	// CLI as RevokedTests control frames. Appended by recordDroppedTC when a
@@ -1840,23 +1845,26 @@ func (m *SyncMockManager) leaveOutOver(mock *models.Mock, epoch uint64, why stri
 // the earliest start among those sent and not revoked is the recording's
 // first test case (beforeFirstTestCase), a loss of a mock any test may
 // need, requested before end, revokes it by name (leaveOutAfter), as does a
-// test's mock no test owns lost over its window (leaveOutOver). It reports false once such a loss's span reaches end, or
-// the span of such a mock's call overlaps the window: the stream leaves the
-// test case out. The stream asks last, once no
-// other check leaves it out, so that only test cases it sends are noted. A
-// zero end is read as now, the latest the window can have ended, and a zero
-// start as end. Nil-safe: a nil manager lets every test case through.
+// test's mock no test owns lost over its window (leaveOutOver); one with no
+// name is noted under the name a revoke finds it by (sentName). It reports
+// false once such a loss's span reaches end, or the span of such a mock's
+// call overlaps the window: the stream leaves the test case out. The stream
+// asks last, once no other check leaves it out, so that only test cases it
+// sends are noted. A zero end is read as now, the latest the window can have
+// ended, and a zero start as end. Nil-safe: a nil manager lets every test
+// case through.
 func (m *SyncMockManager) SendingTestCase(name string, start, end time.Time) bool {
 	if m == nil {
 		return true
 	}
+	sent := m.sentName(name, start, end)
 	start, end = sendingWindow(start, end)
 	m.sharedLossMu.Lock()
 	defer m.sharedLossMu.Unlock()
 	if m.leavesOutLocked(start, end) {
 		return false
 	}
-	m.noteSentLocked(name, start, end)
+	m.noteSentLocked(sent, start, end)
 	return true
 }
 
@@ -1881,6 +1889,7 @@ func SendingTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Tim
 			ms = append(ms, m)
 		}
 	}
+	rawStart, rawEnd := start, end
 	start, end = sendingWindow(start, end)
 	sendingTestCaseOfMu.Lock()
 	defer sendingTestCaseOfMu.Unlock()
@@ -1898,7 +1907,7 @@ func SendingTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Tim
 		}
 	}
 	for _, m := range ms {
-		m.noteSentLocked(name, start, end)
+		m.noteSentLocked(m.sentName(name, rawStart, rawEnd), start, end)
 	}
 	return true
 }
@@ -2002,7 +2011,7 @@ func (m *SyncMockManager) sayLeftOutAfter(mock *models.Mock, why string, n uint6
 		return
 	}
 	if sampled(left.perTest) {
-		m.dropLogger().Warn("syncMock: a test's mock was dropped on its way out of the agent: the recording leaves out the test cases whose window overlaps its call, but its stream sent some it no longer names (it names the latest sent by window start, between sent_named_min and sent_named_max of them), whose window ended after the mock's request and by unnamed_sent_through: they may stay recorded without it, and fail at replay with no matching mock",
+		m.dropLogger().Warn("syncMock: a test's mock was dropped on its way out of the agent: the recording leaves out the test cases whose window overlaps its call, but its stream sent some it cannot name (past the latest it names by window start, between sent_named_min and sent_named_max of them, or sent with no name to a client that cannot find one by its request time), whose window ended after the mock's request and by unnamed_sent_through: they may stay recorded without it, and fail at replay with no matching mock",
 			append(dropFields(mock, n, why),
 				zap.String("unnamed_sent_through", left.unnamedThrough.Format(time.RFC3339Nano)),
 				zap.Int("sent_named_min", maxSentTCs/2),
@@ -2050,7 +2059,7 @@ func (m *SyncMockManager) saySharedLoss(fields []zap.Field, left leftOut) {
 		fields = append(fields, zap.String("unnamed_sent_through", left.unnamedThrough.Format(time.RFC3339Nano)),
 			zap.Int("sent_named_min", maxSentTCs/2),
 			zap.Int("sent_named_max", maxSentTCs),
-			zap.String("unnamed_sent", "test cases the stream sent and no longer names (it names the latest sent by window start, between sent_named_min and sent_named_max of them), whose window ended after left_out_from and by unnamed_sent_through, are not revoked and may stay recorded without the mock"))
+			zap.String("unnamed_sent", "test cases the stream sent and cannot name (past the latest it names by window start, between sent_named_min and sent_named_max of them, or sent with no name to a client that cannot find one by its request time), whose window ended after left_out_from and by unnamed_sent_through, are not revoked and may stay recorded without the mock"))
 	}
 	// The test cases the stream sent already are the client's to delete: one
 	// that did not negotiate the revoke (an older CLI, or a consumer with no
@@ -2452,6 +2461,39 @@ func (m *SyncMockManager) SetRevokeCapable(v bool) {
 		return
 	}
 	m.revokeCapable.Store(v)
+}
+
+// SetRevokeByRequest says whether the client finds a revoked test case the
+// stream sent with no name by its request time
+// (OutgoingOptions.SupportsRevokeByRequest), as GetOutgoing reads it beside
+// SetRevokeCapable. Without it, a loss over such a test case's window says
+// that it may stay recorded without the mock.
+func (m *SyncMockManager) SetRevokeByRequest(v bool) {
+	if m == nil {
+		return
+	}
+	m.revokeByRequest.Store(v)
+}
+
+// RevokesByRequest reports whether the client finds a revoked test case the
+// stream sent with no name by its request time (SetRevokeByRequest).
+// Nil-safe.
+func (m *SyncMockManager) RevokesByRequest() bool {
+	return m != nil && m.revokeByRequest.Load()
+}
+
+// sentName is the name the stream's test case named name, whose window is
+// [start, end] as the stream gives it, is noted sent under: its own, or, for
+// one with none (the async capture leaves naming to the client), the name a
+// revoke finds it by, its request time (models.RevokeNameByRequest), when the
+// client reads such a name (SetRevokeByRequest) and the start is one the
+// client reads from the test case (not zero, nor after its end); else none,
+// and a loss over its window cannot revoke it (sentList.add).
+func (m *SyncMockManager) sentName(name string, start, end time.Time) string {
+	if name != "" || start.IsZero() || (!end.IsZero() && start.After(end)) || !m.revokeByRequest.Load() {
+		return name
+	}
+	return models.RevokeNameByRequest(start)
 }
 
 // WasMockDroppedForTC reports whether a mock owned by test `name` was dropped on

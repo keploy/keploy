@@ -1721,6 +1721,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	revokedNames := map[string]struct{}{}
 	var revokedMu sync.Mutex
 	insertedNames := map[string]struct{}{}
+	// The names of the TCs that persisted, by the request time their window
+	// starts at (models.TestCaseWindow): a revoke names a TC the agent sent
+	// with no name, which this client named as it saved it, by that time
+	// (models.RevokeNameByRequest).
+	insertedByRequest := map[int64][]string{}
 	var insertedMu sync.Mutex
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
@@ -2047,13 +2052,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// only a genuinely deleted one may be excluded from the totals below.
 		deletedSet := map[string]struct{}{}
 
-		var toDelete []string
 		insertedMu.Lock()
-		for _, n := range revokedSnap {
-			if _, ok := insertedNames[n]; ok {
-				toDelete = append(toDelete, n)
-			}
-		}
+		toDelete := revokedToDelete(revokedSnap, insertedNames, insertedByRequest)
 		insertedMu.Unlock()
 		if len(toDelete) > 0 {
 			// DeleteTests is on the concrete *testdb.TestYaml but NOT on the record
@@ -2770,6 +2770,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				insertedMu.Lock()
 				testCount++
 				insertedNames[testCase.Name] = struct{}{}
+				req, _ := models.TestCaseWindow(testCase)
+				insertedByRequest[req.UnixNano()] = append(insertedByRequest[req.UnixNano()], testCase.Name)
 				insertedMu.Unlock()
 				windowMaps.addTest(testCase)
 				capWatch.afterTestCase(ctx, testCase.Name)
@@ -3318,6 +3320,10 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// says that the test cases it sent stay instead of that they were
 		// revoked.
 		SupportsDroppedRevoke: canDelete,
+		// And that it finds a revoked test case the agent sent with no name
+		// (the async capture names none; this client names it as it saves
+		// it) by its request time (revokedToDelete).
+		SupportsRevokeByRequest: canDelete,
 	})
 	if err != nil {
 
@@ -3809,4 +3815,32 @@ func (r *Recorder) sayFormPartsLeftOut(testSetID string) {
 		zap.Int("not_listed", more),
 		zap.String("why", "each part named no file a capture of this run left, carried no contents, and its path names no file in the recording"),
 		zap.String("next_step", "re-record these test cases with the parts' files sent"))
+}
+
+// revokedToDelete is the saved test cases the revoked names name, each once:
+// a name the recording saved (inserted), or the name a revoke gives a test
+// case the agent sent with no name (models.RevokeNameByRequest), which names
+// every saved test case whose window starts at that request time (byRequest).
+// A revoke that names none it saved deletes nothing.
+func revokedToDelete(revoked []string, inserted map[string]struct{}, byRequest map[int64][]string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	add := func(n string) {
+		if _, dup := seen[n]; !dup {
+			seen[n] = struct{}{}
+			out = append(out, n)
+		}
+	}
+	for _, n := range revoked {
+		if _, ok := inserted[n]; ok {
+			add(n)
+			continue
+		}
+		if req, ok := models.RequestOfRevokeName(n); ok {
+			for _, saved := range byRequest[req] {
+				add(saved)
+			}
+		}
+	}
+	return out
 }

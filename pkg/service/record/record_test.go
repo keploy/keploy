@@ -496,6 +496,9 @@ type recTestDB struct {
 	// refuseNames refuses only the named test cases for their own payload, as
 	// the store refuses a body its format cannot hold.
 	refuseNames map[string]bool
+	// autoName, when set, names a test case that comes with no name, as the
+	// YAML store does: autoName-N, N its place among those saved.
+	autoName string
 }
 
 func (d *recTestDB) GetAllTestSetIDs(context.Context) ([]string, error) { return nil, nil }
@@ -511,6 +514,9 @@ func (d *recTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ str
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if tc.Name == "" && d.autoName != "" {
+		tc.Name = fmt.Sprintf("%s-%d", d.autoName, len(d.inserted)+1)
+	}
 	d.inserted = append(d.inserted, tc.Name)
 	return nil
 }

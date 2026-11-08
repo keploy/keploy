@@ -18,11 +18,14 @@ type revokeAskInstr struct {
 	*fakeInstr
 	mu    sync.Mutex
 	asked []bool
+	// byRequest is what it asked for SupportsRevokeByRequest.
+	byRequest []bool
 }
 
 func (d *revokeAskInstr) GetOutgoing(ctx context.Context, o models.OutgoingOptions) (<-chan *models.Mock, error) {
 	d.mu.Lock()
 	d.asked = append(d.asked, o.SupportsDroppedRevoke)
+	d.byRequest = append(d.byRequest, o.SupportsRevokeByRequest)
 	d.mu.Unlock()
 	return d.fakeInstr.GetOutgoing(ctx, o)
 }
@@ -77,10 +80,13 @@ func TestGetTestAndMockChans_AsksForRevokesOnlyWhenItsStoreDeletes(t *testing.T)
 				time.Sleep(time.Millisecond)
 			}
 			inst.mu.Lock()
-			got := inst.asked
+			got, byReq := inst.asked, inst.byRequest
 			inst.mu.Unlock()
 			if len(got) != 1 || got[0] != tc.want {
 				t.Errorf("the mock stream was asked SupportsDroppedRevoke %v, want [%v]", got, tc.want)
+			}
+			if len(byReq) != 1 || byReq[0] != tc.want {
+				t.Errorf("the mock stream was asked SupportsRevokeByRequest %v, want [%v]: only a store that deletes finds a revoked test case by its request time", byReq, tc.want)
 			}
 			close(f.incoming)
 			close(f.outgoing)

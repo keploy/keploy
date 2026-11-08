@@ -24,16 +24,17 @@ const maxSentTCs = maxDroppedTCNames
 // reaches by a search, not a walk of them all: one whose window ends at or
 // after an instant t started at or after t less the longest window noted
 // (longest). Those revoked are taken out. Past maxSentTCs, the half that
-// started first is let go: unnamedFirst and unnamedThrough keep their
-// earliest start and latest end, which a loss says it can no longer revoke
-// past. Guarded by the manager's sharedLossMu; the zero value is empty.
+// started first is let go, and a test case sent with no name is never
+// named: unnamedFirst and unnamedThrough keep their earliest start and
+// latest end, which a loss says it cannot revoke past. Guarded by the
+// manager's sharedLossMu; the zero value is empty.
 type sentList struct {
 	tcs     []sentTC
 	byName  map[string]time.Time
 	longest time.Duration
-	// letGo is set once some were let go, with unnamedFirst and
-	// unnamedThrough.
-	letGo                        bool
+	// letGo is set once some were let go or sent with no name, with
+	// unnamedFirst and unnamedThrough; halved once some were let go.
+	letGo, halved                bool
 	unnamedFirst, unnamedThrough time.Time
 	// firstUnknown is set when a test case it no longer names may have been
 	// revoked (forget): it may have been the earliest of those let go, so the
@@ -42,8 +43,13 @@ type sentList struct {
 }
 
 // add notes the test case named name, whose window is [start, end] (start
-// no later than end), as sent.
+// no later than end), as sent. One with no name, which no revoke can name,
+// is one it does not name (unnamed): a loss over its window says so.
 func (l *sentList) add(name string, start, end time.Time) {
+	if name == "" {
+		l.noteUnnamed(start, end)
+		return
+	}
 	if len(l.tcs) == maxSentTCs {
 		l.letGoHalf()
 	}
@@ -64,18 +70,25 @@ func (l *sentList) add(name string, start, end time.Time) {
 func (l *sentList) letGoHalf() {
 	half := len(l.tcs) / 2
 	for _, tc := range l.tcs[:half] {
-		if !l.letGo || tc.start.Before(l.unnamedFirst) {
-			l.unnamedFirst = tc.start
-		}
-		if !l.letGo || tc.end.After(l.unnamedThrough) {
-			l.unnamedThrough = tc.end
-		}
-		l.letGo = true
+		l.noteUnnamed(tc.start, tc.end)
 		delete(l.byName, tc.name)
 	}
+	l.halved = true
 	k := copy(l.tcs, l.tcs[half:])
 	clear(l.tcs[k:])
 	l.tcs = l.tcs[:k]
+}
+
+// noteUnnamed notes a test case sent whose window is [start, end] as one
+// it does not name: let go, or sent with no name.
+func (l *sentList) noteUnnamed(start, end time.Time) {
+	if !l.letGo || start.Before(l.unnamedFirst) {
+		l.unnamedFirst = start
+	}
+	if !l.letGo || end.After(l.unnamedThrough) {
+		l.unnamedThrough = end
+	}
+	l.letGo = true
 }
 
 // from returns the index of the first test case named that may end at or
@@ -120,7 +133,7 @@ func (l *sentList) revokeReaching(from, to time.Time, revoke func(name string)) 
 func (l *sentList) forget(name string) {
 	start, ok := l.byName[name]
 	if !ok {
-		if l.letGo {
+		if l.halved {
 			l.firstUnknown = true
 		}
 		return
