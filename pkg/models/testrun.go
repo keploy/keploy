@@ -206,8 +206,9 @@ type TemplateFailure struct {
 	// Refused marks a placeholder refused when the test set loaded: the test
 	// case was never sent, and there is no answer to accept. A refusal with
 	// no Placeholder refuses the test case's whole test set (one an
-	// interrupted keploy templatize left half-written; category
-	// TEST_SET_REFUSED), not a placeholder of it.
+	// interrupted keploy templatize left half-written, or one a mock of which
+	// a replay hook refused; category TEST_SET_REFUSED), not a placeholder of
+	// it.
 	Refused bool `json:"refused,omitempty" yaml:"refused,omitempty"`
 }
 
@@ -1040,8 +1041,10 @@ const (
 	TemplateVariable FailureCategory = "TEMPLATE_VARIABLE"
 	// TestSetRefused means keploy refused the test case's whole test set and
 	// ran none of it: an interrupted keploy templatize left the set
-	// half-written. The set's failure reason, and the test case's refusal in
-	// TestResult.TemplateFailures, say which files and what to do.
+	// half-written, or a replay hook refused one of the set's mocks (Keploy
+	// Enterprise: a sealed value its key service did not open). The set's
+	// failure reason, and the test case's refusal in
+	// TestResult.TemplateFailures, say which files or which mock, and why.
 	TestSetRefused FailureCategory = "TEST_SET_REFUSED"
 	// TestCaseNotFound means the run selected the test case by name and its
 	// test set holds none of that name: it failed unsent, and
