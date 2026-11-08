@@ -715,32 +715,23 @@ func (h *HTTP) readResponseWrites(stream *fakeconn.FakeConn, finalResp *[]byte, 
 
 // parseHeaders extracts the body-framing Content-Length and
 // Transfer-Encoding header values (if any) from an HTTP message whose
-// headers end with CRLFCRLF. The parse is the same loose style the chunk.go
-// helpers use: split on '\n', trim '\r', skip malformed lines.
+// headers end with CRLFCRLF, read field by field as headerFields reads them:
+// a folded line is part of the field before it, never a field of its own,
+// and a line with no colon is skipped. The last of a field sent twice is
+// the one taken.
 //
 // A chunked Transfer-Encoding overrides a Content-Length sent with it (RFC
 // 9112 §6.3), so contentLength is "" then: framing such a message by its
 // Content-Length would end it where its peer does not.
 func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
-	lines := strings.Split(string(msg), "\n")
-	for _, line := range lines {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
-			break // end of headers
-		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.ToLower(strings.TrimSpace(parts[0]))
-		val := strings.TrimSpace(parts[1])
-		switch key {
+	headerFields(msg, func(name, value []byte) {
+		switch strings.ToLower(string(name)) {
 		case "content-length":
-			contentLength = val
+			contentLength = string(value)
 		case "transfer-encoding":
-			transferEncoding = val
+			transferEncoding = string(value)
 		}
-	}
+	})
 	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
 		contentLength = ""
 	}

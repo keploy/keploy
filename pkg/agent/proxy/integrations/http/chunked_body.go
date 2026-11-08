@@ -416,18 +416,20 @@ func awaitsContinue(req []byte) bool {
 // expectsContinue reports whether the request's header section carries
 // "Expect: 100-continue" — the field name and the expectation compared without
 // regard to case (RFC 9110 §5.1, §10.1.1), and only in the header section, not
-// in a body line that happens to read like one.
+// in a body line that happens to read like one. Its fields are read as
+// headerFields reads them: an "Expect: 100-continue" on a folded line is part
+// of the field before it, which a server that joins it (net/http's) reads no
+// expectation in.
 func expectsContinue(req []byte) bool {
 	head, _, _, ok := messageHead(req, false)
 	if !ok {
 		head = req // the header section so far
 	}
-	for _, line := range bytes.Split(head, []byte("\n")) {
-		name, value, found := bytes.Cut(bytes.TrimRight(line, "\r"), []byte(":"))
-		if found && bytes.EqualFold(bytes.TrimSpace(name), []byte("Expect")) &&
-			bytes.EqualFold(bytes.TrimSpace(value), []byte("100-continue")) {
-			return true
+	found := false
+	headerFields(head, func(name, value []byte) {
+		if bytes.EqualFold(name, []byte("Expect")) && bytes.EqualFold(value, []byte("100-continue")) {
+			found = true
 		}
-	}
-	return false
+	})
+	return found
 }
