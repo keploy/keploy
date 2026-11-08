@@ -37,11 +37,11 @@ func (m *SyncMockManager) stampOutsideRequestsLocked(mock *models.Mock) {
 }
 
 // noteGivenUpInFlightLocked notes that w has just left the open windows given
-// up (fitHoldLocked, giveUpForPressureLocked, endStopFoundLocked) while its
-// request is still in flight: until that request ends (Close,
-// givenUpEndedLocked), no mock is marked outside the requests. A given-up
-// window whose Close never comes leaves the marking off for the manager's
-// life, which marks nothing it should not. Caller holds mu.
+// up (fitHoldLocked, giveUpForPool, giveUpForPressureLocked,
+// endStopFoundLocked) while its request is still in flight: until that request
+// ends (Close, givenUpEndedLocked), no mock is marked outside the requests. A
+// given-up window whose Close never comes leaves the marking off for the
+// manager's life, which marks nothing it should not. Caller holds mu.
 func (m *SyncMockManager) noteGivenUpInFlightLocked(w *Window) {
 	w.inFlight = true
 	m.givenUpInFlight++

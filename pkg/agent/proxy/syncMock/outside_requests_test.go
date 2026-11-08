@@ -206,6 +206,48 @@ func TestOutsideRequestsAGivenUpRequestCountsUntilItEnds(t *testing.T) {
 	}
 }
 
+// A request the process's hold gives up for another app's call (two apps share
+// one hold, and the other's call takes it past its budget: giveUpForPool) is
+// still running too. A call it makes before it ends is not marked; once it has
+// ended, a later call is.
+func TestOutsideRequestsARequestTheProcesssHoldGivesUpCountsUntilItEnds(t *testing.T) {
+	p := newHoldPool(30 * boundUnit) // a share of 15 for each of two apps
+	mgr, busy := pooledManager(p), pooledManager(p)
+	endedWindow(t, mgr)
+	now := time.Now()
+	w := mgr.OpenWindow(now.Add(-60*time.Second), nil)
+	busyWin := busy.OpenWindow(now.Add(-30*time.Second), nil)
+	defer busyWin.Close()
+	holdOld(mgr, w.Start(), 16)
+	holdOld(busy, busyWin.Start(), 14) // 30: the pool's budget, not past it
+	if givenUp(w) || givenUp(busyWin) {
+		t.Fatal("fixture: a request was given up within the process's budget")
+	}
+	holdOld(busy, busyWin.Start().Add(time.Second), 2) // 32: past it, by the busy app's call
+	if !givenUp(w) || givenUp(busyWin) {
+		t.Fatalf("fixture: the busy app's call gave up the older app's request %v and its own %v; want only the older app's", givenUp(w), givenUp(busyWin))
+	}
+	if w.Keep() {
+		t.Fatal("fixture: a request the process's hold gave up is kept")
+	}
+	if n := mgr.OpenWindows(); n != 0 {
+		t.Fatalf("fixture: %d windows still open, want 0", n)
+	}
+	later := time.Now().Add(time.Second)
+	if addCall(mgr, later, later.Add(time.Millisecond)) {
+		t.Fatal("a call made while a request the process's hold gave up is still in flight is marked outside every request")
+	}
+	during := time.Now()
+	w.Close()
+	ended := time.Now()
+	if addCall(mgr, during, during.Add(time.Millisecond)) {
+		t.Fatal("a call the request made before it ended, handed over after, is marked outside every request")
+	}
+	if !addCall(mgr, ended.Add(2*time.Second), ended.Add(3*time.Second)) {
+		t.Fatal("a call made after the request the process's hold gave up ended is not marked")
+	}
+}
+
 // A given-up request's end is counted once: its window ended again does not
 // hide another given-up request still in flight.
 func TestOutsideRequestsAGivenUpRequestEndsOnce(t *testing.T) {
