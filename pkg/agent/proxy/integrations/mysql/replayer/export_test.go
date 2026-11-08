@@ -380,13 +380,18 @@ func ForgetPlacesForTest() {
 // (placesReads) since the process started.
 func PlacesReadsForTest() int64 { return placesReads.Load() }
 
-// TxControlForTest is txControlOf's verdict on req: "begin", "end" or "none".
+// TxControlForTest is txControlOf's verdict on req: "begin", "end",
+// "autocommit", "reset" or "none".
 func TxControlForTest(req mysql.Request) string {
 	switch txControlOf(req) {
 	case txBegin:
 		return "begin"
 	case txEnd:
 		return "end"
+	case txAutocommit:
+		return "autocommit"
+	case txReset:
+		return "reset"
 	}
 	return "none"
 }

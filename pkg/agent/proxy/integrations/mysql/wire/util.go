@@ -71,14 +71,17 @@ type DecodeContext struct {
 
 	// InTx, Bound and BoundWindow are replay's binding of the live
 	// connection's open transaction to the connection it was recorded on.
-	// InTx is whether the live connection began a transaction (START
-	// TRANSACTION or BEGIN) and has not ended it (COMMIT or ROLLBACK).
-	// Bound is the recording that answered the transaction's latest command
-	// after its START, and BoundWindow the start of the test window it
-	// answered in (zero under exact serving). The replayer keeps them.
-	InTx        bool
-	Bound       *models.Mock
-	BoundWindow time.Time
+	// InTx is whether the live connection is in a transaction: it began one
+	// (START TRANSACTION, BEGIN, XA START) and has not ended it (COMMIT,
+	// ROLLBACK), or its autocommit is off. Bound is the recording that
+	// answered the transaction's latest command after its start, and
+	// BoundWindow the start of the test window it answered in (zero under
+	// exact serving). AutocommitOff is whether the live session's autocommit
+	// is off (SET autocommit = 0). The replayer keeps them.
+	InTx          bool
+	Bound         *models.Mock
+	BoundWindow   time.Time
+	AutocommitOff bool
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000
