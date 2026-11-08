@@ -78,9 +78,10 @@ func ownRepeats(ctx context.Context, req mysql.Request, db integrations.MockMemD
 
 // answeredOnly is the store ownRepeats matches a command on: the open test's
 // own recordings of its type as its only per-test mocks, under exact
-// serving, with the connection's prepared statements and the test's window
-// read from the store; no session, start-up or background
-// recording, and no consume (the dry match reaches none).
+// serving, with the connection's prepared statements read from the store;
+// no test window (it reports exact serving, so the matcher zeroes any
+// window the store reports), no session, start-up or background recording,
+// and no consume (the dry match reaches none).
 type answeredOnly struct {
 	integrations.MockMemDb
 	mocks []*models.Mock

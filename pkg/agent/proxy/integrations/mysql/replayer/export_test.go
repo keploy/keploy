@@ -379,3 +379,48 @@ func ForgetPlacesForTest() {
 // PlacesReadsForTest is how many recordings were read for their places
 // (placesReads) since the process started.
 func PlacesReadsForTest() int64 { return placesReads.Load() }
+
+// TxControlForTest is txControlOf's verdict on req: "begin", "end", "reset"
+// or "none".
+func TxControlForTest(req mysql.Request) string {
+	switch txControlOf(req) {
+	case txBegin:
+		return "begin"
+	case txEnd:
+		return "end"
+	case txReset:
+		return "reset"
+	}
+	return "none"
+}
+
+// StartSessionForTest begins d's session as one the server greeted with the
+// status flags status (startSession).
+func StartSessionForTest(d *wire.DecodeContext, status uint16) {
+	startSession(d, &mysql.HandshakeV10Packet{StatusFlags: status})
+}
+
+// MatchBoundExaminedForTest is MatchBoundForTest's match with no full scan
+// asked for, that also returns how many candidates the scan visited
+// (matchOptions.examined).
+func MatchBoundExaminedForTest(ctx context.Context, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext) (*mysql.Response, bool, int, error) {
+	var served servedRecording
+	examined := 0
+	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, nil, nil, matchOptions{served: &served, examined: &examined})
+	bindAfter(dctx, req, served)
+	return resp, ok, examined, err
+}
+
+// MatchBoundForTest is MatchCommandForTest that keeps the live connection's
+// transaction and its binding as matchCommand does (bindAfter), so a test can
+// check that the full scan answers a bound transaction as the first pass does.
+func MatchBoundForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, fullScan bool) (*mysql.Response, bool, string, error) {
+	var served servedRecording
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, nil, nil, matchOptions{fullScan: fullScan, served: &served})
+	bindAfter(dctx, req, served)
+	missText := ""
+	if miss != nil {
+		missText = fmt.Sprintf("%+v", *miss)
+	}
+	return resp, ok, missText, err
+}
