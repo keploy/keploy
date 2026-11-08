@@ -1,9 +1,11 @@
 package utils
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -101,7 +103,12 @@ func TestOpenRecordingDirIsAnchoredAtTheProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(project)
-	for _, dir := range []string{"keploy-up", "./keploy-abs", filepath.Join("keploy", "linked"), filepath.Join("real", "linked")} {
+	for _, dir := range []string{
+		"keploy-up", "./keploy-abs", filepath.Join("keploy", "linked"), filepath.Join("real", "linked"),
+		// Leading ".." say where the project is: the folders after them are
+		// still opened one inside the other.
+		filepath.Join("..", "project", "keploy-up"), filepath.Join("..", "project", "keploy-abs"),
+	} {
 		if got, err := openReads(dir, "f.yaml"); err == nil || !strings.Contains(err.Error(), "is opened only inside") {
 			t.Errorf("%s: read %q, %v; want it refused as leading out of the folder it is in", dir, got, err)
 		}
@@ -236,5 +243,105 @@ func TestMkdirOpenRecordingDirOpensTheFolderItMakes(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
 		t.Fatalf("made %d entries where the links lead", len(entries))
+	}
+}
+
+// An absolute folder in a recording's keploy folder, such as the
+// <project>/keploy/tests a user passes, is opened from the project, the
+// folder its last keploy folder is in, and then one folder at a time: a
+// keploy folder, or a folder in it, that the repository carries as a link out
+// is refused, with why, and nothing is read or made where it leads. A link
+// that stays inside is followed, and the folders above the project, even one
+// named keploy, are opened as they are.
+func TestAnAbsoluteFolderInKeployIsOpenedFromTheProject(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside")
+	write := func(dir, body string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "f.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := func(target, at string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, at); err != nil {
+			t.Skipf("cannot make a symbolic link here: %v", err)
+		}
+	}
+	write(filepath.Join(outside, "tests"), "SECRET-OUTSIDE")
+	// keploy links out of its project by "..", and by an absolute target.
+	link(filepath.Join("..", "outside"), filepath.Join(base, "up", "keploy"))
+	link(outside, filepath.Join(base, "abs", "keploy"))
+	// A folder in keploy links out of keploy.
+	link(filepath.Join("..", "..", "outside"), filepath.Join(base, "deep", "keploy", "a"))
+	// keploy links to a folder inside its project.
+	write(filepath.Join(base, "in", "store", "tests"), "inside")
+	link("store", filepath.Join(base, "in", "keploy"))
+	// A project reached through an absolute link in a folder named keploy
+	// above it: only the last keploy folder says where the project is.
+	write(filepath.Join(base, "realproj", "keploy", "tests"), "plain")
+	link(filepath.Join(base, "realproj"), filepath.Join(base, "keploy", "proj"))
+
+	for _, dir := range []string{filepath.Join(base, "up", "keploy", "tests"), filepath.Join(base, "deep", "keploy", "a", "tests")} {
+		if b, err := os.ReadFile(filepath.Join(dir, "f.yaml")); err != nil || string(b) != "SECRET-OUTSIDE" {
+			t.Fatalf("%s does not reach the file outside: %q, %v", dir, b, err)
+		}
+	}
+	for _, dir := range []string{
+		filepath.Join(base, "up", "keploy", "tests"),
+		filepath.Join(base, "abs", "keploy", "tests"),
+		filepath.Join(base, "deep", "keploy", "a", "tests"),
+	} {
+		if got, err := openReads(dir, "f.yaml"); err == nil || !strings.Contains(err.Error(), "is opened only inside") {
+			t.Errorf("%s: read %q, %v; want it refused as leading out of the project", dir, got, err)
+		}
+		if err := MkdirRecordingDir(filepath.Join(dir, "new"), 0o755); err == nil || !strings.Contains(err.Error(), "only inside") {
+			t.Errorf("%s: made %v; want it refused as leading out of the project", dir, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outside, "tests", "new")); !os.IsNotExist(err) {
+		t.Errorf("a folder was made where the links lead: %v", err)
+	}
+	for dir, want := range map[string]string{
+		filepath.Join(base, "in", "keploy", "tests"):                            "inside",
+		filepath.Join(base, "keploy", "proj", "keploy", "tests"):                "plain",
+		filepath.Join(base, "keploy", "proj", "keploy", "tests", "..", "tests"): "plain",
+	} {
+		if got, err := openReads(dir, "f.yaml"); err != nil || got != want {
+			t.Errorf("%s: read %q, %v; want %q", dir, got, err, want)
+		}
+	}
+	// The keploy folder itself is its own last keploy folder.
+	if got, err := openReads(filepath.Join(base, "keploy", "proj", "keploy"), filepath.Join("tests", "f.yaml")); err != nil || got != "plain" {
+		t.Errorf("a keploy folder below a folder named keploy: read %q, %v; want %q", got, err, "plain")
+	}
+}
+
+// A folder that cannot be made says which and why: the error names the
+// folder and the permission, and is not taken for a folder that is not there.
+func TestMkdirRecordingDirSaysWhyAFolderCannotBeMade(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder this user cannot write in")
+	}
+	keploy := filepath.Join(t.TempDir(), "keploy")
+	if err := os.Mkdir(keploy, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(keploy, 0o755) })
+	for _, dir := range []string{filepath.Join(keploy, "test-set-0"), filepath.Join(keploy, "test-set-0", "assets")} {
+		r, err := MkdirOpenRecordingDir(dir, 0o755)
+		if err == nil {
+			_ = r.Close()
+			t.Fatalf("%s: made in a read-only folder", dir)
+		}
+		if !strings.Contains(err.Error(), `the folder "test-set-0" is made only inside`) || !errors.Is(err, fs.ErrPermission) || os.IsNotExist(err) {
+			t.Errorf("%s: %v; want it to name the folder and the permission", dir, err)
+		}
 	}
 }

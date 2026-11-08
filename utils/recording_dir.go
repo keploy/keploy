@@ -12,8 +12,16 @@ import (
 // OpenRecordingDir opens dir, a folder whose files come with the repository
 // keploy runs in (a recording's keploy folder, or a folder in it), as an
 // os.Root anchored at the project:
-//   - an absolute dir, as keploy's --path is made, is opened from the folder
-//     it is in, the project: only its own last folder is held to that one;
+//   - an absolute dir that is a keploy folder or in one, such as
+//     <project>/keploy (keploy's --path) or <project>/keploy/tests, is opened
+//     from the project, the folder its last keploy folder is in, and then
+//     one folder at a time: keploy, then each folder inside it;
+//   - any other absolute dir is opened from the folder it is in, taken for
+//     the project: only its own last folder is held to that one. A caller
+//     therefore never passes an absolute dir deeper in the project outside a
+//     keploy folder (a custom layout), whose folders above its last one would
+//     be opened as they are: it passes such a dir relative to the working
+//     directory;
 //   - a relative dir is opened from the working directory, the project, one
 //     folder at a time, each only inside the one before it. Leading ".."
 //     elements say where the project is, and are opened as they are.
@@ -86,6 +94,9 @@ func openRecordingDir(dir string, mkdir bool, perm fs.FileMode) (*os.Root, error
 	return r, nil
 }
 
+// recordingKeployFolder is the name of a recording's folder in its project.
+const recordingKeployFolder = "keploy"
+
 // recordingDirSteps says where OpenRecordingDir opens dir from, base, and the
 // folders it then opens, one inside the other.
 func recordingDirSteps(dir string) (string, []string) {
@@ -95,6 +106,26 @@ func recordingDirSteps(dir string) (string, []string) {
 		if parent == clean {
 			// The file system's root is in no folder.
 			return clean, nil
+		}
+		// From dir up to its last keploy folder, nearest first: dir is
+		// opened from the project that keploy folder is in, so a keploy
+		// folder the repository carries as a link out of the project is
+		// refused for every folder in it, as it is for the keploy folder.
+		var up []string
+		for d := clean; ; {
+			above := filepath.Dir(d)
+			if above == d {
+				break
+			}
+			up = append(up, filepath.Base(d))
+			if filepath.Base(d) == recordingKeployFolder {
+				names := make([]string, len(up))
+				for i, name := range up {
+					names[len(up)-1-i] = name
+				}
+				return above, names
+			}
+			d = above
 		}
 		return parent, []string{filepath.Base(clean)}
 	}
