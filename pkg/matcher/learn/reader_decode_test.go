@@ -2,6 +2,7 @@ package learn
 
 import (
 	"encoding/base64"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -276,6 +277,8 @@ func TestReaderOpensFromTheAdaptersAddress(t *testing.T) {
 		{"F does not decode by the step", "body.n|b64", b64("17"), "x-42", nil, variables.StepB64},
 		{"the second step opens R only", "body.n|b64|json", b64(`"order-17"`), b64("order-18"), nil, variables.StepJSON},
 		{"only the padding changed", "body.n|b64", b64("order-17"), strings.TrimRight(b64("order-17"), "="), nil, variables.StepB64},
+		{"steps past the deepest level", "body.n|pct|pct|pct|pct|pct", "17", "18",
+			[]string{"body.n|pct|pct|pct|pct#0: 17>18"}, ""},
 	} {
 		rds := readLeaf(nil, mustAt(t, c.at), c.rec, c.live)
 		readsBack(t, c.rec, c.live, rds)
@@ -292,6 +295,76 @@ func TestReaderOpensFromTheAdaptersAddress(t *testing.T) {
 			if slices.Contains(rd.At.Steps, c.noStep) {
 				t.Errorf("%s: read at %s; the step %s does not open both runs", c.name, rd.At, c.noStep)
 			}
+		}
+	}
+}
+
+// Steps nest only to maxDecodeLevels, whichever way they are taken: those
+// a text opens by from the leaf, a cookie's pair or a JWT's claim and the
+// steps inside it, and the adapter's own with those after them. A text
+// still encoded at that depth is read as it is there.
+func TestReaderOpensNoDeeperThanTheDeepestLevel(t *testing.T) {
+	pct := func(s string, n int) string {
+		for i := 0; i < n; i++ {
+			s = url.PathEscape(s)
+		}
+		return s
+	}
+	if got := pct("a/17", 2); got != "a%252F17" {
+		t.Fatalf("fixture: a/17 escaped twice is %q", got)
+	}
+	rs := "Sfl-KxwRJ_SMeKKF2QT4fwpMeJf36POk6yJV_adQssw"
+	for _, c := range []struct {
+		name, at, rec, live string
+		want                []string
+	}{
+		{"five escapes, from the leaf", "body.n", pct("a/17", 5), pct("a/18", 5),
+			[]string{"body.n|pct|pct|pct|pct#1: 2F17>2F18"}},
+		{"four escapes in a cookie's pair", "header.Cookie", "sid=" + pct("a/17", 4), "sid=" + pct("a/18", 4),
+			[]string{"header.Cookie|cookie.sid|pct|pct|pct#1: 2F17>2F18"}},
+		{"four escapes in a JWT's claim", "header.Authorization",
+			jwtOf(true, `{"n":"`+pct("a/17", 4)+`"}`, rs), jwtOf(true, `{"n":"`+pct("a/18", 4)+`"}`, rs),
+			[]string{"header.Authorization|jwt.n|pct|pct|pct#1: 2F17>2F18"}},
+		{"five escapes under the adapter's four", "body.n|pct|pct|pct|pct", pct("a/17", 5), pct("a/18", 5),
+			[]string{"body.n|pct|pct|pct|pct#1: 2F17>2F18"}},
+	} {
+		rds := readLeaf(nil, mustAt(t, c.at), c.rec, c.live)
+		readsBack(t, c.rec, c.live, rds)
+		if got := leafChanges(rds); !sameStrings(got, c.want) {
+			t.Errorf("%s: %q; want %q", c.name, got, c.want)
+		}
+		for _, rd := range rds {
+			if len(rd.At.Steps) > maxDecodeLevels {
+				t.Errorf("%s: read at %s, %d steps deep; the deepest is %d", c.name, rd.At, len(rd.At.Steps), maxDecodeLevels)
+			}
+		}
+	}
+}
+
+// TestWithStepCopiesTheStepsSizedToHoldThem: withStep gives at's steps and
+// st in a slice of their own. Only where at holds fewer than
+// maxDecodeLevels steps, as every reader's does, is that slice sized to
+// them up front; at maxDecodeLevels steps and past it, append sizes it,
+// and it still holds the same steps, in a slice of their own.
+func TestWithStepCopiesTheStepsSizedToHoldThem(t *testing.T) {
+	place := mustAt(t, "body.n").Place
+	for n := 0; n <= maxDecodeLevels+1; n++ {
+		var steps []variables.Step
+		for i := 0; i < n; i++ {
+			steps = append(steps, variables.Cookie(string(rune('a'+i))))
+		}
+		steps = slices.Grow(steps, 1) // spare room withStep must not write into
+		at := variables.Address{Place: place, Steps: steps, Word: 2}
+		got := withStep(at, variables.StepPct)
+		want := append(slices.Clone(steps), variables.StepPct)
+		if !slices.Equal(got.Steps, want) || got.Word != -1 || got.Place.String() != place.String() {
+			t.Errorf("%d steps: withStep = %s (word %d); want %v at body.n, the text whole", n, got, got.Word, want)
+		}
+		if n < maxDecodeLevels && cap(got.Steps) != n+1 {
+			t.Errorf("%d steps: the copy holds %d; want %d, sized up front", n, cap(got.Steps), n+1)
+		}
+		if extra := steps[:n+1]; extra[n] != "" {
+			t.Errorf("%d steps: withStep wrote %q into the spare room of at's steps", n, extra[n])
 		}
 	}
 }
