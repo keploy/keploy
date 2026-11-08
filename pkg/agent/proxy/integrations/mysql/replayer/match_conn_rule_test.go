@@ -145,29 +145,20 @@ func connPool(recs []connRec) (pool []*models.Mock, byTest map[int][]*models.Moc
 	return pool, byTest
 }
 
-// recordedOrderStore is a MockManager under exact serving that hands the
-// matcher every recording it shows in one list, in recorded order: the
-// open test's own among the rest, where the MockManager lists them first.
-// The connection rule ranks them by what they are, whatever the order.
+// recordedOrderStore is a MockManager under exact serving whose reusable
+// tier lists its recordings in recorded order, read by the full scan
+// (modeExactInTime). The open test's own that have not answered lead its
+// per-test read, as the exact view lists them (proxy's exactView.perTest and
+// MockManager.rangeExactPerTest), so the matcher stops at the first exact
+// match the test does not own.
 type recordedOrderStore struct{ *proxy.MockManager }
 
-func (s recordedOrderStore) GetPerTestMocksInWindow() ([]*models.Mock, error) { return nil, nil }
-
 func (s recordedOrderStore) GetSessionMocks() ([]*models.Mock, error) {
-	own, err := s.MockManager.GetPerTestMocksInWindow()
-	if err != nil {
-		return nil, err
-	}
 	session, err := s.MockManager.GetSessionMocks() //nolint:staticcheck // SA1019: the matcher reads the pool's session tier through it (loadPool).
 	if err != nil {
 		return nil, err
 	}
-	var all []*models.Mock
-	for _, m := range append(own, session...) {
-		if !slices.Contains(all, m) {
-			all = append(all, m)
-		}
-	}
+	all := slices.Clone(session)
 	slices.SortStableFunc(all, func(a, b *models.Mock) int {
 		return a.Spec.ReqTimestampMock.Compare(b.Spec.ReqTimestampMock)
 	})
@@ -792,8 +783,10 @@ func TestConnectionRuleReadsTheGreetingsAutocommit(t *testing.T) {
 
 // A statement that commits the open transaction implicitly (CREATE TABLE,
 // as every DDL and LOCK TABLES do) ends it, as its answer says, though its
-// text is no COMMIT: the read after it is outside every transaction. One
-// whose answer says the transaction is still open keeps it.
+// text is no COMMIT: the reads after it are outside every transaction, and
+// the first one, answered with no status, binds nothing, so the next is
+// answered with the first exact match too. One whose answer says the
+// transaction is still open keeps it.
 func TestConnectionRuleEndsAtAnImplicitCommit(t *testing.T) {
 	for _, c := range []struct{ ddl, count string }{
 		{"ddl/on", "b-count"},
@@ -805,12 +798,47 @@ func TestConnectionRuleEndsAtAnImplicitCommit(t *testing.T) {
 				{c.ddl, "cA", "CREATE TABLE t (id INT)", 1200 * time.Microsecond, 0},
 				{"b-count", "cB", "SELECT COUNT(*) FROM orders", 1500 * time.Microsecond, 0},
 				{"a-count", "cA", "SELECT COUNT(*) FROM orders", 2500 * time.Microsecond, 0},
+				{"y-a", "cA", "SELECT * FROM products WHERE id = 'y'", 2600 * time.Microsecond, 0},
+				{"y-b", "cB", "SELECT * FROM products WHERE id = 'y'", 2700 * time.Microsecond, 0},
 			}
 			checkConnSet(t, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
 				{"L1", "START TRANSACTION", "*"},
 				{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
 				{"L1", "CREATE TABLE t (id INT)", c.ddl},
 				{"L1", "SELECT COUNT(*) FROM orders", c.count},
+				{"L1", "SELECT * FROM products WHERE id = 'y'", "y-a"},
+			}}})
+		})
+	}
+}
+
+// Under autocommit off a COMMIT, or a reset of a session greeted with
+// autocommit off, ends the transaction and begins the next at once, and binds
+// it to nothing, though the recording that answers it is the test's own and
+// carries no status (an ERR): the read after it is answered with the first
+// exact match the test owns, recorded on another connection than the COMMIT
+// or the reset, not with the one recorded on theirs after them.
+func TestConnectionRuleBindsNothingAtAnEndAnsweredWithAnError(t *testing.T) {
+	off := uint16(0x0000)
+	for _, c := range []struct {
+		end      string
+		greeting *uint16
+	}{
+		{"COMMIT", nil},
+		{"reset", &off},
+	} {
+		t.Run(c.end, func(t *testing.T) {
+			name := strings.ToLower(c.end) + "/err"
+			recs := []connRec{
+				{"off/off", "cA", "SET autocommit = 0", 300 * time.Microsecond, 0},
+				{name, "cA", c.end, 1000 * time.Microsecond, 0},
+				{"y-b", "cB", "SELECT * FROM products WHERE id = 'y'", 1500 * time.Microsecond, 0},
+				{"y-a", "cA", "SELECT * FROM products WHERE id = 'y'", 2500 * time.Microsecond, 0},
+			}
+			checkConnSession(t, c.greeting, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
+				{"L1", "SET autocommit = 0", "off/off"},
+				{"L1", c.end, name},
+				{"L1", "SELECT * FROM products WHERE id = 'y'", "y-b"},
 			}}})
 		})
 	}
@@ -887,13 +915,14 @@ func TestConnectionRuleAnswersTheBoundReusableRecordingAgain(t *testing.T) {
 	}, modeTest, modeTestScan)
 }
 
-// Under exact serving an exact match the open test does not own ranks below
-// every one it owns, inside a bound transaction the one on the bound
-// connection first, in whatever order the store lists them: the test that
-// owns it is left it. In keploy test, of the EXECUTEs, a definitive
-// match the test does not own ranks below the test's own recording of the
-// statement with another parameter (the FIFO candidate); exact serving
-// answers neither (sameStatementOnly).
+// Two tests recorded the same reads. Under exact serving each test is
+// answered with its own, inside a bound transaction the one on the bound
+// connection first, else one on another connection (it waited), and the view
+// shows neither test the other's while it is open, whichever recorded the
+// text first. In keploy test, of the EXECUTEs, a definitive match the test
+// does not own ranks below the test's own recording of the statement with
+// another parameter (the FIFO candidate); exact serving answers neither
+// (sameStatementOnly).
 func TestConnectionRuleRanksTheTestsOwnAboveAnotherTestsMatch(t *testing.T) {
 	recs := []connRec{
 		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
@@ -915,7 +944,8 @@ func TestConnectionRuleRanksTheTestsOwnAboveAnotherTestsMatch(t *testing.T) {
 		{5 * time.Millisecond, 9 * time.Millisecond, []connCall{
 			{"L2", "SELECT * FROM products WHERE id = 'x'", "o-sel"},
 			{"L2", "SELECT * FROM products WHERE id = 'y'", "o-sel2"},
-			// Outside a transaction too: the read the earlier test left.
+			// Outside a transaction: its own, though the earlier test
+			// recorded the text first and left it unanswered.
 			{"L2", "SELECT * FROM products WHERE id = 'w'", "o-w"},
 		}},
 	}, modeExact, modeExactInTime)
@@ -937,42 +967,72 @@ func TestConnectionRuleRanksTheTestsOwnAboveAnotherTestsMatch(t *testing.T) {
 	}, modeTest, modeTestScan)
 }
 
-// Under exact serving the keyed pass of a command compares every recording of
-// its text: when the open test owns none, the first it does not own answers
-// there, inside a bound transaction too, with no scan of the whole pool.
-func TestConnectionRuleAnswersAnotherTestsMatchWithoutAFullScan(t *testing.T) {
-	recs := []connRec{
-		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
-		{"pool-sel", "cB", "SELECT * FROM products WHERE id = 'x'", 7 * time.Millisecond, -1},
+// Under exact serving the store lists every mock the open test owns and has
+// not answered ahead of the rest, so a command's walk stops at the first
+// exact match the test does not own, where main's stops, with no scan of the
+// whole pool: each call visits the candidates main's walk visits, with 10 and
+// with 1000 reusable recordings of its text that no test owns (a poller's,
+// recorded thousands of times), outside a transaction and inside a bound one.
+// One call visits one more: inside the bound transaction the test's own read,
+// recorded on another connection, waits for the bound one, and the walk goes
+// on to the first exact match no test owns and stops there; the waiting read
+// outranks it. A command nothing recorded (the START and the COMMIT here) is
+// scanned whole, as on main.
+func TestConnectionRuleVisitsMainsCandidates(t *testing.T) {
+	const poll = "SELECT id FROM jobs WHERE status = 'pending'"
+	const sel = "SELECT * FROM products WHERE id = 'x'"
+	// want is the recording each call must be answered with; "poll-" is any
+	// recording of the poll. visits is how many candidates the call visits:
+	// main's walk visits the test's unanswered recordings, then the first
+	// exact match (a-cust and b-sel, then a poll, for the first two polls).
+	// -1: not counted (a command nothing recorded, scanned whole).
+	calls := []struct {
+		connCall
+		visits int
+	}{
+		{connCall{"L1", poll, "poll-"}, 3},
+		{connCall{"L1", poll, "poll-"}, 3},
+		{connCall{"L1", "START TRANSACTION", "*"}, -1},
+		{connCall{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"}, 1},
+		// The test's own read, recorded on cB, waits for the bound cA, whose
+		// recordings of the text are no test's: the walk stops at the first
+		// of them (main's stops at b-sel, 1), and b-sel outranks it.
+		{connCall{"L1", sel, "b-sel"}, 2},
+		{connCall{"L1", poll, "poll-"}, 1},
+		{connCall{"L1", "COMMIT", "*"}, -1},
+		{connCall{"L1", poll, "poll-"}, 1},
 	}
-	const others = 200
-	for i := range others {
-		recs = append(recs, connRec{fmt.Sprintf("other-%d", i), "cB", fmt.Sprintf("SELECT * FROM stock WHERE id = '%d'", i), 8*time.Millisecond + time.Duration(i)*time.Microsecond, -1})
-	}
-	pool, byTest := connPool(recs)
-	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
-	t.Cleanup(mm.Close)
-	mm.SetMocksWithWindow(nil, pool, models.BaseTime, time.Now().Add(time.Hour))
-	mm.ServeExactTest("T0", byTest[0])
-	ctx, dctx := connLive("L1")
-	for _, c := range []connCall{
-		{"L1", "START TRANSACTION", "*"},
-		{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
-		{"L1", "SELECT * FROM products WHERE id = 'x'", "pool-sel"},
-	} {
-		resp, ok, examined, err := replayer.MatchBoundExaminedForTest(ctx, connReq(c.sql), mm, dctx)
-		if err != nil {
-			t.Fatalf("%q: %v", c.sql, err)
+	for _, n := range []int{10, 1000} {
+		recs := []connRec{
+			{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
+			{"b-sel", "cB", sel, 1100 * time.Microsecond, 0},
 		}
-		t.Logf("%q visited %d candidates", c.sql, examined)
-		if c.want == "*" {
-			continue
+		for i := range n {
+			at := 7*time.Millisecond + time.Duration(i)*time.Microsecond
+			recs = append(recs,
+				connRec{fmt.Sprintf("poll-%d", i), "cA", poll, at, -1},
+				connRec{fmt.Sprintf("x-%d", i), "cA", sel, at, -1})
 		}
-		if !ok || resp == nil || resp.Payload != c.want {
-			t.Fatalf("%q was answered with %v (ok %v); want %s", c.sql, resp, ok, c.want)
-		}
-		if examined > others/2 {
-			t.Errorf("%q visited %d candidates of the %d the pool holds; want the keyed pass's few", c.sql, examined, len(pool))
+		pool, byTest := connPool(recs)
+		mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SetMocksWithWindow(nil, pool, models.BaseTime, time.Now().Add(time.Hour))
+		mm.ServeExactTest("T0", byTest[0])
+		ctx, dctx := connLive("L1")
+		for _, c := range calls {
+			resp, ok, examined, err := replayer.MatchBoundExaminedForTest(ctx, connReq(c.sql), mm, dctx)
+			if err != nil {
+				t.Fatalf("n=%d %q: %v", n, c.sql, err)
+			}
+			if c.visits >= 0 && examined != c.visits {
+				t.Errorf("n=%d %q visited %d candidates; want %d", n, c.sql, examined, c.visits)
+			}
+			if c.want == "*" {
+				continue
+			}
+			if !ok || resp == nil || !strings.HasPrefix(resp.Payload, c.want) || (c.want != "poll-" && resp.Payload != c.want) {
+				t.Fatalf("n=%d %q was answered with %v (ok %v); want %s", n, c.sql, resp, ok, c.want)
+			}
 		}
 	}
 }
