@@ -144,3 +144,101 @@ func TestABackupKeepsALinkInsideTheSetAsALink(t *testing.T) {
 		t.Fatalf("the backup must be gone once it is put back: %v", err)
 	}
 }
+
+// TestAPutBackRefusesAKeployFolderSwappedForALinkOut: the put-back after a
+// record runs after the repository's own app has run, and checks the keploy
+// folder again: one replaced by a link out of the project after the backup
+// was made is refused, for a refused record (the set is put back), a kept
+// one (the backup is dropped) and a fresh set (what the record left is
+// dropped). Nothing where the link leads is removed or moved, and the link
+// is left as it is.
+func TestAPutBackRefusesAKeployFolderSwappedForALinkOut(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fresh bool
+		keep  bool
+	}{
+		{name: "refused record", keep: false},
+		{name: "kept record", keep: true},
+		{name: "fresh set", fresh: true, keep: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keployDir, outside := backupProject(t)
+			if !tc.fresh {
+				writeBackupFile(t, filepath.Join(keployDir, "e2e", "old"), "mine", 0o644)
+			} else if err := os.MkdirAll(keployDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			m := &mockService{logger: zap.NewNop(), config: &config.Config{Path: keployDir}}
+			restore, existed, err := m.saveSet("e2e")
+			if err != nil || existed == tc.fresh {
+				t.Fatalf("saveSet = %v, %v", existed, err)
+			}
+			// The keploy folder is replaced by a link out while the
+			// record runs.
+			if err := os.Rename(keployDir, keployDir+".moved"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join("..", "outside"), keployDir); err != nil {
+				t.Fatal(err)
+			}
+			theirs := []string{filepath.Join("e2e", "theirs"), filepath.Join(".e2e.previous", "theirs")}
+			for _, f := range theirs {
+				writeBackupFile(t, filepath.Join(outside, f), "theirs", 0o644)
+			}
+
+			restore(tc.keep)
+
+			for _, f := range theirs {
+				got, err := os.ReadFile(filepath.Join(outside, f))
+				if err != nil || string(got) != "theirs" {
+					t.Fatalf("%s where the keploy link leads must be left as it was: %q, %v", f, got, err)
+				}
+			}
+			entries, err := os.ReadDir(outside)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 2 {
+				t.Fatalf("nothing may be made or moved where the keploy link leads: %v", entries)
+			}
+			if fi, err := os.Lstat(keployDir); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("the keploy link must be left as it is: %v, %v", fi, err)
+			}
+		})
+	}
+}
+
+// TestAPutBackRefusesABackupSwappedForALinkOut: the backup the put-back moves
+// back as the set is checked when it is moved: a backup replaced by a link
+// out of the project after it was made is not made the set, so the next
+// record does not write where it leads; the link is left where it was.
+func TestAPutBackRefusesABackupSwappedForALinkOut(t *testing.T) {
+	keployDir, outside := backupProject(t)
+	writeBackupFile(t, filepath.Join(keployDir, "e2e", "old"), "mine", 0o644)
+	m := &mockService{logger: zap.NewNop(), config: &config.Config{Path: keployDir}}
+	restore, existed, err := m.saveSet("e2e")
+	if err != nil || !existed {
+		t.Fatalf("saveSet = %v, %v", existed, err)
+	}
+	saved := filepath.Join(keployDir, ".e2e.previous")
+	if err := os.RemoveAll(saved); err != nil {
+		t.Fatal(err)
+	}
+	writeBackupFile(t, filepath.Join(outside, "theirs", "f"), "theirs", 0o644)
+	if err := os.Symlink(filepath.Join("..", "..", "outside", "theirs"), saved); err != nil {
+		t.Fatal(err)
+	}
+
+	restore(false)
+
+	if fi, err := os.Lstat(filepath.Join(keployDir, "e2e")); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("a backup that links out of the project must not be made the set")
+	}
+	if fi, err := os.Lstat(saved); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the backup's link must be left where it was: %v, %v", fi, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(outside, "theirs", "f")); err != nil || string(got) != "theirs" {
+		t.Fatalf("what the backup's link leads to must be left as it was: %q, %v", got, err)
+	}
+}
