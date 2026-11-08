@@ -1,9 +1,11 @@
 package replayer
 
 import (
+	"encoding/binary"
 	"strings"
 	"time"
 
+	mysqlutils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -26,52 +28,66 @@ import (
 // test's window says what it owns, and under exact serving, where its
 // mapping does, so both answer a recorded set alike.
 //
-// START TRANSACTION (or BEGIN, or XA START) binds nothing: every
-// transaction sends it, so the recording that answers it says nothing of
-// which transaction is open. The command after it binds the transaction to
-// the connection of the recording that answers it. COMMIT and ROLLBACK (and
-// XA END, COMMIT and ROLLBACK) end the binding, and so do a new test window
-// or test, and a reset of the connection. Outside a transaction nothing is
-// bound: a pool hands one live connection to one request after another,
-// which were recorded on other connections.
+// Whether the live connection is in a transaction is read from the answers
+// it was replayed with, as the server said it: every OK and EOF packet it
+// sends (a result set ends with one) carries the session's status,
+// SERVER_STATUS_IN_TRANS (a transaction is open) and
+// SERVER_STATUS_AUTOCOMMIT, and its greeting carries the status a session
+// begins with. A command whose answer says a transaction is open after it
+// is a command of that transaction, and binds it; one whose answer says no
+// transaction is open ended one (a statement that commits implicitly,
+// autocommit turned on) or ran outside one, and nothing is bound after it. With autocommit
+// off the next statement begins a transaction. So every way a session's
+// autocommit is turned off is read as the server read it: a SET in any
+// spelling (and a refused SET, answered with an ERR, changes nothing), the
+// server's default (the greeting's status), init_connect (the first
+// answer's).
 //
-// A session with autocommit off (SET autocommit = 0, as JDBC's
-// setAutoCommit(false) sends it) is always in a transaction: its next
-// statement begins one, and so does the statement after each COMMIT or
-// ROLLBACK. So turning autocommit off begins a transaction as START does, a
-// COMMIT or ROLLBACK under it begins the next one at once, and turning it on
-// again ends the open one (the server commits it). What a SET made of the
-// session's autocommit is read from the status of the recorded answer
-// (SERVER_STATUS_AUTOCOMMIT), so every spelling of every value the server
-// accepts (OFF, FALSE, DEFAULT, a variable) is read as the server read it,
-// and a refused SET (an ERR answer) changes nothing. A reset of the
-// connection brings back the server's default autocommit, which its recorded
-// answer's status says too.
+// Where the status cannot say it, the command is read:
+//   - START TRANSACTION (or BEGIN, XA START, COMMIT AND CHAIN) binds
+//     nothing, though its answer says a transaction is open: every
+//     transaction sends it, so the recording that answers it says nothing of
+//     which transaction is open. The command after it binds.
+//   - COMMIT and ROLLBACK (and XA END, COMMIT and ROLLBACK) end the
+//     transaction and its binding whatever answered them: keploy answers one
+//     nothing recorded with an OK of its own, which says nothing of the
+//     session (txEnd: under autocommit off the next statement begins the
+//     next transaction).
+//   - A reset of the connection (COM_RESET_CONNECTION, COM_CHANGE_USER) ends
+//     them too, and brings back the server's default autocommit, which its
+//     answer says, or, when that carries no status (an auth exchange, or no
+//     recording), the greeting's.
+//
+// An answer that carries no status (an ERR, a PREPARE's, none) leaves the
+// session's state as it was. A new test window or test ends the binding too
+// (boundRecording). Outside a transaction nothing is bound: a pool hands one
+// live connection to one request after another, which were recorded on
+// other connections.
 
-// txControl is what a live command does to the connection's transaction.
+// txControl is what a live command does to the connection's transaction
+// that its answer's status cannot say.
 type txControl int
 
 const (
-	// txNone leaves the transaction as it is.
+	// txNone leaves the transaction to its answer's status.
 	txNone txControl = iota
-	// txBegin begins a transaction (START TRANSACTION, BEGIN, COMMIT AND
-	// CHAIN).
+	// txBegin begins a transaction (START TRANSACTION, BEGIN, XA START,
+	// COMMIT AND CHAIN).
 	txBegin
 	// txEnd ends it (COMMIT, ROLLBACK, XA END, XA COMMIT, XA ROLLBACK).
 	txEnd
-	// txAutocommit sets the session's autocommit (SET [SESSION | LOCAL]
-	// autocommit, SET @@[session. | local.]autocommit) to what the recorded
-	// answer's status says.
-	txAutocommit
-	// txReset resets the session (COM_RESET_CONNECTION, COM_CHANGE_USER): it
-	// ends the transaction, and the session's autocommit is the server's
-	// default, which the recorded answer's status says.
+	// txReset resets the session (COM_RESET_CONNECTION, COM_CHANGE_USER).
 	txReset
 )
 
-// serverStatusAutocommit is the SERVER_STATUS_AUTOCOMMIT bit of an OK
-// packet's status flags: the session's autocommit is on.
-const serverStatusAutocommit = 0x0002
+// The session status flags an OK or EOF packet carries.
+const (
+	// serverStatusInTrans (SERVER_STATUS_IN_TRANS): a transaction is open.
+	serverStatusInTrans = 0x0001
+	// serverStatusAutocommit (SERVER_STATUS_AUTOCOMMIT): the session's
+	// autocommit is on.
+	serverStatusAutocommit = 0x0002
+)
 
 var (
 	sComResetConnection = mysql.CommandStatusToString(mysql.COM_RESET_CONNECTION)
@@ -90,12 +106,6 @@ func txControlOf(req mysql.Request) txControl {
 	id := sqlStatementIdentity(qp.Query) // comments aside, trimmed
 	// The first word decides; a text that cannot begin with one of them is
 	// not upper-cased and split.
-	if hasPrefixFold(id, "SET") {
-		if setsSessionAutocommit(id[len("SET"):]) {
-			return txAutocommit
-		}
-		return txNone
-	}
 	if !hasPrefixFold(id, "BEGIN") && !hasPrefixFold(id, "START") &&
 		!hasPrefixFold(id, "COMMIT") && !hasPrefixFold(id, "ROLLBACK") &&
 		!hasPrefixFold(id, "XA") {
@@ -134,7 +144,7 @@ func txControlOf(req mysql.Request) txControl {
 				return txBegin
 			case "END", "COMMIT", "ROLLBACK":
 				// XA END closes the transaction to every command but XA
-				// PREPARE, COMMIT and ROLLBACK.
+				// PREPARE, COMMIT and ROLLBACK, which name it.
 				return txEnd
 			}
 		}
@@ -143,118 +153,48 @@ func txControlOf(req mysql.Request) txControl {
 	return txNone
 }
 
-// setsSessionAutocommit reports whether the assignments of a SET statement
-// (its text after SET) set the session's autocommit: an assignment of
-// autocommit (or `autocommit`) in session scope. That is a bare name after
-// no modifier, or after SESSION or LOCAL (the latest modifier holds for the
-// assignments after it, as the server reads them), or @@autocommit,
-// @@session.autocommit or @@local.autocommit; not after GLOBAL, PERSIST or
-// PERSIST_ONLY, nor @@global.autocommit and the like, which set the
-// server's default for new sessions, nor @autocommit, a user variable (its
-// name begins with @, which no identifier does).
-func setsSessionAutocommit(assignments string) bool {
-	if assignments == "" || !startsToken(assignments) && assignments[0] != '@' {
-		// SETTINGS, SET_x: another word.
-		return false
-	}
-	session, sets := true, false
-	for _, a := range splitSQLList(assignments) {
-		a = strings.TrimLeft(a, sqlWhitespace)
-		word := a[:identEnd(a, 0)]
-		switch strings.ToUpper(word) {
-		case "GLOBAL", "PERSIST", "PERSIST_ONLY":
-			session, a = false, strings.TrimLeft(a[len(word):], sqlWhitespace)
-		case "SESSION", "LOCAL":
-			session, a = true, strings.TrimLeft(a[len(word):], sqlWhitespace)
-		}
-		inSession := session
-		if after, ok := strings.CutPrefix(a, "@@"); ok {
-			// @@name is the session's, whatever modifier came before.
-			// @@global.autocommit (or @@persist., @@persist_only.) is
-			// read as the name global, which is not autocommit.
-			a, inSession = after, true
-			for _, scope := range []string{"SESSION.", "LOCAL."} {
-				if hasPrefixFold(a, scope) {
-					a = a[len(scope):]
-				}
-			}
-		}
-		name, rest := a[:identEnd(a, 0)], ""
-		if strings.HasPrefix(a, "`") {
-			if end := strings.IndexByte(a[1:], '`'); end >= 0 {
-				name = a[1 : 1+end]
-			}
-			rest = a[min(len(a), len(name)+2):]
-		} else {
-			rest = a[len(name):]
-		}
-		rest = strings.TrimLeft(rest, sqlWhitespace)
-		if inSession && strings.EqualFold(name, "autocommit") &&
-			(strings.HasPrefix(rest, "=") || strings.HasPrefix(rest, ":=")) {
-			sets = true
-		}
-	}
-	return sets
-}
-
-// startsToken reports whether s begins with what ends the word before it
-// and begins another token: whitespace, or a backquoted name (SET`x`=0).
-func startsToken(s string) bool {
-	return strings.ContainsRune(sqlWhitespace, rune(s[0])) || s[0] == '`'
-}
-
-// identEnd is the end of the unquoted identifier that begins at s[i] (i when
-// none does).
-func identEnd(s string, i int) int {
-	for i < len(s) && isIdentByte(s[i]) {
-		i++
-	}
-	return i
-}
-
-// splitSQLList splits s at each comma outside quotes ('...', "...", `...`,
-// a backslash escaping the next byte in the first two) and parentheses.
-func splitSQLList(s string) []string {
-	var parts []string
-	depth, start := 0, 0
-	var quote byte
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case quote != 0:
-			if c == '\\' && quote != '`' {
-				i++
-			} else if c == quote {
-				quote = 0
-			}
-		case c == '\'' || c == '"' || c == '`':
-			quote = c
-		case c == '(':
-			depth++
-		case c == ')':
-			depth--
-		case c == ',' && depth == 0:
-			parts = append(parts, s[start:i])
-			start = i + 1
-		}
-	}
-	return append(parts, s[start:])
-}
-
-// answeredAutocommit is the session's autocommit after the command a
-// recording answered, as the status of the answer it was replayed with (its
-// first response, as the matcher writes it) says: ok is false when that
-// answer is no OK packet (none answered, or the server refused the command
-// with an ERR).
-func answeredAutocommit(mk *models.Mock) (on, ok bool) {
+// answeredStatus is the session's status after the command a recording
+// answered, as the answer it was replayed with (its first response, as the
+// matcher writes it) says: the status flags of an OK or EOF packet, or of
+// the packet that ends a result set. ok is false for an answer that carries
+// none (an ERR, a PREPARE's answer, an auth exchange) and for no recording.
+func answeredStatus(mk *models.Mock) (status uint16, ok bool) {
 	if mk == nil || len(mk.Spec.MySQLResponses) == 0 {
-		return false, false
+		return 0, false
 	}
-	okp, _ := mk.Spec.MySQLResponses[0].Message.(*mysql.OKPacket)
-	if okp == nil {
-		return false, false
+	switch m := mk.Spec.MySQLResponses[0].Message.(type) {
+	case *mysql.OKPacket:
+		return m.StatusFlags, true
+	case *mysql.EOFPacket:
+		return m.StatusFlags, true
+	case *mysql.TextResultSet:
+		return terminatorStatus(m.FinalResponse)
+	case *mysql.BinaryProtocolResultSet:
+		return terminatorStatus(m.FinalResponse)
 	}
-	return okp.StatusFlags&serverStatusAutocommit != 0, true
+	return 0, false
+}
+
+// terminatorStatus is the status of a result set's recorded terminator, the
+// packet as the server sent it (its four-byte header first): an EOF (0xfe,
+// warnings, status) or, under CLIENT_DEPRECATE_EOF, the OK that replaces it
+// (0xfe, affected rows and last insert id, both a zero byte, status,
+// warnings), which hold the status at the same place. ok is false for
+// another packet (an EOF of the protocol before 4.1 has no status).
+func terminatorStatus(t *mysql.GenericResponse) (status uint16, ok bool) {
+	if t == nil || !mysqlutils.IsOKReplacingEOF(t.Data) && !(mysqlutils.IsEOFPacket(t.Data) && len(t.Data) >= 9) {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint16(t.Data[7:9]), true
+}
+
+// startSession sets a live connection's transaction state as it connects,
+// from the status of the server greeting it was answered with: a server
+// whose sessions begin with autocommit off (its global autocommit is 0)
+// begins a transaction with the first statement.
+func startSession(d *wire.DecodeContext, greeting *mysql.HandshakeV10Packet) {
+	d.AutocommitOffAtConnect = greeting.StatusFlags&serverStatusAutocommit == 0
+	d.AutocommitOff, d.InTx = d.AutocommitOffAtConnect, d.AutocommitOffAtConnect
 }
 
 // servedRecording is the recording a command was answered with, whether it
@@ -300,37 +240,29 @@ func bindAfter(d *wire.DecodeContext, req mysql.Request, served servedRecording)
 	if d == nil {
 		return
 	}
+	status, known := answeredStatus(served.mock)
+	if known {
+		d.AutocommitOff = status&serverStatusAutocommit == 0
+		d.InTx = status&serverStatusInTrans != 0 || d.AutocommitOff
+	}
 	switch txControlOf(req) {
 	case txBegin:
 		d.InTx, d.Bound, d.BoundWindow = true, nil, time.Time{}
 		return
 	case txEnd:
-		// Under autocommit off the next statement begins the next
-		// transaction.
 		d.InTx, d.Bound, d.BoundWindow = d.AutocommitOff, nil, time.Time{}
 		return
 	case txReset:
-		on, ok := answeredAutocommit(served.mock)
-		d.AutocommitOff = ok && !on
+		if !known {
+			d.AutocommitOff = d.AutocommitOffAtConnect
+		}
 		d.InTx, d.Bound, d.BoundWindow = d.AutocommitOff, nil, time.Time{}
 		return
-	case txAutocommit:
-		on, ok := answeredAutocommit(served.mock)
-		switch {
-		case !ok:
-			// Not answered, or refused: the session's autocommit is as it
-			// was.
-		case on && d.AutocommitOff:
-			// Turning autocommit on commits the open transaction.
-			d.AutocommitOff, d.InTx, d.Bound, d.BoundWindow = false, false, nil, time.Time{}
-		case !on:
-			// Turning it off outside a transaction begins one with the
-			// next statement (nothing is bound outside a transaction).
-			// Inside one begun by START, the transaction stays open and
-			// bound, and the next one begins at its end.
-			d.AutocommitOff, d.InTx = true, true
-		}
-		// On while it is on changes nothing.
+	}
+	if known && status&serverStatusInTrans == 0 {
+		// No transaction is open after it: it ended one (a statement that
+		// commits implicitly, autocommit turned on) or ran outside one.
+		d.Bound, d.BoundWindow = nil, time.Time{}
 		return
 	}
 	if !d.InTx || !served.own {

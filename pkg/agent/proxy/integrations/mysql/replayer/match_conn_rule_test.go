@@ -22,9 +22,8 @@ import (
 // EXECUTE of statement 1 with parameter P, or "reset", a
 // COM_RESET_CONNECTION), when it was recorded (after diffBase), and the test
 // whose mapping owns it under exact serving (-1: none). A name ending in
-// "/on" or "/off" is answered with an OK packet whose status says the
-// session's autocommit is on or off after it, and one ending in "/err" with
-// an ERR packet.
+// "/" and a status is answered with an answer that says it (connAnswer);
+// any other recording's answer carries no status, as an ERR does.
 type connRec struct {
 	name, conn, sql string
 	at              time.Duration
@@ -62,20 +61,58 @@ func resetReq() mysql.Request {
 	}}
 }
 
-// connAnswer gives m the answer its name asks for (connRec).
+// connAnswer gives m the answer its name asks for (connRec). A name ending
+// in "/err" is answered with an ERR packet. One ending in "/" and a status,
+// "on" (autocommit on), "off" (off), "tx" (a transaction is open, autocommit
+// off) or "on+tx", is answered with that session status: a SELECT with a
+// result set and an EXECUTE with a binary one, each ended by the OK that
+// replaces EOF, and any other command with an OK packet. A form after the
+// status changes that: ".eof" ends the result set with an EOF, ".old" with
+// an EOF of the protocol before 4.1 (it has no status), and ".pkt" answers
+// with a bare EOF packet (as COM_SET_OPTION is).
 func connAnswer(m *models.Mock) {
-	var msg any
-	switch {
-	case strings.HasSuffix(m.Name, "/on"):
-		msg = &mysql.OKPacket{Header: mysql.OK, StatusFlags: 0x0002}
-	case strings.HasSuffix(m.Name, "/off"):
-		msg = &mysql.OKPacket{Header: mysql.OK}
-	case strings.HasSuffix(m.Name, "/err"):
-		msg = &mysql.ERRPacket{Header: mysql.ERR, ErrorCode: 1399, SQLStateMarker: "#", SQLState: "XAE07", ErrorMessage: "XAER_RMFAIL"}
-	default:
+	i := strings.LastIndex(m.Name, "/")
+	if i < 0 {
 		return
 	}
-	m.Spec.MySQLResponses[0].Message = msg
+	resp := &m.Spec.MySQLResponses[0]
+	if m.Name[i+1:] == "err" {
+		resp.Message = &mysql.ERRPacket{Header: mysql.ERR, ErrorCode: 1399, SQLStateMarker: "#", SQLState: "XAE07", ErrorMessage: "XAER_RMFAIL"}
+		return
+	}
+	name, form, _ := strings.Cut(m.Name[i+1:], ".")
+	status, ok := map[string]uint16{"on": 0x0002, "off": 0x0000, "tx": 0x0001, "on+tx": 0x0003}[name]
+	if !ok {
+		panic("connAnswer: no status " + name + " in " + m.Name)
+	}
+	end := []byte{0x07, 0, 0, 3, 0xfe, 0, 0, byte(status), byte(status >> 8), 0, 0}
+	switch form {
+	case "eof":
+		end = []byte{0x05, 0, 0, 3, 0xfe, 0, 0, byte(status), byte(status >> 8)}
+	case "old":
+		end = []byte{0x01, 0, 0, 3, 0xfe}
+	case "pkt":
+		resp.Message = &mysql.EOFPacket{Header: 0xfe, StatusFlags: status}
+		return
+	}
+	terminator := &mysql.GenericResponse{Data: end, Type: mysql.StatusToString(mysql.EOF)}
+	if form == "" {
+		terminator.Type = mysql.StatusToString(mysql.OK)
+	}
+	switch req := m.Spec.MySQLRequests[0]; {
+	case req.Header != nil && req.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE):
+		resp.Message = &mysql.BinaryProtocolResultSet{FinalResponse: terminator}
+	case hasSelect(req):
+		resp.Message = &mysql.TextResultSet{FinalResponse: terminator}
+	default:
+		resp.Message = &mysql.OKPacket{Header: mysql.OK, StatusFlags: status}
+	}
+}
+
+// hasSelect reports whether req is a text query that reads (SELECT).
+func hasSelect(req mysql.Request) bool {
+	qp, _ := req.Message.(*mysql.QueryPacket)
+	return qp != nil && strings.HasPrefix(qp.Query, "SELECT")
 }
 
 // connPool is recs as recorded mocks, after a PREPARE of connStmt on each of
@@ -157,8 +194,9 @@ func connLive(live string) (context.Context, *wire.DecodeContext) {
 // pool scanned for every command (modeTestScan, and modeExactInTime, which
 // reads it in recorded order: recordedOrderStore). It returns what each call
 // was answered with, "miss" for none. Each live connection keeps its state
-// across tests, as an app's pool does.
-func replayConnSet(t *testing.T, recs []connRec, tests []connTest, mode string) [][]string {
+// across tests, as an app's pool does. With greeting set, each live
+// connection begins as one the server greeted with that status does.
+func replayConnSet(t *testing.T, greeting *uint16, recs []connRec, tests []connTest, mode string) [][]string {
 	t.Helper()
 	exact := mode == modeExact || mode == modeExactInTime
 	fullScan := mode == modeTestScan || mode == modeExactInTime
@@ -189,6 +227,9 @@ func replayConnSet(t *testing.T, recs []connRec, tests []connTest, mode string) 
 		for _, c := range tc.calls {
 			if dctxs[c.live] == nil {
 				ctxs[c.live], dctxs[c.live] = connLive(c.live)
+				if greeting != nil {
+					replayer.StartSessionForTest(dctxs[c.live], *greeting)
+				}
 			}
 			var resp *mysql.Response
 			var ok bool
@@ -217,11 +258,18 @@ func replayConnSet(t *testing.T, recs []connRec, tests []connTest, mode string) 
 // with another recording than the call's want.
 func checkConnSet(t *testing.T, recs []connRec, tests []connTest, modes ...string) {
 	t.Helper()
+	checkConnSession(t, nil, recs, tests, modes...)
+}
+
+// checkConnSession is checkConnSet with each live connection greeted with
+// the status greeting (nil: no greeting read).
+func checkConnSession(t *testing.T, greeting *uint16, recs []connRec, tests []connTest, modes ...string) {
+	t.Helper()
 	if len(modes) == 0 {
 		modes = []string{modeTest, modeTestScan, modeExact, modeExactInTime}
 	}
 	for _, mode := range modes {
-		got := replayConnSet(t, recs, tests, mode)
+		got := replayConnSet(t, greeting, recs, tests, mode)
 		for i, tc := range tests {
 			for j, c := range tc.calls {
 				if c.want != "*" && got[i][j] != c.want {
@@ -432,18 +480,18 @@ func TestConnectionRuleEndsAtCommitAndRollback(t *testing.T) {
 }
 
 // A session with autocommit off is always in a transaction (JDBC's
-// setAutoCommit(false) sends SET autocommit = 0, and no START): the SET
-// begins one, which the read after it binds; a COMMIT under it begins the
-// next at once, which the read after it binds again; and turning autocommit
-// on ends it, as the server commits it, so the reads after it are outside
-// every transaction and answered with the first exact match in the window.
-// Turning it off again while it is off keeps the transaction and its
-// binding.
+// setAutoCommit(false) sends SET autocommit = 0, and no START), as the SET's
+// answer says: the read after it binds; a COMMIT under it begins the next at
+// once, which the read after it binds again; and turning autocommit on ends
+// it, as the server commits it and says so, so the reads after it are
+// outside every transaction and answered with the first exact match in the
+// window. Turning it off again while it is off keeps the transaction (its
+// answer says it is open) and its binding.
 func TestConnectionRuleBindsATransactionOfAutocommitOff(t *testing.T) {
 	recs := []connRec{
 		{"off/off", "cA", "SET autocommit = 0", 500 * time.Microsecond, 0},
 		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
-		{"again/off", "cA", "SET autocommit = 0", 1200 * time.Microsecond, 0},
+		{"again/tx", "cA", "SET autocommit = 0", 1200 * time.Microsecond, 0},
 		{"b-count", "cB", "SELECT COUNT(*) FROM orders", 1500 * time.Microsecond, 0},
 		{"a-count", "cA", "SELECT COUNT(*) FROM orders", 2500 * time.Microsecond, 0},
 		{"y-b", "cB", "SELECT * FROM products WHERE id = 'y'", 2600 * time.Microsecond, 0},
@@ -457,7 +505,7 @@ func TestConnectionRuleBindsATransactionOfAutocommitOff(t *testing.T) {
 	checkConnSet(t, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
 		{"L1", "SET autocommit = 0", "off/off"},
 		{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
-		{"L1", "SET autocommit = 0", "again/off"},
+		{"L1", "SET autocommit = 0", "again/tx"},
 		{"L1", "SELECT COUNT(*) FROM orders", "a-count"},
 		{"L1", "COMMIT", "*"},
 		{"L1", "SELECT * FROM products WHERE id = 'y'", "y-b"},
@@ -468,12 +516,12 @@ func TestConnectionRuleBindsATransactionOfAutocommitOff(t *testing.T) {
 }
 
 // Autocommit turned off inside a transaction begun by START keeps it open
-// and bound, and its COMMIT begins the next at once, which the read after it
-// binds.
+// and bound (its answer says it is open), and its COMMIT begins the next at
+// once, which the read after it binds.
 func TestConnectionRuleTurnsAutocommitOffInsideATransaction(t *testing.T) {
 	recs := []connRec{
 		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
-		{"off/off", "cA", "SET autocommit = 0", 1200 * time.Microsecond, 0},
+		{"off/tx", "cA", "SET autocommit = 0", 1200 * time.Microsecond, 0},
 		{"y-b", "cB", "SELECT * FROM products WHERE id = 'y'", 2600 * time.Microsecond, 0},
 		{"y-a", "cA", "SELECT * FROM products WHERE id = 'y'", 2700 * time.Microsecond, 0},
 		{"z-a", "cA", "SELECT * FROM products WHERE id = 'z'", 2800 * time.Microsecond, 0},
@@ -482,7 +530,7 @@ func TestConnectionRuleTurnsAutocommitOffInsideATransaction(t *testing.T) {
 	checkConnSet(t, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
 		{"L1", "START TRANSACTION", "*"},
 		{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
-		{"L1", "SET autocommit = 0", "off/off"},
+		{"L1", "SET autocommit = 0", "off/tx"},
 		{"L1", "COMMIT", "*"},
 		{"L1", "SELECT * FROM products WHERE id = 'y'", "y-b"},
 		{"L1", "SELECT * FROM products WHERE id = 'z'", "z-b"},
@@ -495,7 +543,7 @@ func TestConnectionRuleTurnsAutocommitOffInsideATransaction(t *testing.T) {
 // begins none. A SET the server refused (an ERR answer: inside an XA
 // transaction) changes nothing, and nor does one no recording answered.
 // Inside a transaction begun by START, turning autocommit off, or on while
-// it is on, keeps the transaction and its binding.
+// it is on, keeps the transaction and its binding, as its answer says.
 func TestConnectionRuleReadsAutocommitFromTheAnswer(t *testing.T) {
 	recs := func(set string) []connRec {
 		r := []connRec{
@@ -517,8 +565,8 @@ func TestConnectionRuleReadsAutocommitFromTheAnswer(t *testing.T) {
 		{"default on", "set/on", false, "b-count"},
 		{"refused", "set/err", false, "b-count"},
 		{"not answered", "", false, "b-count"},
-		{"off in START", "set/off", true, "a-count"},
-		{"on in START", "set/on", true, "a-count"},
+		{"off in START", "set/tx", true, "a-count"},
+		{"on in START", "set/on+tx", true, "a-count"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var calls []connCall
@@ -563,6 +611,115 @@ func TestConnectionRuleResetBringsBackTheDefaultAutocommit(t *testing.T) {
 				{"L1", "SET autocommit = 0", "off/off"},
 				{"L1", "reset", "*"},
 				{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+				{"L1", "SELECT COUNT(*) FROM orders", c.count},
+			}}})
+		})
+	}
+}
+
+// A session whose init_connect turns autocommit off (the greeting and the
+// login said it was on: the server sends them before it runs init_connect)
+// is in a transaction from its first read, as that read's answer says (the
+// status that ends its result set), so the first read binds, whatever form
+// its result set ends in, an EXECUTE's binary one too; and a read whose
+// answer says no transaction is open binds nothing. So does a command
+// answered with a bare EOF packet. Inside a transaction begun by START with
+// autocommit on, a read whose answer says the transaction is open binds as
+// any other. An EOF of the protocol before 4.1 has no status: the read is
+// outside every transaction, as the greeting said.
+func TestConnectionRuleReadsTheTransactionFromEachAnswer(t *testing.T) {
+	const cust = "SELECT * FROM customers WHERE id = 'a'"
+	for _, c := range []struct {
+		first, sql string
+		start      bool
+		count      string
+	}{
+		{"a-cust/tx", cust, false, "a-count"},
+		{"a-cust/tx.eof", cust, false, "a-count"},
+		{"a-cust/tx.pkt", cust, false, "a-count"},
+		{"a-exec/tx", "exec:a", false, "a-count"},
+		{"a-exec/tx.eof", "exec:a", false, "a-count"},
+		{"a-cust/on", cust, false, "b-count"},
+		{"a-cust/tx.old", cust, false, "b-count"},
+		{"a-cust/on+tx", cust, true, "a-count"},
+	} {
+		t.Run(c.first, func(t *testing.T) {
+			recs := []connRec{
+				{c.first, "cA", c.sql, 1000 * time.Microsecond, 0},
+				{"b-count", "cB", "SELECT COUNT(*) FROM orders", 1500 * time.Microsecond, 0},
+				{"a-count", "cA", "SELECT COUNT(*) FROM orders", 2500 * time.Microsecond, 0},
+			}
+			var calls []connCall
+			if c.start {
+				calls = append(calls, connCall{"L1", "START TRANSACTION", "*"})
+			}
+			calls = append(calls,
+				connCall{"L1", c.sql, c.first},
+				connCall{"L1", "SELECT COUNT(*) FROM orders", c.count})
+			on := uint16(0x0002)
+			checkConnSession(t, &on, recs, []connTest{{0, 4 * time.Millisecond, calls}})
+		})
+	}
+}
+
+// A server whose global autocommit is off begins every session with it off,
+// as its greeting's status says: the session is in a transaction from its
+// first statement, so the first read binds though its answer carries no
+// status (as an ERR's does not), and a reset nothing recorded answered
+// brings that autocommit back. Greeted with autocommit on, neither binds.
+func TestConnectionRuleReadsTheGreetingsAutocommit(t *testing.T) {
+	recs := []connRec{
+		{"on/on", "cA", "SET autocommit = 1", 300 * time.Microsecond, 0},
+		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
+		{"b-count", "cB", "SELECT COUNT(*) FROM orders", 1500 * time.Microsecond, 0},
+		{"a-count", "cA", "SELECT COUNT(*) FROM orders", 2500 * time.Microsecond, 0},
+	}
+	for _, c := range []struct {
+		name     string
+		greeting uint16
+		reset    bool
+		count    string
+	}{
+		{"off", 0x0000, false, "a-count"},
+		{"on", 0x0002, false, "b-count"},
+		{"off, reset", 0x0000, true, "a-count"},
+		{"on, reset", 0x0002, true, "b-count"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var calls []connCall
+			if c.reset {
+				calls = append(calls,
+					connCall{"L1", "SET autocommit = 1", "on/on"},
+					connCall{"L1", "reset", "*"})
+			}
+			calls = append(calls,
+				connCall{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+				connCall{"L1", "SELECT COUNT(*) FROM orders", c.count})
+			checkConnSession(t, &c.greeting, recs, []connTest{{0, 4 * time.Millisecond, calls}})
+		})
+	}
+}
+
+// A statement that commits the open transaction implicitly (CREATE TABLE,
+// as every DDL and LOCK TABLES do) ends it, as its answer says, though its
+// text is no COMMIT: the read after it is outside every transaction. One
+// whose answer says the transaction is still open keeps it.
+func TestConnectionRuleEndsAtAnImplicitCommit(t *testing.T) {
+	for _, c := range []struct{ ddl, count string }{
+		{"ddl/on", "b-count"},
+		{"ddl/on+tx", "a-count"},
+	} {
+		t.Run(c.ddl, func(t *testing.T) {
+			recs := []connRec{
+				{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
+				{c.ddl, "cA", "CREATE TABLE t (id INT)", 1200 * time.Microsecond, 0},
+				{"b-count", "cB", "SELECT COUNT(*) FROM orders", 1500 * time.Microsecond, 0},
+				{"a-count", "cA", "SELECT COUNT(*) FROM orders", 2500 * time.Microsecond, 0},
+			}
+			checkConnSet(t, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
+				{"L1", "START TRANSACTION", "*"},
+				{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+				{"L1", "CREATE TABLE t (id INT)", c.ddl},
 				{"L1", "SELECT COUNT(*) FROM orders", c.count},
 			}}})
 		})
@@ -831,7 +988,6 @@ func TestConnectionRuleReadsTransactionControl(t *testing.T) {
 		"STARTS":                            "none",
 		"BEGINNING":                         "none",
 		"COMMITTED":                         "none",
-		"SET autocommit = 0":                "autocommit",
 		"SELECT * FROM t WHERE c = 'BEGIN'": "none",
 		"":                                  "none",
 		"  begin":                           "begin",
@@ -854,59 +1010,9 @@ func TestConnectionRuleReadsTransactionControl(t *testing.T) {
 		"XA":                       "none",
 		"XAX START 'x'":            "none",
 		"/* app */ XA COMMIT 'x';": "end",
-		// The session's autocommit, in every scope spelling that sets it.
-		"set autocommit=0":                               "autocommit",
-		"SET AUTOCOMMIT = OFF":                           "autocommit",
-		"SET SESSION autocommit = 0":                     "autocommit",
-		"SET LOCAL autocommit=0":                         "autocommit",
-		"SET @@autocommit := 0":                          "autocommit",
-		"SET @@session.autocommit = OFF":                 "autocommit",
-		"SET @@LOCAL.AUTOCOMMIT=1":                       "autocommit",
-		"SET `autocommit` = 0":                           "autocommit",
-		"SET autocommit = DEFAULT":                       "autocommit",
-		"SET autocommit = @saved":                        "autocommit",
-		"SET\tautocommit=0;":                             "autocommit",
-		"SET@@autocommit=0":                              "autocommit",
-		"/* jdbc */ SET autocommit=0":                    "autocommit",
-		"SET sql_mode = 'a,b', autocommit = 0":           "autocommit",
-		"SET NAMES utf8mb4, autocommit = 0":              "autocommit",
-		"SET x = CONCAT('a', ','), autocommit = 0":       "autocommit",
-		"SET x = (SELECT 1, 2), autocommit = 0":          "autocommit",
-		"SET x = 'it\\'s, ok', autocommit = 0":           "autocommit",
-		"SET GLOBAL x = 1, SESSION autocommit = 0":       "autocommit",
-		"SET GLOBAL x = 1, @@autocommit = 0":             "autocommit",
-		"SET autocommit = 0, GLOBAL autocommit = 1":      "autocommit",
-		"SET GLOBAL autocommit = 0":                      "none",
-		"SET PERSIST autocommit = 0":                     "none",
-		"SET persist_only autocommit = 0":                "none",
-		"SET @@global.autocommit = 0":                    "none",
-		"SET @@PERSIST.autocommit = 0":                   "none",
-		"SET @@persist_only.autocommit = 0":              "none",
-		"SET GLOBAL x = 1, autocommit = 0":               "none",
-		"SET PERSIST x = 1, autocommit = 0":              "none",
-		"SET PERSIST_ONLY x = 1, autocommit = 0":         "none",
-		"SET GLOBAL x = 1, LOCAL autocommit = 0":         "autocommit",
-		"SET @autocommit = 0":                            "none",
-		"SET @x = 'autocommit = 0'":                      "none",
-		"SET x = 'a, autocommit = 0'":                    "none",
-		"SET x = \"a, autocommit = 0\"":                  "none",
-		"SET x = `a, autocommit = 0`":                    "none",
-		"SET x = f(1, autocommit = 0)":                   "none",
-		"SET autocommit_x = 0":                           "none",
-		"SET autocommit":                                 "none",
-		"SET autocommit IN (0)":                          "none",
-		"SET NAMES utf8mb4":                              "none",
-		"SETTINGS autocommit = 0":                        "none",
-		"SET TRANSACTION ISOLATION LEVEL READ COMMITTED": "none",
-		"SET STATEMENT autocommit = 0 FOR SELECT 1":      "none",
-		"SELECT @@autocommit":                            "none",
-		"SETautocommit = 0":                              "none",
-		"SET`autocommit` = 0":                            "autocommit",
-		"SET SESSION`autocommit` = 0":                    "autocommit",
-		"SET GLOBAL`autocommit` = 0":                     "none",
-		"SET `x\\` = 1, autocommit = 0":                  "autocommit",
-		"SET":                                            "none",
-		"SET `autocommit":                                "none",
+		// What a SET makes of autocommit, its answer's status says.
+		"SET autocommit = 0":         "none",
+		"SET @@session.autocommit=1": "none",
 	} {
 		if got := replayer.TxControlForTest(queryReq(sql)); got != want {
 			t.Errorf("%q: %s, want %s", sql, got, want)

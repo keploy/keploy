@@ -380,20 +380,24 @@ func ForgetPlacesForTest() {
 // (placesReads) since the process started.
 func PlacesReadsForTest() int64 { return placesReads.Load() }
 
-// TxControlForTest is txControlOf's verdict on req: "begin", "end",
-// "autocommit", "reset" or "none".
+// TxControlForTest is txControlOf's verdict on req: "begin", "end", "reset"
+// or "none".
 func TxControlForTest(req mysql.Request) string {
 	switch txControlOf(req) {
 	case txBegin:
 		return "begin"
 	case txEnd:
 		return "end"
-	case txAutocommit:
-		return "autocommit"
 	case txReset:
 		return "reset"
 	}
 	return "none"
+}
+
+// StartSessionForTest begins d's session as one the server greeted with the
+// status flags status (startSession).
+func StartSessionForTest(d *wire.DecodeContext, status uint16) {
+	startSession(d, &mysql.HandshakeV10Packet{StatusFlags: status})
 }
 
 // MatchBoundExaminedForTest is MatchBoundForTest's match with no full scan

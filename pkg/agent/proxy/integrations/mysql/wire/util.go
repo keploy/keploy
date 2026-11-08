@@ -69,19 +69,22 @@ type DecodeContext struct {
 	// Statement ID counter for generating unique statement IDs during replay
 	NextStmtID uint32
 
-	// InTx, Bound and BoundWindow are replay's binding of the live
-	// connection's open transaction to the connection it was recorded on.
-	// InTx is whether the live connection is in a transaction: it began one
-	// (START TRANSACTION, BEGIN, XA START) and has not ended it (COMMIT,
-	// ROLLBACK), or its autocommit is off. Bound is the recording that
-	// answered the transaction's latest command after its start, and
-	// BoundWindow the start of the test window it answered in (zero under
-	// exact serving). AutocommitOff is whether the live session's autocommit
-	// is off (SET autocommit = 0). The replayer keeps them.
-	InTx          bool
-	Bound         *models.Mock
-	BoundWindow   time.Time
-	AutocommitOff bool
+	// InTx, Bound, BoundWindow, AutocommitOff and AutocommitOffAtConnect
+	// are replay's binding of the live connection's open transaction to the
+	// connection it was recorded on, which the replayer keeps from the
+	// status of the answers it replayed (its connection rule). InTx is
+	// whether the live connection is in a transaction: the latest answer
+	// said one is open, or that its autocommit is off. Bound is the
+	// recording that answered the transaction's latest command after its
+	// start, and BoundWindow the start of the test window it answered in
+	// (zero under exact serving). AutocommitOff is whether the live
+	// session's autocommit is off, and AutocommitOffAtConnect whether it was
+	// at connect (the greeting's status), which a reset brings back.
+	InTx                   bool
+	Bound                  *models.Mock
+	BoundWindow            time.Time
+	AutocommitOff          bool
+	AutocommitOffAtConnect bool
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000
