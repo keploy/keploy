@@ -492,7 +492,7 @@ func TestHandleIncoming_ATestCaseLetGoUnsettledIsWarnedWhenTheClientEndsTheStrea
 	}
 	// Before srv.Close, which waits for the handler: a row that fails
 	// before it ends the stream would hang there instead.
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	names := streamOf(t, resp)
 
 	start := newStretch().Add(time.Second)
@@ -539,7 +539,7 @@ func TestHandleIncoming_AClientEndingTheStreamUnderTrafficIsAnOrdinaryEnd(t *tes
 	}
 	// Before srv.Close, which waits for the handler: a row that fails
 	// before it ends the stream would hang there instead.
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	names := streamOf(t, resp)
 
 	// Steady traffic after the stop.
