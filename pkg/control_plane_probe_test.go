@@ -9,7 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/internal/testnet"
@@ -234,7 +233,7 @@ func TestAgentHealthTicker_ChecksTheGuardWhenTheAgentBecomesReady(t *testing.T) 
 
 	recordLaunch(t, srv.URL+"/agent")
 	readyCh := make(chan bool, 1)
-	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh, 10*time.Millisecond)
+	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh)
 
 	// No clock bounds either wait: an agent that never becomes ready, or a
 	// check that never lands, fails the run at go test's own -timeout,
@@ -277,7 +276,7 @@ func TestAgentHealthTickerWithAnswer_SendsTheReadyAnswerAndChecksTheGuard(t *tes
 	defer cancel()
 	recordLaunch(t, srv.URL+"/agent")
 	answers := make(chan http.Header, 1)
-	go AgentHealthTickerWithAnswer(ctx, zap.NewNop(), srv.URL+"/agent", answers, 10*time.Millisecond)
+	go AgentHealthTickerWithAnswer(ctx, zap.NewNop(), srv.URL+"/agent", answers)
 
 	header := <-answers
 	require.NotNil(t, header, "the agent answered 200, so the ticker must send its headers")
@@ -290,7 +289,7 @@ func TestAgentHealthTickerWithAnswer_SendsTheReadyAnswerAndChecksTheGuard(t *tes
 	goneURL := "http://" + testnet.RefusedAddr(t, "tcp") // nothing answers there, nor can come to
 	ended, end := context.WithCancel(context.Background())
 	nothing := make(chan http.Header, 1)
-	go AgentHealthTickerWithAnswer(ended, zap.NewNop(), goneURL+"/agent", nothing, 10*time.Millisecond)
+	go AgentHealthTickerWithAnswer(ended, zap.NewNop(), goneURL+"/agent", nothing)
 	end()
 	header, open = <-nothing
 	require.False(t, open, "a ticker whose ctx ended must close the channel")
@@ -323,7 +322,7 @@ func TestAgentHealthTicker_ReadinessDoesNotWaitOnTheCheck(t *testing.T) {
 
 	recordLaunch(t, srv.URL+"/agent")
 	readyCh := make(chan bool, 1)
-	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh, 10*time.Millisecond)
+	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh)
 
 	// Readiness comes while the check is held open. No clock bounds the
 	// wait: a readiness blocked behind the check never comes, and go

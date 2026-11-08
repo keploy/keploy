@@ -2416,7 +2416,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh)
 		agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
 		select {

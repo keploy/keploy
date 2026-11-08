@@ -3256,7 +3256,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	// The headers of the health answer that finds the agent ready, which its
 	// proven switch is read from (below).
 	answers := make(chan http.Header, 1)
-	go pkg.AgentHealthTickerWithAnswer(agentCtx, a.logger, a.conf.Agent.AgentURI, answers, 1*time.Second)
+	go pkg.AgentHealthTickerWithAnswer(agentCtx, a.logger, a.conf.Agent.AgentURI, answers)
 
 	// What the agent reports of its start, and whether its process runs:
 	// judged once a bootLook (watchStart).

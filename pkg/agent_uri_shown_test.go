@@ -384,7 +384,7 @@ func TestAgentHealthTickerNeverSaysTheAgentURIsPassword(t *testing.T) {
 				defer cancel()
 			}
 			ready := make(chan bool, 1)
-			go AgentHealthTicker(ctx, zap.New(core), tc.uri, ready, 5*time.Millisecond)
+			go AgentHealthTicker(ctx, zap.New(core), tc.uri, ready)
 			if ok := <-ready; ok != tc.healthy {
 				t.Fatalf("the agent was found healthy: %v; want %v", ok, tc.healthy)
 			}

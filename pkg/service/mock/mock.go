@@ -262,7 +262,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 	agentCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	agentReadyCh := make(chan bool, 1)
-	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh, time.Second)
+	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh)
 	agentStart := pkg.WatchAgentStart(agentCtx, m.instrumentation)
 
 	select {
