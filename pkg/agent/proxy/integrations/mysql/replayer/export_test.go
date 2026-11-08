@@ -391,6 +391,17 @@ func TxControlForTest(req mysql.Request) string {
 	return "none"
 }
 
+// MatchBoundExaminedForTest is MatchBoundForTest's match with no full scan
+// asked for, that also returns how many candidates the scan visited
+// (matchOptions.examined).
+func MatchBoundExaminedForTest(ctx context.Context, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext) (*mysql.Response, bool, int, error) {
+	var served servedRecording
+	examined := 0
+	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, nil, nil, matchOptions{served: &served, examined: &examined})
+	bindAfter(dctx, req, served)
+	return resp, ok, examined, err
+}
+
 // MatchBoundForTest is MatchCommandForTest that keeps the live connection's
 // transaction and its binding as matchCommand does (bindAfter), so a test can
 // check that the full scan answers a bound transaction as the first pass does.

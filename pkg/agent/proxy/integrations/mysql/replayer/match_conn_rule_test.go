@@ -513,51 +513,42 @@ func TestConnectionRuleRanksTheTestsOwnAboveAnotherTestsMatch(t *testing.T) {
 	}, modeTest, modeTestScan)
 }
 
-// sessionReads counts the matcher's reads of the whole session tier, which
-// its full scan makes (loadPool).
-type sessionReads struct {
-	*proxy.MockManager
-	n *int
-}
-
-func (s sessionReads) GetSessionMocks() ([]*models.Mock, error) {
-	*s.n++
-	return s.MockManager.GetSessionMocks()
-}
-
 // Under exact serving the keyed pass of a command compares every recording of
 // its text: when the open test owns none, the first it does not own answers
 // there, inside a bound transaction too, with no scan of the whole pool.
 func TestConnectionRuleAnswersAnotherTestsMatchWithoutAFullScan(t *testing.T) {
-	pool, byTest := connPool([]connRec{
+	recs := []connRec{
 		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
 		{"pool-sel", "cB", "SELECT * FROM products WHERE id = 'x'", 7 * time.Millisecond, -1},
-	})
+	}
+	const others = 200
+	for i := range others {
+		recs = append(recs, connRec{fmt.Sprintf("other-%d", i), "cB", fmt.Sprintf("SELECT * FROM stock WHERE id = '%d'", i), 8*time.Millisecond + time.Duration(i)*time.Microsecond, -1})
+	}
+	pool, byTest := connPool(recs)
 	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	mm.SetMocksWithWindow(nil, pool, models.BaseTime, time.Now().Add(time.Hour))
 	mm.ServeExactTest("T0", byTest[0])
-	reads := 0
-	db := sessionReads{mm, &reads}
 	ctx, dctx := connLive("L1")
 	for _, c := range []connCall{
 		{"L1", "START TRANSACTION", "*"},
 		{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
 		{"L1", "SELECT * FROM products WHERE id = 'x'", "pool-sel"},
 	} {
-		reads = 0
-		resp, ok, _, err := replayer.MatchWithEngineForTest(ctx, zap.NewNop(), connReq(c.sql), db, dctx, nil)
+		resp, ok, examined, err := replayer.MatchBoundExaminedForTest(ctx, connReq(c.sql), mm, dctx)
 		if err != nil {
 			t.Fatalf("%q: %v", c.sql, err)
 		}
+		t.Logf("%q visited %d candidates", c.sql, examined)
 		if c.want == "*" {
 			continue
 		}
 		if !ok || resp == nil || resp.Payload != c.want {
 			t.Fatalf("%q was answered with %v (ok %v); want %s", c.sql, resp, ok, c.want)
 		}
-		if reads != 0 {
-			t.Errorf("%q read the whole session tier %d times; want none (the keyed pass settles it)", c.sql, reads)
+		if examined > others/2 {
+			t.Errorf("%q visited %d candidates of the %d the pool holds; want the keyed pass's few", c.sql, examined, len(pool))
 		}
 	}
 }
