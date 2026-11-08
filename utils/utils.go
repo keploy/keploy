@@ -1548,7 +1548,9 @@ func EnsureRmBeforeName(cmd string) string {
 	for i, part := range parts {
 		if part == "--rm" {
 			rmIndex = i
-		} else if part == "--name" {
+		} else if part == "--name" || (strings.HasPrefix(part, "--name=") && part != "--name=") {
+			// Docker accepts both "--name app" and "--name=app"
+			// (see dockerLongFlagValue).
 			nameIndex = i
 			break // Assuming --name will always have an argument, we can break here
 		}
