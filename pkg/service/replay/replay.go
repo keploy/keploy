@@ -669,13 +669,20 @@ type Replayer struct {
 	// readyTally is provenReadiness.tally for the sets' waits: tests only.
 	readyTally *readTally
 
-	// isFirstTestSet mirrors isLastTestSet — true while the test-set
-	// about to run is the first one of the current replay run. Read
-	// by the waitForAppReady gate so --delay applies only to the first
-	// test-set when --keep-app-alive is set (subsequent test-sets
-	// inherit a warm app and would otherwise pay --delay seconds of
-	// dead time per boundary).
-	isFirstTestSet     bool
+	// isFirstTestSet is true while the test set about to run is the first
+	// of the current replay run to reach the wait for its application
+	// (keptAppWaited). Read by the waitForAppReady gate so --delay applies
+	// only to that test set when --keep-app-alive is set (later test sets
+	// inherit a warm app and would otherwise pay --delay seconds of dead
+	// time per boundary).
+	isFirstTestSet bool
+	// keptAppWaited is whether a test set of this run has reached the wait
+	// for its application. The first to reach it waits for the application
+	// --keep-app-alive keeps, whichever set that is: a set can end before
+	// it (a replay hook refused one of its mocks, it has no test case to
+	// send), and the next set must not fire at an application nobody
+	// waited for.
+	keptAppWaited      bool
 	runDomainSet       *telemetry.DomainSet // collects host domains across a test run for telemetry
 	testRunTestSets    []string             // all test set IDs for the current run (used by RunTestSet)
 	testRunID          string               // current test run ID (used by RunTestSet)
@@ -729,6 +736,10 @@ type Replayer struct {
 	// a reason, keyed by test set and test, for the run's summary.
 	quarantinedMu sync.Mutex
 	quarantined   map[[2]string]string
+	// refusedSets is each test set of this run keploy refused because a
+	// replay hook refused one of its mocks, with why, for the run's summary
+	// (failSetRefusedMock). Guarded by completeTestReportMu.
+	refusedSets map[string]string
 	// pidMark is where the next test set's refused PID map inserts are
 	// counted from (pidmaps.go).
 	pidMark pidMapMark
@@ -928,6 +939,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.totalTests, r.totalTestPassed, r.totalTestFailed, r.totalTestObsolete, r.totalTestIgnored = 0, 0, 0, 0, 0
 	r.consumedMockNames = make(map[string]struct{})
 	r.totalTestTimeTaken = 0
+	r.refusedSets = nil
 	r.completeTestReportMu.Unlock()
 	r.forgetQuarantined()
 	r.failedTCsBySetID = make(map[string][]string)
@@ -1276,6 +1288,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.testRunTestSets = testSets
 	r.testRunID = testRunID
 	r.firstRun = true
+	r.keptAppWaited = false
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -1303,12 +1316,14 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		if i == len(testSets)-1 {
 			r.isLastTestSet = true
 		}
-		// Mirror of isLastTestSet but for the first-testset boundary.
-		// Set BEFORE the RunTestSet call so the waitForAppReady call
-		// sites in RunTestSet observe the right value. Reset only at
-		// the top of this iteration (so a flaky-retry attempt within
-		// the SAME iteration still observes the same value).
-		r.isFirstTestSet = (i == 0)
+		// Mirror of isLastTestSet but for the first-testset boundary:
+		// the first set to reach the application's wait, not the set
+		// at index 0 (keptAppWaited). Set BEFORE the RunTestSet call so
+		// the waitForAppReady call sites in RunTestSet observe the
+		// right value. Reset only at the top of this iteration (so a
+		// flaky-retry attempt within the SAME iteration still observes
+		// the same value).
+		r.isFirstTestSet = !r.keptAppWaited
 
 		r.completeTestReportMu.RLock()
 		initTotal := r.totalTests
@@ -2381,13 +2396,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// none of whose selected test cases is on disk has nothing to send, and
 	// fails without starting the application.
 	missing, selectedCount := missingSelected(r.config.Test.SelectedTests[testSetID], testCases)
+	// notFoundRows are those test cases' rows, a set refused below fails with.
+	var notFoundRows []models.TestResult
 	if len(missing) > 0 {
-		rows, err := r.failMissingSelected(runTestSetCtx, testRunID, testSetID, missing)
+		notFoundRows, err = r.failMissingSelected(runTestSetCtx, testRunID, testSetID, missing)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
 		if len(missing) == selectedCount {
-			return models.TestSetStatusFailed, r.failSetUnrun(runTestSetCtx, testRunID, testSetID, rows, notFoundSetReason(testSetID, missing), startTime)
+			return models.TestSetStatusFailed, r.failSetUnrun(runTestSetCtx, testRunID, testSetID, notFoundRows, notFoundSetReason(testSetID, missing), startTime)
 		}
 	}
 
@@ -2934,6 +2951,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		filteredMocks, unfilteredMocks, err := loadMocksForAgent()
+		if refusal := mockRefusal(ctx, err); refusal != nil {
+			return models.TestSetStatusFailed, r.failSetRefusedMock(runTestSetCtx, testRunID, testSetID, testCases, notFoundRows, refusal, startTime)
+		}
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -3003,12 +3023,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		//
 		// --keep-app-alive: the app was spawned ONCE in Start() and
 		// has already passed its readiness check during the first
-		// test-set; subsequent test-sets inherit the warm app, so
+		// test-set to reach this wait (keptAppWaited: a set can end
+		// before it); the test-sets after it inherit the warm app, so
 		// paying --delay seconds (or another HealthURL poll round)
-		// per boundary is dead time. Skip when we're past the first
-		// test-set. The first test-set still runs the wait so the
-		// initial app startup can finish (build/boot/connect) before
-		// the first request fires.
+		// per boundary is dead time. Skip for those. The first
+		// test-set to reach the wait still runs it so the initial app
+		// startup can finish (build/boot/connect) before the first
+		// request fires.
 		//
 		// Gate keyed on `serveTest` (the parameter Start() computes
 		// as `effectiveKeepAlive`) rather than the raw config bool,
@@ -3022,6 +3043,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// never got ready for the first set is not fired at for the next,
 		// and a compose app keploy started again for this set is waited for,
 		// as a start (not warm: its --delay is kept).
+		r.keptAppWaited = true
 		if !waitsForApp(serveTest, r.isFirstTestSet) {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet && composeRestart == nil); !ready && why == "" {
@@ -3059,6 +3081,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if cmdType != utils.DockerCompose && !r.noAgent {
 
 		filteredMocks, unfilteredMocks, err := loadMocksForAgent()
+		if refusal := mockRefusal(ctx, err); refusal != nil {
+			return models.TestSetStatusFailed, r.failSetRefusedMock(runTestSetCtx, testRunID, testSetID, testCases, notFoundRows, refusal, startTime)
+		}
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -3218,6 +3243,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// effectiveKeepAlive predicate) — identical to the compose
 			// branch above — so the readiness skip arms only when the
 			// one-shot spawn actually fired.
+			r.keptAppWaited = true
 			if !waitsForApp(serveTest, r.isFirstTestSet) {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 			} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
@@ -3922,9 +3948,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if replay == 0 {
 				if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 					if err := mutator.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
-						utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
-							zap.String("testcase", testCase.Name),
-							zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
+						r.sayBeforeTestCaseRunFailed(err, testCase)
 					}
 				}
 			}
@@ -5149,9 +5173,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// in Phase 1 is not needed here — each tc is executed exactly once.
 			if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 				if err := mutator.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
-					utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
-						zap.String("testcase", tc.Name),
-						zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
+					r.sayBeforeTestCaseRunFailed(err, tc)
 				}
 			}
 
@@ -8899,6 +8921,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				}
 			}
 			fmt.Print(r.quarantinedSummary())
+			fmt.Print(r.refusedSetsSummary())
 			if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
 				utils.LogError(r.logger, err, "failed to print separator")
 				return
@@ -8964,8 +8987,14 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			}
 
 			fmt.Print(r.quarantinedSummary())
+			fmt.Print(r.refusedSetsSummary())
 			fmt.Print("\n<=========================================> \n\n")
 		}
+	} else if refused := r.refusedSetsSummary(); refused != "" {
+		// The run counted no test case, so there is no table to print, but
+		// it refused a set (each of whose test cases it ignores): the
+		// summary still lists it, with its reason.
+		fmt.Print("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: 0" + refused + "\n<=========================================> \n\n")
 	}
 }
 func (r *Replayer) RunApplication(ctx context.Context, opts models.RunOptions) models.AppError {
