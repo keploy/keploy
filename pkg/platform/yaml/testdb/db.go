@@ -1028,10 +1028,18 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 	return "", fmt.Errorf("failed to allocate a unique testcase name after %d attempts (last candidate %q)", maxNameClaimAttempts, lastName)
 }
 
+// DeleteTests deletes the test cases testCaseIDs from the test set testSetID.
+// A test case whose file is already gone is deleted (the set does not hold
+// it), so asking again for one a call deleted before it failed part way is
+// not an error. It stops at the first test case it cannot delete.
 func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 	for _, testCaseID := range testCaseIDs {
 		err := yaml.DeleteRecordingFileF(ts.logger, ts.TcsPath, path, testCaseID, ts.Format)
+		if errors.Is(err, fs.ErrNotExist) {
+			ts.logger.Debug("the testcase to delete is already gone", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
+			continue
+		}
 		if err != nil {
 			ts.logger.Error("failed to delete the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
 			return err

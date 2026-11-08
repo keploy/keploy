@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1107,6 +1108,36 @@ type testCaseDeleter interface {
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 }
 
+// deleteRevoked deletes the revoked test cases names from the test set
+// setID in td, and returns those it deleted. It asks for them all in one
+// call, as a shared loss can revoke thousands and a store may make each call
+// a round trip; when that call fails, it deletes them one by one, so one
+// that cannot be deleted leaves the others deleted. A store's batch may stop
+// part way, so a name it reports gone (fs.ErrNotExist) on the retry counts
+// as deleted: it is not in the set. One that fails is left in the set, said
+// at WARN, and not returned.
+func deleteRevoked(ctx context.Context, logger *zap.Logger, td testCaseDeleter, setID string, names []string) map[string]struct{} {
+	deleted := make(map[string]struct{}, len(names))
+	err := td.DeleteTests(ctx, setID, names)
+	if err == nil {
+		for _, n := range names {
+			deleted[n] = struct{}{}
+		}
+		return deleted
+	}
+	logger.Debug("deferred-orphan revoke: deleting the revoked test cases at once failed; deleting them one by one",
+		zap.String("testSetID", setID), zap.Int("count", len(names)), zap.Error(err))
+	for _, n := range names {
+		if err := td.DeleteTests(ctx, setID, []string{n}); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			logger.Warn("deferred-orphan revoke: failed to delete a capacity-orphaned test case; leaving it in the set",
+				zap.String("testSetID", setID), zap.String("testCase", n), zap.Error(err))
+			continue
+		}
+		deleted[n] = struct{}{}
+	}
+	return deleted
+}
+
 // savedTestCaseDeleter is the recording's store as a testCaseDeleter, reached
 // by assertion; ok is false for a store that cannot delete a test case it
 // saved, so a revoke from the agent cannot be applied to it.
@@ -2061,17 +2092,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			// Reach it by runtime assertion (savedTestCaseDeleter); degrade to a
 			// warning if unavailable.
 			if td, ok := r.savedTestCaseDeleter(); ok {
-				deleted := 0
-				for _, n := range toDelete {
-					if err := td.DeleteTests(ctx, newTestSetID, []string{n}); err != nil {
-						r.logger.Warn("deferred-orphan revoke: failed to delete a capacity-orphaned test case; leaving it in the set",
-							zap.String("testSetID", newTestSetID), zap.String("testCase", n), zap.Error(err))
-						continue
-					}
-					deletedSet[n] = struct{}{}
-					deleted++
-				}
-				if deleted > 0 {
+				deletedSet = deleteRevoked(ctx, r.logger, td, newTestSetID, toDelete)
+				if deleted := len(deletedSet); deleted > 0 {
 					// Guard under insertedMu so this decrement can't race the
 					// (possibly still-live, on the drain-timeout path) testCount++
 					// in the TC-insert loop, which now runs under the same lock.
