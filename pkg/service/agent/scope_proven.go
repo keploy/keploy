@@ -202,6 +202,11 @@ type provenWire struct {
 	// its tests and how far the session's begins went in it
 	// (keepRecordedOrder).
 	order recordedOrder
+	// readsNoSetEnd is the session's word (MockOutgoing) that its client
+	// reads no set's end (models.OutgoingOptions.ReadsSetEnds false). False
+	// until a session says so, so a replay's claim that comes before it is
+	// refused several workers (setEndWorkersRefusal).
+	readsNoSetEnd bool
 }
 
 // recordedOrder is what keeps a session's learn step to tests begun in their

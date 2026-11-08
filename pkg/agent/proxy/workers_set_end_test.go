@@ -15,7 +15,9 @@ import (
 // ends, after the set's last read, and a connection that outlives the set
 // would leave it unreported there. No run reaches that store while keploy's
 // agent takes one test worker at a time: MaxWorkers is the one place the
-// number is set, and a claim that declares more is refused at once.
+// number is set, and a claim that declares more is refused at once. In a
+// build that raises it, a replay whose session reads set ends still refuses
+// a claim of several workers (the agent's setEndWorkersRefusal).
 //
 // This row holds the two together. It fails the moment a build lets
 // MaxWorkers take more than one test worker while a worker's store still

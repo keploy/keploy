@@ -193,5 +193,8 @@ func TestMockOutgoing_SaysTheClientReadsSetEndsOnlyToAProxyThatFilesThem(t *test
 		if got.ReadsSetEnds != tc.want {
 			t.Fatalf("files %v, reads %v: the proxy was told ReadsSetEnds=%v, want %v", tc.files, tc.reads, got.ReadsSetEnds, tc.want)
 		}
+		if a.proven.readsNoSetEnd == tc.want {
+			t.Fatalf("files %v, reads %v: the session's word that it reads no set's end is %v, want %v (setEndWorkersRefusal)", tc.files, tc.reads, a.proven.readsNoSetEnd, !tc.want)
+		}
 	}
 }

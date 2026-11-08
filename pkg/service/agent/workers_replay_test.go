@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"sync"
 	"testing"
@@ -663,6 +664,59 @@ func TestAClockMovingReplayRefusesMoreThanOneWorkerAtTheClaim(t *testing.T) {
 			require.Nil(t, serr, "one worker runs on the run's one clock")
 			require.Len(t, clock.moves, 1)
 			require.Contains(t, clock.moves[0], "begin a::TestOne")
+		})
+	}
+}
+
+// A replay whose session reads each set's end takes one test worker, in
+// every build, whatever MaxWorkers says: a claim of two is refused at the
+// claim, named, before any test runs, since a call a worker's own store
+// holds for a later test would be filed only when its connection ends,
+// after the set's last read. So is a claim before any session said it reads
+// none. A replay whose session reads none takes both, and so does a record,
+// which files nothing at a set's end.
+func TestAReplayThatReadsSetEndsRefusesMoreThanOneWorkerAtTheClaim(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		mode        models.Mode
+		reads, said bool
+		refused     bool
+	}{
+		{"replay reads set ends", models.MODE_TEST, true, true, true},
+		{"replay before its session's word", models.MODE_TEST, false, false, true},
+		{"replay reads none", models.MODE_TEST, false, true, false},
+		{"record reads set ends", models.MODE_RECORD, true, true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, p, h := instanceAgent(t, c.mode)
+			if c.said {
+				a.proven.readsNoSetEnd = !c.reads
+			} else {
+				// A new session, which has not said yet.
+				require.NoError(t, a.resetSession(context.Background()))
+			}
+			w1, w2 := child(t), child(t)
+			if !c.refused {
+				claimWorker(t, a, w1.Process.Pid, "a", 2)
+				claimWorker(t, a, w2.Process.Pid, "b", 2)
+				require.Len(t, a.proven.workers, 2)
+				return
+			}
+			_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 2}, w1.Process.Pid)
+			require.NotNil(t, serr, "a worker's own store files nothing at the set's end")
+			require.Equal(t, models.ScopeErrTooManyWorkers, serr.Code)
+			require.Equal(t, http.StatusUnprocessableEntity, serr.Status)
+			require.Contains(t, serr.Message, "a test process declared 2 test workers, but this replay reads each test set's end, and a call a test worker's own store holds for a later test would be reported only when its connection ends, after that read")
+			require.Equal(t, "replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)", serr.Remedy)
+			refusedAlike(t, a, models.InstanceReq{Key: "b", Workers: 2}, w2.Process.Pid, serr, w1.Process.Pid)
+			require.Empty(t, h.given(), "the refused claim was given no instance")
+			served, _ := p.log()
+			require.Empty(t, served, "the refused claim was served no manager")
+			require.Empty(t, a.proven.workers)
+
+			claimWorker(t, a, w1.Process.Pid, "a", 1)
+			require.Equal(t, w1.Process.Pid, a.proven.claim.pid, "one test process runs the replay")
+			require.Empty(t, a.proven.workers)
 		})
 	}
 }

@@ -84,6 +84,9 @@ func (a *Agent) workerHooks(ctx context.Context, declared int) (coreAgent.Instan
 	if serr := a.lossWorkersRefusal(ctx, declared); serr != nil {
 		return nil, serr
 	}
+	if serr := a.setEndWorkersRefusal(declared); serr != nil {
+		return nil, serr
+	}
 	return a.workerStamper(declared)
 }
 
@@ -146,6 +149,28 @@ func (a *Agent) lossWorkersRefusal(ctx context.Context, declared int) *models.Sc
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
 		fmt.Sprintf("a test process declared %d test workers, but keploy's hooks here count no capture losses, so a connection the kernel dropped while two workers' tests were open could not be charged to each of them", declared),
 		"run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
+}
+
+// setEndWorkersRefusal refuses a claim as one of declared test workers in
+// a replay whose session reads each set's end (models.OutgoingOptions
+// .ReadsSetEnds), or has not yet said it does not: a call a parser holds for
+// a later test is filed as a miss at that read only from the run's own
+// store (Proxy.FileAtSetEnd), and a test worker's own store (serveWorker)
+// takes no such registration, so a call held there would be filed only when
+// its connection ends, after the set's last read. It holds in every build,
+// whatever MaxWorkers says; proxy_test's
+// TestSeveralTestWorkersRunOnlyWhereTheirStoresFileTheSetsEnd names what
+// to build before a worker's store takes them.
+func (a *Agent) setEndWorkersRefusal(declared int) *models.ScopeError {
+	a.provenMu.Lock()
+	none := a.proven.readsNoSetEnd
+	a.provenMu.Unlock()
+	if none || !a.replaying() {
+		return nil
+	}
+	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
+		fmt.Sprintf("a test process declared %d test workers, but this replay reads each test set's end, and a call a test worker's own store holds for a later test would be reported only when its connection ends, after that read", declared),
+		"replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
 }
 
 // workerStamper is the hooks that put each of the run's declared test

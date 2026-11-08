@@ -110,6 +110,9 @@ func workerAgent(t *testing.T, mode models.Mode, most int) (*Agent, *instanceHoo
 	h := &instanceHooks{}
 	a.Hooks = h
 	setMaxWorkers(t, most)
+	// A replay takes several workers only where its session reads no set's
+	// end (setEndWorkersRefusal).
+	a.proven.readsNoSetEnd = true
 	return a, h
 }
 

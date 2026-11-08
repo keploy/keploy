@@ -774,11 +774,6 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	// Whether the session runs the learn step, which its tests' begins keep
 	// to their recorded order (keepRecordedOrder), and onto which tests'
 	// recordings (learnsOnto).
-	a.provenMu.Lock()
-	a.proven.order.learn = opts.Learn
-	a.proven.order.tests = maps.Clone(opts.LearnTests)
-	a.provenMu.Unlock()
-
 	// A parser holds a call for a later test only where a set's end read
 	// files it (integrations.SetEndFiler), and the read files through this
 	// Proxy (GetMockErrors): one that cannot (no SetEndFilingProxy, such as
@@ -787,6 +782,14 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	if _, files := a.Proxy.(coreAgent.SetEndFilingProxy); !files {
 		opts.ReadsSetEnds = false
 	}
+	a.provenMu.Lock()
+	a.proven.order.learn = opts.Learn
+	a.proven.order.tests = maps.Clone(opts.LearnTests)
+	// Whether a replay may take a claim of several test workers
+	// (setEndWorkersRefusal).
+	a.proven.readsNoSetEnd = !opts.ReadsSetEnds
+	a.provenMu.Unlock()
+
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
 		return err
