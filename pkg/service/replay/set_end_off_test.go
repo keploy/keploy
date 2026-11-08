@@ -64,17 +64,23 @@ func TestRunTestSet_SwitchOffReadsTheSetsEndOfTheMissesLast(t *testing.T) {
 	}
 }
 
-// With the switch off and no mocks served, or no agent (a base path),
-// keploy test reads no set's end of the misses, as before.
+// With the switch off and no mocks served, no agent (a base path), or an
+// application keploy test does not run (no command), keploy test reads no
+// set's end of the misses, as before.
 func TestRunTestSet_SwitchOffWithoutMocksOrAgentReadsNoSetsEnd(t *testing.T) {
 	for _, tc := range []struct {
-		name             string
-		mocking, noAgent bool
-	}{{name: "no mocking"}, {name: "no agent", mocking: true, noAgent: true}} {
+		name                             string
+		mocking, noAgent, uninstrumented bool
+	}{
+		{name: "no mocking"},
+		{name: "no agent", mocking: true, noAgent: true},
+		{name: "not instrumented", mocking: true, uninstrumented: true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, instr, _ := offRun(t, 2)
 			h.replayer.config.Test.Mocking = tc.mocking
 			h.replayer.noAgent = tc.noAgent
+			h.replayer.instrument = !tc.uninstrumented
 			if status := h.run(t); status != models.TestSetStatusPassed {
 				t.Fatalf("status %s, want PASSED", status)
 			}
