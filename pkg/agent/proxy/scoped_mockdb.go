@@ -1105,6 +1105,50 @@ func (s *scopedMockDb) WindowChanged() <-chan struct{} {
 	return nil
 }
 
+// RunPlace and RunPlaceChanged carry no mock data either. A wrapped store
+// without the facet reports the set's end and a channel that never fires: a
+// parser holds nothing over it, as over a store with no facet at all.
+func (s *scopedMockDb) RunPlace() models.RunPlace {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.RunPlace()
+	}
+	return models.RunPlace{SetEnd: true}
+}
+
+func (s *scopedMockDb) RunPlaceChanged() <-chan struct{} {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.RunPlaceChanged()
+	}
+	return nil
+}
+
+// IdleUntilRunPlaceChanges over a wrapped store without the facet marks
+// nothing: its place is the set's end, so no parser waits on it.
+func (s *scopedMockDb) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (func(), bool) {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.IdleUntilRunPlaceChanges(changed, mark)
+	}
+	return func() {}, false
+}
+
+// OpenTestRecordings is the wrapped store's: a parser reads it for the
+// recordings a call could have been answered with in its test, so more of
+// them only makes it hold less. ClaimHold of a wrapped store without the
+// facet claims nothing: no parser holds over it.
+func (s *scopedMockDb) OpenTestRecordings() []*models.Mock {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.OpenTestRecordings()
+	}
+	return nil
+}
+
+func (s *scopedMockDb) ClaimHold(name string) bool {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.ClaimHold(name)
+	}
+	return false
+}
+
 // The carry-over tier is a read tier like the others, so it goes through keep().
 func (s *scopedMockDb) GetCarryOverMocks() ([]*models.Mock, error) {
 	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {

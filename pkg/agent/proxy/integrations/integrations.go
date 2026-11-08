@@ -1863,6 +1863,51 @@ type SetEndFiler interface {
 	AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool)
 }
 
+// RunPlacer is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
+// MockManager implements it) for a parser that holds the write of an answer
+// it has matched until the replay's run reaches the answer's recorded place
+// (models.RegisterAnswerRelease): where the run is among the set's recorded
+// test windows, moved only by the events the replayer drives (a window opens,
+// a test ends, the set ends), never back within a set.
+//
+//   - RunPlace is the place now. Its Staging changes when a new set is
+//     staged: a hold taken under an earlier one is over. Its SetEnd is set at
+//     the set's end and once the store is closed.
+//   - RunPlaceChanged returns a channel closed at the next change of the
+//     place. Take it BEFORE reading RunPlace; each change hands out a fresh
+//     channel.
+//   - IdleUntilRunPlaceChanges is how a parser that found nothing due waits:
+//     it runs mark (the connection's MarkIdle) only if the place has not
+//     changed since changed (RunPlaceChanged) was handed out, under the
+//     place's lock, and the release mark returns runs at the next change,
+//     on the goroutine that makes it, before the call that made it returns.
+//     ok is false, and mark does not run, once the place has changed: read
+//     it again. So a read that settles the application's calls right after
+//     a change (the set's end read) never finds the connection idle on a
+//     part that change made due: until its parser has written that part,
+//     or found nothing due and marked it idle again, it is busy. release
+//     is the mark's release, for a wait that ends otherwise (the
+//     connection's context); a release runs at most once.
+//   - OpenTestRecordings is every recording the open test was staged with,
+//     served or not: under exact serving the test's own, else the per-test
+//     recordings of the window its staging opened (a keploy mock replay's
+//     scope: the test's whole pool). None while no test's are staged. A
+//     parser reads it to find the recordings a call could have been
+//     answered with in its test, whichever of them earlier calls took.
+//   - ClaimHold reports whether the named recording's answer may be held:
+//     true the first time it is asked for that recording under the place's
+//     Staging, false from then on, for an answer served again (a stateful
+//     cursor saturated on it), whose call was not on record.
+//
+// A MockMemDb without it holds nothing: write at once.
+type RunPlacer interface {
+	RunPlace() models.RunPlace
+	RunPlaceChanged() <-chan struct{}
+	IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (release func(), ok bool)
+	OpenTestRecordings() []*models.Mock
+	ClaimHold(name string) bool
+}
+
 // CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
 // agent's MockManager implements it) for a parser whose kind registered a
 // carry-over predicate (models.RegisterCarryOver). It returns, in recorded

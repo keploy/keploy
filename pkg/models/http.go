@@ -139,6 +139,11 @@ type HTTPResp struct {
 	// (HTTPSchema.MarshalYAML sets it on the copy it writes), so YAML keeps
 	// it as they came, never split into frames (streamChunksForYAML).
 	bodyOnWire bool
+
+	// Marks: when each part of a mock's answer reached the application
+	// (HTTPAnswerMarks). Replay writes each part at its recorded place. Nil
+	// in a recording older than the marks, whose answer is written at once.
+	Marks *HTTPAnswerMarks `json:"marks,omitempty" yaml:"marks,omitempty"`
 }
 
 // HTTPResponseHasNoBody reports whether a response carries no body whatever
@@ -280,7 +285,8 @@ type httpRespBSON struct {
 	Binary        string            `bson:"binary"`
 	Timestamp     string            `bson:"timestamp"`
 
-	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
+	HeaderLineLengths HeaderLineLengths    `bson:"headerlinelengths,omitempty"`
+	Marks             *httpAnswerMarksBSON `bson:"marks,omitempty"`
 }
 
 type httpRespBSONReader struct {
@@ -296,7 +302,8 @@ type httpRespBSONReader struct {
 	Binary        string            `bson:"binary"`
 	Timestamp     bson.RawValue     `bson:"timestamp"`
 
-	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
+	HeaderLineLengths HeaderLineLengths    `bson:"headerlinelengths,omitempty"`
+	Marks             *httpAnswerMarksBSON `bson:"marks,omitempty"`
 }
 
 // MarshalBSON — see the HTTPReq version above. Same rationale.
@@ -315,6 +322,7 @@ func (h HTTPResp) MarshalBSON() ([]byte, error) {
 		Timestamp:     FormatMockTimestamp(h.Timestamp),
 
 		HeaderLineLengths: h.HeaderLineLengths,
+		Marks:             h.Marks.toBSON(),
 	})
 }
 
@@ -349,6 +357,9 @@ func (h *HTTPResp) UnmarshalBSON(data []byte) error {
 		Timestamp:     ts,
 
 		HeaderLineLengths: raw.HeaderLineLengths,
+	}
+	if h.Marks, err = raw.Marks.marks(); err != nil {
+		return fmt.Errorf("HTTPResp.UnmarshalBSON marks: %w", err)
 	}
 	return nil
 }

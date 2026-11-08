@@ -75,7 +75,12 @@ type scopeKey struct {
 // single global scope, which narrows every connection (sequential runs, a
 // shared app, and the suite-level default).
 func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.Time) error {
-	return a.beginScopeAt(ctx, name, pid, at, nil)
+	if err := a.beginScopeAt(ctx, name, pid, at, nil); err != nil {
+		return err
+	}
+	// The run's place reaches the test's window once its pool is in.
+	a.reachRunTest(name, true)
+	return nil
 }
 
 // beginScopeAt is BeginScopeAt, calling onClock (when not nil) once the
@@ -438,6 +443,9 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		if closed || !provenswitch.On() {
 			err = a.restorePool(ctx, name, pid, worker)
 		}
+		// The test has ended: the run's place reaches its end, the pool
+		// restored or not.
+		a.reachRunTest(name, false)
 		if cerr := a.endTestClock(ctx, name, pid); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("keploy could not move the clock back after %s: %w", name, cerr))
 		}

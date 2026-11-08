@@ -415,6 +415,12 @@ type MockManager struct {
 	repeatNoise       atomic.Pointer[repeatReadNoise]
 	testWindowsSeeded *models.WindowSchedule
 	windowsSeeded     *models.WindowSchedule
+	// placeWindows are the recorded test windows a replay seeded for the
+	// run's place alone (SeedRunPlaceWindows), read where it seeded no
+	// testWindows. Parked (placeWindowsSeeded) and installed as testWindows
+	// are, under swapMu.
+	placeWindows       atomic.Pointer[models.WindowSchedule]
+	placeWindowsSeeded *models.WindowSchedule
 
 	// statedKinds are the kinds of which a mock staged since the current
 	// set's boundary states its lifetime (models.Mock.StatesLifetime): the
@@ -445,6 +451,10 @@ type MockManager struct {
 	// set's end (models.OutgoingOptions.ReadsSetEnds, SetReadsSetEnds):
 	// without it AtSetEnd registers nothing.
 	readsSetEnds atomic.Bool
+
+	// place is where the replay's run is among the set's recorded windows
+	// (RunPlace, run_place.go).
+	place runPlace
 
 	// stagingEpoch changes at every staging call (a SetMocksWithWindow with the
 	// models.BaseTime sentinel): a new set, or the same set staged again after
@@ -667,6 +677,9 @@ func (m *MockManager) Close() {
 		// stop. The replacement channel stays open, so a waiter that does not
 		// check IsClosed blocks again instead of spinning.
 		m.signalWindowChange()
+		// An answer held for the run's place is written: a closed manager
+		// is at the set's end (RunPlace).
+		m.signalRunPlace()
 		// A parser's data built from this manager's reads goes with it.
 		m.letDerivedGo()
 	})
@@ -847,6 +860,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// Same for a parked window seed: it belongs to the set that sent it.
 	m.windowsSeeded = nil
 	m.testWindowsSeeded = nil
+	m.placeWindowsSeeded = nil
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -1398,6 +1412,7 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
 	m.keepRunOnlyForAnExactStartUp(start)
 	m.setMocksWithWindow(filtered, unfiltered, start, end)
+	m.placeWindowAt(start)
 }
 
 // keepRunOnlyForAnExactStartUp, under the proven switch, decides at a
@@ -1742,6 +1757,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// session, that seeded none places no recording by the last one's.
 			m.testWindows.Store(m.testWindowsSeeded)
 			m.testWindowsSeeded = nil
+			// The run's place's too (SeedRunPlaceWindows).
+			m.placeWindows.Store(m.placeWindowsSeeded)
+			m.placeWindowsSeeded = nil
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -1973,6 +1991,10 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			return true
 		})
 	}
+
+	// What the test is staged with (OpenTestRecordings), kept before its
+	// tier is published.
+	m.stageRunTest(filteredForTree)
 
 	// Build both remaining tiers before publishing anything: building stamps
 	// tree IDs and sort orders, and one staged mock can sit in more than one
@@ -2219,6 +2241,8 @@ func (m *MockManager) getUnFilteredMocksIn(v *exactView) ([]*models.Mock, error)
 // identical to SetMocksWithWindow.
 func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup []*models.Mock, start, end time.Time) {
 	m.keepRunOnlyForAnExactStartUp(start)
+	// The run's place moves once the window is visible.
+	defer m.placeWindowAt(start)
 	// Signal once everything below has landed, startup additions included.
 	defer m.signalWindowChange()
 	m.swapMu.Lock()

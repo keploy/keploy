@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -703,7 +704,7 @@ func TestScopeTableInstallsTheRecordedWindowsBeforeThePool(t *testing.T) {
 	svc := &poolSvc{}
 	post(svc, body)
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	if want := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}; !slices.Equal(svc.windows, want) {
+	if want := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}; !reflect.DeepEqual(svc.windows, want) {
 		t.Fatalf("windows %v, want %v", svc.windows, want)
 	}
 	if !slices.Equal(svc.order, []string{"windows", "pool"}) {
@@ -719,5 +720,62 @@ func TestScopeTableInstallsTheRecordedWindowsBeforeThePool(t *testing.T) {
 	post(svc, body)
 	if len(svc.order) != 0 {
 		t.Fatalf("switch off: installed %v", svc.order)
+	}
+}
+
+// placeSvc is poolSvc that takes the run place's windows too.
+type placeSvc struct {
+	*poolSvc
+	placed      []models.TestWindow
+	placedCalls int
+}
+
+func (s *placeSvc) SetRunPlaceWindows(_ context.Context, ws []models.TestWindow) error {
+	s.placed = ws
+	s.placedCalls++
+	return nil
+}
+
+// keploy mock replay's scope table carries every test's recorded window for
+// the run's place, under either switch: the agent installs them there (a
+// merged window's tests included), with the switch off never as the set's
+// recorded windows. A table without them installs none, so a set never reads
+// the previous one's. A per-start table's are not the place's.
+func TestScopeTableGivesTheRunPlaceItsWindows(t *testing.T) {
+	post := func(svc *placeSvc, body string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	body := `{"mappings":{"o::TestA":["mock-3"]},"windows":[{"start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z","tests":["o::TestA","o::TestB"]}]}`
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	t.Setenv(provenswitch.Env, "")
+	svc := &placeSvc{poolSvc: &poolSvc{}}
+	post(svc, body)
+	if want := []models.TestWindow{{Start: t0, End: t0.Add(time.Second), Tests: []string{"o::TestA", "o::TestB"}}}; svc.placedCalls != 1 || !reflect.DeepEqual(svc.placed, want) {
+		t.Fatalf("switch off: the place got %v (%d calls), want %v", svc.placed, svc.placedCalls, want)
+	}
+	if len(svc.order) != 0 {
+		t.Fatalf("switch off: installed %v as the set's", svc.order)
+	}
+	svc = &placeSvc{poolSvc: &poolSvc{}, placed: []models.TestWindow{{TestCase: "stale"}}}
+	post(svc, `{"mappings":{"o::TestA":["mock-3"]}}`)
+	if svc.placedCalls != 1 || svc.placed != nil {
+		t.Fatalf("switch off, a table without windows: the place got %v (%d calls), want none", svc.placed, svc.placedCalls)
+	}
+	t.Cleanup(starts.Default.Reset)
+	svc = &placeSvc{poolSvc: &poolSvc{}}
+	post(svc, `{"mappings":{},"sets":{"s":{}},"windows":[{"start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}]}`)
+	if svc.placedCalls != 0 {
+		t.Fatalf("a per-start table gave the place %v", svc.placed)
+	}
+	t.Setenv(provenswitch.Env, "1")
+	svc = &placeSvc{poolSvc: &poolSvc{}}
+	post(svc, `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}]}`)
+	if svc.placedCalls != 1 || len(svc.placed) != 1 || len(svc.windows) != 1 {
+		t.Fatalf("switch on: the place got %v (%d calls), the set %v; want both", svc.placed, svc.placedCalls, svc.windows)
 	}
 }

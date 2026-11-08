@@ -1852,6 +1852,12 @@ func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilt
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	// Create the URL with query parameters
 	url := fmt.Sprintf("%s/consumedmocks", a.conf.Agent.AgentURI)
+	if models.SetEndRead(ctx) {
+		// The read of what was consumed after a set's last test, with the
+		// proven switch off: the agent moves the run's place to the set's
+		// end first. An agent that predates the parameter ignores it.
+		url += "?" + models.SetEndReadQuery + "=1"
+	}
 	// Create a new GET request with the query parameter
 	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
@@ -4567,6 +4573,12 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 		// for a test of the set first. An agent that predates the parameter
 		// ignores it, and reads as it reads a test's end.
 		url += "?" + models.SetEndReadQuery + "=1"
+	} else if test, ok := models.TestEndRead(ctx); ok {
+		// A test's end read names the test: the agent moves the run's place
+		// to its end first. An agent that predates the parameter ignores it,
+		// and an answer recorded after the test waits for the next test's
+		// window to open.
+		url += "?" + models.TestEndReadQuery + "=" + neturl.QueryEscape(test)
 	}
 	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
@@ -5306,16 +5318,17 @@ func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time
 
 // PushScopeTable hands the agent the replay-time per-test name→mock-names table
 // (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
-// served pool per test. A missing endpoint (older agent) is a no-op.
-func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string) (retErr error) {
+// served pool per test, with the recorded window of every test of the set
+// (models.ScopeTableReq.Windows). A missing endpoint (older agent) is a no-op.
+func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string, windows []models.TestWindow) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded := maps.Clone(table)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushScopeTable(c, recorded) })
+			recorded, recordedWindows := maps.Clone(table), slices.Clone(windows)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushScopeTable(c, recorded, recordedWindows) })
 		}
 	}()
 	url := fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI)
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Windows: windows})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

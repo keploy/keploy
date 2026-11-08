@@ -123,9 +123,11 @@ type ComposeEndReader interface {
 
 // ScopePusher is an optional Instrumentation extension: Replay uses it to hand
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
-// runner's /agent/scope/begin calls can restrict the served pool per test.
+// runner's /agent/scope/begin calls can restrict the served pool per test,
+// with every test's recorded window (recordedTestWindows), the run's place
+// an answer recorded in a later window than its call is written at.
 type ScopePusher interface {
-	PushScopeTable(ctx context.Context, table map[string][]string) error
+	PushScopeTable(ctx context.Context, table map[string][]string, windows []models.TestWindow) error
 }
 
 // ScopeGatePusher is an optional Instrumentation extension: Replay uses it to

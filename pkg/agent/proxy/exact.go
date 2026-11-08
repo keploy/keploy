@@ -1529,6 +1529,8 @@ func (m *MockManager) OpenExactTestConcurrent(test string, owned, cands []*model
 // serveExactTest is ServeExactTest and ServeExactTestConcurrent, and, with
 // begin, OpenExactTest and OpenExactTestConcurrent.
 func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, begin bool, given []models.VariableBinding) {
+	// The run's place reaches test's window once its view is in force.
+	defer m.reachTest(test, true)
 	answered, ahead := m.closeAhead()
 	if m.exact.beforeInstall != nil {
 		m.exact.beforeInstall()
@@ -1857,6 +1859,11 @@ var _ integrations.PoolMembership = (*MockManager)(nil)
 // (one the replay could not open): it is no consume of the next test's, and is
 // not flagged as one (ServeExactTest).
 func (m *MockManager) ServeExactPool(key string, names []string, ahead ...*models.Mock) {
+	// The pool served after a test's view: that test has ended, and the
+	// run's place reaches its end once the pool's view is in force.
+	if v := m.exactView(); v != nil && v.test != "" {
+		defer m.reachTest(v.test, false)
+	}
 	answered, _ := m.closeAhead()
 	if m.exact.beforeInstall != nil {
 		m.exact.beforeInstall()

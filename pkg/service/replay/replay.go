@@ -4360,7 +4360,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// whose mock set diverged from being demoted to OBSOLETE (missed):
 			// it got no answer to a call, which is no sign its recording is out
 			// of date, and the demotion would turn its failure into a green run.
-			read := r.readMockErrors(runTestSetCtx)
+			read := r.readMockErrors(runTestSetCtx, testCase.Name)
 			missed := dataPlaneMisses(read.calls)
 			earlyMissed := 0
 			if provenswitch.On() {
@@ -5647,7 +5647,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// proven switch a miss fails the test (streamMissed); with it off a
 			// miss keeps a test whose mock set diverged from being demoted to
 			// OBSOLETE (streamCallsMissed), as in the request-response path.
-			streamRead := r.readMockErrors(runTestSetCtx)
+			streamRead := r.readMockErrors(runTestSetCtx, tc.Name)
 			streamCallsMissed := dataPlaneMisses(streamRead.calls)
 			streamMissed := 0
 			if provenswitch.On() {
@@ -6487,7 +6487,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// longer reads this set's tail as its own.
 	if !provenswitch.On() && r.instrument && r.mocksDependencies() {
 		drainCtx, cancelDrain := context.WithTimeout(ctx, setEndDrainBudget)
-		late, lateErr := r.hookImpl.GetConsumedMocks(drainCtx)
+		// Marked as the set's end read: the agent first moves the run's
+		// place to the set's end, so an answer recorded after the set's last
+		// test that ran is written now, not at the next set's staging
+		// (models.WithSetEndRead). It is the switch-off run's last read of
+		// the set; under the switch unclaimedCalls makes that read.
+		late, lateErr := r.hookImpl.GetConsumedMocks(models.WithSetEndRead(drainCtx))
 		cancelDrain()
 		if lateErr != nil {
 			if unreadDrain == "" {
@@ -9829,7 +9834,7 @@ func (r *Replayer) beginTestErrorCapture(ctx context.Context) error {
 // simulation-error / invalid-response returns — so the window is finalized for
 // THIS test and a miss is never carried forward to the next test or lost.
 func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName string, result *models.TestResult) {
-	r.attachReadMockErrors(r.readMockErrors(ctx), testSetID, testCaseName, result)
+	r.attachReadMockErrors(r.readMockErrors(ctx, testCaseName), testSetID, testCaseName, result)
 }
 
 // testMisses is one read of a test's misses (readMockErrors): the calls no
@@ -9901,15 +9906,18 @@ func (r *Replayer) sayUnattributed() {
 	r.logger.Warn(msg, zap.Int("testSets", len(sets)), zap.Strings("ids", sets))
 }
 
-// readMockErrors reads, once, the calls of the test just run that no mock
-// answered. Under the proven switch the main loop reads them before its
+// readMockErrors reads, once, the calls of test, the test just run, that no
+// mock answered. Under the proven switch the main loop reads them before its
 // verdict, which they are part of, and attaches that read afterwards.
-func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
+func (r *Replayer) readMockErrors(ctx context.Context, test string) testMisses {
 	// A miss is the agent's to report. A base path has none, and no mocks.
 	if r.noAgent {
 		return testMisses{}
 	}
-	calls, err := r.instrumentation.GetMockErrors(ctx)
+	// Marked as test's end read: the agent first moves the run's place to
+	// test's end, so an answer recorded after test is written now, with the
+	// proven switch off too (models.WithTestEndRead).
+	calls, err := r.instrumentation.GetMockErrors(models.WithTestEndRead(ctx, test))
 	r.keptInside.add(calls)
 	// What was missed before the set's first test, and a call a parser held
 	// for a later test that none answered (its connection ended in this

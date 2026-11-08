@@ -4616,8 +4616,15 @@ func putBack(v interface{}, kept []keptBody) bool {
 // requestId) is chance, never its source. Nor the digits of a Postgres
 // statement's parameter markers ($1, $2 ...: pgMarkersBlanked), syntax that
 // says where each of its values goes: the "1" of "$1" is no word of data.
+// Nor an HTTP answer's marks (models.HTTPAnswerMarks): when each part of it
+// reached the application on record, a clock as its resTimestampMock is.
 // spec is not changed: the copy is.
 func payloadSpec(spec models.MockSpec) models.MockSpec {
+	if r := spec.HTTPResp; r != nil && r.Marks != nil {
+		c := *r
+		c.Marks = nil
+		spec.HTTPResp = &c
+	}
 	if pg := spec.PostgresV3; pg != nil && pg.Query != nil {
 		q := *pg.Query
 		q.InvocationID = ""

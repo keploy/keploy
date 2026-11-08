@@ -198,8 +198,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		}
 		finalResp := append([]byte(nil), firstRespChunk.Bytes...)
 		resTs := firstRespChunk.WrittenAt
+		respWrites := []respWrite{{end: len(finalResp), at: firstRespChunk.WrittenAt}}
 
-		gotLastWritten, err := h.readResponseV2(sess.DestStream, &finalResp, requestMethod(finalReq))
+		gotLastWritten, err := h.readResponseWrites(sess.DestStream, &finalResp, requestMethod(finalReq), &respWrites)
 		// The stream ended before readResponseV2 found the response's end.
 		// Where keploy relays the connection it has read all the server sent,
 		// so that is the server's doing, unless the relay ended the stream
@@ -307,6 +308,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			ResTimestampMock: resTs,
 			ReqClock:         reqClock,
 			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
+			RespWrites:       respWrites,
 			Fault:            fault,
 		}, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
@@ -615,6 +617,14 @@ func (h *HTTP) readRequestV2(stream *fakeconn.FakeConn, finalReq *[]byte) error 
 // "server closed after sending a full response" case; the caller
 // decides whether to emit a mock.
 func (h *HTTP) readResponseV2(stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string) (time.Time, error) {
+	var writes []respWrite
+	return h.readResponseWrites(stream, finalResp, reqMethod, &writes)
+}
+
+// readResponseWrites is readResponseV2 that also notes, in writes, where in
+// *finalResp each chunk it consumed ended and when the relay wrote it to the
+// client (respWrite): the answer's marks (answerMarks).
+func (h *HTTP) readResponseWrites(stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string, writes *[]respWrite) (time.Time, error) {
 	var lastWr time.Time
 
 	// 1. Complete headers: the final response's, past any interim 1xx.
@@ -630,6 +640,7 @@ func (h *HTTP) readResponseV2(stream *fakeconn.FakeConn, finalResp *[]byte, reqM
 			lastWr = chunk.WrittenAt
 		}
 		*finalResp = append(*finalResp, chunk.Bytes...)
+		noteWrite(writes, len(*finalResp), chunk.WrittenAt)
 	}
 
 	// 2. Parse the final response's headers for body framing. The answer to
@@ -655,6 +666,7 @@ func (h *HTTP) readResponseV2(stream *fakeconn.FakeConn, finalResp *[]byte, reqM
 				lastWr = chunk.WrittenAt
 			}
 			*finalResp = append(*finalResp, chunk.Bytes...)
+			noteWrite(writes, len(*finalResp), chunk.WrittenAt)
 			remaining -= len(chunk.Bytes)
 		}
 		return lastWr, nil
@@ -681,6 +693,7 @@ func (h *HTTP) readResponseV2(stream *fakeconn.FakeConn, finalResp *[]byte, reqM
 				lastWr = chunk.WrittenAt
 			}
 			*finalResp = append(*finalResp, chunk.Bytes...)
+			noteWrite(writes, len(*finalResp), chunk.WrittenAt)
 		}
 	}
 
@@ -696,6 +709,7 @@ func (h *HTTP) readResponseV2(stream *fakeconn.FakeConn, finalResp *[]byte, reqM
 			lastWr = chunk.WrittenAt
 		}
 		*finalResp = append(*finalResp, chunk.Bytes...)
+		noteWrite(writes, len(*finalResp), chunk.WrittenAt)
 	}
 }
 
@@ -965,6 +979,16 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
 		}
 	}
+	// When each part of the answer reached the client: replay writes each
+	// part at its place. A whole answer the upstream ended in a fault after
+	// it is recorded with
+	// no fault, and is placed as any whole answer; one its client read in
+	// part (the only answer cut short that is recorded) has no place for the
+	// rest it did not read.
+	var marks *models.HTTPAnswerMarks
+	if fault == nil && !m.RespReadInPart {
+		marks = answerMarks(m.Resp, m.RespWrites, respParsed.Header.Get("Content-Encoding"), len(respBody))
+	}
 
 	meta := map[string]string{
 		"name":      "Http",
@@ -1056,6 +1080,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 				// Replay serves this response: keep what it takes to serve a
 				// repeated header (Set-Cookie) on its own lines.
 				HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
+				Marks:             marks,
 			},
 			Fault:            fault,
 			Created:          time.Now().Unix(),

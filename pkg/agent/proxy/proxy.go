@@ -4882,6 +4882,31 @@ func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
 	_ = p.stageOn("recordedWindows", func(m *MockManager) { m.SeedRecordedWindows(ws) })
 }
 
+// SeedRunPlaceWindows hands the underlying MockManager the recorded window of
+// every test of the set a replay serves, for the run's place alone
+// (MockManager.SeedRunPlaceWindows). Satisfies the agent's optional
+// RunPlaceSeeder extension interface.
+func (p *Proxy) SeedRunPlaceWindows(ws []models.TestWindow) {
+	_ = p.stageOn("runPlaceWindows", func(m *MockManager) { m.SeedRunPlaceWindows(ws) })
+}
+
+// ReachRunTest notes that the replay began test (open) or ended it
+// (MockManager.ReachRunTest). Satisfies the agent's optional RunPlaceSeeder
+// extension interface.
+func (p *Proxy) ReachRunTest(test string, open bool) {
+	_ = p.stageOn("runPlaceTest", func(m *MockManager) { m.ReachRunTest(test, open) })
+}
+
+// EndRunSet moves the run's place to the set's end
+// (MockManager.EndRunSet), on the run's manager alone, as FileAtSetEnd
+// files: no set's end read asks a test worker's, whose own close ends its
+// holds. Satisfies the agent's optional RunSetEnder extension interface.
+func (p *Proxy) EndRunSet() {
+	if m := p.getMockManager(); m != nil {
+		m.EndRunSet()
+	}
+}
+
 // ResetStatefulCursors drops the mock manager's per-request stateful cursors so
 // each test-set replays its stateful sequences from the first recorded response.
 // Satisfies the agent's optional StatefulCursorResetter extension interface.
