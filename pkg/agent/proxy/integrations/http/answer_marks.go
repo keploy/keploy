@@ -132,10 +132,12 @@ func dechunkedAt(wire []byte, ends []int) (decoded []int, data []byte, ok bool) 
 		}
 		sizeField, _, _ := strings.Cut(string(wire[pos:pos+line]), ";")
 		size, err := strconv.ParseInt(strings.TrimSpace(sizeField), 16, 0)
-		if err != nil || size < 0 || size > int64(len(wire)) {
+		start := pos + line + 2
+		// A chunk is no longer than the bytes after its size line: so its
+		// end, start plus size, never wraps an int.
+		if err != nil || size < 0 || size > int64(len(wire)-start) {
 			return nil, nil, false
 		}
-		start := pos + line + 2
 		for ei < len(ends) && ends[ei] <= start {
 			decoded[ei] = len(data)
 			ei++
@@ -147,9 +149,6 @@ func dechunkedAt(wire []byte, ends []int) (decoded []int, data []byte, ok bool) 
 		for ei < len(ends) && ends[ei] < end {
 			decoded[ei] = len(data) + max(ends[ei]-start, 0)
 			ei++
-		}
-		if end > len(wire) {
-			return nil, nil, false
 		}
 		data = append(data, wire[start:end]...)
 		pos = end + 2

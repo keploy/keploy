@@ -457,8 +457,8 @@ func TestRecordKeepsTheTerminalChunksOwnMark(t *testing.T) {
 }
 
 // dechunkedAt places each end where it falls, ends short of the wire too, and
-// reads only framing it can: a size line that is empty, not hex, negative or
-// past the wire's end is no framing (ok false), never a panic.
+// reads only framing it can: a size line that is empty, not hex, negative, or
+// longer than the bytes after it is no framing (ok false), never a panic.
 func TestDechunkedAtReadsOnlyFramingItCan(t *testing.T) {
 	wire := chunk("abc") + chunk("def") + "0\r\n\r\n"
 	for _, tc := range []struct {
@@ -475,6 +475,8 @@ func TestDechunkedAtReadsOnlyFramingItCan(t *testing.T) {
 		{"a size that is not hex", "zz\r\nabc\r\n0\r\n\r\n", []int{14}, nil, false},
 		{"a negative size", "-3\r\nabc\r\n0\r\n\r\n", []int{14}, nil, false},
 		{"a size past the wire", "7fffffffffffffff\r\nabc\r\n0\r\n\r\n", []int{28}, nil, false},
+		{"a size within the wire, past the bytes after its line", "c\r\nabc\r\n0\r\n\r\n", []int{13}, nil, false},
+		{"a size one past the bytes after its line", "4\r\nabc", []int{6}, nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decoded, data, ok := func() (decoded []int, data []byte, ok bool) {
