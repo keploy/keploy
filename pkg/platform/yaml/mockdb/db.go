@@ -2520,7 +2520,7 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 		}
 	}
 
-	if err := os.RemoveAll(stagingDir); err != nil {
+	if err := yaml.RemoveAllInRecording(ys.MockPath, stagingDir); err != nil {
 		ys.Logger.Warn("promoted the staged mock set but could not remove its staging directory; it is safe to delete",
 			zap.String("stagingDir", stagingDir), zap.Error(err))
 	}
@@ -2542,8 +2542,12 @@ func (ys *MockYaml) DiscardStagedSet(ctx context.Context, stagingID string) erro
 	if err := ys.CloseUnless(ctx.Done()); err != nil {
 		ys.Logger.Debug("discardStagedSet: closing the mock writer reported an error; removing the staging dir anyway", zap.Error(err))
 	}
+	// Removed only inside the recording: through a keploy folder that links
+	// out of the project, a folder of this name where it leads is kept, and
+	// the discard (so the record) is refused with why. No keploy folder yet
+	// is nothing to discard.
 	stagingDir := filepath.Join(ys.MockPath, stagingID)
-	if err := os.RemoveAll(stagingDir); err != nil {
+	if err := yaml.RemoveAllInRecording(ys.MockPath, stagingDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("discarding staged set %q: %w", stagingID, err)
 	}
 	return nil

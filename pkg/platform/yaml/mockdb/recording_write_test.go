@@ -242,6 +242,68 @@ func TestPromotingAStagedSetStaysInsideTheRecording(t *testing.T) {
 	})
 }
 
+// Discarding a staged set (a record clears one a crashed run left before it
+// captures) removes it only inside the recording: through a keploy folder
+// that links out of the project, a folder of that name where the link leads
+// is kept, and the record is refused before it captures. A staged folder that
+// is itself a link goes, not what it leads to; no keploy folder yet is
+// nothing to discard.
+func TestDiscardingAStagedSetStaysInsideTheRecording(t *testing.T) {
+	const staging = "set" + yaml.MockStagingSuffix
+	t.Run("keploy folder links out of the project", func(t *testing.T) {
+		base := t.TempDir()
+		out := filepath.Join(base, "outside")
+		kept := filepath.Join(out, staging, "mocks.yaml")
+		if err := os.MkdirAll(filepath.Dir(kept), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(kept, []byte("KEEP ME\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		root := filepath.Join(base, "project", "keploy")
+		linkTo(t, out, root)
+		ys := clockStore(root, string(yaml.FormatYAML))
+		requireWriteRefused(t, "DiscardStagedSet", ys.DiscardStagedSet(context.Background(), staging))
+		requireFileIs(t, "DiscardStagedSet", kept, "KEEP ME\n")
+	})
+	t.Run("staged folder links out", func(t *testing.T) {
+		base := t.TempDir()
+		out := filepath.Join(base, "outside")
+		kept := filepath.Join(out, "mocks.yaml")
+		if err := os.MkdirAll(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(kept, []byte("KEEP ME\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		root := filepath.Join(base, "keploy")
+		linkTo(t, out, filepath.Join(root, staging))
+		ys := clockStore(root, string(yaml.FormatYAML))
+		if err := ys.DiscardStagedSet(context.Background(), staging); err != nil {
+			t.Fatalf("DiscardStagedSet: %v", err)
+		}
+		requireAbsent(t, "DiscardStagedSet", filepath.Join(root, staging))
+		requireFileIs(t, "DiscardStagedSet", kept, "KEEP ME\n")
+	})
+	t.Run("no keploy folder yet", func(t *testing.T) {
+		ys := clockStore(filepath.Join(t.TempDir(), "keploy"), string(yaml.FormatYAML))
+		if err := ys.DiscardStagedSet(context.Background(), staging); err != nil {
+			t.Fatalf("DiscardStagedSet with no keploy folder: %v, want nothing to discard", err)
+		}
+	})
+	t.Run("a staged set inside is removed", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "keploy")
+		ys := clockStore(root, string(yaml.FormatYAML))
+		if err := ys.InsertMock(context.Background(), genericNoiseMock("mock-0"), staging); err != nil {
+			t.Fatal(err)
+		}
+		if err := ys.DiscardStagedSet(context.Background(), staging); err != nil {
+			t.Fatalf("DiscardStagedSet: %v", err)
+		}
+		requireAbsent(t, "DiscardStagedSet", filepath.Join(root, staging))
+	})
+}
+
 // The rewrites of a set's mock file stay inside the recording on their own:
 // each is reached only after a read that refuses a link out, and the rule
 // does not lean on that. A target that links out is refused where each one
