@@ -227,16 +227,23 @@ func encodeYAMLOver(mapping *models.Mapping, old []byte, doc *yamlLib.Node, rena
 // the writer writes neither, and YAML hangs the comments on both its sides
 // on the first key. It reads data no further than its head.
 func commentHead(data []byte) []byte {
+	return scanHead(data, func(string) {})
+}
+
+// scanHead is commentHead, and hands each comment line of the head it reads
+// to line as keploy knows it (headLine), keploy's line included, also when
+// it is the only line and the head commentHead keeps is nil.
+func scanHead(data []byte, line func(string)) []byte {
 	var head bytes.Buffer
 	blanks := 0
 	edited := false
 	for len(data) > 0 {
-		line := data
+		raw := data
 		if i := bytes.IndexByte(data, '\n'); i >= 0 {
-			line = data[:i+1]
+			raw = data[:i+1]
 		}
-		data = data[len(line):]
-		t := bytes.TrimSpace(line)
+		data = data[len(raw):]
+		t := bytes.TrimSpace(raw)
 		if len(t) == 0 {
 			blanks++
 			continue
@@ -251,12 +258,14 @@ func commentHead(data []byte) []byte {
 			head.WriteString(strings.Repeat("\n", blanks))
 		}
 		blanks = 0
-		if headLine(string(t)) == versionLine {
+		l := headLine(string(t))
+		line(l)
+		if l == versionLine {
 			head.WriteString(utils.GetVersionAsComment())
 			continue
 		}
 		edited = true
-		head.Write(bytes.TrimRight(line, "\r\n"))
+		head.Write(bytes.TrimRight(raw, "\r\n"))
 		head.WriteByte('\n')
 	}
 	if !edited {
@@ -280,16 +289,13 @@ func headLine(l string) string {
 	return l
 }
 
-// headComments is the lines of the head commentHead keeps of data, each as
-// keploy knows it (headLine): the comment lines data starts with, which a
-// rewrite keeps; keploy's line among them as versionLine.
+// headComments is the comment lines of data's head, each as keploy knows it
+// (headLine): the lines commentHead reads, which a rewrite keeps; keploy's
+// line among them as versionLine, as often as the head holds it, also when
+// the head holds no other line and commentHead keeps none.
 func headComments(data []byte) []string {
 	var out []string
-	for _, l := range strings.Split(string(commentHead(data)), "\n") {
-		if l = headLine(l); l != "" {
-			out = append(out, l)
-		}
-	}
+	scanHead(data, func(l string) { out = append(out, l) })
 	return out
 }
 

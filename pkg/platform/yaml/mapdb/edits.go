@@ -110,13 +110,17 @@ func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]str
 // comment block between a document marker or a directive and a blank line,
 // so both are read. A line is the head's when the head holds it and the
 // comments of doc and root do not, each line known as headLine knows it and
-// counted as often as it appears; keploy's line is keploy's, which a writer
-// puts where it always did (header), and is taken wherever it is on the
-// key. So no line is written by both the head and the first key, and a
-// rewrite of a file a rewrite wrote changes nothing. A line the head does
-// not hold (after a document marker's own comment, inside a mapping the
-// file writes as {...}, below the key) stays on the key. Keploy's line
-// alone, on every file keploy wrote, costs no read of old.
+// counted as often as it appears, keploy's line too (headComments). A line
+// the head does not hold (after a document marker's own comment, inside a
+// mapping the file writes as {...}, below the key) stays on the key; so does
+// keploy's line below the key, which YAML hangs on the next key in one file
+// and below the first in the file a rewrite writes of it. Above the key,
+// keploy's line is taken whatever the head holds: what stays above the key
+// is the head of the file a rewrite writes, where a writer puts keploy's
+// line where it always did (header). So no line is written by both the head
+// and the first key, and a rewrite of a file a rewrite wrote changes
+// nothing. Keploy's line alone, on every file keploy wrote, costs no read of
+// old.
 func takeFileHead(doc, root *yamlLib.Node, old []byte) string {
 	if len(root.Content) == 0 {
 		return ""
@@ -137,13 +141,13 @@ func takeFileHead(doc, root *yamlLib.Node, old []byte) string {
 		held[headLine(l)]--
 	}
 	var took []string
-	take := func(c string) string {
+	take := func(c string, above bool) string {
 		var left []string
 		for _, l := range strings.Split(c, "\n") {
 			switch n := headLine(l); {
-			case n == versionLine:
 			case held[n] > 0:
 				held[n]--
+			case n == versionLine && above:
 			default:
 				left = append(left, l)
 				continue
@@ -156,8 +160,8 @@ func takeFileHead(doc, root *yamlLib.Node, old []byte) string {
 		// lines on both its sides.
 		return strings.Trim(strings.Join(left, "\n"), "\n")
 	}
-	first.HeadComment = take(first.HeadComment)
-	first.FootComment = take(first.FootComment)
+	first.HeadComment = take(first.HeadComment, true)
+	first.FootComment = take(first.FootComment, false)
 	return strings.Join(took, "\n")
 }
 
