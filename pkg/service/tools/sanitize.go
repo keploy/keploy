@@ -78,7 +78,7 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 			zap.String("dir", testSetDir))
 
 		// if secret.yaml exists in the testSetDir then skip sanitization
-		if _, err := os.Lstat(filepath.Join(testSetDir, "secret.yaml")); err == nil {
+		if hasSecretsFile(testSetDir) {
 			t.logger.Info("secret.yaml found in the test set directory, skipping sanitization",
 				zap.String("testSetID", testSetID),
 				zap.String("dir", testSetDir))
@@ -181,26 +181,33 @@ func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) error
 }
 
 func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error {
+	set, err := openTestSet(testSetDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = set.Close() }()
+
 	// Aggregate secrets across ALL files in this test set
 	aggSecrets := map[string]string{}
 
 	// keploy/<set>/tests/*.yaml, every one checked before any is rewritten.
 	var unsanitized []string
-	files, hasTests, err := testSetFiles(testSetDir)
+	tests, files, err := testSetFiles(set, testSetDir)
 	if err != nil {
 		return err
 	}
-	if !hasTests {
+	if tests == nil {
 		t.logger.Info("No tests directory found")
 		return nil
 	}
+	defer func() { _ = tests.Close() }()
 
 	if len(files) == 0 {
 		t.logger.Info("No files to sanitize")
 		return nil
 	}
 
-	for _, f := range files {
+	for _, name := range files {
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
@@ -209,9 +216,10 @@ func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error
 		default:
 		}
 
-		testName := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f)) // e.g. "test-2"
+		f := filepath.Join(testSetDir, "tests", name)
+		testName := strings.TrimSuffix(name, filepath.Ext(name)) // e.g. "test-2"
 
-		if err := SanitizeFileInPlace(f, testName, aggSecrets); err != nil {
+		if err := sanitizeFileIn(tests, name, testName, aggSecrets); err != nil {
 			// Continue to next file
 			t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
 			unsanitized = append(unsanitized, f)
@@ -221,8 +229,8 @@ func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error
 
 	// Write keploy/<set>/secret.yaml -- even when a file failed: the files
 	// already sanitized need it to be restored.
-	secretPath := filepath.Join(testSetDir, "secret.yaml")
-	if err := WriteSecretsYAML(secretPath, aggSecrets); err != nil {
+	secretPath := filepath.Join(testSetDir, secretsFile)
+	if err := writeSecretsIn(set, secretsFile, aggSecrets); err != nil {
 		return fmt.Errorf("write secret.yaml: %w", err)
 	}
 	t.logger.Info("Wrote secret.yaml", zap.String("path", secretPath))
@@ -933,8 +941,18 @@ func redactGrpcDecodedData(
 
 // SanitizeFileInPlace reads a YAML file, redacts secrets, and writes back in-place.
 // aggSecrets is a shared map across the entire test-set (key -> original value).
+// The file is opened in its folder, opened inside the project
+// (utils.OpenRecordingDir), and is never followed if it is a symbolic link.
 func SanitizeFileInPlace(path, testName string, aggSecrets map[string]string) error {
-	raw, err := readTestSetFile(path)
+	return inFileFolder(path, func(dir *os.Root, name string) error {
+		return sanitizeFileIn(dir, name, testName, aggSecrets)
+	})
+}
+
+// sanitizeFileIn is SanitizeFileInPlace of the file name in the folder dir.
+func sanitizeFileIn(dir *os.Root, name, testName string, aggSecrets map[string]string) error {
+	path := filepath.Join(dir.Name(), name)
+	raw, err := readTestSetFile(dir, name)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
@@ -958,21 +976,44 @@ func SanitizeFileInPlace(path, testName string, aggSecrets map[string]string) er
 	}
 	_ = enc.Close()
 
-	if err := writeTestSetFile(path, out.Bytes(), testFileMode, false); err != nil {
+	if err := writeTestSetFile(dir, name, out.Bytes(), testFileMode, false); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }
 
+// inFileFolder runs op on the file at path in its folder, opened inside the
+// project as a test set's folders are (utils.OpenRecordingDir): a folder on
+// the way that is a link out of the project is refused with why.
+func inFileFolder(path string, op func(dir *os.Root, name string) error) error {
+	dir, err := utils.OpenRecordingDir(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("keploy rewrites %s only inside the project: %w", path, err)
+	}
+	defer func() { _ = dir.Close() }()
+	return op(dir, filepath.Base(path))
+}
+
 // WriteSecretsYAML writes the aggregated secrets map to secret.yaml, which only
 // its owner may read (secretsFileMode).
+// It is opened as SanitizeFileInPlace opens a test file.
 func WriteSecretsYAML(path string, secrets map[string]string) error {
+	return inFileFolder(path, func(dir *os.Root, name string) error {
+		return writeSecretsIn(dir, name, secrets)
+	})
+}
+
+// writeSecretsIn is WriteSecretsYAML of the file name in the folder dir.
+func writeSecretsIn(dir *os.Root, name string, secrets map[string]string) error {
 	b, err := yaml.Marshal(secrets)
 	if err != nil {
 		return err
 	}
-	return writeTestSetFile(path, b, secretsFileMode, true)
+	return writeTestSetFile(dir, name, b, secretsFileMode, true)
 }
+
+// secretsFile is the name of a sanitized test set's secret.yaml.
+const secretsFile = "secret.yaml"
 
 // secretsFileMode is secret.yaml's: it holds the secrets taken out of the
 // tests, so only its owner reads it. It used to be written 0777, which a
@@ -983,40 +1024,84 @@ const secretsFileMode = 0o600
 // test files with. One it rewrites keeps its own mode.
 const testFileMode = 0o644
 
-// testSetFiles is the test files of the test set at testSetDir, its
-// tests/*.yaml, and whether it has a tests directory at all. Every one is
-// checked before any is rewritten: the test set directory, its tests
-// directory and each test file must be what they say, not a symlink to
-// somewhere else. A test set is a directory a cloned repository can carry, and
-// sanitize and normalize often run under sudo, as recording does: tests ->
-// /etc/netplan would have had root rewrite every *.yaml there. Checking up
-// front means a test set is rewritten whole or not at all.
-//
-// Only a tests directory that does not exist means no tests (hasTests
-// false). One that is there but is not a directory, or cannot be looked at
-// or listed, is an error: read as "no tests", sanitize would leave whatever
-// the set holds unsanitized and report success.
-func testSetFiles(testSetDir string) (files []string, hasTests bool, err error) {
-	if fi, err := os.Lstat(testSetDir); err != nil {
-		return nil, false, err
-	} else if !fi.IsDir() {
-		return nil, false, fmt.Errorf("test set %s is not a directory (a symbolic link?); keploy does not follow it", testSetDir)
+// A test set is a directory a cloned repository can carry, and sanitize and
+// normalize often run under sudo, as recording does. Its files are therefore
+// read, rewritten, written and removed only inside the project: the keploy
+// folder is opened from the project (utils.OpenRecordingDir), so one the
+// repository carries as a link out of the project, by an absolute target or
+// by "..", is refused with why, and nothing where it leads is touched. The
+// test set, its tests directory and each test file are then opened, each
+// inside the one before, and must be what they say, not a symbolic link to
+// somewhere else (testSetFiles, openTestSetFile).
+
+// openTestSet opens the test set at testSetDir, <keploy folder>/<set>, inside
+// the project (see above). It is refused if it is a symbolic link, even to a
+// folder in the keploy folder. A test set that is not there is an error that
+// errors.Is fs.ErrNotExist.
+func openTestSet(testSetDir string) (*os.Root, error) {
+	keploy, err := utils.OpenRecordingDir(filepath.Dir(testSetDir))
+	if err != nil {
+		return nil, fmt.Errorf("keploy rewrites test set %s only inside the project's keploy folder: %w", testSetDir, err)
 	}
+	defer func() { _ = keploy.Close() }()
+	name := filepath.Base(testSetDir)
+	fi, err := keploy.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("test set %s is not a directory (a symbolic link?); keploy does not follow it", testSetDir)
+	}
+	return keploy.OpenRoot(name)
+}
+
+// hasSecretsFile reports whether the test set at testSetDir has a
+// secret.yaml, a symbolic link there included: it is sanitized. Its folder is
+// opened inside the project (see above). One it cannot open or look in has
+// none: sanitizing the set opens the same folders, and says why it cannot.
+func hasSecretsFile(testSetDir string) bool {
+	set, err := openTestSet(testSetDir)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = set.Close() }()
+	_, err = set.Lstat(secretsFile)
+	return err == nil
+}
+
+// testSetFiles is the tests directory of the test set set (at testSetDir),
+// opened, and the names of the test files in it, its *.yaml, in name order.
+// Every one is checked before any is rewritten: the tests directory and each
+// test file must be what they say, not a symlink to somewhere else (tests ->
+// /etc/netplan would have had root rewrite every *.yaml there). Checking up
+// front means a test set is rewritten whole or not at all. The caller closes
+// tests.
+//
+// Only a tests directory that does not exist means no tests (tests nil). One
+// that is there but is not a directory, or cannot be looked at or listed, is
+// an error: read as "no tests", sanitize would leave whatever the set holds
+// unsanitized and report success.
+func testSetFiles(set *os.Root, testSetDir string) (tests *os.Root, files []string, err error) {
 	testsDir := filepath.Join(testSetDir, "tests")
-	fi, err := os.Lstat(testsDir)
+	fi, err := set.Lstat("tests")
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return nil, false, nil
+		return nil, nil, nil
 	case err != nil:
-		return nil, false, err
+		return nil, nil, err
 	case fi.Mode()&os.ModeSymlink != 0:
-		return nil, false, fmt.Errorf("%s is a symbolic link; keploy does not follow it", testsDir)
+		return nil, nil, fmt.Errorf("%s is a symbolic link; keploy does not follow it", testsDir)
 	case !fi.IsDir():
-		return nil, false, fmt.Errorf("keploy cannot tell what tests the set holds: %w", &fs.PathError{Op: "lstat", Path: testsDir, Err: syscall.ENOTDIR})
+		return nil, nil, fmt.Errorf("keploy cannot tell what tests the set holds: %w", &fs.PathError{Op: "lstat", Path: testsDir, Err: syscall.ENOTDIR})
 	}
-	ents, err := os.ReadDir(testsDir)
+	tests, err = set.OpenRoot("tests")
 	if err != nil {
-		return nil, true, fmt.Errorf("read tests dir: %w", err)
+		return nil, nil, fmt.Errorf("read tests dir: %w", err)
+	}
+	ents, err := readRootDir(tests)
+	if err != nil {
+		_ = tests.Close()
+		return nil, nil, fmt.Errorf("read tests dir: %w", err)
 	}
 	for _, e := range ents {
 		if e.IsDir() {
@@ -1026,40 +1111,64 @@ func testSetFiles(testSetDir string) (files []string, hasTests bool, err error) 
 		if !strings.HasSuffix(strings.ToLower(name), ".yaml") {
 			continue
 		}
-		path := filepath.Join(testsDir, name)
 		if !e.Type().IsRegular() {
-			return nil, true, fmt.Errorf("%s is not a regular file (a symbolic link?); keploy does not rewrite the test set through it", path)
+			_ = tests.Close()
+			return nil, nil, fmt.Errorf("%s is not a regular file (a symbolic link?); keploy does not rewrite the test set through it", filepath.Join(testsDir, name))
 		}
-		files = append(files, path)
+		files = append(files, name)
 	}
-	return files, true, nil
+	return tests, files, nil
 }
 
-// readTestSetFile reads path, a file of a test set, without following a
-// symlink there: a test set is a directory a cloned repository can carry, and
-// sanitize often runs under sudo, as recording does.
-func readTestSetFile(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow, 0)
+// readRootDir is os.ReadDir of the folder dir: its entries, by name.
+func readRootDir(dir *os.Root) ([]fs.DirEntry, error) {
+	d, err := dir.Open(".")
 	if err != nil {
-		return nil, noFollowError(path, err)
+		return nil, err
+	}
+	defer func() { _ = d.Close() }()
+	ents, err := d.ReadDir(-1)
+	slices.SortFunc(ents, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return ents, err
+}
+
+// openTestSetFile opens name, a file in the folder dir of a test set, as
+// os.OpenFile does, without following a symbolic link there, not even to a
+// file in the folder (openNoFollowIn). name is one path element: anything
+// else, "..", or a path, would be opened from dir, and is refused.
+func openTestSetFile(dir *os.Root, name string, flag int, perm os.FileMode) (*os.File, error) {
+	if name != filepath.Base(name) || name == ".." {
+		return nil, &fs.PathError{Op: "open", Path: filepath.Join(dir.Name(), name), Err: fs.ErrInvalid}
+	}
+	return openNoFollowIn(dir, name, flag, perm)
+}
+
+// readTestSetFile reads name, a file of a test set in its folder dir, without
+// following a symlink there (openTestSetFile).
+func readTestSetFile(dir *os.Root, name string) ([]byte, error) {
+	f, err := openTestSetFile(dir, name, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, noFollowError(filepath.Join(dir.Name(), name), err)
 	}
 	defer func() { _ = f.Close() }()
 	return io.ReadAll(f)
 }
 
-// writeTestSetFile writes data to path, a file of a test set, without
-// following a symlink there (see readTestSetFile). A new file is created with
-// perm and, when root creates it under sudo, belongs to the user who ran sudo,
-// as keploy's other outputs do; whether it is new is told by the open itself
-// (O_EXCL). With narrow, an existing file more open than perm is narrowed to
-// it, through the open file, never by name -- and a file that cannot be is not
-// written. Without it, an existing file keeps its mode and owner.
-func writeTestSetFile(path string, data []byte, perm os.FileMode, narrow bool) error {
-	const flags = os.O_WRONLY | os.O_TRUNC | oNoFollow
-	f, err := os.OpenFile(path, flags|os.O_CREATE|os.O_EXCL, perm)
+// writeTestSetFile writes data to name, a file of a test set in its folder
+// dir, without following a symlink there (openTestSetFile). A new file is
+// created with perm and, when root creates it under sudo, belongs to the user
+// who ran sudo, as keploy's other outputs do; whether it is new is told by
+// the open itself (O_EXCL). With narrow, an existing file more open than perm
+// is narrowed to it, through the open file, never by name -- and a file that
+// cannot be is not written. Without it, an existing file keeps its mode and
+// owner.
+func writeTestSetFile(dir *os.Root, name string, data []byte, perm os.FileMode, narrow bool) error {
+	path := filepath.Join(dir.Name(), name)
+	const flags = os.O_WRONLY | os.O_TRUNC
+	f, err := openTestSetFile(dir, name, flags|os.O_CREATE|os.O_EXCL, perm)
 	created := err == nil
 	if errors.Is(err, os.ErrExist) {
-		f, err = os.OpenFile(path, flags, perm)
+		f, err = openTestSetFile(dir, name, flags, perm)
 	}
 	if err != nil {
 		return noFollowError(path, err)
@@ -1091,8 +1200,17 @@ func noFollowError(path string, err error) error {
 }
 
 // DesanitizeFileInPlace reads a sanitized YAML file and replaces placeholders with actual secret values.
+// It is opened as SanitizeFileInPlace opens a test file.
 func DesanitizeFileInPlace(path string, secrets map[string]string) error {
-	raw, err := readTestSetFile(path)
+	return inFileFolder(path, func(dir *os.Root, name string) error {
+		return desanitizeFileIn(dir, name, secrets)
+	})
+}
+
+// desanitizeFileIn is DesanitizeFileInPlace of the file name in the folder dir.
+func desanitizeFileIn(dir *os.Root, name string, secrets map[string]string) error {
+	path := filepath.Join(dir.Name(), name)
+	raw, err := readTestSetFile(dir, name)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
@@ -1124,7 +1242,7 @@ func DesanitizeFileInPlace(path string, secrets map[string]string) error {
 	}
 	_ = enc.Close()
 
-	err = writeTestSetFile(path, out.Bytes(), testFileMode, false)
+	err = writeTestSetFile(dir, name, out.Bytes(), testFileMode, false)
 	if err != nil {
 		return fmt.Errorf("write desanitized %s: %w", path, err)
 	}
@@ -1149,31 +1267,37 @@ func (t *Tools) desanitizeTestSet(testSetID string, path string) (bool, error) {
 	t.logger.Debug("Desanitizing test set", zap.String("testSetID", testSetID), zap.String("path", path))
 
 	testSetDir := filepath.Join(path, testSetID)
-	if !isDir(testSetDir) {
+	set, err := openTestSet(testSetDir)
+	if errors.Is(err, fs.ErrNotExist) {
 		return false, fmt.Errorf("test set directory not found: %s", testSetDir)
 	}
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = set.Close() }()
 
-	secretPath := filepath.Join(testSetDir, "secret.yaml")
+	secretPath := filepath.Join(testSetDir, secretsFile)
 
 	t.logger.Debug("Checking if secret.yaml exists", zap.String("path", secretPath))
 
 	// Check if secret.yaml exists (a symlink there exists too, and is refused
 	// by the read below rather than taken for "not sanitized")
-	if _, err := os.Lstat(secretPath); os.IsNotExist(err) {
+	if _, err := set.Lstat(secretsFile); errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
 
 	// Every test file checked before secret.yaml is read or any is rewritten.
-	files, hasTests, err := testSetFiles(testSetDir)
+	tests, files, err := testSetFiles(set, testSetDir)
 	if err != nil {
 		return false, err
 	}
-	if !hasTests {
+	if tests == nil {
 		return false, fmt.Errorf("tests directory not found: %s", filepath.Join(testSetDir, "tests"))
 	}
+	defer func() { _ = tests.Close() }()
 
 	// Read secret.yaml
-	secretBytes, err := readTestSetFile(secretPath)
+	secretBytes, err := readTestSetFile(set, secretsFile)
 	if err != nil {
 		return false, fmt.Errorf("read secret.yaml: %w", err)
 	}
@@ -1190,17 +1314,18 @@ func (t *Tools) desanitizeTestSet(testSetID string, path string) (bool, error) {
 	t.logger.Debug("Parsed secrets map for desanitization", zap.Int("secrets", len(secrets)))
 
 	// Desanitize each file
-	for _, f := range files {
+	for _, name := range files {
+		f := filepath.Join(testSetDir, "tests", name)
 		t.logger.Debug("Desanitizing file", zap.String("file", f))
 
-		err = DesanitizeFileInPlace(f, secrets)
+		err = desanitizeFileIn(tests, name, secrets)
 		if err != nil {
 			return false, fmt.Errorf("failed to desanitize file %s: %w", f, err)
 		}
 	}
 
 	// Remove secret.yaml after desanitization
-	err = os.Remove(secretPath)
+	err = set.Remove(secretsFile)
 	if err != nil {
 		return false, fmt.Errorf("remove secret.yaml: %w", err)
 	}
