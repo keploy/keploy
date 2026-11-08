@@ -143,7 +143,8 @@ func TestATestCasesAssetsAreWrittenOnlyInsideTheRecording(t *testing.T) {
 			tc.HTTPReq.Form = []models.FormData{{Key: "field", Values: []string{large}}}
 		}},
 		{"a form file from a temp file", filepath.Join("test-1", "field", "a.txt"), func(t *testing.T, tc *models.TestCase) {
-			tc.HTTPReq.Form = []models.FormData{{Key: "field", FileNames: []string{"a.txt"}, Paths: []string{upload(t)}}}
+			p := upload(t)
+			tc.HTTPReq.Form = []models.FormData{{Key: "field", FileNames: []string{"a.txt"}, Paths: []string{p}, Captured: []string{p}}}
 		}},
 		{"a form file sent with the test case", filepath.Join("test-1", "field", "a.txt"), func(_ *testing.T, tc *models.TestCase) {
 			tc.HTTPReq.Form = []models.FormData{{Key: "field", FileNames: []string{"a.txt"}, FileContents: [][]byte{[]byte("sent")}}}

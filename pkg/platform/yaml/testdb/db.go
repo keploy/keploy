@@ -1180,6 +1180,24 @@ func extractTestNumber(name string) int {
 // are offloaded to the assets directory and response bodies are stored as hashes.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
+// keptAsset says whether paths[j], a form file part's path in a test case
+// read back, names a regular file already kept inside the recording, as the
+// replay reads it (relative to the keploy folder, only inside it), and where.
+// A path that is absolute, leads out of the recording or names no file there
+// is not one: the part is persisted from what else the test case carries, and
+// that path is neither read nor removed.
+func (ts *TestYaml) keptAsset(paths []string, j int) (string, bool) {
+	if j >= len(paths) || filepath.IsAbs(paths[j]) {
+		return "", false
+	}
+	p := filepath.Join(ts.TcsPath, paths[j])
+	info, err := yaml.StatInRecording(ts.TcsPath, p)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	return p, true
+}
+
 func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName string) error {
 	// 1. Offload large request body (>1MB) to assets directory
 	if len(tc.HTTPReq.Body) > LargeBodyThreshold {
@@ -1307,9 +1325,11 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				destPath := filepath.Join(assetDir, safeFileName)
 				wroteFile := false
 
-				// Case 1: File is in Paths (downloaded to local temp)
-				if j < len(form.Paths) && form.Paths[j] != "" {
-					srcPath := form.Paths[j]
+				// Case 1: the file the capture left the part in (Captured),
+				// never a path the test case names: one read back from a
+				// set's file or the cloud names no file to copy or remove.
+				if j < len(form.Captured) && form.Captured[j] != "" {
+					srcPath := form.Captured[j]
 					// Check if srcPath exists
 					if _, err := os.Stat(srcPath); err == nil {
 						input, err := os.Open(srcPath)
@@ -1344,6 +1364,11 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					} else {
 						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", srcPath), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", srcPath))
 					}
+				} else if kept, ok := ts.keptAsset(form.Paths, j); ok {
+					// Case 1a: a test case read back already keeps the part
+					// beside it: kept as it is.
+					destPath = kept
+					wroteFile = true
 				} else if j < len(form.FileContents) && form.FileContents[j] != nil {
 					// Case 1b: File content travelled with the test case (captured
 					// in another process, e.g. the DaemonSet agent)
@@ -1381,7 +1406,10 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 
 			tc.HTTPReq.Form[i].Paths = newPaths
 			// Written to the assets above; never stored in the test case.
+			// The captured files are gone (copied and removed): a later save
+			// of this test case keeps the part where it now is (Case 1a).
 			tc.HTTPReq.Form[i].FileContents = nil
+			tc.HTTPReq.Form[i].Captured = nil
 			if allFilesPersisted {
 				tc.HTTPReq.Form[i].Values = nil
 			}

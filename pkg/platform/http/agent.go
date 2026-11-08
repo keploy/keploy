@@ -640,7 +640,7 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 				select {
 				case <-ctx.Done():
 					return true
-				case tcChan <- &tc:
+				case tcChan <- capturedByAgent(&tc):
 					pendingTestCase = nil
 				}
 			}
@@ -698,12 +698,26 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			select {
 			case <-ctx.Done():
 				return true
-			case tcChan <- pendingTestCase:
+			case tcChan <- capturedByAgent(pendingTestCase):
 				pendingTestCase = nil
 			}
 		}
 	}
 	return false
+}
+
+// capturedByAgent marks the paths of tc's file parts, a test case this client
+// read from its agent, as the files they were captured in: this client's own
+// copy of a part it received, or the agent's on this host
+// (FormData.Captured). The test store copies a part only from there. A path
+// in a test case read any other way (a set's file, the cloud) is never one.
+// Called on each test case as it is handed on, once its parts are in.
+func capturedByAgent(tc *models.TestCase) *models.TestCase {
+	for i := range tc.HTTPReq.Form {
+		f := &tc.HTTPReq.Form[i]
+		f.Captured = slices.Clone(f.Paths)
+	}
+	return tc
 }
 
 // readIncomingJSON reads a legacy JSON incoming stream; see readIncoming.
@@ -725,7 +739,7 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 		case <-ctx.Done():
 			// If the context is done, exit the loop
 			return true
-		case tcChan <- &testCase:
+		case tcChan <- capturedByAgent(&testCase):
 			// Send the decoded test case to the channel
 		}
 	}

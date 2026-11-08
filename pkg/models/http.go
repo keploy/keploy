@@ -109,6 +109,14 @@ type FormData struct {
 	// JSON upload: the persister writes it to the test case's assets and
 	// clears it, and yaml/bson "-" keep it out of stored test cases.
 	FileContents [][]byte `json:"file_contents,omitempty" bson:"-" yaml:"-"`
+	// Captured names, index-aligned with FileNames, the file a part's bytes
+	// are in as this process received the test case from its agent (the
+	// agent client, platform/http): the test store copies a part into the
+	// test case's assets, and removes the file, only from here. It is never
+	// encoded, so a test case read back (a set's file, the cloud, the wire)
+	// never names a file for the store to read or remove: its Paths name
+	// files already kept beside it, opened only inside the recording.
+	Captured []string `json:"-" bson:"-" yaml:"-"`
 }
 
 // HTTPResp is an HTTP response. StreamBody is a streamed body's frames, as a
