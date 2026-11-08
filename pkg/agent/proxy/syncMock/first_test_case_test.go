@@ -44,7 +44,7 @@ func TestAStartUpReadInAWindowThatBecameNoTestCaseIsOneAnyTestMayNeed(t *testing
 			m.OpenWindow(t0, nil).Close()
 			lost := addMockTo("c2", false)
 			lost.Spec.ReqTimestampMock, lost.Spec.ResTimestampMock = t0.Add(time.Millisecond), t0.Add(2*time.Millisecond)
-			m.leaveOutOver(lost, m.revokeEpoch.Load())
+			m.leaveOutOver(lost, m.revokeEpoch.Load(), string(MockDroppedOutputFull))
 			if m.SendingTestCase("first-request", t0, t0.Add(5*time.Millisecond)) {
 				t.Fatal("setup: a test case over a lost call was sent")
 			}
@@ -142,7 +142,7 @@ func TestARevokedTestCaseIsNotTheRecordingsFirst(t *testing.T) {
 		sendTwo(m)
 		lost := addMockTo("c2", false)
 		lost.Spec.ReqTimestampMock, lost.Spec.ResTimestampMock = t0.Add(100*time.Millisecond), t0.Add(200*time.Millisecond)
-		m.leaveOutOver(lost, m.revokeEpoch.Load())
+		m.leaveOutOver(lost, m.revokeEpoch.Load(), string(MockDroppedOutputFull))
 		if !m.servedToAnyTest(read, "") {
 			t.Fatal("a start-up read before the first test case still sent is read as a test's")
 		}
@@ -162,7 +162,7 @@ func TestARevokedTestCaseIsNotTheRecordingsFirst(t *testing.T) {
 		// those let go.
 		over := addMockTo("c2", false)
 		over.Spec.ReqTimestampMock, over.Spec.ResTimestampMock = t0.Add(time.Hour), t0.Add(time.Hour+10*time.Second)
-		m.leaveOutOver(over, m.revokeEpoch.Load())
+		m.leaveOutOver(over, m.revokeEpoch.Load(), string(MockDroppedOutputFull))
 		if m.servedToAnyTest(read, "") {
 			t.Fatal("with every test case named revoked, the first let go is not the first")
 		}
@@ -272,7 +272,7 @@ func TestALossFindsALongTestCaseSentLongBefore(t *testing.T) {
 	}
 	lost := addMockTo("c1", false)
 	lost.Spec.ReqTimestampMock, lost.Spec.ResTimestampMock = at, at.Add(time.Millisecond)
-	m.leaveOutOver(lost, m.revokeEpoch.Load())
+	m.leaveOutOver(lost, m.revokeEpoch.Load(), string(MockDroppedOutputFull))
 	if got := revokesQueued(m); len(got) != 1 || got[0] != "long" {
 		t.Fatalf("revoked %v, want only the long test case over the call", got)
 	}
