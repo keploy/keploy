@@ -163,11 +163,11 @@ func TestACopyCountsOnceTheRecordingsConsumerTookIt(t *testing.T) {
 		if sendNow(m, copyAt(t, "k", t0.Add(time.Second)), ""); !leftOutAfter(m, t0.Add(time.Second)) {
 			t.Fatal("a mock whose copy only the last recording's consumer took, lost, left out none of the tests after it")
 		}
-		// The third, whose consumer takes a copy: after the second's span,
-		// which its start closed.
-		t1 := time.Now()
-		fullLaneAfter(t, m, copyAt(t, "k", t1))
-		if sendNow(m, copyAt(t, "k", t1.Add(5*time.Second)), ""); leftOutAfter(m, t1.Add(5*time.Second)) {
+		// The third, whose consumer takes a copy: before the second's span
+		// (from t0+1s until the third's start closed it), which a window
+		// of the third's would overlap.
+		fullLaneAfter(t, m, copyAt(t, "k", t0.Add(-30*time.Second)))
+		if sendNow(m, copyAt(t, "k", t0.Add(-20*time.Second)), ""); leftOutAfter(m, t0.Add(-20*time.Second)) {
 			t.Fatal("a mock whose copy the third recording's consumer took, lost, left out the tests after it")
 		}
 	})
@@ -210,27 +210,33 @@ func TestTheCopiesARecordingHoldsAreBounded(t *testing.T) {
 	t0 := time.Now().Add(-time.Minute)
 	m := New(nil)
 	m.SetOutputChannel(make(chan *models.Mock, 1))
+	m.SetOutputChannel(make(chan *models.Mock, 1)) // the second recording: an older one's epoch is a real one
 	ep := m.revokeEpoch.Load()
+	m.noteDelivered(copyAt(t, "cur", t0), ep)
 	m.noteDelivered(copyAt(t, "none", t0), ep)     // needs no mock: no key to hold
 	m.noteDelivered(copyAt(t, "needed:k", t0), ep) // needed in itself: no copy of k
 	if m.neededByNone(copyAt(t, "k", t0.Add(time.Second)), ep) {
 		t.Fatal("a mock its kind needs in itself was held as a copy")
 	}
-	for i := 0; i < heldCopiesMax; i++ {
+	m.noteDelivered(copyAt(t, "older", t0), ep-1)
+	if m.neededByNone(copyAt(t, "older", t0.Add(time.Second)), ep) {
+		t.Fatal("a copy taken for an older recording's channel is held")
+	}
+	for i := 0; i < heldCopiesMax-1; i++ { // "cur" holds one
 		m.noteDelivered(copyAt(t, fmt.Sprint(i), t0), ep)
 	}
 	m.noteDelivered(copyAt(t, "past", t0), ep)
 	if m.neededByNone(copyAt(t, "past", t0.Add(time.Second)), ep) {
 		t.Fatal("a key past the bound is held")
 	}
-	if !m.neededByNone(copyAt(t, "0", t0.Add(time.Second)), ep) || !m.neededByNone(copyAt(t, fmt.Sprint(heldCopiesMax-1), t0), ep) {
+	if !m.neededByNone(copyAt(t, "0", t0.Add(time.Second)), ep) || !m.neededByNone(copyAt(t, fmt.Sprint(heldCopiesMax-2), t0), ep) {
 		t.Fatal("a key within the bound is not held")
 	}
 	if m.neededByNone(copyAt(t, "0", t0.Add(-time.Second)), ep) {
 		t.Fatal("a mock requested before its key's copy is held")
 	}
 	m.noteDelivered(copyAt(t, "0", t0.Add(time.Hour)), ep)
-	if m.neededByNone(copyAt(t, "0", t0.Add(-time.Second)), ep) {
+	if !m.neededByNone(copyAt(t, "0", t0.Add(time.Second)), ep) {
 		t.Fatal("a later copy moved its key's time")
 	}
 	m.noteDelivered(copyAt(t, "0", t0.Add(-2*time.Second)), ep)
@@ -242,10 +248,6 @@ func TestTheCopiesARecordingHoldsAreBounded(t *testing.T) {
 	}
 	if m.neededByNone(copyAt(t, "0", t0.Add(time.Second)), ep-1) {
 		t.Fatal("a loss of an older recording's epoch is needed by none")
-	}
-	m.noteDelivered(copyAt(t, "older", t0), ep-1)
-	if m.neededByNone(copyAt(t, "older", t0.Add(time.Second)), ep) {
-		t.Fatal("a copy taken for an older recording's channel is held")
 	}
 	needed := copyAt(t, "", t0.Add(time.Second))
 	if m.neededByNone(needed, ep) {
