@@ -217,8 +217,8 @@ func TestSanitizeAndNormalizeRefuseALinkInsideTheKeployFolder(t *testing.T) {
 		if err := os.Symlink("real", filepath.Join(set, "tests")); err != nil {
 			t.Fatal(err)
 		}
-		if err := tools.SanitizeTestSetDir(context.Background(), set); err == nil {
-			t.Error("SanitizeTestSetDir followed a tests folder that links to a folder in the set")
+		if err := tools.SanitizeTestSetDir(context.Background(), set); err == nil || !strings.Contains(err.Error(), "is a symbolic link") {
+			t.Errorf("SanitizeTestSetDir through a tests folder that links to a folder in the set = %v; want it refused as a link", err)
 		}
 		if b, _ := os.ReadFile(filepath.Join(set, "real", "test-1.yaml")); string(b) != projectSecretTest {
 			t.Errorf("the test the link leads to was rewritten: %s", b)
