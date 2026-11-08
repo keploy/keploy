@@ -33,6 +33,9 @@ import (
 //	                          is a leaf lock — never re-acquire
 //	                          swapMu/treesMu from under it)
 //	swapMu  →  consumedMu    (independent; never hold consumedMu then swapMu)
+//	swapMu  →  exact.ofKind.mu  (the staging installs the set-as-recorded
+//	                          source, RangeRecordedSet reads it with the
+//	                          trees; a LEAF, also taken bare)
 //	hitMu   →  treesMu  →  connMu  →  TreeDb.mu
 //	                         (bumpHitCount's slow path; rebuildHitIndex takes
 //	                          hitMu as a LEAF — never acquire treesMu from
@@ -1662,6 +1665,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// Every staging starts the per-test stateful cursors over: a test's own
 	// recordings of a request advance their cursor within that test alone.
 	m.resetPerTestCursors()
+	// The set's recordings as recorded are the trees this staging builds and
+	// the source the agent handed before it.
+	m.installRecordedOfKindLocked()
 	// Track the earliest window-start we've ever seen on this manager.
 	// Used below to distinguish startup-init mocks (recorded before
 	// any test fired) from stale previous-test mocks. Once set, only
@@ -3626,6 +3632,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&mocks)
+	m.installRecordedOfKindLocked()
 	m.stampSet(mocks)
 	m.publishFiltered(m.buildTier(mocks, true), true)
 }
@@ -3750,6 +3757,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&mocks)
+	m.installRecordedOfKindLocked()
 	m.stampSet(mocks)
 	m.publishUnfiltered(m.buildTier(mocks, false), true)
 }

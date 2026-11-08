@@ -283,9 +283,24 @@ func (m *Mock) HydrateResponse() error {
 // whole while other connections count matches against them, so the replay
 // mock manager keeps the counts itself.
 type TestModeInfo struct {
-	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
-	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
-	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	ID         int  `json:"Id,omitempty" bson:"Id,omitempty"`
+	IsFiltered bool `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
+
+	// LoadSeq is the mock's place, counted from 1, in the set the agent's
+	// mock stream handed it (Agent.StoreMocksStream): the order the client
+	// sent the set in, the order its mocks were recorded in. The agent keeps
+	// each per-test mock in memory or on disk, and a read lists those kept in
+	// memory ahead of those loaded from disk, so where one time ties mocks
+	// (the frames of one pipelined write) the order a read holds them in is
+	// not the order recorded; this is, whichever tier holds the mock. Zero on
+	// a mock no stream handed. A uint32 in IsFiltered's word's padding, so a
+	// Mock stays in its size class; the stream refuses a set with more mocks
+	// than it counts. Runtime-only, like Lifetime and the fields below it:
+	// gob carries it into the agent's on-disk store and back, and no file
+	// keeps it.
+	LoadSeq uint32 `json:"-" bson:"-"`
+
+	SortOrder int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
 
 	// Lifetime classifies the mock (per-test / session / connection)
 	// once at ingest via (*Mock).DeriveLifetime. Matchers read this
