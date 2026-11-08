@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -66,6 +67,75 @@ func TestATestsMockLostOverATestCaseSentWithNoNameRevokesItByItsRequestTime(t *t
 			t.Fatalf("a loss whose test case it revoked by its request time says one may stay: %v", f)
 		}
 	})
+	// Its name is the request stamp the client reads from the test case it
+	// saves, whatever the response stamp says: one stamped before the
+	// request (the stream reads the window as [end, end]) or not at all (as
+	// [start, now]) is still found by it, through either entry point.
+	for _, c := range []struct {
+		name  string
+		start func(at time.Time) time.Time
+		end   func(at time.Time) time.Time
+	}{
+		{"a response stamped before its request", func(at time.Time) time.Time { return at.Add(2 * time.Second) }, func(at time.Time) time.Time { return at.Add(time.Second / 2) }},
+		{"a test case with no window end", func(at time.Time) time.Time { return at.Add(-time.Second) }, func(time.Time) time.Time { return time.Time{} }},
+	} {
+		for _, of := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s (several managers: %v)", c.name, of), func(t *testing.T) {
+				core, logs := observer.New(zapcore.DebugLevel)
+				m := New(zap.New(core))
+				m.SetRevokeCapable(true)
+				m.SetRevokeByRequest(true)
+				_, clk := fullLane(t, m)
+				t0 := time.Now().Add(-time.Minute)
+				sentFirstAt(m, t0)
+				at := t0.Add(10 * time.Second)
+				start, end := c.start(at), c.end(at)
+				var sent bool
+				if of {
+					sent = SendingTestCaseOf([]*SyncMockManager{m, New(nil)}, "", start, end)
+				} else {
+					sent = m.SendingTestCase("", start, end)
+				}
+				if !sent {
+					t.Fatal("a test case sent with no name was left out with no mock lost")
+				}
+				lose(t, m, clk, at)
+				if got := revokesQueued(m); len(got) != 1 || got[0] != models.RevokeNameByRequest(start) {
+					t.Fatalf("revoked %v, want only %q: the test case over the lost call, by its request stamp", got, models.RevokeNameByRequest(start))
+				}
+				if n, f := unnamedWarns(logs); n != 0 {
+					t.Fatalf("a loss whose test case it revoked by its request time says one may stay: %v", f)
+				}
+			})
+		}
+	}
+	// A test case the stream sent with its own name is revoked by that name
+	// alone, also for a client that finds nameless ones by request time.
+	for _, of := range []bool{false, true} {
+		t.Run(fmt.Sprintf("a named test case keeps its name (several managers: %v)", of), func(t *testing.T) {
+			m := New(nil)
+			m.SetRevokeCapable(true)
+			m.SetRevokeByRequest(true)
+			_, clk := fullLane(t, m)
+			t0 := time.Now().Add(-time.Minute)
+			sentFirstAt(m, t0)
+			at := t0.Add(10 * time.Second)
+			over := at.Add(-time.Second)
+			var sent bool
+			if of {
+				sent = SendingTestCaseOf([]*SyncMockManager{m, New(nil)}, "test-7", over, at.Add(time.Second))
+			} else {
+				sent = m.SendingTestCase("test-7", over, at.Add(time.Second))
+			}
+			if !sent {
+				t.Fatal("a named test case was left out with no mock lost")
+			}
+			lose(t, m, clk, at)
+			if got := revokesQueued(m); len(got) != 1 || got[0] != "test-7" {
+				t.Fatalf("revoked %v, want only the test case's own name test-7", got)
+			}
+		})
+	}
 	for _, c := range []struct {
 		name     string
 		byReq    bool
@@ -134,6 +204,20 @@ func TestATestsMockLostOverATestCaseSentWithNoNameRevokesItByItsRequestTime(t *t
 		}
 		if !m.servedToAnyTest(asyncAt("c1", t0.Add(-time.Second)), "") {
 			t.Fatal("a start-up mock before the first test case, one sent with no name, is not one any test may need")
+		}
+	})
+	// Test cases sent with no name count by their earliest start, whatever
+	// the order the stream sends them in.
+	t.Run("the first of several sent with no name, sent second", func(t *testing.T) {
+		m := New(nil)
+		t0 := time.Now().Add(-time.Minute)
+		m.SendingTestCase("", t0.Add(5*time.Second), t0.Add(6*time.Second))
+		m.SendingTestCase("", t0, t0.Add(time.Millisecond))
+		if m.servedToAnyTest(asyncAt("c1", t0.Add(2*time.Second)), "") {
+			t.Fatal("a start-up mock after the earliest test case sent with no name, sent after a later one, is read as one any test may need")
+		}
+		if !m.servedToAnyTest(asyncAt("c1", t0.Add(-time.Second)), "") {
+			t.Fatal("a start-up mock before the earliest test case sent with no name is not one any test may need")
 		}
 	})
 }

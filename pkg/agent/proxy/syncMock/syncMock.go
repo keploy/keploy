@@ -1857,7 +1857,7 @@ func (m *SyncMockManager) SendingTestCase(name string, start, end time.Time) boo
 	if m == nil {
 		return true
 	}
-	sent := m.sentName(name, start, end)
+	sent := m.sentName(name, start)
 	start, end = sendingWindow(start, end)
 	m.sharedLossMu.Lock()
 	defer m.sharedLossMu.Unlock()
@@ -1889,7 +1889,7 @@ func SendingTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Tim
 			ms = append(ms, m)
 		}
 	}
-	rawStart, rawEnd := start, end
+	rawStart := start
 	start, end = sendingWindow(start, end)
 	sendingTestCaseOfMu.Lock()
 	defer sendingTestCaseOfMu.Unlock()
@@ -1907,7 +1907,7 @@ func SendingTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Tim
 		}
 	}
 	for _, m := range ms {
-		m.noteSentLocked(m.sentName(name, rawStart, rawEnd), start, end)
+		m.noteSentLocked(m.sentName(name, rawStart), start, end)
 	}
 	return true
 }
@@ -2482,15 +2482,17 @@ func (m *SyncMockManager) RevokesByRequest() bool {
 	return m != nil && m.revokeByRequest.Load()
 }
 
-// sentName is the name the stream's test case named name, whose window is
-// [start, end] as the stream gives it, is noted sent under: its own, or, for
-// one with none (the async capture leaves naming to the client), the name a
-// revoke finds it by, its request time (models.RevokeNameByRequest), when the
-// client reads such a name (SetRevokeByRequest) and the start is one the
-// client reads from the test case (not zero, nor after its end); else none,
-// and a loss over its window cannot revoke it (sentList.add).
-func (m *SyncMockManager) sentName(name string, start, end time.Time) string {
-	if name != "" || start.IsZero() || (!end.IsZero() && start.After(end)) || !m.revokeByRequest.Load() {
+// sentName is the name the stream's test case named name, whose request came
+// at start as the stream gives it (the test case's own request stamp, which
+// the client reads from the test case it saves), is noted sent under: its
+// own, or, for one with none (the async capture leaves naming to the client),
+// the name a revoke finds it by, that request time
+// (models.RevokeNameByRequest), when the client reads such a name
+// (SetRevokeByRequest) and the start is set; a response stamped before the
+// request, or none, does not change it. Else none, and a loss over its window
+// cannot revoke it (sentList.add).
+func (m *SyncMockManager) sentName(name string, start time.Time) string {
+	if name != "" || start.IsZero() || !m.revokeByRequest.Load() {
 		return name
 	}
 	return models.RevokeNameByRequest(start)
