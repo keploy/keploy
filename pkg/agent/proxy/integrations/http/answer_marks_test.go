@@ -175,6 +175,83 @@ func TestAnswerMarksReadsTheBodyAsKept(t *testing.T) {
 	}
 }
 
+// A Content-Length that is no length, or a negative one, is framing
+// answerMarks does not read: the answer keeps no marks, and reading it never
+// panics. Go's reader takes such a head when the line is folded onto the one
+// before it: Go joins it to that header, and keploy's header scan reads it as
+// a Content-Length of its own.
+func TestAnswerMarksReadsNoLengthItCannot(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		resp    string
+		bodyLen int
+	}{
+		{"a negative length on a 304", "HTTP/1.1 304 Not Modified\r\nContent-Length: -5\r\n\r\n", 0},
+		{"a length of -1 on a 304", "HTTP/1.1 304 Not Modified\r\nContent-Length: -1\r\n\r\n", 0},
+		{"a length that is no number on a 304", "HTTP/1.1 304 Not Modified\r\nContent-Length: x5\r\n\r\n", 0},
+		{"a negative length folded into a close-delimited 200",
+			"HTTP/1.1 200 OK\r\nConnection: close\r\nX-A: b\r\n Content-Length: -5\r\n\r\nhello", 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := []byte(tc.resp)
+			writes := []respWrite{{end: 20, at: markAt(1)}, {end: len(resp), at: markAt(2)}}
+			marks := func() *models.HTTPAnswerMarks {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("answerMarks(%q) panicked: %v", tc.resp, r)
+					}
+				}()
+				return answerMarks(resp, writes, "", tc.bodyLen)
+			}()
+			if marks != nil {
+				t.Errorf("answerMarks(%q) = %+v, want none", tc.resp, marks)
+			}
+		})
+	}
+}
+
+// A Content-Length of 0 is a length: an answer whose head took two writes
+// keeps its marks, at the write that ended its head.
+func TestAnswerMarksKeepsAZeroLength(t *testing.T) {
+	resp := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+	writes := []respWrite{{end: 20, at: markAt(1)}, {end: len(resp), at: markAt(2)}}
+	wantMarks(t, answerMarks(resp, writes, "", 0), markAt(2), w(0, 2))
+}
+
+// A response whose folded line keploy's header scan reads as a negative
+// Content-Length is recorded as Go reads it, with no marks: the record does
+// not panic and lose the exchange.
+func TestRecordKeepsNoMarksForALengthItCannotRead(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		pieces []string
+		status int
+		body   string
+	}{
+		{"a 304", []string{"HTTP/1.1 304 Not Modified\r\nX-A: b\r\n", " Content-Length: -5\r\n\r\n"}, 304, ""},
+		{"a 200 the connection's close ends",
+			[]string{"HTTP/1.1 200 OK\r\nConnection: close\r\nX-A: b\r\n", " Content-Length: -5\r\n\r\nhello"}, 200, "hello"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := func() *models.Mock {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("recordV2 panicked: %v", r)
+					}
+				}()
+				return recordWrites(t, marksReq, tc.pieces, []time.Time{markAt(1), markAt(2)})
+			}()
+			resp := m.Spec.HTTPResp
+			if resp.StatusCode != tc.status || resp.Body != tc.body {
+				t.Errorf("recorded %d %q, want %d %q", resp.StatusCode, resp.Body, tc.status, tc.body)
+			}
+			if resp.Marks != nil {
+				t.Errorf("marks = %+v, want none", resp.Marks)
+			}
+		})
+	}
+}
+
 // An answer the upstream sent in one write keeps one mark, at its head's
 // time: marks are what lets replay hold an answer. So does one whose head and
 // whole body went out in the same last write, after a head split in two, and

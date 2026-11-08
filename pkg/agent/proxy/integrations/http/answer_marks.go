@@ -32,7 +32,9 @@ func noteWrite(writes *[]respWrite, end int, at time.Time) {
 // decode to.
 //
 // It is nil for an answer it cannot place write by write: a write with no
-// time, a body whose framing or encoding does not read back to bodyLen bytes.
+// time, framing it does not read (a Content-Length that is no length, or a
+// negative one), a body whose framing or encoding does not read back to
+// bodyLen bytes.
 // Such an answer is written at once, as a recording with no marks is.
 func answerMarks(resp []byte, writes []respWrite, encoding string, bodyLen int) *models.HTTPAnswerMarks {
 	if len(writes) == 0 {
@@ -78,8 +80,13 @@ func answerMarks(resp []byte, writes []respWrite, encoding string, bodyLen int) 
 		}
 		wire = data
 	case contentLength != "":
-		// Bytes after the declared length are no part of the body.
-		n, _ := contentLengthValue(contentLength)
+		// A length that does not read as one, or a negative one, is framing
+		// this does not read. Bytes after the declared length are no part
+		// of the body.
+		n, err := contentLengthValue(contentLength)
+		if err != nil || n < 0 {
+			return nil
+		}
 		n = min(n, len(wire))
 		wire = wire[:n]
 		decoded = make([]int, len(ends))
