@@ -14,7 +14,7 @@ func sentNames(m *SyncMockManager) []string {
 	m.sharedLossMu.Lock()
 	defer m.sharedLossMu.Unlock()
 	var n []string
-	for _, tc := range m.sentTCs.tcs {
+	for _, tc := range m.sentTCs.of("").tcs {
 		n = append(n, tc.name)
 	}
 	return n
@@ -60,7 +60,7 @@ func TestATestCaseOfManyManagersIsLeftOutWhenAnyOfThemLostAMockItMayNeed(t *test
 	if got := fmt.Sprint(sentNames(node)); got != "[before]" {
 		t.Fatalf("the node-default manager noted %s sent, want [before]", got)
 	}
-	if first := own.firstSent.Load(); first == nil || !first.Equal(t0.Add(-2*time.Second)) {
+	if first := own.firstSentOf(""); first == nil || !first.Equal(t0.Add(-2*time.Second)) {
 		t.Fatalf("the runtime's own first test case is %v, want the one sent", first)
 	}
 	// A lost test's mock no test owns, over the window, of the second named.
@@ -71,8 +71,8 @@ func TestATestCaseOfManyManagersIsLeftOutWhenAnyOfThemLostAMockItMayNeed(t *test
 	if SendingTestCaseOf([]*SyncMockManager{own2, node2}, "over", t0.Add(500*time.Millisecond), t0.Add(2*time.Second)) {
 		t.Fatal("a test case over a lost mock's call of the second manager was sent")
 	}
-	if n := sentNames(own2); len(n) != 0 || own2.firstSent.Load() != nil {
-		t.Fatalf("the first manager noted %v sent (first %v) for a test case left out", n, own2.firstSent.Load())
+	if n := sentNames(own2); len(n) != 0 || own2.firstSentOf("") != nil {
+		t.Fatalf("the first manager noted %v sent (first %v) for a test case left out", n, own2.firstSentOf(""))
 	}
 	if !SendingTestCaseOf([]*SyncMockManager{own2, node2}, "later", t0.Add(3*time.Second), t0.Add(4*time.Second)) {
 		t.Fatal("a test case after the lost mock's call was left out")

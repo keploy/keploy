@@ -185,7 +185,7 @@ func TestATestsMockLostOverATestCaseSentWithNoNameRevokesItByItsRequestTime(t *t
 			t.Fatalf("revoked %v, want only %q", got, models.RevokeNameByRequest(over))
 		}
 		other.sharedLossMu.Lock()
-		named := len(other.sentTCs.tcs)
+		named := len(other.sentTCs.of("").tcs)
 		other.sharedLossMu.Unlock()
 		if named != 0 {
 			t.Fatalf("a manager whose client does not revoke by request time names %d test cases sent with no name, want 0", named)

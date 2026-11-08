@@ -226,7 +226,9 @@ type SyncMockManager struct {
 	// effect is that static-dedup pruning only begins from the (N+1)-th test
 	// case, keeping the boot-through-Nth-test mock corpus complete. Mirrors
 	// firstReqSeen's lifecycle (set forward-only within a record session,
-	// and cleared as the next one starts: StartRecordSession).
+	// and cleared as the next one starts: StartRecordSession). A manager
+	// whose mocks go to several recordings counts them per recording too
+	// (destTCs).
 	resolvedTestCount int
 
 	// recentWindows is a COUNT-bounded ring of the most recently
@@ -650,13 +652,14 @@ type SyncMockManager struct {
 	// on the way out (leaveOutAfter): open in orphans from that mock's
 	// request, the earliest such loss's, until the recording ends
 	// (SetOutputChannel). sentTCs is the test cases its stream sent since
-	// (SendingTestCase), by name and window: such a loss revokes those whose
-	// window reaches past the lost mock's request, sent before it. Guarded
+	// (SendingTestCase), by name and window, apart per destination
+	// (SetDestinationOf): such a loss revokes those whose window reaches past
+	// the lost mock's request, sent before it, of every destination. Guarded
 	// by sharedLossMu, taken under outChanMu or alone, and under which only
 	// orphans' own lock and droppedMu are taken.
 	sharedLossMu sync.Mutex
 	sharedLoss   sharedLoss
-	sentTCs      sentList
+	sentTCs      sentByDest
 	// perTestUnnamed counts the recording's losses of a test's mock no test
 	// owns that may reach a test case its stream sent and no longer names
 	// (leaveOutOver), for sayLeftOutAfter's sample.
@@ -666,25 +669,43 @@ type SyncMockManager struct {
 	// them (leaveOutOver), and perTestKeptSent those test cases, for
 	// sayLeftOutAfter.
 	perTestKept, perTestKeptSent uint64
-	// startupLost is the earliest-requested start-up mock (IsStartup) the
-	// current recording lost as a test's (leaveOutOver), requested at or
-	// after its first test case then, its zero value (a zero request) when
-	// none. A revoke can move the first test case past its request, or leave
-	// it unknown: it is then a start-up mock of the recording as it now
-	// stands, which a replay serves to any test, and is re-read as one any
-	// test may need (rereadStartupLocked). The earliest alone is kept: the
-	// span its re-read opens reaches every later one's request.
-	startupLost lostStartup
+	// startupLost is, per destination (mockDest), the earliest-requested
+	// start-up mock (IsStartup) the current recording lost as a test's
+	// (leaveOutOver), requested at or after that destination's first test
+	// case then; nil when none. A revoke can move the first test case past
+	// its request, or leave it unknown: it is then a start-up mock of the
+	// recording as it now stands, which a replay serves to any test, and is
+	// re-read as one any test may need (rereadStartupLocked). The earliest
+	// alone is kept per destination: the span its re-read opens reaches every
+	// later one's request.
+	startupLost map[string]lostStartup
 
-	// firstSent is the earliest window start among the test cases the
-	// current recording's stream sent that are still in the recording
-	// (sentList.first): not revoked, or revoked and kept by a client that
-	// cannot delete them. Once that is not known, it is a bound the first is
-	// no later than; nil while it knows none. A replay serves a mock
-	// requested before it from its start-up tier, to any test
-	// (servedToAnyTest). Stored under sharedLossMu as sent changes, read
-	// without it.
-	firstSent atomic.Pointer[time.Time]
+	// firstSent is, per destination (SetDestinationOf), the earliest window
+	// start among the test cases the current recording's stream sent to it
+	// that are still in the recording (sentList.first): not revoked, or
+	// revoked and kept by a client that cannot delete them. Once that is not
+	// known, it is a bound the first is no later than; a destination with
+	// none known has no entry, and the map is nil while none has one. A
+	// replay serves a mock requested before its destination's first from its
+	// start-up tier, to any test (servedToAnyTest). Stored, copied, under
+	// sharedLossMu as sent changes, read without it.
+	firstSent atomic.Pointer[map[string]time.Time]
+
+	// destOf, when set (SetDestinationOf), names the destination whose
+	// recording a mock goes to, and the one the test cases of the requests
+	// the manager resolves itself go to: the manager's mocks go to several
+	// recordings, each with its own first test case and its own start-up
+	// window. Nil for a manager whose mocks go to one recording.
+	destOf atomic.Pointer[destinations]
+
+	// destTCs is, per destination the test cases of the requests the manager
+	// resolves itself go to (destinations.own, "" for a manager whose mocks
+	// go to one recording and when it cannot tell), how many of them it
+	// resolved kept (ResolveRange), as resolvedTestCount counts them all. A
+	// manager whose mocks go to several recordings tags a mock start-up by
+	// its own destination's count (startupLocked). Guarded by mu; cleared as
+	// a recording starts (StartRecordSession).
+	destTCs map[string]int
 
 	// copies is, per copy key a kind's replay serves its mocks by
 	// (ServedByCopy), the earliest request of a mock of it the current
@@ -1163,26 +1184,141 @@ const outQueueSharedRoom int64 = 16 << 20
 // a mock no test owns, requested after the first test case sent, is the
 // test's whose window it was requested in, until a revoke moves the first
 // test case past its request: its loss is then re-read as one any test may
-// need (rereadStartupLocked). An answer the client never read serves no test.
+// need (rereadStartupLocked). The first is that of the recording the mock
+// goes to (mockDest): one whose recording the manager cannot tell may be
+// any destination's, a new one's too, so it counts as before the first. An
+// answer the client never read serves no test.
 func (m *SyncMockManager) servedToAnyTest(mock *models.Mock, owner string) bool {
 	if owner != "" || mock.IsUndelivered() {
 		return false
 	}
 	req := mock.Spec.ReqTimestampMock
-	return req.IsZero() || attributedReusable(mock) || (mock.TestModeInfo.IsStartup && m.beforeFirstTestCase(req))
+	if req.IsZero() || attributedReusable(mock) {
+		return true
+	}
+	if !mock.TestModeInfo.IsStartup {
+		return false
+	}
+	dest, known := m.mockDest(mock)
+	return !known || m.beforeFirstTestCase(req, dest)
 }
 
 // beforeFirstTestCase reports whether req is before the earliest window
-// start among the test cases the recording's stream sent that are still in
-// the recording (firstSent), or may be: it knows none, or req is before the
-// bound it knows the first by (sentList.first). A window that became no test case
-// (an exchange keploy's filters or its sampling left out, or a test case
-// left out) does not count: the replay's start-up tier reaches the first
-// test case the recording holds, so until one is sent every start-up mock
-// may be in it.
-func (m *SyncMockManager) beforeFirstTestCase(req time.Time) bool {
-	first := m.firstSent.Load()
+// start among the test cases the recording's stream sent to dest that are
+// still in the recording (firstSent), or may be: it knows none, or req is
+// before the bound it knows the first by (sentList.first). A window that
+// became no test case (an exchange keploy's filters or its sampling left
+// out, or a test case left out) does not count: the replay's start-up tier
+// reaches the first test case the recording holds, so until one is sent
+// every start-up mock may be in it.
+func (m *SyncMockManager) beforeFirstTestCase(req time.Time, dest string) bool {
+	first := m.firstSentOf(dest)
 	return first == nil || req.Before(*first)
+}
+
+// firstSentOf returns the first test case sent to dest that it knows
+// (firstSent), nil when it knows none.
+func (m *SyncMockManager) firstSentOf(dest string) *time.Time {
+	firsts := m.firstSent.Load()
+	if firsts == nil {
+		return nil
+	}
+	first, ok := (*firsts)[dest]
+	if !ok {
+		return nil
+	}
+	return &first
+}
+
+// destinations is what a manager whose mocks go to several recordings is
+// told of them (SetDestinationOf).
+type destinations struct {
+	// of names the recording a mock goes to, "" when it cannot tell.
+	of func(*models.Mock) string
+	// own names the recording the test cases of the requests the manager
+	// resolves itself (ResolveRange) go to, "" when it cannot tell; nil
+	// names none.
+	own func() string
+}
+
+// SetDestinationOf tells the manager that its mocks go to several
+// recordings, as a DaemonSet node's default manager's go to the app each
+// connection belongs to, how to name the one a mock goes to (of), and the
+// one the test cases of the requests it resolves itself go to (own): each
+// returns "" when it cannot tell, and a nil own names none. The manager
+// then knows each destination's first test case apart (SendTestCaseOf
+// names a test case's), so a start-up mock lost before its own recording's
+// first test case counts as one any test may need, though another
+// recording's test cases came first, and one whose recording it cannot tell
+// counts so too. It counts the test cases it resolves per destination too
+// (destTCs), as each recording has its own start-up window: a mock is
+// tagged start-up (AddMock) while its own recording's count is under it,
+// and always when the manager cannot tell its recording, or resolves none
+// of that recording's requests itself (startupLocked). A manager whose own
+// requests and mocks all go to one recording so tags them as a manager
+// without SetDestinationOf does, and its reapers (static-dedup pruning, the
+// stale cutoff, the memory-pressure wipe) take its mocks as that one's do.
+// Set before the recording starts; a nil of goes back to one recording.
+func (m *SyncMockManager) SetDestinationOf(of func(*models.Mock) string, own func() string) {
+	if of == nil {
+		m.destOf.Store(nil)
+		return
+	}
+	m.destOf.Store(&destinations{of: of, own: own})
+}
+
+// mockDest names the destination whose recording mock goes to (destOf), ""
+// for a manager whose mocks go to one, with known false when the manager
+// cannot tell it.
+func (m *SyncMockManager) mockDest(mock *models.Mock) (dest string, known bool) {
+	d := m.destOf.Load()
+	if d == nil {
+		return "", true
+	}
+	dest = d.of(mock)
+	return dest, dest != ""
+}
+
+// ownDest names the destination the test cases of the requests the manager
+// resolves itself go to (destinations.own): "" for a manager whose mocks go
+// to one recording, and when it cannot tell.
+func (m *SyncMockManager) ownDest() string {
+	d := m.destOf.Load()
+	if d == nil || d.own == nil {
+		return ""
+	}
+	return d.own()
+}
+
+// startupLocked reports whether AddMock tags a mock that goes to dest
+// (mockDest, known false when the manager cannot tell it) a start-up one:
+// it is taken before the first request, or while fewer than
+// models.StartupMockTestCaseWindow test cases were resolved. A manager whose
+// mocks go to several recordings (SetDestinationOf) reads the count of the
+// mock's own recording (destTCs): its count and first request are those of
+// the requests it resolves itself, which may be another recording's. A mock
+// whose recording it cannot tell is tagged: it may be any recording's, one
+// whose window is still open too. One of a recording whose requests it
+// resolves none of keeps a count of 0, and is tagged so too: its start-up
+// window is not known to be past. Under mu.
+func (m *SyncMockManager) startupLocked(dest string, known bool) bool {
+	if !m.firstReqSeen || m.resolvedTestCount < models.StartupMockTestCaseWindow {
+		return true
+	}
+	if m.destOf.Load() == nil {
+		return false
+	}
+	return !known || m.destTCs[dest] < models.StartupMockTestCaseWindow
+}
+
+// destKey is the key the manager keeps a test case sent to dest under: dest
+// in a manager whose mocks go to several recordings (SetDestinationOf), ""
+// in any other.
+func (m *SyncMockManager) destKey(dest string) string {
+	if m.destOf.Load() == nil {
+		return ""
+	}
+	return dest
 }
 
 // queueBound is the bytes the out queue may hold with mock, sent for owner,
@@ -1779,12 +1915,24 @@ func (m *SyncMockManager) openSharedLocked(from time.Time, epoch uint64) leftOut
 // loss revoked it or left it out (one a client that cannot delete keeps
 // still counts toward the first), or it was let go, which a loss's revokes
 // do not take out.
+//
+// It re-reads the earliest of those whose destination's first moved past
+// their request: the span it opens reaches every later one's.
 func (m *SyncMockManager) rereadStartupLocked(epoch uint64) *rereadLoss {
-	s := m.startupLost
-	if s.req.IsZero() || !m.beforeFirstTestCase(s.req) {
+	var s lostStartup
+	dest := ""
+	for d, l := range m.startupLost {
+		if l.req.IsZero() || !m.beforeFirstTestCase(l.req, d) {
+			continue
+		}
+		if s.req.IsZero() || l.req.Before(s.req) {
+			s, dest = l, d
+		}
+	}
+	if s.req.IsZero() {
 		return nil
 	}
-	first, _, exact := m.sentTCs.first()
+	first, _, exact := m.sentTCs.first(dest)
 	left := m.openSharedLocked(s.req, epoch)
 	if left.from.IsZero() {
 		return nil
@@ -1829,8 +1977,19 @@ func (m *SyncMockManager) leaveOutOver(mock *models.Mock, epoch uint64, why stri
 	deletes := m.revokeCapable.Load()
 	revoked := m.sentTCs.revokeReaching(from, to, deletes, func(name string) { m.recordDroppedTCFor(name, epoch) })
 	m.noteFirstSentLocked()
-	if mock.TestModeInfo.IsStartup && (m.startupLost.req.IsZero() || from.Before(m.startupLost.req)) {
-		m.startupLost = lostStartup{req: from, fields: lostFields(mock, why)}
+	if mock.TestModeInfo.IsStartup {
+		// Kept per destination, re-read against its first. One whose
+		// destination the manager cannot tell is one any test may need
+		// (servedToAnyTest), and gets here only if the manager lost track
+		// of it since: kept under "", it is re-read below unless a test
+		// case sent with no destination named came before it (fail closed).
+		dest, _ := m.mockDest(mock)
+		if s, ok := m.startupLost[dest]; !ok || from.Before(s.req) {
+			if m.startupLost == nil {
+				m.startupLost = make(map[string]lostStartup)
+			}
+			m.startupLost[dest] = lostStartup{req: from, fields: lostFields(mock, why)}
+		}
 	}
 	var left leftOut
 	if unnamed := m.sentTCs.unnamedReaching(from); !unnamed.IsZero() {
@@ -1870,7 +2029,7 @@ func (m *SyncMockManager) SendingTestCase(name string, start, end time.Time) boo
 	if m.leavesOutLocked(start, end) {
 		return false
 	}
-	m.noteSentLocked(sent, start, end)
+	m.noteSentLocked("", sent, start, end)
 	return true
 }
 
@@ -1888,19 +2047,23 @@ var sendingTestCaseOfMu sync.Mutex
 // and a start-up mock lost after it would not count as one any test may
 // need). Nil and repeated managers are skipped; with none left, it lets the
 // test case through. A stream that may refuse the test case once asked (a
-// full queue) sends it through SendTestCaseOf instead.
+// full queue), or one of several destinations, sends it through
+// SendTestCaseOf instead.
 func SendingTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Time) bool {
-	return SendTestCaseOf(mgrs, name, start, end, nil)
+	return SendTestCaseOf(mgrs, "", name, start, end, nil)
 }
 
-// SendTestCaseOf is SendingTestCaseOf for a stream that may refuse the test
-// case: when each of mgrs may send it, it calls send, under their locks, and
-// notes the test case sent in each only when send reports it queued, so a
-// test case its stream refused is noted by none, and no loss checked between
-// the two finds it. send must not block, nor call into these managers. It
-// reports whether the test case was sent, false when one of mgrs left it
-// out (send is then not called) or send refused it. A nil send queues it.
-func SendTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Time, send func() bool) bool {
+// SendTestCaseOf is SendingTestCaseOf for a test case sent to the recording
+// of dest, by a stream that may refuse it: when each of mgrs may send it, it
+// calls send, under their locks, and notes the test case sent in each only
+// when send reports it queued, so a test case its stream refused is noted by
+// none, and no loss checked between the two finds it. send must not block,
+// nor call into these managers. A manager whose mocks go to several
+// recordings (SetDestinationOf) notes it as dest's, named as its mocks' are
+// (mockDest); any other notes it as its one recording's. It reports whether
+// the test case was sent, false when one of mgrs left it out (send is then
+// not called) or send refused it. A nil send queues it.
+func SendTestCaseOf(mgrs []*SyncMockManager, dest, name string, start, end time.Time, send func() bool) bool {
 	ms := make([]*SyncMockManager, 0, len(mgrs))
 	for _, m := range mgrs {
 		if m != nil && !slices.Contains(ms, m) {
@@ -1928,7 +2091,7 @@ func SendTestCaseOf(mgrs []*SyncMockManager, name string, start, end time.Time, 
 		return false
 	}
 	for _, m := range ms {
-		m.noteSentLocked(m.sentName(name, rawStart), start, end)
+		m.noteSentLocked(m.destKey(dest), m.sentName(name, rawStart), start, end)
 	}
 	return true
 }
@@ -1959,27 +2122,47 @@ func (m *SyncMockManager) leavesOutLocked(start, end time.Time) bool {
 }
 
 // noteSentLocked notes the test case named name, whose window is [start,
-// end], sent by the recording's stream (SendingTestCase). Called under
-// sharedLossMu.
-func (m *SyncMockManager) noteSentLocked(name string, start, end time.Time) {
-	m.sentTCs.add(name, start, end)
+// end], sent by the recording's stream to dest (destKey) (SendingTestCase).
+// Called under sharedLossMu.
+func (m *SyncMockManager) noteSentLocked(dest, name string, start, end time.Time) {
+	m.sentTCs.of(dest).add(name, start, end)
 	m.noteFirstSentLocked()
 }
 
-// noteFirstSentLocked stores the recording's first test case sent and not
-// revoked (sentList.first) as firstSent, nil when it knows none, if it moved.
-// Called under sharedLossMu, as sent changes.
+// noteFirstSentLocked stores each destination's first test case sent and
+// not revoked (sentList.first) in firstSent, with no entry for one it knows
+// none of, if one moved. Called under sharedLossMu, as sent changes.
 func (m *SyncMockManager) noteFirstSentLocked() {
-	first, ok, _ := m.sentTCs.first()
-	if !ok {
-		m.firstSent.Store(nil)
+	cur := m.firstSent.Load()
+	n := 0
+	moved := false
+	for dest, l := range m.sentTCs.lists {
+		first, ok, _ := l.first()
+		if !ok {
+			continue
+		}
+		n++
+		if cur == nil {
+			moved = true
+			break
+		}
+		if was, had := (*cur)[dest]; !had || !was.Equal(first) {
+			moved = true
+			break
+		}
+	}
+	// An equal set of firsts is not stored again: a test case sent costs no
+	// allocation unless it moves a first.
+	if !moved && (cur == nil || len(*cur) == n) {
 		return
 	}
-	// An equal first is not stored again: a test case sent costs no
-	// allocation unless it moves the first.
-	if cur := m.firstSent.Load(); cur == nil || !cur.Equal(first) {
-		m.firstSent.Store(&first)
+	next := make(map[string]time.Time, n)
+	for dest, l := range m.sentTCs.lists {
+		if first, ok, _ := l.first(); ok {
+			next[dest] = first
+		}
 	}
+	m.firstSent.Store(&next)
 }
 
 // endSharedLoss ends the span of test cases a recording leaves out for a mock
@@ -1993,8 +2176,8 @@ func (m *SyncMockManager) endSharedLoss() {
 		m.sharedLoss.close()
 	}
 	m.sharedLoss = sharedLoss{}
-	m.sentTCs, m.perTestUnnamed = sentList{}, 0
-	m.perTestKept, m.perTestKeptSent, m.startupLost = 0, 0, lostStartup{}
+	m.sentTCs, m.perTestUnnamed = sentByDest{}, 0
+	m.perTestKept, m.perTestKeptSent, m.startupLost = 0, 0, nil
 	m.firstSent.Store(nil)
 }
 
@@ -2767,6 +2950,13 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) MockDrop {
 		// its connection is open (starts.Registry.StampDest).
 		starts.Default.StampDest(mock)
 	}
+	// The recording it goes to, named before mu is taken: the namer is the
+	// caller's (SetDestinationOf).
+	var dest string
+	known := true
+	if mock != nil {
+		dest, known = m.mockDest(mock)
+	}
 	m.mu.Lock()
 	if m.lostToPressureLocked(mock) {
 		m.mu.Unlock()
@@ -2789,7 +2979,13 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) MockDrop {
 	// makes static-dedup pruning a no-op until the (N+1)-th test case. (firstReqSeen
 	// is subsumed by the count test — count is 0 before the first request — but
 	// is kept explicit so the boot case still holds if the window is ever 0.)
-	if mock != nil && (!m.firstReqSeen || m.resolvedTestCount < models.StartupMockTestCaseWindow) {
+	//
+	// A manager whose mocks go to several recordings (SetDestinationOf) reads
+	// the count of the recording the mock goes to (startupLocked): one whose
+	// recording it cannot tell, or whose recording's requests it does not
+	// resolve itself, stays tagged. Whether one is served to any test is then
+	// the first test case of its own recording's to say (servedToAnyTest).
+	if mock != nil && m.startupLocked(dest, known) {
 		mock.TestModeInfo.IsStartup = true
 	}
 	m.stampOutsideRequestsLocked(mock)
@@ -4357,6 +4553,7 @@ func (m *SyncMockManager) StartRecordSession() {
 	m.mu.Lock()
 	m.firstReqSeen = false
 	m.resolvedTestCount = 0
+	m.destTCs = nil
 	m.mu.Unlock()
 	m.EndStoppedRecording()
 }
@@ -5184,6 +5381,13 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	lateBinned := 0
 	var tally dropTally
 
+	// The destination a kept window's test case goes to, named before mu is
+	// taken: the namer is the caller's (SetDestinationOf).
+	var own string
+	if keep {
+		own = m.ownDest()
+	}
+
 	m.mu.Lock()
 	// Snapshot the outChan wiring status under outChanMu (NOT m.mu)
 	// so we don't race SetOutputChannel / CloseOutChan. Only the
@@ -5225,9 +5429,15 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// must NOT count — the window is measured in recorded tests, not requests.
 	// Incrementing here only gates FUTURE ingests; the mocks processed in this
 	// call were already tagged (or not) at AddMock time, and the rescues below
-	// key off that per-mock tag, not the live counter.
+	// key off that per-mock tag, not the live counter. It counts toward its
+	// destination's too (destTCs), which a manager whose mocks go to several
+	// recordings tags by.
 	if keep {
 		m.resolvedTestCount++
+		if m.destTCs == nil {
+			m.destTCs = make(map[string]int)
+		}
+		m.destTCs[own]++
 	}
 
 	// Stale-buffer safety valve.

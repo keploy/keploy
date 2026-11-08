@@ -20,7 +20,7 @@ func TestATestCaseTheStreamRefusedIsNotTheRecordingsFirst(t *testing.T) {
 	t0 := time.Now().Add(-time.Minute)
 	mgrs := []*SyncMockManager{own, node}
 	asked := 0
-	if SendTestCaseOf(mgrs, "refused", t0, t0.Add(time.Second), func() bool { asked++; return false }) {
+	if SendTestCaseOf(mgrs, "", "refused", t0, t0.Add(time.Second), func() bool { asked++; return false }) {
 		t.Fatal("a test case its stream refused was reported sent")
 	}
 	if asked != 1 {
@@ -30,7 +30,7 @@ func TestATestCaseTheStreamRefusedIsNotTheRecordingsFirst(t *testing.T) {
 		if got := fmt.Sprint(sentNames(m)); got != "[]" {
 			t.Fatalf("a manager noted %s sent after its stream refused it", got)
 		}
-		if f := m.firstSent.Load(); f != nil {
+		if f := m.firstSentOf(""); f != nil {
 			t.Fatalf("a manager's first test case is at %v after the only one asked was refused", *f)
 		}
 	}
@@ -39,7 +39,7 @@ func TestATestCaseTheStreamRefusedIsNotTheRecordingsFirst(t *testing.T) {
 	if got := sendNow(node, startupAt("boot", t0.Add(2*time.Second)), ""); got != MockDroppedOutputFull {
 		t.Fatalf("a start-up read at the bound: %q, want %q", got, MockDroppedOutputFull)
 	}
-	if SendTestCaseOf(mgrs, "later", t0.Add(3*time.Second), t0.Add(4*time.Second), func() bool { return true }) {
+	if SendTestCaseOf(mgrs, "", "later", t0.Add(3*time.Second), t0.Add(4*time.Second), func() bool { return true }) {
 		t.Fatal("a test case after a start-up read lost before the first test case sent was sent: it is recorded without the read")
 	}
 }
@@ -52,7 +52,7 @@ func TestSendTestCaseOfAsksTheStreamOnlyForATestCaseItMaySend(t *testing.T) {
 	queueAt(t, outQueueMaxBytes)
 	t0 := time.Now().Add(-time.Minute)
 	mgrs := []*SyncMockManager{own, node}
-	if !SendTestCaseOf(mgrs, "queued", t0.Add(-2*time.Second), t0.Add(-time.Second), func() bool { return true }) {
+	if !SendTestCaseOf(mgrs, "", "queued", t0.Add(-2*time.Second), t0.Add(-time.Second), func() bool { return true }) {
 		t.Fatal("a test case its stream queued, with no loss, was reported not sent")
 	}
 	for _, m := range mgrs {
@@ -63,13 +63,13 @@ func TestSendTestCaseOfAsksTheStreamOnlyForATestCaseItMaySend(t *testing.T) {
 	if got := sendNow(node, sharedAt(t, "c1", t0), ""); got != MockDroppedOutputFull {
 		t.Fatalf("a session's mock at the bound: %q, want %q", got, MockDroppedOutputFull)
 	}
-	if SendTestCaseOf(mgrs, "after", t0.Add(time.Second), t0.Add(2*time.Second), func() bool {
+	if SendTestCaseOf(mgrs, "", "after", t0.Add(time.Second), t0.Add(2*time.Second), func() bool {
 		t.Error("the stream was asked to send a test case a manager left out")
 		return true
 	}) {
 		t.Fatal("a test case after a lost session's mock was sent")
 	}
-	if !SendTestCaseOf(nil, "none", t0, t0, nil) {
+	if !SendTestCaseOf(nil, "", "none", t0, t0, nil) {
 		t.Fatal("a test case with no manager and a nil send was not let through")
 	}
 }
@@ -80,7 +80,7 @@ func TestSendTestCaseOfAsksTheStreamOnlyForATestCaseItMaySend(t *testing.T) {
 func TestSendTestCaseOfAsksTheStreamUnderTheManagersLocks(t *testing.T) {
 	own, node := New(zap.NewNop()), New(zap.NewNop())
 	t0 := time.Now().Add(-time.Minute)
-	SendTestCaseOf([]*SyncMockManager{own, node}, "x", t0, t0.Add(time.Second), func() bool {
+	SendTestCaseOf([]*SyncMockManager{own, node}, "", "x", t0, t0.Add(time.Second), func() bool {
 		for i, m := range []*SyncMockManager{own, node} {
 			if m.sharedLossMu.TryLock() {
 				m.sharedLossMu.Unlock()

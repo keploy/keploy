@@ -33,8 +33,8 @@ type sentList struct {
 	byName  map[string]time.Time
 	longest time.Duration
 	// letGo is set once some were let go or sent with no name, with
-	// unnamedFirst and unnamedThrough; halved once some were let go.
-	letGo, halved                bool
+	// unnamedFirst and unnamedThrough.
+	letGo                        bool
 	unnamedFirst, unnamedThrough time.Time
 	// firstLetGo is the name of the test case at unnamedFirst, the one it
 	// does not name that started first: "" for one sent with no name, which
@@ -83,7 +83,6 @@ func (l *sentList) letGoHalf() {
 		l.noteUnnamed(tc.name, tc.start, tc.end)
 		delete(l.byName, tc.name)
 	}
-	l.halved = true
 	k := copy(l.tcs, l.tcs[half:])
 	clear(l.tcs[k:])
 	l.tcs = l.tcs[:k]
@@ -211,4 +210,69 @@ func (l *sentList) unnamedReaching(from time.Time) time.Time {
 		return time.Time{}
 	}
 	return l.unnamedThrough
+}
+
+// sentByDest is the test cases a recording's stream sent (sentList), kept
+// apart by the destination whose recording each went to: a manager whose
+// mocks go to several recordings (SetDestinationOf) knows each one's first
+// test case, as a replay of each serves its own start-up tier from it. A
+// manager told of none keeps them all under "". Each list is bounded as one
+// is (maxSentTCs), so a manager holds that many per destination. Guarded by
+// the manager's sharedLossMu; the zero value is empty.
+type sentByDest struct {
+	lists map[string]*sentList
+}
+
+// of returns the list of the test cases sent to dest, made empty on first
+// use.
+func (s *sentByDest) of(dest string) *sentList {
+	l := s.lists[dest]
+	if l == nil {
+		if s.lists == nil {
+			s.lists = make(map[string]*sentList)
+		}
+		l = &sentList{}
+		s.lists[dest] = l
+	}
+	return l
+}
+
+// revokeReaching is sentList.revokeReaching over every destination's list: a
+// loss's span leaves out test cases of each, as the mock may be any one's.
+func (s *sentByDest) revokeReaching(from, to time.Time, applied bool, revoke func(name string)) int {
+	n := 0
+	for _, l := range s.lists {
+		n += l.revokeReaching(from, to, applied, revoke)
+	}
+	return n
+}
+
+// unnamedReaching is the latest of sentList.unnamedReaching over every
+// destination's list, the zero time when none has one.
+func (s *sentByDest) unnamedReaching(from time.Time) time.Time {
+	var through time.Time
+	for _, l := range s.lists {
+		if t := l.unnamedReaching(from); t.After(through) {
+			through = t
+		}
+	}
+	return through
+}
+
+// forget is sentList.forget in every destination's list: a name is sent to
+// one destination, so the list that holds it, or let it go first, is the one
+// it moves; the others hold no such name.
+func (s *sentByDest) forget(name string, applied bool) {
+	for _, l := range s.lists {
+		l.forget(name, applied)
+	}
+}
+
+// first is sentList.first of the test cases sent to dest, with ok false and
+// exact true when none was.
+func (s *sentByDest) first(dest string) (at time.Time, ok, exact bool) {
+	if l := s.lists[dest]; l != nil {
+		return l.first()
+	}
+	return time.Time{}, false, true
 }

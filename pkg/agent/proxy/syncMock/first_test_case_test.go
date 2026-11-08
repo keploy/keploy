@@ -281,7 +281,7 @@ func TestALossFindsALongTestCaseSentLongBefore(t *testing.T) {
 		t.Fatalf("revoked %v, want only the long test case over the call", got)
 	}
 	m.sharedLossMu.Lock()
-	named := len(m.sentTCs.tcs)
+	named := len(m.sentTCs.of("").tcs)
 	m.sharedLossMu.Unlock()
 	if named != 100 {
 		t.Fatalf("%d test cases still named, want the 100 short ones", named)

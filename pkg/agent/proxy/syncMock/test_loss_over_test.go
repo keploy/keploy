@@ -186,7 +186,7 @@ func TestATestsMockNoTestOwnsGivenUpRevokesTheSentTestCasesOverIt(t *testing.T) 
 			t.Fatalf("revoked %v, want over and no-start", revokesQueued(m))
 		}
 		m.sharedLossMu.Lock()
-		named := len(m.sentTCs.tcs)
+		named := len(m.sentTCs.of("").tcs)
 		m.sharedLossMu.Unlock()
 		if named != 3 {
 			t.Fatalf("%d test cases still named after the loss, want 3: a revoked one is taken out", named)
