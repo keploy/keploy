@@ -124,7 +124,7 @@ func dechunkedAt(wire []byte, ends []int) (decoded []int, data []byte, ok bool) 
 			break
 		}
 		sizeField, _, _ := strings.Cut(string(wire[pos:pos+line]), ";")
-		size, err := strconv.ParseInt(strings.TrimSpace(sizeField), 16, 64)
+		size, err := strconv.ParseInt(strings.TrimSpace(sizeField), 16, 0)
 		if err != nil || size < 0 || size > int64(len(wire)) {
 			return nil, nil, false
 		}
