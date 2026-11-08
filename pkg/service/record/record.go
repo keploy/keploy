@@ -3705,11 +3705,21 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 }
 
 // pcapDir makes the folder a record's packet capture is streamed to, the test
-// set's, <keploy folder>/<set>, and returns it. It is made only inside the
-// project, each folder inside the one before (utils.MkdirRecordingDir): a
-// keploy folder that is a link out of the project is refused with why, and
-// no folder is made where it leads.
+// set's, <keploy folder>/<set>, and returns it. The keploy folder is made and
+// opened from the project (utils.MkdirOpenRecordingDir), and the set's folder
+// only inside it: a keploy folder or set that is a link out is refused with
+// why, and no folder is made where it leads. The keploy folder is the root,
+// not the set's folder, so a set's name, even keploy, never decides where the
+// project is.
 func pcapDir(keployDir, set string) (string, error) {
 	destDir := filepath.Join(keployDir, set)
-	return destDir, utils.MkdirRecordingDir(destDir, 0o755)
+	r, err := utils.MkdirOpenRecordingDir(keployDir, 0o755)
+	if err != nil {
+		return destDir, err
+	}
+	defer func() { _ = r.Close() }()
+	if err := r.MkdirAll(set, 0o755); err != nil {
+		return destDir, fmt.Errorf("the test set's folder %q is made only inside %q: %w", set, keployDir, err)
+	}
+	return destDir, nil
 }
