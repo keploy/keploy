@@ -117,8 +117,8 @@ func TestAttachMockErrors_NamesItsTest(t *testing.T) {
 // proven switch on or off, so the agent moves the run's place to that end
 // first. The set's end is read under the switch as its last read of the
 // misses, and with the switch off as its read of what was consumed after
-// the set's last test, made only where the run's mocks stand in for its
-// dependencies.
+// the set's last test and then its read of the misses (setEndOff), both
+// made only where the run's mocks stand in for its dependencies.
 func TestRunTestSet_EachTestsReadNamesItsTestAndTheSetsEndIsMarked(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -127,7 +127,7 @@ func TestRunTestSet_EachTestsReadNamesItsTestAndTheSetsEndIsMarked(t *testing.T)
 		want    []string
 	}{
 		{"switch on", true, true, []string{"misses test-1", "misses test-2", "misses set end"}},
-		{"switch off", false, true, []string{"misses test-1", "misses test-2", "consumed set end"}},
+		{"switch off", false, true, []string{"misses test-1", "misses test-2", "consumed set end", "misses set end"}},
 		{"switch off, no mocks", false, false, []string{"misses test-1", "misses test-2"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
