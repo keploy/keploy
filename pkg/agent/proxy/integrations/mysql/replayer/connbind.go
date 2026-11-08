@@ -65,7 +65,7 @@ func txControlOf(req mysql.Request) txControl {
 	if qp == nil {
 		return txNone
 	}
-	id := strings.TrimSpace(sqlStatementIdentity(qp.Query))
+	id := sqlStatementIdentity(qp.Query) // comments aside, trimmed
 	// The first word decides; a text that cannot begin with one of them is
 	// not upper-cased and split.
 	if !hasPrefixFold(id, "BEGIN") && !hasPrefixFold(id, "START") &&
@@ -147,10 +147,11 @@ func bindAfter(d *wire.DecodeContext, req mysql.Request, served servedRecording)
 		d.InTx, d.Bound, d.BoundWindow = false, nil, time.Time{}
 		return
 	}
-	if !d.InTx || served.mock == nil || !served.own {
+	if !d.InTx || !served.own {
 		// Outside a transaction nothing binds. A command answered with no
-		// recording, or with one the open test does not own, keeps the
-		// binding the transaction's latest answered command made.
+		// recording (served is then zero: it owns nothing), or with one the
+		// open test does not own, keeps the binding the transaction's latest
+		// answered command made.
 		return
 	}
 	d.Bound, d.BoundWindow = served.mock, served.window

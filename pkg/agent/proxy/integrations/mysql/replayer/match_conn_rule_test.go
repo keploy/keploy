@@ -381,12 +381,20 @@ func TestConnectionRuleTakesTheNextRecordingNotTheBoundAgain(t *testing.T) {
 		{"L1", "SELECT rate FROM fx", "a-x1"},
 		{"L1", "SELECT rate FROM fx", "a-x2"},
 	}}}, "keploy test", "keploy test, full scan")
+	// The same statement sent with a comment: not a byte-identical repeat.
+	checkConnSet(t, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
+		{"L1", "START TRANSACTION", "*"},
+		{"L1", "SELECT rate FROM fx", "a-x1"},
+		{"L1", "/* again */ SELECT rate FROM fx", "a-x2"},
+	}}}, "keploy test", "keploy test, full scan")
 }
 
 // A recording that names no connection binds nothing: the transaction's
-// commands are answered with the first exact match, as before the rule.
+// commands are answered with the first exact match, as before the rule, the
+// one recorded before the transaction's latest command's too.
 func TestConnectionRuleNeedsTheRecordedConnection(t *testing.T) {
 	recs := []connRec{
+		{"early-sel", "", "SELECT * FROM products WHERE id = 'x'", 500 * time.Microsecond, 0},
 		{"a-cust", "", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
 		{"b-sel", "", "SELECT * FROM products WHERE id = 'x'", 1100 * time.Microsecond, 0},
 		{"a-sel", "", "SELECT * FROM products WHERE id = 'x'", 1200 * time.Microsecond, 0},
@@ -394,7 +402,48 @@ func TestConnectionRuleNeedsTheRecordedConnection(t *testing.T) {
 	checkConnSet(t, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
 		{"L1", "START TRANSACTION", "*"},
 		{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+		{"L1", "SELECT * FROM products WHERE id = 'x'", "early-sel"},
 		{"L1", "SELECT * FROM products WHERE id = 'x'", "b-sel"},
+	}}})
+}
+
+// With no exact match the test owns on the bound connection, the first one
+// it owns answers, as before the rule: of the reads, and of the EXECUTEs,
+// whose window also holds a recording of the statement with another
+// parameter (the FIFO candidate, which a definitive match outranks).
+func TestConnectionRuleAnswersTheFirstWaitingRecording(t *testing.T) {
+	recs := []connRec{
+		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
+		{"b-other", "cB", "exec:y", 1050 * time.Microsecond, 0},
+		{"b-exec", "cB", "exec:x", 1100 * time.Microsecond, 0},
+		{"c-exec", "cC", "exec:x", 1150 * time.Microsecond, 0},
+		{"a-cust2", "cA", "SELECT * FROM customers WHERE id = 'a2'", 1300 * time.Microsecond, 0},
+		{"b-sel", "cB", "SELECT * FROM products WHERE id = 'x'", 1400 * time.Microsecond, 0},
+		{"c-sel", "cC", "SELECT * FROM products WHERE id = 'x'", 1450 * time.Microsecond, 0},
+	}
+	checkConnSet(t, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
+		{"L1", "START TRANSACTION", "*"},
+		{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+		{"L1", "exec:x", "b-exec"},
+		{"L1", "COMMIT", "*"},
+		{"L1", "START TRANSACTION", "*"},
+		{"L1", "SELECT * FROM customers WHERE id = 'a2'", "a-cust2"},
+		{"L1", "SELECT * FROM products WHERE id = 'x'", "b-sel"},
+	}}})
+}
+
+// A command recorded on the bound connection at the same time as the
+// transaction's latest command (a coarse clock) is its next command.
+func TestConnectionRuleTakesTheBoundConnectionsCommandAtTheSameTime(t *testing.T) {
+	recs := []connRec{
+		{"b-sel", "cB", "SELECT * FROM products WHERE id = 'x'", 900 * time.Microsecond, 0},
+		{"a-cust", "cA", "SELECT * FROM customers WHERE id = 'a'", 1000 * time.Microsecond, 0},
+		{"a-sel", "cA", "SELECT * FROM products WHERE id = 'x'", 1000 * time.Microsecond, 0},
+	}
+	checkConnSet(t, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
+		{"L1", "START TRANSACTION", "*"},
+		{"L1", "SELECT * FROM customers WHERE id = 'a'", "a-cust"},
+		{"L1", "SELECT * FROM products WHERE id = 'x'", "a-sel"},
 	}}})
 }
 
@@ -447,6 +496,10 @@ func TestConnectionRuleReadsTransactionControl(t *testing.T) {
 		"  begin":                           "begin",
 		"\n/* x */ COMMIT":                  "end",
 		"BEGIN NOT ATOMIC SELECT 1; END":    "none",
+		"BEGIN;":                            "begin",
+		"start transaction;":                "begin",
+		"COMMIT;":                           "end",
+		"ROLLBACK ;":                        "end",
 	} {
 		if got := replayer.TxControlForTest(queryReq(sql)); got != want {
 			t.Errorf("%q: %s, want %s", sql, got, want)
@@ -458,6 +511,13 @@ func TestConnectionRuleReadsTransactionControl(t *testing.T) {
 	}}
 	if got := replayer.TxControlForTest(reset); got != "end" {
 		t.Errorf("COM_RESET_CONNECTION: %s, want end", got)
+	}
+	changeUser := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 1}, Type: mysql.CommandStatusToString(mysql.COM_CHANGE_USER)},
+		Message: &mysql.ChangeUserPacket{Command: mysql.COM_CHANGE_USER},
+	}}
+	if got := replayer.TxControlForTest(changeUser); got != "end" {
+		t.Errorf("COM_CHANGE_USER: %s, want end", got)
 	}
 	if got := replayer.TxControlForTest(executeReq(1, "x")); got != "none" {
 		t.Errorf("COM_STMT_EXECUTE: %s, want none", got)
