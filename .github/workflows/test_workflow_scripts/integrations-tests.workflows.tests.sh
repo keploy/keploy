@@ -509,6 +509,11 @@ only_keys() {
 only_keys "$job" "" name on permissions concurrency jobs
 only_keys "$job" jobs.integrations-tests name timeout-minutes runs-on env steps
 only_keys "$job" jobs.integrations-tests.env CGO_ENABLED
+# integrations-tests.sh runs go with no GOFLAGS whatever the env holds; a step
+# that sets one (an env key, or a line written to GITHUB_ENV) is refused too.
+if p="$(grep -nvE '^[[:space:]]*#' "$job_yml" | grep -F GOFLAGS)"; then
+  problem "integrations-tests.yml sets GOFLAGS, which could change what go test runs: $p"
+fi
 while IFS=$'\t' read -r p _; do
   case "$p" in *continue-on-error) problem "$p: a failure there would pass the check" ;; esac
 done <<<"$job"
