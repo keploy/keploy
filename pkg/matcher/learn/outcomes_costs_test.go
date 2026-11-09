@@ -1306,13 +1306,14 @@ func costServed(dc *DriftCache, n int, body, view func(i int) string) []Raw {
 // A recording whose round F view holds F's word, its recording not R's,
 // shows that F gave the application the word before the call: unknown,
 // refused, naming it, in each test of a set, whether the view's text is
-// under the posting floor (read for every word: 20 places a test) or past
-// it (read where the postings name F's word: that one place).
+// under the posting floor (its words posted by the text, shortEntry) or
+// past it (its filter's): either way read where the postings name F's
+// word, that one place a test, not the 20 the call's recordings hold.
 func TestOutcomeCostAViewThatHoldsOnlyFsWordIsReadAtAnyLength(t *testing.T) {
 	for _, c := range []struct {
 		pad   int
 		reads int64
-	}{{0, 40}, {300, 2}} {
+	}{{0, 2}, {300, 2}} {
 		seen := strings.Repeat("s", c.pad)
 		body := func(i int) string { return fmt.Sprintf(`{"note":"Item %d"}`, i) }
 		view := func(i int) string {
