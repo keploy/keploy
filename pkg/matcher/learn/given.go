@@ -50,6 +50,14 @@ func givenPlace(test string) string {
 	return "test case " + test
 }
 
+// GivenPlaceCase is the test case whose request givenPlace named place
+// (a Place's Mock): ok is false for a place of another name (a mock's) and
+// for the request of a test case keploy cannot name.
+func GivenPlaceCase(place string) (testCase string, ok bool) {
+	testCase, ok = strings.CutPrefix(place, "test case ")
+	return testCase, ok && testCase != ""
+}
+
 // unsentRequest is why a test case's request could not be read when the
 // filter that opened it carried none.
 const unsentRequest = "keploy test sent the agent no copy of the test case's request, as a keploy older than its agent does"

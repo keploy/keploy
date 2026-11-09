@@ -165,3 +165,14 @@ func arrivedBefore(earlier []Earlier, rec, live time.Time) []Earlier {
 	}
 	return out
 }
+
+// clientCase reports whether mock, a test case's request among the call's
+// earlier places, is a client test's (Earlier.incoming, Place.Client).
+func (dc *decider) clientCase(mock string) bool {
+	for _, e := range dc.in.Earlier {
+		if e.Given && e.Mock == mock {
+			return e.incoming
+		}
+	}
+	return false
+}

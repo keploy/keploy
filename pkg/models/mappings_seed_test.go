@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -73,5 +74,45 @@ func TestNormalizeScopeSeed(t *testing.T) {
 		"":                      "",
 	} {
 		require.Equal(t, want, NormalizeScopeSeed(in), in)
+	}
+}
+
+// A test entry's variables (MappedTestCase.Variables) are written and read
+// back in both formats, whatever the switch, bound as CaseBind says; an
+// entry whose variables do not read is an error. ParseCaseBind reads a
+// CaseBind back, and nothing else.
+func TestATestsCaseVariablesAreReadBack(t *testing.T) {
+	vars := MockVariables{"name": {Recorded: "app-1", Bind: CaseBind("post-apps-1", "body.name")}}
+	tc := MappedTestCase{ID: "t1", Mocks: []MockEntry{{Name: "mock-0", Kind: "Http"}}, Variables: vars}
+	y, err := yaml.Marshal(tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromYAML MappedTestCase
+	if err := yaml.Unmarshal(y, &fromYAML); err != nil || !reflect.DeepEqual(fromYAML.Variables, vars) {
+		t.Fatalf("YAML %s read back %+v (%v); want %v", y, fromYAML.Variables, err, vars)
+	}
+	j, err := json.Marshal(tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromJSON MappedTestCase
+	if err := json.Unmarshal(j, &fromJSON); err != nil || !reflect.DeepEqual(fromJSON.Variables, vars) {
+		t.Fatalf("JSON %s read back %+v (%v); want %v", j, fromJSON.Variables, err, vars)
+	}
+	var bad MappedTestCase
+	if err := yaml.Unmarshal([]byte("id: t1\nmock_entries: []\nvariables: [a, b]\n"), &bad); err == nil {
+		t.Fatal("variables that are not a map were read")
+	}
+	if err := json.Unmarshal([]byte(`{"id":"t1","mock_entries":[],"variables":[1]}`), &bad); err == nil {
+		t.Fatal("JSON variables that are not a map were read")
+	}
+	if c, p, ok := ParseCaseBind(vars["name"].Bind); !ok || c != "post-apps-1" || p != "body.name" {
+		t.Fatalf("ParseCaseBind(%q) = %q, %q, %v", vars["name"].Bind, c, p, ok)
+	}
+	for _, b := range []string{"body.name", "test case , request body.name", "test case post-apps-1, request ", "test case post-apps-1 body.name", "mock-1, request body.name"} {
+		if _, _, ok := ParseCaseBind(b); ok {
+			t.Errorf("ParseCaseBind(%q) read", b)
+		}
 	}
 }

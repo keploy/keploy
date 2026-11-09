@@ -422,6 +422,18 @@ type MappedTestCase struct {
 	// switch only; empty in recordings made without it. Read and kept by
 	// each rewrite, whatever the switch, as Key.
 	Given []GivenValue `json:"given,omitempty" yaml:"given,omitempty" bson:"given,omitempty"`
+	// Variables is, by name, each variable a value the test's client sent in
+	// one of its requests binds (learn.Place.Client): its recorded value, and
+	// where the request of the test case that sent it holds it, as Bind
+	// "test case <name>, request <place>" (CaseBind). A call of the test that
+	// carries the value names the variable with use places only, as it names
+	// a template key's (MockVariables). Each replay binds it from the live
+	// request that pairs with that test case; a test whose request pairs with
+	// none binds nothing, so every use of the variable misses. Written by
+	// record's full round under the proven switch only, and replaced by each
+	// record of the test (MappingDb.UpsertCases); read and kept by each
+	// rewrite, whatever the switch, as Key.
+	Variables MockVariables `json:"variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
 	// Key is the key of the claim the test ran under in its recording: the
 	// test process's (POST /agent/instance). A reader who moves one of the
 	// test's calls to the set's worker: list gives the moved entry this key,
@@ -463,11 +475,12 @@ type persistedTestFormat struct {
 // persistedTestFormat, which also picks the shape an entry is read in.
 type writtenTestFormat struct {
 	persistedTestFormat `yaml:",inline"`
-	At                  time.Time    `json:"at,omitzero" yaml:"at,omitempty"`
-	Real                []string     `json:"real,omitempty" yaml:"real,omitempty"`
-	Given               []GivenValue `json:"given,omitempty" yaml:"given,omitempty"`
-	Key                 string       `json:"key,omitempty" yaml:"key,omitempty"`
-	Seed                string       `json:"seed,omitempty" yaml:"seed,omitempty"`
+	At                  time.Time     `json:"at,omitzero" yaml:"at,omitempty"`
+	Real                []string      `json:"real,omitempty" yaml:"real,omitempty"`
+	Given               []GivenValue  `json:"given,omitempty" yaml:"given,omitempty"`
+	Variables           MockVariables `json:"variables,omitempty" yaml:"variables,omitempty"`
+	Key                 string        `json:"key,omitempty" yaml:"key,omitempty"`
+	Seed                string        `json:"seed,omitempty" yaml:"seed,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -482,11 +495,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Key: tc.Key, Seed: tc.Seed}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Key: tc.Key, Seed: tc.Seed})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -576,6 +589,65 @@ func recordedGivenJSON(data []byte) ([]GivenValue, error) {
 	}
 	return g.Given, nil
 
+}
+
+// errRecordedVariables is a test entry whose variables: is not a map of
+// variables by name.
+const errRecordedVariables = "a test's variables (variables) are not a map of name to recorded value and bind: %w"
+
+// recordedVariablesYAML is a test entry's variables:, whatever the proven
+// switch, as recordedGivenYAML: one that does not read is an error, never a
+// reason to read the entry without it, whose replay would then bind none of
+// them.
+func recordedVariablesYAML(node *yaml.Node) (MockVariables, error) {
+	if !nodeHasField(node, "variables") {
+		return nil, nil
+	}
+	var v struct {
+		Variables MockVariables `yaml:"variables"`
+	}
+	if err := node.Decode(&v); err != nil {
+		return nil, fmt.Errorf(errRecordedVariables, err)
+	}
+	return v.Variables, nil
+}
+
+// recordedVariablesJSON is recordedVariablesYAML for a JSON entry.
+func recordedVariablesJSON(data []byte) (MockVariables, error) {
+	if !jsonContainsField(data, "variables") {
+		return nil, nil
+	}
+	var v struct {
+		Variables MockVariables `json:"variables"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, fmt.Errorf(errRecordedVariables, err)
+	}
+	return v.Variables, nil
+}
+
+// CaseBind is where a test's variable is bound in its client test case's
+// request (MappedTestCase.Variables): "test case <name>, request <place>",
+// place in the grammar of a MockVariable's places.
+func CaseBind(testCase, place string) string {
+	return caseBindPrefix + testCase + caseBindRequest + place
+}
+
+const caseBindPrefix, caseBindRequest = "test case ", ", request "
+
+// ParseCaseBind reads a CaseBind: the test case and the place in its
+// request. ok is false for a bind of another form, or one naming no test
+// case or no place: a replay binds nothing from it.
+func ParseCaseBind(bind string) (testCase, place string, ok bool) {
+	rest, found := strings.CutPrefix(bind, caseBindPrefix)
+	if !found {
+		return "", "", false
+	}
+	testCase, place, found = strings.Cut(rest, caseBindRequest)
+	if !found || testCase == "" || place == "" {
+		return "", "", false
+	}
+	return testCase, place, true
 }
 
 // errRecordedKey is a test entry whose key: is not a string.
@@ -692,6 +764,10 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	vars, err := recordedVariablesYAML(node)
+	if err != nil {
+		return err
+	}
 	key, err := recordedKeyYAML(node)
 	if err != nil {
 		return err
@@ -703,7 +779,7 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given, tc.Key, tc.Seed = at, rl, gv, key, seed
+	tc.At, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, rl, gv, vars, key, seed
 	return nil
 }
 
@@ -791,6 +867,10 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	vars, err := recordedVariablesJSON(data)
+	if err != nil {
+		return err
+	}
 	key, err := recordedKeyJSON(data)
 	if err != nil {
 		return err
@@ -802,7 +882,7 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given, tc.Key, tc.Seed = at, rl, gv, key, seed
+	tc.At, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, rl, gv, vars, key, seed
 	return nil
 }
 

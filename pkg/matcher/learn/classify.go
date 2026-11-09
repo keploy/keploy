@@ -854,6 +854,11 @@ type Place struct {
 	// Gave: the Given place is a value the test gave keploy (Earlier.Gave),
 	// named by its variable (Path).
 	Gave bool
+	// Client: the Given place is a client test's request, which reached the
+	// application from the test (Tracker.Incoming), not a request keploy
+	// test sent: its test case binds a variable at Var, from the request
+	// that pairs with it in each replay (models.MappedTestCase.Variables).
+	Client bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
 	// Clock: the learn step learned the leaf as a plain read of the
@@ -4318,7 +4323,7 @@ func withoutGave(earlier []Earlier) []Earlier {
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Name: s.Name, Clock: s.Clock,
+		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Client: e.incoming, Name: s.Name, Clock: s.Clock,
 		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
 }
 

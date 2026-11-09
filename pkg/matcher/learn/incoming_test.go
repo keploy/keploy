@@ -58,8 +58,8 @@ func TestAClientTestsRequestIsAPlaceOfTheCallsItLedTo(t *testing.T) {
 	}
 
 	d := Decide(authTimeCall(rec, live, rCall, fCall, placed(liveReq)))
-	if len(d) != 1 || d[0].Outcome != OutcomeValue || d[0].From.Mock != "test case post-auth-temp-code-4" || d[0].From.Path != "header.Cookie" || d[0].Clock != nil {
-		t.Fatalf("authTime %d -> %d, the auth_time of the token the client sent before the call: %s; want a Value of test case post-auth-temp-code-4's header.Cookie, no clock", rec, live, oDescribe(d))
+	if len(d) != 1 || d[0].Outcome != OutcomeValue || d[0].From.Mock != "test case post-auth-temp-code-4" || d[0].From.Path != "header.Cookie" || d[0].Clock != nil || !d[0].From.Client {
+		t.Fatalf("authTime %d -> %d, the auth_time of the token the client sent before the call: %s (client test's request: %v); want a Value of test case post-auth-temp-code-4's header.Cookie, a client test's, no clock", rec, live, oDescribe(d), len(d) == 1 && d[0].From.Client)
 	}
 
 	// The same request, reaching the application after the call in
