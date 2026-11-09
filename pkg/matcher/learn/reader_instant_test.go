@@ -570,6 +570,22 @@ func TestReaderAnInstantAlignedWithNoneChangesShapeWhateverItsWords(t *testing.T
 	}
 }
 
+// A stretch that ends at an aligned instant and holds an instant of one run
+// alone changes the shape, whatever its words: 10:50 in R and no instant in
+// F before the aligned 10:51>10:52.
+func TestReaderALoneInstantBeforeAnAlignedOneChangesShape(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"x 10:50 a 10:51 y", "x b 10:52 y"},
+		{"x 07:06:07 a 07:06:08 y", "x b 07:07:09 y"},
+		{"x 07:06:07 a b 07:06:08 y", "x c 07:07:09 y"},
+	} {
+		rd := readText(c.rec, c.live)
+		if !rd.ChangedShape || !slices.ContainsFunc(rd.Stretches, func(st wordStretch) bool { return st.Loose }) {
+			t.Errorf("%q -> %q: changed shape %v, stretches %+v; want a loose stretch, a changed shape", c.rec, c.live, rd.ChangedShape, rd.Stretches)
+		}
+	}
+}
+
 // A word of an instant only one run has takes the partner the instant's
 // paired words give it: `10:50:13.305 x` to `10:51:13 x` pairs R's
 // instant with F's by 50>51 alone, and 305 reads that one instant, with a

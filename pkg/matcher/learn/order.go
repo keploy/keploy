@@ -1991,7 +1991,7 @@ func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool)
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
 	defer dc.letGoHalves()
 	r, l := c.r, c.l
-	inScope := func(p evPlace) bool { return dc.allScope || !p.otherTest || p.given }
+	inScope := dc.inScope
 	// untold: answers of the scope before the call, whose view in round F
 	// keploy cannot tell, that hold F's moment and not R's.
 	var hs []instantHold
@@ -2693,11 +2693,12 @@ func (dc *decider) copied(path string, at variables.Address, n int, c changedIns
 }
 
 // instantEchoed is the first leaf of the call's recorded answer that echoes
-// the recorded instant: holds its text, or an instant that echoes its
-// moment (echoesMoment); "" where none does.
+// the recorded instant of the request leaf: holds its text, or an instant
+// that echoes its moment (echoesMoment) and that no other place holds
+// (heldElsewhere); "" where none does.
 func (dc *decider) instantEchoed(c changedInstant) string {
 	for _, a := range dc.in.Resp {
-		if t := dc.x.text(a.Value); textHoldsInstant(t, c.r) || c.rm != nil && dc.echoesMoment(t, *c.rm) {
+		if t := dc.x.text(a.Value); textHoldsInstant(t, c.r) || c.rm != nil && dc.echoesMoment(t, *c.rm, func(e moment) bool { return dc.heldElsewhere(e, *c.rm) }) {
 			return a.Path
 		}
 	}
@@ -2715,19 +2716,21 @@ func textHoldsInstant(t *readerText, w string) bool {
 }
 
 // echoesMoment reports whether an instant of t echoes m, a value's moment,
-// or m read in the run's zone (inZone): the instant is m cut, truncated or
-// rounded at one unit (cuts' coarser rule, m held, the instant the value),
-// to a unit no coarser than the instant is written at. A database stores
+// or m read in the run's zone (inZone): the instant is m, or m cut,
+// truncated or rounded at one unit (cuts' coarser rule, m held, the
+// instant the value), and elsewhere does not explain it. A database stores
 // what a call sent, or that cut to what it keeps: a second of a read of
-// milliseconds (a DATETIME), a millisecond of one of nanoseconds. An instant
-// that m is a cut of is another moment, finer: a row's created_at of 597 ms
-// that m, a read of 600, rounds at 10 ms. So is one m names only at a unit
-// coarser than it is written at: a created_at of milliseconds whole at 10 ms
-// by chance, m within its 10. t's instants are read as holdsMoment reads
+// milliseconds (a DATETIME), a day of it (a date kept as its midnight). An
+// instant that m is a cut of is another moment, finer: a row's created_at
+// of 597 ms that m, a read of 600, rounds at 10 ms. The unit an instant is
+// written at does not say whether it is m's stored form (the read's second
+// as Unix seconds may be a sign-in time the request sets beside the read),
+// so an instant another place holds is that place's value (heldElsewhere),
+// which its own source binds. t's instants are read as holdsMoment reads
 // them, its escapes read and its declared forms too; one as written that
 // its escapes change (openedOnly: a percent-encoded time's date alone) is
 // none.
-func (dc *decider) echoesMoment(t *readerText, m moment) bool {
+func (dc *decider) echoesMoment(t *readerText, m moment, elsewhere func(a moment) bool) bool {
 	text, ok := t.textNow()
 	if !ok {
 		return false
@@ -2743,12 +2746,45 @@ func (dc *decider) echoesMoment(t *readerText, m moment) bool {
 	echoes := func(sp instant) bool {
 		a := sp.moment()
 		return sp.keyed && slices.ContainsFunc(ms, func(m moment) bool {
-			return a.key == m.key || cuts(m, a, func(c cutRule) bool { return !c.finer && time.Duration(c.unit) <= a.res })
-		})
+			return a.key == m.key || cuts(m, a, func(c cutRule) bool { return !c.finer })
+		}) && !elsewhere(a)
 	}
 	x := t.x.dc
 	return slices.ContainsFunc(spans, func(sp instant) bool { return echoes(sp) && !escapeMoves(text, sp) }) ||
 		slices.ContainsFunc(slices.Concat(x.spansOf(unescaped(text)), x.spansOf(x.rawExtra(text))), echoes)
+}
+
+// heldElsewhere reports whether a, an instant of the call's recorded answer
+// that echoes the read (moment read), is held by another place: a leaf of
+// the call's request, or a place of the call's scope before it, whose
+// recorded text holds a's moment and not the read's. The answer then holds
+// that place's value (a sign-in time the request sets, a created_at an
+// earlier insert wrote), not the read's stored form. A place that holds
+// the read itself is the read: a request that sets the read and filters by
+// it, answered with what it set, is still the read's echo, as is the leaf
+// the read stands in.
+func (dc *decider) heldElsewhere(a, read moment) bool {
+	holds := func(t *readerText) bool { return dc.holdsMomentOf(t, a) && !dc.holdsMomentOf(t, read) }
+	for _, l := range dc.in.Rec.Leaves {
+		if holds(dc.x.text(l.Value)) {
+			return true
+		}
+	}
+	return slices.ContainsFunc(dc.ps, func(p evPlace) bool {
+		return p.state == stateBefore && dc.inScope(p) && holds(p.t.rec)
+	})
+}
+
+// inScope reports whether p is a place of the call's scope: its own test's,
+// the start-up's, or one the test gave (every place under ModeAll).
+func (dc *decider) inScope(p evPlace) bool { return dc.allScope || !p.otherTest || p.given }
+
+// holdsMomentOf reports whether an instant of t, as written, is m itself,
+// or m in the application's zone (inZone). A text keploy could not read
+// gives no instants, and holds none.
+func (dc *decider) holdsMomentOf(t *readerText, m moment) bool {
+	spans, _ := t.spansOf()
+	return dc.namedIn(spans, m, func(h, m moment) bool { return h.key == m.key }) > 0
 }
 
 // readBack is where the call's own answer reads back w, a word of the
