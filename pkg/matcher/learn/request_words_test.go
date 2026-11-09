@@ -391,3 +391,19 @@ func TestAClientRequestKeployCouldNotReadIsNoSourceOfAValueItsWordsLack(t *testi
 	oneRun := placed(`{"file":"` + strings.Repeat("QUJD", 20<<10) + `"}`)
 	refuses(String, "tok-1a2b3c4d5e6f", "tok-9f8e7d6c5b4a", oneRun)
 }
+
+// Words may hold any word where there are none (nil) or they could not read
+// their text (a window with no place to cut it), never fresh ones.
+func TestRequestWordsMayHoldAnyWordOnlyWhereTheyCouldNotReadTheirText(t *testing.T) {
+	if NewRequestWords().MayHoldAny() {
+		t.Fatal("fresh words may hold any word")
+	}
+	if !(*RequestWords)(nil).MayHoldAny() {
+		t.Fatal("no words hold no word")
+	}
+	w := NewRequestWords()
+	_, _ = w.Write(make([]byte, requestWordsWindow))
+	if !w.MayHoldAny() {
+		t.Fatal("words that could not read a window may hold no word")
+	}
+}

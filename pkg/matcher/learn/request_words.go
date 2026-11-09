@@ -166,6 +166,11 @@ func (w *RequestWords) End() {
 	w.buf = nil
 }
 
+// MayHoldAny reports whether w may hold any word: it is nil, or it could
+// not read its text in every form (undecoded). A writer may stop writing
+// to one that does.
+func (w *RequestWords) MayHoldAny() bool { return w == nil || w.undecoded }
+
 // MayHoldChange reports whether the request may be the source of a value's
 // change from rec, as recorded, to live, as record's full round saw it:
 // where the value holds an instant (moments: an instant leaf, or a text
@@ -230,6 +235,10 @@ func (dc *DriftCache) momentsIn(r, l Leaf) bool {
 	}
 	return false
 }
+
+// Words are the words of the place's request keploy could not read that it
+// keeps (unreadWords; Tracker.IncomingWords): nil where it keeps none.
+func (e Earlier) Words() *RequestWords { return e.unreadWords }
 
 // unreadWordsIn says whether one of served is a client test's request keploy
 // could not read that keeps its words (Earlier.unreadWords).

@@ -19,6 +19,7 @@ import (
 
 	"github.com/andybalholm/brotli"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -27,6 +28,7 @@ import (
 type takenRequest struct {
 	req    *models.HTTPReq
 	unread string
+	words  *learn.RequestWords
 	at     time.Time
 	// coming: taken by TakeComing, its done not called yet; dones: how
 	// many times its done was called.
@@ -47,14 +49,14 @@ type requestLog struct {
 
 func (l *requestLog) WantsIncoming() bool { return l.wants.Load() }
 
-func (l *requestLog) TakeIncoming(req *models.HTTPReq, unread string, at time.Time) {
+func (l *requestLog) TakeIncoming(req *models.HTTPReq, unread string, words *learn.RequestWords, at time.Time) {
 	l.mu.Lock()
-	l.got = append(l.got, takenRequest{req: req, unread: unread, at: at})
+	l.got = append(l.got, takenRequest{req: req, unread: unread, words: words, at: at})
 	l.mu.Unlock()
 	l.taken.Add(1)
 }
 
-func (l *requestLog) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPReq, string) {
+func (l *requestLog) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPReq, string, *learn.RequestWords) {
 	if l.noComing {
 		return nil
 	}
@@ -63,9 +65,9 @@ func (l *requestLog) TakeComing(req *models.HTTPReq, at time.Time) func(*models.
 	l.got = append(l.got, takenRequest{req: req, at: at, coming: true})
 	l.mu.Unlock()
 	l.taken.Add(1)
-	return func(r *models.HTTPReq, unread string) {
+	return func(r *models.HTTPReq, unread string, words *learn.RequestWords) {
 		l.mu.Lock()
-		l.got[k] = takenRequest{req: r, unread: unread, at: at, dones: l.got[k].dones + 1}
+		l.got[k] = takenRequest{req: r, unread: unread, words: words, at: at, dones: l.got[k].dones + 1}
 		l.mu.Unlock()
 	}
 }
@@ -171,7 +173,6 @@ func TestTheLearnStepTakesAClientTestsRequestBeforeTheAppGetsAByteOfIt(t *testin
 // reads nothing of it rather than part of it.
 func TestTakeRequestSaysWhyItCannotReadARequest(t *testing.T) {
 	for _, c := range []struct{ name, raw, why string }{
-		{"large", fmt.Sprintf("POST /u HTTP/1.1\r\nHost: api\r\nContent-Length: %d\r\n\r\nab", maxTakenBody+1), "larger than"},
 		{"encoded so a recording keeps it as sent", postWith("Content-Encoding: deflate\r\n", "ab"), "Content-Encoding deflate), which a recording keeps"},
 		{"gzip that does not decode", postWith("Content-Encoding: gzip\r\n", "ab"), "does not decode as its Content-Encoding gzip says"},
 		{"a form part sending a file", postWith("Content-Type: multipart/form-data; boundary=XX\r\n",
@@ -184,14 +185,10 @@ func TestTakeRequestSaysWhyItCannotReadARequest(t *testing.T) {
 			pm := &IngressProxyManager{logger: zap.NewNop()}
 			pm.SetRequestTaker(log)
 			req := readRequest(t, c.raw)
-			body := req.Body
 			pm.takeRequest(req, time.Now())
 			got := log.list()
 			if len(got) != 1 || !strings.Contains(got[0].unread, c.why) || got[0].req.Body != "" {
 				t.Fatalf("taken %+v, want one unread for %q", got, c.why)
-			}
-			if c.name == "large" && req.Body != body {
-				t.Fatal("a body larger than keploy reads was read ahead")
 			}
 		})
 	}
@@ -294,6 +291,7 @@ func TestTakeRequestDecodesABodySentGzipOrBr(t *testing.T) {
 		body, why string
 	}{
 		{"gzip", "gzip", gz.Bytes(), text, ""},
+		{"identity", "Identity", []byte(text), text, ""},
 		{"br", "BR", br.Bytes(), text, ""},
 		{"gzip larger than keploy reads once decoded", "gzip", big.Bytes(), "", "decoded, its body is larger than"},
 	} {

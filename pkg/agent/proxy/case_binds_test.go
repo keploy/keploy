@@ -69,7 +69,7 @@ func TestAClientTestsRequestBindsTheVariableBoundAtItsTestCase(t *testing.T) {
 	if got := postKey(t, mm, "/apps", "app-2"); strings.HasPrefix(got, "200 ") {
 		t.Fatalf("a call before the request that binds its variable was answered %s", got)
 	}
-	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", at)
+	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", nil, at)
 	if p.WantsIncoming() {
 		t.Fatal("every request a variable is bound at was paired: the proxy still asks for requests")
 	}
@@ -151,7 +151,7 @@ func TestAClientTestsRequestBindsNothingItCannotShow(t *testing.T) {
 			p.TakeClientCases("test-1", tc.cases)
 			open()
 			for _, l := range tc.live {
-				p.TakeIncoming(l, tc.unread, at)
+				p.TakeIncoming(l, tc.unread, nil, at)
 			}
 			b, ok := mm.vars.Lookup("key")
 			if tc.bound != "" {
@@ -185,7 +185,7 @@ func TestAClientTestsRequestsAreTakenOnlyWhereTheyBind(t *testing.T) {
 	p, mm, _, open := caseBindsProxy(t)
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
 	open()
-	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", at)
+	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", nil, at)
 	if _, ok := mm.vars.Lookup("key"); ok || p.WantsIncoming() || mm.vars.Unbound("key") != "" {
 		t.Fatal("the switch off: a client test's request bound or noted its variable, or the proxy asks for requests")
 	}
@@ -195,7 +195,7 @@ func TestAClientTestsRequestsAreTakenOnlyWhereTheyBind(t *testing.T) {
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
 	open()
 	t.Setenv(provenswitch.Env, "")
-	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", at)
+	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", nil, at)
 	t.Setenv(provenswitch.Env, "1")
 	if _, ok := mm.vars.Lookup("key"); ok || !p.WantsIncoming() {
 		t.Fatal("a request taken with the switch off bound its test's variable, or was paired")
@@ -210,7 +210,7 @@ func TestAClientTestsRequestsAreTakenOnlyWhereTheyBind(t *testing.T) {
 	p, mm, logs, open := caseBindsProxy(t)
 	open()
 	p.TakeClientCases("test-2", []models.ClientCase{appsCase("post-apps-1", keyAtName, models.ClientCaseBind{Name: "key2", Recorded: "app-9", Place: "body.name"})})
-	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", at)
+	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", nil, at)
 	if _, ok := mm.vars.Lookup("key"); ok || mm.vars.Unbound("key") != "" || mm.vars.Unbound("key2") != "" {
 		t.Fatal("a test keploy does not serve bound or noted a variable in the served one")
 	}
@@ -242,7 +242,7 @@ func TestAClientTestsRequestsAreTakenOnlyWhereTheyBind(t *testing.T) {
 
 	p = &Proxy{learnTracker: learn.NewTracker()}
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
-	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", at)
+	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", nil, at)
 	if p.WantsIncoming() {
 		t.Fatal("no mock manager: the request did not pair")
 	}
@@ -276,7 +276,7 @@ func TestAComingRequestBindsItsVariableOnceItsBodyEnded(t *testing.T) {
 	if got := postKey(t, mm, "/apps", "app-2"); strings.HasPrefix(got, "200 ") {
 		t.Fatalf("a call before its body ended was answered %s", got)
 	}
-	done(liveApps(`{"name":"app-2"}`), "")
+	done(liveApps(`{"name":"app-2"}`), "", nil)
 	if b, ok := mm.vars.Lookup("key"); !ok || b.Value != "app-2" || b.Mock != "test case post-apps-1" || b.Place != "request body.name" {
 		t.Fatalf("bound %+v (%v) once its body ended", b, ok)
 	}
@@ -300,7 +300,7 @@ func TestAComingRequestBindsItsVariableOnceItsBodyEnded(t *testing.T) {
 	p, mm, _, open = caseBindsProxy(t)
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
 	open()
-	p.TakeComing(liveApps(""), at)(liveApps(""), "its body did not come whole: unexpected EOF")
+	p.TakeComing(liveApps(""), at)(liveApps(""), "its body did not come whole: unexpected EOF", nil)
 	if _, ok := mm.vars.Lookup("key"); ok {
 		t.Fatal("a body that did not come whole bound its variable")
 	}

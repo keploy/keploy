@@ -5156,10 +5156,11 @@ func (p *Proxy) WantsIncoming() bool {
 // byte of it reached the application (incoming.RequestTaker;
 // learn.Tracker.Incoming), and binds the test's variables bound at the
 // recorded request it pairs with (bindCase), under the proven switch.
-// unread says why keploy could not read it, "" where it could.
-func (p *Proxy) TakeIncoming(req *models.HTTPReq, unread string, at time.Time) {
+// unread says why keploy could not read it, "" where it could, and words
+// are the words of what it could not read (learn.Tracker.IncomingWords).
+func (p *Proxy) TakeIncoming(req *models.HTTPReq, unread string, words *learn.RequestWords, at time.Time) {
 	if provenswitch.On() {
-		p.learnTracker.Incoming(req, unread, at)
+		p.learnTracker.IncomingWords(req, unread, words, at)
 		p.bindCase(req, unread)
 	}
 }
@@ -5170,9 +5171,9 @@ func (p *Proxy) TakeIncoming(req *models.HTTPReq, unread string, at time.Time) {
 // the recorded request whose variables it binds (pairCase), under the proven
 // switch: until its body ended each is noted as bound at a request keploy
 // has not read yet (learn.ComingUnread), and done, once it ended, gives the
-// learn step the request whole and binds them from it. nil where it takes
-// nothing of it.
-func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPReq, string) {
+// learn step the request whole, with the words of what keploy could not
+// read of it, and binds them from it. nil where it takes nothing of it.
+func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPReq, string, *learn.RequestWords) {
 	if !provenswitch.On() {
 		return nil
 	}
@@ -5183,9 +5184,9 @@ func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPR
 	if bind != nil {
 		bind(req, learn.ComingUnread)
 	}
-	return func(live *models.HTTPReq, unread string) {
+	return func(live *models.HTTPReq, unread string, words *learn.RequestWords) {
 		if learned != nil {
-			learned(live, unread, nil)
+			learned(live, unread, words)
 		}
 		if bind != nil {
 			bind(live, unread)
