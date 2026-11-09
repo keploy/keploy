@@ -2692,15 +2692,63 @@ func (dc *decider) copied(path string, at variables.Address, n int, c changedIns
 	return dc.bound(path, at, n, c, src, rule)
 }
 
-// instantEchoed is the first leaf of the call's recorded answer that holds
-// the recorded instant, by its text or its moment; "" where none does.
+// instantEchoed is the first leaf of the call's recorded answer that echoes
+// the recorded instant: holds its text, or an instant that echoes its
+// moment (echoesMoment); "" where none does.
 func (dc *decider) instantEchoed(c changedInstant) string {
 	for _, a := range dc.in.Resp {
-		if h, _, _ := dc.holds(evPlace{}, dc.x.text(a.Value), c.r, c.rm, c.byText); h {
+		if t := dc.x.text(a.Value); textHoldsInstant(t, c.r) || c.rm != nil && dc.echoesMoment(t, *c.rm) {
 			return a.Path
 		}
 	}
 	return ""
+}
+
+// textHoldsInstant reports whether t holds w, an instant's text, as its
+// words (holds' reading of a text).
+func textHoldsInstant(t *readerText, w string) bool {
+	h, ok := t.holdsWord(w)
+	if ok && !h && len(variables.Words(w)) > 1 {
+		h, ok = t.contains(w)
+	}
+	return ok && h
+}
+
+// echoesMoment reports whether an instant of t echoes m, a value's moment,
+// or m read in the run's zone (inZone): the instant is m cut, truncated or
+// rounded at one unit (cuts' coarser rule, m held, the instant the value),
+// to a unit no coarser than the instant is written at. A database stores
+// what a call sent, or that cut to what it keeps: a second of a read of
+// milliseconds (a DATETIME), a millisecond of one of nanoseconds. An instant
+// that m is a cut of is another moment, finer: a row's created_at of 597 ms
+// that m, a read of 600, rounds at 10 ms. So is one m names only at a unit
+// coarser than it is written at: a created_at of milliseconds whole at 10 ms
+// by chance, m within its 10. t's instants are read as holdsMoment reads
+// them, its escapes read and its declared forms too; one as written that
+// its escapes change (openedOnly: a percent-encoded time's date alone) is
+// none.
+func (dc *decider) echoesMoment(t *readerText, m moment) bool {
+	text, ok := t.textNow()
+	if !ok {
+		return false
+	}
+	spans, ok := t.spansOf()
+	if !ok {
+		return false
+	}
+	ms := []moment{m}
+	if z, ok := dc.inZone(m); ok {
+		ms = append(ms, z)
+	}
+	echoes := func(sp instant) bool {
+		a := sp.moment()
+		return sp.keyed && slices.ContainsFunc(ms, func(m moment) bool {
+			return a.key == m.key || cuts(m, a, func(c cutRule) bool { return !c.finer && time.Duration(c.unit) <= a.res })
+		})
+	}
+	x := t.x.dc
+	return slices.ContainsFunc(spans, func(sp instant) bool { return echoes(sp) && !escapeMoves(text, sp) }) ||
+		slices.ContainsFunc(slices.Concat(x.spansOf(unescaped(text)), x.spansOf(x.rawExtra(text))), echoes)
 }
 
 // readBack is where the call's own answer reads back w, a word of the

@@ -1513,6 +1513,75 @@ func TestAnHTTPDateWhoseMinuteTakesItsSecondsIsReadWhole(t *testing.T) {
 	}
 }
 
+// api-server's sign-in calls (TestAgentSignsInToMCPWithOAuth's mock-1007,
+// TestCLISignsInWithADeviceCode's mock-1141) find their grant by
+// expires_at > now, a read of the clock in milliseconds, and the call's
+// recorded answer holds the grant's created_at, the same test's insert a few
+// milliseconds before. Where the read was created_at rounded at 10 ms (600
+// of 597, 680 of 679), keploy took the answer for an echo of the read and
+// refused it (cannot-check). An echo holds the read itself, or the read cut
+// to a unit the answer writes (a DATETIME's second); created_at is an
+// earlier moment that the read is a cut of, no echo: the read is a Clock, as
+// where it is no round of created_at (598 of 597), and as where created_at
+// is whole at 10 ms by chance and the read within its 10 (593 of 590). An
+// answer of the read's own millisecond, or of its second as a DATETIME,
+// truncated or rounded, still echoes it: refused.
+func TestAnExpiryFilterBesideItsGrantsCreatedAtIsNoEcho(t *testing.T) {
+	if reflect.ValueOf(decideBy).Pointer() == reflect.ValueOf(refuseAll).Pointer() {
+		t.Skip("the order of a changed word is not on this tree")
+	}
+	const p, ms = "body.cmd.query.expires_at.$gt.$date.$numberLong", time.Millisecond
+	created := func(v string) Leaf {
+		return Leaf{Path: "resp.0.0.value.created_at.$date.$numberLong", Noise: "resp.0.0.value.created_at.$date.$numberLong", Type: String, Value: v}
+	}
+	stored := func(v string) Leaf { return Leaf{Path: "resp.0.0.value.created_at", Noise: "resp.0.0.value.created_at", Type: String, Value: v} }
+	decide := func(read int64, answer Leaf) Decision {
+		rAt := time.UnixMilli(read + 2).UTC()
+		fAt := rAt.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 150*ms)
+		leaf := func(v int64) Shape {
+			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: strconv.FormatInt(v, 10)}}}
+		}
+		dc := NewDriftCache()
+		dc.appClock = true
+		ds := Decide(Input{
+			Drifts: dc, Drift: []string{p}, Live: leaf(fAt.Add(-2 * ms).UnixMilli()), Rec: leaf(read),
+			At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-1007", Mode: ModeOwn, Resp: []Leaf{answer},
+			Window: v5Window(v5Call(rAt, 20*ms, 0), v5Call(fAt, 20*ms, 0)), Landed: Landed{Where: LandedBetween},
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
+		})
+		if len(ds) != 1 {
+			t.Fatalf("read %d beside %q: %d decisions; want one", read, answer.Value, len(ds))
+		}
+		return ds[0]
+	}
+	for _, c := range []struct {
+		read    int64
+		created string
+	}{
+		{1794207702600, "1794207702597"},
+		{1794207702680, "1794207702679"},
+		{1794207702598, "1794207702597"},
+		{1794207702593, "1794207702590"},
+	} {
+		if d := decide(c.read, created(c.created)); d.Outcome != OutcomeClock || d.Clock == nil {
+			t.Errorf("read %d beside created_at %s: %+v (%+v); want a Clock", c.read, c.created, d, d.Refusal)
+		}
+	}
+	const echo = "its own call's recorded answer holds"
+	for _, c := range []struct {
+		read   int64
+		answer Leaf
+	}{
+		{1794207702600, created("1794207702600")},
+		{1794207702600, stored("2026-11-09 07:01:42")},
+		{1794207702600, stored("2026-11-09 07:01:43")},
+	} {
+		if d := decide(c.read, c.answer); d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalCannotCheck || !strings.Contains(d.Refusal.Why, echo) {
+			t.Errorf("read %d echoed as %q: %+v (%+v); want refused, an echo", c.read, c.answer.Value, d, d.Refusal)
+		}
+	}
+}
+
 // The same look-back as a word of a raw text (dirtyAt<2026-...Z&limit=10):
 // one rule across value forms. It waits for the same change to the order.
 func TestALookBackInARawTextIsAClockThroughTheOrder(t *testing.T) {
