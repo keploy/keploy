@@ -1214,7 +1214,7 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 func setEvidence(g givenWords, inR, inF heldRoles, at time.Time, piece bool) (ev wordEvidence, changed bool) {
 	// A recording answered after the call gave R's application nothing
 	// before it: R's word there decides nothing (F's still does).
-	hr := inR&inOwn != 0 && (g.noTime || !g.at.After(at) && !g.answered.After(at))
+	hr := inR&inOwn != 0 && g.givenBefore(at)
 	before := g.at.Before(at) && !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
 	switch {
 	case g.unstated || g.unread:
@@ -1254,6 +1254,13 @@ func setEvidence(g givenWords, inR, inF heldRoles, at time.Time, piece bool) (ev
 		return evUnknown, false
 	}
 	return evNone, false
+}
+
+// givenBefore reports whether g's answer was given R's application before
+// the call at at: recorded and answered at or before it, or with no answer
+// time keploy can read (fail closed).
+func (g *givenWords) givenBefore(at time.Time) bool {
+	return g.noTime || !g.at.After(at) && !g.answered.After(at)
 }
 
 // gluedAt reports whether p, a body that declares no media type, holds R's
