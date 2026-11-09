@@ -1613,13 +1613,15 @@ func TestAnExpiryFilterBesideItsGrantsCreatedAtIsNoEcho(t *testing.T) {
 // later and sets last_polled_at to its read. Each answer holds auth_time,
 // the read's second, and last_polled_at 680, an earlier poll's read and
 // the read cut at 10 ms. Neither is the read's echo: auth_time is the value
-// the approval's request sets (and, for the poll, the approval's), and 680
-// the earlier poll's. Each read is a Clock, the answers built as
-// integrations' mongo/v2 builds them (a $date typed, a $numberLong a
-// string) and with the read as a string too. With no place that holds
-// them, the same answers are the reads' stored seconds and 10 ms cuts,
-// refused; so are they where the only place that holds them is answered
-// after the call, or is an earlier test's.
+// the approval's request sets (and, for the poll, the approval's, or that
+// of a find answered before the poll), and 680 the earlier poll's. Each
+// read is a Clock, the answers built as integrations' mongo/v2 builds them
+// (a $date typed, a $numberLong a string) and with the read as a string
+// too. With no place that holds them, the same answers are the reads'
+// stored seconds and 10 ms cuts, refused; so are they where the only place
+// that holds them is recorded after the call, is a find sent before the
+// call but answered after it (it shows nothing the store held before), or
+// is an earlier test's.
 func TestASignInTimeTheRequestSetsBesideItsReadIsNoEcho(t *testing.T) {
 	if reflect.ValueOf(decideBy).Pointer() == reflect.ValueOf(refuseAll).Pointer() {
 		t.Skip("the order of a changed word is not on this tree")
@@ -1685,14 +1687,26 @@ func TestASignInTimeTheRequestSetsBesideItsReadIsNoEcho(t *testing.T) {
 		e.Mock, e.Run, e.Own, e.Payload = "mock-1099", true, false, payloadOf("mock-1099", e.At)
 		return e
 	}
+	// readBack is a find of the test sent 2 ms before the call whose answer,
+	// given at answered from the call's instant, holds auth_time.
+	readBack := func(answered time.Duration) func(rAt, fAt time.Time) Earlier {
+		return func(rAt, fAt time.Time) Earlier {
+			at := rAt.Add(-2 * ms)
+			m := &models.Mock{Name: "mock-1140", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: rAt.Add(answered)}}
+			return Earlier{Mock: m.Name, At: at, Payload: RawOf(m, true), Own: true,
+				Seen: []Seen{{Side: Response, Leaf: str("resp.0.0.value.auth_time.$numberLong", auth), Live: fAuth}}}
+		}
+	}
 	for _, c := range []call{
 		{"mock-1134, the approval", 1794207702683, map[string][2]string{authSet: {auth, fAuth}}, both(firstPoll), true},
 		{"mock-1135, the next poll", 1794207702684, map[string][2]string{polledSet: {"1794207702684", ""}}, both(firstPoll, approval), true},
 		{"mock-1134 with no request that sets auth_time", 1794207702683, nil, both(firstPoll), false},
 		{"mock-1134 with no earlier poll", 1794207702683, map[string][2]string{authSet: {auth, fAuth}}, nil, false},
 		{"mock-1135 with no earlier call", 1794207702684, map[string][2]string{polledSet: {"1794207702684", ""}}, nil, false},
-		{"mock-1135, the approval answered after it", 1794207702684, nil, both(firstPoll, later), false},
+		{"mock-1135, the approval recorded after it", 1794207702684, nil, both(firstPoll, later), false},
 		{"mock-1135, the approval an earlier test's", 1794207702684, nil, both(firstPoll, older), false},
+		{"mock-1135, a find answered before it that holds auth_time", 1794207702684, nil, both(firstPoll, readBack(-1*ms)), true},
+		{"mock-1135, a find sent before it, answered after it, that holds auth_time", 1794207702684, nil, both(firstPoll, readBack(5*ms)), false},
 	} {
 		for _, typed := range []bool{true, false} {
 			rAt := time.UnixMilli(c.read + 1).UTC()
