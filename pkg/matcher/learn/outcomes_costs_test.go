@@ -595,6 +595,30 @@ func TestOutcomeAWordFsViewMovedToAnotherFieldIsRefused(t *testing.T) {
 	}
 }
 
+// Two recordings whose F views each moved the word to another column are
+// each refused as unknown, the first naming the field F gave it at: a
+// word's check keeps every place it moved at (wordBy's moved), not only the
+// last, and neither is bound as the place the value came from. F served
+// them in the order they were recorded, so no order is unknown and only
+// the moved fields refuse them.
+func TestOutcomeAWordFsViewsMovedAtTwoPlacesAreEachRefused(t *testing.T) {
+	ms := time.Millisecond
+	row := func(name string, before time.Duration, a, b, c string) Raw {
+		return ePg(name, before, "SELECT a, b, c FROM t", []models.PostgresV3Cells{{{Value: a}, {Value: b}, {Value: c}}}, "SELECT 1")
+	}
+	raw := append(eStartup(),
+		row("mock-6", 110*ms, "48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(row("mock-6", 110*ms, "9998", "9999", "6c7d")),
+		row("mock-7", 100*ms, "bbbb", "48d1", "cccc").ServedAs(7).ServedLive(row("mock-7", 100*ms, "9997", "9996", "6c7d")))
+	d := oWord(t, Decide(costF("k-48d1", "k-6c7d", nil, raw, nil)), "48d1", "6c7d")
+	costRefused(t, "k-48d1 to k-6c7d, two F views that moved it", d, costUnknown, "mock-6", "mock-7")
+	if d.Outcome == OutcomeValue {
+		t.Errorf("k-48d1 to k-6c7d, two F views that moved it: bound %+v; want neither place bound", d.From)
+	}
+	if d.Refusal != nil && (!strings.Contains(d.Refusal.Why, "rows[0][2]") || strings.Contains(d.Refusal.Why, "another order")) {
+		t.Errorf("k-48d1 to k-6c7d, two F views that moved it: why %q; want the field F gave it at (rows[0][2]), and no unknown order", d.Refusal.Why)
+	}
+}
+
 // Beside an exchange keploy holds no payload of, a client test's read of the
 // clock made since its test began (in seconds, before its call's window) is
 // refused, naming the exchange, even where a send of its test before the
@@ -4045,5 +4069,41 @@ func TestOutcomeCostAWordsCheckKeepsOnlyThePlacesItReads(t *testing.T) {
 	}
 	if got[1] > got[0]+4096 {
 		t.Errorf("a word's check allocates %d bytes in a call of 200 recordings and %d in one of 3200; want no more as the call grows", got[0], got[1])
+	}
+}
+
+// A word's check reads each place the postings name once, in the call's
+// order of places (placeIndex.ascending), where both of a place's texts
+// name it: two recordings whose recorded text holds R's word and whose
+// view holds F's are each named by both sides' postings, and the check
+// asks each of them once, the earlier first, as it read every place before
+// the postings named any.
+func TestOutcomeCostAWordsCheckReadsEachPlaceOnceInTheCallsOrder(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	both := func(i int) bool { return i == 3 || i == 7 }
+	body := func(i int) string {
+		if both(i) {
+			return fmt.Sprintf(`{"note":"Item %d","ref":"a1b2c3d4"}`, i)
+		}
+		return fmt.Sprintf(`{"note":"Item %d"}`, i)
+	}
+	view := func(i int) string {
+		if both(i) {
+			return fmt.Sprintf(`{"note":"Item %d","ref":"f0e9d8c7"}`, i)
+		}
+		return body(i)
+	}
+	in := costCall(tr.Drifts(), "body.ref", "a1b2c3d4", "f0e9d8c7", eRecAt, nil, costServed(tr.Drifts(), 20, body, view), nil, nil)
+	dc := newDecider(in, false, newReaderIndex(in.Drifts))
+	at, all := dc.places().asked(readWord{Rec: "a1b2c3d4", Live: "f0e9d8c7"})
+	var mocks []string
+	for _, i := range at {
+		mocks = append(mocks, dc.ps[i].mock)
+	}
+	if all || len(at) != 2 || at[0] >= at[1] || !slices.Equal(mocks, []string{"mock-3", "mock-7"}) {
+		t.Errorf("a word both texts of two places name is asked at %v (all %v), of %v; want mock-3's place and then mock-7's, each once", at, all, mocks)
 	}
 }

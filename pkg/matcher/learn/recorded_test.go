@@ -173,10 +173,44 @@ func TestOutcomeCostTheSetsRecordingsKeepOnlyTheRoomItsBudgetHasSpare(t *testing
 	}
 }
 
+// Where another tier holds part of the set's budget, the recordings keep
+// within the room it leaves, though they are within their own cap (the
+// set's budget, noCap): the next recording lets go of the one read least
+// recently, and the set never holds past its budget.
+func TestOutcomeCostTheSetsRecordingsLetGoForTheRoomTheOtherTiersLeave(t *testing.T) {
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	learnBudget = 16 << 10
+	tr := NewTracker()
+	tr.NewSet()
+	s := tr.derived
+	s.mu.Lock()
+	s.held.keep("other", partStamps, 6<<10, func(*heldParts) {})
+	held := s.held.used
+	s.mu.Unlock()
+	var n int
+	for _, name := range []string{"a", "b", "c", "b", "a"} {
+		if _, err := tr.KeepRecording(name, 4<<10, decodeOf(name, &n)); err != nil {
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		used, heldNow, recCap := s.budget.used, s.held.used, s.recs.cap
+		s.mu.Unlock()
+		if used > learnBudget || heldNow != held || recCap != learnBudget {
+			t.Fatalf("after %s: the set holds %d of %d, the other tier %d (was %d), the recordings' cap %d; want the set within its budget, the other tier's part kept, the cap the budget", name, used, learnBudget, heldNow, held, recCap)
+		}
+	}
+	// a, b, c decoded; c lets a go; b read again kept; a decoded again.
+	if n != 4 {
+		t.Errorf("five reads of three recordings, two kept at a time beside the other tier, decoded %d; want 4", n)
+	}
+}
+
 // A row's cap on the set's recordings (recordingBudget) bounds them within
 // the set's budget: a recording past the cap is decoded at each read and
 // lets none of those kept go. A recording kept twice (two readers decoded
-// it at once) is counted once. A tracker of no set decodes at each read.
+// it at once) is counted once. A tracker of no set decodes at each read,
+// and so does a set for a decode that gives no recording and no error: it
+// keeps none and counts no decode.
 func TestOutcomeCostTheSetsRecordingsKeepWithinTheirCap(t *testing.T) {
 	defer func(b int64) { recordingBudget = b }(recordingBudget)
 	recordingBudget = 8 << 10
@@ -204,10 +238,29 @@ func TestOutcomeCostTheSetsRecordingsKeepWithinTheirCap(t *testing.T) {
 	if after != before || all != before {
 		t.Errorf("a recording kept again: the recordings count %d, the set %d; want %d, as kept once", after, all, before)
 	}
+	empty := 0
+	for range 2 {
+		if m, err := tr.KeepRecording("empty", 1<<10, func() (*models.Mock, error) { empty++; return nil, nil }); m != nil || err != nil {
+			t.Errorf("a decode of no recording and no error read as %+v, %v; want neither", m, err)
+		}
+	}
+	if decodes := tr.RecordingDecodes(); empty != 2 || decodes != 3 {
+		t.Errorf("two reads of a decode of no recording decoded %d, the set counts %d decodes; want 2, and the 3 before", empty, decodes)
+	}
 	for _, none := range []*Tracker{nil, {}} {
 		n = 0
 		for range 2 {
-			if m, err := none.KeepRecording("a", 1<<10, decodeOf("a", &n)); err != nil || !reflect.DeepEqual(m, recordingOf("a")) {
+			var m *models.Mock
+			var err error
+			if crashed := func() (crashed any) {
+				defer func() { crashed = recover() }()
+				m, err = none.KeepRecording("a", 1<<10, decodeOf("a", &n))
+				return nil
+			}(); crashed != nil {
+				t.Errorf("a tracker of no set panicked at a read: %v; want the recording as decoded", crashed)
+				continue
+			}
+			if err != nil || !reflect.DeepEqual(m, recordingOf("a")) {
 				t.Errorf("a tracker of no set read %+v, %v; want the recording as decoded", m, err)
 			}
 		}
