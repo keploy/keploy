@@ -69,7 +69,7 @@ func TestDiskRecordedBeforeKeptVisitsTheSameRecordingsDecodedOnce(t *testing.T) 
 	}{{"cold", 12}, {"warm", 12}, {"warm again", 12}} {
 		got := recordedVisits(t, d)
 		if !reflect.DeepEqual(got, plain) {
-			t.Errorf("%s: visited %v; want the recordings as decoded at each read %v", c.name, got, plain)
+			t.Fatalf("%s: visited %v; want the recordings as decoded at each read %v", c.name, got, plain)
 		}
 		if d.RecordedReads() != c.reads {
 			t.Errorf("%s: %d decodes in all; want %d", c.name, d.RecordedReads(), c.reads)
@@ -102,6 +102,9 @@ func TestDiskRecordedBeforeKeptReadsAsTheStoreReadsNow(t *testing.T) {
 		return tr.KeepRecording(key, size, decode)
 	})
 	first := recordedVisits(t, d)
+	if len(sizes) != len(first) {
+		t.Fatalf("the keeper was handed %d of the %d records visited; want each once", len(sizes), len(first))
+	}
 	for i, m := range first {
 		if sizes[i] <= m.StoredSize() {
 			t.Errorf("%s: handed its keeper as %d bytes; want more than its record's %d", m.Name, sizes[i], m.StoredSize())
