@@ -75,11 +75,16 @@ func CallShape(protocol, summary string) string {
 const maxCommandName = 64
 
 // CommandName is c, a call's command as its parser read it
-// (UnmatchedCall.Command), when it can name a command and no value: at most
+// (UnmatchedCall.Command), when it has a command's shape: at most
 // maxCommandName bytes, an ASCII letter first, then only ASCII letters,
-// digits, '_' and '.' (a Redis module's "JSON.GET"). "" for anything else,
-// so a parser that put a value there (a key, an address, a sentence) names
-// no command. The parser's own contract is that it never does.
+// digits, '_' and '.' (a Redis module's "JSON.GET", DNS's "NSEC3"). "" for
+// anything else: a value with a space, ':', '-', '@' or '/' in it (a key
+// such as "user:42", a dashed UUID, an address, a sentence) names no
+// command. The shape is a defence, not a proof: a value of the same shape (a
+// bare key such as "orders", "session.abc123", an undashed hex id that
+// starts with a letter) is kept. That the word is a command is the parser's
+// contract: it puts there only the command it names a call by (the Redis
+// command, the Kafka API, the DNS query type).
 func CommandName(c string) string {
 	if c == "" || len(c) > maxCommandName || !isLetterByte(c[0]) {
 		return ""
