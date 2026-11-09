@@ -572,6 +572,90 @@ func TestAMultipartFileReachesReplayWhereverItsTestCaseIsPersisted(t *testing.T)
 	}
 }
 
+// A part whose temp file is gone when its test case leaves for another process
+// goes with no path, never the path of a file that process cannot read: a test
+// store refuses an absolute path that comes with no contents, and would lose the
+// whole test case for one part. It keeps the case, with that part's file lost,
+// and the other part's bytes still ride it.
+func TestAPartInlineFormFilesCannotReadGoesWithNoPath(t *testing.T) {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for _, name := range []string{"gone.bin", "kept.bin"} {
+		fw, err := mw.CreateFormFile("bundle", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write([]byte(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	form := ExtractFormData(zap.NewNop(), body.Bytes(), mw.FormDataContentType())
+	if len(form) != 2 || len(form[0].Paths) != 1 || len(form[1].Paths) != 1 {
+		t.Fatalf("capture form = %+v, want two file parts with a temp file each", form)
+	}
+	gone, kept := form[0].Paths[0], form[1].Paths[0]
+	t.Cleanup(func() { _ = os.Remove(gone); _ = os.Remove(kept) })
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	tc := &models.TestCase{
+		Kind:          models.HTTP,
+		HasBinaryFile: true,
+		HTTPReq: models.HTTPReq{
+			Method: http.MethodPost,
+			URL:    "http://localhost:8080/upload",
+			Header: map[string]string{"Content-Type": mw.FormDataContentType()},
+			Form:   form,
+		},
+		HTTPResp: models.HTTPResp{StatusCode: http.StatusOK},
+	}
+	core, logs := observer.New(zap.ErrorLevel)
+	InlineFormFiles(zap.New(core), tc)
+
+	if f := tc.HTTPReq.Form[0]; len(f.Paths) != 1 || f.Paths[0] != "" || (len(f.FileContents) > 0 && f.FileContents[0] != nil) {
+		t.Fatalf("gone part = %+v, want no path and no contents", f)
+	}
+	if f := tc.HTTPReq.Form[1]; len(f.Paths) != 1 || f.Paths[0] != "" || len(f.FileContents) != 1 || string(f.FileContents[0]) != "kept.bin" {
+		t.Fatalf("kept part = %+v, want its bytes and no path", f)
+	}
+	if said := logs.FilterField(zap.String("path", gone)).All(); len(said) != 1 {
+		t.Fatalf("logged %+v, want one line naming %s", logs.All(), gone)
+	}
+
+	// What the DaemonSet stream carries, persisted as k8s-proxy's control plane does.
+	payload, err := json.Marshal(tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var streamed models.TestCase
+	if err := json.Unmarshal(payload, &streamed); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	keployPath := t.TempDir()
+	db := testdb.New(zap.NewNop(), keployPath)
+	if err := db.InsertTestCase(ctx, &streamed, "test-set-0", false); err != nil {
+		t.Fatalf("insert test case: %v: a part with no file cost the whole test case", err)
+	}
+	stored, err := db.GetTestCases(ctx, "test-set-0")
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("stored test cases = %d (err %v), want 1", len(stored), err)
+	}
+	if f := stored[0].HTTPReq.Form[0]; len(f.Paths) != 0 {
+		t.Fatalf("stored gone part = %+v, want no file", f)
+	}
+	f := stored[0].HTTPReq.Form[1]
+	if len(f.Paths) != 1 {
+		t.Fatalf("stored kept part = %+v, want its file", f)
+	}
+	if onDisk, err := os.ReadFile(filepath.Join(keployPath, f.Paths[0])); err != nil || string(onDisk) != "kept.bin" {
+		t.Fatalf("asset %s = %q (err %v), want kept.bin", f.Paths[0], onDisk, err)
+	}
+}
+
 // While the memory guard has paused recording, a capture hook's skip closes
 // the exchange's bodies and counts the request as not recorded, on the ingress
 // connection its context names: a request that was in flight as the pause
