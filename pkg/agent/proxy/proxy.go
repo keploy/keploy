@@ -137,6 +137,10 @@ type Proxy struct {
 	// whenever its error capture window opens (openTestErrorCapture). Under
 	// the proven switch the parsers find it on their connection's context.
 	learnTracker *learn.Tracker
+	// caseBinds are the running client test's recorded requests and the
+	// variables of the test bound at them, which its requests bind as they
+	// reach the application (TakeClientCases, bindCase).
+	caseBinds caseBinds
 	// serveClock tells, with the proven switch off, a call's span on the
 	// application's clock for the background check alone (learn.
 	// CallSpanOf): the managers note their serves to it, and the parsers
@@ -5121,10 +5125,11 @@ func (p *Proxy) ClientTests() bool { return p.learnTracker.ClientTests() }
 
 var _ agent.ClientTestsReader = (*Proxy)(nil)
 
-// TakeClientCases gives the learn step the requests the running client test
-// sent the application in its recording (agent.ClientCasesTaker;
-// learn.Tracker.SetCases), under the proven switch.
-func (p *Proxy) TakeClientCases(cases []models.ClientCase) {
+// TakeClientCases gives the learn step the requests the running client
+// test, test, sent the application in its recording (agent.ClientCasesTaker;
+// learn.Tracker.SetCases), and the test's variables bound at them
+// (caseBinds), under the proven switch.
+func (p *Proxy) TakeClientCases(test string, cases []models.ClientCase) {
 	if !provenswitch.On() {
 		return
 	}
@@ -5133,25 +5138,29 @@ func (p *Proxy) TakeClientCases(cases []models.ClientCase) {
 		cs = append(cs, learn.ClientCase{Name: cases[i].Name, Req: &cases[i].Req})
 	}
 	p.learnTracker.SetCases(cs)
+	p.setCaseBinds(test, cases)
 }
 
 var _ agent.ClientCasesTaker = (*Proxy)(nil)
 
 // WantsIncoming reports whether the learn step takes the running client
 // test's requests now (incoming.RequestTaker; learn.Tracker.WantsIncoming),
-// under the proven switch.
+// or a variable of the test is bound at one not yet paired (caseBinds), under
+// the proven switch.
 func (p *Proxy) WantsIncoming() bool {
-	return provenswitch.On() && p.learnTracker.WantsIncoming()
+	return provenswitch.On() && (p.learnTracker.WantsIncoming() || p.caseBinds.wants())
 }
 
 // TakeIncoming gives the learn step a request of the running client test
 // that reached the application's ingress at the real instant at, before any
 // byte of it reached the application (incoming.RequestTaker;
-// learn.Tracker.Incoming), under the proven switch. unread says why keploy
-// could not read it, "" where it could.
+// learn.Tracker.Incoming), and binds the test's variables bound at the
+// recorded request it pairs with (bindCase), under the proven switch.
+// unread says why keploy could not read it, "" where it could.
 func (p *Proxy) TakeIncoming(req *models.HTTPReq, unread string, at time.Time) {
 	if provenswitch.On() {
 		p.learnTracker.Incoming(req, unread, at)
+		p.bindCase(req, unread)
 	}
 }
 

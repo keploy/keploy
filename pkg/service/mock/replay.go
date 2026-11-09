@@ -1896,27 +1896,44 @@ func (m *mockService) testClientCases(ctx context.Context, name string, mapping 
 		m.logger.Warn("keploy cannot read the requests the recording's tests sent: a value a test sent is read from no request of it", zap.String("mock-set", name), zap.Error(err))
 		return nil
 	}
-	return clientCases(mapping, tcs)
+	cases, unbound := clientCases(mapping, tcs)
+	if len(unbound) > 0 {
+		m.logger.Warn("keploy binds these variables of the recording's tests from no request of the test, so each call that uses one misses: re-record the test", zap.String("mock-set", name), zap.Strings("variables", unbound))
+	}
+	return cases
 }
 
 // clientCases is testClientCases of the test cases tcs read: by test ID,
 // the HTTP requests of each test's cases, ordered by when each reached the
-// application in the recording. A case tcs does not hold, or not of HTTP, is
-// left out.
-func clientCases(mapping *models.Mapping, tcs []*models.TestCase) map[string][]models.ClientCase {
+// application in the recording, each with the test's variables bound at it
+// (MappedTestCase.Variables, models.ParseCaseBind). A case tcs does not
+// hold, or not of HTTP, is left out. unbound names each variable of a test
+// whose bind is at none of the cases kept (one of another form, one naming a
+// case the test does not list or tcs does not hold): no request of the test
+// binds it at replay, so every use of it misses.
+func clientCases(mapping *models.Mapping, tcs []*models.TestCase) (out map[string][]models.ClientCase, unbound []string) {
 	byName := make(map[string]models.HTTPReq, len(tcs))
 	for _, tc := range tcs {
 		if tc != nil && tc.Kind == models.HTTP {
 			byName[tc.Name] = tc.HTTPReq
 		}
 	}
-	var out map[string][]models.ClientCase
 	for _, test := range mapping.TestCases {
 		var cs []models.ClientCase
 		for _, n := range test.Cases {
 			if req, ok := byName[n]; ok {
 				cs = append(cs, models.ClientCase{Name: n, Req: req})
 			}
+		}
+		for _, name := range slices.Sorted(maps.Keys(test.Variables)) {
+			v := test.Variables[name]
+			testCase, place, ok := models.ParseCaseBind(v.Bind)
+			at := slices.IndexFunc(cs, func(c models.ClientCase) bool { return c.Name == testCase })
+			if !ok || at < 0 {
+				unbound = append(unbound, test.ID+" "+name+" (bound at "+v.Bind+")")
+				continue
+			}
+			cs[at].Binds = append(cs[at].Binds, models.ClientCaseBind{Name: name, Recorded: v.Recorded, Place: place})
 		}
 		if len(cs) == 0 {
 			continue
@@ -1927,7 +1944,7 @@ func clientCases(mapping *models.Mapping, tcs []*models.TestCase) map[string][]m
 		}
 		out[test.ID] = append(out[test.ID], cs...)
 	}
-	return out
+	return out, unbound
 }
 
 // testSeeds is, by test ID, the seed each test of mapping kept for its

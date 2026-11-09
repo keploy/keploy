@@ -22,7 +22,7 @@ func TestTheProxyGivesItsLearnStepAClientTestsRequestsUnderTheSwitchOnly(t *test
 	t.Setenv(provenswitch.Env, "")
 	p := &Proxy{learnTracker: learn.NewTracker()}
 	p.learnTracker.Begin()
-	p.TakeClientCases(cases)
+	p.TakeClientCases("test-1", cases)
 	if p.learnTracker.WantsIncoming() {
 		t.Fatal("the switch off: the learn step was given the test's requests")
 	}
@@ -38,7 +38,7 @@ func TestTheProxyGivesItsLearnStepAClientTestsRequestsUnderTheSwitchOnly(t *test
 	t.Setenv(provenswitch.Env, "1")
 	p = &Proxy{learnTracker: learn.NewTracker()}
 	p.learnTracker.Begin()
-	p.TakeClientCases(cases)
+	p.TakeClientCases("test-1", cases)
 	if !p.learnTracker.WantsIncoming() || !p.WantsIncoming() {
 		t.Fatal("the switch on: the learn step was not given the test's requests, or the proxy asks for none")
 	}
@@ -47,7 +47,7 @@ func TestTheProxyGivesItsLearnStepAClientTestsRequestsUnderTheSwitchOnly(t *test
 		t.Fatalf("the switch on: the learn step holds %+v", got)
 	}
 	p.learnTracker.Begin()
-	p.TakeClientCases(nil)
+	p.TakeClientCases("test-1", nil)
 	if p.WantsIncoming() {
 		t.Fatal("no requests given: the proxy asks for some")
 	}

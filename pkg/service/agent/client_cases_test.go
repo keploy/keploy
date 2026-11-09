@@ -14,11 +14,12 @@ import (
 type casesProxy struct {
 	*wireProxy
 	order []string
+	tests []string
 	taken [][]models.ClientCase
 }
 
-func (p *casesProxy) TakeClientCases(cases []models.ClientCase) {
-	p.order, p.taken = append(p.order, "cases"), append(p.taken, cases)
+func (p *casesProxy) TakeClientCases(test string, cases []models.ClientCase) {
+	p.order, p.tests, p.taken = append(p.order, "cases"), append(p.tests, test), append(p.taken, cases)
 }
 
 func (p *casesProxy) ContinueTestErrorCapture() {
@@ -48,6 +49,7 @@ func TestABeginGivesTheLearnStepTheRequestsItsTestSent(t *testing.T) {
 	_, serr = a.ProvenBegin(ctx, begin("TestB"))
 	require.Nil(t, serr)
 	require.Equal(t, []string{"open", "cases", "open", "cases"}, p.order)
+	require.Equal(t, []string{"o::TestA", "o::TestB"}, p.tests, "each test's requests are given as its own, so a variable bound at one binds in that test")
 	require.Len(t, p.taken, 2)
 	require.Len(t, p.taken[0], 1)
 	require.Equal(t, "post-apps-1", p.taken[0][0].Name, "the agent keeps its own copy of the requests")

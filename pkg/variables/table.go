@@ -1,6 +1,7 @@
 package variables
 
 import (
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -56,6 +57,9 @@ type Table struct {
 	// gen counts the scopes the table has begun (Reset): a call checked in
 	// one scope never binds in the next (BindAll).
 	gen uint64
+	// notes say, by name, why a variable of the scope is not bound (Note):
+	// the scope's alone, forgotten when the next begins.
+	notes map[string]string
 }
 
 // lock takes t.mu, and before it the lock of the table whose run's t reads
@@ -629,7 +633,7 @@ func (t *Table) StartOpening(open func(), given, carried []Binding) {
 // start begins a scope (StartCarrying). t.mu is held.
 func (t *Table) start(given, carried []Binding) {
 	t.gen++
-	t.vals = nil
+	t.vals, t.notes = nil, nil
 	t.began = true
 	if len(given)+len(carried) == 0 {
 		return
@@ -673,11 +677,41 @@ func (t *Table) Give(b Binding) (Binding, bool) {
 	return b, true
 }
 
+// Note says why, in the open scope, the variable name is not bound: where
+// the test binds it in a place no call is (a client test case's request,
+// models.ClientCaseBind), why that place bound nothing, so a call that uses
+// it misses saying so (Unbound) rather than naming a call that binds it.
+// It refuses, noting nothing, when no scope has begun. A later Note of the
+// name replaces it; the next scope forgets it.
+func (t *Table) Note(name, why string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.began {
+		return false
+	}
+	if t.notes == nil {
+		t.notes = make(map[string]string)
+	}
+	t.notes[name] = why
+	return true
+}
+
+// Unbound is the scope's note on name (Note) while name is not bound: ""
+// where it is bound, or the scope noted nothing.
+func (t *Table) Unbound(name string) string {
+	from := t.lock()
+	defer t.unlock(from)
+	if _, ok := t.lookup(from, name); ok {
+		return ""
+	}
+	return t.notes[name]
+}
+
 // Reset forgets every binding of the scope: a new scope begins. The run's
 // stay.
 func (t *Table) Reset() {
 	t.mu.Lock()
-	t.vals = nil
+	t.vals, t.notes = nil, nil
 	t.began = true
 	t.gen++
 	t.mu.Unlock()
@@ -687,7 +721,7 @@ func (t *Table) Reset() {
 // next test set's replay starts (as learn.Tracker.NewSet).
 func (t *Table) NewSet() {
 	t.mu.Lock()
-	t.vals, t.run = nil, nil
+	t.vals, t.run, t.notes = nil, nil, nil
 	t.began = false
 	t.gen++
 	t.mu.Unlock()
@@ -699,7 +733,7 @@ func (t *Table) NewSet() {
 func (t *Table) Clone() *Table {
 	from := t.lock()
 	defer t.unlock(from)
-	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun}
+	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun, notes: maps.Clone(t.notes)}
 	if t.vals != nil {
 		c.vals = make(map[string]Binding, len(t.vals))
 		for k, v := range t.vals {

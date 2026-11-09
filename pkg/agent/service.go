@@ -850,11 +850,13 @@ type RecordedBeginTaker interface {
 // after the proxy opened the test, the requests the test sent the
 // application in its recording (models.ClientCase), which the requests of
 // the test that reach the application this run pair with
-// (learn.Tracker.SetCases, Incoming). nil gives none: the requests that
-// reach it from then give no place. A proxy that lacks it reads no client
-// test's request.
+// (learn.Tracker.SetCases, Incoming), and from which each request of the
+// test that pairs with one binds the test's variables bound at it
+// (models.ClientCase.Binds) before the application is given it. nil gives
+// none: the requests that reach it from then give no place and bind
+// nothing. A proxy that lacks it reads no client test's request.
 type ClientCasesTaker interface {
-	TakeClientCases(cases []models.ClientCase)
+	TakeClientCases(test string, cases []models.ClientCase)
 }
 
 // VariableBinder is the optional extension implemented by proxies that keep

@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -276,4 +277,69 @@ func (d *countingTestDB) GetTestCases(ctx context.Context, set string) ([]*model
 		return nil, d.err
 	}
 	return d.TestDB.GetTestCases(ctx, set)
+}
+
+// Each request a client test sent goes with the test's variables bound at
+// it (MappedTestCase.Variables, models.CaseBind), so the agent binds each
+// from the request of the run that pairs with it. A variable bound at no
+// request the test's cases hold (one of another form, one naming a case the
+// test does not list or keploy does not hold) goes with none, and is named:
+// no request binds it, so every use of it misses.
+func TestAClientTestsRequestGoesWithTheVariablesBoundAtIt(t *testing.T) {
+	t0 := time.Date(2026, 11, 9, 7, 0, 0, 0, time.UTC)
+	req := func(path string, at time.Time) models.HTTPReq {
+		return models.HTTPReq{Method: "POST", URL: "http://api" + path, Body: `{"name":"app-1"}`, Timestamp: at}
+	}
+	tcs := []*models.TestCase{
+		{Name: "post-apps-2", Kind: models.HTTP, HTTPReq: req("/apps", t0.Add(2*time.Second))},
+		{Name: "post-apps-1", Kind: models.HTTP, HTTPReq: req("/apps", t0.Add(time.Second))},
+		{Name: "get-suites-1", Kind: models.HTTP, HTTPReq: req("/suites", t0)},
+	}
+	mapping := &models.Mapping{TestCases: []models.MappedTestCase{
+		{ID: "pkg::TestApps", Cases: []string{"post-apps-2", "post-apps-1", "gone-1"}, Variables: models.MockVariables{
+			"appName":  {Recorded: "app-1", Bind: models.CaseBind("post-apps-2", "body.name")},
+			"gone":     {Recorded: "app-1", Bind: models.CaseBind("gone-1", "body.name")},
+			"plain":    {Recorded: "app-1", Bind: "body.name"},
+			"another":  {Recorded: "app-1", Bind: models.CaseBind("get-suites-1", "body.name")},
+			"appName2": {Recorded: "app-1", Bind: models.CaseBind("post-apps-2", "header.X-Name")},
+		}},
+		{ID: "pkg::TestSuites", Cases: []string{"get-suites-1"}},
+		{ID: "pkg::TestNameless", Cases: []string{""}, Variables: models.MockVariables{"plain": {Recorded: "app-1", Bind: "body.name"}}},
+	}}
+	tcs = append(tcs, &models.TestCase{Name: "", Kind: models.HTTP, HTTPReq: req("/teams", t0)})
+	out, unbound := clientCases(mapping, tcs)
+	apps := out["pkg::TestApps"]
+	if len(apps) != 2 || apps[0].Name != "post-apps-1" || len(apps[0].Binds) != 0 || apps[1].Name != "post-apps-2" {
+		t.Fatalf("pushed cases %+v", apps)
+	}
+	want := []models.ClientCaseBind{{Name: "appName", Recorded: "app-1", Place: "body.name"}, {Name: "appName2", Recorded: "app-1", Place: "header.X-Name"}}
+	if !reflect.DeepEqual(apps[1].Binds, want) {
+		t.Fatalf("post-apps-2 goes with %+v; want %+v", apps[1].Binds, want)
+	}
+	if s := out["pkg::TestSuites"]; len(s) != 1 || len(s[0].Binds) != 0 {
+		t.Fatalf("another test's case goes with %+v", s)
+	}
+	wantUnbound := []string{
+		"pkg::TestApps another (bound at test case get-suites-1, request body.name)",
+		"pkg::TestApps gone (bound at test case gone-1, request body.name)",
+		"pkg::TestApps plain (bound at body.name)",
+		"pkg::TestNameless plain (bound at body.name)",
+	}
+	if !reflect.DeepEqual(unbound, wantUnbound) {
+		t.Fatalf("named unbound %q; want %q", unbound, wantUnbound)
+	}
+	if n := out["pkg::TestNameless"]; len(n) != 1 || len(n[0].Binds) != 0 {
+		t.Fatalf("a bind of another form went with a case named none: %+v", n)
+	}
+	for _, tc := range []struct {
+		mapping *models.Mapping
+		warned  int
+	}{{mapping, 1}, {&models.Mapping{TestCases: mapping.TestCases[1:2]}, 0}} {
+		core, logs := observer.New(zap.WarnLevel)
+		m := &mockService{logger: zap.New(core), testDB: &memTestDB{existing: tcs}}
+		m.testClientCases(context.Background(), "rec", tc.mapping)
+		if logs.Len() != tc.warned {
+			t.Fatalf("warned %v; want %d warnings naming the variables no request binds", logs.All(), tc.warned)
+		}
+	}
 }

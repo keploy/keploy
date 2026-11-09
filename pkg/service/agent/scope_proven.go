@@ -1055,13 +1055,13 @@ func (a *Agent) giveClientCases(id string, worker uint32, overlaps bool) {
 		return
 	}
 	if worker != 0 || overlaps {
-		taker.TakeClientCases(nil)
+		taker.TakeClientCases(id, nil)
 		return
 	}
 	a.scopeMu.Lock()
 	cases := a.testCases[id]
 	a.scopeMu.Unlock()
-	taker.TakeClientCases(cases)
+	taker.TakeClientCases(id, cases)
 }
 
 // ProvenBegin opens a test (design v14 §5.3). The run must be claimed; the
