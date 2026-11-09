@@ -122,3 +122,46 @@ func TestOutcomeAnAnswerThatReadsBackNoCoarseClockReadStaysTheSource(t *testing.
 	s.readR, s.readF = s.sendR, s.sendF
 	iValue(t, "a millisecond the find reads back", s.decide(t), "mock-1516")
 }
+
+// otherTestsAnswer is an answer of an earlier test (an OAuth code it made,
+// recorded 20 s before the test began, given back with its expiry at now
+// plus a minute in milliseconds), which round F gave the application before
+// the call as recorded.
+func (s readBackShape) otherTestsAnswer(expires time.Time) Raw {
+	at := s.r0.Add(-20 * time.Second)
+	return RawOf(&models.Mock{Name: "mock-1204", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+		HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://auth.local/oauth/code", Header: map[string]string{}},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"expires_at":"` + iMs(expires) + `"}`},
+		ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+	}}, true).OfAnotherTest()
+}
+
+// Round F ran the test slower than the recording, as a loaded box does: the
+// app read its second late in it and sent the audit insert in the next
+// second, so the call's own window holds the read in the recording alone,
+// and it is a read its test made since it began. The set holds an earlier
+// test's answer whose time names neither run's second. The echo of what
+// round F gave the application takes the value for a copy only by the
+// test's own find, which reads back the cluster's read of the clock: no
+// answer outside the test takes part, so the value is never refused as one
+// standing in such an answer (as it was, naming none), and is checked as a
+// read of the clock since its test began. An earlier test's answer that
+// does hold the recorded second, in milliseconds, stays a source outside
+// the test, refused naming it.
+func TestOutcomeASecondAnAnswerReadsBackIsAClockBesideAnotherTestsAnswer(t *testing.T) {
+	s := readBackRuns()
+	s.readF = s.sendF.Truncate(time.Second).Add(880 * time.Millisecond)
+	s.callF = s.sendF.Truncate(time.Second).Add(time.Second + 10*time.Millisecond)
+	in := s.input()
+	in.Raw = append(in.Raw, s.otherTestsAnswer(s.r0.Add(40*time.Second+28*time.Millisecond)))
+	d := oWord(t, Decide(in), s.secs(s.readR), s.secs(s.readF))
+	iClock(t, "a second the find reads back, round F's call in the next second, beside another test's answer", d)
+	if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
+		t.Errorf("%+v; want a read since its test began", *d.Clock)
+	}
+
+	in = s.input()
+	in.Raw = append(in.Raw, s.otherTestsAnswer(s.readR.Truncate(time.Second).Add(28*time.Millisecond)))
+	oRefused(t, "another test's answer holding the recorded second", oWord(t, Decide(in), s.secs(s.readR), s.secs(s.readF)), RefusalAnotherScope, "mock-1204")
+}

@@ -1162,6 +1162,15 @@ func namesApart(ms []givenMoment, m, other moment) bool {
 // holds F's moment so; mock "" where no one recording names it alone. An
 // instant there is a copy of what F gave the application, or a pick from
 // it, never a read of the clock.
+//
+// The echo reads the call's own places (earlierMoments, recordedMoments)
+// beside those recordings' answers. Where no answer names a moment alone,
+// and the call's own places name each run's moment by one rule without them
+// (oneCut: an answer of the call's test that reads back what a send of it
+// wrote with the clock), the answers add to the echo only an instant that
+// names both moments by one rule (one that names either alone is named
+// above), which is no source of what changed: not ok, and the steps of the
+// scope read the value.
 func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 	if c.rm == nil || c.lm == nil {
 		return "", false
@@ -1178,6 +1187,9 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 		return namesMomentApart(g.m, *c.lm, *c.rm, nil) || !g.at.After(dc.in.At) && namesMomentApart(g.m, *c.rm, *c.lm, nil)
 	}); i >= 0 {
 		return op.answers[i].mock, true
+	}
+	if oneCut(dc.dr.earlierMoments(dc.in.At, dc.in.Earlier, dc.in.Raw), dc.dr.recordedMoments(dc.in.At, dc.in.Earlier, dc.in.Raw), *c.rm, *c.lm) != nil {
+		return "", false
 	}
 	return "", true
 }
