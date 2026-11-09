@@ -655,6 +655,11 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 	}
 	mm.setGen.Store(1)
 	mm.answered.fence(1)
+	// The test variables keep what each ended test's scope bound, for the
+	// background calls the application makes for that test after it ended
+	// (variables.Table.EndedOf). The scope the next test's calls in flight
+	// bind in (aheadVars) is read by none of them, and keeps none.
+	mm.vars.KeepEnded()
 	// Start the per-connection idle sweeper. Reclaims
 	// connection-scoped pools whose last activity exceeded
 	// connectionIdleRetention so long-running agents don't accumulate

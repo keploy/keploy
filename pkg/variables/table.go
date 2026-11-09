@@ -56,10 +56,23 @@ type Table struct {
 	// gen counts the scopes the table has begun (Reset): a call checked in
 	// one scope never binds in the next (BindAll).
 	gen uint64
-	// ended is what the set's ended scopes bound themselves (Ended): each
-	// scope's own bindings, appended as the next scope begins, until
-	// NewSet.
-	ended []Binding
+	// ended is what the set's ended scopes of a named test bound themselves
+	// (EndedOf): each such scope's own bindings with its test, appended as
+	// the next scope begins, until NewSet. Only a table that keeps them
+	// (KeepEnded) does.
+	ended []endedScope
+	// keepEnded: the table keeps its ended scopes' bindings (KeepEnded).
+	keepEnded bool
+	// test is the test whose scope is running (StartOpeningTest), "" for a
+	// scope begun with no test named, or before the first.
+	test string
+}
+
+// endedScope is an ended scope's own bindings (Own as it ended), by name,
+// and the test it was the scope of.
+type endedScope struct {
+	test     string
+	bindings []Binding
 }
 
 // lock takes t.mu, and before it the lock of the table whose run's t reads
@@ -608,7 +621,7 @@ func (t *Table) Start(given []Binding) {
 func (t *Table) StartCarrying(given, carried []Binding) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.start(given, carried)
+	t.start("", given, carried)
 }
 
 // StartOpening is StartCarrying in the step that opens the scope: open, what
@@ -627,12 +640,26 @@ func (t *Table) StartOpening(open func(), given, carried []Binding) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	open()
-	t.start(given, carried)
+	t.start("", given, carried)
 }
 
-// start begins a scope (StartCarrying). t.mu is held.
-func (t *Table) start(given, carried []Binding) {
+// StartOpeningTest is StartOpening for the scope of the test named test:
+// once the next scope begins, what this one bound itself is that test's
+// (EndedOf), on a table that keeps it (KeepEnded). The name is the scope's
+// from the step that begins it, so no binding of another scope is ever
+// kept as test's.
+func (t *Table) StartOpeningTest(test string, open func(), given, carried []Binding) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	open()
+	t.start(test, given, carried)
+}
+
+// start begins a scope (StartCarrying), of test ("" for none named). t.mu
+// is held.
+func (t *Table) start(test string, given, carried []Binding) {
 	t.end()
+	t.test = test
 	t.gen++
 	t.vals = nil
 	t.began = true
@@ -683,6 +710,7 @@ func (t *Table) Give(b Binding) (Binding, bool) {
 func (t *Table) Reset() {
 	t.mu.Lock()
 	t.end()
+	t.test = ""
 	t.vals = nil
 	t.began = true
 	t.gen++
@@ -694,7 +722,7 @@ func (t *Table) Reset() {
 func (t *Table) NewSet() {
 	t.mu.Lock()
 	t.vals, t.run, t.ended = nil, nil, nil
-	t.began = false
+	t.began, t.test = false, ""
 	t.gen++
 	t.mu.Unlock()
 }
@@ -731,26 +759,48 @@ func (t *Table) Own() []Binding {
 	return sorted(t.vals)
 }
 
-// Ended is what the set's ended scopes bound themselves, scope by scope in
-// the order they ended, each scope's by name: every binding Own gave in a
-// scope until the next began, never the run's (KeepRun), nor what was bound
-// before the first scope began. A test's scope ends only when the next
-// begins, so the running scope's are Own's, not these; NewSet forgets them.
-// A background miss reads them: a call the application makes for a test
-// that has ended (a clean-up it runs once it answered the test) carries a
-// value that test bound, which only these still hold.
-func (t *Table) Ended() []Binding {
+// KeepEnded makes the table keep what each ended scope of a named test
+// bound itself (EndedOf), from its next scope on, until NewSet; NewSet
+// does not undo it. Only the table a background miss reads keeps them (the
+// mock manager's test variables): any other table, such as the one the
+// next test's calls in flight bind in, keeps none.
+func (t *Table) KeepEnded() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	return append([]Binding(nil), t.ended...)
+	t.keepEnded = true
+	t.mu.Unlock()
 }
 
-// end keeps the running scope's own bindings as an ended scope's (Ended),
-// as the next scope begins: nothing before the first scope began, which no
-// test bound. t.mu is held.
+// EndedOf is what the set's ended scopes of test bound themselves, scope
+// by scope in the order they ended, each scope's by name: every binding
+// Own gave in a scope begun for test (StartOpeningTest) until the next
+// began, never the run's (KeepRun), nor another test's scope's, nor one of
+// a scope begun with no test named, which is kept as no test's: none for
+// test "", and none on a table that does not keep them (KeepEnded). A
+// test's scope ends only when the next begins, so the running scope's are
+// Own's, not these; NewSet forgets them. A background miss reads them: a
+// call the application makes for a test that has ended (a clean-up it runs
+// once it answered the test) carries a value that test bound, which only
+// these still hold, and only test's scope can have bound it.
+func (t *Table) EndedOf(test string) []Binding {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []Binding
+	for _, e := range t.ended {
+		if e.test == test {
+			out = append(out, e.bindings...)
+		}
+	}
+	return out
+}
+
+// end keeps the running scope's own bindings as its test's ended scope's
+// (EndedOf), as the next scope begins, on a table that keeps them
+// (KeepEnded): nothing of a scope begun with no test named, nor before the
+// first scope began (no test is named then: NewSet forgets the name), which
+// no test bound. t.mu is held.
 func (t *Table) end() {
-	if t.began && len(t.vals) > 0 {
-		t.ended = append(t.ended, sorted(t.vals)...)
+	if t.keepEnded && t.test != "" {
+		t.ended = append(t.ended, endedScope{test: t.test, bindings: sorted(t.vals)})
 	}
 }
 
