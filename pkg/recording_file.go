@@ -39,8 +39,12 @@ func openRecordingRoot(root, path string) (*os.Root, error) {
 }
 
 // recordingFileError says why path, a file of the recording, could not be read
-// inside the recording at root.
-func recordingFileError(root, path string, err error) error {
+// inside r, the recording at root: a link on its way that r does not follow is
+// named, with where it leads (utils.LinkOutError).
+func recordingFileError(r *os.Root, root, path string, err error) error {
+	if out := utils.RecordingLinkOut(r, root, path, err); out != nil {
+		return out
+	}
 	return fmt.Errorf("the recording's file %q is read only inside its recording %q: %w", path, root, err)
 }
 
@@ -55,7 +59,7 @@ func ReadRecordingFile(root, path string) ([]byte, error) {
 	defer func() { _ = r.Close() }()
 	b, err := r.ReadFile(path)
 	if err != nil {
-		return nil, recordingFileError(root, path, err)
+		return nil, recordingFileError(r, root, path, err)
 	}
 	return b, nil
 }
@@ -72,7 +76,7 @@ func OpenRecordingFile(root, path string) (*os.File, error) {
 	defer func() { _ = r.Close() }()
 	f, err := r.Open(path)
 	if err != nil {
-		return nil, recordingFileError(root, path, err)
+		return nil, recordingFileError(r, root, path, err)
 	}
 	return f, nil
 }

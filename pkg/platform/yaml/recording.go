@@ -126,6 +126,9 @@ func readBounded(root, path string, limit int64) ([]byte, error) {
 	defer func() { _ = r.Close() }()
 	data, err := safeyaml.ReadFileIn(r, rel, limit)
 	if err != nil {
+		if out := utils.RecordingLinkOut(r, root, rel, err); out != nil {
+			return nil, out
+		}
 		// Wrapped, a file that is not there is still fs.ErrNotExist to
 		// errors.Is.
 		return nil, fmt.Errorf("the recording's file %q is read only inside its recording %q: %w", rel, root, err)
@@ -194,6 +197,16 @@ func changeRefused(root, path string, err error) error {
 	return fmt.Errorf("the recording's file %q is changed only inside its recording %q: %w", path, root, err)
 }
 
+// changeRefusedIn is changeRefused for path, inside r, the recording at root,
+// that r refused: a link on its way that r does not follow is named, with
+// where it leads (utils.LinkOutError).
+func changeRefusedIn(r *os.Root, root, path string, err error) error {
+	if out := utils.RecordingLinkOut(r, root, path, err); out != nil {
+		return out
+	}
+	return changeRefused(root, path, err)
+}
+
 // inRecording calls op with path's place inside root.
 func inRecording[T any](root, path string, op func(r *os.Root, rel string) (T, error)) (T, error) {
 	r, rel, err := recordingRoot(root, path)
@@ -204,7 +217,7 @@ func inRecording[T any](root, path string, op func(r *os.Root, rel string) (T, e
 	defer func() { _ = r.Close() }()
 	v, err := op(r, rel)
 	if err != nil {
-		return v, changeRefused(root, rel, err)
+		return v, changeRefusedIn(r, root, rel, err)
 	}
 	return v, nil
 }
@@ -253,7 +266,7 @@ func MkdirAllInRecording(root, path string, perm fs.FileMode) error {
 	}
 	defer func() { _ = r.Close() }()
 	if err := r.MkdirAll(rel, perm); err != nil {
-		return changeRefused(root, rel, err)
+		return changeRefusedIn(r, root, rel, err)
 	}
 	return nil
 }
@@ -290,11 +303,11 @@ func RenameInRecording(root, oldPath, newPath string) error {
 	}
 	for _, rel := range []string{oldRel, newRel} {
 		if _, err := r.Stat(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return changeRefused(root, rel, err)
+			return changeRefusedIn(r, root, rel, err)
 		}
 	}
 	if err := r.Rename(oldRel, newRel); err != nil {
-		return changeRefused(root, oldRel, err)
+		return changeRefusedIn(r, root, oldRel, err)
 	}
 	return nil
 }
