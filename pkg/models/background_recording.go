@@ -29,7 +29,10 @@ type BackgroundRecording struct {
 // value the test bound it to (variables.Table.Own). Recording is that
 // background recording, Place the call's place (body.<path>, as learned
 // noise names it), Variable the binding's name, and BoundMock and BoundPlace
-// where the test bound it (VariableBinding.Mock and Place). Names only,
+// where the test bound it (VariableBinding.Mock and Place). BoundTest is
+// the test that bound it when that is not the call's own test: the ended
+// test the recording trails (MockEntry.Trails), whose clean-up the call is
+// (variables.Table.Ended); empty for the call's own test. Names only,
 // never a value; evidence keeps it Sanitized.
 type BackgroundBinding struct {
 	Recording  string `json:"recording" yaml:"recording"`
@@ -37,6 +40,7 @@ type BackgroundBinding struct {
 	Variable   string `json:"variable,omitempty" yaml:"variable,omitempty"`
 	BoundMock  string `json:"bound_mock" yaml:"bound_mock"`
 	BoundPlace string `json:"bound_place" yaml:"bound_place"`
+	BoundTest  string `json:"bound_test,omitempty" yaml:"bound_test,omitempty"`
 }
 
 // Sanitized is b as evidence keeps it (UnmatchedCall.Sanitized): the names
@@ -44,9 +48,10 @@ type BackgroundBinding struct {
 // key on the way to it can be a value the app sent (a map keyed by an
 // email). A learned variable's name stays out, as a variable miss's does:
 // it can be such a key. A given's (ValidGivenVariable) is the test's own
-// name for a value it chose, and is kept.
+// name for a value it chose, and is kept, as is the test that bound it: a
+// test's name, as every miss's report names its test.
 func (b BackgroundBinding) Sanitized() BackgroundBinding {
-	out := BackgroundBinding{Recording: b.Recording, Place: FieldShape(b.Place), BoundMock: b.BoundMock, BoundPlace: FieldShape(b.BoundPlace)}
+	out := BackgroundBinding{Recording: b.Recording, Place: FieldShape(b.Place), BoundMock: b.BoundMock, BoundPlace: FieldShape(b.BoundPlace), BoundTest: b.BoundTest}
 	if ValidGivenVariable(b.Variable) {
 		out.Variable = b.Variable
 	}

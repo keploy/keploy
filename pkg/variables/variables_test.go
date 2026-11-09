@@ -915,3 +915,55 @@ func TestTableOwnIsTheRunningScopesBindingsAlone(t *testing.T) {
 		t.Fatalf("Own in the next scope = %+v; want none", got)
 	}
 }
+
+// Ended is what the set's ended scopes bound themselves, scope by scope:
+// nothing while the first scope runs (its bindings are Own's), nor what was
+// bound before it began or a run variable bound in it (the run's); each
+// scope's own bindings once the next began, Reset ending one as Start does;
+// and none after NewSet.
+func TestTableEndedIsWhatEachEndedScopeBoundItself(t *testing.T) {
+	var tb Table
+	tb.KeepRun()
+	tb.Bind(Binding{Name: "boot", Value: "b-live", Recorded: "b-rec", Mock: "mock-1", Place: "body.id"})
+	tb.Start(nil)
+	tb.Bind(Binding{Name: "appId", Value: "94e00a23", Recorded: "c2e52a70", Mock: "mock-226", Place: "body.docs.msgs.0.appId"})
+	tb.Bind(Binding{Name: models.RunVariablePrefix + "tenant", Value: "t-live", Recorded: "t-rec", Mock: "mock-227", Place: "body.tenant"})
+	if got := tb.Ended(); len(got) != 0 {
+		t.Fatalf("Ended while the first scope runs = %+v; want none", got)
+	}
+	tb.Start(nil)
+	got := tb.Ended()
+	if len(got) != 1 || got[0].Name != "appId" || got[0].Mock != "mock-226" || got[0].Value != "94e00a23" {
+		t.Fatalf("Ended once the next scope began = %+v; want the first scope's appId alone", got)
+	}
+	if own := tb.Own(); len(own) != 0 {
+		t.Fatalf("the ended scope's binding is still Own's: %+v", own)
+	}
+	tb.Bind(Binding{Name: "appId", Value: "5f1e0c11", Recorded: "6a0b3d2e", Mock: "mock-301", Place: "body.docs.msgs.0.appId"})
+	tb.Reset()
+	got = tb.Ended()
+	if len(got) != 2 || got[0].Mock != "mock-226" || got[1].Mock != "mock-301" {
+		t.Fatalf("Ended after Reset = %+v; want both scopes' appId, in the order they ended", got)
+	}
+	got[0].Value = "changed"
+	if again := tb.Ended(); again[0].Value != "94e00a23" {
+		t.Fatal("Ended hands out the table's own slice")
+	}
+	tb.NewSet()
+	if got := tb.Ended(); len(got) != 0 {
+		t.Fatalf("Ended after NewSet = %+v; want none", got)
+	}
+}
+
+// A table made with no KeepRun ends no scope before the first: what was
+// bound before it began was the first scope's to forget, which no test
+// bound.
+func TestTableEndedHoldsNothingBoundBeforeTheFirstScope(t *testing.T) {
+	var tb Table
+	tb.Bind(Binding{Name: "boot", Value: "b-live", Recorded: "b-rec", Mock: "mock-1", Place: "body.id"})
+	tb.Start(nil)
+	tb.Start(nil)
+	if got := tb.Ended(); len(got) != 0 {
+		t.Fatalf("Ended = %+v; want none", got)
+	}
+}

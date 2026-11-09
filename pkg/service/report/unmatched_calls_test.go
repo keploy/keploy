@@ -303,3 +303,19 @@ func TestRenderUnmatchedCalls_NamesABackgroundMissesBoundPlaces(t *testing.T) {
 		t.Fatalf("a sanitized miss, which keeps no learned variable's name, lacks %q:\n%s", want, out)
 	}
 }
+
+// A background miss whose place holds a value an ended test bound (the
+// recording trails that test) names that test as the binder, not "this
+// test", and a sanitized miss keeps the test's name.
+func TestRenderUnmatchedCalls_NamesTheTrailedTestThatBoundAPlace(t *testing.T) {
+	del := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "delete on api-server.uiJourneyPins", MatchPhase: models.MatchPhaseBody, Background: true,
+		BackgroundBound: []models.BackgroundBinding{{Recording: "mock-233", Place: "body.docs.msgs.0.q.app_id", Variable: "appId", BoundMock: "mock-226", BoundPlace: "body.docs.msgs.0.appId", BoundTest: ".::TestAppCRUD"}}}
+	for _, uc := range []models.UnmatchedCall{del, del.Sanitized()} {
+		var sb strings.Builder
+		renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{uc}}})
+		out := sb.String()
+		if !strings.Contains(out, "as .::TestAppCRUD bound it at mock-226 ") || strings.Contains(out, "as this test bound it") {
+			t.Fatalf("report does not name the trailed test as the binder:\n%s", out)
+		}
+	}
+}

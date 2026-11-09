@@ -56,6 +56,10 @@ type Table struct {
 	// gen counts the scopes the table has begun (Reset): a call checked in
 	// one scope never binds in the next (BindAll).
 	gen uint64
+	// ended is what the set's ended scopes bound themselves (Ended): each
+	// scope's own bindings, appended as the next scope begins, until
+	// NewSet.
+	ended []Binding
 }
 
 // lock takes t.mu, and before it the lock of the table whose run's t reads
@@ -628,6 +632,7 @@ func (t *Table) StartOpening(open func(), given, carried []Binding) {
 
 // start begins a scope (StartCarrying). t.mu is held.
 func (t *Table) start(given, carried []Binding) {
+	t.end()
 	t.gen++
 	t.vals = nil
 	t.began = true
@@ -677,6 +682,7 @@ func (t *Table) Give(b Binding) (Binding, bool) {
 // stay.
 func (t *Table) Reset() {
 	t.mu.Lock()
+	t.end()
 	t.vals = nil
 	t.began = true
 	t.gen++
@@ -687,7 +693,7 @@ func (t *Table) Reset() {
 // next test set's replay starts (as learn.Tracker.NewSet).
 func (t *Table) NewSet() {
 	t.mu.Lock()
-	t.vals, t.run = nil, nil
+	t.vals, t.run, t.ended = nil, nil, nil
 	t.began = false
 	t.gen++
 	t.mu.Unlock()
@@ -723,6 +729,29 @@ func (t *Table) Own() []Binding {
 		return nil
 	}
 	return sorted(t.vals)
+}
+
+// Ended is what the set's ended scopes bound themselves, scope by scope in
+// the order they ended, each scope's by name: every binding Own gave in a
+// scope until the next began, never the run's (KeepRun), nor what was bound
+// before the first scope began. A test's scope ends only when the next
+// begins, so the running scope's are Own's, not these; NewSet forgets them.
+// A background miss reads them: a call the application makes for a test
+// that has ended (a clean-up it runs once it answered the test) carries a
+// value that test bound, which only these still hold.
+func (t *Table) Ended() []Binding {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]Binding(nil), t.ended...)
+}
+
+// end keeps the running scope's own bindings as an ended scope's (Ended),
+// as the next scope begins: nothing before the first scope began, which no
+// test bound. t.mu is held.
+func (t *Table) end() {
+	if t.began && len(t.vals) > 0 {
+		t.ended = append(t.ended, sorted(t.vals)...)
+	}
 }
 
 // Snapshot returns the bindings in force, the run's included, by name.
