@@ -86,3 +86,74 @@ func TestARecordingFileThatLinksOutIsSaidPlainly(t *testing.T) {
 		})
 	}
 }
+
+// A change refused at a link out for another cause, a folder keploy may not
+// change or a name that is there already, is said with that cause, after
+// what any refusal of it says, never as a link that leads out: os.Root's
+// Remove and an O_EXCL create do not follow the link, so it is not why.
+func TestAnotherCauseAtALinkOutIsSaidAsItIs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links need privileges on windows")
+	}
+	for _, c := range []struct {
+		name, folder, cause string
+		notRoot             bool
+		op                  func(rec, link string) error
+	}{
+		{"a remove in a folder keploy may not change", "d", "permission denied", true, func(rec, link string) error {
+			return RemoveInRecording(rec, link)
+		}},
+		{"an O_EXCL create", "w", "file exists", false, func(rec, link string) error {
+			f, err := OpenFileInRecording(rec, link, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+			if err == nil {
+				_ = f.Close()
+			}
+			return err
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.notRoot && os.Geteuid() == 0 {
+				t.Skip("root may change a folder whatever its mode")
+			}
+			base := t.TempDir()
+			rec := filepath.Join(base, "project", "keploy")
+			outside := filepath.Join(base, "outside.txt")
+			if err := os.WriteFile(outside, []byte("OUTSIDE"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			folder := filepath.Join(rec, c.folder)
+			if err := os.MkdirAll(folder, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(folder, "l.yaml")
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatal(err)
+			}
+			if c.notRoot {
+				if err := os.Chmod(folder, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(folder, 0o755) })
+			}
+			err := c.op(rec, link)
+			if err == nil {
+				t.Fatal("not refused")
+			}
+			want := fmt.Sprintf("the recording's file %q is changed only inside its recording %q: ", filepath.Join(c.folder, "l.yaml"), rec)
+			msg := err.Error()
+			if !strings.HasPrefix(msg, want) || !strings.HasSuffix(msg, c.cause) {
+				t.Errorf("says %q\nwant %q, then os.Root's error, ending %q", msg, want, c.cause)
+			}
+			var out *linkout.Error
+			if errors.As(err, &out) || strings.Contains(msg, "leads out") {
+				t.Errorf("says %q: the link out is not why", msg)
+			}
+			if b, _ := os.ReadFile(outside); string(b) != "OUTSIDE" {
+				t.Errorf("the file outside now holds %q", b)
+			}
+			if _, err := os.Lstat(link); err != nil {
+				t.Errorf("the link is gone: %v", err)
+			}
+		})
+	}
+}

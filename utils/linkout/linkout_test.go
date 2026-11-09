@@ -71,9 +71,14 @@ func folderChain(t *testing.T, rec, secret string, n int) {
 	symlink(t, secret, filepath.Join(rec, fmt.Sprintf("f%d", n), "out.yaml"))
 }
 
-// refusedIn opens file inside rec as os.Root does and returns its refusal,
+// escapeWords is what os.Root says when it refuses a name for leading out
+// of it.
+const escapeWords = "path escapes from parent"
+
+// refusedIn opens file inside rec as os.Root does, requires os.Root to
+// refuse it with cause, its own words for why, and returns its refusal,
 // said by Explain.
-func refusedIn(t *testing.T, rec, file string) (*Error, error) {
+func refusedIn(t *testing.T, rec, file, cause string) (*Error, error) {
 	t.Helper()
 	r, err := os.OpenRoot(rec)
 	if err != nil {
@@ -84,7 +89,21 @@ func refusedIn(t *testing.T, rec, file string) (*Error, error) {
 	if err == nil {
 		t.Fatalf("os.Root followed %s", file)
 	}
+	if !strings.Contains(err.Error(), cause) {
+		t.Fatalf("os.Root refused %s with %q, not for %q", file, err, cause)
+	}
 	return Explain(r, rec, file, refusedFor(rec, file), err), err
+}
+
+// escapeOf is os.Root's refusal of a name that leads out of r, as it says
+// it for "..".
+func escapeOf(t *testing.T, r *os.Root) error {
+	t.Helper()
+	_, err := r.Stat("..")
+	if err == nil || !strings.Contains(err.Error(), escapeWords) {
+		t.Fatalf("os.Root said %v for \"..\", want %q", err, escapeWords)
+	}
+	return err
 }
 
 // refusedFor is what a reader says for any refusal of file in rec.
@@ -192,7 +211,7 @@ func TestExplainNamesTheLinkAndWhereItLeads(t *testing.T) {
 			rec, secret := linkOutRecording(t)
 			c.layout(t, rec, secret)
 			file := filepath.FromSlash(c.file)
-			got, rootErr := refusedIn(t, rec, file)
+			got, rootErr := refusedIn(t, rec, file, escapeWords)
 			if got == nil {
 				t.Fatalf("os.Root's refusal %q is not said as a link out", rootErr)
 			}
@@ -250,7 +269,7 @@ func TestExplainStopsWhereOSRootStopsFollowingLinks(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			rec, secret := linkOutRecording(t)
 			c.layout(t, rec, secret)
-			got, rootErr := refusedIn(t, rec, filepath.FromSlash(c.file))
+			got, rootErr := refusedIn(t, rec, filepath.FromSlash(c.file), syscall.ELOOP.Error())
 			if !errors.Is(rootErr, syscall.ELOOP) {
 				t.Fatalf("os.Root said %v at the ninth link, want ELOOP: its bound is not maxLinks", rootErr)
 			}
@@ -285,8 +304,10 @@ func TestExplainStopsWhereOSRootStopsFollowingLinks(t *testing.T) {
 	}
 }
 
-// Anything else os.Root refuses, or a path that is not there, is not said as
-// a link out: Explain is nil, and the caller says it as before.
+// A name that does not lead out, or a path that is not there, is not said as
+// a link out: Explain is nil, and the caller says it as before. Each name is
+// given os.Root's refusal for leading out, so the walk alone says it does
+// not lead out.
 func TestExplainIsNilForAnythingElse(t *testing.T) {
 	rec, secret := linkOutRecording(t)
 	symlink(t, secret, filepath.Join(rec, "reports", "out.yaml"))
@@ -304,7 +325,7 @@ func TestExplainIsNilForAnythingElse(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	other := errors.New("refused for something else")
+	escape := escapeOf(t, r)
 	for _, c := range []struct {
 		name, file string
 		err        error
@@ -313,17 +334,17 @@ func TestExplainIsNilForAnythingElse(t *testing.T) {
 		{"no error, even at a link out", "reports/out.yaml", nil},
 		{"no error, even at a name that leads out", "../../secret.txt", nil},
 		{"not there", "reports/none.yaml", os.ErrNotExist},
-		{"a regular file", "reports/r.yaml", other},
-		{"a link inside to nothing", "reports/dangling.yaml", other},
-		{"links that lead to each other", "loop/a", other},
-		{"a link that stays inside from where it is", "a/l", other},
-		{"a name that only passes by .. and stays inside", "reports/../reports/r.yaml", other},
-		{"a name that begins with two dots", "..x", other},
-		{"a folder whose name begins with two dots", "..x/r.yaml", other},
+		{"a regular file", "reports/r.yaml", escape},
+		{"a link inside to nothing", "reports/dangling.yaml", escape},
+		{"links that lead to each other", "loop/a", escape},
+		{"a link that stays inside from where it is", "a/l", escape},
+		{"a name that only passes by .. and stays inside", "reports/../reports/r.yaml", escape},
+		{"a name that begins with two dots", "..x", escape},
+		{"a folder whose name begins with two dots", "..x/r.yaml", escape},
 		// os.Root cannot open r.yaml as a folder, so the ".." never climbs.
-		{"a name that passes by a file as if it were a folder", "reports/r.yaml/../../../x", other},
+		{"a name that passes by a file as if it were a folder", "reports/r.yaml/../../../x", escape},
 		// os.Root stops at none, so the ".." never climbs.
-		{"a name that passes by a folder that is not there", "none/../../x", other},
+		{"a name that passes by a folder that is not there", "none/../../x", escape},
 	} {
 		// Explain returns, even for links that lead to each other: it
 		// follows at most maxLinks links, as os.Root does.
@@ -337,6 +358,101 @@ func TestExplainIsNilForAnythingElse(t *testing.T) {
 		case <-time.After(30 * time.Second):
 			t.Fatalf("%s: Explain did not return in 30 s", c.name)
 		}
+	}
+	// A closed root refuses every name, ".." too, as closed: not said as a
+	// link out.
+	closed, err := os.OpenRoot(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = closed.Close()
+	file := filepath.Join("reports", "out.yaml")
+	_, err = closed.Stat(file)
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("a closed root said %v, want os.ErrClosed", err)
+	}
+	if got := Explain(closed, rec, file, refusedFor(rec, file), err); got != nil {
+		t.Errorf("a closed root: got %v, want nil", got)
+	}
+}
+
+// os.Root's Remove, Rename and Mkdir, and an O_EXCL create, do not follow a
+// link at the end of the name, so they can fail at a link out for another
+// cause: a folder keploy may not change, or a name that is there already.
+// Explain says only os.Root's refusal for leading out; for any other cause it
+// is nil, and the caller says that cause, never that the link leads out.
+func TestExplainIsNilForAnotherCauseAtALinkOut(t *testing.T) {
+	rec, secret := linkOutRecording(t)
+	symlink(t, secret, filepath.Join(rec, "d", "l"))
+	symlink(t, secret, filepath.Join(rec, "w", "l"))
+	if err := os.MkdirAll(filepath.Join(rec, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.OpenRoot(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	l := filepath.Join("d", "l")
+	// os.Root's refusal for leading out is said: the link leads out.
+	if _, err := r.Stat(l); Explain(r, rec, l, refusedFor(rec, l), err) == nil {
+		t.Fatalf("os.Root's refusal %v of the link out is not said", err)
+	}
+	for _, c := range []struct {
+		name string
+		err  error
+	}{
+		{"a folder keploy may not change", &os.PathError{Op: "removeat", Path: l, Err: syscall.EACCES}},
+		{"a file system keploy may not change", &os.PathError{Op: "renameat", Path: l, Err: syscall.EROFS}},
+		{"a name that is there already", &os.PathError{Op: "openat", Path: l, Err: syscall.EEXIST}},
+		{"too many links", &os.PathError{Op: "openat", Path: l, Err: syscall.ELOOP}},
+		{"anything else", errors.New("refused for something else")},
+	} {
+		if got := Explain(r, rec, l, refusedFor(rec, l), c.err); got != nil {
+			t.Errorf("%s: got %v, want nil", c.name, got)
+		}
+	}
+	// The operations themselves, each refused at a link out for its own
+	// cause. In d, which keploy may not change, a remove and a rename are
+	// refused only for a user other than root.
+	if err := os.Chmod(filepath.Join(rec, "d"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(rec, "d"), 0o755) })
+	exclusive := func(name string) error {
+		f, err := r.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			_ = f.Close()
+		}
+		return err
+	}
+	for _, c := range []struct {
+		name, file string
+		op         func(file string) error
+		cause      error
+		notRoot    bool
+	}{
+		{"a remove in a folder keploy may not change", l, r.Remove, syscall.EACCES, true},
+		{"a rename out of a folder keploy may not change", l, func(f string) error { return r.Rename(f, "moved") }, syscall.EACCES, true},
+		{"an O_EXCL create", filepath.Join("w", "l"), exclusive, syscall.EEXIST, false},
+		{"a folder made", filepath.Join("w", "l"), func(f string) error { return r.Mkdir(f, 0o755) }, syscall.EEXIST, false},
+		{"a rename onto a folder", filepath.Join("w", "l"), func(f string) error { return r.Rename(f, "empty") }, syscall.EEXIST, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.notRoot && os.Geteuid() == 0 {
+				t.Skip("root may change a folder whatever its mode")
+			}
+			err := c.op(c.file)
+			if !errors.Is(err, c.cause) {
+				t.Fatalf("os.Root said %v, want %v", err, c.cause)
+			}
+			if got := Explain(r, rec, c.file, refusedFor(rec, c.file), err); got != nil {
+				t.Fatalf("said %q for os.Root's %v, want nil: the caller says the cause", got, err)
+			}
+		})
+	}
+	if b, err := os.ReadFile(secret); err != nil || string(b) != "SECRET" {
+		t.Errorf("the file outside now holds %q (%v)", b, err)
 	}
 }
 
@@ -484,7 +600,7 @@ func TestExplainWalksAsOSRootDoesOnWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	refused := errors.New("refused")
+	refused := escapeOf(t, r)
 	for _, c := range []struct {
 		name, file, link, target string
 	}{

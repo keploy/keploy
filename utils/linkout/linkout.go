@@ -81,14 +81,18 @@ func (e *Error) Error() string {
 func (e *Error) Unwrap() error { return e.Err }
 
 // Explain is err, r's refusal of file, a path inside r, the recording
-// at dir ("" is the working directory), as a *Error when file's own
-// name leads out of r or is absolute, or file, or a link on its way, is a
-// symbolic link r does not follow (see Error). refused is what the
-// caller says for any refusal of file; the error says it first. It is nil
-// when err is nil, a file that is not there, or anything else, which the
-// caller says as before.
+// at dir ("" is the working directory), as a *Error when err is r's refusal
+// of file for leading out of r (escape) because file's own name leads out of
+// r or is absolute, or file, or a link on its way, is a symbolic link r does
+// not follow (see Error). refused is what the caller says for any refusal of
+// file; the error says it first. It is nil for anything else, which the
+// caller says as before: no error, a file that is not there, or any other
+// cause, such as a folder keploy may not change or a name that is there
+// already, even at a link out that the operation did not follow (os.Root's
+// Remove, Rename and Mkdir, and an O_EXCL create, do not follow a link at the
+// end of the name).
 func Explain(r *os.Root, dir, file, refused string, err error) *Error {
-	if err == nil || errors.Is(err, fs.ErrNotExist) {
+	if !errors.Is(err, escape(r)) {
 		return nil
 	}
 	if dir == "" {
@@ -102,6 +106,16 @@ func Explain(r *os.Root, dir, file, refused string, err error) *Error {
 	}
 	e.Target, e.Inside, e.Back = where(dir, place)
 	return e
+}
+
+// escape is os.Root's error for a name that leads out of it (errPathEscapes
+// in the standard library's os package, which does not export it): what r
+// says, wrapped, for "..", which every root refuses before it looks at a
+// file. It is never nil; for a closed r it is os.ErrClosed, and then the walk
+// finds nothing.
+func escape(r *os.Root) error {
+	_, err := r.Stat("..")
+	return errors.Unwrap(err)
 }
 
 // where says where place, a path the recording at dir does not open, leads:
