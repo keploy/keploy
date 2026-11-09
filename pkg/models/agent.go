@@ -496,6 +496,20 @@ type TestBeginsReq struct {
 	// random numbers (MappedTestCase.Seed): a begin that asks for one is
 	// answered it (ScopeBeginResp.Seed). Absent when no test kept one.
 	Seeds map[string]string `json:"seeds,omitempty"`
+	// Cases is, by test, the requests its client test sent the application
+	// in its recording, in the order it sent them (MappedTestCase.Cases, each
+	// read from its test case): under the proven switch the agent pairs each
+	// request of the test that reaches the application with one of them, as
+	// an earlier place of the test's calls (learn.Tracker.Incoming). Absent
+	// when no test's recording kept its requests.
+	Cases map[string][]ClientCase `json:"cases,omitempty"`
+}
+
+// ClientCase is one request a client test sent the application in its
+// recording: its test case's name and its request as recorded.
+type ClientCase struct {
+	Name string  `json:"name"`
+	Req  HTTPReq `json:"req"`
 }
 
 type SetTable struct {

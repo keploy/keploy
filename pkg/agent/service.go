@@ -844,6 +844,19 @@ type RecordedBeginTaker interface {
 	TakeRecordedBegin(at time.Time)
 }
 
+// ClientCasesTaker is the optional extension implemented by proxies whose
+// learn step reads a client test's requests as places of its calls: the
+// agent gives it, as a keploy mock test begins in the run's own window and
+// after the proxy opened the test, the requests the test sent the
+// application in its recording (models.ClientCase), which the requests of
+// the test that reach the application this run pair with
+// (learn.Tracker.SetCases, Incoming). nil gives none: the requests that
+// reach it from then give no place. A proxy that lacks it reads no client
+// test's request.
+type ClientCasesTaker interface {
+	TakeClientCases(cases []models.ClientCase)
+}
+
 // VariableBinder is the optional extension implemented by proxies that keep
 // the test variables a replay binds: it begins a test's variables with the
 // values its own request gave (false when it holds no table), and reads back

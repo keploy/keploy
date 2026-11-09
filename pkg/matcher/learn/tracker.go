@@ -730,16 +730,42 @@ func (t *Tracker) SetCases(cases []ClientCase) {
 	t.mu.Unlock()
 }
 
+// WantsIncoming reports whether the running client test's requests are
+// taken now (Incoming): a test is open and its recording sent a request not
+// yet paired. The application's ingress reads a request's body before the
+// application is given it only then (Incoming's caller).
+func (t *Tracker) WantsIncoming() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.open {
+		return false
+	}
+	for _, u := range t.cases.used {
+		if !u {
+			return true
+		}
+	}
+	return false
+}
+
 // Incoming notes live, a request of the running client test that reached the
 // application at the real instant at, paired with the recorded request of
 // the test it pairs with (PairCase), as an earlier place of the test's calls
 // (IncomingRequest; GivenRequest) from its arrival until the next test
 // begins: a call reads it where it came before the call in both runs
-// (arrivedBefore). It reports whether it paired. One that pairs with none
-// of the test's recorded requests gives nothing, as does one that reached
-// the application while no test was open: keploy cannot tell what the
-// recording sent in its place.
-func (t *Tracker) Incoming(live *models.HTTPReq, at time.Time) bool {
+// (arrivedBefore). Its caller gives it before any byte of it reaches the
+// application, so no call it led to reads the test's places without it.
+// unread, where not "", says why keploy could not read live (a body it did
+// not read before the application was given it): the place is then one
+// keploy could not read (Earlier.Unread), and every value that changed in a
+// call after it is refused. It reports whether it paired. One that pairs
+// with none of the test's recorded requests gives nothing, as does one that
+// reached the application while no test was open: keploy cannot tell what
+// the recording sent in its place.
+func (t *Tracker) Incoming(live *models.HTTPReq, unread string, at time.Time) bool {
 	if t == nil || live == nil || at.IsZero() {
 		return false
 	}
@@ -755,6 +781,9 @@ func (t *Tracker) Incoming(live *models.HTTPReq, at time.Time) bool {
 	t.cases.used[i] = true
 	c := t.cases.cases[i]
 	req := IncomingRequest(c.Name, c.Req, live)
+	if unread != "" {
+		req = &models.TestRequest{Test: c.Name, RecordedAt: c.Req.Timestamp, Unread: unread}
+	}
 	e := GivenRequest(req)
 	e.incoming, e.arrivedRec, e.arrivedLive = true, req.RecordedAt, at
 	t.incoming = append(t.incoming, e)

@@ -24,6 +24,13 @@ type testSeedsSetter interface {
 	SetTestSeeds(ctx context.Context, seeds map[string]string)
 }
 
+// testCasesSetter takes, by test, the requests its client test sent in its
+// recording (models.TestBeginsReq.Cases). A service without it learns as it
+// did before it could: no request of a client test is a place of its calls.
+type testCasesSetter interface {
+	SetTestCases(ctx context.Context, cases map[string][]models.ClientCase)
+}
+
 // HandleTestBegins installs when each test of the replayed recording began
 // (models.TestBeginsReq). A service that cannot take them, or a build that
 // freezes the run's clock but cannot move it per test (agent.ErrNoTestClock),
@@ -71,6 +78,9 @@ func (a *Agent) HandleTestBegins(w http.ResponseWriter, r *http.Request) {
 	}
 	if ss != nil {
 		ss.SetTestSeeds(r.Context(), req.Seeds)
+	}
+	if cs, ok := s.(testCasesSetter); ok {
+		cs.SetTestCases(r.Context(), req.Cases)
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})

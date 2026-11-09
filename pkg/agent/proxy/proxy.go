@@ -5121,6 +5121,40 @@ func (p *Proxy) ClientTests() bool { return p.learnTracker.ClientTests() }
 
 var _ agent.ClientTestsReader = (*Proxy)(nil)
 
+// TakeClientCases gives the learn step the requests the running client test
+// sent the application in its recording (agent.ClientCasesTaker;
+// learn.Tracker.SetCases), under the proven switch.
+func (p *Proxy) TakeClientCases(cases []models.ClientCase) {
+	if !provenswitch.On() {
+		return
+	}
+	cs := make([]learn.ClientCase, 0, len(cases))
+	for i := range cases {
+		cs = append(cs, learn.ClientCase{Name: cases[i].Name, Req: &cases[i].Req})
+	}
+	p.learnTracker.SetCases(cs)
+}
+
+var _ agent.ClientCasesTaker = (*Proxy)(nil)
+
+// WantsIncoming reports whether the learn step takes the running client
+// test's requests now (incoming.RequestTaker; learn.Tracker.WantsIncoming),
+// under the proven switch.
+func (p *Proxy) WantsIncoming() bool {
+	return provenswitch.On() && p.learnTracker.WantsIncoming()
+}
+
+// TakeIncoming gives the learn step a request of the running client test
+// that reached the application's ingress at the real instant at, before any
+// byte of it reached the application (incoming.RequestTaker;
+// learn.Tracker.Incoming), under the proven switch. unread says why keploy
+// could not read it, "" where it could.
+func (p *Proxy) TakeIncoming(req *models.HTTPReq, unread string, at time.Time) {
+	if provenswitch.On() {
+		p.learnTracker.Incoming(req, unread, at)
+	}
+}
+
 // TakeRecordedBegin gives the learn step the instant the next test began at
 // in its recording (agent.RecordedBeginTaker; learn.Tracker.RecordedBegin),
 // under the proven switch.

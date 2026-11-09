@@ -1858,7 +1858,8 @@ func (m *mockService) pushTestBegins(ctx context.Context, name string) error {
 	begins := testBegins(mapping)
 	real := testReal(mapping)
 	seeds := testSeeds(mapping)
-	if err := pusher.PushTestBegins(ctx, begins, real, seeds); err != nil {
+	cases := m.testClientCases(ctx, name, mapping)
+	if err := pusher.PushTestBegins(ctx, begins, real, seeds, cases); err != nil {
 		return err
 	}
 	m.realListed = real
@@ -1870,6 +1871,63 @@ func (m *mockService) pushTestBegins(ctx context.Context, name string) error {
 	}
 	m.logger.Info("sent the agent when each test began in its recording", zap.Int("tests", len(begins)), zap.String("mock-set", name))
 	return nil
+}
+
+// testClientCases is, by test ID, the requests each client test of mapping
+// sent the application in its recording (MappedTestCase.Cases, each read
+// from its HTTP test case), in the order they reached it: the agent pairs
+// each request of the test this run with one of them (models.ClientCase). A
+// recording whose test cases keploy cannot read gives none, and says so:
+// its tests' requests are then no place of their calls, as in a recording
+// that kept no requests.
+func (m *mockService) testClientCases(ctx context.Context, name string, mapping *models.Mapping) map[string][]models.ClientCase {
+	if mapping == nil || m.testDB == nil {
+		return nil
+	}
+	kept := false
+	for _, tc := range mapping.TestCases {
+		kept = kept || len(tc.Cases) > 0
+	}
+	if !kept {
+		return nil
+	}
+	tcs, err := m.testDB.GetTestCases(ctx, name)
+	if err != nil {
+		m.logger.Warn("keploy cannot read the requests the recording's tests sent: a value a test sent is read from no request of it", zap.String("mock-set", name), zap.Error(err))
+		return nil
+	}
+	return clientCases(mapping, tcs)
+}
+
+// clientCases is testClientCases of the test cases tcs read: by test ID,
+// the HTTP requests of each test's cases, ordered by when each reached the
+// application in the recording. A case tcs does not hold, or not of HTTP, is
+// left out.
+func clientCases(mapping *models.Mapping, tcs []*models.TestCase) map[string][]models.ClientCase {
+	byName := make(map[string]models.HTTPReq, len(tcs))
+	for _, tc := range tcs {
+		if tc != nil && tc.Kind == models.HTTP {
+			byName[tc.Name] = tc.HTTPReq
+		}
+	}
+	var out map[string][]models.ClientCase
+	for _, test := range mapping.TestCases {
+		var cs []models.ClientCase
+		for _, n := range test.Cases {
+			if req, ok := byName[n]; ok {
+				cs = append(cs, models.ClientCase{Name: n, Req: req})
+			}
+		}
+		if len(cs) == 0 {
+			continue
+		}
+		sort.SliceStable(cs, func(i, j int) bool { return cs[i].Req.Timestamp.Before(cs[j].Req.Timestamp) })
+		if out == nil {
+			out = map[string][]models.ClientCase{}
+		}
+		out[test.ID] = append(out[test.ID], cs...)
+	}
+	return out
 }
 
 // testSeeds is, by test ID, the seed each test of mapping kept for its

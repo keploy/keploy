@@ -2,6 +2,7 @@ package learn
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,7 +51,7 @@ func TestAClientTestsRequestIsAPlaceOfTheCallsItLedTo(t *testing.T) {
 			{Name: "get-client-v1-apps-1", Req: &models.HTTPReq{Method: "GET", URL: "http://localhost:8083/client/v1/apps", Timestamp: signed}},
 			{Name: "post-auth-temp-code-4", Req: signInCase(rec, recReq)},
 		})
-		if !tr.Incoming(signInCase(live, liveReq), at) {
+		if !tr.Incoming(signInCase(live, liveReq), "", at) {
 			t.Fatal("the run's login-code request paired with no recorded request of the test; want post-auth-temp-code-4")
 		}
 		return tr.Placed().Earlier
@@ -77,7 +78,7 @@ func TestAClientTestsRequestIsAPlaceOfTheCallsItLedTo(t *testing.T) {
 		tr := NewTracker()
 		tr.Begin()
 		tr.SetCases([]ClientCase{{Name: "post-auth-temp-code-4", Req: signInCase(rec, time.Time{})}})
-		tr.Incoming(signInCase(live, liveReq), liveReq)
+		tr.Incoming(signInCase(live, liveReq), "", liveReq)
 		return tr.Placed().Earlier
 	}
 	if d = Decide(authTimeCall(rec, live, rCall, fCall, untimed())); len(d) == 1 && d[0].From.Mock == signIn {
@@ -121,7 +122,7 @@ func TestAClientTestsRequestPairsByOrderMethodAndPath(t *testing.T) {
 	tr := NewTracker()
 	tr.Begin()
 	tr.SetCases(cases)
-	if tr.Incoming(cases[1].Req, time.Time{}) {
+	if tr.Incoming(cases[1].Req, "", time.Time{}) {
 		t.Fatal("a request whose arrival is not told paired")
 	}
 	for _, c := range []struct {
@@ -136,7 +137,7 @@ func TestAClientTestsRequestPairsByOrderMethodAndPath(t *testing.T) {
 		{req("DELETE", "http://localhost:8083/client/v1/apps/69a0000000000000000000ff", ""), "delete-client-v1-apps-by-id-1"},
 	} {
 		before := len(tr.Placed().Earlier)
-		got := tr.Incoming(c.live, at)
+		got := tr.Incoming(c.live, "", at)
 		after := tr.Placed().Earlier
 		switch {
 		case got != (c.want != ""):
@@ -148,13 +149,13 @@ func TestAClientTestsRequestPairsByOrderMethodAndPath(t *testing.T) {
 		}
 	}
 	tr.Begin()
-	if tr.Incoming(cases[1].Req, at) || len(tr.Placed().Earlier) != 0 {
+	if tr.Incoming(cases[1].Req, "", at) || len(tr.Placed().Earlier) != 0 {
 		t.Fatal("the next test pairs with the previous test's recorded requests, or keeps its places")
 	}
 	tr.SetCases(cases)
-	tr.Incoming(cases[1].Req, at)
+	tr.Incoming(cases[1].Req, "", at)
 	tr.End()
-	if tr.Incoming(cases[3].Req, at) {
+	if tr.Incoming(cases[3].Req, "", at) {
 		t.Fatal("a request sent while no test is open paired")
 	}
 	tr.NewSet()
@@ -203,5 +204,68 @@ func TestAClientTestsRequestKeployCannotReadIsSaid(t *testing.T) {
 		if got.Parts[i] != want[i] {
 			t.Fatalf("part %d %+v; want %+v", i, got.Parts[i], want[i])
 		}
+	}
+}
+
+// TestAClientTestIsAskedForItsRequestsWhileItsRecordingSentOneNotYetPaired:
+// the ingress reads a request's body before the application is given it only
+// while a test is open whose recording sent a request no request of the run
+// paired with yet; a test with none, a test whose requests all paired, and
+// no test open ask for none.
+func TestAClientTestIsAskedForItsRequestsWhileItsRecordingSentOneNotYetPaired(t *testing.T) {
+	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
+	post := &models.HTTPReq{Method: "POST", URL: "http://api/apps", Body: `{"name":"app-1"}`, Timestamp: at}
+	var nilTracker *Tracker
+	tr := NewTracker()
+	switch {
+	case nilTracker.WantsIncoming():
+		t.Fatal("no tracker asks for requests")
+	case tr.WantsIncoming():
+		t.Fatal("a tracker with no test open asks for requests")
+	}
+	tr.SetCases([]ClientCase{{Name: "post-apps-1", Req: post}})
+	if tr.WantsIncoming() {
+		t.Fatal("cases given while no test is open ask for requests")
+	}
+	tr.Begin()
+	if tr.WantsIncoming() {
+		t.Fatal("a test with no recorded request asks for requests")
+	}
+	tr.SetCases([]ClientCase{{Name: "post-apps-1", Req: post}})
+	if !tr.WantsIncoming() {
+		t.Fatal("a test whose recorded request is not paired yet asks for none")
+	}
+	if !tr.Incoming(post, "", at) || tr.WantsIncoming() {
+		t.Fatal("a test whose requests all paired still asks for requests")
+	}
+	tr.SetCases([]ClientCase{{Name: "post-apps-1", Req: post}})
+	tr.End()
+	if tr.WantsIncoming() {
+		t.Fatal("an ended test asks for requests")
+	}
+}
+
+// TestAClientTestsRequestKeployCouldNotReadRefusesWhatChangedAfterIt: a
+// request whose body the ingress did not read before the application was
+// given it pairs as any request does, but its place is one keploy could not
+// read, saying why: every value that changed in a call after it is refused,
+// never bound to a part of it nor learned as noise.
+func TestAClientTestsRequestKeployCouldNotReadRefusesWhatChangedAfterIt(t *testing.T) {
+	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
+	rec := &models.HTTPReq{Method: "POST", URL: "http://api/upload", Body: "a", Timestamp: at.Add(-time.Hour)}
+	tr := NewTracker()
+	tr.Begin()
+	tr.SetCases([]ClientCase{{Name: "post-upload-1", Req: rec}})
+	const why = "its body declares no length"
+	if !tr.Incoming(&models.HTTPReq{Method: "POST", URL: "http://api/upload"}, why, at) {
+		t.Fatal("an unread request did not pair")
+	}
+	got := tr.Placed().Earlier
+	if len(got) != 1 || got[0].Unread != why || len(got[0].Seen) != 0 || !got[0].incoming ||
+		!got[0].arrivedRec.Equal(rec.Timestamp) || !got[0].arrivedLive.Equal(at) || got[0].Mock != "test case post-upload-1" {
+		t.Fatalf("placed %+v", got)
+	}
+	if r := requestUnread(got); !strings.Contains(r, why) {
+		t.Fatalf("what changed after it is refused with %q, want it to say %q", r, why)
 	}
 }

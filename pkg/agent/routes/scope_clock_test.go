@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
@@ -109,6 +110,47 @@ func TestHandleTestBeginsHandsTheServiceEachTestsSeed(t *testing.T) {
 	}
 	if code := send(&Agent{logger: zap.NewNop(), svc: old}, `{"begins":{"ui::tr":"2026-10-06T09:01:00Z"}}`); code != http.StatusOK {
 		t.Fatalf("a service without seeds, given none: status %d", code)
+	}
+}
+
+// casesSvc keeps begins and the requests each client test sent.
+type casesSvc struct {
+	beginsSvc
+	cases map[string][]models.ClientCase
+	calls int
+}
+
+func (s *casesSvc) SetTestCases(_ context.Context, cases map[string][]models.ClientCase) {
+	s.cases = cases
+	s.calls++
+}
+
+// The CLI hands the service the requests each client test sent in its
+// recording with the tests' begins; a begin the service refuses hands it
+// none, and a service that keeps begins but no requests still takes the
+// begins: it learns as it did before it could.
+func TestHandleTestBeginsHandsTheServiceEachClientTestsRequests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	send := func(a *Agent, body string) int {
+		rec := httptest.NewRecorder()
+		a.HandleTestBegins(rec, httptest.NewRequest(http.MethodPost, "/agent/replay/clock", strings.NewReader(body)))
+		return rec.Code
+	}
+	const body = `{"begins":{"ui::tr":"2026-10-06T09:01:00Z"},"cases":{"ui::tr":[{"name":"post-apps-1","req":{"method":"POST","url":"http://api/apps","body":"{}"}}]}}`
+	svc := &casesSvc{}
+	if code := send(&Agent{logger: zap.NewNop(), svc: svc}, body); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if cs := svc.cases["ui::tr"]; len(cs) != 1 || cs[0].Name != "post-apps-1" || cs[0].Req.URL != "http://api/apps" || svc.begins["ui::tr"].IsZero() {
+		t.Fatalf("the service got cases %+v and begins %v", svc.cases, svc.begins)
+	}
+	refused := &casesSvc{beginsSvc: beginsSvc{err: errors.New("no clock")}}
+	if code := send(&Agent{logger: zap.NewNop(), svc: refused}, body); code == http.StatusOK || refused.calls != 0 {
+		t.Fatalf("a refused begin: status %d, %d hand-overs of the requests", code, refused.calls)
+	}
+	old := &beginsSvc{}
+	if code := send(&Agent{logger: zap.NewNop(), svc: old}, body); code != http.StatusOK || old.begins["ui::tr"].IsZero() {
+		t.Fatalf("a service without requests: status %d, begins %v", code, old.begins)
 	}
 }
 

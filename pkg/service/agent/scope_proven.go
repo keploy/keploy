@@ -1040,6 +1040,30 @@ func (a *Agent) replaying() bool {
 	return a.config != nil && a.config.Agent.Mode == models.MODE_TEST
 }
 
+// giveClientCases gives the learn step, as test id begins in worker's
+// window and after its proxy opened the test, the requests its client test
+// sent the application in its recording (SetTestCases,
+// coreAgent.ClientCasesTaker): the learn step follows the run's window alone
+// (worker 0). The ingress cannot tell which test a request is of, so while
+// another worker's test is open (overlaps) no request pairs: a test begun
+// beside one gives none, and one begun in another worker stops the run's
+// window's test pairing from then (nil). The requests already paired stay
+// its places: each reached the application while its test alone was open.
+func (a *Agent) giveClientCases(id string, worker uint32, overlaps bool) {
+	taker, ok := a.Proxy.(coreAgent.ClientCasesTaker)
+	if !ok {
+		return
+	}
+	if worker != 0 || overlaps {
+		taker.TakeClientCases(nil)
+		return
+	}
+	a.scopeMu.Lock()
+	cases := a.testCases[id]
+	a.scopeMu.Unlock()
+	taker.TakeClientCases(cases)
+}
+
 // ProvenBegin opens a test (design v14 §5.3). The run must be claimed; the
 // harness must say it can skip; a second test while one is open is refused;
 // in a replay a gated test is answered skip, and opens nothing.
@@ -1228,6 +1252,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			// test.
 			capture.ContinueTestErrorCapture()
 			opened = true
+			a.giveClientCases(id, worker, overlaps)
 		}
 	}
 	if err := a.beginScopeAt(ctx, id, 0, at, open); err != nil {

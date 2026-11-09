@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A test keeps the begin of its window in the recording; a test begun twice
@@ -39,11 +40,12 @@ type beginsPusher struct {
 	begins map[string]time.Time
 	real   map[string][]string
 	seeds  map[string]string
+	cases  map[string][]models.ClientCase
 	calls  int
 }
 
-func (p *beginsPusher) PushTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string) error {
-	p.begins, p.real, p.seeds = begins, real, seeds
+func (p *beginsPusher) PushTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string, cases map[string][]models.ClientCase) error {
+	p.begins, p.real, p.seeds, p.cases = begins, real, seeds, cases
 	p.calls++
 	return nil
 }
@@ -200,4 +202,78 @@ func TestStampKeysGivesEachTestItsProcesssClaimKey(t *testing.T) {
 			t.Fatalf("%s got %+v", id, got)
 		}
 	}
+}
+
+// Replay hands the agent the requests each client test sent in its
+// recording, read from its HTTP test cases in the order they reached the
+// application: a case the store does not hold, or not of HTTP, is left out,
+// and a recording that kept no requests sends none.
+func TestPushTestBeginsSendsEachClientTestsRequests(t *testing.T) {
+	t0 := time.Date(2026, 11, 9, 9, 0, 0, 0, time.UTC)
+	req := func(path string, at time.Time) models.HTTPReq {
+		return models.HTTPReq{Method: "POST", URL: "http://api" + path, Timestamp: at}
+	}
+	db := &memTestDB{existing: []*models.TestCase{
+		{Name: "post-apps-2", Kind: models.HTTP, HTTPReq: req("/apps", t0.Add(2*time.Second))},
+		{Name: "post-apps-1", Kind: models.HTTP, HTTPReq: req("/apps", t0.Add(time.Second))},
+		{Name: "grpc-1", Kind: models.GRPC_EXPORT, HTTPReq: req("/grpc", t0)},
+		{Name: "get-suites-1", Kind: models.HTTP, HTTPReq: req("/suites", t0)},
+	}}
+	p := &beginsPusher{}
+	m := &mockService{logger: zap.NewNop(), instrumentation: p, testDB: db, mappingDB: setTableDB{mapping: &models.Mapping{
+		TestCases: []models.MappedTestCase{
+			{ID: "pkg::TestApps", Cases: []string{"post-apps-2", "post-apps-1", "grpc-1", "gone-1"}},
+			{ID: "pkg::TestSuites", Cases: []string{"get-suites-1"}},
+			{ID: "pkg::TestNone"},
+		},
+	}}}
+	if err := m.pushTestBegins(context.Background(), "rec"); err != nil {
+		t.Fatal(err)
+	}
+	apps := p.cases["pkg::TestApps"]
+	if len(p.cases) != 2 || len(apps) != 2 || apps[0].Name != "post-apps-1" || apps[1].Name != "post-apps-2" ||
+		apps[0].Req.URL != "http://api/apps" || len(p.cases["pkg::TestSuites"]) != 1 {
+		t.Fatalf("pushed cases %+v", p.cases)
+	}
+
+	p = &beginsPusher{}
+	counted := &countingTestDB{TestDB: db}
+	m = &mockService{logger: zap.NewNop(), instrumentation: p, testDB: counted, mappingDB: setTableDB{mapping: &models.Mapping{
+		TestCases: []models.MappedTestCase{{ID: "pkg::TestNone"}},
+	}}}
+	if err := m.pushTestBegins(context.Background(), "rec"); err != nil {
+		t.Fatal(err)
+	}
+	if p.cases != nil || counted.reads != 0 {
+		t.Fatalf("a recording that kept no requests pushed %+v, reading its test cases %d times", p.cases, counted.reads)
+	}
+
+	// A store keploy cannot read gives none, and says so; the begins still go.
+	p = &beginsPusher{}
+	core, logs := observer.New(zap.WarnLevel)
+	m = &mockService{logger: zap.New(core), instrumentation: p, testDB: &countingTestDB{TestDB: db, err: errors.New("unreadable")}, mappingDB: setTableDB{mapping: &models.Mapping{
+		TestCases: []models.MappedTestCase{{ID: "pkg::TestApps", At: t0, Cases: []string{"post-apps-1"}}},
+	}}}
+	if err := m.pushTestBegins(context.Background(), "rec"); err != nil {
+		t.Fatal(err)
+	}
+	if p.cases != nil || p.begins["pkg::TestApps"].IsZero() || logs.FilterMessageSnippet("cannot read the requests").Len() != 1 {
+		t.Fatalf("an unreadable store pushed cases %+v, begins %v, and said %v", p.cases, p.begins, logs.All())
+	}
+}
+
+// countingTestDB counts the reads of a recording's test cases, failing each
+// with err where it is set.
+type countingTestDB struct {
+	TestDB
+	reads int
+	err   error
+}
+
+func (d *countingTestDB) GetTestCases(ctx context.Context, set string) ([]*models.TestCase, error) {
+	d.reads++
+	if d.err != nil {
+		return nil, d.err
+	}
+	return d.TestDB.GetTestCases(ctx, set)
 }
