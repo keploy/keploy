@@ -875,6 +875,20 @@ type InFlightPlanner interface {
 	InFlightFrom(start time.Time) (from time.Time, ok bool)
 }
 
+// ReachedAnswerPlanner is the optional extension of a proxy that serves a
+// mock placed at its answer (models.IsAnswerPlaced) from its place on until a
+// consume takes it, with the proven switch off. For the window that starts at
+// start it names the range of places of such mocks the agent loads from its
+// on-disk store (DiskMocks.LoadAnswerPlaced, both ends inclusive) and passes
+// in the filtered slice of the same SetMocksWithWindow call, past its window
+// filter: one answered in the gap after the window, which no window's load
+// reads, and those of windows the replay passed over. ok is false when there
+// is nothing to load. A proxy without it loads none, and serves such a mock
+// in its own window only.
+type ReachedAnswerPlanner interface {
+	ReachedAnswerLoadRange(start time.Time) (from, to time.Time, ok bool)
+}
+
 // ExactServer is the optional extension of a proxy that serves each test its
 // own mocks exactly, under the proven switch (design v14 §5.2): while a test
 // is open, each of its test mocks answers at most one request, in recorded

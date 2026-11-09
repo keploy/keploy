@@ -486,6 +486,13 @@ type MockManager struct {
 	// pass (CarryOverLoadRange). Under swapMu.
 	carryLastStart time.Time
 	carryLoadedTo  time.Time
+	// reachLastStart is the window start of the last SetMocksWithWindow that
+	// served the mocks placed at their answer the replay has reached
+	// (reachedSchedule), and reachLoadedTo the recorded time up to which the
+	// agent has loaded them in this pass (ReachedAnswerLoadRange). Under
+	// swapMu.
+	reachLastStart time.Time
+	reachLoadedTo  time.Time
 
 	// swapMu guards the {filtered, unfiltered, window} swap performed by
 	// SetMocksWithWindow. Writers Lock(); readers via GetFilteredMocksInWindow
@@ -1331,6 +1338,7 @@ func (m *MockManager) getFilteredMocksInWindowIn(v *exactView) ([]*models.Mock, 
 	out := make([]*models.Mock, 0, len(all))
 	var droppedOutOfWindow, droppedInvalidOrder, missingTs uint64
 	gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
+	reach := m.reachedSchedule()
 	for _, mock := range all {
 		if mock == nil {
 			continue
@@ -1366,6 +1374,12 @@ func (m *MockManager) getFilteredMocksInWindowIn(v *exactView) ([]*models.Mock, 
 			out = append(out, mock)
 		case inFlightAtStart(mock, req, res, gapFrom, start, hasGap):
 			// In flight when the window's test began: its own.
+			out = append(out, mock)
+		case reach != nil && models.IsAnswerPlaced(mock) && reach.Released(place, start):
+			// Placed at its answer, and reached (pkg.ServeWindow.Reached):
+			// answered in the gap after the window, or earlier and not
+			// taken yet. The staging keeps it in the tier until a consume
+			// takes it.
 			out = append(out, mock)
 		default:
 			droppedOutOfWindow++
@@ -1509,6 +1523,7 @@ func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bo
 	m.bumpStagingEpoch()
 	m.carry.reset()
 	m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
+	m.reachLastStart, m.reachLoadedTo = time.Time{}, time.Time{}
 	// A zero window is no time window: the per-test tier takes filtered as
 	// it is, the startup tier is rebuilt empty, and the published window
 	// stays zero, published with the open scope.
@@ -1746,6 +1761,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// snapshot too.
 		m.carry.reset()
 		m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
+		m.reachLastStart, m.reachLoadedTo = time.Time{}, time.Time{}
 		// Staging is the set boundary as far as routing is concerned: this is
 		// where the previous set's window bits and startup-init cutoff go, so
 		// they are replaced in the same call that replaces the trees rather
@@ -1889,6 +1905,19 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		sw := pkg.ServeWindow{Start: start, End: end, FirstStart: firstStart, StrictPerCall: true, StrictWindow: true}
 		if gapFrom, hasGap := m.testWindows.Load().GapBefore(start); hasGap {
 			sw.InFlightFrom = gapFrom
+		}
+		// With the proven switch off, a mock placed at its answer is served
+		// from its place on until a consume takes it (pkg.ServeWindow.Reached):
+		// the ones the closing window's per-test tier still holds stay, beside
+		// those the agent loaded up to this window's release horizon
+		// (ReachedAnswerLoadRange).
+		if reach := m.reachedSchedule(); reach != nil {
+			sw.Reached = reach
+			m.treesMu.RLock()
+			closing := m.filtered
+			m.treesMu.RUnlock()
+			filtered = withUntakenReached(filtered, closing)
+			m.reachLastStart, m.reachLoadedTo = start, reachLoadHorizon(reach, start)
 		}
 		for _, mock := range filtered {
 			if mock == nil {
@@ -5723,6 +5752,99 @@ func (m *MockManager) CarryOverLoadRange(start time.Time) (from, to time.Time, o
 		from = sched.Window(0).Start
 	}
 	to = carryLoadHorizon(sched, start)
+	if to.Before(from) {
+		return time.Time{}, time.Time{}, false
+	}
+	return from, to, true
+}
+
+// reachedSchedule is the set's recorded test windows by which the staging
+// serves a mock placed at its answer from its place on until a consume takes
+// it (pkg.ServeWindow.Reached), or nil where it does not: under the proven
+// switch, whose exact serving serves such a mock from its place by the set's
+// worker scope, with no kind placed at its answer, or with no recorded
+// windows (the replayer sent none).
+func (m *MockManager) reachedSchedule() *models.WindowSchedule {
+	if provenswitch.On() || !models.AnswerPlacedRegistered() {
+		return nil
+	}
+	if sched := m.testWindows.Load(); sched.Len() > 0 {
+		return sched
+	}
+	return nil
+}
+
+// withUntakenReached is filtered with, beside it, the mocks placed at their
+// answer that closing, the closing window's per-test tier, still holds: the
+// ones no consume has taken out of the tier yet. One filtered holds already
+// (by name) is not added twice. The staging asks the window rule of each, as
+// of every mock it is handed (pkg.ServeWindow.Reached), so one whose place
+// the new window has not reached (a pass that went back to an earlier
+// window) stays out.
+func withUntakenReached(filtered []*models.Mock, closing *TreeDb) []*models.Mock {
+	var have map[string]struct{}
+	closing.rangeValues(func(v interface{}) bool {
+		mk, ok := v.(*models.Mock)
+		if !ok || mk == nil || !models.IsAnswerPlaced(mk) {
+			return true
+		}
+		if have == nil {
+			have = make(map[string]struct{}, len(filtered))
+			for _, f := range filtered {
+				if f != nil {
+					have[f.Name] = struct{}{}
+				}
+			}
+			filtered = append(make([]*models.Mock, 0, len(filtered)+1), filtered...)
+		}
+		if _, dup := have[mk.Name]; !dup {
+			have[mk.Name] = struct{}{}
+			filtered = append(filtered, mk)
+		}
+		return true
+	})
+	return filtered
+}
+
+// reachLoadHorizon is the latest place a mock placed at its answer can have
+// and be reached while the window that starts at start is current.
+func reachLoadHorizon(sched *models.WindowSchedule, start time.Time) time.Time {
+	if h, bounded := sched.ReleaseHorizon(start); bounded {
+		return h
+	}
+	return maxRecordedTime
+}
+
+// ReachedAnswerLoadRange tells the agent which places of the mocks placed at
+// their answer (models.IsAnswerPlaced, DiskMocks.LoadAnswerPlaced) to load,
+// beside the window's own mocks, for the window that starts at start, with
+// the proven switch off: from where the previous window's load ended (or from
+// the set's first window, on the first window of a pass or when a pass goes
+// back to an earlier window) up to the latest place this window reaches
+// (models.WindowSchedule.ReleaseHorizon): one answered in the gap after the
+// window, and those of windows the replay passed over. Both ends are
+// inclusive, as LoadAnswerPlaced's are. The staging serves them from their
+// place on until a consume takes them (reachedSchedule), and the ones a
+// window leaves untaken stay for the next, so each is loaded once in a pass.
+//
+// ok is false where nothing is loaded: the staging serves none so
+// (reachedSchedule), or the range is empty, as it is for a set's staging
+// call (start at models.BaseTime, before every window: the start-up band
+// reads what precedes the first window).
+func (m *MockManager) ReachedAnswerLoadRange(start time.Time) (from, to time.Time, ok bool) {
+	m.swapMu.RLock()
+	sched := m.reachedSchedule()
+	last, loaded := m.reachLastStart, m.reachLoadedTo
+	m.swapMu.RUnlock()
+	if sched == nil {
+		return time.Time{}, time.Time{}, false
+	}
+	if !loaded.IsZero() && !start.Before(last) {
+		from = loaded.Add(time.Nanosecond)
+	} else {
+		from = sched.Window(0).Start
+	}
+	to = reachLoadHorizon(sched, start)
 	if to.Before(from) {
 		return time.Time{}, time.Time{}, false
 	}

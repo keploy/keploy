@@ -429,10 +429,12 @@ func answerPlacedPoll(name string, req, res int) *models.Mock {
 // test-1's; (e) one sent as the app boots and answered in test-2, which by
 // its request was start-up traffic; and one sent in the gap before test-2 and
 // answered in it, as the in-flight rule has it. One answered in the gap after
-// test-2 is no window's, where the in-flight rule gave it to test-2, and one
+// test-2 is no window's, where the in-flight rule gave it to test-2: with the
+// proven switch off test-2 reaches it, the test before the gap, as it is
+// served from its place on until a consume takes it, but does not own it. One
 // sent in test-2 and answered in test-3 is test-3's. The windowed read serves
-// test-2's own, the open test owns them, and a consume of one in its window is
-// not out of it.
+// the same, the open test owns its own, and a consume of one in its window is
+// not out of it. test-3 keeps the polls test-2 reached and left untaken.
 func TestTheManagerStagesAPollInTheWindowItsAnswerIsIn(t *testing.T) {
 	registerAnswerPlacedPolls(t)
 	// A carry-over registration for the kind, of no mock: every per-test HTTP
@@ -465,7 +467,7 @@ func TestTheManagerStagesAPollInTheWindowItsAnswerIsIn(t *testing.T) {
 	mm.SeedRecordedWindows(windowsOf("test-1", "test-2", "test-3"))
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
 	mm.SetMocksWithWindow(recording(), nil, winStart(2), winEnd(2))
-	want := []string{"boot-poll", "gap-poll", "own-2", "poll-b"}
+	want := []string{"boot-poll", "gap-poll", "own-2", "poll-b", "poll-to-gap"}
 	if got, _ := mm.GetFilteredMocks(); !equalStrings(names(got), want) {
 		t.Fatalf("test-2's per-test tier holds %v; want %v", names(got), want)
 	}
@@ -478,6 +480,12 @@ func TestTheManagerStagesAPollInTheWindowItsAnswerIsIn(t *testing.T) {
 		t.Fatalf("test-2's windowed read serves %v; want %v", names(inWindow), want)
 	}
 	for _, mk := range inWindow {
+		if mk.Name == "poll-to-gap" {
+			if mm.OwnedByOpenTest(mk) {
+				t.Error("test-2 owns the poll answered in the gap after it")
+			}
+			continue
+		}
 		if !mm.OwnedByOpenTest(mk) {
 			t.Errorf("%s is not owned by test-2", mk.Name)
 		}
@@ -515,9 +523,16 @@ func TestTheManagerStagesAPollInTheWindowItsAnswerIsIn(t *testing.T) {
 	if !found["poll-b"] || !found["gap-poll"] {
 		t.Errorf("the consumes recorded %v; want poll-b's and gap-poll's", found)
 	}
-	mm.SetMocksWithWindow(recording(), nil, winStart(3), winEnd(3))
-	if got, _ := mm.GetFilteredMocks(); !equalStrings(names(got), []string{"boot-poll-3", "poll-3"}) {
-		t.Fatalf("test-3's per-test tier holds %v; want the polls answered in it", names(got))
+	// The agent hands test-3 what no consume took (filterOutDeleted).
+	var handed []*models.Mock
+	for _, mk := range recording() {
+		if mk.Name != "gap-poll" {
+			handed = append(handed, mk)
+		}
+	}
+	mm.SetMocksWithWindow(handed, nil, winStart(3), winEnd(3))
+	if got, _ := mm.GetFilteredMocks(); !equalStrings(names(got), []string{"boot-poll", "boot-poll-3", "poll-3", "poll-b", "poll-to-gap"}) {
+		t.Fatalf("test-3's per-test tier holds %v; want the polls answered in it and the untaken ones test-2 reached", names(got))
 	}
 }
 

@@ -4486,7 +4486,7 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			preservedStartup++
-		default: // ruleOutOfWindow; ruleReleased needs w.Recorded, which is nil here
+		default: // ruleOutOfWindow; ruleReleased and ruleReached need w.Recorded and w.Reached, which are nil here
 			// Per-mock diagnostic: the hash + window + actual ts, so a CI log
 			// can pinpoint which mock the per-test cohort lost. Info-level
 			// (not Debug) under strict so it surfaces in default CI runs;

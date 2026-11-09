@@ -4979,6 +4979,15 @@ func (p *Proxy) CarryOverLoadRange(start time.Time) (time.Time, time.Time, bool)
 	return time.Time{}, time.Time{}, false
 }
 
+// ReachedAnswerLoadRange implements agent.ReachedAnswerPlanner
+// (MockManager.ReachedAnswerLoadRange).
+func (p *Proxy) ReachedAnswerLoadRange(start time.Time) (time.Time, time.Time, bool) {
+	if m := p.getMockManager(); m != nil {
+		return m.ReachedAnswerLoadRange(start)
+	}
+	return time.Time{}, time.Time{}, false
+}
+
 // InFlightFrom implements agent.InFlightPlanner (MockManager.InFlightFrom).
 func (p *Proxy) InFlightFrom(start time.Time) (time.Time, bool) {
 	if m := p.getMockManager(); m != nil {

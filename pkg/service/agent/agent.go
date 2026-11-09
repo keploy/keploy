@@ -1987,6 +1987,41 @@ func (a *Agent) loadCarryOverLookahead(disk *proxyPkg.DiskMocks, params models.M
 	return carry, nil
 }
 
+// loadReachedAnswers loads the mocks placed at their answer
+// (models.IsAnswerPlaced) that the window params opens reaches beyond its own,
+// with the proven switch off: the range ReachedAnswerLoadRange names, which
+// starts where the previous window's load ended and reaches the latest place
+// this window releases (one answered in the gap after it, and those of
+// windows the replay passed over). The manager serves them per-test from
+// their place on until a consume takes them (pkg.ServeWindow.Reached), so a
+// consumer's poll answered between two tests is reached from the test before
+// the gap, as the switch's worker scope reaches it, and never before.
+//
+// Only for the windowed disk loads (strict-window, mapping): the lax load
+// already holds every mock, and its filter routes them. Nothing loads with no
+// planner, where the planner names no range (no kind placed at its answer, the
+// proven switch on), or with no disk store.
+func (a *Agent) loadReachedAnswers(disk *proxyPkg.DiskMocks, params models.MockFilterParams) ([]*models.Mock, error) {
+	if disk == nil || perTestLoadMode(params) == loadModeLaxAll {
+		return nil, nil
+	}
+	planner, ok := a.Proxy.(coreAgent.ReachedAnswerPlanner)
+	if !ok {
+		return nil, nil
+	}
+	from, to, ok := planner.ReachedAnswerLoadRange(params.AfterTime)
+	if !ok {
+		return nil, nil
+	}
+	reached, err := disk.LoadAnswerPlaced(from, to)
+	if err != nil {
+		return nil, err
+	}
+	a.logger.Debug("agent mock residency: loaded the answered polls this window reaches past its own",
+		zap.Time("from", from), zap.Time("to", to), zap.Int("count", len(reached)))
+	return reached, nil
+}
+
 // appendCarryOver adds the lookahead mocks the filtered slice does not hold
 // already (by name), marked per-test like the rest of it.
 func appendCarryOver(filtered, carry []*models.Mock) []*models.Mock {
@@ -2381,6 +2416,11 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		utils.LogError(a.logger, err, "failed to load the carry-over mocks for this test from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
 		return nil, nil, err
 	}
+	reached, err := a.loadReachedAnswers(disk, params)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to load the answered polls this test reaches from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
+		return nil, nil, err
+	}
 
 	a.logger.Debug("Original mocks before filtering",
 		zap.Int("originalFiltered", len(originalFiltered)),
@@ -2465,6 +2505,10 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// SetMocksWithWindow files into that tier. filterOutDeleted below still
 	// drops the ones already consumed.
 	filteredMocks = appendCarryOver(filteredMocks, carryOver)
+	// So do the mocks placed at their answer this window reaches past its
+	// own (loadReachedAnswers): the filter would leave out, or make session
+	// mocks of, what the manager serves per-test from its place on.
+	filteredMocks = appendCarryOver(filteredMocks, reached)
 
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.AgentOwnsConsumed {

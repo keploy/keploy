@@ -75,6 +75,17 @@ type ServeWindow struct {
 	// placed outside the window to the session pool in lax mode. Asked only
 	// with Recorded.
 	Lookahead bool
+	// Reached is the set's recorded test windows by which the mock
+	// manager's staging, with the proven switch off, serves a mock placed at
+	// its answer (models.IsAnswerPlaced) from its place on: in every window
+	// that starts at or after the one its place is released in
+	// (models.WindowSchedule.Released: the window that holds it, or for one
+	// answered in the gap between two tests, the test before the gap), until
+	// a consume takes it out of the per-test tier, and never earlier. The
+	// recorded order of a consumer's messages is then kept whatever window
+	// its poll comes in. Nil or empty: not asked, as in the window filter's
+	// own call and the replayer's mock prune.
+	Reached *models.WindowSchedule
 	// Resolved says StrictPerCall and StrictWindow are the agent's own,
 	// with its KEPLOY_STRICT_MOCK_WINDOW folded in already, as it said them
 	// (models.MockWindowHeader): they are taken as they are. Else, as in the
@@ -153,6 +164,7 @@ const (
 	ruleInWindow
 	ruleStartup
 	ruleInFlight
+	ruleReached
 	ruleReleased
 	ruleOutOfWindow
 	ruleLaxPromoted
@@ -161,7 +173,7 @@ const (
 // serve is the pool a rule hands its mock to.
 func (r serveRule) serve() WindowServe {
 	switch r {
-	case ruleWindowBoundInWindow, ruleUntimed, ruleInWindow, ruleInFlight:
+	case ruleWindowBoundInWindow, ruleUntimed, ruleInWindow, ruleInFlight, ruleReached:
 		return ServedPerTest
 	case ruleWindowBoundStartup, ruleStartup:
 		return ServedStartup
@@ -210,6 +222,12 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 	}
 	if !w.FirstStart.IsZero() && models.PlaceOf(p).Before(w.FirstStart) {
 		return ruleStartup
+	}
+	// A mock placed at its answer, once the replay has reached its place
+	// (ServeWindow.Reached): placed in the gap after the window, or in an
+	// earlier window or gap and not consumed there.
+	if w.Reached.Len() > 0 && models.IsAnswerPlaced(p) && w.Reached.Released(models.PlaceOf(p), w.Start) {
+		return ruleReached
 	}
 	if !w.InFlightFrom.IsZero() && (w.enabled(w.StrictWindow) || p.StatesLifetime()) && models.InFlightEligible(p) &&
 		models.SentInGapAnsweredBy(req, res, w.InFlightFrom, w.Start) {

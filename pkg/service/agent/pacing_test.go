@@ -175,6 +175,9 @@ func (p *mgrProxy) GetPersistentConsumed() map[string]models.MockState {
 func (p *mgrProxy) CarryOverLoadRange(start time.Time) (time.Time, time.Time, bool) {
 	return p.mm.CarryOverLoadRange(start)
 }
+func (p *mgrProxy) ReachedAnswerLoadRange(start time.Time) (time.Time, time.Time, bool) {
+	return p.mm.ReachedAnswerLoadRange(start)
+}
 
 const agentPulsar models.Kind = "AgentTestPulsar"
 
@@ -698,8 +701,8 @@ func TestTheAgentStagesAPollForTheTestItsAnswerIsIn(t *testing.T) {
 			t.Fatalf("mapped=%v: post-order-1's per-test tier holds %v; want its own mock and the boot poll", mapped, namesOf(got))
 		}
 		call(ws[1].Start, ws[1].End, false, []string{"own-2"})
-		if got, _ := mm.GetFilteredMocks(); !reflect.DeepEqual(namesOf(got), []string{"own-2", "poll-b"}) {
-			t.Fatalf("mapped=%v: post-order-2's per-test tier holds %v; want its own mock and the poll answered in it", mapped, namesOf(got))
+		if got, _ := mm.GetFilteredMocks(); !reflect.DeepEqual(namesOf(got), []string{"boot-poll", "own-2", "poll-b"}) {
+			t.Fatalf("mapped=%v: post-order-2's per-test tier holds %v; want its own mock, the poll answered in it, and the boot poll no consume took", mapped, namesOf(got))
 		}
 		mm.Close()
 	}
@@ -739,5 +742,143 @@ func TestAStagingCallsMappingIsServedWithNoPollPlacedInItsWindow(t *testing.T) {
 	}
 	if got := namesOf(loaded); !reflect.DeepEqual(got, []string{"own-1"}) {
 		t.Fatalf("a staging call whose mapping is [own-1] reads %v from disk; want its mapping alone", got)
+	}
+}
+
+// The switch-off shape of a consumer that reads each message's two copies,
+// through the agent's disk load and a real manager, by window and by mapping:
+// post-order-1's own poll hands the first copy, and the next poll, which the
+// recording answered with the second copy in the gap after post-order-1's
+// response, belongs to no test (placed at its answer). No window's own load
+// reads it: the agent loads it as post-order-1 reaches it
+// (ReachedAnswerLoadRange), and the manager serves it from then on until a
+// consume takes it, so the consumer gets the second copy whether it polls
+// before post-order-2 or in it. The poll answered in post-order-2 is not
+// reached in post-order-1, and a consumed poll is not handed again.
+func TestTheAgentServesAPollAnsweredBetweenTwoTestsFromTheTestBeforeTheGapUntilTaken(t *testing.T) {
+	t.Cleanup(models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["poll"] == "yes" }))
+	base := time.Date(2026, 11, 9, 1, 0, 0, 0, time.UTC)
+	ms := func(n int) time.Time { return base.Add(time.Duration(n) * time.Millisecond) }
+	mk := func(name string, req, res int, poll bool) *models.Mock {
+		m := stageMock(name, "/"+name, ms(req))
+		m.Spec.ResTimestampMock = ms(res)
+		if poll {
+			m.Spec.Metadata["poll"] = "yes"
+		}
+		return m
+	}
+	ws := []models.TestWindow{
+		{TestCase: "post-order-1", Start: ms(1000), End: ms(1100)},
+		{TestCase: "post-order-2", Start: ms(3344), End: ms(3505)},
+	}
+	recording := func() []*models.Mock {
+		return []*models.Mock{
+			mk("own-1", 1050, 1051, false),
+			mk("copy-1", 900, 1060, true),  // answered in post-order-1
+			mk("copy-2", 1090, 1101, true), // answered in the gap after it
+			mk("next", 1102, 3450, true),   // answered in post-order-2
+			mk("own-2", 3400, 3401, false),
+		}
+	}
+	namesOf := func(got []*models.Mock) []string {
+		names := []string{}
+		for _, m := range got {
+			names = append(names, m.Name)
+		}
+		sort.Strings(names)
+		return names
+	}
+	for _, mapped := range []bool{false, true} {
+		mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+		mm.ResetForReplaySession()
+		a := diskAgent(t, &mgrProxy{mm: mm}, recording()...)
+		consumed := map[string]models.MockState{}
+		call := func(after, before time.Time, shape bool, mapping []string) {
+			t.Helper()
+			params := models.MockFilterParams{AfterTime: after, BeforeTime: before, StrictMockWindow: true, TotalConsumedMocks: consumed}
+			if shape {
+				params.FirstRecordedTestStart, params.RecordedWindows = ws[0].Start, ws
+			}
+			if mapped && mapping != nil {
+				params.UseMappingBased, params.MockMapping = true, mapping
+			}
+			if err := a.UpdateMockParams(context.Background(), params); err != nil {
+				t.Fatal(err)
+			}
+		}
+		take := func(name string) {
+			t.Helper()
+			got, _ := mm.GetFilteredMocks()
+			for _, m := range got {
+				if m.Name == name {
+					if !mm.DeleteFilteredMock(*m) {
+						t.Fatalf("mapped=%v: %s's consume was refused", mapped, name)
+					}
+					consumed[name] = models.MockState{Name: name, Usage: models.Deleted}
+					return
+				}
+			}
+			t.Fatalf("mapped=%v: %s is not in the per-test tier to consume", mapped, name)
+		}
+		call(models.BaseTime, time.Now(), true, nil)
+		call(ws[0].Start, ws[0].End, false, []string{"own-1"})
+		if got, _ := mm.GetFilteredMocks(); !reflect.DeepEqual(namesOf(got), []string{"copy-1", "copy-2", "own-1"}) {
+			t.Fatalf("mapped=%v: post-order-1's per-test tier holds %v; want its own mock, its poll and the poll answered in the gap after it", mapped, namesOf(got))
+		}
+		take("copy-1")
+		call(ws[1].Start, ws[1].End, false, []string{"own-2"})
+		if got, _ := mm.GetFilteredMocks(); !reflect.DeepEqual(namesOf(got), []string{"copy-2", "next", "own-2"}) {
+			t.Fatalf("mapped=%v: post-order-2's per-test tier holds %v; want the gap poll no consume took, the poll answered in it and its own mock", mapped, namesOf(got))
+		}
+		take("copy-2")
+		call(ws[1].Start, ws[1].End, false, []string{"own-2"})
+		if got, _ := mm.GetFilteredMocks(); !reflect.DeepEqual(namesOf(got), []string{"next", "own-2"}) {
+			t.Fatalf("mapped=%v: post-order-2 staged again holds %v; want the consumed gap poll gone", mapped, namesOf(got))
+		}
+		mm.Close()
+	}
+}
+
+// With the strict window off (KEPLOY_STRICT_MOCK_WINDOW=0) the agent loads the
+// whole store and its lax filter routes every mock: the polls a window reaches
+// past its own are not loaded again past the filter, so the per-test tier holds
+// the window's own.
+func TestTheLaxWindowLoadsNoReachedPollPastItsFilter(t *testing.T) {
+	t.Cleanup(models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["poll"] == "yes" }))
+	base := time.Date(2026, 11, 9, 1, 0, 0, 0, time.UTC)
+	ms := func(n int) time.Time { return base.Add(time.Duration(n) * time.Millisecond) }
+	mk := func(name string, req, res int, poll bool) *models.Mock {
+		m := stageMock(name, "/"+name, ms(req))
+		m.Spec.ResTimestampMock = ms(res)
+		if poll {
+			m.Spec.Metadata["poll"] = "yes"
+		}
+		return m
+	}
+	ws := []models.TestWindow{
+		{TestCase: "post-order-1", Start: ms(1000), End: ms(1100)},
+		{TestCase: "post-order-2", Start: ms(3344), End: ms(3505)},
+	}
+	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	a := diskAgent(t, &mgrProxy{mm: mm},
+		mk("own-1", 1050, 1051, false), mk("copy-1", 900, 1060, true), mk("copy-2", 1090, 1101, true))
+	for _, p := range []models.MockFilterParams{
+		{AfterTime: models.BaseTime, BeforeTime: time.Now(), FirstRecordedTestStart: ws[0].Start, RecordedWindows: ws},
+		{AfterTime: ws[0].Start, BeforeTime: ws[0].End},
+	} {
+		if err := a.UpdateMockParams(context.Background(), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _ := mm.GetFilteredMocks()
+	names := []string{}
+	for _, m := range got {
+		names = append(names, m.Name)
+	}
+	sort.Strings(names)
+	if !reflect.DeepEqual(names, []string{"copy-1", "own-1"}) {
+		t.Fatalf("post-order-1's per-test tier holds %v in lax mode; want the window's own", names)
 	}
 }
