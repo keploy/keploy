@@ -102,8 +102,12 @@ type evPlace struct {
 	// request's time instead (req), as an exchange's request leaf is.
 	// views: the views round F's serves gave where they differ
 	// (Raw.ServedChanged); one that holds F's word leaves it unknown.
-	fUnstated, fMay, fGave, recAfter bool
-	views                            []*Raw
+	// rBefore: the recording gave the application this place before the
+	// call, by times keploy reads (its answer's, answerState, where it holds
+	// one): R's application had it to cut a value from. Unlike recAfter, a
+	// place with no time keploy reads, or at the call's own instant, is not.
+	fUnstated, fMay, fGave, recAfter, rBefore bool
+	views                                     []*Raw
 	// req: a recording's state by its request's time, where that is not
 	// its state by its answer's (rawRequestState): a word its request
 	// holds is placed so (placedFor), as an exchange's request leaf is.
@@ -246,6 +250,11 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		}
 		// Of the exchange, not of a leaf: built once for its leaves.
 		outsideTest, lateCall := earlierOutsideTest(e), earlierLateCall(e)
+		// rBefore of its leaves: a request leaf by the request's time, an
+		// answer leaf by the answer's (none where keploy was given no
+		// payload: the zero time).
+		sentBefore := e.alwaysEarlier() || !e.noTime && e.At.Before(in.At)
+		answeredBefore := e.alwaysEarlier() || sentBefore && answeredBy(e.At, e.Payload.answered, in.At)
 		for _, s := range e.Seen {
 			path := cmp.Or(s.Leaf.Path, s.Place)
 			ps = append(ps, evPlace{
@@ -254,6 +263,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, startUp: startUp, otherTest: other, trailed: trailed, scope: scope,
 				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: outsideTest, lateCall: lateCall,
 				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
+				rBefore:  s.Side != Response && sentBefore || s.Side == Response && answeredBefore,
 			})
 			// What the application got in an answer it got at the answer's
 			// time (answerState), its request before or at the call's instant.
@@ -311,6 +321,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
 			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
 			fGave: r.served && !r.servedAfter, recAfter: !r.noTime && (r.at.After(in.At) || r.answered.After(in.At)),
+			rBefore: !r.noTime && answeredBy(r.at, r.answered, in.At),
 		}
 		if rst, rwhy := rawRequestState(in, r); !r.noTime && (rst != st || rwhy != why) {
 			p.req = &reqPlace{state: rst, why: rwhy, after: r.at.After(in.At)}
@@ -626,6 +637,13 @@ const recordedAfterWhy = "answered after the call, it shows nothing of the recor
 // it (rawRequestState, earlierState): it was asked after the call, which
 // keploy knows where it can read no answer time too.
 const askedAfterWhy = "asked after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there"
+
+// answeredBy reports whether answerState places the answer before the call
+// at at.
+func answeredBy(req, answered, at time.Time) bool {
+	st, _ := answerState(req, answered, at)
+	return st == stateBefore
+}
 
 // untimedAnswer: a recording's answer time keploy cannot read, none or one
 // before its own request was recorded (follows.go's recordedGave), so it
@@ -1215,7 +1233,7 @@ func setEvidence(g givenWords, inR, inF heldRoles, at time.Time, piece bool) (ev
 	// A recording answered after the call gave R's application nothing
 	// before it: R's word there decides nothing (F's still does).
 	hr := inR&inOwn != 0 && g.givenBefore(at)
-	before := g.at.Before(at) && !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
+	before := g.answeredBefore(at)
 	switch {
 	case g.unstated || g.unread:
 		// Round F served it and keploy cannot tell what it gave there.
@@ -1261,6 +1279,14 @@ func setEvidence(g givenWords, inR, inF heldRoles, at time.Time, piece bool) (ev
 // time keploy can read (fail closed).
 func (g *givenWords) givenBefore(at time.Time) bool {
 	return g.noTime || !g.at.After(at) && !g.answered.After(at)
+}
+
+// answeredBefore reports whether g's answer was given R's application
+// before the call at at, by times keploy reads: answered before it, after
+// its own request (so that was before it too). Unlike givenBefore, one with
+// no time keploy reads is not.
+func (g *givenWords) answeredBefore(at time.Time) bool {
+	return !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
 }
 
 // gluedAt reports whether p, a body that declares no media type, holds R's

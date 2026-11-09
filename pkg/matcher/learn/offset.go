@@ -810,11 +810,17 @@ type givenWords struct {
 	// test (unseenWhy).
 	unstated, unread bool
 	views            []answerLists
+	// fRead: keploy reads what F gave the application there: F served it
+	// as recorded, or changed with the one view it stated (Raw.Live). Not
+	// where F's serves gave different views, a view was unstated or
+	// unread, or F did not serve it. An outside recording is one F gave
+	// the application before the call (Raw.elsewhere, GivenEarlier).
+	fRead bool
 }
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
-	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, test: x.test, prev: x.prev, first: x.first, last: x.last}
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, test: x.test, prev: x.prev, first: x.first, last: x.last, fRead: x.AsRecorded() || x.Live()}
 	lists, plain := dc.answerListsOf(x)
 	g.answerLists = lists
 	// Served unchanged, every word is one both gave: the same lists.
