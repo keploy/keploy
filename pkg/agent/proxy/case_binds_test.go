@@ -136,7 +136,8 @@ func TestAClientTestsRequestBindsNothingItCannotShow(t *testing.T) {
 }
 
 // The proxy asks the ingress for requests only under the proven switch and
-// while a request a variable is bound at is not paired: a test whose
+// while a request a variable is bound at is not paired, and a request taken
+// with the switch off neither pairs nor binds: a test whose
 // requests bind none asks for none (its learn step aside). A test the proxy
 // does not serve binds and notes nothing, and says so; a proxy that serves
 // no replay pairs the requests all the same, and binds nothing.
@@ -151,6 +152,15 @@ func TestAClientTestsRequestsAreTakenOnlyWhereTheyBind(t *testing.T) {
 	}
 
 	t.Setenv(provenswitch.Env, "1")
+	p, mm, _ = caseBindsProxy(t)
+	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
+	t.Setenv(provenswitch.Env, "")
+	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", at)
+	t.Setenv(provenswitch.Env, "1")
+	if _, ok := mm.vars.Lookup("key"); ok || !p.WantsIncoming() {
+		t.Fatal("a request taken with the switch off bound its test's variable, or was paired")
+	}
+
 	p, _, _ = caseBindsProxy(t)
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1")})
 	if p.WantsIncoming() {
@@ -181,6 +191,11 @@ func TestAClientTestsRequestsAreTakenOnlyWhereTheyBind(t *testing.T) {
 	mm.ServeExactTest("test-1", nil)
 	if err := mm.NoteExactTest("test-1", "key", "why"); err == nil || !strings.Contains(err.Error(), "no scope of test-1's variables has begun") {
 		t.Fatalf("a note before the test's variables began: %v", err)
+	}
+	_, mm, _ = caseBindsProxy(t)
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	if err := mm.NoteExactTest("", "key", "why"); err == nil || mm.vars.Unbound("key") != "" {
+		t.Fatalf("a note naming no test, after a test's variables began and the pool came back, was taken: %v", err)
 	}
 
 	p = &Proxy{learnTracker: learn.NewTracker()}
