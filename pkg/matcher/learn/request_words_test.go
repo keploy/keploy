@@ -1,8 +1,10 @@
 package learn
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -211,7 +213,11 @@ func TestAnUnreadClientRequestKeepsItsWordsAndItsURLAndHeaders(t *testing.T) {
 // classify (ClassifyArrived) and its decider (Decide). A value whose
 // changed word it holds, as written, case-folded or inside a base64 run of
 // it, is refused for it, and so is an instant where a form of it holds a
-// digit, and every value where it held a run longer than a window.
+// token shaped as an instant (an ISO 8601 date, a time of day, a run of
+// nine digits or more), and every value where it held a run longer than a
+// window. An upload of random bytes holds digits but no such token: a
+// later read of the clock is kept, as with no request. A window's cut never
+// splits a time of day so neither side holds it.
 func TestAClientRequestKeployCouldNotReadIsNoSourceOfAValueItsWordsLack(t *testing.T) {
 	const why = "its body is larger than keploy reads"
 	const p = "body.token"
@@ -313,25 +319,75 @@ func TestAClientRequestKeployCouldNotReadIsNoSourceOfAValueItsWordsLack(t *testi
 	if ln, _ := read(Instant, r, l, nil); ln.Kind == KindUnaccounted {
 		t.Fatalf("%s -> %s with no request: %s (%s); want learned, a read of the clock", r, l, ln.Kind, ln.Why)
 	}
-	refuses(Instant, r, l, earlier)
-	refuses(String, "booked at "+rt, "booked at "+lt, earlier)
-	// A moment the recorded value held and the live one does not, and an
-	// instant leaf whose text names no moment a text is read for (a time
-	// of day), are changes of an instant too.
-	refuses(String, "booked at "+rt, "booked at noon", earlier)
 	tod := func(at time.Time) string {
 		return TimeOfDayLeaf(p, p, at.Sub(at.Truncate(24*time.Hour)), time.Millisecond).Value
 	}
-	// Classify reads a time of day as no read of the clock, whatever came
-	// before it (unaccounted); the decider refuses it for the request.
 	rT, lT := tod(rAt.Add(-120*time.Millisecond)), tod(fAt.Add(-120*time.Millisecond))
-	if ln, d := read(Instant, rT, lT, earlier); ln.Kind != KindUnaccounted || !decidedUnread(d) {
-		t.Errorf("%s -> %s after a request that may hold it: %s (%s), %s; want refused for %q", rT, lT, ln.Kind, ln.Why, oDescribe(d), why)
+	// A moment the recorded value held and the live one does not, and an
+	// instant leaf whose text names no moment a text is read for (a time
+	// of day), are changes of an instant too: a request that holds a token
+	// shaped as an instant may be their source.
+	momentsRefused := func(body string, earlier []Earlier) {
+		t.Helper()
+		refuses(Instant, r, l, earlier)
+		refuses(String, "booked at "+rt, "booked at "+lt, earlier)
+		refuses(String, "booked at "+rt, "booked at noon", earlier)
+		// Classify reads a time of day as no read of the clock, whatever
+		// came before it (unaccounted); the decider refuses it for the
+		// request.
+		if ln, d := read(Instant, rT, lT, earlier); ln.Kind != KindUnaccounted || !decidedUnread(d) {
+			t.Errorf("%s: %s -> %s after a request that may hold it: %s (%s), %s; want refused for %q", body, rT, lT, ln.Kind, ln.Why, oDescribe(d), why)
+		}
 	}
+	// One that holds none is no source of them.
+	momentsKept := func(earlier []Earlier) {
+		t.Helper()
+		keeps(Instant, r, l, earlier)
+		keeps(String, "booked at "+rt, "booked at "+lt, earlier)
+		keeps(String, "booked at "+rt, "booked at noon", earlier)
+		keeps(Instant, rT, lT, earlier)
+	}
+	// The body's digits ("n17", "q7w8e9r0t1y2") are no instant's.
+	momentsKept(earlier)
+	// A token only a decoded form holds counts too: a sign-in time inside
+	// a base64 run, a time of day percent-escaped.
+	iat := base64.RawURLEncoding.EncodeToString([]byte(`{"iat":1762682400}`))
+	for _, at := range []string{"2026-11-09T10:00:00Z", "1762682400", "999999999", "booked 10:00:41", iat, "at 10%3A41"} {
+		momentsRefused(at, placed(big(`"rowvalue","n17",`, at)))
+	}
+	momentsKept(placed(big(`"rowvalue","n17",`, "12345678")))
 	letters := placed(big(`"rowvalue","nseventeen",`, "abc"))
-	keeps(Instant, r, l, letters)
-	keeps(String, "booked at "+rt, "booked at "+lt, letters)
+	momentsKept(letters)
 	keeps(String, "tok-1a2b3c4d5e6f", "tok-9f8e7d6c5b4a", letters)
+	// An upload of random bytes, no digit of it beside another, so it holds
+	// no instant's shape, but digits: a later read of the clock is kept.
+	// One that holds an instant among them may be its source.
+	noise := make([]byte, 2<<20)
+	rnd := rand.New(rand.NewPCG(11, 9))
+	for i := range noise {
+		noise[i] = byte(rnd.Uint32())
+		if i > 0 && isDigit(noise[i]) && isDigit(noise[i-1]) {
+			noise[i] = 'x'
+		}
+	}
+	if !bytes.ContainsAny(noise, "0123456789") {
+		t.Fatal("the random bytes hold no digit")
+	}
+	momentsKept(placed(string(noise)))
+	in := func(token string) string {
+		return string(noise[:1<<20]) + " " + token + " " + string(noise[1<<20:])
+	}
+	momentsKept(placed(in("12345678")))
+	for _, at := range []string{"2026-11-09T10:00:00Z", "1762682400"} {
+		momentsRefused("random bytes and "+at, placed(in(at)))
+	}
+	// A time of day to the minute that a window ends inside: cut before
+	// its ':', neither side would hold it.
+	split := strings.Repeat("abc ", (requestWordsWindow-4)/4) + "10:00" + strings.Repeat(" abc", 1000)
+	if split[requestWordsWindow-2] != ':' {
+		t.Fatalf("the window ends at %q, not inside the time of day", split[requestWordsWindow-4:requestWordsWindow])
+	}
+	momentsRefused("a time of day a window ends inside", placed(split))
 	oneRun := placed(`{"file":"` + strings.Repeat("QUJD", 20<<10) + `"}`)
 	refuses(String, "tok-1a2b3c4d5e6f", "tok-9f8e7d6c5b4a", oneRun)
 }

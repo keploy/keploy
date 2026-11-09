@@ -25,9 +25,10 @@ type RequestWords struct {
 	buf []byte
 	// n is the bytes written.
 	n int64
-	// digit says a form of the text held a digit, which an instant in any
-	// layout holds (MayHoldChange).
-	digit bool
+	// instant says a form of the text held a token shaped as an instant
+	// (instantShaped), which a value's instant in another layout may be
+	// written from (MayHoldChange).
+	instant bool
 	// undecoded says the text held a window with no place to cut it, a run
 	// of a form longer than a window (a file sent as one base64 string), or
 	// more than requestWordsMaxBytes: its forms were not all read, and it
@@ -87,6 +88,14 @@ func (w *RequestWords) Write(p []byte) (int, error) {
 // backslash, and '\' in a letter, '/', a backslash or '"', the only one of
 // these it cuts before, and "\"" reads as a space (unescaped), a
 // separator, so each side reads as it does whole.
+//
+// It never cuts before a ':', so no cut hides an instant (instantShaped):
+// a cut before the one ':' of a time of day to the minute ("10" | ":00")
+// leaves neither side one, and every other instant a cut may split (at a
+// space, ',' or '.', the only bytes it cuts before that an instant holds)
+// leaves one whole on a side: an ISO 8601 date before its time, a time of
+// day ("10:00:41") in an RFC 1123 one, the seconds of an epoch before its
+// fraction, a time of day before its fraction.
 func requestWordsCut(b []byte) int {
 	for i := len(b) - 1; i > 0; i-- {
 		if cutBefore(b[i]) {
@@ -98,19 +107,46 @@ func requestWordsCut(b []byte) int {
 
 // cutBefore says whether a text may be cut before c (requestWordsCut).
 func cutBefore(c byte) bool {
-	return c < 0x80 && !isB64Byte(c) && !strings.ContainsRune("=\\%", rune(c)) && (c == ' ' || c == '\t' || c > ' ' && c < 0x7f)
+	return c < 0x80 && !isB64Byte(c) && !strings.ContainsRune("=\\%:", rune(c)) && (c == ' ' || c == '\t' || c > ' ' && c < 0x7f)
 }
 
-// read adds the words of each form of text, one window (textForms).
+// read adds the words of each form of text, one window (textForms), and
+// notes a form shaped as an instant (instantShaped).
 func (w *RequestWords) read(text string) {
 	for _, form := range textForms(text) {
-		eachWord(form, func(word string) {
-			w.f.add(word)
-			if !w.digit && strings.ContainsAny(word, "0123456789") {
-				w.digit = true
-			}
-		})
+		eachWord(form, w.f.add)
+		if !w.instant && instantShaped(form) {
+			w.instant = true
+		}
 	}
+}
+
+// instantMinDigits is the fewest digits of a run read as an instant: Unix
+// seconds since 1973 (nine digits) and every longer epoch.
+const instantMinDigits = 9
+
+// instantShaped says whether s holds a token shaped as an instant: a run of
+// instantMinDigits digits or more, or a match of a layout keploy reads an
+// instant in (clockLayouts: an RFC 1123 or ISO 8601 date or time, a compact
+// one, a time-bearing UUID, an epoch, a time of day), whether or not its
+// reader reads it (month 13 is a match). Random bytes hold one about once
+// in a hundred megabytes: the likeliest, a time of day, is two digits, ':'
+// and two digits.
+func instantShaped(s string) bool {
+	run := 0
+	for i := 0; i < len(s); i++ {
+		if !isDigit(s[i]) {
+			run = 0
+		} else if run++; run >= instantMinDigits {
+			return true
+		}
+	}
+	for _, m := range scanInstants(s) {
+		if len(m) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // WriteText adds the words of s as a text of its own: a word that s begins
@@ -134,15 +170,18 @@ func (w *RequestWords) End() {
 // change from rec, as recorded, to live, as record's full round saw it:
 // where the value holds an instant (moments: an instant leaf, or a text
 // that holds a moment in a layout keploy reads), in any layout, where a
-// form of the request held a digit; else where it may hold a word of what
-// changed (movedOf), as written or case-folded, and where no word
-// changed. A nil or undecoded RequestWords may hold any change.
+// form of the request held a token shaped as an instant (instantShaped);
+// else where it may hold a word of what changed (movedOf), as written or
+// case-folded, and where no word changed. A nil or undecoded RequestWords
+// may hold any change. A value the application made from the request's
+// words by an offset from its clock ("in 5 days") has that read of the
+// clock as its source, not the request.
 func (w *RequestWords) MayHoldChange(rec, live string, moments bool) bool {
 	if w == nil || w.undecoded {
 		return true
 	}
 	if moments {
-		return w.digit
+		return w.instant
 	}
 	moved := movedOf(rec, live)
 	if len(moved) == 0 {
