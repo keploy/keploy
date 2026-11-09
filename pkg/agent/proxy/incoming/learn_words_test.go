@@ -215,6 +215,7 @@ func TestTakeRequestGivesNoWordsWhereItCannotReadThem(t *testing.T) {
 		{"gzip read", "Content-Encoding: gzip\r\n", string(encode(t, "gzip", small)), ""},
 		{"an encoding keploy does not decode", "Content-Encoding: compress\r\n", string(small), "Content-Encoding compress)"},
 		{"two encodings", "Content-Encoding: gzip, br\r\n", string(encode(t, "gzip", small)), "Content-Encoding gzip, br)"},
+		{"gzip that does not decode", "Content-Encoding: gzip\r\n", string(small), "does not decode as its Content-Encoding gzip says"},
 		{"deflate that does not decode", "Content-Encoding: deflate\r\n", string(encode(t, "zlib", small)[:20]), "Content-Encoding deflate)"},
 		{"raw deflate that does not decode", "Content-Encoding: deflate\r\n", string(encode(t, "raw deflate", small)[:20]), "Content-Encoding deflate)"},
 		{"zstd that does not decode", "Content-Encoding: zstd\r\n", string(encode(t, "zstd", small)[:20]), "Content-Encoding zstd)"},
