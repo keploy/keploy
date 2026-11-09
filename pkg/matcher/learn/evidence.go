@@ -1589,10 +1589,13 @@ func (oh *outsideHeld) asked(state bool, in ...map[int32]heldRoles) []int32 {
 // the places always read: any other holds neither word, so it shows
 // nothing of it (evidenceOf: evNone) and no token around it (tokenShown),
 // as the filter of its texts would tell (ruledOut), with no lookup per
-// place. Read always: a place whose texts the postings do not hold (a text
-// shorter than filterTextMin, one keploy could not read, one past the
-// set's budget, a call in no set), and one a word may show at without its
-// texts holding it (showsUntold): F's side unstated where F served it with no
+// place. The postings hold a text shorter than filterTextMin too, by its
+// words alone (shortEntry): an exchange's leaves are mostly such texts,
+// and read always, each was copied and asked for every word of every call,
+// nearly all of a word's check on api-server's round F. Read always: a
+// place whose texts the postings do not hold (one keploy could not read,
+// one past the set's budget, a call in no set), and one a word may show at
+// without its texts holding it (showsUntold): F's side unstated where F served it with no
 // view told or read (fMay) or with views (its views decide), a body that
 // declares no media type (gluedAt), a given (glued inside the word). A
 // place F's side leaves unstated otherwise (a recording round F never

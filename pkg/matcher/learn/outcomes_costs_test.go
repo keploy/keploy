@@ -3782,3 +3782,97 @@ func TestOutcomeCostARecordingFServedChangedIsReadForEveryWord(t *testing.T) {
 		t.Errorf("over %d recordings, one served changed, the call read %d places; want the changed one for each of the 5 words (5 to 10: wordAt may decide a word twice)", n, asks)
 	}
 }
+
+// An exchange served leaf by leaf hands the call each leaf's two texts,
+// most shorter than filterTextMin: the set's postings hold their words
+// (shortEntry), so a word's check reads and copies only the leaves that may
+// hold it, not every leaf of every exchange for every word (on api-server's
+// round F, about 2,000 leaves a call, each read for every word). Beside n
+// exchanges of two short leaves that hold no word, one leaf served
+// unchanged holds R's first word (refused, naming it), and one round F
+// served changed holds F's second word (refused as unknown, naming it):
+// the verdicts are those of the two exchanges alone, at 300 and 3000
+// exchanges, and the places read do not grow with them.
+func TestOutcomeCostAWordsCheckReadsOnlyTheShortLeavesThatMayHoldIt(t *testing.T) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
+	exchange := func(name string, at time.Time, leaves ...[3]string) Earlier {
+		e := Earlier{Mock: name, At: at, Payload: oPayload(name, at)}
+		for _, l := range leaves {
+			e.Seen = append(e.Seen, Seen{Side: Response, Leaf: Leaf{Path: l[0], Noise: l[0], Type: String, Value: l[1]}, Live: l[2]})
+		}
+		return e
+	}
+	decide := func(n int) (string, int64, int64) {
+		earlier := make([]Earlier, 0, n+2)
+		for i := range n {
+			note, ref := fmt.Sprintf("Item %d of the run", i), fmt.Sprintf("Ref-%05d", i)
+			earlier = append(earlier, exchange(fmt.Sprintf("mock-%d", i), eRecAt.Add(-time.Duration(n+10-i)*time.Millisecond),
+				[3]string{"body.note", note, note}, [3]string{"body.ref", ref, ref}))
+		}
+		earlier = append(earlier,
+			exchange("mock-held", eRecAt.Add(-6*time.Millisecond), [3]string{"body.ref", "a1b2c3d4", "a1b2c3d4"}),
+			exchange("mock-gave", eRecAt.Add(-4*time.Millisecond), [3]string{"body.ref", "Ref-gave", "e9d8c7b6"}))
+		tr := NewTracker()
+		tr.NewSet()
+		var got string
+		var copies, asks int64
+		// The second call of the set, as the first: the postings are the set's.
+		for range 2 {
+			tr.Begin()
+			c, a := placeCopies.Load(), placeAsks.Load()
+			got = oDescribe(Decide(costCall(tr.Drifts(), "body.ids", rec, live, eRecAt, earlier, nil, nil, nil)))
+			copies, asks = placeCopies.Load()-c, placeAsks.Load()-a
+			tr.End()
+		}
+		return got, copies, asks
+	}
+	want, _, _ := decide(0)
+	if !strings.Contains(want, "a1b2c3d4->f0e9d8c7 refused") || !strings.Contains(want, "mock-held") ||
+		!strings.Contains(want, "b2c3d4e5->e9d8c7b6 refused") || !strings.Contains(want, "mock-gave") || strings.Count(want, "fresh") != 3 {
+		t.Fatalf("the two exchanges alone decide %q; want a1b2c3d4 refused at mock-held, b2c3d4e5 refused at mock-gave, each other word fresh", want)
+	}
+	for _, n := range []int{300, 3000} {
+		got, copies, asks := decide(n)
+		t.Logf("%d exchanges of short leaves: %s; places read %d, copied %d", n, got, asks, copies)
+		if got != want {
+			t.Errorf("beside %d exchanges of short leaves that hold no word the call decides %q; want %q, as the two exchanges alone", n, got, want)
+		}
+		// mock-held's leaf for R's first word, mock-gave's for F's second,
+		// each once a pass (wordAt may decide a word twice).
+		if asks < 2 || asks > 4 || copies < 2 || copies > 4 {
+			t.Errorf("beside %d exchanges of short leaves the call read %d places and copied %d; want only the two leaves that hold a word (2 to 4 each)", n, asks, copies)
+		}
+	}
+}
+
+// The set's map of its short texts' postings entries, by the text
+// (shortEntry), allocates its first group (208 bytes: 8 slots of a 16-byte
+// text and an 8-byte pointer, and their control word) at its first entry,
+// which counts it; three short texts of one length, each one word, count
+// the same bytes but that. A recording's filter posts its words first, so
+// the postings' own first group is no short text's.
+func TestOutcomeCostTheFirstShortTextsPostingsEntryCountsItsMapsFirstGroup(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	x := newReaderIndex(dc)
+	defer x.release()
+	used := func() int64 { dc.set.mu.Lock(); defer dc.set.mu.Unlock(); return dc.set.budget.used }
+	if x.textOf(RawOf(getAnswer("mock-0", "http://api/items/0", `{"v":"posted first"}`, eRecAt), true)).postID() < 0 {
+		t.Fatalf("a recording's words are not posted within the set's budget")
+	}
+	var got []int64
+	for i := range 3 {
+		h := x.text(fmt.Sprintf("a1b2c3d%d", i))
+		u := used()
+		if h.setFilter() != nil || h.postID() < 0 {
+			t.Fatalf("short text %d: a filter kept (%v), or its words not posted", i, h.setFilter() != nil)
+		}
+		got = append(got, used()-u)
+	}
+	if got[0]-got[1] != 208 || got[1] != got[2] || got[1] <= 0 {
+		t.Errorf("three alike short texts' postings entries count %v bytes; want the first 208 more than each later one (its map's first group), the later ones alike", got)
+	}
+}
