@@ -2867,7 +2867,9 @@ func (dc *decider) heldElsewhere(a, read moment, unit time.Duration, text string
 
 // movedOn reports whether live, a place's text in round F, holds another
 // moment than a where rec, its recorded text, holds a, written in a layout
-// rec writes a in: a value made anew each run, in one form.
+// rec writes a in: a value made anew each run, in one form. A layout's
+// instants are all keyed or none (a time-ordered UUID's), and one that
+// names a is keyed, so an instant of live in its layout is too.
 func (dc *decider) movedOn(rec, live *readerText, a moment) bool {
 	if dc.holdsMomentOf(live, a) {
 		return false
@@ -2876,7 +2878,7 @@ func (dc *decider) movedOn(rec, live *readerText, a moment) bool {
 	ls, _ := live.spansOf()
 	return slices.ContainsFunc(rs, func(r instant) bool {
 		return dc.namedIn([]instant{r}, a, func(h, m moment) bool { return h.key == m.key }) > 0 &&
-			slices.ContainsFunc(ls, func(l instant) bool { return l.keyed && l.layout == r.layout })
+			slices.ContainsFunc(ls, func(l instant) bool { return l.layout == r.layout })
 	})
 }
 
