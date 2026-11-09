@@ -416,3 +416,79 @@ func TestOutcomeCostARecordingTwoReadersDecodeAtOnceIsMeasuredOnce(t *testing.T)
 		t.Errorf("two first reads of one recording at once kept %d recordings; want 1", kept)
 	}
 }
+
+// A recording whose least size (its record's, as the store gives it) has
+// room in the set but whose measured heap has none is measured once, at
+// its first read, and refused: the set remembers its key, on its budget, so
+// each later read decodes it, as with no set, and measures it no more. A
+// key of another generation of its store names it anew and is measured
+// once more; the set's next set remembers none.
+func TestOutcomeCostARecordingTheSetRefusedIsMeasuredOnce(t *testing.T) {
+	headers := func() *models.Mock {
+		m := recordingOf("headers")
+		h := map[string]string{}
+		for i := range 4000 {
+			h["h"+strconv.Itoa(i)] = "v" + strconv.Itoa(i)
+		}
+		m.Spec.HTTPReq.Header = h
+		return m
+	}
+	const least = 2*54219 + 1<<10 // DiskMocks.recordedAt's, of its 54,219-byte record
+	heap := recordingHeap(headers())
+	if heap <= 2*least {
+		t.Fatalf("4000 headers measure %d bytes; want well past their least size, %d", heap, least)
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	s := tr.derived
+	s.mu.Lock()
+	s.budget.limit = s.budget.used + (least+heap)/2
+	s.mu.Unlock()
+	var n int
+	decode := func() (*models.Mock, error) { n++; return headers(), nil }
+	measured := recordingMeasures.Load()
+	const reads = 20
+	for range reads {
+		m, err := tr.KeepRecording("1:0:0", least, decode)
+		if err != nil || !reflect.DeepEqual(m, headers()) {
+			t.Fatalf("a refused recording read as %v (error %v); want it as decoded", m != nil, err)
+		}
+	}
+	s.mu.Lock()
+	kept, refused, used, all := len(s.recs.by), len(s.refused.by), s.budget.used, s.usedBytes
+	s.mu.Unlock()
+	if d := recordingMeasures.Load() - measured; n != reads || d != 1 || kept != 0 {
+		t.Errorf("%d reads of a recording whose heap has no room decoded %d, measured %d, kept %d; want %d, 1, 0", reads, n, d, kept, reads)
+	}
+	if want := int64(slotBytes + len("1:0:0")); refused != 1 || used != want {
+		t.Errorf("the set remembers %d refused recordings and counts %d bytes on its budget; want 1, its slot's %d", refused, used, want)
+	}
+	if u := all(); u != used {
+		t.Errorf("the set's tiers count %d bytes, its budget %d; want the same", u, used)
+	}
+	measured = recordingMeasures.Load()
+	if _, err := tr.KeepRecording("1:1:0", least, decode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.KeepRecording("1:1:0", least, decode); err != nil {
+		t.Fatal(err)
+	}
+	if d := recordingMeasures.Load() - measured; d != 1 {
+		t.Errorf("a key of the store's next generation, read twice, measured %d; want 1", d)
+	}
+	tr.NewSet()
+	if u := s.usedBytes(); u != 0 {
+		t.Errorf("the set over keeps %d bytes; want none", u)
+	}
+	next := tr.derived
+	next.mu.Lock()
+	next.budget.limit = next.budget.used + (least+heap)/2
+	next.mu.Unlock()
+	measured = recordingMeasures.Load()
+	if _, err := tr.KeepRecording("1:0:0", least, decode); err != nil {
+		t.Fatal(err)
+	}
+	if d := recordingMeasures.Load() - measured; d != 1 {
+		t.Errorf("the next set's first read of a recording the set before refused measured %d; want 1", d)
+	}
+}

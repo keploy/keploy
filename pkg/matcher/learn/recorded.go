@@ -23,8 +23,11 @@ const partRecording part = 1
 // decoding each again on every call cost a call more than the rest of its
 // reads of them. The set keeps it only in the room its budget has spare
 // (setBudget): never past it, and the first let go when any other part of
-// the set needs room, so the set's memory is what it was, and a recording
-// the set has no room for is decoded at each read, as before. The set
+// the set needs room, so the set's memory is what it was. A recording
+// whose least size has no room is decoded at each read, as before, and
+// not measured; one whose least size has room but whose measured heap has
+// none is measured once, and the set remembers its key (keepSpare), so
+// each later read decodes it, as before, and measures it no more. The set
 // keeps it as decode gave it; each caller gets a copy of its own
 // (models.Mock.ShallowCopy), as the store gave one per read before, whose
 // fields of its own it may set, its response's too (HydrateResponse). A
@@ -64,8 +67,8 @@ func (s *setDerived) keepRecording(key string, size int64, decode func() (*model
 	room := s.recRoom(key, size)
 	s.mu.Unlock()
 	// Measured outside the set's lock, and only where the least size has
-	// room: a recording the set has no room for is decoded at each read,
-	// as before, at no more cost than its decode.
+	// room and the set has not refused the recording before: one it has
+	// refused is decoded at each read, as before, and not measured again.
 	if room {
 		size = max(size, recordingHeap(m))
 		s.mu.Lock()
@@ -76,11 +79,12 @@ func (s *setDerived) keepRecording(key string, size int64, decode func() (*model
 }
 
 // recRoom reports whether the recordings' tier may keep a recording of size
-// bytes under key (keepSpare's first checks), at the least: s.mu is held.
+// bytes under key (keepSpare's first checks), at the least, and the set
+// has not refused it before (refused): s.mu is held.
 func (s *setDerived) recRoom(key string, size int64) bool {
 	t := &s.recs
 	size += slotBytes + int64(len(key))
-	return t.by[key] == nil && size <= t.cap && s.budget.used-t.used+size <= s.budget.limit
+	return t.by[key] == nil && s.refused.by[key] == nil && size <= t.cap && s.budget.used-t.used+size <= s.budget.limit
 }
 
 // recordingMeasures counts the recordings recordingHeap measured, for the
@@ -162,8 +166,10 @@ func recordingHeap(m *models.Mock) int64 {
 // keepSpare keeps m under key in the recordings' tier (recs), within the
 // tier's cap and the room the set's budget has spare: it lets go of the
 // recordings it read least recently to make room, never another tier's
-// part, and keeps none where the other tiers leave no room for it. s.mu is
-// held.
+// part, and keeps none where the other tiers leave no room for it. A key it
+// keeps none of it remembers (refused), on the set's budget, so recRoom
+// refuses it from then on, before a reader measures the recording again.
+// s.mu is held.
 func (s *setDerived) keepSpare(key string, size int64, m *models.Mock) {
 	t := &s.recs
 	if t.by[key] != nil {
@@ -171,6 +177,7 @@ func (s *setDerived) keepSpare(key string, size int64, m *models.Mock) {
 	}
 	size += slotBytes + int64(len(key))
 	if size > t.cap || s.budget.used-t.used+size > s.budget.limit {
+		s.refused.keep(key, partRecording, 0, func(*struct{}) {})
 		return
 	}
 	for t.used+size > t.cap || s.budget.used+size > s.budget.limit {

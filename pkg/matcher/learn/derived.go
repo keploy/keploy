@@ -139,6 +139,11 @@ type setDerived struct {
 	// the room the budget has spare, and the first let go when any other
 	// part needs room (keepSpare).
 	recs tier[*models.Mock]
+	// refused are the keys of the recordings keepSpare refused once their
+	// least size had room (recRoom) but their measured heap did not: one
+	// more tier on budget, a slot each, let go of by none, so a recording
+	// is measured once for the set, not at each read (keepRecording).
+	refused tier[struct{}]
 	// recDecodes counts the recordings decoded for KeepRecording, for the
 	// rows.
 	recDecodes int
@@ -529,6 +534,7 @@ func newSetDerived() *setDerived {
 	s.views = newSetBodyStore(&s.mu, b, viewBudget)
 	s.views.forgetUnread = true
 	s.recs = newTier[*models.Mock](recordingBudget, b, true)
+	s.refused = newTier[struct{}](noCap, b, false)
 	s.inFlight = semaphore.NewWeighted(readInFlight)
 	// The decoded recordings go first: they keep only what the budget has
 	// spare, and one let go is decoded again from the store, as it was at
@@ -565,6 +571,7 @@ func (s *setDerived) drop() {
 	s.bodies.over = true
 	s.views.kept.drop()
 	s.recs.drop()
+	s.refused.drop()
 }
 
 // keepsPayloads reports whether the set's store keeps the payloads a test
@@ -585,7 +592,7 @@ func (s *setDerived) keepsPayloads() bool {
 func (s *setDerived) usedBytes() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.held.used + s.words.used + s.forms.used + s.drifts.used + s.bodies.kept.used + s.views.kept.used + s.recs.used
+	return s.held.used + s.words.used + s.forms.used + s.drifts.used + s.bodies.kept.used + s.views.kept.used + s.recs.used + s.refused.used
 }
 
 // keepRun counts size bytes more of the run's places (Tracker.keepRun) on
