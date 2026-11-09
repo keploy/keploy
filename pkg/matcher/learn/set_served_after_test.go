@@ -245,16 +245,16 @@ func TestOutcomeAWordAtASetRecordingServedOnlyAfterTheCallIsNoEvidence(t *testin
 // F gave it the application before the call that reads them, not before
 // the first call that kept them: its kept entry is keyed by that too
 // (wordsKey.servedAfter). Handed, served as recorded, to three calls of one
-// set, before the first and third arrived and only after the second did:
-// the recorded word there is set aside where round F gave it before the
-// call, and refused where round F gave it only after, its words read once
-// each way.
+// set, before the first and third arrived and only after the second and
+// fourth did: the recorded word there is set aside where round F gave it
+// before the call, and refused where round F gave it only after, its words
+// read once each way.
 func TestOutcomeAnOutsideRecordingsKeptWordsSayWhenRoundFGaveIt(t *testing.T) {
 	const rec, live = "ids 7f3a9c", "ids 2b8e41"
 	m := getAnswer("mock-7", "http://api/items/7", `{"ref":"7f3a9c"}`, eRecAt.Add(-time.Minute))
 	tr := NewTracker()
 	tr.NewSet()
-	for c, after := range []bool{false, true, false} {
+	for c, after := range []bool{false, true, false, true} {
 		tr.Begin()
 		dc := tr.Drifts()
 		x := dc.LazyRawOf(m, true, nil).ServedAs(1).ServedAsRecorded().OfAnotherTest()
@@ -265,7 +265,7 @@ func TestOutcomeAnOutsideRecordingsKeptWordsSayWhenRoundFGaveIt(t *testing.T) {
 		tr.End()
 		what := "call " + strconv.Itoa(c+1) + ", round F served it " + map[bool]string{false: "before the call", true: "only after the call"}[after]
 		t.Logf("%s: %s (words read %d)", what, oDescribe([]Decision{d}), builds)
-		if want := []int{1, 1, 0}[c]; builds != want {
+		if want := []int{1, 1, 0, 0}[c]; builds != want {
 			t.Errorf("%s: read its words %d times; want %d", what, builds, want)
 		}
 		if !after {
