@@ -36,7 +36,8 @@ func takenLog() []Take {
 // AnsweredInRound and ClaimedInRound, and answers each as a read of the log
 // for that one recording does: a consume or a spend that holds for the view
 // in force answers, a give-back takes back only its own recording's entry,
-// and a claim is no answer. A copy whose log was cut reads its own log.
+// and a claim is no answer. A copy whose log was cut, or replaced by
+// another of the same length, reads its own log.
 func TestRoundSnapshotTakenAnswersAsAScanOfTheLog(t *testing.T) {
 	want := map[string][2]bool{ // name: answered, claimed
 		"consumed": {true, false}, "spent-old-view": {false, false}, "spent-this-view": {true, false},
@@ -70,6 +71,17 @@ func TestRoundSnapshotTakenAnswersAsAScanOfTheLog(t *testing.T) {
 	if !cut.AnsweredInRound("given-back") || cut.AnsweredInRound("other") || cut.ClaimedInRound("claimed") {
 		t.Errorf("a copy with its log cut at 5 entries answered from the whole log: given-back %v (want true), other %v (want false), claimed %v (want false)",
 			cut.AnsweredInRound("given-back"), cut.AnsweredInRound("other"), cut.ClaimedInRound("claimed"))
+	}
+	// A copy whose log is another of the same length: it answers from that
+	// log, not from the index its snapshot read of the first.
+	replaced := stored
+	replaced.Taken = make([]Take, len(log))
+	for i := range replaced.Taken {
+		replaced.Taken[i] = Take{Mock: &models.Mock{Name: "replaced"}, How: TakeConsumed, Of: -1}
+	}
+	if !replaced.AnsweredInRound("replaced") || replaced.AnsweredInRound("consumed") || replaced.ClaimedInRound("claimed") {
+		t.Errorf("a copy with its log replaced by another of %d entries answered from the first: replaced %v (want true), consumed %v (want false), claimed %v (want false)",
+			len(log), replaced.AnsweredInRound("replaced"), replaced.AnsweredInRound("consumed"), replaced.ClaimedInRound("claimed"))
 	}
 }
 
