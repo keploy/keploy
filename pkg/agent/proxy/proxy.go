@@ -5185,7 +5185,7 @@ func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPR
 	}
 	return func(live *models.HTTPReq, unread string) {
 		if learned != nil {
-			learned(live, unread)
+			learned(live, unread, nil)
 		}
 		if bind != nil {
 			bind(live, unread)

@@ -194,6 +194,9 @@ type Tracker struct {
 	// a request whose body ended after it belongs to no running test
 	// (IncomingComing).
 	incomingGen uint64
+	// incomingWords counts the places of incoming that keep their request's
+	// words (keepWordsLocked).
+	incomingWords int
 	// awaiting is open while the running test awaits its test case's request
 	// (BeginAwaiting, Await): a call that reads the test's places then
 	// (Places) waits (AwaitRequest) until Give brings the request, or the
@@ -285,7 +288,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.answered, t.drifts = nil, t.newDrifts()
 	t.servedAt, t.serveAt = nil, nil
 	t.given, t.gave = nil, nil
-	t.cases, t.incoming = caseCursor{}, nil
+	t.cases, t.incoming, t.incomingWords = caseCursor{}, nil, 0
 	t.incomingGen++
 	say := t.closeUnread()
 	t.open, t.began = false, false
@@ -601,7 +604,7 @@ func (t *Tracker) beginAt(at time.Time) func() {
 	t.drifts = t.newDrifts()
 	t.names, t.taken = nil, nil
 	t.given, t.gave = nil, nil
-	t.cases, t.incoming = caseCursor{}, nil
+	t.cases, t.incoming, t.incomingWords = caseCursor{}, nil, 0
 	t.incomingGen++
 	t.open, t.began = true, true
 	t.beganAt = at
@@ -772,12 +775,22 @@ func (t *Tracker) WantsIncoming() bool {
 // reached the application while no test was open: keploy cannot tell what
 // the recording sent in its place.
 func (t *Tracker) Incoming(live *models.HTTPReq, unread string, at time.Time) bool {
+	return t.IncomingWords(live, unread, nil, at)
+}
+
+// IncomingWords is Incoming of a request keploy could not read (unread)
+// whose words it read as they passed (words; nil where it read none): the
+// place is one keploy could not read that holds those words, and a value
+// that changed in a call after it none of whose words it may hold
+// (RequestWords.MayHold) is not refused for it (requestUnread). Past
+// maxRequestWords such places in a test, a place keeps no words.
+func (t *Tracker) IncomingWords(live *models.HTTPReq, unread string, words *RequestWords, at time.Time) bool {
 	if t == nil || live == nil || at.IsZero() {
 		return false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	_, _, ok := t.pairIncomingLocked(live, unread, at)
+	_, _, ok := t.pairIncomingLocked(live, unread, words, at)
 	return ok
 }
 
@@ -792,27 +805,28 @@ const ComingUnread = "its body was still coming from its client, and keploy read
 // could not read (ComingUnread), so every value that changed in a call that
 // reaches keploy before its body ended is refused. done gives the request
 // with its body once it ended (unread, where not "", why keploy could not
-// read it), and the place is from then what Incoming makes of it. A done
-// after the next test began, or a second one, does nothing. It is nil where
-// live pairs with none (Incoming's false).
-func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time) (done func(live *models.HTTPReq, unread string)) {
+// read it, and words, where not nil, the words of what it could not read:
+// IncomingWords), and the place is from then what IncomingWords makes of
+// it. A done after the next test began, or a second one, does nothing. It
+// is nil where live pairs with none (Incoming's false).
+func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time) (done func(live *models.HTTPReq, unread string, words *RequestWords)) {
 	if t == nil || live == nil || at.IsZero() {
 		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	k, c, ok := t.pairIncomingLocked(live, ComingUnread, at)
+	k, c, ok := t.pairIncomingLocked(live, ComingUnread, nil, at)
 	if !ok {
 		return nil
 	}
 	gen := t.incomingGen
 	var once sync.Once
-	return func(live *models.HTTPReq, unread string) {
+	return func(live *models.HTTPReq, unread string, words *RequestWords) {
 		once.Do(func() {
 			t.mu.Lock()
 			defer t.mu.Unlock()
 			if t.incomingGen == gen && k < len(t.incoming) {
-				t.incoming[k] = incomingPlace(c, live, unread, at)
+				t.incoming[k] = incomingPlace(c, live, unread, t.keepWordsLocked(unread, words), at)
 			}
 		})
 	}
@@ -823,7 +837,7 @@ func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time) (done func(
 // notes it as an earlier place of the test's calls (incomingPlace): its
 // index among t.incoming, and the case. ok is false where no test is open or
 // live pairs with none. t.mu is held.
-func (t *Tracker) pairIncomingLocked(live *models.HTTPReq, unread string, at time.Time) (k int, c ClientCase, ok bool) {
+func (t *Tracker) pairIncomingLocked(live *models.HTTPReq, unread string, words *RequestWords, at time.Time) (k int, c ClientCase, ok bool) {
 	if !t.open {
 		return -1, ClientCase{}, false
 	}
@@ -833,21 +847,49 @@ func (t *Tracker) pairIncomingLocked(live *models.HTTPReq, unread string, at tim
 	}
 	t.cases.used[i] = true
 	c = t.cases.cases[i]
-	t.incoming = append(t.incoming, incomingPlace(c, live, unread, at))
+	t.incoming = append(t.incoming, incomingPlace(c, live, unread, t.keepWordsLocked(unread, words), at))
 	return len(t.incoming) - 1, c, true
+}
+
+// maxRequestWords is how many requests' words (RequestWords) a test keeps:
+// a test that sends more requests keploy could not read keeps no words of
+// the later ones, whose places then refuse every value that changed after
+// them, as a place with no words does (requestUnread).
+const maxRequestWords = 32
+
+// keepWordsLocked is words, of a request keploy could not read (unread),
+// where the running test keeps fewer than maxRequestWords requests' words,
+// counting it; nil past that, and of a request keploy read. t.mu is held.
+func (t *Tracker) keepWordsLocked(unread string, words *RequestWords) *RequestWords {
+	if unread == "" || words == nil || t.incomingWords >= maxRequestWords {
+		return nil
+	}
+	t.incomingWords++
+	return words
 }
 
 // incomingPlace is live, a request of a client test that reached the
 // application at at, paired with c, its recorded request, as an earlier
 // place of the test's calls (IncomingRequest; GivenRequest); one keploy
 // could not read where unread is not "".
-func incomingPlace(c ClientCase, live *models.HTTPReq, unread string, at time.Time) Earlier {
+//
+// words, where not nil, are the words of the body keploy could not read
+// (IncomingWords): the place holds them and the words of live's URL and
+// header values, which keploy read (Earlier.unreadWords).
+func incomingPlace(c ClientCase, live *models.HTTPReq, unread string, words *RequestWords, at time.Time) Earlier {
 	req := IncomingRequest(c.Name, c.Req, live)
 	if unread != "" {
 		req = &models.TestRequest{Test: c.Name, RecordedAt: c.Req.Timestamp, Unread: unread}
 	}
 	e := GivenRequest(req)
 	e.incoming, e.arrivedRec, e.arrivedLive = true, req.RecordedAt, at
+	if words != nil { // keepWordsLocked keeps none of a request keploy read
+		words.WriteText(live.URL)
+		for _, v := range live.Header {
+			words.WriteText(v)
+		}
+		e.unreadWords = words
+	}
 	return e
 }
 

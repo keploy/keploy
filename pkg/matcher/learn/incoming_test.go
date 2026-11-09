@@ -461,7 +461,7 @@ func TestAClientRequestStillComingIsUnreadUntilItsBodyEnds(t *testing.T) {
 	}
 	whole := *live
 	whole.Body = `{"name":"app-2"}`
-	done(&whole, "")
+	done(&whole, "", nil)
 	got = tr.Placed().Earlier
 	if len(got) != 1 || got[0].Unread != "" || got[0].Mock != "test case post-apps-1" || !got[0].arrivedLive.Equal(at) || !holdsSeen(got[0], "body.name", "app-1", "app-2") {
 		t.Fatalf("placed once whole %+v", got)
@@ -469,16 +469,18 @@ func TestAClientRequestStillComingIsUnreadUntilItsBodyEnds(t *testing.T) {
 	if r := requestUnread(got); r != "" {
 		t.Fatalf("once whole, what changed is refused with %q", r)
 	}
-	done(live, "its body did not come whole")
+	done(live, "its body did not come whole", nil)
 	if got := tr.Placed().Earlier; got[0].Unread != "" {
 		t.Fatalf("a second done changed the place: %+v", got)
 	}
 
-	// Its body ends once the next test began: that test's places stay.
+	// Its body ends once the next test began: that test's places stay,
+	// though its first place stands where the coming request's stood.
 	done = tr.IncomingComing(live, at)
 	if done != nil {
 		t.Fatal("a request with no recorded request left paired")
 	}
+	tr.Begin()
 	tr.SetCases([]ClientCase{{Name: "post-apps-1", Req: rec}})
 	done = tr.IncomingComing(live, at)
 	tr.Begin()
@@ -486,7 +488,7 @@ func TestAClientRequestStillComingIsUnreadUntilItsBodyEnds(t *testing.T) {
 	if !tr.Incoming(&whole, "", at) {
 		t.Fatal("the next test's request did not pair")
 	}
-	done(live, "its body did not come whole")
+	done(live, "its body did not come whole", nil)
 	if got := tr.Placed().Earlier; len(got) != 1 || got[0].Unread != "" || got[0].Mock != "test case post-apps-2" {
 		t.Fatalf("a done after the next test began changed its places: %+v", got)
 	}
@@ -499,7 +501,7 @@ func TestAClientRequestStillComingIsUnreadUntilItsBodyEnds(t *testing.T) {
 	tr.Begin()
 	tr.SetCases([]ClientCase{{Name: "post-apps-5", Req: rec}})
 	tr.Incoming(&whole, "", at)
-	done(live, "its body did not come whole")
+	done(live, "its body did not come whole", nil)
 	if got := tr.Placed().Earlier; len(got) != 1 || got[0].Unread != "" || got[0].Mock != "test case post-apps-5" {
 		t.Fatalf("a done after a new set began changed its places: %+v", got)
 	}

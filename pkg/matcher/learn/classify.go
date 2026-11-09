@@ -137,7 +137,10 @@ type Earlier struct {
 	// came before the call in both (arrivedBefore).
 	incoming                bool
 	arrivedRec, arrivedLive time.Time
-	Seen                    []Seen
+	// unreadWords, of an incoming place keploy could not read (Unread), are
+	// the words of its request (Tracker.IncomingWords; nil: none read).
+	unreadWords *RequestWords
+	Seen        []Seen
 	// noTime: the exchange's recorded time keploy cannot read (At was the
 	// zero time), read as one made at the call's own instant
 	// (timedEarlier), and named so.
