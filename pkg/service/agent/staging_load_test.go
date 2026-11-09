@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -574,5 +576,149 @@ func TestAStoreSeedsTheProxyWithThePortsItsRecordingReached(t *testing.T) {
 	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
 	if proxyPkg.RecordedPort(18094) {
 		t.Fatal("a store with no on-disk store kept the previous store's ports")
+	}
+}
+
+// diskListed registers kind, until t ends, as one whose parser holds a call
+// while the set holds an unserved recording of it (models.RegisterAnswerPlaced,
+// matching no mock, so none is placed at its answer), as the Redis parser
+// registers its kind: the agent's on-disk store lists it by kind in either
+// switch mode.
+func diskListed(t *testing.T, kind models.Kind) {
+	t.Helper()
+	t.Cleanup(models.RegisterAnswerPlaced(kind, func(*models.Mock) bool { return false }))
+}
+
+// ofKindProxy is a recordingProxy that takes the set's recordings of a kind
+// (coreAgent.RecordedOfKindSetter).
+type ofKindProxy struct {
+	*recordingProxy
+	src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+	set int
+}
+
+func (p *ofKindProxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.src, p.set = src, p.set+1
+	return nil
+}
+
+// With the switch off, each staging hands the proxy the on-disk store's
+// recordings of a kind it lists by kind, one placed at its answer, as Redis
+// is (integrations.RecordedSetRanger): a test's call reads its own window,
+// and the source still ranges the whole set, those of the other tests and of
+// the startup band included.
+func TestEveryStagingHandsTheProxyTheSetAsRecorded(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "0")
+	diskListed(t, models.HTTP)
+	a, rp, _ := stagingStore(t)
+	p := &ofKindProxy{recordingProxy: rp}
+	a.Proxy = p
+	for _, params := range []models.MockFilterParams{
+		{AfterTime: models.BaseTime, BeforeTime: stageT0.Add(2 * time.Hour), FirstRecordedTestStart: stageT0, StrictMockWindow: true},
+		{AfterTime: stageT0, BeforeTime: stageT0.Add(2 * time.Second), StrictMockWindow: true},
+	} {
+		before := p.set
+		if err := a.UpdateMockParams(context.Background(), params); err != nil {
+			t.Fatal(err)
+		}
+		if p.set != before+1 || p.src == nil {
+			t.Fatalf("staging from %s set the source %d times (nil: %v); want once, the on-disk store's", params.AfterTime, p.set-before, p.src == nil)
+		}
+	}
+	if got, want := sortedNames(p.windowed[1][0]), []string{"boot-auth", "boot-config", "test-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the test's call staged %v; want %v", got, want)
+	}
+	var names []string
+	if err := p.src(models.HTTP, func(name string, _ func() (*models.Mock, error)) bool {
+		names = append(names, name)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sortedNames(names), []string{"boot-auth", "boot-config", "poll-later", "test-a", "test-b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the source ranged %v; want the whole set %v", got, want)
+	}
+}
+
+// recordedSetProxy puts a real MockManager behind the agent and hands it the
+// set's recordings of a kind (coreAgent.RecordedOfKindSetter), as the proxy
+// does.
+type recordedSetProxy struct{ *mgrProxy }
+
+func (p *recordedSetProxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.mm.SetRecordedOfKind(src)
+	return nil
+}
+
+// A pipelined write's frames share one request time, and the agent keeps
+// some of a set's per-test mocks in memory (no reply time, so not on disk:
+// proxyPkg.EligibleForDisk) and the rest on disk. A test's read lists the
+// resident ones first, and the set as recorded (MockManager.RangeRecordedSet)
+// visits the trees, then the disk. Each mock still carries its place in the
+// set as the client sent it (models.TestModeInfo.LoadSeq), whichever tier
+// holds it, so a parser orders frames of one time as recorded.
+func TestEveryMockKeepsItsPlaceInTheSetWhicheverTierHoldsIt(t *testing.T) {
+	for _, sw := range []string{"0", "1"} {
+		t.Run("KEPLOY_PROVEN="+sw, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", sw)
+			t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+			diskListed(t, models.HTTP)
+			var filtered []*models.Mock
+			want := map[string]uint32{}
+			for i, resident := range []bool{false, true, false, true, false} {
+				m := stageMock("frame-"+string(rune('0'+i)), "/q", stageT0.Add(time.Second))
+				if resident {
+					m.Spec.ResTimestampMock = time.Time{}
+				}
+				filtered = append(filtered, m)
+				want[m.Name] = uint32(i + 1)
+			}
+			// A later test's, outside the window staged: one on disk, one
+			// kept in memory.
+			filtered = append(filtered, stageMock("later", "/q", stageT0.Add(time.Minute)))
+			want["later"] = 6
+			held := stageMock("later-resident", "/q", stageT0.Add(time.Minute))
+			held.Spec.ResTimestampMock = time.Time{}
+			filtered = append(filtered, held)
+			want["later-resident"] = 7
+			unfiltered := []*models.Mock{stageSessionMock("session", "/config")}
+			want["session"] = 8
+
+			mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			a := strictAgent(true)
+			a.Proxy = &recordedSetProxy{&mgrProxy{mm: mm}}
+			header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, filtered, unfiltered))
+			if err := a.StoreMocksStream(context.Background(), header, dec); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+				AfterTime: stageT0, BeforeTime: stageT0.Add(2 * time.Second), StrictMockWindow: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]uint32{}
+			var order []string
+			whole, err := mm.RangeRecordedSet(models.HTTP, func(name string, load func() (*models.Mock, error)) bool {
+				m, err := load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				got[name] = m.TestModeInfo.LoadSeq
+				order = append(order, name)
+				return true
+			})
+			if err != nil || !whole {
+				t.Fatalf("the set as recorded: whole %v, err %v; want the whole set", whole, err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("places in the set as sent: %v; want %v", got, want)
+			}
+			// The tiers split the frames: the set as recorded visits them in
+			// another order than sent, which is what LoadSeq repairs.
+			if slices.IsSortedFunc(order, func(a, b string) int { return cmp.Compare(want[a], want[b]) }) {
+				t.Fatalf("visited %v, the order sent: the frames are no longer split between memory and disk", order)
+			}
+		})
 	}
 }

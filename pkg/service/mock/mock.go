@@ -72,6 +72,12 @@ type mockService struct {
 	// pushProvenTable: the receipt names, on a test's miss that is another
 	// test's recording, that test (withRecordedIn).
 	mockOwners map[string][]string
+	// skippedReadOf is, under the proven switch, each read of a test the
+	// replay's gate skips that pushProvenTable moved to the worker scope,
+	// with that test (skippedReads' moved): the receipt names, on a miss one
+	// past such a read (models.RepeatNote.SkippedRead), its test
+	// (withSkippedTest).
+	skippedReadOf map[string]string
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil
@@ -244,7 +250,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 	})
 
 	m.logger.Info("waiting for the keploy-agent compose service to come up",
-		zap.String("agent-uri", m.config.Agent.AgentURI))
+		zap.String("agent-uri", pkg.ShownAgentURI(m.config.Agent.AgentURI)))
 
 	// The wait follows the agent container's BOOT, which is exactly what this
 	// waits on, as keploy record's same wait does: it lasts while the start
@@ -256,7 +262,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 	agentCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	agentReadyCh := make(chan bool, 1)
-	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh, time.Second)
+	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh)
 	agentStart := pkg.WatchAgentStart(agentCtx, m.instrumentation)
 
 	select {
@@ -313,6 +319,16 @@ func (m *mockService) composeAgentFailure() error {
 		return nil
 	}
 	return reader.ComposeAgentFailure()
+}
+
+// composeEnd is what ended a compose recording when the test command's own
+// end, appExit, does not stand, or nil. See ComposeEndReader.
+func (m *mockService) composeEnd(appExit int) error {
+	reader, ok := m.instrumentation.(ComposeEndReader)
+	if !ok || !m.isDockerCompose() {
+		return nil
+	}
+	return reader.ComposeEndAfterReady(appExit)
 }
 
 // releaseComposeApp releases the app service, which has been parked at its

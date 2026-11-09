@@ -50,6 +50,15 @@ func (p *stageProxy) GetPersistentConsumed() map[string]models.MockState {
 	return p.mm.GetPersistentConsumed()
 }
 
+func (p *stageProxy) RefuseWorker(uint32, string)                {}
+func (p *stageProxy) SeedRunPlaceWindows(ws []models.TestWindow) { p.mm.SeedRunPlaceWindows(ws) }
+func (p *stageProxy) ReachRunTest(test string, open bool)        { p.mm.ReachRunTest(test, open) }
+func (p *stageProxy) EndRunSet()                                 { p.mm.EndRunSet() }
+
+func (p *stageProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
+	return nil, nil
+}
+
 func (p *stageProxy) FirstTestWindowStart() time.Time { return p.mm.FirstTestWindowStart() }
 func (p *stageProxy) SetMappedUniverse([]string)      {}
 
@@ -73,6 +82,13 @@ func stageMock(name, path string, at time.Time) *models.Mock {
 		},
 		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true},
 	}
+}
+
+// answeredAt gives m the answer's time at, written in one write: its one mark.
+func answeredAt(m *models.Mock, at time.Time) *models.Mock {
+	m.Spec.ResTimestampMock = at
+	m.Spec.HTTPResp.Marks = &models.HTTPAnswerMarks{Head: at, Writes: []models.HTTPAnswerWrite{{Offset: len(m.Spec.HTTPResp.Body), TS: at}}}
+	return m
 }
 
 func stageSessionMock(name, path string) *models.Mock {

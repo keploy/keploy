@@ -69,6 +69,10 @@ func (p *servingProxy) ServeExactWorker(names []string) error {
 	p.mm.ServeExactWorker(names)
 	return nil
 }
+func (p *servingProxy) ServeExactWorkerSkipped(names, skipped []string) error {
+	p.mm.ServeExactWorkerSkipped(names, skipped)
+	return nil
+}
 func (p *servingProxy) RestartExactKey(key string, names []string) error {
 	p.mm.RestartExactKey(key, names)
 	return nil
@@ -92,7 +96,8 @@ func (p *servingProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, e
 // noteMiss files a miss the matcher reported, as the proxy does
 // (sendMockNotFoundErrorFrom, GetMockErrors): by the view served when it is
 // filed, an extra call as its matcher found it, with the fields its report
-// says differ, and stamped with when its report was built.
+// says differ, whether it is a recording made elsewhere, its repeat note,
+// and stamped with when its report was built.
 func (p *servingProxy) noteMiss(err error) {
 	uc := models.UnmatchedCall{Protocol: "HTTP", Kind: models.MissOutsideTest, At: time.Now()}
 	if p.mm.WindowSnapshot().Active {
@@ -104,12 +109,12 @@ func (p *servingProxy) noteMiss(err error) {
 	if errors.As(err, &r) && r.MismatchReport() != nil {
 		rep := r.MismatchReport()
 		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
-		uc.ClosestMock = rep.ClosestMock
+		uc.ClosestMock, uc.NotOwned, uc.Repeat = rep.ClosestMock, rep.NotOwned, rep.Repeat.Clone()
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}
 		if rep.MissKind == models.MissExtraCall {
-			uc.Kind, uc.Recorded = models.MissExtraCall, rep.Recorded
+			uc.Kind, uc.Recorded, uc.SkippedReads = models.MissExtraCall, rep.Recorded, rep.SkippedReads
 		}
 	}
 	p.mu.Lock()
@@ -606,6 +611,38 @@ func TestASkippedTestsRecordingNeverShiftsToTheNextTest(t *testing.T) {
 	require.True(t, strings.HasPrefix(got[1], "502"), "the skipped test's recording answered the next test: %s", got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "was called 2 times, recorded 1")
+}
+
+// A test the replay's gate skips never opens, so its recordings answer no
+// call, yet each is still an unserved recording to a parser that holds a
+// call while the set holds one (integrations.UnservedRecordingFinder). Such
+// a call (a worker's blocking pop for a job the skipped test pushed at
+// record) waits, as the server waits with nothing pushed, instead of missing
+// at once in whichever test is open and failing that test for the skip. The
+// next test's own recording, once it answered, is no longer one.
+func TestASkippedTestsRecordingStillBoundsAHeldCall(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
+		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil))
+	b, serr := a.ProvenBegin(ctx, begin("TestSkipped"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+	_, serr = a.ProvenBegin(ctx, begin("TestNext"))
+	require.Nil(t, serr)
+	code, body := p.call(t, "/n")
+	require.Equal(t, "200 next", fmt.Sprintf("%d %s", code, strings.TrimSpace(body)))
+	unserved := func(name string) bool {
+		found, err := p.mm.HasUnservedRecording(models.HTTP, func(m *models.Mock) bool { return m.Name == name })
+		require.NoError(t, err)
+		return found
+	}
+	require.True(t, unserved("mock-1"), "the skipped test's recording no longer bounds a held call")
+	require.False(t, unserved("mock-2"), "the next test's recording that answered still bounds a held call")
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestNext", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, e.Reason)
 }
 
 // keploy #4745's F20 scenarios under ConsumeExact. Tests whose recorded

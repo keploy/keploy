@@ -251,3 +251,30 @@ func TestRenderUnmatchedCalls_NamesTheOperation(t *testing.T) {
 		t.Fatalf("the miss does not name its operation:\n%s", sb.String())
 	}
 }
+
+// A background miss is listed apart from the test's own misses, counted,
+// under a heading that says it counts against no test, never under "likely
+// root cause"; a test with only background misses has no root-cause block.
+func TestRenderUnmatchedCalls_ListsBackgroundMissesApart(t *testing.T) {
+	poll := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "findAndModify ptw_endpoints", MatchPhase: models.MatchPhaseBody, Background: true}
+	own := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "find users", MatchPhase: models.MatchPhaseBody}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{poll, own, poll}}})
+	out := sb.String()
+	root := strings.Index(out, "(likely root cause)")
+	bg := strings.Index(out, "=== 2 BACKGROUND CALL(S) WITH NO MATCHING MOCK (count against no test) ===")
+	if root < 0 || bg < 0 || bg < root {
+		t.Fatalf("want the own miss under the root-cause heading, then 2 background misses apart:\n%s", out)
+	}
+	if strings.Contains(out[root:bg], "ptw_endpoints") || !strings.Contains(out[root:bg], "find users") {
+		t.Fatalf("the root-cause block holds a background miss, or not the test's own:\n%s", out)
+	}
+	if strings.Count(out[bg:], "findAndModify ptw_endpoints") != 2 || strings.Contains(out[bg:], "find users") {
+		t.Fatalf("the background block does not list exactly the two background misses:\n%s", out)
+	}
+	sb.Reset()
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{poll}}})
+	if out := sb.String(); strings.Contains(out, "likely root cause") || !strings.Contains(out, "1 BACKGROUND CALL(S)") {
+		t.Fatalf("a test with only a background miss:\n%s", out)
+	}
+}

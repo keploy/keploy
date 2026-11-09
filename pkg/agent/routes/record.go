@@ -646,6 +646,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	var tcsSentSoFar int       // TCs sent to CLI this session
 	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's HTTP window, or its mock was capacity-dropped
 	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
+	// A body that is not UTF-8 goes as a body object only to a client that
+	// says it reads one (models.BodyEncodingHeader); to any other client, one
+	// built before it among them, each test case goes as encoding/json writes it.
+	bodyObjects := models.ReadsBodyObjects(r.Header)
 	// send checks one test case and streams it unless it is left out. It
 	// reports false once the stream is broken.
 	send := func(t *models.TestCase) bool {
@@ -727,7 +731,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			streamWriteFailed(a.logger, r, "failed to create metadata part", err)
 			return false
 		}
-		if err := json.NewEncoder(part).Encode(t); err != nil {
+		if err := json.NewEncoder(part).Encode(models.TestCaseJSON(t, bodyObjects)); err != nil {
 			streamWriteFailed(a.logger, r, "failed to encode metadata", err)
 			return false
 		}

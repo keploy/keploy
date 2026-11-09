@@ -748,6 +748,40 @@ type RecordedWindowsSeeder interface {
 	SeedRecordedWindows(ws []models.TestWindow)
 }
 
+// RunPlaceSeeder is the optional extension implemented by proxies that hold
+// an answer's write until the replay's run reaches its recorded place
+// (integrations.RunPlacer), for a replay that seeds no recorded windows
+// (keploy mock replay with the proven switch off): SeedRunPlaceWindows gives
+// the run's place the set's recorded test windows, and ReachRunTest moves it
+// at each test's begin (open) and end. An agent whose proxy lacks it writes
+// every answer at once, as before.
+type RunPlaceSeeder interface {
+	SeedRunPlaceWindows(ws []models.TestWindow)
+	ReachRunTest(test string, open bool)
+}
+
+// RunSetEnder is the optional extension implemented by proxies that hold an
+// answer's write until the replay's run reaches its recorded place
+// (integrations.RunPlacer): EndRunSet moves the run's place to the set's
+// end, at keploy test's read of a set's end (models.SetEndRead), before that
+// read settles the application's calls, so the read settles and takes the
+// calls the answers written then make. An agent whose proxy lacks it ends
+// those holds at the next set's staging or at the store's close.
+type RunSetEnder interface {
+	EndRunSet()
+}
+
+// BackgroundRecordingsSeeder is the optional extension implemented by proxies
+// whose mock manager can be handed the set's background recordings as it is
+// staged (models.MockFilterParams.BackgroundMocks), read-only, each with its
+// recorded span, for a parser to tell a miss is one more run of one of them
+// (integrations.BackgroundRecordingReader). An agent whose proxy lacks it
+// seeds nothing, and every miss stays its test's, as before. nil clears the
+// previous set's.
+type BackgroundRecordingsSeeder interface {
+	SeedBackgroundRecordings(recs []models.BackgroundRecording)
+}
+
 // StatefulCursorResetter is the optional extension implemented by proxies whose
 // mock manager keeps per-request cursors for stateful dependency replay (serving
 // successive recorded responses in record order). The agent calls it once per
@@ -856,6 +890,17 @@ type InFlightPlanner interface {
 // request in the staging.
 type ExactWorkerServer interface {
 	ServeExactWorker(names []string) error
+}
+
+// ExactWorkerSkippedServer is implemented by a proxy that serves, under
+// exact serving, a worker scope part of which keploy mock replay moved there
+// from the tests its gate skips (models.ScopeTableReq.SkippedReads):
+// ServeExactWorkerSkipped is ServeExactWorker, with skipped those names of
+// names. Each answers at most one request in the staging's windows, as the
+// rest of the worker scope does, and also a request one more than the open
+// test's own recordings of it, which the rest never answers.
+type ExactWorkerSkippedServer interface {
+	ServeExactWorkerSkipped(names, skipped []string) error
 }
 
 // ExactBackgroundServer is implemented by a proxy that serves a test set's
@@ -967,6 +1012,18 @@ type ExactServer interface {
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
 }
 
+// ExactSkippedReadsReader is an optional ExactServer capability:
+// ExactTestSkippedReads is the latest test opened, open or ended, as
+// ExactTestOutcome names it, and the reads of the tests the replay's gate
+// skips, moved to the worker scope (ExactWorkerSkippedServer), that
+// answered a call in its window, in the order they did; final once the test
+// stops being served. A replay that never loads the skipped tests'
+// recordings has no answer for those calls. test is "" when no test has
+// been opened.
+type ExactSkippedReadsReader interface {
+	ExactTestSkippedReads() (test string, reads []string)
+}
+
 // ExactTestServedReader is an optional ExactServer capability: ExactTestServed
 // is the test whose view is in force now, "" when none is (the pool is
 // served: before a set's first test, or after a test ended). Unlike
@@ -1004,6 +1061,16 @@ type AppClockSetter interface {
 	SetAppClock(f func(real time.Time) (time.Time, bool))
 }
 
+// BackgroundClockSetter is an optional proxy capability: with the proven
+// switch off, SetBackgroundClock hands the proxy how to read the app's clock
+// at a real instant (false where the hooks cannot tell; nil for none), for
+// the check that a call no recording answered is one more run of the set's
+// background work alone (learn.CallSpanOf, learn.ServeClock). The learn
+// step reads no clock with the switch off, and is handed none here.
+type BackgroundClockSetter interface {
+	SetBackgroundClock(f func(real time.Time) (time.Time, bool))
+}
+
 // AppClockRunSetter is an optional proxy capability, beside AppClockSetter:
 // SetAppClockRun makes the learn step read, through f, the real instant
 // from which the app's clock has run as one to a real instant, as the
@@ -1024,6 +1091,16 @@ type AppClockRunSetter interface {
 // bounds the teardown of.
 type PoolNamesSetter interface {
 	SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error
+}
+
+// PoolTrailsSetter is implemented by a proxy whose learn step reads a
+// worker-scope call that trails an earlier test in that test's scope
+// (integrations.TrailedTests): SetPoolTrails installs, of keploy mock
+// replay's scope table under the proven switch, the test each worker-scope
+// recording trails (models.ScopeTableReq.Trails), with the table's tests
+// (PoolNamesSetter).
+type PoolTrailsSetter interface {
+	SetPoolTrails(trails map[string]string) error
 }
 
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead

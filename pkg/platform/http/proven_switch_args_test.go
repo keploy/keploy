@@ -123,6 +123,17 @@ func newStandInAgent(t *testing.T, state string, status int) *standInAgent {
 	return newStandIn(t, healthSays(state, status))
 }
 
+// noURILooks has the watch of an agent known only by its URI, which asks its
+// health check too (watchAgentAt), make no look while the test runs, so what
+// a stand-in counts of its health check is what the client asks itself,
+// whatever the clock does.
+func noURILooks(t *testing.T) {
+	t.Helper()
+	look := bootLook
+	bootLook = time.Hour
+	t.Cleanup(func() { bootLook = look })
+}
+
 func clientFor(uri string) *AgentClient {
 	return New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: uri}})
 }
@@ -324,6 +335,7 @@ func TestWaitForAgentWhoseStartStopsIsNotReady(t *testing.T) {
 // a definite answer; a second read of /health gives up at once, on its count,
 // rather than leaving a regression to the readiness budget.
 func TestMakeAgentReadyForDockerComposeWithTheSwitchOffIsAsBefore(t *testing.T) {
+	noURILooks(t)
 	t.Setenv(provenswitch.Env, "")
 	for _, tc := range []struct {
 		name   string
@@ -361,6 +373,7 @@ func TestMakeAgentReadyForDockerComposeWithTheSwitchOffIsAsBefore(t *testing.T) 
 // the count); one whose health check answers 503 once and then reports the
 // switch on is released after that read.
 func TestMakeAgentReadyForDockerComposeWithTheSwitchOnWaitsForAReadableSwitch(t *testing.T) {
+	noURILooks(t)
 	t.Setenv(provenswitch.Env, "1")
 
 	ctx, cancel := context.WithCancel(context.Background())

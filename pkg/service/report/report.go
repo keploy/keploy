@@ -1088,6 +1088,14 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 	sb.WriteString(header + "\n")
 	sb.WriteString(demotedLines(test))
+	if notRun := notFoundLine(test); notRun != "" {
+		// Selected and not on disk: nothing was sent, so nothing was
+		// compared, and no status, header or body section may read as if
+		// it had been.
+		sb.WriteString(notRun)
+		sb.WriteString("\n--------------------------------------------------------------------\n")
+		return nil
+	}
 
 	// Mock-miss diagnostics FIRST: when an outgoing call had no matching
 	// mock, the response diff below is usually a downstream symptom (the app
@@ -1190,16 +1198,39 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 // (FailureInfo.UnmatchedCalls) for a test. Field-diff paths use the noise
 // vocabulary, so the rendered output doubles as copy-paste material for
 // test.globalNoise / spec.assertions.noise.
+//
+// A background miss (models.UnmatchedCall.Background: the same request as one
+// of the set's background recordings, which counts against no test) is listed
+// apart, after the test's own, with how many there were: never under the
+// "likely root cause" heading, which it is not.
 func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
-	if len(test.FailureInfo.UnmatchedCalls) == 0 {
-		return
+	var own, background []models.UnmatchedCall
+	for _, uc := range test.FailureInfo.UnmatchedCalls {
+		if uc.Background {
+			background = append(background, uc)
+			continue
+		}
+		own = append(own, uc)
 	}
-	sb.WriteString("=== OUTGOING CALLS WITH NO MATCHING MOCK (likely root cause) ===\n")
+	if len(own) > 0 {
+		sb.WriteString("=== OUTGOING CALLS WITH NO MATCHING MOCK (likely root cause) ===\n")
+		renderMissList(sb, own)
+	}
+	if len(background) > 0 {
+		fmt.Fprintf(sb, "=== %d BACKGROUND CALL(S) WITH NO MATCHING MOCK (count against no test) ===\n", len(background))
+		sb.WriteString("  each is the same request as a recording of the set's background (mappings.yaml worker: or startup:), made once more than one was left to answer it\n")
+		renderMissList(sb, background)
+	}
+}
+
+// renderMissList writes each of calls, and the shared explanation of an
+// out-of-scope destination once if any call has one, then a blank line.
+func renderMissList(sb *strings.Builder, calls []models.UnmatchedCall) {
 	// Set by any out-of-scope call below; the shared explanation is written
 	// ONCE for the whole test after the loop, never once per call — see
 	// models.OutOfScopeDestinationCauses.
 	var outOfScope bool
-	for _, uc := range test.FailureInfo.UnmatchedCalls {
+	for _, uc := range calls {
 		fmt.Fprintf(sb, "  [%s] %s", uc.Protocol, uc.Named())
 		if uc.MatchPhase != "" {
 			sb.WriteString(fmt.Sprintf(" (match stopped at: %s", uc.MatchPhase))
@@ -1364,6 +1395,12 @@ func (r *Report) renderSingleFullBodyFailedTest(ctx context.Context, sb *strings
 	// Write header via printer.Sprintf (no stdout)
 	header := r.generateTestHeader(test, r.printer) // returns string via Sprintf already
 	sb.WriteString(header)
+	if notRun := notFoundLine(test); notRun != "" {
+		// Selected and not on disk: nothing was sent or compared.
+		sb.WriteString(notRun)
+		sb.WriteString("\n--------------------------------------------------------------------\n")
+		return nil
+	}
 
 	// Template variable places the answer did not satisfy: each fails the
 	// test case on its own, also where every row below is normal.
@@ -1439,6 +1476,16 @@ func demotedLines(test models.TestResult) string {
 		return ""
 	}
 	return notJudgedLines(test)
+}
+
+// notFoundLine says, under a rendered test's header, why a test case the run
+// selected by name was never run: its test set holds none of that name
+// (FailureInfo.NotFound). "" for any other test.
+func notFoundLine(test models.TestResult) string {
+	if test.FailureInfo.NotFound == "" {
+		return ""
+	}
+	return "  not run: " + test.FailureInfo.NotFound + "\n"
 }
 
 // notJudgedLines says, under a rendered test's header, why it has no verdict

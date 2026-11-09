@@ -269,7 +269,11 @@ func TestALaterCallsWindowStartsAtTheLatestArrivalServedBeforeIt(t *testing.T) {
 // store served while the call waited for that read (a wait that grows with
 // load) leaves the verdict as it is with the sibling unserved (Order.ArrivedAt).
 // One F served before the call arrived stays the value's source, as before,
-// and so does every serve where the caller says no arrival.
+// and so does every serve where the caller says no arrival. A sibling F
+// claimed before the call arrived, in a request of the application's still
+// aloft then (its answer not yet going out: Flight.Land), had given the
+// application nothing by the arrival either: the instant its request sent is
+// no source of the call's read (Order.landedAfter, read by follows.notServed).
 func TestASiblingFServedOnlyAfterTheCallArrivedIsNoSourceOfItsStartUpRead(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const path = "body.cmd.query.createdAt.$lt.$numberLong"
@@ -304,32 +308,38 @@ func TestASiblingFServedOnlyAfterTheCallArrivedIsNoSourceOfItsStartUpRead(t *tes
 		if !plainRead(unserved) || unserved.From.Mock != "" {
 			t.Fatalf("the find unserved: %s from %q (%q); want the call's own read of the clock", unserved.Kind, unserved.From.Mock, unserved.Why)
 		}
-		for _, aloft := range []bool{false, true} {
+		for _, aloft := range []string{"in no request", "in a request aloft across the arrival", "claimed before the arrival in a request landing after it"} {
 			tr := NewTracker()
 			var fS *Flight
-			if aloft {
+			if aloft != "in no request" {
 				fS = tr.Lift() // the find's request, aloft across the call's arrival
+			}
+			claimedFirst := aloft == "claimed before the arrival in a request landing after it"
+			if claimedFirst {
+				tr.ServedMockIn(find, fS) // the parser claims the find, then learns and renders its answer
 			}
 			time.Sleep(time.Millisecond)
 			arrival := time.Now() // the distinct reaches keploy
 			time.Sleep(time.Millisecond)
-			tr.ServedMockIn(find, fS) // the find is served while the distinct waits for its learn step
+			if !claimedFirst {
+				tr.ServedMockIn(find, fS) // the find is served while the distinct waits for its learn step
+			}
 			if fS != nil {
 				fS.Land()
 			}
 			o := tr.Placed().Order
 			got := classify(dc, raw(o.ArrivedAt(arrival)))
 			if got.Kind != unserved.Kind || got.From.Mock != "" || fmt.Sprint(got.Read) != fmt.Sprint(unserved.Read) {
-				t.Errorf("aloft %v: the find served after the distinct arrived: %s from %q read %v (%q); want as with the find unserved: %s read %v", aloft, got.Kind, got.From.Mock, got.Read, got.Why, unserved.Kind, unserved.Read)
+				t.Errorf("%s: the find served after the distinct arrived: %s from %q read %v (%q); want as with the find unserved: %s read %v", aloft, got.Kind, got.From.Mock, got.Read, got.Why, unserved.Kind, unserved.Read)
 			}
 			if !strings.Contains(got.Refuted, "mock-17") || !strings.Contains(got.Refuted, "had not served") {
-				t.Errorf("aloft %v: the reason does not name the find set aside and why: %q", aloft, got.Refuted)
+				t.Errorf("%s: the reason does not name the find set aside and why: %q", aloft, got.Refuted)
 			}
 			// Served before the call arrived, or no arrival said: the find
 			// stays the value's source, as before (fail closed).
 			for what, o := range map[string]Order{"served before the call arrived": o.ArrivedAt(time.Now()), "no arrival said": o} {
 				if got := classify(dc, raw(o)); got.Kind != KindVariable || got.From.Mock != "mock-17" {
-					t.Errorf("aloft %v, %s: %s from %q (%q); want the variable of mock-17, as before", aloft, what, got.Kind, got.From.Mock, got.Why)
+					t.Errorf("%s, %s: %s from %q (%q); want the variable of mock-17, as before", aloft, what, got.Kind, got.From.Mock, got.Why)
 				}
 			}
 		}

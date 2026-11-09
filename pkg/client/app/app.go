@@ -1519,8 +1519,9 @@ const (
 	// to give a contention-starved daemon progressively more breathing room
 	// between bring-ups without unbounding the retry.
 	composeDepFailureBaseBackoff = 2 * time.Second
-	// composePsStateBudget bounds the `docker compose ps -a` state probe used to
-	// classify a failed `up` (transient dependency crash vs genuine app failure).
+	// composePsStateBudget bounds the `docker compose ps -a` state probe that
+	// classifies a failed `up` (transient dependency crash vs genuine app
+	// failure) when the daemon gave no answer (composeFailedUpStates).
 	composePsStateBudget = 5 * time.Second
 )
 
@@ -1886,7 +1887,7 @@ func (a *App) composeServiceStatesOf(ctx context.Context, project string) []comp
 // composeServiceStatesWithin is composeServiceStates bounded by its own
 // deadline, so the post-failure state probe can never wedge the run on a
 // saturated daemon. Used by the transient-dependency-failure classifier in
-// run()'s retry loop.
+// run()'s retry loop, when the daemon gave it no answer (composeFailedUpStates).
 func (a *App) composeServiceStatesWithin(budget time.Duration) []composeServiceState {
 	return a.composeServiceStatesOfWithin(budget, "")
 }
@@ -1972,7 +1973,17 @@ func parseComposeServiceStates(out string) []composeServiceState {
 // every time) is bounded by composeDepFailureRetries and then surfaced — the
 // retry can only DELAY a persistent failure, never hide it.
 func isTransientComposeDependencyFailure(runErr error, errType utils.ErrType, appService string, states []composeServiceState) bool {
-	if runErr == nil || errType != utils.Runtime || appService == "" {
+	if runErr == nil || errType != utils.Runtime {
+		return false
+	}
+	return composeDependencyStoppedTheApp(appService, states)
+}
+
+// composeDependencyStoppedTheApp reads conditions 2 to 4 above from the
+// project's states: a dependency's crash ended the up before compose started
+// the app, and keploy's agent did not crash.
+func composeDependencyStoppedTheApp(appService string, states []composeServiceState) bool {
+	if appService == "" {
 		return false
 	}
 	appCreated := false
@@ -2071,10 +2082,12 @@ func (a *App) removeCrashedDependencies(ctx context.Context, states []composeSer
 // The per-service states are supplied LAZILY via statesFn, which is invoked ONLY
 // after the four cheap predicates above all pass. This matters because the loop
 // re-evaluates this predicate on EVERY iteration (including the success and
-// ctx-cancelled graceful-stop paths); statesFn shells out to `docker compose ps`
-// (up to composePsStateBudget), so gating it behind the cheap checks keeps that
-// subprocess off the non-failure paths — it never runs on a successful up or a
-// cancelled run, only when a transient-dependency retry is actually plausible.
+// ctx-cancelled graceful-stop paths); statesFn reads the project
+// (composeFailedUpStates), so gating it behind the cheap checks keeps that read
+// off the non-failure paths — it never runs on a successful up or a cancelled
+// run, only when a transient-dependency retry is actually plausible. (An up
+// that reported 0 comes here already read, by composeAbortReportedZero, and
+// run() hands that read in.)
 //
 // kind/maxRetries/statesFn are passed in (rather than read off App) so the whole
 // decision is a pure function exercisable without a docker daemon.
@@ -2466,10 +2479,15 @@ func (a *App) run(ctx context.Context) models.AppError {
 		// A compose up that aborted before the app started can wait for
 		// the app's container forever (compose_abort.go): keploy watches
 		// for that end while the up runs, and ends the up itself on it.
-		upCtx, stopAbortWatch := a.watchComposeAbort(ctx)
-		defer stopAbortWatch()
-		cmdErr := a.executeCommand(upCtx, runCmd, runEnv, endsAbortedComposeUp(upCtx, a.logger, cmdCancel))
-		return composeAbortCmdError(upCtx, cmdErr)
+		watchedUp := func() utils.CmdError {
+			upCtx, stopAbortWatch := a.watchComposeAbort(ctx)
+			defer stopAbortWatch()
+			cmdErr := a.executeCommand(upCtx, runCmd, runEnv, endsAbortedComposeUp(upCtx, a.logger, cmdCancel))
+			return composeAbortCmdError(upCtx, cmdErr)
+		}
+		// Read once the watch has ended: an up that has returned is no up
+		// for it to end.
+		return a.composeAbortReportedZero(ctx, watchedUp())
 	}
 
 	var err error
@@ -2514,16 +2532,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// retry the bring-up in place, a bounded number of times with a linear
 	// backoff (see the loop for why in place, and how keploy's agent is kept).
 	//
-	// The non-zero exit on a dependency abort is the COMMON case, not guaranteed:
-	// empirically ~1 in 20 `up --abort-on-container-exit --exit-code-from app` runs
-	// report exit 0 for an app that never started (compose returns the app's
-	// exit-code-from value of 0 instead of the dependency-failed error). That race
-	// slips past this retry (cmdErr.Err == nil -> the gate's runErr check is false,
-	// so no retry). keploy record does not pass it as a clean run: it reads the
-	// stopped app's container and fails a project whose app never started though
-	// compose reported 0 (record.composeEnd). keploy mock does not read it so yet,
-	// and can pass such a run. So the retry catches most-but-not-all of this
-	// flake.
+	// A non-zero exit is not guaranteed on a dependency abort: some compose
+	// versions report 0 for an app they never started. executeApp reads such
+	// an up as the failure it is (composeAbortReportedZero), so it comes here
+	// as a Runtime error like any other abort, and the retry, or the run's
+	// failure once the retries are spent, follows.
 	//
 	// Gated STRICTLY by isTransientComposeDependencyFailure, which reads docker's
 	// own post-mortem state (the abort message is on the up's stderr, which keploy
@@ -2538,7 +2551,12 @@ func (a *App) run(ctx context.Context) models.AppError {
 	for attempt := 1; shouldRetryComposeUp(a.kind, attempt, composeDepFailureRetries, ctx.Err(),
 		cmdErr.Err, cmdErr.Type, a.composeService,
 		func() []composeServiceState {
-			states = a.composeServiceStatesWithin(composePsStateBudget)
+			var zero *composeReportedZero
+			if errors.As(cmdErr.Err, &zero) {
+				states = zero.states
+				return states
+			}
+			states = a.composeFailedUpStates(ctx)
 			return states
 		}); attempt++ {
 		a.logger.Info("a dependency container failed to start transiently during docker compose up (it crashed before the app could start); retrying the bring-up",

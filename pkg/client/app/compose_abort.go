@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -51,7 +53,11 @@ import (
 // Each read of the daemon the decision makes is read again until it
 // succeeds or the watch ends (composeAbortRead): the die it is about may be
 // the abort's last, and no later die comes to decide on. A read that fails
-// for good (a refused request) is read until the up ends, at a pace.
+// for good (a refused request) is read until the up ends, at a pace. A daemon
+// keploy's Engine API client cannot even open a connection to is the one
+// exception (composeAbortLost): it gives the watch no events and no answers,
+// so the watch stops, says so once, and the up runs unwatched, as before the
+// watch, rather than re-dial that daemon at a pace for the whole up.
 
 // errComposeUpAborted is the cause the watch ends an up attempt's context
 // with.
@@ -63,8 +69,13 @@ var errComposeUpAborted = errors.New("docker compose stopped every container of 
 // the proven switch, under which keploy leaves compose's abort flags out and
 // ends the run on the app's exit itself (compose_appstop.go).
 func (a *App) watchesComposeAbort() bool {
-	return a.kind == utils.DockerCompose && !composeStopsTheApp() &&
-		a.docker != nil && a.composeService != "" && a.keployContainer != ""
+	return !composeStopsTheApp() && a.readsComposeProject()
+}
+
+// readsComposeProject reports whether keploy can read a compose run's project
+// from the daemon: a compose app keploy knows the service and the agent of.
+func (a *App) readsComposeProject() bool {
+	return a.kind == utils.DockerCompose && a.docker != nil && a.composeService != "" && a.keployContainer != ""
 }
 
 // watchComposeAbort watches one up attempt, from now until the returned stop
@@ -72,7 +83,9 @@ func (a *App) watchesComposeAbort() bool {
 // app started (see above). upCtx is the up's context, made from ctx: the
 // watch ends it, with the cause errComposeUpAborted, on that abort. The
 // stream is the daemon's die events of compose's containers; a stream that
-// breaks is asked for again from its last event, so no die is missed.
+// breaks is asked for again from its last event, so no die is missed, until
+// composeAbortUnreachableAsks asks in a row cannot open a connection to the
+// daemon (composeAbortCannotDial).
 func (a *App) watchComposeAbort(ctx context.Context) (upCtx context.Context, stop func()) {
 	upCtx, endUp := context.WithCancelCause(ctx)
 	if !a.watchesComposeAbort() {
@@ -81,12 +94,18 @@ func (a *App) watchComposeAbort(ctx context.Context) (upCtx context.Context, sto
 	// From the watch's start, not the goroutine's: a die before the goroutine
 	// runs (a loaded host) is in the stream's replay. On the daemon's clock,
 	// read before the up starts (composeAbortSince).
-	since := a.composeAbortSince(ctx)
+	since, reached := a.composeAbortSince(ctx)
+	if !reached {
+		// No events come from a daemon keploy cannot reach: the up runs
+		// unwatched, as before the watch (composeAbortLost said so).
+		return upCtx, func() { endUp(nil) }
+	}
 	wctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		var project string
+		unreached := 0
 		for wctx.Err() == nil {
 			msgs, errs := a.docker.Events(wctx, events.ListOptions{
 				Since: fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond()),
@@ -105,16 +124,29 @@ func (a *App) watchComposeAbort(ctx context.Context) (upCtx context.Context, sto
 					if wctx.Err() != nil {
 						return
 					}
+					if a.composeAbortLost(&unreached, err) != nil {
+						return
+					}
 					a.logger.Debug("the docker events stream of the compose project broke; asking for it again from its last event", zap.Error(err))
 					break stream
 				case m := <-msgs:
 					if m.TimeNano > 0 {
 						since = time.Unix(0, m.TimeNano)
 					}
+					var err error
 					if project == "" {
-						project = a.composeAbortProject(wctx)
+						project, err = a.composeAbortProject(wctx)
 					}
-					if a.composeAbortEnds(wctx, project, m) {
+					ended := false
+					if err == nil {
+						ended, err = a.composeAbortEnds(wctx, project, m)
+					}
+					if err != nil {
+						// The watch's end, or a daemon keploy lost
+						// (composeAbortLost said so).
+						return
+					}
+					if ended {
 						a.logger.Info("docker compose stopped every container of the project, keploy's agent too, before it started the application (a container it depends on exited); keploy ends compose's up, which would wait for the application's container forever",
 							zap.String("service", a.composeService))
 						endUp(errComposeUpAborted)
@@ -125,7 +157,7 @@ func (a *App) watchComposeAbort(ctx context.Context) (upCtx context.Context, sto
 			select {
 			case <-wctx.Done():
 				return
-			case <-time.After(200 * time.Millisecond):
+			case <-time.After(composeAbortRetryPace):
 			}
 		}
 	}()
@@ -143,11 +175,12 @@ func (a *App) watchComposeAbort(ctx context.Context) (upCtx context.Context, sto
 // the app's never started. The app's own die is read as any other, not the
 // watch's end: compose recreating a running app stops the old one and goes
 // on, and an abort later in that up must still be seen. An app that started
-// is never "created" again, so once it ran no read is the abort.
-func (a *App) composeAbortEnds(ctx context.Context, project string, m events.Message) bool {
+// is never "created" again, so once it ran no read is the abort. The error
+// is the read's that did not end with an answer (composeAbortedBeforeTheApp).
+func (a *App) composeAbortEnds(ctx context.Context, project string, m events.Message) (bool, error) {
 	attrs := m.Actor.Attributes
 	if project == "" || attrs[composeProjectLabelKey] != project || isComposeOneOffLabel(attrs) {
-		return false
+		return false, nil
 	}
 	return a.composeAbortedBeforeTheApp(ctx, project)
 }
@@ -163,18 +196,17 @@ func (a *App) composeAbortEnds(ctx context.Context, project string, m events.Mes
 // before compose started anything.
 //
 // The up starts only once this read is done, so it never waits on a daemon
-// that will not say its time: one that refuses the read, gives no time,
-// cannot be reached by keploy's Engine API client (DOCKER_HOST, else the
-// default socket, which is not always the daemon the compose CLI uses), or
+// that will not say its time: one that refuses the read, gives no time, or
 // fails the read composeAbortSinceReads times, leaves keploy's clock, which
-// is as right as the daemon's is close to it. A daemon keploy cannot reach
-// gives the watch no events either, so that up runs unwatched, as it did
-// before the watch.
-func (a *App) composeAbortSince(ctx context.Context) time.Time {
-	var since time.Time
+// is as right as the daemon's is close to it. One keploy's Engine API client
+// cannot open a connection to (DOCKER_HOST, else the default socket, which
+// is not always the daemon the compose CLI uses) composeAbortUnreachableAsks
+// times in a row gives the watch no events either: reached is false, and
+// that up runs unwatched, as it did before the watch.
+func (a *App) composeAbortSince(ctx context.Context) (since time.Time, reached bool) {
 	var unsaid error
 	reads := 0
-	_ = a.composeAbortRead(ctx, "the docker daemon's clock", func(rctx context.Context) error {
+	err := a.composeAbortRead(ctx, "the docker daemon's clock", func(rctx context.Context) error {
 		reads++
 		info, err := a.docker.Info(rctx)
 		switch {
@@ -183,9 +215,13 @@ func (a *App) composeAbortSince(ctx context.Context) time.Time {
 				since, unsaid = time.Time{}, fmt.Errorf("the daemon gave the time %q", info.SystemTime)
 			}
 			return nil
-		case composeAbortDaemonRefuses(err), client.IsErrConnectionFailed(err):
+		case composeAbortDaemonRefuses(err):
 			unsaid = err
 			return nil
+		case composeAbortCannotDial(err):
+			// composeAbortRead reads it again, and ends on
+			// composeAbortUnreachableAsks of these in a row.
+			return err
 		}
 		// Every read before this one failed too. Bounded by a count, not a
 		// time: a daemon that keeps failing this one request (a 5xx) must
@@ -196,20 +232,96 @@ func (a *App) composeAbortSince(ctx context.Context) time.Time {
 		}
 		return err
 	})
+	if errors.Is(err, errComposeAbortUnreachable) {
+		return time.Time{}, false
+	}
 	if unsaid != nil {
 		a.logger.Warn("keploy could not read the docker daemon's time; it reads the daemon's events for compose aborting the up before the application started from keploy's clock instead",
 			zap.Int("reads", reads), zap.Error(unsaid))
 	}
 	if since.IsZero() {
-		return time.Now()
+		return time.Now(), true
 	}
-	return since
+	return since, true
 }
 
-// composeAbortSinceReads is how many failed reads of the daemon's time
-// (other than a refusal or no connection, each of which ends the reads at
-// once) the watch makes before it takes keploy's clock.
+// composeAbortSinceReads is the count of reads of the daemon's time from
+// which a read that fails makes the watch take keploy's clock; one that
+// fails before it is read again. Every read counts, failed dials too, so a
+// failed dial, another, then a 500 take keploy's clock at the third read.
+// Two failures are apart from it: a refusal takes keploy's clock at any
+// read, and a failed dial is read again at any read, until
+// composeAbortUnreachableAsks of them in a row end the watch.
 const composeAbortSinceReads = 3
+
+// composeAbortUnreachableAsks is how many asks of the daemon in a row that
+// cannot open a connection to it (composeAbortCannotDial) end the watch. A
+// count, not a time, and in a row: one dial that fails (a daemon whose
+// accept queue is full) does not end it, and any ask whose connection the
+// daemon accepted starts the count again, even one it then dropped before
+// any answer.
+const composeAbortUnreachableAsks = 3
+
+// errComposeAbortUnreachable is the error a read of the daemon ends with,
+// and the watch on, once composeAbortUnreachableAsks asks in a row could not
+// open a connection to the daemon.
+var errComposeAbortUnreachable = errors.New("keploy's docker client could not connect to the docker daemon")
+
+// composeAbortLost takes err, the failure of an ask of the daemon, with
+// *unreached the count of the asks before it, in a row, that could not open
+// a connection to the daemon (composeAbortCannotDial). It counts such an err
+// and returns nil while the count is under composeAbortUnreachableAsks; any
+// other failure starts the count again. On the
+// composeAbortUnreachableAsks-th, it says, once for the watch or the read that
+// lost the daemon, that keploy does not read the rest of the up, and returns
+// errComposeAbortUnreachable: its caller ends.
+func (a *App) composeAbortLost(unreached *int, err error) error {
+	if !composeAbortCannotDial(err) {
+		*unreached = 0
+		return nil
+	}
+	*unreached++
+	if *unreached < composeAbortUnreachableAsks {
+		return nil
+	}
+	a.logger.Warn("keploy cannot reach the docker daemon (its Engine API client uses DOCKER_HOST, else the default socket, which is not always the daemon docker compose uses), so it reads no more of this docker compose up from the daemon: neither compose stopping every container before it started the application, nor how the up ended",
+		zap.String("service", a.composeService), zap.Int("asks", *unreached), zap.Error(err))
+	return fmt.Errorf("%w (%d asks in a row): %w", errComposeAbortUnreachable, *unreached, err)
+}
+
+// composeAbortCannotDial reports whether err, the failure of an ask of the
+// daemon, is keploy's Engine API client failing to open a connection to it:
+// no socket at its address, nobody listening there, one keploy's user may
+// not open, a host that does not resolve, a Windows named pipe that does not
+// exist. Any other failure is not: one the daemon answered, even with a
+// failure; a connection the daemon (or a socket proxy in front of it)
+// accepted and then dropped before any answer, which
+// client.IsErrConnectionFailed also reports; a dial the read's context
+// ended (its cap, composeAbortRead). That daemon may well be there, and the
+// watch goes on: a watch that stopped on it could leave an aborted up
+// waiting for ever again.
+//
+// The client (docker v28) keeps a failed dial's *net.OpError (op "dial";
+// under an HTTP proxy's "proxyconnect" when the dial was the proxy's) in the
+// chain for most failed dials, and go-winio's *os.PathError for a named
+// pipe's, its only source in the client's transport. For a refused
+// connection and a unix socket's failed dial it keeps no cause, only its own
+// "Cannot connect to the Docker daemon" error, which it gives for nothing
+// but those and a net timeout that is not the context's (keploy's client
+// sets none).
+func composeAbortCannotDial(err error) bool {
+	if !client.IsErrConnectionFailed(err) {
+		return false
+	}
+	var op *net.OpError
+	for e := err; errors.As(e, &op); e = op.Err {
+		if op.Op == "dial" {
+			return true
+		}
+	}
+	var pipe *os.PathError
+	return errors.As(err, &pipe) || strings.Contains(err.Error(), "Cannot connect to the Docker daemon")
+}
 
 // composeAbortDaemonRefuses reports whether err is the daemon's answer that
 // it will not serve a request, which reading it again does not change: one
@@ -235,9 +347,12 @@ const composeAbortFirstReadCap = 2 * time.Second
 // then. A read that fails is read again; one that runs past its cap
 // (composeAbortFirstReadCap at first) is read again with twice the cap, so a
 // daemon slower than any one cap is still read. Neither an error nor a cap
-// ends the decision on that die.
+// ends the decision on that die; composeAbortUnreachableAsks reads in a row
+// whose dial of the daemon failed (composeAbortCannotDial) end it, with
+// errComposeAbortUnreachable (composeAbortLost).
 func (a *App) composeAbortRead(ctx context.Context, what string, read func(context.Context) error) error {
 	budget := composeAbortFirstReadCap
+	unreached := 0
 	for {
 		rctx, cancel := context.WithTimeout(ctx, budget)
 		err := read(rctx)
@@ -248,6 +363,9 @@ func (a *App) composeAbortRead(ctx context.Context, what string, read func(conte
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if lost := a.composeAbortLost(&unreached, err); lost != nil {
+			return lost
 		}
 		if capped {
 			budget *= 2
@@ -265,22 +383,28 @@ func (a *App) composeAbortRead(ctx context.Context, what string, read func(conte
 // composeAbortProject is the compose project of keploy's agent's container,
 // read until the daemon answers (composeAbortRead): "" when that container
 // does not exist, which the up makes before it starts any container of the
-// project, so the die is another project's.
-func (a *App) composeAbortProject(ctx context.Context) (project string) {
-	_ = a.composeAbortRead(ctx, "keploy's agent's container", func(rctx context.Context) error {
-		info, err := a.docker.ContainerInspect(rctx, a.keployContainer)
-		if cerrdefs.IsNotFound(err) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if info.Config != nil {
-			project = strings.TrimSpace(info.Config.Labels[composeProjectLabelKey])
-		}
-		return nil
+// project, so the die is another project's. The error is composeAbortRead's.
+func (a *App) composeAbortProject(ctx context.Context) (project string, err error) {
+	err = a.composeAbortRead(ctx, "keploy's agent's container", func(rctx context.Context) (err error) {
+		project, err = a.readComposeAbortProject(rctx)
+		return err
 	})
-	return project
+	return project, err
+}
+
+// readComposeAbortProject is one read of composeAbortProject.
+func (a *App) readComposeAbortProject(ctx context.Context) (string, error) {
+	info, err := a.docker.ContainerInspect(ctx, a.keployContainer)
+	if cerrdefs.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if info.Config == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(info.Config.Labels[composeProjectLabelKey]), nil
 }
 
 // composeAbortedBeforeTheApp reads the containers of project, one-offs aside,
@@ -289,13 +413,13 @@ func (a *App) composeAbortProject(ctx context.Context) (project string) {
 // which has never started. Each agent container must have stopped: one still
 // "created" is one compose may yet start, as while compose recreates a
 // running agent (it makes the new one, then stops the old one: that die is
-// not the abort).
-func (a *App) composeAbortedBeforeTheApp(ctx context.Context, project string) (aborted bool) {
-	_ = a.composeAbortRead(ctx, "the compose project's containers", func(rctx context.Context) (err error) {
+// not the abort). The error is composeAbortRead's.
+func (a *App) composeAbortedBeforeTheApp(ctx context.Context, project string) (aborted bool, err error) {
+	err = a.composeAbortRead(ctx, "the compose project's containers", func(rctx context.Context) (err error) {
 		aborted, err = a.readComposeAbortedBeforeTheApp(rctx, project)
 		return err
 	})
-	return aborted
+	return aborted, err
 }
 
 // readComposeAbortedBeforeTheApp is one read of composeAbortedBeforeTheApp;
@@ -377,4 +501,156 @@ func composeAbortCmdError(upCtx context.Context, cmdErr utils.CmdError) utils.Cm
 	}
 	cmdErr.Err = fmt.Errorf("%s: %w (%w)", ended, errComposeUpAborted, cmdErr.Err)
 	return cmdErr
+}
+
+// errComposeAbortReportedZero is what the error of an up that exited 0 though
+// compose never started the app wraps (composeReportedZero).
+var errComposeAbortReportedZero = errors.New("docker compose reported 0, but a service the application depends on crashed and compose never started the application")
+
+// composeReportedZero is that error. states is the project as keploy read it,
+// which the retry's decision and its removal of what crashed take from here: a
+// read of their own could miss on the daemon this read waited for.
+type composeReportedZero struct {
+	states []composeServiceState
+}
+
+func (e *composeReportedZero) Error() string { return errComposeAbortReportedZero.Error() }
+
+func (e *composeReportedZero) Unwrap() error { return errComposeAbortReportedZero }
+
+// composeAbortReportedZero reads the project of an up that returned no error,
+// and gives the Runtime error of an abort when a dependency's crash ended that
+// up before compose started the app. Compose can report 0 for such an up:
+// docker compose v5.1.3 stops the project on the dependency's exit in a
+// goroutine that assigns the up's own err, and the up waits for that goroutine
+// before it returns the failed start's err, so a stop that ends after the
+// start failed turns the up's error into nil. Read as a clean end, that up
+// passed the retry by, and the run ended on the crash the retry is for; keploy
+// mock took it for a test command that succeeded.
+//
+// An app that ran never reads as an abort, nor does an up the run's own stop
+// ended: the stop does not wait on this read, and the run's end reads that up.
+func (a *App) composeAbortReportedZero(ctx context.Context, cmdErr utils.CmdError) utils.CmdError {
+	if cmdErr.Err != nil || ctx.Err() != nil || !a.readsComposeProject() {
+		return cmdErr
+	}
+	states := a.composeProjectStates(ctx)
+	if !composeDependencyStoppedTheApp(a.composeService, states) {
+		return cmdErr
+	}
+	a.logger.Info("docker compose reported 0 for an up a dependency's crash ended before it started the application; keploy reads it as that failed up",
+		zap.String("service", a.composeService))
+	return utils.CmdError{Type: utils.Runtime, Err: &composeReportedZero{states: states}}
+}
+
+// composeEndReadFailures is how many reads the daemon answers with a failure
+// end composeEndRead. A count, not a time: no clock decides how an up ended,
+// and a daemon that keeps failing a read, which nothing else would end now
+// that the up has returned, must not hold the run.
+const composeEndReadFailures = 3
+
+// composeEndRead runs read, a read of how a compose up ended, until the daemon
+// answers or ctx ends (composeAbortRead): one that runs past its cap is read
+// again with a longer one, so a daemon slower than any cap is still read.
+//
+// It also ends, with what read last left, when there is no answer to wait
+// for: the daemon refuses the read, which reading it again does not change,
+// or fails it composeEndReadFailures times, or keploy's client cannot reach it
+// (composeAbortLost). Its error is ctx's or a lost daemon's, nil otherwise, so
+// a caller takes the answer from what read left.
+func (a *App) composeEndRead(ctx context.Context, what string, read func(context.Context) error) error {
+	failed := 0
+	return a.composeAbortRead(ctx, what, func(rctx context.Context) error {
+		err := read(rctx)
+		switch {
+		case err == nil, errors.Is(rctx.Err(), context.DeadlineExceeded), composeAbortCannotDial(err):
+			// An answer; or none yet, past its cap, which composeAbortRead
+			// reads again; or a failed dial, which it counts.
+			return err
+		case composeAbortDaemonRefuses(err):
+			a.logger.Debug("the docker daemon refused keploy's read of "+what, zap.Error(err))
+			return nil
+		}
+		if failed++; failed >= composeEndReadFailures {
+			a.logger.Debug("the docker daemon keeps failing keploy's read of "+what, zap.Int("reads", failed), zap.Error(err))
+			return nil
+		}
+		return err
+	})
+}
+
+// composeProjectStates is the project of keploy's agent's container as the
+// daemon says, one-offs aside, read until it answers (composeEndRead). It
+// reads the daemon, not `docker compose ps`: ps loads the project again
+// without what the user's command gave the up (an assignment, an --env-file),
+// so a file that needs it fails every ps.
+//
+// nil when composeEndRead ended with no answer, or when keploy's agent's
+// container does not exist. An up that reported 0 then stands, and the run's
+// end decides from the stopped containers (ComposeEndAfterReady); a failed up
+// is read by ps (composeFailedUpStates).
+func (a *App) composeProjectStates(ctx context.Context) []composeServiceState {
+	var states []composeServiceState
+	// Its error is ctx's or a lost daemon's, said by then: no answer either
+	// way, and a read that failed left no states.
+	_ = a.composeEndRead(ctx, "the compose project's states", func(rctx context.Context) (err error) {
+		states, err = a.readComposeProjectStates(rctx)
+		return err
+	})
+	return states
+}
+
+// composeFailedUpStates is the project of an up that failed, for the retry's
+// decision and its removal of what crashed. The daemon's answer
+// (composeProjectStates), so no clock decides that retry and a file `docker
+// compose ps` cannot load does not lose it; `docker compose ps` when the daemon
+// gave none: one keploy's client does not reach may be the one compose uses,
+// and an up that failed before it made keploy's agent's container has no
+// project to read.
+func (a *App) composeFailedUpStates(ctx context.Context) []composeServiceState {
+	if a.readsComposeProject() {
+		if states := a.composeProjectStates(ctx); len(states) > 0 {
+			return states
+		}
+	}
+	return a.composeServiceStatesWithin(composePsStateBudget)
+}
+
+// readComposeProjectStates is one read of composeProjectStates; it fails on
+// any read of the daemon that fails, and gives no states then.
+func (a *App) readComposeProjectStates(ctx context.Context) ([]composeServiceState, error) {
+	project, err := a.readComposeAbortProject(ctx)
+	if err != nil || project == "" {
+		return nil, err
+	}
+	list, err := a.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
+		filters.Arg("label", composeProjectLabelKey+"="+project),
+	)})
+	if err != nil {
+		return nil, err
+	}
+	states := make([]composeServiceState, 0, len(list))
+	for _, c := range list {
+		if isComposeOneOffLabel(c.Labels) {
+			continue
+		}
+		info, err := a.docker.ContainerInspect(ctx, c.ID)
+		if cerrdefs.IsNotFound(err) {
+			// Removed since the list.
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.ContainerJSONBase == nil || info.State == nil {
+			return nil, fmt.Errorf("the daemon gave no state of container %s", c.ID)
+		}
+		states = append(states, composeServiceState{
+			Service:  c.Labels[composeServiceLabelKey],
+			State:    info.State.Status,
+			ExitCode: info.State.ExitCode,
+			ID:       c.ID,
+		})
+	}
+	return states, nil
 }

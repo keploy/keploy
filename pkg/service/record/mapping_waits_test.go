@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -439,6 +440,17 @@ func (run *recRun) test(t *testing.T, name string) {
 	waitForPersistedTestCase(t, run.testDB, name)
 }
 
+// offer hands the recorder a test case the store may not keep, so it does not
+// wait for it to persist.
+func (run *recRun) offer(t *testing.T, name string) {
+	t.Helper()
+	select {
+	case run.f.incoming <- &models.TestCase{Name: name, Kind: models.HTTP}:
+	case <-time.After(hangGuard):
+		t.Fatalf("recorder never consumed %s", name)
+	}
+}
+
 func (run *recRun) mapping(t *testing.T, test string, ids ...string) {
 	t.Helper()
 	select {
@@ -645,6 +657,98 @@ func TestStart_NeverSentMockIsCountedAtTheStreamsEnd(t *testing.T) {
 	lost := logs.FilterMessageSnippet("Failed to correlate").All()
 	require.Len(t, lost, 1)
 	assert.Equal(t, lossNextStep(reasonEnded), lost[0].ContextMap()["next_step"])
+}
+
+// TestStart_ATestCaseTheStoreCannotHoldIsSkippedAndCounted: a test case refused
+// for its own body says nothing about the next one, so it costs the recording
+// that one test case, and the count is said when the recording ends. One binary
+// body must not end a recording, as one unencodable mock does not.
+func TestStart_ATestCaseTheStoreCannotHoldIsSkippedAndCounted(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}}, BaseRecordHooks{}, zap.New(core), func(r *Recorder) {
+		r.testDB.(*recTestDB).refuseNames = map[string]bool{"binary-1": true, "binary-2": true}
+	})
+	run.offer(t, "binary-1")
+	run.offer(t, "binary-2")
+	run.test(t, "test-3")
+	run.stop(t)
+
+	run.testDB.mu.Lock()
+	defer run.testDB.mu.Unlock()
+	assert.Equal(t, []string{"test-3"}, run.testDB.inserted)
+	said := logs.FilterMessageSnippet("recording finished without the test cases the store refused").All()
+	require.Len(t, said, 1)
+	assert.Equal(t, zap.WarnLevel, said[0].Level, "a recording that lost test cases says so above Info")
+	assert.EqualValues(t, 2, said[0].ContextMap()["testCasesRefused"])
+	run.tele.mu.Lock()
+	defer run.tele.mu.Unlock()
+	assert.Equal(t, 1, run.tele.suiteTestCount, "a refused test case was counted as recorded")
+	assert.EqualValues(t, 1, run.tele.sessionTestCount, "a refused test case was counted as recorded")
+	assert.Equal(t, 1, run.tele.testsAndMocks, "a refused test case was counted as recorded")
+}
+
+// TestStart_ARefusedTestCaseTheAgentRevokesIsNotDeleted: the store holds no such
+// test case, so the revoke finds nothing to delete and nothing to take off the
+// count of those recorded.
+func TestStart_ARefusedTestCaseTheAgentRevokesIsNotDeleted(t *testing.T) {
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}}, BaseRecordHooks{}, zap.NewNop(), func(r *Recorder) {
+		r.testDB.(*recTestDB).refuseNames = map[string]bool{"binary-1": true}
+	})
+	run.offer(t, "binary-1")
+	run.test(t, "test-2")
+	run.frame(t, revokeFrame("revoke-frame", "binary-1"))
+	run.stop(t)
+
+	assert.Empty(t, run.deleted())
+	run.tele.mu.Lock()
+	defer run.tele.mu.Unlock()
+	assert.Equal(t, 1, run.tele.suiteTestCount)
+}
+
+// TestStart_ATestCaseRefusedDuringShutdownIsCounted: the insert comes back
+// refused once the recording is stopping, as it does for the last requests
+// drained. Such a test case is as missing as any other, so the count has it.
+func TestStart_ATestCaseRefusedDuringShutdownIsCounted(t *testing.T) {
+	db := &gatedFailTestDB{
+		failName: "binary-1",
+		failErr:  fmt.Errorf("%w: testdb: the response body is not valid UTF-8", models.ErrTestCaseEncode),
+		release:  make(chan struct{}),
+		entered:  make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(db.release) }) }
+	t.Cleanup(release) // a failure below must not leave the consumer in the insert
+	core, logs := observer.New(zap.DebugLevel)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}}, BaseRecordHooks{}, zap.New(core), func(r *Recorder) {
+		r.testDB = db
+	})
+	run.offer(t, "test-1")
+	run.offer(t, "binary-1")
+	select {
+	case <-db.entered:
+	case <-time.After(hangGuard):
+		t.Fatal("the consumer never reached the refused insert")
+	}
+	// Stopping first, then the refusal: the error comes back on a done context.
+	run.cancel()
+	release()
+	run.stop(t)
+
+	said := logs.FilterMessageSnippet("recording finished without the test cases the store refused").All()
+	require.Len(t, said, 1)
+	assert.EqualValues(t, 1, said[0].ContextMap()["testCasesRefused"])
+	assert.Zero(t, logs.FilterMessageSnippet("failed to record test case during shutdown").Len(),
+		"a refused test case is said by the store and counted, not reported as a failed write")
+}
+
+// TestStart_ARecordingWithNothingRefusedSaysNothingOfIt: the line is for a
+// recording that lost test cases.
+func TestStart_ARecordingWithNothingRefusedSaysNothingOfIt(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}}, BaseRecordHooks{}, zap.New(core))
+	run.test(t, "test-1")
+	run.stop(t)
+	assert.Zero(t, logs.FilterMessageSnippet("recording finished without the test cases the store refused").Len())
 }
 
 // armedClock is a ManualClock that says when a drain arms a look.

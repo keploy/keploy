@@ -5,8 +5,10 @@ package http
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -56,7 +59,10 @@ exit 0
 	t.Cleanup(func() { daemonAsk = prev })
 
 	daemon := &goesSilent{taken: make(chan struct{}), looked: make(chan struct{}), lookEnded: make(chan error, 1), removed: make(chan string, 8)}
-	a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{InstallationID: "install-id"}, dockerClient: daemon}
+	// What the run says it could not do, for a run that ends before its
+	// `docker run`.
+	core, logged := observer.New(zap.ErrorLevel)
+	a := &AgentClient{logger: zap.New(core), conf: &config.Config{InstallationID: "install-id"}, dockerClient: daemon}
 	grp, gctx := errgroup.WithContext(context.Background())
 	ctx, stop := context.WithCancel(context.WithValue(gctx, models.ErrGroupKey, grp))
 	t.Cleanup(stop)
@@ -68,15 +74,18 @@ exit 0
 		t.Fatalf("startAgent: %v", err)
 	}
 	// The stop comes once the agent's container runs: a stop before would
-	// find no `docker run` to end.
+	// find no `docker run` to end. A run that ends before its container
+	// runs ended without its `docker run`, and says why.
 	hung := time.After(hangBound)
 	for {
 		if _, err := os.Stat(running); err == nil {
 			break
 		}
 		select {
+		case err := <-exited:
+			t.Fatalf("the run ended before the agent's `docker run` ran, with %v; the run logged:%s", err, linesOf(logged))
 		case <-hung:
-			t.Fatalf("the agent's `docker run` never ran within %v", hangBound)
+			t.Fatalf("the agent's `docker run` never ran within %v; the run logged:%s", hangBound, linesOf(logged))
 		case <-time.After(time.Millisecond):
 		}
 	}
@@ -113,6 +122,15 @@ exit 0
 	}
 }
 
+// linesOf is what logged holds, a line an entry: its message and its fields.
+func linesOf(logged *observer.ObservedLogs) string {
+	var b strings.Builder
+	for _, e := range logged.All() {
+		fmt.Fprintf(&b, "\n\t%s %v", e.Message, e.ContextMap())
+	}
+	return b.String()
+}
+
 // armsSaid is a ManualClock that says each look at it a bound arms (After).
 // A bound arms its first as it is set, and no other before the clock moves.
 type armsSaid struct {
@@ -129,7 +147,8 @@ func (c armsSaid) After(d time.Duration) (<-chan time.Time, func() bool) {
 // goesSilent is a daemon that takes a stop's question of the removal of the
 // agent's container (ContainerWait) and then answers nothing: neither that
 // question, nor a look at the container, nor a volume's removal. Each
-// returns only once its context ends.
+// returns only once its context ends. A volume's removal asked before the
+// stop's question, by a run that ended before its stop, it answers at once.
 type goesSilent struct {
 	kdocker.Client
 	taken     chan struct{}
@@ -152,6 +171,11 @@ func (d *goesSilent) ContainerInspect(ctx context.Context, _ string) (container.
 
 func (d *goesSilent) VolumeRemove(ctx context.Context, name string, _ bool) error {
 	d.removed <- name
+	select {
+	case <-d.taken:
+	default:
+		return nil
+	}
 	<-ctx.Done()
 	return ctx.Err()
 }

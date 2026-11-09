@@ -138,6 +138,12 @@ type Proxy struct {
 	// whenever its error capture window opens (openTestErrorCapture). Under
 	// the proven switch the parsers find it on their connection's context.
 	learnTracker *learn.Tracker
+	// serveClock tells, with the proven switch off, a call's span on the
+	// application's clock for the background check alone (learn.
+	// CallSpanOf): the managers note their serves to it, and the parsers
+	// find it on their connection's context. The learn tracker, which tells
+	// it under the switch, is fed nothing with it off.
+	serveClock *learn.ServeClock
 	// procZones reads the zone each application process writes a wall
 	// clock of no zone in, from /proc, by the connection's origin PID
 	// (learn.WithProcZone): its calls are learned and checked in it.
@@ -1075,6 +1081,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
 		logger:                    logger,
 		learnTracker:              learn.NewTracker(),
+		serveClock:                &learn.ServeClock{},
 		Port:                      opts.ProxyPort,
 		agentPort:                 opts.Agent.AgentPort,
 		IncomingProxyPort:         opts.IncomingProxyPort,
@@ -2060,6 +2067,10 @@ func (p *Proxy) setMockManager(m *MockManager) {
 	} else if provenswitch.On() {
 		// No manager serves: the tracker keeps no hold on the one it drops.
 		p.learnTracker.SetServeOwnerOf(nil)
+	} else if m != nil {
+		// With the switch off every serve is noted to the serve clock
+		// alone: a call's span for the background check.
+		m.SetServeClock(p.serveClock)
 	}
 	p.sessionMu.Lock()
 	prev := p.mockManager
@@ -2281,10 +2292,9 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	p.logAgentEgressKnobs()
 
 	// Wait for the proxy server to be ready or fail
-	if err := <-readyChan; err != nil {
+	if err := p.awaitListen(ctx, g, readyChan); err != nil {
 		return err
 	}
-	utils.BootStep("the proxy listens")
 
 	// Serve DNS over TCP and UDP, and wait for both to be bound.
 	if err := p.startDNSServers(ctx, g); err != nil {
@@ -2374,6 +2384,27 @@ var beginBootWork = utils.BeginBootWork
 // start function starts the proxy server on the idle local port.
 // When skipListener is true, no TCP listener is created.
 // The function blocks on ctx.Done and handles cleanup on shutdown.
+// sweepLegacyJavaAlias is pTls.SweepLegacyJavaAlias; a test replaces it.
+var sweepLegacyJavaAlias = pTls.SweepLegacyJavaAlias
+
+// awaitListen waits for the proxy's listener (readyChan), then removes the
+// retired CA's JDK keystore alias beside the rest of the start, in g: off
+// the start path, as its removal may run keytool, and a JVM takes seconds
+// on a starved host. The app reads keploy's merged truststore, not that
+// keystore. A start whose listener fails removes nothing.
+func (p *Proxy) awaitListen(ctx context.Context, g *errgroup.Group, readyChan <-chan error) error {
+	if err := <-readyChan; err != nil {
+		return err
+	}
+	utils.BootStep("the proxy listens")
+	g.Go(func() error {
+		defer utils.Recover(p.logger)
+		sweepLegacyJavaAlias(ctx, p.logger)
+		return nil
+	})
+	return nil
+}
+
 func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 
 	if p.skipListener {
@@ -2975,6 +3006,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			parserCtx = learn.WithProcZone(parserCtx, z)
 		}
+	} else {
+		// With the switch off a parser reads a call's span for the
+		// background check alone on the serve clock (learn.CallSpanOf).
+		parserCtx = learn.WithServeClock(parserCtx, p.serveClock)
 	}
 	// A handshake made under parserCtx (a parser's STARTTLS upgrade, MySQL
 	// or Postgres; opportunistic TLS) names its leaf for the IP the client
@@ -4858,11 +4893,43 @@ func (p *Proxy) SeedStatementCatalog(mocks []*models.Mock) {
 	_ = p.stageOn("catalog", func(m *MockManager) { m.SeedStatementCatalog(mocks) })
 }
 
+// SeedBackgroundRecordings hands the underlying MockManager the set's
+// background recordings (MockManager.SeedBackgroundRecordings). Satisfies the
+// agent's optional BackgroundRecordingsSeeder extension interface.
+func (p *Proxy) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
+	_ = p.stageOn("backgroundRecordings", func(m *MockManager) { m.SeedBackgroundRecordings(recs) })
+}
+
 // SeedRecordedWindows hands the underlying MockManager the recorded window of
 // every test of the set being staged. Satisfies the agent's optional
 // RecordedWindowsSeeder extension interface.
 func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
 	_ = p.stageOn("recordedWindows", func(m *MockManager) { m.SeedRecordedWindows(ws) })
+}
+
+// SeedRunPlaceWindows hands the underlying MockManager the recorded window of
+// every test of the set a replay serves, for the run's place alone
+// (MockManager.SeedRunPlaceWindows). Satisfies the agent's optional
+// RunPlaceSeeder extension interface.
+func (p *Proxy) SeedRunPlaceWindows(ws []models.TestWindow) {
+	_ = p.stageOn("runPlaceWindows", func(m *MockManager) { m.SeedRunPlaceWindows(ws) })
+}
+
+// ReachRunTest notes that the replay began test (open) or ended it
+// (MockManager.ReachRunTest). Satisfies the agent's optional RunPlaceSeeder
+// extension interface.
+func (p *Proxy) ReachRunTest(test string, open bool) {
+	_ = p.stageOn("runPlaceTest", func(m *MockManager) { m.ReachRunTest(test, open) })
+}
+
+// EndRunSet moves the run's place to the set's end
+// (MockManager.EndRunSet), on the run's manager alone, as FileAtSetEnd
+// files: no set's end read asks a test worker's, whose own close ends its
+// holds. Satisfies the agent's optional RunSetEnder extension interface.
+func (p *Proxy) EndRunSet() {
+	if m := p.getMockManager(); m != nil {
+		m.EndRunSet()
+	}
 }
 
 // ResetStatefulCursors drops the mock manager's per-request stateful cursors so
@@ -4998,6 +5065,20 @@ func (p *Proxy) SetPoolNames(names []string, owners map[string]string, tests map
 	})
 }
 
+var _ agent.PoolTrailsSetter = (*Proxy)(nil)
+
+// SetPoolTrails implements agent.PoolTrailsSetter: the test each
+// worker-scope recording trails, on the mock manager
+// (MockManager.SetPoolTrails).
+func (p *Proxy) SetPoolTrails(trails map[string]string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolTrails(trails)
+	return nil
+}
+
 // learnBoundary runs step (the learn tracker's Begin, End or NewSet) on the
 // proxy's learn tracker through the mock manager it holds
 // (MockManager.LearnBoundary): holding the manager's round lock, so a learn
@@ -5062,6 +5143,15 @@ func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 
 var _ agent.AppClockSetter = (*Proxy)(nil)
 
+// SetBackgroundClock makes the background check read, with the proven
+// switch off, the app's clock through f (agent.BackgroundClockSetter): the
+// serve clock's (learn.ServeClock.SetClock). The learn step reads none.
+func (p *Proxy) SetBackgroundClock(f func(real time.Time) (time.Time, bool)) {
+	p.serveClock.SetClock(f)
+}
+
+var _ agent.BackgroundClockSetter = (*Proxy)(nil)
+
 // SetAppClockRun makes the learn step read, through f, where the app's
 // clock's run to a real instant began (agent.AppClockRunSetter).
 func (p *Proxy) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
@@ -5111,6 +5201,17 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 		return errNoMockManager
 	}
 	m.ServeExactWorker(names)
+	return nil
+}
+
+// ServeExactWorkerSkipped implements agent.ExactWorkerSkippedServer
+// (exact.go).
+func (p *Proxy) ServeExactWorkerSkipped(names, skipped []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactWorkerSkipped(names, skipped)
 	return nil
 }
 
@@ -5313,6 +5414,17 @@ func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
 	}
 	return m.ExactTestOutcome()
 }
+
+// ExactTestSkippedReads implements agent.ExactSkippedReadsReader (exact.go).
+func (p *Proxy) ExactTestSkippedReads() (string, []string) {
+	m := p.getMockManager()
+	if m == nil {
+		return "", nil
+	}
+	return m.ExactTestSkippedReads()
+}
+
+var _ agent.ExactSkippedReadsReader = (*Proxy)(nil)
 
 var (
 	_ agent.ExactServer            = (*Proxy)(nil)
@@ -6121,11 +6233,15 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
 					Kind:             parserErr.MissKind,
 					Recorded:         parserErr.Recorded,
+					SkippedReads:     parserErr.MismatchReport.SkippedReads,
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 					Given:            parserErr.MismatchReport.Given,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
+					// The same request as a set background recording:
+					// listed, counted against no test.
+					Background: parserErr.MismatchReport.Background,
 					// A call the parser held for a later test's recording
 					// that none answered: missed only at the set's end.
 					Held: parserErr.MismatchReport.HeldPastWindow,
@@ -6141,6 +6257,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					WriteKind:  parserErr.MismatchReport.WriteKind,
 					Source:     parserErr.MismatchReport.Source,
 					RecordedIn: parserErr.MismatchReport.RecordedIn,
+					Earlier:    parserErr.MismatchReport.Earlier,
 					Repeat:     parserErr.MismatchReport.Repeat.Clone(),
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {

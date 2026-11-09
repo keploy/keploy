@@ -6,6 +6,7 @@ import (
 	"math"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -13,33 +14,43 @@ import (
 )
 
 // answeredLog remembers, for the test set staged now, the per-test recordings
-// that answered a call, by their request keys (models.RequestKeys), so that a
-// later miss can tell it is a repeat of a call an earlier test made
-// (FindAnsweredEarlier, models.RepeatNote). A consumed per-test recording is
-// in no read after it answers, so without this the miss of an identical
-// later call names nothing ("no_mocks, candidates 0").
+// that answered a call, and the background's that a call spent (one of the
+// worker scope's in a test's window, one of the pool's), by their request
+// keys (models.RequestKeys), so that a later miss can tell it is a repeat of
+// a call made earlier (FindAnsweredEarlier, models.RepeatNote). A consumed
+// per-test recording, or a spent one of the background's, is in no read
+// after it answers, so without this the miss of an identical later call
+// names nothing ("no_mocks, candidates 0").
 //
 // It keeps of each recording only what a match reads (answeredProbe): its
 // name, kind, times, noise and request, never its response, so the on-disk
 // store's promise that a set's answers are not resident holds. It is bounded
 // by bytes: at most answeredPerKey recordings per key (the newest), at most
-// answeredMaxBytes in all (answeredSize; the oldest noted goes first), and a
-// recording whose request alone is over answeredMaxEntryBytes is not kept. A
-// repeat whose earlier twin was not kept, or was pushed out, is reported as
-// before, with no note. It is for a miss's diagnosis only: nothing in it is
-// ever served.
+// answeredMaxBytes in all (answeredSize; the least recently answered goes
+// first, a kept recording moving to the back at each answer: noteLatest),
+// and a recording whose request alone is over answeredMaxEntryBytes is not
+// kept. A repeat whose earlier twin was not kept, or was pushed out, is
+// reported as before, with no note. It is for a miss's diagnosis only:
+// nothing in it is ever served.
 type answeredLog struct {
 	mu    sync.Mutex
 	byKey map[string][]*answeredEntry
-	// queue holds the entries in the order noted, oldest first, for the
-	// byte bound's eviction; one a key's bound dropped from every list it
-	// was in stays as an empty shell until compact.
-	queue []*answeredEntry
+	// queue holds the entries in the order they last answered, oldest
+	// first, for the byte bound's eviction; one a key's bound dropped from
+	// every list it was in, and a place a kept recording's entry left when
+	// it answered again (queued.own), stay until compact.
+	queue []queued
 	live  int // entries in some key's list
 	bytes int // the live entries' sizes
 	// set is the test set generation (MockManager.setGen) whose answers the
 	// log holds, moved by fence.
 	set uint64
+	// latest holds, by name, the entry noteLatest made for a recording that
+	// may answer call after call, while a key's list keeps it.
+	latest map[string]*answeredEntry
+	// copies counts the probes noteAs made of a recording (answeredProbe),
+	// read by the rows that pin what an answer costs.
+	copies atomic.Uint64
 	// redacting holds, apart from the keyed entries and their bounds, every
 	// recording noted that holds a pattern (Mock.Noise: the obfuscator
 	// redacted something in it), once a name and content (redactingKey), in
@@ -60,9 +71,30 @@ const redactingMaxBytes = 16 << 20
 type answeredEntry struct {
 	mock *models.Mock // answeredProbe's; nil once the entry is dropped
 	at   time.Time
-	keys []string
-	refs int // the key lists it is in: 0 once dropped
-	size int // answeredSize
+	// background is the scope of the set's background mock is of
+	// (models.RepeatNote.Background), empty for a test's own recording.
+	// skippedRead says mock is a skipped test's read that answered
+	// (noteSkippedReadSpent; models.RepeatNote.SkippedRead): no background.
+	background  string
+	skippedRead bool
+	keys        []string
+	refs        int // the key lists it is in: 0 once dropped
+	size        int // answeredSize
+	// turn counts the times the entry moved to the back of the queue
+	// (answeredLog.touch): the place of that turn is its own.
+	turn int
+}
+
+// queued is a place in answeredLog.queue: e's, of its turn then.
+type queued struct {
+	e    *answeredEntry
+	turn int
+}
+
+// own says the place is its entry's, which is still kept: not one the
+// entry left by moving to the back, nor one of an entry dropped.
+func (q queued) own() bool {
+	return q.e.mock != nil && q.turn == q.e.turn
 }
 
 const (
@@ -83,6 +115,66 @@ const (
 // A recording that holds a pattern is kept apart too, whatever its keys and
 // size, under redactingMaxBytes alone (keepRedacting).
 func (l *answeredLog) note(mk *models.Mock, at time.Time) {
+	l.noteFrom(mk, at, "", false)
+}
+
+// noteLatest is note of a recording that may answer call after call (one of
+// the pool's a door keeps: MockManager.noteKeptAnswer): while the log keeps
+// the entry an earlier noteLatest made for it, only the time it answered
+// moves to at, and the entry to the back of the queue (touch), so each
+// answer after the first copies nothing, and the byte bound pushes out a
+// recording that answered a moment ago last.
+func (l *answeredLog) noteLatest(mk *models.Mock, at time.Time) {
+	if mk == nil || mk.Name == "" || l.movedLatest(mk, at) {
+		return
+	}
+	l.noteAs(mk, at, "", false, true)
+}
+
+// movedLatest moves the time of the entry noteLatest made for mk, of this
+// test set, to at, and reports whether there is one. A mock an earlier
+// set's staging pooled is refused, as note refuses it, and reported as
+// moved: there is nothing to note.
+func (l *answeredLog) movedLatest(mk *models.Mock, at time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if g := mk.TestModeInfo.StagedSet; g != 0 && g != l.set {
+		return true
+	}
+	e := l.latest[mk.Name]
+	if e == nil {
+		return false
+	}
+	l.touch(e, at)
+	return true
+}
+
+// touch moves e's time to at and e to the back of the queue, the place of
+// the entry answered last, unless at is earlier than its time: an answer
+// noted after a later one moves nothing, and one at the same clock reading
+// (a coarse clock) still moves e behind what was noted between the two.
+// Caller holds mu.
+func (l *answeredLog) touch(e *answeredEntry, at time.Time) {
+	if at.Before(e.at) {
+		return
+	}
+	e.at = at
+	e.turn++
+	l.queue = append(l.queue, queued{e: e, turn: e.turn})
+	l.compact()
+}
+
+// noteFrom is note of a recording of the set's background of scope
+// background (models.RepeatNote.Background); "" is a test's own, or, with
+// skippedRead, a skipped test's read (models.RepeatNote.SkippedRead).
+func (l *answeredLog) noteFrom(mk *models.Mock, at time.Time, background string, skippedRead bool) {
+	l.noteAs(mk, at, background, skippedRead, false)
+}
+
+// noteAs is noteFrom, and with latest noteLatest's first note of mk, which
+// it files as mk's (latest): one filed by another call while this one made
+// its copy has its time moved instead, so a recording has one such entry.
+func (l *answeredLog) noteAs(mk *models.Mock, at time.Time, background string, skippedRead, latest bool) {
 	if mk == nil || mk.Name == "" {
 		return
 	}
@@ -92,6 +184,7 @@ func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 		return
 	}
 	probe := answeredProbe(mk)
+	l.copies.Add(1)
 	size := answeredSize(probe, keys)
 	var key redactingKey
 	keyed := false
@@ -103,6 +196,10 @@ func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 	if g := mk.TestModeInfo.StagedSet; g != 0 && g != l.set {
 		return
 	}
+	if e := l.latest[mk.Name]; latest && e != nil {
+		l.touch(e, at)
+		return
+	}
 	if redacts {
 		l.keepRedacting(probe, key, keyed, size)
 	}
@@ -112,8 +209,14 @@ func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 	if l.byKey == nil {
 		l.byKey = map[string][]*answeredEntry{}
 	}
-	e := &answeredEntry{mock: probe, at: at, keys: keys, size: size}
-	l.queue = append(l.queue, e)
+	e := &answeredEntry{mock: probe, at: at, background: background, skippedRead: skippedRead, keys: keys, size: size}
+	if latest {
+		if l.latest == nil {
+			l.latest = map[string]*answeredEntry{}
+		}
+		l.latest[mk.Name] = e
+	}
+	l.queue = append(l.queue, queued{e: e})
 	l.live++
 	l.bytes += size
 	for _, k := range keys {
@@ -187,21 +290,25 @@ func (l *answeredLog) unref(e *answeredEntry) {
 
 // drop forgets e's recording and its bytes. Caller holds mu.
 func (l *answeredLog) drop(e *answeredEntry) {
+	if l.latest[e.mock.Name] == e {
+		delete(l.latest, e.mock.Name)
+	}
 	e.mock, e.refs = nil, 0
 	l.live--
 	l.bytes -= e.size
 }
 
-// evictOldest takes the oldest entry still kept out of every key's list.
-// Caller holds mu.
+// evictOldest takes the entry still kept that answered least recently out
+// of every key's list. Caller holds mu.
 func (l *answeredLog) evictOldest() {
 	for len(l.queue) > 0 {
-		e := l.queue[0]
-		l.queue[0] = nil
+		q := l.queue[0]
+		l.queue[0] = queued{}
 		l.queue = l.queue[1:]
-		if e.mock == nil {
+		if !q.own() {
 			continue
 		}
+		e := q.e
 		for _, k := range e.keys {
 			list := l.byKey[k][:0:0]
 			for _, o := range l.byKey[k] {
@@ -220,17 +327,17 @@ func (l *answeredLog) evictOldest() {
 	}
 }
 
-// compact sheds the queue's dropped entries once they outnumber the kept
-// ones, so a key answered again and again holds no growing queue. Caller
-// holds mu.
+// compact sheds the queue's places that are no kept entry's own once they
+// outnumber the kept ones, so a key answered again and again, or a kept
+// recording, holds no growing queue. Caller holds mu.
 func (l *answeredLog) compact() {
 	if len(l.queue) <= 2*l.live+64 {
 		return
 	}
-	kept := make([]*answeredEntry, 0, l.live)
-	for _, e := range l.queue {
-		if e.mock != nil {
-			kept = append(kept, e)
+	kept := make([]queued, 0, l.live)
+	for _, q := range l.queue {
+		if q.own() {
+			kept = append(kept, q)
 		}
 	}
 	l.queue = kept
@@ -273,7 +380,7 @@ func (l *answeredLog) candidates(keys []string) []answeredEntry {
 func (l *answeredLog) reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.byKey, l.queue, l.live, l.bytes = nil, nil, 0, 0
+	l.byKey, l.queue, l.live, l.bytes, l.latest = nil, nil, 0, 0, nil
 }
 
 // fence empties the log for the test set of generation set, which from now
@@ -283,7 +390,7 @@ func (l *answeredLog) reset() {
 func (l *answeredLog) fence(set uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.byKey, l.queue, l.live, l.bytes = nil, nil, 0, 0
+	l.byKey, l.queue, l.live, l.bytes, l.latest = nil, nil, 0, 0, nil
 	l.forgetRedacting()
 	l.set = set
 }
@@ -541,11 +648,40 @@ func (m *MockManager) noteAnswered(mk models.Mock) {
 	m.answered.note(&mk, time.Now())
 }
 
+// noteKeptAnswer records that mk answered a call now through a door that
+// keeps it (UpdateUnFilteredMock, MarkMockAsUsed) when, under exact serving,
+// it is one of the pool's (InPool: a recording made outside every test, in
+// TestMain or at start-up), whatever its lifetime. A test's view hides such
+// a recording but for a call a keploy.yaml sessionCalls entry names exactly
+// (sharesRest), and a door that keeps it settles its answer as the tier's
+// (exactPass), so nothing else notes it: a test's identical call then
+// misses, and its miss names it (FindAnsweredEarlier) and why it was not
+// served (models.RepeatNote.OutsideTests), as it names a per-test one.
+// Such a recording may answer call after call: it is noted at its first
+// answer of a test set, and while the log keeps that entry each answer after
+// it moves the entry's time and its place in the bound's queue, unless noted
+// at an earlier time (answeredLog.noteLatest). Nothing else is noted here: a test's own is
+// noted as it is served (noteExactServed), a background's as it is spent
+// (noteBackgroundSpent), and a recording no view hides is served to every
+// identical call.
+func (m *MockManager) noteKeptAnswer(mk *models.Mock) {
+	if mk == nil || m.exactView() == nil {
+		return
+	}
+	if pool, known := m.InPool(mk); !pool || !known {
+		return
+	}
+	m.answered.noteLatest(mk, time.Now())
+}
+
 // AnsweredRedacting implements integrations.AnsweredRedactingReader: since
 // the last fence (the test set staged now; the run, for a CLI that never
 // says a set starts: answeredLog.reset), every per-test recording of kind
-// that answered a call and holds a pattern, once a name and content, as the
-// answered log keeps it (answeredProbe), and whether the log kept every one
+// that answered a call and holds a pattern, every such background recording
+// a call spent (noteBackgroundSpent), and every such pool recording a door
+// that keeps it answered with (noteKeptAnswer: noted at its first answer of
+// the set, of any lifetime), once a name and content, as the answered log
+// keeps it (answeredProbe), and whether the log kept every one
 // (redactingMaxBytes).
 func (m *MockManager) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
 	return m.answered.redactingOf(kind)
@@ -553,11 +689,33 @@ func (m *MockManager) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool)
 
 var _ integrations.AnsweredRedactingReader = (*MockManager)(nil)
 
+// noteBackgroundSpent records that mk, a recording of the set's background
+// of scope background (models.RepeatBackgroundWorker or
+// models.RepeatBackgroundPool), answered a call now and is spent for the
+// calls it answers no more: a later identical call it does not answer then
+// names it, and its scope (FindAnsweredEarlier).
+func (m *MockManager) noteBackgroundSpent(mk *models.Mock, background string) {
+	m.answered.noteFrom(mk, time.Now(), background, false)
+}
+
+// noteSkippedReadSpent records that mk, the read of a test the replay's gate
+// skips that keploy mock replay moved to the worker scope (isSkippedRead),
+// answered a call now: a later identical call it does not answer names it
+// as that skipped test's read, with no scope of the background
+// (FindAnsweredEarlier). The read answers at most as many calls as its test
+// recorded it, so that call is one past what the set recorded: the miss of
+// the test it was made in, never a background call charged to no test.
+func (m *MockManager) noteSkippedReadSpent(mk *models.Mock) {
+	m.answered.noteFrom(mk, time.Now(), "", true)
+}
+
 // FindAnsweredEarlier implements integrations.AnsweredFinder: of the per-test
-// recordings of kind that answered a call earlier in this test set, under any
-// of keys, the one answered last that match accepts, and is not the open
-// test's own (recorded inside its window, or in its exact view). ok is false
-// when there is none.
+// recordings of kind that answered a call earlier in this test set, of the
+// background's a call spent (AnsweredCall.Background), and of the skipped
+// tests' reads a call spent (AnsweredCall.SkippedRead), under any of
+// keys, the one answered last that match accepts, and is not the open test's
+// own (recorded inside its window, or in its exact view). ok is false when
+// there is none.
 func (m *MockManager) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
 	if match == nil || len(keys) == 0 {
 		return integrations.AnsweredCall{}, false
@@ -582,7 +740,7 @@ func (m *MockManager) FindAnsweredEarlier(kind models.Kind, keys []string, match
 	if best.mock == nil {
 		return integrations.AnsweredCall{}, false
 	}
-	return integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at}, true
+	return integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at, Background: best.background, SkippedRead: best.skippedRead}, true
 }
 
 var _ integrations.AnsweredFinder = (*MockManager)(nil)

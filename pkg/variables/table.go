@@ -2,10 +2,12 @@ package variables
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Binding is the value a variable has in a scope, and where it was taken:
@@ -368,8 +370,221 @@ func collides(inForce map[string]Binding, beside []Binding, b Binding, earlier [
 // about the live values decides it. BindAll and Bind refuse such a b, and an
 // adapter that checks a call before it binds asks the same (http's
 // holdVariables).
+//
+// Under the proven switch (KEPLOY_PROVEN), two bindings at words of values
+// (each with its WordRun, the value span its word is in: WordRuns) are set
+// side by side at the word they share, each span at its own word
+// (WordRunAt), and each pair of words they both hold there is read live and
+// as recorded (WordRunRecorded). A span holds only words the recording names
+// as one learned value: a neighbour that is, or may be, another value says
+// nothing of the shared word, so "<P>/7" and "<Q>/7", where "<B>/3" and
+// "<D>/5" were recorded, leave "7" its own value, refused as main refuses
+// it, whether the mocks hold "<B>" and "<D>" whole, the whole texts, or
+// nothing. A pair equal live that was two words when recorded is a copy:
+// the application sent more than the one word where the recording had two
+// values, whole ("<X>" where "<A>" and "<C>" were recorded) or beside
+// another ("<X>" inside "<X>/<Y>", or "<P>/<X>" and "<Q>/<X>" where
+// "<B>/<A>" and "<D>/<C>" were), and it is refused. A pair recorded as one
+// word is one value at both places: no evidence either way. The shared word
+// is equal by chance (a group of two fresh UUIDs, or two groups of one), and
+// neither binding refused, only where no pair is a copy and at least one
+// pair differs both live and as recorded; with no such pair it is refused.
+// So a word binding is never bound where main's word by word check refuses
+// it, but inside a span. A word binding beside a binding of a value whole is
+// checked as two values whole, and with the switch off every pair is (main's
+// word by word check).
 func TwoValues(held, b Binding) bool {
-	return !held.Given && held.Name != b.Name && held.Value == b.Value && held.Recorded != b.Recorded && !models.ReadInOneSecond(held.Clock, b.Clock)
+	if held.Given || held.Name == b.Name || held.Value != b.Value || held.Recorded == b.Recorded || models.ReadInOneSecond(held.Clock, b.Clock) {
+		return false
+	}
+	if held.WordRun != "" && b.WordRun != "" && provenswitch.On() {
+		return !chanceInRuns(held, b)
+	}
+	return true
+}
+
+// chanceInRuns reports whether, set side by side at the word they share
+// (held's WordRunAt beside b's), the two runs show the shared word equal by
+// chance: no pair of words they both hold there is equal live where its
+// recorded words differ, and at least one pair differs both live and as
+// recorded. Runs whose recorded words are not as many as their live words
+// show nothing.
+func chanceInRuns(held, b Binding) bool {
+	hw, bw := strings.Split(held.WordRun, wordRunSep), strings.Split(b.WordRun, wordRunSep)
+	hr, br := strings.Split(held.WordRunRecorded, wordRunSep), strings.Split(b.WordRunRecorded, wordRunSep)
+	if len(hr) != len(hw) || len(br) != len(bw) {
+		return false
+	}
+	shift := b.WordRunAt - held.WordRunAt
+	differ := false
+	for i := range hw {
+		j := i + shift
+		if i == held.WordRunAt || j < 0 || j >= len(bw) || hr[i] == br[j] {
+			continue
+		}
+		if hw[i] == bw[j] {
+			return false
+		}
+		differ = true
+	}
+	return differ
+}
+
+// wordRunSep joins the words of a run: no word holds it (Words).
+const wordRunSep = "-"
+
+// WordBind is a binding one call makes at a word of a value: Text names the
+// text that holds the word (its place and decode steps, as the adapter writes
+// a place: one name for one text), Word is the word's index in it (Words; -1
+// for a value whole), Live is the word, live, and Recorded the word its
+// recording holds there. RecordedText is that text as recorded (decoded by
+// its steps), and Elsewhere reports whether the binding's mock holds a
+// string, whole, at a place other than Text (a field, a segment, a header, a
+// value of its answer): the evidence that cuts a run into held stretches
+// (WordRuns). Of names the learned value Live is a word of: a held stretch
+// is one value only when each of its words names the same one. A WordBind
+// with none of them has no span but its own word.
+type WordBind struct {
+	Text         string
+	Word         int
+	Live         string
+	Recorded     string
+	RecordedText string
+	Elsewhere    func(string) bool
+	Of           string
+}
+
+// Run is one binding's value span (Binding.WordRun): its words, live and as
+// recorded, each joined, and At, the index of the binding's own word among
+// them. A binding of a value whole has the zero Run.
+type Run struct {
+	Live     string
+	Recorded string
+	At       int
+}
+
+// On is b with r as its run.
+func (r Run) On(b Binding) Binding {
+	b.WordRun, b.WordRunRecorded, b.WordRunAt = r.Live, r.Recorded, r.At
+	return b
+}
+
+// maxSpanRun bounds the run spansOf reads (it tries each stretch of it): a
+// longer run gives each of its words no span but its own (main's word by
+// word check).
+const maxSpanRun = 64
+
+// WordRuns is, for each binding one call makes (ws[i]), its value span: the
+// words of its run (the words the call binds at consecutive words of the same
+// text, its own among them, in word order; words the call binds apart, with
+// a word between them it does not bind, are two runs) that hold the one
+// value its word is a word of. That is the shortest stretch of the run
+// around its word whose recorded text its mock holds whole elsewhere (a cid
+// or an appId sent whole in another field) and that holds no shorter such
+// stretch (a stretch that holds one, "<B>/3" sent whole beside "<B>", is two
+// values), when each of its words names the same learned value (Of). A held
+// stretch is not proof of one value by itself: "<B>/3" sent whole elsewhere
+// may be one id or a cid beside a count, and the recording does not say
+// which. Every other word is its own value, alone, checked word by word as
+// main checks it: a word no held stretch covers (never the words around it:
+// "<cid>/<appId>/7" with only the cid held leaves "7" alone, not with the
+// appId), a word of a held stretch whose words name no one value, a word
+// whose recorded text does not hold the run's recorded words where the run
+// says, and one with no Elsewhere. A binding of a value whole has none.
+func WordRuns(ws []WordBind) []Run {
+	runs := make([]Run, len(ws))
+	byText := map[string][]int{}
+	var texts []string
+	for i, w := range ws {
+		if w.Word < 0 {
+			continue
+		}
+		if _, seen := byText[w.Text]; !seen {
+			texts = append(texts, w.Text)
+		}
+		byText[w.Text] = append(byText[w.Text], i)
+	}
+	for _, k := range texts {
+		idx := byText[k]
+		sort.SliceStable(idx, func(x, y int) bool { return ws[idx[x]].Word < ws[idx[y]].Word })
+		for lo := 0; lo < len(idx); {
+			hi := lo + 1
+			for hi < len(idx) && ws[idx[hi]].Word == ws[idx[hi-1]].Word+1 {
+				hi++
+			}
+			run := idx[lo:hi]
+			for at, span := range spansOf(ws, run) {
+				from, to := span[0], span[1]
+				live, recorded := make([]string, 0, to-from+1), make([]string, 0, to-from+1)
+				for _, j := range run[from : to+1] {
+					live, recorded = append(live, ws[j].Live), append(recorded, ws[j].Recorded)
+				}
+				runs[run[at]] = Run{Live: strings.Join(live, wordRunSep), Recorded: strings.Join(recorded, wordRunSep), At: at - from}
+			}
+			lo = hi
+		}
+	}
+	return runs
+}
+
+// spansOf is the value span (WordRuns) of each word of run (indexes of ws, at
+// consecutive words of one text), as the first and last index into run:
+// read once for the run from its recorded text and its mock (Elsewhere), the
+// same for every word of one text in one call.
+func spansOf(ws []WordBind, run []int) [][2]int {
+	n := len(run)
+	spans := make([][2]int, n)
+	for at := range spans {
+		spans[at] = [2]int{at, at}
+	}
+	first := ws[run[0]]
+	words := Words(first.RecordedText)
+	if first.Elsewhere == nil || n > maxSpanRun || ws[run[n-1]].Word >= len(words) {
+		return spans
+	}
+	for _, j := range run {
+		if x := words[ws[j].Word]; ws[j].RecordedText != first.RecordedText || first.RecordedText[x[0]:x[1]] != ws[j].Recorded {
+			return spans
+		}
+	}
+	// value[a*n+b]: the stretch a..b of run is held whole elsewhere and holds
+	// no shorter stretch held whole (inner). A held stretch that holds another
+	// ("<B>/3" beside "<B>") is two values, never one.
+	value, inner := make([]bool, n*n), make([]bool, n*n)
+	for a := n - 1; a >= 0; a-- {
+		for b := a; b < n; b++ {
+			if b > a {
+				inner[a*n+b] = value[(a+1)*n+b] || inner[(a+1)*n+b] || value[a*n+b-1] || inner[a*n+b-1]
+			}
+			value[a*n+b] = !inner[a*n+b] && first.Elsewhere(first.RecordedText[words[ws[run[a]].Word][0]:words[ws[run[b]].Word][1]])
+		}
+	}
+	for at := range spans {
+		from, to := -1, -1
+		for a := 0; a <= at; a++ {
+			for b := at; b < n; b++ {
+				if value[a*n+b] && (from < 0 || b-a < to-from) {
+					from, to = a, b
+				}
+			}
+		}
+		if from >= 0 && oneValue(ws, run[from:to+1]) {
+			spans[at] = [2]int{from, to}
+		}
+	}
+	return spans
+}
+
+// oneValue reports whether the word binds of stretch (indexes of ws) each
+// name the same learned value (WordBind.Of).
+func oneValue(ws []WordBind, stretch []int) bool {
+	of := ws[stretch[0]].Of
+	for _, j := range stretch {
+		if ws[j].Of == "" || ws[j].Of != of {
+			return false
+		}
+	}
+	return true
 }
 
 // Start begins a new scope (as Reset) with the values its test case gave

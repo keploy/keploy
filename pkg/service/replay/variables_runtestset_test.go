@@ -644,6 +644,22 @@ func TestTestRequestOf(t *testing.T) {
 	if got := testRequestOf(run, gone, dir); got.Unread == "" || len(got.Parts) != 0 || !strings.Contains(got.Unread, "assets/test-4.body") {
 		t.Fatalf("a body kept apart that cannot be read %+v; want it unread", got)
 	}
+	// A file kept outside the recording is not read, even where one is: the
+	// body's path leads out of the recording's directory.
+	outside := filepath.Join(t.TempDir(), "outside.body")
+	if err := os.WriteFile(outside, []byte("not the recording's"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	up, err := filepath.Rel(dir, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{up, outside} {
+		out := &models.TestCase{Kind: models.HTTP, Name: "test-8", HTTPReq: models.HTTPReq{URL: "http://h/x", BodyRef: models.BodyRef{Path: path, Size: 19}}}
+		if got := testRequestOf(run, out, dir); !strings.Contains(got.Unread, "is read only inside its recording") || len(got.Parts) != 0 {
+			t.Fatalf("a body kept outside the recording (%s) %+v; want it unread, with why", path, got)
+		}
+	}
 	file := &models.TestCase{Kind: models.HTTP, Name: "test-6", HTTPReq: models.HTTPReq{URL: "http://h/x",
 		Form: []models.FormData{{Key: "f", FileNames: []string{"a"}, Paths: []string{"missing.csv"}}}}}
 	if got := testRequestOf(run, file, dir); got.Unread == "" || len(got.Parts) != 0 || !strings.Contains(got.Unread, "form.f") {

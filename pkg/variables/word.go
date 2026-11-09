@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -648,7 +649,14 @@ func jsonString(s string, escapeHTML bool) (string, bool) {
 // pctOffsets is, for each byte text percent-decodes to, where it starts in
 // text, and len(text) last; nil where a '%' is not followed by two hex
 // digits.
+//
+// There are at most len(text)+1 offsets, so their slice is sized to that up
+// front. No string is math.MaxInt bytes long, so the sum cannot wrap; the
+// check before it says so where CodeQL's allocation-size check can see it.
 func pctOffsets(text string) []int {
+	if len(text) >= math.MaxInt {
+		return nil // not reached
+	}
 	at := make([]int, 0, len(text)+1)
 	for i := 0; i < len(text); i++ {
 		at = append(at, i)

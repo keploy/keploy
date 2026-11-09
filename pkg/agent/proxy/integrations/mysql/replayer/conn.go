@@ -119,6 +119,8 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 	// Store the server greetings
 	decodeCtx.ServerGreetings.Store(clientConn, handshake)
+	// The session begins with the autocommit the greeting's status says.
+	startSession(decodeCtx, handshake)
 
 	// Set the intial auth plugin
 	decodeCtx.PluginName = handshake.AuthPluginName

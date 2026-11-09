@@ -123,6 +123,16 @@ type exactPlan struct {
 	// returned is, by mock, the owner a drift move's recording was given
 	// back to (returnStaleMoves): its quarantine no longer applies.
 	returned map[string]string
+	// stopsDerived: the worker scope's at-stop marks (MockEntry.AtStop) are
+	// derived, not recorded: the set has no mappings.yaml keploy record
+	// wrote, so its windows give its worker scope, and each call of it
+	// recorded after its last test ended is marked (windowOwnership). A
+	// derived mark is treated exactly as a recorded one: never waited for,
+	// required once keploy has stopped the application and read what it
+	// consumed as it stopped, and not required of an application keploy did
+	// not stop, whose end says which went unjudged (unjudgedAtStop).
+	// stopsDerived only picks what a failure says of them (stopsDerivedWhy).
+	stopsDerived bool
 }
 
 // noteAhead fills p.ahead from what each test case of cases owns: its mapped
@@ -272,7 +282,9 @@ func (p *exactPlan) takeWorker(counted, rearm []models.MockState) ([]models.Mock
 // beginning it makes none due, begun), but for the ones whose answer is idle
 // (D3, D4). One the recording made as keploy record stopped the application
 // (MockEntry.AtStop) is required only once keploy has stopped this set's
-// application and read what it consumed as it stopped (stopped).
+// application and read what it consumed as it stopped (stopped), one marked
+// so because no mappings.yaml says which calls the stop made (stopsDerived)
+// as well.
 func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState, stopped bool) []string {
 	// Under the background rules the set's end requires none: what a
 	// background call answered is judged by record's judging,
@@ -486,7 +498,7 @@ func returnStaleMoves(mappings map[string][]models.MockEntry, worker []models.Mo
 			continue
 		}
 		// Back as recorded: no place, no line, no move.
-		e.Place, e.Reason, e.Owner, e.Drift = "", "", "", false
+		e.Place, e.Reason, e.Owner, e.Drift, e.Trails = "", "", "", false, ""
 		outMappings[owner] = insertByRecordedTime(outMappings[owner], e)
 	}
 	return outMappings, outWorker, returned
@@ -654,12 +666,33 @@ func (r *Replayer) windowOwnershipOf(testSetID string, cases []*models.TestCase,
 		out[tc.ID] = tc.Mocks
 		mapped += len(tc.Mocks)
 	}
+	// No mappings.yaml says which calls keploy record's stop made
+	// (MockEntry.AtStop): each worker-scope call recorded after the set's last
+	// test ended may be one, so each is marked as one, and judged as a
+	// recorded mark is (exactPlan.stopsDerived): the set's end never waits
+	// for it, and requires it once keploy has stopped the application.
+	// A mock with no place (one built without it) is read by its request
+	// time, as the derivation places it.
+	placed := make(map[string]time.Time, len(mocks))
+	for _, m := range mocks {
+		if !m.Place.IsZero() {
+			placed[m.Name] = m.Place
+		}
+	}
+	models.MarkAtStop(derived.Worker, placed, models.LastWindowEnd(windows))
+	atStop := 0
+	for _, e := range derived.Worker {
+		if e.AtStop {
+			atStop++
+		}
+	}
 	r.logger.Info("under KEPLOY_PROVEN each test case of this test set owns the calls recorded inside its own window, as keploy record maps a recording made under the switch",
 		zap.String("testSetID", testSetID),
 		zap.String("reason", why),
 		zap.Int("numTests", len(out)),
 		zap.Int("ownedMocks", mapped),
 		zap.Int("workerMocks", len(derived.Worker)),
+		zap.Int("workerMocksAfterTheLastTest", atStop),
 		zap.String("next_step", "record the test set again under KEPLOY_PROVEN for a mappings.yaml keploy record writes"))
 	if n := len(derived.Concurrent); n > 0 {
 		r.logger.Warn("some tests of this test set were recorded while another test's request was still open: a call recorded while two tests were open is owned by the test whose request came first, which may not be the test that made it",
@@ -683,12 +716,15 @@ func (r *Replayer) windowOwnershipOf(testSetID string, cases []*models.TestCase,
 // order; it is not the pool's.
 func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEntry, stored ...[]*models.Mock) *exactPlan {
 	p := &exactPlan{owned: make(map[string][]string, len(mappings))}
-	// held: the stored mocks by name, true for a test mock (data-plane).
+	// held: the stored mocks by name, true for a test mock
+	// (models.Mock.OutsideTestScopes: data-plane, and no answer the client
+	// never read, so whatever mapping lists one, neither its test nor the
+	// worker scope requires it).
 	held := map[string]bool{}
 	for _, list := range stored {
 		for _, mk := range list {
 			if mk != nil && mk.Name != "" {
-				held[mk.Name] = !mk.IsProtocolPhase()
+				held[mk.Name] = !mk.OutsideTestScopes()
 				if models.IsAnswerPlaced(mk) {
 					if p.answerPlaced == nil {
 						p.answerPlaced = map[string]bool{}
@@ -1114,24 +1150,57 @@ func (r *Replayer) noteOwnsNothing(testSetID string) {
 
 // workerStallLimit is the count of wake-ups in a row, with none of the set's
 // worker-scope mocks answered, after which the set's end stops waiting for
-// them (awaitWorkerScope): the end count's watchdog's (design v14's lead
-// decision, 600). It counts wake-ups, not seconds: a starved replay starves
-// its watchdog equally, so load alone cannot trip it.
-var workerStallLimit = 600
+// them (awaitWorkerScope). It counts wake-ups, not seconds: a starved replay
+// starves its watchdog equally, so load alone cannot trip it. At
+// workerWakeAfter's delays, 6000 wake-ups span about 600 s, as long as the
+// end count's watchdog (design v14's lead decision: 600 wake-ups a second
+// apart).
+var workerStallLimit = 6000
 
-// workerWake is how the wait for the worker scope wakes: once a second. A
-// test replaces it.
-var workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
-	t := time.NewTicker(time.Second)
-	return t.C, t.Stop
+// workerWakeFirst is how soon the wait for the worker scope first reads what
+// the agent consumed, and workerWakeMost the longest it sleeps between two
+// reads. A worker call answered as the set's last test ends (a consumer's
+// poll answered just after it) is read within about workerWakeFirst, and one
+// answered later in the wait at most workerWakeMost after its answer, not at
+// the next whole second. A read is one request to the agent, which hands
+// back only what was consumed since the read before.
+const (
+	workerWakeFirst = 10 * time.Millisecond
+	workerWakeMost  = 100 * time.Millisecond
+)
+
+// workerWakeAfter is how long the wait for the worker scope sleeps before its
+// n-th wake-up, from 0: workerWakeFirst, twice as long at each wake-up after
+// it, at most workerWakeMost.
+func workerWakeAfter(n int) time.Duration {
+	d := workerWakeFirst
+	for ; n > 0 && d < workerWakeMost; n-- {
+		d *= 2
+	}
+	return min(d, workerWakeMost)
+}
+
+// workerWake is how the wait for the worker scope wakes: next is its next
+// wake-up, which comes workerWakeAfter(n) after the wait asks for it, n the
+// count of wake-ups it asked for before. A test replaces it.
+var workerWake = func(context.Context) (func() <-chan time.Time, func()) {
+	n := 0
+	return func() <-chan time.Time {
+		d := workerWakeAfter(n)
+		n++
+		return time.After(d)
+	}, func() {}
 }
 
 // awaitWorkerScope waits, at the set's end and before its application is
 // stopped, until every worker-scope mock the set's end requires answered by
 // then has answered (exactPlan.unansweredWorker, those the recording made
 // before its stop; D3): a worker makes its calls in its own time, after the
-// last test as well. It reads what the agent consumed meanwhile into
-// consumed (through add), as the set's end reads it. It returns those still
+// last test as well. It never waits for a call marked as one the stop may
+// make (MockEntry.AtStop), a mark derived for a set with no mappings.yaml
+// included: an application makes such a call only once it is stopped. It
+// reads what the agent consumed meanwhile into consumed (through add), as the
+// set's end reads it. It returns those still
 // unanswered when the run stops waiting: the set's own context ends (its
 // application exited, or the user stopped it), or none of them answers
 // across workerStallLimit wake-ups in a row. The wake-ups count the
@@ -1146,14 +1215,14 @@ func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consum
 	}
 	r.logger.Info("waiting for the test set's worker scope: the calls the application makes on its own that no test owns, which its recording made by the set's end ("+provenswitch.Env+"=1)",
 		zap.Int("calls", len(missing)), zap.Strings("mocks", missing[:min(len(missing), 20)]))
-	wake, stop := workerWake(ctx)
+	next, stop := workerWake(ctx)
 	defer stop()
 	stalls := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return missing, nil
-		case <-wake:
+		case <-next():
 		}
 		read, err := r.hookImpl.GetConsumedMocks(ctx)
 		if err != nil {
@@ -1177,6 +1246,55 @@ func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consum
 			return missing, nil
 		}
 	}
+}
+
+// stopsDerivedWhy says, of missing (the worker-scope calls the set's end
+// found unanswered), how many are marked as ones the stop may make only
+// because no mappings.yaml says which calls keploy record's stop made
+// (stopsDerived), and what keploy did with them: "" for none.
+func (p *exactPlan) stopsDerivedWhy(missing []string) string {
+	n := len(p.derivedAtStop(missing))
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d of them were recorded after the set's last test ended, and the set has no mappings.yaml keploy record wrote to say whether the application made them on its own or as keploy record stopped it, so keploy required them by the set's end, what the application consumed as keploy stopped it included, without waiting for them", n)
+}
+
+// unjudgedAtStop is, when keploy did not stop the set's application and
+// read what it consumed as it stopped (stopped false), the calls marked as
+// ones the stop may make only because no mappings.yaml says which calls
+// keploy record's stop made (stopsDerived) that the set's end would require
+// of a stopped application and consumed does not hold: the set's end judges
+// none of them (unansweredWorker), so it says which. Nil when the
+// application was stopped, or under the background rules, which require
+// none.
+func (p *exactPlan) unjudgedAtStop(consumed map[string]models.MockState, stopped bool) []string {
+	if stopped || p == nil || p.background {
+		return nil
+	}
+	return p.derivedAtStop(p.unansweredWorkerOf(consumed, true))
+}
+
+// derivedAtStop is, in the order of names, those of names marked as calls
+// the stop may make only because no mappings.yaml says which calls keploy
+// record's stop made (stopsDerived): none when the set's marks are recorded.
+func (p *exactPlan) derivedAtStop(names []string) []string {
+	if p == nil || !p.stopsDerived {
+		return nil
+	}
+	marked := map[string]bool{}
+	for _, e := range p.worker {
+		if e.AtStop {
+			marked[e.Name] = true
+		}
+	}
+	var out []string
+	for _, name := range names {
+		if marked[name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // workerWhy says what a set's end found of its worker scope: the calls its

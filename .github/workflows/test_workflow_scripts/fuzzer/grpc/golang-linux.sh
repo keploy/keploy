@@ -10,6 +10,11 @@
 set -Eeuo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../../keploy-start-wait.sh"
+
+# keploy's agent runs under sudo, with sudo's PATH: a java there makes its
+# start import its CA into that JDK, for this Go app too.
+echo "java on the agent's (sudo's) PATH: $(sudo -n sh -c 'command -v java' 2>/dev/null || echo none)"
 
 MODE=${1:-incoming}
 
@@ -124,6 +129,7 @@ wait_for_log() {
   done
   echo "::error::timed out after 120s waiting in $file for: ${missing[*]}"
   cat "$file" || true
+  save_keploy_start_evidence
   return 1
 }
 
@@ -209,6 +215,8 @@ if [ "$MODE" = "incoming" ]; then
   fi
   rec_pid=$! # tee's: it ends once keploy and all it started have exited
   rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
+  # The app starts once the agent is ready: its wait starts there.
+  await_agent_ready record_incoming.txt "$rec_keploy" || exit 1
  
  sleep 10
 
@@ -304,6 +312,8 @@ if [ "$MODE" = "incoming" ]; then
    fi
    rec_pid=$!
    rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
+   # The app starts once the agent is ready: its wait starts there.
+   await_agent_ready record_incoming_json.txt "$rec_keploy" || exit 1
    sleep 10
    # Likewise the yaml pass's client still holds :18080: stop it, or this
    # pass's client cannot bind and the old one would serve this run.
@@ -344,6 +354,8 @@ elif [ "$MODE" = "outgoing" ]; then
  "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing.txt &
  rec_pid=$!
  rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
+ # The app starts once the agent is ready: its wait starts there.
+ await_agent_ready record_outgoing.txt "$rec_keploy" || exit 1
  sleep 10
 
  echo "Waiting for client to listen on 18080..."
@@ -392,6 +404,8 @@ elif [ "$MODE" = "outgoing" ]; then
    "$RECORD_BIN" record --storage-format json -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing_json.txt &
    rec_pid=$!
    rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
+   # The app starts once the agent is ready: its wait starts there.
+   await_agent_ready record_outgoing_json.txt "$rec_keploy" || exit 1
    sleep 10
    for i in {1..60}; do nc -z localhost 18080 && break; sleep 1; done
    run_fuzz || exit 1

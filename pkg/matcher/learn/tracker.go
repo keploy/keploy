@@ -67,9 +67,9 @@ type Tracker struct {
 	starts []int
 	// asRecorded are, of each mock F served in the set (by mockID), the
 	// statements its adapters made that a serve of it gave the application
-	// its recording byte for byte (ServedMockAsRecorded, Served of an
-	// exchange served as recorded), each the last serve number given (seq)
-	// when it was made: the view a later call reads it with
+	// its recording, as ServedMockAsRecorded means it (ServedMockAsRecorded,
+	// Served of an exchange served as recorded), each the last serve number
+	// given (seq) when it was made: the view a later call reads it with
 	// (Order.ServedView). Made with serves, and replaced with it, so an
 	// Order read before keeps the statements it can count.
 	asRecorded map[string][]int
@@ -1004,8 +1004,9 @@ type Order struct {
 	t      *Tracker
 	serves map[string][]int
 	// asRecorded are the set's statements that a serve gave the application
-	// its recording byte for byte (Tracker.asRecorded): ServedView counts
-	// them, and lives the views stated of serves (Tracker.lives).
+	// its recording, as ServedMockAsRecorded means it (Tracker.asRecorded):
+	// ServedView counts them, and lives the views stated of serves
+	// (Tracker.lives).
 	asRecorded map[string][]int
 	lives      map[string]*liveViews
 	upTo       int
@@ -1056,9 +1057,11 @@ func (o Order) ArrivedAt(arrival time.Time) Order {
 }
 
 // servedAfterLocked reports whether every serve of the mock of identity id
-// that o saw was made after o's arrival (ArrivedAt), and there was one: no
+// that o saw was made after o's arrival (ArrivedAt), or in a request of the
+// application's still aloft then (landedAfter), and there was one: no
 // arrival said, a serve of an instant not kept, or one made at or before the
-// arrival, says it was served before the call. o.t.mu is held.
+// arrival in no such request, says it was served before the call. o.t.mu is
+// held.
 func (o Order) servedAfterLocked(id string) bool {
 	if o.arrival.IsZero() {
 		return false
@@ -1069,11 +1072,24 @@ func (o Order) servedAfterLocked(id string) bool {
 		return false
 	}
 	for _, s := range n[:k] {
-		if s < 1 || s > len(o.serveAt) || !o.serveAt[s-1].After(o.arrival) {
+		if s < 1 || s > len(o.serveAt) || !o.serveAt[s-1].After(o.arrival) && !o.landedAfter(s) {
 			return false
 		}
 	}
 	return true
+}
+
+// landedAfter reports whether the serve numbered s was made in a request
+// the application sent (one Lift lifted) that had not landed by o's arrival:
+// its answer had not started to go out (Flight.Land), so the application
+// had none of it when the call reached keploy, however early F claimed the
+// recording (a parser that claims it, then learns and renders the answer
+// before writing it, as the Mongo learn step does). A serve in no request,
+// in a request a serve caused (LiftCaused, landed by its parser), or in one
+// that landed at or before the arrival, is not. o.t.mu is held.
+func (o Order) landedAfter(s int) bool {
+	f := o.flights[s]
+	return f != nil && !f.at.IsZero() && (f.landed == 0 || f.landedAt.After(o.arrival))
 }
 
 // Of is where F served m in the set, in one sequence across its start-up,
@@ -1127,9 +1143,12 @@ func (o Order) Spans(ms []*models.Mock) [][2]int {
 // adapter told of, or one keploy cannot tell from another set's. F's view of
 // r is then one no adapter stated, and a word a value holds now that may
 // stand there is refused (Raw.viewUnstated: fail closed). A Raw with a view
-// already stated (ServedLive, ServedChanged) keeps it. Every adapter's learn
-// step reads the recordings F served through it, so a statement one adapter
-// made holds for every other's call.
+// already stated (ServedLive, ServedChanged) keeps it, except where every
+// serve of m the read saw came after the call reached keploy
+// (Raw.servedAfter): r then carries no view F stated of it changed, as of
+// that arrival, whenever it was stated. Every adapter's learn step reads the
+// recordings F served through it, so a statement one adapter made holds for
+// every other's call.
 //
 // Where F made every serve of m the read saw in an older test of the set
 // (olderTestLocked), r is also marked so (Raw.ServedInAnOlderTest): F gave
@@ -1164,8 +1183,21 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 		r = r.ServedBeforeTheTest()
 	}
 	r.servedAfter = after
+	read := func(i int, load func() (*models.Mock, error)) Raw { return o.viewRead(m, id, keys[i], load) }
+	return statedView(r, unstated && ok, recorded, unread, loads, read).asOfArrival()
+}
+
+// statedView is r, a recording of m F served whose view no adapter stated
+// yet, with the view the statements of F's serves of m give it (ServedView),
+// where every serve was told (told): as recorded where each was told so;
+// the one view they gave (ServedLive); each view where they gave more than
+// one, the recording counted where one was told as recorded
+// (ServedChanged); a view that could not be kept or read standing for any
+// text (ServedChanged with none), each view read by read (Order.viewRead).
+// Untold, r is returned as it is.
+func statedView(r Raw, told, recorded, unread bool, loads []func() (*models.Mock, error), read func(int, func() (*models.Mock, error)) Raw) Raw {
 	switch {
-	case !unstated, !ok:
+	case !told:
 		return r
 	case unread:
 		return r.ServedChanged()
@@ -1174,7 +1206,7 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	}
 	views := make([]Raw, len(loads))
 	for i, load := range loads {
-		views[i] = o.viewRead(m, id, keys[i], load)
+		views[i] = read(i, load)
 	}
 	if !recorded && len(views) == 1 {
 		return r.ServedLive(views[0])
@@ -1528,15 +1560,20 @@ func (t *Tracker) Served(n uint64, e Earlier) {
 }
 
 // ServedMockAsRecorded says that F's serve of m just told (ServedMock and
-// its forms) gave the application m's recording byte for byte: its request
-// as recorded (no part of it learned as noise or bound as a variable) and
-// the recorded answer (no variable, template value or clock stamp of F's
-// own in it), as Raw.ServedAsRecorded says it. An adapter tells it once for
-// each such serve, after the serve, and only where it knows both. A later
-// call of the set reads m as served as recorded where every serve of it
-// the call's read saw was told so (Order.ServedView); a serve no adapter
-// told so is one whose view no adapter stated, and a word a value holds
-// now that may stand there is refused (fail closed).
+// its forms) gave the application m's recording: the serve is the
+// recording packet for packet, in the form the recording holds them, its
+// request as recorded (no part of it learned as noise or bound as a
+// variable) and the recorded answer (no variable, template value or clock
+// stamp of F's own in it), but for the values the replay copies from the
+// live request (an id it echoes, as a Pulsar receipt's sequence id) or
+// numbers itself (a MySQL statement id). Those are no part of what F gave
+// the application, so they make no serve another view, as
+// Raw.ServedAsRecorded says it. An adapter tells it once for each such
+// serve, after the serve, and only where it knows both. A later call of
+// the set reads m as served as recorded where every serve of it the call's
+// read saw was told so (Order.ServedView); a serve no adapter told so is
+// one whose view no adapter stated, and a word a value holds now that may
+// stand there is refused (fail closed).
 func (t *Tracker) ServedMockAsRecorded(m *models.Mock) {
 	if t == nil || m == nil {
 		return
@@ -1548,19 +1585,25 @@ func (t *Tracker) ServedMockAsRecorded(m *models.Mock) {
 
 // ServedMockLive says that F's serve of m just told (ServedMock and its
 // forms) gave the application another view of m than its recording, which
-// its adapter knows whole: view gives m as F's application sent its request
-// and F answered it (Raw.ServedLive's live), read where a later call's rule
-// first reads it and kept for the set's later calls in a store of the
-// set's views (setDerived.views, Order.viewRead), never in its caches by
-// recording; key names that view among m's, the same for two serves that
-// gave the same view and another for each other. An adapter tells it once
-// for each such serve, after the serve, in place of ServedMockAsRecorded,
-// and only where it knows the whole view. A later call of the set reads m
-// with the view (Order.ServedView) where every serve of it the call's read
-// saw was told; with each where they differ. A nil view, a key "", or a
-// view past the maxLiveViews different ones a set keeps of m, says F gave a
-// view keploy cannot read: a later call refuses every word a value holds
-// now that may stand there (Raw.ServedChanged with none: fail closed).
+// its adapter knows whole: view gives m as F's application sent its
+// request and F answered it (Raw.ServedLive's live), read where a later
+// call's rule first reads it and kept for the set's later calls in a store
+// of the set's views (setDerived.views, Order.viewRead), never in its
+// caches by recording; key names that view among m's by what F gave the
+// application there, its answer, read without the values
+// ServedMockAsRecorded leaves out, never by the request it answered: the
+// same for two serves that gave the same answer and another for each other
+// answer. The set keeps the first view told under a key: a poll the
+// application signs anew on each call (a date, a signature, an invocation
+// id), which F answers with the same recorded answer every time, is one
+// view however often F serves it. An adapter tells it once for each such
+// serve, after the serve, in place of ServedMockAsRecorded, and only where
+// it knows the whole view. A later call of the set reads m with the view
+// (Order.ServedView) where every serve of it the call's read saw was told;
+// with each where they differ. A nil view, a key "", or a view past the
+// maxLiveViews different ones a set keeps of m, says F gave a view keploy
+// cannot read: a later call refuses every word a value holds now that may
+// stand there (Raw.ServedChanged with none: fail closed).
 func (t *Tracker) ServedMockLive(m *models.Mock, key string, view func() (*models.Mock, error)) {
 	if t == nil || m == nil {
 		return
@@ -1570,8 +1613,9 @@ func (t *Tracker) ServedMockLive(m *models.Mock, key string, view func() (*model
 	t.mu.Unlock()
 }
 
-// maxLiveViews is how many different views of one recording a set keeps
-// (ServedMockLive): a serve that gave another one is read as one whose view
+// maxLiveViews is how many different views of one recording, different
+// answers F gave of it, a set keeps (ServedMockLive): a serve that gave
+// another one is read as one whose view
 // could not be read, which fails closed, so a set keeps at most
 // maxLiveViews loaders of each recording, and a later call reads at most
 // as many views of it.
@@ -1626,9 +1670,9 @@ func (t *Tracker) livedLocked(id, key string, load func() (*models.Mock, error))
 }
 
 // statedLocked notes a statement that a serve of the mock of identity id
-// gave the application its recording byte for byte (ServedMockAsRecorded),
-// at the last serve number given: a statement follows its serve, so one
-// numbered at or below a read's last serve is of a serve that read saw
+// gave the application its recording (ServedMockAsRecorded), at the last
+// serve number given: a statement follows its serve, so one numbered at or
+// below a read's last serve is of a serve that read saw
 // (Order.ServedView). Of a mock the set never served, or of an id "" (a
 // payload not read from its mock), it notes nothing. t.mu is held.
 func (t *Tracker) statedLocked(id string) {

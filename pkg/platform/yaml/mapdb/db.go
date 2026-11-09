@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 type MappingDb struct {
@@ -21,6 +22,9 @@ type MappingDb struct {
 	path        string
 	MapFileName string
 	Format      yaml.Format
+	// jsonWritten is the mappings.json files this db last encoded, per
+	// test set (encodeOver).
+	jsonWritten writtenFiles
 }
 
 func New(logger *zap.Logger, path string, mapFileName string) *MappingDb {
@@ -51,6 +55,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	var existingRecordedWith []string
 	var existingConfig models.Mapping
 	var old []byte
+	var oldDoc *yamlLib.Node
 
 	// Detect whether a mappings file already exists in either format,
 	// and remember which one so we write back in the same format.
@@ -70,7 +75,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		}
 		old = data
 
-		if err := yaml.UnmarshalGeneric(effFormat, data, &existingConfig); err != nil {
+		if oldDoc, err = decodeInto(effFormat, data, &existingConfig); err != nil {
 			utils.LogError(db.logger, err, "failed to unmarshal existing mappings", zap.String("path", mappingPath))
 			return err
 		}
@@ -158,8 +163,8 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	// whatever the switch; what acts on one checks the switch itself
 	// (models.MappedTestCase.At). A set keploy mock record wrote under the
 	// switch and keploy rewrote without it keeps every such field. What a hand
-	// edit added (its comments, a person's own fields) is kept only under the
-	// switch, by design (encodeOver).
+	// edit added (its comments, a person's own fields) is kept too, whatever
+	// the switch (encodeOver).
 	keepEntries(newMapping, existingConfig.TestCases, mapping.TestCases)
 	if len(mapping.Suites) == 0 {
 		newMapping.Suites = existingConfig.Suites
@@ -177,7 +182,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		newMapping.Runner = mapping.Runner
 	}
 
-	encodedData, err := db.encodeOver(newMapping, effFormat, old, headerAlways, testSetID)
+	encodedData, err := db.encodeOver(newMapping, effFormat, old, oldDoc, headerAlways, testSetID)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to encode mapping", zap.String("testSetID", testSetID))
 		return err
@@ -312,6 +317,7 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // stream is never the bottleneck.
 func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error {
 	var fileData []byte
+	var doc *yamlLib.Node
 	if len(byTest) == 0 {
 		return nil
 	}
@@ -342,7 +348,7 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 			return err
 		}
 
-		mapping, err = DecodeMappingF(fileData, db.logger, effFormat)
+		mapping, doc, err = db.decodeOld(fileData, effFormat)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to decode mapping",
 				zap.String("testSetID", testSetID))
@@ -383,7 +389,7 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 		})
 	}
 
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerOnNew, testSetID)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to encode mapping during upsert",
 			zap.String("testSetID", testSetID))
@@ -410,6 +416,7 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 // written replaces what was there. An empty scope clears it.
 func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error {
 	var fileData []byte
+	var doc *yamlLib.Node
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -428,12 +435,12 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 		if err != nil {
 			return err
 		}
-		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+		if mapping, doc, err = db.decodeOld(fileData, effFormat); err != nil {
 			return err
 		}
 	}
 	mapping.Worker = worker
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerOnNew, testSetID)
 	if err != nil {
 		return err
 	}
@@ -455,8 +462,9 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 //
 // Each move's Reason (MockEntry.Reason, under the proven switch: why judging
 // moved it, and its undo) is written on the entry as given: the entry's line
-// is the last placement's. So is its Drift (MockEntry.Drift: the move rests on
-// its owner's quarantine). Under the switch a mock taken out of a test's list
+// is the last placement's. So are its Drift (MockEntry.Drift: the move rests
+// on its owner's quarantine) and its Trails (MockEntry.Trails: the earlier
+// test whose call it trails, which only the move that proved it names). Under the switch a mock taken out of a test's list
 // names that test as its Owner (MockEntry.Owner), unless the move names one;
 // a worker entry placed again keeps its owner unless the move names one.
 // Without the switch no owner is written, so a move writes what it wrote
@@ -491,7 +499,7 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	if err != nil {
 		return nil, err
 	}
-	mapping, err := DecodeMappingF(fileData, db.logger, effFormat)
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
 	if err != nil {
 		return nil, err
 	}
@@ -507,7 +515,7 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	sort.SliceStable(mapping.Worker, func(i, j int) bool {
 		return workerAt(mapping.Worker[i]).Before(workerAt(mapping.Worker[j]))
 	})
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerNever, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
 	if err != nil {
 		return nil, err
 	}
@@ -526,6 +534,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			mapping.Worker[i].Place = mv.Place
 			mapping.Worker[i].Reason = mv.Reason
 			mapping.Worker[i].Drift = mv.Drift
+			mapping.Worker[i].Trails = mv.Trails
 			if mv.Owner != "" {
 				mapping.Worker[i].Owner = mv.Owner
 			}
@@ -560,6 +569,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	entry.Place = mv.Place
 	entry.Reason = mv.Reason
 	entry.Drift = mv.Drift
+	entry.Trails = mv.Trails
 	// A replay serves a worker entry only while a test process of its key
 	// holds the run, and a moved entry with none would sit in the slice no
 	// test process holds: the move's key, else the test's. A test with no
@@ -606,7 +616,7 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 	if err != nil {
 		return err
 	}
-	mapping, err := DecodeMappingF(fileData, db.logger, effFormat)
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
 	if err != nil {
 		return err
 	}
@@ -614,7 +624,7 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 		return nil
 	}
 	mapping.RecordedWith = append(mapping.RecordedWith, feature)
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerNever, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
 	if err != nil {
 		return err
 	}
@@ -627,6 +637,7 @@ func workerAt(e models.MockEntry) time.Time { return e.RecordedAt() }
 
 func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {
 	var fileData []byte
+	var doc *yamlLib.Node
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -642,13 +653,13 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 		if err != nil {
 			return err
 		}
-		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+		if mapping, doc, err = db.decodeOld(fileData, effFormat); err != nil {
 			return err
 		}
 	}
 	mapping.Boots = boots
 	mapping.Startup = nil
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerNever, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
 	if err != nil {
 		return err
 	}
@@ -658,6 +669,7 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 // UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
 func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error {
 	var fileData []byte
+	var doc *yamlLib.Node
 	if len(byTest) == 0 && len(startup) == 0 && len(suites) == 0 {
 		return nil
 	}
@@ -676,7 +688,7 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		if err != nil {
 			return err
 		}
-		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+		if mapping, doc, err = db.decodeOld(fileData, effFormat); err != nil {
 			return err
 		}
 	}
@@ -734,7 +746,7 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	if len(startup) > 0 {
 		mapping.Startup = startup
 	}
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerOnNew, testSetID)
 	if err != nil {
 		return err
 	}
@@ -989,6 +1001,7 @@ func (db *MappingDb) ApplyShares(ctx context.Context, testSetID string, s models
 // mustExist, and left missing when not.
 func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, mustExist bool, change func(*models.Mapping) bool) error {
 	var fileData []byte
+	var doc *yamlLib.Node
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -1013,14 +1026,14 @@ func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, must
 		if err != nil {
 			return err
 		}
-		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+		if mapping, doc, err = db.decodeOld(fileData, effFormat); err != nil {
 			return err
 		}
 	}
 	if !change(mapping) {
 		return nil
 	}
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerOnNew, testSetID)
 	if err != nil {
 		return err
 	}

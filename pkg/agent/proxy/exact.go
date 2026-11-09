@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -29,8 +30,9 @@ import (
 //     settings, DNS). One more request identical to one a test mock already
 //     answered finds no test mock: a miss (models.MissExtraCall). Under the
 //     proven switch no worker-scope mock (below) answers it either
-//     (integrations.OwnRepeatRead); with the switch off, one the run has
-//     reached that is that request does.
+//     (integrations.OwnRepeatRead), but a skipped test's read keploy mock
+//     replay moved there (ServeExactWorkerSkipped), once; with the switch
+//     off, one the run has reached that is that request does.
 //   - While no test is open, the current key's pool slice answers, with
 //     reuse or cursor-saturate as its mocks were recorded, beside the
 //     protocol-phase mocks. Its stateful cursors are the key's own.
@@ -83,6 +85,23 @@ import (
 // test mock answering) bumps the revisions, so a parser that keeps an index
 // of what it read reads again.
 
+// poolSlice is the names of a pool view's pool slice, as a test's view that
+// shows its declared session calls reads them (exactView.declared). A pool
+// view that serves the names the last one served keeps its poolSlice
+// (installExactWith), so two test views with such a pool view between them
+// share one, and with it their shared part (sharedIdent): what a test view
+// shows of it is read by name alone (declaredInPool).
+type poolSlice struct{ names map[string]struct{} }
+
+// has reports whether name is one of the slice's.
+func (p *poolSlice) has(name string) bool {
+	if p == nil {
+		return false
+	}
+	_, ok := p.names[name]
+	return ok
+}
+
 // exactView is what exact serving shows. It is replaced, never changed,
 // except for which of its test mocks have answered and what its open test
 // was served (mu).
@@ -115,10 +134,22 @@ type exactView struct {
 	inFlight map[string]bool
 	// pool is, while no test is open, the names of the pool slice served.
 	pool map[string]struct{}
+	// declared is, on a view installed while keploy.yaml declares session
+	// calls (models.SessionCallsDeclared), the pool slice of the pool view
+	// installed last (a pool view's own): in a test, its recordings a
+	// declared session call names (models.Mock.DeclaredSessionCall),
+	// recorded outside every test, are shown too (sharesRest). A pool view
+	// shows none of them so, and carries it for its ident (sharedIdent).
+	// nil otherwise.
+	declared *poolSlice
 	// worker is the set's worker-scope mocks the run has reached the place
 	// of, by name, as ServeExactWorker last said when the view was
 	// installed: shown whether a test is open or not.
 	worker map[string]struct{}
+	// skippedReads is, of worker, the reads keploy mock replay moved there
+	// from a test its gate skips (ServeExactWorkerSkipped): each also
+	// answers a call one more than the open test's own recordings of it.
+	skippedReads map[string]struct{}
 	// poolKey is the key of that slice: its stateful cursors are its own.
 	// winStart and winEnd are, on a test view, the test's recorded window
 	// (the staging's recorded windows, by its name), where its sequences
@@ -170,6 +201,10 @@ type exactView struct {
 	// mu (MockManager.AnswerRepeatRead).
 	repeats       map[models.RepeatReadMark][]int
 	answeredAgain map[models.RepeatReadMark]bool
+	// skippedSpent are, on a test view, the skipped tests' reads
+	// (skippedReads) that answered a call in its window, in the order they
+	// did (SkippedReadsAnswered). Written under mu.
+	skippedSpent []*models.Mock
 	// spent are the staged mocks this view shows that a parser consumed
 	// through a delete door in its test, or a protocol-phase mock one
 	// evicted outside every test: gone until the view changes. The staged
@@ -312,6 +347,10 @@ type exactState struct {
 	// the tests that list each mock (SetPoolTests): what tells the run of a
 	// test's recording on no clock (teardownBy). nil until a replay sent one.
 	poolTests atomic.Pointer[poolTests]
+	// poolTrails is, of the same scope table, the test each worker-scope
+	// recording trails (SetPoolTrails): what the learn step reads such a
+	// call's scope by (TrailOf). nil until a replay sent one.
+	poolTrails atomic.Pointer[map[string]string]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
 	// cached for one staging generation of the trees (StagingGeneration: an
 	// exact serve does not move it), one scope table, one recording's times
@@ -357,6 +396,11 @@ type exactState struct {
 	// are the background's (BackgroundCursor) and, in a test, the worker
 	// scope's (SequenceView.Between).
 	poolCursor atomic.Pointer[string]
+	// lastPool is the pool slice of the pool view installed last (its
+	// pool; one that serves the same names as the one before keeps that
+	// one's): a test's view installed while keploy.yaml declares session
+	// calls shows those of them it holds (exactView.declared).
+	lastPool atomic.Pointer[poolSlice]
 	// pairs says the session pairs (SetPairing); claimed, the recordings a
 	// pairing claimed in the current staging; ofKind, where the pairing
 	// reads recordings of a kind the trees do not hold.
@@ -526,10 +570,13 @@ func (c *exactClaims) takenByOther(epoch uint64, name, test string) bool {
 }
 
 // reachedWorker is what ServeExactWorker last said: the worker-scope mocks
-// the run has reached, and each one's position in the order it gave.
+// the run has reached, and each one's position in the order it gave; and
+// what ServeExactWorkerSkipped said of them: those that are a skipped test's
+// reads.
 type reachedWorker struct {
-	set   map[string]struct{}
-	order map[string]int
+	set          map[string]struct{}
+	order        map[string]int
+	skippedReads map[string]struct{}
 }
 
 // stagingNames is a set of mock names that belongs to one staging
@@ -1482,6 +1529,8 @@ func (m *MockManager) OpenExactTestConcurrent(test string, owned, cands []*model
 // serveExactTest is ServeExactTest and ServeExactTestConcurrent, and, with
 // begin, OpenExactTest and OpenExactTestConcurrent.
 func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, begin bool, given []models.VariableBinding) {
+	// The run's place reaches test's window once its view is in force.
+	defer m.reachTest(test, true)
 	answered, ahead := m.closeAhead()
 	if m.exact.beforeInstall != nil {
 		m.exact.beforeInstall()
@@ -1738,6 +1787,41 @@ func (m *MockManager) SetPoolTests(table map[string][]string) {
 	m.exact.poolTests.Store(t)
 }
 
+// SetPoolTrails installs, of the replay's scope table, the test each
+// worker-scope recording trails (models.ScopeTableReq.Trails: recording name
+// -> test ID; keploy mock replay under the proven switch). The learn step
+// reads it through TrailOf. The agent installs it with the scope table's
+// tests (SetPoolTests); none leaves the set none, never the previous set's.
+func (m *MockManager) SetPoolTrails(trails map[string]string) {
+	cp := make(map[string]string, len(trails))
+	for n, test := range trails {
+		if n != "" {
+			cp[n] = test
+		}
+	}
+	m.exact.poolTrails.Store(&cp)
+}
+
+var _ integrations.TrailedTests = (*MockManager)(nil)
+
+// TrailOf implements integrations.TrailedTests: the test the recording
+// named mock trails (SetPoolTrails) and the mocks that test lists in the
+// same scope table (SetPoolTests). The zero Trail for a recording that
+// trails no test, for a test the table does not list, and until a replay
+// sent both: such a call reads only its own test's places.
+func (m *MockManager) TrailOf(mock string) learn.Trail {
+	trails, tests := m.exact.poolTrails.Load(), m.exact.poolTests.Load()
+	if trails == nil || tests == nil {
+		return learn.Trail{}
+	}
+	test := (*trails)[mock]
+	names, ok := tests.lists[test]
+	if test == "" || !ok {
+		return learn.Trail{}
+	}
+	return learn.Trail{Test: test, Mocks: append([]string(nil), names...)}
+}
+
 // poolTests is a scope table as the teardown bound reads it
 // (SetPoolTests): the names each test lists (lists) and the tests that list
 // each name (of).
@@ -1775,6 +1859,11 @@ var _ integrations.PoolMembership = (*MockManager)(nil)
 // (one the replay could not open): it is no consume of the next test's, and is
 // not flagged as one (ServeExactTest).
 func (m *MockManager) ServeExactPool(key string, names []string, ahead ...*models.Mock) {
+	// The pool served after a test's view: that test has ended, and the
+	// run's place reaches its end once the pool's view is in force.
+	if v := m.exactView(); v != nil && v.test != "" {
+		defer m.reachTest(v.test, false)
+	}
 	answered, _ := m.closeAhead()
 	if m.exact.beforeInstall != nil {
 		m.exact.beforeInstall()
@@ -1824,6 +1913,23 @@ func (m *MockManager) ServeExactPool(key string, names []string, ahead ...*model
 // shows them, whether a test is open or not (agent.ExactWorkerServer). It
 // installs no view itself: the next ServeExactTest or ServeExactPool does.
 func (m *MockManager) ServeExactWorker(names []string) {
+	m.ServeExactWorkerSkipped(names, nil)
+}
+
+// ServeExactWorkerSkipped is ServeExactWorker, with skipped the names of
+// names that keploy mock replay moved to the worker scope from a test its
+// gate skips: a read the app made once and kept (a token it looks up and
+// caches), recorded in the skipped test's window and made now in the window
+// of whichever test runs first (models.ScopeTableReq.SkippedReads). Each
+// still answers at most one call in the windows of the staging, after the
+// open test's own; unlike the rest of the worker scope, it also answers a
+// call one more than the open test's own recordings of it (heldScope's
+// background): the test that holds its own recording of the read makes the
+// skipped test's too. So a read answers at most as many calls in the windows
+// as the skipped test recorded it, by construction, and a call past them
+// misses as one more than the test recorded. A name of skipped that names
+// does not hold is no read of the worker scope.
+func (m *MockManager) ServeExactWorkerSkipped(names, skipped []string) {
 	set := make(map[string]struct{}, len(names))
 	order := make(map[string]int, len(names))
 	for _, n := range names {
@@ -1835,7 +1941,13 @@ func (m *MockManager) ServeExactWorker(names []string) {
 		}
 		set[n] = struct{}{}
 	}
-	m.exact.worker.Store(&reachedWorker{set: set, order: order})
+	reads := make(map[string]struct{}, len(skipped))
+	for _, n := range skipped {
+		if _, ok := set[n]; ok {
+			reads[n] = struct{}{}
+		}
+	}
+	m.exact.worker.Store(&reachedWorker{set: set, order: order, skippedReads: reads})
 }
 
 // installExact makes v the view, then tells every parser that keeps an index
@@ -1861,10 +1973,20 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	if v.test == "" {
 		key := v.poolKey
 		m.exact.poolCursor.Store(&key)
+		if last := m.exact.lastPool.Load(); last == nil || !maps.Equal(last.names, v.pool) {
+			m.exact.lastPool.Store(&poolSlice{names: v.pool})
+		}
+	}
+	// A pool view carries the slice the tests after it show too: it shows
+	// none of it in a test's way (sharesRest reads it in a test alone), but
+	// its ident is then theirs, so it leaves their shared number to the next
+	// test (sharedViews).
+	if models.SessionCallsDeclared() {
+		v.declared = m.exact.lastPool.Load()
 	}
 	w := m.exact.worker.Load()
 	if w != nil {
-		v.worker = w.set
+		v.worker, v.skippedReads = w.set, w.skippedReads
 	}
 	// A test's view is never a staging's: a test opens once its set is staged.
 	v.staging = v.test == "" && m.exact.staging.Load()
@@ -1998,6 +2120,24 @@ func (m *MockManager) ExactTestOutcome() (test string, consumed, unconsumed []st
 	return o.test, append([]string(nil), o.consumed...), append([]string(nil), o.unconsumed...), true
 }
 
+// ExactTestSkippedReads implements agent.ExactSkippedReadsReader: under
+// exact serving, the latest test opened, open or ended (ExactTestOutcome),
+// and the reads of the tests the replay's gate skips (isSkippedRead) that
+// answered a call in its window, in the order they did. Read once the test
+// stops being served, it is final, as ExactTestOutcome is. test is "" when
+// no test has been opened this session.
+func (m *MockManager) ExactTestSkippedReads() (test string, reads []string) {
+	var o *testOutcome
+	if v := m.exact.last.Load(); v != nil {
+		v.mu.Lock()
+		o = v.outcomeLocked()
+		v.mu.Unlock()
+	} else if o = m.exact.ended.Load(); o == nil {
+		return "", nil
+	}
+	return o.test, append([]string(nil), o.skipped...)
+}
+
 // ExactTestServed is, under exact serving, the test whose view is in force
 // now: "" when none is, the pool being served, before a set's first test or
 // after a test ended (agent.ExactTestServedReader). It reads the published
@@ -2015,6 +2155,10 @@ func (m *MockManager) ExactTestServed() string {
 type testOutcome struct {
 	test                 string
 	consumed, unconsumed []string
+	// skipped are the skipped tests' reads that answered a call in the
+	// view's window (skippedSpent), in the order they did
+	// (ExactTestSkippedReads).
+	skipped []string
 }
 
 // outcomeLocked is v's outcome, v.mu held: which of its test mocks have
@@ -2032,6 +2176,9 @@ func (v *exactView) outcomeLocked() *testOutcome {
 		if !done && !v.isCand(i) && !excused[i] {
 			o.unconsumed = append(o.unconsumed, v.owned[i].Name)
 		}
+	}
+	for _, mk := range v.skippedSpent {
+		o.skipped = append(o.skipped, mk.Name)
 	}
 	return o
 }
@@ -2058,6 +2205,21 @@ func consumedTestMocksIn(v *exactView) []*models.Mock {
 }
 
 var _ integrations.ExactConsumedReader = (*MockManager)(nil)
+
+// SkippedReadsAnswered implements integrations.ExactSkippedReadsReader: the
+// skipped tests' reads that answered a call in the open test's window, in
+// the order they did; none while no test is open.
+func (m *MockManager) SkippedReadsAnswered() []*models.Mock {
+	v := m.exactView()
+	if v == nil || v.test == "" {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]*models.Mock(nil), v.skippedSpent...)
+}
+
+var _ integrations.ExactSkippedReadsReader = (*MockManager)(nil)
 
 // ServedInOpenTest implements integrations.ExactServedReader: the open
 // test's view's stamp (exactView.stamp) and every mock a parser was served
@@ -2476,15 +2638,24 @@ func (v *exactView) inBackgroundPool(mk *models.Mock) bool {
 // spendsAsPool reports whether mk is one of the pool's data-plane recordings
 // under the background rules, in a test or between tests: one answers at
 // most one call in the staging, through whichever door a parser consumes it
-// (exactConsumeIn). An async lane's recording keeps today's rules.
+// (exactConsumeIn). An async lane's recording keeps today's rules, and so
+// does one a keploy.yaml sessionCalls entry names served to every test
+// (models.Mock.DeclaredSessionCall): spent once, it would answer one test.
 func (v *exactView) spendsAsPool(mk *models.Mock) bool {
-	return v.bg.inPool(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync()
+	return v.bg.inPool(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync() && !mk.DeclaredSessionCall()
 }
 
 // isWorker reports whether name is one of the set's worker-scope mocks the
 // view shows (ServeExactWorker).
 func (v *exactView) isWorker(name string) bool {
 	_, ok := v.worker[name]
+	return ok
+}
+
+// isSkippedRead reports whether name is one of the worker-scope mocks the
+// view shows that is a skipped test's read (ServeExactWorkerSkipped).
+func (v *exactView) isSkippedRead(name string) bool {
+	_, ok := v.skippedReads[name]
 	return ok
 }
 
@@ -3435,12 +3606,41 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 			return exactRefused, wait, nil
 		}
 		verdict := m.consumeOutside(mk, worker)
+		// A skipped test's read the open test's call spent is a call of
+		// that test's its own recordings do not count: its extra-call miss
+		// counts it (SkippedReadsAnswered). A skipped read is one of the
+		// worker scope's, so it is spent here only by a call read in a
+		// test's window (one read between tests spends nothing, above); a
+		// pool view's list, a call in flight as its test ended, is read by
+		// no one.
+		skipped := verdict == exactServed && v.isSkippedRead(mk.Name)
+		if skipped {
+			v.skippedSpent = append(v.skippedSpent, mk)
+		}
 		v.mu.Unlock()
 		if verdict != exactServed {
 			return verdict, nil, nil
 		}
 		m.takeLocked(integrations.Take{Mock: m.stagedRecording(mk), How: integrations.TakeSpent, Gen: v.round, Test: v.test})
-		return verdict, nil, func() { m.noteExactSpent(mk) }
+		// The spend is the background's: one of the worker scope's for the
+		// windows, else one of the pool's for the staging. A later identical
+		// call it no longer answers names it (noteBackgroundSpent). A
+		// skipped test's read is no background's: it is spent as that
+		// test's recording, and a later identical call, one past what the
+		// test recorded, stays the miss of the test that made it
+		// (noteSkippedReadSpent).
+		background := models.RepeatBackgroundPool
+		if worker {
+			background = models.RepeatBackgroundWorker
+		}
+		return verdict, nil, func() {
+			m.noteExactSpent(mk)
+			if skipped {
+				m.noteSkippedReadSpent(mk)
+				return
+			}
+			m.noteBackgroundSpent(mk, background)
+		}
 	}
 	v.mu.Lock()
 	if wait := v.closedWait(); wait != nil {

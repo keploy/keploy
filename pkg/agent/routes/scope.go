@@ -292,6 +292,18 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.Sets == nil {
+		// The run's place, under either switch: an answer recorded in a later
+		// test than its call is written once the replay reaches that test.
+		// A table without windows (an older CLI, a set with no test) leaves
+		// the set none: written at once.
+		if s, ok := a.svc.(runPlaceWindowsSetter); ok {
+			if err := s.SetRunPlaceWindows(r.Context(), req.Windows); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
 	if provenswitch.On() && req.Sets == nil {
 		// Under the switch a table without pool slices serves no pool mock
 		// between tests: an older CLI's push fails closed.
@@ -326,6 +338,28 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if len(req.Worker) > 0 {
 			http.Error(w, "this keploy agent cannot serve a set's worker: calls in a test's window", http.StatusNotImplemented)
+			return
+		}
+		// Which of the worker scope are the reads of tests the replay's gate
+		// skips, said by every table too. An agent that cannot tell them
+		// serves them as the rest of the worker scope, failing closed: they
+		// answer no call one more than the open test recorded.
+		if rs, ok := a.svc.(scopeSkippedReadsSetter); ok {
+			if err := rs.SetScopeSkippedReads(r.Context(), req.SkippedReads); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		// The test each worker recording trails, with the worker scope.
+		// Every table says it, an empty one too. An agent that cannot learn
+		// by it refuses a table that has one: the CLI judges the calls on it.
+		if ts, ok := a.svc.(scopeTrailsSetter); ok {
+			if err := ts.SetScopeTrails(r.Context(), req.Trails); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Trails) > 0 {
+			http.Error(w, "this keploy agent cannot learn a worker: call that trails an earlier test", http.StatusNotImplemented)
 			return
 		}
 		// The recordings keploy's judging marked served, not required, by test, before
@@ -373,11 +407,31 @@ type scopeWorkerSetter interface {
 	SetScopeWorker(ctx context.Context, worker map[string][]string) error
 }
 
+// scopeSkippedReadsSetter installs which of a replay's worker scope are the
+// reads of tests its gate skips, each with the skipped test that lists it
+// (models.ScopeTableReq.SkippedReads, proven wire).
+type scopeSkippedReadsSetter interface {
+	SetScopeSkippedReads(ctx context.Context, reads map[string]string) error
+}
+
+// scopeTrailsSetter installs the test each worker-scope recording trails
+// for a replay (models.ScopeTableReq.Trails, proven wire).
+type scopeTrailsSetter interface {
+	SetScopeTrails(ctx context.Context, trails map[string]string) error
+}
+
 // scopeNotRequiredSetter installs, by test, the recordings keploy's judging
 // marked served, not required (models.ScopeTableReq.NotRequired, proven
 // wire).
 type scopeNotRequiredSetter interface {
 	SetScopeNotRequired(ctx context.Context, notRequired map[string][]string) error
+}
+
+// runPlaceWindowsSetter installs the recorded window of every test of the set
+// keploy mock replay serves, for the run's place alone
+// (models.ScopeTableReq.Windows, models.RunWindows).
+type runPlaceWindowsSetter interface {
+	SetRunPlaceWindows(ctx context.Context, ws []models.TestWindow) error
 }
 
 // recordedWindowsSetter installs the recorded window of every test of the

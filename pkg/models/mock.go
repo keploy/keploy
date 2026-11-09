@@ -166,6 +166,14 @@ type Mock struct {
 	// that worker's test only (ScopeWindow.Instance). 0 for none. Like
 	// SourcePID it only travels, to keploy record, and is never stored.
 	Instance uint32 `json:"-" yaml:"-" bson:"-"`
+	// OutsideRequests says the agent knows no incoming request was open while
+	// this call ran, so no request made it: it is the app's own background
+	// work, such as a poll on a timer. Only an agent that can tell sets it;
+	// false means "not known", never "a request's", so a mock from an agent
+	// that does not set it is taken for a request's. Like SourcePID it only
+	// travels, to the recorder, and is never stored; it sits in that field's
+	// padding, so a Mock is no bigger for it.
+	OutsideRequests bool `json:"-" yaml:"-" bson:"-"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -275,9 +283,24 @@ func (m *Mock) HydrateResponse() error {
 // whole while other connections count matches against them, so the replay
 // mock manager keeps the counts itself.
 type TestModeInfo struct {
-	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
-	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
-	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	ID         int  `json:"Id,omitempty" bson:"Id,omitempty"`
+	IsFiltered bool `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
+
+	// LoadSeq is the mock's place, counted from 1, in the set the agent's
+	// mock stream handed it (Agent.StoreMocksStream): the order the client
+	// sent the set in, the order its mocks were recorded in. The agent keeps
+	// each per-test mock in memory or on disk, and a read lists those kept in
+	// memory ahead of those loaded from disk, so where one time ties mocks
+	// (the frames of one pipelined write) the order a read holds them in is
+	// not the order recorded; this is, whichever tier holds the mock. Zero on
+	// a mock no stream handed. A uint32 in IsFiltered's word's padding, so a
+	// Mock stays in its size class; the stream refuses a set with more mocks
+	// than it counts. Runtime-only, like Lifetime and the fields below it:
+	// gob carries it into the agent's on-disk store and back, and no file
+	// keeps it.
+	LoadSeq uint32 `json:"-" bson:"-"`
+
+	SortOrder int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
 
 	// Lifetime classifies the mock (per-test / session / connection)
 	// once at ingest via (*Mock).DeriveLifetime. Matchers read this
@@ -519,11 +542,17 @@ type MockSpec struct {
 // echoed in that mock's RESPONSE, so replay can reproduce an app-minted value
 // (UUID / nonce / idempotency key) the dependency reflects back. On replay the
 // matcher matches the request field by presence + ValueClass (not value),
-// binds the live value, and renders it into each ResponsePath of the served
-// response. Paths use the kind-agnostic dotted vocabulary of ReqBodyNoise
-// (body.<path>, header.<name>, url.query.<name>). RecordedValue is the value as
-// recorded (never a live/secret value) and ValueClass names its shape
-// (e.g. "uuid", "hex", "nonce") for the presence/type match.
+// binds the live value, and replaces RecordedValue with it in the served
+// response. RecordedValue is the value as recorded (never a live/secret value)
+// and ValueClass names its shape (e.g. "uuid", "hex", "nonce") for the
+// presence/type match.
+//
+// An HTTP mock's paths use the dotted vocabulary of ReqBodyNoise (body.<path>,
+// header.<name>, url.query.<name>). A Mongo mock's are section.<i>.<path>,
+// where i is the OP_MSG section's index. ResponsePaths says where the recording
+// answered the value, for a reader: the render goes by RecordedValue, and no
+// replay reads it. A Mongo list holds at most a few places of a value, on the
+// value's first correlation, and is empty on the value's others.
 type FieldCorrelation struct {
 	RequestPath   string   `json:"requestPath" yaml:"request_path" bson:"request_path"`
 	ResponsePaths []string `json:"responsePaths" yaml:"response_paths" bson:"response_paths"`
@@ -1247,6 +1276,7 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 	// And the test worker it came from, which record charges it by.
 	c.Instance, c.EndedInstance = m.Instance, m.EndedInstance
+	c.OutsideRequests = m.OutsideRequests
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {

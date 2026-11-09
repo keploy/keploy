@@ -39,6 +39,7 @@ func (r *HTTPResp) clone() *HTTPResp {
 		}
 	}
 	c.HeaderLineLengths = r.HeaderLineLengths.clone()
+	c.Marks = r.Marks.clone()
 	return &c
 }
 

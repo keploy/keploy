@@ -163,7 +163,8 @@ const ScopeUpgradeRemedy = "use an integration that speaks keploy's scope protoc
 
 // ScopeEvidence is what keploy saw of one replayed test that fails it: the
 // calls no recorded answer matched while it was open (a miss outside every
-// test is charged to no test: UnmatchedCall.ChargedTo), and the recorded
+// test, and one that repeats a spent recording of the set's background, is
+// charged to no test: UnmatchedCall.ChargedTo, WindowOf), and the recorded
 // data-plane calls of its mapping it never made.
 // Misses carry only the summary fields; never a recorded value.
 type ScopeEvidence struct {

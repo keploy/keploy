@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -356,9 +357,12 @@ type SimulationConfig struct {
 	// Unbounded: no clock bounds the app's answer, and APITimeout is not
 	// applied. The replay sets it under the proven switch when the user set
 	// no apiTimeout of their own (config.Test.APITimeoutSet, rule 15).
-	Unbounded       bool
-	RequestTimeout  time.Duration
-	ConfigPort      uint32
+	Unbounded      bool
+	RequestTimeout time.Duration
+	ConfigPort     uint32
+	// KeployPath is the recording's directory, the root the test case's
+	// files (a body or a form part kept beside it) are named from and read
+	// inside (ReadRecordingFile). With none, such a file is not read.
 	KeployPath      string
 	ConfigHost      string
 	URLReplacements map[string]string
@@ -628,22 +632,17 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
 
-	// If the request body was offloaded to an asset file (>1MB), load it back
+	// A body kept beside the test case (over 1 MB) is read back from its
+	// recording, cfg.KeployPath, and only from inside it (ReadRecordingFile).
 	if tc.HTTPReq.BodyRef.Path != "" {
-		bodyRefPath := tc.HTTPReq.BodyRef.Path
-		// Resolve relative paths against keployPath so assets work even if
-		// the keploy directory has been moved since recording.
-		if cfg.KeployPath != "" && !filepath.IsAbs(bodyRefPath) {
-			bodyRefPath = filepath.Join(cfg.KeployPath, bodyRefPath)
-		}
-		bodyData, readErr := os.ReadFile(bodyRefPath)
+		bodyData, readErr := ReadRecordingFile(cfg.KeployPath, tc.HTTPReq.BodyRef.Path)
 		if readErr != nil {
-			utils.LogError(logger, readErr, "failed to read request body from asset file", zap.String("path", bodyRefPath))
+			utils.LogError(logger, readErr, "failed to read the request body kept beside the test case")
 			return nil, readErr
 		}
 		reqBody = bodyData
 		logger.Debug("loaded request body from asset file",
-			zap.String("path", bodyRefPath),
+			zap.String("path", tc.HTTPReq.BodyRef.Path),
 			zap.Int("size", len(bodyData)))
 	}
 
@@ -653,13 +652,9 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			for j, value := range form.Values {
 				if value == "" && j < len(form.Paths) && form.Paths[j] != "" {
 					formPath := form.Paths[j]
-					if cfg.KeployPath != "" && !filepath.IsAbs(formPath) {
-						formPath = filepath.Join(cfg.KeployPath, formPath)
-					}
-					valData, readErr := os.ReadFile(formPath)
+					valData, readErr := ReadRecordingFile(cfg.KeployPath, formPath)
 					if readErr != nil {
-						utils.LogError(logger, readErr, "failed to read form value from asset file",
-							zap.String("path", formPath),
+						utils.LogError(logger, readErr, "failed to read the form value kept beside the test case",
 							zap.String("key", form.Key))
 						return nil, readErr
 					}
@@ -692,18 +687,14 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				zap.Int("paths", len(field.Paths)),
 			)
 			for _, path := range field.Paths {
-				// Resolve relative paths against keployPath
-				resolvedPath := path
-				if cfg.KeployPath != "" && !filepath.IsAbs(path) {
-					resolvedPath = filepath.Join(cfg.KeployPath, path)
-				}
-				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", field.Key))
-				file, ferr := os.Open(resolvedPath)
+				// Read from the recording, and only inside it (OpenRecordingFile).
+				logger.Debug("multipart file path", zap.String("path", path), zap.String("field", field.Key))
+				file, ferr := OpenRecordingFile(cfg.KeployPath, path)
 				if ferr != nil {
-					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", resolvedPath))
+					utils.LogError(logger, ferr, "failed to open the multipart file kept beside the test case", zap.String("field", field.Key))
 					return nil, ferr
 				}
-				part, perr := writer.CreateFormFile(field.Key, filepath.Base(resolvedPath))
+				part, perr := writer.CreateFormFile(field.Key, filepath.Base(path))
 				if perr != nil {
 					file.Close()
 					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
@@ -2152,12 +2143,12 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 					if nextExpected == 0 {
 						// A recording of no frame, and the app sent
 						// none: nothing of the answer to compare.
-						return false, strings.Join(actualQueue, "\n\n"), nil, keptOpenWithKeepalivesOnly()
+						return false, sseBodyOf(actualQueue), nil, keptOpenWithKeepalivesOnly()
 					}
-					return true, strings.Join(actualQueue, "\n\n"), nil, ErrStreamHeldOpen
+					return true, sseBodyOf(actualQueue), nil, ErrStreamHeldOpen
 				}
 				actualQueue = append(actualQueue, frame)
-				return false, strings.Join(actualQueue, "\n\n"), trailingFrame(len(expectedQueue), frame), nil
+				return false, sseBodyOf(actualQueue), trailingFrame(len(expectedQueue), frame), nil
 			}
 			logger.Debug("received additional SSE data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
@@ -2179,7 +2170,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 				ActualFrame:   frame,
 				Reason:        reason,
 			}
-			return false, strings.Join(actualQueue, "\n\n"), mismatchInfo, nil
+			return false, sseBodyOf(actualQueue), mismatchInfo, nil
 		}
 
 		nextExpected++
@@ -2191,7 +2182,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "frame")
+		return false, sseBodyOf(actualQueue), nil, streamCut(err, nextExpected, len(expectedQueue), "frame")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -2209,10 +2200,21 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 			ActualFrame:   "(stream ended - no more frames)",
 			Reason:        fmt.Sprintf("expected %d frames but only received %d", len(expectedQueue), nextExpected),
 		}
-		return false, strings.Join(actualQueue, "\n\n"), mismatchInfo, nil
+		return false, sseBodyOf(actualQueue), mismatchInfo, nil
 	}
 
-	return true, strings.Join(actualQueue, "\n\n"), nil, nil
+	return true, sseBodyOf(actualQueue), nil, nil
+}
+
+// sseBodyOf is the body of an SSE stream of frames, as the wire carries it:
+// each frame ended by a blank line, the last one too, as a recording's body
+// reads back (models.HTTPResp: its frames each ended), so a diff of the two
+// shows no blank line that only one has. No frame is no body.
+func sseBodyOf(frames []string) string {
+	if len(frames) == 0 {
+		return ""
+	}
+	return strings.Join(frames, "\n\n") + "\n\n"
 }
 
 func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
@@ -3550,6 +3552,81 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 	return err
 }
 
+// ShownAgentURI is uri as keploy says it, in its logs and in what it
+// reports: all of what comes before its last @ is shown as xxxxx, past its
+// scheme's :// where it has one. That is all of its userinfo, a name as much
+// as a password (k8s-proxy seals a token into keploy-agent://), whatever
+// characters it has: nothing parses the URI to decide what to hide, so one
+// that does not parse, or whose password a raw / ? or # breaks up, shows none
+// of it either, and a URI with an @ past its host shows less of itself than
+// it could. A URI with no @ has no userinfo, and is shown as it is. The scheme
+// is said as RFC 3986 reads it: a token spelled as a scheme, before a :// of
+// its own (t0ken://x@host), is not told from one, and is said.
+func ShownAgentURI(uri string) string {
+	at := strings.LastIndex(uri, "@")
+	if at < 0 {
+		return uri
+	}
+	return agentURIScheme.FindString(uri) + "xxxxx" + uri[at:]
+}
+
+// agentURIScheme is a URI's scheme, as RFC 3986 spells one, and its ://: all
+// that ShownAgentURI says of what comes before the URI's last @.
+var agentURIScheme = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*://`)
+
+// agentURIAtEndsUserinfo reports whether uri parses with a host and its one @
+// ends that host's userinfo. With a scheme, all that a password in it can then
+// be is what url.URL.User holds. With none it can be more: a request for
+// //://tok@h has the URL //tok@h, whose tok came from a path. Such a request
+// goes no further than net/http's "unsupported protocol scheme", which quotes
+// none of the URI.
+func agentURIAtEndsUserinfo(uri string) bool {
+	u, err := url.Parse(uri)
+	return err == nil && u.User != nil && strings.Count(uri, "@") == 1
+}
+
+// ShownAgentURIError is err, an error from making or sending a request to an
+// agent URI, as keploy says it; every such error goes through it before a log
+// line or a reason says it. An error with no url.Error in it names no URI, and
+// is err as it is. One with a url.Error in it:
+//   - url.Parse's is said with none of its text, with or without an @: it
+//     names the URI, cut short at a raw # in a password, where no @ is left to
+//     show where the password ends, and its inner error quotes it too (a bad
+//     port, a bad escape). The caller says the URI itself (ShownAgentURI);
+//   - a request's, for a URI with no @, is err as it is: that URI has no
+//     userinfo;
+//   - any other request's has its URI shown as ShownAgentURI shows it. Its
+//     inner error is kept only for a URI whose @ ends its userinfo, the one
+//     shape whose host and port hold nothing of a password.
+func ShownAgentURIError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	if ue.Op == "parse" {
+		return errAgentURINotParsed
+	}
+	if !strings.Contains(ue.URL, "@") {
+		return err
+	}
+	inner := ue.Err
+	if !agentURIAtEndsUserinfo(ue.URL) {
+		inner = &agentRequestFailed{err: ue.Err}
+	}
+	return &url.Error{Op: ue.Op, URL: ShownAgentURI(ue.URL), Err: inner}
+}
+
+// errAgentURINotParsed is what ShownAgentURIError says of url.Parse's error.
+var errAgentURINotParsed = errors.New("the agent URI does not parse")
+
+// agentRequestFailed is what ShownAgentURIError says in place of a request's
+// inner error: none of err's text, while errors.Is and errors.As still read it
+// (a cancelled request stays one).
+type agentRequestFailed struct{ err error }
+
+func (e *agentRequestFailed) Error() string { return "the request failed" }
+func (e *agentRequestFailed) Unwrap() error { return e.err }
+
 // agentHealthFirstWait is how long the first agent health check waits for its
 // answer. An agent on the same host answers in well under a millisecond, and one
 // that is not up yet refuses the connection at once, so this keeps the local case
@@ -3560,6 +3637,27 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 const (
 	agentHealthFirstWait = 500 * time.Millisecond
 	agentHealthMaxWait   = 30 * time.Second
+)
+
+// agentHealthFirstLook is how soon after its start the agent health check
+// first looks, and AgentHealthEvery how long it pauses between two checks
+// after that, timed from the start of the check before (agentHealthTicker): an
+// agent is found ready within about AgentHealthEvery of answering, however
+// long it took to start. No busy loop: a check of an agent not up yet on this
+// host is one refused connect, twenty a second at most.
+//
+// No signal replaces the checks. The agent's only channel to keploy that every
+// way of running it has (native under sudo, its docker container, a port
+// forwarded to a remote one) is this health endpoint: sudo closes inherited
+// descriptors above stderr, so a pipe or a descriptor the agent could close
+// needs a sudoers change; the file a native agent reports its start in
+// (utils.MarkBootReady) is on this host for a native agent alone, and keploy
+// reads it by looking, as it checks this endpoint; and nothing answers a long
+// poll before the agent listens. The health check must be answered anyway,
+// for the proven switch its headers carry.
+const (
+	agentHealthFirstLook = 10 * time.Millisecond
+	AgentHealthEvery     = 50 * time.Millisecond
 )
 
 // nextAgentHealthWait is how long the next agent health check waits: twice the
@@ -3582,8 +3680,9 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 	return 2 * wait
 }
 
-// AgentHealthTicker checks the agent's health endpoint every checkInterval
-// until an answer finds it healthy, sends true on agentReadyCh, and returns. It
+// AgentHealthTicker checks the agent's health endpoint until an answer finds
+// it healthy, sends true on agentReadyCh, and returns. It checks
+// agentHealthFirstLook after it starts, then once every AgentHealthEvery. It
 // returns when ctx ends too, and closes agentReadyCh either way, so a receive
 // that gets false means ctx ended first.
 //
@@ -3595,9 +3694,9 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 // for it, off this goroutine and after the readiness signal, so the check never
 // spends the caller's readiness budget. That check can log at error level, which
 // keploy's CI treats as fatal.
-func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
+func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool) {
 	defer close(agentReadyCh)
-	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(http.Header) bool {
+	agentHealthTicker(ctx, logger, agentURI, func(http.Header) bool {
 		select {
 		case agentReadyCh <- true:
 			return true
@@ -3612,9 +3711,9 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 // so the caller reads what that same answer said, with no second request that
 // an agent which has since stopped answering, or a budget that has since run
 // out, could fail. A receive that gets nil means ctx ended first.
-func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI string, answers chan<- http.Header, checkInterval time.Duration) {
+func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI string, answers chan<- http.Header) {
 	defer close(answers)
-	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(header http.Header) bool {
+	agentHealthTicker(ctx, logger, agentURI, func(header http.Header) bool {
 		select {
 		case answers <- header:
 			return true
@@ -3625,32 +3724,41 @@ func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentU
 }
 
 // agentHealthTicker is the loop of the two above: it checks the agent's health
-// every checkInterval until an answer finds it healthy, hands that answer's
-// headers to ready, which reports whether it delivered them (false when ctx
-// ended first), and returns; or it returns when ctx ends.
-func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, checkInterval time.Duration, ready func(http.Header) bool) {
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
+// until an answer finds it healthy, hands that answer's headers to ready, which
+// reports whether it delivered them (false when ctx ended first), and returns;
+// or it returns when ctx ends. The first check comes agentHealthFirstLook
+// after the start, and the next ones AgentHealthEvery apart, timed from the
+// start of the check before (one that took longer, as a check through a slow
+// port forward may, is followed at once): an agent up a few milliseconds
+// after keploy started it is found then, and one slow to start within about
+// AgentHealthEvery of coming up.
+func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, ready func(http.Header) bool) {
+	timer := time.NewTimer(agentHealthFirstLook)
+	defer timer.Stop()
 
 	// No client-wide timeout: each check waits as long as `wait` (below).
 	client := &http.Client{}
 	wait := agentHealthFirstWait
+	// Said once, not at each check: twenty a second would bury the log.
+	logger.Debug("Checking agent health", zap.String("url", ShownAgentURI(agentURI+"/health")), zap.Duration("every", AgentHealthEvery))
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
+			began := time.Now()
 			checkCtx, cancel := context.WithTimeout(ctx, wait)
 			header := agentHealthAnswer(checkCtx, logger, client, agentURI)
 			timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 			cancel()
 			if next := nextAgentHealthWait(wait, timedOut); next != wait {
 				logger.Debug("agent health check ran out of time; the next one waits longer",
-					zap.String("agentURI", agentURI), zap.Duration("waited", wait), zap.Duration("next_wait", next))
+					zap.String("agentURI", ShownAgentURI(agentURI)), zap.Duration("waited", wait), zap.Duration("next_wait", next))
 				wait = next
 			}
 			if header == nil {
+				timer.Reset(time.Until(began.Add(AgentHealthEvery)))
 				continue
 			}
 			if ready(header) {
@@ -3676,11 +3784,9 @@ func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 // other than 200, whose headers say nothing about the agent.
 func agentHealthAnswer(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) http.Header {
 	healthURL := fmt.Sprintf("%s/health", agentURI)
-	logger.Debug("Checking agent health", zap.String("url", healthURL))
-
 	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
-		logger.Debug("Failed to create health check request", zap.Error(err))
+		logger.Debug("Failed to create health check request", zap.Error(ShownAgentURIError(err)))
 		return nil
 	}
 
@@ -5481,7 +5587,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 	launch, launched := token.Launched(agentURI)
 	if !launched {
 		logger.Debug("not checking the control-plane authentication of an agent this process did not launch",
-			zap.String("agent", agentURI))
+			zap.String("agent", ShownAgentURI(agentURI)))
 		return
 	}
 	key := fmt.Sprintf("%s#%d", agentURI, launch)
@@ -5491,7 +5597,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agentURI+token.ProbePath, nil)
 	if err != nil {
-		logger.Debug("could not build the agent authentication probe", zap.Error(err))
+		logger.Debug("could not build the agent authentication probe", zap.Error(ShownAgentURIError(err)))
 		return
 	}
 	// Wrong by construction, and a bare client: a request carrying the real
@@ -5504,7 +5610,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 		// is not evidence either way. Saying nothing beats crying wolf with an
 		// error that fails CI — and this attempt is deliberately NOT recorded,
 		// so a later readiness gate for the same agent tries again.
-		logger.Debug("agent authentication probe did not complete", zap.Error(err))
+		logger.Debug("agent authentication probe did not complete", zap.Error(ShownAgentURIError(err)))
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -5514,7 +5620,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 	controlPlaneProbed.Store(key, struct{}{})
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		logger.Debug("agent control-plane authentication verified", zap.String("agent", agentURI))
+		logger.Debug("agent control-plane authentication verified", zap.String("agent", ShownAgentURI(agentURI)))
 		return
 	}
 

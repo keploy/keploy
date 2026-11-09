@@ -155,6 +155,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				header:  request.Header,
 				body:    reqBody,
 				raw:     reqBuf,
+				client:  clientConn,
 				arrived: arrived,
 			}
 
@@ -203,9 +204,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// with built-in defaults (POST /v1/traces, /ingest) as a "skip" fallback.
 			// These are live, fire-and-forget telemetry the app emits every run, not
 			// recorded dependencies — matching them falls through to the HTTP
-			// fuzzy-matcher, which shingles the large (~150–200 KB) bodies and OOMs
-			// the sidecar (measured: ~432 MB of a ~1.1 GB peak). We short-circuit
-			// BEFORE h.match:
+			// fuzzy-matcher, which reads the large (~150–200 KB) bodies against
+			// every recording of the path, for an answer no test reads. We
+			// short-circuit BEFORE h.match:
 			//   - skip:      synthesize a bare 200 (OTLP/HTTP & Pyroscope treat any
 			//                2xx as success); no mock is consulted.
 			//   - recordOne: serve ONE recorded response for (method,path)
@@ -319,6 +320,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				stub  *models.Mock
 				diag  *matchDiag
 				lmiss *learnMiss
+				// repeat is set where the answer is a recording answered
+				// again (AnswerRepeatRead): it is written at once, never
+				// held for its place (heldAnswerOf).
+				repeat bool
 				// extra is the full round's own-repeat check (extraCall),
 				// asked before its pairing; -1 where it was not asked, or
 				// could not be told (the call's view moved), which pairs
@@ -473,6 +478,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 				}
 			}
+			if errors.Is(err, errClientGone) {
+				// No one is left to answer, and a match cut short is no
+				// miss: the connection ends as if read to its end.
+				h.Logger.Debug("the client left while its call was being matched", zap.Any("metadata", utils.GetReqMeta(request)))
+				errCh <- io.EOF
+				return
+			}
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -499,7 +511,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// it, and how many times the test recorded it.
 					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
 						zap.String("test", again.Test), zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.Mock.TestModeInfo.ReadMark().Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
-					stub, ok, diag, lmiss = again.Mock, true, nil, nil
+					stub, ok, diag, lmiss, repeat = again.Mock, true, nil, nil, true
 				}
 			}
 
@@ -548,9 +560,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
 				}
-				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
+				report, hint := h.buildHTTPMismatchReportHinted(request, input.body, db, nil, headerNoise, bodyNoise, diag)
+				if hint != "" {
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + hint)
+				}
 				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
+					report.SkippedReads = h.skippedReadsOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				}
 				// The miss was decided where the request first read the
 				// round: whether that read found a staging is told from it.
@@ -602,6 +618,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
 					earlier, repeated = repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n)
 				}
+				// A call of the test's own that changed (it is no
+				// recording made elsewhere, nor one call more than the test
+				// recorded) names the latest recording another test made of
+				// its method and path before the test's own
+				// (earlierRecording): judging reads whether the replay
+				// skipped that test, whose write the call's change then
+				// likely follows. The miss stays the test's own.
+				var earlierRec *models.Mock
+				if elsewhere == nil && !staged && n == 0 && report != nil && provenswitch.On() {
+					earlierRec = earlierRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+				}
 				// The call's view went after the call was decided: a
 				// test's begin or end replaced it before the miss was
 				// diagnosed, or while it was, between any two of the
@@ -609,6 +636,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// during them is told too, and then the miss carries
 				// nothing any of them read (viewless): no closest
 				// recording, no diff, no recording made elsewhere, no
+				// earlier test's recording of its method and path, no
 				// repeat note and no next step of a comparison, whichever
 				// view a read was of. Nor does it get its learn step's
 				// reason (learnMiss.explain): that code is judging's class
@@ -624,7 +652,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				if gone != "" {
 					viewless(report)
-					elsewhere, repeated = nil, false
+					elsewhere, repeated, earlierRec = nil, false, nil
+				}
+				if earlierRec != nil {
+					report.Earlier = earlierRec.Name
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)
@@ -639,7 +670,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
 				}
 				if repeated {
-					markRepeat(report, earlier)
+					markRepeat(report, earlier, madeOutsideTests(db, earlier), hint)
 				}
 				if gone != "" && (lmiss == nil || !lmiss.moved) {
 					report.Reason = models.MissViewReplaced
@@ -749,6 +780,40 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- nil
 					return
 				}
+			}
+
+			// An answer recorded later than the run's place now is written
+			// as the run reaches each part's recorded place (heldAnswerOf,
+			// writeHeld): the call was matched and consumed above, in its
+			// own test. Whether the call could have been answered with
+			// another of its test's recordings is the matcher's dry
+			// judgement, as an extra call's is (answeredMatch).
+			same := func(twins []*models.Mock) bool {
+				return h.answeredMatch(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)(twins)
+			}
+			if held, err := h.heldAnswerOf(stub, request, mockDb, repeat, same); err != nil {
+				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
+				errCh <- err
+				return
+			} else if held != nil {
+				if err := h.writeHeld(ctx, clientConn, held); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					// The application closed its connection while the
+					// answer waited for its place: the rest is dropped.
+					h.Logger.Info("the application closed the connection of a mock's answer while the answer waited for its recorded place; the rest of the answer is dropped",
+						zap.String("mock", stub.Name), zap.Error(err))
+					errCh <- nil
+					return
+				}
+				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+				if err != nil {
+					h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
+					errCh <- nil
+					return
+				}
+				continue
 			}
 
 			// Serialize the matched mock's response to wire bytes (hydrates a

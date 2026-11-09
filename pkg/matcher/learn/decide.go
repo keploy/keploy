@@ -34,20 +34,21 @@ const (
 	OutcomeFresh
 )
 
-// RefusalKind is why a word is refused: one of the nine below.
+// RefusalKind is why a word is refused: one of the ten below.
 type RefusalKind string
 
-// The nine refusals.
+// The ten refusals.
 const (
-	RefusalPick         RefusalKind = "pick"
-	RefusalNoClockRead  RefusalKind = "no-clock-read"
-	RefusalTwoSources   RefusalKind = "two-sources"
-	RefusalConflict     RefusalKind = "conflict"
-	RefusalUnknown      RefusalKind = "unknown"
-	RefusalAnotherScope RefusalKind = "another-scope"
-	RefusalUnread       RefusalKind = "unread"
-	RefusalChangedShape RefusalKind = "changed-shape"
-	RefusalCannotCheck  RefusalKind = "cannot-check"
+	RefusalPick            RefusalKind = "pick"
+	RefusalNoClockRead     RefusalKind = "no-clock-read"
+	RefusalTwoSources      RefusalKind = "two-sources"
+	RefusalConflict        RefusalKind = "conflict"
+	RefusalUnknown         RefusalKind = "unknown"
+	RefusalAnotherScope    RefusalKind = "another-scope"
+	RefusalUnread          RefusalKind = "unread"
+	RefusalChangedShape    RefusalKind = "changed-shape"
+	RefusalCannotCheck     RefusalKind = "cannot-check"
+	RefusalLandedElsewhere RefusalKind = "landed-elsewhere"
 )
 
 // EditKind is an edit a person or a tool makes to accept a refused word.
@@ -70,9 +71,11 @@ const (
 // Edit is one edit that would accept a refused word: Mock and Field name
 // where, Name a given's name; Word -1 is the whole field.
 type Edit struct {
-	Kind              EditKind
-	Mock, Field, Name string
-	Word              int
+	Kind  EditKind `json:"kind"`
+	Mock  string   `json:"mock,omitempty"`
+	Field string   `json:"field,omitempty"`
+	Name  string   `json:"name,omitempty"`
+	Word  int      `json:"word,omitempty"`
 }
 
 // Refusal is a refused word: its kind, where it stands, both values (as
@@ -80,13 +83,16 @@ type Edit struct {
 // place, which state, which rule), at most three "mock-N <path>" places, and
 // the edits that would accept it, likeliest first.
 type Refusal struct {
-	Kind              RefusalKind
-	Test, Mock, Field string
-	Word              int
-	Recorded, Full    string
-	Why               string
-	Places            []string
-	Edits             []Edit
+	Kind     RefusalKind `json:"kind"`
+	Test     string      `json:"test,omitempty"`
+	Mock     string      `json:"mock,omitempty"`
+	Field    string      `json:"field,omitempty"`
+	Word     int         `json:"word,omitempty"`
+	Recorded string      `json:"recorded,omitempty"`
+	Full     string      `json:"full,omitempty"`
+	Why      string      `json:"why,omitempty"`
+	Places   []string    `json:"places,omitempty"`
+	Edits    []Edit      `json:"edits,omitempty"`
 }
 
 // Mode is where a word's sources may be.
@@ -167,14 +173,19 @@ func (l Landed) String() string {
 // givens, which test and mock it is, the Mode, the adapter's Caps, the noise
 // keploy.yml declares (word -1: the whole field), each mock's scope in
 // mappings.yaml (nil: none known; read it through ScopeOf), where the full
-// round's call landed, and how the adapter names a leaf's place (nil:
-// VarPlace; read it through AddressOf).
+// round's call landed, how the adapter names a leaf's place (nil:
+// VarPlace; read it through AddressOf), and the instant a client test
+// began at in its recording (RecBegan: the tracker's recorded begin, zero
+// where none is known), which the test's own value must precede where no
+// window tells it, and the test the call trails (Trails; the zero Trail:
+// none).
 type Input struct {
 	Drifts    *DriftCache
 	Drift     []string
 	Live, Rec Shape
 	At        time.Time
 	Arrived   time.Time
+	RecBegan  time.Time
 	Earlier   []Earlier
 	Raw       []Raw
 	Resp      []Leaf
@@ -188,6 +199,29 @@ type Input struct {
 	Scope     func(mock string) Scope
 	Landed    Landed
 	PlaceOf   func(l Leaf, answer bool) (string, bool)
+	Trails    Trail
+}
+
+// Trail is the test a call trails: keploy record marked the call's
+// recording trailing it (models.MockEntry.Trails), on proof that the call
+// carries a value that test's own call sent and was recorded after that
+// test ended (a call the application makes for a test once it has
+// answered it, such as a clean-up it runs in the background). Test names
+// the test, and Mocks the recordings of its own list. The places those
+// recordings left the run (an earlier test's, Earlier.Run) are the call's
+// own scope, and a value one sent is bound there as the run's variable,
+// which a replay keeps past the test's end; every other earlier test's
+// place stays outside the call's scope (inScope). A Trail that names no
+// test trails none, nor does the zero Trail.
+type Trail struct {
+	Test  string
+	Mocks []string
+}
+
+// trails reports whether mock is a recording of the test the call trails
+// (Input.Trails).
+func (in Input) trails(mock string) bool {
+	return in.Trails.Test != "" && slices.Contains(in.Trails.Mocks, mock)
 }
 
 // AddressOf is the address of l, a leaf of the call's request (answer
@@ -237,6 +271,10 @@ type Decision struct {
 	Clock          *models.ClockOffset
 	Refusal        *Refusal
 	Line           string
+	// AnsweredAfter are the recordings whose answer holds Recorded that
+	// the decision set aside because they were asked at or before the
+	// call and answered after it: R's word there decided nothing.
+	AnsweredAfter []Place
 }
 
 // Decide is every changed word of in, decided (see above).

@@ -144,3 +144,18 @@ func TestMappedTestCaseGivenIsReadWhateverTheSwitch(t *testing.T) {
 		require.Equal(t, "mock-0", j.Mocks[0].Name)
 	}
 }
+
+// A sanitized extra-call miss keeps the skipped tests' reads that answered
+// the same call: recording names, never a value, which the test's
+// extra-call line counts and names.
+func TestASanitizedExtraCallKeepsTheSkippedReadsItNames(t *testing.T) {
+	m := UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /x", Kind: MissExtraCall, Recorded: 1, SkippedReads: []string{"mock-1"}}
+	s := m.Sanitized()
+	if s.Recorded != 1 || len(s.SkippedReads) != 1 || s.SkippedReads[0] != "mock-1" {
+		t.Fatalf("sanitized: recorded %d, skipped reads %v; want 1 and [mock-1]", s.Recorded, s.SkippedReads)
+	}
+	s.SkippedReads[0] = "changed"
+	if m.SkippedReads[0] != "mock-1" {
+		t.Fatal("the sanitized miss shares the miss's list")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -67,6 +68,23 @@ type DecodeContext struct {
 	StmtIDToQuery map[uint32]string
 	// Statement ID counter for generating unique statement IDs during replay
 	NextStmtID uint32
+
+	// InTx, Bound, BoundWindow, AutocommitOff and AutocommitOffAtConnect
+	// are replay's binding of the live connection's open transaction to the
+	// connection it was recorded on, which the replayer keeps from the
+	// status of the answers it replayed (its connection rule). InTx is
+	// whether the live connection is in a transaction: the latest answer
+	// said one is open, or that its autocommit is off. Bound is the
+	// recording that answered the transaction's latest command after its
+	// start, and BoundWindow the start of the test window it answered in
+	// (zero under exact serving). AutocommitOff is whether the live
+	// session's autocommit is off, and AutocommitOffAtConnect whether it was
+	// at connect (the greeting's status), which a reset brings back.
+	InTx                   bool
+	Bound                  *models.Mock
+	BoundWindow            time.Time
+	AutocommitOff          bool
+	AutocommitOffAtConnect bool
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000

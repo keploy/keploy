@@ -256,8 +256,10 @@ func (r *Runner) executeAndCompare(ctx context.Context, tc *models.TestCase, ser
 	tcCopy.HTTPReq = httpReq
 
 	// Sent as written: one test case run alone has no test set's template
-	// values, which belong to a replay of the whole set (pkg/templates).
-	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{})
+	// values, which belong to a replay of the whole set (pkg/templates). The
+	// files kept beside the test case are read from its testdb's directory,
+	// not the process's working directory.
+	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{KeployPath: r.testCaseDB.Root()})
 	if err != nil {
 		return false, models.RespCompare{}, err
 	}
@@ -385,7 +387,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		// waited out the whole of it for one that had stopped.
 		agentCtx, cancel := context.WithCancel(gCtx)
 		agentReadyCh := make(chan bool, 1)
-		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh)
 		agentStart := r.instrumentation.WatchAgentStart(agentCtx)
 		select {
 		case <-gCtx.Done():
@@ -396,7 +398,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			if gCtx.Err() != nil {
 				return nil, gCtx.Err()
 			}
-			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", r.config.Agent.AgentURI, err)
+			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", keployPkg.ShownAgentURI(r.config.Agent.AgentURI), err)
 		case ready, ok := <-agentReadyCh:
 			if !ok || !ready {
 				cancel()

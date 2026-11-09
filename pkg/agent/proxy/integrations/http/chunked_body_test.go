@@ -636,8 +636,8 @@ func TestMockOfAResponseAfterAnInterimResponse(t *testing.T) {
 func TestTransferEncodingOverridesContentLength(t *testing.T) {
 	const both = "POST /v1/echo HTTP/1.1\r\nHost: tlsup\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n"
 	body := []string{"5\r\nhel", "lo\r\n0\r\n\r\n"}
-	if cl, te := parseHeaders([]byte(both)); cl != "" || te != "chunked" {
-		t.Errorf("parseHeaders = (%q, %q), want (\"\", \"chunked\")", cl, te)
+	if cl, chunked, err := parseHeaders([]byte(both), false); err != nil || cl != -1 || !chunked {
+		t.Errorf("parseHeaders = (%d, %v, %v), want (-1, true, nil)", cl, chunked, err)
 	}
 
 	t.Run("replay request", func(t *testing.T) {
@@ -687,31 +687,37 @@ func TestTransferEncodingOverridesContentLength(t *testing.T) {
 }
 
 // A 101 Switching Protocols (WebSocket) ends the HTTP exchange but not the
-// connection: what follows is the other protocol. The V2 record path reads it
-// to the close as one response, as before, instead of taking the upgraded
-// stream for the next HTTP request.
-func TestReadResponseV2ReadsAnUpgradedConnectionToItsClose(t *testing.T) {
+// connection: what follows is the other protocol. net/http frames the 101 as
+// its head alone, and so does the V2 record path: it returns at the head's
+// end, the switched-to protocol's bytes in the head's read cut off, and its
+// writes end there. It read them as the 101's body, to the connection's close.
+func TestReadResponseV2FramesA101AsItsHeadAlone(t *testing.T) {
+	const head = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
-	stream, send, closeStream := makeStream(t, fakeconn.FromDest, 8)
-	now := time.Now()
-	head := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
-	send([]byte("\x81\x05hello"), now, now)
-	finalResp := []byte(head) // the first chunk, already read by recordV2
+	stream, send, _ := makeStream(t, fakeconn.FromDest, 8)
+	first, second := time.Now(), time.Now().Add(time.Millisecond)
+	send([]byte(head[20:]+"\x81\x05hello"), second, second) // the head's end, and a frame
+	finalResp := []byte(head[:20])                          // the first chunk, already read by recordV2
+	writes := []respWrite{{end: 20, at: first}}
 	done := make(chan error, 1)
-	go func() { _, err := h.readResponseV2(stream, &finalResp, "GET"); done <- err }()
+	go func() { _, err := h.readResponseWrites(stream, &finalResp, "GET", &writes); done <- err }()
 	select {
 	case err := <-done:
-		t.Fatalf("readResponseV2 returned (%v) at the 101's head, with the connection still open", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	closeStream()
-	select {
-	case <-done:
+		if err != nil {
+			t.Fatalf("readResponseWrites = %v at the 101's head", err)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("readResponseV2 did not return at the close")
+		t.Fatal("readResponseWrites did not return at the 101's head: it waits on the switched-to protocol's bytes")
 	}
-	if string(finalResp) != head+"\x81\x05hello" {
-		t.Fatalf("finalResp = %q", finalResp)
+	if string(finalResp) != head {
+		t.Fatalf("finalResp = %q, want the 101's head alone", finalResp)
+	}
+	if len(writes) != 2 || writes[0].end != 20 || writes[1].end != len(head) {
+		t.Fatalf("writes = %+v, want the second to end at the head's end, %d", writes, len(head))
+	}
+	marks := answerMarks(finalResp, writes, "", 0)
+	if marks == nil || !marks.Head.Equal(second) || len(marks.Writes) != 1 || marks.Writes[0].Offset != 0 {
+		t.Fatalf("answerMarks = %+v, want the head at the second write, and no body", marks)
 	}
 }
 
@@ -778,8 +784,11 @@ func TestChunkedEndRefused(t *testing.T) {
 		{name: "after a trailer field the client had", resp: head + chunk + "0\r\nX-A: 1\r\n", refused: "\r\n", whole: head + chunk + "0\r\nX-A: 1\r\n\r\n"},
 		{name: "after a trailer field the client had all but the CRLF of", resp: head + chunk + "0\r\nX-A: 1", refused: "\r\n\r\n", whole: head + chunk + "0\r\nX-A: 1\r\n\r\n"},
 		{name: "an empty body", resp: head, refused: "0\r\n\r\n", whole: head + "0\r\n\r\n"},
-		{name: "chunked among other codings, in any case", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, Chunked\r\n\r\n" + chunk, refused: "0\r\n\r\n",
-			whole: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, Chunked\r\n\r\n" + chunk + "0\r\n\r\n"},
+		{name: "chunked in any case", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n" + chunk, refused: "0\r\n\r\n",
+			whole: "HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n" + chunk + "0\r\n\r\n"},
+		// net/http refuses a coding other than chunked alone: its framing is
+		// not read (parseHeaders), so it is not ended either.
+		{name: "chunked among other codings", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n" + chunk, refused: "0\r\n\r\n"},
 		{name: "after an interim response", resp: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk, refused: "0\r\n\r\n", whole: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk + "0\r\n\r\n"},
 		{name: "a data chunk", resp: head + chunk, refused: "3\r\nabc\r\n0\r\n\r\n"},
 		{name: "the rest of a chunk's data", resp: head + "5\r\nhel", refused: "lo\r\n0\r\n\r\n"},

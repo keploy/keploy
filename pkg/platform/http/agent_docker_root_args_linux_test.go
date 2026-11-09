@@ -141,7 +141,7 @@ exec "$@"
 		}
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(dir, "no-daemon.sock"))
+	t.Setenv("DOCKER_HOST", noDaemonHost)
 	// GetKeployDockerAlias writes the installation id into the package's
 	// DockerConfig; leave it as other tests found it.
 	envs := maps.Clone(kdocker.DockerConfig.Envs)
@@ -165,6 +165,38 @@ func agentContainerRun(t *testing.T, calls string) string {
 		t.Fatalf("no `docker container run` among the calls:\n%s", b)
 	}
 	return run
+}
+
+// The fake engine takes startInDocker to its `docker run` however long the
+// test's temporary directory is. With its engine API's socket in that
+// directory, a GOTMPDIR (t.TempDir's root) of a few dozen bytes made the
+// socket's path longer than a unix socket's can be: the engine API's client
+// refused it, startInDocker ended before its `docker run`, and
+// TestADockerRunsEndIsNotHeldByADaemonThatGoesSilent waited its whole bound
+// for a `docker run` that never came.
+func TestTheFakeEngineRunsTheAgentUnderALongTempDir(t *testing.T) {
+	root, err := os.MkdirTemp("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	long := filepath.Join(root, strings.Repeat("d", 100))
+	if err := os.Mkdir(long, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Before this test's first TempDir, which roots them all.
+	t.Setenv("GOTMPDIR", long)
+	t.Setenv("TMPDIR", long)
+	calls := fakeDockerForStartInDocker(t)
+	if !strings.HasPrefix(calls, long) {
+		t.Fatalf("the fake engine is in %s, not under the long directory %s", calls, long)
+	}
+	a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{InstallationID: "install-id"}}
+	opts := models.SetupOptions{KeployContainer: "keploy-v3-0a1b2c3d4e5f6071", Mode: models.MODE_RECORD, AgentPort: 43902, ProxyPort: 16791, DnsPort: 26791}
+	if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun(), nil); err != nil {
+		t.Fatalf("startInDocker under a %d-byte temporary directory: %v", len(long), err)
+	}
+	agentContainerRun(t, calls)
 }
 
 // Two docker-run runs on one host: each agent container writes its CA to its

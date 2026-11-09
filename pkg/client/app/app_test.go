@@ -387,6 +387,14 @@ func TestIsTransientComposeDependencyFailure(t *testing.T) {
 		{"init type -> NOT transient", runtimeErr, utils.Init, "app", depFailStates("app"), false},
 		// No app service known: can't prove the app never started, so don't retry.
 		{"empty app service -> NOT transient", runtimeErr, utils.Runtime, "", depFailStates("app"), false},
+		// Not even when compose lists a row that names no service: that row is
+		// no app keploy knows.
+		{
+			"empty app service, a row with no service -> NOT transient",
+			runtimeErr, utils.Runtime, "",
+			[]composeServiceState{{State: "created"}, {Service: "dep", State: "exited", ExitCode: 3}},
+			false,
+		},
 		// Empty/absent state (probe failed): conservatively NOT transient -> fail
 		// fast rather than retry blindly.
 		{"no states -> NOT transient", runtimeErr, utils.Runtime, "app", nil, false},

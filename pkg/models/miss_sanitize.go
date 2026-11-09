@@ -25,15 +25,15 @@ import (
 // value the test bound). The next step is the matcher's advice, or the
 // learn step's reason, with each field path it names in its shape
 // (SanitizedNextStep); a variable miss's is keploy's own sentence, which
-// names a given (Given) and no learned variable. ChargedTo stays: it names a
-// test, no value.
+// names a given (Given) and no learned variable. ChargedTo and WindowOf
+// stay: each names a test, no value.
 func (m UnmatchedCall) Sanitized() UnmatchedCall {
 	out := UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Operation: SanitizedOperation(m.Operation), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
-		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
+		Kind: m.Kind, Recorded: m.Recorded, SkippedReads: slices.Clone(m.SkippedReads), NotOwned: m.NotOwned, Background: m.Background, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.
-		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn, OrderDependent: m.OrderDependent, ChargedTo: m.ChargedTo,
+		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn, OrderDependent: m.OrderDependent, Earlier: m.Earlier, EarlierIn: m.EarlierIn, ChargedTo: m.ChargedTo, WindowOf: m.WindowOf,
 		Repeat: m.Repeat.Clone()}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (MissShape) still writes them {}. Any other place

@@ -491,6 +491,9 @@ type recTestDB struct {
 	// failNames fails only the named test cases, so a recording can
 	// persist some and lose others. Same construction-time rule.
 	failNames map[string]bool
+	// refuseNames refuses only the named test cases for their own payload, as
+	// the store refuses a body its format cannot hold.
+	refuseNames map[string]bool
 }
 
 func (d *recTestDB) GetAllTestSetIDs(context.Context) ([]string, error) { return nil, nil }
@@ -500,6 +503,9 @@ func (d *recTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ str
 	}
 	if d.failNames[tc.Name] {
 		return errors.New("no space left on device")
+	}
+	if d.refuseNames[tc.Name] {
+		return fmt.Errorf("%w: testdb: the response body is not valid UTF-8", models.ErrTestCaseEncode)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -601,6 +607,9 @@ type recTelemetry struct {
 	sessionRecorded  bool
 	sessionStatus    string
 	sessionReason    string
+	// testsAndMocks counts RecordedTestAndMocks: the call says a test case
+	// was recorded, and only a stored one is.
+	testsAndMocks int
 }
 
 func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]int, metadata map[string]interface{}) {
@@ -612,7 +621,11 @@ func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]
 }
 func (tl *recTelemetry) RecordedTestCaseMock(string)  {}
 func (tl *recTelemetry) RecordedMocks(map[string]int) {}
-func (tl *recTelemetry) RecordedTestAndMocks()        {}
+func (tl *recTelemetry) RecordedTestAndMocks() {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	tl.testsAndMocks++
+}
 func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, status string, reason string) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()

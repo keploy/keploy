@@ -126,6 +126,17 @@ func TestANewViewFilesWhatItShowsByItsNames(t *testing.T) {
 	if n := keyedExamined.Load() - examined; n != 270+31 {
 		t.Fatalf("a pool view's first read examined %d entries; want %d (the 270 data-plane entries, then what it gives)", n, 270+31)
 	}
+	// A test view's names include the pool slice it shows the declared
+	// session calls of (exactView.declared): with 2,000 of them it examines
+	// the 270 instead, as the pool view does.
+	v = &exactView{test: "T", worker: nameSet("m005"), declared: &poolSlice{names: pool}}
+	examined = keyedExamined.Load()
+	if got := shownWalk(v, db, "k"); len(got) != 31 {
+		t.Fatalf("the test view's read gives %d mocks; want 31", len(got))
+	}
+	if n := keyedExamined.Load() - examined; n != 270+31 {
+		t.Fatalf("a test view with 2,001 names' first read examined %d entries; want %d (the 270 data-plane entries, then what it gives)", n, 270+31)
+	}
 }
 
 // TestAKeyedReadUnderExactServingExaminesNoOwnedRecording: the same through

@@ -280,17 +280,21 @@ func (c redactedLiveCase) sent() (*req, *http.Request) {
 // platform API persist. It goes by the place: the live value matches none of
 // the recording's patterns, and neither its key nor its shape says it is a
 // secret. The rest of the call is still shown, and the place is shown
-// redacted. Switch off and on, and switch off at a recording that states
-// its lifetime (as the recorder writes every HTTP mock), whose report tells
-// how to serve the call to every test (sessionCallHint).
+// redacted. Switch off and on, each also at a recording that states its
+// lifetime (as the recorder writes every HTTP mock), whose report tells how
+// to serve the call to every test (sessionCallHint).
 func TestMissReportRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 	for _, c := range redactedLiveCases(t) {
-		for _, mode := range []string{"off", "off-stated-lifetime", "on"} {
-			on := mode == "on"
+		for _, mode := range []string{"off", "off-stated-lifetime", "on", "on-stated-lifetime"} {
+			on := strings.HasPrefix(mode, "on")
 			t.Run(c.name+"/"+mode, func(t *testing.T) {
 				m := c.mock()
-				if mode == "off-stated-lifetime" {
+				if strings.HasSuffix(mode, "stated-lifetime") {
 					m.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+				}
+				if mode == "on-stated-lifetime" {
+					// The hint reads the switch.
+					t.Setenv(provenswitch.Env, "1")
 				}
 				in, request := c.sent()
 				var diag *matchDiag
@@ -363,6 +367,9 @@ func TestMissReportRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 				if mode == "off-stated-lifetime" {
 					sessionHintMatchesTheCall(t, r, request)
 				}
+				if mode == "on-stated-lifetime" {
+					sessionHintNamesTheCallExactly(t, r, request, strings.HasPrefix(c.name, "path-segment") || c.name == "url-does-not-parse")
+				}
 				// A query or a form renders the marker query-escaped.
 				if !strings.Contains(r.ReceivedReq, valueRedacted) && !strings.Contains(r.ReceivedReq, url.QueryEscape(valueRedacted)) {
 					t.Errorf("ReceivedReq does not show the redacted place redacted:\n%s", r.ReceivedReq)
@@ -397,18 +404,60 @@ func sessionHintMatchesTheCall(t *testing.T, r *models.MockMismatchReport, reque
 	}
 }
 
+// sessionHintNamesTheCallExactly fails t unless r's next steps, under the
+// proven switch, name the sessionCalls entry that names the call exactly
+// (models.SessionCallRule.names): its method and its whole path, or, where
+// the recording redacted a segment of it, the path up to that segment, said
+// to go on with segments keploy does not show; cut says the recording
+// redacted one (a URL it could not read redacts the path whole).
+func sessionHintNamesTheCallExactly(t *testing.T, r *models.MockMismatchReport, request *http.Request, cut bool) {
+	t.Helper()
+	if !strings.Contains(r.NextSteps, `method: "POST"`) {
+		t.Fatalf("the hint does not name the call's method: %s", r.NextSteps)
+	}
+	quoted := func(s string) string {
+		q, err := strconv.QuotedPrefix(s)
+		if err != nil {
+			t.Fatalf("the hint's path is not quoted: %s", r.NextSteps)
+		}
+		v, _ := strconv.Unquote(q)
+		return v
+	}
+	path := request.URL.Path
+	if _, rest, ok := strings.Cut(r.NextSteps, "pathPrefix: the call's whole path}], a path that begins "); ok {
+		begins := quoted(rest)
+		if !strings.HasPrefix(path, begins) || begins == path || strings.Contains(begins, valueRedacted) {
+			t.Errorf("the hint says the call's path begins %q and goes on unshown, for the call's path %q", begins, path)
+		}
+		return
+	}
+	_, hint, ok := strings.Cut(r.NextSteps, "pathPrefix: ")
+	if !ok {
+		t.Fatalf("the report does not tell how to serve the call to every test: %s", r.NextSteps)
+	}
+	if got := quoted(hint); cut || got != path {
+		t.Errorf("the hint's pathPrefix %q is not the call's whole path %q, or names a path a recording redacted a segment of (%v)", got, path, cut)
+	}
+}
+
 // A call whose path is empty is named "/" in the hint that tells how to
-// serve it to every test, as the request line names it.
+// serve it to every test, as the request line names it, with the switch off
+// and on: under the switch an entry names it exactly with "/"
+// (models.SessionCallRule.names reads an empty path as the root).
 func TestSessionHintNamesAnEmptyPathSlash(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
-	m := recorded("m", "/x/REDACTED_abc", map[string]string{"Content-Type": "application/json"}, `{"x":"alpha1"}`)
-	m.Noise = []string{`^REDACTED_abc$`}
-	m.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
-	request, _ := http.NewRequest("POST", "http://api.example", strings.NewReader(`{"x":"bravo2"}`))
-	request.Header.Set("Content-Type", "application/json")
-	r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"x":"bravo2"}`), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, nil)
-	if r == nil || !strings.Contains(r.NextSteps, `pathPrefix: "/"}`) {
-		t.Fatalf("the hint does not name the empty path \"/\": %+v", r)
+	for _, proven := range []string{"", "1"} {
+		t.Run("switch="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			m := recorded("m", "/x/REDACTED_abc", map[string]string{"Content-Type": "application/json"}, `{"x":"alpha1"}`)
+			m.Noise = []string{`^REDACTED_abc$`}
+			m.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+			request, _ := http.NewRequest("POST", "http://api.example", strings.NewReader(`{"x":"bravo2"}`))
+			request.Header.Set("Content-Type", "application/json")
+			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"x":"bravo2"}`), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, nil)
+			if r == nil || !strings.Contains(r.NextSteps, `pathPrefix: "/"}`) {
+				t.Fatalf("the hint does not name the empty path \"/\": %+v", r)
+			}
+		})
 	}
 }
 
@@ -937,6 +986,9 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 				}
 				if mode == "off-stated-lifetime" {
 					sessionHintMatchesTheCall(t, r, request)
+				}
+				if mode == "on-stated-lifetime" {
+					sessionHintNamesTheCallExactly(t, r, request, strings.HasPrefix(c.name, "path-segment") || c.name == "url-does-not-parse")
 				}
 			})
 		}

@@ -296,6 +296,16 @@ func (s instanceExact) ExactTestOutcome() (string, []string, []string, bool) {
 	return m.ExactTestOutcome()
 }
 
+func (s instanceExact) ExactTestSkippedReads() (string, []string) {
+	m, err := s.mgr()
+	if err != nil {
+		return "", nil
+	}
+	return m.ExactTestSkippedReads()
+}
+
+var _ agent.ExactSkippedReadsReader = instanceExact{}
+
 var (
 	_ agent.ExactServer           = instanceExact{}
 	_ agent.ExactTestOpener       = instanceExact{}

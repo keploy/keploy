@@ -206,8 +206,9 @@ type TemplateFailure struct {
 	// Refused marks a placeholder refused when the test set loaded: the test
 	// case was never sent, and there is no answer to accept. A refusal with
 	// no Placeholder refuses the test case's whole test set (one an
-	// interrupted keploy templatize left half-written; category
-	// TEST_SET_REFUSED), not a placeholder of it.
+	// interrupted keploy templatize left half-written, or one a mock of which
+	// a replay hook refused; category TEST_SET_REFUSED), not a placeholder of
+	// it.
 	Refused bool `json:"refused,omitempty" yaml:"refused,omitempty"`
 }
 
@@ -335,6 +336,12 @@ type FailureInfo struct {
 	// on it alone, so the test has no verdict, and its test set is not
 	// judged.
 	LearningNotKept string `json:"learning_not_kept,omitempty" yaml:"learning_not_kept,omitempty"`
+	// NotFound says why a FAILED test was never run: the run selected it by
+	// name (test.selectedTests in keploy.yml, or the enterprise binary's -t
+	// set:case), and its test set holds no test case of that name ("test
+	// case <name> not found in <set>"). It has no request and no answer, and
+	// is filed under TEST_CASE_NOT_FOUND.
+	NotFound string `json:"not_found,omitempty" yaml:"not_found,omitempty"`
 }
 
 // MappingStaleRemedy is what to do about a test whose recorded mapping
@@ -557,6 +564,10 @@ type UnmatchedCall struct {
 	// out: the run of one test process, or no worker).
 	Instance uint32 `json:"instance,omitempty" yaml:"instance,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	// SkippedReads mirrors MockMismatchReport.SkippedReads: for an extra
+	// call, the reads of tests the replay's gate skips that answered the
+	// same call in the test's window, by name, never a value.
+	SkippedReads []string `json:"skipped_reads,omitempty" yaml:"skipped_reads,omitempty"`
 	// BeforeSet says, under the proven switch, that the call was made before
 	// its test set's first test began, with no test's window open: the
 	// application's startup. Its Kind is MissOutsideTest. It is the set's,
@@ -575,9 +586,22 @@ type UnmatchedCall struct {
 	// and that test's evidence lists it. Empty for a call no test was
 	// charged with: one made before the test process claimed the run, one
 	// made outside every test (before the first, between two, or after the
-	// last), and every call without the switch. keploy mock's receipt lists
-	// those of them that count against a test (Receipt.UnchargedMisses).
+	// last), one that repeats a spent recording of the set's background
+	// (WindowOf), and every call without the switch. keploy mock's receipt
+	// lists those of them that count against a test
+	// (Receipt.UnchargedMisses).
 	ChargedTo string `json:"charged_to,omitempty" yaml:"charged_to,omitempty"`
+	// WindowOf names, under the proven switch, the test whose window a call
+	// was made in when keploy charged it to no test because it repeats a
+	// spent recording of the set's background (Repeat.Background): the
+	// application's own schedule (a janitor's sweep, a timer) made it again
+	// after that recording answered one call, and no recording of the open
+	// test's own is that call (it is no extra call of the test's, nor a
+	// recording another test made). Such a call never fails the test whose
+	// window it lands in; the receipt lists it, by this name, so a reader
+	// sees where it landed. Empty for every other call, and for one made
+	// before that test began being served, whose window is not known.
+	WindowOf string `json:"window_of,omitempty" yaml:"window_of,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
@@ -588,6 +612,14 @@ type UnmatchedCall struct {
 	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
 	// a recording the test does not own.
 	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`
+	// Background mirrors MockMismatchReport.Background, under either switch:
+	// the call is the same request as one of the set's background recordings
+	// (mappings.yaml worker: or startup:), apart from noise and clock reads,
+	// made once more than any was left to answer. It is listed with the
+	// test's misses, and counts against no test (CountsAgainstTest): the
+	// application's background work made it, so it fails no test and no set,
+	// and holds back no noise learning.
+	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
 	// RecordedIn names, under the proven switch, the other test of the set
 	// that owns the recording a NotOwned call is (ClosestMock): the call is
 	// likely one that test recorded, such as a later exchange of a connection
@@ -601,6 +633,14 @@ type UnmatchedCall struct {
 	// test's. The test fails on it, named, as it fails on any miss: keploy
 	// never answers it with the other test's recording.
 	OrderDependent bool `json:"order_dependent,omitempty" yaml:"order_dependent,omitempty"`
+	// Earlier mirrors MockMismatchReport.Earlier: for a call of the test's
+	// own that changed, the latest recording another test made of the same
+	// method and path, to the same destination, before the test's own.
+	// EarlierIn names, under the proven switch, the other test of the set
+	// that owns it (NameEarlierIn): a test whose skip can explain the
+	// change.
+	Earlier   string `json:"earlier,omitempty" yaml:"earlier,omitempty"`
+	EarlierIn string `json:"earlier_in,omitempty" yaml:"earlier_in,omitempty"`
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
 	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall, or
 	// MissViewReplaced for a call whose view a test's begin or end, or another
@@ -1009,9 +1049,15 @@ const (
 	TemplateVariable FailureCategory = "TEMPLATE_VARIABLE"
 	// TestSetRefused means keploy refused the test case's whole test set and
 	// ran none of it: an interrupted keploy templatize left the set
-	// half-written. The set's failure reason, and the test case's refusal in
-	// TestResult.TemplateFailures, say which files and what to do.
+	// half-written, or a replay hook refused one of the set's mocks (Keploy
+	// Enterprise: a sealed value its key service did not open). The set's
+	// failure reason, and the test case's refusal in
+	// TestResult.TemplateFailures, say which files or which mock, and why.
 	TestSetRefused FailureCategory = "TEST_SET_REFUSED"
+	// TestCaseNotFound means the run selected the test case by name and its
+	// test set holds none of that name: it failed unsent, and
+	// FailureInfo.NotFound says which.
+	TestCaseNotFound FailureCategory = "TEST_CASE_NOT_FOUND"
 )
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.

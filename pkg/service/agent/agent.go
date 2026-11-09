@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -51,8 +52,9 @@ type ClientMockStorage struct {
 	// (variables this keploy cannot follow, followable): each was logged as
 	// it was refused. A mapping that lists one owns nothing for it, and the
 	// call it recorded misses (mocksByName). The value says whether the mock
-	// is a test mock (data-plane): one is a recorded call its test is judged
-	// for (refusedOf).
+	// is a test mock (data-plane, and no answer the client never read:
+	// models.Mock.OutsideTestScopes): one is a recorded call its test is
+	// judged for (refusedOf).
 	refused map[string]bool
 	// statements is the set's statement catalog, read from diskMocks once
 	// when it is built (DiskMocks.LoadStatements) and seeded on the proxy when
@@ -975,13 +977,13 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 // joins, is not empty when the agent starts: on a user-defined network, as
 // every compose stack's is, Docker's embedded DNS resolver listens in it on
 // 127.0.0.11, on a TCP and a UDP port the kernel drew from the namespace's
-// ephemeral range (32768-60999) before the agent ran. The CLI checks its
-// ports in its own namespace and cannot see them, and their holder, dockerd,
-// is in another PID namespace, so the agent cannot name it. A --proxy-port or
-// --dns-port in that range met one of them now and then, and the agent failed
-// its start. The app reaches the proxy and the DNS server through the hooks'
-// redirect, never through the port the CLI publishes for the proxy, so a
-// moved port serves it as the one the CLI chose would have.
+// ephemeral range (32768-60999) before the agent ran. The CLI cannot see
+// them from its own namespace, and their holder, dockerd, is in another PID
+// namespace, so the agent cannot name it. A --proxy-port or --dns-port in
+// that range met one of them now and then, and the agent failed its start.
+// The app reaches the proxy and the DNS server through the hooks' redirect,
+// and the CLI publishes neither on the host, so a moved port serves it as the
+// configured one would have.
 func (a *Agent) letProxyPortsMove() {
 	setter, ok := a.Hooks.(coreAgent.ProxyPortsSetter)
 	if !ok || coreAgent.EbpfProxyPortOverride != 0 {
@@ -1004,10 +1006,36 @@ func (a *Agent) letProxyPortsMove() {
 }
 
 func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	// keploy test's read of what was consumed after a set's last test, with
+	// the proven switch off, which reads no misses there: every answer held
+	// for a later place of the set is due (coreAgent.RunSetEnder). It files
+	// nothing: no parser holds a call for a set whose client reads no set's
+	// end (models.OutgoingOptions.ReadsSetEnds).
+	if models.SetEndRead(ctx) {
+		if e, ok := a.Proxy.(coreAgent.RunSetEnder); ok {
+			e.EndRunSet()
+		}
+	}
 	return a.Proxy.GetConsumedMocks(ctx)
 }
 
 func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	// keploy test's read of a set's end: every answer held for a later
+	// place of the set is due (coreAgent.RunSetEnder), before the settle
+	// below, so the read settles the calls those answers make and takes
+	// their misses: it is the set's last.
+	if models.SetEndRead(ctx) {
+		if e, ok := a.Proxy.(coreAgent.RunSetEnder); ok {
+			e.EndRunSet()
+		}
+	}
+	// keploy test's read of a test's end: every answer held for the gap
+	// after that test is due (reachRunTest), before the settle below, as at
+	// the set's end, and as under exact serving the pool's view moves the
+	// place before this read.
+	if test, ok := models.TestEndRead(ctx); ok {
+		a.reachRunTest(test, false)
+	}
 	// Under the proven switch a replay's read of its misses waits, as a
 	// test's end does, until every call the application made is in the
 	// proxy's hands and answered (settle_proven.go): the run's last read
@@ -1247,13 +1275,13 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	for _, m := range storage.filtered {
 		if m != nil {
 			m.DeriveLifetime()
-			mocknoise.MaterializeCorrelations(m)
+			mocknoise.MaterializeCorrelations(a.logger, m)
 		}
 	}
 	for _, m := range storage.unfiltered {
 		if m != nil {
 			m.DeriveLifetime()
-			mocknoise.MaterializeCorrelations(m)
+			mocknoise.MaterializeCorrelations(a.logger, m)
 		}
 	}
 
@@ -1326,6 +1354,20 @@ func (a *Agent) wireAppClock() {
 	r, reads := ActiveHooks.(AppClockReader)
 	_, own := ActiveHooks.(*AgentHook)
 	realClock := !reads && own && provenswitch.On()
+	// With the switch off the learn step reads no clock, and is handed none
+	// below, as before. The background check alone reads a call's span
+	// then (coreAgent.BackgroundClockSetter): on the real clock where the
+	// hooks say no clock is moved (BackgroundClockReader), or are this
+	// build's own, which move none; hooks that say neither hand it none.
+	if bs, ok := a.Proxy.(coreAgent.BackgroundClockSetter); ok && !provenswitch.On() {
+		var f func(time.Time) (time.Time, bool)
+		if br, tells := ActiveHooks.(BackgroundClockReader); tells {
+			f = br.BackgroundAppClock
+		} else if own {
+			f = realAppClock
+		}
+		bs.SetBackgroundClock(f)
+	}
 	if rs, ok := a.Proxy.(coreAgent.AppClockRunSetter); ok {
 		var run func(time.Time) (time.Time, bool)
 		if rr, tells := ActiveHooks.(AppClockRunReader); tells && reads {
@@ -1361,6 +1403,12 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	total := header.FilteredCount + header.UnfilteredCount
 	if header.FilteredCount < 0 || header.UnfilteredCount < 0 || total < 0 {
 		return fmt.Errorf("storemocks stream: invalid counts (filtered=%d unfiltered=%d)", header.FilteredCount, header.UnfilteredCount)
+	}
+	// Each mock is numbered by its place in the set (a uint32,
+	// models.TestModeInfo.LoadSeq), so a set too large to number is refused
+	// before any mock is read: no two of its mocks share a place.
+	if uint64(total) > math.MaxUint32 {
+		return fmt.Errorf("storemocks stream: a set of %d mocks: a mock's place in the set counts at most %d", total, uint64(math.MaxUint32))
 	}
 	// Pre-size from the header counts, but cap the capacity: the counts are
 	// client-provided, so an inflated header must not force a huge upfront
@@ -1427,8 +1475,11 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			return failStream(fmt.Errorf("storemocks stream: decode mock %d/%d: %w", i+1, total, err))
 		}
 		mock := &m
+		// Its place in the set as sent, kept whichever tier holds it below
+		// (models.TestModeInfo.LoadSeq).
+		mock.TestModeInfo.LoadSeq = uint32(i + 1)
 		mock.DeriveLifetime()
-		mocknoise.MaterializeCorrelations(mock)
+		mocknoise.MaterializeCorrelations(a.logger, mock)
 		if proven {
 			tally.Add(mock)
 			storage.dests.add(mock)
@@ -1548,7 +1599,7 @@ func (s *ClientMockStorage) noteRefused(mock *models.Mock) {
 	if s.refused == nil {
 		s.refused = map[string]bool{}
 	}
-	s.refused[mock.Name] = !mock.IsProtocolPhase()
+	s.refused[mock.Name] = !mock.OutsideTestScopes()
 }
 
 // maxStreamPresize bounds the slice capacity pre-allocated from a /storemocks
@@ -2126,6 +2177,9 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 	if err != nil {
 		return err
 	}
+	// Handed before the staging, which installs it with the trees it builds,
+	// so a read of the set as recorded (integrations.RecordedSetRanger)
+	// ranges one staging's trees and source, the last set's until then.
 	a.readKindFromDisk()
 
 	// Atomically update mocks AND the active test window when the proxy
@@ -2283,6 +2337,13 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	copy(originalUnfiltered, storage.unfiltered)
 	disk := storage.diskMocks
 	storage.mu.RUnlock()
+
+	// The staging call (recordedSetShape populated, as for the cursors'
+	// reset above) hands the proxy the set's background recordings, read
+	// from every mock held for the set, served or not.
+	if !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
+		a.seedBackgroundRecordings(params, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk)
+	}
 
 	// On WindowedProxy the agent filter runs non-strict (SetMocksWithWindow does
 	// the authoritative strict enforcement); env override still applies inside.

@@ -248,6 +248,12 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 	if mock.Kind == models.ConnectionFailure {
 		return true
 	}
+	// An answer the client never read is never served (models.Mock.
+	// IsUndelivered), so never consumed: the recording keeps it, as it says
+	// what the dependency answered.
+	if mock.IsUndelivered() {
+		return true
+	}
 	if st, ok := mockNames[mock.Name]; ok {
 		// Persist any request-body noise detected during schema-based
 		// auto-replay matching (config.Test.SchemaNoiseDetection) onto the

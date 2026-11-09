@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-start-wait.sh"
 
 # E2E test for MySQL dual-connection handshake matching.
 #
@@ -50,6 +51,7 @@ wait_for_app() {
     sleep 1
   done
   echo "::error::App did not start in time"
+  save_keploy_start_evidence
   endsec; return 1
 }
 
@@ -161,6 +163,9 @@ do_record_iteration() {
     > "${app_name}.txt" 2>&1 &
   local KEPLOY_PID=$!
 
+  # The app starts once keploy's agent is ready: its wait, with its full
+  # budget, starts there (keploy-start-wait.sh).
+  await_agent_ready "${app_name}.txt" "$KEPLOY_PID" || exit 1
   send_request "$KEPLOY_PID"
 
   set +e

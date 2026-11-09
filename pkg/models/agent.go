@@ -366,6 +366,12 @@ type ScopeWindow struct {
 	// was open (POST /agent/scope/given), in the order it gave them: in a
 	// record, the givens its mapping keeps (MappedTestCase.Given).
 	Given []GivenValue `json:"given,omitempty"`
+	// SkippedReads is, under the proven wire, in a replay, the names of the
+	// reads of tests the replay's gate skips (moved to the worker scope)
+	// that answered the test's calls while it was open, in the order they
+	// did, whatever its outcome. A replay that never loads the skipped
+	// tests' recordings has no answer for those calls.
+	SkippedReads []string `json:"skippedReads,omitempty"`
 	// Claim, under the proven wire, makes this no test's window but a claim:
 	// from Start on, the run's test process is the one that claimed it with
 	// this key (POST /agent/instance), until the next claim. A call made
@@ -409,7 +415,11 @@ type ScopeTableReq struct {
 	// as MockFilterParams.RecordedWindows. keploy mock replay derives each
 	// from the set's mappings (the test's recorded begin and its own
 	// recordings), so the learn step tells a test's own recordings from
-	// another test's (integrations.TestWindows). Absent from an older CLI
+	// another test's (integrations.TestWindows). With the switch off,
+	// keploy mock replay sends them too, derived the same way. Under either
+	// switch the agent reads them for the run's place (models.RunPlace) as
+	// RunWindows says: an answer recorded in a later test than its call is
+	// written once the replay reaches that test. Absent from an older CLI
 	// and from a set with no test: the agent then knows none.
 	Windows []TestWindow `json:"windows,omitempty"`
 	// Given is, under the proven switch, the values each test gave when it
@@ -426,6 +436,13 @@ type ScopeTableReq struct {
 	// no slice of its key holds is not served. Absent from an older CLI:
 	// worker: entries then answer between tests only, as the pool's.
 	Worker map[string][]string `json:"worker,omitempty"`
+	// Trails is, under the proven switch, the test each worker-scope
+	// recording trails (MockEntry.Trails), by the recording's name: only
+	// names Worker holds, each naming a test of Mappings. The learn step
+	// reads the places that test's own list left the run as such a call's
+	// own (learn.Trail). Absent when no entry trails a test, and from an
+	// older CLI: every call then reads only its own test's places.
+	Trails map[string]string `json:"trails,omitempty"`
 	// RepeatReads is, under the proven switch, each test's repeated reads
 	// by test ID, as whatever names them for the replay named them
 	// (mock.RegisterRepeatReadNamer): recordings of one read the test made
@@ -442,6 +459,18 @@ type ScopeTableReq struct {
 	// An agent that cannot take it refuses a table that has one. Absent
 	// when no entry is marked.
 	NotRequired map[string][]string `json:"notRequired,omitempty"`
+	// SkippedReads is, under the proven switch, the names of Worker that
+	// keploy mock replay moved there from the tests its gate skips: reads
+	// the app made once and kept (an HTTP GET, HEAD or OPTIONS a test
+	// recorded), made now in the window of whichever test runs first. Each
+	// answers at most one request in the staging's windows, as the rest of
+	// Worker does, and also a request one more than the open test's own
+	// recordings of it, which the rest never answers: so a read answers at
+	// most as many requests in the windows as the skipped test recorded it.
+	// Each name maps to the skipped test that lists it, which a test's
+	// extra-call line names (UnmatchedCall.SkippedReads). Absent from an
+	// older CLI and when the gate skips no test.
+	SkippedReads map[string]string `json:"skippedReads,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its
@@ -587,6 +616,17 @@ type MockFilterParams struct {
 	BeforeTime      time.Time    `json:"beforeTime,omitempty"`
 	MockMapping     []string     `json:"mockMapping,omitempty"`
 	UseMappingBased bool         `json:"useMappingBased"`
+	// BackgroundMocks names the set's background recordings: its
+	// mappings.yaml worker: and startup: mocks, the calls the application
+	// made on its own rather than for a test's request. Sent on the staging
+	// call only, beside RecordedWindows, under either switch. The agent
+	// hands them to the proxy read-only, served or not, each with its
+	// recorded span (BackgroundRecording), through the optional
+	// BackgroundRecordingsSeeder capability, so a parser can tell a miss is
+	// one more run of one of them (MockMismatchReport.Background). No test
+	// is served differently for it. Empty: the set has none, and every miss
+	// stays its test's.
+	BackgroundMocks []string `json:"backgroundMocks,omitempty"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase

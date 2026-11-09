@@ -111,11 +111,23 @@ type ComposeAgentFailureReader interface {
 	ComposeAgentFailure() error
 }
 
+// ComposeEndReader is an optional Instrumentation extension for a docker
+// compose recording: what ended the project when the test command's own end
+// does not stand. Compose can report 0 for a test command it never started
+// (another of the project's services ended the project first), and that 0 is
+// no verdict: nothing ran to be recorded. appExit is the test command's exit
+// as keploy got it. nil when its own end stands. AgentClient implements it.
+type ComposeEndReader interface {
+	ComposeEndAfterReady(appExit int) error
+}
+
 // ScopePusher is an optional Instrumentation extension: Replay uses it to hand
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
-// runner's /agent/scope/begin calls can restrict the served pool per test.
+// runner's /agent/scope/begin calls can restrict the served pool per test,
+// with every test's recorded window (recordedTestWindows), the run's place
+// an answer recorded in a later window than its call is written at.
 type ScopePusher interface {
-	PushScopeTable(ctx context.Context, table map[string][]string) error
+	PushScopeTable(ctx context.Context, table map[string][]string, windows []models.TestWindow) error
 }
 
 // ScopeGatePusher is an optional Instrumentation extension: Replay uses it to
@@ -141,13 +153,16 @@ type SetPusher interface {
 // proven switch needs: it hands the agent the per-test table and each key's
 // pool slice (models.ScopeTableReq.Pool) in one request, with the recorded
 // window of every test of the set (models.ScopeTableReq.Windows), each
-// key's worker scope (models.ScopeTableReq.Worker), the values each test
+// key's worker scope (models.ScopeTableReq.Worker), the names of it that
+// are the reads of tests the replay's gate skips, each with the skipped test
+// that lists it (models.ScopeTableReq.SkippedReads), the test each worker
+// recording trails (models.ScopeTableReq.Trails), the values each test
 // gave when it was recorded (models.ScopeTableReq.Given), each test's
 // repeated reads (models.ScopeTableReq.RepeatReads) and the names of each
 // test's list keploy's judging marked served, not required
 // (models.ScopeTableReq.NotRequired).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error
+	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error
 }
 
 type MappingReader interface {

@@ -585,6 +585,16 @@ var (
 	_ integrations.CallViewGoneTeller = (*scopedMockDb)(nil)
 )
 
+// SkippedReadsAnswered forwards the store's skipped tests' reads that
+// answered in the open test's window (integrations.ExactSkippedReadsReader),
+// none when it keeps none.
+func (s *scopedMockDb) SkippedReadsAnswered() []*models.Mock {
+	if sr, ok := s.MockMemDb.(integrations.ExactSkippedReadsReader); ok {
+		return sr.SkippedReadsAnswered()
+	}
+	return nil
+}
+
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
 // keeps none, so a learn step on a scoped view reads the store's account as
@@ -1023,6 +1033,14 @@ func (s *scopedMockDb) InPool(m *models.Mock) (bool, bool) {
 	return integrations.InPool(s.MockMemDb, m)
 }
 
+// TrailOf forwards integrations.TrailedTests: the test a recording trails
+// by the replay's scope table is the store's, whatever view a worker reads.
+func (s *scopedMockDb) TrailOf(mock string) learn.Trail {
+	return integrations.TrailOf(s.MockMemDb, mock)
+}
+
+var _ integrations.TrailedTests = (*scopedMockDb)(nil)
+
 // RecordedWindowIndex forwards integrations.RecordedWindowIndex.
 func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
 	if w, ok := s.MockMemDb.(integrations.RecordedWindowIndex); ok {
@@ -1069,6 +1087,13 @@ func (s *scopedMockDb) cursorKey(key string) string {
 	return s.lastScope + "\x00" + key
 }
 
+// BackgroundRecordings is the set's background recordings whatever this
+// view's allowlist (integrations.BackgroundRecordingReader): they are read,
+// never served.
+func (s *scopedMockDb) BackgroundRecordings(kind models.Kind) []models.BackgroundRecording {
+	return integrations.BackgroundRecordingsOf(s.MockMemDb, kind)
+}
+
 // RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
 // pass straight through.
 func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
@@ -1085,6 +1110,50 @@ func (s *scopedMockDb) WindowChanged() <-chan struct{} {
 		return p.WindowChanged()
 	}
 	return nil
+}
+
+// RunPlace and RunPlaceChanged carry no mock data either. A wrapped store
+// without the facet reports the set's end and a channel that never fires: a
+// parser holds nothing over it, as over a store with no facet at all.
+func (s *scopedMockDb) RunPlace() models.RunPlace {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.RunPlace()
+	}
+	return models.RunPlace{SetEnd: true}
+}
+
+func (s *scopedMockDb) RunPlaceChanged() <-chan struct{} {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.RunPlaceChanged()
+	}
+	return nil
+}
+
+// IdleUntilRunPlaceChanges over a wrapped store without the facet marks
+// nothing: its place is the set's end, so no parser waits on it.
+func (s *scopedMockDb) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (func(), bool) {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.IdleUntilRunPlaceChanges(changed, mark)
+	}
+	return func() {}, false
+}
+
+// OpenTestRecordings is the wrapped store's: a parser reads it for the
+// recordings a call could have been answered with in its test, so more of
+// them only makes it hold less. ClaimHold of a wrapped store without the
+// facet claims nothing: no parser holds over it.
+func (s *scopedMockDb) OpenTestRecordings() []*models.Mock {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.OpenTestRecordings()
+	}
+	return nil
+}
+
+func (s *scopedMockDb) ClaimHold(name string) bool {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.ClaimHold(name)
+	}
+	return false
 }
 
 // The carry-over tier is a read tier like the others, so it goes through keep().

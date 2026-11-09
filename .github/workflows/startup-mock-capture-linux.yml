@@ -13,13 +13,14 @@ name: Startup Mock Capture Regression (Linux)
 # pkg/agent/proxy/syncMock.
 #
 # Also here, on the same runner and binary: two records started together on
-# the default ports (python/concurrent-records). Each CLI checks its ports
-# free before its agent binds them, so both could find them free, and the
-# second agent failed to bind. Now an agent that finds its port taken moves
-# off it, naming the holder, and tells its hooks. Each run's mocks must hold
-# its own app's DNS names and upstream calls, and none of the other run's;
-# with UDP 26789 held, which the CLI's TCP check misses, both agents must
-# move their DNS servers.
+# the default ports (python/concurrent-records). Each CLI hands its agent
+# the configured ports unchecked, and an agent that finds its port taken
+# moves off it, naming the holder, and tells its hooks. Each run's mocks must
+# hold its own app's DNS names and upstream calls, and none of the other
+# run's, and a proxy or DNS server off its configured port must be on one its
+# agent said it moved to. With one run started once the other's agent
+# listens, its agent must move both; with UDP 26789 held, both agents must
+# move their DNS servers, naming its holder.
 on:
   workflow_call:
     inputs:

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -243,8 +244,8 @@ func TestReaderIndexBudget(t *testing.T) {
 	if held, read := small.text(answer).holdsWord(strings.Split(ids[0], "-")[1]); !held || !read {
 		t.Errorf("past the budget: held %v read %v; want held, as within it", held, read)
 	}
-	if small.unread() || small.used != 0 {
-		t.Errorf("past the budget: unread %v, %d bytes kept; want read, nothing kept", small.unread(), small.used)
+	if small.unread() || small.used != entryBytes(0, 0) {
+		t.Errorf("past the budget: unread %v, %d bytes kept; want read, nothing kept but the text's entry (%d)", small.unread(), small.used, entryBytes(0, 0))
 	}
 	if held, read := small.text("a short text 42").holdsWord("42"); !held || !read || small.used == 0 {
 		t.Errorf("a text within what is left of the budget: held %v read %v, %d bytes kept", held, read, small.used)
@@ -430,13 +431,18 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 	}
 	// Past the budget each question reads the recording once: its text and
 	// its fields from one read, its instants and their declared forms from
-	// one read.
+	// one read. A word the set's filter of the recording's words rules out
+	// (setFilter) reads it not at all.
 	last := places[n-1]
+	loads = dc.Loads()
+	if held, read := last.holdsWord("zzz"); held || !read || dc.Loads() != loads {
+		t.Errorf("a word the recording's filter rules out, past the budget: held %v, read %v, %d loads; want not held, read, none", held, read, dc.Loads()-loads)
+	}
 	for _, q := range []struct {
 		name string
 		ask  func()
 	}{
-		{"a word", func() { last.holdsWord("zzz") }},
+		{"a word its filter may hold", func() { last.holdsWord("w") }},
 		{"a base64 run", func() { last.holdsToken(tokenB64, "QUJDREVGR0g") }},
 		{"a word's fields", func() { last.fieldsWith(id(n - 1)) }},
 		{"an instant", func() { last.holdsMoment(moment{}) }},
@@ -501,7 +507,8 @@ func TestReaderWholeBase64RunsAreTheScansTokens(t *testing.T) {
 // tiers keep within (setBudget), never on a budget beside it: what it keeps
 // is counted there while the call runs, it keeps none of what the set has
 // no room for once the tiers that let go (words, payloads) have let go of
-// theirs, and it gives all of it back when the call is over (release). Its
+// theirs, and it gives all of it back when the call is over (release): the
+// set's own filter of a text's words stays, counted on that budget. Its
 // answers are the same kept or not.
 func TestReaderIndexKeepsOnTheSetsOneBudget(t *testing.T) {
 	defer func(b, r int64) { learnBudget, readerBudget = b, r }(learnBudget, readerBudget)
@@ -514,12 +521,29 @@ func TestReaderIndexKeepsOnTheSetsOneBudget(t *testing.T) {
 	if held, read := x.text(text).holdsWord("7f3c"); !held || !read {
 		t.Fatalf("held %v read %v; want the word held", held, read)
 	}
-	if x.used <= 0 || dc.set.budget.used != x.used {
-		t.Fatalf("the index keeps %d bytes; the set's budget counts %d: want what the index keeps counted on the set's budget", x.used, dc.set.budget.used)
+	// The set keeps the filter of the text's words past the call
+	// (textEntry), and its postings of them (postRuns), on the same budget,
+	// each the first of its map: with the map's first group (288 bytes of
+	// 32-byte slots for the texts, 352 of 40-byte ones for the postings).
+	kept, posted := int64(0), false
+	fs := filtersOf(dc.set)
+	fs.mu.Lock()
+	for _, e := range fs.texts {
+		if e.f != nil {
+			kept += textFilterBytes(e.f) + 288
+		}
+		if e.id >= 0 {
+			kept += postingBytes(text) + 352
+			posted = true
+		}
+	}
+	fs.mu.Unlock()
+	if x.used <= 0 || kept <= 0 || !posted || dc.set.budget.used != x.used+kept {
+		t.Fatalf("the index keeps %d bytes and the set's filter of the text and its postings %d (posted: %v); the set's budget counts %d: want both counted on the set's budget", x.used, kept, posted, dc.set.budget.used)
 	}
 	x.release()
-	if dc.set.budget.used != 0 {
-		t.Fatalf("the call is over and the set's budget still counts %d bytes of its index", dc.set.budget.used)
+	if dc.set.budget.used != kept {
+		t.Fatalf("the call is over and the set's budget counts %d bytes; want only the set's filter's %d, none of the index's", dc.set.budget.used, kept)
 	}
 
 	// The set's tiers that let none go keep all but 1 KiB of its budget.
@@ -530,6 +554,9 @@ func TestReaderIndexKeepsOnTheSetsOneBudget(t *testing.T) {
 	if held, read := y.text(text).holdsWord("7f3c"); !held || !read {
 		t.Fatalf("past the set's budget: held %v read %v; want the word held, as within it", held, read)
 	}
+	// The set's entry for the text's filter is made first (428 bytes), and
+	// the index's entry for the text (676) no longer fits: the text shares
+	// the index's past entry, and none of its answers is kept.
 	if y.used != 0 || full.set.budget.used > full.set.budget.limit {
 		t.Fatalf("the set's budget has 1 KiB left; the index keeps %d bytes and the set counts %d of %d: want nothing kept past the set's one budget", y.used, full.set.budget.used, full.set.budget.limit)
 	}
@@ -649,23 +676,24 @@ func TestReaderFieldsOfARecordingHoldItsWordsWhereTheyStand(t *testing.T) {
 }
 
 // The index keeps an answer only where it and its text fit what is left of
-// the call's cap: a text that fits alone, whose words do not, keeps none,
-// and the index never holds past its cap.
+// the call's cap: a text that fits alone, whose other forms do not, keeps
+// none, and the index never holds past its cap.
 func TestReaderIndexKeepsNoAnswerPastItsCap(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	var sb strings.Builder
 	for i := 0; i < 64; i++ {
-		fmt.Fprintf(&sb, "w%d ", i)
+		fmt.Fprintf(&sb, "W%d ", i)
 	}
 	text := sb.String()
 	readerBudget = int64(len(text)) + headerBytes + 1
 	x := newReaderIndex(nil)
 	tt := x.text(text)
+	// Only its case-folded form holds w17: its other forms are read.
 	if held, read := tt.holdsWord("w17"); !held || !read {
 		t.Fatalf("held %v read %v; want held", held, read)
 	}
-	if x.used > x.budget || tt.e.tokens.ok {
-		t.Errorf("the index keeps %d bytes (words kept %v) within a cap of %d", x.used, tt.e.tokens.ok, x.budget)
+	if x.used > x.budget || tt.e.forms.ok {
+		t.Errorf("the index keeps %d bytes (other forms kept %v) within a cap of %d", x.used, tt.e.forms.ok, x.budget)
 	}
 	// The entry is past the cap from then on: an answer that would fit
 	// alone (its instants: none) is built for the question and not kept.
@@ -735,19 +763,22 @@ func TestReaderFieldsOfAStreamedBodyAreItsValuesFields(t *testing.T) {
 }
 
 // The index counts a text it keeps once, however many of its answers it
-// keeps: the entry keeps the text with the first answer it keeps.
+// keeps: the entry keeps the text with the first answer it keeps. Each is
+// counted as the runtime allocates it, beside the entry itself.
 func TestReaderIndexCountsAKeptTextOnce(t *testing.T) {
-	text := "id 7f3c " + strings.Repeat("word ", 20000)
+	text := "ID 7F3C " + strings.Repeat("WORD ", 20000)
 	x := newReaderIndex(NewDriftCache())
 	tt := x.text(text)
 	if held, read := tt.holdsWord("7f3c"); !held || !read {
 		t.Fatalf("held %v read %v; want held", held, read)
 	}
-	if _, ok := tt.spansOf(); !ok || tt.e.text != text || !tt.e.tokens.ok || !tt.e.spans.ok {
-		t.Fatalf("fixture: the entry keeps the text %v, its words %v, its instants %v", tt.e.text == text, tt.e.tokens.ok, tt.e.spans.ok)
+	if _, ok := tt.spansOf(); !ok || tt.e.text != text || !tt.e.forms.ok || !tt.e.spans.ok {
+		t.Fatalf("fixture: the entry keeps the text %v, its other forms %v, its instants %v", tt.e.text == text, tt.e.forms.ok, tt.e.spans.ok)
 	}
-	if want := int64(len(text)) + tokensBytes(tt.e.tokens.v) + spansBytes(tt.e.spans.v); x.used != want {
-		t.Errorf("the index counts %d bytes; want %d: the text once, beside its two answers", x.used, want)
+	want := entryBytes(0, 0) + allocBytes(len(text), false) + allocBytes(len(tt.e.forms.v), false) +
+		allocBytes(uintptr(cap(tt.e.spans.v))*unsafe.Sizeof(instant{}), false)
+	if x.used != want {
+		t.Errorf("the index counts %d bytes; want %d: its entry, the text once, beside its two answers", x.used, want)
 	}
 }
 
@@ -756,16 +787,16 @@ func TestReaderIndexCountsAKeptTextOnce(t *testing.T) {
 // the text again and keeps nothing.
 func TestReaderReleaseLetsGoOfEveryAnswer(t *testing.T) {
 	x := newReaderIndex(NewDriftCache())
-	tt := x.text("id 7f3c and more words")
-	if held, read := tt.holdsWord("7f3c"); !held || !read || !tt.e.tokens.ok {
-		t.Fatalf("held %v read %v, words kept %v; want held and kept", held, read, tt.e.tokens.ok)
+	tt := x.text("ID 7F3C AND MORE WORDS")
+	if held, read := tt.holdsWord("7f3c"); !held || !read || !tt.e.forms.ok {
+		t.Fatalf("held %v read %v, other forms kept %v; want held and kept", held, read, tt.e.forms.ok)
 	}
 	x.release()
-	if tt.e.tokens.ok || tt.e.text != "" {
-		t.Errorf("after release the handle's entry keeps its words %v, its text %q; want nothing", tt.e.tokens.ok, tt.e.text)
+	if tt.e.forms.ok || tt.e.text != "" {
+		t.Errorf("after release the handle's entry keeps its other forms %v, its text %q; want nothing", tt.e.forms.ok, tt.e.text)
 	}
-	if held, read := tt.holdsWord("7f3c"); !held || !read || tt.e.tokens.ok || x.used != 0 {
-		t.Errorf("asked after release: held %v read %v, words kept %v, %d bytes; want held, nothing kept", held, read, tt.e.tokens.ok, x.used)
+	if held, read := tt.holdsWord("7f3c"); !held || !read || tt.e.forms.ok || x.used != 0 {
+		t.Errorf("asked after release: held %v read %v, other forms kept %v, %d bytes; want held, nothing kept", held, read, tt.e.forms.ok, x.used)
 	}
 }
 
@@ -877,12 +908,12 @@ func TestReaderReleaseClearsEveryKindOfAnswer(t *testing.T) {
 	const w = "ord7Kq2Xw9"
 	x := newReaderIndex(NewDriftCache())
 	tt := x.textOf(RawOf(getAnswer("mock-1", "http://api/items/1", `{"a":"`+w+` 2026-10-31T10:50:13Z"}`, eRecAt), false))
-	tt.holdsWord(w)
+	tt.holdsWord(strings.ToLower(w)) // only its case-folded form holds it
 	tt.fieldsWith(w)
 	tt.holdsToken(tokenB64, "zzzzzzzz")
 	tt.spansOf()
 	tt.holdsMoment(moment{})
-	if e := tt.e; !e.tokens.ok || !e.fields.ok || !e.runs.ok || !e.spans.ok || !e.formSpans.ok {
+	if e := tt.e; !e.forms.ok || !e.fields.ok || !e.runs.ok || !e.spans.ok || !e.formSpans.ok {
 		t.Fatalf("fixture: kept %+v", e)
 	}
 	x.release()
@@ -982,8 +1013,8 @@ func TestReaderOneLargeBodyIsReadFieldByFieldWithinABound(t *testing.T) {
 
 // A view is built only where what building it holds fits what is left of
 // the index's cap, what the index already keeps counted: past that the
-// question is answered by a scan that keeps nothing, and the same as the
-// view answers.
+// question is answered by a scan that keeps nothing but the text's entry,
+// and the same as the view answers.
 func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	body, ids := uuidAnswer(40, 64<<10)
@@ -992,26 +1023,33 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 	room := viewRoom(t, rec, w)
 	p, stop := rec.payload(), int64(0)
 	eachField(p.text, p.fields, func(_ fieldAt, text string) { _, held := formsHeld(text); stop = max(stop, held) })
-	otherBody, _ := uuidAnswer(40, 64<<10)
+	otherBody, otherIDs := uuidAnswer(40, 64<<10)
 	other := RawOf(getAnswer("mock-2", "http://api/items/2", otherBody, eRecAt), false)
+	// A word the other text holds: a set's filter of its words (setFilter)
+	// rules out none of it, so asking it keeps the text's words.
+	held := otherIDs[5][9:13]
 	answers := map[bool][]fieldAt{}
 	for _, keeps := range []bool{false, true} {
-		kept := int64(0)
+		// The text's entry: the index's first (676 bytes, with its map's
+		// first group), or its second (388) where it keeps the other's.
+		kept, entry := int64(0), entryBytes(0, 0)
 		if keeps {
 			probe := newReaderIndex(NewDriftCache())
-			probe.textOf(other).holdsWord("zzzz")
+			probe.textOf(other).holdsWord(held)
 			if kept = probe.used; kept == 0 {
 				t.Fatalf("fixture: the other text's words were not kept")
 			}
+			entry = entryBytes(1, 0)
 		}
+		need := room - entryBytes(0, 0) + entry
 		for _, c := range []struct {
 			budget int64
 			view   bool
-		}{{room + kept - 1, false}, {room + kept, true}} {
+		}{{need + kept - 1, false}, {need + kept, true}} {
 			readerBudget = c.budget
 			x := newReaderIndex(NewDriftCache())
 			if keeps {
-				if x.textOf(other).holdsWord("zzzz"); x.used != kept {
+				if x.textOf(other).holdsWord(held); x.used != kept {
 					t.Fatalf("fixture: kept %d, want %d", x.used, kept)
 				}
 			}
@@ -1020,8 +1058,8 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 			if !read || len(at) == 0 || r.e.fields.ok != c.view {
 				t.Errorf("keeping %d, budget %d: at %d fields read %v, view kept %v; want the view kept %v", kept, c.budget, len(at), read, r.e.fields.ok, c.view)
 			}
-			if !c.view && x.used != kept {
-				t.Errorf("keeping %d, budget %d: no view, %d bytes kept; want only the %d kept before", kept, c.budget, x.used, kept)
+			if !c.view && x.used != kept+entry {
+				t.Errorf("keeping %d, budget %d: no view, %d bytes kept; want only the %d kept before and the text's entry, %d", kept, c.budget, x.used, kept, entry)
 			}
 			if !c.view && x.peak > c.budget+stop {
 				t.Errorf("keeping %d, budget %d: no view, the question held %d bytes; want at most the budget and the forms of the field it stopped at, %d", kept, c.budget, x.peak, c.budget+stop)
@@ -1594,15 +1632,22 @@ func TestReaderAViewThatDoesNotFitIsBuiltOnceACall(t *testing.T) {
 	if r.e.fields.ok || !r.e.fields.big || x.peak <= past.peak {
 		t.Fatalf("fixture: kept %v, big %v, the first question held %d (the scan alone %d); want an abandoned build", r.e.fields.ok, r.e.fields.big, x.peak, past.peak)
 	}
+	// The abandoned build keeps nothing but the text's entry, the index's
+	// first; past the budget the text has none (it shares the index's
+	// past entry, counted nowhere).
+	if x.used != entryBytes(0, 0) || past.used != 0 {
+		t.Fatalf("fixture: the index keeps %d bytes, past the budget %d; want the text's entry alone, %d, and nothing", x.used, past.used, entryBytes(0, 0))
+	}
 	x.peak = 0
-	if at, read := r.fieldsWith(ids[5][9:13]); len(at) == 0 || !read || x.peak != past.peak {
-		t.Errorf("a second question past the room held %d; want the scan's alone, %d (at %d fields, read %v)", x.peak, past.peak, len(at), read)
+	if at, read := r.fieldsWith(ids[5][9:13]); len(at) == 0 || !read || x.peak != past.peak+x.used {
+		t.Errorf("a second question past the room held %d; want the scan's alone beside the text's entry, %d (at %d fields, read %v)", x.peak, past.peak+x.used, len(at), read)
 	}
 }
 
 // Past the budget, a question on one long text holds by the index's count
-// the text, the decoder's buffer of it (twice its length) and each of its
-// declared forms: exactly that, no more and no less.
+// the text as the runtime allocates it (whole pages past 32 KiB), the
+// decoder's buffer of it (twice its length) and each of its declared forms,
+// beside what the index keeps: exactly that, no more and no less.
 func TestReaderAQuestionPastTheBudgetCountsTheTextAndItsForms(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	readerBudget = 1
@@ -1611,7 +1656,7 @@ func TestReaderAQuestionPastTheBudgetCountsTheTextAndItsForms(t *testing.T) {
 	if len(forms) < 2 {
 		t.Fatalf("fixture: %d forms; want the percent-decoded form beside the text", len(forms))
 	}
-	want := int64(3 * len(s))
+	want := allocBytes(len(s), false) + int64(2*len(s))
 	for _, f := range forms {
 		want += int64(len(f))
 	}
@@ -1625,12 +1670,21 @@ func TestReaderAQuestionPastTheBudgetCountsTheTextAndItsForms(t *testing.T) {
 				t.Fatalf("fixture: the index keeps %d bytes; want some, and no room for the text", x.used)
 			}
 		}
-		kept := x.used
+		// The text's entry: none past the budget (it shares the index's
+		// past entry, counted nowhere), the index's second (388 bytes)
+		// where its budget has room for it.
+		kept, entry := x.used, int64(0)
+		if keep != "" {
+			entry = entryBytes(1, 0)
+		}
 		if at, read := x.text(s).fieldsWith("cart_42"); len(at) != 1 || !read {
 			t.Fatalf("at %v read %v; want the one field", at, read)
 		}
-		if x.peak != kept+want {
-			t.Errorf("keeping %d, held %d by the count; want what the index keeps, the text, twice it and its forms, %d", kept, x.peak, kept+want)
+		if x.used != kept+entry {
+			t.Errorf("keeping %d, the index keeps %d after the question; want only the text's entry more, %d", kept, x.used, entry)
+		}
+		if x.peak != kept+entry+want {
+			t.Errorf("keeping %d, held %d by the count; want what the index keeps, the text's entry, the text, twice it and its forms, %d", kept, x.peak, kept+entry+want)
 		}
 	}
 }
@@ -1692,10 +1746,11 @@ func TestReaderTheViewAndTheScanPlaceEveryWordAlike(t *testing.T) {
 	}
 }
 
-// A kept field view counts what each part holds: a fieldAt by the list's
-// capacity, its path and its field's, and each word its map slot (a
-// string's header and a slice's, doubled for growth, 80 bytes), its
-// letters and its list of fields by capacity.
+// A kept field view counts what each part holds, as the runtime allocates
+// it: its map's header and first group, its fieldAt list by capacity (40
+// bytes a field), each field's path and name, and each word its map slot
+// (mapSlotBytes of a string's header and a slice's), its letters and its
+// list of fields by capacity.
 func TestReaderAFieldViewCountsEachWordsSlotAndList(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	readerBudget = 1 << 40
@@ -1705,12 +1760,12 @@ func TestReaderAFieldViewCountsEachWordsSlotAndList(t *testing.T) {
 		t.Fatalf("fixture: at %v read %v kept %v; want x at two fields and the view kept", at, read, r.e.fields.ok)
 	}
 	v := r.e.fields.v
-	want := int64(48 + 40*cap(v.at))
+	want := 48 + mapGroupBytes(40, true) + allocBytes(40*cap(v.at), true)
 	for _, a := range v.at {
-		want += int64(len(a.path) + len(a.in))
+		want += allocBytes(len(a.path), false) + allocBytes(len(a.in), false)
 	}
 	for w, l := range v.of {
-		want += int64(80 + len(w) + 4*cap(l))
+		want += mapSlotBytes(40, true) + allocBytes(len(w), false) + allocBytes(4*cap(l), false)
 	}
 	if got := fieldWordsBytes(v); got != want {
 		t.Errorf("a view of %d fields and %d words counts %d bytes; want %d", len(v.at), len(v.of), got, want)

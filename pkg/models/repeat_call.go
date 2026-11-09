@@ -79,7 +79,53 @@ type RepeatNote struct {
 	// was never made again, so its recording is not the one that answered.
 	// Empty while the record gap is not known.
 	RecordedLast string `json:"recorded_last,omitempty" yaml:"recorded_last,omitempty"`
+	// Background is the scope of the set's background Mock is a recording
+	// of, when it is no test's own: RepeatBackgroundWorker or
+	// RepeatBackgroundPool. Such a recording answers at most one call in the
+	// replay's test windows (the pool's: at most one in the replay), so this
+	// call, made after it answered, found no answer. Empty for a test's own
+	// recording.
+	Background string `json:"background,omitempty" yaml:"background,omitempty"`
+	// SkippedRead says Mock is the read of a test this replay's gate skips,
+	// which keploy mock replay moved to the worker scope for the replay
+	// (ScopeTableReq.SkippedReads): it answers at most as many calls as that
+	// test recorded it, so this call, one past that, found no answer. Such a
+	// read is no recording of the background (Background is empty): the call
+	// stays the miss of the test it was made in, which the skipped test's
+	// read would otherwise answer more often than it was recorded.
+	SkippedRead bool `json:"skipped_read,omitempty" yaml:"skipped_read,omitempty"`
+	// SkippedTest is, on a SkippedRead note, the skipped test whose read
+	// Mock is: the one keploy mock replay moved it to the worker scope from
+	// (the first by name when two skipped tests list it). Judging names it
+	// in the line of the test that made the call, which is one call more
+	// than that test recorded. Empty while it is not known: the agent knows
+	// the recording, and the replay names the test at the end of the set.
+	SkippedTest string `json:"skipped_test,omitempty" yaml:"skipped_test,omitempty"`
+	// OutsideTests says Mock is a recording made outside every test (in
+	// TestMain or at start-up): one no test lists, by keploy mock replay's
+	// scope table under the proven switch (its startup: recordings among
+	// them), which answered a call at this replay. Unlike Background it
+	// moves no charge: a test is served such a recording only for a call
+	// a keploy.yaml sessionCalls entry names exactly, by its method and
+	// whole path, so a call it made that is no such call stays its miss.
+	OutsideTests bool `json:"outside_tests,omitempty" yaml:"outside_tests,omitempty"`
+	// Hint is the parser's word on how the call could be served to its
+	// test (HTTP: what keploy.yaml's sessionCalls serve), which the note's
+	// explanation ends with. Empty for none.
+	Hint string `json:"hint,omitempty" yaml:"hint,omitempty"`
 }
+
+// The scopes of the set's background a note's recording can be of
+// (RepeatNote.Background).
+const (
+	// RepeatBackgroundWorker is the set's worker scope (mappings.yaml
+	// worker:).
+	RepeatBackgroundWorker = "worker:"
+	// RepeatBackgroundPool is the set's pool: the recordings no test lists
+	// (its startup: ones among them), which under the background rules
+	// answer in a test's window too.
+	RepeatBackgroundPool = "pool"
+)
 
 // NewRepeatNote is the note of a call made at missAt, identical to mock,
 // which answered an earlier call at answeredAt and was recorded at
@@ -179,9 +225,28 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 	var b strings.Builder
 	b.WriteString("This request is identical to ")
 	b.WriteString(n.Mock)
-	if n.Test != "" {
+	switch {
+	case n.SkippedRead:
+		b.WriteString(", the read of a test this replay skips, which the replay moved to the test set's worker scope: it answers at most as many calls as that test recorded it, and already answered a call at this replay")
+		if n.Test != "" {
+			fmt.Fprintf(&b, " (consumed by test %s)", n.Test)
+		}
+		b.WriteString(". ")
+	case n.Background != "":
+		fmt.Fprintf(&b, ", %s, which already answered a call at this replay", backgroundPhrase(n.Background))
+		if n.Test != "" {
+			fmt.Fprintf(&b, " (consumed by test %s)", n.Test)
+		}
+		b.WriteString(". ")
+	case n.OutsideTests:
+		b.WriteString(", a recording made outside every test (in TestMain or at start-up), which already answered a call at this replay")
+		if n.Test != "" {
+			fmt.Fprintf(&b, " (consumed by test %s)", n.Test)
+		}
+		b.WriteString(". ")
+	case n.Test != "":
 		fmt.Fprintf(&b, ", the recording that already answered test %s's call at this replay. ", n.Test)
-	} else {
+	default:
 		b.WriteString(", a recording of an earlier test of this set that already answered that test's call at this replay. ")
 	}
 	if n.ReplayGapFromStart {
@@ -203,8 +268,30 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 	default:
 		b.WriteString("If the application keeps that answer for a span of elapsed time (a cache with expire-after-write, a token, a refresh window), a replay slower than the recording passes it and the application asks again; keploy's time freeze does not slow that clock. ")
 	}
-	fmt.Fprintf(&b, "keploy does not answer it with the earlier test's recording, which could hide a bug. To make the test independent of timing, record it with that cache disabled or its span longer than the replay ('%s'), or make the call in every test that needs it.", recordCmd)
+	switch {
+	case n.SkippedRead:
+		b.WriteString("keploy does not answer a call past what the skipped test recorded, which could hide a bug: the call is this test's. ")
+	case n.Background != "":
+		b.WriteString("keploy does not answer a second call with that recording, which could hide a bug; a call the application makes on its own schedule (a timer, a janitor's sweep) is made as often as the replay's timing allows. ")
+	case n.OutsideTests:
+		b.WriteString("keploy does not answer it with that recording: a test is served a recording made outside every test only for a call a keploy.yaml sessionCalls entry names exactly, by its method and whole path, and an answer given otherwise could hide a bug. ")
+	default:
+		b.WriteString("keploy does not answer it with the earlier test's recording, which could hide a bug. ")
+	}
+	fmt.Fprintf(&b, "To make the test independent of timing, record it with that cache disabled or its span longer than the replay ('%s'), or make the call in every test that needs it.", recordCmd)
+	if n.Hint != "" {
+		b.WriteString(" " + n.Hint)
+	}
 	return b.String()
+}
+
+// backgroundPhrase names, in a sentence, the scope of the set's background a
+// note's recording is of (RepeatNote.Background), and how often it answers.
+func backgroundPhrase(scope string) string {
+	if scope == RepeatBackgroundWorker {
+		return "a recording of the test set's worker scope (mappings.yaml worker:), which answers at most one call in a replay's test windows"
+	}
+	return "a recording no test of the set lists (the set's " + scope + "), which answers at most one call in a replay"
 }
 
 // ExplainMiss is the next step of a miss the note is on: Explain, unless the
@@ -314,7 +401,9 @@ func (n *RepeatNote) Brief(unmade bool) string {
 		return ""
 	}
 	s := "identical to mock " + n.Mock
-	if n.Test != "" {
+	if n.OutsideTests {
+		s += ", made outside every test, which answered a call"
+	} else if n.Test != "" {
 		s += ", which answered test " + n.Test + "'s call"
 	} else {
 		s += ", which answered an earlier test's call"

@@ -78,6 +78,23 @@ type HTTPSchema struct {
 	Fault *Fault `json:"fault,omitempty" yaml:"fault,omitempty"`
 }
 
+// MarshalYAML writes s as its fields are tagged, with one rule over them: a
+// fault that sends the head (Fault.SendsHead) has replay send BodyBytes of the
+// body as the upstream sent them, so that body is written as those bytes and
+// never as a stream's frames. A stream's frames do not keep its bytes: an SSE
+// field's space after its ':' and its line ends are not kept, so the first
+// BodyBytes of the body they read back as are not the bytes the client read
+// at record. A body already held as frames (read back from them: StreamBody)
+// stays frames, never rewritten as the bytes they read back as, and replay
+// refuses its fault (faultHead).
+func (s HTTPSchema) MarshalYAML() (interface{}, error) {
+	type plain HTTPSchema // no MarshalYAML of its own: s's fields as tagged
+	if s.Fault != nil && s.Fault.SendsHead() {
+		s.Response.bodyOnWire = true // s is a copy: the caller's is untouched
+	}
+	return plain(s), nil
+}
+
 type FormData struct {
 	Key       string   `json:"key" bson:"key" yaml:"key"`
 	Values    []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
@@ -117,6 +134,16 @@ type HTTPResp struct {
 	// HeaderLineLengths: as on HTTPReq. Recorded for a mock's response, the
 	// one recorded response keploy sends back out at replay.
 	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
+
+	// bodyOnWire: Body is the bytes the upstream sent before a fault
+	// (HTTPSchema.MarshalYAML sets it on the copy it writes), so YAML keeps
+	// it as they came, never split into frames (streamChunksForYAML).
+	bodyOnWire bool
+
+	// Marks: when each part of a mock's answer reached the application
+	// (HTTPAnswerMarks). Replay writes each part at its recorded place. Nil
+	// in a recording older than the marks, whose answer is written at once.
+	Marks *HTTPAnswerMarks `json:"marks,omitempty" yaml:"marks,omitempty"`
 }
 
 // HTTPResponseHasNoBody reports whether a response carries no body whatever
@@ -209,8 +236,14 @@ func (h HTTPReq) MarshalBSON() ([]byte, error) {
 
 // UnmarshalBSON reads HTTPReq, accepting either the new RFC3339Nano string
 // timestamp or the legacy BSON DateTime (millisecond) shape for backward
-// compatibility with records written before MarshalBSON landed.
+// compatibility with records written before MarshalBSON landed. A null
+// request reads as the zero HTTPReq, as the driver's default does: the driver
+// passes a null or undefined value here as no bytes.
 func (h *HTTPReq) UnmarshalBSON(data []byte) error {
+	if len(data) == 0 {
+		*h = HTTPReq{}
+		return nil
+	}
 	var raw httpReqBSONReader
 	if err := bson.Unmarshal(data, &raw); err != nil {
 		return err
@@ -252,7 +285,8 @@ type httpRespBSON struct {
 	Binary        string            `bson:"binary"`
 	Timestamp     string            `bson:"timestamp"`
 
-	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
+	HeaderLineLengths HeaderLineLengths    `bson:"headerlinelengths,omitempty"`
+	Marks             *httpAnswerMarksBSON `bson:"marks,omitempty"`
 }
 
 type httpRespBSONReader struct {
@@ -268,7 +302,8 @@ type httpRespBSONReader struct {
 	Binary        string            `bson:"binary"`
 	Timestamp     bson.RawValue     `bson:"timestamp"`
 
-	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
+	HeaderLineLengths HeaderLineLengths    `bson:"headerlinelengths,omitempty"`
+	Marks             *httpAnswerMarksBSON `bson:"marks,omitempty"`
 }
 
 // MarshalBSON — see the HTTPReq version above. Same rationale.
@@ -287,10 +322,17 @@ func (h HTTPResp) MarshalBSON() ([]byte, error) {
 		Timestamp:     FormatMockTimestamp(h.Timestamp),
 
 		HeaderLineLengths: h.HeaderLineLengths,
+		Marks:             h.Marks.toBSON(),
 	})
 }
 
+// UnmarshalBSON — see the HTTPReq version above. A null response reads as
+// the zero HTTPResp.
 func (h *HTTPResp) UnmarshalBSON(data []byte) error {
+	if len(data) == 0 {
+		*h = HTTPResp{}
+		return nil
+	}
 	var raw httpRespBSONReader
 	if err := bson.Unmarshal(data, &raw); err != nil {
 		return err
@@ -316,12 +358,16 @@ func (h *HTTPResp) UnmarshalBSON(data []byte) error {
 
 		HeaderLineLengths: raw.HeaderLineLengths,
 	}
+	if h.Marks, err = raw.Marks.marks(); err != nil {
+		return fmt.Errorf("HTTPResp.UnmarshalBSON marks: %w", err)
+	}
 	return nil
 }
 
-// decodeBSONTimestamp handles the two on-disk shapes for HTTP timestamps:
-// the new RFC3339Nano string (preserves nanoseconds) and the legacy BSON
-// DateTime (millisecond int64). An absent/null value decodes to the zero time.
+// decodeBSONTimestamp handles the two on-disk shapes for HTTP and gRPC
+// timestamps: the new RFC3339Nano string (preserves nanoseconds) and the
+// legacy BSON DateTime (millisecond int64), read in UTC as the driver reads a
+// date. An absent/null value decodes to the zero time.
 func decodeBSONTimestamp(v bson.RawValue) (time.Time, error) {
 	switch v.Type {
 	case 0, bson.TypeNull, bson.TypeUndefined:
@@ -337,7 +383,7 @@ func decodeBSONTimestamp(v bson.RawValue) (time.Time, error) {
 		if !ok {
 			return time.Time{}, fmt.Errorf("expected DateTime, got malformed value")
 		}
-		return bson.DateTime(dt).Time(), nil
+		return bson.DateTime(dt).Time().UTC(), nil
 	default:
 		return time.Time{}, fmt.Errorf("unsupported BSON type %v for timestamp", v.Type)
 	}

@@ -334,10 +334,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// Under the proven switch, every mock the set decoded, before what the
 	// agent never holds is left out: what a mapping may name
 	// (pushProvenTable).
-	var decoded []*models.Mock
-	if provenswitch.On() {
-		decoded = append(append([]*models.Mock(nil), filtered...), unfiltered...)
-	}
+	// With the switch off, the same: the recordings each test's recorded
+	// window is derived from (recordedTestWindows).
+	decoded := append(append([]*models.Mock(nil), filtered...), unfiltered...)
 	filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
 	loaded := len(filtered) + len(unfiltered)
 	// The recording this run replays, for the receipt: read after Pull, so in
@@ -356,7 +355,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// 5. Hand the agent the per-test table so the runner's /agent/scope/begin
 	//    calls can narrow the served pool per test (best-effort / optional;
 	//    under the proven switch each test is judged by it, so required).
-	if err := m.pushScopeTable(ctx, name, filtered, unfiltered, decoded); err != nil {
+	//    The gate's skips are read first, once: the table serves the reads
+	//    of the tests it skips to whichever test makes them (skippedReads),
+	//    but for those whose recordings no test is served (leftOut).
+	skips := readScopeSkips(ctx, name, digest, m.config.Path)
+	if err := m.pushScopeTable(ctx, name, filtered, unfiltered, decoded, skips.moving()); err != nil {
 		return err
 	}
 	if provenswitch.On() {
@@ -371,7 +374,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if !provenswitch.On() {
 		gate = m.pushScopeGate(ctx, name, digest)
 	}
-	if err := m.pushScopeSkips(ctx, name, digest); err != nil {
+	if err := m.pushSkips(ctx, name, skips); err != nil {
 		utils.LogError(m.logger, err, "refusing to replay", zap.String("mock-set", name))
 		return err
 	}
@@ -1247,10 +1250,11 @@ func (m *mockService) highestMockIndex(ctx context.Context, name string) (int64,
 // pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)
 // and hands the agent the name→mock-names table so per-test scoping works.
 // Under the proven switch it is pushProvenTable: loaded are the mocks the
-// agent holds, and decoded every mock the set decoded.
-func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered, unfiltered, decoded []*models.Mock) error {
+// agent holds, decoded every mock the set decoded, and skipped the tests the
+// replay's gate skips (ScopeSkipSource).
+func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered, unfiltered, decoded []*models.Mock, skipped map[string]string) error {
 	if provenswitch.On() {
-		return m.pushProvenTable(ctx, name, append(append([]*models.Mock(nil), filtered...), unfiltered...), decoded)
+		return m.pushProvenTable(ctx, name, append(append([]*models.Mock(nil), filtered...), unfiltered...), decoded, skipped)
 	}
 	if m.mappingDB == nil {
 		return nil
@@ -1274,11 +1278,17 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered,
 		}
 		table[testName] = names
 	}
-	if err := pusher.PushScopeTable(ctx, table); err != nil {
+	// Every test's recorded window, as under the switch, for the run's
+	// place alone: an answer recorded in a later test than its call is
+	// written once the replay reaches that test (models.RunWindows). A
+	// test's recorded begin (at:) is read only under the switch, so each
+	// window starts at its test's first recording.
+	windows := recordedTestWindows(nil, table, decoded)
+	if err := pusher.PushScopeTable(ctx, table, windows); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
 		return nil
 	}
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
 	return nil
 }
 
@@ -1322,14 +1332,22 @@ func (m *mockService) matchNoise(name string) models.OutgoingOptions {
 // test lists is the pool's: under the key it was recorded with (mappings'
 // startup: or worker:), else models.PoolKeyNone. Those worker: lists are
 // each key's worker scope too, which answers in a test's window as well,
-// each at most once, and is required of no test. A mapping that cannot be
+// each at most once, and is required of no test; with the test each of them
+// trails (workerTrails). A mapping that cannot be
 // read, or that names a mock the recording does not have, refuses, and so
 // does an agent that refuses the table: nothing is served from a whole pool
 // instead. The values each test gave when it was recorded go in the same
 // request, and so do the repeated reads the registered namer names
 // (namedRepeatReads) and the names of each test's own list marked served,
-// not required (notRequired).
-func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
+// not required (notRequired). The reads of each test the gate skips are the
+// worker scope's for this replay (skippedReads), but for a test whose
+// recordings no test is served (ScopeLeftOutSource), so they answer whichever
+// test now makes them, and the agent is told which they are
+// (models.ScopeTableReq.SkippedReads): each also answers a call one more than
+// the open test's own recordings of it, which the rest of the worker scope
+// never answers. A read moved so is no longer its test's, so no namer names
+// it and no mark marks it.
+func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock, skipped map[string]string) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
 	}
@@ -1377,18 +1395,24 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	// Every test's recorded window, of every recording its mapping lists,
 	// the ones the agent never holds included: they were made in it.
 	windows := recordedTestWindows(mp, table, decoded)
+	served, table, moved := skippedReads(mp, table, skipped, decoded)
+	if len(moved) > 0 {
+		pool, _ = poolSlices(served, table, loaded, decoded)
+		m.logger.Info("the reads that the tests this replay skips recorded answer whichever test makes them, a test that recorded the same read included, each at most once, and no test is required to make them", zap.Int("reads", len(moved)), zap.Int("skipped tests", len(skipped)), zap.String("mock-set", name))
+	}
 	table = heldOnly(table, loaded)
 	if !ownsTestMocks(table, loaded) {
 		m.logger.Warn("under KEPLOY_PROVEN no test of this mock set owns a recorded call: it has no mappings.yaml, or its mapping lists no data-plane mock the agent holds, so every call a test makes to a dependency misses",
 			zap.String("mock-set", name),
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
-	worker := workerSlices(mp, pool)
+	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp), repeats, notRequired(mappings, table)); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
+	m.skippedReadOf = moved
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.Int("tests with a repeated read", len(repeats)), zap.String("mock-set", name))
 	return nil
 }
@@ -1535,12 +1559,13 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 }
 
 // ownsTestMocks reports whether a test of table owns a test mock: a
-// data-plane mock of loaded (a protocol-phase mock is the pool's).
+// data-plane mock of loaded (a protocol-phase mock is the pool's, and an
+// answer the client never read no test's: models.Mock.OutsideTestScopes).
 func ownsTestMocks(table map[string][]string, loaded []*models.Mock) bool {
 	test := make(map[string]bool, len(loaded))
 	for _, mk := range loaded {
 		if mk != nil && mk.Name != "" {
-			test[mk.Name] = !mk.IsProtocolPhase()
+			test[mk.Name] = !mk.OutsideTestScopes()
 		}
 	}
 	for _, names := range table {
@@ -1694,6 +1719,110 @@ func workerSlices(mp *models.Mapping, pool map[string][]string) map[string][]str
 			out = map[string][]string{}
 		}
 		out[key] = append(out[key], e.Name)
+	}
+	return out
+}
+
+// skippedReads is mp and table with each read (readOnly) that a test the
+// replay's gate skips lists moved to worker:, under that test's key, as the
+// mapping edit "move it to worker:" would move it, for this replay alone:
+// nothing is written. Such a read is one the app makes once and keeps (a
+// token or setting it looks up and caches): recorded in the window of the
+// test that made it first, it is made in the window of whichever test runs
+// first once that one is skipped, where no recording of that test answers
+// it. As the worker scope it answers that test, at most once and after the
+// test's own, and no test is required to make it, so one skipped test does
+// not fail the next one and every test after it in turn. A test that
+// recorded the same read itself makes it once more than it recorded: the
+// skipped test's read answers that call too (ServeExactWorkerSkipped). A
+// write stays the skipped test's, served to no test: it changes state that
+// belongs to the test that makes it. moved is each read moved, by name,
+// with the skipped test that lists it (the first by name when two do), which
+// a test's extra-call line names; with none, mp and table are returned as
+// they are. mp is never changed.
+func skippedReads(mp *models.Mapping, table map[string][]string, skipped map[string]string, decoded []*models.Mock) (*models.Mapping, map[string][]string, map[string]string) {
+	if mp == nil || len(skipped) == 0 {
+		return mp, table, nil
+	}
+	reads := make(map[string]bool, len(decoded))
+	for _, mk := range decoded {
+		if readOnly(mk) {
+			reads[mk.Name] = true
+		}
+	}
+	keyOf := make(map[string]string, len(mp.TestCases))
+	for _, tc := range mp.TestCases {
+		keyOf[tc.ID] = tc.Key
+	}
+	var worker []models.MockEntry
+	moved := map[string]string{}
+	out := make(map[string][]string, len(table))
+	// By name, so a read two skipped tests list is named with the first.
+	for _, test := range slices.Sorted(maps.Keys(table)) {
+		names := table[test]
+		out[test] = names
+		if _, skip := skipped[test]; !skip {
+			continue
+		}
+		kept := make([]string, 0, len(names))
+		for _, n := range names {
+			if reads[n] {
+				worker = append(worker, models.MockEntry{Name: n, Key: keyOf[test]})
+				if _, ok := moved[n]; !ok {
+					moved[n] = test
+				}
+				continue
+			}
+			kept = append(kept, n)
+		}
+		out[test] = kept
+	}
+	if len(worker) == 0 {
+		return mp, table, nil
+	}
+	slices.SortFunc(worker, func(a, b models.MockEntry) int { return strings.Compare(a.Name, b.Name) })
+	served := *mp
+	served.Worker = append(slices.Clone(mp.Worker), worker...)
+	return &served, out, moved
+}
+
+// readOnly reports whether mk records a call that only reads: an HTTP GET,
+// HEAD or OPTIONS. Every other call, of HTTP or another protocol, is not
+// known to read only, so it stays its test's.
+func readOnly(mk *models.Mock) bool {
+	if mk == nil || mk.Kind != models.HTTP || mk.Spec.HTTPReq == nil {
+		return false
+	}
+	switch strings.ToUpper(string(mk.Spec.HTTPReq.Method)) {
+	case "GET", "HEAD", "OPTIONS":
+		return true
+	}
+	return false
+}
+
+// workerTrails is, by name, the test each recording of the worker scope
+// trails (models.MockEntry.Trails): only a name worker serves, and only a
+// test of table, the set's; a trail naming any other test trails none. nil
+// when no entry trails one.
+func workerTrails(mp *models.Mapping, worker map[string][]string, table map[string][]string) map[string]string {
+	if mp == nil {
+		return nil
+	}
+	served := map[string]bool{}
+	for _, names := range worker {
+		for _, n := range names {
+			served[n] = true
+		}
+	}
+	var out map[string]string
+	for _, e := range mp.Worker {
+		if _, ok := table[e.Trails]; e.Trails == "" || !ok || !served[e.Name] {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[e.Name] = e.Trails
 	}
 	return out
 }
@@ -1857,22 +1986,93 @@ func RegisterScopeSkipSource(fn ScopeSkipSource) {
 	scopeSkipSource = fn
 }
 
+// ScopeLeftOutSource names, of the tests the skip source skips
+// (ScopeSkipSource), each one whose recordings the replay serves to no test,
+// as a replay that does not hold them would: CI's replay of the set holds
+// none of them (a wrapping build's pull leaves out the recordings of the
+// tests it skips), so a run that is to show what CI will do must not let a
+// read of theirs answer another test (skippedReads moves none of them). The
+// gate still skips each. It is asked once per replay, right after the skip
+// source and only when that one answered; a name the skip source did not
+// skip changes nothing.
+type ScopeLeftOutSource func(ctx context.Context, req ScopeGateRequest) map[string]bool
+
+var scopeLeftOutSource ScopeLeftOutSource
+
+// RegisterScopeLeftOutSource installs the left-out source, read with the
+// skip source. A nil fn removes it: every skipped test's reads then answer
+// whichever test makes them.
+func RegisterScopeLeftOutSource(fn ScopeLeftOutSource) {
+	scopeLeftOutSource = fn
+}
+
 // ScopeSkipPusher is an optional Instrumentation extension: under the proven
 // switch, Replay hands the agent the tests to skip with it.
 type ScopeSkipPusher interface {
 	PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error
 }
 
+// scopeSkips is the proven gate a replay read from its skip source
+// (ScopeSkipSource): read is false when the switch is off or no source is
+// installed, and err is the source's. leftOut is what the left-out source
+// (ScopeLeftOutSource) named.
+type scopeSkips struct {
+	read    bool
+	skip    map[string]string
+	needs   map[string][]models.ScopeNeed
+	leftOut map[string]bool
+	err     error
+}
+
+// moving is the tests of skip whose reads the table moves (skippedReads):
+// every one but those leftOut names, whose recordings no test is served.
+func (g scopeSkips) moving() map[string]string {
+	if len(g.leftOut) == 0 {
+		return g.skip
+	}
+	out := make(map[string]string, len(g.skip))
+	for t, why := range g.skip {
+		if !g.leftOut[t] {
+			out[t] = why
+		}
+	}
+	return out
+}
+
+// readScopeSkips reads the proven gate of the replay of set name, once per
+// replay: the agent's gate (pushSkips) is handed the list, and the table
+// (skippedReads) the part of it whose reads move (scopeSkips.moving).
+func readScopeSkips(ctx context.Context, name, digest, path string) scopeSkips {
+	if !provenswitch.On() || scopeSkipSource == nil {
+		return scopeSkips{}
+	}
+	req := ScopeGateRequest{Set: name, MocksDigest: digest, Path: path}
+	skip, needs, err := scopeSkipSource(ctx, req)
+	if err != nil {
+		return scopeSkips{read: true, err: err}
+	}
+	g := scopeSkips{read: true, skip: skip, needs: needs}
+	if scopeLeftOutSource != nil {
+		g.leftOut = scopeLeftOutSource(ctx, req)
+	}
+	return g
+}
+
 // pushScopeSkips hands the agent the proven gate, under the proven switch and
 // when a skip source is installed. Its failure refuses the replay.
 func (m *mockService) pushScopeSkips(ctx context.Context, name, digest string) error {
-	if !provenswitch.On() || scopeSkipSource == nil {
+	return m.pushSkips(ctx, name, readScopeSkips(ctx, name, digest, m.config.Path))
+}
+
+// pushSkips is pushScopeSkips for a gate already read.
+func (m *mockService) pushSkips(ctx context.Context, name string, g scopeSkips) error {
+	if !g.read {
 		return nil
 	}
-	skip, needs, err := scopeSkipSource(ctx, ScopeGateRequest{Set: name, MocksDigest: digest, Path: m.config.Path})
-	if err != nil {
-		return fmt.Errorf("could not read which tests this replay skips: %w", err)
+	if g.err != nil {
+		return fmt.Errorf("could not read which tests this replay skips: %w", g.err)
 	}
+	skip, needs := g.skip, g.needs
 	pusher, ok := m.instrumentation.(ScopeSkipPusher)
 	if !ok {
 		if len(skip) == 0 && len(needs) == 0 {
@@ -2421,6 +2621,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// owns names that test, as keploy test's replay does (markRecordedIn):
 	// judging lists it as the root of the test's entry.
 	named, orderDependent := withRecordedIn(counts.tests, m.mockOwners, detail.windows)
+	withSkippedTest(counts.tests, m.skippedReadOf)
+	withSkippedReads(counts.tests, detail.windows, m.skippedReadOf)
 	if len(named) > 0 {
 		m.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under evidence.misses.recorded_in in "+TestsReceiptFile,
 			zap.String("mock-set", m.setName()),
@@ -2570,14 +2772,16 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 // withRecordedIn names, on each miss of tests' evidence that is a recording
 // its test does not own (NotOwned, ClosestMock), the other test that owns it
 // (owners: models.MockOwners of the table the replay pushed), as keploy
-// test's replay does (models.UnmatchedCall.NameRecordedIn). A test a
-// parallel test worker ran (its window's Instance, in windows) made it out
-// of the order its worker recorded in: the miss is order-dependent
-// (models.UnmatchedCall.OrderDependent). The evidence is withEvidence's own
-// copy, never the windows'. It returns "test: call (closest mock, recorded
-// in test)" for each it named, a worker's test's in orderDependent and any
-// other's in named. With the switch off owners is nil and no miss is
-// NotOwned: nothing changes.
+// test's replay does (models.UnmatchedCall.NameRecordedIn), and on each that
+// names an earlier recording of its method and path (Earlier), that
+// recording's owner (models.UnmatchedCall.NameEarlierIn). A test a
+// parallel test worker ran (its window's Instance, in windows) made a
+// NotOwned call out of the order its worker recorded in: the miss is
+// order-dependent (models.UnmatchedCall.OrderDependent). The evidence is
+// withEvidence's own copy, never the windows'. It returns "test: call
+// (closest mock, recorded in test)" for each NotOwned call it named, a
+// worker's test's in orderDependent and any other's in named. With the
+// switch off owners is nil and no miss is NotOwned: nothing changes.
 func withRecordedIn(tests []TestReceipt, owners map[string][]string, windows []models.ScopeWindow) (named, orderDependent []string) {
 	workers := make(map[string]bool)
 	for _, w := range windows {
@@ -2592,6 +2796,11 @@ func withRecordedIn(tests []TestReceipt, owners map[string][]string, windows []m
 		}
 		for j := range ev.Misses {
 			c := &ev.Misses[j]
+			// A changed call of the test's own names the test whose window
+			// holds the latest recording of its method and path before the
+			// test's own (models.UnmatchedCall.NameEarlierIn): judging reads
+			// whether that test was skipped.
+			c.NameEarlierIn(tests[i].Name, owners)
 			if !c.NameRecordedIn(tests[i].Name, owners) {
 				continue
 			}
@@ -2605,6 +2814,62 @@ func withRecordedIn(tests []TestReceipt, owners map[string][]string, windows []m
 		}
 	}
 	return named, orderDependent
+}
+
+// withSkippedTest names, on each miss of tests' evidence that is one call
+// past a read of a test this replay's gate skips (models.RepeatNote
+// .SkippedRead), that test (RepeatNote.SkippedTest), from skippedOf: each
+// read keploy mock replay moved to the worker scope, with its test
+// (skippedReads). The test whose window holds the recording is the skipped
+// one, which the per-test table the replay pushed no longer lists it under,
+// so the miss names no RecordedIn: without this, judging could not say
+// which test the call is one past. The note is the receipt's own copy; the
+// windows' is never written; any other note is left as it is.
+func withSkippedTest(tests []TestReceipt, skippedOf map[string]string) {
+	if len(skippedOf) == 0 {
+		return
+	}
+	for i := range tests {
+		ev := tests[i].Evidence
+		if ev == nil {
+			continue
+		}
+		for j := range ev.Misses {
+			c := &ev.Misses[j]
+			if c.Repeat == nil || !c.Repeat.SkippedRead {
+				continue
+			}
+			c.Repeat = c.Repeat.Clone()
+			c.Repeat.SkippedTest = skippedOf[c.Repeat.Mock]
+		}
+	}
+}
+
+// withSkippedReads puts on each test's line the reads of tests this
+// replay's gate skips that answered its calls (models.ScopeWindow
+// .SkippedReads), each with the skipped test whose recording it is, from
+// skippedOf: each read keploy mock replay moved to the worker scope, with
+// its test (skippedReads). Every run of the test this replay is counted, in
+// the order its windows closed: a read that answered one attempt answered a
+// call a replay without it cannot. A name skippedOf does not hold is no
+// read this replay moved and is left off.
+func withSkippedReads(tests []TestReceipt, windows []models.ScopeWindow, skippedOf map[string]string) {
+	var byName map[string][]SkippedReadAnswer
+	for _, w := range windows {
+		for _, name := range w.SkippedReads {
+			test, ok := skippedOf[name]
+			if !ok {
+				continue
+			}
+			if byName == nil {
+				byName = map[string][]SkippedReadAnswer{}
+			}
+			byName[w.Name] = append(byName[w.Name], SkippedReadAnswer{Mock: name, Test: test})
+		}
+	}
+	for i := range tests {
+		tests[i].SkippedReads = byName[tests[i].Name]
+	}
 }
 
 // withBegan puts on each test's line when its latest run began: its latest

@@ -132,7 +132,7 @@ func TestAgentClient_StreamsSayTheyDrainAfterTheStop(t *testing.T) {
 	// A stream that reconnects to a restarted agent asks it to hold for it
 	// again; one not marked does not.
 	reopen := func(ctx context.Context) string {
-		if _, err := a.reopenStream(ctx, "incoming", http.MethodPost, "/incoming", []byte("{}")); err == nil {
+		if _, err := a.reopenStream(ctx, "incoming", a.incomingRequest([]byte("{}"))); err == nil {
 			t.Fatal("the agent answered 404, yet the stream reopened")
 		}
 		return <-seen
@@ -167,7 +167,7 @@ func TestAgentClient_StreamsAskAComposeAgentForItsWordOfAStop(t *testing.T) {
 			for range ch {
 			}
 		}
-		if _, err := a.reopenStream(ctx, "incoming", http.MethodPost, "/incoming", []byte("{}")); err == nil {
+		if _, err := a.reopenStream(ctx, "incoming", a.incomingRequest([]byte("{}"))); err == nil {
 			t.Fatal("the agent answered 404, yet the stream reopened")
 		}
 		var got []string

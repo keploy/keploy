@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -41,6 +42,9 @@ type req struct {
 	header http.Header
 	body   []byte
 	raw    []byte
+	// client is the connection the call came on, watched for its end while
+	// a heavy call waits and is matched (admit); nil for none.
+	client net.Conn
 	// encoded is the body as the client sent it, before its Content-Encoding
 	// was undone into body; nil when it had none.
 	encoded []byte
@@ -127,6 +131,11 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 func (h *HTTP) matchOf(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 	ctx = context.WithValue(ctx, statefulMocksKey{}, statefulMocks)
 	ok, stub, diag, err := h.matchCascade(ctx, input, mockDb, base, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+	if errors.Is(err, context.Canceled) && ctx.Err() == nil {
+		// Only its client's end (admit) cancels a match its caller's
+		// context still runs.
+		err = errClientGone
+	}
 	if diag != nil && provenswitch.On() {
 		// Under the proven switch a miss names where the call went too
 		// (strict.go), so its report can name a destination that differs.
@@ -227,6 +236,14 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 	// on, so a recording the index still lists and the store no longer hands
 	// out is never chosen again.
 	reread := false
+	// endTurn ends the call's turn (admit), taken once, before the first pass
+	// that reads every recording's body.
+	var endTurn func()
+	defer func() {
+		if endTurn != nil {
+			endTurn()
+		}
+	}()
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
@@ -357,6 +374,12 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 				return false, nil, diag, nil
 			}
 			return true, served, nil, nil
+		}
+
+		if endTurn == nil {
+			if ctx, endTurn, err = admit(ctx, input.client, int64(len(input.body))+recordedBytes(unfilteredMocks, models.Method(input.method))); err != nil {
+				return false, nil, nil, err
+			}
 		}
 
 		// Matching process
@@ -526,7 +549,10 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 
 		h.Logger.Debug("Performing fuzzy match for req buffer")
 		// Perform fuzzy match on the request
-		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
+		isMatched, bestMatch, err := h.performFuzzyMatch(ctx, shortListed, input.body)
+		if err != nil {
+			return false, nil, nil, err
+		}
 		if isMatched {
 			if ce := h.Logger.Check(zap.DebugLevel, "fuzzy match found a matching mock"); ce != nil {
 				ce.Write(zap.String("mock name", bestMatch.Name))
@@ -1668,124 +1694,6 @@ func (h *HTTP) performBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 	return bodyMatched, nil
 }
 
-// findStringMatch returns the index of the closest mock string and the
-// Levenshtein distance so callers don't need to recompute it.
-func (h *HTTP) findStringMatch(req string, mockStrings []string) (int, int) {
-	minDist := int(^uint(0) >> 1)
-	bestMatch := -1
-	for idx, mock := range mockStrings {
-		if !util.IsASCII(mock) {
-			continue
-		}
-		dist := levenshtein.ComputeDistance(req, mock)
-		if dist == 0 {
-			return idx, 0
-		}
-		if dist < minDist {
-			minDist = dist
-			bestMatch = idx
-		}
-	}
-	return bestMatch, minDist
-}
-
-// jaccardBestMatch finds the mock body with the highest Jaccard similarity
-// to reqBuff. mockBodies are pre-decoded/stripped byte slices so the caller
-// controls noise handling. Returns the best index and similarity score.
-func (h *HTTP) jaccardBestMatch(mockBodies [][]byte, reqBuff []byte) (int, float64) {
-	mxSim := -1.0
-	mxIdx := -1
-	k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
-	reqShingles := util.CreateShingles(reqBuff, k)
-	for idx, body := range mockBodies {
-		mockShingles := util.CreateShingles(body, k)
-		similarity := util.JaccardSimilarity(mockShingles, reqShingles)
-		if similarity > mxSim {
-			mxSim = similarity
-			mxIdx = idx
-		}
-	}
-	return mxIdx, mxSim
-}
-
-// findBinaryMatch decodes mock bodies and delegates to jaccardBestMatch.
-func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
-	bodies := make([][]byte, len(mocks))
-	for i, mock := range mocks {
-		bodies[i], _ = decode(mock.Spec.HTTPReq.Body)
-	}
-	idx, _ := h.jaccardBestMatch(bodies, reqBuff)
-	return idx
-}
-
-// PerformFuzzyMatch performs fuzzy matching on the request body.
-// Noisy (obfuscated) values are stripped from mock bodies before computing
-// similarity so that redacted padding doesn't skew the score.
-func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
-	// Log all mock names in a single line for better readability
-	if ce := h.Logger.Check(zap.DebugLevel, "mocks under consideration for performfuzzyMatch function"); ce != nil {
-		ce.Write(zap.Strings("mock names", mockNamesOf(tcsMocks)))
-	}
-
-	encodedReq := encode(reqBuff)
-	for _, mock := range tcsMocks {
-		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
-		if string(encodedMock) == string(reqBuff) || mock.Spec.HTTPReq.Body == encodedReq {
-			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
-				ce.Write(zap.String("mock", mock.Name),
-					zap.Float64("match_percentage", 100.0),
-					zap.String("match_type", "fuzzy_exact"))
-			}
-			return true, mock
-		}
-	}
-
-	// Build mock body strings, stripping noisy values for fair comparison
-	mockStrings := make([]string, len(tcsMocks))
-	for i := range tcsMocks {
-		nc := util.NewNoiseChecker(tcsMocks[i].Noise)
-		mockStrings[i] = util.StripNoisyJSON(tcsMocks[i].Spec.HTTPReq.Body, nc)
-	}
-
-	// String-based fuzzy matching (Levenshtein distance)
-	reqStr := string(reqBuff)
-	if util.IsASCII(reqStr) {
-		idx, dist := h.findStringMatch(reqStr, mockStrings)
-		if idx != -1 {
-			maxLen := len(reqStr)
-			if len(mockStrings[idx]) > maxLen {
-				maxLen = len(mockStrings[idx])
-			}
-			pct := 0.0
-			if maxLen > 0 {
-				pct = (1.0 - float64(dist)/float64(maxLen)) * 100
-			}
-			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
-				ce.Write(zap.String("mock", tcsMocks[idx].Name),
-					zap.Float64("match_percentage", pct),
-					zap.String("match_type", "fuzzy_levenshtein"))
-			}
-			return true, tcsMocks[idx]
-		}
-	}
-
-	// Binary fuzzy matching (Jaccard similarity) with stripped mock bodies
-	mockBodies := make([][]byte, len(mockStrings))
-	for i := range mockStrings {
-		mockBodies[i] = []byte(mockStrings[i])
-	}
-	mxIdx, mxSim := h.jaccardBestMatch(mockBodies, reqBuff)
-	if mxIdx != -1 {
-		if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
-			ce.Write(zap.String("mock", tcsMocks[mxIdx].Name),
-				zap.Float64("match_percentage", mxSim*100),
-				zap.String("match_type", "fuzzy_jaccard"))
-		}
-		return true, tcsMocks[mxIdx]
-	}
-	return false, nil
-}
-
 // parseMediaTypes splits a (possibly comma-joined) Content-Type header
 // value into individual media types using mime.ParseMediaType. Malformed
 // entries are skipped so that a single non-conformant value (e.g. a
@@ -2430,13 +2338,24 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // just the lowest-Levenshtein path. If httpMocks is nil, it fetches from
 // mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
 func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
-	r, places := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
-	// Under the proven switch a test is served what its mapping names, and a
-	// declared call does not change that: the hint would not help.
-	if r != nil && !provenswitch.On() && statesHTTPLifetimes(mockDb, httpMocks) {
-		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + sessionCallHint(request, places))
+	r, hint := h.buildHTTPMismatchReportHinted(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+	if hint != "" {
+		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + hint)
 	}
 	return r
+}
+
+// buildHTTPMismatchReportHinted is buildHTTPMismatchReport with the hint for
+// a call shared across tests (sessionCallHint) apart, not yet in the next
+// steps: "" when the recording does not state its HTTP mocks' lifetimes. A
+// repeat note keeps it (markRepeat), so the hint outlives the note's own
+// next step.
+func (h *HTTP) buildHTTPMismatchReportHinted(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (*models.MockMismatchReport, string) {
+	r, places := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+	if r == nil || !statesHTTPLifetimes(mockDb, httpMocks) {
+		return r, ""
+	}
+	return r, sessionCallHint(request, places, provenswitch.On())
 }
 
 // viewless makes r the miss of a call whose view a test's begin or end
@@ -2460,10 +2379,18 @@ func viewless(r *models.MockMismatchReport) {
 
 // sessionCallHint tells how to serve a call to every test, for a recording
 // that serves each test its own HTTP calls only: a test that never recorded
-// a call misses it though another test recorded it. places are the report's
-// (poolPlaces): the path prefix it names stops before the first segment a
+// a call misses it though another test, or the application outside every
+// test, recorded it. Without the proven switch a declared call is served to
+// every test from any test's recording of it; under the switch from a
+// recording made outside every test only (in TestMain or at start-up), of a
+// call a keploy.yaml entry names exactly, by its method and whole path
+// (models.SessionCallDeclared), and another test's recording of it stays
+// that test's. Under the switch, a call an entry names is told what the
+// declaration serves, and one an entry covers only by a path prefix or with
+// no method the exact entry to declare. places are the report's
+// (poolPlaces): a path the hint names stops before the first segment a
 // recording of the pool redacted (redactedPlaces.pathPrefix).
-func sessionCallHint(request *http.Request, places redactedPlaces) string {
+func sessionCallHint(request *http.Request, places redactedPlaces, proven bool) string {
 	host := request.Host
 	if host == "" && request.URL != nil {
 		host = request.URL.Host
@@ -2473,8 +2400,36 @@ func sessionCallHint(request *http.Request, places redactedPlaces) string {
 	if prefix := places.pathPrefix(request.URL.EscapedPath()); prefix != "" {
 		path = prefix
 	}
-	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]), or record again with '%s' so this test records it.",
-		host, request.Method, path, mismatch.RecordCommand())
+	record := mismatch.RecordCommand()
+	if !proven {
+		return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]), or record again with '%s' so this test records it.",
+			host, request.Method, path, record)
+	}
+	// The rules read the call's real path; the hint names only the part of
+	// it the report may show.
+	covered, named := models.SessionCallDeclared(request.Method, host, request.URL.Path)
+	entry := exactSessionCall(host, request.Method, path, strings.Contains(places.decodedPath(request.URL.EscapedPath()), valueRedacted))
+	switch {
+	case named:
+		return fmt.Sprintf("keploy.yaml declares this call a session call, which serves a recording of it made outside every test (in TestMain or at start-up) to every test; a recording another test made of it is served to that test only. Record again with '%s' so this test records it.", record)
+	case covered:
+		return fmt.Sprintf("A keploy.yaml sessionCalls entry covers this call only by a path prefix or with no method. Under the proven switch a recording made outside every test (in TestMain or at start-up) is served to every test only for a call an entry names exactly, by its method and whole path, so that no recording is served to a call no one declared: to serve this one so, declare %s. A recording another test made of it is served to that test only, declared or not. Or record again with '%s' so this test records it.",
+			entry, record)
+	}
+	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If the application made this call outside every test (in TestMain or at start-up) and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve that recording to every test (%s); a recording another test made of it is served to that test only, declared or not. Or record again with '%s' so this test records it.",
+		entry, record)
+}
+
+// exactSessionCall is the keploy.yaml sessionCalls entry that names a call
+// of method to host exactly, as a hint shows it: path is the call's path up
+// to the first segment a recording redacted, and cut says one did, so the
+// entry's pathPrefix is said to go on with the rest of the call's path,
+// which the hint does not show.
+func exactSessionCall(host, method, path string, cut bool) string {
+	if cut {
+		return fmt.Sprintf("sessionCalls: [{host: %q, method: %q, pathPrefix: the call's whole path}], a path that begins %q and goes on with segments a recording redacted, which keploy does not show", host, method, path)
+	}
+	return fmt.Sprintf("sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]", host, method, path)
 }
 
 // statesHTTPLifetimes reports whether the recording being replayed states its
