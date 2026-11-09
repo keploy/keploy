@@ -1346,6 +1346,83 @@ func TestALookBackAnEarlierTestSentIsItsValueCarriedThroughTheOrder(t *testing.T
 	}
 }
 
+// api-server's device-code sign-in writes a refresh token's expiration as
+// time.Now().Add(30 days).Unix(), epoch seconds, 86 ms after the test before
+// it wrote an OAuth grant's expires_at as its own clock + 30d at the
+// millisecond, which that call's learn step learned so: the two share a
+// second in both runs. They are two reads of one time to live, not the
+// grant's value carried: the expiration is a Clock of clock + 30d, and a
+// replay passes the application's value and fails a dropped or shorter time
+// to live. Each condition holds it apart from a carried value: a grant no
+// learn step learned as a read, one learned at the expiration's own cut or
+// with no cut, one no meet holds, one whose learned offset the expiration's
+// window does not hold or only touches, and a plain read sent again as a
+// look-back stay refused, naming the grant.
+func TestATimeToLiveAnEarlierTestReadAtAFinerCutIsARead(t *testing.T) {
+	sec, ms, µs, month := time.Second, time.Millisecond, time.Microsecond, 30*24*time.Hour
+	const p, sent = "body.docs.msgs.0.expiration.$numberLong", "body.docs.msgs.0.expires_at.$date.$numberLong"
+	at := time.Date(2026, 11, 9, 7, 2, 32, 979e6, time.UTC)
+	fAt := at.Add(FullRoundLead + 9*sec + 82*ms)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	millis := func(t time.Time) string { return strconv.FormatInt(t.UnixMilli(), 10) }
+	// grant is the earlier test's send, its read 86 ms before the call plus
+	// sentOff, written by value, learned as learned (none where nil).
+	grant := func(sentOff time.Duration, value func(time.Time) string, learned *models.ClockOffset) Earlier {
+		read := -86 * ms
+		e := Earlier{Mock: "mock-1018", At: at.Add(read), Run: true,
+			Seen: []Seen{{Side: Request, Leaf: Leaf{Path: sent, Noise: sent, Type: Number, Value: value(at.Add(read + sentOff))}, Live: value(fAt.Add(read + sentOff))}}}
+		if learned == nil {
+			return e
+		}
+		return Named(e, nil, map[string]models.ClockOffset{sent: *learned})
+	}
+	fine := models.ClockOffset{Min: month - 771*µs, Max: month + 379*µs, Res: ms}
+	rec, live := secs(at.Add(month)), secs(fAt.Add(month))
+	width := 20 * ms
+	d := v5Decide(t, p, Number, rec, live, at, fAt, width, grant(month, millis, &fine))
+	if d.Outcome != OutcomeClock || d.Clock == nil || d.Clock.Plain() || d.Clock.Min > month || d.Clock.Max < month {
+		t.Fatalf("a refresh token's clock + 30d beside an earlier test's grant read at the millisecond: %+v; want a Clock of clock + 30d", d)
+	}
+	for ph := 7 * ms; ph < sec; ph += 70 * ms {
+		to := at.Add(72*time.Hour + ph)
+		sp := Span{From: to.Add(-width), To: to}
+		if ok, why := v5Check(p, *d.Clock, rec, to.Add(-4*ms+month), sp); !ok {
+			t.Errorf("FALSE RED: %s into its second: %s", ph, why)
+		}
+		for _, bad := range []time.Duration{0, month - 5*sec, month - 24*time.Hour} {
+			if ok, _ := v5Check(p, *d.Clock, rec, to.Add(-4*ms+bad), sp); ok {
+				t.Errorf("FALSE GREEN: clock + %s passes, %s into its second", bad, ph)
+			}
+		}
+	}
+	at0 := func(o models.ClockOffset) *models.ClockOffset { return &o }
+	// touch is a grant learned at offsets from the expiration's greatest on:
+	// the two ranges touch, and share no offset.
+	touch := models.ClockOffset{Min: d.Clock.Max, Max: d.Clock.Max + ms, Res: ms}
+	for _, row := range []struct {
+		name string
+		e    Earlier
+		rec  string
+		live string
+	}{
+		{"a grant no learn step learned as a read", grant(month, millis, nil), rec, live},
+		{"a grant learned at the expiration's own cut", grant(month, secs, at0(models.ClockOffset{Min: month - 500*ms, Max: month + 500*ms, Res: sec})), rec, live},
+		{"a grant learned with no cut", grant(month, millis, at0(models.ClockOffset{Min: fine.Min, Max: fine.Max})), rec, live},
+		{"a grant two learnings in two layouts met", grant(month, millis, at0(models.ClockOffset{Min: fine.Min, Max: fine.Max, Res: ms, Layout: models.LayoutApart})), rec, live},
+		{"a grant learned at an offset the expiration's window does not hold", grant(month+100*ms, millis, at0(models.ClockOffset{Min: month + 100*ms - 771*µs, Max: month + 100*ms + 379*µs, Res: ms})), rec, live},
+		{"a grant learned at offsets that only touch the expiration's", grant(touch.Min+ms/2, millis, &touch), rec, live},
+		{"a plain read at the millisecond sent again as now - 9s", grant(86*ms-9*sec, millis, at0(models.ClockOffset{Res: ms})), secs(at.Add(-9 * sec)), secs(fAt.Add(-9 * sec))},
+	} {
+		d := v5Decide(t, p, Number, row.rec, row.live, at, fAt, width, row.e)
+		if d.Clock != nil || d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalNoClockRead || !slices.Contains(d.Refusal.Places, "mock-1018 "+sent) {
+			t.Errorf("%s: %+v; want refused (no-clock-read) naming mock-1018 %s", row.name, d, sent)
+		}
+		if d := v5Decide(t, p, Number, row.rec, row.live, at, fAt, width); d.Clock == nil || d.Outcome != OutcomeClock {
+			t.Errorf("%s, with no earlier send: %+v; want a Clock", row.name, d)
+		}
+	}
+}
+
 // The same look-back as a word of a raw text (dirtyAt<2026-...Z&limit=10):
 // one rule across value forms. It waits for the same change to the order.
 func TestALookBackInARawTextIsAClockThroughTheOrder(t *testing.T) {

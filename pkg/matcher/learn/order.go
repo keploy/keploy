@@ -1423,6 +1423,17 @@ func clockCarriedWhy(path string, o models.ClockOffset, place string) string {
 	return path + " = " + o.String() + " in both runs, but " + place + " sent that moment before this call in both runs: the offset is the gap between the two calls, which a replay moves, so keploy reads it as that call's value carried, never a read of this call's clock"
 }
 
+// sameRead reports whether learned, the read of the clock an earlier call's
+// learn step learned its send as (evPlace.offset), is a read plus the same
+// offset as off, the one this call's window holds a value written at res
+// at in both runs: learned at a cut (one with no Res holds nothing) finer
+// than res, of an offset no meet emptied, and sharing with off an offset
+// both hold (their ranges meet; a plain read's never meets an offset's: the
+// reading signs every offset).
+func sameRead(learned *models.ClockOffset, off models.ClockOffset, res time.Duration) bool {
+	return learned != nil && learned.Res > 0 && learned.Res < res && !learned.Empty() && max(learned.Min, off.Min) < min(learned.Max, off.Max)
+}
+
 // heldWhere is the place of each of hs that keep keeps, in order.
 func heldWhere(hs []instantHold, keep func(instantHold) bool) []evPlace {
 	var out []evPlace
@@ -2316,10 +2327,17 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// is the gap between the two calls, which a replay moves, so it is no
 	// read of this call's clock. It is refused naming that call, as a source
 	// outside the scope is (keploy binds only within a test and the
-	// start-up); a plain read its own window holds stays a read.
+	// start-up); a plain read its own window holds stays a read. So is a
+	// send that call's learn step learned as its own read of the clock plus
+	// this one's offset at a finer cut (sameRead): two reads of one time to
+	// live (a grant's expires_at at the millisecond, then a refresh token's
+	// expiration at the second, both clock + 30d), which share this word's
+	// cut only as the runs' timing falls. A copy of it shows the offset its
+	// own read added only where the gap fits in this word's cut, and a
+	// replay where it does not goes red.
 	if inWindow && !off.Plain() {
 		if carried := heldWhere(hs, func(h instantHold) bool {
-			return h.hr && h.hl && h.p.otherTest && !dc.allScope && before(h.p)
+			return h.hr && h.hl && h.p.otherTest && !dc.allScope && before(h.p) && !sameRead(h.p.offset, off, max(c.rm.res, c.lm.res))
 		}); len(carried) > 0 {
 			off, cutWhy, inWindow = models.ClockOffset{}, clockCarriedWhy(path, off, carried[0].name), false
 		}

@@ -60,6 +60,15 @@ type Seen struct {
 	// its value but does not hold it as its own read of the clock is
 	// refused, never followed (classifyRead, clockSourceWhy).
 	Clock bool
+	// Offset is the read of the application's clock the learn step learned
+	// the leaf, a request's, as, with its offset and the cut it was learned
+	// at (MockSpec.Clocks' entry, its Why left out: Named), a plain read
+	// too, which Clock marks; nil where it learned none. A later test's call
+	// whose own window holds its value plus that same offset at a coarser
+	// cut is a second read of one time to live, not that call's value
+	// carried (the order's step 5). A pointer, so a leaf that is no read
+	// keeps no more than before (runPlaceBytes).
+	Offset *models.ClockOffset
 	// Undeclared: the leaf is a test case's request body, or a leaf of it,
 	// one side of which declares no media type (no Content-Type) and is
 	// read as text by its bytes (plainText, GivenRequest); both sides are
@@ -5208,7 +5217,8 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 // a use) naming that variable (Seen.Name), the first by name when two hold
 // one place, and each request leaf clocks (the call's learn step's clock
 // reads, by leaf path, as MockSpec.Clocks keys them) holds as a plain read
-// marked so (Seen.Clock). An echo is not named: it is its call's alone, and
+// marked so (Seen.Clock), and each such leaf with the read it holds
+// (Seen.Offset). An echo is not named: it is its call's alone, and
 // a later call that reads its value back binds it there as a variable of the
 // test (ReadBack). e's own Seen is left as it was: the result holds a copy,
 // with no name or mark at any other place.
@@ -5241,6 +5251,11 @@ func Named(e Earlier, vars models.MockVariables, clocks map[string]models.ClockO
 		}
 		o, clock := clocks[s.Leaf.Path]
 		e.Seen[i].Clock = s.Side == Request && clock && o.Plain()
+		e.Seen[i].Offset = nil
+		if s.Side == Request && clock {
+			o.Why = ""
+			e.Seen[i].Offset = &o
+		}
 	}
 	return e
 }
