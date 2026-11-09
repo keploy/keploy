@@ -795,6 +795,25 @@ func (s *DebugFileSink) Written() int64 {
 	return s.capped.Written()
 }
 
+// OpenDebugFile opens path, the file KEPLOY_DEBUG_FILE names, for the debug
+// log: made if it is not there, truncated if it is, and only inside the
+// folder it is in. A link at path whose target stays in that folder is
+// followed; one with an absolute target, or one that climbs out by "..", is
+// refused with why (os.Root), and nothing is written where it leads. In
+// keploy's agent container that folder is /keploy-host, the host's keploy
+// folder, whose files come with the repository keploy runs in: a link a
+// cloned repository carries there would otherwise have the agent truncate
+// and write a file of the container's, or of a folder the host mounts into
+// it. RotateForScope keeps every later file inside the same folder.
+func OpenDebugFile(path string) (*os.File, error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	return root.OpenFile(filepath.Base(path), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+}
+
 // AddDebugFileSink returns a new logger that, in addition to whatever
 // sinks the input logger already had, writes every debug-level-or-above
 // entry to file via a 256 KiB buffered, capBytes-capped pipeline. Used
