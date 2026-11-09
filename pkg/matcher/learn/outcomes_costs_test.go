@@ -3943,3 +3943,63 @@ func TestOutcomeCostALongTextPastItsFilterHasNoPostingsEntry(t *testing.T) {
 		t.Errorf("a %d-byte text has postings id %d and %d short entries; want it posted by its words, one entry", len(long)-1, id, len(x.filters.short))
 	}
 }
+
+// A call's places are listed once, sized to the call (placesOf): a call of
+// a long test has thousands, and grown by append the list was copied at
+// each growth, about five times its size allocated per call. What an
+// exchange says of all its leaves (an earlier test's call: why it may be a
+// late call) is made once for the exchange, not once per leaf. So the bytes
+// placesOf allocates for 3000 recordings are its list's own, and for 3000
+// leaves of 300 exchanges an earlier test left the run its list's own, each
+// leaf's name, and each exchange's strings.
+func TestOutcomeCostACallsPlacesAreListedOnce(t *testing.T) {
+	allocated := func(in Input) (int, uint64) {
+		var a, b runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&a)
+		ps, _ := placesOf(in)
+		runtime.ReadMemStats(&b)
+		return len(ps), b.TotalAlloc - a.TotalAlloc
+	}
+	size := uint64(unsafe.Sizeof(evPlace{}))
+	raws := make([]Raw, 3000)
+	for i := range raws {
+		raws[i] = RawOf(getAnswer(fmt.Sprintf("mock-%d", i), "http://api/items", `{"v":"x"}`, eRecAt.Add(-time.Hour)), false)
+	}
+	n, got := allocated(Input{At: eRecAt, Raw: raws})
+	t.Logf("%d recordings' places: %d bytes allocated, %d a place", n, got, size)
+	if want := uint64(n)*size + 4096; n != len(raws) || got > want {
+		t.Errorf("%d recordings' places allocate %d bytes; want %d places in at most %d (the list, %d bytes a place)", n, got, len(raws), want, size)
+	}
+	// Each recording's handles (withTexts): one block of them for the
+	// call, and a recording's place reads its text through one handle of
+	// the recording, none of a handed text it does not hold.
+	ps, _ := placesOf(Input{At: eRecAt, Raw: raws})
+	x := newReaderIndex(nil)
+	var a, b runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&a)
+	withTexts(x, ps)
+	runtime.ReadMemStats(&b)
+	each := allocBytes(unsafe.Sizeof(readerText{}), true) + allocBytes(unsafe.Sizeof(Raw{}), true)
+	got, objs := b.TotalAlloc-a.TotalAlloc, b.Mallocs-a.Mallocs
+	t.Logf("%d recordings' handles: %d bytes in %d objects allocated, %d a handle and its recording", len(ps), got, objs, each)
+	if want := uint64(len(ps))*uint64(unsafe.Sizeof(placeText{})+uintptr(each)) + 16384; got > want || objs > uint64(2*len(ps))+16 {
+		t.Errorf("%d recordings' handles allocate %d bytes in %d objects; want at most %d in %d (a block of them, and one handle of %d bytes and its recording a place)", len(ps), got, objs, want, 2*len(ps)+16, each)
+	}
+	var earlier []Earlier
+	for i := range 300 {
+		e := Earlier{Mock: fmt.Sprintf("mock-%d", i), At: eRecAt.Add(-time.Hour), Run: true, Payload: oPayload(fmt.Sprintf("mock-%d", i), eRecAt.Add(-time.Hour))}
+		for j := range 10 {
+			path := fmt.Sprintf("body.f%d", j)
+			e.Seen = append(e.Seen, Seen{Side: Response, Leaf: Leaf{Path: path, Noise: path, Type: String, Value: "v"}, Live: "v"})
+		}
+		earlier = append(earlier, e)
+	}
+	n, got = allocated(Input{At: eRecAt, Earlier: earlier})
+	late := uint64(len(earlierLateCall(earlier[0])))
+	t.Logf("%d leaves' places: %d bytes allocated, %d a place, %d bytes of strings an exchange", n, got, size, late)
+	if want := uint64(n)*(size+32) + 300*(late+64) + 4096; n != 3000 || got > want {
+		t.Errorf("3000 leaves' places allocate %d bytes; want 3000 places in at most %d (the list, %d bytes a place, a name each, %d bytes of strings an exchange)", got, want, size, late)
+	}
+}

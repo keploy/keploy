@@ -130,10 +130,14 @@ type placeText struct {
 
 // withTexts gives each of ps the handles its texts are read by, in x.
 func withTexts(x *readerIndex, ps []evPlace) []evPlace {
+	// One block for the places' handles: one allocation per call, not one
+	// per place.
+	ts := make([]placeText, len(ps))
 	for i := range ps {
-		p := &ps[i]
-		t := &placeText{rec: x.text(p.rec), live: x.text(p.live)}
-		if p.src != nil {
+		p, t := &ps[i], &ts[i]
+		if p.src == nil {
+			t.rec, t.live = x.text(p.rec), x.text(p.live)
+		} else {
 			t.rec = x.textOf(*p.src)
 			t.live = t.rec
 			if p.fSrc != p.src {
@@ -205,6 +209,14 @@ func payloadless(in Input) (mock, why string) {
 // first place keploy could not read ("" where it read every one): every
 // change of the call is then refused.
 func placesOf(in Input) (ps []evPlace, unread string) {
+	// Sized once: a call of a long test has thousands of places, and grown
+	// by append the list was copied at each growth (a quarter more each
+	// time past 256), about five times its size allocated per call.
+	n := len(in.Raw)
+	for _, e := range in.Earlier {
+		n += len(e.Seen)
+	}
+	ps = make([]evPlace, 0, n)
 	for _, e := range in.Earlier {
 		// An exchange keploy could not read (Earlier.Unread), or one F
 		// served with no leaf and no payload keploy read, is a place it
@@ -232,13 +244,15 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		if trailed {
 			other = false
 		}
+		// Of the exchange, not of a leaf: built once for its leaves.
+		outsideTest, lateCall := earlierOutsideTest(e), earlierLateCall(e)
 		for _, s := range e.Seen {
 			path := cmp.Or(s.Leaf.Path, s.Place)
 			ps = append(ps, evPlace{
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
 				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, startUp: startUp, otherTest: other, trailed: trailed, scope: scope,
-				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: earlierOutsideTest(e), lateCall: earlierLateCall(e),
+				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: outsideTest, lateCall: lateCall,
 				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
 			})
 			// What the application got in an answer it got at the answer's

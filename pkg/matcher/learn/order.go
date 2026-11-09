@@ -563,7 +563,8 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// application had last, decides only where no place shows it: a candidate
 	// that kept the recorded word is not where F's word came from, and replay
 	// checks the bound value, so a wrong bind goes red.
-	moved := make([]string, len(dc.ps))
+	// By place, only where one shows it moved: most words have none.
+	var moved map[int]string
 	shown := false
 	// held: what each place's texts hold of the word, asked once here and
 	// read again below, where orderUnknown and swapUnknown may have changed
@@ -586,8 +587,14 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 		}
 		cand[p.mock] = true
 		if ev == evShown {
-			moved[i] = movedField(p, w.Rec, w.Live)
-			shown = shown || moved[i] == ""
+			if why := movedField(p, w.Rec, w.Live); why != "" {
+				if moved == nil {
+					moved = map[int]string{}
+				}
+				moved[i] = why
+			} else {
+				shown = true
+			}
 		}
 	}
 	if !shown && ordered != nil {
