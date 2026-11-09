@@ -3,9 +3,10 @@
 # the job runs on, that a run with no key to keploy/integrations fails, that
 # nothing lets the job pass without running the tests (continue-on-error, an
 # if: or a changed command on the steps that matter), which runs a new push
-# cancels, which runs save the cache, and that release.yml's publishing jobs
-# wait for the job and do not run after it failed. Needs bash and a POSIX awk. Run by integrations-tests.yml before
-# the real run, or locally:
+# cancels, which runs save the cache, that release.yml's publishing jobs wait
+# for the job and do not run after it failed, and that setup-private-parsers'
+# build lanes read the PR body from the event. Needs bash and a POSIX awk. Run
+# by integrations-tests.yml before the real run, or locally:
 #
 #   bash .github/workflows/test_workflow_scripts/integrations-tests.workflows.tests.sh
 #
@@ -529,7 +530,13 @@ need_step() {
     return
   fi
   only_keys "$job" "$at" name run "$@"
-  [ "$(get "$job" "$at.run")" = "$want_run" ] || problem "$n runs '$(get "$job" "$at.run")', want '$want_run'"
+  got="$(get "$job" "$at.run")"
+  if [[ "$got" =~ ^[|\>] ]]; then
+    # flatten skips a block scalar's lines, so it cannot see what it runs.
+    problem "$n runs a block scalar ('$got'), which this check refuses on purpose, since it cannot read the block: want 'run: $want_run' on one line"
+  elif [ "$got" != "$want_run" ]; then
+    problem "$n runs '$got', want '$want_run'"
+  fi
   printf -v "$var" '%s' "${at##*.}"
 }
 need_step i_tests "$s_tests" "bash $scripts/integrations-tests.tests.sh"
@@ -552,7 +559,24 @@ if [ -n "$i_co" ] && [ -n "$i_ref" ] && [ -n "$i_run" ] && [ -n "$i_tests" ] && 
 else
   problem "a step the checks above need is missing (integrations checkout: '${i_co}')"
 fi
-report "no continue-on-error, if: or other command on the steps that decide the check"
+# The keploy checkout takes the tree the run is for: a PR merged onto main, or
+# the pushed commit. A ref: (main, the PR's base) or a repository: there would
+# make every PR test another tree and pass, so it takes no input but its path.
+k_co=()
+for k in $(children "$job" jobs.integrations-tests.steps); do
+  case "$(get "$job" "jobs.integrations-tests.steps.$k.uses")" in actions/checkout@*) ;; *) continue ;; esac
+  [ "$k" = "$i_co" ] || k_co+=("$k")
+done
+if [ "${#k_co[@]}" -ne 1 ]; then
+  problem "steps '${k_co[*]}' check out keploy, want one step"
+else
+  at="jobs.integrations-tests.steps.${k_co[0]}"
+  only_keys "$job" "$at" uses with
+  only_keys "$job" "$at.with" path
+  [ "$(get "$job" "$at.with.path")" = keploy ] ||
+    problem "the keploy checkout's path is '$(get "$job" "$at.with.path")', want keploy"
+fi
+report "no continue-on-error, if: or other command on the steps that decide the check, and keploy's own tree checked out"
 
 # The first step fails a run that has no key to keploy/integrations, so a PR
 # from a fork fails the check, saying why and naming the way out, instead of
@@ -638,6 +662,32 @@ else
   runs_case "release.yml's call on a tag push, a miss" "$save_if" "$tag_push$nl$passed$nl$(hit success '')" skip
 fi
 report "only main's runs save the module cache, after a restore with no exact hit"
+
+# ---- setup-private-parsers: the PR body the build lanes read -----------------
+
+# Both build lanes read the PR body's Integration-Ref from PR_BODY: the body of
+# the event that started the run, on a PR, and empty on any other run. A lane
+# given another value, or that sets PR_BODY itself, would build against
+# another integrations ref than the one this job tests.
+action_yml="$here/../../actions/setup-private-parsers/action.yaml"
+act="$(flatten "$action_yml")" || problem "cannot read $action_yml"
+want_body="\${{ github.event_name == 'pull_request' && github.event.pull_request.body || '' }}"
+for lane in "Config Git & Fetch (non-Windows)" "Configure Git, Fetch Dependencies, and Create Parsers File (Windows)"; do
+  if ! at="$(awk -F '\t' -v n="$lane" '$1 ~ /^runs\.steps\.[0-9]+\.name$/ && substr($0, length($1) + 2) == n { print substr($1, 1, length($1) - 5); found = 1; exit } END { exit !found }' <<<"$act")"; then
+    problem "setup-private-parsers has no step '$lane'"
+    continue
+  fi
+  only_keys "$act" "$at.env" INTEGRATION_REF GITHUB_HEAD_REF_VAL PR_BODY
+  got="$(get "$act" "$at.env.PR_BODY")" || got="(none)"
+  [ "$got" = "$want_body" ] || problem "$lane: PR_BODY is '$got', want '$want_body'"
+done
+# Outside comments, PR_BODY is named only where the two lanes set it and where
+# each reads it once.
+got="$(grep -vE '^[[:space:]]*#' "$action_yml" | grep -F PR_BODY | sed -e 's/^[[:space:]]*//' | sort)"
+# shellcheck disable=SC2016 # the text the action holds
+want="$(printf '%s\n' "PR_BODY: $want_body" "PR_BODY: $want_body" '$BodyRef = Get-IntegrationRefOfBody $env:PR_BODY' 'BODY_REF="$(integration_ref_of_body "$PR_BODY")"' | sort)"
+[ "$got" = "$want" ] || problem "action.yaml names PR_BODY in:$nl$got${nl}want only:$nl$want"
+report "both build lanes read the body of the PR event, as PR_BODY, and nothing else sets it"
 
 # ---- release.yml: the gate -------------------------------------------------------
 

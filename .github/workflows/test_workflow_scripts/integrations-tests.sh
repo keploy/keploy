@@ -29,12 +29,20 @@
 #   A ref names what `go get` takes it to name, as setup-private-parsers
 #   fetches it with go get: a tag, else a branch, else a commit (7 to 40 hex
 #   digits, or the commit of a pseudo-version). So the build lanes and this
-#   job pair a PR with the same integrations commit, but for three things:
-#   the lanes read the body from the event that started the run, so a body
-#   edited since counts there only from the next push; a ref the body names
-#   that the lanes cannot fetch falls through to the next ref there and fails
-#   here; and a ref go get takes but names no tag, branch or commit (latest,
-#   a version prefix) fails here.
+#   job pair a PR with the same integrations commit, but in five cases:
+#   - the lanes read the body from the event that started the run, so a body
+#     edited since counts there only from the next push;
+#   - a body ref that names no integrations tag, branch or commit falls
+#     through to the next ref there, and fails here;
+#   - a ref go get takes that names no tag, branch or commit (latest, a
+#     version prefix) is built there; here it fails when the body or
+#     INTEGRATION_REF names it, and a head branch so named falls through to
+#     INTEGRATION_REF;
+#   - a head branch with characters outside the allow-list falls through
+#     there, and is looked up here;
+#   - a pseudo-version go get refuses (a wrong timestamp or base version)
+#     falls through there, or fails there as INTEGRATION_REF, and its commit
+#     is tested here.
 #   Env: PR_NUMBER and GH_TOKEN (pull requests only), GITHUB_REPOSITORY,
 #   HEAD_REF, INTEGRATION_REF. Writes ref=, source= and sha= to GITHUB_OUTPUT
 #   when it is set.
@@ -44,8 +52,9 @@
 #   tidies, and runs `go test -count=1 ./...` under each switch. Both switches
 #   run even when the first fails. Every failing package and test is named on
 #   stdout, as a GitHub error annotation, and in GITHUB_STEP_SUMMARY when it is
-#   set. INTEGRATIONS_DESC names the integrations ref in those lines.
-#   Exit 0 only when both runs exit 0 and each tested at least one package.
+#   set. INTEGRATIONS_DESC names the integrations ref in those lines. go runs
+#   with no GOFLAGS. Exit 0 only when both runs exit 0 and each ran a test in
+#   at least one package.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -162,7 +171,7 @@ failures_of() {
 }
 
 run_tests() {
-  local keploy_dir integ_dir desc replaced mode rc failed=0 lines line ok_count
+  local keploy_dir integ_dir desc replaced mode rc failed=0 lines line ok_count flags
   keploy_dir="$(cd "$1" && pwd -P)" || die "no keploy tree at $1"
   integ_dir="$(cd "$2" && pwd -P)" || die "no keploy/integrations tree at $2"
   desc="${INTEGRATIONS_DESC:-keploy/integrations}"
@@ -170,6 +179,14 @@ run_tests() {
   source "$here/go-retry.sh"
 
   cd "$integ_dir"
+  # A GOFLAGS such as -run=^$, set by an earlier step through GITHUB_ENV or
+  # with go env -w, would change what go test runs: each package would pass
+  # with no test run. So go runs with none: the env's is dropped, and go's env
+  # file, which go reads when the env has none, must set none either.
+  unset GOFLAGS
+  flags="$(go env GOFLAGS)" || die "go env GOFLAGS failed"
+  [ -z "$flags" ] ||
+    die "go's env file sets GOFLAGS \"${flags}\", which would change what go test runs; this job runs go with none"
   go mod edit -replace="${keploy_module}=${keploy_dir}" ||
     die "cannot replace ${keploy_module} in ${desc}'s go.mod"
   # Adds the sums of modules this keploy tree requires and integrations' pin
@@ -198,7 +215,8 @@ run_tests() {
     fi
     echo "::endgroup::"
     lines="$(failures_of "$test_log")"
-    ok_count="$(grep -cE '^ok[[:space:]]' "$test_log" || true)"
+    # A package whose tests ran, not one that ran none ("[no tests to run]").
+    ok_count="$(grep -E '^ok[[:space:]]' "$test_log" | grep -cvF '[no tests to run]' || true)"
     if [ "$rc" -eq 0 ] && [ "$ok_count" -gt 0 ]; then
       echo "PASS: ${desc}, ${mode}: ${ok_count} packages"
       if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -208,7 +226,7 @@ run_tests() {
     fi
     failed=1
     if [ "$rc" -eq 0 ]; then
-      lines="go test ran no package with tests"
+      lines="go test ran no test in any package"
     elif [ -z "$lines" ]; then
       lines="go test exited ${rc} with no FAIL line; see its output in the group above"
     fi

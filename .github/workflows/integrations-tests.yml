@@ -113,7 +113,7 @@ jobs:
       # either go.sum has moved. The build cache is not kept: on 4 CPUs it
       # saved 52 s of a run whose keploy tree was four commits from the
       # cached one (66 s on the same tree), for 180 MB more in a repository
-      # cache already over GitHub's 10 GB limit.
+      # cache already at GitHub's 10 GB limit.
       - name: Restore the Go module cache
         id: cache
         uses: actions/cache/restore@v4

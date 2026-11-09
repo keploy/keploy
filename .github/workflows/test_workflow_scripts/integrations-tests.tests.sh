@@ -51,10 +51,16 @@ bin="$work/bin"
 mkdir -p "$bin"
 cat >"$bin/go" <<'EOF'
 #!/usr/bin/env bash
-# Stand-in go: records each call with the KEPLOY_PROVEN it saw.
+# Stand-in go: records each call with the KEPLOY_PROVEN and GOFLAGS it saw.
 s="$STUB_STATE"
 echo "go $* KEPLOY_PROVEN=${KEPLOY_PROVEN-<unset>}" >>"$s/calls"
+echo "go $1 GOFLAGS=${GOFLAGS-<unset>}" >>"$s/goflags"
 case "$1 $2" in
+"env GOFLAGS")
+  # As go does: the env's GOFLAGS, else the env file's (goenv.flags).
+  if [ -n "${GOFLAGS:-}" ]; then echo "$GOFLAGS"; else cat "$s/goenv.flags" 2>/dev/null; echo; fi
+  exit 0
+  ;;
 "mod edit")
   r="${3#-replace=}"
   printf '%s' "${r#*=}" >"$s/replace"
@@ -104,6 +110,8 @@ fail_out=$'ok  \tgithub.com/keploy/integrations/pkg/parsers\t0.1s\n--- FAIL: Tes
 build_out=$'# github.com/keploy/integrations/pkg/mongo/v2\npkg/mongo/v2/learn.go:1520:5: not enough arguments in call to learn.Named\nFAIL\tgithub.com/keploy/integrations/pkg/mongo/v2 [build failed]\nok  \tgithub.com/keploy/integrations/pkg/parsers\t0.1s\nFAIL'
 two_out=$'--- FAIL: TestA (0.00s)\nFAIL\nFAIL\tgithub.com/keploy/integrations/pkg/a\t0.1s\n# github.com/keploy/integrations/pkg/b\npkg/b/b.go:1:1: undefined: x\nFAIL\tgithub.com/keploy/integrations/pkg/b [build failed]\nok  \tgithub.com/keploy/integrations/pkg/c\t0.1s\nFAIL'
 none_out=$'?   \tgithub.com/keploy/integrations/cmd/lookup\t[no test files]'
+# What go test prints when a -run or -skip matches no test in any package.
+notests_out=$'ok  \tgithub.com/keploy/integrations/pkg/parsers\t0.01s [no tests to run]\n?   \tgithub.com/keploy/integrations/cmd/tool\t[no test files]\nok  \tgithub.com/keploy/integrations/pkg/postgres/v3/recorder\t0.02s [no tests to run]'
 
 # test_case NAME UNSET_RC UNSET_OUT PROVEN_RC PROVEN_OUT: runs `test` with go
 # test answering those under each switch.
@@ -120,6 +128,7 @@ test_case() {
   [ -z "${EDIT_RC:-}" ] || echo "$EDIT_RC" >"$s/edit.rc"
   [ -z "${LIST_OUT+x}" ] || printf '%s\n' "$LIST_OUT" >"$s/list.out"
   [ -z "${LIST_RC:-}" ] || echo "$LIST_RC" >"$s/list.rc"
+  [ -z "${GOENV_FLAGS:-}" ] || printf '%s' "$GOENV_FLAGS" >"$s/goenv.flags"
   : >"$work/summary"
   local summary=(GITHUB_STEP_SUMMARY="$work/summary")
   [ -z "${NO_SUMMARY:-}" ] || summary=(-u GITHUB_STEP_SUMMARY)
@@ -178,7 +187,27 @@ expect_has "KEPLOY_PROVEN=1: go test exited 2 with no FAIL line"
 
 test_case "a passing go test that tested no package fails" 0 "$none_out" 0 "$pass_out"
 expect_rc 1
-expect_has "KEPLOY_PROVEN unset: go test ran no package with tests"
+expect_has "KEPLOY_PROVEN unset: go test ran no test in any package"
+
+test_case "a passing go test that ran no test in any package fails" 0 "$pass_out" 0 "$notests_out"
+expect_rc 1
+expect_has "KEPLOY_PROVEN=1: go test ran no test in any package"
+expect_has "PASS: keploy/integrations main at abc1234, KEPLOY_PROVEN unset: 2 packages"
+
+# A GOFLAGS of -run=^$ would pass every package with no test run.
+export GOFLAGS='-run=^$'
+test_case "go runs with no GOFLAGS, even when the caller exports one" 0 "$pass_out" 0 "$pass_out"
+unset GOFLAGS
+expect_rc 0
+flags_seen="$(sort -u "$work/state-$cases/goflags" | tr '\n' ' ')"
+[ "$flags_seen" = "go env GOFLAGS=<unset> go list GOFLAGS=<unset> go mod GOFLAGS=<unset> go test GOFLAGS=<unset> " ] ||
+  fail "go saw GOFLAGS: $flags_seen"
+
+GOENV_FLAGS='-run=^$' test_case "a GOFLAGS in go's env file fails before any go command" 0 "$pass_out" 0 "$pass_out"
+expect_rc 1
+expect_has "go's env file sets GOFLAGS \"-run=^\$\", which would change what go test runs"
+[ "$(cat "$work/state-$cases/calls")" = "go env GOFLAGS KEPLOY_PROVEN=<unset>" ] ||
+  fail "go ran after a GOFLAGS in its env file: $(cat "$work/state-$cases/calls")"
 
 TIDY_RC=1 test_case "a failed tidy fails before any test" 0 "$pass_out" 0 "$pass_out"
 expect_rc 1
@@ -224,6 +253,8 @@ c_head="$(commit head)"
 git -C "$origin" checkout -q -b tagged main
 c_tag="$(commit tagged)"
 git -C "$origin" tag v1.0.0
+# An annotated tag names a tag object, whose commit is the one to test.
+git -C "$origin" -c user.name=t -c user.email=t@t tag -a -m annotated annotated "$c_head"
 git -C "$origin" tag only-a-tag "$c_x"
 git -C "$origin" checkout -q main
 git -C "$origin" branch -q -D tagged
@@ -293,6 +324,14 @@ expect_rc 0
 expect_at "$c_x"
 
 resolve_case "the body names a short commit" "> Integration-Ref: ${c_head:0:9}" INTEGRATION_REF=main
+expect_rc 0
+expect_at "$c_head"
+
+resolve_case "the body names a commit by 7 digits, the fewest go get takes" "Integration-Ref: ${c_head:0:7}" INTEGRATION_REF=main
+expect_rc 0
+expect_at "$c_head"
+
+resolve_case "the body names an annotated tag" $'Integration-Ref: annotated\n' INTEGRATION_REF=main
 expect_rc 0
 expect_at "$c_head"
 
@@ -438,6 +477,7 @@ body_case "a CR alone ends no ref" $'Integration-Ref:\r\nfeat/x\r\n' ""
 body_case "a lone CR ends a line" $'Fixes it.\rIntegration-Ref: feat/x\rmore' feat/x
 body_case "an LF body" $'Fixes it.\n\nIntegration-Ref: feat/x\n' feat/x
 body_case "the first word only" $'Integration-Ref: main other-tag\n' main
+body_case "a later colon on the line is not the ref's" $'Integration-Ref: feat/x (see: y)\n' feat/x
 body_case "the first Integration-Ref line wins" $'- integration-REF:  feat/x  and more\nIntegration-Ref: feat/y\n' feat/x
 body_case "a quote marker and spaces before the colon" $'  > INTEGRATION-REF :feat/x\n' feat/x
 body_case "a tag in a sentence is no ref" $'See Integration-Ref: feat/x\n' ""
