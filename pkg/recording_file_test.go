@@ -230,6 +230,29 @@ func TestATestCasesFileIsReadOnlyInsideItsRecording(t *testing.T) {
 	})
 }
 
+// A name that passes by ".." and stays inside the recording, as a test case
+// may name its file (test-set-0/assets/deep/../body.txt), reads as before:
+// os.Root walks it, and nothing is refused.
+func TestANameThatPassesByDotDotInsideItsRecordingReads(t *testing.T) {
+	root, _ := recordingDirs(t)
+	writeRecordingFile(t, root, "test-set-0/assets/body.txt", "kept beside")
+	if err := os.MkdirAll(filepath.Join(root, "test-set-0", "assets", "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	name := "test-set-0/assets/deep/../body.txt"
+	if b, err := ReadRecordingFile(root, name); err != nil || string(b) != "kept beside" {
+		t.Fatalf("ReadRecordingFile(%q) = %q, %v; want the file", name, b, err)
+	}
+	f, err := OpenRecordingFile(root, name)
+	if err != nil {
+		t.Fatalf("OpenRecordingFile(%q): %v", name, err)
+	}
+	defer func() { _ = f.Close() }()
+	if b, err := io.ReadAll(f); err != nil || string(b) != "kept beside" {
+		t.Fatalf("OpenRecordingFile(%q) read %q, %v; want the file", name, b, err)
+	}
+}
+
 // Reading a test case's file leaves no file open: neither the recording's
 // directory nor the file.
 func TestReadingATestCasesFileLeavesNothingOpen(t *testing.T) {

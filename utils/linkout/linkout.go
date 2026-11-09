@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -37,9 +38,10 @@ type Error struct {
 	// File's own name leads out or is absolute: no link is involved.
 	Link string
 	// Target is where Link leads: its own target when that is absolute, else
-	// the place it names from the recording's folder. With no Link, it is
-	// the place File names: itself when absolute, else joined to the
-	// recording's folder.
+	// the place it names from the folder it is in, as os.Root walks it,
+	// joined to the recording's folder. With no Link, it is the place File
+	// names: itself when absolute, else, as os.Root walks it, with the links
+	// on its way followed, joined to the recording's folder.
 	Target string
 	// Inside says Target is a place in the recording named by an absolute
 	// path: File's own name, or Link's own target.
@@ -93,26 +95,13 @@ func Explain(r *os.Root, dir, file, refused string, err error) *Error {
 		dir = "."
 	}
 	e := &Error{Refused: refused, File: file, Recording: dir, Err: err}
-	place, ok := namedOut(file)
-	if !ok {
-		if e.Link, place, ok = linkOut(r, file); !ok {
-			return nil
-		}
+	var place string
+	var ok bool
+	if e.Link, place, ok = walk(r, file); !ok {
+		return nil
 	}
 	e.Target, e.Inside, e.Back = where(dir, place)
 	return e
-}
-
-// namedOut says file is a path os.Root refuses by its name alone, and the
-// place it names: itself when absolute, or, when it climbs out by "..", that
-// path from the recording. ok is false for any other name, one that stays
-// inside.
-func namedOut(file string) (place string, ok bool) {
-	clean := filepath.Clean(file)
-	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return clean, true
-	}
-	return "", false
 }
 
 // where says where place, a path the recording at dir does not open, leads:
@@ -129,52 +118,135 @@ func where(dir, place string) (target string, inside, back bool) {
 
 // maxLinks is how many links os.Root follows in one lookup, the link out
 // among them (rootMaxSymlinks in the standard library's os/root.go). Past
-// it os.Root says ELOOP, too many links, not a link out; so linkOut gives up
+// it os.Root says ELOOP, too many links, not a link out; so walk gives up
 // there too.
 const maxLinks = 8
 
-// linkOut walks rel inside r one name at a time, following each link r
-// follows (a relative one that stays inside r), and finds the first link r
-// does not follow: one with an absolute target, or one whose target climbs
-// out of r. It says where that link is inside r and the place it leads: its
-// target when absolute, else that target from r's folder. ok is false when
-// there is none: r refused rel for something else.
-func linkOut(r *os.Root, rel string) (link, place string, ok bool) {
-	clean := filepath.Clean(rel)
-	if !filepath.IsLocal(clean) {
-		return "", "", false
+// cleansFirst says os.Root cleans a path, with the target of each link it
+// follows put in place of the link, before it walks it, as it does on
+// Windows (rootCleanPath in the standard library's os/root_windows.go).
+// Elsewhere it walks the name as it is: a ".." leaves the folder the walk
+// has reached, after the links before it are followed.
+var cleansFirst = runtime.GOOS == "windows"
+
+// part is a name on the path os.Root walks, and where it came from: by is
+// the index, among the links the walk followed, of the link whose target
+// holds it, or -1 for file's own name.
+type part struct {
+	name string
+	by   int
+}
+
+// followed is a link the walk followed: where it is, from the recording,
+// and how many names came after it then (the rest of the path, which the
+// walk reaches only after the link's target).
+type followed struct {
+	at    string
+	after int
+}
+
+// parse is os.Root's splitPathInRoot (os/root.go): s, a name or a link's
+// target, split into names put between before and after, each marked by.
+// It drops "" and "." (os.Root keeps a "." at the very end, which names the
+// folder reached, as its absence does). With clean (os.Root on Windows) the
+// whole path is cleaned first. out says os.Root refuses it at once: s is
+// absolute or begins with a separator, or, cleaned, it climbs out.
+func parse(s string, by int, before, after []part, clean bool) (parts []part, out bool) {
+	if filepath.IsAbs(s) || strings.HasPrefix(filepath.ToSlash(s), "/") {
+		return nil, true
 	}
-	sep := string(filepath.Separator)
-	// cur is a folder inside r, by a path with no link on it ("" is r);
-	// rest is what is left to walk from it.
-	cur, rest := "", strings.Split(clean, sep)
-	for links := 0; len(rest) > 0; {
-		p := filepath.Join(cur, rest[0])
-		rest = rest[1:]
-		info, err := r.Lstat(p)
+	if clean {
+		all := make([]string, 0, len(before)+1+len(after))
+		for _, p := range before {
+			all = append(all, p.name)
+		}
+		all = append(all, s)
+		for _, p := range after {
+			all = append(all, p.name)
+		}
+		if s = filepath.Join(all...); !filepath.IsLocal(s) {
+			return nil, true
+		}
+		before, after = nil, nil
+	}
+	parts = append([]part(nil), before...)
+	for _, n := range strings.Split(filepath.ToSlash(s), "/") {
+		if n != "" && n != "." {
+			parts = append(parts, part{n, by})
+		}
+	}
+	return append(parts, after...), false
+}
+
+// join is parts as a path from the recording.
+func join(parts []part) string {
+	names := make([]string, len(parts))
+	for i, p := range parts {
+		names[i] = p.name
+	}
+	return filepath.Join(names...)
+}
+
+// walk walks file inside r as os.Root does (doInRoot in the standard
+// library's os/root_openat.go): one name at a time, with each link's target
+// put in its place, a ".." taken against the folder reached, and at most
+// maxLinks links. It stops where os.Root refuses file for leading out: at
+// file's own name when absolute, at a link whose target is absolute, or at
+// a ".." that climbs out of r. It says the link to blame, "" when it is
+// file's own name, and the place that leads to: an absolute target as it is,
+// else that link's target (or file) from r's folder, with the links before
+// the ".." followed. ok is false when the walk reaches the end, or stops for
+// anything else: r refused file for something else.
+func walk(r *os.Root, file string) (link, place string, ok bool) {
+	parts, out := parse(file, -1, nil, nil, cleansFirst)
+	if out {
+		return "", filepath.Clean(file), true
+	}
+	var links []followed
+	for i := 0; i < len(parts); {
+		if parts[i].name == ".." {
+			if i == 0 {
+				// It climbs out of r: blame the name, or the link, it is from.
+				if by := parts[0].by; by >= 0 {
+					return links[by].at, join(parts[:len(parts)-links[by].after]), true
+				}
+				return "", join(parts), true
+			}
+			// It leaves the folder before it, which the walk reached.
+			parts = append(parts[:i-1], parts[i+1:]...)
+			i--
+			continue
+		}
+		at := join(parts[:i+1])
+		info, err := r.Lstat(at)
 		if err != nil {
 			return "", "", false
 		}
 		if info.Mode()&fs.ModeSymlink == 0 {
-			cur = p
+			// A file, at the end or where os.Root needs a folder: no link
+			// on the way leads out.
+			if !info.IsDir() {
+				return "", "", false
+			}
+			i++
 			continue
 		}
-		if links++; links > maxLinks {
+		if len(links) == maxLinks {
 			return "", "", false
 		}
-		dest, err := r.Readlink(p)
+		dest, err := r.Readlink(at)
 		if err != nil {
 			return "", "", false
 		}
-		if filepath.IsAbs(dest) {
-			return p, dest, true
+		links = append(links, followed{at, len(parts) - i - 1})
+		next, out := parse(dest, len(links)-1, parts[:i], parts[i+1:], cleansFirst)
+		if out {
+			if filepath.IsAbs(dest) {
+				return at, dest, true
+			}
+			return at, filepath.Join(join(parts[:i]), dest), true
 		}
-		next := filepath.Join(cur, dest)
-		if !filepath.IsLocal(next) {
-			return p, next, true
-		}
-		// The link is followed: walk its target from r, then what was left.
-		cur, rest = "", append(strings.Split(next, sep), rest...)
+		parts = next
 	}
 	return "", "", false
 }
