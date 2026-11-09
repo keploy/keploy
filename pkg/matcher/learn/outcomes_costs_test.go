@@ -3877,3 +3877,69 @@ func TestOutcomeCostTheFirstShortTextsPostingsEntryCountsItsMapsFirstGroup(t *te
 		t.Errorf("three alike short texts' postings entries count %v bytes; want the first 208 more than each later one (its map's first group), the later ones alike", got)
 	}
 }
+
+// A text keploy could not read has no postings entry (shortEntry): its
+// place is read for every word (placeIndex's read always), and that read
+// refuses the call, as a recording whose payload a later load could not
+// read is refused. Posted by its empty text instead, it would hold no word,
+// so no check would read it and the call would decide as if it held none.
+func TestOutcomeCostAnUnreadTextHasNoPostingsEntry(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	x := newReaderIndex(dc)
+	defer x.release()
+	unread := Raw{mock: "mock-7", served: true}
+	if unread.Read() {
+		t.Fatal("the zero Raw is read")
+	}
+	if id := x.textOf(unread).postID(); id >= 0 {
+		t.Errorf("an unread text has postings id %d; want -1, read for every word and refused", id)
+	}
+	if n := len(x.filters.short); n != 0 {
+		t.Errorf("an unread text left %d short texts' postings entries; want none", n)
+	}
+}
+
+// A text of filterTextMin bytes or more has a filter of its words
+// (textEntry), or, where the filter does not fit the set's budget, none: it
+// is read for every word, and the set keeps no entry by its text
+// (shortEntry), which would keep the whole text for as long as the set
+// runs. A text one byte shorter is posted by its words.
+func TestOutcomeCostALongTextPastItsFilterHasNoPostingsEntry(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	x := newReaderIndex(dc)
+	defer x.release()
+	long := strings.Repeat("ab12 ", filterTextMin/5) + strings.Repeat("z", filterTextMin%5)
+	if len(long) != filterTextMin {
+		t.Fatalf("the long text is %d bytes; want %d", len(long), filterTextMin)
+	}
+	h := x.text(long)
+	// Room for the text's filter entry alone: its filter's bits do not fit.
+	dc.set.mu.Lock()
+	limit := dc.set.budget.limit
+	dc.set.budget.limit = dc.set.budget.used + filterEntryBytes + filterTextSlotBytes + filterTextGroupBytes
+	dc.set.mu.Unlock()
+	f := h.setFilter()
+	dc.set.mu.Lock()
+	dc.set.budget.limit = limit
+	dc.set.mu.Unlock()
+	if f != nil || h.filter == nil {
+		t.Fatalf("the long text's filter fit (%v) or it has no filter entry (%v); want an entry whose filter did not fit", f != nil, h.filter == nil)
+	}
+	if id := h.postID(); id >= 0 {
+		t.Errorf("a %d-byte text past its filter has postings id %d; want -1, read for every word", len(long), id)
+	}
+	if n := len(x.filters.short); n != 0 {
+		t.Errorf("a %d-byte text past its filter left %d short texts' postings entries; want none", len(long), n)
+	}
+	if id := x.text(long[1:]).postID(); id < 0 || len(x.filters.short) != 1 {
+		t.Errorf("a %d-byte text has postings id %d and %d short entries; want it posted by its words, one entry", len(long)-1, id, len(x.filters.short))
+	}
+}
