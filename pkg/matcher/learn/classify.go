@@ -4443,11 +4443,16 @@ func WholeEcho(r, a Leaf) bool {
 }
 
 // payloadKeys are the fields of a mock's spec that say where and when it was
-// recorded, not what it carried: a value found in them did not flow from the
-// mock.
+// recorded, or what keploy learned of it (its noise, correlations, variables
+// and clock reads, each with the line the learn step wrote for it), not what
+// it carried: a value found in them did not flow from the mock. A clock
+// read's line quotes what both runs read at its place: read as payload, the
+// moment record's full round read there was a moment the application was
+// given, and the echo paired a read of the clock made in the same second
+// with it.
 var payloadKeys = map[string]bool{
 	"metadata": true, "created": true, "reqtimestampmock": true, "restimestampmock": true,
-	"reqbodynoise": true, "correlations": true, "variables": true, "timestamp": true, "async": true,
+	"reqbodynoise": true, "correlations": true, "variables": true, "clocks": true, "timestamp": true, "async": true,
 }
 
 // RawOf is a mock as Classify reads it when no leaf names its values: its
