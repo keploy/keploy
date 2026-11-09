@@ -25,7 +25,9 @@ import (
 // line made the echo pair the two: a pick from what the application was
 // given, a variable of the lookup's Date header, which an HTTP replay
 // cannot follow, so the test was set aside. lastUsedAt is a read of the
-// clock in its call's window, learned and checked as one.
+// clock in its call's window, learned and checked as one. On main this row
+// fails in both classifiers: `keploy test`'s and `keploy mock`'s client
+// tests both take the value for the echo's variable.
 //
 // The same moment in the start-up recording's payload itself is still
 // found, and the echo still takes the value for a pick from it: the rule
@@ -119,14 +121,10 @@ func TestAnEchosReasonNamesWhereTheFullRoundsMomentStandsOnlyWhereKnown(t *testi
 // clock in the same seconds. The line is no word of that recording's
 // payload, and the call's own window, which holds the read in both runs,
 // makes it a read of the clock, in both classifiers. Read as payload, the
-// line made `keploy mock`'s client tests take the value for a pick from
-// the older test's Date stamp: an echo, a variable an HTTP replay cannot
-// follow.
-//
-// api-server's TestDashboardAppOperations writes updatedAt into an audit
-// insert in the same second as TestAppCRUD's PAT lookup and
-// TestAppScopedReadEndpoints' audit inserts, whose nanosecond reads the
-// learn step had learned.
+// line made both classifiers, `keploy test`'s and `keploy mock`'s client
+// tests, take the value for a pick from the older test's Date stamp: an
+// echo, a variable an HTTP replay cannot follow. On main this row fails in
+// both classifiers.
 func TestAPlainReadBesideAnotherTestsLearnedClockLineIsARead(t *testing.T) {
 	const p = "body.docs.msgs.0.app.updatedAt.$numberLong"
 	const nanos = "body.docs.msgs.0.auditedAtNanos.$numberLong"
