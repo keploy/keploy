@@ -62,8 +62,10 @@ jobs:
   # unset and set (integrations-tests.yml, against INTEGRATION_REF as the
   # builds below are). It runs beside the builds; release (the binaries) and
   # build-docker (the images) wait for it, so a tag whose tree fails
-  # integrations' tests publishes neither. Once integrations is fixed,
-  # `gh run rerun <run> --failed` tests integrations' ref again and publishes.
+  # integrations' tests publishes neither. Once integrations is fixed, re-run
+  # the failed jobs (`gh run rerun <run> --failed`) within a day, while the
+  # builds' artifacts last (retention-days: 1): it tests integrations' ref
+  # again and publishes. After a day, re-run all jobs.
   # ---------------------------------------------------------------
   integrations-tests:
     uses: ./.github/workflows/integrations-tests.yml

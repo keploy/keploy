@@ -13,7 +13,7 @@ name: Integrations Tests
 # each failing integrations package and test, and the switch it failed under.
 #
 # The integrations ref it tests, first hit wins: an `Integration-Ref: <branch,
-# tag or commit>` line in the PR body (it must exist), an integrations branch
+# tag or commit>` line in the PR body (it must exist), an integrations ref
 # named like the PR's head branch, else vars.INTEGRATION_REF or main. A keploy
 # PR that changes an API integrations uses names its integrations branch so.
 # Such a change lands in this order: the keploy PR, the integrations PR, the
@@ -21,9 +21,10 @@ name: Integrations Tests
 # tests its merge onto main) fails, and release.yml publishes nothing, until
 # the integrations PR merges.
 #
-# Fork PRs get no secrets, so they cannot read the private integrations repo:
-# the job is skipped there, and main's run after the merge and release.yml's
-# gate test the change.
+# A PR from a fork gets no secrets, so its run cannot read the private
+# integrations repo. It fails at its first step, which says so and names the
+# way out, rather than pass a check it never ran: a maintainer pushes the PR's
+# head to a keploy/keploy branch and opens a PR from it, whose run has them.
 
 on:
   pull_request:
@@ -48,15 +49,26 @@ concurrency:
 jobs:
   integrations-tests:
     name: integrations-tests
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
-    # Measured cold (no module or build cache) at about 2 min for both
-    # switches on 8 CPUs; a hosted runner has 4.
+    # Both switches take about 2.5 min on a hosted runner's 4 CPUs with no
+    # cache, and about 2.2 min with the module cache.
     timeout-minutes: 45
     runs-on: ubuntu-latest
     env:
       # pg_query_go (integrations' Postgres parser) links libpg_query by cgo.
       CGO_ENABLED: "1"
     steps:
+      # Fails closed when the run has no key to keploy/integrations (a PR from
+      # a fork), before anything else can.
+      - name: Check this run can read keploy/integrations
+        env:
+          HAS_KEY: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE != '' }}
+        # One plain scalar over several lines, which YAML joins with spaces.
+        run: test "$HAS_KEY" = true || { echo "::error title=keploy/integrations tests::This
+          run has no INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE secret, as a PR from a fork has none,
+          so it cannot read the private keploy/integrations and tests nothing. A maintainer
+          pushes this PR's head to a branch of keploy/keploy and opens a PR from that branch,
+          whose run has the secret."; exit 1; }
+
       - uses: actions/checkout@v4
         with:
           path: keploy
@@ -95,16 +107,18 @@ jobs:
           go-version-file: keploy/go.mod
           cache: false
 
-      # Restored on every run, saved only from main (below): a PR's cache is
-      # visible to that PR alone, so saving one per PR would only evict main's.
-      # The prefix match takes main's latest when either go.sum has moved.
-      - name: Restore the Go module and build caches
+      # The module cache only. Restored on every run, saved only from main
+      # (below): a PR's cache is visible to that PR alone, so saving one per
+      # PR would only evict main's. The prefix match takes main's latest when
+      # either go.sum has moved. The build cache is not kept: on 4 CPUs it
+      # saved 52 s of a run whose keploy tree was four commits from the
+      # cached one (66 s on the same tree), for 180 MB more in a repository
+      # cache already over GitHub's 10 GB limit.
+      - name: Restore the Go module cache
         id: cache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
+          path: ~/go/pkg/mod
           key: integrations-tests-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-${{ hashFiles('keploy/go.sum', 'integrations/go.sum') }}
           restore-keys: |
             integrations-tests-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-
@@ -114,11 +128,9 @@ jobs:
           INTEGRATIONS_DESC: keploy/integrations ${{ steps.ref.outputs.ref }} (${{ steps.ref.outputs.sha }})
         run: bash keploy/.github/workflows/test_workflow_scripts/integrations-tests.sh test keploy integrations
 
-      - name: Save the Go module and build caches
+      - name: Save the Go module cache
         if: ${{ !cancelled() && steps.cache.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@v4
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
+          path: ~/go/pkg/mod
           key: ${{ steps.cache.outputs.cache-primary-key }}

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Checks of integrations-tests.yml and of release.yml's gate on it: which runs
-# the job runs on, which runs a new push cancels, which runs save the cache,
-# and that release.yml's publishing jobs wait for the job and do not run after
-# it failed. Needs bash and a POSIX awk. Run by integrations-tests.yml before
+# the job runs on, that a run with no key to keploy/integrations fails, that
+# nothing lets the job pass without running the tests (continue-on-error, an
+# if: or a changed command on the steps that matter), which runs a new push
+# cancels, which runs save the cache, and that release.yml's publishing jobs
+# wait for the job and do not run after it failed. Needs bash and a POSIX awk. Run by integrations-tests.yml before
 # the real run, or locally:
 #
 #   bash .github/workflows/test_workflow_scripts/integrations-tests.workflows.tests.sh
@@ -128,9 +130,10 @@ flatten() { awk "$flatten_awk" "$1"; }
 get() { awk -F '\t' -v p="$2" '$1 == p { print substr($0, length($1) + 2); found = 1; exit } END { exit !found }' <<<"$1"; }
 # has FLAT PATH: whether PATH or anything under it is present.
 has() { awk -F '\t' -v p="$2" '$1 == p || index($1, p ".") == 1 { found = 1; exit } END { exit !found }' <<<"$1"; }
-# children FLAT PATH: the keys directly under PATH, one per line.
+# children FLAT PATH: the keys directly under PATH ("": the top-level keys),
+# one per line.
 children() {
-  awk -F '\t' -v p="$2." 'index($1, p) == 1 { k = substr($1, length(p) + 1); sub(/\..*/, "", k); if (!(k in seen)) { seen[k] = 1; print k } }' <<<"$1"
+  awk -F '\t' -v p="${2:+$2.}" '(p == "" || index($1, p) == 1) { k = substr($1, length(p) + 1); sub(/\..*/, "", k); if (!(k in seen)) { seen[k] = 1; print k } }' <<<"$1"
 }
 # step FLAT JOB NAME: the path of JOB's step with that name.
 step() {
@@ -480,12 +483,112 @@ mapfile -t jobs < <(children "$job" jobs)
 if [ "${#jobs[@]}" -ne 1 ] || [ "${jobs[0]}" != integrations-tests ]; then
   problem "jobs: ${jobs[*]}, want integrations-tests alone"
 fi
+# A skipped job passes a required check, so the job runs on every run, a PR
+# from a fork too: there its first step fails (below).
 job_if="$(get "$job" jobs.integrations-tests.if)"
 runs_case "a PR from a branch of keploy/keploy" "$job_if" "$pr$nl$passed" run
-runs_case "a PR from a fork, which gets no secrets" "$job_if" "$fork_pr$nl$passed" skip
+runs_case "a PR from a fork, which gets no secrets" "$job_if" "$fork_pr$nl$passed" run
 runs_case "a push to main" "$job_if" "$main_push$nl$passed" run
 runs_case "release.yml's call on a tag push" "$job_if" "$tag_push$nl$passed" run
-report "the job runs on PRs from keploy/keploy, main and release.yml's call, and skips fork PRs"
+report "the job runs on every PR, a fork's too, on main and on release.yml's call"
+
+# ---- integrations-tests.yml: nothing passes it without the tests ---------------
+
+# only_keys FLAT PATH KEY...: PATH has no key but those named.
+only_keys() {
+  local flat="$1" path="$2" k
+  shift 2
+  for k in $(children "$flat" "$path"); do
+    case " $* " in *" $k "*) ;; *) problem "$path has a $k key; only $* are expected" ;; esac
+  done
+}
+# A key the steps below do not expect could skip, soften or redirect them:
+# continue-on-error, if:, shell:, working-directory:, or an env such as
+# GOFLAGS that changes what go test runs.
+only_keys "$job" "" name on permissions concurrency jobs
+only_keys "$job" jobs.integrations-tests name timeout-minutes runs-on env steps
+only_keys "$job" jobs.integrations-tests.env CGO_ENABLED
+while IFS=$'\t' read -r p _; do
+  case "$p" in *continue-on-error) problem "$p: a failure there would pass the check" ;; esac
+done <<<"$job"
+p="$(get "$rel" jobs.integrations-tests.continue-on-error)" && problem "release.yml's integrations-tests has continue-on-error: $p"
+s_tests="Test integrations-tests.sh"
+s_wf="Check this workflow and release.yml's gate on it"
+s_ref="Pick the keploy/integrations ref"
+s_run="Run keploy/integrations' tests against this keploy tree"
+scripts=keploy/.github/workflows/test_workflow_scripts
+# need_step VAR NAME RUN KEY...: sets VAR to the index of the step NAME, whose
+# run: must be exactly RUN and whose keys only name, run and the KEYs; to ""
+# when there is no such step.
+need_step() {
+  local var="$1" n="$2" want_run="$3" at
+  shift 3
+  printf -v "$var" '%s' ''
+  if ! at="$(step "$job" integrations-tests "$n")"; then
+    problem "no step named '$n'"
+    return
+  fi
+  only_keys "$job" "$at" name run "$@"
+  [ "$(get "$job" "$at.run")" = "$want_run" ] || problem "$n runs '$(get "$job" "$at.run")', want '$want_run'"
+  printf -v "$var" '%s' "${at##*.}"
+}
+need_step i_tests "$s_tests" "bash $scripts/integrations-tests.tests.sh"
+need_step i_wf "$s_wf" "bash $scripts/integrations-tests.workflows.tests.sh"
+need_step i_ref "$s_ref" "bash $scripts/integrations-tests.sh resolve integrations" id env
+need_step i_run "$s_run" "bash $scripts/integrations-tests.sh test keploy integrations" env
+only_keys "$job" "jobs.integrations-tests.steps.$i_ref.env" PR_NUMBER GH_TOKEN HEAD_REF INTEGRATION_REF
+only_keys "$job" "jobs.integrations-tests.steps.$i_run.env" INTEGRATIONS_DESC
+# The integrations checkout leaves its default branch checked out; the tests
+# run on the ref resolve picked only when resolve runs between the two.
+i_co=''
+for k in $(children "$job" jobs.integrations-tests.steps); do
+  [ "$(get "$job" "jobs.integrations-tests.steps.$k.with.repository")" = keploy/integrations ] && i_co="$k"
+done
+if [ -n "$i_co" ] && [ -n "$i_ref" ] && [ -n "$i_run" ] && [ -n "$i_tests" ] && [ -n "$i_wf" ]; then
+  [ "$i_co" -lt "$i_ref" ] && [ "$i_ref" -lt "$i_run" ] ||
+    problem "steps: integrations checkout $i_co, resolve $i_ref, tests $i_run; want them in that order"
+  [ "$i_tests" -lt "$i_run" ] && [ "$i_wf" -lt "$i_run" ] ||
+    problem "the self-tests (steps $i_tests and $i_wf) do not run before the tests (step $i_run)"
+else
+  problem "a step the checks above need is missing (integrations checkout: '${i_co}')"
+fi
+report "no continue-on-error, if: or other command on the steps that decide the check"
+
+# The first step fails a run that has no key to keploy/integrations, so a PR
+# from a fork fails the check, saying why and naming the way out, instead of
+# passing it with nothing run.
+s_key="Check this run can read keploy/integrations"
+key_ok=1
+if [ "$(get "$job" jobs.integrations-tests.steps.0.name)" != "$s_key" ]; then
+  problem "the first step is '$(get "$job" jobs.integrations-tests.steps.0.name)', want '$s_key'"
+  key_ok=0
+fi
+only_keys "$job" jobs.integrations-tests.steps.0 name env run
+only_keys "$job" jobs.integrations-tests.steps.0.env HAS_KEY
+has_key="$(get "$job" jobs.integrations-tests.steps.0.env.HAS_KEY)" || has_key=''
+key_run="$(get "$job" jobs.integrations-tests.steps.0.run)" || key_run=''
+# key_case NAME SECRET WANT_HAS_KEY WANT_RC: HAS_KEY under that secret, and the
+# step's exit code under the value it got.
+key_case() {
+  local v rc
+  v="$(interpolate "$has_key" "$pr${nl}secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE=s:$2")" || v="unreadable HAS_KEY: $has_key"
+  [ "$v" = "$3" ] || problem "$1: HAS_KEY is '$v', want '$3'"
+  printf '%s\n' "$key_run" >"$work/key.sh"
+  HAS_KEY="$v" bash -e "$work/key.sh" >"$work/key.out" 2>&1
+  rc=$?
+  [ "$rc" = "$4" ] || problem "$1: the step exits $rc, want $4"
+  if [ "$4" = 0 ]; then
+    [ ! -s "$work/key.out" ] || problem "$1: the step says: $(cat "$work/key.out")"
+  elif [ "$(grep -c '^::error title=keploy/integrations tests::' "$work/key.out")" != 1 ] ||
+    ! grep -q 'a PR from a fork' "$work/key.out" || ! grep -q 'branch of keploy/keploy' "$work/key.out"; then
+    problem "$1: the step does not fail with one error naming forks and the way out: $(cat "$work/key.out")"
+  fi
+}
+if [ "$key_ok" = 1 ]; then
+  key_case "a run with the key" "-----BEGIN OPENSSH PRIVATE KEY-----" true 0
+  key_case "a run without it (a PR from a fork)" "" false 1
+fi
+report "the first step fails a run that has no key to keploy/integrations, naming the way out"
 
 # ---- integrations-tests.yml: concurrency ---------------------------------------
 
@@ -511,10 +614,17 @@ report "a PR's new push cancels its older run, and main's and releases' runs eac
 # when the restore step ran and found no exact hit. A failed test run of main
 # still saves: its modules and build cache are good. cache-hit is 'true' on an
 # exact hit, 'false' on a restore-keys hit and empty on a miss.
-save="$(step "$job" integrations-tests "Save the Go module and build caches")" || save=''
-if [ -z "$save" ]; then
-  problem "no step named 'Save the Go module and build caches'"
+save="$(step "$job" integrations-tests "Save the Go module cache")" || save=''
+restore="$(step "$job" integrations-tests "Restore the Go module cache")" || restore=''
+if [ -z "$save" ] || [ -z "$restore" ]; then
+  problem "no step named 'Save the Go module cache' or 'Restore the Go module cache'"
 else
+  # The module cache only: the build cache saves under a minute a run and
+  # would evict other workflows' caches (see the restore step).
+  for at in "$restore" "$save"; do
+    # shellcheck disable=SC2088 # the text the file holds, not a path here
+    [ "$(get "$job" "$at.with.path")" = "~/go/pkg/mod" ] || problem "$at caches '$(get "$job" "$at.with.path")', want ~/go/pkg/mod alone"
+  done
   save_if="$(get "$job" "$save.if")"
   hit() { printf 'steps.cache.outcome=s:%s%ssteps.cache.outputs.cache-hit=s:%s' "$1" "$nl" "$2"; }
   runs_case "main, a miss" "$save_if" "$main_push$nl$passed$nl$(hit success '')" run
@@ -527,7 +637,7 @@ else
   runs_case "a PR, a miss" "$save_if" "$pr$nl$passed$nl$(hit success '')" skip
   runs_case "release.yml's call on a tag push, a miss" "$save_if" "$tag_push$nl$passed$nl$(hit success '')" skip
 fi
-report "only main's runs save the cache, after a restore with no exact hit"
+report "only main's runs save the module cache, after a restore with no exact hit"
 
 # ---- release.yml: the gate -------------------------------------------------------
 
