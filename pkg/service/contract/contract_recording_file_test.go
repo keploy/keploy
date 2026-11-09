@@ -204,15 +204,21 @@ func TestTheContractReadsNoRequestBodyOutsideItsRecording(t *testing.T) {
 			if !strings.Contains(contract, "/users") {
 				t.Fatalf("the contract left out the test case:\n%.2000s", contract)
 			}
-			// The warning names the test set and the test case, and os.Root
-			// says why: the path escapes the recording's directory.
+			// The warning names the test set and the test case, and says
+			// why: os.Root's words for a path that escapes the recording's
+			// directory by its name, and, for a link, the link out and
+			// where it leads.
+			why := "path escapes from parent"
+			if strings.Contains(c.name, "link") {
+				why = "a link that leads out of it, to "
+			}
 			said := false
 			for _, e := range logs.All() {
 				fields := e.ContextMap()
 				msg, _ := fields["error"].(string)
 				if e.Level >= zapcore.WarnLevel && fields["testSetID"] == "test-set-0" && fields["testCase"] == "test-1" &&
 					strings.Contains(msg, path) && strings.Contains(msg, "is read only inside its recording") &&
-					strings.Contains(msg, "path escapes from parent") {
+					strings.Contains(msg, why) {
 					said = true
 				}
 			}

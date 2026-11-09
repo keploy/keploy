@@ -12,9 +12,14 @@ import (
 // LinkOutError is the error for a recording's file that keploy does not open
 // because the file, or a link on its way, is a symbolic link os.Root does not
 // follow: one that leads out of the recording, or one into it by an absolute
-// path. It says which link that is and where it leads, in place of os.Root's
-// own words; errors.Is and errors.As still see os.Root's error through it.
+// path. It says what keploy refused as it says any refusal of the file, then
+// which link that is and where it leads, in place of os.Root's own words;
+// errors.Is and errors.As still see os.Root's error through it.
 type LinkOutError struct {
+	// Refused says what keploy refused, as it says it for any refusal of
+	// the file, such as `the recording's file "F" is read only inside its
+	// recording "R"`.
+	Refused string
 	// File is the recording's file, relative to the recording.
 	File string
 	// Recording is the recording's folder.
@@ -33,14 +38,14 @@ type LinkOutError struct {
 }
 
 func (e *LinkOutError) Error() string {
-	subject := fmt.Sprintf("the recording's file %q is a link", e.File)
+	subject := "it is a link"
 	if e.Link != e.File {
-		subject = fmt.Sprintf("the recording's file %q leads through %q, a link", e.File, e.Link)
+		subject = fmt.Sprintf("it leads through %q, a link", e.Link)
 	}
 	if e.Inside {
-		return fmt.Sprintf("%s by the absolute path %q: keploy follows a link in the recording %q only by a relative path that stays inside it; make the link relative", subject, e.Target, e.Recording)
+		return fmt.Sprintf("%s: %s by the absolute path %q, which keploy does not follow; make the link relative", e.Refused, subject, e.Target)
 	}
-	return fmt.Sprintf("%s that leads out of the recording %q, to %q: keploy uses a recording's files only inside it; replace the link with what it leads to", subject, e.Recording, e.Target)
+	return fmt.Sprintf("%s: %s that leads out of it, to %q; replace the link with what it leads to", e.Refused, subject, e.Target)
 }
 
 func (e *LinkOutError) Unwrap() error { return e.Err }
@@ -48,8 +53,10 @@ func (e *LinkOutError) Unwrap() error { return e.Err }
 // RecordingLinkOut is err, r's refusal of file, a path inside r, the recording
 // at dir ("" is the working directory), as a *LinkOutError when file, or a
 // link on its way, is a symbolic link r does not follow (see LinkOutError).
-// It is nil when err is nil, a file that is not there, or anything else.
-func RecordingLinkOut(r *os.Root, dir, file string, err error) *LinkOutError {
+// refused is what the caller says for any refusal of file; the error says it
+// first. It is nil when err is nil, a file that is not there, or anything
+// else, which the caller says as before.
+func RecordingLinkOut(r *os.Root, dir, file, refused string, err error) *LinkOutError {
 	if err == nil || errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -60,7 +67,7 @@ func RecordingLinkOut(r *os.Root, dir, file string, err error) *LinkOutError {
 	if !ok {
 		return nil
 	}
-	return &LinkOutError{File: file, Recording: dir, Link: link, Target: target, Inside: absoluteInto(dir, target), Err: err}
+	return &LinkOutError{Refused: refused, File: file, Recording: dir, Link: link, Target: target, Inside: absoluteInto(dir, target), Err: err}
 }
 
 // maxLinkHops bounds how many links linkOut follows inside the recording, as

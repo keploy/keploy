@@ -2,17 +2,18 @@ package pkg
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/utils"
 )
 
 // A file a test case names that is a link out of the recording is refused
-// with the link and where it leads said plainly, by both readers.
+// by both readers with what any refusal of it says, then the link and where
+// it leads, said plainly.
 func TestARecordingFileALinkOutIsSaidPlainly(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symbolic links need privileges on windows")
@@ -40,8 +41,9 @@ func TestARecordingFileALinkOutIsSaidPlainly(t *testing.T) {
 		if !errors.As(err, &out) {
 			t.Fatalf("%s: got %v, want the link out named", what, err)
 		}
-		if msg := err.Error(); !strings.Contains(msg, `"set/body.txt" is a link that leads out of the recording`) || !strings.Contains(msg, outside) || strings.Contains(msg, "escapes from parent") {
-			t.Errorf("%s: %q", what, msg)
+		want := fmt.Sprintf("the recording's file %q is read only inside its recording %q: it is a link that leads out of it, to %q; replace the link with what it leads to", name, rec, outside)
+		if msg := err.Error(); msg != want {
+			t.Errorf("%s: says %q\nwant %q", what, msg, want)
 		}
 	}
 }

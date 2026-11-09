@@ -81,17 +81,30 @@ func openRecordingDir(dir string, mkdir bool, perm fs.FileMode) (*os.Root, error
 			}
 		}
 		next, err := r.OpenRoot(name)
-		_ = r.Close()
-		if errors.Is(err, fs.ErrNotExist) {
-			// Only not there: returned as it is, so os.IsNotExist tells it.
+		if err != nil {
+			err = openRefused(r, at, name, err)
+			_ = r.Close()
 			return nil, err
 		}
-		if err != nil {
-			return nil, fmt.Errorf("the folder %q is opened only inside %q: %w", name, at, err)
-		}
+		_ = r.Close()
 		r, at = next, filepath.Join(at, name)
 	}
 	return r, nil
+}
+
+// openRefused says why r, the folder at, did not open name, a folder in it: a
+// folder that is not there is only that, and is returned as it is, so
+// os.IsNotExist still tells it; one that is a link r does not follow is
+// named, with where it leads (LinkOutError).
+func openRefused(r *os.Root, at, name string, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	refused := fmt.Sprintf("the folder %q is opened only inside %q", name, at)
+	if out := RecordingLinkOut(r, at, name, refused, err); out != nil {
+		return out
+	}
+	return fmt.Errorf("%s: %w", refused, err)
 }
 
 // recordingKeployFolder is the name of a recording's folder in its project.

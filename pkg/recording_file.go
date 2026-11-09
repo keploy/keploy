@@ -42,10 +42,11 @@ func openRecordingRoot(root, path string) (*os.Root, error) {
 // inside r, the recording at root: a link on its way that r does not follow is
 // named, with where it leads (utils.LinkOutError).
 func recordingFileError(r *os.Root, root, path string, err error) error {
-	if out := utils.RecordingLinkOut(r, root, path, err); out != nil {
+	refused := fmt.Sprintf("the recording's file %q is read only inside its recording %q", path, root)
+	if out := utils.RecordingLinkOut(r, root, path, refused, err); out != nil {
 		return out
 	}
-	return fmt.Errorf("the recording's file %q is read only inside its recording %q: %w", path, root, err)
+	return fmt.Errorf("%s: %w", refused, err)
 }
 
 // ReadRecordingFile reads path, a file a test case names or one of the

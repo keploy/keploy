@@ -143,7 +143,8 @@ func TestATestCasesFileIsReadOnlyInsideItsRecording(t *testing.T) {
 		{"a recording directory that is not there", filepath.Join(root, "gone"), "body.txt", "open the recording directory"},
 	}
 	if hasLink(root) {
-		refused = append(refused, struct{ name, root, path, why string }{"a link out", root, link, "path escapes"})
+		// A link out is said as one, after what any refusal of the file says.
+		refused = append(refused, struct{ name, root, path, why string }{"a link out", root, link, inside + fmt.Sprintf(" %q: it is a link that leads out of it", root)})
 	}
 
 	t.Run("body", func(t *testing.T) {

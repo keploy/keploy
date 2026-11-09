@@ -126,12 +126,13 @@ func readBounded(root, path string, limit int64) ([]byte, error) {
 	defer func() { _ = r.Close() }()
 	data, err := safeyaml.ReadFileIn(r, rel, limit)
 	if err != nil {
-		if out := utils.RecordingLinkOut(r, root, rel, err); out != nil {
+		refused := fmt.Sprintf("the recording's file %q is read only inside its recording %q", rel, root)
+		if out := utils.RecordingLinkOut(r, root, rel, refused, err); out != nil {
 			return nil, out
 		}
 		// Wrapped, a file that is not there is still fs.ErrNotExist to
 		// errors.Is.
-		return nil, fmt.Errorf("the recording's file %q is read only inside its recording %q: %w", rel, root, err)
+		return nil, fmt.Errorf("%s: %w", refused, err)
 	}
 	return data, nil
 }
@@ -194,14 +195,20 @@ func changeRefused(root, path string, err error) error {
 	if errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	return fmt.Errorf("the recording's file %q is changed only inside its recording %q: %w", path, root, err)
+	return fmt.Errorf("%s: %w", changeRefusal(root, path), err)
+}
+
+// changeRefusal is what keploy says for any refusal to change path, relative
+// to root, inside the recording.
+func changeRefusal(root, path string) string {
+	return fmt.Sprintf("the recording's file %q is changed only inside its recording %q", path, root)
 }
 
 // changeRefusedIn is changeRefused for path, inside r, the recording at root,
 // that r refused: a link on its way that r does not follow is named, with
-// where it leads (utils.LinkOutError).
+// where it leads, after what changeRefused says (utils.LinkOutError).
 func changeRefusedIn(r *os.Root, root, path string, err error) error {
-	if out := utils.RecordingLinkOut(r, root, path, err); out != nil {
+	if out := utils.RecordingLinkOut(r, root, path, changeRefusal(root, path), err); out != nil {
 		return out
 	}
 	return changeRefused(root, path, err)
