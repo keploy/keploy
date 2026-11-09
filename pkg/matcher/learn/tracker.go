@@ -182,6 +182,14 @@ type Tracker struct {
 	// (service/agent.MaxGivensPerTest) and how long each is; Begin and NewSet
 	// forget them, so a test's givens live only while it runs.
 	gave []Earlier
+	// cases are the requests the running client test sent the application
+	// in its recording (SetCases), and how many of them the requests that
+	// reached it this run paired with (PairCase); incoming are those
+	// requests, each paired with its recorded one, in the order they
+	// arrived (Incoming): earlier places of the test's calls from their
+	// arrival (Earlier.incoming). Begin and NewSet forget them.
+	cases    caseCursor
+	incoming []Earlier
 	// awaiting is open while the running test awaits its test case's request
 	// (BeginAwaiting, Await): a call that reads the test's places then
 	// (Places) waits (AwaitRequest) until Give brings the request, or the
@@ -273,6 +281,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.answered, t.drifts = nil, t.newDrifts()
 	t.servedAt, t.serveAt = nil, nil
 	t.given, t.gave = nil, nil
+	t.cases, t.incoming = caseCursor{}, nil
 	say := t.closeUnread()
 	t.open, t.began = false, false
 	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
@@ -587,6 +596,7 @@ func (t *Tracker) beginAt(at time.Time) func() {
 	t.drifts = t.newDrifts()
 	t.names, t.taken = nil, nil
 	t.given, t.gave = nil, nil
+	t.cases, t.incoming = caseCursor{}, nil
 	t.open, t.began = true, true
 	t.beganAt = at
 	t.recBegan, t.nextRecBegan = t.nextRecBegan, time.Time{}
@@ -707,6 +717,50 @@ func (t *Tracker) GiveValue(e Earlier) {
 	t.mu.Unlock()
 }
 
+// SetCases gives the running client test's requests as its recording sent
+// them, in the order it sent them: the requests of the test that reach the
+// application from now on pair with them (Incoming). Begin and NewSet forget
+// them, so they are set once the test began.
+func (t *Tracker) SetCases(cases []ClientCase) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.cases = caseCursor{cases: append([]ClientCase(nil), cases...), used: make([]bool, len(cases))}
+	t.mu.Unlock()
+}
+
+// Incoming notes live, a request of the running client test that reached the
+// application at the real instant at, paired with the recorded request of
+// the test it pairs with (PairCase), as an earlier place of the test's calls
+// (IncomingRequest; GivenRequest) from its arrival until the next test
+// begins: a call reads it where it came before the call in both runs
+// (arrivedBefore). It reports whether it paired. One that pairs with none
+// of the test's recorded requests gives nothing, as does one that reached
+// the application while no test was open: keploy cannot tell what the
+// recording sent in its place.
+func (t *Tracker) Incoming(live *models.HTTPReq, at time.Time) bool {
+	if t == nil || live == nil || at.IsZero() {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.open {
+		return false
+	}
+	i, ok := PairCase(t.cases.cases, t.cases.used, live)
+	if !ok {
+		return false
+	}
+	t.cases.used[i] = true
+	c := t.cases.cases[i]
+	req := IncomingRequest(c.Name, c.Req, live)
+	e := GivenRequest(req)
+	e.incoming, e.arrivedRec, e.arrivedLive = true, req.RecordedAt, at
+	t.incoming = append(t.incoming, e)
+	return true
+}
+
 // End ends the running test: until the next Begin no test is open, and a
 // request belongs to no test's own mocks. A test that still awaited its
 // request closes without it: the calls waiting for it read the test's places
@@ -814,11 +868,11 @@ func (t *Tracker) Placed() Placed {
 			before = append(before, m)
 		}
 	}
-	earlier := make([]Earlier, 0, len(t.gave)+len(t.run)+len(t.served)+1)
+	earlier := make([]Earlier, 0, len(t.incoming)+len(t.gave)+len(t.run)+len(t.served)+1)
 	if t.given != nil {
 		earlier = append(earlier, *t.given)
 	}
-	earlier = append(append(append(earlier, t.gave...), t.run...), t.served...)
+	earlier = append(append(append(append(earlier, t.incoming...), t.gave...), t.run...), t.served...)
 	return Placed{
 		Test: t.epoch, Earlier: earlier, Served: append([]*models.Mock(nil), t.mocks...), Before: before, Awaiting: t.awaiting != nil,
 		Open: t.open, Begun: t.began, SetAt: t.setEpoch,

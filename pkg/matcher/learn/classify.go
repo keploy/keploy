@@ -130,7 +130,14 @@ type Earlier struct {
 	// (withoutGave): never a moment it names, so a read of the application's
 	// own clock learns as it does with no given.
 	Gave bool
-	Seen []Seen
+	// incoming, of a Given place, says it is a client test's request
+	// (Tracker.Incoming) rather than a keploy test case's: it reached the
+	// application at arrivedRec in its recording and at arrivedLive (a real
+	// instant) in record's full round, and a call reads it only where it
+	// came before the call in both (arrivedBefore).
+	incoming                bool
+	arrivedRec, arrivedLive time.Time
+	Seen                    []Seen
 	// noTime: the exchange's recorded time keploy cannot read (At was the
 	// zero time), read as one made at the call's own instant
 	// (timedEarlier), and named so.
@@ -1135,7 +1142,9 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 		return heldLearned(drift, live, rec)
 	}
 	given = givenOnce(given)
-	earlier = timedEarlier(earlier, at)
+	// The call's instant in record's full round is not told here: no
+	// client test's request is a place of it (arrivedBefore).
+	earlier = timedEarlier(arrivedBefore(earlier, at, time.Time{}), at)
 	raw = timedRaw(raw, at)
 	earlier, raw = leafedAfterCall(earlier, raw, at)
 	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, follow)

@@ -50,7 +50,7 @@ func decideOrder(in Input) []Decision {
 // either reading refuses is refused, as is one the two readings learn
 // differently, naming both (bothWays).
 func decideBoth(in Input, allScope bool) ([]Decision, []string) {
-	in.Earlier, in.Raw = timedEarlier(in.Earlier, in.At), timedRaw(in.Raw, in.At)
+	in.Earlier, in.Raw = timedEarlier(arrivedBefore(in.Earlier, in.At, in.Arrived), in.At), timedRaw(in.Raw, in.At)
 	in.Earlier, in.Raw = leafedAfterCall(in.Earlier, in.Raw, in.At)
 	ds, fields := decideWords(in, allScope)
 	kept, late := leafedAtCall(in.Earlier, in.At)
