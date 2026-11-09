@@ -1592,7 +1592,10 @@ func TestAnExpiryFilterBesideItsGrantsCreatedAtIsNoEcho(t *testing.T) {
 // the read. A date is the read's own day cut (the start of 9 November in
 // New York, 9 November), never a date the read is a cut of: 10 November,
 // read as midnight UTC, falls on 9 November in New York, so that read is
-// 10 November cut to its day there, and no echo of it.
+// 10 November cut to its day there, and no echo of it. A percent-encoded
+// time is read as it opens: its date alone, as written, is no echo of the
+// read's day where the time it opens to is another, and the time it opens
+// to echoes the read's second.
 func TestAnEchoOfAClockReadIsTheReadCutInItsOwnZoneOrTheApplications(t *testing.T) {
 	ny := time.FixedZone("EST", -5*3600)
 	for _, c := range []struct {
@@ -1605,6 +1608,8 @@ func TestAnEchoOfAClockReadIsTheReadCutInItsOwnZoneOrTheApplications(t *testing.
 		{"a created_at 3 ms before the read", "2026-11-09 12:31:42.600", "2026-11-09T07:01:42.597Z", ist, false},
 		{"the start of a day in New York, its date", "2026-11-09T00:00:00-05:00", "2026-11-09", ny, true},
 		{"the start of a day in New York, the next date", "2026-11-09T00:00:00-05:00", "2026-11-10", ny, false},
+		{"a percent-encoded time of the read's day, opened another time", "2026-11-09T10:30:00.123Z", "2026-11-09T11%3A45%3A00Z", time.UTC, false},
+		{"a percent-encoded time, opened the read's second", "2026-11-09T10:30:00.123Z", "2026-11-09T10%3A30%3A00Z", time.UTC, true},
 	} {
 		dc := NewDriftCache()
 		dc.zone = c.zone
@@ -1625,6 +1630,22 @@ func TestAnEchoOfAClockReadIsTheReadCutInItsOwnZoneOrTheApplications(t *testing.
 	} {
 		if got := textHoldsInstant(x.text(c.answer), "2026-11-09 07:01:42"); got != c.want {
 			t.Errorf("%q holds the read 2026-11-09 07:01:42 by its text: %v; want %v", c.answer, got, c.want)
+		}
+	}
+	// An answer that holds the read's text where no instant of it is read
+	// (glued to a word an instant would end inside) echoes it by that text
+	// alone: replay would serve the recorded text.
+	read := momentOf(t, "2026-11-09 07:01:42")
+	for _, c := range []struct {
+		answer, want string
+	}{
+		{"2026-11-09 07:01:42x", "resp.0.at"},
+		{"2026-11-09 07:01:43x", ""},
+	} {
+		dc := NewDriftCache()
+		d := &decider{dr: dc, x: newReaderIndex(dc), in: Input{Resp: []Leaf{{Path: "resp.0.at", Noise: "resp.0.at", Type: String, Value: c.answer}}}}
+		if got := d.instantEchoed(changedInstant{r: "2026-11-09 07:01:42", rm: &read}); got != c.want {
+			t.Errorf("an answer %q beside the read 2026-11-09 07:01:42 echoes it at %q; want %q", c.answer, got, c.want)
 		}
 	}
 }

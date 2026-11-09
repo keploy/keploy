@@ -550,7 +550,9 @@ func TestReaderAWordBesideAnAlignedInstantPairsWithItsOwn(t *testing.T) {
 // way round: R's 10:50 is an instant, F's "10 50" or "10:77" at its place
 // none (its 11:00, the text's one instant, aligns with R's 11:00). The
 // words are as many in both runs, and the separators the same where F
-// holds 10:77, yet R's instant stands alone.
+// holds 10:77, yet R's instant stands alone. Its words, and the other
+// run's at its place, pair with none: none is read as changed in place
+// (50 to 77), and no separator between them as changed (":" to " ").
 func TestReaderAnInstantAlignedWithNoneChangesShapeWhateverItsWords(t *testing.T) {
 	for _, c := range []struct{ rec, live string }{
 		{"from 10:50 to 11:00", "from 10 50 to 11:00"},
@@ -558,8 +560,12 @@ func TestReaderAnInstantAlignedWithNoneChangesShapeWhateverItsWords(t *testing.T
 		{"from 10:50 to 11:00", "from 10:77 to 11:00"},
 		{"from 10:77 to 11:00", "from 10:50 to 11:00"},
 	} {
-		if rd := readText(c.rec, c.live); !rd.ChangedShape {
+		rd := readText(c.rec, c.live)
+		if !rd.ChangedShape {
 			t.Errorf("%q -> %q: no changed shape; want an instant one run alone holds at its place to change it", c.rec, c.live)
+		}
+		if slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx >= 0 && w.LiveIdx >= 0 }) || len(rd.Separators) > 0 {
+			t.Errorf("%q -> %q: words %+v, separators %+v; want the words at the lone instant's place to pair with none", c.rec, c.live, rd.Words, rd.Separators)
 		}
 	}
 }
