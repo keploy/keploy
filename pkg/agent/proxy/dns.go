@@ -774,7 +774,10 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					At:            missed,
 					Protocol:      "DNS",
 					ActualSummary: fmt.Sprintf("%s %s", dns.TypeToString[question.Qtype], question.Name),
-					NextSteps:     "DNS mocks may be missing. Re-record to capture DNS queries.",
+					// The query's type names the call; its name is the
+					// value it asked for.
+					Command:   dns.TypeToString[question.Qtype],
+					NextSteps: "DNS mocks may be missing. Re-record to capture DNS queries.",
 				},
 			}
 			p.sendDNSMiss(proxyErr, question)

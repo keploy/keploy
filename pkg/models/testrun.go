@@ -528,6 +528,11 @@ type UnmatchedCall struct {
 	// sanitized call keeps it. A line for a person names the call with it
 	// (Named); ActualSummary never holds it, so no shape or identity does.
 	Operation string `json:"operation,omitempty" yaml:"operation,omitempty"`
+	// Command mirrors MockMismatchReport.Command: the name of a call of a
+	// protocol keploy has no shape of ("GET", "Produce"), "" when its parser
+	// names none. It names no value, so a sanitized call keeps it
+	// (CommandName) and its shape is it (MissShape).
+	Command string `json:"command,omitempty" yaml:"command,omitempty"`
 	// LiveDestination is, under the proven switch, the address the call was
 	// made to when Destination names it as the recording does instead (the
 	// mocks' destAddr: 127.0.0.1:27017 where the app reached [::1]:27017,

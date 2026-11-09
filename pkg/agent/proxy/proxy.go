@@ -6219,6 +6219,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					Protocol:      parserErr.MismatchReport.Protocol,
 					ActualSummary: parserErr.MismatchReport.ActualSummary,
 					Operation:     parserErr.MismatchReport.Operation,
+					Command:       parserErr.MismatchReport.Command,
 					Destination:   parserErr.MismatchReport.Destination,
 					ClosestMock:   parserErr.MismatchReport.ClosestMock,
 					Diff:          parserErr.MismatchReport.Diff,

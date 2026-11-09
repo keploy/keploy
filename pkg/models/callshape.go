@@ -29,10 +29,16 @@ import (
 //
 // A MongoDB miss's shape also names, from the request the matcher rendered
 // (ReceivedReq), the database the command ran in and its filter's keys
-// (mongoMissShape).
+// (mongoMissShape). A miss of a protocol keploy has no shape of (CallShape
+// "": a cache, a broker, a queue, DNS) is named by the command its parser
+// read (Command, as CommandName keeps it), and its summary is left out: it
+// can hold the values the call sent.
 func MissShape(m UnmatchedCall) string {
 	if isMongoCall(m.Protocol) {
 		return mongoMissShape(m)
+	}
+	if !IsPathProtocol(m.Protocol) && !isSQLCall(m.Protocol) {
+		return CommandName(m.Command)
 	}
 	shape := CallShape(m.Protocol, m.ActualSummary)
 	if !IsPathProtocol(m.Protocol) || (len(m.FieldDiffs) == 0 && len(m.VariablePlaces) == 0) {
@@ -63,6 +69,27 @@ func CallShape(protocol, summary string) string {
 		return mongoShape(summary)
 	}
 	return ""
+}
+
+// maxCommandName is the longest command a miss is named by (CommandName).
+const maxCommandName = 64
+
+// CommandName is c, a call's command as its parser read it
+// (UnmatchedCall.Command), when it can name a command and no value: at most
+// maxCommandName bytes, an ASCII letter first, then only ASCII letters,
+// digits, '_' and '.' (a Redis module's "JSON.GET"). "" for anything else,
+// so a parser that put a value there (a key, an address, a sentence) names
+// no command. The parser's own contract is that it never does.
+func CommandName(c string) string {
+	if c == "" || len(c) > maxCommandName || !isLetterByte(c[0]) {
+		return ""
+	}
+	for i := 1; i < len(c); i++ {
+		if b := c[i]; !isLetterByte(b) && (b < '0' || b > '9') && b != '_' && b != '.' {
+			return ""
+		}
+	}
+	return c
 }
 
 // isHTTPProtocol reports whether a miss's protocol is HTTP, whose summary is

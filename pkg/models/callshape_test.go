@@ -446,3 +446,46 @@ func TestSQLShapeMasksDigitsInNames(t *testing.T) {
 	require.Equal(t, "SELECT a `~ ? AND b ~` c", SQLShape("SELECT a `~ 999 AND b ~` c"))
 	require.Equal(t, "SELECT `t?` FROM x", SQLShape("SELECT `t1` FROM x"))
 }
+
+// A miss of a protocol keploy has no shape of is named by the command its
+// parser read, and by no word of its summary, which can hold the values the
+// call sent: a Redis command, a Kafka API, an SQS operation, a DNS query's
+// type. A miss whose parser names no command, or whose command does not read
+// as one, is named by nothing, as before. A protocol with a shape is named
+// by its shape alone, whatever command it carries. A sanitized miss keeps the
+// command, so its shape is the same when it is read again.
+func TestMissShapeOfAProtocolWithNoShapeIsItsCommand(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		miss UnmatchedCall
+		want string
+	}{
+		{"redis", UnmatchedCall{Protocol: "Redis", ActualSummary: "GET", Command: "GET"}, "GET"},
+		{"redis module", UnmatchedCall{Protocol: "Redis", ActualSummary: "JSON.GET", Command: "JSON.GET"}, "JSON.GET"},
+		{"kafka", UnmatchedCall{Protocol: "Kafka", ActualSummary: "Produce v9", Command: "Produce"}, "Produce"},
+		{"sqs", UnmatchedCall{Protocol: "SQS", ActualSummary: "SendMessage", Command: "SendMessage"}, "SendMessage"},
+		{"dns", UnmatchedCall{Protocol: "DNS", ActualSummary: "A orders.internal.", Command: "A"}, "A"},
+		// No command: the summary's words are never taken for one.
+		{"redis no command", UnmatchedCall{Protocol: "Redis", ActualSummary: "GET"}, ""},
+		{"generic", UnmatchedCall{Protocol: "Generic", ActualSummary: "opaque TCP exchange (1 request buffer(s), first 12 bytes)"}, ""},
+		// A command that could be a value names none.
+		{"spaced", UnmatchedCall{Protocol: "Redis", Command: "GET user:42"}, ""},
+		{"address", UnmatchedCall{Protocol: "Redis", Command: "alice@example.com"}, ""},
+		{"digit first", UnmatchedCall{Protocol: "Kafka", Command: "42"}, ""},
+		{"unparsed", UnmatchedCall{Protocol: "Redis", Command: "(unparsed command)"}, ""},
+		{"too long", UnmatchedCall{Protocol: "SQS", Command: strings.Repeat("A", maxCommandName+1)}, ""},
+		// A protocol with a shape is named by it.
+		{"http", UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /orders/42", Command: "GET"}, "GET /orders/{}"},
+		{"sql", UnmatchedCall{Protocol: "PostgreSQL", ActualSummary: "SELECT 1", Command: "SELECT"}, "SELECT ?"},
+		{"mongo", UnmatchedCall{Protocol: "MongoDB", ActualSummary: "delete on apps", Command: "drop"}, "delete on apps"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, c.want, MissShape(c.miss))
+			s := c.miss.Sanitized()
+			require.Equal(t, c.want, s.ActualSummary, "a sanitized miss's summary is its shape")
+			require.Equal(t, c.want, MissShape(s), "a sanitized miss is shaped the same again")
+			require.Equal(t, CommandName(c.miss.Command), s.Command, "a sanitized miss keeps a command only when it names one")
+		})
+	}
+	require.Equal(t, maxCommandName, len(CommandName(strings.Repeat("A", maxCommandName))), "a command of the longest length is kept")
+}

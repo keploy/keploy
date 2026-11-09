@@ -256,6 +256,12 @@ type MockMismatchReport struct {
 	// registered reader names it (HTTPOperationLabel): "query GetAppLabels".
 	// "" when it carries none. ActualSummary never holds it.
 	Operation string
+	// Command is the name of the call, as its parser reads it from the
+	// request, for a protocol keploy has no shape of (CallShape ""): a cache
+	// command ("GET"), a broker API ("Produce"), a queue operation
+	// ("SendMessage"), a DNS query type ("A"). Never a value the call sent,
+	// and "" when the parser names none. A miss's shape is it (MissShape).
+	Command string
 	// DestinationScope is the verdict on whether any mock the matcher
 	// compared against targeted this call's upstream (DestinationScope*
 	// constants; empty means the question was never answered). It is a
