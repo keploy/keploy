@@ -151,7 +151,14 @@ type TestResult struct {
 	//     (GetConsumedMocks, in either instrument or non-instrument mode)
 	//     fails. The replayer skips emitting MockMismatches rather than
 	//     attribute stale loop-scoped data to the wrong test case.
+	//   - Replay without an agent, and results written before a test reaches
+	//     the replay loop (a test that could not be sent).
 	//
+	// Present, even with both lists empty, whenever the consumed mocks were
+	// read: an empty value says the test consumed no asserted mock and its
+	// mapping names none (no mapping, or only DNS, connection-failure, startup
+	// or undelivered entries). DNS, connection-failure and startup mocks are
+	// never listed on either side, so it may have consumed those.
 	// Consumers should treat an absent value as "data not available for
 	// this test / run mode", NOT "no mocks were consumed".
 	MockMismatches *MockMismatchInfo `json:"mock_mismatches,omitempty" yaml:"mock_mismatches,omitempty"`
@@ -472,8 +479,10 @@ type MockMismatchMock struct {
 //     due to mock-pool divergence (mocks were added/removed between recording
 //     and replay).
 //   - TestResult.MockMismatches — populated for EVERY test that went through
-//     the replay loop, regardless of pass/fail or obsolescence. Lets report
-//     UIs render expected vs consumed mocks for passing tests too.
+//     the replay loop, regardless of pass/fail or obsolescence, whenever its
+//     consumed mocks were read, both lists empty for a test with no
+//     dependency. Lets report UIs render expected vs consumed mocks for
+//     passing tests too.
 type MockMismatchInfo struct {
 	ExpectedMocks []MockMismatchMock `json:"expected_mocks,omitempty" yaml:"expected_mocks,omitempty"`
 	ActualMocks   []MockMismatchMock `json:"actual_mocks,omitempty" yaml:"actual_mocks,omitempty"`

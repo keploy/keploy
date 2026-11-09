@@ -4941,23 +4941,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 					// TestResult.MockMismatches: populated for tests going
 					// through this (non-streaming) replay path — regardless of
-					// pass/fail or obsolescence. Mirrors the sandbox integration
-					// runner's behaviour so report UIs can render expected vs
-					// actual mocks for passing tests too, not just the
-					// obsolete-mismatch path. The deferred streaming-test path
-					// (Phase 2 stream replay) does NOT populate this field
-					// today — consumers should treat absence as "data not
-					// available for this run mode", not "no mocks". Skip when
-					// both sides are empty so the json/yaml field stays absent
-					// via omitempty. Also skip when perTestConsumed is unknown
-					// (non-instrument GetConsumedMocks failed) so we don't
-					// emit ActualMocks built from stale loop-scoped data.
-					if perTestConsumedKnown && (len(expectedMockInfos) > 0 || len(actualMockInfos) > 0) {
-						testCaseResult.MockMismatches = &models.MockMismatchInfo{
-							ExpectedMocks: expectedMockInfos,
-							ActualMocks:   actualMockInfos,
-						}
-					}
+					// pass/fail or obsolescence — whenever what the test
+					// consumed is known (mockMismatchesFor). The deferred
+					// streaming-test path (Phase 2 stream replay) does NOT
+					// populate this field today.
+					testCaseResult.MockMismatches = mockMismatchesFor(perTestConsumedKnown, expectedMockInfos, actualMockInfos)
 
 					// Existing FailureInfo.MockMismatch semantics preserved:
 					// only set when the test became OBSOLETE due to a real
