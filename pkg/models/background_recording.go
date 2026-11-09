@@ -21,3 +21,20 @@ type BackgroundRecording struct {
 	Mock *Mock
 	From time.Time
 }
+
+// BackgroundBinding names one place at which a background miss
+// (MockMismatchReport.Background) differs from the background recording it
+// is the same request as: the recording holds the recorded value of a
+// variable the call's own test bound before the call, and the call holds the
+// value the test bound it to (variables.Table.Own). Recording is that
+// background recording, Place the call's place (body.<path>, as learned
+// noise names it), Variable the binding's name, and BoundMock and BoundPlace
+// where the test bound it (VariableBinding.Mock and Place). Names only,
+// never a value.
+type BackgroundBinding struct {
+	Recording  string `json:"recording" yaml:"recording"`
+	Place      string `json:"place" yaml:"place"`
+	Variable   string `json:"variable" yaml:"variable"`
+	BoundMock  string `json:"bound_mock" yaml:"bound_mock"`
+	BoundPlace string `json:"bound_place" yaml:"bound_place"`
+}

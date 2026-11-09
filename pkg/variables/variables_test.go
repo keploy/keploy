@@ -888,3 +888,30 @@ func TestTable_ARunsVariableAnEarlierTestBindsIsTheSets(t *testing.T) {
 		t.Fatalf("a run's variable carried into a test is forgotten at the next: %+v (%v)", b, ok)
 	}
 }
+
+// Own is the running scope's own bindings: none before the first scope
+// began (a start-up binding is the run's under KeepRun, and no test runs),
+// then the scope's alone, never the run's, nor a run variable bound in the
+// scope; and the next scope begins with none of the last one's.
+func TestTableOwnIsTheRunningScopesBindingsAlone(t *testing.T) {
+	var tb Table
+	tb.KeepRun()
+	tb.Bind(Binding{Name: "boot", Value: "b-live", Recorded: "b-rec", Mock: "mock-1", Place: "body.id"})
+	if got := tb.Own(); got != nil {
+		t.Fatalf("Own before the first scope = %+v; want none", got)
+	}
+	tb.Start(nil)
+	tb.Bind(Binding{Name: "appId", Value: "edf54684", Recorded: "459916c7", Mock: "mock-226", Place: "body.docs.msgs.0.appId"})
+	tb.Bind(Binding{Name: models.RunVariablePrefix + "tenant", Value: "t-live", Recorded: "t-rec", Mock: "mock-227", Place: "body.tenant"})
+	got := tb.Own()
+	if len(got) != 1 || got[0].Name != "appId" || got[0].Mock != "mock-226" {
+		t.Fatalf("Own in the scope = %+v; want appId alone", got)
+	}
+	if _, ok := tb.Lookup("boot"); !ok {
+		t.Fatal("the run's binding is not in force in the scope")
+	}
+	tb.Start(nil)
+	if got := tb.Own(); len(got) != 0 {
+		t.Fatalf("Own in the next scope = %+v; want none", got)
+	}
+}

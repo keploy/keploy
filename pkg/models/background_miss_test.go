@@ -63,3 +63,31 @@ func TestBackgroundMockNamesAreTheWorkerThenTheStartupMocks(t *testing.T) {
 		t.Fatalf("no mapping names %v", got)
 	}
 }
+
+// A background miss that differs from its background recording by a value
+// its own test bound keeps, through the sanitized copy and the report's
+// yaml and json, the names of each such place and of where the test bound
+// it, and no value.
+func TestABackgroundMissKeepsTheNamesOfItsTestsBoundValues(t *testing.T) {
+	bound := BackgroundBinding{Recording: "mock-2954", Place: "body.docs.msgs.0.q.app_id", Variable: "appId", BoundMock: "mock-226", BoundPlace: "body.docs.msgs.0.appId"}
+	bg := UnmatchedCall{Protocol: "MongoDB", MatchPhase: MatchPhaseBody, ActualSummary: "delete on api-server.uiSessionBatches", Background: true, BackgroundBound: []BackgroundBinding{bound}}
+	got := bg.Sanitized()
+	if !reflect.DeepEqual(got.BackgroundBound, bg.BackgroundBound) {
+		t.Fatalf("sanitized BackgroundBound = %+v; want %+v", got.BackgroundBound, bg.BackgroundBound)
+	}
+	got.BackgroundBound[0].Variable = "changed"
+	if bg.BackgroundBound[0].Variable != "appId" {
+		t.Fatal("the sanitized copy shares its places with the miss")
+	}
+	y, err := yaml.Marshal(bg)
+	if err != nil || !strings.Contains(string(y), "background_bound:") || !strings.Contains(string(y), "bound_mock: mock-226") {
+		t.Fatalf("yaml %s (%v) lost the bound places", y, err)
+	}
+	j, err := json.Marshal(bg)
+	if err != nil || !strings.Contains(string(j), `"background_bound":[{"recording":"mock-2954","place":"body.docs.msgs.0.q.app_id","variable":"appId","bound_mock":"mock-226","bound_place":"body.docs.msgs.0.appId"}]`) {
+		t.Fatalf("json %s (%v) lost the bound places", j, err)
+	}
+	if y, _ := yaml.Marshal(UnmatchedCall{Background: true}); strings.Contains(string(y), "background_bound") {
+		t.Fatalf("a background miss with no bound places writes them: %s", y)
+	}
+}

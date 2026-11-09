@@ -278,3 +278,22 @@ func TestRenderUnmatchedCalls_ListsBackgroundMissesApart(t *testing.T) {
 		t.Fatalf("a test with only a background miss:\n%s", out)
 	}
 }
+
+// A background miss that differs from its background recording by a value
+// its test bound is listed with the place and where the test bound it; a
+// background miss with no bound place writes no such line.
+func TestRenderUnmatchedCalls_NamesABackgroundMissesBoundPlaces(t *testing.T) {
+	del := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "delete on api-server.uiSessionBatches", MatchPhase: models.MatchPhaseBody, Background: true,
+		BackgroundBound: []models.BackgroundBinding{{Recording: "mock-2954", Place: "body.docs.msgs.0.q.app_id", Variable: "appId", BoundMock: "mock-226", BoundPlace: "body.docs.msgs.0.appId"}}}
+	poll := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "findAndModify ptw_endpoints", MatchPhase: models.MatchPhaseBody, Background: true}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{del, poll}}})
+	out := sb.String()
+	want := "  delete on api-server.uiSessionBatches: like background recording mock-2954 but at body.docs.msgs.0.q.app_id, which holds appId as this test bound it at mock-226 body.docs.msgs.0.appId\n"
+	if !strings.Contains(out, want) {
+		t.Fatalf("report lacks the bound place line %q:\n%s", want, out)
+	}
+	if strings.Count(out, "like background recording") != 1 {
+		t.Fatalf("report names bound places for a miss with none:\n%s", out)
+	}
+}

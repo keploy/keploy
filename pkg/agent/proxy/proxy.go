@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -6248,6 +6249,9 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					// The same request as a set background recording:
 					// listed, counted against no test.
 					Background: parserErr.MismatchReport.Background,
+					// Of a background miss, the places it differs from
+					// its recording only by its test's bound values.
+					BackgroundBound: slices.Clone(parserErr.MismatchReport.BackgroundBound),
 					// A call the parser held for a later test's recording
 					// that none answered: missed only at the set's end.
 					Held: parserErr.MismatchReport.HeldPastWindow,

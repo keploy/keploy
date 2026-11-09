@@ -634,6 +634,11 @@ type UnmatchedCall struct {
 	// application's background work made it, so it fails no test and no set,
 	// and holds back no noise learning.
 	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
+	// BackgroundBound mirrors MockMismatchReport.BackgroundBound: of a
+	// background miss, each place at which it differs from its background
+	// recording only by a value its own test bound before it, and where the
+	// test bound it. Names only, never a value.
+	BackgroundBound []BackgroundBinding `json:"background_bound,omitempty" yaml:"background_bound,omitempty"`
 	// RecordedIn names, under the proven switch, the other test of the set
 	// that owns the recording a NotOwned call is (ClosestMock): the call is
 	// likely one that test recorded, such as a later exchange of a connection

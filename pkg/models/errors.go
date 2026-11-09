@@ -343,6 +343,11 @@ type MockMismatchReport struct {
 	// that no recording was left to answer. Its miss is listed, and counts
 	// against no test (UnmatchedCall.Background).
 	Background bool
+	// BackgroundBound, of a Background miss, names each place at which the
+	// call differs from its background recording only by a value the call's
+	// own test bound before it (BackgroundBinding). Empty when the call is
+	// that recording's request apart from noise and clock reads alone.
+	BackgroundBound []BackgroundBinding
 	// Reason is why the call missed, when the learn step decided it, or
 	// MissViewReplaced when a test's begin or end, or another view served
 	// between tests, replaced its view before its miss was diagnosed

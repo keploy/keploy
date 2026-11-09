@@ -710,6 +710,21 @@ func (t *Table) Clone() *Table {
 	return c
 }
 
+// Own is the bindings the running scope made itself, sorted by name: each
+// value a call of the running test (or of the gap after it) bound, never one
+// of the run's (KeepRun), nor one of the table whose run's it reads
+// (ReadRunOf). Before the first scope began it is none: no test is running.
+// A background miss reads it: only a value the call's own test bound before
+// it may stand where its background recording holds the recorded value.
+func (t *Table) Own() []Binding {
+	from := t.lock()
+	defer t.unlock(from)
+	if !t.began {
+		return nil
+	}
+	return sorted(t.vals)
+}
+
 // Snapshot returns the bindings in force, the run's included, by name.
 func (t *Table) Snapshot() []Binding {
 	from := t.lock()

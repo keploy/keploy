@@ -1219,7 +1219,20 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 	if len(background) > 0 {
 		fmt.Fprintf(sb, "=== %d BACKGROUND CALL(S) WITH NO MATCHING MOCK (count against no test) ===\n", len(background))
 		sb.WriteString("  each is the same request as a recording of the set's background (mappings.yaml worker: or startup:), made once more than one was left to answer it\n")
+		renderBackgroundBound(sb, background)
 		renderMissList(sb, background)
+	}
+}
+
+// renderBackgroundBound writes, for each background miss that differs from
+// its background recording by values its test bound (UnmatchedCall.
+// BackgroundBound), which places do and where the test bound each: the
+// evidence that the call is that recording's, by names alone.
+func renderBackgroundBound(sb *strings.Builder, calls []models.UnmatchedCall) {
+	for _, uc := range calls {
+		for _, b := range uc.BackgroundBound {
+			fmt.Fprintf(sb, "  %s: like background recording %s but at %s, which holds %s as this test bound it at %s %s\n", uc.ActualSummary, b.Recording, b.Place, b.Variable, b.BoundMock, b.BoundPlace)
+		}
 	}
 }
 
