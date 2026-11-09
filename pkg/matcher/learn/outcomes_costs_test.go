@@ -3668,3 +3668,68 @@ func mapsHeld[K comparable, V any](keys []K) func(copies int) int64 {
 		return held
 	}
 }
+
+// A recording round F never served before the call (its F side unstated,
+// no view of it told) shows a word only where one of its texts holds it, so
+// a word's check reads and copies only those the set's postings name for
+// the word, as it does a recording F served as recorded: on api-server's
+// round F every such recording was read for every word of every call. One
+// F served with no view told (fMay) may have given the word whatever its
+// texts hold: it is read for every word, and refuses each as unknown. The
+// verdicts stay at 300 and 3000 recordings, and the places read do not grow
+// with them.
+func TestOutcomeCostAWordsCheckReadsOnlyTheUnservedRecordingsThatMayHoldIt(t *testing.T) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
+	decide := func(n int, served bool) (string, int64, int64) {
+		mocks := make([]*models.Mock, n)
+		for i := range mocks {
+			name, body, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d"}`, i, i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
+			if i == n/2 {
+				name, body, at = "mock-held", `{"note":"Kept A1B2C3D4","ref":"a1b2c3d4"}`, eRecAt.Add(-time.Second)
+			}
+			mocks[i] = getAnswer(name, fmt.Sprintf("http://api/items/%d", i), body, at)
+		}
+		tr := NewTracker()
+		tr.NewSet()
+		var got string
+		var copies, asks int64
+		// The second call of the set: the set's filters are built by then.
+		for range 2 {
+			tr.Begin()
+			dc := tr.Drifts()
+			raw := make([]Raw, n)
+			for i, m := range mocks {
+				raw[i] = dc.LazyRawOf(m, false, nil)
+				if served {
+					raw[i] = dc.LazyRawOf(m, true, nil).ServedAs(i + 1)
+				}
+			}
+			c, a := placeCopies.Load(), placeAsks.Load()
+			got = oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, raw, nil, nil)))
+			copies, asks = placeCopies.Load()-c, placeAsks.Load()-a
+			tr.End()
+		}
+		return got, copies, asks
+	}
+	const heldUnknown = `[ a1b2c3d4->f0e9d8c7 refused unknown: keploy cannot tell what round F gave at mock-held before this call (both values hold it, or only part of a word)] [ b2c3d4e5->e9d8c7b6 fresh] [ c3d4e5f6->d8c7b6a5 fresh] [ d4e5f6a7->c7b6a5f4 fresh] [ e5f6a7b8->b6a5f4e3 fresh] `
+	for _, n := range []int{300, 3000} {
+		got, copies, asks := decide(n, false)
+		t.Logf("%d recordings round F never served: %s; places read %d, copied %d", n, got, asks, copies)
+		if got != heldUnknown {
+			t.Errorf("over %d recordings round F never served the call decides %q; want %q", n, got, heldUnknown)
+		}
+		if asks != 1 || copies != 1 {
+			t.Errorf("over %d recordings round F never served the call read %d places and copied %d; want only mock-held, the one whose text holds a word, once", n, asks, copies)
+		}
+	}
+	got, copies, asks := decide(300, true)
+	t.Logf("300 recordings round F served with no view told: %s; places read %d, copied %d", got, asks, copies)
+	if strings.Count(got, "refused unknown") != 5 || strings.Contains(got, "fresh") {
+		t.Errorf("over 300 recordings round F served with no view told the call decides %q; want each word refused as unknown", got)
+	}
+	// Each word's check reads every place, once a pass (wordAt may decide a
+	// word twice).
+	if asks < 5*300 {
+		t.Errorf("over 300 recordings round F served with no view told the call read %d places; want each for each of the 5 words (at least %d)", asks, 5*300)
+	}
+}

@@ -1592,8 +1592,15 @@ func (oh *outsideHeld) asked(state bool, in ...map[int32]heldRoles) []int32 {
 // place. Read always: a place whose texts the postings do not hold (a text
 // shorter than filterTextMin, one keploy could not read, one past the
 // set's budget, a call in no set), and one a word may show at without its
-// texts holding it: F's side unstated (its views and fMay decide), a body
-// that declares no media type (gluedAt), a given (glued inside the word).
+// texts holding it (showsUntold): F's side unstated where F served it with no
+// view told or read (fMay) or with views (its views decide), a body that
+// declares no media type (gluedAt), a given (glued inside the word). A
+// place F's side leaves unstated otherwise (a recording round F never
+// served) shows a word only where one of its texts holds it (evidenceOf), so
+// the postings name it as they name any place: read for every word, each of
+// thousands of recordings round F had not served was copied and asked for
+// every word of every call, most of the learn step's work on api-server's
+// round F.
 type placeIndex struct {
 	rec, live map[int32][]int32
 	always    []int32
@@ -1613,7 +1620,7 @@ func (dc *decider) places() *placeIndex {
 	placeBuilds.Add(1)
 	for i, p := range dc.ps {
 		r, l := int32(-1), int32(-1)
-		if !p.fUnstated && !p.undeclared && !p.gave {
+		if !p.showsUntold() {
 			r, l = p.t.rec.postID(), p.t.live.postID()
 		}
 		if r < 0 || l < 0 {
@@ -1624,6 +1631,16 @@ func (dc *decider) places() *placeIndex {
 		pi.live[l] = append(pi.live[l], int32(i))
 	}
 	return pi
+}
+
+// showsUntold reports whether a word may show at p without either of its
+// texts holding it (placeIndex's read always): round F served it with no
+// view told (fMay) or with views of its own (evidenceOf reads both as
+// unknown whatever its texts hold; placesOf sets either only where F's side
+// is unstated), a body that declares no media type (gluedAt), or a given
+// (glued inside the word).
+func (p evPlace) showsUntold() bool {
+	return p.fMay || len(p.views) > 0 || p.undeclared || p.gave
 }
 
 // asked reports, by place, whether a check of w reads it (placeIndex); nil
