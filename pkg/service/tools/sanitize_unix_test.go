@@ -411,6 +411,9 @@ func TestATestSetFileNameThatLeadsOutIsSaidPlainly(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(set, "out")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(filepath.Join(outside, "y.yaml"), filepath.Join(set, "sub", "l.yaml")); err != nil {
+		t.Fatal(err)
+	}
 	dir, err := os.OpenRoot(set)
 	if err != nil {
 		t.Fatal(err)
@@ -425,6 +428,9 @@ func TestATestSetFileNameThatLeadsOutIsSaidPlainly(t *testing.T) {
 		{"out/x.yaml", refused("out/x.yaml") + fmt.Sprintf("it leads through %q, a link that leads out of it, to %q; replace the link with what it leads to", "out", outside)},
 		// Not one path element, but inside: refused, not as leading out.
 		{"sub/x.yaml", (&fs.PathError{Op: "open", Path: filepath.Join(set, "sub", "x.yaml"), Err: fs.ErrInvalid}).Error()},
+		// Nor is a link out at the end of such a name, which the open would
+		// not follow: it is refused for its name.
+		{"sub/l.yaml", (&fs.PathError{Op: "open", Path: filepath.Join(set, "sub", "l.yaml"), Err: fs.ErrInvalid}).Error()},
 	} {
 		_, rerr := readTestSetFile(dir, c.name)
 		werr := writeTestSetFile(dir, c.name, []byte("x"), 0o644, false)
