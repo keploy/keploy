@@ -740,6 +740,56 @@ func TestOutcomeAWallClockOfNoZonePickedFromATimetableInUTCIsItsValue(t *testing
 	}
 }
 
+// laterTimetable is a call whose argument is a wall clock of no zone in IST
+// (the minute the application picked), recorded at 11:14 and seen at 11:15
+// by round F, beside another test's timetable recorded 20 s after the call,
+// which round F gave the application before it; own are the call's own
+// test's earlier exchanges.
+func laterTimetable(slots [2]string, client bool, own []Earlier) Input {
+	const p = "args.0"
+	ist := time.FixedZone("IST", 5*3600+1800)
+	call := time.Date(2026, 10, 22, 5, 44, 20, 0, time.UTC)
+	recPick, livePick := time.Date(2026, 10, 22, 5, 44, 0, 0, time.UTC), time.Date(2026, 10, 22, 5, 45, 0, 0, time.UTC)
+	tt := getAnswer("mock-2", "http://api/departures", `{"slots":[{"at":"`+slots[0]+`"},{"at":"`+slots[1]+`"}]}`, call.Add(20*time.Second))
+	in := iCall(p, Instant, "", "", call, call.Add(FullRoundLead), nil, own, []Raw{RawOf(tt, true).OfAnotherTest()})
+	in.Rec.Leaves[p], in.Live.Leaves[p] = WallClockLeaf(p, p, recPick.In(ist), time.Minute), WallClockLeaf(p, p, livePick.In(ist), time.Minute)
+	in.Drifts.zone, in.Drifts.clientTests = ist, client
+	return in
+}
+
+// A wall clock of no zone the application picked from another test's
+// timetable that round F gave it before the call, recorded after the call,
+// stays refused as a pick from it, never the test's own value: only round
+// F's run had that timetable to pick from, and no place of the call's own
+// test holds either minute, so the echo stands on the timetable alone. In
+// UTC its slots name the minutes only read in the application's zone; at
+// the application's offset the refusal names the timetable. In a client
+// test and a keploy test.
+func TestOutcomeAWallClockPickedFromAnotherTestsLaterTimetableStaysRefused(t *testing.T) {
+	for _, client := range []bool{false, true} {
+		oRefused(t, fmt.Sprintf("a minute picked from a later timetable in UTC, client test %v", client),
+			oWord(t, Decide(laterTimetable([2]string{"2026-10-22T05:44:00Z", "2026-10-22T05:45:00Z"}, client, nil)), "2026-10-22T11:14", "2026-10-22T11:15"), RefusalPick)
+		oRefused(t, fmt.Sprintf("a minute picked from a later timetable at the app's +5:30, client test %v", client),
+			oWord(t, Decide(laterTimetable([2]string{"2026-10-22T11:14:00+05:30", "2026-10-22T11:15:00+05:30"}, client, nil)), "2026-10-22T11:14", "2026-10-22T11:15"), RefusalAnotherScope, "mock-2")
+	}
+}
+
+// The test's own places make no echo of their own where the recorded minute
+// stands there only as round F served it: an earlier answer of the test
+// recorded with round F's minute and served by round F with the recorded
+// one names the recorded minute in no recording. The minute picked from
+// another test's later timetable stays refused as a pick, as without that
+// answer.
+func TestOutcomeAMinuteOnlyRoundFServedTheTestMakesNoOwnEcho(t *testing.T) {
+	at := time.Date(2026, 10, 22, 5, 44, 15, 0, time.UTC)
+	own := []Earlier{{Mock: "mock-1", At: at, Own: true, Payload: oPayload("mock-1", at),
+		Seen: []Seen{{Side: Response, Leaf: oText("body.next", "2026-10-22T11:15:00+05:30"), Live: "2026-10-22T11:14:00+05:30"}}}}
+	for _, client := range []bool{false, true} {
+		oRefused(t, fmt.Sprintf("a minute only round F served at the test's own answer, client test %v", client),
+			oWord(t, Decide(laterTimetable([2]string{"2026-10-22T05:44:00Z", "2026-10-22T05:45:00Z"}, client, own)), "2026-10-22T11:14", "2026-10-22T11:15"), RefusalPick)
+	}
+}
+
 // A client test's own UnixNano that no earlier place holds in either run,
 // with no begin: the test's own value, a fresh Value at the call that first
 // sends it (client_bind_test.go:23-74, step 8). A later send of it binds to
