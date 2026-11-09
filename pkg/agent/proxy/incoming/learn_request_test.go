@@ -435,6 +435,9 @@ func TestTakeRequestReadsAChunkedBodyAsItPasses(t *testing.T) {
 			if len(cb.got) > maxTakenBody {
 				t.Fatalf("the body read as it passed holds %d bytes, more than the %d keploy reads", len(cb.got), maxTakenBody)
 			}
+			if cb.over != (c.name == "larger than keploy reads") || cb.over && len(cb.got) > 0 {
+				t.Fatalf("over the bound: %v, and it still holds %d bytes of what passed", cb.over, len(cb.got))
+			}
 			_ = req.Body.Close()
 			got := log.list()
 			if len(got) != 1 || got[0].coming || got[0].dones != 1 || !strings.Contains(got[0].unread, c.why) {
