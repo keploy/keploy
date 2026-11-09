@@ -1472,6 +1472,47 @@ func TestATimeToLiveAnEarlierTestReadAtAFinerCutIsAReadThroughTheRun(t *testing.
 	}
 }
 
+// api-server's jobEvents insert of a suite step's answer
+// (TestSlowStepFailsOnlyItself) carries that answer's Date header, an HTTP
+// date to the second, read from the clock in the call's window. Where the
+// minute moves to the value the seconds were recorded at (07:06:07 to
+// 07:07:09), or the seconds to the value the minute was (02:42:39 to
+// 02:43:42), the word diff kept that word, pairing R's seconds with F's
+// minute or R's minute with F's seconds, and keploy read the date's other
+// words as one the text lost and one it gained (refused, changed-shape).
+// These are the ten distinct pairs one day of the api-server suite refused.
+// The date is one instant in both runs, aligned whole before any word is
+// diffed, read by its moment: a Clock, a plain read at the second, as where
+// no word repeats (07:06:17 to 07:07:29). A text of the same words that is
+// no instant still changes shape, word by word.
+func TestAnHTTPDateWhoseMinuteTakesItsSecondsIsReadWhole(t *testing.T) {
+	const p, httpDate = "body.docs.msgs.0.event.response.headers.Date", "Mon, 02 Jan 2006 15:04:05 GMT"
+	at := func(h, m, s int) time.Time { return time.Date(2026, 11, 9, h, m, s, 500e6, time.UTC) }
+	for _, row := range []struct{ rec, live time.Time }{
+		{at(1, 56, 58), at(1, 58, 1)},
+		{at(2, 42, 39), at(2, 43, 42)},
+		{at(3, 9, 10), at(3, 10, 13)},
+		{at(3, 57, 59), at(3, 59, 2)},
+		{at(6, 32, 33), at(6, 33, 35)},
+		{at(6, 55, 56), at(6, 56, 58)},
+		{at(7, 6, 7), at(7, 7, 9)},
+		{at(9, 48, 45), at(9, 49, 48)},
+		{at(13, 32, 33), at(13, 33, 35)},
+		{at(15, 29, 30), at(15, 30, 32)},
+		{at(7, 6, 17), at(7, 7, 29)},
+	} {
+		rec, live := row.rec.Format(httpDate), row.live.Format(httpDate)
+		d := v5Decide(t, p, String, rec, live, row.rec, row.live, 20*time.Millisecond)
+		if d.Outcome != OutcomeClock || d.Clock == nil || !d.Clock.Plain() || d.Clock.Res != time.Second {
+			t.Errorf("%q to %q: %+v (%+v); want a Clock, a plain read at the second", rec, live, d, d.Refusal)
+		}
+	}
+	d := v5Decide(t, p, String, "seq 07 06 07", "seq 07 07 09", at(7, 6, 7), at(7, 7, 9), 20*time.Millisecond)
+	if d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalChangedShape {
+		t.Errorf("a text of no instant whose word moves: %+v; want refused (changed-shape)", d)
+	}
+}
+
 // The same look-back as a word of a raw text (dirtyAt<2026-...Z&limit=10):
 // one rule across value forms. It waits for the same change to the order.
 func TestALookBackInARawTextIsAClockThroughTheOrder(t *testing.T) {
