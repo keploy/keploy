@@ -1515,6 +1515,41 @@ func (m *MockManager) NoteExactTest(test, name, why string) error {
 	return nil
 }
 
+// NoteExactTestAtOpen leaves notes, by variable name, for the scope of test's
+// variables to begin with, as its variables begin (OpenExactTest,
+// OpenExactTestConcurrent; variables.Table.StartOpeningNoted), in the same
+// step: each says why the variable is not bound (variables.Table.Note). A
+// client test's begin gives the test's cases before it opens the test's view
+// (the agent's ProvenBegin), so a note taken into the scope in force then
+// would be refused, or forgotten by the open. The next call replaces them,
+// and the next open of any test's variables takes them: another test's drops
+// them.
+func (m *MockManager) NoteExactTestAtOpen(test string, notes map[string]string) {
+	m.caseNotesMu.Lock()
+	defer m.caseNotesMu.Unlock()
+	m.caseNotes = pendingNotes{test: test, notes: maps.Clone(notes)}
+}
+
+// takeCaseNotes returns the notes left for test's scope
+// (NoteExactTestAtOpen), and leaves none for any.
+func (m *MockManager) takeCaseNotes(test string) map[string]string {
+	m.caseNotesMu.Lock()
+	defer m.caseNotesMu.Unlock()
+	n := m.caseNotes
+	m.caseNotes = pendingNotes{}
+	if n.test != test {
+		return nil
+	}
+	return n.notes
+}
+
+// pendingNotes are the notes the scope of test's variables begins with
+// (NoteExactTestAtOpen).
+type pendingNotes struct {
+	test  string
+	notes map[string]string
+}
+
 // ServeExactTestConcurrent is ServeExactTest for a test that shares
 // recordings with the tests whose requests were open beside its own at
 // record time (keploy record's full round, models.ExactServing.Concurrent):
@@ -1615,7 +1650,8 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		// What the test's calls in flight bound is read before the
 		// variables' lock is taken: the scope they bound in reads the run's
 		// of vars, and so locks vars first (variables.Table.ReadRunOf).
-		m.vars.StartOpening(install, given, m.carriedInto(v))
+		// The scope begins with the notes left for it (NoteExactTestAtOpen).
+		m.vars.StartOpeningNoted(install, given, m.carriedInto(v), m.takeCaseNotes(test))
 		m.aheadVars.Reset()
 	} else {
 		install()

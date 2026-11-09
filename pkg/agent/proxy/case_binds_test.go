@@ -12,19 +12,21 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// caseBindsProxy is a proxy serving test-1 exactly, whose one call carries
-// variable key (recorded app-1) with use places only, as a client test
-// case's variable is written; its learn step has begun no test, so it asks
-// the ingress for no request of its own.
-func caseBindsProxy(t *testing.T) (*Proxy, *MockManager, *observer.ObservedLogs) {
+// caseBindsProxy is a proxy serving the pool exactly, staged with test-1's
+// one call, which carries variable key (recorded app-1) with use places only,
+// as a client test case's variable is written; its learn step has begun no
+// test, so it asks the ingress for no request of its own. open opens test-1's
+// view and begins its variables, as the agent's begin does once it gave the
+// proxy the test's cases (ProvenBegin: TakeClientCases, then the view).
+func caseBindsProxy(t *testing.T) (p *Proxy, mm *MockManager, logs *observer.ObservedLogs, open func()) {
 	t.Helper()
 	own := varMockOf("own-1", "/apps", "app-1", true, models.LifetimePerTest)
-	mm := stagedManager(t, []*models.Mock{own}, nil)
+	mm = stagedManager(t, []*models.Mock{own}, nil)
 	mm.NewVariableSet()
 	mm.ServeExactPool(models.PoolKeyNone, nil)
-	mm.OpenExactTest("test-1", []*models.Mock{own}, nil)
 	core, logs := observer.New(zap.WarnLevel)
-	return &Proxy{mockManager: mm, learnTracker: learn.NewTracker(), logger: zap.New(core)}, mm, logs
+	return &Proxy{mockManager: mm, learnTracker: learn.NewTracker(), logger: zap.New(core)}, mm, logs,
+		func() { mm.OpenExactTest("test-1", []*models.Mock{own}, nil) }
 }
 
 // appsCase is test case name's recorded POST /apps request, sending app-1
@@ -44,18 +46,28 @@ var keyAtName = models.ClientCaseBind{Name: "key", Recorded: "app-1", Place: "bo
 // A variable a client test's request bound in its recording binds from the
 // request of the run that pairs with it, before the application is given
 // it: the call that carries the value this run's test sent is answered with
-// it, and one carrying the recorded value is not. Until the request comes,
-// the variable is noted as unbound, saying where the test binds it.
+// it, and one carrying the recorded value is not. In the agent's order, the
+// test's cases given before its view opens (ProvenBegin), the variable is
+// noted as unbound from the scope's first, saying where the test binds it,
+// and nothing is warned: a call that uses it before its request came misses
+// with that reason, and one after binds.
 func TestAClientTestsRequestBindsTheVariableBoundAtItsTestCase(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
-	p, mm, logs := caseBindsProxy(t)
+	p, mm, logs, open := caseBindsProxy(t)
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
+	open()
+	if logs.Len() != 0 {
+		t.Fatalf("warned at the test's begin %v", logs.All())
+	}
 	if !p.WantsIncoming() {
 		t.Fatal("a variable is bound at a request not yet paired: the proxy asks the ingress for none")
 	}
 	if why := mm.vars.Unbound("key"); !strings.Contains(why, "test case post-apps-1's request, at body.name, and no request of the test reached the application") {
 		t.Fatalf("before its request came the variable is noted %q", why)
+	}
+	if got := postKey(t, mm, "/apps", "app-2"); strings.HasPrefix(got, "200 ") {
+		t.Fatalf("a call before the request that binds its variable was answered %s", got)
 	}
 	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", at)
 	if p.WantsIncoming() {
@@ -76,6 +88,31 @@ func TestAClientTestsRequestBindsTheVariableBoundAtItsTestCase(t *testing.T) {
 	}
 	if logs.Len() != 0 {
 		t.Fatalf("warned %v", logs.All())
+	}
+}
+
+// The notes a test's cases leave for its scope are its own: another test's
+// opening drops them, so its scope is noted nothing, and the test's next
+// opening, with none given again, is noted nothing either. Cases given with
+// no variable bound at them leave none, and drop what was left.
+func TestACaseBindsNoteIsLeftForItsOwnTestsScopeOnly(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p, mm, logs, open := caseBindsProxy(t)
+	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
+	mm.OpenExactTest("test-2", nil, nil)
+	if why := mm.vars.Unbound("key"); why != "" {
+		t.Fatalf("another test's scope is noted %q", why)
+	}
+	open()
+	if why := mm.vars.Unbound("key"); why != "" {
+		t.Fatalf("the test's scope, opened after another's took its notes, is noted %q", why)
+	}
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
+	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1")})
+	open()
+	if why := mm.vars.Unbound("key"); why != "" || logs.Len() != 0 {
+		t.Fatalf("cases with no variable bound at them left the earlier cases' note: %q, warned %v", why, logs.All())
 	}
 }
 
@@ -110,8 +147,9 @@ func TestAClientTestsRequestBindsNothingItCannotShow(t *testing.T) {
 			live: []*models.HTTPReq{liveApps(`{"name":"app-2"}`), liveApps(`{"name":"app-3"}`)}, bound: "app-3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, mm, logs := caseBindsProxy(t)
+			p, mm, logs, open := caseBindsProxy(t)
 			p.TakeClientCases("test-1", tc.cases)
+			open()
 			for _, l := range tc.live {
 				p.TakeIncoming(l, tc.unread, at)
 			}
@@ -144,16 +182,18 @@ func TestAClientTestsRequestBindsNothingItCannotShow(t *testing.T) {
 func TestAClientTestsRequestsAreTakenOnlyWhereTheyBind(t *testing.T) {
 	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
 	t.Setenv(provenswitch.Env, "")
-	p, mm, _ := caseBindsProxy(t)
+	p, mm, _, open := caseBindsProxy(t)
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
+	open()
 	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", at)
 	if _, ok := mm.vars.Lookup("key"); ok || p.WantsIncoming() || mm.vars.Unbound("key") != "" {
 		t.Fatal("the switch off: a client test's request bound or noted its variable, or the proxy asks for requests")
 	}
 
 	t.Setenv(provenswitch.Env, "1")
-	p, mm, _ = caseBindsProxy(t)
+	p, mm, _, open = caseBindsProxy(t)
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
+	open()
 	t.Setenv(provenswitch.Env, "")
 	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", at)
 	t.Setenv(provenswitch.Env, "1")
@@ -161,20 +201,21 @@ func TestAClientTestsRequestsAreTakenOnlyWhereTheyBind(t *testing.T) {
 		t.Fatal("a request taken with the switch off bound its test's variable, or was paired")
 	}
 
-	p, _, _ = caseBindsProxy(t)
+	p, _, _, _ = caseBindsProxy(t)
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1")})
 	if p.WantsIncoming() {
 		t.Fatal("no variable is bound at the test's requests: the proxy asks for them")
 	}
 
-	p, mm, logs := caseBindsProxy(t)
+	p, mm, logs, open := caseBindsProxy(t)
+	open()
 	p.TakeClientCases("test-2", []models.ClientCase{appsCase("post-apps-1", keyAtName, models.ClientCaseBind{Name: "key2", Recorded: "app-9", Place: "body.name"})})
 	p.TakeIncoming(liveApps(`{"name":"app-2"}`), "", at)
 	if _, ok := mm.vars.Lookup("key"); ok || mm.vars.Unbound("key") != "" || mm.vars.Unbound("key2") != "" {
 		t.Fatal("a test keploy does not serve bound or noted a variable in the served one")
 	}
-	if logs.Len() != 4 {
-		t.Fatalf("warned %v; want the two notes, the bind and the note of the request refused", logs.All())
+	if logs.Len() != 2 {
+		t.Fatalf("warned %v; want the bind and the note of the request refused", logs.All())
 	}
 	for _, e := range logs.All() {
 		if !strings.Contains(e.ContextMap()["why"].(string), "test-2 is not the test keploy serves now") {
@@ -192,7 +233,8 @@ func TestAClientTestsRequestsAreTakenOnlyWhereTheyBind(t *testing.T) {
 	if err := mm.NoteExactTest("test-1", "key", "why"); err == nil || !strings.Contains(err.Error(), "no scope of test-1's variables has begun") {
 		t.Fatalf("a note before the test's variables began: %v", err)
 	}
-	_, mm, _ = caseBindsProxy(t)
+	_, mm, _, open = caseBindsProxy(t)
+	open()
 	mm.ServeExactPool(models.PoolKeyNone, nil)
 	if err := mm.NoteExactTest("", "key", "why"); err == nil || mm.vars.Unbound("key") != "" {
 		t.Fatalf("a note naming no test, after a test's variables began and the pool came back, was taken: %v", err)

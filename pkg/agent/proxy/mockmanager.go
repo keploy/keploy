@@ -275,6 +275,10 @@ type MockManager struct {
 	// every other call of the gap reads and binds in. It is carried into the
 	// next test's scope as it begins (StartVariables).
 	aheadVars variables.Table
+	// caseNotes are the notes the next scope of a test's variables begins
+	// with (NoteExactTestAtOpen), under caseNotesMu.
+	caseNotesMu sync.Mutex
+	caseNotes   pendingNotes
 
 	// exact is exact serving, under the proven switch (exact.go): when on,
 	// it decides what every read shows and which consume succeeds.

@@ -80,22 +80,23 @@ func (c *caseBinds) pair(live *models.HTTPReq) (test string, rec learn.ClientCas
 
 // setCaseBinds gives the requests that reach the application from now
 // test's recorded requests to pair with (caseBinds), and notes each
-// variable bound at one as not bound until its request pairs: one whose
-// request never comes misses saying so.
+// variable bound at one as not bound until its request pairs, in test's
+// scope as it begins (MockManager.NoteExactTestAtOpen: the agent gives a
+// test's cases before it opens the test's view): one whose request never
+// comes misses saying so.
 func (p *Proxy) setCaseBinds(test string, cases []models.ClientCase) {
 	p.caseBinds.set(test, cases)
 	m := p.getMockManager()
 	if m == nil {
 		return
 	}
+	notes := map[string]string{}
 	for _, c := range cases {
 		for _, b := range c.Binds {
-			why := fmt.Sprintf("the test binds it at test case %s's request, at %s, and no request of the test reached the application in that test case's place before this call", c.Name, b.Place)
-			if err := m.NoteExactTest(test, b.Name, why); err != nil {
-				p.warnCaseBind(test, c.Name, b, err.Error())
-			}
+			notes[b.Name] = fmt.Sprintf("the test binds it at test case %s's request, at %s, and no request of the test reached the application in that test case's place before this call", c.Name, b.Place)
 		}
 	}
+	m.NoteExactTestAtOpen(test, notes)
 }
 
 // bindCase binds, before live is forwarded, each variable of the running
