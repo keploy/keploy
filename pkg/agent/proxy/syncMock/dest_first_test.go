@@ -344,6 +344,30 @@ func TestANodeManagersCountsArePerRecordingAndClearedBySession(t *testing.T) {
 	tagged("r1 after a new session, whose requests went to r2", true)
 }
 
+// A recording's start-up window is counted in the test cases it keeps: on a
+// node's manager whose first recording is past its window, a second
+// recording that has resolved only static-dedup duplicates (twice the
+// window's count of them) is still inside its own window, so its mock stays
+// a start-up one, and dedup pruning and the stale cutoff leave it alone.
+func TestDuplicatesDoNotCountTowardARecordingsStartUpWindow(t *testing.T) {
+	key := "r1"
+	m := New(nil)
+	m.SetOutputChannel(make(chan *models.Mock, 64))
+	m.SetDestinationOf(func(*models.Mock) string { return key }, func() string { return key })
+	now := time.Now()
+	pastWindow(m, now.Add(-3*time.Second))
+	key = "r2"
+	for i := 0; i < 2*models.StartupMockTestCaseWindow; i++ {
+		at := now.Add(-2*time.Second + time.Duration(i)*time.Millisecond)
+		m.ResolveRange(at, at, fmt.Sprintf("dup-%d", i), false, false)
+	}
+	mk := appMockAt("c", "", now)
+	m.AddMock(mk)
+	if !mk.TestModeInfo.IsStartup {
+		t.Fatal("r2 resolved only duplicates, yet its mock is not tagged start-up: duplicates counted toward its window")
+	}
+}
+
 // On a node's manager, a re-read's ERROR names the first test case of the
 // re-read mock's own app as it now stands, not that of the manager's other
 // recordings (it has none under "").
