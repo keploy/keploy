@@ -1291,7 +1291,9 @@ func TestOutcomeRoundFsGroupInOneOfTwoViewsOfAPlaceTheRecordingHadNot(t *testing
 
 // Where several set recordings hold the recorded group and round F gave
 // none of them with a text keploy reads, the line names the first of them
-// in the set's order, the same place on every decision.
+// in the set's order, the same place on every decision; so too where
+// several hold round F's group and the recording gave none of them before
+// the call.
 func TestOutcomeTheHolderTheLineNamesIsTheSetsFirst(t *testing.T) {
 	const (
 		path            = "body.docs.msgs.0._id"
@@ -1316,6 +1318,25 @@ func TestOutcomeTheHolderTheLineNamesIsTheSetsFirst(t *testing.T) {
 		d := oWord(t, Decide(in), r, f)
 		if d.Refusal == nil || d.Refusal.Why != want {
 			t.Fatalf("decision %d names another place: %s; want %q", i, oDescribe([]Decision{d}), want)
+		}
+	}
+	// Round F's group in a view of each of several set recordings asked
+	// after the call, which the recording did not give the application
+	// before it: the line names the first of them too.
+	holdsF, holdsF2 := "9e9e9e9e-77aa-4b8a-b2c3-d4e5f6071829", "1d1d1d1d-2e2e-4b8a-a3a3-d4d4d4d4d4d4"
+	after := func(name, held string) GivenPlaces {
+		m := receiveOf(name, noneR, oAt.Add(time.Second))
+		m.Spec.ResTimestampMock = oAt.Add(2 * time.Second)
+		return givenThrough(t, m, toldView("v1", set(name, held)))
+	}
+	gs = []GivenPlaces{after("mock-31", holdsF), after("mock-32", holdsF2), after("mock-33", holdsF), after("mock-34", holdsF2)}
+	want = "round F's own piece of the id stands at mock-31, which the recording did not give the application before the call, by a time keploy reads: the recording's making its own piece shows nothing of whether the application cut it from there"
+	for i := 0; i < 40; i++ {
+		in := oInput(path, rec, live, nil, nil)
+		in.Given = func() ([]GivenPlaces, error) { return gs, nil }
+		d := oWord(t, Decide(in), r, f)
+		if d.Refusal == nil || d.Refusal.Why != want {
+			t.Fatalf("round F's holders, decision %d names another place: %s; want %q", i, oDescribe([]Decision{d}), want)
 		}
 	}
 }
@@ -1366,4 +1387,31 @@ func TestOutcomeTheFirstPlacesOwnReasonLeadsTheLine(t *testing.T) {
 	}
 	alone := oWord(t, Decide(oInput(path, rec, live, late, nil)), r, f)
 	oOneSideLine(t, alone, "the recording's own piece of the id stands at mock-51 "+field+fNotGiven)
+}
+
+// A place unknown for a piece of one id the call minted that the per-run
+// rule (oneRun) leaves no chance, for one run's reason, stays a candidate
+// whose serve order counts, as any place left unknown does: mock-50 holds
+// the recorded group whole and round F gave another word there (set aside
+// alone), and mock-45 holds the recorded group inside another id at a
+// place round F served only after the call. The recording gave mock-50
+// first and round F mock-45 first, so keploy cannot tell which the
+// application took the word from: mock-50 is named unknown, not set aside.
+func TestOutcomeAOneRunPlaceStaysAServeOrderCandidate(t *testing.T) {
+	const (
+		rec, live = "1111aaaa-2222-48d1-9444-444455556666", "9999cccc-7777-4a2e-8888-000011112222"
+		r, f      = "48d1", "4a2e"
+		path      = "body.docs.msgs.0.appId"
+	)
+	aside := oCarried("mock-50", "body.ref", "ref 48d1 x", "ref zzzz x", 2*time.Second, time.Second, 2)
+	late := oCarried("mock-45", "body.note", "owner bb7ed9ee-670e-48d1-982f-b54b2b73982f", "owner 0c1d2e3f-4a5b-4c7d-8e9f-0b1c2d3e4f50", 900*time.Millisecond, 100*time.Millisecond, 1)
+	late.Payload.servedAfter = true
+	d := oWord(t, Decide(oInput(path, rec, live, []Earlier{aside, late}, nil)), r, f)
+	oRefused(t, "the recorded group at a place round F served only after the call, given in another order than mock-50", d, RefusalUnknown, "mock-50", "mock-45")
+	if d.Refusal == nil || !strings.HasPrefix(d.Refusal.Why, "keploy cannot tell what round F gave at mock-50 body.ref before this call (another order: the 1st earlier answer was mock-50 in the recording and mock-45") {
+		t.Errorf("the line must lead with mock-50, which the runs gave in another order than mock-45: %q", d.Line)
+	}
+	// Alone, mock-45 is refused for the per-run rule's reason.
+	alone := oWord(t, Decide(oInput(path, rec, live, []Earlier{late}, nil)), r, f)
+	oOneSideLine(t, alone, "the recording's own piece of the id stands at mock-45 body.note, which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
 }
