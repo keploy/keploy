@@ -322,6 +322,8 @@ func TestExplainIsNilForAnythingElse(t *testing.T) {
 		{"a folder whose name begins with two dots", "..x/r.yaml", other},
 		// os.Root cannot open r.yaml as a folder, so the ".." never climbs.
 		{"a name that passes by a file as if it were a folder", "reports/r.yaml/../../../x", other},
+		// os.Root stops at none, so the ".." never climbs.
+		{"a name that passes by a folder that is not there", "none/../../x", other},
 	} {
 		// Explain returns, even for links that lead to each other: it
 		// follows at most maxLinks links, as os.Root does.
