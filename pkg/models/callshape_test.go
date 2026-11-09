@@ -465,11 +465,13 @@ func TestMissShapeOfAProtocolWithNoShapeIsItsCommand(t *testing.T) {
 		{"kafka", UnmatchedCall{Protocol: "Kafka", ActualSummary: "Produce v9", Command: "Produce"}, "Produce"},
 		{"sqs", UnmatchedCall{Protocol: "SQS", ActualSummary: "SendMessage", Command: "SendMessage"}, "SendMessage"},
 		{"dns", UnmatchedCall{Protocol: "DNS", ActualSummary: "A orders.internal.", Command: "A"}, "A"},
+		{"dns digit", UnmatchedCall{Protocol: "DNS", ActualSummary: "NSEC3 orders.internal.", Command: "NSEC3"}, "NSEC3"},
 		// No command: the summary's words are never taken for one.
 		{"redis no command", UnmatchedCall{Protocol: "Redis", ActualSummary: "GET"}, ""},
 		{"generic", UnmatchedCall{Protocol: "Generic", ActualSummary: "opaque TCP exchange (1 request buffer(s), first 12 bytes)"}, ""},
 		// A command that could be a value names none.
 		{"spaced", UnmatchedCall{Protocol: "Redis", Command: "GET user:42"}, ""},
+		{"key after it", UnmatchedCall{Protocol: "Redis", Command: "GET orders"}, ""},
 		{"address", UnmatchedCall{Protocol: "Redis", Command: "alice@example.com"}, ""},
 		{"digit first", UnmatchedCall{Protocol: "Kafka", Command: "42"}, ""},
 		{"unparsed", UnmatchedCall{Protocol: "Redis", Command: "(unparsed command)"}, ""},
