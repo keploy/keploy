@@ -1165,8 +1165,9 @@ func TestOutcomeALongWordShownJudgesAPlaceAtTheQuestion(t *testing.T) {
 // (unknown there; round F served it before the call): round F's group
 // stands nowhere, so round F made it, and it gave the application both
 // before the call with a text keploy reads. Chance: the id fresh. Not where
-// round F's serves of the set recording gave two views, which keploy reads
-// as round F having given nothing there.
+// round F's serves of the set recording gave two views, one with no view
+// stated, or one keploy could not keep, which keploy reads as round F
+// having given nothing there.
 func TestOutcomeASetRecordingRoundFReadCountsBesideAnUnknownOwnPlace(t *testing.T) {
 	const (
 		path          = "body.docs.msgs.0._id"
@@ -1198,6 +1199,9 @@ func TestOutcomeASetRecordingRoundFReadCountsBesideAnUnknownOwnPlace(t *testing.
 		{"served as recorded", []tell{toldAsRecorded}, true},
 		{"served with one view none of round F's group", []tell{toldView("v1", set(noneF))}, true},
 		{"served with two views, neither round F's group", []tell{toldView("v1", set(noneF)), toldView("v2", set(noneR))}, false},
+		{"served with no view stated", []tell{toldNothing}, false},
+		{"served as recorded once and with no view stated once", []tell{toldAsRecorded, toldNothing}, false},
+		{"served with a view keploy could not keep", []tell{toldUnkept}, false},
 	} {
 		for _, g := range givenBoth(t, set(holdsR), c.tells...) {
 			d := decide(&g.g)
@@ -1206,6 +1210,13 @@ func TestOutcomeASetRecordingRoundFReadCountsBesideAnUnknownOwnPlace(t *testing.
 				continue
 			}
 			oRefused(t, "beside a set recording ("+g.how+") "+c.what, d, RefusalUnknown, "mock-31")
+			if len(c.tells) < 2 || c.tells[1].view == nil {
+				continue
+			}
+			// Two views: the own place asks the rule first, and the set
+			// recording is the holder round F was not given with a text
+			// keploy reads.
+			oOneSideLine(t, d, "the recording's own piece of the id stands at mock-31, which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
 		}
 	}
 }
