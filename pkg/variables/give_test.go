@@ -44,8 +44,9 @@ func TestTable_GiveBindsInTheOpenScopeOnly(t *testing.T) {
 }
 
 // A note says why a variable of the open scope is not bound (Note): read
-// while the variable is not bound (Unbound), copied with the table, and
-// forgotten with the scope. None is taken before a scope begins.
+// while the variable is not bound (Unbound), copied with the table but not
+// shared with it, and forgotten with the scope. None is taken before a
+// scope begins.
 func TestANoteSaysWhyAVariableOfTheScopeIsNotBound(t *testing.T) {
 	var tb Table
 	if tb.Note("key", "why") || tb.Unbound("key") != "" {
@@ -70,6 +71,9 @@ func TestANoteSaysWhyAVariableOfTheScopeIsNotBound(t *testing.T) {
 	}
 	if c.Unbound("key") != "the request bound nothing" {
 		t.Fatal("a bind in the table reached its clone")
+	}
+	if !c.Note("second", "the clone's") || tb.Unbound("second") != "why 2" {
+		t.Fatal("a note in the clone reached its table")
 	}
 	for name, next := range map[string]func(*Table){"Start": func(t *Table) { t.Start(nil) }, "Reset": (*Table).Reset, "NewSet": (*Table).NewSet} {
 		c := tb.Clone()
