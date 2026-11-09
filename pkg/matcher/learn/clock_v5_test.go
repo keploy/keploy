@@ -1534,7 +1534,9 @@ func TestAnExpiryFilterBesideItsGrantsCreatedAtIsNoEcho(t *testing.T) {
 	created := func(v string) Leaf {
 		return Leaf{Path: "resp.0.0.value.created_at.$date.$numberLong", Noise: "resp.0.0.value.created_at.$date.$numberLong", Type: String, Value: v}
 	}
-	stored := func(v string) Leaf { return Leaf{Path: "resp.0.0.value.created_at", Noise: "resp.0.0.value.created_at", Type: String, Value: v} }
+	stored := func(v string) Leaf {
+		return Leaf{Path: "resp.0.0.value.created_at", Noise: "resp.0.0.value.created_at", Type: String, Value: v}
+	}
 	decide := func(read int64, answer Leaf) Decision {
 		rAt := time.UnixMilli(read + 2).UTC()
 		fAt := rAt.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 150*ms)
@@ -1578,6 +1580,51 @@ func TestAnExpiryFilterBesideItsGrantsCreatedAtIsNoEcho(t *testing.T) {
 	} {
 		if d := decide(c.read, c.answer); d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalCannotCheck || !strings.Contains(d.Refusal.Why, echo) {
 			t.Errorf("read %d echoed as %q: %+v (%+v); want refused, an echo", c.read, c.answer.Value, d, d.Refusal)
+		}
+	}
+}
+
+// An answer echoes a clock read where it holds the read, or the read cut to
+// a unit the answer writes, as the read is written or in the application's
+// zone: a wall clock of no zone read in India (12:31:42.600) is the instant
+// 07:01:42.600Z, which a database answers in UTC. Where keploy knows no
+// zone, that answer is another moment, and so is a created_at 3 ms before
+// the read. A date is the read's own day cut (the start of 9 November in
+// New York, 9 November), never a date the read is a cut of: 10 November,
+// read as midnight UTC, falls on 9 November in New York, so that read is
+// 10 November cut to its day there, and no echo of it.
+func TestAnEchoOfAClockReadIsTheReadCutInItsOwnZoneOrTheApplications(t *testing.T) {
+	ny := time.FixedZone("EST", -5*3600)
+	for _, c := range []struct {
+		name, read, answer string
+		zone               *time.Location
+		want               bool
+	}{
+		{"a wall clock read in India, answered in UTC", "2026-11-09 12:31:42.600", "2026-11-09T07:01:42.600Z", ist, true},
+		{"the same, keploy knowing no zone", "2026-11-09 12:31:42.600", "2026-11-09T07:01:42.600Z", nil, false},
+		{"a created_at 3 ms before the read", "2026-11-09 12:31:42.600", "2026-11-09T07:01:42.597Z", ist, false},
+		{"the start of a day in New York, its date", "2026-11-09T00:00:00-05:00", "2026-11-09", ny, true},
+		{"the start of a day in New York, the next date", "2026-11-09T00:00:00-05:00", "2026-11-10", ny, false},
+	} {
+		dc := NewDriftCache()
+		dc.zone = c.zone
+		d := &decider{dr: dc, x: newReaderIndex(dc)}
+		if got := d.echoesMoment(d.x.text(c.answer), momentOf(t, c.read)); got != c.want {
+			t.Errorf("%s: %q beside the read %q echoes it %v; want %v", c.name, c.answer, c.read, got, c.want)
+		}
+	}
+	// By its text, an instant of several words is held where the answer
+	// holds its text, even glued to a word no instant begins inside.
+	x := newReaderIndex(NewDriftCache())
+	for _, c := range []struct {
+		answer string
+		want   bool
+	}{
+		{"x2026-11-09 07:01:42", true},
+		{"x2026-11-09 07:01:43", false},
+	} {
+		if got := textHoldsInstant(x.text(c.answer), "2026-11-09 07:01:42"); got != c.want {
+			t.Errorf("%q holds the read 2026-11-09 07:01:42 by its text: %v; want %v", c.answer, got, c.want)
 		}
 	}
 }

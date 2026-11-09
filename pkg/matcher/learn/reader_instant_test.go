@@ -523,6 +523,47 @@ func TestReaderAnInstantAlignsWithOneInstantAtMost(t *testing.T) {
 	}
 }
 
+// A word beside an aligned instant pairs with the other run's word at its
+// place, never with a word of the instant: the instant's bounds end the
+// stretch before it and start the one after it. R's "1" stands just before
+// an instant none of whose words stay (09:59:59.305 to 10:00:01, a
+// fraction dropped), or just after one whose last words change (10:50:13.305
+// to 10:51:27): 1>2 is one changed word, paired, of no instant, and the
+// text keeps its shape.
+func TestReaderAWordBesideAnAlignedInstantPairsWithItsOwn(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"attempt 1 09:59:59.305", "attempt 2 10:00:01"},
+		{"10:50:13.305 1 attempt", "10:51:27 2 attempt"},
+	} {
+		rd := readText(c.rec, c.live)
+		if rd.ChangedShape || len(rd.Instants) != 1 {
+			t.Errorf("%q -> %q: changed shape %v, %d instants; want one instant aligned whole and no change of shape", c.rec, c.live, rd.ChangedShape, len(rd.Instants))
+		}
+		if iw := instantOf(t, rd, "1", "2"); iw != nil {
+			t.Errorf("%q -> %q: 1>2 reads an instant %+v; want a word of none", c.rec, c.live, iw)
+		}
+	}
+}
+
+// An instant the alignment aligns with none of the other run's changes the
+// text's shape, whatever words stand at its place in the other run, either
+// way round: R's 10:50 is an instant, F's "10 50" or "10:77" at its place
+// none (its 11:00, the text's one instant, aligns with R's 11:00). The
+// words are as many in both runs, and the separators the same where F
+// holds 10:77, yet R's instant stands alone.
+func TestReaderAnInstantAlignedWithNoneChangesShapeWhateverItsWords(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"from 10:50 to 11:00", "from 10 50 to 11:00"},
+		{"from 10 50 to 11:00", "from 10:50 to 11:00"},
+		{"from 10:50 to 11:00", "from 10:77 to 11:00"},
+		{"from 10:77 to 11:00", "from 10:50 to 11:00"},
+	} {
+		if rd := readText(c.rec, c.live); !rd.ChangedShape {
+			t.Errorf("%q -> %q: no changed shape; want an instant one run alone holds at its place to change it", c.rec, c.live)
+		}
+	}
+}
+
 // A word of an instant only one run has takes the partner the instant's
 // paired words give it: `10:50:13.305 x` to `10:51:13 x` pairs R's
 // instant with F's by 50>51 alone, and 305 reads that one instant, with a

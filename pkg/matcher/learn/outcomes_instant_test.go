@@ -759,6 +759,30 @@ func TestOutcomeAClientTestsOwnValueIsFreshAtItsFirstSend(t *testing.T) {
 	iValue(t, "the client test's own value, sent again", oWord(t, Decide(in), recN, liveN), "mock-1")
 }
 
+// A client test's number of an epoch's length that names no time (matched
+// by its exact text, with no moment) is the test's own value only where
+// its call's answer does not hold it: an answer that holds its text echoes
+// it, as the answer echoes a time by its text or its moment, and replay
+// would serve the recorded one.
+func TestOutcomeAClientTestsNumberItsAnswerHoldsIsNoOwnValue(t *testing.T) {
+	const p = "body.cmd.query.app.name"
+	rAt, fAt := oAt, oAt.Add(61*time.Second)
+	recN, liveN := "9999999999473", "9999999999901"
+	rec, live := "[E2E] app-crud-"+recN, "[E2E] app-crud-"+liveN
+	decide := func(resp []Leaf) Decision {
+		in := iCall(p, String, rec, live, rAt, fAt, nil, nil, nil)
+		in.Drifts, in.Resp = oClientDrifts(), resp
+		return oWord(t, Decide(in), recN, liveN)
+	}
+	if d := decide(nil); d.Outcome != OutcomeFresh {
+		t.Errorf("a client test's number that names no time, no answer holding it: %s; want fresh", oDescribe([]Decision{d}))
+	}
+	answer := []Leaf{{Path: "resp.0.name", Noise: "resp.0.name", Type: String, Value: rec}}
+	if d := decide(answer); d.Outcome == OutcomeFresh {
+		t.Errorf("a client test's number that names no time, its answer holding it: %s; want no own value", oDescribe([]Decision{d}))
+	}
+}
+
 // A client test's instant that no earlier place holds and its answer does
 // not echo is the test's own value only where it was made before the test
 // began: one past the begin in either run (an audit time an hour past its
