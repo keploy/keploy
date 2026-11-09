@@ -1219,6 +1219,23 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 		tr, err = ReadRecordTestsReceipt(keployDir, "set")
 		refused(t, fmt.Sprintf("ReadRecordTestsReceipt (read %+v)", tr), err)
 	}
+	// readSays requires each reader's refusal to say exactly which receipt
+	// was refused, then what says(file) gives: the link, and where it leads
+	// from the recording, for a relative link out too.
+	readSays := func(t *testing.T, keployDir string, says func(file string) string) {
+		t.Helper()
+		for file, read := range map[string]func() error{
+			ReceiptFile:            func() error { _, err := ReadReceipt(keployDir, "set"); return err },
+			TestsReceiptFile:       func() error { _, err := ReadTestsReceipt(keployDir, "set"); return err },
+			RecordTestsReceiptFile: func() error { _, err := ReadRecordTestsReceipt(keployDir, "set"); return err },
+		} {
+			name := filepath.Join("set", file)
+			want := fmt.Sprintf("the recording's file %q is read only inside its recording %q: %s", name, keployDir, says(file))
+			if err := read(); err == nil || err.Error() != want {
+				t.Errorf("reading %s: %v, want %q", name, err, want)
+			}
+		}
+	}
 	write := func(keployDir string) {
 		writeReceipt(zap.NewNop(), keployDir, Receipt{Set: "set", OnMiss: "fail"})
 		writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Tests: []TestReceipt{{Name: "t1"}}})
@@ -1236,6 +1253,9 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 			symlink(t, filepath.Join("..", "..", "..", "outside", "set", f), filepath.Join(keployDir, "set", f))
 		}
 		read(t, keployDir)
+		readSays(t, keployDir, func(file string) string {
+			return fmt.Sprintf("it is a link that leads out of it, to %q; replace the link with what it leads to", filepath.Join(outside, "set", file))
+		})
 		write(keployDir)
 		untouched(t, outside)
 	})
@@ -1243,6 +1263,9 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 		outside, keployDir := layout(t)
 		symlink(t, filepath.Join("..", "..", "outside", "set"), filepath.Join(keployDir, "set"))
 		read(t, keployDir)
+		readSays(t, keployDir, func(string) string {
+			return fmt.Sprintf("it leads through %q, a link that leads out of it, to %q; replace the link with what it leads to", "set", filepath.Join(outside, "set"))
+		})
 		write(keployDir)
 		untouched(t, outside)
 	})

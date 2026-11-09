@@ -15,9 +15,10 @@ import (
 
 // Error is the error for a recording's file that keploy does not open
 // because the file, or a link on its way, is a symbolic link os.Root does not
-// follow: one that leads out of the recording, or one into it by an absolute
-// path; or because the file's own name leads out ("..") or is an absolute
-// path, which os.Root refuses as well. It says what keploy refused as it says
+// follow: one that leads out of the recording, one into it by an absolute
+// path, or one whose relative target climbs out of it and back in; or because
+// the file's own name leads out ("..") or is an absolute path, which os.Root
+// refuses as well. It says what keploy refused as it says
 // any refusal of the file, then which link that is and where it leads, or
 // where the name leads, in place of os.Root's own words; errors.Is and
 // errors.As still see os.Root's error through it.
@@ -40,8 +41,14 @@ type Error struct {
 	// the place File names: itself when absolute, else joined to the
 	// recording's folder.
 	Target string
-	// Inside says Target is an absolute path into the recording.
+	// Inside says Target is a place in the recording named by an absolute
+	// path: File's own name, or Link's own target.
 	Inside bool
+	// Back says Target is a place in the recording that File's own name, or
+	// Link's relative target, reaches only by climbing out of the recording
+	// first (".."), which os.Root refuses as it refuses any path that climbs
+	// out.
+	Back bool
 	// Err is os.Root's refusal.
 	Err error
 }
@@ -51,6 +58,9 @@ func (e *Error) Error() string {
 		if e.Inside {
 			return fmt.Sprintf("%s: it names %q by an absolute path, which keploy does not open; name it relative to %q", e.Refused, e.Target, e.Recording)
 		}
+		if e.Back {
+			return fmt.Sprintf("%s: it names %q by a path that climbs out of it and back in, which keploy does not open; name it relative to %q without climbing out", e.Refused, e.Target, e.Recording)
+		}
 		return fmt.Sprintf("%s: it names %q, a place outside it; name a place inside it", e.Refused, e.Target)
 	}
 	subject := "it is a link"
@@ -59,6 +69,9 @@ func (e *Error) Error() string {
 	}
 	if e.Inside {
 		return fmt.Sprintf("%s: %s by the absolute path %q, which keploy does not follow; make the link relative", e.Refused, subject, e.Target)
+	}
+	if e.Back {
+		return fmt.Sprintf("%s: %s that climbs out of it and back in, to %q, which keploy does not follow; make the link lead there without climbing out", e.Refused, subject, e.Target)
 	}
 	return fmt.Sprintf("%s: %s that leads out of it, to %q; replace the link with what it leads to", e.Refused, subject, e.Target)
 }
@@ -79,41 +92,54 @@ func Explain(r *os.Root, dir, file, refused string, err error) *Error {
 	if dir == "" {
 		dir = "."
 	}
-	if target, ok := namedOut(dir, file); ok {
-		return &Error{Refused: refused, File: file, Recording: dir, Target: target, Inside: absoluteInto(dir, target), Err: err}
-	}
-	link, target, ok := linkOut(r, dir, file)
+	e := &Error{Refused: refused, File: file, Recording: dir, Err: err}
+	place, ok := namedOut(file)
 	if !ok {
-		return nil
+		if e.Link, place, ok = linkOut(r, file); !ok {
+			return nil
+		}
 	}
-	return &Error{Refused: refused, File: file, Recording: dir, Link: link, Target: target, Inside: absoluteInto(dir, target), Err: err}
+	e.Target, e.Inside, e.Back = where(dir, place)
+	return e
 }
 
-// namedOut says where file, a path os.Root refuses by its name alone, leads:
-// itself when absolute, or, when it climbs out by "..", the place it names
-// from dir. ok is false for any other name, one that stays inside.
-func namedOut(dir, file string) (target string, ok bool) {
+// namedOut says file is a path os.Root refuses by its name alone, and the
+// place it names: itself when absolute, or, when it climbs out by "..", that
+// path from the recording. ok is false for any other name, one that stays
+// inside.
+func namedOut(file string) (place string, ok bool) {
 	clean := filepath.Clean(file)
-	if filepath.IsAbs(clean) {
+	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return clean, true
-	}
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return filepath.Join(dir, clean), true
 	}
 	return "", false
 }
 
-// maxLinkHops bounds how many links linkOut follows inside the recording, as
-// the kernel bounds a lookup (ELOOP).
-const maxLinkHops = 40
+// where says where place, a path the recording at dir does not open, leads:
+// place itself when absolute, else place from dir. inside says place is
+// absolute and in dir; back says place is relative and comes back into dir
+// after it climbs out.
+func where(dir, place string) (target string, inside, back bool) {
+	if filepath.IsAbs(place) {
+		return place, absoluteInto(dir, place), false
+	}
+	abs, err := filepath.Abs(dir)
+	return filepath.Join(dir, place), false, err == nil && absoluteInto(abs, filepath.Join(abs, place))
+}
 
-// linkOut walks rel inside r (the folder at) one name at a time, following
-// each link r follows (a relative one that stays inside r), and finds the
-// first link r does not follow: one with an absolute target, or one whose
-// target climbs out of r. It says where that link is inside r and where it
-// leads: its target when absolute, else the place it names, joined to at. ok
-// is false when there is none: r refused rel for something else.
-func linkOut(r *os.Root, at, rel string) (link, target string, ok bool) {
+// maxLinks is how many links os.Root follows in one lookup, the link out
+// among them (rootMaxSymlinks in the standard library's os/root.go). Past
+// it os.Root says ELOOP, too many links, not a link out; so linkOut gives up
+// there too.
+const maxLinks = 8
+
+// linkOut walks rel inside r one name at a time, following each link r
+// follows (a relative one that stays inside r), and finds the first link r
+// does not follow: one with an absolute target, or one whose target climbs
+// out of r. It says where that link is inside r and the place it leads: its
+// target when absolute, else that target from r's folder. ok is false when
+// there is none: r refused rel for something else.
+func linkOut(r *os.Root, rel string) (link, place string, ok bool) {
 	clean := filepath.Clean(rel)
 	if !filepath.IsLocal(clean) {
 		return "", "", false
@@ -122,7 +148,7 @@ func linkOut(r *os.Root, at, rel string) (link, target string, ok bool) {
 	// cur is a folder inside r, by a path with no link on it ("" is r);
 	// rest is what is left to walk from it.
 	cur, rest := "", strings.Split(clean, sep)
-	for hops := 0; len(rest) > 0; {
+	for links := 0; len(rest) > 0; {
 		p := filepath.Join(cur, rest[0])
 		rest = rest[1:]
 		info, err := r.Lstat(p)
@@ -133,6 +159,9 @@ func linkOut(r *os.Root, at, rel string) (link, target string, ok bool) {
 			cur = p
 			continue
 		}
+		if links++; links > maxLinks {
+			return "", "", false
+		}
 		dest, err := r.Readlink(p)
 		if err != nil {
 			return "", "", false
@@ -142,10 +171,7 @@ func linkOut(r *os.Root, at, rel string) (link, target string, ok bool) {
 		}
 		next := filepath.Join(cur, dest)
 		if !filepath.IsLocal(next) {
-			return p, filepath.Join(at, next), true
-		}
-		if hops++; hops > maxLinkHops {
-			return "", "", false
+			return p, next, true
 		}
 		// The link is followed: walk its target from r, then what was left.
 		cur, rest = "", append(strings.Split(next, sep), rest...)
@@ -153,7 +179,7 @@ func linkOut(r *os.Root, at, rel string) (link, target string, ok bool) {
 	return "", "", false
 }
 
-// absoluteInto says target, a link's absolute target, names a place in dir.
+// absoluteInto says target, an absolute path, names a place in dir.
 func absoluteInto(dir, target string) bool {
 	if !filepath.IsAbs(target) {
 		return false
