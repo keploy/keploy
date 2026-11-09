@@ -111,3 +111,76 @@ func TestAnEchosReasonNamesWhereTheFullRoundsMomentStandsOnlyWhereKnown(t *testi
 		t.Errorf("F's moment in mock-11: %q; want %q", got, want)
 	}
 }
+
+// The same line on another, older test's recording: a plain read of the
+// clock beside an older test's answer whose Date stamp holds the moment
+// only at its second, and an older test's recording the learn step already
+// wrote a `clocks:` line on, quoting both runs' reads of its own nanosecond
+// clock in the same seconds. The line is no word of that recording's
+// payload, and the call's own window, which holds the read in both runs,
+// makes it a read of the clock, in both classifiers. Read as payload, the
+// line made `keploy mock`'s client tests take the value for a pick from
+// the older test's Date stamp: an echo, a variable an HTTP replay cannot
+// follow.
+//
+// api-server's TestDashboardAppOperations writes updatedAt into an audit
+// insert in the same second as TestAppCRUD's PAT lookup and
+// TestAppScopedReadEndpoints' audit inserts, whose nanosecond reads the
+// learn step had learned.
+func TestAPlainReadBesideAnotherTestsLearnedClockLineIsARead(t *testing.T) {
+	const p = "body.docs.msgs.0.app.updatedAt.$numberLong"
+	const nanos = "body.docs.msgs.0.auditedAtNanos.$numberLong"
+	ms := time.Millisecond
+	r0 := time.Date(2026, 11, 9, 7, 2, 32, 690_000_000, time.UTC)
+	f0 := r0.Add(67*time.Second + 20*ms)
+	if r0.Unix() == f0.Unix() {
+		t.Fatal("precondition: the two runs read the clock in different seconds")
+	}
+	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	num := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+	}
+	at := r0.Add(ms)
+	w := &Window{
+		Rec: Span{From: r0.Add(-2 * ms), To: at, Began: r0.Add(-time.Second)},
+		F:   Span{From: f0.Add(-2 * ms), To: f0.Add(ms), Began: f0.Add(-time.Second)},
+	}
+	// lookup is the older test's PAT lookup, answered before the call with
+	// a Date stamp of the run's second.
+	lookup := func(date time.Time) *models.Mock {
+		return &models.Mock{Name: "mock-213", Kind: models.HTTP, Spec: models.MockSpec{
+			ReqTimestampMock: r0.Add(-260 * ms), ResTimestampMock: r0.Add(-259 * ms),
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://localhost:8200/v1/secret/data/keploy/personal-access-tokens/_lookup/f16e", Header: map[string]string{"Accept": "application/json"}},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Date": date.Format(http.TimeFormat)}, Body: `{"data":{"data":{"_id":"e2e-go-key"}}}`},
+		}}
+	}
+	recNs, liveNs := r0.Add(-70*ms).UnixNano(), f0.Add(-90*ms).UnixNano()
+	// insert is the older test's audit insert, made before the call, with
+	// the learn step's line on its nanosecond read.
+	insert := &models.Mock{Name: "mock-607", Kind: models.GENERIC, Spec: models.MockSpec{
+		ReqTimestampMock: r0.Add(-70 * ms), ResTimestampMock: r0.Add(-69 * ms),
+		GenericRequests:  []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "utf-8", Data: `{"insert":"app_config_audits","documents":[{"eventType":"SaveSettings"}]}`}}}},
+		GenericResponses: []models.Payload{{Origin: models.FromServer, Message: []models.OutputBinary{{Type: "utf-8", Data: `{"n":1,"ok":1}`}}}},
+		Clocks: map[string]models.ClockOffset{nanos: {Res: time.Nanosecond, Layout: "epoch-ns", Why: fmt.Sprintf(
+			`".::TestAppScopedReadEndpoints" mock-607 %s word 0: recorded "%d", round F "%d": learned a clock read, checked in its call's span`, nanos, recNs, liveNs)}},
+	}}
+	for _, follow := range []bool{false, true} {
+		dc := clockedDrifts()
+		raw := []Raw{
+			dc.RawOf(lookup(r0), true).ServedLive(RawOf(lookup(f0), true)).ServedInAnOlderTest(),
+			dc.RawOf(insert, true).ServedAsRecorded().ServedInAnOlderTest(),
+		}
+		if strings.Contains(raw[1].rText, strconv.FormatInt(liveNs, 10)) {
+			t.Errorf("client test %v: the payload text holds the learn step's line: %q", follow, raw[1].rText)
+		}
+		var ln Learned
+		if follow {
+			ln = ClassifyFollowing(dc, []string{p}, num(secs(f0)), num(secs(r0)), at, nil, raw, nil, w, nil)[0]
+		} else {
+			ln = ClassifyIn(dc, []string{p}, num(secs(f0)), num(secs(r0)), at, nil, raw, nil, w)[0]
+		}
+		if !plainRead(ln) {
+			t.Errorf("client test %v: %s Read=%+v from %+v (%s); want a plain read of the clock", follow, ln.Kind, ln.Read, ln.From, ln.Why)
+		}
+	}
+}
