@@ -40,21 +40,24 @@ func requireNothingHolds(t *testing.T, root, secret string) {
 // JSON file (keploy normalize, an updated test) or built from the cloud's
 // copy (a pull) names one as the repository or the cloud wrote it. The file
 // it names, absolute or led to by a relative path out of the recording, is
-// neither read into the recording nor removed.
+// neither read into the recording nor removed. An absolute one, where a
+// capture leaves a part, with no contents for it, has the test case refused
+// with the part named, not stored without the part's file.
 func TestAFormFilePathATestCaseNamesIsNeitherCopiedNorRemoved(t *testing.T) {
 	ctx := context.Background()
 	for _, c := range []struct {
-		name string
-		path func(victim, root string) string
+		name    string
+		path    func(victim, root string) string
+		refused bool
 	}{
-		{"absolute", func(victim, _ string) string { return victim }},
+		{"absolute", func(victim, _ string) string { return victim }, true},
 		{"relative out of the recording", func(victim, root string) string {
 			rel, err := filepath.Rel(root, victim)
 			if err != nil {
 				panic(err)
 			}
 			return rel
-		}},
+		}, false},
 	} {
 		setup := func(t *testing.T) (root, victim string) {
 			base := t.TempDir()
@@ -72,6 +75,26 @@ func TestAFormFilePathATestCaseNamesIsNeitherCopiedNorRemoved(t *testing.T) {
 			t.Helper()
 			requireFileIs(t, "the file the test case names", victim, "SECRET-OUTSIDE")
 			requireNothingHolds(t, root, "SECRET-OUTSIDE")
+		}
+		// stored says whether the write stored the test case, as c says it
+		// must: refused, with the part and the path named.
+		stored := func(t *testing.T, err error, victim string) bool {
+			t.Helper()
+			if !c.refused {
+				if err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				return true
+			}
+			if err == nil {
+				t.Fatal("the test case was stored without its part's file; want it refused")
+			}
+			for _, want := range []string{`form part "file"`, `"id_rsa"`, victim} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal %q does not name %s", err, want)
+				}
+			}
+			return false
 		}
 		t.Run(c.name+": read back from a set's JSON file", func(t *testing.T) {
 			root, victim := setup(t)
@@ -99,19 +122,21 @@ func TestAFormFilePathATestCaseNamesIsNeitherCopiedNorRemoved(t *testing.T) {
 			if err != nil || len(tcs) != 1 {
 				t.Fatalf("read: %d test cases, %v", len(tcs), err)
 			}
-			if err := db.UpdateTestCase(ctx, tcs[0], "set", false); err != nil {
-				t.Fatalf("update: %v", err)
-			}
+			stored(t, db.UpdateTestCase(ctx, tcs[0], "set", false), victim)
 			check(t, root, victim)
 		})
 		for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
 			t.Run(c.name+": from the cloud, "+string(format), func(t *testing.T) {
 				root, victim := setup(t)
 				tc := formCase("test-1", models.FormData{Key: "file", FileNames: []string{"id_rsa"}, Paths: []string{c.path(victim, root)}})
-				if err := NewWithFormat(zap.NewNop(), root, format).InsertTestCase(ctx, tc, "set", false); err != nil {
-					t.Fatalf("insert: %v", err)
-				}
+				ok := stored(t, NewWithFormat(zap.NewNop(), root, format).InsertTestCase(ctx, tc, "set", false), victim)
 				check(t, root, victim)
+				if !ok {
+					if files, _ := filepath.Glob(filepath.Join(root, "set", "tests", "*")); len(files) != 0 {
+						t.Errorf("a refused test case was stored: %q", files)
+					}
+					return
+				}
 				if p := tc.HTTPReq.Form[0].Paths; len(p) != 0 {
 					t.Errorf("the stored test case names %q, a file it does not keep", p)
 				}
@@ -165,7 +190,9 @@ func TestACapturedFormFileIsKeptAndStaysKept(t *testing.T) {
 }
 
 // An absolute path a test case names is not a kept part, as the replay never
-// opens one, even where the same path under the recording names a file.
+// opens one, even where the same path under the recording names a file: with
+// no file a capture left and no contents for it, the test case is refused,
+// with the part named, and the file is left as it was.
 func TestAnAbsoluteFormFilePathIsNotKept(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a path with no volume is not absolute on windows")
@@ -179,11 +206,13 @@ func TestAnAbsoluteFormFilePathIsNotKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	tc := formCase("test-1", models.FormData{Key: "file", FileNames: []string{"a.txt"}, Paths: []string{"/" + kept}})
-	if err := NewWithFormat(zap.NewNop(), root, yaml.FormatJSON).InsertTestCase(context.Background(), tc, "set", false); err != nil {
-		t.Fatalf("insert: %v", err)
+	err := NewWithFormat(zap.NewNop(), root, yaml.FormatJSON).InsertTestCase(context.Background(), tc, "set", false)
+	if err == nil || !strings.Contains(err.Error(), `form part "file"`) {
+		t.Fatalf("insert = %v, want the test case refused with its part named", err)
 	}
-	if p := tc.HTTPReq.Form[0].Paths; len(p) != 0 {
-		t.Errorf("the stored test case names %q, from an absolute path", p)
+	requireFileIs(t, "the file under the recording", filepath.Join(root, kept), "kept")
+	if files, _ := filepath.Glob(filepath.Join(root, "set", "tests", "*")); len(files) != 0 {
+		t.Errorf("a refused test case was stored: %q", files)
 	}
 }
 

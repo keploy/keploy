@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -522,6 +523,14 @@ func TestAMultipartFileReachesReplayWhereverItsTestCaseIsPersisted(t *testing.T)
 					t.Fatal(err)
 				}
 				tc = &streamed
+			} else {
+				// What the agent client does with each test case it reads
+				// from its agent (capturedByAgent): the part's path is the
+				// file the capture left it in. The test store copies a part
+				// only from such a file.
+				for i := range tc.HTTPReq.Form {
+					tc.HTTPReq.Form[i].Captured = slices.Clone(tc.HTTPReq.Form[i].Paths)
+				}
 			}
 
 			keployPath := t.TempDir()

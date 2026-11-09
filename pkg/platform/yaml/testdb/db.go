@@ -1385,6 +1385,14 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 						return err
 					}
 					wroteFile = true
+				} else if j < len(form.Paths) && filepath.IsAbs(form.Paths[j]) {
+					// An absolute path is where a capture leaves a part, but
+					// this one is no file a capture of this run left
+					// (Captured), and the test case carries no contents for
+					// it: stored, the test case would lose the part's file
+					// with nothing said to its caller. Refused instead; the
+					// file the path names is neither read nor removed.
+					return fmt.Errorf("the test case's form part %q (file %q) names %q, no file a capture of this run left, and carries no contents for it: keploy keeps a part's file only from the capture that made it, from contents the test case carries, or from a file in the recording it names by a relative path, and does not store a test case without its part's file", form.Key, fileName, form.Paths[j])
 				}
 
 				if wroteFile {
