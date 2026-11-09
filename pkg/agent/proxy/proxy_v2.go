@@ -332,6 +332,7 @@ func (p *Proxy) recordViaSupervisor(
 	reads.follow(svSess.ClientStream, r.Teed)
 	svSess.Directives = r.Directives()
 	svSess.Acks = r.Acks()
+	svSess.PreClaimPauseBarrier = r.PreClaimPauseBarrier
 
 	// The recording's capture watermark follows this connection while its
 	// parser runs (capture_watermark.go): a test case it carried bytes for
