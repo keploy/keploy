@@ -1197,8 +1197,12 @@ func writeTestSetFile(dir *os.Root, name string, data []byte, perm os.FileMode, 
 // words. A symbolic link there, which an O_NOFOLLOW open refuses even when it
 // leads to a file in the folder, is named with where it leads; on a system
 // with no O_NOFOLLOW open, where only a link out of the folder is refused, the
-// link is said as linkout.Error says it. Anything else is returned as it is.
-// errors.Is still sees the open's error (syscall.ELOOP for a link).
+// link is said as linkout.Error says it. A name that is not one path element,
+// which openTestSetFile refuses before os.Root opens it (fs.ErrInvalid), is
+// said as linkout.Error says os.Root's own refusal of it when that is for
+// leading out of dir. Anything else is returned as it is. errors.Is still
+// sees the open's error (syscall.ELOOP for a link, fs.ErrInvalid for such a
+// name).
 func noFollowError(dir *os.Root, name string, err error) error {
 	path := filepath.Join(dir.Name(), name)
 	refused := fmt.Sprintf("%s is a symbolic link; keploy does not follow it", path)
@@ -1208,14 +1212,24 @@ func noFollowError(dir *os.Root, name string, err error) error {
 		}
 		return &linkRefusedError{refused + "; replace the link with the file it leads to", err}
 	}
-	if out := linkout.Explain(dir, dir.Name(), name, fmt.Sprintf("the test set's file %q is rewritten only inside its folder %q", name, dir.Name()), err); out != nil {
+	why, unopened := err, errors.Is(err, fs.ErrInvalid)
+	if unopened {
+		// os.Root never saw name: what it says of it is why it leads out,
+		// if it does.
+		_, why = dir.Lstat(name)
+	}
+	if out := linkout.Explain(dir, dir.Name(), name, fmt.Sprintf("the test set's file %q is rewritten only inside its folder %q", name, dir.Name()), why); out != nil {
+		if unopened {
+			return &linkRefusedError{out.Error(), err}
+		}
 		return out
 	}
 	return err
 }
 
-// linkRefusedError is noFollowError's refusal of a link: msg says it, and
-// errors.Is and errors.As see err, the open's error, through it.
+// linkRefusedError is noFollowError's refusal of a link, or of a name that
+// is not one path element and leads out: msg says it, and errors.Is and
+// errors.As see err, the open's error, through it.
 type linkRefusedError struct {
 	msg string
 	err error
