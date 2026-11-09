@@ -3696,7 +3696,7 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 // keploy's CI treats as fatal.
 func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool) {
 	defer close(agentReadyCh)
-	agentHealthTicker(ctx, logger, agentURI, func(http.Header) bool {
+	agentHealthTicker(ctx, logger, wallClock{}, agentURI, func(http.Header) bool {
 		select {
 		case agentReadyCh <- true:
 			return true
@@ -3713,7 +3713,7 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 // out, could fail. A receive that gets nil means ctx ended first.
 func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI string, answers chan<- http.Header) {
 	defer close(answers)
-	agentHealthTicker(ctx, logger, agentURI, func(header http.Header) bool {
+	agentHealthTicker(ctx, logger, wallClock{}, agentURI, func(header http.Header) bool {
 		select {
 		case answers <- header:
 			return true
@@ -3721,6 +3721,39 @@ func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentU
 			return false
 		}
 	})
+}
+
+// agentHealthClock is the time agentHealthTicker paces its checks and times
+// each one out by: wallClock in keploy. Its tests run it on a clock they move
+// themselves, so when the checks come does not depend on how busy the machine
+// running them is.
+type agentHealthClock interface {
+	Now() time.Time
+	// Sleep waits d, or until ctx ends, and reports whether d passed first.
+	// A d of zero or less waits for nothing.
+	Sleep(ctx context.Context, d time.Duration) bool
+	// WithTimeout is context.WithTimeout, timed by this clock.
+	WithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc)
+}
+
+// wallClock is the agentHealthClock of the time of day.
+type wallClock struct{}
+
+func (wallClock) Now() time.Time { return time.Now() }
+
+func (wallClock) Sleep(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (wallClock) WithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, d)
 }
 
 // agentHealthTicker is the loop of the two above: it checks the agent's health
@@ -3731,50 +3764,46 @@ func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentU
 // start of the check before (one that took longer, as a check through a slow
 // port forward may, is followed at once): an agent up a few milliseconds
 // after keploy started it is found then, and one slow to start within about
-// AgentHealthEvery of coming up.
-func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, ready func(http.Header) bool) {
-	timer := time.NewTimer(agentHealthFirstLook)
-	defer timer.Stop()
-
+// AgentHealthEvery of coming up. All of it is timed by clock.
+func agentHealthTicker(ctx context.Context, logger *zap.Logger, clock agentHealthClock, agentURI string, ready func(http.Header) bool) {
 	// No client-wide timeout: each check waits as long as `wait` (below).
 	client := &http.Client{}
 	wait := agentHealthFirstWait
 	// Said once, not at each check: twenty a second would bury the log.
 	logger.Debug("Checking agent health", zap.String("url", ShownAgentURI(agentURI+"/health")), zap.Duration("every", AgentHealthEvery))
 
+	pause := agentHealthFirstLook
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			began := time.Now()
-			checkCtx, cancel := context.WithTimeout(ctx, wait)
-			header := agentHealthAnswer(checkCtx, logger, client, agentURI)
-			timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
-			cancel()
-			if next := nextAgentHealthWait(wait, timedOut); next != wait {
-				logger.Debug("agent health check ran out of time; the next one waits longer",
-					zap.String("agentURI", ShownAgentURI(agentURI)), zap.Duration("waited", wait), zap.Duration("next_wait", next))
-				wait = next
-			}
-			if header == nil {
-				timer.Reset(time.Until(began.Add(AgentHealthEvery)))
-				continue
-			}
-			if ready(header) {
-				// Only now, and off this goroutine. The check is a
-				// diagnostic: every caller races this signal against a
-				// readiness deadline, and spending any of that budget on it
-				// could fail the user's run with "did not become ready"
-				// against an agent that had just answered its health check.
-				// Detached from ctx for the same reason it runs at all --
-				// the caller cancels this context as soon as it has its
-				// answer, which would cancel the check before it could
-				// report anything.
-				go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
-			}
+		if !clock.Sleep(ctx, pause) {
 			return
 		}
+		began := clock.Now()
+		checkCtx, cancel := clock.WithTimeout(ctx, wait)
+		header := agentHealthAnswer(checkCtx, logger, client, agentURI)
+		timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+		cancel()
+		if next := nextAgentHealthWait(wait, timedOut); next != wait {
+			logger.Debug("agent health check ran out of time; the next one waits longer",
+				zap.String("agentURI", ShownAgentURI(agentURI)), zap.Duration("waited", wait), zap.Duration("next_wait", next))
+			wait = next
+		}
+		if header == nil {
+			pause = AgentHealthEvery - clock.Now().Sub(began)
+			continue
+		}
+		if ready(header) {
+			// Only now, and off this goroutine. The check is a
+			// diagnostic: every caller races this signal against a
+			// readiness deadline, and spending any of that budget on it
+			// could fail the user's run with "did not become ready"
+			// against an agent that had just answered its health check.
+			// Detached from ctx for the same reason it runs at all --
+			// the caller cancels this context as soon as it has its
+			// answer, which would cancel the check before it could
+			// report anything.
+			go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
+		}
+		return
 	}
 }
 
