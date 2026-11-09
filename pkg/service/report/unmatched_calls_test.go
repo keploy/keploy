@@ -296,4 +296,10 @@ func TestRenderUnmatchedCalls_NamesABackgroundMissesBoundPlaces(t *testing.T) {
 	if strings.Count(out, "like background recording") != 1 {
 		t.Fatalf("report names bound places for a miss with none:\n%s", out)
 	}
+	sb.Reset()
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{del.Sanitized()}}})
+	want = "  delete on api-server.{}: like background recording mock-2954 but at body.docs.msgs.{}.q.app_id, which holds a value as this test bound it at mock-226 body.docs.msgs.{}.appId\n"
+	if out := sb.String(); !strings.Contains(out, want) {
+		t.Fatalf("a sanitized miss, which keeps no learned variable's name, lacks %q:\n%s", want, out)
+	}
 }

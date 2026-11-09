@@ -1227,11 +1227,17 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 // renderBackgroundBound writes, for each background miss that differs from
 // its background recording by values its test bound (UnmatchedCall.
 // BackgroundBound), which places do and where the test bound each: the
-// evidence that the call is that recording's, by names alone.
+// evidence that the call is that recording's, by names alone. A sanitized
+// miss keeps no learned variable's name (BackgroundBinding.Sanitized): its
+// place holds "a value" the test bound.
 func renderBackgroundBound(sb *strings.Builder, calls []models.UnmatchedCall) {
 	for _, uc := range calls {
 		for _, b := range uc.BackgroundBound {
-			fmt.Fprintf(sb, "  %s: like background recording %s but at %s, which holds %s as this test bound it at %s %s\n", uc.ActualSummary, b.Recording, b.Place, b.Variable, b.BoundMock, b.BoundPlace)
+			held := b.Variable
+			if held == "" {
+				held = "a value"
+			}
+			fmt.Fprintf(sb, "  %s: like background recording %s but at %s, which holds %s as this test bound it at %s %s\n", uc.ActualSummary, b.Recording, b.Place, held, b.BoundMock, b.BoundPlace)
 		}
 	}
 }
