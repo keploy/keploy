@@ -1613,15 +1613,24 @@ func TestAnExpiryFilterBesideItsGrantsCreatedAtIsNoEcho(t *testing.T) {
 // later and sets last_polled_at to its read. Each answer holds auth_time,
 // the read's second, and last_polled_at 680, an earlier poll's read and
 // the read cut at 10 ms. Neither is the read's echo: auth_time is the value
-// the approval's request sets (and, for the poll, the approval's, or that
-// of a find answered before the poll), and 680 the earlier poll's. Each
-// read is a Clock, the answers built as integrations' mongo/v2 builds them
-// (a $date typed, a $numberLong a string) and with the read as a string
-// too. With no place that holds them, the same answers are the reads'
-// stored seconds and 10 ms cuts, refused; so are they where the only place
-// that holds them is recorded after the call, is a find sent before the
-// call but answered after it (it shows nothing the store held before), or
-// is an earlier test's.
+// the approval's request sets (and, for the poll, the approval's), and 680
+// the earlier poll's, each a value made anew each run, written as the answer
+// writes it: their sources. Each read is a Clock, the answers built as
+// integrations' mongo/v2 builds them (a $date typed, a $numberLong a string)
+// and with the read as a string too; so is it where the earlier poll's
+// call learned its 680 as a read of the clock at the millisecond, finer
+// than the 10 ms the answer cuts the read to, where the test's own request
+// or a recording's request sets auth_time instead. With no source, the
+// same answers are the reads' stored seconds and 10 ms cuts, refused: where
+// the only place that holds them is recorded after the call, is an earlier
+// test's, is an answer (a find's, answered before the call, at its instant,
+// or at no time keploy knows), a recording's answer, a value the test gave
+// keploy, a request sent at no time keploy knows or at the call's own
+// instant, or a request that sets auth_time the same in both runs, in
+// another form in round F, or in another form than the answer's; and
+// where the earlier poll's call learned its 680 as a read cut at 10 ms, or
+// at no cut, or the approval's call learned auth_time as a read at the
+// second: two reads that cut alike, two sources.
 func TestASignInTimeTheRequestSetsBesideItsReadIsNoEcho(t *testing.T) {
 	if reflect.ValueOf(decideBy).Pointer() == reflect.ValueOf(refuseAll).Pointer() {
 		t.Skip("the order of a changed word is not on this tree")
@@ -1659,6 +1668,7 @@ func TestASignInTimeTheRequestSetsBesideItsReadIsNoEcho(t *testing.T) {
 		also    map[string][2]string
 		earlier func(rAt, fAt time.Time) []Earlier
 		clock   bool
+		raw     func(rAt, fAt time.Time) Raw
 	}
 	msOf := func(t time.Time) string { return strconv.FormatInt(t.UnixMilli(), 10) }
 	firstPoll := func(rAt, fAt time.Time) Earlier {
@@ -1697,16 +1707,96 @@ func TestASignInTimeTheRequestSetsBesideItsReadIsNoEcho(t *testing.T) {
 				Seen: []Seen{{Side: Response, Leaf: str("resp.0.0.value.auth_time.$numberLong", auth), Live: fAuth}}}
 		}
 	}
+	// noAnswerAt: that find, its answer at no time keploy knows.
+	noAnswerTime := func(rAt, fAt time.Time) Earlier {
+		e := readBack(-1*ms)(rAt, fAt)
+		m := &models.Mock{Name: e.Mock, Spec: models.MockSpec{ReqTimestampMock: e.At}}
+		e.Payload = RawOf(m, true)
+		return e
+	}
+	// sets is the approval setting auth_time rec, live in round F, its call
+	// having learned it as o (nil: as no read of the clock).
+	sets := func(rec, live string, o *models.ClockOffset) func(rAt, fAt time.Time) Earlier {
+		return func(rAt, fAt time.Time) Earlier {
+			e := approval(rAt, fAt)
+			e.Seen[1].Leaf.Value, e.Seen[1].Live, e.Seen[1].Offset = rec, live, o
+			e.Seen[1].Clock = o != nil && o.Plain()
+			return e
+		}
+	}
+	untimed := func(rAt, fAt time.Time) Earlier {
+		e := approval(rAt, fAt)
+		e.At, e.Payload = time.Time{}, payloadOf(e.Mock, time.Time{})
+		return e
+	}
+	atCall := func(rAt, fAt time.Time) Earlier {
+		e := approval(rAt, fAt)
+		e.At, e.Payload = rAt, payloadOf(e.Mock, rAt)
+		return e
+	}
+	// learnedPoll is the earlier poll, its call having learned its leaves
+	// as plain reads of the clock at res.
+	learnedPoll := func(res time.Duration) func(rAt, fAt time.Time) Earlier {
+		return func(rAt, fAt time.Time) Earlier {
+			e := firstPoll(rAt, fAt)
+			for i := range e.Seen {
+				e.Seen[i].Clock, e.Seen[i].Offset = true, &models.ClockOffset{Res: res}
+			}
+			return e
+		}
+	}
+	// given is the test's own request holding auth_time (gave: a value the
+	// test gave keploy instead).
+	given := func(gave bool) func(rAt, fAt time.Time) Earlier {
+		return func(rAt, fAt time.Time) Earlier {
+			return Earlier{Mock: "test-2", Given: true, Gave: gave, Seen: []Seen{{Side: Request, Leaf: str("body.auth_time", auth), Live: fAuth}}}
+		}
+	}
+	// recording is the approval as a recording F served, sent at sent from
+	// the call's instant, that sets auth_time in its request (else holds it
+	// in its answer alone).
+	recording := func(request bool, sent time.Duration) func(rAt, fAt time.Time) Raw {
+		return func(rAt, fAt time.Time) Raw {
+			mock := func(a string, at time.Time) *models.Mock {
+				req, resp := `{"auth_time":"`+a+`"}`, `{"ok":1}`
+				if !request {
+					req, resp = resp, req
+				}
+				return &models.Mock{Name: "mock-1134", Kind: models.HTTP, Spec: models.MockSpec{
+					HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://auth.local/approve", Header: map[string]string{"Content-Type": "application/json"}, Body: req},
+					HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: resp},
+					ReqTimestampMock: at, ResTimestampMock: at.Add(ms / 2),
+				}}
+			}
+			return RawOf(mock(auth, rAt.Add(sent)), true).ServedAs(1).ServedLive(RawOf(mock(fAuth, fAt.Add(sent)), true))
+		}
+	}
 	for _, c := range []call{
-		{"mock-1134, the approval", 1794207702683, map[string][2]string{authSet: {auth, fAuth}}, both(firstPoll), true},
-		{"mock-1135, the next poll", 1794207702684, map[string][2]string{polledSet: {"1794207702684", ""}}, both(firstPoll, approval), true},
-		{"mock-1134 with no request that sets auth_time", 1794207702683, nil, both(firstPoll), false},
-		{"mock-1134 with no earlier poll", 1794207702683, map[string][2]string{authSet: {auth, fAuth}}, nil, false},
-		{"mock-1135 with no earlier call", 1794207702684, map[string][2]string{polledSet: {"1794207702684", ""}}, nil, false},
-		{"mock-1135, the approval recorded after it", 1794207702684, nil, both(firstPoll, later), false},
-		{"mock-1135, the approval an earlier test's", 1794207702684, nil, both(firstPoll, older), false},
-		{"mock-1135, a find answered before it that holds auth_time", 1794207702684, nil, both(firstPoll, readBack(-1*ms)), true},
-		{"mock-1135, a find sent before it, answered after it, that holds auth_time", 1794207702684, nil, both(firstPoll, readBack(5*ms)), false},
+		{"mock-1134, the approval", 1794207702683, map[string][2]string{authSet: {auth, fAuth}}, both(firstPoll), true, nil},
+		{"mock-1135, the next poll", 1794207702684, map[string][2]string{polledSet: {"1794207702684", ""}}, both(firstPoll, approval), true, nil},
+		{"mock-1134 with no request that sets auth_time", 1794207702683, nil, both(firstPoll), false, nil},
+		{"mock-1134 with no earlier poll", 1794207702683, map[string][2]string{authSet: {auth, fAuth}}, nil, false, nil},
+		{"mock-1135 with no earlier call", 1794207702684, map[string][2]string{polledSet: {"1794207702684", ""}}, nil, false, nil},
+		{"mock-1135, the approval recorded after it", 1794207702684, nil, both(firstPoll, later), false, nil},
+		{"mock-1135, the approval an earlier test's", 1794207702684, nil, both(firstPoll, older), false, nil},
+		{"mock-1135, a find answered before it that holds auth_time", 1794207702684, nil, both(firstPoll, readBack(-1*ms)), false, nil},
+		{"mock-1135, a find answered at its instant that holds auth_time", 1794207702684, nil, both(firstPoll, readBack(0)), false, nil},
+		{"mock-1135, a find answered at no time keploy knows that holds auth_time", 1794207702684, nil, both(firstPoll, noAnswerTime), false, nil},
+		{"mock-1135, a find sent before it, answered after it, that holds auth_time", 1794207702684, nil, both(firstPoll, readBack(5*ms)), false, nil},
+		{"mock-1135, the approval sent at no time keploy knows", 1794207702684, nil, both(firstPoll, untimed), false, nil},
+		{"mock-1135, the approval sent at its own instant", 1794207702684, nil, both(firstPoll, atCall), false, nil},
+		{"mock-1135, the approval setting auth_time the same in round F", 1794207702684, nil, both(firstPoll, sets(auth, auth, nil)), false, nil},
+		{"mock-1135, the approval setting auth_time in another form in round F", 1794207702684, nil, both(firstPoll, sets(auth, "2026-11-09T07:02:52Z", nil)), false, nil},
+		{"mock-1135, the approval setting auth_time in another form than the answer", 1794207702684, nil, both(firstPoll, sets("2026-11-09T07:01:42Z", "2026-11-09T07:02:52Z", nil)), false, nil},
+		{"mock-1135, the approval's call learning auth_time as a read at the second", 1794207702684, nil, both(firstPoll, sets(auth, fAuth, &models.ClockOffset{Res: time.Second})), false, nil},
+		{"mock-1135, the earlier poll's call learning 680 as a read at the millisecond", 1794207702684, nil, both(learnedPoll(ms), approval), true, nil},
+		{"mock-1135, the earlier poll's call learning 680 as a read cut at 10 ms", 1794207702684, nil, both(learnedPoll(10*ms), approval), false, nil},
+		{"mock-1135, the earlier poll's call learning 680 as a read at no cut", 1794207702684, nil, both(learnedPoll(0), approval), false, nil},
+		{"mock-1135, the test's own request setting auth_time", 1794207702684, nil, both(firstPoll, given(false)), true, nil},
+		{"mock-1135, a value the test gave keploy holding auth_time", 1794207702684, nil, both(firstPoll, given(true)), false, nil},
+		{name: "mock-1135, a recording's request setting auth_time", read: 1794207702684, earlier: both(firstPoll), clock: true, raw: recording(true, -1*ms)},
+		{name: "mock-1135, a recording's answer holding auth_time", read: 1794207702684, earlier: both(firstPoll), clock: false, raw: recording(false, -1*ms)},
+		{name: "mock-1135, a recording's request setting auth_time, recorded at its instant", read: 1794207702684, earlier: both(firstPoll), clock: false, raw: recording(true, 0)},
 	} {
 		for _, typed := range []bool{true, false} {
 			rAt := time.UnixMilli(c.read + 1).UTC()
@@ -1734,11 +1824,15 @@ func TestASignInTimeTheRequestSetsBesideItsReadIsNoEcho(t *testing.T) {
 			if c.earlier != nil {
 				earlier = c.earlier(rAt, fAt)
 			}
+			var raw []Raw
+			if c.raw != nil {
+				raw = []Raw{c.raw(rAt, fAt)}
+			}
 			dc := NewDriftCache()
 			dc.appClock = true
 			ds := Decide(Input{
 				Drifts: dc, Drift: []string{p}, Live: shape(msOf(fAt.Add(-1*ms)), true), Rec: shape(strconv.FormatInt(c.read, 10), false),
-				At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-1135", Mode: ModeOwn, Resp: answer(typed), Earlier: earlier,
+				At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-1135", Mode: ModeOwn, Resp: answer(typed), Earlier: earlier, Raw: raw,
 				Window: v5Window(v5Call(rAt, 20*ms, 0), v5Call(fAt, 20*ms, 0)), Landed: Landed{Where: LandedBetween},
 				Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
 			})
@@ -1752,6 +1846,214 @@ func TestASignInTimeTheRequestSetsBesideItsReadIsNoEcho(t *testing.T) {
 			case !c.clock && (d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalCannotCheck || !strings.Contains(d.Refusal.Why, "its own call's recorded answer holds")):
 				t.Errorf("%s (typed %v): %v %+v; want refused, an echo", c.name, typed, d.Outcome, d.Refusal)
 			}
+		}
+	}
+}
+
+// A read of milliseconds (07:01:42.600) whose own call's answer holds its
+// second, day or 10 ms is that read's stored form, refused, unless a source
+// holds that instant (heldElsewhere): a place the application sent before
+// the call, written as the answer writes it, made anew each run, and not
+// another read of the clock its call learned at a cut no finer than the
+// answer's. An answer of an earlier exchange (its HTTP Date), an earlier
+// test's place, a Unix second written otherwise than the answer's
+// DATETIME, a date or midnight the same in both runs or written otherwise in
+// round F, and another read learned at the second are no source. One that
+// is, a DATETIME second an earlier insert wrote and wrote anew in F, makes
+// the read a Clock. An HTTP answer's Date header is the server's clock,
+// never an echo of the read, whatever holds it.
+func TestAClockReadsEchoIsExplainedOnlyByASourceOfTheAnswersInstant(t *testing.T) {
+	if reflect.ValueOf(decideBy).Pointer() == reflect.ValueOf(refuseAll).Pointer() {
+		t.Skip("the order of a changed word is not on this tree")
+	}
+	const p, ms = "body.cmd.query.expires_at.$gt.$date.$numberLong", time.Millisecond
+	const read = int64(1794207702600) // 2026-11-09T07:01:42.600Z
+	str := func(path, v string) Leaf { return Leaf{Path: path, Noise: path, Type: String, Value: v} }
+	// answered is an exchange of the test sent 40 ms before the call, its
+	// answer leaf path=v given 5 ms before the call.
+	answered := func(path, v string) func(rAt time.Time) Earlier {
+		return func(rAt time.Time) Earlier {
+			at := rAt.Add(-40 * ms)
+			m := &models.Mock{Name: "mock-990", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: rAt.Add(-5 * ms)}}
+			return Earlier{Mock: m.Name, At: at, Payload: RawOf(m, true), Own: true,
+				Seen: []Seen{{Side: Response, Leaf: str(path, v), Live: "Mon, 09 Nov 2026 09:19:05 GMT"}}}
+		}
+	}
+	// sent is a request of the test (another test's: other) sent 40 ms
+	// before the call, that sent path=v, live in round F, its call having
+	// learned it as o.
+	sent := func(path, v, live string, other bool, o *models.ClockOffset) func(rAt time.Time) Earlier {
+		return func(rAt time.Time) Earlier {
+			at := rAt.Add(-40 * ms)
+			return Earlier{Mock: "mock-991", At: at, Payload: payloadOf("mock-991", at), Own: !other, Run: other,
+				Seen: []Seen{{Side: Request, Leaf: str(path, v), Live: live, Clock: o != nil && o.Plain(), Offset: o}}}
+		}
+	}
+	decide := func(apath, aval string, also map[string][2]string, earlier ...func(time.Time) Earlier) Decision {
+		rAt := time.UnixMilli(read + 2).UTC()
+		fAt := rAt.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 150*ms)
+		leaf := func(v int64, live bool) Shape {
+			s := Shape{Leaves: map[string]Leaf{p: str(p, strconv.FormatInt(v, 10))}}
+			for k, w := range also {
+				x := w[0]
+				if live {
+					x = w[1]
+				}
+				if x == "" { // a leaf of no value of its own sets the read
+					x = strconv.FormatInt(v, 10)
+				}
+				s.Leaves[k] = str(k, x)
+			}
+			return s
+		}
+		var es []Earlier
+		for _, e := range earlier {
+			es = append(es, e(rAt))
+		}
+		dc := NewDriftCache()
+		dc.appClock = true
+		ds := Decide(Input{
+			Drifts: dc, Drift: []string{p}, Live: leaf(fAt.Add(-2*ms).UnixMilli(), true), Rec: leaf(read, false),
+			At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-1007", Mode: ModeOwn, Resp: []Leaf{str(apath, aval)}, Earlier: es,
+			Window: v5Window(v5Call(rAt, 20*ms, 0), v5Call(fAt, 20*ms, 0)), Landed: Landed{Where: LandedBetween},
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
+		})
+		if len(ds) != 1 {
+			t.Fatalf("%d decisions; want one", len(ds))
+		}
+		return ds[0]
+	}
+	const upd, day, hdr = "resp.0.0.value.updated_at", "resp.0.0.value.day", "header.Date"
+	const second, fSecond = "2026-11-09 07:01:42", "2026-11-09 09:19:05"
+	const unixS, fUnixS = "1794207702", "1794215945"
+	const filter = "body.cmd.pipeline.0.$match.expiration.$gt.$numberLong"
+	setsRead := map[string][2]string{"body.cmd.update.$set.updated_at.$date.$numberLong": {"", ""}}
+	for _, c := range []struct {
+		name, path, val string
+		also            map[string][2]string
+		earlier         []func(time.Time) Earlier
+		clock           bool
+	}{
+		{"a DATETIME second, held nowhere else", upd, second, nil, nil, false},
+		{"a DATETIME second, an earlier answer's Date of it", upd, second, nil, []func(time.Time) Earlier{answered("header.Date", "Mon, 09 Nov 2026 07:01:42 GMT")}, false},
+		{"a DATETIME second, an earlier answer of it", upd, second, nil, []func(time.Time) Earlier{answered("resp.0.0.value.updated_at", second)}, false},
+		{"a DATETIME second, a request's Unix second of it", upd, second, nil, []func(time.Time) Earlier{sent(filter, unixS, fUnixS, false, nil)}, false},
+		{"a DATETIME second, an earlier insert of it", upd, second, nil, []func(time.Time) Earlier{sent("body.docs.0.updated_at", second, fSecond, false, nil)}, true},
+		{"a DATETIME second, an earlier test's insert of it", upd, second, nil, []func(time.Time) Earlier{sent("body.docs.0.updated_at", second, fSecond, true, nil)}, false},
+		{"a DATETIME second, an insert of it the same in round F", upd, second, nil, []func(time.Time) Earlier{sent("body.docs.0.updated_at", second, second, false, nil)}, false},
+		{"a DATETIME second, an insert of it its call learned as a read at the second", upd, second, nil, []func(time.Time) Earlier{sent("body.docs.0.updated_at", second, fSecond, false, &models.ClockOffset{Res: time.Second})}, false},
+		{"a DATETIME second, an insert of it its call learned as a read at the millisecond", upd, second, nil, []func(time.Time) Earlier{sent("body.docs.0.updated_at", second, fSecond, false, &models.ClockOffset{Res: ms})}, true},
+		{"a DATETIME second, a leaf of the request beside it", upd, second, map[string][2]string{"body.cmd.update.$set.seen": {second, fSecond}}, nil, true},
+		{"a DATETIME second, the request setting the read", upd, second, setsRead, nil, false},
+		{"a DATETIME second, the request setting the read, an earlier answer's Date of it", upd, second, setsRead, []func(time.Time) Earlier{answered("header.Date", "Mon, 09 Nov 2026 07:01:42 GMT")}, false},
+		{"the read's date, a request's date the same in round F", day, "2026-11-09", nil, []func(time.Time) Earlier{sent("body.cmd.query.day", "2026-11-09", "2026-11-09", false, nil)}, false},
+		{"the read's date, a request's date written otherwise in round F", day, "2026-11-09", nil, []func(time.Time) Earlier{sent("body.cmd.query.day", "2026-11-09", fUnixS, false, nil)}, false},
+		{"the read's midnight, a request's midnight the same in round F", day, "2026-11-09T00:00:00.000Z", nil, []func(time.Time) Earlier{sent("body.cmd.query.from", "2026-11-09T00:00:00.000Z", "2026-11-09T00:00:00.000Z", false, nil)}, false},
+		{"the read's midnight, a request's midnight written otherwise in round F", day, "2026-11-09T00:00:00.000Z", nil, []func(time.Time) Earlier{sent("body.cmd.query.from", "2026-11-09T00:00:00.000Z", fUnixS, false, nil)}, false},
+		{"the read itself, a request of it", upd, "2026-11-09T07:01:42.600Z", nil, []func(time.Time) Earlier{sent("body.cmd.query.at", "2026-11-09T07:01:42.600Z", "2026-11-09T09:19:05.750Z", false, nil)}, false},
+		{"an HTTP answer's Date of the read's second", hdr, "Mon, 09 Nov 2026 07:01:42 GMT", nil, nil, true},
+		{"an HTTP answer's date header of the read's second", "header.date", "Mon, 09 Nov 2026 07:01:42 GMT", nil, nil, true},
+		{"an HTTP answer's Date of the read's second, an earlier Date of it", hdr, "Mon, 09 Nov 2026 07:01:42 GMT", nil, []func(time.Time) Earlier{answered("header.Date", "Mon, 09 Nov 2026 07:01:42 GMT")}, true},
+		{"an HTTP answer's Date of the read's second, the request holding it", hdr, "Mon, 09 Nov 2026 07:01:42 GMT", map[string][2]string{"header.X-Sent": {unixS, fUnixS}}, nil, true},
+		{"an HTTP answer's Last-Modified of the read's second", "header.Last-Modified", "Mon, 09 Nov 2026 07:01:42 GMT", nil, nil, false},
+	} {
+		d := decide(c.path, c.val, c.also, c.earlier...)
+		switch {
+		case c.clock && (d.Outcome != OutcomeClock || d.Clock == nil):
+			t.Errorf("%s: %v %+v; want a Clock", c.name, d.Outcome, d.Refusal)
+		case !c.clock && (d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalCannotCheck || !strings.Contains(d.Refusal.Why, "its own call's recorded answer holds")):
+			t.Errorf("%s: %v %+v; want refused, an echo", c.name, d.Outcome, d.Refusal)
+		}
+	}
+}
+
+// An answer of n instants, each the read's second as Unix seconds, that the
+// last of n earlier inserts wrote, asks once whether a source holds that
+// second (heldElsewhere), however large n is: what the call does for it is
+// linear in its answers and places. An answer that writes the second in a
+// second form asks once more, and where no insert writes that form, the
+// read is refused at its first such answer.
+func TestAnAnswerOfManyEchoesOfOneSecondAsksForItsSourceOnce(t *testing.T) {
+	if reflect.ValueOf(decideBy).Pointer() == reflect.ValueOf(refuseAll).Pointer() {
+		t.Skip("the order of a changed word is not on this tree")
+	}
+	const p, ms, n = "body.cmd.query.expires_at.$gt.$date.$numberLong", time.Millisecond, 3000
+	const read = int64(1794207702600)
+	str := func(path, v string) Leaf { return Leaf{Path: path, Noise: path, Type: String, Value: v} }
+	rAt := time.UnixMilli(read + 2).UTC()
+	fAt := rAt.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 150*ms)
+	var es []Earlier
+	for i := range n {
+		v := strconv.Itoa(1794207000 + i%600)
+		if i == n-1 {
+			v = "1794207702"
+		}
+		at := rAt.Add(-time.Duration(n-i) * ms)
+		mock := "mock-" + strconv.Itoa(1000+i)
+		es = append(es, Earlier{Mock: mock, At: at, Payload: payloadOf(mock, at), Own: true,
+			Seen: []Seen{{Side: Request, Leaf: str("body.docs.msgs."+strconv.Itoa(i)+".created_at", v), Live: strconv.Itoa(1794215000 + i)}}})
+	}
+	for _, c := range []struct {
+		what  string
+		forms []string
+		asks  int
+		clock bool
+	}{
+		{"one form", []string{"1794207702"}, 1, true},
+		{"two forms", []string{"1794207702", "2026-11-09 07:01:42"}, 2, false},
+	} {
+		var resp []Leaf
+		for i := range n {
+			resp = append(resp, str("resp.0.0.cursor.firstBatch."+strconv.Itoa(i)+".created_at", c.forms[i%len(c.forms)]))
+		}
+		in := Input{
+			Drifts: NewDriftCache(), Drift: []string{p}, Live: oShape(p, strconv.FormatInt(fAt.Add(-2*ms).UnixMilli(), 10)), Rec: oShape(p, strconv.FormatInt(read, 10)),
+			At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-9999", Mode: ModeOwn, Resp: resp, Earlier: es,
+			Window: v5Window(v5Call(rAt, 20*ms, 0), v5Call(fAt, 20*ms, 0)), Landed: Landed{Where: LandedBetween},
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
+		}
+		in.Drifts.appClock = true
+		x := newReaderIndex(in.Drifts)
+		dc := newDecider(in, false, x)
+		ds, _ := dc.decide()
+		x.release()
+		if len(ds) != 1 || (ds[0].Outcome == OutcomeClock) != c.clock {
+			t.Errorf("%s: %s; want one decision, a Clock %v", c.what, oDescribe(ds), c.clock)
+		}
+		if dc.asked != c.asks {
+			t.Errorf("%s: %d answers asked for their source %d times; want %d", c.what, n, dc.asked, c.asks)
+		}
+	}
+}
+
+// A client test's name made of its UnixNano (a CI identity
+// "…repo-<UnixNano>" a Vault PUT sends) is the test's own value beside the
+// answer's HTTP Date in the name's second, truncated or rounded up: the
+// server's clock is no echo of it.
+func TestAClientMadeNameBesideTheAnswersDateIsTheTestsOwnValue(t *testing.T) {
+	const p = "body.data.name"
+	recT := time.Date(2026, 11, 9, 3, 28, 6, 953971088, time.UTC)
+	liveT := recT.Add(61*time.Second + 310*time.Millisecond)
+	rAt, fAt := recT.Add(27*time.Millisecond), liveT.Add(27*time.Millisecond)
+	recN, liveN := strconv.FormatInt(recT.UnixNano(), 10), strconv.FormatInt(liveT.UnixNano(), 10)
+	str := func(path, v string) Leaf { return Leaf{Path: path, Noise: path, Type: String, Value: v} }
+	created := map[string][2]string{"body.data.createdAt": {"1794194886", "1794194947"}, "body.data.updatedAt": {"2026-11-09T03:28:06Z", "2026-11-09T03:29:07Z"}}
+	for _, c := range []struct {
+		name string
+		resp []Leaf
+		also map[string][2]string
+	}{
+		{"the Date the name's second rounded up", []Leaf{str("header.Date", "Mon, 09 Nov 2026 03:28:07 GMT")}, nil},
+		{"the Date the name's second truncated", []Leaf{str("header.Date", "Mon, 09 Nov 2026 03:28:06 GMT")}, nil},
+		{"the Date rounded up beside the request's times", []Leaf{str("header.Date", "Mon, 09 Nov 2026 03:28:07 GMT"), str("body.data.created_time", "2026-11-09T03:28:07.016453Z")}, created},
+	} {
+		in := iCall(p, String, "CI identity: github octo-org/repo-"+recN, "CI identity: github octo-org/repo-"+liveN, rAt, fAt, nil, nil, nil)
+		in.Drifts, in.Resp = oClientDrifts(), c.resp
+		for k, v := range c.also {
+			in.Rec.Leaves[k], in.Live.Leaves[k] = str(k, v[0]), str(k, v[1])
+		}
+		if d := oWord(t, Decide(in), recN, liveN); d.Outcome != OutcomeFresh {
+			t.Errorf("%s: %s %+v; want the test's own value", c.name, oOutcomeName(d), d.Refusal)
 		}
 	}
 }
@@ -1790,7 +2092,7 @@ func TestAnEchoOfAClockReadIsTheReadCutInItsOwnZoneOrTheApplications(t *testing.
 		dc := NewDriftCache()
 		dc.zone = c.zone
 		d := &decider{dr: dc, x: newReaderIndex(dc)}
-		if got := d.echoesMoment(d.x.text(c.answer), momentOf(t, c.read), func(moment) bool { return false }); got != c.want {
+		if got := d.echoesMoment(d.x.text(c.answer), momentOf(t, c.read), func(moment, time.Duration, string) bool { return false }); got != c.want {
 			t.Errorf("%s: %q beside the read %q echoes it %v; want %v", c.name, c.answer, c.read, got, c.want)
 		}
 	}
