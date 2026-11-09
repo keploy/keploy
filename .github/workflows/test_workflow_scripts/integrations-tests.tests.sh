@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Tests for integrations-tests.sh, against a stand-in go and gh and a real git
-# repository built here. Needs bash, git and awk; no network, no Go toolchain.
+# repository built here, and for integration-ref.sh and integration-ref.ps1,
+# which read a PR body's Integration-Ref for it and for setup-private-parsers.
+# Needs bash, git, awk and pwsh (GitHub's Ubuntu runners have it); no network,
+# no Go toolchain.
 # Run by integrations-tests.yml before the real run, or locally:
 #
 #   bash .github/workflows/test_workflow_scripts/integrations-tests.tests.sh
 #
 # resolve: which integrations ref a run tests, in setup-private-parsers'
-#   order (the PR body's Integration-Ref, a branch named like the PR's head,
-#   INTEGRATION_REF), that a ref the body names must exist, that refs with
+#   order (the PR body's Integration-Ref, a ref named like the PR's head,
+#   INTEGRATION_REF), that a name is looked up as go get looks it up (a tag,
+#   then a branch, then a commit or a pseudo-version's commit), that a ref the
+#   body names must exist, that refs with
 #   characters outside the allow-list are refused, that the body is read again
 #   from the API with a bounded retry, and that the clone is left detached at
 #   the commit it names.
@@ -222,6 +227,9 @@ git -C "$origin" tag v1.0.0
 git -C "$origin" tag only-a-tag "$c_x"
 git -C "$origin" checkout -q main
 git -C "$origin" branch -q -D tagged
+# A branch and a tag of one name, on different commits.
+git -C "$origin" branch -q both "$c_head"
+git -C "$origin" tag both "$c_x"
 
 # resolve_case NAME BODY|- [ENV...]: runs `resolve` in a fresh clone, with gh
 # answering BODY ("-": no PR).
@@ -303,15 +311,47 @@ expect_has "Integration-Ref \"feat/x;rm\" has characters outside"
 resolve_case "a branch named like the PR's head" $'No ref line here.\n' HEAD_REF=feat/pr-head INTEGRATION_REF=main
 expect_rc 0
 expect_at "$c_head"
-expect_has "(from the keploy/integrations branch named like this PR's)"
+expect_has "(from the keploy/integrations ref named like this PR's branch)"
 
 resolve_case "a head branch integrations does not have falls to INTEGRATION_REF" "" HEAD_REF=feat/absent INTEGRATION_REF=main
 expect_rc 0
 expect_at "$c_main"
 
-resolve_case "a head name that is only a tag there is no pair" "" HEAD_REF=only-a-tag INTEGRATION_REF=main
+resolve_case "a head name that is a tag there pairs with the tag, as go get does" "" HEAD_REF=only-a-tag INTEGRATION_REF=main
 expect_rc 0
-expect_at "$c_main"
+expect_at "$c_x"
+
+# go get and git rev-parse both take the tag of a name that is a tag and a
+# branch.
+both_want="$(git -C "$origin" rev-parse --quiet --verify 'both^{commit}' 2>/dev/null)"
+resolve_case "a name that is a tag and a branch is the tag, as git rev-parse has it" $'Integration-Ref: both\n' INTEGRATION_REF=main
+[ "$both_want" = "$c_x" ] || fail "git rev-parse both: $both_want, want the tag's $c_x"
+expect_rc 0
+expect_at "$both_want"
+
+resolve_case "a head name that is a tag and a branch is the tag" "" HEAD_REF=both INTEGRATION_REF=main
+expect_rc 0
+expect_at "$c_x"
+
+resolve_case "INTEGRATION_REF that is a tag and a branch is the tag" - INTEGRATION_REF=both
+expect_rc 0
+expect_at "$c_x"
+
+resolve_case "the body names a pseudo-version" "Integration-Ref: v0.0.0-20261109182141-${c_x:0:12}" INTEGRATION_REF=main
+expect_rc 0
+expect_at "$c_x"
+
+resolve_case "the body names a pre-release pseudo-version" "Integration-Ref: v1.2.4-0.20261109182141-${c_head:0:12}" INTEGRATION_REF=main
+expect_rc 0
+expect_at "$c_head"
+
+resolve_case "a pseudo-version of a commit integrations lacks fails" $'Integration-Ref: v0.0.0-20261109182141-deadbeefdead\n' INTEGRATION_REF=main
+expect_rc 1
+expect_has "Integration-Ref \"v0.0.0-20261109182141-deadbeefdead\" names no branch, tag or commit"
+
+resolve_case "a pseudo-version with a short hash is no pseudo-version" "Integration-Ref: v0.0.0-20261109182141-${c_x:0:11}" INTEGRATION_REF=main
+expect_rc 1
+expect_has "names no branch, tag or commit"
 
 resolve_case "INTEGRATION_REF names a tag" - INTEGRATION_REF=v1.0.0
 expect_rc 0
@@ -352,6 +392,58 @@ expect_has "names no branch, tag or commit"
 NO_OUTPUT=1 resolve_case "no GITHUB_OUTPUT" - INTEGRATION_REF=main
 expect_rc 0
 expect_has "keploy/integrations main at $c_main (from INTEGRATION_REF)"
+
+# ---- integration-ref.sh and integration-ref.ps1 ------------------------------
+# body_case NAME BODY WANT: both readers give WANT for BODY ("" for none).
+# shellcheck source=/dev/null
+source "$here/integration-ref.sh"
+body_case() {
+  case_name="$1"
+  cases=$((cases + 1))
+  local got
+  : >"$work/out"
+  got="$(integration_ref_of_body "$2")"
+  [ "$got" = "$3" ] || fail "integration-ref.sh read [$got], want [$3]"
+  if ! command -v pwsh >/dev/null; then
+    fail "pwsh is not installed, so integration-ref.ps1 is not tested"
+    return
+  fi
+  # shellcheck disable=SC2016 # PowerShell text
+  got="$(BODY="$2" pwsh -NoProfile -NonInteractive -Command \
+    '. $env:INTEGRATION_REF_PS1; $r = Get-IntegrationRefOfBody $env:BODY; if ($null -eq $r) { "<none>" } else { "[$r]" }' 2>&1)" ||
+    got="pwsh failed: $got"
+  local want="<none>"
+  [ -z "$3" ] || want="[$3]"
+  [ "$got" = "$want" ] || fail "integration-ref.ps1 read $got, want $want"
+}
+export INTEGRATION_REF_PS1="$here/integration-ref.ps1"
+
+# setup-private-parsers reads the body with these two, not a copy of its own.
+case_name="setup-private-parsers reads the body with integration-ref.sh and .ps1"
+cases=$((cases + 1))
+action="$here/../../actions/setup-private-parsers/action.yaml"
+: >"$work/out"
+# shellcheck disable=SC2016 # the text the action holds
+for want in 'source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/integration-ref.sh"' \
+  'BODY_REF="$(integration_ref_of_body "$PR_BODY")"' \
+  '. "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/integration-ref.ps1"' \
+  '$BodyRef = Get-IntegrationRefOfBody $env:PR_BODY'; do
+  [ "$(grep -cxF -- "        $want" "$action")" = 1 ] || fail "action.yaml does not hold, once: $want"
+done
+! grep -iE '(grep|imatch).*integration-ref' "$action" >"$work/out" ||
+  fail "action.yaml still matches Integration-Ref lines itself"
+body_case "a CRLF body whose ref ends its line" $'Fixes it.\r\nIntegration-Ref: feat/x\r\nmore\r\n' feat/x
+body_case "a CRLF body whose ref line is its last" $'Fixes it.\r\nIntegration-Ref: feat/x\r' feat/x
+body_case "a CR alone ends no ref" $'Integration-Ref:\r\nfeat/x\r\n' ""
+body_case "a lone CR ends a line" $'Fixes it.\rIntegration-Ref: feat/x\rmore' feat/x
+body_case "an LF body" $'Fixes it.\n\nIntegration-Ref: feat/x\n' feat/x
+body_case "the first word only" $'Integration-Ref: main other-tag\n' main
+body_case "the first Integration-Ref line wins" $'- integration-REF:  feat/x  and more\nIntegration-Ref: feat/y\n' feat/x
+body_case "a quote marker and spaces before the colon" $'  > INTEGRATION-REF :feat/x\n' feat/x
+body_case "a tag in a sentence is no ref" $'See Integration-Ref: feat/x\n' ""
+body_case "no ref line" $'Fixes it.\n' ""
+body_case "an empty body" "" ""
+unset INTEGRATION_REF_PS1
 
 # ---- usage -----------------------------------------------------------------
 case_name="no command"

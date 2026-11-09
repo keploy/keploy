@@ -18,16 +18,23 @@
 #   INTEGRATIONS_DIR is a clone of keploy/integrations that holds every branch
 #   and tag (actions/checkout with fetch-depth: 0). Picks the integrations ref
 #   to test and checks it out detached. First hit wins:
-#     1. an `Integration-Ref: <branch, tag or commit>` line in the PR's body.
-#        The body is read from the API, not the event, so an edited body
-#        counts on a re-run. A ref named there must exist: the PR is tested
-#        against it or fails. It never falls back to main, which is the ref
-#        the PR said it does not build against.
-#     2. a keploy/integrations branch named like the PR's head branch.
+#     1. an `Integration-Ref: <ref>` line in the PR's body, read by
+#        integration-ref.sh as setup-private-parsers reads it. The body is
+#        read from the API, not the event, so an edited body counts on a
+#        re-run. A ref named there must exist: the PR is tested against it or
+#        fails. It never falls back to main, which is the ref the PR said it
+#        does not build against.
+#     2. a keploy/integrations ref named like the PR's head branch.
 #     3. INTEGRATION_REF (vars.INTEGRATION_REF, else main). It must exist.
-#   This is setup-private-parsers' order, so the build lanes and this job pair
-#   a PR with the same integrations branch; unlike there, a ref the PR body
-#   names but that does not exist fails here instead of falling through.
+#   A ref names what `go get` takes it to name, as setup-private-parsers
+#   fetches it with go get: a tag, else a branch, else a commit (7 to 40 hex
+#   digits, or the commit of a pseudo-version). So the build lanes and this
+#   job pair a PR with the same integrations commit, but for three things:
+#   the lanes read the body from the event that started the run, so a body
+#   edited since counts there only from the next push; a ref the body names
+#   that the lanes cannot fetch falls through to the next ref there and fails
+#   here; and a ref go get takes but names no tag, branch or commit (latest,
+#   a version prefix) fails here.
 #   Env: PR_NUMBER and GH_TOKEN (pull requests only), GITHUB_REPOSITORY,
 #   HEAD_REF, INTEGRATION_REF. Writes ref=, source= and sha= to GITHUB_OUTPUT
 #   when it is set.
@@ -47,17 +54,25 @@ integrations_module=github.com/keploy/integrations
 # The characters of a git branch, tag or commit. The PR body is untrusted, so a
 # ref read from it is refused unless it is made of these alone.
 safe_ref_re='^[A-Za-z0-9._/+-]+$'
+# A Go pseudo-version, which names a commit by its first 12 hex digits.
+pseudo_re='^v[0-9]+\.[0-9]+\.[0-9]+-(.*\.)?[0-9]{14}-([0-9a-f]{12})$'
+# shellcheck source=/dev/null
+source "$here/integration-ref.sh"
 
 die() {
   echo "::error title=keploy/integrations tests::$*"
   exit 1
 }
 
-# Prints the commit REF names in the clone at DIR: a branch of origin, a tag,
-# or a commit (7 to 40 hex digits). Fails when it names none.
+# Prints the commit REF names in the clone at DIR, looked up as go get and
+# git rev-parse look it up: a tag, else a branch of origin, else a commit (7 to
+# 40 hex digits, or a pseudo-version's 12). Fails when it names none.
 commit_of() {
   local dir="$1" ref="$2" sha
-  for cand in "refs/remotes/origin/$ref" "refs/tags/$ref"; do
+  if [[ "$ref" =~ $pseudo_re ]]; then
+    ref="${BASH_REMATCH[2]}"
+  fi
+  for cand in "refs/tags/$ref" "refs/remotes/origin/$ref"; do
     if sha="$(git -C "$dir" rev-parse --verify --quiet "$cand^{commit}")"; then
       echo "$sha"
       return 0
@@ -91,10 +106,7 @@ resolve() {
   local dir="$1" ref="" source="" sha="" body body_ref
   if [ -n "${PR_NUMBER:-}" ]; then
     body="$(pr_body)" || die "cannot read the body of PR #${PR_NUMBER}, which may name the integrations ref to test"
-    # GitHub keeps a body edited on the web with CRLF line ends.
-    body_ref="$(printf '%s\n' "$body" | tr -d '\r' |
-      grep -iE '^[[:space:]]*([-*>][[:space:]]+)?integration-ref:' | head -1 |
-      sed -E 's/^[^:]+:[[:space:]]*//' | awk '{print $1; exit}' || true)"
+    body_ref="$(integration_ref_of_body "$body")"
     if [ -n "$body_ref" ]; then
       [[ "$body_ref" =~ $safe_ref_re ]] ||
         die "the PR body's Integration-Ref \"$body_ref\" has characters outside [A-Za-z0-9._/+-]"
@@ -104,10 +116,9 @@ resolve() {
       source="the PR body's Integration-Ref"
     fi
   fi
-  if [ -z "$ref" ] && [ -n "${HEAD_REF:-}" ] &&
-    sha="$(git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/${HEAD_REF}^{commit}")"; then
+  if [ -z "$ref" ] && [ -n "${HEAD_REF:-}" ] && sha="$(commit_of "$dir" "$HEAD_REF")"; then
     ref="$HEAD_REF"
-    source="the keploy/integrations branch named like this PR's"
+    source="the keploy/integrations ref named like this PR's branch"
   fi
   if [ -z "$ref" ]; then
     ref="${INTEGRATION_REF:-main}"
