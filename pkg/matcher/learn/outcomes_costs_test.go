@@ -3902,6 +3902,62 @@ func TestOutcomeCostTheFirstShortTextsPostingsEntryCountsItsMapsFirstGroup(t *te
 	}
 }
 
+// A short text whose postings entry fits the set's budget but whose words
+// do not (postRuns finds no room for them) has postings id -1 (shortEntry):
+// its place is read for every word (placeIndex's read always), and the call
+// decides as a call in no set, which reads every place. With the entry's
+// zero id it would name the set's first posted text: the place would be
+// asked only for that text's words, never for the word it holds itself, and
+// that word's refusal would become a fresh learn.
+func TestOutcomeCostAShortTextWhosePostingsDoNotFitIsReadForEveryWord(t *testing.T) {
+	const rec, live, held = "ids a1b2c3d4 b2c3d4e5", "ids f0e9d8c7 e9d8c7b6", "a1b2c3d4"
+	call := func(dc *DriftCache) Input {
+		at := eRecAt.Add(-6 * time.Millisecond)
+		e := Earlier{Mock: "mock-held", At: at, Payload: oPayload("mock-held", at)}
+		e.Seen = []Seen{{Side: Response, Leaf: Leaf{Path: "body.ref", Noise: "body.ref", Type: String, Value: held}, Live: held}}
+		return costCall(dc, "body.ids", rec, live, eRecAt, []Earlier{e}, nil, nil, nil)
+	}
+	want := oDescribe(Decide(call(nil)))
+	if !strings.Contains(want, "a1b2c3d4->f0e9d8c7 refused") || !strings.Contains(want, "mock-held") {
+		t.Fatalf("a call in no set decides %q; want a1b2c3d4 refused, naming mock-held", want)
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	s := dc.set
+	x := newReaderIndex(dc)
+	// The set's first posted text, id 0, holds none of the call's words.
+	if id := x.textOf(RawOf(getAnswer("mock-0", "http://api/items/0", `{"v":"posted first"}`, eRecAt.Add(-time.Hour)), true)).postID(); id != 0 {
+		t.Fatalf("the set's first posted text has postings id %d; want 0", id)
+	}
+	// Room for the leaf's entry (the map's first group with it), none for
+	// its words.
+	entry := filterEntryBytes + filterIDSlotBytes + allocBytes(len(held), false) + filterIDGroupBytes
+	s.mu.Lock()
+	limit := s.budget.limit
+	s.budget.limit = s.budget.used + entry
+	s.mu.Unlock()
+	id := x.text(held).postID()
+	s.mu.Lock()
+	s.budget.limit = limit
+	s.mu.Unlock()
+	x.release()
+	if id != -1 || len(x.filters.short) != 1 {
+		t.Fatalf("a short text whose words do not fit the set's budget has postings id %d, %d short entries; want -1, its one entry kept", id, len(x.filters.short))
+	}
+	in := call(dc)
+	d := newDecider(in, false, newReaderIndex(dc))
+	defer d.x.release()
+	if pi := d.places(); len(d.ps) != 1 || !slices.Equal(pi.always, []int32{0}) {
+		t.Errorf("the leaf whose words the set did not post is read always at %v of %d places; want [0], read for every word", pi.always, len(d.ps))
+	}
+	if got := oDescribe(Decide(in)); got != want {
+		t.Errorf("beside a short text whose words the set did not post the call decides %q; want %q, as a call in no set", got, want)
+	}
+}
+
 // A text keploy could not read has no postings entry (shortEntry): its
 // place is read for every word (placeIndex's read always), and that read
 // refuses the call, as a recording whose payload a later load could not
@@ -3976,13 +4032,31 @@ func TestOutcomeCostALongTextPastItsFilterHasNoPostingsEntry(t *testing.T) {
 // placesOf allocates for 3000 recordings are its list's own, and for 3000
 // leaves of 300 exchanges an earlier test left the run its list's own, each
 // leaf's name, and each exchange's strings.
+//
+// Whether keploy read each recording (Raw.Read: a place it could not read
+// refuses the call) is a bit the set's store keeps for the set once it has
+// read the recording's payload (bodyStore.readOf), as the set's staging
+// (WarmSet) or its first call does: a call asks the bit, and decodes no
+// payload. A lazy Raw no store has read yet (each RawOf under
+// KEPLOY_LEARN_LAZY_EVERY_RAW) is read once by the first ask, as the set
+// reads it once; the call measured is the next, which decodes none.
 func TestOutcomeCostACallsPlacesAreListedOnce(t *testing.T) {
-	allocated := func(in Input) (int, uint64) {
+	allocated := func(in Input, of int) (int, uint64) {
+		d := payloadDecodes.Load()
+		placesOf(in)
+		if d = payloadDecodes.Load() - d; d > int64(of) {
+			t.Errorf("the set's first ask of %d recordings' places decoded %d payloads; want each read once at most (%d)", of, d, of)
+		}
 		var a, b runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&a)
+		d = payloadDecodes.Load()
 		ps, _ := placesOf(in)
+		d = payloadDecodes.Load() - d
 		runtime.ReadMemStats(&b)
+		if d != 0 {
+			t.Errorf("a call's places of %d recordings the set has read decoded %d payloads; want none (the set's store keeps whether each was read)", of, d)
+		}
 		return len(ps), b.TotalAlloc - a.TotalAlloc
 	}
 	size := uint64(unsafe.Sizeof(evPlace{}))
@@ -3990,7 +4064,7 @@ func TestOutcomeCostACallsPlacesAreListedOnce(t *testing.T) {
 	for i := range raws {
 		raws[i] = RawOf(getAnswer(fmt.Sprintf("mock-%d", i), "http://api/items", `{"v":"x"}`, eRecAt.Add(-time.Hour)), false)
 	}
-	n, got := allocated(Input{At: eRecAt, Raw: raws})
+	n, got := allocated(Input{At: eRecAt, Raw: raws}, len(raws))
 	t.Logf("%d recordings' places: %d bytes allocated, %d a place", n, got, size)
 	if want := uint64(n)*size + 4096; n != len(raws) || got > want {
 		t.Errorf("%d recordings' places allocate %d bytes; want %d places in at most %d (the list, %d bytes a place)", n, got, len(raws), want, size)
@@ -4020,7 +4094,7 @@ func TestOutcomeCostACallsPlacesAreListedOnce(t *testing.T) {
 		}
 		earlier = append(earlier, e)
 	}
-	n, got = allocated(Input{At: eRecAt, Earlier: earlier})
+	n, got = allocated(Input{At: eRecAt, Earlier: earlier}, len(earlier))
 	late := uint64(len(earlierLateCall(earlier[0])))
 	t.Logf("%d leaves' places: %d bytes allocated, %d a place, %d bytes of strings an exchange", n, got, size, late)
 	if want := uint64(n)*(size+32) + 300*(late+64) + 4096; n != 3000 || got > want {
