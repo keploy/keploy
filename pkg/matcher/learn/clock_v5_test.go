@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // v5Read is one run's call: its window, from 61 ms before the call (a
@@ -1355,9 +1356,10 @@ func TestALookBackAnEarlierTestSentIsItsValueCarriedThroughTheOrder(t *testing.T
 // replay passes the application's value and fails a dropped or shorter time
 // to live. Each condition holds it apart from a carried value: a grant no
 // learn step learned as a read, one learned at the expiration's own cut or
-// with no cut, one no meet holds, one whose learned offset the expiration's
-// window does not hold or only touches, and a plain read sent again as a
-// look-back stay refused, naming the grant.
+// with no cut, one no meet holds (two layouts, two zones, two steps, or an
+// inverted range), one whose learned offset the expiration's window does not
+// hold or only touches, and a plain read sent again as a look-back stay
+// refused, naming the grant.
 func TestATimeToLiveAnEarlierTestReadAtAFinerCutIsARead(t *testing.T) {
 	sec, ms, µs, month := time.Second, time.Millisecond, time.Microsecond, 30*24*time.Hour
 	const p, sent = "body.docs.msgs.0.expiration.$numberLong", "body.docs.msgs.0.expires_at.$date.$numberLong"
@@ -1409,6 +1411,9 @@ func TestATimeToLiveAnEarlierTestReadAtAFinerCutIsARead(t *testing.T) {
 		{"a grant learned at the expiration's own cut", grant(month, secs, at0(models.ClockOffset{Min: month - 500*ms, Max: month + 500*ms, Res: sec})), rec, live},
 		{"a grant learned with no cut", grant(month, millis, at0(models.ClockOffset{Min: fine.Min, Max: fine.Max})), rec, live},
 		{"a grant two learnings in two layouts met", grant(month, millis, at0(models.ClockOffset{Min: fine.Min, Max: fine.Max, Res: ms, Layout: models.LayoutApart})), rec, live},
+		{"a grant two learnings in two zones met", grant(month, millis, at0(models.ClockOffset{Min: fine.Min, Max: fine.Max, Res: ms, Zone: models.ZoneApart})), rec, live},
+		{"a grant two learnings at two steps met", grant(month, millis, at0(models.ClockOffset{Min: fine.Min, Max: fine.Max, Res: ms, Step: models.StepApart})), rec, live},
+		{"a grant learned at an inverted range", grant(month, millis, at0(models.ClockOffset{Min: fine.Max, Max: fine.Min, Res: ms})), rec, live},
 		{"a grant learned at an offset the expiration's window does not hold", grant(month+100*ms, millis, at0(models.ClockOffset{Min: month + 100*ms - 771*µs, Max: month + 100*ms + 379*µs, Res: ms})), rec, live},
 		{"a grant learned at offsets that only touch the expiration's", grant(touch.Min+ms/2, millis, &touch), rec, live},
 		{"a plain read at the millisecond sent again as now - 9s", grant(86*ms-9*sec, millis, at0(models.ClockOffset{Res: ms})), secs(at.Add(-9 * sec)), secs(fAt.Add(-9 * sec))},
@@ -1419,6 +1424,50 @@ func TestATimeToLiveAnEarlierTestReadAtAFinerCutIsARead(t *testing.T) {
 		}
 		if d := v5Decide(t, p, Number, row.rec, row.live, at, fAt, width); d.Clock == nil || d.Outcome != OutcomeClock {
 			t.Errorf("%s, with no earlier send: %+v; want a Clock", row.name, d)
+		}
+	}
+}
+
+// The same two reads of one time to live, the grant reaching the next test
+// as keploy carries it there: served in test 1 with the reads its call's
+// learn step learned (Tracker.Served of Named), kept for the tests after it
+// as the run's when test 1 ends (ranCalls), and read by test 2's call
+// (Tracker.Test). The expiration is a Clock of clock + 30d; the same grant
+// served with no learned read is refused, naming it, so the run's place does
+// reach test 2.
+func TestATimeToLiveAnEarlierTestReadAtAFinerCutIsAReadThroughTheRun(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ms, µs, month := time.Millisecond, time.Microsecond, 30*24*time.Hour
+	const p, sent = "body.docs.msgs.0.expiration.$numberLong", "body.docs.msgs.0.expires_at.$date.$numberLong"
+	at := time.Date(2026, 11, 9, 7, 2, 32, 979e6, time.UTC)
+	fAt := at.Add(FullRoundLead + 9*time.Second + 82*ms)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	millis := func(t time.Time) string { return strconv.FormatInt(t.UnixMilli(), 10) }
+	read := at.Add(-86 * ms)
+	fine := models.ClockOffset{Min: month - 771*µs, Max: month + 379*µs, Res: ms, Why: sent + " = clock + 30d"}
+	for _, row := range []struct {
+		name   string
+		clocks map[string]models.ClockOffset
+		clock  bool
+	}{
+		{"the grant's learned read of the clock + 30d at the millisecond", map[string]models.ClockOffset{sent: fine}, true},
+		{"the grant with no learned read", nil, false},
+	} {
+		tr := NewTracker()
+		tr.Begin()
+		n, _, _, _ := tr.Test()
+		grant := Earlier{Mock: "mock-1018", At: read, Own: true, Seen: []Seen{{Side: Request, Place: sent,
+			Leaf: Leaf{Path: sent, Noise: sent, Type: Number, Value: millis(read.Add(month))}, Live: millis(fAt.Add(-86*ms + month))}}}
+		tr.Served(n, Named(grant, nil, row.clocks))
+		tr.End()
+		tr.Begin()
+		_, earlier, _, _ := tr.Test()
+		d := v5Decide(t, p, Number, secs(at.Add(month)), secs(fAt.Add(month)), at, fAt, 20*ms, earlier...)
+		switch {
+		case row.clock && (d.Outcome != OutcomeClock || d.Clock == nil || d.Clock.Min > month || d.Clock.Max < month):
+			t.Errorf("%s: test 2's expiration is %+v; want a Clock of clock + 30d", row.name, d)
+		case !row.clock && (d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalNoClockRead || !slices.Contains(d.Refusal.Places, "mock-1018 "+sent)):
+			t.Errorf("%s: test 2's expiration is %+v; want refused (no-clock-read) naming mock-1018 %s", row.name, d, sent)
 		}
 	}
 }

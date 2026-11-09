@@ -60,15 +60,6 @@ type Seen struct {
 	// its value but does not hold it as its own read of the clock is
 	// refused, never followed (classifyRead, clockSourceWhy).
 	Clock bool
-	// Offset is the read of the application's clock the learn step learned
-	// the leaf, a request's, as, with its offset and the cut it was learned
-	// at (MockSpec.Clocks' entry, its Why left out: Named), a plain read
-	// too, which Clock marks; nil where it learned none. A later test's call
-	// whose own window holds its value plus that same offset at a coarser
-	// cut is a second read of one time to live, not that call's value
-	// carried (the order's step 5). A pointer, so a leaf that is no read
-	// keeps no more than before (runPlaceBytes).
-	Offset *models.ClockOffset
 	// Undeclared: the leaf is a test case's request body, or a leaf of it,
 	// one side of which declares no media type (no Content-Type) and is
 	// read as text by its bytes (plainText, GivenRequest); both sides are
@@ -79,6 +70,16 @@ type Seen struct {
 	// (unaccounted), as one found there as a word is, never learned as
 	// noise. A body that declares a text media type is read by its words.
 	Undeclared bool
+	// Offset is the read of the application's clock the learn step learned
+	// the leaf, a request's, as, with its offset and the cut it was learned
+	// at (MockSpec.Clocks' entry, its Why left out: Named), a plain read
+	// too, which Clock marks; nil where it learned none. A later test's call
+	// whose own window holds its value plus that same offset at a coarser
+	// cut is a second read of one time to live, not that call's value
+	// carried (the order's step 5). A pointer after the flags: every leaf
+	// the run keeps costs 8 bytes more, and one learned as a read the
+	// models.ClockOffset it points to as well (runPlaceBytes).
+	Offset *models.ClockOffset
 }
 
 // Earlier is an HTTP mock the learn step served earlier in the same test,
