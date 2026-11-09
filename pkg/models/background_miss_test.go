@@ -65,26 +65,42 @@ func TestBackgroundMockNamesAreTheWorkerThenTheStartupMocks(t *testing.T) {
 }
 
 // A background miss that differs from its background recording by a value
-// its own test bound keeps, through the sanitized copy and the report's
-// yaml and json, the names of each such place and of where the test bound
-// it, and no value.
+// its own test bound keeps, through the report's yaml and json, the names of
+// each such place and of where the test bound it, and no value. Its
+// sanitized copy, what evidence keeps, has the recordings' names and each
+// place's shape: a key on the way that can be a value the app sent is {},
+// and a learned variable's name, which can be such a key, is dropped; a
+// given's is kept.
 func TestABackgroundMissKeepsTheNamesOfItsTestsBoundValues(t *testing.T) {
 	bound := BackgroundBinding{Recording: "mock-2954", Place: "body.docs.msgs.0.q.app_id", Variable: "appId", BoundMock: "mock-226", BoundPlace: "body.docs.msgs.0.appId"}
-	bg := UnmatchedCall{Protocol: "MongoDB", MatchPhase: MatchPhaseBody, ActualSummary: "delete on api-server.uiSessionBatches", Background: true, BackgroundBound: []BackgroundBinding{bound}}
+	keyed := BackgroundBinding{Recording: "mock-2955", Place: "body.docs.msgs.0.q.alice@example.com", Variable: "alice@example.com", BoundMock: "mock-227", BoundPlace: "body.byEmail.alice@example.com"}
+	given := BackgroundBinding{Recording: "mock-2956", Place: "body.docs.msgs.0.q.tenant", Variable: GivenPrefix + "tenant", BoundMock: "mock-228", BoundPlace: "body.tenant"}
+	bg := UnmatchedCall{Protocol: "MongoDB", MatchPhase: MatchPhaseBody, ActualSummary: "delete on api-server.uiSessionBatches", Background: true, BackgroundBound: []BackgroundBinding{bound, keyed, given}}
 	got := bg.Sanitized()
-	if !reflect.DeepEqual(got.BackgroundBound, bg.BackgroundBound) {
-		t.Fatalf("sanitized BackgroundBound = %+v; want %+v", got.BackgroundBound, bg.BackgroundBound)
+	want := []BackgroundBinding{
+		{Recording: "mock-2954", Place: "body.docs.msgs.{}.q.app_id", BoundMock: "mock-226", BoundPlace: "body.docs.msgs.{}.appId"},
+		{Recording: "mock-2955", Place: "body.docs.msgs.{}.q.{}.com", BoundMock: "mock-227", BoundPlace: "body.byEmail.{}.com"},
+		{Recording: "mock-2956", Place: "body.docs.msgs.{}.q.tenant", Variable: GivenPrefix + "tenant", BoundMock: "mock-228", BoundPlace: "body.tenant"},
 	}
-	got.BackgroundBound[0].Variable = "changed"
-	if bg.BackgroundBound[0].Variable != "appId" {
+	if !reflect.DeepEqual(got.BackgroundBound, want) {
+		t.Fatalf("sanitized BackgroundBound = %+v; want %+v", got.BackgroundBound, want)
+	}
+	if y, _ := yaml.Marshal(got); strings.Contains(string(y), "alice") || strings.Contains(string(y), "variable: appId") || strings.Contains(string(y), "variable: \"\"") {
+		t.Fatalf("the sanitized copy keeps a key that can be a value: %s", y)
+	}
+	got.BackgroundBound[0].Recording = "changed"
+	if bg.BackgroundBound[0].Recording != "mock-2954" {
 		t.Fatal("the sanitized copy shares its places with the miss")
+	}
+	if got := (UnmatchedCall{Background: true}).Sanitized(); got.BackgroundBound != nil {
+		t.Fatalf("a background miss with no bound place has %+v sanitized", got.BackgroundBound)
 	}
 	y, err := yaml.Marshal(bg)
 	if err != nil || !strings.Contains(string(y), "background_bound:") || !strings.Contains(string(y), "bound_mock: mock-226") {
 		t.Fatalf("yaml %s (%v) lost the bound places", y, err)
 	}
 	j, err := json.Marshal(bg)
-	if err != nil || !strings.Contains(string(j), `"background_bound":[{"recording":"mock-2954","place":"body.docs.msgs.0.q.app_id","variable":"appId","bound_mock":"mock-226","bound_place":"body.docs.msgs.0.appId"}]`) {
+	if err != nil || !strings.Contains(string(j), `"background_bound":[{"recording":"mock-2954","place":"body.docs.msgs.0.q.app_id","variable":"appId","bound_mock":"mock-226","bound_place":"body.docs.msgs.0.appId"},`) {
 		t.Fatalf("json %s (%v) lost the bound places", j, err)
 	}
 	if y, _ := yaml.Marshal(UnmatchedCall{Background: true}); strings.Contains(string(y), "background_bound") {

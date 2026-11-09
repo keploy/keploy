@@ -30,11 +30,37 @@ type BackgroundRecording struct {
 // background recording, Place the call's place (body.<path>, as learned
 // noise names it), Variable the binding's name, and BoundMock and BoundPlace
 // where the test bound it (VariableBinding.Mock and Place). Names only,
-// never a value.
+// never a value; evidence keeps it Sanitized.
 type BackgroundBinding struct {
 	Recording  string `json:"recording" yaml:"recording"`
 	Place      string `json:"place" yaml:"place"`
-	Variable   string `json:"variable" yaml:"variable"`
+	Variable   string `json:"variable,omitempty" yaml:"variable,omitempty"`
 	BoundMock  string `json:"bound_mock" yaml:"bound_mock"`
 	BoundPlace string `json:"bound_place" yaml:"bound_place"`
+}
+
+// Sanitized is b as evidence keeps it (UnmatchedCall.Sanitized): the names
+// of the two recordings, and each place in its shape (FieldShape), since a
+// key on the way to it can be a value the app sent (a map keyed by an
+// email). A learned variable's name stays out, as a variable miss's does:
+// it can be such a key. A given's (ValidGivenVariable) is the test's own
+// name for a value it chose, and is kept.
+func (b BackgroundBinding) Sanitized() BackgroundBinding {
+	out := BackgroundBinding{Recording: b.Recording, Place: FieldShape(b.Place), BoundMock: b.BoundMock, BoundPlace: FieldShape(b.BoundPlace)}
+	if ValidGivenVariable(b.Variable) {
+		out.Variable = b.Variable
+	}
+	return out
+}
+
+// sanitizedBindings is each of bs Sanitized, in a new slice; nil for none.
+func sanitizedBindings(bs []BackgroundBinding) []BackgroundBinding {
+	if len(bs) == 0 {
+		return nil
+	}
+	out := make([]BackgroundBinding, len(bs))
+	for i, b := range bs {
+		out[i] = b.Sanitized()
+	}
+	return out
 }
