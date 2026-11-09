@@ -858,6 +858,8 @@ type Place struct {
 	// application from the test (Tracker.Incoming), not a request keploy
 	// test sent: its test case binds a variable at Var, from the request
 	// that pairs with it in each replay (models.MappedTestCase.Variables).
+	// Only Decide sets it: a reading told no arrival in record's full round
+	// (ClassifyIn) reads no client test's request (arrivedBefore).
 	Client bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
@@ -4323,7 +4325,7 @@ func withoutGave(earlier []Earlier) []Earlier {
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Client: e.incoming, Name: s.Name, Clock: s.Clock,
+		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Name: s.Name, Clock: s.Clock,
 		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
 }
 

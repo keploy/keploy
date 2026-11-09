@@ -39,6 +39,20 @@ func TestUpsertCasesKeepsEachTestsCaseVariables(t *testing.T) {
 			require.Equal(t, models.MockVariables{"name": name["name"], "suite": suite["suite"]}, byID["t1"].Variables, "the full round's variables, beside each other, kept by a write of the test's mocks")
 			require.Len(t, byID["t1"].Mocks, 1)
 			require.Empty(t, byID["t2"].Variables, "a later record of the test drops them")
+
+			// A writer that rewrites the set (Insert) sets the variables it
+			// writes for a test, over the file's: none there, or others.
+			require.NoError(t, db.Insert(ctx, &models.Mapping{TestSetID: "set", TestCases: []models.MappedTestCase{
+				{ID: "t1", Mocks: []models.MockEntry{{Name: "mock-0"}}, Variables: name},
+				{ID: "t2", Mocks: []models.MockEntry{{Name: "mock-1"}}, Variables: suite},
+			}}))
+			mapping, err = db.GetMapping(ctx, "set")
+			require.NoError(t, err)
+			for _, tc := range mapping.TestCases {
+				byID[tc.ID] = tc
+			}
+			require.Equal(t, name, byID["t1"].Variables, "Insert's variables for t1, over the file's")
+			require.Equal(t, suite, byID["t2"].Variables, "Insert's variables for t2, where the file held none")
 		})
 	}
 }

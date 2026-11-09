@@ -643,8 +643,10 @@ func ParseCaseBind(bind string) (testCase, place string, ok bool) {
 	if !found {
 		return "", "", false
 	}
-	testCase, place, found = strings.Cut(rest, caseBindRequest)
-	if !found || testCase == "" || place == "" {
+	// A bind with no ", request " names no place: Cut gives it all as the
+	// test case, and place "".
+	testCase, place, _ = strings.Cut(rest, caseBindRequest)
+	if testCase == "" || place == "" {
 		return "", "", false
 	}
 	return testCase, place, true

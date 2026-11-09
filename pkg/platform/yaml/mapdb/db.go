@@ -737,10 +737,9 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 			tc.Seed = in.Seed
 		}
 		// What record's full round learned a client test's request binds
-		// (proven switch only), beside what it learned before in the round.
-		if len(in.Variables) > 0 {
-			tc.Variables = models.MergeVariables(tc.Variables, in.Variables)
-		}
+		// (proven switch only), beside what it learned before in the round:
+		// none leaves them as they are.
+		tc.Variables = models.MergeVariables(tc.Variables, in.Variables)
 		// The mock.real destinations this record's run of the test used
 		// (proven switch only): they replace what an earlier record wrote.
 		if len(in.Real) > 0 {

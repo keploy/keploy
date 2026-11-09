@@ -2150,7 +2150,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// A given's text, and 2. one templated slot of the test case's request
 	// that shows it in both runs: a Value bound there; two slots, refused.
 	gave := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && h.p.gave })
-	slots := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() })
+	slots := oneSlotEach(heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() }))
 	if len(gave) > 0 {
 		return dc.bound(path, at, n, c, gave, ": a value the test gave keploy, which the call sends as given in both runs")
 	}
@@ -2656,7 +2656,7 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	}
 	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+rule+answeredAt(c.valueEcho, c.rec), names(src))
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
-		Given: first.given, Client: first.given && dc.clientCase(first.mock)}
+		Given: first.given, Client: dc.clientCase(first.mock)}
 	d.FromAt = dc.fromAt(first, c.r)
 	d.Echo = c.valueEcho
 	return d

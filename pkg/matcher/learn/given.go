@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"mime"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +57,17 @@ func givenPlace(test string) string {
 func GivenPlaceCase(place string) (testCase string, ok bool) {
 	testCase, ok = strings.CutPrefix(place, "test case ")
 	return testCase, ok && testCase != ""
+}
+
+// oneSlotEach is slots, places of test case requests that hold a moment,
+// without each place another of them lies inside in the same request: the
+// body read whole beside the leaf of its JSON that holds the moment
+// (GivenRequest reads both) holds it only through that leaf, so the two are
+// one slot, the leaf's. Two leaves, or two requests, are two slots still.
+func oneSlotEach(slots []evPlace) []evPlace {
+	return slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool {
+		return slices.ContainsFunc(slots, func(q evPlace) bool { return q.mock == p.mock && strings.HasPrefix(q.path, p.path+".") })
+	})
 }
 
 // unsentRequest is why a test case's request could not be read when the

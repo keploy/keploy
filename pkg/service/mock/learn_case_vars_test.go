@@ -57,6 +57,11 @@ func TestAVariableAClientTestsRequestBindsIsWrittenOnTheTestsEntry(t *testing.T)
 	if _, err := m.persistLearned(context.Background(), "s", twice, nil, flows, expected); err == nil || !strings.Contains(err.Error(), "bound the variable name") || maps.got != nil {
 		t.Fatalf("a variable bound at two places of the request: err %v, written %v; want the round failed, nothing written", err, maps.got)
 	}
+	// The same place, two recorded values: two variables under one name.
+	apart := append(consumed, models.MockState{Name: "mock-1", Binds: map[string]models.MockVariables{"test case post-apps-1": {"name": {Recorded: "app-2", Bind: "body.name"}}}})
+	if _, err := m.persistLearned(context.Background(), "s", apart, nil, flows, expected); err == nil || !strings.Contains(err.Error(), "bound the variable name") || maps.got != nil {
+		t.Fatalf("a variable bound at one place holding two recorded values: err %v, written %v; want the round failed, nothing written", err, maps.got)
+	}
 	none := &mockService{config: &config.Config{}, mockDB: &learnedStore{}, logger: zap.NewNop()}
 	if _, err := none.persistLearned(context.Background(), "s", consumed, nil, flows, expected); err == nil {
 		t.Fatal("a store that cannot write a test's variables: the round passed")

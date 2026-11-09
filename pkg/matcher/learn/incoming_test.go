@@ -272,3 +272,126 @@ func TestAClientTestsRequestKeployCouldNotReadRefusesWhatChangedAfterIt(t *testi
 		t.Fatalf("what changed after it is refused with %q, want it to say %q", r, why)
 	}
 }
+
+// appNameCase is the request a client test sends to create an app it names
+// "[E2E] app-crud-<nanos>", nanos read from its own clock (api-server's e2e
+// client: time.Now().UnixNano()), sent at at.
+func appNameCase(nanos int64, at time.Time) *models.HTTPReq {
+	return &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/client/v1/apps", Timestamp: at,
+		Header: map[string]string{"Content-Type": "application/json", "Host": "localhost:8083"},
+		Body:   `{"endpoint":"https://example.com","name":"[E2E] app-crud-` + strconv.FormatInt(nanos, 10) + `"}`}
+}
+
+// clientPlaced is the earlier places of a client test's call, the test's
+// recording holding the one request rec sent at rAt, which pairs with live,
+// sent at fAt in record's full round.
+func clientPlaced(t *testing.T, name string, rec, live *models.HTTPReq, fAt time.Time) []Earlier {
+	t.Helper()
+	tr := NewTracker()
+	tr.Begin()
+	tr.SetCases([]ClientCase{{Name: name, Req: rec}})
+	if !tr.Incoming(live, "", fAt) {
+		t.Fatalf("the run's request paired with no recorded request of the test; want %s", name)
+	}
+	return tr.Placed().Earlier
+}
+
+// TestAClientTestsUnixNanoNameIsBoundAtItsRequest: a client test names the
+// app it creates by its own clock (UnixNano) and sends the name in its
+// request; the application writes it whole (the app_name_reservations
+// insert). The name is a Value bound at that request's body.name, a client
+// test's request: never a read of the call's clock, nor a value the
+// application made. A value the call took from a recording keploy served
+// stays that recording's, whatever client requests came before it.
+func TestAClientTestsUnixNanoNameIsBoundAtItsRequest(t *testing.T) {
+	rNanos := int64(1794207702156240454)
+	rReq := time.Unix(0, rNanos).Add(131 * time.Microsecond)
+	gap := 69*time.Second + 3*time.Millisecond
+	fNanos, fReq := rNanos+gap.Nanoseconds(), rReq.Add(gap)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	name := func(n int64) string { return "[E2E] app-crud-" + strconv.FormatInt(n, 10) }
+	const p = "body.docs.msgs.0.name"
+	in := iCall(p, String, name(rNanos), name(fNanos), rCall, fCall, nil, clientPlaced(t, "post-client-v1-apps-1", appNameCase(rNanos, rReq), appNameCase(fNanos, fReq), fReq), nil)
+	in.Drifts = oClientDrifts()
+	d := Decide(in)
+	if len(d) != 1 || d[0].Outcome != OutcomeValue || d[0].From.Mock != "test case post-client-v1-apps-1" || d[0].From.Path != "body.name" || !d[0].From.Client || d[0].Clock != nil {
+		t.Fatalf("the app name %q -> %q the client sent: %s (client test's request: %v); want a Value of test case post-client-v1-apps-1's body.name, a client test's, no clock", name(rNanos), name(fNanos), oDescribe(d), len(d) == 1 && d[0].From.Client)
+	}
+
+	// The body read whole holds it only through its JSON's name: one slot.
+	// Two leaves of the body, or two requests, that hold it are two slots,
+	// two separate places the application could have read it from.
+	twoSlots := func(rec, live []*models.HTTPReq) []Decision {
+		tr := NewTracker()
+		tr.Begin()
+		cases := make([]ClientCase, len(rec))
+		for i, r := range rec {
+			cases[i] = ClientCase{Name: "case-" + strconv.Itoa(i), Req: r}
+		}
+		tr.SetCases(cases)
+		for _, l := range live {
+			if !tr.Incoming(l, "", fReq) {
+				t.Fatalf("the run's %s %s paired with none of the test's recorded requests", l.Method, l.URL)
+			}
+		}
+		in := iCall(p, String, name(rNanos), name(fNanos), rCall, fCall, nil, tr.Placed().Earlier, nil)
+		in.Drifts = oClientDrifts()
+		return Decide(in)
+	}
+	withSlug := func(n int64, at time.Time) *models.HTTPReq {
+		r := appNameCase(n, at)
+		r.Body = `{"name":"` + name(n) + `","slug":"` + name(n) + `"}`
+		return r
+	}
+	plain := func(n int64, at time.Time) *models.HTTPReq {
+		return &models.HTTPReq{Method: "PUT", URL: "http://localhost:8083/client/v1/apps/917ded3b-8816-4ebe-84f9-16d652f87600/title", Timestamp: at,
+			Header: map[string]string{"Content-Type": "text/plain"}, Body: name(n)}
+	}
+	for what, ds := range map[string][]Decision{
+		"two leaves of the body":                       twoSlots([]*models.HTTPReq{withSlug(rNanos, rReq)}, []*models.HTTPReq{withSlug(fNanos, fReq)}),
+		"a plain body and another request's JSON leaf": twoSlots([]*models.HTTPReq{plain(rNanos, rReq), appNameCase(rNanos, rReq)}, []*models.HTTPReq{plain(fNanos, fReq), appNameCase(fNanos, fReq)}),
+	} {
+		if len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
+			t.Errorf("the app name held at %s: %s; want refused, two sources", what, oDescribe(ds))
+		}
+	}
+
+	// An id the call took from a recording's answer, beside a client
+	// request the test sent before it.
+	before := oAt.Add(-3 * time.Second)
+	placed := clientPlaced(t, "post-client-v1-apps-1", appNameCase(rNanos, before), appNameCase(fNanos, before), before)
+	served := oServed("mock-20", false, false, Response, oText("body.id", "17"), "18", time.Millisecond)
+	w := oWord(t, Decide(oInput("body.key", "uploads/17/a.png", "uploads/18/a.png", append(placed, served...), nil)), "17", "18")
+	if w.Outcome != OutcomeValue || w.From.Mock != "mock-20" || w.From.Client {
+		t.Fatalf("uploads/17 beside mock-20's id 17 to 18, after a client request: %s (client test's request: %v); want a Value from mock-20, no client test's", oDescribe([]Decision{w}), w.From.Client)
+	}
+}
+
+// TestARequestKeployTestSentIsNoClientTestsRequest: the auth_time a keploy
+// test case's request carries in its token binds there as it does in a
+// client test's, but the place is a request keploy test sent, no client
+// test's (Place.Client), which the adapter refuses as one it cannot follow.
+func TestARequestKeployTestSentIsNoClientTestsRequest(t *testing.T) {
+	at := time.Date(2026, 11, 9, 7, 1, 42, 498_000_000, time.UTC)
+	rec, live := at.Unix(), at.Add(69*time.Second).Unix()
+	req := &models.TestRequest{Test: "post-auth-temp-code-4", Parts: []models.TestRequestPart{
+		jsonType,
+		{Name: "header.Cookie", Recorded: "jwt_token_staging=" + signInJWT(rec), Sent: "jwt_token_staging=" + signInJWT(live)},
+		{Name: "body", Recorded: `{"code":"E2EHANDOFF1"}`, Sent: `{"code":"E2EHANDOFF1"}`},
+	}}
+	d := Decide(authTimeCall(rec, live, at, at.Add(69*time.Second), []Earlier{GivenRequest(req)}))
+	if len(d) != 1 || d[0].Outcome != OutcomeValue || d[0].From.Mock != "test case post-auth-temp-code-4" || !d[0].From.Given || d[0].From.Client {
+		t.Fatalf("authTime %d -> %d in the request keploy test sent: %s (given %v, client test's %v); want a Value of that request, given, no client test's", rec, live, oDescribe(d), len(d) == 1 && d[0].From.Given, len(d) == 1 && d[0].From.Client)
+	}
+}
+
+// A place GivenPlaceCase names a test case of is a test case's request
+// (givenPlace): a recording's is not, nor the request of a test case keploy
+// holds no copy of, which names none (givenPlace("")).
+func TestGivenPlaceCaseNamesOnlyATestCase(t *testing.T) {
+	for place, want := range map[string]string{"test case post-client-v1-apps-1": "post-client-v1-apps-1", givenPlace(""): "", "mock-20": "", "test-2": ""} {
+		if got, ok := GivenPlaceCase(place); ok != (want != "") || ok && got != want {
+			t.Errorf("GivenPlaceCase(%q) = %q, %v; want %q, %v", place, got, ok, want, want != "")
+		}
+	}
+}
