@@ -176,10 +176,10 @@ func TestAnswerMarksReadsTheBodyAsKept(t *testing.T) {
 }
 
 // A Content-Length that is no length, or a negative one, is framing
-// answerMarks does not read: the answer keeps no marks, and reading it never
-// panics. Go's reader takes such a head when the line is folded onto the one
-// before it: Go joins it to that header, and keploy's header scan reads it as
-// a Content-Length of its own.
+// answerMarks does not read (parseHeaders refuses it): the answer keeps no
+// marks, and reading it never panics. No answer recordV2 records carries one,
+// since Go's reader, which reads the answer before its marks are read, refuses
+// such a head: this is answerMarks' own guard.
 func TestAnswerMarksReadsNoLengthItCannot(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -189,8 +189,8 @@ func TestAnswerMarksReadsNoLengthItCannot(t *testing.T) {
 		{"a negative length on a 304", "HTTP/1.1 304 Not Modified\r\nContent-Length: -5\r\n\r\n", 0},
 		{"a length of -1 on a 304", "HTTP/1.1 304 Not Modified\r\nContent-Length: -1\r\n\r\n", 0},
 		{"a length that is no number on a 304", "HTTP/1.1 304 Not Modified\r\nContent-Length: x5\r\n\r\n", 0},
-		{"a negative length folded into a close-delimited 200",
-			"HTTP/1.1 200 OK\r\nConnection: close\r\nX-A: b\r\n Content-Length: -5\r\n\r\nhello", 5},
+		{"a signed length", "HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello", 5},
+		{"a length written with white space before its colon", "HTTP/1.1 200 OK\r\nContent-Length : 5\r\n\r\nhello", 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := []byte(tc.resp)
@@ -216,21 +216,31 @@ func TestAnswerMarksKeepsAZeroLength(t *testing.T) {
 	resp := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 	writes := []respWrite{{end: 20, at: markAt(1)}, {end: len(resp), at: markAt(2)}}
 	wantMarks(t, answerMarks(resp, writes, "", 0), markAt(2), w(0, 2))
+	// The bytes after it are no part of its body.
+	next := append(resp[:len(resp):len(resp)], "HTTP/1.1"...)
+	if m := answerMarks(next, []respWrite{{end: len(resp), at: markAt(1)}, {end: len(next), at: markAt(2)}}, "", 0); m == nil {
+		t.Errorf("answerMarks(%q) kept no marks for a zero length", next)
+	}
 }
 
-// A response whose folded line keploy's header scan reads as a negative
-// Content-Length is recorded as Go reads it, with no marks: the record does
-// not panic and lose the exchange.
-func TestRecordKeepsNoMarksForALengthItCannotRead(t *testing.T) {
+// A header line folded onto the one before it is part of that field, as Go's
+// reader reads it, so " Content-Length: -5" on one is no Content-Length: the
+// answer is framed as Go frames it, and keeps its marks.
+func TestAnswerMarksReadsAFoldedLineAsTheFieldBefore(t *testing.T) {
+	resp := []byte("HTTP/1.1 200 OK\r\nConnection: close\r\nX-A: b\r\n Content-Length: -5\r\n\r\nhello")
+	writes := []respWrite{{end: 20, at: markAt(1)}, {end: len(resp), at: markAt(2)}}
+	wantMarks(t, answerMarks(resp, writes, "", 5), markAt(2), w(5, 2))
+
 	for _, tc := range []struct {
 		name   string
 		pieces []string
 		status int
 		body   string
+		marks  []models.HTTPAnswerWrite
 	}{
-		{"a 304", []string{"HTTP/1.1 304 Not Modified\r\nX-A: b\r\n", " Content-Length: -5\r\n\r\n"}, 304, ""},
+		{"a 304", []string{"HTTP/1.1 304 Not Modified\r\nX-A: b\r\n", " Content-Length: -5\r\n\r\n"}, 304, "", []models.HTTPAnswerWrite{w(0, 2)}},
 		{"a 200 the connection's close ends",
-			[]string{"HTTP/1.1 200 OK\r\nConnection: close\r\nX-A: b\r\n", " Content-Length: -5\r\n\r\nhello"}, 200, "hello"},
+			[]string{"HTTP/1.1 200 OK\r\nConnection: close\r\nX-A: b\r\n", " Content-Length: -5\r\n\r\nhello"}, 200, "hello", []models.HTTPAnswerWrite{w(5, 2)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := func() *models.Mock {
@@ -245,9 +255,7 @@ func TestRecordKeepsNoMarksForALengthItCannotRead(t *testing.T) {
 			if resp.StatusCode != tc.status || resp.Body != tc.body {
 				t.Errorf("recorded %d %q, want %d %q", resp.StatusCode, resp.Body, tc.status, tc.body)
 			}
-			if resp.Marks != nil {
-				t.Errorf("marks = %+v, want none", resp.Marks)
-			}
+			wantMarks(t, resp.Marks, markAt(2), tc.marks...)
 		})
 	}
 }

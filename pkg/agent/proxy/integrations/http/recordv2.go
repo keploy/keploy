@@ -201,6 +201,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		respWrites := []respWrite{{end: len(finalResp), at: firstRespChunk.WrittenAt}}
 
 		gotLastWritten, err := h.readResponseWrites(sess.DestStream, &finalResp, requestMethod(finalReq), &respWrites)
+		// A 101 (Switching Protocols) is the connection's last HTTP message:
+		// the protocol it switched to carries the rest (passUpgradeThrough).
+		_, _, status, _ := messageHead(finalResp, true)
+		upgraded := status == http.StatusSwitchingProtocols
 		// The stream ended before readResponseV2 found the response's end.
 		// Where keploy relays the connection it has read all the server sent,
 		// so that is the server's doing, unless the relay ended the stream
@@ -335,7 +339,38 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			// set during it must not leave out the next exchange's mock.
 			sess.MarkMockComplete()
 		}
+		if upgraded {
+			passUpgradeThrough(sess)
+			return nil
+		}
 	}
+}
+
+// passUpgradeThrough reads what sess's streams carry after a 101 (Switching
+// Protocols) to their ends, and records none of it: from the 101's head on,
+// the connection carries the protocol it switched to (a WebSocket's frames),
+// both ways, and no HTTP message. The relay forwards those bytes as it
+// forwards every byte. Read here, the client's are no request the parser left
+// unread, so no test case is left out over them, and the capture holds none
+// of them for no one. keploy read the server's as the 101's body, to the
+// connection's close, and only then recorded the 101: at the recording's
+// stop, partway through that "body", the exchange was left out.
+func passUpgradeThrough(sess *supervisor.Session) {
+	dest := make(chan struct{})
+	go func() {
+		defer close(dest)
+		for {
+			if _, err := sess.DestStream.ReadChunk(); err != nil {
+				return
+			}
+		}
+	}()
+	for {
+		if _, err := sess.ClientStream.ReadChunk(); err != nil {
+			break
+		}
+	}
+	<-dest
 }
 
 // noAnswerFault is the fault a call ended in that got no byte of an answer, as
@@ -554,13 +589,12 @@ func (h *HTTP) readRequestV2(stream *fakeconn.FakeConn, finalReq *[]byte) error 
 	}
 	bodyStart -= dropEmptyLinesBeforeRequest(finalReq)
 
-	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
+	contentLength, chunked, err := parseHeaders(head, false)
+	if err != nil {
+		return err
+	}
 
-	if contentLengthHeader != "" {
-		contentLength, err := contentLengthValue(contentLengthHeader)
-		if err != nil {
-			return err
-		}
+	if contentLength >= 0 {
 		remaining := contentLength - (len(*finalReq) - bodyStart)
 		for remaining > 0 {
 			chunk, err := stream.ReadChunk()
@@ -573,8 +607,7 @@ func (h *HTTP) readRequestV2(stream *fakeconn.FakeConn, finalReq *[]byte) error 
 		return nil
 	}
 
-	if transferEncodingHeader != "" &&
-		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
+	if chunked {
 		// Frame the chunks (see chunkedBody): a suffix test on the buffer ended
 		// a body whose data ends like "0\r\n\r\n" at a chunk boundary, and
 		// never ended one that carries trailers.
@@ -644,18 +677,26 @@ func (h *HTTP) readResponseWrites(stream *fakeconn.FakeConn, finalResp *[]byte, 
 	}
 
 	// 2. Parse the final response's headers for body framing. The answer to
-	// a HEAD, a 204 and a 304 have no body whatever the headers say.
+	// a HEAD, a 204, a 304 and a 101 are their head alone whatever the
+	// headers say (framedHeadOnly), but net/http reads their framing fields
+	// too, and refuses the ones it refuses.
 	head, bodyStart, status, _ := messageHead(*finalResp, true)
-	if responseHasNoBody(reqMethod, status) {
+	contentLength, chunked, err := parseHeaders(head, true)
+	if err != nil {
+		return lastWr, err
+	}
+	if framedHeadOnly(reqMethod, status) {
+		// What came after the head in its read is no part of the response
+		// (a 101's: the switched-to protocol's), and the write that completed
+		// the head ends at the head's end.
+		*finalResp = (*finalResp)[:bodyStart]
+		for i := range *writes {
+			(*writes)[i].end = min((*writes)[i].end, bodyStart)
+		}
 		return lastWr, nil
 	}
-	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
-	if contentLengthHeader != "" {
-		contentLength, err := contentLengthValue(contentLengthHeader)
-		if err != nil {
-			return lastWr, err
-		}
+	if contentLength >= 0 {
 		remaining := contentLength - (len(*finalResp) - bodyStart)
 		for remaining > 0 {
 			chunk, err := stream.ReadChunk()
@@ -672,8 +713,7 @@ func (h *HTTP) readResponseWrites(stream *fakeconn.FakeConn, finalResp *[]byte, 
 		return lastWr, nil
 	}
 
-	if transferEncodingHeader != "" &&
-		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
+	if chunked {
 		// Chunked: read until the body's chunked framing ends (see
 		// chunkedBody), not until finalResp ends in "0\r\n\r\n".
 		body := chunkedBody{response: true}
@@ -713,38 +753,127 @@ func (h *HTTP) readResponseWrites(stream *fakeconn.FakeConn, finalResp *[]byte, 
 	}
 }
 
-// parseHeaders extracts the body-framing Content-Length and
-// Transfer-Encoding header values (if any) from an HTTP message whose
-// headers end with CRLFCRLF. The parse is the same loose style the chunk.go
-// helpers use: split on '\n', trim '\r', skip malformed lines.
+// errFramingRefused is returned for a message whose header section net/http's
+// reader refuses, or frames otherwise than keploy would: keploy does not frame
+// it, and it is passed through whole. It names the fields only, not their
+// values, which are the app's bytes (see contentLengthValue).
+var errFramingRefused = errors.New("the message's header section is one net/http refuses or frames otherwise")
+
+// parseHeaders reads the body framing of the HTTP message whose header section
+// is head, as messageHead returns it: a start line (a status line when
+// response is true, a request line when not), field lines read as
+// headerFields reads them, and the empty line that ends it. contentLength is
+// the length its Content-Length gives, or -1 when it has none; chunked is
+// whether a "Transfer-Encoding: chunked" frames it, which overrides a
+// Content-Length sent with it (RFC 9112 §6.3), so contentLength is -1 then.
+// With an error it gives no framing: -1 and false. It reads the framing
+// fields of an answer that has no body (a HEAD's, a 1xx, 204 or 304) too, as
+// net/http's reader does before it looks at the status: the caller drops that
+// framing, and passes through one parseHeaders refuses.
 //
-// A chunked Transfer-Encoding overrides a Content-Length sent with it (RFC
-// 9112 §6.3), so contentLength is "" then: framing such a message by its
-// Content-Length would end it where its peer does not.
-func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
-	lines := strings.Split(string(msg), "\n")
-	for _, line := range lines {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
-			break // end of headers
+// It frames a message only as net/http's reader (ReadRequest, ReadResponse)
+// frames it, and refuses (errFramingRefused, or errBadContentLength for a
+// value that is no length) one it refuses, so the caller passes it through
+// whole rather than end it where its peer does not:
+//   - a start line (startLine) or a header section (headerFields) it refuses;
+//   - a Content-Length that is not decimal digits below 2^63 ("+5", "-5",
+//     "5, 5", "", "9223372036854775808"), or two that differ ("5" and "6",
+//     or "5" and "05"); two that are the same are one length;
+//   - on HTTP/1.1 and later (HTTP/0.0 is read as HTTP/1.1), a
+//     Transfer-Encoding that is not the one coding chunked ("gzip, chunked",
+//     or two Transfer-Encoding fields), and a chunked message whose Trailer
+//     names Content-Length, Transfer-Encoding or Trailer;
+//   - a request with two Host fields.
+//
+// It also refuses two messages it could frame as net/http does, where that
+// framing is not one every peer shares:
+//   - a Content-Length or a Transfer-Encoding written with a space before its
+//     colon: net/http's server refuses the request, and its client reads the
+//     field as another one;
+//   - a Transfer-Encoding on a message below HTTP/1.1, which net/http ignores
+//     and RFC 9112 §6.1 has a recipient treat as faulty framing.
+func parseHeaders(head []byte, response bool) (contentLength int, chunked bool, err error) {
+	major, minor, _, ok := startLine(head, response)
+	if !ok {
+		return -1, false, fmt.Errorf("%w: a start line net/http's reader refuses", errFramingRefused)
+	}
+	if major == 0 && minor == 0 {
+		major, minor = 1, 1 // net/http's reader frames HTTP/0.0 as HTTP/1.1
+	}
+	contentLength = -1
+	var length, coding []byte
+	var trailers [][]byte
+	lengths, codings, hosts := 0, 0, 0
+	var fieldErr error
+	err = headerFields(head, func(name, value []byte) {
+		field := strings.ToLower(string(bytes.TrimRight(name, " "))) // token bytes: ASCII
+		if len(field) != len(name) {
+			// A name no other field has, to net/http's reader.
+			if field == "content-length" || field == "transfer-encoding" {
+				fieldErr = fmt.Errorf("%w: a space before a %s field's colon", errFramingRefused, field)
+			}
+			return
 		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.ToLower(strings.TrimSpace(parts[0]))
-		val := strings.TrimSpace(parts[1])
-		switch key {
-		case "content-length":
-			contentLength = val
+		switch field {
+		case "host":
+			hosts++
+		case "trailer":
+			trailers = append(trailers, value)
 		case "transfer-encoding":
-			transferEncoding = val
+			coding = value
+			codings++
+		case "content-length":
+			value = trimWhiteSpace(value) // a value's end, which a fold can leave
+			n, valueErr := contentLengthValue(string(value))
+			switch {
+			case valueErr != nil:
+				fieldErr = valueErr
+			case lengths > 0 && !bytes.Equal(value, length):
+				fieldErr = fmt.Errorf("%w: two Content-Length fields that differ", errFramingRefused)
+			default:
+				contentLength, length = n, value
+				lengths++
+			}
+		}
+	})
+	if err == nil {
+		err = fieldErr
+	}
+	if err == nil && !response && hosts > 1 {
+		err = fmt.Errorf("%w: a request with two Host fields", errFramingRefused)
+	}
+	if err != nil {
+		return -1, false, err
+	}
+	if codings == 0 {
+		return contentLength, false, nil
+	}
+	if major < 1 || major == 1 && minor < 1 {
+		return -1, false, fmt.Errorf("%w: a Transfer-Encoding below HTTP/1.1", errFramingRefused)
+	}
+	if codings > 1 || !asciiEqualFold(coding, "chunked") {
+		return -1, false, fmt.Errorf("%w: a Transfer-Encoding other than the one coding chunked", errFramingRefused)
+	}
+	for _, names := range trailers {
+		if trailerNamesFraming(names) {
+			return -1, false, fmt.Errorf("%w: a Trailer that names a framing field", errFramingRefused)
 		}
 	}
-	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
-		contentLength = ""
+	return -1, true, nil
+}
+
+// trailerNamesFraming reports whether names, a Trailer field's value (a list
+// of field names), names Content-Length, Transfer-Encoding or Trailer, which
+// net/http's reader refuses in a chunked message: a trailer section cannot
+// frame the message it ends.
+func trailerNamesFraming(names []byte) bool {
+	for _, name := range bytes.Split(names, []byte(",")) {
+		name = trimWhiteSpace(name)
+		if asciiEqualFold(name, "content-length") || asciiEqualFold(name, "transfer-encoding") || asciiEqualFold(name, "trailer") {
+			return true
+		}
 	}
-	return contentLength, transferEncoding
+	return false
 }
 
 // destPortFromAddr extracts the destination TCP port from a FakeConn's

@@ -288,6 +288,9 @@ func TestARequestAfterEmptyLinesIsParsed(t *testing.T) {
 func TestHandleChunkedResponsesHandsOverAfterAProtocolSwitch(t *testing.T) {
 	for _, c := range []struct{ method, head string }{
 		{"GET", "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"},
+		// net/http frames a 101 as its head whatever its fields say.
+		{"GET", "HTTP/1.1 101 Switching Protocols\r\nContent-Length: 5\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n"},
+		{"GET", "HTTP/1.1 101 Switching Protocols\r\nTransfer-Encoding: chunked\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n"},
 		{"CONNECT", "HTTP/1.1 200 Connection Established\r\n\r\n"},
 	} {
 		dest := newScriptedConn() // the upgraded stream: nothing more yet
