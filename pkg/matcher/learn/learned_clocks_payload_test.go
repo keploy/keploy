@@ -97,3 +97,17 @@ func TestALearnedClockLineOnARecordingIsNoWordOfItsPayload(t *testing.T) {
 		}
 	}
 }
+
+// An echo's reason names where the moment record's full round saw stands
+// (Place.liveAt) beside where the recorded moment does, and says no more
+// where no earlier place was named for it: never a dangling ", " with no
+// place after it.
+func TestAnEchosReasonNamesWhereTheFullRoundsMomentStandsOnlyWhereKnown(t *testing.T) {
+	const head = "the moment it was recorded with stands in mock-31 at spec.resp.body, and the moment record's full round saw in it stands earlier in the test too"
+	if got := echoFound("mock-31 at spec.resp.body", ""); got != head {
+		t.Errorf("no place for F's moment: %q; want %q", got, head)
+	}
+	if got, want := echoFound("mock-31 at spec.resp.body", "in mock-11 at spec.resp.body"), head+", in mock-11 at spec.resp.body"; got != want {
+		t.Errorf("F's moment in mock-11: %q; want %q", got, want)
+	}
+}
