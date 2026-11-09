@@ -490,6 +490,19 @@ func TestAClientRequestStillComingIsUnreadUntilItsBodyEnds(t *testing.T) {
 	if got := tr.Placed().Earlier; len(got) != 1 || got[0].Unread != "" || got[0].Mock != "test case post-apps-2" {
 		t.Fatalf("a done after the next test began changed its places: %+v", got)
 	}
+	// Or once a new set began.
+	tr.NewSet()
+	tr.Begin()
+	tr.SetCases([]ClientCase{{Name: "post-apps-3", Req: rec}, {Name: "post-apps-4", Req: rec}})
+	done = tr.IncomingComing(live, at)
+	tr.NewSet()
+	tr.Begin()
+	tr.SetCases([]ClientCase{{Name: "post-apps-5", Req: rec}})
+	tr.Incoming(&whole, "", at)
+	done(live, "its body did not come whole")
+	if got := tr.Placed().Earlier; len(got) != 1 || got[0].Unread != "" || got[0].Mock != "test case post-apps-5" {
+		t.Fatalf("a done after a new set began changed its places: %+v", got)
+	}
 }
 
 // holdsSeen reports whether e holds the leaf path, recorded rec and sent live.
@@ -527,7 +540,7 @@ func TestAClientRequestsFormTextPartsArePlacesOfItsCalls(t *testing.T) {
 	if e := GivenRequest(req); e.Unread != "" || !holdsSeen(e, "form.name", "app-1", "app-2") || requestUnread([]Earlier{e}) != "" {
 		t.Fatalf("placed %+v", e)
 	}
-	for _, f := range []models.FormData{{Key: "f", FileNames: []string{"a.txt"}, Paths: []string{"/tmp/a"}}, {Key: "v", Paths: []string{"/tmp/v"}}} {
+	for _, f := range []models.FormData{{Key: "f", FileNames: []string{"a.txt"}}, {Key: "v", Paths: []string{"/tmp/v"}}, {Key: "c", FileContents: [][]byte{[]byte("x")}}} {
 		live := &models.HTTPReq{Method: "POST", URL: "http://api/apps", Form: []models.FormData{f}}
 		if req := IncomingRequest("post-apps-1", rec, live); !strings.Contains(req.Unread, "form part "+f.Key+" sends a file or a value kept apart") || len(req.Parts) != 0 {
 			t.Fatalf("a form part %+v gave %+v", f, req)

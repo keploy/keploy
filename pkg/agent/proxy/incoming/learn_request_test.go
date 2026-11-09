@@ -37,10 +37,12 @@ type takenRequest struct {
 // requestLog is a RequestTaker that wants requests while wants is set and
 // keeps each one given.
 type requestLog struct {
-	wants atomic.Bool
-	mu    sync.Mutex
-	got   []takenRequest
-	taken atomic.Int32
+	// noComing: TakeComing takes nothing (a nil done).
+	noComing bool
+	wants    atomic.Bool
+	mu       sync.Mutex
+	got      []takenRequest
+	taken    atomic.Int32
 }
 
 func (l *requestLog) WantsIncoming() bool { return l.wants.Load() }
@@ -53,6 +55,9 @@ func (l *requestLog) TakeIncoming(req *models.HTTPReq, unread string, at time.Ti
 }
 
 func (l *requestLog) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPReq, string) {
+	if l.noComing {
+		return nil
+	}
 	l.mu.Lock()
 	k := len(l.got)
 	l.got = append(l.got, takenRequest{req: req, at: at, coming: true})
@@ -311,8 +316,8 @@ func TestTakeRequestDecodesABodySentGzipOrBr(t *testing.T) {
 }
 
 // A multipart form is taken as a recording takes it apart: its text parts
-// in the order sent, its Content-Type without its boundary, which the
-// forward still carries.
+// in the order sent, none of no name, its Content-Type without its
+// boundary, which the forward still carries.
 func TestTakeRequestReadsAMultipartFormsTextParts(t *testing.T) {
 	log := &requestLog{}
 	log.wants.Store(true)
@@ -320,6 +325,7 @@ func TestTakeRequestReadsAMultipartFormsTextParts(t *testing.T) {
 	pm.SetRequestTaker(log)
 	form := "--XX\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\napp-1762758102\r\n" +
 		"--XX\r\nContent-Disposition: form-data; name=\"suite\"\r\n\r\nsuite-1\r\n" +
+		"--XX\r\nContent-Disposition: form-data\r\n\r\nno name\r\n" +
 		"--XX\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\napp-2\r\n--XX--\r\n"
 	req := readRequest(t, postWith("Content-Type: multipart/form-data; boundary=XX\r\n", form))
 	pm.takeRequest(req, time.Now())
@@ -382,13 +388,35 @@ func TestTakeRequestReadsAChunkedBodyAsItPasses(t *testing.T) {
 		t.Fatalf("forwarded %q, taken %+v; want the whole body given once", fwd, got)
 	}
 
+	// One of exactly the bytes keploy reads is read whole.
+	req = readRequest(t, "POST /u HTTP/1.1\r\nHost: api\r\nTransfer-Encoding: chunked\r\n\r\n"+fmt.Sprintf("%x\r\n%s\r\n", maxTakenBody, strings.Repeat("a", maxTakenBody))+"0\r\n\r\n")
+	log = &requestLog{}
+	log.wants.Store(true)
+	pm.SetRequestTaker(log)
+	pm.takeRequest(req, time.Now())
+	_, _ = io.ReadAll(req.Body)
+	if got := log.list(); len(got) != 1 || got[0].unread != "" || len(got[0].req.Body) != maxTakenBody {
+		t.Fatalf("a body of exactly %d bytes: taken %d entries, unread %q", maxTakenBody, len(got), got[0].unread)
+	}
+
+	// A taker that takes nothing of it leaves the body as it came.
+	log = &requestLog{noComing: true}
+	log.wants.Store(true)
+	pm.SetRequestTaker(log)
+	req = readRequest(t, "POST /u HTTP/1.1\r\nHost: api\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n0\r\n\r\n")
+	body := req.Body
+	pm.takeRequest(req, time.Now())
+	if req.Body != body {
+		t.Fatal("a body no taker takes was wrapped")
+	}
+
 	for _, c := range []struct {
 		name, raw, why string
 		readAll        bool
 	}{
 		{"larger than keploy reads", "POST /u HTTP/1.1\r\nHost: api\r\nTransfer-Encoding: chunked\r\n\r\n" + fmt.Sprintf("%x\r\n%s\r\n", maxTakenBody+1, strings.Repeat("a", maxTakenBody+1)) + "0\r\n\r\n", "its body is larger than", true},
 		{"closed before its end", "POST /u HTTP/1.1\r\nHost: api\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n0\r\n\r\n", "closed before its end", false},
-		{"cut short", "POST /u HTTP/1.1\r\nHost: api\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nab", "did not come whole", true},
+		{"cut short", "POST /u HTTP/1.1\r\nHost: api\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nab", "did not come whole: unexpected EOF", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			log := &requestLog{}
@@ -399,6 +427,13 @@ func TestTakeRequestReadsAChunkedBodyAsItPasses(t *testing.T) {
 			pm.takeRequest(req, time.Now())
 			if c.readAll {
 				_, _ = io.ReadAll(req.Body)
+			}
+			cb, ok := req.Body.(*comingBody)
+			if !ok {
+				t.Fatal("the body was not read as it passed")
+			}
+			if len(cb.got) > maxTakenBody {
+				t.Fatalf("the body read as it passed holds %d bytes, more than the %d keploy reads", len(cb.got), maxTakenBody)
 			}
 			_ = req.Body.Close()
 			got := log.list()
@@ -456,5 +491,16 @@ func TestTakeRequestReadsABodyAfterContinueBeforeItsLastByteReachesTheApp(t *tes
 	_, _ = io.ReadAll(req.Body)
 	if got := log.list(); len(got) != 1 || got[0].coming || !strings.Contains(got[0].unread, "did not come whole") {
 		t.Fatalf("a body its client sent less of than declared: taken %+v", got)
+	}
+	// One that ends, with no error of its own, short of its declared length.
+	req = readRequest(t, postWith("Expect: 100-continue\r\n", "ab"))
+	req.Body, req.ContentLength = io.NopCloser(strings.NewReader("ab")), 5
+	log = &requestLog{}
+	log.wants.Store(true)
+	pm.SetRequestTaker(log)
+	pm.takeRequest(req, time.Now())
+	_, _ = io.ReadAll(req.Body)
+	if got := log.list(); len(got) != 1 || got[0].coming || !strings.Contains(got[0].unread, "did not send the whole body it declared") {
+		t.Fatalf("a body that ended short: taken %+v", got)
 	}
 }

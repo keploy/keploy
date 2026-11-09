@@ -256,8 +256,12 @@ func TestAComingRequestBindsItsVariableOnceItsBodyEnded(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
 	p, mm, _, open := caseBindsProxy(t)
+	p.learnTracker.Begin()
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
 	open()
+	if done := p.TakeComing(&models.HTTPReq{Method: "GET", URL: "http://api/other"}, at); done != nil {
+		t.Fatal("a request that pairs with none is taken as coming")
+	}
 	live := liveApps("")
 	done := p.TakeComing(live, at)
 	if done == nil || p.WantsIncoming() {
@@ -279,6 +283,19 @@ func TestAComingRequestBindsItsVariableOnceItsBodyEnded(t *testing.T) {
 	if got := postKey(t, mm, "/apps", "app-2"); got != `200 {"echo":"app-2"}` {
 		t.Fatalf("the call after its body ended was answered %s", got)
 	}
+	if got := p.learnTracker.Placed().Earlier; len(got) != 1 || got[0].Unread != "" || got[0].Mock != "test case post-apps-1" {
+		t.Fatalf("the learn step placed %+v once its body ended", got)
+	}
+
+	// Under the switch off it takes nothing.
+	p, _, _, open = caseBindsProxy(t)
+	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
+	open()
+	t.Setenv(provenswitch.Env, "0")
+	if p.TakeComing(liveApps(""), at) != nil {
+		t.Fatal("the switch off took a coming request")
+	}
+	t.Setenv(provenswitch.Env, "1")
 
 	p, mm, _, open = caseBindsProxy(t)
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
