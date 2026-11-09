@@ -858,8 +858,9 @@ type Place struct {
 	// application from the test (Tracker.Incoming), not a request keploy
 	// test sent: its test case binds a variable at Var, from the request
 	// that pairs with it in each replay (models.MappedTestCase.Variables).
-	// Only Decide sets it: a reading told no arrival in record's full round
-	// (ClassifyIn) reads no client test's request (arrivedBefore).
+	// Decide (Input.Arrived) and ClassifyArrived set it: a reading told no
+	// arrival in record's full round (ClassifyGiven, ClassifyIn) reads no
+	// client test's request (arrivedBefore).
 	Client bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
@@ -1110,8 +1111,21 @@ type GivenEarlier func() ([]GivenPlaces, error)
 // ClassifyGiven is ClassifyIn with the recordings F gave the application
 // earlier in the set (given; nil: none), which the offset rule, the word rule
 // and the echo of what F gave there read beside raw's.
+//
+// Its call's arrival is not told: no client test's request is a place of it
+// (arrivedBefore). ClassifyArrived reads them.
 func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
-	return classifyGiven(dc, drift, live, rec, at, earlier, raw, resp, w, given, false)
+	return classifyGiven(dc, drift, live, rec, at, time.Time{}, earlier, raw, resp, w, given, false)
+}
+
+// ClassifyArrived is ClassifyGiven of a call that reached keploy at the
+// real instant arrived in record's full round: each client test's request
+// (Tracker.Incoming) that reached the application before the call in both
+// runs (arrivedBefore) is an earlier place of it, as Decide reads them
+// (Input.Arrived), where the request's test case binds a value the call
+// carries whole (Place.Client). A zero arrived is ClassifyGiven.
+func ClassifyArrived(dc *DriftCache, drift []string, live, rec Shape, at, arrived time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
+	return classifyGiven(dc, drift, live, rec, at, arrived, earlier, raw, resp, w, given, false)
 }
 
 // classifyGiven is ClassifyGiven, its word rule read under the rule a copy
@@ -1141,7 +1155,7 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 // both ways (leafedAtCall). Its leaves would otherwise read as an earlier
 // place both runs were given, where a minute F's run rounded from what F
 // served there names both moments and is learned as noise.
-func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
+func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at, arrived time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
@@ -1149,9 +1163,10 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 		return heldLearned(drift, live, rec)
 	}
 	given = givenOnce(given)
-	// The call's instant in record's full round is not told here: no
-	// client test's request is a place of it (arrivedBefore).
-	earlier = timedEarlier(arrivedBefore(earlier, at, time.Time{}), at)
+	// A client test's request is a place of the call only where it reached
+	// the application before the call in both runs (arrivedBefore): with
+	// no arrival told (ClassifyGiven), none is.
+	earlier = timedEarlier(arrivedBefore(earlier, at, arrived), at)
 	raw = timedRaw(raw, at)
 	earlier, raw = leafedAfterCall(earlier, raw, at)
 	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, follow)
@@ -4325,8 +4340,23 @@ func withoutGave(earlier []Earlier) []Earlier {
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Name: s.Name, Clock: s.Clock,
+		Var: seenVar(e, s), Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Client: e.incoming, Name: s.Name, Clock: s.Clock,
 		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
+}
+
+// seenVar is the variable place of s, a leaf of e (Seen.Place). A client
+// test's request (Earlier.incoming, its leaves named by their paths alone,
+// GivenRequest) binds a variable of its test case at the place a replay
+// reads in the request that pairs with it (VarPlace; its body's leaves are
+// those of a JSON body, jsonSeen), none at a leaf of a body that declares no
+// media type (Seen.Undeclared), nor at one no place names (the body whole,
+// the request's names).
+func seenVar(e Earlier, s Seen) string {
+	if !e.incoming || s.Undeclared {
+		return s.Place
+	}
+	v, _ := VarPlace(s.Leaf, true)
+	return v
 }
 
 // echoedIn are v's changed instants the echo takes for a copy of what the

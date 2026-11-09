@@ -1852,7 +1852,10 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				}
 				w = oc.Window(input.arrived)
 			}
-			return learn.ClassifyGiven(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order)), answered, earlier, ""
+			// A client test's request that reached the application before
+			// the call in both runs is a place of it (learn.ClassifyArrived),
+			// where its test case binds a value the call carries whole.
+			return learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order)), answered, earlier, ""
 		}
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
