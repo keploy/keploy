@@ -91,6 +91,10 @@ func (s *setDerived) recRoom(key string, size int64) bool {
 // rows: one atomic add beside a walk of the whole recording.
 var recordingMeasures atomic.Int64
 
+// recordingWalks counts the values recordingHeap visited, for the rows: one
+// atomic add for each recording it measures.
+var recordingWalks atomic.Int64
+
 // recordingHeap is about the heap m holds, as the runtime allocates it
 // (allocBytes): its struct, each string's bytes, each slice's array, each
 // map's header and entries (mapSlotBytes), and what each pointer and
@@ -106,7 +110,9 @@ func recordingHeap(m *models.Mock) int64 {
 	recordingMeasures.Add(1)
 	seen := map[uintptr]bool{}
 	var walk func(v reflect.Value) int64
+	var walks int64
 	walk = func(v reflect.Value) int64 {
+		walks++
 		var n int64
 		switch v.Kind() {
 		case reflect.String:
@@ -131,6 +137,12 @@ func recordingHeap(m *models.Mock) int64 {
 				return 0
 			}
 			n = allocBytes(uintptr(v.Cap())*v.Type().Elem().Size(), true)
+			// A bool's or a number's element holds nothing past the
+			// array: a []byte is counted by its array, not walked byte
+			// by byte, which took several times its decode.
+			if v.Type().Elem().Kind() <= reflect.Complex128 {
+				return n
+			}
 			for i := range v.Len() {
 				n += walk(v.Index(i))
 			}
@@ -160,7 +172,9 @@ func recordingHeap(m *models.Mock) int64 {
 	if m == nil {
 		return 0
 	}
-	return walk(reflect.ValueOf(m))
+	n := walk(reflect.ValueOf(m))
+	recordingWalks.Add(walks)
+	return n
 }
 
 // keepSpare keeps m under key in the recordings' tier (recs), within the

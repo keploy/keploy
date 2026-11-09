@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
 	"runtime"
@@ -490,5 +491,27 @@ func TestOutcomeCostARecordingTheSetRefusedIsMeasuredOnce(t *testing.T) {
 	}
 	if d := recordingMeasures.Load() - measured; d != 1 {
 		t.Errorf("the next set's first read of a recording the set before refused measured %d; want 1", d)
+	}
+}
+
+// A slice of bools or numbers is counted by its array, its capacity's,
+// not its length's, and its elements are not visited one by one: a
+// Postgres copy-out of 1 MiB took several times its decode to walk byte by
+// byte, for no byte of its count.
+func TestOutcomeCostARecordingsByteSlicesAreCountedByTheirArrays(t *testing.T) {
+	m := recordingOf("copy")
+	data := make([][]byte, 0, 65)
+	for i := range 64 {
+		data = append(data, bytes.Repeat([]byte{byte(i)}, 16<<10))
+	}
+	data = append(data, make([]byte, 1<<20, 2<<20))
+	m.Spec.PostgresV3 = &models.PostgresV3Spec{Type: "query", Query: &models.PostgresV3QuerySpec{Response: &models.PostgresV3Response{CopyOut: &models.PostgresV3CopyOutPayload{Data: data}}}}
+	walked := recordingWalks.Load()
+	heap := recordingHeap(m)
+	if d := recordingWalks.Load() - walked; d > 1000 {
+		t.Errorf("a recording of 3 MiB in 65 byte slices visited %d values to measure; want at most 1000", d)
+	}
+	if want := int64(64*16<<10 + 2<<20); heap < want {
+		t.Errorf("a recording of 64 slices of 16 KiB and one of 1 MiB in 2 MiB counts %d bytes; want at least their arrays' %d", heap, want)
 	}
 }
