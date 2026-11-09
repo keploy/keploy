@@ -170,8 +170,8 @@ func TestAClientTestsRequestPairsByOrderMethodAndPath(t *testing.T) {
 }
 
 // TestAClientTestsRequestKeployCannotReadIsSaid: a request whose body is
-// kept apart from its test case, or that sends a form, is a place keploy
-// could not read, which says why.
+// kept apart from its test case, or that sends a form (recorded as one, or
+// sent so), is a place keploy could not read, which says why.
 func TestAClientTestsRequestKeployCannotReadIsSaid(t *testing.T) {
 	rec := &models.HTTPReq{Method: "POST", URL: "http://h/upload", Form: []models.FormData{{Key: "f", Values: []string{"a"}}}}
 	if got := IncomingRequest("post-upload-1", rec, rec); got.Unread == "" || len(got.Parts) != 0 {
@@ -185,6 +185,9 @@ func TestAClientTestsRequestKeployCannotReadIsSaid(t *testing.T) {
 	for name, c := range map[string][2]*models.HTTPReq{
 		"a form sent in record's full round alone": {plain, rec}, "a body kept apart in record's full round alone": {plain, kept},
 		"no recorded request": {nil, plain}, "no request of the run": {plain, nil},
+		// The ingress gives a form as its raw body: the recording's form says
+		// what it is.
+		"a form recorded, sent as the ingress reads it": {rec, {Method: "POST", URL: "http://h/upload", Body: "--b\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\na\r\n--b--\r\n"}},
 	} {
 		if got := IncomingRequest("post-upload-1", c[0], c[1]); got.Unread == "" || len(got.Parts) != 0 {
 			t.Errorf("%s: %+v; want one keploy could not read, with no parts", name, got)
