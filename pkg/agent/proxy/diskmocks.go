@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,6 +67,18 @@ type DiskMocks struct {
 	// is decoded (readAt): what a test set's first cycle learned, put on the
 	// recordings its retry cycles are served (SetOnLoad). nil until then.
 	onLoad atomic.Pointer[func(*models.Mock)]
+	// id names the store among the agent's, and loadGen how many times
+	// its onLoad was set (SetOnLoad), in the keys of the recordings a
+	// keeper keeps (SetRecordingKeeper): a key names one record as the
+	// store reads it now.
+	id      uint64
+	loadGen atomic.Uint64
+	// keeper keeps the recordings RangeRecordedBefore decodes
+	// (SetRecordingKeeper); nil: each is decoded at each read.
+	keeper atomic.Pointer[RecordingKeeper]
+	// recordedReads counts the records RangeRecordedBefore decoded, for
+	// the rows.
+	recordedReads atomic.Int64
 
 	// byKey names, by kind and request key (models.RequestKeys), every mock
 	// on disk under each key its parser declares, in the order Add took them
@@ -158,6 +171,7 @@ func newDiskMocks(logger *zap.Logger, budget int64) (*DiskMocks, error) {
 		path = ""
 	}
 	return &DiskMocks{
+		id:      diskStores.Add(1),
 		f:       f,
 		path:    path,
 		byName:  make(map[string]diskEntry),
@@ -455,6 +469,13 @@ func (d *DiskMocks) DecodersBuilt() int64 { return d.records.built.Load() }
 // set's first cycle learned, for its retry cycles (learn.KeptLearning.Into).
 // A mock read before keeps what it was read with.
 func (d *DiskMocks) SetOnLoad(f func(*models.Mock)) {
+	// The generation the keeper's keys name (recordedAt) moves only after
+	// the Store, deferred. Moved before it, a read in between would take
+	// the new generation's key, decode with the old onLoad, and the keeper
+	// would hand that stale recording to every later read of the set. In
+	// this order a read in between keys its recording by the old generation,
+	// which no read after the bump asks again.
+	defer d.loadGen.Add(1)
 	if f == nil {
 		d.onLoad.Store(nil)
 		return
@@ -680,8 +701,9 @@ func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) 
 	}
 	d.mu.Unlock()
 	sortRecorded(sel, entryRequest)
+	keep := d.keeper.Load()
 	for _, e := range sel {
-		m, err := d.readAt(e)
+		m, err := d.recordedAt(e, keep)
 		if err != nil {
 			return err
 		}
@@ -690,6 +712,50 @@ func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) 
 		}
 	}
 	return nil
+}
+
+// RecordingKeeper keeps a recording key names as decode reads it, for the
+// learn step's reads of the set's recordings (learn.Tracker.KeepRecording):
+// size is about the bytes the decoded recording holds. It hands each read a
+// recording of its own, as decode does.
+type RecordingKeeper func(key string, size int64, decode func() (*models.Mock, error)) (*models.Mock, error)
+
+// SetRecordingKeeper has k keep the recordings RangeRecordedBefore decodes,
+// so the learn step's calls, each of which reads every recording of the set
+// made before it, decode one once for the set where k has room, and at
+// each read where it has none, as with no keeper (nil).
+func (d *DiskMocks) SetRecordingKeeper(k RecordingKeeper) {
+	if k == nil {
+		d.keeper.Store(nil)
+		return
+	}
+	d.keeper.Store(&k)
+}
+
+// RecordedReads is how many records RangeRecordedBefore has decoded, for
+// the rows.
+func (d *DiskMocks) RecordedReads() int64 { return d.recordedReads.Load() }
+
+// diskStores numbers the agent's stores (DiskMocks.id).
+var diskStores atomic.Uint64
+
+// decodedOverhead is about the bytes a decoded recording holds past its
+// record's: its struct, its spec's and the maps and slices they hold.
+const decodedOverhead = 1 << 10
+
+// recordedAt is e's recording as RangeRecordedBefore hands it: kept by
+// keep where one is set (nil: decoded now). Its key names the store, how
+// its onLoad was set when it was read, and e's record.
+func (d *DiskMocks) recordedAt(e diskEntry, keep *RecordingKeeper) (*models.Mock, error) {
+	decode := func() (*models.Mock, error) {
+		d.recordedReads.Add(1)
+		return d.readAt(e)
+	}
+	if keep == nil {
+		return decode()
+	}
+	key := strconv.FormatUint(d.id, 10) + ":" + strconv.FormatUint(d.loadGen.Load(), 10) + ":" + strconv.FormatInt(e.off, 10)
+	return (*keep)(key, 2*int64(e.length)+decodedOverhead, decode)
 }
 
 // LoadStatements returns the statement catalog: for each statement the mocks

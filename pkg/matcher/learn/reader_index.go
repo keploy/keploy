@@ -535,6 +535,9 @@ type setFilters struct {
 	// entries whose text holds it, in order.
 	runs     map[string][]int32
 	nextText int32
+	// short are the entries that post the words of texts shorter than
+	// filterTextMin, by the text (shortEntry): postings alone, no filter.
+	short map[string]*filterEntry
 }
 
 // filterTextKey is a text by what it holds: its length and two hashes of
@@ -562,7 +565,8 @@ var (
 // filterTextMin is the shortest text with no recording's identity that a
 // set keeps a filter of (textEntry): a shorter one is scanned for each word
 // in fewer bytes than finding its filter reads (its two hashes, and the
-// set's lock).
+// set's lock). Its words are posted all the same (shortEntry): a call's
+// place index finds them once per place, not once per word.
 const filterTextMin = 256
 
 // filterEntry is one recording's filter, or one text's, built once for the
@@ -592,7 +596,8 @@ func filtersOf(s *setDerived) *setFilters {
 	}
 	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{},
 		seeds: [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}, words: map[string][]*wordsEntry{},
-		lists: map[weak.Pointer[[]string]]*listsEntry{}, post: map[string][]int32{}, runs: map[string][]int32{}})
+		lists: map[weak.Pointer[[]string]]*listsEntry{}, post: map[string][]int32{}, runs: map[string][]int32{},
+		short: map[string]*filterEntry{}})
 	if !loaded {
 		runtime.AddCleanup(s, func(k weak.Pointer[setDerived]) { setsFilters.Delete(k) }, k)
 	}
@@ -900,14 +905,66 @@ var sizeClasses = [...]int64{8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 
 	18432, 19072, 20480, 21760, 24576, 27264, 28672, 32768}
 
 // postID is the id the set's postings name t's text by (postRuns), its
-// filter built at the first ask (setFilter); -1 where they hold none of its
-// words: t is in no set's call, its text has no entry, or the entry's
-// words did not fit the set's budget.
+// filter built at the first ask (setFilter), or, for a text shorter than
+// filterTextMin, its words posted at the first ask (shortEntry); -1 where
+// they hold none of its words: t is in no set's call, its text has no
+// entry, or the entry's words did not fit the set's budget.
 func (t *readerText) postID() int32 {
-	if t.setFilter() == nil {
-		return -1
+	if t.setFilter() != nil {
+		return t.filter.id
 	}
-	return t.filter.id
+	if e := t.shortEntry(); e != nil {
+		return e.id
+	}
+	return -1
+}
+
+// shortEntry is the set's entry that posts the words of t's text (postRuns)
+// where the set keeps no filter of it (setFilter) and the text is shorter
+// than filterTextMin: a leaf of an exchange, a short view. Such a text is
+// scanned for each word it is asked (ruledOut), but a call's place index
+// (placeIndex) asks the postings which places may hold a word, not each
+// place: a text they named nowhere was read for every word of every call,
+// and an exchange's leaves are mostly such texts, thousands in each call of
+// a long test. The text's words are read once for the set, by the text, as
+// a longer one's are: the entry keeps the text as its key, counted on the
+// set's budget with its slot (filterIDSlotBytes, and the map's first group
+// for the first), and the words as postRuns counts them. nil where t is in
+// no set's call, keploy could not read its view, the text is not short, or
+// the entry does not fit.
+func (t *readerText) shortEntry() *filterEntry {
+	fs := t.x.filters
+	if fs == nil {
+		return nil
+	}
+	s := t.text
+	if t.raw != nil {
+		b := t.raw.payload()
+		if !b.read {
+			return nil
+		}
+		s = b.text
+	}
+	if len(s) >= filterTextMin {
+		return nil
+	}
+	fs.mu.Lock()
+	e, first := fs.short[s], len(fs.short) == 0
+	fs.mu.Unlock()
+	if e == nil {
+		n := filterEntryBytes + filterIDSlotBytes + allocBytes(len(s), false)
+		if first {
+			n += filterIDGroupBytes
+		}
+		if e = newFilterEntry(fs, t.x.set, fs.short, s, strings.Clone, n, true); e == nil {
+			return nil
+		}
+	}
+	e.once.Do(func() {
+		e.id = -1
+		postRuns(fs, t.x.set, e, textForms(s))
+	})
+	return e
 }
 
 // holdingRuns is, in order, the ids of the set's texts whose words hold
