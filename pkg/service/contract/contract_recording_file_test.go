@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -205,10 +206,9 @@ func TestTheContractReadsNoRequestBodyOutsideItsRecording(t *testing.T) {
 				t.Fatalf("the contract left out the test case:\n%.2000s", contract)
 			}
 			// The warning names the test set and the test case, and says
-			// why: os.Root's words for a path that escapes the recording's
-			// directory by its name, and, for a link, the link out and
-			// where it leads.
-			why := "path escapes from parent"
+			// why, plainly: for a path that leads out by its name, where it
+			// leads, and, for a link, the link out and where it leads.
+			why := ", a place outside it; name a place inside it"
 			if strings.Contains(c.name, "link") {
 				why = "a link that leads out of it, to "
 			}
@@ -218,7 +218,7 @@ func TestTheContractReadsNoRequestBodyOutsideItsRecording(t *testing.T) {
 				msg, _ := fields["error"].(string)
 				if e.Level >= zapcore.WarnLevel && fields["testSetID"] == "test-set-0" && fields["testCase"] == "test-1" &&
 					strings.Contains(msg, path) && strings.Contains(msg, "is read only inside its recording") &&
-					strings.Contains(msg, why) {
+					strings.Contains(msg, why) && !strings.Contains(msg, "escapes from parent") {
 					said = true
 				}
 			}
@@ -242,8 +242,9 @@ func TestTheContractIsWrittenOnlyInsideTheRecording(t *testing.T) {
 	}
 	s := &contract{logger: zap.NewNop(), testDB: db, config: &config.Config{Path: filepath.Join(tmp, "keploy")}}
 	err := s.GenerateFromTests(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "only inside its recording") {
-		t.Fatalf("GenerateFromTests: %v, want it refused as outside the recording", err)
+	// Said plainly: the link, where it leads, what to do.
+	if want := fmt.Sprintf("the contract %q is written only inside its recording %q: it is a link that leads out of it, to %q; replace the link with what it leads to", "contract.yaml", filepath.Join(tmp, "keploy"), out); err == nil || err.Error() != want {
+		t.Fatalf("GenerateFromTests: %v, want it refused as outside the recording: %q", err, want)
 	}
 	if got, err := os.ReadFile(out); err != nil || string(got) != "KEEP ME\n" {
 		t.Fatalf("the file outside holds %q (%v)", got, err)

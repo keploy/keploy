@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
 )
 
@@ -127,7 +128,7 @@ func readBounded(root, path string, limit int64) ([]byte, error) {
 	data, err := safeyaml.ReadFileIn(r, rel, limit)
 	if err != nil {
 		refused := fmt.Sprintf("the recording's file %q is read only inside its recording %q", rel, root)
-		if out := utils.RecordingLinkOut(r, root, rel, refused, err); out != nil {
+		if out := linkout.Explain(r, root, rel, refused, err); out != nil {
 			return nil, out
 		}
 		// Wrapped, a file that is not there is still fs.ErrNotExist to
@@ -206,9 +207,9 @@ func changeRefusal(root, path string) string {
 
 // changeRefusedIn is changeRefused for path, inside r, the recording at root,
 // that r refused: a link on its way that r does not follow is named, with
-// where it leads, after what changeRefused says (utils.LinkOutError).
+// where it leads, after what changeRefused says (linkout.Error).
 func changeRefusedIn(r *os.Root, root, path string, err error) error {
-	if out := utils.RecordingLinkOut(r, root, path, changeRefusal(root, path), err); out != nil {
+	if out := linkout.Explain(r, root, path, changeRefusal(root, path), err); out != nil {
 		return out
 	}
 	return changeRefused(root, path, err)

@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 )
 
 // A test case keeps a part of its request that is too large to hold in a file
@@ -40,10 +41,10 @@ func openRecordingRoot(root, path string) (*os.Root, error) {
 
 // recordingFileError says why path, a file of the recording, could not be read
 // inside r, the recording at root: a link on its way that r does not follow is
-// named, with where it leads (utils.LinkOutError).
+// named, with where it leads (linkout.Error).
 func recordingFileError(r *os.Root, root, path string, err error) error {
 	refused := fmt.Sprintf("the recording's file %q is read only inside its recording %q", path, root)
-	if out := utils.RecordingLinkOut(r, root, path, refused, err); out != nil {
+	if out := linkout.Explain(r, root, path, refused, err); out != nil {
 		return out
 	}
 	return fmt.Errorf("%s: %w", refused, err)

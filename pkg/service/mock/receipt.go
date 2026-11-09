@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -566,7 +567,7 @@ func readTestsFile(keployDir, set, file, whose string) (*TestsReceipt, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", filepath.Join(set, file), safeyaml.StripPath(err))
+		return nil, receiptError(filepath.Join(set, file), err)
 	}
 	var r TestsReceipt
 	if err := yaml.Unmarshal(raw, &r); err != nil {
@@ -586,13 +587,33 @@ func readTestsFile(keployDir, set, file, whose string) (*TestsReceipt, error) {
 // and name within it. A receipt, a set folder or a keploy folder that links
 // out is refused with why, as the recording's other files are: a cloned
 // repository could otherwise have a receipt read from anywhere.
+//
+// A link out, or a name that leads out, is said plainly (linkout.Error),
+// and receiptError keeps that whole.
 func readInRecording(keployDir, name string, limit int64) ([]byte, error) {
 	r, err := utils.OpenRecordingDir(keployDir)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = r.Close() }()
-	return safeyaml.ReadFileIn(r, name, limit)
+	b, err := safeyaml.ReadFileIn(r, name, limit)
+	refused := fmt.Sprintf("the recording's file %q is read only inside its recording %q", name, keployDir)
+	if out := linkout.Explain(r, keployDir, name, refused, err); out != nil {
+		return nil, out
+	}
+	return b, err
+}
+
+// receiptError says why name, a receipt readInRecording read, could not be
+// read: a link out of the recording as linkout.Error says it, whole,
+// since it names the receipt and where the link leads; anything else after
+// the receipt's name, without the path safeyaml's error repeats.
+func receiptError(name string, err error) error {
+	var out *linkout.Error
+	if errors.As(err, &out) {
+		return out
+	}
+	return fmt.Errorf("%s: %w", name, safeyaml.StripPath(err))
 }
 
 // ReceiptBytes bounds a receipt read. A receipt is a handful of scalar fields
@@ -613,7 +634,7 @@ func ReadReceipt(keployDir, set string) (*Receipt, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", filepath.Join(set, ReceiptFile), safeyaml.StripPath(err))
+		return nil, receiptError(filepath.Join(set, ReceiptFile), err)
 	}
 	var r Receipt
 	if err := yaml.Unmarshal(raw, &r); err != nil {

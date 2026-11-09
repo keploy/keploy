@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
 )
 
@@ -63,7 +63,7 @@ func TestARecordingFileThatLinksOutIsSaidPlainly(t *testing.T) {
 				t.Fatal(err)
 			}
 			err := c.op(rec)
-			var out *utils.LinkOutError
+			var out *linkout.Error
 			if !errors.As(err, &out) {
 				t.Fatalf("got %v, want the link out named", err)
 			}

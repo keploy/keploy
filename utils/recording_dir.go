@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"go.keploy.io/server/v3/utils/linkout"
 )
 
 // OpenRecordingDir opens dir, a folder whose files come with the repository
@@ -95,13 +97,13 @@ func openRecordingDir(dir string, mkdir bool, perm fs.FileMode) (*os.Root, error
 // openRefused says why r, the folder at, did not open name, a folder in it: a
 // folder that is not there is only that, and is returned as it is, so
 // os.IsNotExist still tells it; one that is a link r does not follow is
-// named, with where it leads (LinkOutError).
+// named, with where it leads (linkout.Error).
 func openRefused(r *os.Root, at, name string, err error) error {
 	if errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	refused := fmt.Sprintf("the folder %q is opened only inside %q", name, at)
-	if out := RecordingLinkOut(r, at, name, refused, err); out != nil {
+	if out := linkout.Explain(r, at, name, refused, err); out != nil {
 		return out
 	}
 	return fmt.Errorf("%s: %w", refused, err)

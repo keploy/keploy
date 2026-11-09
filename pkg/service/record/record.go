@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -3719,7 +3720,11 @@ func pcapDir(keployDir, set string) (string, error) {
 	}
 	defer func() { _ = r.Close() }()
 	if err := r.MkdirAll(set, 0o755); err != nil {
-		return destDir, fmt.Errorf("the test set's folder %q is made only inside %q: %w", set, keployDir, err)
+		refused := fmt.Sprintf("the test set's folder %q is made only inside %q", set, keployDir)
+		if out := linkout.Explain(r, keployDir, set, refused, err); out != nil {
+			return destDir, out
+		}
+		return destDir, fmt.Errorf("%s: %w", refused, err)
 	}
 	return destDir, nil
 }

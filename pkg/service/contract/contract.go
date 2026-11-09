@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/contract/consumer"
 	"go.keploy.io/server/v3/pkg/service/contract/provider"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -496,7 +497,12 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 
 	outputPath := filepath.Join(keployPath, "contract.yaml")
 	if err := root.WriteFile("contract.yaml", data, 0o644); err != nil {
-		err = fmt.Errorf("the contract %q is written only inside its recording %q: %w", "contract.yaml", keployPath, err)
+		refused := fmt.Sprintf("the contract %q is written only inside its recording %q", "contract.yaml", keployPath)
+		if out := linkout.Explain(root, keployPath, "contract.yaml", refused, err); out != nil {
+			err = out
+		} else {
+			err = fmt.Errorf("%s: %w", refused, err)
+		}
 		utils.LogError(s.logger, err, "failed to write inferred OpenAPI schema", zap.String("path", outputPath))
 		return err
 	}

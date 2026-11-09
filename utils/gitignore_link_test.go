@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,8 +27,9 @@ func TestAddToGitIgnoreStaysInsideTheFolder(t *testing.T) {
 		t.Skipf("cannot make a symbolic link here: %v", err)
 	}
 	err := AddToGitIgnore(zap.NewNop(), dir, "/reports/")
-	if err == nil || !strings.Contains(err.Error(), "only inside") {
-		t.Fatalf("AddToGitIgnore: %v, want it refused", err)
+	// Said plainly: the link, where it leads, what to do.
+	if want := fmt.Sprintf("the .gitignore file is written only inside %q: it is a link that leads out of it, to %q; replace the link with what it leads to", dir, out); err == nil || err.Error() != want {
+		t.Fatalf("AddToGitIgnore: %v, want it refused: %q", err, want)
 	}
 	if got, err := os.ReadFile(out); err != nil || string(got) != "KEEP ME\n" {
 		t.Fatalf("the file outside holds %q (%v)", got, err)

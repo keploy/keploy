@@ -86,6 +86,19 @@ func TestSanitizeFiles_DoNotFollowSymlinks(t *testing.T) {
 		t.Errorf("the symlink's target was changed to %q", b)
 	}
 	requireMode(t, target, 0o644)
+	// Each refusal is said plainly: the link, where it leads, and what to
+	// do, not in the kernel's words (ELOOP's "too many levels of symbolic
+	// links").
+	says := fmt.Sprintf("link.yaml is a symbolic link; keploy does not follow it: it leads to %q; replace the link with the file it leads to", target)
+	for what, err := range map[string]error{
+		"WriteSecretsYAML":      WriteSecretsYAML(link, map[string]string{"TOKEN": "s3cret"}),
+		"SanitizeFileInPlace":   SanitizeFileInPlace(link, "test-1", map[string]string{}),
+		"DesanitizeFileInPlace": DesanitizeFileInPlace(link, map[string]string{"TOKEN": "s3cret"}),
+	} {
+		if err == nil || !strings.HasSuffix(err.Error(), says) || strings.Contains(err.Error(), "levels of symbolic links") {
+			t.Errorf("%s through a symlink said %v; want it to end %q", what, err, says)
+		}
+	}
 }
 
 // A test file sanitize and normalize rewrite keeps its own mode -- a team's

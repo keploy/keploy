@@ -37,6 +37,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/linkout"
 	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
@@ -1741,7 +1742,11 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 
 	file, err := root.OpenFile(".gitignore", os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
-		return fmt.Errorf("the .gitignore file is written only inside %q: %w", path, err)
+		refused := fmt.Sprintf("the .gitignore file is written only inside %q", path)
+		if out := linkout.Explain(root, path, ".gitignore", refused, err); out != nil {
+			return out
+		}
+		return fmt.Errorf("%s: %w", refused, err)
 	}
 
 	defer func() {

@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -1181,7 +1182,7 @@ func (m *mockService) saveSet(name string) (func(keep bool), bool, error) {
 // is copied as the link it is. Both are opened from the project, and every
 // folder and file is read and made only inside the recording, so a set or a
 // folder in it that links out is refused with why, and nothing where it
-// leads is read.
+// leads is read. A link out is said plainly (linkout.Error).
 func backUpSet(root, name, backup string) error {
 	r, err := utils.OpenRecordingDir(root)
 	if err != nil {
@@ -1191,6 +1192,10 @@ func backUpSet(root, name, backup string) error {
 	fsys := r.FS()
 	return fs.WalkDir(fsys, name, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			refused := fmt.Sprintf("the recording's file %q is read only inside its recording %q", p, root)
+			if out := linkout.Explain(r, root, p, refused, err); out != nil {
+				return out
+			}
 			return err
 		}
 		to := backup + strings.TrimPrefix(p, name)

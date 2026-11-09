@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -1148,7 +1149,7 @@ func openTestSetFile(dir *os.Root, name string, flag int, perm os.FileMode) (*os
 func readTestSetFile(dir *os.Root, name string) ([]byte, error) {
 	f, err := openTestSetFile(dir, name, os.O_RDONLY, 0)
 	if err != nil {
-		return nil, noFollowError(filepath.Join(dir.Name(), name), err)
+		return nil, noFollowError(dir, name, err)
 	}
 	defer func() { _ = f.Close() }()
 	return io.ReadAll(f)
@@ -1171,7 +1172,7 @@ func writeTestSetFile(dir *os.Root, name string, data []byte, perm os.FileMode, 
 		f, err = openTestSetFile(dir, name, flags, perm)
 	}
 	if err != nil {
-		return noFollowError(path, err)
+		return noFollowError(dir, name, err)
 	}
 	if narrow {
 		if fi, err := f.Stat(); err == nil && fi.Mode().Perm()&^perm != 0 {
@@ -1191,13 +1192,38 @@ func writeTestSetFile(dir *os.Root, name string, data []byte, perm os.FileMode, 
 	return f.Close()
 }
 
-// noFollowError names a symlink an O_NOFOLLOW open refused.
-func noFollowError(path string, err error) error {
+// noFollowError says why name, a file of a test set in its folder dir, was
+// not opened (openTestSetFile), plainly, never in os.Root's or the kernel's
+// words. A symbolic link there, which an O_NOFOLLOW open refuses even when it
+// leads to a file in the folder, is named with where it leads; on a system
+// with no O_NOFOLLOW open, where only a link out of the folder is refused, the
+// link is said as linkout.Error says it. Anything else is returned as it is.
+// errors.Is still sees the open's error (syscall.ELOOP for a link).
+func noFollowError(dir *os.Root, name string, err error) error {
+	path := filepath.Join(dir.Name(), name)
+	refused := fmt.Sprintf("%s is a symbolic link; keploy does not follow it", path)
 	if errors.Is(err, syscall.ELOOP) {
-		return fmt.Errorf("%s is a symbolic link; keploy does not follow it: %w", path, err)
+		if target, rerr := dir.Readlink(name); rerr == nil {
+			return &linkRefusedError{fmt.Sprintf("%s: it leads to %q; replace the link with the file it leads to", refused, target), err}
+		}
+		return &linkRefusedError{refused + "; replace the link with the file it leads to", err}
+	}
+	if out := linkout.Explain(dir, dir.Name(), name, fmt.Sprintf("the test set's file %q is rewritten only inside its folder %q", name, dir.Name()), err); out != nil {
+		return out
 	}
 	return err
 }
+
+// linkRefusedError is noFollowError's refusal of a link: msg says it, and
+// errors.Is and errors.As see err, the open's error, through it.
+type linkRefusedError struct {
+	msg string
+	err error
+}
+
+func (e *linkRefusedError) Error() string { return e.msg }
+
+func (e *linkRefusedError) Unwrap() error { return e.err }
 
 // DesanitizeFileInPlace reads a sanitized YAML file and replaces placeholders with actual secret values.
 // It is opened as SanitizeFileInPlace opens a test file.

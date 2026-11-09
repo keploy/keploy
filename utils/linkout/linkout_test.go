@@ -1,4 +1,4 @@
-package utils
+package linkout
 
 import (
 	"errors"
@@ -44,8 +44,8 @@ func symlink(t *testing.T, target, at string) {
 }
 
 // refusedIn opens file inside rec as os.Root does and returns its refusal,
-// said by RecordingLinkOut.
-func refusedIn(t *testing.T, rec, file string) (*LinkOutError, error) {
+// said by Explain.
+func refusedIn(t *testing.T, rec, file string) (*Error, error) {
 	t.Helper()
 	r, err := os.OpenRoot(rec)
 	if err != nil {
@@ -56,7 +56,7 @@ func refusedIn(t *testing.T, rec, file string) (*LinkOutError, error) {
 	if err == nil {
 		t.Fatalf("os.Root followed %s", file)
 	}
-	return RecordingLinkOut(r, rec, file, refusedFor(rec, file), err), err
+	return Explain(r, rec, file, refusedFor(rec, file), err), err
 }
 
 // refusedFor is what a reader says for any refusal of file in rec.
@@ -68,7 +68,7 @@ func refusedFor(rec, file string) string {
 // is a link it does not follow is said plainly: what the caller says for any
 // refusal of it, then which link, and where it leads, with os.Root's own
 // error kept for errors.Is.
-func TestRecordingLinkOutNamesTheLinkAndWhereItLeads(t *testing.T) {
+func TestExplainNamesTheLinkAndWhereItLeads(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		// layout makes the links in rec; secret is a file outside it.
@@ -123,7 +123,7 @@ func TestRecordingLinkOutNamesTheLinkAndWhereItLeads(t *testing.T) {
 			if got == nil {
 				t.Fatalf("os.Root's refusal %q is not said as a link out", rootErr)
 			}
-			want := LinkOutError{Refused: refusedFor(rec, file), File: file, Recording: rec, Link: filepath.FromSlash(c.link), Target: c.target(rec, secret), Inside: c.inside, Err: rootErr}
+			want := Error{Refused: refusedFor(rec, file), File: file, Recording: rec, Link: filepath.FromSlash(c.link), Target: c.target(rec, secret), Inside: c.inside, Err: rootErr}
 			if *got != want {
 				t.Fatalf("got %+v\nwant %+v", *got, want)
 			}
@@ -147,8 +147,8 @@ func TestRecordingLinkOutNamesTheLinkAndWhereItLeads(t *testing.T) {
 }
 
 // Anything else os.Root refuses, or a path that is not there, is not said as
-// a link out: RecordingLinkOut is nil, and the caller says it as before.
-func TestRecordingLinkOutIsNilForAnythingElse(t *testing.T) {
+// a link out: Explain is nil, and the caller says it as before.
+func TestExplainIsNilForAnythingElse(t *testing.T) {
 	rec, _ := linkOutRecording(t)
 	symlink(t, "nowhere.yaml", filepath.Join(rec, "reports", "dangling.yaml"))
 	symlink(t, "b", filepath.Join(rec, "loop", "a"))
@@ -175,17 +175,16 @@ func TestRecordingLinkOutIsNilForAnythingElse(t *testing.T) {
 		{"a link inside to nothing", "reports/dangling.yaml", other},
 		{"links that lead to each other", "loop/a", other},
 		{"a link that stays inside from where it is", "a/l", other},
-		{"a path out by its name", "../secret.txt", other},
-		{"an absolute path", filepath.Join(rec, "reports", "r.yaml"), other},
+		{"a name that only passes by .. and stays inside", "reports/../reports/r.yaml", other},
 	} {
-		if got := RecordingLinkOut(r, rec, filepath.FromSlash(c.file), refusedFor(rec, c.file), c.err); got != nil {
+		if got := Explain(r, rec, filepath.FromSlash(c.file), refusedFor(rec, c.file), c.err); got != nil {
 			t.Errorf("%s: got %v, want nil", c.name, got)
 		}
 	}
 }
 
 // The working directory as the recording ("") is named ".".
-func TestRecordingLinkOutNamesTheWorkingDirectory(t *testing.T) {
+func TestExplainNamesTheWorkingDirectory(t *testing.T) {
 	rec, secret := linkOutRecording(t)
 	symlink(t, secret, filepath.Join(rec, "out.yaml"))
 	t.Chdir(rec)
@@ -195,100 +194,64 @@ func TestRecordingLinkOutNamesTheWorkingDirectory(t *testing.T) {
 	}
 	defer func() { _ = r.Close() }()
 	_, rootErr := r.Stat("out.yaml")
-	got := RecordingLinkOut(r, "", "out.yaml", refusedFor("", "out.yaml"), rootErr)
+	got := Explain(r, "", "out.yaml", refusedFor("", "out.yaml"), rootErr)
 	if got == nil || got.Recording != "." || got.Target != secret || got.Inside {
 		t.Fatalf("got %+v, want the link out of \".\" to %s", got, secret)
 	}
 }
 
-// A keploy folder, or a folder in it, that is a link os.Root does not follow
-// is refused by OpenRecordingDir and MkdirOpenRecordingDir with what any
-// refusal of the folder says, then the link and where it leads, not in
-// os.Root's words; nothing is made where it leads.
-func TestAFolderThatLinksOutIsSaidPlainly(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symbolic links need privileges on windows")
+// A path that os.Root refuses by its own name, one that climbs out by ".."
+// or an absolute one, is said plainly too: what the caller says for any
+// refusal of it, then where the name leads (or that it is an absolute path
+// into the recording, and what to name instead), with os.Root's own error
+// kept for errors.Is, and never os.Root's words.
+func TestExplainSaysWhereANameLeads(t *testing.T) {
+	rec, secret := linkOutRecording(t)
+	r, err := os.OpenRoot(rec)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer func() { _ = r.Close() }()
+	project := filepath.Dir(rec)
+	inRec := filepath.Join(rec, "reports", "r.yaml")
 	for _, c := range []struct {
-		name string
-		// layout makes the link in project, beside outside, and says the
-		// folder to open, the link's name and the folder it is in, and
-		// where it leads.
-		layout func(t *testing.T, project, outside string) (dir, link, at, target string)
-		inside bool
+		name, file, says string
+		target           string
+		inside           bool
 	}{
-		{"a keploy folder by an absolute path out", func(t *testing.T, project, outside string) (string, string, string, string) {
-			symlink(t, outside, filepath.Join(project, "keploy"))
-			return filepath.Join(project, "keploy"), "keploy", project, outside
-		}, false},
-		{"a keploy folder that climbs out", func(t *testing.T, project, outside string) (string, string, string, string) {
-			symlink(t, filepath.Join("..", "outside"), filepath.Join(project, "keploy"))
-			return filepath.Join(project, "keploy"), "keploy", project, outside
-		}, false},
-		{"a keploy folder by an absolute path into the project", func(t *testing.T, project, _ string) (string, string, string, string) {
-			if err := os.MkdirAll(filepath.Join(project, "real"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			symlink(t, filepath.Join(project, "real"), filepath.Join(project, "keploy"))
-			return filepath.Join(project, "keploy"), "keploy", project, filepath.Join(project, "real")
-		}, true},
-		{"a folder in keploy that climbs out", func(t *testing.T, project, outside string) (string, string, string, string) {
-			symlink(t, filepath.Join("..", "..", "outside"), filepath.Join(project, "keploy", "tests"))
-			return filepath.Join(project, "keploy", "tests"), "tests", filepath.Join(project, "keploy"), outside
-		}, false},
-		{"a keploy folder named from the working directory", func(t *testing.T, project, _ string) (string, string, string, string) {
-			symlink(t, filepath.Join("..", "outside"), filepath.Join(project, "keploy"))
-			t.Chdir(project)
-			return "keploy", "keploy", ".", filepath.Join("..", "outside")
-		}, false},
+		{"up and out", filepath.Join("..", "..", "secret.txt"), "it names %q, a place outside it; name a place inside it", secret, false},
+		{"up and out, by the folder above", "..", "it names %q, a place outside it; name a place inside it", project, false},
+		{"up and out after a folder", filepath.Join("reports", "..", "..", "x"), "it names %q, a place outside it; name a place inside it", filepath.Join(project, "x"), false},
+		{"absolute, outside", secret, "it names %q, a place outside it; name a place inside it", secret, false},
+		{"absolute, inside", inRec, "it names %q by an absolute path, which keploy does not open; name it relative to %q", inRec, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			base := t.TempDir()
-			project, outside := filepath.Join(base, "project"), filepath.Join(base, "outside")
-			for _, d := range []string{project, outside} {
-				if err := os.MkdirAll(d, 0o755); err != nil {
-					t.Fatal(err)
-				}
+			_, rootErr := r.Stat(c.file)
+			if rootErr == nil {
+				t.Fatalf("os.Root opened %s", c.file)
 			}
-			dir, link, at, target := c.layout(t, project, outside)
-			open := func() error {
-				r, err := OpenRecordingDir(dir)
-				if err == nil {
-					_ = r.Close()
-				}
-				return err
+			got := Explain(r, rec, c.file, refusedFor(rec, c.file), rootErr)
+			if got == nil {
+				t.Fatalf("Explain(%q) = nil, want it said", c.file)
 			}
-			mkdir := func() error {
-				r, err := MkdirOpenRecordingDir(filepath.Join(dir, "test-set-0"), 0o755)
-				if err == nil {
-					_ = r.Close()
-				}
-				return err
+			want := Error{Refused: refusedFor(rec, c.file), File: c.file, Recording: rec, Target: c.target, Inside: c.inside, Err: rootErr}
+			if *got != want {
+				t.Fatalf("Explain(%q) = %+v, want %+v", c.file, *got, want)
 			}
-			for what, op := range map[string]func() error{"open": open, "make": mkdir} {
-				err := op()
-				var out *LinkOutError
-				if !errors.As(err, &out) {
-					t.Fatalf("%s: got %v, want the link named", what, err)
-				}
-				if out.Link != link || out.Recording != at || out.Target != target || out.Inside != c.inside {
-					t.Errorf("%s: got %+v, want the link %q in %q to %q (inside: %v)", what, *out, link, at, target, c.inside)
-				}
-				msg := err.Error()
-				says := fmt.Sprintf("it is a link that leads out of it, to %q; replace the link with what it leads to", target)
-				if c.inside {
-					says = fmt.Sprintf("it is a link by the absolute path %q, which keploy does not follow; make the link relative", target)
-				}
-				if want := fmt.Sprintf("the folder %q is opened only inside %q: %s", link, at, says); msg != want {
-					t.Errorf("%s: says %q\nwant %q", what, msg, want)
-				}
+			says := fmt.Sprintf(c.says, c.target)
+			if c.inside {
+				says = fmt.Sprintf(c.says, c.target, rec)
 			}
-			if ents, err := os.ReadDir(outside); err != nil || len(ents) != 0 {
-				t.Errorf("the folder outside holds %v (%v), want nothing made there", ents, err)
+			if msg := got.Error(); msg != refusedFor(rec, c.file)+": "+says {
+				t.Fatalf("said %q, want %q", msg, refusedFor(rec, c.file)+": "+says)
 			}
-			if ents, err := os.ReadDir(filepath.Join(project, "real")); err == nil && len(ents) != 0 {
-				t.Errorf("the folder the absolute link names holds %v, want nothing made there", ents)
+			if strings.Contains(got.Error(), "escapes") || !errors.Is(got, rootErr) {
+				t.Fatalf("said %q (errors.Is os.Root's error: %v), want it plain and os.Root's error kept", got, errors.Is(got, rootErr))
 			}
 		})
+	}
+	// A file that is not there is only that, whatever its name.
+	if got := Explain(r, rec, "../none", refusedFor(rec, "../none"), os.ErrNotExist); got != nil {
+		t.Fatalf("Explain of a file not there = %v, want nil", got)
 	}
 }

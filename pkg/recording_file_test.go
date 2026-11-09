@@ -136,9 +136,11 @@ func TestATestCasesFileIsReadOnlyInsideItsRecording(t *testing.T) {
 	refused := []struct {
 		name, root, path, why string
 	}{
-		{"up and out", root, "../outside.txt", "path escapes"},
-		{"absolute, outside", root, outside, "path escapes"},
-		{"absolute, inside", root, filepath.Join(root, "test-set-0/assets/test-1/body.txt"), "path escapes"},
+		// A path that leads out by its own name is said plainly too: where
+		// it leads, or that it is absolute, and what to name instead.
+		{"up and out", root, "../outside.txt", fmt.Sprintf("%s %q: it names %q, a place outside it; name a place inside it", inside, root, filepath.Join(filepath.Dir(root), "outside.txt"))},
+		{"absolute, outside", root, outside, fmt.Sprintf("%s %q: it names %q, a place outside it; name a place inside it", inside, root, outside)},
+		{"absolute, inside", root, filepath.Join(root, "test-set-0/assets/test-1/body.txt"), fmt.Sprintf("%s %q: it names %q by an absolute path, which keploy does not open; name it relative to %q", inside, root, filepath.Join(root, "test-set-0/assets/test-1/body.txt"), root)},
 		{"no recording directory", "", "body.txt", noRoot},
 		{"a recording directory that is not there", filepath.Join(root, "gone"), "body.txt", "open the recording directory"},
 	}
@@ -165,8 +167,8 @@ func TestATestCasesFileIsReadOnlyInsideItsRecording(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), c.why) || !strings.Contains(err.Error(), fmt.Sprintf("%q", c.path)) {
 					t.Fatalf("SimulateHTTP: %v; want it refused, naming %q, with %q", err, c.path, c.why)
 				}
-				if c.why == "path escapes" && !strings.Contains(err.Error(), inside) {
-					t.Fatalf("SimulateHTTP: %v; want %q", err, inside)
+				if strings.Contains(err.Error(), "escapes from parent") {
+					t.Fatalf("SimulateHTTP: %v; want it said without os.Root's words", err)
 				}
 				if n, _, _ := app.sent(); n != 0 {
 					t.Fatalf("the app was sent %d requests; want none", n)

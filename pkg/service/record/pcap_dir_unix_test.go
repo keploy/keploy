@@ -4,6 +4,7 @@ package record
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,6 +42,26 @@ func TestPcapDirIsMadeOnlyInsideTheProject(t *testing.T) {
 // out of the project, is refused with why, and nothing is made where the
 // link leads. Rooted at the set's folder instead, the set would be taken for
 // the keploy folder and the link followed.
+// A set folder that is a link out of the keploy folder is refused, said
+// plainly (the set, the link and where it leads), and nothing is made there.
+func TestPcapDirASetThatLinksOutIsSaidPlainly(t *testing.T) {
+	keployDir, outside := filepath.Join(t.TempDir(), "keploy"), t.TempDir()
+	if err := os.MkdirAll(keployDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(outside, "pcap")
+	if err := os.Symlink(target, filepath.Join(keployDir, "test-set-0")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := pcapDir(keployDir, "test-set-0")
+	if want := fmt.Sprintf("the test set's folder %q is made only inside %q: it is a link that leads out of it, to %q; replace the link with what it leads to", "test-set-0", keployDir, target); err == nil || err.Error() != want {
+		t.Fatalf("pcapDir through a set that links out = %v; want %q", err, want)
+	}
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a folder was made where the set's link leads: %v", err)
+	}
+}
+
 func TestPcapDirASetNamedKeployDoesNotMoveTheProject(t *testing.T) {
 	project, outside := t.TempDir(), t.TempDir()
 	keployDir := filepath.Join(project, "keploy")

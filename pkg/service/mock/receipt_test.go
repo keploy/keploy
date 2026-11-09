@@ -608,8 +608,9 @@ func TestReadReceiptRefusesNonRegular(t *testing.T) {
 			case err := <-done:
 				// A link to /dev/zero is a link out of the recording, refused
 				// before anything is opened; a FIFO in it is no regular file.
-				if name == "devzero" && (err == nil || !strings.Contains(err.Error(), "path escapes from parent")) {
-					t.Fatalf("ReadReceipt on a %s receipt = %v, want it refused as outside the recording", name, err)
+				want := fmt.Sprintf("the recording's file %q is read only inside its recording %q: it is a link that leads out of it, to %q; replace the link with what it leads to", filepath.Join("set", ReceiptFile), keployDir, "/dev/zero")
+				if name == "devzero" && (err == nil || err.Error() != want) {
+					t.Fatalf("ReadReceipt on a %s receipt = %v, want it refused as outside the recording: %q", name, err, want)
 				}
 				if name != "devzero" && !errors.Is(err, safeyaml.ErrNotRegular) {
 					t.Fatalf("ReadReceipt on a %s receipt = %v, want ErrNotRegular", name, err)
@@ -1205,7 +1206,7 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 	}
 	refused := func(t *testing.T, what string, err error) {
 		t.Helper()
-		if err == nil || (!strings.Contains(err.Error(), "path escapes from parent") && !strings.Contains(err.Error(), "only inside")) {
+		if err == nil || !strings.Contains(err.Error(), "only inside") || !strings.Contains(err.Error(), "a link that leads out of it") || strings.Contains(err.Error(), "escapes from parent") {
 			t.Fatalf("%s: %v, want it refused as outside the recording", what, err)
 		}
 	}
@@ -1268,7 +1269,7 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 		if len(said) != len(receiptIgnore) {
 			t.Fatalf("said %d times that an entry could not be added, want %d: %v", len(said), len(receiptIgnore), logs.All())
 		}
-		if why := fmt.Sprint(said[0].ContextMap()["error"]); !strings.Contains(why, "only inside") && !strings.Contains(why, "path escapes from parent") {
+		if why := fmt.Sprint(said[0].ContextMap()["error"]); !strings.Contains(why, "only inside") || !strings.Contains(why, "a link that leads out of it") || strings.Contains(why, "escapes from parent") {
 			t.Fatalf("said %q, want it refused as outside the recording", why)
 		}
 		if b, err := os.ReadFile(gi); err != nil || string(b) != all {

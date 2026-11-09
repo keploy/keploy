@@ -1,8 +1,10 @@
 package mock
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
@@ -92,6 +94,10 @@ func TestABackupRefusesASetThatLinksOut(t *testing.T) {
 	if err == nil {
 		restore(false)
 		t.Fatal("saveSet must refuse a set that links out of the project")
+	}
+	// Said plainly: the set, the link, and where it leads.
+	if want := fmt.Sprintf("the recording's file %q is read only inside its recording %q: it is a link that leads out of it, to %q; replace the link with what it leads to", "e2e", keployDir, filepath.Join(outside, "secrets")); !strings.HasSuffix(err.Error(), want) {
+		t.Fatalf("saveSet said %q; want it to end %q", err, want)
 	}
 	if _, _, err := m.existsOnly("e2e"); err == nil {
 		t.Fatal("existsOnly must refuse a set that links out of the project")

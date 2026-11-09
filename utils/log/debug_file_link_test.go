@@ -3,9 +3,9 @@
 package log
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -41,8 +41,10 @@ func TestOpenDebugFileALinkOutOfItsFolderIsRefused(t *testing.T) {
 				_ = f.Close()
 				t.Fatalf("OpenDebugFile(%q -> %q) opened it; want it refused", path, tc.target)
 			}
-			if !strings.Contains(err.Error(), "agent-debug.log") {
-				t.Errorf("the error %q does not name the file", err)
+			// Said plainly: which file, the link, and where it leads, not
+			// in os.Root's words.
+			if want := fmt.Sprintf("the debug log %q is written only inside %q: it is a link that leads out of it, to %q; replace the link with what it leads to", "agent-debug.log", dir, outside); err.Error() != want {
+				t.Errorf("the error is %q; want %q", err, want)
 			}
 			if got, _ := os.ReadFile(outside); string(got) != kept {
 				t.Errorf("the file outside the folder is now %q; want it untouched %q", got, kept)

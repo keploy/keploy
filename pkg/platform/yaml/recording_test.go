@@ -104,8 +104,8 @@ func TestReadRecordingFileReadsOnlyInsideTheRecording(t *testing.T) {
 	out := filepath.Join(root, "..")
 	data, err := ReadRecordingFileF(ctx, log, root, out, "secret", FormatYAML)
 	requireRefused(t, data, err, root, filepath.Join(out, "secret.yaml"))
-	if !strings.Contains(err.Error(), "path escapes from parent") {
-		t.Fatalf("error %q does not say the path leads out of the recording", err)
+	if want := fmt.Sprintf("it names %q, a place outside it; name a place inside it", filepath.Join(filepath.Dir(root), "secret.yaml")); !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "escapes from parent") {
+		t.Fatalf("error %q does not say plainly where the path leads (%q)", err, want)
 	}
 	// A path that is not under root at all (a relative one, for a root that
 	// is absolute) is refused, naming it, and is not a missing file.

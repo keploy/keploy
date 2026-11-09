@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -804,14 +805,29 @@ func (s *DebugFileSink) Written() int64 {
 // folder, whose files come with the repository keploy runs in: a link a
 // cloned repository carries there would otherwise have the agent truncate
 // and write a file of the container's, or of a folder the host mounts into
-// it. RotateForScope keeps every later file inside the same folder.
+// it. RotateForScope keeps every later file inside the same folder. A link
+// out is said plainly (linkout.Error), not in os.Root's words.
 func OpenDebugFile(path string) (*os.File, error) {
-	root, err := os.OpenRoot(filepath.Dir(path))
+	dir, name := filepath.Dir(path), filepath.Base(path)
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = root.Close() }()
-	return root.OpenFile(filepath.Base(path), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		if out := linkout.Explain(root, dir, name, debugLogRefusal(name, dir), err); out != nil {
+			return nil, out
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
+// debugLogRefusal is what keploy says for any refusal of the debug log name,
+// a path inside the folder dir.
+func debugLogRefusal(name, dir string) string {
+	return fmt.Sprintf("the debug log %q is written only inside %q", name, dir)
 }
 
 // AddDebugFileSink returns a new logger that, in addition to whatever
@@ -992,6 +1008,9 @@ func (s *DebugFileSink) RotateForScope(scope string) error {
 	}
 	newFile, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
+		if out := linkout.Explain(root, rootDir, rel, "debug file sink: "+debugLogRefusal(rel, rootDir), err); out != nil {
+			return out
+		}
 		return fmt.Errorf("debug file sink: open %q under %q: %w", rel, rootDir, err)
 	}
 

@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"testing"
 
-	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 )
 
 // A file a test case names that is a link out of the recording is refused
@@ -37,7 +37,7 @@ func TestARecordingFileALinkOutIsSaidPlainly(t *testing.T) {
 		_ = f.Close()
 	}
 	for what, err := range map[string]error{"read": readErr, "open": openErr} {
-		var out *utils.LinkOutError
+		var out *linkout.Error
 		if !errors.As(err, &out) {
 			t.Fatalf("%s: got %v, want the link out named", what, err)
 		}
