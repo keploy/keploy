@@ -275,35 +275,52 @@ func TestOutcomeAnInstantAnAnswerOutsideTheScopeGaveIsRefusedNamingTheEdit(t *te
 // answered after the call gave R's application nothing before it, so R's
 // word there decides nothing; served as recorded, it holds no source of F's
 // value: fresh (answerState, one rule however a recording is handed in).
+// That is where the recording holds the word as a value of its own. Where
+// it holds a fresh id's 16-bit group only inside another id, and nothing of
+// the id's 32-bit and 48-bit groups, it cannot be where the id came from,
+// whenever it was answered: chance, fresh, its line naming it. One that
+// holds the id's 32-bit group beside it is read as for any word.
 func TestOutcomeASetRecordingWithNoTimeBeforeTheCallShowsNothing(t *testing.T) {
 	const p = "body.appId"
 	before := r1Insert.Add(-time.Minute)
-	answered := func(res time.Time) Raw {
-		m := receiveOf("mock-31", "bb7ed9ee-670e-48d1-982f-b54b2b73982f", before)
+	answered := func(held string, res time.Time) Raw {
+		m := receiveOf("mock-31", held, before)
 		m.Spec.ResTimestampMock = res
 		return clockedDrifts().RawOf(m, true).ServedAs(3).ServedAsRecorded()
 	}
 	for _, c := range []struct {
 		what, why string
-		x         Raw
+		res       time.Time
 	}{
-		{"answered before the call", "", answered(before.Add(time.Second))},
-		{"no answer time", noAnswerAt, answered(time.Time{})},
-		{"answered at the call's own instant", atCallWhy, answered(r1Insert)},
-		{"answered after the call", "", answered(r1Insert.Add(time.Second))},
+		{"answered before the call", "", before.Add(time.Second)},
+		{"no answer time", noAnswerAt, time.Time{}},
+		{"answered at the call's own instant", atCallWhy, r1Insert},
+		{"answered after the call", "", r1Insert.Add(time.Second)},
 	} {
-		x := c.x
-		in := oInput(p, "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812", "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5", nil, nil)
-		in.At, in.Arrived = r1Insert, r1Insert
-		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
-		d := oWord(t, Decide(in), "48d1", "4c7d")
-		switch {
-		case c.why == "" && d.Outcome != OutcomeFresh:
-			t.Errorf("%s: %s; want fresh (a short word by chance)", c.what, oDescribe([]Decision{d}))
-		case c.why != "":
-			oRefused(t, c.what, d, "unknown", "mock-31")
-			if d.Refusal != nil && !strings.Contains(d.Refusal.Why, c.why) {
-				t.Errorf("%s: %s; want it to say %q", c.what, d.Refusal.Why, c.why)
+		for _, h := range []struct{ what, held string }{
+			{"its own value", "48d1"},
+			{"inside another id", "bb7ed9ee-670e-48d1-982f-b54b2b73982f"},
+			{"inside another id beside the id's 32-bit group", "5c0e9a7b bb7ed9ee-670e-48d1-982f-b54b2b73982f"},
+		} {
+			x := answered(h.held, c.res)
+			what := c.what + ", the group " + h.what
+			in := oInput(p, "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812", "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5", nil, nil)
+			in.At, in.Arrived = r1Insert, r1Insert
+			in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
+			d := oWord(t, Decide(in), "48d1", "4c7d")
+			switch {
+			case c.why == "" || h.held == "bb7ed9ee-670e-48d1-982f-b54b2b73982f":
+				if d.Outcome != OutcomeFresh {
+					t.Errorf("%s: %s; want fresh (a short word by chance)", what, oDescribe([]Decision{d}))
+				}
+				if c.why != "" && (!strings.Contains(d.Line, "mock-31") || !strings.Contains(d.Line, "piece of an id")) {
+					t.Errorf("%s: the line %q must name mock-31 and say the piece is chance", what, d.Line)
+				}
+			default:
+				oRefused(t, what, d, "unknown", "mock-31")
+				if d.Refusal != nil && !strings.Contains(d.Refusal.Why, c.why) {
+					t.Errorf("%s: %s; want it to say %q", what, d.Refusal.Why, c.why)
+				}
 			}
 		}
 	}
@@ -908,8 +925,10 @@ func TestOutcomeASecondAnotherTestsAnswerAlsoHoldsIsTheCallsOwnRead(t *testing.T
 // group stands in one of its seeded ids by chance, about once in 38. At the
 // field that holds the word the place is unchanged, so the piece is chance
 // and the id fresh, whichever run's id holds it; a word that counts by its
-// text there is a conflict. Where round F's answer holds round F's word and
-// the recording's holds none, or gave round F's id whole, it is refused.
+// text there is a conflict. Where round F's answer holds round F's word
+// inside another id and the recording's holds none, it shows nothing of the
+// id's long words: chance there too, and fresh. Where it holds round F's
+// 32-bit group beside it, or gave round F's id whole, it is refused.
 func TestOutcomeAPieceAStartUpsAnswerHoldsInASessionOfItsOwnIsChance(t *testing.T) {
 	const (
 		recSID, liveSID = "5Xa0KmL0RxqLFfFyLtYhPw", "w6Hg1H8rSmm44V0Mn3o7Jg"
@@ -948,7 +967,11 @@ func TestOutcomeAPieceAStartUpsAnswerHoldsInASessionOfItsOwnIsChance(t *testing.
 	}
 	oRefused(t, "round F's 32-bit word at the answer as recorded, its own session", oWord(t, call(plain, long, asRecorded(liveSID)), "1111aaaa", "bb7ed9ee"), RefusalConflict, "mock-0")
 	onlyF := ans(recSID, other).ServedAs(1).ServedLive(ans(liveSID, other, "c0de0000-1111-48d1-8222-333344445555"))
-	oRefused(t, "round F's answer holds round F's word, the recording's none", oWord(t, call(plain, holding, onlyF), "4333", "48d1"), RefusalUnknown, "mock-0")
+	if d := oWord(t, call(plain, holding, onlyF), "4333", "48d1"); d.Outcome != OutcomeFresh {
+		t.Errorf("round F's answer holds round F's word inside another id, the recording's none: %s; want fresh", oDescribe([]Decision{d}))
+	}
+	withLong := ans(recSID, other).ServedAs(1).ServedLive(ans(liveSID, other, "9999cccc-1111-48d1-8222-333344445555"))
+	oRefused(t, "round F's answer holds round F's word beside round F's 32-bit group", oWord(t, call(plain, holding, withLong), "4333", "48d1"), RefusalUnknown, "mock-0")
 	whole := ans(recSID, seeded, other).ServedAs(1).ServedLive(ans(liveSID, holding, other))
 	if d := call(plain, holding, whole); len(d) == 0 || d[0].Outcome != OutcomeRefused {
 		t.Errorf("FALSE GREEN? round F's answer gave round F's id whole: %s; want refused", oDescribe(d))

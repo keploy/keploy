@@ -353,7 +353,18 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 	}
 	var out []Decision
 	done := map[*instantWord]bool{}
-	for _, w := range rd.Words {
+	// A piece of one id is decided after the other words, since it asks the
+	// verdicts of the id's long words (mintedLong); it keeps its place in
+	// out. fresh: the words, by index into rd.Words, learned fresh.
+	type piece struct {
+		at, k int
+		long  []int
+	}
+	var pieces []piece
+	var whole *Decision
+	fresh := map[int]bool{}
+words:
+	for k, w := range rd.Words {
 		switch {
 		case w.Instant != nil:
 			if done[w.Instant] {
@@ -362,12 +373,49 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 			done[w.Instant] = true
 			out = append(out, dc.textInstant(path, bare, rec, live, rd, w))
 		case w.RecIdx < 0 || w.LiveIdx < 0:
-			return append(out, dc.unpaired(path, bare, rec, live, rd)), true
+			d := dc.unpaired(path, bare, rec, live, rd)
+			whole = &d
+			break words
 		default:
-			out = append(out, dc.word(path, bare, rec, live, rd.Rec, w, pieceOfAnId(rd, w)))
+			if long := idLongWords(rd, w); len(long) > 0 {
+				pieces = append(pieces, piece{at: len(out), k: k, long: long})
+				out = append(out, Decision{})
+				continue
+			}
+			d := dc.word(path, bare, rec, live, rd.Rec, w, pieceOfAnId(rd, w), nil)
+			fresh[k] = d.Outcome == OutcomeFresh
+			out = append(out, d)
 		}
 	}
+	for _, p := range pieces {
+		w := rd.Words[p.k]
+		out[p.at] = dc.word(path, bare, rec, live, rd.Rec, w, pieceOfAnId(rd, w), mintedLong(rd, fresh, p.long))
+	}
+	if whole != nil {
+		return append(out, *whole), true
+	}
 	return out, false
+}
+
+// mintedLong is long (idLongWords, indexes into rd.Words) as words where
+// this call made every one of them anew: each was learned fresh (fresh),
+// no place before the call showing it. Only then is the id one the call
+// minted, so a place that shows none of its long words may hold its piece
+// by chance (idChance, oneRun). nil where one is bound at a source, refused, or not
+// decided (it stands past a word one run lacks, which refuses the field
+// whole), or is an instant's word (the run clock's, read whole by its
+// moment): an id built from a value the application took may hold a piece
+// it took elsewhere too, so the piece is read as for any word (fail
+// closed).
+func mintedLong(rd textReading, fresh map[int]bool, long []int) []readWord {
+	ws := make([]readWord, 0, len(long))
+	for _, k := range long {
+		if !fresh[k] {
+			return nil
+		}
+		ws = append(ws, rd.Words[k])
+	}
+	return ws
 }
 
 // tokenBits is the fewest bits (wordBits) the changed part of a URL-safe
@@ -376,8 +424,9 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 // ("order-17_x" to "order-42-x") is no such token.
 const tokenBits = 64
 
-// oneToken decides a field that is one URL-safe base64 token in each run
-// and whose '-' and '_' moved. They are letters of that alphabet there, not
+// oneToken decides a field that is one base64 token in each run, of the
+// URL-safe alphabet whose '-' and '_' moved or the standard one whose '+'
+// and '/' did (tokenAlphabet). They are letters of that alphabet there, not
 // separators, so the runs' words do not pair and replay could never write
 // them: the token is one value, read as a word whole. A word of 32 bits or
 // more that an earlier place holds, where no place shows the whole token,
@@ -397,19 +446,19 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 	}) {
 		return Decision{}, false
 	}
-	return dc.word(path, bare, rec, live, rec, whole, false), true
+	return dc.word(path, bare, rec, live, rec, whole, false, nil), true
 }
 
 // randomToken reports whether rec and live are one value of one generator:
-// a run of the URL-safe base64 alphabet of one length in each run, whose
-// changed part, past what they share at each end, carries tokenBits in both.
-// Text keploy can name is no such value: hex groups (a UUID's, with or
-// without a word beside them) and a run that decodes to text (a name of a
-// script keploy does not split into words, inside base64 JSON).
+// a run of one base64 alphabet of one length in each run (tokenAlphabet),
+// whose changed part, past what they share at each end, carries tokenBits in
+// both, read by its letters and digits. Text keploy can name is no such
+// value: hex groups (a UUID's, with or without a word beside them) and a run
+// that decodes to text (a name of a script keploy does not split into words,
+// inside base64 JSON).
 func randomToken(rec, live string) bool {
-	const urlSafe = "-_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	hexGroups := func(s string) bool { return strings.Trim(strings.ToLower(s), "-_0123456789abcdef") == "" }
-	if len(rec) != len(live) || strings.Trim(rec, urlSafe) != "" || strings.Trim(live, urlSafe) != "" || hexGroups(rec) || hexGroups(live) {
+	if len(rec) != len(live) || !tokenAlphabet(rec, live) || hexGroups(rec) || hexGroups(live) {
 		return false
 	}
 	head := 0
@@ -420,7 +469,34 @@ func randomToken(rec, live string) bool {
 	for len(r) > 0 && len(l) > 0 && r[len(r)-1] == l[len(l)-1] {
 		r, l = r[:len(r)-1], l[:len(l)-1]
 	}
-	return wordBits(r) >= tokenBits && wordBits(l) >= tokenBits && b64Text(rec, nil) == "" && b64Text(live, nil) == ""
+	return wordBits(lettersOf(r)) >= tokenBits && wordBits(lettersOf(l)) >= tokenBits && b64Text(rec, nil) == "" && b64Text(live, nil) == ""
+}
+
+// lettersOf is s without the standard base64 alphabet's '+' and '/', which
+// wordBits would count as 8 bits each: a token's bits are its letters' and
+// digits'.
+func lettersOf(s string) string {
+	return strings.Map(func(c rune) rune {
+		if c == '+' || c == '/' {
+			return -1
+		}
+		return c
+	}, s)
+}
+
+// tokenAlphabet reports whether rec and live are both of one base64
+// alphabet: the URL-safe one ('-' and '_' among the letters), or the
+// standard one ('+' and '/'), whole groups of four characters there with the
+// same '=' padding in each run (Go's base64.StdEncoding, a 256-bit key's 44
+// characters). A text that mixes the two alphabets is neither.
+func tokenAlphabet(rec, live string) bool {
+	const letters = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	if strings.Trim(rec, "-_"+letters) == "" && strings.Trim(live, "-_"+letters) == "" {
+		return true
+	}
+	r, l := strings.TrimRight(rec, "="), strings.TrimRight(live, "=")
+	return len(rec)%4 == 0 && len(rec)-len(r) <= 2 && len(rec)-len(r) == len(live)-len(l) &&
+		strings.Trim(r, "+/"+letters) == "" && strings.Trim(l, "+/"+letters) == ""
 }
 
 // unpaired decides a text where a word was added or dropped: refused whole
@@ -464,6 +540,205 @@ func pieceOfAnId(rd textReading, w readWord) bool {
 	})
 }
 
+// idLongWords are the words that judge a place for w where w is a piece of
+// one id: the other changed words of the whole id token around it (tokenID,
+// a run of letters, digits, '-' and '_' in both runs) that carry chanceBits
+// in both runs, as a v4 UUID's 32-bit and 48-bit groups do for its 16-bit
+// ones, as indexes into rd.Words. An application makes or copies such an
+// id whole, so where the call made the id's long words anew (mintedLong), a
+// place that shows nothing of them in either run is no source of the id:
+// its holding the piece is chance (the 4-hex groups of api-server's fresh
+// UUIDs stand all over its sets), unless each run holds its own piece at a
+// place it had, where the application may have cut the piece alone
+// (oneRun). nil where w carries chanceBits itself, stands in no such token,
+// or its long words stand outside its token ("qty 12 ref <random>": 12 is
+// no piece of the ref, and stays judged by its own text).
+func idLongWords(rd textReading, w readWord) []int {
+	if wordBits(w.Rec) >= chanceBits || wordBits(w.Live) >= chanceBits {
+		return nil
+	}
+	i := slices.IndexFunc(w.Tokens, func(t wholeToken) bool { return t.Kind == tokenID })
+	if i < 0 {
+		return nil
+	}
+	tok := w.Tokens[i]
+	within := func(at, span [2]int) bool { return span[0] <= at[0] && at[1] <= span[1] }
+	// w itself carries fewer bits, and a word one run lacks has no text
+	// there: neither is one of them. An instant's word is one, and is never
+	// learned fresh, so an id that holds one is no id the call minted.
+	var long []int
+	for k, o := range rd.Words {
+		if wordBits(o.Rec) >= chanceBits && wordBits(o.Live) >= chanceBits && within(o.RecAt, tok.RecAt) && within(o.LiveAt, tok.LiveAt) {
+			long = append(long, k)
+		}
+	}
+	return long
+}
+
+// idChance reports, for w, a piece of one id the call minted (long:
+// mintedLong), whether the place at i holds it as chance would. It is no
+// value the test gave keploy, nor a body that declares no media type (the
+// test made the one, and keploy cannot tell the words of the other from
+// its framing). It shows nothing of any of the id's long words in either
+// run (idShownAt is false, every text read), and holds the piece only
+// inside longer tokens of its own, never as a whole id token
+// (pieceWholeAt). The application makes an id whole, so the place cannot
+// be where it took the id, nor a piece of it: a value of that place's own
+// ("<code>-<random>" built from a place's "<code>") stands there whole. It
+// may still be where the application cut the piece out of another value,
+// at one place or at another in each run: the piece is chance there only
+// where one run's own piece stands at no place that run had (oneRun),
+// asked apart. A place that shows or disproves the piece itself is read as
+// for any word. false for every place where long is empty. Each place is
+// asked once, on demand.
+func (dc *decider) idChance(ps *wordPlaces, w readWord, long []readWord) func(i int) bool {
+	if len(long) == 0 {
+		return func(int) bool { return false }
+	}
+	// known: by place, made at the first ask, so a pass that asks no
+	// place costs nothing per place of the call.
+	var known map[int]int8
+	return func(i int) bool {
+		if known == nil {
+			known = map[int]int8{}
+		}
+		k, ok := known[i]
+		if !ok {
+			p := *ps.at(i)
+			k = 1
+			if p.gave || p.undeclared || pieceWholeAt(p, w.Rec, w.Live) || idShownAt(p, long) {
+				k = -1
+			}
+			known[i] = k
+		}
+		return k > 0
+	}
+}
+
+// oneRun reports, for w, a piece of one id the call minted, whether one
+// run at most holds its own piece at a place it had: the recording, the
+// recorded piece in the text of a place not answered after the call
+// (recAfter), or in the answer of a set recording given by then
+// (givenBefore: recorded and answered by then, where an answer with no
+// time counts, or recorded at a time keploy cannot read); round F, at any
+// time, its piece in the text of a place, in a view its serves gave there,
+// or in any list of a set recording (its answer, F's view of it, a view
+// its serves gave). The application runs the same code
+// in each run, so one that cut the piece out of a value it was given finds
+// its own piece at a place in each run, at one place or at another in
+// each. keploy cannot tell that from chance (fail closed): where both runs
+// do, no place holds the piece by chance, and it is refused as unknown at
+// each place idChance or idOutside left. Where one run's piece stands at
+// no place, that run's application cut it from nothing it was given, so it
+// made it, with the id. held[k] is what asked[k]'s texts hold of w
+// (heldAt), set for every asked place before the first ask; a place the
+// word's check does not ask holds neither word and has no views (a place
+// with views is read always, showsUntold), so it is not read. inR and inF are the set recordings' lists that hold R's
+// and F's piece (outsideHeld.holding). Asked once, on demand.
+func (dc *decider) oneRun(ps *wordPlaces, w readWord, asked []int32, held []evHeld, inR, inF map[int32]heldRoles) func() bool {
+	known := int8(0)
+	return func() bool {
+		if known == 0 {
+			gs := dc.outside().words
+			r, f := false, len(inF) > 0
+			for j, in := range inR {
+				r = r || in&inOwn != 0 && gs[j].givenBefore(dc.in.At)
+			}
+			for k, i32 := range asked {
+				r = r || held[k].hr && !ps.at(int(i32)).recAfter
+				f = f || held[k].hf || slices.ContainsFunc(dc.ps[i32].t.views, func(v *readerText) bool { return evHolds(v, w.Live) })
+			}
+			known = 1
+			if r && f {
+				known = -1
+			}
+		}
+		return known > 0
+	}
+}
+
+// bothRunsWhy is why a place that holds a piece of one id the call minted
+// as chance would (idChance, idOutside) is no chance (oneRun). The refusal
+// it leads says it in a sentence of its own (bothRunsLine).
+const bothRunsWhy = "each run's own piece of the id stands at a place that run had, where the application may have cut it from"
+
+// bothRunsLine is the refusal line where the first place left unknown is
+// no chance by bothRunsWhy: name is that place, one of those the refusal
+// names.
+func bothRunsLine(name string) string {
+	return bothRunsWhy + " (" + name + " among them): keploy cannot tell a cut from chance"
+}
+
+// idShownAt reports whether p shows anything of one of an id's long words
+// (evidenceOf is not evNone), or keploy could not read its texts for one: a
+// place it cannot read for the id may be where the application took it
+// (fail closed).
+func idShownAt(p evPlace, long []readWord) bool {
+	return slices.ContainsFunc(long, func(o readWord) bool {
+		ev, read := evidenceOf(p, heldAt(p, o.Rec, o.Live), o.Rec, o.Live, false)
+		return ev != evNone || !read
+	})
+}
+
+// pieceWholeAt reports whether a text of p holds the piece as a whole id
+// token (main's idByte reading, holdsToken): the recorded word in the
+// recording's text, round F's in round F's or in a view F's serves gave.
+// A text keploy could not read may: fail closed.
+func pieceWholeAt(p evPlace, r, f string) bool {
+	whole := func(t *readerText, w string) bool {
+		h, ok := t.holdsToken(tokenID, w)
+		return h || !ok
+	}
+	return whole(p.t.rec, r) || whole(p.t.live, f) || slices.ContainsFunc(p.t.views, func(v *readerText) bool { return whole(v, f) })
+}
+
+// idOutside is, for w, a piece of one id the call minted (long:
+// mintedLong), whether the set's recording j may be where the application
+// took it, the outside recordings' idChance: it shows anything of one of
+// the id's long words (setEvidence is not evNone), or one of its lists
+// holds the recorded or round F's piece as a whole id token. One that does
+// neither, and leaves the piece unknown, holds it as chance would, and is
+// chance where oneRun holds. One where keploy cannot tell what round F
+// gave (unstated, unread) shows the id's long words as unknown
+// (setEvidence), so it is no chance. nil where long is empty: every
+// recording is read as for any word. The lists holding the long words are
+// asked once, on the first recording that holds neither piece whole.
+func (dc *decider) idOutside(oh *outsideHeld, w readWord, long []readWord) func(j int32) bool {
+	if len(long) == 0 {
+		return nil
+	}
+	gs := dc.outside().words
+	type held struct{ r, f map[int32]heldRoles }
+	var hs []held
+	return func(j int32) bool {
+		if gs[j].holdsWholeID(w.Rec) || gs[j].holdsWholeID(w.Live) {
+			return true
+		}
+		if hs == nil {
+			hs = make([]held, len(long))
+			for k, o := range long {
+				hs[k] = held{oh.holding(o.Rec), oh.holding(o.Live)}
+			}
+		}
+		return slices.ContainsFunc(hs, func(h held) bool {
+			ev, _ := setEvidence(gs[j], h.r[j], h.f[j], dc.in.At, false)
+			return ev != evNone
+		})
+	}
+}
+
+// holdsWholeID reports whether one of g's lists (its answer's, the
+// embedded answerLists; F's view of it; a view F's serves gave) holds t as
+// a whole id token: a word of main's idByte reading, stamps read as any
+// text.
+func (g givenWords) holdsWholeID(t string) bool {
+	id := len(readings) - 1
+	if g.holds(id, t, true) || g.view.holds(id, t, true) {
+		return true
+	}
+	return slices.ContainsFunc(g.views, func(l answerLists) bool { return l.holds(id, t, true) })
+}
+
 // neverServed reports whether the set's read saw no serve of mock.
 func (dc *decider) neverServed(mock string) bool {
 	return slices.ContainsFunc(dc.set, func(g GivenPlaces) bool { return g.mock == mock && g.first == 0 })
@@ -472,9 +747,10 @@ func (dc *decider) neverServed(mock string) bool {
 // word decides one changed word that is no instant (any other word), at
 // its address (w.At) in text, the text the leaf at bare opens to, and
 // lists the recordings it set aside as answered after the call. piece:
-// pieceOfAnId; under unreadFloorBits it is floor.
-func (dc *decider) word(path string, bare variables.Address, rec, live, text string, w readWord, piece bool) Decision {
-	d := dc.wordAt(path, bare, rec, live, text, w, piece)
+// pieceOfAnId; under unreadFloorBits it is floor. long: mintedLong, the
+// words that judge a place for a piece of one id token the call minted.
+func (dc *decider) word(path string, bare variables.Address, rec, live, text string, w readWord, piece bool, long []readWord) Decision {
+	d := dc.wordAt(path, bare, rec, live, text, w, piece, long)
 	d.AnsweredAfter = dc.answeredAfter(w.Rec)
 	return d
 }
@@ -536,11 +812,11 @@ var wordPasses atomic.Int64
 // instead. A conflict wins over an unknown place (wordBy), so it can come
 // only from a place the order marked. Any other verdict there keeps the
 // order's refusal: the second decision names a refusal, never loosens one.
-func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text string, w readWord, piece bool) Decision {
+func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text string, w readWord, piece bool, long []readWord) Decision {
 	ordered := false
-	d := dc.wordBy(path, bare, rec, live, text, w, piece, &ordered)
+	d := dc.wordBy(path, bare, rec, live, text, w, piece, long, &ordered)
 	if ordered && d.Refusal != nil && d.Refusal.Kind == RefusalUnknown {
-		if c := dc.wordBy(path, bare, rec, live, text, w, piece, nil); c.Refusal != nil && c.Refusal.Kind == RefusalConflict {
+		if c := dc.wordBy(path, bare, rec, live, text, w, piece, long, nil); c.Refusal != nil && c.Refusal.Kind == RefusalConflict {
 			return c
 		}
 	}
@@ -549,7 +825,7 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 
 // wordBy is word's verdict, serve order asked where ordered is not nil
 // (set where the order made a place unknown), and not asked where it is.
-func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text string, w readWord, piece bool, ordered *bool) Decision {
+func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text string, w readWord, piece bool, long []readWord, ordered *bool) Decision {
 	wordPasses.Add(1)
 	at, n := w.At, w.At.Word
 	ps := newWordPlaces(dc.ps, w.Rec)
@@ -564,7 +840,8 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// By place, only where one shows it moved: most words have none.
 	var moved map[int]string
 	shown := false
-	// held: what each place's texts hold of the word, asked once here and
+	// held: what each place's texts hold of the word, asked once here,
+	// before any place is judged (oneRun reads every asked place's), and
 	// read again below, where orderUnknown and swapUnknown may have changed
 	// a place's state but no text.
 	// asked: the places that may show anything of the word (placeIndex),
@@ -575,11 +852,18 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	asked = askedPlaces(asked, all, len(dc.ps))
 	held := make([]evHeld, len(asked))
 	for k, i32 := range asked {
+		held[k] = heldAt(*ps.at(int(i32)), w.Rec, w.Live)
+	}
+	// Only the outside recordings whose lists hold R's or F's word, or whose
+	// state leaves them unknown, show anything of it (outsideHeld).
+	gs, oh := dc.outside().words, dc.held()
+	inR, inF := oh.holding(w.Rec), oh.holding(w.Live)
+	idChance, oneRun := dc.idChance(ps, w, long), dc.oneRun(ps, w, asked, held, inR, inF)
+	for k, i32 := range asked {
 		i := int(i32)
 		p := *ps.at(i)
-		held[k] = heldAt(p, w.Rec, w.Live)
 		ev, _ := evidenceOf(p, held[k], w.Rec, w.Live, piece)
-		if ev == evNone {
+		if ev == evNone || ev == evUnknown && idChance(i) && oneRun() {
 			continue
 		}
 		cand[p.mock] = true
@@ -601,7 +885,10 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// aside: places that held R's word where F's did not follow, too
 	// little to be a conflict; a fresh word's line names them. unserved:
 	// recordings round F never served, which say nothing of a piece.
-	var src, outside, conflict, unknown, aside, unserved []evPlace
+	// chance: places unknown for a piece of one id the call minted that
+	// show nothing of its long words (idChance) where one run at most
+	// holds its own piece (oneRun), named on a fresh word's line.
+	var src, outside, conflict, unknown, aside, unserved, chance []evPlace
 	lateHeld := map[string][2]int{}
 	for k, i32 := range asked {
 		i := int(i32)
@@ -670,13 +957,17 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 				aside = append(aside, p)
 			}
 		case evUnknown:
+			if idChance(i) {
+				if oneRun() {
+					chance = append(chance, p)
+					break
+				}
+				p.why = bothRunsWhy
+			}
 			unknown = append(unknown, p)
 		}
 	}
-	// Only the outside recordings whose lists hold R's or F's word, or whose
-	// state leaves them unknown, show anything of it (outsideHeld).
-	gs, oh := dc.outside().words, dc.held()
-	inR, inF := oh.holding(w.Rec), oh.holding(w.Live)
+	idShows := dc.idOutside(oh, w, long)
 	for _, j := range oh.asked(true, inR, inF) {
 		g := gs[j]
 		outsideAsked.Add(1)
@@ -693,7 +984,15 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 				unserved = append(unserved, p)
 				break
 			}
-			p.why = setUnknownWhy(g, dc.in.At)
+			if idShows != nil && !idShows(j) {
+				if oneRun() {
+					chance = append(chance, p)
+					break
+				}
+				p.why = bothRunsWhy
+			} else {
+				p.why = setUnknownWhy(g, dc.in.At)
+			}
 			unknown = append(unknown, p)
 		case evDisproven:
 			if inR[j]&inOwn == 0 {
@@ -724,8 +1023,13 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 		if p.why == "" && (p.fMay || len(p.views) > 0) {
 			why = "round F served it and keploy cannot tell what it gave there"
 		}
-		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown,
-			"keploy cannot tell what round F gave at "+p.name+" before this call ("+why+")", names(unknown),
+		line := "keploy cannot tell what round F gave at " + p.name + " before this call (" + why + ")"
+		if p.why == bothRunsWhy {
+			// What round F gave there is not the reason, so the line
+			// says only the reason: a cut cannot be told from chance.
+			line = bothRunsLine(p.name)
+		}
+		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, line, names(unknown),
 			Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 	case len(outside) > 0:
 		p := outside[0]
@@ -766,7 +1070,10 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	if len(unserved) > 0 {
 		rule += " (round F never served " + unserved[0].name + ", and a piece of a longer value under " + strconv.Itoa(unreadFloorBits) + " bits is no evidence at such a place)"
 	}
-	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule+"; bound at its first call"+answeredAt(echo, rec), names(append(aside, unserved...)))
+	if len(chance) > 0 {
+		rule += " (" + chance[0].name + " holds " + strconv.Quote(w.Rec) + " or " + strconv.Quote(w.Live) + " as a piece of an id, and nothing of the id's words of " + strconv.Itoa(chanceBits) + " bits or more, which this call made anew: an id is made whole, so the piece there is chance)"
+	}
+	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule+"; bound at its first call"+answeredAt(echo, rec), names(append(append(aside, unserved...), chance...)))
 	d.Echo = echo
 	return d
 }
