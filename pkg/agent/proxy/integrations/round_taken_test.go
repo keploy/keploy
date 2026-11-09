@@ -23,10 +23,12 @@ func takenLog() []Take {
 		{Mock: m("restored-early"), How: TakeRestored, Of: 9},   // 8: names an entry not taken yet
 		{Mock: m("restored-early"), How: TakeConsumed, Of: -1},  // 9
 		{Mock: m("claimed"), How: TakeClaimed, Of: -1},
-		{How: TakeConsumed, Of: -1},                   // no recording
-		{Mock: m("twice"), How: TakeConsumed, Of: -1}, // 12
-		{Mock: m("twice"), How: TakeConsumed, Of: -1}, // 13
-		{Mock: m("twice"), How: TakeRestored, Of: 12}, // one of two given back
+		{How: TakeConsumed, Of: -1},                       // no recording
+		{Mock: m("twice"), How: TakeConsumed, Of: -1},     // 12
+		{Mock: m("twice"), How: TakeConsumed, Of: -1},     // 13
+		{Mock: m("twice"), How: TakeRestored, Of: 12},     // one of two given back
+		{Mock: m("keeps-own"), How: TakeConsumed, Of: -1}, // 15
+		{Mock: m("keeps-own"), How: TakeRestored, Of: 0},  // names consumed's live entry: gives back neither
 	}
 }
 
@@ -40,7 +42,7 @@ func TestRoundSnapshotTakenAnswersAsAScanOfTheLog(t *testing.T) {
 		"consumed": {true, false}, "spent-old-view": {false, false}, "spent-this-view": {true, false},
 		"spent": {true, false}, "given-back": {false, false}, "other": {true, false},
 		"restores-another": {false, false}, "restored-early": {true, false}, "claimed": {false, true},
-		"twice": {true, false}, "never": {false, false},
+		"twice": {true, false}, "keeps-own": {true, false}, "never": {false, false},
 	}
 	log := takenLog()
 	literal := RoundSnapshot{Taken: log, viewGen: 2}
