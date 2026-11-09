@@ -99,6 +99,35 @@ func TestAClientTestsRequestIsAPlaceOfTheCallsItLedTo(t *testing.T) {
 	}
 }
 
+// A client test's request left out of a call's places, as one that reached
+// the application after the call, leaves the call's other places in: the
+// value an exchange answered the application before the call binds there.
+func TestALateClientRequestLeavesTheCallsOtherPlaces(t *testing.T) {
+	signed := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
+	gap := 69 * time.Second
+	recReq, liveReq := signed.Add(497*time.Millisecond), signed.Add(gap+497*time.Millisecond)
+	rCall, fCall := recReq.Add(time.Millisecond), liveReq.Add(time.Millisecond)
+	rec, live := signed.Unix(), signed.Add(gap).Unix()
+	tr := NewTracker()
+	tr.Begin()
+	tr.SetCases([]ClientCase{{Name: "post-auth-temp-code-4", Req: signInCase(rec, recReq)}})
+	if !tr.Incoming(signInCase(live, liveReq), "", fCall.Add(time.Microsecond)) {
+		t.Fatal("the run's login-code request paired with no recorded request of the test")
+	}
+	earlier := tr.Placed().Earlier
+	if len(earlier) != 1 {
+		t.Fatalf("placed %d; want the client test's request", len(earlier))
+	}
+	at := recReq.Add(-100 * time.Millisecond)
+	payload := RawOf(&models.Mock{Name: "mock-7", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
+	served := Earlier{Mock: "mock-7", At: at, Own: true, Payload: payload.ServedAs(1), Seen: []Seen{{Side: Response,
+		Leaf: Leaf{Path: "body.session.auth_time", Type: Number, Value: strconv.FormatInt(rec, 10)}, Live: strconv.FormatInt(live, 10)}}}
+	d := Decide(authTimeCall(rec, live, rCall, fCall, append(earlier, served)))
+	if len(d) != 1 || d[0].Outcome != OutcomeValue || d[0].From.Mock != "mock-7" || d[0].From.Client {
+		t.Fatalf("authTime %d -> %d, served by mock-7 before the call, the client's request late: %s; want a Value of mock-7", rec, live, oDescribe(d))
+	}
+}
+
 // TestAClientTestsRequestPairsByOrderMethodAndPath: the n-th request of the
 // run with a method and a path (its record ids blanked) pairs with the n-th
 // one of the test's recording with them, whatever the test's other requests
@@ -343,12 +372,19 @@ func TestAClientTestsUnixNanoNameIsBoundAtItsRequest(t *testing.T) {
 		r.Body = `{"name":"` + name(n) + `","slug":"` + name(n) + `"}`
 		return r
 	}
+	// Two leaves, one's name the start of the other's: two slots still.
+	withNames := func(n int64, at time.Time) *models.HTTPReq {
+		r := appNameCase(n, at)
+		r.Body = `{"name":"` + name(n) + `","names":"` + name(n) + `"}`
+		return r
+	}
 	plain := func(n int64, at time.Time) *models.HTTPReq {
 		return &models.HTTPReq{Method: "PUT", URL: "http://localhost:8083/client/v1/apps/917ded3b-8816-4ebe-84f9-16d652f87600/title", Timestamp: at,
 			Header: map[string]string{"Content-Type": "text/plain"}, Body: name(n)}
 	}
 	for what, ds := range map[string][]Decision{
 		"two leaves of the body":                       twoSlots([]*models.HTTPReq{withSlug(rNanos, rReq)}, []*models.HTTPReq{withSlug(fNanos, fReq)}),
+		"two leaves, one name the other's start":       twoSlots([]*models.HTTPReq{withNames(rNanos, rReq)}, []*models.HTTPReq{withNames(fNanos, fReq)}),
 		"a plain body and another request's JSON leaf": twoSlots([]*models.HTTPReq{plain(rNanos, rReq), appNameCase(rNanos, rReq)}, []*models.HTTPReq{plain(fNanos, fReq), appNameCase(fNanos, fReq)}),
 	} {
 		if len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
