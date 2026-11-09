@@ -1765,12 +1765,34 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// source keploy can bind, and where the call's own window holds the
 	// read, it is that read (5), as main reads it; so is a client test's
 	// read since its begin (7).
-	cutOnly := len(heldWhere(hs, func(h instantHold) bool {
-		return answer(h) && !h.fr && c.rm != nil && dc.cutOfFinerOnly(h.p.t.rec, h.p.t.live, r, *c.rm)
-	})) == len(answers)
+	cutOnly := func(h instantHold) bool {
+		return !h.fr && c.rm != nil && dc.cutOfFinerOnly(h.p.t.rec, h.p.t.live, r, *c.rm)
+	}
+	// So is an answer that reads back, at a cut coarser than a millisecond,
+	// what a send of the scope wrote no later than it as its own call's read
+	// of the clock (a find of the record the test stamped with now, or the
+	// answer of the exchange that stamped it, at the same instant): it gives
+	// the application nothing that read did not. Two reads of one coarse cut
+	// share it only as the runs' timing falls (6), and a replay answers such
+	// a find with its own run's read, never the recorded stamp: a read of
+	// the clock holds under both readings, and a bind to the answer only
+	// while the two reads fall in one cut. Asked only where both runs'
+	// moments are read and an answer holds the value.
+	noSource := func() bool {
+		var reads []evPlace
+		if max(c.rm.res, c.lm.res) > time.Millisecond {
+			reads = slices.DeleteFunc(copies(false), func(p evPlace) bool { return !p.clock })
+		}
+		readsBack := func(h instantHold) bool {
+			return slices.ContainsFunc(reads, func(s evPlace) bool { return !s.at.After(h.p.at) })
+		}
+		return len(heldWhere(hs, func(h instantHold) bool { return answer(h) && (cutOnly(h) || readsBack(h)) })) == len(answers)
+	}
 	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
-	ownRead := cutOnly && c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
-	if len(answers) > 0 && !ownRead {
+	ownRead := func() bool {
+		return c.rm != nil && c.lm != nil && noSource() && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	}
+	if len(answers) > 0 && !ownRead() {
 		// An answer recorded after the call that round F gave the
 		// application before it, holding F's moment, is a second source:
 		// the bind would be a guess between the two.
