@@ -64,6 +64,11 @@ jobs:
       - name: Test integrations-tests.sh
         run: bash keploy/.github/workflows/test_workflow_scripts/integrations-tests.tests.sh
 
+      # When this job runs, cancels and saves its cache, and release.yml's gate
+      # on it.
+      - name: Check this workflow and release.yml's gate on it
+        run: bash keploy/.github/workflows/test_workflow_scripts/integrations-tests.workflows.tests.sh
+
       # Every branch and tag, so the resolve step can pair this PR with an
       # integrations branch or commit without another fetch.
       - name: Check out keploy/integrations
@@ -110,7 +115,7 @@ jobs:
         run: bash keploy/.github/workflows/test_workflow_scripts/integrations-tests.sh test keploy integrations
 
       - name: Save the Go module and build caches
-        if: ${{ !cancelled() && steps.cache.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@v4
         with:
           path: |
