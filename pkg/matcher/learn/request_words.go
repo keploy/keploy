@@ -78,13 +78,15 @@ func (w *RequestWords) Write(p []byte) (int, error) {
 }
 
 // requestWordsCut is the last place in b, after its first byte, before a
-// byte no form runs across (a space or a mark that is no part of a word, a
-// run of the base64 alphabet, an escape, a quoted-printable one, a line
-// break of wrapped base64, a JWT's dot or a path's slash): 0 where there is
-// none. The byte before it may start an escape: '%' and '=' go on in a hex
-// digit, a line break or a backslash, and '\' in a letter, '/', a backslash
-// or '"', the only one of these it cuts before, and "\"" reads as a space
-// (unescaped), a separator, so each side reads as it does whole.
+// byte no form runs across (a space or a printable mark that is no part of
+// a word, of a run of the base64 alphabet, of an escape or of a
+// quoted-printable one; never a line break, which wrapped base64 runs
+// across): 0 where there is none. A dot ends every run (nextB64Run), a
+// JWT's parts too, so a cut before one splits none. The byte before it may
+// start an escape: '%' and '=' go on in a hex digit, a line break or a
+// backslash, and '\' in a letter, '/', a backslash or '"', the only one of
+// these it cuts before, and "\"" reads as a space (unescaped), a
+// separator, so each side reads as it does whole.
 func requestWordsCut(b []byte) int {
 	for i := len(b) - 1; i > 0; i-- {
 		if cutBefore(b[i]) {
@@ -96,7 +98,7 @@ func requestWordsCut(b []byte) int {
 
 // cutBefore says whether a text may be cut before c (requestWordsCut).
 func cutBefore(c byte) bool {
-	return c < 0x80 && !isB64Byte(c) && !strings.ContainsRune("=\\%.\r\n", rune(c)) && (c == ' ' || c == '\t' || c > ' ' && c < 0x7f)
+	return c < 0x80 && !isB64Byte(c) && !strings.ContainsRune("=\\%", rune(c)) && (c == ' ' || c == '\t' || c > ' ' && c < 0x7f)
 }
 
 // read adds the words of each form of text, one window (textForms).
