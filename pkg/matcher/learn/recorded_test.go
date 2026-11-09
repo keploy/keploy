@@ -311,17 +311,29 @@ func TestOutcomeCostAKeptRecordingCountsTheHeapItHoldsDecoded(t *testing.T) {
 		return m
 	}
 	small := func() *models.Mock { return recordingOf("small") }
+	// A Mongo answer's message is an interface: one holding a value, not a
+	// pointer, holds it boxed on the heap.
+	boxed := func() *models.Mock {
+		m := recordingOf("boxed")
+		m.Spec.MongoResponses = make([]models.MongoResponse, 0, 1000)
+		for i := range cap(m.Spec.MongoResponses) {
+			m.Spec.MongoResponses = append(m.Spec.MongoResponses, models.MongoResponse{Message: models.MongoOpMessage{FlagBits: i, Sections: []string{"s" + strconv.Itoa(i)}}})
+		}
+		return m
+	}
 	for _, c := range []struct {
-		name string
-		make func() *models.Mock
-	}{{"4000 headers", headers}, {"a 1 MiB body", body}, {"a small recording", small}} {
-		// Eight of it, live at the second read, for a heap of each well
-		// past what the runtime's own work moves between two reads.
+		name   string
+		make   func() *models.Mock
+		copies int
+	}{{"4000 headers", headers, 8}, {"a 1 MiB body", body, 8}, {"a small recording", small, 4096}, {"1000 answers holding their message by value", boxed, 64}} {
+		// Copies of it live at the second read, a few MiB of them: the
+		// runtime's own work moves the heap by a few KiB between two
+		// reads, well under 1/64 of that.
 		var a, b runtime.MemStats
 		runtime.GC()
 		runtime.GC()
 		runtime.ReadMemStats(&a)
-		ms := make([]*models.Mock, 0, 8)
+		ms := make([]*models.Mock, 0, c.copies)
 		for range cap(ms) {
 			ms = append(ms, c.make())
 		}
@@ -340,8 +352,7 @@ func TestOutcomeCostAKeptRecordingCountsTheHeapItHoldsDecoded(t *testing.T) {
 		counted := s.recs.used - slotBytes - int64(len(c.name))
 		s.mu.Unlock()
 		t.Logf("%s: holds %d bytes decoded, counted %d", c.name, heap, counted)
-		// The heap read moves by a few hundred bytes a copy with the
-		// runtime's own work: within 1/64 of it is the heap it holds.
+		// Within 1/64 of the heap read is the heap it holds.
 		if counted < heap-heap/64 || counted > 3*heap+1<<10 {
 			t.Errorf("%s: kept, counted %d bytes on the set's budget; want at least the %d it holds decoded (less 1/64), at most three times that and 1 KiB", c.name, counted, heap)
 		}
@@ -359,5 +370,49 @@ func TestOutcomeCostAKeptRecordingCountsTheHeapItHoldsDecoded(t *testing.T) {
 	h := &models.MongoHeader{Length: 1}
 	if a, b := recordingHeap(responses(h, h)), recordingHeap(responses(h, &models.MongoHeader{Length: 1})); a >= b {
 		t.Errorf("two answers that share one header count %d bytes; want less than two with a header each (%d)", a, b)
+	}
+	// An interface holding a value holds it boxed, as one holding a
+	// pointer to it holds what the pointer names.
+	message := func(msg any) *models.Mock {
+		return &models.Mock{Spec: models.MockSpec{MongoResponses: []models.MongoResponse{{Message: msg}}}}
+	}
+	if a, b := recordingHeap(message(models.MongoOpMessage{FlagBits: 1, Sections: []string{"a"}})), recordingHeap(message(&models.MongoOpMessage{FlagBits: 1, Sections: []string{"a"}})); a != b {
+		t.Errorf("an answer holding its message by value counts %d bytes; want the %d of one holding a pointer to it", a, b)
+	}
+}
+
+// Two first reads of one recording at once both decode it, and the set
+// keeps the first kept: the second, finding it kept, does not measure what
+// it decoded, so a recording is measured once for the set however many
+// readers decode it at once.
+func TestOutcomeCostARecordingTwoReadersDecodeAtOnceIsMeasuredOnce(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	measured := recordingMeasures.Load()
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		_, err := tr.KeepRecording("a", 1<<10, func() (*models.Mock, error) {
+			close(started)
+			<-release
+			return recordingOf("a"), nil
+		})
+		done <- err
+	}()
+	<-started
+	var n int
+	_, err := tr.KeepRecording("a", 1<<10, decodeOf("a", &n))
+	close(release)
+	if err := errors.Join(err, <-done); err != nil {
+		t.Fatal(err)
+	}
+	if d, decodes := recordingMeasures.Load()-measured, tr.RecordingDecodes(); n != 1 || decodes != 2 || d != 1 {
+		t.Errorf("two first reads at once decoded %d (the set counts %d) and measured %d; want the second read's decode, 2 and 1", n, decodes, d)
+	}
+	s := tr.derived
+	s.mu.Lock()
+	kept := len(s.recs.by)
+	s.mu.Unlock()
+	if kept != 1 {
+		t.Errorf("two first reads of one recording at once kept %d recordings; want 1", kept)
 	}
 }
