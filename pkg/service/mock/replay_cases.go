@@ -3,7 +3,6 @@ package mock
 import (
 	"context"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -103,26 +103,11 @@ func (c *actualCapture) list() []*models.TestCase {
 	return append([]*models.TestCase(nil), c.cases...)
 }
 
-var idSegment = regexp.MustCompile(`^([0-9]+|[0-9a-fA-F]{12,}|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27})$`)
-
-// normalisePath keeps the path of a URL with ids blanked, so the same call made twice looks the same.
-func normalisePath(rawURL string) string {
-	path := rawURL
-	if u, err := url.Parse(rawURL); err == nil && u.Path != "" {
-		path = u.Path
-	}
-	parts := strings.Split(path, "/")
-	for i, p := range parts {
-		if idSegment.MatchString(p) {
-			parts[i] = "{id}"
-		}
-	}
-	return strings.Join(parts, "/")
-}
-
-// requestKey is what makes two requests the same call: the method and the path with ids blanked.
+// requestKey is what makes two requests the same call: the method and the
+// path with each segment that names a record blanked (learn.CaseKey, the
+// rule the learn step pairs a client test's requests by).
 func requestKey(method, rawURL string) string {
-	return strings.ToUpper(method) + " " + normalisePath(rawURL)
+	return learn.CaseKey(models.Method(method), rawURL)
 }
 
 func exactKey(method, rawURL string) string {
