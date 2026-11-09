@@ -386,10 +386,11 @@ func TestARequestKeployTestSentIsNoClientTestsRequest(t *testing.T) {
 }
 
 // A place GivenPlaceCase names a test case of is a test case's request
-// (givenPlace): a recording's is not, nor the request of a test case keploy
-// holds no copy of, which names none (givenPlace("")).
+// (givenPlace): a recording's is not, nor one with no test case's name
+// after "test case ", nor the request of a test case keploy cannot name
+// (givenPlace("")).
 func TestGivenPlaceCaseNamesOnlyATestCase(t *testing.T) {
-	for place, want := range map[string]string{"test case post-client-v1-apps-1": "post-client-v1-apps-1", givenPlace(""): "", "mock-20": "", "test-2": ""} {
+	for place, want := range map[string]string{"test case post-client-v1-apps-1": "post-client-v1-apps-1", "test case ": "", givenPlace(""): "", "mock-20": "", "test-2": ""} {
 		if got, ok := GivenPlaceCase(place); ok != (want != "") || ok && got != want {
 			t.Errorf("GivenPlaceCase(%q) = %q, %v; want %q, %v", place, got, ok, want, want != "")
 		}
