@@ -58,6 +58,24 @@ env:
 
 jobs:
   # ---------------------------------------------------------------
+  # keploy/integrations' tests against the tagged tree, with KEPLOY_PROVEN
+  # unset and set (integrations-tests.yml, against INTEGRATION_REF as the
+  # builds below are). It runs beside the builds; release (the binaries) and
+  # build-docker (the images) wait for it, so a tag whose tree fails
+  # integrations' tests publishes neither. Once integrations is fixed,
+  # `gh run rerun <run> --failed` tests integrations' ref again and publishes.
+  # ---------------------------------------------------------------
+  integrations-tests:
+    uses: ./.github/workflows/integrations-tests.yml
+    # What integrations-tests.yml asks for; the workflow's contents: write is
+    # not passed on.
+    permissions:
+      contents: read
+      pull-requests: read
+    secrets:
+      INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
+  # ---------------------------------------------------------------
   # Linux native builds (amd64 + arm64).
   #
   # Produces TWO binaries per arch:
@@ -402,7 +420,7 @@ jobs:
     # The longest healthy job in this repo runs ~32 min, so this is ~2x
     # headroom and cannot trip a job that is merely slow.
     timeout-minutes: 60
-    needs: [build-linux, build-darwin, build-windows]
+    needs: [build-linux, build-darwin, build-windows, integrations-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -497,7 +515,7 @@ jobs:
     # The longest healthy job in this repo runs ~32 min, so this is ~2x
     # headroom and cannot trip a job that is merely slow.
     timeout-minutes: 60
-    needs: build-linux
+    needs: [build-linux, integrations-tests]
     strategy:
       fail-fast: true
       matrix:
