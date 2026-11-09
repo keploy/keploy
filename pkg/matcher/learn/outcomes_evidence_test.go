@@ -612,30 +612,36 @@ func TestOutcomeARecordingMadeAfterTheCallDecidesNothingByItsRecordedWord(t *tes
 // a set entry; round F served it as recorded, or with a view that holds
 // "6c7d" where fView. mock-6 is the exchange's name, mock-5 the others'.
 func answeredAtInput(how string, req, res time.Time, fView bool) Input {
+	return answeredAtWords(how, req, res, fView, "82", "6c7d")
+}
+
+// answeredAtWords is answeredAtInput where the recorded word is rec and
+// round F's is live.
+func answeredAtWords(how string, req, res time.Time, fView bool, rec, live string) Input {
 	const path = "bind.$8"
 	in := Input{Drifts: clockedDrifts(), Drift: []string{path}, At: eRecAt, Arrived: eRecAt, Raw: eStartup(), Test: "test-2", Mock: "mock-300",
-		Rec:  Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}},
-		Live: Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}},
+		Rec:  Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: rec}}},
+		Live: Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}},
 		Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}}
 	pg := func(id string) Raw {
 		return ePgAnswered("mock-5", eRecAt.Sub(req), res, "SELECT id, n FROM jobs", []models.PostgresV3Cells{{{Value: id}, {Value: "5"}}}, "SELECT 1")
 	}
-	x := pg("82").ServedAs(6).ServedAsRecorded()
+	x := pg(rec).ServedAs(6).ServedAsRecorded()
 	if fView {
-		x = pg("82").ServedAs(6).ServedLive(pg("6c7d"))
+		x = pg(rec).ServedAs(6).ServedLive(pg(live))
 	}
 	switch how {
 	case "an exchange of the test":
-		m := jobsMock("82", "5")
+		m := jobsMock(rec, "5")
 		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = req, res
 		tr := NewTracker()
 		tr.Begin()
 		tr.ServedMock(m)
 		tr.Served(tr.Placed().Test, Earlier{Mock: m.Name, At: req, Own: true, Payload: RawOf(m, true),
-			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.id", Type: String, Value: "82"}, Live: map[bool]string{false: "82", true: "6c7d"}[fView]}}})
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.id", Type: String, Value: rec}, Live: map[bool]string{false: rec, true: live}[fView]}}})
 		if fView {
 			tr.ServedMockLive(m, "a", func() (*models.Mock, error) {
-				v := jobsMock("6c7d", "5")
+				v := jobsMock(live, "5")
 				v.Spec.ReqTimestampMock, v.Spec.ResTimestampMock = req, res
 				return v, nil
 			})
@@ -1236,6 +1242,23 @@ func TestOutcomeASwapQuestionLoadsNoRecordingThatIsNoStartUp(t *testing.T) {
 		dc.swappable(p, changedInstant{r: "82", l: "83"})
 		if tc.startUp != (loads > 0) {
 			t.Errorf("%s: asked whether a swap could change its word, it was loaded %d times; want it loaded only where it is a start-up (%v)", tc.what, loads, tc.startUp)
+		}
+	}
+}
+
+// A changed text with no letter or digit (one the set's postings cannot
+// name: no run of them) is refused before any place is read, and sets
+// nothing aside: a word's check, and the places it asks the postings for
+// (placeIndex.recAsked), only ever reads a run of ASCII letters and digits.
+// Were such a word ever asked, the postings would name no place and the
+// check would read every place of the call, never none.
+func TestOutcomeAChangeThePostingsCannotNameIsRefusedBeforeAnyPlaceIsRead(t *testing.T) {
+	ms := time.Millisecond
+	for _, how := range answeredAtHow {
+		d := oWord(t, Decide(answeredAtWords(how, eRecAt.Add(-10*ms), eRecAt.Add(10*ms), false, "\u00fc", "\u00e9")), "\u00fc", "\u00e9")
+		oRefused(t, how+": a change of no letter or digit", d, RefusalCannotCheck)
+		if len(d.AnsweredAfter) != 0 {
+			t.Errorf("%s: a change of no letter or digit set aside %+v as answered after the call; want none", how, d.AnsweredAfter)
 		}
 	}
 }
