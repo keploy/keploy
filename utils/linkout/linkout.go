@@ -162,6 +162,7 @@ func absoluteInto(dir, target string) bool {
 	if err != nil {
 		return false
 	}
+	// filepath.IsLocal(".") is true: the recording itself is in it.
 	rel, err := filepath.Rel(abs, target)
-	return err == nil && (rel == "." || filepath.IsLocal(rel))
+	return err == nil && filepath.IsLocal(rel)
 }

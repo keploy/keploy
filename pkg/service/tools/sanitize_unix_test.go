@@ -391,3 +391,20 @@ func TestSanitize_FailsWhenATestSetIsLeftUnsanitized(t *testing.T) {
 		t.Errorf("test-set-0 failed %d time(s) in SanitizeTestSetDir, want 1: %v", n, logs.All())
 	}
 }
+
+// A name that leads out of the test set's folder by itself, which
+// openTestSetFile refuses, is said plainly too: where it leads and what to
+// name instead, never in os.Root's words, with the refusal kept for
+// errors.Is.
+func TestATestSetFileNameThatLeadsOutIsSaidPlainly(t *testing.T) {
+	set := t.TempDir()
+	dir, err := os.OpenRoot(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	want := fmt.Sprintf("the test set's file %q is rewritten only inside its folder %q: it names %q, a place outside it; name a place inside it", "..", set, filepath.Dir(set))
+	if _, err := readTestSetFile(dir, ".."); err == nil || err.Error() != want || !errors.Is(err, os.ErrInvalid) {
+		t.Fatalf("reading %q said %v; want %q, with os.ErrInvalid kept", "..", err, want)
+	}
+}

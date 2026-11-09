@@ -216,6 +216,33 @@ func TestAnAbsoluteFormFilePathIsNotKept(t *testing.T) {
 	}
 }
 
+// The refusal above is for a part that names an absolute path. A part that
+// names no path at all, and carries nothing to keep its file from, is stored
+// as before, without the file: nothing is refused, and saving it reads no
+// path the part does not have.
+func TestAFormPartWithNoPathIsNotRefused(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "keploy")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tc := formCase("test-1", models.FormData{Key: "file", FileNames: []string{"a.txt"}})
+	var err error
+	panicked := func() (p any) {
+		defer func() { p = recover() }()
+		err = NewWithFormat(zap.NewNop(), root, yaml.FormatJSON).InsertTestCase(context.Background(), tc, "set", false)
+		return nil
+	}()
+	if panicked != nil {
+		t.Fatalf("insert panicked: %v", panicked)
+	}
+	if err != nil {
+		t.Fatalf("insert = %v, want the test case stored as before", err)
+	}
+	if files, _ := filepath.Glob(filepath.Join(root, "set", "tests", "*")); len(files) != 1 {
+		t.Errorf("stored %q, want the test case", files)
+	}
+}
+
 // A path a test case names that is kept inside the recording, but through a
 // link that leads out of it, is not kept: the part is not stored with it.
 func TestAKeptFormFileThatLinksOutIsNotKept(t *testing.T) {

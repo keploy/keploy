@@ -331,6 +331,28 @@ func TestAnInterruptedTestSetFileOpenIsMadeAgain(t *testing.T) {
 	}
 }
 
+// A link refused at a test set file that is gone, or no longer a link, when
+// keploy reads where it led (replaced between the open and the read) is
+// still said plainly, without a place it cannot name.
+func TestALinkReplacedBeforeItIsReadIsStillSaidPlainly(t *testing.T) {
+	folder := t.TempDir()
+	if err := os.WriteFile(filepath.Join(folder, "test-1.yaml"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.OpenRoot(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	plain := openat
+	openat = func(int, string, int, uint32) (int, error) { return -1, unix.ELOOP }
+	t.Cleanup(func() { openat = plain })
+	want := filepath.Join(folder, "test-1.yaml") + " is a symbolic link; keploy does not follow it; replace the link with the file it leads to"
+	if _, err := readTestSetFile(dir, "test-1.yaml"); err == nil || err.Error() != want || !errors.Is(err, unix.ELOOP) {
+		t.Fatalf("readTestSetFile said %v; want %q, with ELOOP kept", err, want)
+	}
+}
+
 // A test set's folder keploy may search but not read: listing it, or opening
 // a file in it, fails with the reason, permission denied, not a stand-in.
 func TestATestSetFolderThatCannotBeReadSaysWhy(t *testing.T) {

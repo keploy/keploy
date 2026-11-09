@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // linkOutRecording makes a recording at <tmp>/project/keploy holding
@@ -149,7 +150,8 @@ func TestExplainNamesTheLinkAndWhereItLeads(t *testing.T) {
 // Anything else os.Root refuses, or a path that is not there, is not said as
 // a link out: Explain is nil, and the caller says it as before.
 func TestExplainIsNilForAnythingElse(t *testing.T) {
-	rec, _ := linkOutRecording(t)
+	rec, secret := linkOutRecording(t)
+	symlink(t, secret, filepath.Join(rec, "reports", "out.yaml"))
 	symlink(t, "nowhere.yaml", filepath.Join(rec, "reports", "dangling.yaml"))
 	symlink(t, "b", filepath.Join(rec, "loop", "a"))
 	symlink(t, "a", filepath.Join(rec, "loop", "b"))
@@ -170,15 +172,28 @@ func TestExplainIsNilForAnythingElse(t *testing.T) {
 		err        error
 	}{
 		{"no error", "reports/r.yaml", nil},
+		{"no error, even at a link out", "reports/out.yaml", nil},
+		{"no error, even at a name that leads out", "../../secret.txt", nil},
 		{"not there", "reports/none.yaml", os.ErrNotExist},
 		{"a regular file", "reports/r.yaml", other},
 		{"a link inside to nothing", "reports/dangling.yaml", other},
 		{"links that lead to each other", "loop/a", other},
 		{"a link that stays inside from where it is", "a/l", other},
 		{"a name that only passes by .. and stays inside", "reports/../reports/r.yaml", other},
+		{"a name that begins with two dots", "..x", other},
+		{"a folder whose name begins with two dots", "..x/r.yaml", other},
 	} {
-		if got := Explain(r, rec, filepath.FromSlash(c.file), refusedFor(rec, c.file), c.err); got != nil {
-			t.Errorf("%s: got %v, want nil", c.name, got)
+		// Explain returns, even for links that lead to each other: it
+		// follows at most maxLinkHops links, as the kernel does.
+		said := make(chan *Error, 1)
+		go func() { said <- Explain(r, rec, filepath.FromSlash(c.file), refusedFor(rec, c.file), c.err) }()
+		select {
+		case got := <-said:
+			if got != nil {
+				t.Errorf("%s: got %v, want nil", c.name, got)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("%s: Explain did not return in 30 s", c.name)
 		}
 	}
 }
