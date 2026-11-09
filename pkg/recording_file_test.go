@@ -148,6 +148,13 @@ func TestATestCasesFileIsReadOnlyInsideItsRecording(t *testing.T) {
 		// A link out is said as one, after what any refusal of the file says.
 		refused = append(refused, struct{ name, root, path, why string }{"a link out", root, link, inside + fmt.Sprintf(" %q: it is a link that leads out of it", root)})
 	}
+	// A folder on the way that links out is named as the test case names
+	// its files, with slashes, on every OS; where it leads is a path on disk.
+	folder := "test-set-0/assets/test-2"
+	if os.Symlink(filepath.Dir(outside), filepath.Join(root, filepath.FromSlash(folder))) == nil {
+		refused = append(refused, struct{ name, root, path, why string }{"a folder link out", root, folder + "/outside.txt",
+			inside + fmt.Sprintf(" %q: it leads through %q, a link that leads out of it, to %q", root, folder, filepath.Dir(outside))})
+	}
 
 	t.Run("body", func(t *testing.T) {
 		app := &partsApp{}

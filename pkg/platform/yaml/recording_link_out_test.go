@@ -72,7 +72,7 @@ func TestARecordingFileThatLinksOutIsSaidPlainly(t *testing.T) {
 			report := filepath.Join("reports", "test-run-0", "test-set-0-report.yaml")
 			file, link := report, "it is a link"
 			if c.name == "a folder made on the way" {
-				file, link = filepath.Join(report, "x"), fmt.Sprintf("it leads through %q, a link", report)
+				file, link = filepath.Join(report, "x"), fmt.Sprintf("it leads through %q, a link", filepath.ToSlash(report))
 			}
 			want := fmt.Sprintf("the recording's file %q is %s only inside its recording %q: %s that leads out of it, to %q; replace the link with what it leads to",
 				file, c.verb, rec, link, outside)

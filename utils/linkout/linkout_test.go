@@ -202,6 +202,10 @@ func TestExplainNamesTheLinkAndWhereItLeads(t *testing.T) {
 			symlink(t, filepath.Join("..", "keploy2", "x"), filepath.Join(rec, "sib"))
 		}, "sib", "sib", func(rec, _ string) string { return filepath.Join(filepath.Dir(rec), "keploy2", "x") }, false, false,
 			[]string{`: it is a link that leads out of it, to "`}},
+		{"the file, by a name that is not clean", func(t *testing.T, rec, secret string) {
+			symlink(t, secret, filepath.Join(rec, "reports", "out.yaml"))
+		}, "./reports//out.yaml", "reports/out.yaml", func(_, secret string) string { return secret }, false, false,
+			[]string{`the recording's file "./reports//out.yaml" is read only inside its recording`, `: it is a link that leads out of it, to "`}},
 		{"an absolute path into the project, outside the recording", func(t *testing.T, rec, _ string) {
 			symlink(t, filepath.Join(filepath.Dir(rec), "x"), filepath.Join(rec, "proj"))
 		}, "proj", "proj", func(rec, _ string) string { return filepath.Join(filepath.Dir(rec), "x") }, false, false,
@@ -215,7 +219,7 @@ func TestExplainNamesTheLinkAndWhereItLeads(t *testing.T) {
 			if got == nil {
 				t.Fatalf("os.Root's refusal %q is not said as a link out", rootErr)
 			}
-			want := Error{Refused: refusedFor(rec, file), File: file, Recording: rec, Link: filepath.FromSlash(c.link), Target: c.target(rec, secret), Inside: c.inside, Back: c.back, Err: rootErr}
+			want := Error{Refused: refusedFor(rec, file), File: file, Recording: rec, Link: c.link, Target: c.target(rec, secret), Inside: c.inside, Back: c.back, Err: rootErr}
 			if *got != want {
 				t.Fatalf("got %+v\nwant %+v", *got, want)
 			}
@@ -224,7 +228,7 @@ func TestExplainNamesTheLinkAndWhereItLeads(t *testing.T) {
 				t.Errorf("%q does not begin with what any refusal of the file says, %q", msg, want.Refused)
 			}
 			for _, s := range append(c.says, want.Target, rec) {
-				if !strings.Contains(msg, filepath.FromSlash(s)) {
+				if !strings.Contains(msg, s) {
 					t.Errorf("%q does not say %q", msg, s)
 				}
 			}
@@ -580,6 +584,49 @@ func TestParseSplitsAsOSRootDoes(t *testing.T) {
 	}
 }
 
+// A link is named as a recording names its own files, with slashes, on
+// every OS and whichever way os.Root walks the name (on Windows it cleans the
+// whole path first); and it is the file itself when the file's name, cleaned
+// and in that form, is the link's, whatever form the caller names the file
+// in. These are the words a test case's own link out gets on Windows: the
+// link's name holds no backslash, so it is the same name as the test case's.
+func TestExplainNamesTheLinkWithSlashes(t *testing.T) {
+	for _, clean := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cleaned first %v", clean), func(t *testing.T) {
+			was := cleansFirst
+			cleansFirst = clean
+			t.Cleanup(func() { cleansFirst = was })
+			rec, secret := linkOutRecording(t)
+			link, folder := "test-set-0/assets/test-1/link.txt", "test-set-0/assets/test-2"
+			symlink(t, secret, filepath.Join(rec, filepath.FromSlash(link)))
+			symlink(t, filepath.Dir(secret), filepath.Join(rec, filepath.FromSlash(folder)))
+			for _, c := range []struct {
+				file, link, subject, target string
+			}{
+				{link, link, "it is a link", secret},
+				{filepath.FromSlash(link), link, "it is a link", secret},
+				{"./test-set-0//assets/test-1/link.txt", link, "it is a link", secret},
+				{folder + "/secret.txt", folder, fmt.Sprintf("it leads through %q, a link", folder), filepath.Dir(secret)},
+			} {
+				got, _ := refusedIn(t, rec, c.file, escapeWords)
+				if got == nil {
+					t.Fatalf("%s: not said as a link out", c.file)
+				}
+				tail := fmt.Sprintf("%q; replace the link with what it leads to", c.target)
+				want := refusedFor(rec, c.file) + ": " + c.subject + " that leads out of it, to " + tail
+				if got.Link != c.link || got.Error() != want {
+					t.Errorf("%s: Link %q, says %q\nwant Link %q, saying %q", c.file, got.Link, got.Error(), c.link, want)
+				}
+				// Between what any refusal of the file says and where the
+				// link leads, a path on disk, it names places with slashes.
+				if words := strings.TrimSuffix(strings.TrimPrefix(got.Error(), refusedFor(rec, c.file)), tail); strings.Contains(words, `\`) {
+					t.Errorf("%s: %q names a place in the recording with a backslash", c.file, words)
+				}
+			}
+		})
+	}
+}
+
 // On Windows os.Root cleans a name, and each link's target put in its place,
 // before it walks it: a ".." is never taken after a link, and a target that
 // climbs out is refused as it is put in. Explain walks the same way there
@@ -611,7 +658,7 @@ func TestExplainWalksAsOSRootDoesOnWindows(t *testing.T) {
 	} {
 		file := filepath.FromSlash(c.file)
 		got := Explain(r, rec, file, refusedFor(rec, file), refused)
-		want := Error{Refused: refusedFor(rec, file), File: file, Recording: rec, Link: filepath.FromSlash(c.link), Target: c.target, Err: refused}
+		want := Error{Refused: refusedFor(rec, file), File: file, Recording: rec, Link: c.link, Target: c.target, Err: refused}
 		if got == nil || *got != want {
 			t.Errorf("%s: got %+v, want %+v", c.name, got, want)
 		}

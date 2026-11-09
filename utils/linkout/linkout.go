@@ -35,13 +35,15 @@ type Error struct {
 	// Link is where the link os.Root does not follow is, relative to the
 	// recording, with every link before it followed: File itself, a folder
 	// on its way, or a place a link on the way leads to. It is "" when
-	// File's own name leads out or is absolute: no link is involved.
+	// File's own name leads out or is absolute: no link is involved. It is
+	// named with slashes on every OS, as a recording names its own files.
 	Link string
 	// Target is where Link leads: its own target when that is absolute, else
 	// the place it names from the folder it is in, as os.Root walks it,
 	// joined to the recording's folder. With no Link, it is the place File
 	// names: itself when absolute, else, as os.Root walks it, with the links
-	// on its way followed, joined to the recording's folder.
+	// on its way followed, joined to the recording's folder. It is a path on
+	// disk, in the OS's own form.
 	Target string
 	// Inside says Target is a place in the recording named by an absolute
 	// path: File's own name, or Link's own target.
@@ -66,7 +68,10 @@ func (e *Error) Error() string {
 		return fmt.Sprintf("%s: it names %q, a place outside it; name a place inside it", e.Refused, e.Target)
 	}
 	subject := "it is a link"
-	if e.Link != e.File {
+	// File is the caller's name, perhaps not clean or, on Windows, with
+	// backslashes: it is the link itself when it names the same place in the
+	// same form as Link.
+	if e.Link != filepath.ToSlash(filepath.Clean(e.File)) {
 		subject = fmt.Sprintf("it leads through %q, a link", e.Link)
 	}
 	if e.Inside {
@@ -104,6 +109,7 @@ func Explain(r *os.Root, dir, file, refused string, err error) *Error {
 	if e.Link, place, ok = walk(r, file); !ok {
 		return nil
 	}
+	e.Link = filepath.ToSlash(e.Link)
 	e.Target, e.Inside, e.Back = where(dir, place)
 	return e
 }
