@@ -54,16 +54,24 @@ func TestOpenDebugFileALinkOutOfItsFolderIsRefused(t *testing.T) {
 	}
 
 	t.Run("a link inside the folder and a plain file keep working", func(t *testing.T) {
+		// The earlier log is longer than what is written now, so a file
+		// that was overwritten but not truncated keeps its tail and fails.
+		const earlier = "an earlier agent run's debug log, longer than the new one\n"
 		in := filepath.Join(dir, "real.log")
-		if err := os.WriteFile(in, []byte("old\n"), 0o644); err != nil {
+		if err := os.WriteFile(in, []byte(earlier), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		plain := filepath.Join(dir, "plain.log")
+		if err := os.WriteFile(plain, []byte(earlier), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		fresh := filepath.Join(dir, "fresh.log")
 		link := filepath.Join(dir, "agent-debug.log")
 		_ = os.Remove(link)
 		if err := os.Symlink("real.log", link); err != nil {
 			t.Fatal(err)
 		}
-		for _, path := range []string{link, filepath.Join(dir, "fresh.log")} {
+		for _, path := range []string{link, plain, fresh} {
 			f, err := OpenDebugFile(path)
 			if err != nil {
 				t.Fatalf("OpenDebugFile(%q): %v", path, err)
@@ -76,8 +84,10 @@ func TestOpenDebugFileALinkOutOfItsFolderIsRefused(t *testing.T) {
 			}
 			_ = f.Close()
 		}
-		if got, _ := os.ReadFile(in); string(got) != "new\n" {
-			t.Errorf("the file the inside link names is %q; want it truncated and written", got)
+		for _, path := range []string{in, plain, fresh} {
+			if got, err := os.ReadFile(path); err != nil || string(got) != "new\n" {
+				t.Errorf("%s is %q (%v); want it truncated and written as %q", path, got, err, "new\n")
+			}
 		}
 	})
 }
