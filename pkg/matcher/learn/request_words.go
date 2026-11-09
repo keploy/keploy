@@ -80,11 +80,14 @@ func (w *RequestWords) Write(p []byte) (int, error) {
 // requestWordsCut is the last place in b, after its first byte, before a
 // byte no form runs across (a space or a mark that is no part of a word, a
 // run of the base64 alphabet, an escape, a quoted-printable one, a line
-// break of wrapped base64, a JWT's dot or a path's slash) where the byte
-// before it starts no escape either: 0 where there is none.
+// break of wrapped base64, a JWT's dot or a path's slash): 0 where there is
+// none. The byte before it may start an escape: '%' and '=' go on in a hex
+// digit, a line break or a backslash, and '\' in a letter, '/', a backslash
+// or '"', the only one of these it cuts before, and "\"" reads as a space
+// (unescaped), a separator, so each side reads as it does whole.
 func requestWordsCut(b []byte) int {
 	for i := len(b) - 1; i > 0; i-- {
-		if cutBefore(b[i]) && !strings.ContainsRune(`\%=&`, rune(b[i-1])) {
+		if cutBefore(b[i]) {
 			return i
 		}
 	}
@@ -119,20 +122,10 @@ func (w *RequestWords) WriteText(s string) {
 // End reads the text written and not yet read, ending the word or form
 // being read.
 func (w *RequestWords) End() {
-	if len(w.buf) > 0 && !w.undecoded {
+	if len(w.buf) > 0 { // nil once undecoded
 		w.read(string(w.buf))
 	}
 	w.buf = nil
-}
-
-// MayHold reports whether the request may hold v as a token (ContainsToken):
-// each of v's runs of letters and digits (mayHold). A v of no letter or
-// digit, and any v of a nil or undecoded RequestWords, may.
-func (w *RequestWords) MayHold(v string) bool {
-	if w == nil || w.undecoded {
-		return true
-	}
-	return mayHold(w.f, wordsBy(v, isWord))
 }
 
 // MayHoldChange reports whether the request may be the source of a value's
@@ -201,7 +194,7 @@ func (dc *DriftCache) momentsIn(r, l Leaf) bool {
 // could not read that keeps its words (Earlier.unreadWords).
 func unreadWordsIn(served []Earlier) bool {
 	for _, e := range served {
-		if e.Unread != "" && e.unreadWords != nil {
+		if e.unreadWords != nil {
 			return true
 		}
 	}
@@ -215,7 +208,7 @@ func unreadWordsIn(served []Earlier) bool {
 func (dc *DriftCache) requestUnreadOf(served []Earlier, r, l Leaf) string {
 	moments, read := false, false
 	for _, e := range served {
-		if e.Unread != "" && e.unreadWords != nil {
+		if e.unreadWords != nil {
 			if !read {
 				moments, read = dc.momentsIn(r, l), true
 			}

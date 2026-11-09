@@ -139,7 +139,8 @@ type Earlier struct {
 	incoming                bool
 	arrivedRec, arrivedLive time.Time
 	// unreadWords, of an incoming place keploy could not read (Unread), are
-	// the words of its request (Tracker.IncomingWords; nil: none read): a
+	// the words of its request (Tracker.IncomingWords, which keeps them for
+	// no other place: keepWordsLocked; nil: none read): a
 	// value whose change they cannot hold (RequestWords.MayHoldChange) reads
 	// the place as no source of it, not as unread (requestUnreadOf).
 	unreadWords *RequestWords

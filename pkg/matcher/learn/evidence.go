@@ -241,7 +241,7 @@ func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 			}
 		}
 		if bad != "" {
-			if e.Unread != "" && e.unreadWords != nil {
+			if e.unreadWords != nil {
 				byWords = append(byWords, e)
 				continue
 			}

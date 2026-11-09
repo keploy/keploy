@@ -10,6 +10,17 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
+// mayHoldWord reports whether the request may hold v as a token
+// (ContainsToken), as the filter reads a value's words (mayHold): each of
+// v's runs of letters and digits. A v of no letter or digit, and any v of a
+// nil or undecoded RequestWords, may.
+func (w *RequestWords) mayHoldWord(v string) bool {
+	if w == nil || w.undecoded {
+		return true
+	}
+	return mayHold(w.f, wordsBy(v, isWord))
+}
+
 // TestRequestWordsHoldEveryWordHoweverTheBodyIsCut: the filter of a
 // request's words holds each word of letters and digits written to it, and
 // its lower case, however the writes cut the text (a word cut between two
@@ -30,16 +41,16 @@ func TestRequestWordsHoldEveryWordHoweverTheBodyIsCut(t *testing.T) {
 		}
 		w.End()
 		for _, word := range []string{"name", "Word0X", "word0x", "Word24999X", "word24999x", "174993", "n"} {
-			if !w.MayHold(word) {
+			if !w.mayHoldWord(word) {
 				t.Fatalf("cut every %d bytes: the filter lacks %q, which the body holds", cut, word)
 			}
 		}
-		if !w.MayHold(`Word17X "n"`) || !w.MayHold("-") {
+		if !w.mayHoldWord(`Word17X "n"`) || !w.mayHoldWord("-") {
 			t.Fatalf("cut every %d bytes: a value the body holds as a token, or one of no word, is said absent", cut)
 		}
 		held := 0
 		for i := 0; i < 2000; i++ {
-			if w.MayHold(fmt.Sprintf("absent%dq", i)) {
+			if w.mayHoldWord(fmt.Sprintf("absent%dq", i)) {
 				held++
 			}
 		}
@@ -58,8 +69,8 @@ func TestRequestWordsHoldEveryWordHoweverTheBodyIsCut(t *testing.T) {
 	}
 	w.WriteText("Alpha ZULU az")
 	for word, want := range map[string]bool{"alpha": true, "zulu": true, "Alpha": true, "ZULU": true, "az": true, "AZ": false} {
-		if w.MayHold(word) != want {
-			t.Errorf("MayHold(%q) = %v, want %v", word, !want, want)
+		if w.mayHoldWord(word) != want {
+			t.Errorf("mayHoldWord(%q) = %v, want %v", word, !want, want)
 		}
 	}
 	w = NewRequestWords()
@@ -68,13 +79,52 @@ func TestRequestWordsHoldEveryWordHoweverTheBodyIsCut(t *testing.T) {
 	_, _ = w.Write([]byte("ghi"))
 	w.End()
 	for word, want := range map[string]bool{"abc": true, "def": true, "ghi": true, "abcdef": false, "defghi": false, "abcdefghi": false} {
-		if w.MayHold(word) != want {
-			t.Errorf("MayHold(%q) = %v, want %v", word, !want, want)
+		if w.mayHoldWord(word) != want {
+			t.Errorf("mayHoldWord(%q) = %v, want %v", word, !want, want)
 		}
 	}
 	var none *RequestWords
-	if !none.MayHold("anything") {
+	if !none.mayHoldWord("anything") {
 		t.Error("no filter says a word is absent")
+	}
+}
+
+// TestRequestWordsReadAFormAWindowEndsInsideWhole: a word that only a
+// decoded form of the body holds (a percent-escape, a backslash escape, a
+// quoted-printable soft break inside it) stays one word where the window
+// the filter reads ends just past its escape: the window is cut before the
+// word, never inside its escape. A text of exactly requestWordsMaxBytes is
+// read; one byte past it, the filter may hold any word.
+func TestRequestWordsReadAFormAWindowEndsInsideWhole(t *testing.T) {
+	for _, word := range []string{`tok%33n`, `tok\u0033n`, "tok=\r\n3n"} {
+		// The window ends inside a run of a letter no word holds (é),
+		// after the word, so its last byte to cut before is in the word
+		// unless the escape's bytes are kept from the cut.
+		lead := requestWordsWindow - len(word) - 100
+		body := strings.Repeat("x ", lead/2) + strings.Repeat(" ", lead%2) + word + strings.Repeat("é", 100) + " tail"
+		w := NewRequestWords()
+		_, _ = w.Write([]byte(body))
+		w.End()
+		if !w.mayHoldWord("tok3n") || !w.mayHoldWord("tail") {
+			t.Errorf("%q: a window that ends past its escape split the word it decodes to", word)
+		}
+		if w.mayHoldWord("zz9absent") {
+			t.Errorf("%q: the filter holds a word the body lacks", word)
+		}
+	}
+	w := NewRequestWords()
+	spaces := []byte(strings.Repeat(" ", 1<<20))
+	for i := 0; i < requestWordsMaxBytes>>20; i++ {
+		_, _ = w.Write(spaces)
+	}
+	w.End()
+	if w.undecoded || w.mayHoldWord("zz9absent") {
+		t.Fatal("a text of the most bytes read is not read")
+	}
+	_, _ = w.Write([]byte("omega"))
+	w.End()
+	if !w.mayHoldWord("zz9absent") || !w.MayHoldChange("a-1", "a-2", false) {
+		t.Fatal("past the most bytes read, the filter says a word is absent")
 	}
 }
 
@@ -111,12 +161,12 @@ func TestAnUnreadClientRequestKeepsItsWordsAndItsURLAndHeaders(t *testing.T) {
 		t.Fatalf("placed %+v", got)
 	}
 	for _, word := range []string{"bodyword", "urlword", "headerword", "uploads"} {
-		if !got[0].unreadWords.MayHold(word) {
+		if !got[0].unreadWords.mayHoldWord(word) {
 			t.Errorf("the place's words lack %q", word)
 		}
 	}
 	done(live(), "its body is larger than keploy reads", body())
-	if got := tr.Placed().Earlier; got[1].unreadWords == nil || !got[1].unreadWords.MayHold("bodyword") || got[1].Unread == "" {
+	if got := tr.Placed().Earlier; got[1].unreadWords == nil || !got[1].unreadWords.mayHoldWord("bodyword") || got[1].Unread == "" {
 		t.Fatalf("once its body ended the coming request keeps no words: %+v", got[1])
 	}
 	if !tr.IncomingWords(live(), "", body(), at) {
@@ -193,7 +243,9 @@ func TestAClientRequestKeployCouldNotReadIsNoSourceOfAValueItsWordsLack(t *testi
 		}
 		return tr.Placed().Earlier
 	}
-	read := func(typ Type, rec, live string, earlier []Earlier) (Learned, Decision) {
+	// read is the value's change from rec to live as classify reads it and
+	// as the decider decides it, word by word where its words changed.
+	read := func(typ Type, rec, live string, earlier []Earlier) (Learned, []Decision) {
 		sh := func(v string) Shape {
 			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: typ, Value: v}}}
 		}
@@ -201,27 +253,34 @@ func TestAClientRequestKeployCouldNotReadIsNoSourceOfAValueItsWordsLack(t *testi
 		in := iCall(p, typ, rec, live, rAt, fAt, nil, earlier, nil)
 		in.Drifts = oClientDrifts()
 		d := Decide(in)
-		if len(d) != 1 {
-			t.Fatalf("%s -> %s: %d decisions", rec, live, len(d))
+		if len(d) == 0 {
+			t.Fatalf("%s -> %s: no decision", rec, live)
 		}
-		return ln, d[0]
+		return ln, d
 	}
-	refusedFor := func(ln Learned, d Decision) bool {
-		return ln.Kind == KindUnaccounted && strings.Contains(ln.Why, why) &&
-			d.Outcome == OutcomeRefused && d.Refusal != nil && d.Refusal.Kind == RefusalUnread && strings.Contains(d.Refusal.Why, why)
+	decidedUnread := func(ds []Decision) bool {
+		for _, d := range ds {
+			if d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalUnread || !strings.Contains(d.Refusal.Why, why) {
+				return false
+			}
+		}
+		return true
+	}
+	refusedFor := func(ln Learned, ds []Decision) bool {
+		return ln.Kind == KindUnaccounted && strings.Contains(ln.Why, why) && decidedUnread(ds)
 	}
 	keeps := func(typ Type, rec, live string, earlier []Earlier) {
 		t.Helper()
 		ln, d := read(typ, rec, live, earlier)
 		ln0, d0 := read(typ, rec, live, nil)
-		if ln.Kind != ln0.Kind || ln.Why != ln0.Why || d.Outcome != d0.Outcome || (d.Refusal == nil) != (d0.Refusal == nil) || d.Refusal != nil && d.Refusal.Why != d0.Refusal.Why {
-			t.Errorf("%s -> %s after a request that cannot hold it: %s (%s), %s; want as with no request: %s (%s), %s", rec, live, ln.Kind, ln.Why, oDescribe([]Decision{d}), ln0.Kind, ln0.Why, oDescribe([]Decision{d0}))
+		if ln.Kind != ln0.Kind || ln.Why != ln0.Why || oDescribe(d) != oDescribe(d0) {
+			t.Errorf("%s -> %s after a request that cannot hold it: %s (%s), %s; want as with no request: %s (%s), %s", rec, live, ln.Kind, ln.Why, oDescribe(d), ln0.Kind, ln0.Why, oDescribe(d0))
 		}
 	}
 	refuses := func(typ Type, rec, live string, earlier []Earlier) {
 		t.Helper()
 		if ln, d := read(typ, rec, live, earlier); !refusedFor(ln, d) {
-			t.Errorf("%s -> %s after a request that may hold it: %s (%s), %s; want refused for %q", rec, live, ln.Kind, ln.Why, oDescribe([]Decision{d}), why)
+			t.Errorf("%s -> %s after a request that may hold it: %s (%s), %s; want refused for %q", rec, live, ln.Kind, ln.Why, oDescribe(d), why)
 		}
 	}
 	earlier := placed(numbered)
@@ -233,6 +292,21 @@ func TestAClientRequestKeployCouldNotReadIsNoSourceOfAValueItsWordsLack(t *testi
 	refuses(String, "tok-1a2b3c4d5e6f", "tok-zq5upper", earlier)
 	refuses(String, "tok-1a2b3c4d5e6f", "TOK-ZQ5UPPER", earlier)
 	refuses(String, "tok-1a2b3c4d5e6f", "tok-bsixfourhid9x", earlier)
+	// What changed is read by where each word stands and by each form of
+	// the value: two words that swap places changed, though the recorded
+	// value held both, and so did a word that moved, the body holding it
+	// in another case or not; a word that stayed in its place is no
+	// change; a word only the value's base64 run holds changed in it.
+	keeps(String, "aaa1q-bbb2q", "bbb2q-aaa1q", earlier)
+	refuses(String, "rowvalue-aaa1q", "aaa1q-rowvalue", earlier)
+	refuses(String, "ROWVALUE-aaa1q", "aaa1q-ROWVALUE", earlier)
+	keeps(String, "rowvalue-1a2b3c4d5e6f", "rowvalue-9f8e7d6c5b4a", earlier)
+	// A change of no word (a mark between two): the words cannot tell it
+	// apart from one the request made.
+	refuses(String, "tok-1a2b3c4d5e6f", "tok_1a2b3c4d5e6f", earlier)
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	refuses(String, b64(`{"k":"tok-1a2b3c4d5e6f"}`), b64(`{"k":"tok-q7w8e9r0t1y2"}`), earlier)
+	keeps(String, b64(`{"k":"tok-1a2b3c4d5e6f"}`), b64(`{"k":"tok-9f8e7d6c5b4a"}`), earlier)
 	// An instant read of the application's clock: it moved by the lead.
 	r, l := iMs(rAt.Add(-120*time.Millisecond)), iMs(fAt.Add(-120*time.Millisecond))
 	rt, lt := rAt.Add(-120*time.Millisecond).Format(time.RFC3339Nano), fAt.Add(-120*time.Millisecond).Format(time.RFC3339Nano)
@@ -241,6 +315,19 @@ func TestAClientRequestKeployCouldNotReadIsNoSourceOfAValueItsWordsLack(t *testi
 	}
 	refuses(Instant, r, l, earlier)
 	refuses(String, "booked at "+rt, "booked at "+lt, earlier)
+	// A moment the recorded value held and the live one does not, and an
+	// instant leaf whose text names no moment a text is read for (a time
+	// of day), are changes of an instant too.
+	refuses(String, "booked at "+rt, "booked at noon", earlier)
+	tod := func(at time.Time) string {
+		return TimeOfDayLeaf(p, p, at.Sub(at.Truncate(24*time.Hour)), time.Millisecond).Value
+	}
+	// Classify reads a time of day as no read of the clock, whatever came
+	// before it (unaccounted); the decider refuses it for the request.
+	rT, lT := tod(rAt.Add(-120*time.Millisecond)), tod(fAt.Add(-120*time.Millisecond))
+	if ln, d := read(Instant, rT, lT, earlier); ln.Kind != KindUnaccounted || !decidedUnread(d) {
+		t.Errorf("%s -> %s after a request that may hold it: %s (%s), %s; want refused for %q", rT, lT, ln.Kind, ln.Why, oDescribe(d), why)
+	}
 	letters := placed(big(`"rowvalue","nseventeen",`, "abc"))
 	keeps(Instant, r, l, letters)
 	keeps(String, "booked at "+rt, "booked at "+lt, letters)
