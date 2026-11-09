@@ -1116,6 +1116,10 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 		case p.why != "" && p.why == cut:
 			// oneSideWhy names its place, and says the reason alone.
 			line = p.why
+		case p.why == servedAfterWhy:
+			// The reason is the whole answer: round F gave the
+			// application nothing there before the call.
+			line = "keploy cannot tell what round F gave at " + p.name + " before this call: " + servedAfterWhy
 		}
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, line, names(unknown),
 			Edit{Kind: EditReRecord}, dc.fieldNoise(path))

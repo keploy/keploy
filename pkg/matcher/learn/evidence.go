@@ -705,7 +705,7 @@ const (
 	// servedAfterWhy: round F served a recording of the set only after the
 	// call reached keploy, or in a request still aloft then
 	// (givenWords.fAfter).
-	servedAfterWhy = "round F gave it the application only after the call reached keploy"
+	servedAfterWhy = "round F gave it to the application only after the call reached keploy"
 )
 
 // swapUnknown marks unknown each place of ps, before the call in both runs,
@@ -1244,10 +1244,13 @@ func setEvidence(g givenWords, inR, inF heldRoles, at time.Time, piece bool) (ev
 	case g.fAfter:
 		// Round F served it only after the call reached keploy, or in a
 		// request still aloft then: it gave the application nothing there
-		// before the call, whatever its serves stated, as where it did not
-		// serve it (below). So that round F's word does not stand there,
-		// or does, shows nothing of where round F's application took it.
-		if hr {
+		// before the call, whatever its serves stated. So round F's word in
+		// what round F gave there shows nothing of where round F's
+		// application took it. Round F's word in the recording's own text,
+		// written in the recording run, is no word round F's application
+		// made: it shows nothing either way, as a serve told as recorded
+		// stays so for a Raw place (Raw.asOfArrival).
+		if hr || inF&inOwn != 0 {
 			return evUnknown, false
 		}
 		return evNone, false
