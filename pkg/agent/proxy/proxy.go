@@ -5164,6 +5164,35 @@ func (p *Proxy) TakeIncoming(req *models.HTTPReq, unread string, at time.Time) {
 	}
 }
 
+// TakeComing gives the learn step a request of the running client test
+// whose body is still coming as it reaches the application's ingress
+// (incoming.RequestTaker; learn.Tracker.IncomingComing), and pairs it with
+// the recorded request whose variables it binds (pairCase), under the proven
+// switch: until its body ended each is noted as bound at a request keploy
+// has not read yet (learn.ComingUnread), and done, once it ended, gives the
+// learn step the request whole and binds them from it. nil where it takes
+// nothing of it.
+func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPReq, string) {
+	if !provenswitch.On() {
+		return nil
+	}
+	learned, bind := p.learnTracker.IncomingComing(req, at), p.pairCase(req)
+	if learned == nil && bind == nil {
+		return nil
+	}
+	if bind != nil {
+		bind(req, learn.ComingUnread)
+	}
+	return func(live *models.HTTPReq, unread string) {
+		if learned != nil {
+			learned(live, unread)
+		}
+		if bind != nil {
+			bind(live, unread)
+		}
+	}
+}
+
 // TakeRecordedBegin gives the learn step the instant the next test began at
 // in its recording (agent.RecordedBeginTaker; learn.Tracker.RecordedBegin),
 // under the proven switch.

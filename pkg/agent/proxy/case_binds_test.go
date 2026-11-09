@@ -247,3 +247,47 @@ func TestAClientTestsRequestsAreTakenOnlyWhereTheyBind(t *testing.T) {
 		t.Fatal("no mock manager: the request did not pair")
 	}
 }
+
+// A request whose body is still coming pairs as it arrives and binds its
+// variable once its body ended (TakeComing's done), never before: a call
+// before then misses. One whose body did not come whole binds nothing and
+// notes why.
+func TestAComingRequestBindsItsVariableOnceItsBodyEnded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
+	p, mm, _, open := caseBindsProxy(t)
+	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
+	open()
+	live := liveApps("")
+	done := p.TakeComing(live, at)
+	if done == nil || p.WantsIncoming() {
+		t.Fatal("a coming request did not pair")
+	}
+	if _, ok := mm.vars.Lookup("key"); ok {
+		t.Fatal("bound before its body came")
+	}
+	if why := mm.vars.Unbound("key"); !strings.Contains(why, "test case post-apps-1's request, at body.name, which bound nothing this run: keploy could not read it: "+learn.ComingUnread) {
+		t.Fatalf("while its body came the variable is noted %q", why)
+	}
+	if got := postKey(t, mm, "/apps", "app-2"); strings.HasPrefix(got, "200 ") {
+		t.Fatalf("a call before its body ended was answered %s", got)
+	}
+	done(liveApps(`{"name":"app-2"}`), "")
+	if b, ok := mm.vars.Lookup("key"); !ok || b.Value != "app-2" || b.Mock != "test case post-apps-1" || b.Place != "request body.name" {
+		t.Fatalf("bound %+v (%v) once its body ended", b, ok)
+	}
+	if got := postKey(t, mm, "/apps", "app-2"); got != `200 {"echo":"app-2"}` {
+		t.Fatalf("the call after its body ended was answered %s", got)
+	}
+
+	p, mm, _, open = caseBindsProxy(t)
+	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
+	open()
+	p.TakeComing(liveApps(""), at)(liveApps(""), "its body did not come whole: unexpected EOF")
+	if _, ok := mm.vars.Lookup("key"); ok {
+		t.Fatal("a body that did not come whole bound its variable")
+	}
+	if why := mm.vars.Unbound("key"); !strings.Contains(why, "did not come whole") {
+		t.Fatalf("noted %q", why)
+	}
+}

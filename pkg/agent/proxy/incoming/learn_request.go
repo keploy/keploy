@@ -2,15 +2,21 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strings"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // RequestTaker is what the ingress gives each request of a client test to
@@ -20,10 +26,14 @@ import (
 // takes requests now (a client test is open whose recording sent requests
 // not yet paired); TakeIncoming takes one that reached the ingress at the
 // real instant at, unread saying why keploy could not read it ("" where it
-// could).
+// could). TakeComing takes one whose body is still coming (comingBody): the
+// place is one keploy could not read until done gives the request with its
+// body, once the body ended, unread saying why where keploy could not read
+// it; done is nil where the taker takes nothing of it.
 type RequestTaker interface {
 	WantsIncoming() bool
 	TakeIncoming(req *models.HTTPReq, unread string, at time.Time)
+	TakeComing(req *models.HTTPReq, at time.Time) (done func(req *models.HTTPReq, unread string))
 }
 
 // SetRequestTaker makes the ingress give t each HTTP/1 request it forwards
@@ -45,14 +55,16 @@ const maxTakenBody = hooksUtils.LargeBodyThreshold
 // where it wants it, before req is forwarded: no call the request leads the
 // application to make can read the test's places without it. The request is
 // read as a recording reads it (hooksUtils.Capture): its URL, its headers
-// and its body, which takeRequest reads whole first, of up to maxTakenBody
-// bytes, and puts back for the forward. A body keploy does not read so (one
-// its client sends only after the application answers 100, one of no
-// declared length or larger than maxTakenBody, one encoded) is given as
-// unread, so the learn step reads nothing from the request rather than part
-// of it. A body the client did not send whole (it left, or declared more than
-// it sent) gives nothing, and the forward meets the same end as it would
-// have without the read.
+// and its body (readTakenBody), of up to maxTakenBody bytes. A body of a
+// declared length its client sends at once is read whole first and put back
+// for the forward. One its client sends only after the application answers
+// 100 (Continue), and one of no declared length (chunked), are read as they
+// pass to the application (comingBody): until they end the request is a
+// place keploy could not read (TakeComing). A body larger than maxTakenBody
+// is given as unread, so the learn step reads nothing from the request
+// rather than part of it. A body of a declared length its client did not
+// send whole (it left, or declared more than it sent) gives nothing, and the
+// forward meets the same end as it would have without the read.
 func (pm *IngressProxyManager) takeRequest(req *http.Request, at time.Time) {
 	t := pm.requestTaker
 	if t == nil || !t.WantsIncoming() {
@@ -67,17 +79,15 @@ func (pm *IngressProxyManager) takeRequest(req *http.Request, at time.Time) {
 		URLParams:  pkg.URLParams(req),
 		Timestamp:  at,
 	}
-	unread := ""
 	switch {
 	case req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0:
-	case expectsContinue(req):
-		unread = "its client sent its body only once the application answered 100 (Continue), and keploy reads no body after the application was given the request"
-	case req.ContentLength < 0:
-		unread = "its body declares no length, and keploy reads no body as it streams to the application"
+		t.TakeIncoming(live, "", at)
 	case req.ContentLength > maxTakenBody:
-		unread = fmt.Sprintf("its body is larger than the %d bytes keploy reads before the application is given the request", maxTakenBody)
-	case req.Header.Get("Content-Encoding") != "":
-		unread = "its body is encoded (Content-Encoding " + req.Header.Get("Content-Encoding") + "), which keploy does not read for a client test's request"
+		t.TakeIncoming(live, tooLarge, at)
+	case expectsContinue(req) || req.ContentLength < 0:
+		if done := t.TakeComing(live, at); done != nil {
+			req.Body = &comingBody{ReadCloser: req.Body, live: live, header: req.Header, left: req.ContentLength, done: done}
+		}
 	default:
 		body, err := io.ReadAll(io.LimitReader(req.Body, req.ContentLength))
 		rest := io.Reader(bytes.NewReader(body))
@@ -91,14 +101,169 @@ func (pm *IngressProxyManager) takeRequest(req *http.Request, at time.Time) {
 		if err != nil {
 			return
 		}
-		live.Body = string(body)
-		if req.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
-			if decoded, derr := url.QueryUnescape(live.Body); derr == nil {
-				live.Body = decoded
+		t.TakeIncoming(live, readTakenBody(live, req.Header, body), at)
+	}
+}
+
+// tooLarge is why keploy did not read a request body larger than
+// maxTakenBody.
+var tooLarge = fmt.Sprintf("its body is larger than the %d bytes keploy reads of a client test's request", maxTakenBody)
+
+// readTakenBody reads body, the whole body of a request with headers h,
+// into live as a recording reads it (hooksUtils.Capture), and is why keploy
+// could not read it ("" where it could): a body sent gzip or br
+// (Content-Encoding) is decoded (pkg.Decompress), one of another encoding
+// not, as a recording keeps it as its client sent it; a multipart form is
+// taken apart into its text parts (live.Form), its Content-Type kept
+// without its boundary, and a file part in it is not read; a form sent
+// URL-encoded is unescaped; any other body is its text.
+func readTakenBody(live *models.HTTPReq, h http.Header, body []byte) string {
+	if enc := strings.TrimSpace(h.Get("Content-Encoding")); enc != "" {
+		switch strings.ToLower(enc) {
+		case "gzip", "br":
+			decoded, err := pkg.Decompress(zap.NewNop(), enc, body, maxTakenBody)
+			switch {
+			case errors.Is(err, pkg.ErrDecompressedTooLarge):
+				return "decoded, " + tooLarge
+			case err != nil:
+				return "its body does not decode as its Content-Encoding " + enc + " says: " + err.Error()
 			}
+			body = decoded
+		default:
+			return "its body is encoded (Content-Encoding " + enc + "), which a recording keeps as its client sent it, undecoded"
 		}
 	}
-	t.TakeIncoming(live, unread, at)
+	ct := h.Get("Content-Type")
+	switch {
+	case strings.HasPrefix(ct, "multipart/form-data"):
+		form, why := formTextParts(ct, body)
+		if why != "" {
+			return why
+		}
+		live.Form = form
+		live.Header["Content-Type"] = strings.TrimSpace(strings.Split(ct, ";")[0])
+	case ct == "application/x-www-form-urlencoded":
+		live.Body = string(body)
+		if decoded, err := url.QueryUnescape(live.Body); err == nil {
+			live.Body = decoded
+		}
+	default:
+		live.Body = string(body)
+	}
+	return ""
+}
+
+// formTextParts are the parts of body, a multipart form of Content-Type ct,
+// in the order sent, each its name's value (hooksUtils.ExtractFormData), or
+// why keploy does not read them: a part that sends a file (a file name), and
+// a form that does not parse.
+func formTextParts(ct string, body []byte) ([]models.FormData, string) {
+	_, params, err := mime.ParseMediaType(ct)
+	if err != nil || params["boundary"] == "" {
+		return nil, "its multipart form names no boundary keploy can read"
+	}
+	r := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	var form []models.FormData
+	for {
+		part, err := r.NextPart()
+		if err == io.EOF {
+			return form, ""
+		}
+		if err != nil {
+			return nil, "its multipart form does not parse: " + err.Error()
+		}
+		if part.FormName() == "" {
+			continue
+		}
+		if part.FileName() != "" {
+			return nil, "its form part " + part.FormName() + " sends a file, which keploy does not read for a client test's request"
+		}
+		v, err := io.ReadAll(part)
+		if err != nil {
+			return nil, "its multipart form does not parse: " + err.Error()
+		}
+		form = append(form, models.FormData{Key: part.FormName(), Values: []string{string(v)}})
+	}
+}
+
+// comingBody is a request body the ingress gives the application as it
+// comes (takeRequest), read as it passes for the learn step: up to
+// maxTakenBody bytes of it, given to done (readTakenBody) once the body
+// ended. Where its length is declared (left), done is given it before the
+// read that brings its last byte returns, so before the application has
+// it; where not (chunked), as the read meets its end, before the forward
+// sends its last chunk, which the application waits for to know the body
+// ended. So no call the application makes once it has the body whole reads
+// the request as still coming. One that does not end whole (an error, a
+// close first, fewer bytes than declared) or is larger than maxTakenBody
+// is given done as unread.
+type comingBody struct {
+	io.ReadCloser
+	live   *models.HTTPReq
+	header http.Header
+	// left is how many bytes the body declares still to come; < 0 where it
+	// declares no length.
+	left int64
+	done func(*models.HTTPReq, string)
+
+	mu    sync.Mutex
+	got   []byte
+	over  bool
+	ended bool
+}
+
+func (b *comingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.mu.Lock()
+	if b.ended {
+		b.mu.Unlock()
+		return n, err
+	}
+	if !b.over && len(b.got)+n > maxTakenBody {
+		b.over, b.got = true, nil
+	}
+	if !b.over {
+		b.got = append(b.got, p[:n]...)
+	}
+	if b.left >= 0 {
+		b.left -= int64(n)
+	}
+	why, end := "", true
+	switch {
+	case b.left == 0 || b.left < 0 && err == io.EOF:
+	case err == io.EOF:
+		why = "its client did not send the whole body it declared"
+	case err != nil:
+		why = "its body did not come whole: " + err.Error()
+	default:
+		end = false
+	}
+	b.ended = end
+	got, over := b.got, b.over
+	b.mu.Unlock()
+	if end {
+		switch {
+		case why != "":
+		case over:
+			why = tooLarge
+		default:
+			why = readTakenBody(b.live, b.header, got)
+		}
+		b.done(b.live, why)
+	}
+	return n, err
+}
+
+// Close closes the body: one that had not ended is given done as unread.
+func (b *comingBody) Close() error {
+	b.mu.Lock()
+	ended := b.ended
+	b.ended = true
+	b.mu.Unlock()
+	if !ended {
+		b.done(b.live, "its body did not come whole: it was closed before its end")
+	}
+	return b.ReadCloser.Close()
 }
 
 // readCloser reads from Reader and closes Closer: a body read ahead, put

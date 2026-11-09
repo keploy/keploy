@@ -105,29 +105,41 @@ func (p *Proxy) setCaseBinds(test string, cases []models.ClientCase) {
 // read live, which then binds nothing. A variable it cannot bind is noted
 // with why in the test's scope (MockManager.NoteExactTest).
 func (p *Proxy) bindCase(live *models.HTTPReq, unread string) {
+	if bind := p.pairCase(live); bind != nil {
+		bind(live, unread)
+	}
+}
+
+// pairCase pairs live, a request of the running client test, with the
+// recorded request it pairs with (caseBinds), and is what binds that
+// request's variables from live as bindCase does, once keploy has live's
+// body: nil where it pairs with none.
+func (p *Proxy) pairCase(live *models.HTTPReq) func(*models.HTTPReq, string) {
 	test, rec, binds, ok := p.caseBinds.pair(live)
 	if !ok {
-		return
+		return nil
 	}
-	m := p.getMockManager()
-	if m == nil {
-		return
-	}
-	for _, b := range binds {
-		value, why := "", "keploy could not read it: "+unread
-		if unread == "" {
-			value, why = httpint.RequestPlace(rec.Req, live, b.Place, b.Recorded)
+	return func(live *models.HTTPReq, unread string) {
+		m := p.getMockManager()
+		if m == nil {
+			return
 		}
-		if why == "" {
-			bound := models.VariableBinding{Name: b.Name, Value: value, Recorded: b.Recorded, Mock: "test case " + rec.Name, Place: "request " + b.Place}
-			if err := m.GiveExactTest(test, bound); err != nil {
+		for _, b := range binds {
+			value, why := "", "keploy could not read it: "+unread
+			if unread == "" {
+				value, why = httpint.RequestPlace(rec.Req, live, b.Place, b.Recorded)
+			}
+			if why == "" {
+				bound := models.VariableBinding{Name: b.Name, Value: value, Recorded: b.Recorded, Mock: "test case " + rec.Name, Place: "request " + b.Place}
+				if err := m.GiveExactTest(test, bound); err != nil {
+					p.warnCaseBind(test, rec.Name, b, err.Error())
+				}
+				continue
+			}
+			note := fmt.Sprintf("the test binds it at test case %s's request, at %s, which bound nothing this run: %s", rec.Name, b.Place, why)
+			if err := m.NoteExactTest(test, b.Name, note); err != nil {
 				p.warnCaseBind(test, rec.Name, b, err.Error())
 			}
-			continue
-		}
-		note := fmt.Sprintf("the test binds it at test case %s's request, at %s, which bound nothing this run: %s", rec.Name, b.Place, why)
-		if err := m.NoteExactTest(test, b.Name, note); err != nil {
-			p.warnCaseBind(test, rec.Name, b, err.Error())
 		}
 	}
 }

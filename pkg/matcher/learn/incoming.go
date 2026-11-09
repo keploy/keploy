@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,8 +98,10 @@ func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq) (int, bool)
 // the test's recording (test case name), as a keploy test case's request
 // is read (models.TestRequest; GivenRequest): its URL, each header and its
 // body, as recorded and as sent, and where it reached the recorded
-// application (RecordedAt). A body kept apart from the test case, and a
-// form, keploy does not read here: the request says why (Unread).
+// application (RecordedAt), and the text parts of a multipart form
+// (clientFormParts). A body kept apart from the test case, and a form part
+// that sends a file, keploy does not read here: the request says why
+// (Unread).
 func IncomingRequest(name string, rec, live *models.HTTPReq) *models.TestRequest {
 	out := &models.TestRequest{Test: name}
 	if rec == nil || live == nil {
@@ -110,8 +113,10 @@ func IncomingRequest(name string, rec, live *models.HTTPReq) *models.TestRequest
 	case rec.BodyRef.Path != "" || live.BodyRef.Path != "":
 		out.Unread = "its body is kept apart from the test case, which keploy does not read for a client test's request"
 		return out
-	case len(rec.Form) > 0 || len(live.Form) > 0:
-		out.Unread = "it sends a form, which keploy does not read for a client test's request"
+	}
+	form, why := clientFormParts(rec.Form, live.Form)
+	if why != "" {
+		out.Unread = why
 		return out
 	}
 	add := func(name, recorded, sent string) {
@@ -135,7 +140,59 @@ func IncomingRequest(name string, rec, live *models.HTTPReq) *models.TestRequest
 	if rec.Binary != "" || live.Binary != "" {
 		add("binary", rec.Binary, live.Binary)
 	}
+	out.Parts = append(out.Parts, form...)
 	return out
+}
+
+// clientFormParts are the text parts of a client test's multipart form, as
+// recorded (rec) and as sent (live), as a keploy test case's are read
+// (replay's testRequest): the n-th part (from 0) of a name is
+// "form.<name>", then "form.<name>#<n+1>", its values one per line, and a
+// part one side alone sends is "" on the other. why says why keploy does not
+// read them: a part that sends a file, or one kept apart from the test case,
+// whose text keploy does not hold.
+func clientFormParts(rec, live []models.FormData) (parts []models.TestRequestPart, why string) {
+	type slot struct {
+		name           string
+		recorded, sent string
+	}
+	var slots []*slot
+	at := map[string]*slot{}
+	read := func(form []models.FormData, recorded bool) string {
+		seen := map[string]int{}
+		for _, f := range form {
+			if len(f.FileNames) > 0 || len(f.Paths) > 0 || len(f.FileContents) > 0 {
+				return "its form part " + f.Key + " sends a file or a value kept apart from the test case, which keploy does not read for a client test's request"
+			}
+			name := "form." + f.Key
+			if n := seen[f.Key]; n > 0 {
+				name += "#" + strconv.Itoa(n+1)
+			}
+			seen[f.Key]++
+			s := at[name]
+			if s == nil {
+				s = &slot{name: name}
+				at[name] = s
+				slots = append(slots, s)
+			}
+			if recorded {
+				s.recorded = strings.Join(f.Values, "\n")
+			} else {
+				s.sent = strings.Join(f.Values, "\n")
+			}
+		}
+		return ""
+	}
+	if why := read(rec, true); why != "" {
+		return nil, why
+	}
+	if why := read(live, false); why != "" {
+		return nil, why
+	}
+	for _, s := range slots {
+		parts = append(parts, models.TestRequestPart{Name: s.name, Recorded: s.recorded, Sent: s.sent})
+	}
+	return parts, ""
 }
 
 // arrivedBefore is earlier without each client test's request

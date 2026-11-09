@@ -190,6 +190,10 @@ type Tracker struct {
 	// arrival (Earlier.incoming). Begin and NewSet forget them.
 	cases    caseCursor
 	incoming []Earlier
+	// incomingGen counts the times incoming was forgotten (Begin, NewSet):
+	// a request whose body ended after it belongs to no running test
+	// (IncomingComing).
+	incomingGen uint64
 	// awaiting is open while the running test awaits its test case's request
 	// (BeginAwaiting, Await): a call that reads the test's places then
 	// (Places) waits (AwaitRequest) until Give brings the request, or the
@@ -282,6 +286,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.servedAt, t.serveAt = nil, nil
 	t.given, t.gave = nil, nil
 	t.cases, t.incoming = caseCursor{}, nil
+	t.incomingGen++
 	say := t.closeUnread()
 	t.open, t.began = false, false
 	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
@@ -597,6 +602,7 @@ func (t *Tracker) beginAt(at time.Time) func() {
 	t.names, t.taken = nil, nil
 	t.given, t.gave = nil, nil
 	t.cases, t.incoming = caseCursor{}, nil
+	t.incomingGen++
 	t.open, t.began = true, true
 	t.beganAt = at
 	t.recBegan, t.nextRecBegan = t.nextRecBegan, time.Time{}
@@ -771,23 +777,78 @@ func (t *Tracker) Incoming(live *models.HTTPReq, unread string, at time.Time) bo
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	_, _, ok := t.pairIncomingLocked(live, unread, at)
+	return ok
+}
+
+// ComingUnread is why keploy could not read a client test's request whose
+// body was still coming when a call reached keploy (IncomingComing).
+const ComingUnread = "its body was still coming from its client, and keploy reads a body only once it has it whole"
+
+// IncomingComing is Incoming of live, a request of the running client test
+// whose body is still coming as it reaches the application (one of no
+// declared length, one its client sends only once the application answered
+// 100): it pairs now, as Incoming does, and is until done a place keploy
+// could not read (ComingUnread), so every value that changed in a call that
+// reaches keploy before its body ended is refused. done gives the request
+// with its body once it ended (unread, where not "", why keploy could not
+// read it), and the place is from then what Incoming makes of it. A done
+// after the next test began, or a second one, does nothing. It is nil where
+// live pairs with none (Incoming's false).
+func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time) (done func(live *models.HTTPReq, unread string)) {
+	if t == nil || live == nil || at.IsZero() {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	k, c, ok := t.pairIncomingLocked(live, ComingUnread, at)
+	if !ok {
+		return nil
+	}
+	gen := t.incomingGen
+	var once sync.Once
+	return func(live *models.HTTPReq, unread string) {
+		once.Do(func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			if t.incomingGen == gen && k < len(t.incoming) {
+				t.incoming[k] = incomingPlace(c, live, unread, at)
+			}
+		})
+	}
+}
+
+// pairIncomingLocked pairs live, which reached the application at at, with
+// the running client test's recorded request it pairs with (PairCase), and
+// notes it as an earlier place of the test's calls (incomingPlace): its
+// index among t.incoming, and the case. ok is false where no test is open or
+// live pairs with none. t.mu is held.
+func (t *Tracker) pairIncomingLocked(live *models.HTTPReq, unread string, at time.Time) (k int, c ClientCase, ok bool) {
 	if !t.open {
-		return false
+		return -1, ClientCase{}, false
 	}
 	i, ok := PairCase(t.cases.cases, t.cases.used, live)
 	if !ok {
-		return false
+		return -1, ClientCase{}, false
 	}
 	t.cases.used[i] = true
-	c := t.cases.cases[i]
+	c = t.cases.cases[i]
+	t.incoming = append(t.incoming, incomingPlace(c, live, unread, at))
+	return len(t.incoming) - 1, c, true
+}
+
+// incomingPlace is live, a request of a client test that reached the
+// application at at, paired with c, its recorded request, as an earlier
+// place of the test's calls (IncomingRequest; GivenRequest); one keploy
+// could not read where unread is not "".
+func incomingPlace(c ClientCase, live *models.HTTPReq, unread string, at time.Time) Earlier {
 	req := IncomingRequest(c.Name, c.Req, live)
 	if unread != "" {
 		req = &models.TestRequest{Test: c.Name, RecordedAt: c.Req.Timestamp, Unread: unread}
 	}
 	e := GivenRequest(req)
 	e.incoming, e.arrivedRec, e.arrivedLive = true, req.RecordedAt, at
-	t.incoming = append(t.incoming, e)
-	return true
+	return e
 }
 
 // End ends the running test: until the next Begin no test is open, and a

@@ -199,12 +199,12 @@ func TestAClientTestsRequestPairsByOrderMethodAndPath(t *testing.T) {
 }
 
 // TestAClientTestsRequestKeployCannotReadIsSaid: a request whose body is
-// kept apart from its test case, or that sends a form (recorded as one, or
-// sent so), is a place keploy could not read, which says why.
+// kept apart from its test case, or that sends a file in a form (recorded
+// so, or sent so), is a place keploy could not read, which says why.
 func TestAClientTestsRequestKeployCannotReadIsSaid(t *testing.T) {
-	rec := &models.HTTPReq{Method: "POST", URL: "http://h/upload", Form: []models.FormData{{Key: "f", Values: []string{"a"}}}}
+	rec := &models.HTTPReq{Method: "POST", URL: "http://h/upload", Form: []models.FormData{{Key: "f", FileNames: []string{"a.txt"}, Paths: []string{"/tmp/a"}}}}
 	if got := IncomingRequest("post-upload-1", rec, rec); got.Unread == "" || len(got.Parts) != 0 {
-		t.Fatalf("a form request: %+v; want one keploy could not read, with no parts", got)
+		t.Fatalf("a form request sending a file: %+v; want one keploy could not read, with no parts", got)
 	}
 	kept := &models.HTTPReq{Method: "POST", URL: "http://h/upload", BodyRef: models.BodyRef{Path: "assets/b"}}
 	if got := IncomingRequest("post-upload-1", kept, &models.HTTPReq{Method: "POST", URL: "http://h/upload"}); got.Unread == "" {
@@ -212,7 +212,7 @@ func TestAClientTestsRequestKeployCannotReadIsSaid(t *testing.T) {
 	}
 	plain := &models.HTTPReq{Method: "POST", URL: "http://h/upload"}
 	for name, c := range map[string][2]*models.HTTPReq{
-		"a form sent in record's full round alone": {plain, rec}, "a body kept apart in record's full round alone": {plain, kept},
+		"a file sent in record's full round alone": {plain, rec}, "a body kept apart in record's full round alone": {plain, kept},
 		"no recorded request": {nil, plain}, "no request of the run": {plain, nil},
 		// The ingress gives a form as its raw body: the recording's form says
 		// what it is.
@@ -429,6 +429,108 @@ func TestGivenPlaceCaseNamesOnlyATestCase(t *testing.T) {
 	for place, want := range map[string]string{"test case post-client-v1-apps-1": "post-client-v1-apps-1", "test case ": "", givenPlace(""): "", "mock-20": "", "test-2": ""} {
 		if got, ok := GivenPlaceCase(place); ok != (want != "") || ok && got != want {
 			t.Errorf("GivenPlaceCase(%q) = %q, %v; want %q, %v", place, got, ok, want, want != "")
+		}
+	}
+}
+
+// TestAClientRequestStillComingIsUnreadUntilItsBodyEnds: a request whose
+// body is still coming pairs as it arrives, as one keploy could not read,
+// so what changed in a call before its body ended is refused; once done
+// gives it whole it is a place as any request is, and a done after the next
+// test began, or a second done, changes nothing.
+func TestAClientRequestStillComingIsUnreadUntilItsBodyEnds(t *testing.T) {
+	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
+	rec := &models.HTTPReq{Method: "POST", URL: "http://api/apps", Header: map[string]string{"Content-Type": "application/json"}, Body: `{"name":"app-1"}`, Timestamp: at.Add(-time.Hour)}
+	live := &models.HTTPReq{Method: "POST", URL: "http://api/apps", Header: map[string]string{"Content-Type": "application/json"}}
+	tr := NewTracker()
+	tr.Begin()
+	tr.SetCases([]ClientCase{{Name: "post-apps-1", Req: rec}})
+	if done := tr.IncomingComing(&models.HTTPReq{Method: "GET", URL: "http://api/other"}, at); done != nil {
+		t.Fatal("a request that pairs with none is taken as coming")
+	}
+	done := tr.IncomingComing(live, at)
+	if done == nil || tr.WantsIncoming() {
+		t.Fatal("a coming request did not pair")
+	}
+	got := tr.Placed().Earlier
+	if len(got) != 1 || got[0].Unread != ComingUnread || !got[0].incoming || !got[0].arrivedRec.Equal(rec.Timestamp) || !got[0].arrivedLive.Equal(at) {
+		t.Fatalf("placed while coming %+v", got)
+	}
+	if r := requestUnread(got); !strings.Contains(r, ComingUnread) {
+		t.Fatalf("what changed while its body came is refused with %q", r)
+	}
+	whole := *live
+	whole.Body = `{"name":"app-2"}`
+	done(&whole, "")
+	got = tr.Placed().Earlier
+	if len(got) != 1 || got[0].Unread != "" || got[0].Mock != "test case post-apps-1" || !got[0].arrivedLive.Equal(at) || !holdsSeen(got[0], "body.name", "app-1", "app-2") {
+		t.Fatalf("placed once whole %+v", got)
+	}
+	if r := requestUnread(got); r != "" {
+		t.Fatalf("once whole, what changed is refused with %q", r)
+	}
+	done(live, "its body did not come whole")
+	if got := tr.Placed().Earlier; got[0].Unread != "" {
+		t.Fatalf("a second done changed the place: %+v", got)
+	}
+
+	// Its body ends once the next test began: that test's places stay.
+	done = tr.IncomingComing(live, at)
+	if done != nil {
+		t.Fatal("a request with no recorded request left paired")
+	}
+	tr.SetCases([]ClientCase{{Name: "post-apps-1", Req: rec}})
+	done = tr.IncomingComing(live, at)
+	tr.Begin()
+	tr.SetCases([]ClientCase{{Name: "post-apps-2", Req: rec}})
+	if !tr.Incoming(&whole, "", at) {
+		t.Fatal("the next test's request did not pair")
+	}
+	done(live, "its body did not come whole")
+	if got := tr.Placed().Earlier; len(got) != 1 || got[0].Unread != "" || got[0].Mock != "test case post-apps-2" {
+		t.Fatalf("a done after the next test began changed its places: %+v", got)
+	}
+}
+
+// holdsSeen reports whether e holds the leaf path, recorded rec and sent live.
+func holdsSeen(e Earlier, path, rec, live string) bool {
+	for _, s := range e.Seen {
+		if s.Leaf.Path == path && s.Leaf.Value == rec && s.Live == live {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAClientRequestsFormTextPartsArePlacesOfItsCalls: a client test's
+// multipart form is read part by part, as a keploy test case's is: the n-th
+// part of a name at form.<name>, then form.<name>#<n+1>, a part one side
+// alone sent "" on the other. A part that sends a file, or a value kept
+// apart, keploy does not read: the request says why.
+func TestAClientRequestsFormTextPartsArePlacesOfItsCalls(t *testing.T) {
+	rec := &models.HTTPReq{Method: "POST", URL: "http://api/apps", Form: []models.FormData{{Key: "name", Values: []string{"app-1"}}, {Key: "name", Values: []string{"x"}}}}
+	live := &models.HTTPReq{Method: "POST", URL: "http://api/apps", Form: []models.FormData{{Key: "name", Values: []string{"app-2"}}, {Key: "suite", Values: []string{"s-2"}}}}
+	req := IncomingRequest("post-apps-1", rec, live)
+	want := map[string][2]string{"form.name": {"app-1", "app-2"}, "form.name#2": {"x", ""}, "form.suite": {"", "s-2"}}
+	n := 0
+	for _, p := range req.Parts {
+		if w, ok := want[p.Name]; ok {
+			n++
+			if p.Recorded != w[0] || p.Sent != w[1] {
+				t.Fatalf("part %s recorded %q sent %q, want %q %q", p.Name, p.Recorded, p.Sent, w[0], w[1])
+			}
+		}
+	}
+	if req.Unread != "" || n != len(want) {
+		t.Fatalf("parts %+v (unread %q), want %v", req.Parts, req.Unread, want)
+	}
+	if e := GivenRequest(req); e.Unread != "" || !holdsSeen(e, "form.name", "app-1", "app-2") || requestUnread([]Earlier{e}) != "" {
+		t.Fatalf("placed %+v", e)
+	}
+	for _, f := range []models.FormData{{Key: "f", FileNames: []string{"a.txt"}, Paths: []string{"/tmp/a"}}, {Key: "v", Paths: []string{"/tmp/v"}}} {
+		live := &models.HTTPReq{Method: "POST", URL: "http://api/apps", Form: []models.FormData{f}}
+		if req := IncomingRequest("post-apps-1", rec, live); !strings.Contains(req.Unread, "form part "+f.Key+" sends a file or a value kept apart") || len(req.Parts) != 0 {
+			t.Fatalf("a form part %+v gave %+v", f, req)
 		}
 	}
 }
