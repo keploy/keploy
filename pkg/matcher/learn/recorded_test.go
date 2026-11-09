@@ -3,8 +3,12 @@ package learn
 import (
 	"errors"
 	"reflect"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -79,14 +83,15 @@ func TestOutcomeCostARecordingPastTheSetsBudgetIsDecodedAtEachRead(t *testing.T)
 	tr := NewTracker()
 	tr.NewSet()
 	var n int
+	measured := recordingMeasures.Load()
 	for range 3 {
 		m, err := tr.KeepRecording("big", 64<<10, decodeOf("big", &n))
 		if err != nil || !reflect.DeepEqual(m, recordingOf("big")) {
 			t.Fatalf("a recording past the budget read as %+v, %v; want the recording as decoded", m, err)
 		}
 	}
-	if n != 3 {
-		t.Errorf("three reads of a recording past the budget decoded %d; want 3", n)
+	if d := recordingMeasures.Load() - measured; n != 3 || d != 0 {
+		t.Errorf("three reads of a recording past the budget decoded %d and measured %d; want 3, none", n, d)
 	}
 	// The other parts take all but 4 KiB of the budget: a recording of
 	// 8 KiB is decoded at each read, and the other parts keep theirs, and
@@ -104,10 +109,16 @@ func TestOutcomeCostARecordingPastTheSetsBudgetIsDecodedAtEachRead(t *testing.T)
 	if used == 0 {
 		t.Fatal("the row's other part was not kept")
 	}
+	measured = recordingMeasures.Load()
 	for range 3 {
 		if m, err := tr.KeepRecording("mid", 8<<10, decodeOf("mid", &n)); err != nil || !reflect.DeepEqual(m, recordingOf("mid")) {
 			t.Fatalf("a recording with no room read as %+v, %v; want the recording as decoded", m, err)
 		}
+	}
+	// Decoded at each read, as with no set, and measured at none: its
+	// size has no room before it is measured (recRoom).
+	if d := recordingMeasures.Load() - measured; d != 0 {
+		t.Errorf("a recording with no room was measured %d times in 3 reads; want none", d)
 	}
 	s.mu.Lock()
 	heldNow, recs := s.held.used, s.recs.used
@@ -217,6 +228,7 @@ func TestOutcomeCostTheSetsRecordingsKeepWithinTheirCap(t *testing.T) {
 	tr := NewTracker()
 	tr.NewSet()
 	var n int
+	measured := recordingMeasures.Load()
 	for _, name := range []string{"a", "big", "big", "a"} {
 		size := int64(1 << 10)
 		if name == "big" {
@@ -226,8 +238,9 @@ func TestOutcomeCostTheSetsRecordingsKeepWithinTheirCap(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n != 3 {
-		t.Errorf("a kept and one past the cap read twice each decoded %d; want 3", n)
+	// Measured once, the one kept: one past the cap is not measured.
+	if d := recordingMeasures.Load() - measured; n != 3 || d != 1 {
+		t.Errorf("a kept and one past the cap read twice each decoded %d and measured %d; want 3, 1", n, d)
 	}
 	s := tr.derived
 	s.mu.Lock()
@@ -267,5 +280,84 @@ func TestOutcomeCostTheSetsRecordingsKeepWithinTheirCap(t *testing.T) {
 		if n != 2 || none.RecordingDecodes() != 0 {
 			t.Errorf("a tracker of no set decoded %d of two reads, counted %d; want 2, 0", n, none.RecordingDecodes())
 		}
+	}
+}
+
+// A kept recording counts on the set's budget at least the heap it holds
+// decoded, whatever the size its reader knew of it (its record's): a
+// recording of thousands of headers holds about eleven times its record,
+// and counted by its record it kept that much more than the budget said.
+// Nor does it count much more than it holds, which would leave the set
+// room for fewer recordings than its budget has: at most three times (a
+// map's entries are counted at the most any fill of its table costs), and
+// 1 KiB.
+func TestOutcomeCostAKeptRecordingCountsTheHeapItHoldsDecoded(t *testing.T) {
+	headers := func() *models.Mock {
+		m := recordingOf("headers")
+		h := func() map[string]string {
+			h := map[string]string{}
+			for i := range 4000 {
+				h["h"+strconv.Itoa(i)] = "v" + strconv.Itoa(i)
+			}
+			return h
+		}
+		m.Spec.HTTPReq.Header = h()
+		m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Header: h()}
+		return m
+	}
+	body := func() *models.Mock {
+		m := recordingOf("body")
+		m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: strings.Repeat("x", 1<<20)}
+		return m
+	}
+	small := func() *models.Mock { return recordingOf("small") }
+	for _, c := range []struct {
+		name string
+		make func() *models.Mock
+	}{{"4000 headers", headers}, {"a 1 MiB body", body}, {"a small recording", small}} {
+		// Eight of it, live at the second read, for a heap of each well
+		// past what the runtime's own work moves between two reads.
+		var a, b runtime.MemStats
+		runtime.GC()
+		runtime.GC()
+		runtime.ReadMemStats(&a)
+		ms := make([]*models.Mock, 0, 8)
+		for range cap(ms) {
+			ms = append(ms, c.make())
+		}
+		runtime.GC()
+		runtime.GC()
+		runtime.ReadMemStats(&b)
+		heap := (int64(b.HeapAlloc) - int64(a.HeapAlloc) - int64(unsafe.Sizeof(ms[0]))*int64(cap(ms))) / int64(len(ms))
+		runtime.KeepAlive(ms)
+		tr := NewTracker()
+		tr.NewSet()
+		if _, err := tr.KeepRecording(c.name, 1<<10, func() (*models.Mock, error) { return c.make(), nil }); err != nil {
+			t.Fatal(err)
+		}
+		s := tr.derived
+		s.mu.Lock()
+		counted := s.recs.used - slotBytes - int64(len(c.name))
+		s.mu.Unlock()
+		t.Logf("%s: holds %d bytes decoded, counted %d", c.name, heap, counted)
+		// The heap read moves by a few hundred bytes a copy with the
+		// runtime's own work: within 1/64 of it is the heap it holds.
+		if counted < heap-heap/64 || counted > 3*heap+1<<10 {
+			t.Errorf("%s: kept, counted %d bytes on the set's budget; want at least the %d it holds decoded (less 1/64), at most three times that and 1 KiB", c.name, counted, heap)
+		}
+	}
+	// A map or a pointer the recording reaches twice holds its heap once,
+	// and is counted once.
+	shared, apart := headers(), headers()
+	shared.Spec.HTTPResp.Header = shared.Spec.HTTPReq.Header
+	if a, b := recordingHeap(shared), recordingHeap(apart); a >= b {
+		t.Errorf("a recording whose request and answer share one header map counts %d bytes; want less than one with a map each (%d)", a, b)
+	}
+	responses := func(h1, h2 *models.MongoHeader) *models.Mock {
+		return &models.Mock{Spec: models.MockSpec{MongoResponses: []models.MongoResponse{{Header: h1}, {Header: h2}}}}
+	}
+	h := &models.MongoHeader{Length: 1}
+	if a, b := recordingHeap(responses(h, h)), recordingHeap(responses(h, &models.MongoHeader{Length: 1})); a >= b {
+		t.Errorf("two answers that share one header count %d bytes; want less than two with a header each (%d)", a, b)
 	}
 }

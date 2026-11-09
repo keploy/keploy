@@ -1,7 +1,9 @@
 package learn
 
 import (
+	"reflect"
 	"strings"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -39,8 +41,9 @@ func (t *Tracker) KeepRecording(key string, size int64, decode func() (*models.M
 	return s.keepRecording(key, size, decode)
 }
 
-// keepRecording is KeepRecording on s: size is about the bytes the decoded
-// recording holds.
+// keepRecording is KeepRecording on s: size is the least the caller knows
+// the decoded recording holds (its record's bytes and more); the set counts
+// what it measures the recording holds (recordingHeap) where that is more.
 func (s *setDerived) keepRecording(key string, size int64, decode func() (*models.Mock, error)) (*models.Mock, error) {
 	if s == nil {
 		return decode()
@@ -58,9 +61,102 @@ func (s *setDerived) keepRecording(key string, size int64, decode func() (*model
 	}
 	s.mu.Lock()
 	s.recDecodes++
-	s.keepSpare(key, size, m)
+	room := s.recRoom(key, size)
 	s.mu.Unlock()
+	// Measured outside the set's lock, and only where the least size has
+	// room: a recording the set has no room for is decoded at each read,
+	// as before, at no more cost than its decode.
+	if room {
+		size = max(size, recordingHeap(m))
+		s.mu.Lock()
+		s.keepSpare(key, size, m)
+		s.mu.Unlock()
+	}
 	return m.ShallowCopy(), nil
+}
+
+// recRoom reports whether the recordings' tier may keep a recording of size
+// bytes under key (keepSpare's first checks), at the least: s.mu is held.
+func (s *setDerived) recRoom(key string, size int64) bool {
+	t := &s.recs
+	size += slotBytes + int64(len(key))
+	return t.by[key] == nil && size <= t.cap && s.budget.used-t.used+size <= s.budget.limit
+}
+
+// recordingMeasures counts the recordings recordingHeap measured, for the
+// rows: one atomic add beside a walk of the whole recording.
+var recordingMeasures atomic.Int64
+
+// recordingHeap is about the heap m holds, as the runtime allocates it
+// (allocBytes): its struct, each string's bytes, each slice's array, each
+// map's header and entries (mapSlotBytes), and what each pointer and
+// interface holds, each pointer and map counted once; a func's closure is
+// not counted. A map's entries are each counted at the most an entry costs
+// at any fill of its table (mapSlotBytes), up to about twice and a third
+// what a map of that length holds: a size never under the heap. A recording's record on disk says little of it: an entry of a
+// header map is a few bytes encoded and about a hundred in its map, so a
+// recording of thousands of headers holds about eleven times its record,
+// and a size taken from the record kept that much more than the set's
+// budget counted.
+func recordingHeap(m *models.Mock) int64 {
+	recordingMeasures.Add(1)
+	seen := map[uintptr]bool{}
+	var walk func(v reflect.Value) int64
+	walk = func(v reflect.Value) int64 {
+		var n int64
+		switch v.Kind() {
+		case reflect.String:
+			n = allocBytes(v.Len(), false)
+		case reflect.Pointer:
+			if v.IsNil() || seen[v.Pointer()] {
+				return 0
+			}
+			seen[v.Pointer()] = true
+			n = allocBytes(v.Type().Elem().Size(), true) + walk(v.Elem())
+		case reflect.Interface:
+			if v.IsNil() {
+				return 0
+			}
+			if e := v.Elem(); e.Kind() == reflect.Pointer {
+				n = walk(e)
+			} else {
+				n = allocBytes(e.Type().Size(), true) + walk(e)
+			}
+		case reflect.Slice:
+			if v.IsNil() {
+				return 0
+			}
+			n = allocBytes(uintptr(v.Cap())*v.Type().Elem().Size(), true)
+			for i := range v.Len() {
+				n += walk(v.Index(i))
+			}
+		case reflect.Array:
+			for i := range v.Len() {
+				n += walk(v.Index(i))
+			}
+		case reflect.Struct:
+			for i := range v.NumField() {
+				n += walk(v.Field(i))
+			}
+		case reflect.Map:
+			if v.IsNil() || seen[v.Pointer()] {
+				return 0
+			}
+			seen[v.Pointer()] = true
+			slot := v.Type().Key().Size() + v.Type().Elem().Size()
+			if n = mapHeaderBytes + mapGroupBytes(slot, true); v.Len() > 8 {
+				n = mapHeaderBytes + int64(v.Len())*mapSlotBytes(slot, true)
+			}
+			for it := v.MapRange(); it.Next(); {
+				n += walk(it.Key()) + walk(it.Value())
+			}
+		}
+		return n
+	}
+	if m == nil {
+		return 0
+	}
+	return walk(reflect.ValueOf(m))
 }
 
 // keepSpare keeps m under key in the recordings' tier (recs), within the

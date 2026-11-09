@@ -469,6 +469,12 @@ func (d *DiskMocks) DecodersBuilt() int64 { return d.records.built.Load() }
 // set's first cycle learned, for its retry cycles (learn.KeptLearning.Into).
 // A mock read before keeps what it was read with.
 func (d *DiskMocks) SetOnLoad(f func(*models.Mock)) {
+	// The generation the keeper's keys name (recordedAt) moves only after
+	// the Store, deferred. Moved before it, a read in between would take
+	// the new generation's key, decode with the old onLoad, and the keeper
+	// would hand that stale recording to every later read of the set. In
+	// this order a read in between keys its recording by the old generation,
+	// which no read after the bump asks again.
 	defer d.loadGen.Add(1)
 	if f == nil {
 		d.onLoad.Store(nil)
