@@ -134,6 +134,14 @@ type setDerived struct {
 	// Its own store, not bodies: a view bears its recording's identity,
 	// and read as the recording a word only the view holds would pass.
 	views *bodyStore
+	// recs are the set's recordings the agent's on-disk store decoded for
+	// its readers (Tracker.KeepRecording), by the store's key: kept only in
+	// the room the budget has spare, and the first let go when any other
+	// part needs room (keepSpare).
+	recs tier[*models.Mock]
+	// recDecodes counts the recordings decoded for KeepRecording, for the
+	// rows.
+	recDecodes int
 	// offsets are the set's places the offset rule reads, by place and
 	// moment (offsetIndex), within offsetBudget: its handlers share them.
 	offsets *offsetIndex
@@ -520,14 +528,18 @@ func newSetDerived() *setDerived {
 	s.bodies = newSetBodyStore(&s.mu, b, bodyBudget)
 	s.views = newSetBodyStore(&s.mu, b, viewBudget)
 	s.views.forgetUnread = true
+	s.recs = newTier[*models.Mock](recordingBudget, b, true)
 	s.inFlight = semaphore.NewWeighted(readInFlight)
-	// The words go first: a recording's words are read again from its
-	// payload, where one let go is decoded again (a JSON encode and decode
-	// of the whole recording) before any of its parts can be read. The
-	// views go last: every call that reads a recording F served with a
-	// view reads the view.
+	// The decoded recordings go first: they keep only what the budget has
+	// spare, and one let go is decoded again from the store, as it was at
+	// every read before the set kept them. The words go next: a
+	// recording's words are read again from its payload, where one let go
+	// is decoded again (a JSON encode and decode of the whole recording)
+	// before any of its parts can be read. The views go last: every call
+	// that reads a recording F served with a view reads the view.
 	b.letGo = func(need int64) {
-		freed := s.words.letGo(need)
+		freed := s.recs.letGo(need)
+		freed += s.words.letGo(need - freed)
 		freed += s.bodies.kept.letGo(need - freed)
 		s.views.kept.letGo(need - freed)
 	}
@@ -552,6 +564,7 @@ func (s *setDerived) drop() {
 	s.bodies.kept.drop()
 	s.bodies.over = true
 	s.views.kept.drop()
+	s.recs.drop()
 }
 
 // keepsPayloads reports whether the set's store keeps the payloads a test
@@ -572,7 +585,7 @@ func (s *setDerived) keepsPayloads() bool {
 func (s *setDerived) usedBytes() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.held.used + s.words.used + s.forms.used + s.drifts.used + s.bodies.kept.used + s.views.kept.used
+	return s.held.used + s.words.used + s.forms.used + s.drifts.used + s.bodies.kept.used + s.views.kept.used + s.recs.used
 }
 
 // keepRun counts size bytes more of the run's places (Tracker.keepRun) on

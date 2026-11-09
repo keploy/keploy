@@ -963,6 +963,16 @@ type RecordedBeforeSetter interface {
 	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
 }
 
+// RecordingKeeper is implemented by a proxy whose learn step keeps the
+// staged set's recordings it reads from the agent's on-disk store decoded,
+// within the set's learn budget (learn.Tracker.KeepRecording): the agent
+// hands KeepRecording to the store (proxy.DiskMocks.SetRecordingKeeper), so
+// its calls, each of which reads every recording of the set made before it,
+// decode one once for the set, not once per call. Nothing it keeps is served.
+type RecordingKeeper interface {
+	KeepRecording(key string, size int64, decode func() (*models.Mock, error)) (*models.Mock, error)
+}
+
 // LearnSetWarmer is implemented by a proxy whose learn step reads the staged
 // set's recordings before its tests' calls do: WarmLearnSet, called once the
 // set is staged and its on-disk recordings are set (RecordedBeforeSetter),

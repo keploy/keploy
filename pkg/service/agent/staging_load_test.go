@@ -275,6 +275,14 @@ type workerExactProxy struct {
 	// before is the reader of the recordings before an instant the staging
 	// set (coreAgent.RecordedBeforeSetter).
 	before func(t time.Time, visit func(*models.Mock) bool) error
+	// keeps counts the recordings the on-disk store handed the proxy to
+	// keep as it read them (coreAgent.RecordingKeeper).
+	keeps int
+}
+
+func (p *workerExactProxy) KeepRecording(_ string, _ int64, decode func() (*models.Mock, error)) (*models.Mock, error) {
+	p.keeps++
+	return decode()
 }
 
 func (p *workerExactProxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
@@ -371,6 +379,12 @@ func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
 		if has != tc.want {
 			t.Fatalf("the recordings before %v hold test-a: %v; want %v", tc.at, has, tc.want)
 		}
+	}
+	// The store hands each recording it reads for them to the proxy's
+	// learn step to keep for the set (coreAgent.RecordingKeeper), so each
+	// call does not decode them again.
+	if p.keeps == 0 {
+		t.Fatal("the on-disk store handed the proxy none of the recordings it read before an instant to keep")
 	}
 	// The next set's staging withdraws this set's worker scope before its
 	// view goes on: none of its names is reachable in the next set.
