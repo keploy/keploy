@@ -102,8 +102,12 @@ type evPlace struct {
 	// request's time instead (req), as an exchange's request leaf is.
 	// views: the views round F's serves gave where they differ
 	// (Raw.ServedChanged); one that holds F's word leaves it unknown.
-	fUnstated, fMay, fGave, recAfter bool
-	views                            []*Raw
+	// rBefore: the recording gave the application this place before the
+	// call, by times keploy reads (its answer's, answerState, where it holds
+	// one): R's application had it to cut a value from. Unlike recAfter, a
+	// place with no time keploy reads, or at the call's own instant, is not.
+	fUnstated, fMay, fGave, recAfter, rBefore bool
+	views                                     []*Raw
 	// req: a recording's state by its request's time, where that is not
 	// its state by its answer's (rawRequestState): a word its request
 	// holds is placed so (placedFor), as an exchange's request leaf is.
@@ -246,6 +250,11 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		}
 		// Of the exchange, not of a leaf: built once for its leaves.
 		outsideTest, lateCall := earlierOutsideTest(e), earlierLateCall(e)
+		// rBefore of its leaves: a request leaf by the request's time, an
+		// answer leaf by the answer's (none where keploy was given no
+		// payload: the zero time).
+		sentBefore := e.alwaysEarlier() || !e.noTime && e.At.Before(in.At)
+		answeredBefore := e.alwaysEarlier() || sentBefore && answeredBy(e.At, e.Payload.answered, in.At)
 		for _, s := range e.Seen {
 			path := cmp.Or(s.Leaf.Path, s.Place)
 			ps = append(ps, evPlace{
@@ -254,6 +263,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, startUp: startUp, otherTest: other, trailed: trailed, scope: scope,
 				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: outsideTest, lateCall: lateCall,
 				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
+				rBefore:  s.Side != Response && sentBefore || s.Side == Response && answeredBefore,
 			})
 			// What the application got in an answer it got at the answer's
 			// time (answerState), its request before or at the call's instant.
@@ -311,6 +321,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
 			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
 			fGave: r.served && !r.servedAfter, recAfter: !r.noTime && (r.at.After(in.At) || r.answered.After(in.At)),
+			rBefore: !r.noTime && answeredBy(r.at, r.answered, in.At),
 		}
 		if rst, rwhy := rawRequestState(in, r); !r.noTime && (rst != st || rwhy != why) {
 			p.req = &reqPlace{state: rst, why: rwhy, after: r.at.After(in.At)}
@@ -627,6 +638,13 @@ const recordedAfterWhy = "answered after the call, it shows nothing of the recor
 // keploy knows where it can read no answer time too.
 const askedAfterWhy = "asked after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there"
 
+// answeredBy reports whether answerState places the answer before the call
+// at at.
+func answeredBy(req, answered, at time.Time) bool {
+	st, _ := answerState(req, answered, at)
+	return st == stateBefore
+}
+
 // untimedAnswer: a recording's answer time keploy cannot read, none or one
 // before its own request was recorded (follows.go's recordedGave), so it
 // cannot place the answer before the call.
@@ -684,6 +702,10 @@ const (
 	atCallWhy  = "recorded at the call's own instant"
 	noTimeWhy  = "recorded at a time keploy cannot read"
 	noAnswerAt = "no answer time keploy can read"
+	// servedAfterWhy: round F served a recording of the set only after the
+	// call reached keploy, or in a request still aloft then
+	// (givenWords.fAfter).
+	servedAfterWhy = "round F gave it to the application only after the call reached keploy"
 )
 
 // swapUnknown marks unknown each place of ps, before the call in both runs,
@@ -997,7 +1019,7 @@ type wordsEntry struct {
 func keptWordsOf(k wordsKey, g givenWords) *wordsEntry {
 	e := &wordsEntry{}
 	n := allocBytes(unsafe.Sizeof(*e), true)
-	e.key.served, e.key.asRecorded, e.key.unseen = k.served, k.asRecorded, k.unseen
+	e.key.served, e.key.asRecorded, e.key.unseen, e.key.servedAfter = k.served, k.asRecorded, k.unseen, k.servedAfter
 	if k.live != nil {
 		b, bn := keptPayload(*k.live)
 		e.key.live, n = &b, n+bn+allocBytes(unsafe.Sizeof(b), true)
@@ -1088,16 +1110,18 @@ func keptPayload(b rawBody) (rawBody, int64) {
 
 // wordsKey is what makes a recording's words (wordsOf) past its identity,
 // which fixes its own payload: how round F served it (Raw.served,
-// asRecorded, unseen) and the payloads of F's view of it (live) and of the
-// views F's serves of it gave (views).
+// asRecorded, unseen), whether only after the call reached keploy
+// (servedAfter: a later call it was served before reads it apart), and the
+// payloads of F's view of it (live) and of the views F's serves of it gave
+// (views).
 type wordsKey struct {
-	served, asRecorded, unseen bool
-	live                       *rawBody
-	views                      []rawBody
+	served, asRecorded, unseen, servedAfter bool
+	live                                    *rawBody
+	views                                   []rawBody
 }
 
 func wordsKeyOf(x Raw) wordsKey {
-	k := wordsKey{served: x.served, asRecorded: x.asRecorded, unseen: x.unseen}
+	k := wordsKey{served: x.served, asRecorded: x.asRecorded, unseen: x.unseen, servedAfter: x.servedAfter}
 	if x.live != nil {
 		b := x.live.payload()
 		k.live = &b
@@ -1109,7 +1133,7 @@ func wordsKeyOf(x Raw) wordsKey {
 }
 
 func (k wordsKey) equal(o wordsKey) bool {
-	return k.served == o.served && k.asRecorded == o.asRecorded && k.unseen == o.unseen &&
+	return k.served == o.served && k.asRecorded == o.asRecorded && k.unseen == o.unseen && k.servedAfter == o.servedAfter &&
 		(k.live == nil) == (o.live == nil) && (k.live == nil || sameBody(*k.live, *o.live)) && slices.EqualFunc(k.views, o.views, sameBody)
 }
 
@@ -1215,8 +1239,21 @@ func setEvidence(g givenWords, inR, inF heldRoles, at time.Time, piece bool) (ev
 	// A recording answered after the call gave R's application nothing
 	// before it: R's word there decides nothing (F's still does).
 	hr := inR&inOwn != 0 && g.givenBefore(at)
-	before := g.at.Before(at) && !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
+	before := g.answeredBefore(at)
 	switch {
+	case g.fAfter:
+		// Round F served it only after the call reached keploy, or in a
+		// request still aloft then: it gave the application nothing there
+		// before the call, whatever its serves stated. So round F's word in
+		// what round F gave there shows nothing of where round F's
+		// application took it. Round F's word in the recording's own text,
+		// written in the recording run, is no word round F's application
+		// made: it shows nothing either way, as a serve told as recorded
+		// stays so for a Raw place (Raw.asOfArrival).
+		if hr || inF&inOwn != 0 {
+			return evUnknown, false
+		}
+		return evNone, false
 	case g.unstated || g.unread:
 		// Round F served it and keploy cannot tell what it gave there.
 		return evUnknown, true
@@ -1263,6 +1300,14 @@ func (g *givenWords) givenBefore(at time.Time) bool {
 	return g.noTime || !g.at.After(at) && !g.answered.After(at)
 }
 
+// answeredBefore reports whether g's answer was given R's application
+// before the call at at, by times keploy reads: answered before it, after
+// its own request (so that was before it too). Unlike givenBefore, one with
+// no time keploy reads is not.
+func (g *givenWords) answeredBefore(at time.Time) bool {
+	return !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
+}
+
 // gluedAt reports whether p, a body that declares no media type, holds R's
 // or F's word glued to the bytes around it, in any form it declares (main's
 // gluedIn): keploy cannot tell its words from the bytes that frame them.
@@ -1274,11 +1319,14 @@ func (dc *decider) gluedAt(p evPlace, w readWord) bool {
 	return gluedIn(ed, w.Rec, true) || gluedIn(ed, w.Live, false)
 }
 
-// setUnknownWhy is why a recording of the set shows nothing of a word: its
-// time, where keploy cannot place it before the call (rawState), else that
+// setUnknownWhy is why a recording of the set shows nothing of a word:
+// that round F gave it the application only after the call (fAfter); its
+// time, where keploy cannot place it before the call (rawState); else that
 // keploy keeps only its words.
 func setUnknownWhy(g givenWords, at time.Time) string {
 	switch st, why := answerState(g.at, g.answered, at); {
+	case g.fAfter:
+		return servedAfterWhy
 	case g.noTime:
 		return noAnswerAt
 	case st != stateBefore:

@@ -2,6 +2,7 @@ package learn
 
 import (
 	"cmp"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -549,8 +550,9 @@ func pieceOfAnId(rd textReading, w readWord) bool {
 // place that shows nothing of them in either run is no source of the id:
 // its holding the piece is chance (the 4-hex groups of api-server's fresh
 // UUIDs stand all over its sets), unless each run holds its own piece at a
-// place it had, where the application may have cut the piece alone
-// (oneRun). nil where w carries chanceBits itself, stands in no such token,
+// place it had, where the application may have cut the piece alone, or
+// one run's piece stands at a place the other run was not given before the
+// call (oneRun). nil where w carries chanceBits itself, stands in no such token,
 // or its long words stand outside its token ("qty 12 ref <random>": 12 is
 // no piece of the ref, and stays judged by its own text).
 func idLongWords(rd textReading, w readWord) []int {
@@ -587,7 +589,8 @@ func idLongWords(rd textReading, w readWord) []int {
 // ("<code>-<random>" built from a place's "<code>") stands there whole. It
 // may still be where the application cut the piece out of another value,
 // at one place or at another in each run: the piece is chance there only
-// where one run's own piece stands at no place that run had (oneRun),
+// where one run's own piece stands at no place that run had, and the other
+// run's only at places the first was given before the call (oneRun),
 // asked apart. A place that shows or disproves the piece itself is read as
 // for any word. false for every place where long is empty. Each place is
 // asked once, on demand.
@@ -615,46 +618,122 @@ func (dc *decider) idChance(ps *wordPlaces, w readWord, long []readWord) func(i 
 	}
 }
 
-// oneRun reports, for w, a piece of one id the call minted, whether one
-// run at most holds its own piece at a place it had: the recording, the
+// oneRun reports, for w, a piece of one id the call minted, why no place
+// holds it as chance would, "" where one may: one run's application made
+// its piece with the id, and the other run's piece stands only at places
+// the first run was given before the call, so its application had each to
+// cut the piece from and did not. A run's holders: the recording's, the
 // recorded piece in the text of a place not answered after the call
 // (recAfter), or in the answer of a set recording given by then
 // (givenBefore: recorded and answered by then, where an answer with no
-// time counts, or recorded at a time keploy cannot read); round F, at any
+// time counts, or recorded at a time keploy cannot read); round F's, at any
 // time, its piece in the text of a place, in a view its serves gave there,
 // or in any list of a set recording (its answer, F's view of it, a view
-// its serves gave). The application runs the same code
-// in each run, so one that cut the piece out of a value it was given finds
-// its own piece at a place in each run, at one place or at another in
-// each. keploy cannot tell that from chance (fail closed): where both runs
-// do, no place holds the piece by chance, and it is refused as unknown at
-// each place idChance or idOutside left. Where one run's piece stands at
-// no place, that run's application cut it from nothing it was given, so it
-// made it, with the id. held[k] is what asked[k]'s texts hold of w
-// (heldAt), set for every asked place before the first ask; a place the
-// word's check does not ask holds neither word and has no views (a place
-// with views is read always, showsUntold), so it is not read. inR and inF are the set recordings' lists that hold R's
-// and F's piece (outsideHeld.holding). Asked once, on demand.
-func (dc *decider) oneRun(ps *wordPlaces, w readWord, asked []int32, held []evHeld, inR, inF map[int32]heldRoles) func() bool {
-	known := int8(0)
-	return func() bool {
-		if known == 0 {
-			gs := dc.outside().words
-			r, f := false, len(inF) > 0
-			for j, in := range inR {
-				r = r || in&inOwn != 0 && gs[j].givenBefore(dc.in.At)
-			}
-			for k, i32 := range asked {
-				r = r || held[k].hr && !ps.at(int(i32)).recAfter
-				f = f || held[k].hf || slices.ContainsFunc(dc.ps[i32].t.views, func(v *readerText) bool { return evHolds(v, w.Live) })
-			}
-			known = 1
-			if r && f {
-				known = -1
+// its serves gave). The application runs the same code in each run, so one
+// that cut the piece out of a value it was given finds its own piece at a
+// place in each run, at one place or at another in each: where both runs
+// hold theirs, keploy cannot tell that from chance (fail closed,
+// bothRunsWhy). Where one run's piece stands at no place, that run's
+// application cut it from nothing it was given, so it made it, with the
+// id; but that shows nothing of a place it was not given before the call,
+// so each place the other run's piece stands at must be one it was:
+//   - round F made its piece: F gave the application each recording holder
+//     before the call, with a text keploy reads there (fGave, not
+//     fUnstated: no view unstated, unread, or one of several that differ;
+//     an outside recording by givenWords.fRead, never one F served only
+//     after the call reached keploy, fAfter);
+//   - the recording made its piece: it gave the application each of F's
+//     holders before the call, by times keploy reads (rBefore,
+//     answeredBefore), or round F gave it only after the call (not fGave),
+//     so neither run's application had it to cut from.
+//
+// Else the piece is refused as unknown (oneSideWhy), naming the place and
+// which of round F's two reasons holds there (fNotBefore, fNoView). It
+// is so at each place idChance or idOutside left. held[k] is what
+// asked[k]'s texts hold of w (heldAt), set for every asked place before
+// the first ask; a place the word's check does not ask holds neither word
+// and has no views (a place with views is read always, showsUntold), so it
+// is not read. inR and inF are the set recordings' lists that hold R's and
+// F's piece (outsideHeld.holding). Asked once, on demand.
+func (dc *decider) oneRun(ps *wordPlaces, w readWord, asked []int32, held []evHeld, inR, inF map[int32]heldRoles) func() string {
+	known, why := false, ""
+	return func() string {
+		if known {
+			return why
+		}
+		known = true
+		gs, at := dc.outside().words, dc.in.At
+		// r, f: a run holds its piece at a place. rOut, fOut: the first
+		// holder of each run's the other run was not given (above), the
+		// set's in its order, so the line names the same one each time.
+		// rNot says which of the two reasons holds at rOut: round F did
+		// not give it the application before the call, or gave it with
+		// no view keploy reads.
+		r, f := false, false
+		rOut, rNot, fOut := "", "", ""
+		for _, j := range slices.Sorted(maps.Keys(inR)) {
+			if inR[j]&inOwn != 0 && gs[j].givenBefore(at) {
+				r = true
+				if rOut == "" && !gs[j].fRead {
+					rOut, rNot = gs[j].mock, fNoView
+					if gs[j].fAfter {
+						rNot = fNotBefore
+					}
+				}
 			}
 		}
-		return known > 0
+		for _, j := range slices.Sorted(maps.Keys(inF)) {
+			f = true
+			if fOut == "" && !gs[j].answeredBefore(at) {
+				fOut = gs[j].mock
+			}
+		}
+		for k, i32 := range asked {
+			p := ps.at(int(i32))
+			if held[k].hr && !p.recAfter {
+				r = true
+				if rOut == "" && (!p.fGave || p.fUnstated) {
+					rOut, rNot = p.name, fNoView
+					if !p.fGave {
+						rNot = fNotBefore
+					}
+				}
+			}
+			if held[k].hf || slices.ContainsFunc(dc.ps[i32].t.views, func(v *readerText) bool { return evHolds(v, w.Live) }) {
+				f = true
+				if fOut == "" && p.fGave && !p.rBefore {
+					fOut = p.name
+				}
+			}
+		}
+		switch {
+		case r && f:
+			why = bothRunsWhy
+		case r && rOut != "":
+			why = oneSideWhy("the recording's", rOut, rNot, "round F")
+		case f && fOut != "":
+			why = oneSideWhy("round F's", fOut, "the recording did not give the application before the call, by a time keploy reads", "the recording")
+		}
+		return why
 	}
+}
+
+// Why round F's application was not given a place the recording's piece
+// of an id stands at (oneRun), as its line says it: round F served it only
+// after the call reached keploy, or not at all (fNotBefore), or served it
+// with no view keploy reads there: none stated, one keploy could not keep,
+// or several that differ (fNoView).
+const (
+	fNotBefore = "round F did not give the application before the call"
+	fNoView    = "round F gave the application with no view keploy reads"
+)
+
+// oneSideWhy is why a piece of one id the call minted is no chance where
+// one run's piece stands at no place it had (oneRun) but the other's, of
+// holder, stands at place, which that run was not given: its making its
+// own piece shows nothing of whether the application cuts it from there.
+func oneSideWhy(holder, place, notGiven, run string) string {
+	return holder + " own piece of the id stands at " + place + ", which " + notGiven + ": " + run + "'s making its own piece shows nothing of whether the application cut it from there"
 }
 
 // bothRunsWhy is why a place that holds a piece of one id the call minted
@@ -863,7 +942,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 		i := int(i32)
 		p := *ps.at(i)
 		ev, _ := evidenceOf(p, held[k], w.Rec, w.Live, piece)
-		if ev == evNone || ev == evUnknown && idChance(i) && oneRun() {
+		if ev == evNone || ev == evUnknown && idChance(i) && oneRun() == "" {
 			continue
 		}
 		cand[p.mock] = true
@@ -888,7 +967,10 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// chance: places unknown for a piece of one id the call minted that
 	// show nothing of its long words (idChance) where one run at most
 	// holds its own piece (oneRun), named on a fresh word's line.
+	// cut: why oneRun found no place holds the piece as chance would, set
+	// where a place it left took it.
 	var src, outside, conflict, unknown, aside, unserved, chance []evPlace
+	cut := ""
 	lateHeld := map[string][2]int{}
 	for k, i32 := range asked {
 		i := int(i32)
@@ -958,11 +1040,12 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 			}
 		case evUnknown:
 			if idChance(i) {
-				if oneRun() {
+				why := oneRun()
+				if why == "" {
 					chance = append(chance, p)
 					break
 				}
-				p.why = bothRunsWhy
+				p.why, cut = why, why
 			}
 			unknown = append(unknown, p)
 		}
@@ -985,11 +1068,12 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 				break
 			}
 			if idShows != nil && !idShows(j) {
-				if oneRun() {
+				why := oneRun()
+				if why == "" {
 					chance = append(chance, p)
 					break
 				}
-				p.why = bothRunsWhy
+				p.why, cut = why, why
 			} else {
 				p.why = setUnknownWhy(g, dc.in.At)
 			}
@@ -1024,10 +1108,18 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 			why = "round F served it and keploy cannot tell what it gave there"
 		}
 		line := "keploy cannot tell what round F gave at " + p.name + " before this call (" + why + ")"
-		if p.why == bothRunsWhy {
+		switch {
+		case p.why == bothRunsWhy:
 			// What round F gave there is not the reason, so the line
 			// says only the reason: a cut cannot be told from chance.
 			line = bothRunsLine(p.name)
+		case p.why != "" && p.why == cut:
+			// oneSideWhy names its place, and says the reason alone.
+			line = p.why
+		case p.why == servedAfterWhy:
+			// The reason is the whole answer: round F gave the
+			// application nothing there before the call.
+			line = "keploy cannot tell what round F gave at " + p.name + " before this call: " + servedAfterWhy
 		}
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, line, names(unknown),
 			Edit{Kind: EditReRecord}, dc.fieldNoise(path))
