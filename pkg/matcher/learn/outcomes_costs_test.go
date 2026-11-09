@@ -3733,3 +3733,52 @@ func TestOutcomeCostAWordsCheckReadsOnlyTheUnservedRecordingsThatMayHoldIt(t *te
 		t.Errorf("over 300 recordings round F served with no view told the call read %d places; want each for each of the 5 words (at least %d)", asks, 5*300)
 	}
 }
+
+// A recording round F served changed, with views of its own, may have given
+// the application F's word in a view whatever its recorded text holds: a
+// word's check reads it for every word (showsUntold), beside the recordings
+// round F never served, which it reads only where the set's postings name
+// them. Its one view alone holds F's word "f0e9d8c7", so that word is
+// refused as unknown there, and each other word, held nowhere, is fresh.
+// Read only where its recorded text holds a word's runs, as an unserved
+// recording is, the place would be passed and F's word read as fresh.
+func TestOutcomeCostARecordingFServedChangedIsReadForEveryWord(t *testing.T) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
+	const n = 300
+	mocks := make([]*models.Mock, n)
+	for i := range mocks {
+		mocks[i] = getAnswer(fmt.Sprintf("mock-%d", i), fmt.Sprintf("http://api/items/%d", i), fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d"}`, i, i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond))
+	}
+	const changed = n / 2
+	view := getAnswer(mocks[changed].Name, "http://api/items/150", `{"note":"Item 150 of the run","ref":"f0e9d8c7"}`, mocks[changed].Spec.ReqTimestampMock)
+	tr := NewTracker()
+	tr.NewSet()
+	var got string
+	var asks int64
+	// The second call of the set: the set's filters are built by then.
+	for range 2 {
+		tr.Begin()
+		dc := tr.Drifts()
+		raw := make([]Raw, n)
+		for i, m := range mocks {
+			raw[i] = dc.LazyRawOf(m, false, nil)
+		}
+		raw[changed] = dc.LazyRawOf(mocks[changed], true, nil).ServedAs(1).ServedChanged(dc.LazyRawOf(view, true, nil))
+		if len(raw[changed].views) != 1 {
+			t.Fatalf("the changed recording holds %d views, want its one", len(raw[changed].views))
+		}
+		a := placeAsks.Load()
+		got = oDescribe(Decide(costCall(dc, "body.ids", rec, live, eRecAt, nil, raw, nil, nil)))
+		asks = placeAsks.Load() - a
+		tr.End()
+	}
+	t.Logf("%d recordings, one served changed: %s; places read %d", n, got, asks)
+	if !strings.Contains(got, "a1b2c3d4->f0e9d8c7 refused unknown") || !strings.Contains(got, "mock-150") || strings.Count(got, "fresh") != 4 {
+		t.Errorf("over %d recordings, one round F served changed whose view alone holds F's word, the call decides %q; want a1b2c3d4->f0e9d8c7 refused unknown at mock-150 and each other word fresh", n, got)
+	}
+	// Only the changed recording is read, for each of the 5 words: none of
+	// the others holds a word.
+	if asks < 5 || asks > 10 {
+		t.Errorf("over %d recordings, one served changed, the call read %d places; want the changed one for each of the 5 words (5 to 10: wordAt may decide a word twice)", n, asks)
+	}
+}
