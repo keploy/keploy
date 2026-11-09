@@ -67,21 +67,28 @@ func IsShutdownError(err error) bool {
 }
 
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
-	// Parse the current URL
-	parsedURL, err := url.Parse(currentURL)
-
-	if err != nil {
-		// Return the original URL if parsing fails
-		return currentURL, err
-	}
-
 	if ipAddress == "" {
 		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
 	}
 
-	// Replace hostname with the IP address
-	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
-	// Return the modified URL
+	parsedURL, err := url.Parse(currentURL)
+	if err != nil {
+		return currentURL, err
+	}
+
+	cleanIP := strings.TrimPrefix(strings.TrimSuffix(ipAddress, "]"), "[")
+	_, port, err := net.SplitHostPort(parsedURL.Host)
+	if err != nil {
+		// parsedURL.Host has no port
+		if strings.Contains(cleanIP, ":") {
+			parsedURL.Host = "[" + cleanIP + "]"
+		} else {
+			parsedURL.Host = cleanIP
+		}
+	} else {
+		parsedURL.Host = net.JoinHostPort(cleanIP, port)
+	}
+
 	return parsedURL.String(), nil
 }
 
@@ -152,16 +159,16 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	}
 
 	parsedURL, err := url.Parse(currentURL)
-
 	if err != nil {
 		return currentURL, err
 	}
 
-	if parsedURL.Port() == "" {
-		parsedURL.Host = parsedURL.Host + ":" + port
-	} else {
-		parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Port(), port, 1)
+	cleanPort := strings.TrimPrefix(port, ":")
+	host, _, err := net.SplitHostPort(parsedURL.Host)
+	if err != nil {
+		host = strings.TrimPrefix(strings.TrimSuffix(parsedURL.Host, "]"), "[")
 	}
+	parsedURL.Host = net.JoinHostPort(host, cleanPort)
 
 	return parsedURL.String(), nil
 }
