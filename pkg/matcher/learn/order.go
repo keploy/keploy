@@ -495,11 +495,9 @@ func (dc *decider) answeredAfter(r string) []Place {
 			out = append(out, p)
 		}
 	}
-	ask := dc.places().recAsked(len(dc.ps), r)
-	for i, p := range dc.ps {
-		if ask != nil && !ask[i] {
-			continue
-		}
+	at, all := dc.places().recAsked(r)
+	for _, i := range askedPlaces(at, all, len(dc.ps)) {
+		p := dc.ps[i]
 		answeredPlaced.Add(1)
 		if p = placedFor(p, r); !p.recAfter || p.at.After(dc.in.At) {
 			continue
@@ -569,19 +567,18 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// held: what each place's texts hold of the word, asked once here and
 	// read again below, where orderUnknown and swapUnknown may have changed
 	// a place's state but no text.
-	// ask: the places that may show anything of the word (placeIndex);
-	// each other holds neither word nor a token around R's, and shows
-	// nothing (evNone), so both loops pass it.
-	held := make([]evHeld, len(dc.ps))
-	ask := dc.places().asked(len(dc.ps), w)
-	for i := range dc.ps {
-		if ask != nil && !ask[i] {
-			held[i] = evHeld{read: true}
-			continue
-		}
+	// asked: the places that may show anything of the word (placeIndex),
+	// in order, held[k] what asked[k]'s texts hold of it; each other holds
+	// neither word nor a token around R's, and shows nothing (evNone), so
+	// both loops pass it.
+	asked, all := dc.places().asked(w)
+	asked = askedPlaces(asked, all, len(dc.ps))
+	held := make([]evHeld, len(asked))
+	for k, i32 := range asked {
+		i := int(i32)
 		p := *ps.at(i)
-		held[i] = heldAt(p, w.Rec, w.Live)
-		ev, _ := evidenceOf(p, held[i], w.Rec, w.Live, piece)
+		held[k] = heldAt(p, w.Rec, w.Live)
+		ev, _ := evidenceOf(p, held[k], w.Rec, w.Live, piece)
 		if ev == evNone {
 			continue
 		}
@@ -600,18 +597,16 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	if !shown && ordered != nil {
 		*ordered = orderUnknown(dc.in, ps, cand)
 	}
-	swapUnknown(dc.in, ps, w, held)
+	swapUnknown(dc.in, ps, w, asked, held)
 	// aside: places that held R's word where F's did not follow, too
 	// little to be a conflict; a fresh word's line names them. unserved:
 	// recordings round F never served, which say nothing of a piece.
 	var src, outside, conflict, unknown, aside, unserved []evPlace
 	lateHeld := map[string][2]int{}
-	for i := range dc.ps {
-		if ask != nil && !ask[i] {
-			continue
-		}
+	for k, i32 := range asked {
+		i := int(i32)
 		p := *ps.at(i)
-		ev, read := evidenceOf(p, held[i], w.Rec, w.Live, piece)
+		ev, read := evidenceOf(p, held[k], w.Rec, w.Live, piece)
 		if floor && ev == evUnknown && p.fUnstated && !p.fGave {
 			unserved = append(unserved, p)
 			continue
@@ -799,11 +794,10 @@ func (dc *decider) lateCallTook(ps *wordPlaces, i int, w readWord, holders map[s
 	hs, ok := holders[lacks]
 	if !ok {
 		hs = [2]int{-1, -1}
-		ask := dc.places().asked(len(ps.base), readWord{Rec: lacks, Live: lacks})
-		for j, n := 0, 0; j < len(ps.base) && n < 2; j++ {
-			if ask != nil && !ask[j] {
-				continue
-			}
+		at, all := dc.places().asked(readWord{Rec: lacks, Live: lacks})
+		at = askedPlaces(at, all, len(ps.base))
+		for k, n := 0, 0; k < len(at) && n < 2; k++ {
+			j := int(at[k])
 			if q := ps.at(j); q.state != stateNotBefore && (evHolds(q.t.rec, lacks) || evHolds(q.t.live, lacks)) {
 				hs[n], n = j, n+1
 			}

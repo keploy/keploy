@@ -1231,7 +1231,7 @@ func TestOutcomeASwapQuestionLoadsNoRecordingThatIsNoStartUp(t *testing.T) {
 		raw := dr.LazyRawOf(tc.m, true, func() (*models.Mock, error) { loads++; return tc.m, nil })
 		x := newReaderIndex(dr)
 		p := evPlace{name: tc.m.Name, raw: 1, state: stateBefore, t: &placeText{rec: x.text(`{"pid":"82"}`), live: x.text(`{"pid":"83"}`)}}
-		swapUnknown(Input{Raw: []Raw{raw}}, newWordPlaces([]evPlace{p}, "82"), readWord{Rec: "82", Live: "83"}, []evHeld{heldAt(p, "82", "83")})
+		swapUnknown(Input{Raw: []Raw{raw}}, newWordPlaces([]evPlace{p}, "82"), readWord{Rec: "82", Live: "83"}, []int32{0}, []evHeld{heldAt(p, "82", "83")})
 		dc := &decider{in: Input{Raw: []Raw{raw}}, x: x, dr: dr}
 		dc.swappable(p, changedInstant{r: "82", l: "83"})
 		if tc.startUp != (loads > 0) {

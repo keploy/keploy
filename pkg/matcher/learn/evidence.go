@@ -390,15 +390,18 @@ func placedFor(p evPlace, r string) evPlace {
 // the places the postings name (placeIndex), the places of a candidate's
 // mock (orderUnknown) and those a late call's search names
 // (lateCallTook): it copies and places those alone, not every place of the
-// call for every word (placeCopies counts each copy).
+// call for every word (placeCopies counts each copy). It keeps them by
+// place (of, made at the first copy): a slot for each place of the call,
+// made for every word, cost a call of thousands of places and hundreds of
+// words more than the few places each word reads.
 type wordPlaces struct {
 	base []evPlace
 	r    string
-	of   []*evPlace
+	of   map[int]*evPlace
 }
 
 func newWordPlaces(base []evPlace, r string) *wordPlaces {
-	return &wordPlaces{base: base, r: r, of: make([]*evPlace, len(base))}
+	return &wordPlaces{base: base, r: r}
 }
 
 // at is the i-th place, placed for the word.
@@ -409,6 +412,9 @@ func (ps *wordPlaces) at(i int) *evPlace {
 	placeCopies.Add(1)
 	p := new(evPlace)
 	*p = placedFor(ps.base[i], ps.r)
+	if ps.of == nil {
+		ps.of = map[int]*evPlace{}
+	}
 	ps.of[i] = p
 	return p
 }
@@ -690,17 +696,19 @@ const (
 // start-up carries alike is no swap's, and reads as any recording's. Only
 // a place whose recorded text holds the word is asked: swapHolds reads a
 // match it finds in no one field as a swap's. A recording that is no
-// start-up is no swap's, and is not loaded to ask. held is what each
-// place's texts hold of w (heldAt), asked once for the word.
-func swapUnknown(in Input, ps *wordPlaces, w readWord, held []evHeld) {
+// start-up is no swap's, and is not loaded to ask. at is the places the
+// word's check reads (placeIndex.asked), held what each of their texts
+// holds of w (heldAt, held[k] of at[k]), asked once for the word: a place
+// it does not read holds neither word.
+func swapUnknown(in Input, ps *wordPlaces, w readWord, at []int32, held []evHeld) {
 	holds := func(own string) bool {
 		return holdsToken(own, w.Rec) || slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return holdsToken(own, t.Rec) })
 	}
-	for i := range ps.base {
-		if !held[i].hr {
+	for k, i := range at {
+		if !held[k].hr {
 			continue
 		}
-		p := ps.at(i)
+		p := ps.at(int(i))
 		if p.raw == 0 || p.state != stateBefore {
 			continue
 		}
@@ -1660,7 +1668,7 @@ func (p evPlace) showsUntold() bool {
 	return p.fMay || len(p.views) > 0 || p.undeclared || p.gave
 }
 
-// asked reports, by place, whether a check of w reads it (placeIndex); nil
+// asked is the places a check of w reads (placeIndex), ascending; all
 // where it reads every place: R's word or F's has no run of letters and
 // digits the postings can name. A place that shows a whole token around
 // R's word (tokenShown) is among those the postings name for R's word:
@@ -1669,43 +1677,56 @@ func (p evPlace) showsUntold() bool {
 // (holdsToken; an instant never starts or ends glued to a letter or digit,
 // so a base64 run cut at one's bound ends a run of letters and digits
 // there too).
-func (pi *placeIndex) asked(n int, w readWord) []bool {
-	ask := make([]bool, n)
-	if !pi.mark(ask, pi.rec, runsOf(w.Rec)) || !pi.mark(ask, pi.live, runsOf(w.Live)) {
-		return nil
+func (pi *placeIndex) asked(w readWord) (at []int32, all bool) {
+	if !pi.mark(&at, pi.rec, runsOf(w.Rec)) || !pi.mark(&at, pi.live, runsOf(w.Live)) {
+		return nil, true
 	}
-	for _, i := range pi.always {
-		ask[i] = true
-	}
-	return ask
+	return pi.ascending(at), false
 }
 
-// recAsked reports, by place, whether its recorded text may hold r as a
-// word (holdsWord), as asked's does for R's word, or is read always; nil
-// where r has no run of letters and digits the postings can name. A text
+// recAsked is the places whose recorded text may hold r as a word
+// (holdsWord), as asked's does for R's word, and those read always,
+// ascending; all where r has no run of letters and digits the postings can name. A text
 // that holds r as a word in any reading holds each of r's runs whole: every
 // reading reads a letter or digit as a word byte, so none stands right
 // before or after r.
-func (pi *placeIndex) recAsked(n int, r string) []bool {
-	ask := make([]bool, n)
-	if !pi.mark(ask, pi.rec, runsOf(r)) {
-		return nil
+func (pi *placeIndex) recAsked(r string) (at []int32, all bool) {
+	if !pi.mark(&at, pi.rec, runsOf(r)) {
+		return nil, true
 	}
-	for _, i := range pi.always {
-		ask[i] = true
-	}
-	return ask
+	return pi.ascending(at), false
 }
 
-// mark marks in ask the places whose text on side (rec or live) the set's
+// ascending is at and the places read always, each once, in the call's
+// order of places: a check reads them in that order, as it read every
+// place before the postings named any. It is as long as the places the
+// word's check reads, never the call's: a slot per place of the call for
+// every word of a call of thousands of places cost more than the reads.
+func (pi *placeIndex) ascending(at []int32) []int32 {
+	at = append(at, pi.always...)
+	slices.Sort(at)
+	return slices.Compact(at)
+}
+
+// askedPlaces is at, or where all is set every place of n, in order.
+func askedPlaces(at []int32, all bool, n int) []int32 {
+	if !all {
+		return at
+	}
+	at = make([]int32, n)
+	for i := range at {
+		at[i] = int32(i)
+	}
+	return at
+}
+
+// mark adds to ask the places whose text on side (rec or live) the set's
 // postings say may hold every run of runs; false where runs is empty, which
 // every text may hold.
-func (pi *placeIndex) mark(ask []bool, side map[int32][]int32, runs []string) bool {
+func (pi *placeIndex) mark(ask *[]int32, side map[int32][]int32, runs []string) bool {
 	ids, ok := pi.fs.holdingRuns(runs)
 	for _, id := range ids {
-		for _, i := range side[id] {
-			ask[i] = true
-		}
+		*ask = append(*ask, side[id]...)
 	}
 	return ok
 }

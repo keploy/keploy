@@ -4003,3 +4003,47 @@ func TestOutcomeCostACallsPlacesAreListedOnce(t *testing.T) {
 		t.Errorf("3000 leaves' places allocate %d bytes; want 3000 places in at most %d (the list, %d bytes a place, a name each, %d bytes of strings an exchange)", got, want, size, late)
 	}
 }
+
+// A word's check keeps a slot only for each place it reads (placeIndex's
+// asked, wordPlaces), never one for every place of the call: in a call of
+// 200 recordings or of 3200, a word one view holds is asked at that place
+// alone, and what its check allocates to list, hold and copy its places
+// does not grow with the call.
+func TestOutcomeCostAWordsCheckKeepsOnlyThePlacesItReads(t *testing.T) {
+	var got [2]uint64
+	for k, n := range []int{200, 3200} {
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		body := func(i int) string { return fmt.Sprintf(`{"note":"Item %d"}`, i) }
+		view := func(i int) string {
+			if i == 7 {
+				return fmt.Sprintf(`{"note":"Item %d","ref":"f0e9d8c7"}`, i)
+			}
+			return body(i)
+		}
+		in := costCall(tr.Drifts(), "body.ref", "a1b2c3d4", "f0e9d8c7", eRecAt, nil, costServed(tr.Drifts(), n, body, view), nil, nil)
+		dc := newDecider(in, false, newReaderIndex(in.Drifts))
+		pi, w := dc.places(), readWord{Rec: "a1b2c3d4", Live: "f0e9d8c7"}
+		var a, b runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&a)
+		at, all := pi.asked(w)
+		at = askedPlaces(at, all, len(dc.ps))
+		ps := newWordPlaces(dc.ps, w.Rec)
+		held := make([]evHeld, len(at))
+		for j, i := range at {
+			held[j] = heldAt(*ps.at(int(i)), w.Rec, w.Live)
+		}
+		runtime.ReadMemStats(&b)
+		tr.End()
+		got[k] = b.TotalAlloc - a.TotalAlloc
+		t.Logf("%d recordings: the word is asked at %v, its check allocates %d bytes", n, at, got[k])
+		if all || len(at) != 1 || dc.ps[at[0]].mock != "mock-7" || len(ps.of) != 1 || !held[0].hf {
+			t.Errorf("%d recordings: the word is asked at %v (all %v), %d places copied, held %+v; want mock-7's place alone, copied once, holding F's word", n, at, all, len(ps.of), held)
+		}
+	}
+	if got[1] > got[0]+4096 {
+		t.Errorf("a word's check allocates %d bytes in a call of 200 recordings and %d in one of 3200; want no more as the call grows", got[0], got[1])
+	}
+}
