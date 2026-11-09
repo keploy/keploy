@@ -381,54 +381,57 @@ func TestOutcomeAPieceAPlaceHoldsInBothRunsIsNoChance(t *testing.T) {
 	)
 	// A recording answered a second after it was asked, a minute before the
 	// call; untimed, one whose answer time keploy cannot read.
-	timed := func(held string, answered bool) Raw {
+	timed := func(held string, answered bool) *models.Mock {
 		m := receiveOf("mock-31", held, r1Insert.Add(-time.Minute))
 		m.Spec.ResTimestampMock = time.Time{}
 		if answered {
 			m.Spec.ResTimestampMock = r1Insert.Add(-time.Minute + time.Second)
 		}
-		return clockedDrifts().RawOf(m, true)
+		return m
 	}
-	mock := func(held string) Raw { return timed(held, true) }
-	untimed := func(held string) Raw { return timed(held, false) }
+	mock := func(held string) *models.Mock { return timed(held, true) }
+	untimed := func(held string) *models.Mock { return timed(held, false) }
+	decideSet := func(g GivenPlaces) Decision {
+		in := oInput("body.appId", setRec, setLive, nil, nil)
+		in.At, in.Arrived = r1Insert, r1Insert
+		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{g}, nil }
+		return oWord(t, Decide(in), "48d1", "4c7d")
+	}
 	for _, c := range []struct {
 		what   string
-		x      Raw
+		m      *models.Mock
+		tells  []tell
 		chance bool
 	}{
-		{"round F's view holds round F's group", untimed(heldR).ServedAs(3).ServedLive(untimed(heldF)), false},
-		{"round F served it with no view stated", untimed(heldR).ServedAs(3), false},
-		{"round F served it changed with a view keploy could not read", untimed(heldR).ServedAs(3).ServedChanged(), false},
-		{"round F's view alone holds round F's group", mock(other).ServedAs(3).ServedLive(mock(heldF)), true},
-		{"round F's view holds both runs' groups, the recording's answer none", mock(other).ServedAs(3).ServedLive(mock(heldR + " " + heldF)), true},
-		{"the recording alone holds the recorded group, round F's view none, its answer time unread", untimed(heldR).ServedAs(3).ServedLive(untimed(other)), true},
+		{"round F's view holds round F's group", untimed(heldR), []tell{toldView("v1", untimed(heldF))}, false},
+		{"round F served it with no view stated", untimed(heldR), []tell{toldNothing}, false},
+		{"round F served it changed with a view keploy could not read", untimed(heldR), []tell{toldUnkept}, false},
+		{"round F's view alone holds round F's group", mock(other), []tell{toldView("v1", mock(heldF))}, true},
+		{"round F's view holds both runs' groups, the recording's answer none", mock(other), []tell{toldView("v1", mock(heldR+" "+heldF))}, true},
+		{"the recording alone holds the recorded group, round F's view none, its answer time unread", untimed(heldR), []tell{toldView("v1", untimed(other))}, true},
+		{"the recording alone holds the recorded group, served as recorded, its answer time unread", untimed(heldR), []tell{toldAsRecorded}, true},
 		// The recording made its group, but keploy cannot read when it
 		// gave the application this recording: it may not have had it to
 		// cut from, so round F's group in round F's view is no chance.
-		{"round F's view alone holds round F's group, the recording's answer time unread", untimed(other).ServedAs(3).ServedLive(mock(heldF)), false},
-		{"round F's view holds both runs' groups, the recording's answer none and its time unread", untimed(other).ServedAs(3).ServedLive(mock(heldR + " " + heldF)), false},
+		{"round F's view alone holds round F's group, the recording's answer time unread", untimed(other), []tell{toldView("v1", mock(heldF))}, false},
+		{"round F's view holds both runs' groups, the recording's answer none and its time unread", untimed(other), []tell{toldView("v1", mock(heldR+" "+heldF))}, false},
 		// Round F made its group, but its serves gave two views: keploy
 		// reads that it gave nothing there (ServedChanged), so the
 		// recording's group in its answer is no chance.
-		{"the recording alone holds the recorded group, round F's serves gave two views, neither round F's group", untimed(heldR).ServedAs(3).ServedChanged(untimed(other), untimed(heldR)), false},
+		{"the recording alone holds the recorded group, round F's serves gave two views, neither round F's group", untimed(heldR), []tell{toldView("v1", untimed(other)), toldView("v2", untimed(heldR))}, false},
 	} {
-		in := oInput("body.appId", setRec, setLive, nil, nil)
-		in.At, in.Arrived = r1Insert, r1Insert
-		x := c.x
-		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
-		d := oWord(t, Decide(in), "48d1", "4c7d")
-		if c.chance {
-			costFresh(t, "a set recording: "+c.what, d)
-			continue
+		for _, g := range givenBoth(t, c.m, c.tells...) {
+			d := decideSet(g.g)
+			if c.chance {
+				costFresh(t, "a set recording ("+g.how+"): "+c.what, d)
+				continue
+			}
+			oRefused(t, "a set recording ("+g.how+"): "+c.what, d, RefusalUnknown, "mock-31")
 		}
-		oRefused(t, "a set recording: "+c.what, d, RefusalUnknown, "mock-31")
 	}
-	in := oInput("body.appId", setRec, setLive, nil, nil)
-	in.At, in.Arrived = r1Insert, r1Insert
-	in.Given = func() ([]GivenPlaces, error) {
-		return []GivenPlaces{PlacesOf(untimed(other).ServedAs(3).ServedLive(mock(heldF)))}, nil
+	for _, g := range givenBoth(t, untimed(other), toldView("v1", mock(heldF))) {
+		oOneSideLine(t, decideSet(g.g), "round F's own piece of the id stands at mock-31, which the recording did not give the application before the call, by a time keploy reads: the recording's making its own piece shows nothing of whether the application cut it from there")
 	}
-	oOneSideLine(t, oWord(t, Decide(in), "48d1", "4c7d"), "round F's own piece of the id stands at mock-31, which the recording did not give the application before the call, by a time keploy reads: the recording's making its own piece shows nothing of whether the application cut it from there")
 }
 
 // oNoChanceLine checks d's line says, in a sentence of its own, why the
@@ -772,46 +775,159 @@ func TestOutcomeASetRecordingCountsForTheRunThatHadIt(t *testing.T) {
 	)
 	// set is a set recording asked asked and answered answered from the
 	// call (answered 0: no answer time), held in its answer.
-	set := func(held string, asked, answered time.Duration) Raw {
+	set := func(held string, asked, answered time.Duration) *models.Mock {
 		m := receiveOf("mock-31", held, oAt.Add(asked))
 		m.Spec.ResTimestampMock = time.Time{}
 		if answered != 0 {
 			m.Spec.ResTimestampMock = oAt.Add(answered)
 		}
-		return clockedDrifts().RawOf(m, true)
+		return m
 	}
-	decide := func(x Raw) Decision {
+	decide := func(g GivenPlaces) Decision {
 		in := oInput(path, rec, live, nil, nil)
-		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
+		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{g}, nil }
 		return oWord(t, Decide(in), r, f)
 	}
-	before := func(held string) Raw { return set(held, -time.Minute, -time.Minute+time.Second) }
+	before := func(held string) *models.Mock { return set(held, -time.Minute, -time.Minute+time.Second) }
 	for _, c := range []struct {
 		what   string
-		x      Raw
+		m      *models.Mock
+		tells  []tell
 		chance bool
 	}{
-		{"the recorded group, round F's view none of its group", before(holdsR).ServedAs(3).ServedLive(before(noneF)), true},
-		{"the recorded group, served as recorded", before(holdsR).ServedAs(3).ServedAsRecorded(), true},
-		{"the recorded group, round F's serves gave two views, neither its group", before(holdsR).ServedAs(3).ServedChanged(before(noneF), before(noneR)), false},
-		{"the recorded group, round F did not serve it", before(holdsR), false},
-		{"round F's group in its view, answered before the call", before(noneR).ServedAs(3).ServedLive(before(holdsF)), true},
-		{"round F's group in its view, answered after the call", set(noneR, -time.Second, time.Second).ServedAs(3).ServedLive(before(holdsF)), false},
-		{"round F's group in its view, asked after the call", set(noneR, time.Second, 2*time.Second).ServedAs(3).ServedLive(before(holdsF)), false},
-		{"round F's group in its view, no answer time", set(noneR, -time.Minute, 0).ServedAs(3).ServedLive(before(holdsF)), false},
+		{"the recorded group, round F's view none of its group", before(holdsR), []tell{toldView("v1", before(noneF))}, true},
+		{"the recorded group, round F's serves gave one view twice, none of its group", before(holdsR), []tell{toldView("v1", before(noneF)), toldView("v1", before(noneF))}, true},
+		{"the recorded group, served as recorded", before(holdsR), []tell{toldAsRecorded}, true},
+		{"the recorded group, served as recorded twice", before(holdsR), []tell{toldAsRecorded, toldAsRecorded}, true},
+		{"the recorded group with no answer time, round F's view none of its group", set(holdsR, -time.Minute, 0), []tell{toldView("v1", before(noneF))}, true},
+		{"the recorded group, round F's serves gave two views, neither its group", before(holdsR), []tell{toldView("v1", before(noneF)), toldView("v2", before(noneR))}, false},
+		{"the recorded group, served as recorded once and with a view none of its group once", before(holdsR), []tell{toldAsRecorded, toldView("v1", before(noneF))}, false},
+		{"the recorded group, served with no view stated", before(holdsR), []tell{toldNothing}, false},
+		{"the recorded group, served as recorded once and with no view stated once", before(holdsR), []tell{toldAsRecorded, toldNothing}, false},
+		{"the recorded group, served with a view keploy could not keep", before(holdsR), []tell{toldUnkept}, false},
+		{"the recorded group, round F did not serve it", before(holdsR), nil, false},
+		{"round F's group in its view, answered before the call", before(noneR), []tell{toldView("v1", before(holdsF))}, true},
+		{"round F's group in its view, answered after the call", set(noneR, -time.Second, time.Second), []tell{toldView("v1", before(holdsF))}, false},
+		{"round F's group in its view, asked after the call", set(noneR, time.Second, 2*time.Second), []tell{toldView("v1", before(holdsF))}, false},
+		{"round F's group in its view, no answer time", set(noneR, -time.Minute, 0), []tell{toldView("v1", before(holdsF))}, false},
 	} {
-		d := decide(c.x)
-		if c.chance {
-			costFresh(t, "a set recording: "+c.what, d)
-			continue
+		for _, g := range givenBoth(t, c.m, c.tells...) {
+			d := decide(g.g)
+			if c.chance {
+				costFresh(t, "a set recording ("+g.how+"): "+c.what, d)
+				continue
+			}
+			oRefused(t, "a set recording ("+g.how+"): "+c.what, d, RefusalUnknown, "mock-31")
 		}
-		oRefused(t, "a set recording: "+c.what, d, RefusalUnknown, "mock-31")
 	}
-	noTime := before(noneR).ServedAs(3).ServedLive(before(holdsF))
+	noTime := clockedDrifts().RawOf(before(noneR), true).ServedAs(3).ServedLive(clockedDrifts().RawOf(before(holdsF), true))
 	noTime.noTime = true
-	oRefused(t, "a set recording: round F's group in its view, its recorded time unread", decide(noTime), RefusalUnknown, "mock-31")
-	oOneSideLine(t, decide(set(noneR, time.Second, 2*time.Second).ServedAs(3).ServedLive(before(holdsF))), "round F's own piece of the id stands at mock-31, which the recording did not give the application before the call, by a time keploy reads: the recording's making its own piece shows nothing of whether the application cut it from there")
-	oOneSideLine(t, decide(before(holdsR).ServedAs(3).ServedChanged(before(noneF), before(noneR))), "the recording's own piece of the id stands at mock-31, which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
+	oRefused(t, "a set recording: round F's group in its view, its recorded time unread", decide(PlacesOf(noTime)), RefusalUnknown, "mock-31")
+	for _, g := range givenBoth(t, set(noneR, time.Second, 2*time.Second), toldView("v1", before(holdsF))) {
+		oOneSideLine(t, decide(g.g), "round F's own piece of the id stands at mock-31, which the recording did not give the application before the call, by a time keploy reads: the recording's making its own piece shows nothing of whether the application cut it from there")
+	}
+	for _, g := range givenBoth(t, before(holdsR), toldView("v1", before(noneF)), toldView("v2", before(noneR))) {
+		oOneSideLine(t, decide(g.g), "the recording's own piece of the id stands at mock-31, which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
+	}
+}
+
+// tell is how one of round F's serves of a set recording was told: as
+// recorded (toldAsRecorded), with a view named key (toldView), with a view
+// keploy cannot keep (toldUnkept), or not at all (toldNothing).
+type tell struct {
+	key  string
+	view *models.Mock
+}
+
+var (
+	toldAsRecorded = tell{key: "\x00recorded"}
+	toldNothing    = tell{key: "\x00untold"}
+	toldUnkept     = tell{}
+)
+
+func toldView(key string, view *models.Mock) tell { return tell{key: key, view: view} }
+
+// givenThrough is m as production hands a set recording to a call: served
+// in a tracker's set once for each of tells, each serve told so, and read
+// by Order.GivenPlaces, as integrations' Mongo and Postgres learn steps
+// read it. No tells: round F did not serve it.
+func givenThrough(t *testing.T, m *models.Mock, tells ...tell) GivenPlaces {
+	t.Helper()
+	tr := NewTracker()
+	tr.Begin()
+	for _, c := range tells {
+		tr.ServedMock(m)
+		switch c.key {
+		case toldAsRecorded.key:
+			tr.ServedMockAsRecorded(m)
+		case toldNothing.key:
+		default:
+			var load func() (*models.Mock, error)
+			if view := c.view; view != nil {
+				load = func() (*models.Mock, error) { return view, nil }
+			}
+			tr.ServedMockLive(m, c.key, load)
+		}
+	}
+	g, err := tr.Placed().Order.GivenPlaces(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// givenRaw is m's Raw marked as Order.ServedView marks a recording of
+// another test whose serves were told as tells say (statedView), read as
+// a set recording: PlacesOf of it.
+func givenRaw(m *models.Mock, tells ...tell) GivenPlaces {
+	x := clockedDrifts().RawOf(m, true)
+	if len(tells) == 0 {
+		return PlacesOf(x)
+	}
+	x = x.ServedAs(3)
+	recorded, untold, unkept := false, false, false
+	var views []Raw
+	seen := map[string]bool{}
+	for _, c := range tells {
+		switch {
+		case c.key == toldAsRecorded.key:
+			recorded = true
+		case c.key == toldNothing.key:
+			untold = true
+		case c.key == "" || c.view == nil:
+			unkept = true
+		case !seen[c.key]:
+			seen[c.key] = true
+			views = append(views, clockedDrifts().RawOf(c.view, true))
+		}
+	}
+	switch {
+	case untold:
+		return PlacesOf(x)
+	case unkept:
+		return PlacesOf(x.ServedChanged())
+	case len(views) == 0:
+		return PlacesOf(x.ServedAsRecorded())
+	case !recorded && len(views) == 1:
+		return PlacesOf(x.ServedLive(views[0]))
+	case recorded:
+		views = append(views, x)
+	}
+	return PlacesOf(x.ServedChanged(views...))
+}
+
+// givenShape is a set recording read one way (how).
+type givenShape struct {
+	how string
+	g   GivenPlaces
+}
+
+// givenBoth is m as a set recording whose serves were told as tells say,
+// read both ways: as a marked Raw (givenRaw) and as production reads one
+// (givenThrough).
+func givenBoth(t *testing.T, m *models.Mock, tells ...tell) []givenShape {
+	t.Helper()
+	return []givenShape{{"a marked Raw", givenRaw(m, tells...)}, {"through the tracker", givenThrough(t, m, tells...)}}
 }
 
 // A set recording was given R's application before the call only where it
@@ -1041,4 +1157,202 @@ func TestOutcomeALongWordShownJudgesAPlaceAtTheQuestion(t *testing.T) {
 			t.Errorf("%s: the set recording may be where the application took the id: %v; want %v", tc.what, got, tc.shows)
 		}
 	}
+}
+
+// A timed set recording holding the recorded group that round F served as
+// recorded, or with one view none of its group, beside a place of the
+// call's own test answered at the call's own instant that holds it too
+// (unknown there; round F served it before the call): round F's group
+// stands nowhere, so round F made it, and it gave the application both
+// before the call with a text keploy reads. Chance: the id fresh. Not where
+// round F's serves of the set recording gave two views, which keploy reads
+// as round F having given nothing there.
+func TestOutcomeASetRecordingRoundFReadCountsBesideAnUnknownOwnPlace(t *testing.T) {
+	const (
+		path          = "body.docs.msgs.0._id"
+		rec, live     = "ed35a78f-905c-48d1-bc3d-a07311678c73", "3f0c9a12-7e6d-4b8a-9e21-5c6d7e8f9a0b"
+		r, f          = "48d1", "4b8a"
+		field         = "body.cursor.firstBatch.0._id"
+		holdsR        = "b0fd3b58-3ff5-48d1-a1b2-c3d4e5f60718"
+		noneR, noneF  = "aaaa1111-2222-4c00-8333-444455556666", "c1ae4c69-77aa-4c00-b2c3-d4e5f6071829"
+		answeredAtTwo = 2 * time.Second
+	)
+	set := func(held string) *models.Mock {
+		m := receiveOf("mock-31", held, oAt.Add(-time.Minute))
+		m.Spec.ResTimestampMock = oAt.Add(-time.Minute + time.Second)
+		return m
+	}
+	decide := func(g *GivenPlaces) Decision {
+		in := oInput(path, rec, live, oServed("mock-51", false, false, Response, oText(field, holdsR), noneF, answeredAtTwo), nil)
+		if g != nil {
+			in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{*g}, nil }
+		}
+		return oWord(t, Decide(in), r, f)
+	}
+	costFresh(t, "the own place alone", decide(nil))
+	for _, c := range []struct {
+		what   string
+		tells  []tell
+		chance bool
+	}{
+		{"served as recorded", []tell{toldAsRecorded}, true},
+		{"served with one view none of round F's group", []tell{toldView("v1", set(noneF))}, true},
+		{"served with two views, neither round F's group", []tell{toldView("v1", set(noneF)), toldView("v2", set(noneR))}, false},
+	} {
+		for _, g := range givenBoth(t, set(holdsR), c.tells...) {
+			d := decide(&g.g)
+			if c.chance {
+				costFresh(t, "beside a set recording ("+g.how+") "+c.what, d)
+				continue
+			}
+			oRefused(t, "beside a set recording ("+g.how+") "+c.what, d, RefusalUnknown, "mock-31")
+		}
+	}
+}
+
+// A view a set recording's words were read from that cannot be read again
+// for its instants is one keploy does not read: the recording counts for
+// no run's making its piece (givenWords.fRead), as for a view never read.
+func TestGivenPlacesAViewReadOnceOnlyIsNotRead(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	m := receiveOf("mock-31", "b0fd3b58-3ff5-48d1-a1b2-c3d4e5f60718", oAt.Add(-time.Minute))
+	m.Spec.ResTimestampMock = oAt.Add(-time.Minute + time.Second)
+	view := receiveOf("mock-31", "c1ae4c69-77aa-4c00-b2c3-d4e5f6071829", oAt.Add(-time.Minute))
+	view.Spec.ResTimestampMock = m.Spec.ResTimestampMock
+	for _, c := range []struct {
+		what  string
+		reads int
+		want  bool
+	}{{"read each time", 1 << 30, true}, {"read once only", 1, false}} {
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(m)
+		n := 0
+		tr.ServedMockLive(m, "v1", func() (*models.Mock, error) {
+			if n++; n > c.reads {
+				return nil, errors.New("the view is gone")
+			}
+			return view, nil
+		})
+		o := tr.Placed().Order
+		// No set store of views: each reader reads the view again.
+		o.places = nil
+		g, err := o.GivenPlaces(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g.words.fRead != c.want || g.words.unread == c.want {
+			t.Errorf("a view %s: fRead %v, unread %v; want fRead %v", c.what, g.words.fRead, g.words.unread, c.want)
+		}
+	}
+}
+
+// The recording made its group (it holds it at no place it had), and
+// round F's group stands in one of the two views round F's serves gave of
+// a place the recording did not give the application before the call
+// (answered after it): the recording's making its group shows nothing of
+// that place. Refused, naming it, for a recording handed to the call and
+// for a set recording.
+func TestOutcomeRoundFsGroupInOneOfTwoViewsOfAPlaceTheRecordingHadNot(t *testing.T) {
+	const (
+		path         = "body.docs.msgs.0._id"
+		rec, live    = "ed35a78f-905c-48d1-bc3d-a07311678c73", "3f0c9a12-7e6d-4b8a-9e21-5c6d7e8f9a0b"
+		r, f         = "48d1", "4b8a"
+		holdsF       = "9e9e9e9e-77aa-4b8a-b2c3-d4e5f6071829"
+		noneR, noneF = "aaaa1111-2222-4c00-8333-444455556666", "c1ae4c69-77aa-4c00-b2c3-d4e5f6071829"
+	)
+	// at is a recording of mock asked a second before the call and
+	// answered answered from the call, holding held.
+	at := func(mock, held string, answered time.Duration) *models.Mock {
+		m := receiveOf(mock, held, oAt.Add(-time.Second))
+		m.Spec.ResTimestampMock = oAt.Add(answered)
+		return m
+	}
+	raw := func(mock, held string) Raw { return clockedDrifts().RawOf(at(mock, held, time.Second), true) }
+	x := raw("mock-61", noneR).ServedAs(3).ServedChanged(raw("mock-61", noneF), raw("mock-61", holdsF))
+	oRefused(t, "round F's group in one of two views of a recording the recording answered after the call", oWord(t, Decide(oInput(path, rec, live, nil, []Raw{x})), r, f), RefusalUnknown, "mock-61")
+	for _, g := range givenBoth(t, at("mock-31", noneR, time.Second), toldView("v1", at("mock-31", noneF, time.Second)), toldView("v2", at("mock-31", holdsF, time.Second))) {
+		in := oInput(path, rec, live, nil, nil)
+		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{g.g}, nil }
+		oRefused(t, "a set recording ("+g.how+"): round F's group in one of two views, the recording answered it after the call", oWord(t, Decide(in), r, f), RefusalUnknown, "mock-31")
+	}
+}
+
+// Where several set recordings hold the recorded group and round F gave
+// none of them with a text keploy reads, the line names the first of them
+// in the set's order, the same place on every decision.
+func TestOutcomeTheHolderTheLineNamesIsTheSetsFirst(t *testing.T) {
+	const (
+		path            = "body.docs.msgs.0._id"
+		rec, live       = "ed35a78f-905c-48d1-bc3d-a07311678c73", "3f0c9a12-7e6d-4b8a-9e21-5c6d7e8f9a0b"
+		r, f            = "48d1", "4b8a"
+		holdsR, holdsR2 = "b0fd3b58-3ff5-48d1-a1b2-c3d4e5f60718", "0b0b0b0b-1c1c-48d1-a2a2-c3c3c3c3c3c3"
+		noneR, noneF    = "aaaa1111-2222-4c00-8333-444455556666", "c1ae4c69-77aa-4c00-b2c3-d4e5f6071829"
+	)
+	set := func(name, held string) *models.Mock {
+		m := receiveOf(name, held, oAt.Add(-time.Minute))
+		m.Spec.ResTimestampMock = oAt.Add(-time.Minute + time.Second)
+		return m
+	}
+	two := func(name, held string) GivenPlaces {
+		return givenThrough(t, set(name, held), toldView("v1", set(name, noneF)), toldView("v2", set(name, noneR)))
+	}
+	gs := []GivenPlaces{two("mock-31", holdsR), two("mock-32", holdsR2), two("mock-33", holdsR), two("mock-34", holdsR2)}
+	want := "the recording's own piece of the id stands at mock-31, which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there"
+	for i := 0; i < 40; i++ {
+		in := oInput(path, rec, live, nil, nil)
+		in.Given = func() ([]GivenPlaces, error) { return gs, nil }
+		d := oWord(t, Decide(in), r, f)
+		if d.Refusal == nil || d.Refusal.Why != want {
+			t.Fatalf("decision %d names another place: %s; want %q", i, oDescribe([]Decision{d}), want)
+		}
+	}
+}
+
+// Where each run holds its own piece at a place it had, the line says only
+// that (bothRunsWhy), even where one of the recording's holders is a place
+// round F was not given before the call: that one run made its piece is no
+// longer the reason.
+func TestOutcomeBothRunsHoldingSaysSoOverOneRunsHolder(t *testing.T) {
+	const (
+		path           = "body.docs.msgs.0._id"
+		rec, live      = "ed35a78f-905c-48d1-bc3d-a07311678c73", "3f0c9a12-7e6d-4b8a-9e21-5c6d7e8f9a0b"
+		r, f           = "48d1", "4b8a"
+		field          = "body.cursor.firstBatch.0._id"
+		holdsR, holdsF = "b0fd3b58-3ff5-48d1-a1b2-c3d4e5f60718", "9e9e9e9e-77aa-4b8a-b2c3-d4e5f6071829"
+		noneR, noneF   = "aaaa1111-2222-4c00-8333-444455556666", "c1ae4c69-77aa-4c00-b2c3-d4e5f6071829"
+	)
+	late := oServed("mock-51", false, false, Response, oText(field, holdsR), noneF, time.Second)
+	late[0].Payload.servedAfter = true
+	e := append(late, oServed("mock-52", false, false, Response, oText(field, noneR), holdsF, time.Second)...)
+	d := oWord(t, Decide(oInput(path, rec, live, e, nil)), r, f)
+	oRefused(t, "the recorded group at a place round F served only after the call, round F's at a place answered before it", d, RefusalUnknown, "mock-51", "mock-52")
+	oNoChanceLine(t, d, "mock-51 "+field)
+}
+
+// Where the place a refusal names first is unknown for a reason of its own
+// (here, a request sent at the call's own instant that holds the recorded
+// group whole), the line says that reason of it as of any place, not the
+// reason a later place took from oneRun.
+func TestOutcomeTheFirstPlacesOwnReasonLeadsTheLine(t *testing.T) {
+	const (
+		path      = "body.docs.msgs.0._id"
+		rec, live = "ed35a78f-905c-48d1-bc3d-a07311678c73", "3f0c9a12-7e6d-4b8a-9e21-5c6d7e8f9a0b"
+		r, f      = "48d1", "4b8a"
+		field     = "body.cursor.firstBatch.0._id"
+		holdsR    = "b0fd3b58-3ff5-48d1-a1b2-c3d4e5f60718"
+		noneF     = "c1ae4c69-77aa-4c00-b2c3-d4e5f6071829"
+		fNotGiven = ", which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there"
+	)
+	whole := oServed("mock-50", false, false, Request, oText(field, r), "c0de", 0)
+	whole[0].At = oAt
+	late := oServed("mock-51", false, false, Response, oText(field, holdsR), noneF, time.Second)
+	late[0].Payload.servedAfter = true
+	d := oWord(t, Decide(oInput(path, rec, live, append(whole, late...), nil)), r, f)
+	oRefused(t, "the recorded group whole in a request sent at the call's instant, and in an id at a place round F served only after it", d, RefusalUnknown, "mock-50", "mock-51")
+	if d.Refusal == nil || !strings.HasPrefix(d.Refusal.Why, "keploy cannot tell what round F gave at mock-50 "+field+" before this call (") || strings.Contains(d.Line, fNotGiven) {
+		t.Errorf("the line must lead with mock-50's own reason: %q", d.Line)
+	}
+	alone := oWord(t, Decide(oInput(path, rec, live, late, nil)), r, f)
+	oOneSideLine(t, alone, "the recording's own piece of the id stands at mock-51 "+field+fNotGiven)
 }

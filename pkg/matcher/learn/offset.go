@@ -814,7 +814,10 @@ type givenWords struct {
 	// as recorded, or changed with the one view it stated (Raw.Live). Not
 	// where F's serves gave different views, a view was unstated or
 	// unread, or F did not serve it. An outside recording is one F gave
-	// the application before the call (Raw.elsewhere, GivenEarlier).
+	// the application before the call (Raw.elsewhere, GivenEarlier). A
+	// set recording (GivenPlaces) reads it from the statements of F's
+	// serves the read saw (statedWords), as Order.ServedView marks a Raw:
+	// each told as recorded, or with one view read and none as recorded.
 	fRead bool
 }
 
@@ -1161,6 +1164,9 @@ func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
 	}
 	g.words = o.statedWords(m, g.words, g.answers)
 	g.fView, g.words.unread = o.viewMoments(m, g.words, g.answers)
+	// A view read for its words that cannot be read again for its
+	// instants is one keploy does not read (fail closed).
+	g.words.fRead = g.words.fRead && !g.words.unread
 	if o.t != nil {
 		o.t.mu.Lock()
 		g.words.test = o.testOf(g.first, g.last)
@@ -1181,7 +1187,9 @@ func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
 // where m's recording holds an answer (answers): one of a kind that holds
 // its answer apart from its request and holds none gave the application
 // nothing. What both gave (same) stays as read with no view stated, none:
-// it lets no word go, the fail-closed side.
+// it lets no word go, the fail-closed side. fRead says keploy reads what F
+// gave there: every serve told as recorded, or with one view, read, and
+// none as recorded (givenWords.fRead).
 func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWords {
 	if o.t == nil || !answers {
 		return w
@@ -1191,6 +1199,9 @@ func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWord
 	recorded, keys, loads, unread, ok := o.viewsLocked(id)
 	o.t.mu.Unlock()
 	w.unstated, w.unread, w.gave, w.view, w.views = !ok, ok && unread, nil, answerLists{}, nil
+	// Every serve told as recorded gave the recording itself
+	// (Raw.ServedAsRecorded): keploy reads it.
+	w.fRead = ok && !unread && len(loads) == 0
 	if !ok || unread || len(loads) == 0 {
 		return w
 	}
@@ -1202,7 +1213,8 @@ func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWord
 			return w
 		}
 		if !recorded && len(loads) == 1 {
-			w.gave, w.view = words.gave, words.answerLists
+			// The one view, read (Raw.ServedLive): keploy reads it.
+			w.gave, w.view, w.fRead = words.gave, words.answerLists, true
 			return w
 		}
 		views = append(views, words.answerLists)

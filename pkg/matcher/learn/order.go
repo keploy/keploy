@@ -2,6 +2,7 @@ package learn
 
 import (
 	"cmp"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -661,18 +662,19 @@ func (dc *decider) oneRun(ps *wordPlaces, w readWord, asked []int32, held []evHe
 		known = true
 		gs, at := dc.outside().words, dc.in.At
 		// r, f: a run holds its piece at a place. rOut, fOut: the first
-		// holder of each run's the other run was not given (above).
+		// holder of each run's the other run was not given (above), the
+		// set's in its order, so the line names the same one each time.
 		r, f := false, false
 		rOut, fOut := "", ""
-		for j, in := range inR {
-			if in&inOwn != 0 && gs[j].givenBefore(at) {
+		for _, j := range slices.Sorted(maps.Keys(inR)) {
+			if inR[j]&inOwn != 0 && gs[j].givenBefore(at) {
 				r = true
 				if rOut == "" && !gs[j].fRead {
 					rOut = gs[j].mock
 				}
 			}
 		}
-		for j := range inF {
+		for _, j := range slices.Sorted(maps.Keys(inF)) {
 			f = true
 			if fOut == "" && !gs[j].answeredBefore(at) {
 				fOut = gs[j].mock
