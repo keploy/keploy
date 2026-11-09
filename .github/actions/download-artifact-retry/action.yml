@@ -1,0 +1,124 @@
+name: download-artifact-retry
+description: "actions/download-artifact@v8, tried three times, so that one dropped connection to GitHub's artifact service does not fail the job"
+
+# Every artifact download in this repo goes through this action;
+# check-artifact-downloads.sh keeps it so.
+#
+# actions/download-artifact v8.0.2 asks the artifact service where the
+# artifact is (ListArtifacts, then GetSignedArtifactURL) before it downloads
+# it. Its client tries those calls up to five times on HTTP 500, 502, 503,
+# 504 and 429, but a connection that is reset or refused, or a name that
+# does not resolve (ECONNRESET, ECONNREFUSED, ENOTFOUND, ETIMEDOUT,
+# EHOSTUNREACH), ends the step at once: "Unable to download artifact(s):
+# Failed to GetSignedArtifactURL: Unable to make request: ECONNRESET", six
+# seconds into the job, before any keploy code ran (run 42655632271, on a
+# GitHub-hosted runner). Runs 38529644196 and 39569418600 ended so with
+# ENOTFOUND on the self-hosted macOS runners, whose network drops for tens
+# of seconds now and then.
+#
+# A github-token does not mend it: the action then lists the run's artifacts
+# through the REST API, whose client does retry a reset, but the request
+# that follows (the artifact's zip, answered with a redirect) goes through a
+# client that does not.
+#
+# So the download is tried again, 15 s and then 45 s after a failure: a
+# reset passes on the next try, and a network down for up to a minute is
+# outlasted. Each try is the whole download, with v8's own checks, so a try
+# that passes has the bytes that were uploaded, whatever an earlier one left
+# in the path: it writes every file of the artifact again. A failure that
+# is not transient (no such artifact, a digest that does not match the
+# upload's) fails all three, about a minute later than it would have.
+#
+# The inputs are the ones this repo uses, passed through as given; the
+# others keep v8's defaults (this run, this repository, digest-mismatch:
+# error). It has no outputs: nothing here reads v8's download-path, which
+# is the path given.
+
+inputs:
+  name:
+    description: "The artifact to download; empty: those matching pattern"
+    required: false
+    default: ''
+  pattern:
+    description: "A glob of artifact names, used when name is empty"
+    required: false
+    default: ''
+  path:
+    description: "Where the artifact lands; empty: the workspace"
+    required: false
+    default: ''
+  merge-multiple:
+    description: "true: the artifacts a pattern matches land in path itself, not in a directory each"
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Download (try 1 of 3)
+      id: try1
+      continue-on-error: true
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.name }}
+        pattern: ${{ inputs.pattern }}
+        path: ${{ inputs.path }}
+        merge-multiple: ${{ inputs.merge-multiple }}
+
+    # A composite `shell: bash` step needs Git Bash, which not every
+    # self-hosted Windows runner has, so Windows waits in PowerShell.
+    - name: Wait 15 s before try 2 (Unix)
+      if: steps.try1.outcome == 'failure' && runner.os != 'Windows'
+      shell: bash
+      env:
+        ARTIFACT: ${{ inputs.name || inputs.pattern }}
+      run: |
+        echo "::warning::download of artifact '$ARTIFACT' failed (try 1 of 3, its error is above); trying again in 15 s"
+        sleep 15
+    - name: Wait 15 s before try 2 (Windows)
+      if: steps.try1.outcome == 'failure' && runner.os == 'Windows'
+      shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+      env:
+        ARTIFACT: ${{ inputs.name || inputs.pattern }}
+      run: |
+        Write-Host "::warning::download of artifact '$env:ARTIFACT' failed (try 1 of 3, its error is above); trying again in 15 s"
+        Start-Sleep -Seconds 15
+
+    - name: Download (try 2 of 3)
+      id: try2
+      if: steps.try1.outcome == 'failure'
+      continue-on-error: true
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.name }}
+        pattern: ${{ inputs.pattern }}
+        path: ${{ inputs.path }}
+        merge-multiple: ${{ inputs.merge-multiple }}
+
+    - name: Wait 45 s before try 3 (Unix)
+      if: steps.try2.outcome == 'failure' && runner.os != 'Windows'
+      shell: bash
+      env:
+        ARTIFACT: ${{ inputs.name || inputs.pattern }}
+      run: |
+        echo "::warning::download of artifact '$ARTIFACT' failed (try 2 of 3, its error is above); trying again in 45 s"
+        sleep 45
+    - name: Wait 45 s before try 3 (Windows)
+      if: steps.try2.outcome == 'failure' && runner.os == 'Windows'
+      shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+      env:
+        ARTIFACT: ${{ inputs.name || inputs.pattern }}
+      run: |
+        Write-Host "::warning::download of artifact '$env:ARTIFACT' failed (try 2 of 3, its error is above); trying again in 45 s"
+        Start-Sleep -Seconds 45
+
+    # The last try fails the step, and so the job, when it fails.
+    - name: Download (try 3 of 3)
+      id: try3
+      if: steps.try2.outcome == 'failure'
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.name }}
+        pattern: ${{ inputs.pattern }}
+        path: ${{ inputs.path }}
+        merge-multiple: ${{ inputs.merge-multiple }}
