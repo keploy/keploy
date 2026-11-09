@@ -84,7 +84,7 @@ func TestTheLearnStepTakesAClientTestsRequestBeforeTheAppGetsAByteOfIt(t *testin
 				if err != nil {
 					return
 				}
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				r := bufio.NewReader(c)
 				if _, err := r.Peek(1); err != nil {
 					return
