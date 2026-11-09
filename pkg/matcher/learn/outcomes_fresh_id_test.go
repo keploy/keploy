@@ -373,7 +373,7 @@ func TestOutcomeAPieceAPlaceHoldsInBothRunsIsNoChance(t *testing.T) {
 	// integrations' served-view rows refuse it too).
 	d := call(ans(recSID, other, holdsR).ServedAs(1).ServedChanged(ans(liveSID, other), ans(liveSID, other, "c0de0000-1111-4c00-8222-333344445555")))
 	oRefused(t, "the recording holds the recorded group, no view round F's serves gave holds round F's", d, RefusalUnknown, "mock-0")
-	oOneSideLine(t, d, "the recording's own piece of the id stands at mock-0, which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
+	oOneSideLine(t, d, "the recording's own piece of the id stands at mock-0, which round F gave the application with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
 
 	const (
 		setRec, setLive = "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812", "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"
@@ -698,7 +698,7 @@ func TestOutcomeAPieceOneRunMadeIsChanceOnlyAtPlacesThatRunHad(t *testing.T) {
 		field          = "body.cursor.firstBatch.0._id"
 		holdsR, holdsF = "b0fd3b58-3ff5-48d1-a1b2-c3d4e5f60718", "9e9e9e9e-77aa-4b8a-b2c3-d4e5f6071829"
 		noneR, noneF   = "aaaa1111-2222-4c00-8333-444455556666", "c1ae4c69-77aa-4c00-b2c3-d4e5f6071829"
-		fNotGiven      = ", which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there"
+		fNotGiven      = ", which round F did not give the application before the call: round F's making its own piece shows nothing of whether the application cut it from there"
 		rNotGiven      = ", which the recording did not give the application before the call, by a time keploy reads: the recording's making its own piece shows nothing of whether the application cut it from there"
 	)
 	// own is a place of the call's own test, sent two seconds before the
@@ -827,7 +827,7 @@ func TestOutcomeASetRecordingCountsForTheRunThatHadIt(t *testing.T) {
 		oOneSideLine(t, decide(g.g), "round F's own piece of the id stands at mock-31, which the recording did not give the application before the call, by a time keploy reads: the recording's making its own piece shows nothing of whether the application cut it from there")
 	}
 	for _, g := range givenBoth(t, before(holdsR), toldView("v1", before(noneF)), toldView("v2", before(noneR))) {
-		oOneSideLine(t, decide(g.g), "the recording's own piece of the id stands at mock-31, which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
+		oOneSideLine(t, decide(g.g), "the recording's own piece of the id stands at mock-31, which round F gave the application with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
 	}
 }
 
@@ -1216,7 +1216,7 @@ func TestOutcomeASetRecordingRoundFReadCountsBesideAnUnknownOwnPlace(t *testing.
 			// Two views: the own place asks the rule first, and the set
 			// recording is the holder round F was not given with a text
 			// keploy reads.
-			oOneSideLine(t, d, "the recording's own piece of the id stands at mock-31, which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
+			oOneSideLine(t, d, "the recording's own piece of the id stands at mock-31, which round F gave the application with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
 		}
 	}
 }
@@ -1311,7 +1311,7 @@ func TestOutcomeTheHolderTheLineNamesIsTheSetsFirst(t *testing.T) {
 		return givenThrough(t, set(name, held), toldView("v1", set(name, noneF)), toldView("v2", set(name, noneR)))
 	}
 	gs := []GivenPlaces{two("mock-31", holdsR), two("mock-32", holdsR2), two("mock-33", holdsR), two("mock-34", holdsR2)}
-	want := "the recording's own piece of the id stands at mock-31, which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there"
+	want := "the recording's own piece of the id stands at mock-31, which round F gave the application with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there"
 	for i := 0; i < 40; i++ {
 		in := oInput(path, rec, live, nil, nil)
 		in.Given = func() ([]GivenPlaces, error) { return gs, nil }
@@ -1374,7 +1374,7 @@ func TestOutcomeTheFirstPlacesOwnReasonLeadsTheLine(t *testing.T) {
 		field     = "body.cursor.firstBatch.0._id"
 		holdsR    = "b0fd3b58-3ff5-48d1-a1b2-c3d4e5f60718"
 		noneF     = "c1ae4c69-77aa-4c00-b2c3-d4e5f6071829"
-		fNotGiven = ", which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there"
+		fNotGiven = ", which round F did not give the application before the call: round F's making its own piece shows nothing of whether the application cut it from there"
 	)
 	whole := oServed("mock-50", false, false, Request, oText(field, r), "c0de", 0)
 	whole[0].At = oAt
@@ -1413,5 +1413,5 @@ func TestOutcomeAOneRunPlaceStaysAServeOrderCandidate(t *testing.T) {
 	}
 	// Alone, mock-45 is refused for the per-run rule's reason.
 	alone := oWord(t, Decide(oInput(path, rec, live, []Earlier{late}, nil)), r, f)
-	oOneSideLine(t, alone, "the recording's own piece of the id stands at mock-45 body.note, which round F did not give the application before the call, or gave it with no view keploy reads: round F's making its own piece shows nothing of whether the application cut it from there")
+	oOneSideLine(t, alone, "the recording's own piece of the id stands at mock-45 body.note, which round F did not give the application before the call: round F's making its own piece shows nothing of whether the application cut it from there")
 }

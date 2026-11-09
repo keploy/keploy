@@ -640,13 +640,15 @@ func (dc *decider) idChance(ps *wordPlaces, w readWord, long []readWord) func(i 
 //   - round F made its piece: F gave the application each recording holder
 //     before the call, with a text keploy reads there (fGave, not
 //     fUnstated: no view unstated, unread, or one of several that differ;
-//     an outside recording, one F gave before the call, by givenWords.fRead);
+//     an outside recording by givenWords.fRead, never one F served only
+//     after the call reached keploy, fAfter);
 //   - the recording made its piece: it gave the application each of F's
 //     holders before the call, by times keploy reads (rBefore,
 //     answeredBefore), or round F gave it only after the call (not fGave),
 //     so neither run's application had it to cut from.
 //
-// Else the piece is refused as unknown (oneSideWhy), naming the place. It
+// Else the piece is refused as unknown (oneSideWhy), naming the place and
+// which of round F's two reasons holds there (fNotBefore, fNoView). It
 // is so at each place idChance or idOutside left. held[k] is what
 // asked[k]'s texts hold of w (heldAt), set for every asked place before
 // the first ask; a place the word's check does not ask holds neither word
@@ -664,13 +666,19 @@ func (dc *decider) oneRun(ps *wordPlaces, w readWord, asked []int32, held []evHe
 		// r, f: a run holds its piece at a place. rOut, fOut: the first
 		// holder of each run's the other run was not given (above), the
 		// set's in its order, so the line names the same one each time.
+		// rNot says which of the two reasons holds at rOut: round F did
+		// not give it the application before the call, or gave it with
+		// no view keploy reads.
 		r, f := false, false
-		rOut, fOut := "", ""
+		rOut, rNot, fOut := "", "", ""
 		for _, j := range slices.Sorted(maps.Keys(inR)) {
 			if inR[j]&inOwn != 0 && gs[j].givenBefore(at) {
 				r = true
 				if rOut == "" && !gs[j].fRead {
-					rOut = gs[j].mock
+					rOut, rNot = gs[j].mock, fNoView
+					if gs[j].fAfter {
+						rNot = fNotBefore
+					}
 				}
 			}
 		}
@@ -685,7 +693,10 @@ func (dc *decider) oneRun(ps *wordPlaces, w readWord, asked []int32, held []evHe
 			if held[k].hr && !p.recAfter {
 				r = true
 				if rOut == "" && (!p.fGave || p.fUnstated) {
-					rOut = p.name
+					rOut, rNot = p.name, fNoView
+					if !p.fGave {
+						rNot = fNotBefore
+					}
 				}
 			}
 			if held[k].hf || slices.ContainsFunc(dc.ps[i32].t.views, func(v *readerText) bool { return evHolds(v, w.Live) }) {
@@ -699,13 +710,23 @@ func (dc *decider) oneRun(ps *wordPlaces, w readWord, asked []int32, held []evHe
 		case r && f:
 			why = bothRunsWhy
 		case r && rOut != "":
-			why = oneSideWhy("the recording's", rOut, "round F did not give the application before the call, or gave it with no view keploy reads", "round F")
+			why = oneSideWhy("the recording's", rOut, rNot, "round F")
 		case f && fOut != "":
 			why = oneSideWhy("round F's", fOut, "the recording did not give the application before the call, by a time keploy reads", "the recording")
 		}
 		return why
 	}
 }
+
+// Why round F's application was not given a place the recording's piece
+// of an id stands at (oneRun), as its line says it: round F served it only
+// after the call reached keploy, or not at all (fNotBefore), or served it
+// with no view keploy reads there: none stated, one keploy could not keep,
+// or several that differ (fNoView).
+const (
+	fNotBefore = "round F did not give the application before the call"
+	fNoView    = "round F gave the application with no view keploy reads"
+)
 
 // oneSideWhy is why a piece of one id the call minted is no chance where
 // one run's piece stands at no place it had (oneRun) but the other's, of

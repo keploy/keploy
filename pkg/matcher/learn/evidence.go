@@ -702,6 +702,10 @@ const (
 	atCallWhy  = "recorded at the call's own instant"
 	noTimeWhy  = "recorded at a time keploy cannot read"
 	noAnswerAt = "no answer time keploy can read"
+	// servedAfterWhy: round F served a recording of the set only after the
+	// call reached keploy, or in a request still aloft then
+	// (givenWords.fAfter).
+	servedAfterWhy = "round F gave it the application only after the call reached keploy"
 )
 
 // swapUnknown marks unknown each place of ps, before the call in both runs,
@@ -1015,7 +1019,7 @@ type wordsEntry struct {
 func keptWordsOf(k wordsKey, g givenWords) *wordsEntry {
 	e := &wordsEntry{}
 	n := allocBytes(unsafe.Sizeof(*e), true)
-	e.key.served, e.key.asRecorded, e.key.unseen = k.served, k.asRecorded, k.unseen
+	e.key.served, e.key.asRecorded, e.key.unseen, e.key.servedAfter = k.served, k.asRecorded, k.unseen, k.servedAfter
 	if k.live != nil {
 		b, bn := keptPayload(*k.live)
 		e.key.live, n = &b, n+bn+allocBytes(unsafe.Sizeof(b), true)
@@ -1106,16 +1110,18 @@ func keptPayload(b rawBody) (rawBody, int64) {
 
 // wordsKey is what makes a recording's words (wordsOf) past its identity,
 // which fixes its own payload: how round F served it (Raw.served,
-// asRecorded, unseen) and the payloads of F's view of it (live) and of the
-// views F's serves of it gave (views).
+// asRecorded, unseen), whether only after the call reached keploy
+// (servedAfter: a later call it was served before reads it apart), and the
+// payloads of F's view of it (live) and of the views F's serves of it gave
+// (views).
 type wordsKey struct {
-	served, asRecorded, unseen bool
-	live                       *rawBody
-	views                      []rawBody
+	served, asRecorded, unseen, servedAfter bool
+	live                                    *rawBody
+	views                                   []rawBody
 }
 
 func wordsKeyOf(x Raw) wordsKey {
-	k := wordsKey{served: x.served, asRecorded: x.asRecorded, unseen: x.unseen}
+	k := wordsKey{served: x.served, asRecorded: x.asRecorded, unseen: x.unseen, servedAfter: x.servedAfter}
 	if x.live != nil {
 		b := x.live.payload()
 		k.live = &b
@@ -1127,7 +1133,7 @@ func wordsKeyOf(x Raw) wordsKey {
 }
 
 func (k wordsKey) equal(o wordsKey) bool {
-	return k.served == o.served && k.asRecorded == o.asRecorded && k.unseen == o.unseen &&
+	return k.served == o.served && k.asRecorded == o.asRecorded && k.unseen == o.unseen && k.servedAfter == o.servedAfter &&
 		(k.live == nil) == (o.live == nil) && (k.live == nil || sameBody(*k.live, *o.live)) && slices.EqualFunc(k.views, o.views, sameBody)
 }
 
@@ -1235,6 +1241,16 @@ func setEvidence(g givenWords, inR, inF heldRoles, at time.Time, piece bool) (ev
 	hr := inR&inOwn != 0 && g.givenBefore(at)
 	before := g.answeredBefore(at)
 	switch {
+	case g.fAfter:
+		// Round F served it only after the call reached keploy, or in a
+		// request still aloft then: it gave the application nothing there
+		// before the call, whatever its serves stated, as where it did not
+		// serve it (below). So that round F's word does not stand there,
+		// or does, shows nothing of where round F's application took it.
+		if hr {
+			return evUnknown, false
+		}
+		return evNone, false
 	case g.unstated || g.unread:
 		// Round F served it and keploy cannot tell what it gave there.
 		return evUnknown, true
@@ -1300,11 +1316,14 @@ func (dc *decider) gluedAt(p evPlace, w readWord) bool {
 	return gluedIn(ed, w.Rec, true) || gluedIn(ed, w.Live, false)
 }
 
-// setUnknownWhy is why a recording of the set shows nothing of a word: its
-// time, where keploy cannot place it before the call (rawState), else that
+// setUnknownWhy is why a recording of the set shows nothing of a word:
+// that round F gave it the application only after the call (fAfter); its
+// time, where keploy cannot place it before the call (rawState); else that
 // keploy keeps only its words.
 func setUnknownWhy(g givenWords, at time.Time) string {
 	switch st, why := answerState(g.at, g.answered, at); {
+	case g.fAfter:
+		return servedAfterWhy
 	case g.noTime:
 		return noAnswerAt
 	case st != stateBefore:

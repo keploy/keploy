@@ -810,8 +810,9 @@ type givenWords struct {
 	// test (unseenWhy).
 	unstated, unread bool
 	views            []answerLists
-	// fRead: keploy reads what F gave the application there: F served it
-	// as recorded, or changed with the one view it stated (Raw.Live). Not
+	// fRead: keploy reads what F gave the application there before the
+	// call: F served it before the call reached keploy (not fAfter), as
+	// recorded, or changed with the one view it stated (Raw.Live). Not
 	// where F's serves gave different views, a view was unstated or
 	// unread, or F did not serve it. An outside recording is one F gave
 	// the application before the call (Raw.elsewhere, GivenEarlier). A
@@ -819,11 +820,18 @@ type givenWords struct {
 	// serves the read saw (statedWords), as Order.ServedView marks a Raw:
 	// each told as recorded, or with one view read and none as recorded.
 	fRead bool
+	// fAfter: every serve of it the read saw was made after the call
+	// reached keploy, or in a request of the application's still aloft
+	// then (Order.ArrivedAt, Raw.servedAfter): F gave the application
+	// nothing there before the call, whatever its serves stated, so no
+	// word F gave there is a source of the call's (setEvidence).
+	fAfter bool
 }
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
-	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, test: x.test, prev: x.prev, first: x.first, last: x.last, fRead: x.AsRecorded() || x.Live()}
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, test: x.test, prev: x.prev, first: x.first, last: x.last}
+	g.fRead, g.fAfter = x.readBefore()
 	lists, plain := dc.answerListsOf(x)
 	g.answerLists = lists
 	// Served unchanged, every word is one both gave: the same lists.
@@ -1188,8 +1196,10 @@ func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
 // its answer apart from its request and holds none gave the application
 // nothing. What both gave (same) stays as read with no view stated, none:
 // it lets no word go, the fail-closed side. fRead says keploy reads what F
-// gave there: every serve told as recorded, or with one view, read, and
-// none as recorded (givenWords.fRead).
+// gave there before the call: every serve told as recorded, or with one
+// view, read, and none as recorded, where F did not serve it only after
+// the call reached keploy (givenWords.fRead, fAfter: servedAfterLocked, as
+// Order.ServedView marks a Raw).
 func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWords {
 	if o.t == nil || !answers {
 		return w
@@ -1197,11 +1207,16 @@ func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWord
 	id := MockID(m)
 	o.t.mu.Lock()
 	recorded, keys, loads, unread, ok := o.viewsLocked(id)
+	// Served only after the call reached keploy, or in a request still
+	// aloft then (Order.ArrivedAt): F gave the application nothing there
+	// before the call, however its serves were told (Raw.servedAfter).
+	after := o.servedAfterLocked(id)
 	o.t.mu.Unlock()
-	w.unstated, w.unread, w.gave, w.view, w.views = !ok, ok && unread, nil, answerLists{}, nil
+	w.unstated, w.unread, w.gave, w.view, w.views, w.fAfter = !ok, ok && unread, nil, answerLists{}, nil, after
 	// Every serve told as recorded gave the recording itself
-	// (Raw.ServedAsRecorded): keploy reads it.
-	w.fRead = ok && !unread && len(loads) == 0
+	// (Raw.ServedAsRecorded): keploy reads it, where F gave it before the
+	// call.
+	w.fRead = ok && !unread && len(loads) == 0 && !after
 	if !ok || unread || len(loads) == 0 {
 		return w
 	}
@@ -1213,8 +1228,9 @@ func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWord
 			return w
 		}
 		if !recorded && len(loads) == 1 {
-			// The one view, read (Raw.ServedLive): keploy reads it.
-			w.gave, w.view, w.fRead = words.gave, words.answerLists, true
+			// The one view, read (Raw.ServedLive): keploy reads it, where
+			// F gave it before the call.
+			w.gave, w.view, w.fRead = words.gave, words.answerLists, !after
 			return w
 		}
 		views = append(views, words.answerLists)

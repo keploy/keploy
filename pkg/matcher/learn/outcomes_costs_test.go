@@ -1929,9 +1929,12 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 		{name: "served, nothing stated", of: func(x Raw, n int) Raw { return x.ServedIn(n, n+1) }},
 		{name: "not served", of: func(x Raw, _ int) Raw { return x }, unserved: true},
 	}
+	// A third call is handed each as one round F served only after the
+	// call reached keploy (Raw.servedAfter): its words are read apart,
+	// never the entry an earlier call kept (wordsKey.servedAfter).
 	tr := NewTracker()
 	tr.NewSet()
-	for c := range 2 {
+	for c := range 3 {
 		tr.Begin()
 		dc := tr.Drifts()
 		d := &decider{dr: dc}
@@ -1943,7 +1946,7 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 			dc.LazyRawOf(gone, true, func() (*models.Mock, error) { return nil, errors.New("gone") }).ServedAs(2).OfAnotherTest()}
 		for i, s := range shapes {
 			x := s.of(dc.LazyRawOf(m, !s.unserved, nil), 1+i+10*c).OfAnotherTest()
-			x.test, x.prev, x.late = 2+c, c == 1, c == 1
+			x.test, x.prev, x.late, x.servedAfter = 2+c, c == 1, c == 1, c == 2
 			got, want := d.outsideWords(x), dc.wordsOf(x)
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("test %d, %s: the set's words are %+v; want wordsOf's %+v", c+1, s.name, got, want)
@@ -1956,7 +1959,7 @@ func TestOutcomeCostAnOtherTestsRecordingsKeptWordsAreWhatItsCallHandsIt(t *test
 				t.Fatalf("fixture: %s reads the words the view does without it: %+v", n, read[n])
 			}
 		}
-		if got, want := wordsRead(dc)-b, []int{len(shapes), 0}[c]; got != want {
+		if got, want := wordsRead(dc)-b, []int{len(shapes), 0, len(shapes)}[c]; got != want {
 			t.Errorf("test %d read the recording's words %d times; want %d (one entry each way it was handed)", c+1, got, want)
 		}
 		// The call's places are offsetPlacesOf's, in its order: raw's, then the

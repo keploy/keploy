@@ -673,6 +673,14 @@ func (r Raw) viewOf(live Raw) (*Raw, bool) {
 // (ServedLive; WithServed(false) drops it).
 func (r Raw) Live() bool { return r.live != nil }
 
+// readBefore is what r says of what F gave the application there before
+// the call (givenWords.fRead, fAfter): read where F served it as recorded
+// or changed with the one view it stated, and not only after the call
+// reached keploy; after where every serve of it was (servedAfter).
+func (r Raw) readBefore() (read, after bool) {
+	return (r.AsRecorded() || r.Live()) && !r.servedAfter, r.servedAfter
+}
+
 // ServedAs is r as served once, the n-th serve of F's in the running set
 // (ServedIn(n, n)).
 func (r Raw) ServedAs(n int) Raw { return r.ServedIn(n, n) }
