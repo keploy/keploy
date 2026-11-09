@@ -120,7 +120,8 @@ type Earlier struct {
 	// places, past its bound (Tracker.keepRun), the reason itself. It has
 	// no Seen, and every value that changed is refused (ClassifyIn,
 	// requestUnread), never learned as noise or an echo, and names no late
-	// call (lateServes).
+	// call (lateServes): of a client test's request that keeps its words
+	// (unreadWords), every value whose change they may hold.
 	Unread string
 	// Gave, of a Given place, says it is a value the running test gave keploy
 	// (POST /agent/scope/given; TestGiven) rather than its test case's
@@ -138,7 +139,9 @@ type Earlier struct {
 	incoming                bool
 	arrivedRec, arrivedLive time.Time
 	// unreadWords, of an incoming place keploy could not read (Unread), are
-	// the words of its request (Tracker.IncomingWords; nil: none read).
+	// the words of its request (Tracker.IncomingWords; nil: none read): a
+	// value whose change they cannot hold (RequestWords.MayHoldChange) reads
+	// the place as no source of it, not as unread (requestUnreadOf).
 	unreadWords *RequestWords
 	Seen        []Seen
 	// noTime: the exchange's recorded time keploy cannot read (At was the
@@ -1632,7 +1635,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		dc.warm(raw)
 	}
 	unreadRaw := rawUnread(raw)
-	unreadReq := requestUnread(served)
+	// unreadOf is requestUnread of the change of one value from r to l: of
+	// the call where no client test's request keploy could not read keeps
+	// its words, else of that change (requestUnreadOf).
+	callUnread, byWords := requestUnread(served), unreadWordsIn(served)
+	unreadOf := func(r, l Leaf) string {
+		if !byWords {
+			return callUnread
+		}
+		return dc.requestUnreadOf(served, r, l)
+	}
 	all := raw
 	// The places F gave the application earlier in the set (given), read
 	// once for the call, and only where the offset rule reads them.
@@ -1690,6 +1702,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
+		unreadReq := unreadOf(r, l)
 		if r.Type == Instant || l.Type == Instant {
 			return dc.classifyInstant(r, l, at, placed, raw, resp, w, unreadReq, places, skip)
 		}

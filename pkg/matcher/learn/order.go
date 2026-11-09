@@ -113,6 +113,10 @@ type decider struct {
 	allScope bool
 	// unread names what of the call keploy could not read, "" where none.
 	unread string
+	// byWords are the client tests' requests keploy could not read that keep
+	// their words (placesOf): unread for a value whose change one may hold
+	// (unreadByWords).
+	byWords []Earlier
 	// noPayload is payloadless(in): an exchange before the call whose
 	// payload keploy has not read, and why; its mock "" where none.
 	noPayload struct{ mock, why string }
@@ -168,9 +172,9 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 // newDecider is the decider of the call in, reading its texts through x;
 // allScope as decideWords takes it.
 func newDecider(in Input, allScope bool, x *readerIndex) *decider {
-	ps, unread := placesOf(in)
+	ps, unread, byWords := placesOf(in)
 	set, setNotRead := setUnread(in)
-	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead)}
+	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead), byWords: byWords}
 	dc.noPayload.mock, dc.noPayload.why = payloadless(in)
 	if dc.dr == nil {
 		dc.dr = NewDriftCache()
@@ -261,10 +265,29 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 // its path spells, which the line says.
 const unnamedWhy = "no path names this field alone: its key holds '.', '[' or ']', or its document holds that key twice, so its noise in keploy.yml also names the other field its path spells"
 
+// unreadByWords names the first of dc.byWords that may hold the change of
+// a value from rec to live (MayHoldChange), as placesOf names a place keploy
+// could not read; "" where none may.
+func (dc *decider) unreadByWords(rec, live Leaf) string {
+	moments, read := false, false
+	for _, e := range dc.byWords {
+		if !read {
+			moments, read = dc.dr.momentsIn(rec, live), true
+		}
+		if e.unreadWords.MayHoldChange(rec.Value, live.Value, moments) {
+			return unreadName(e.Mock, e) + " (" + e.Unread + ")"
+		}
+	}
+	return ""
+}
+
 // leaf decides the changed words of the drifted leaf at path.
 func (dc *decider) leaf(path, unread string) []Decision {
 	rec, live := dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path]
 	at := dc.in.AddressOf(rec, false)
+	if unread == "" {
+		unread = dc.unreadByWords(rec, live)
+	}
 	switch {
 	case unread != "":
 		return []Decision{dc.refuse(path, at, -1, rec.Value, live.Value, RefusalUnread,

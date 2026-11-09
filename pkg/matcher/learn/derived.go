@@ -1055,24 +1055,11 @@ const (
 // (splitmix64's finalizer). It is the same in every process, so which
 // words a filter holds that were never added is the same on every run.
 func filterHash(w string) uint64 {
-	h := uint64(fnvOffset)
+	h := uint64(14695981039346656037)
 	for i := 0; i < len(w); i++ {
 		h ^= uint64(w[i])
-		h *= fnvPrime
+		h *= 1099511628211
 	}
-	return spreadHash(h)
-}
-
-// fnvOffset and fnvPrime are FNV-1a's (64-bit), which filterHash reads a
-// word by, one byte at a time (RequestWords reads it as it streams).
-const (
-	fnvOffset = 14695981039346656037
-	fnvPrime  = 1099511628211
-)
-
-// spreadHash spreads the bits of h, a word's FNV-1a (splitmix64's
-// finalizer): filterHash's last step.
-func spreadHash(h uint64) uint64 {
 	h ^= h >> 33
 	h *= 0xff51afd7ed558ccd
 	h ^= h >> 33
@@ -1094,11 +1081,7 @@ func newWordFilter(n int) wordFilter {
 
 // bits are the filterHashes bits that hold w in f, as add and has read them.
 func (f wordFilter) bits(w string, each func(word int, bit uint64) bool) bool {
-	return f.bitsOf(filterHash(w), each)
-}
-
-// bitsOf are the bits that hold the word whose hash (filterHash) is h.
-func (f wordFilter) bitsOf(h uint64, each func(word int, bit uint64) bool) bool {
+	h := filterHash(w)
 	h1, h2 := uint32(h), uint32(h>>32)|1
 	mask := uint32(len(f)*64 - 1)
 	for i := uint32(0); i < filterHashes; i++ {

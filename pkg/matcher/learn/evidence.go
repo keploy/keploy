@@ -216,7 +216,11 @@ func payloadless(in Input) (mock, why string) {
 // placesOf lists in's places before the call and each one's state, and the
 // first place keploy could not read ("" where it read every one): every
 // change of the call is then refused.
-func placesOf(in Input) (ps []evPlace, unread string) {
+//
+// byWords are the client tests' requests keploy could not read that keep
+// their words (Earlier.unreadWords): each is unread for a value whose change
+// it may hold (MayHoldChange), and no source of any other (decider.leaf).
+func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 	// Sized once: a call of a long test has thousands of places, and grown
 	// by append the list was copied at each growth (a quarter more each
 	// time past 256), about five times its size allocated per call.
@@ -237,6 +241,10 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			}
 		}
 		if bad != "" {
+			if e.Unread != "" && e.unreadWords != nil {
+				byWords = append(byWords, e)
+				continue
+			}
 			unread = cmp.Or(unread, unreadName(e.Mock, e)+" ("+bad+")")
 			continue
 		}
@@ -332,7 +340,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		}
 		ps = append(ps, p)
 	}
-	return ps, unread
+	return ps, unread, byWords
 }
 
 // rawOutsideTest is evPlace.outsideTest of r: why F's serve of it says
