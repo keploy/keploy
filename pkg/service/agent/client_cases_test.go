@@ -61,6 +61,12 @@ func TestABeginGivesTheLearnStepTheRequestsItsTestSent(t *testing.T) {
 	require.Len(t, p.taken[0], 1)
 	require.Equal(t, "post-apps-1", p.taken[0][0].Name, "the agent keeps its own copy of the requests")
 	require.Nil(t, p.taken[1], "a test whose recording kept no request")
+	a.SetTestCases(ctx, map[string][]models.ClientCase{"o::TestA": sent})
+	a.resetScopeState()
+	a.giveClientCases("o::TestA", 0, false)
+	require.Len(t, p.taken, 3)
+	require.Nil(t, p.taken[2], "a new session gave the requests the last one installed")
+	a.SetTestCases(ctx, map[string][]models.ClientCase{"o::TestA": sent})
 	a.SetTestCases(ctx, nil)
 	require.Nil(t, a.testCases)
 }

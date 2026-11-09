@@ -31,6 +31,10 @@ type RequestTaker interface {
 // none.
 func (pm *IngressProxyManager) SetRequestTaker(t RequestTaker) { pm.requestTaker = t }
 
+// RequestTaker is what the ingress gives the requests it forwards to
+// (SetRequestTaker): nil where none.
+func (pm *IngressProxyManager) RequestTaker() RequestTaker { return pm.requestTaker }
+
 // maxTakenBody is the largest request body the ingress reads before the
 // application is given it, for the learn step: a recording keeps a larger
 // one apart from its test case (hooksUtils.LargeBodyThreshold), which the
