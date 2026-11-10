@@ -1252,6 +1252,44 @@ func TestALearnStepWaitsForTheStoreToOpenTheTestTheTrackerBegan(t *testing.T) {
 	}
 }
 
+// A call read with the learn tracker ahead of the store (TrackerAhead) is the
+// pool's or the tracker's test's, never that of the test whose view is in
+// force: the store's mark of it (MarkCallRound) and the round snapshot's
+// alike name no test (integrations.CallRound.Test), so a test's end charges
+// its miss by the view it was read in, never sets it aside as that test's
+// late call. Here the store still shows test-1's view as the tracker began
+// test-2 (an end whose pool view keploy could not install). In test-1's own
+// round the mark names test-1.
+func TestACallReadWithTheTrackerAheadNamesNoTestItWasMadeIn(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed], func(t *testing.T) {
+			p, mm := heldOrders(t, routed)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			if c := mm.MarkCallRound(); c.TrackerAhead() || c.Test() != "test-1" {
+				t.Fatalf("precondition: a call read in test-1's own round is marked ahead %v, in %q; want test-1's", c.TrackerAhead(), c.Test())
+			}
+			p.EndTestErrorCapture()
+			p.ContinueTestErrorCapture()
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+			if !ok || !snap.TrackerAhead() || snap.PoolsCall() || snap.Test != "test-1" {
+				t.Fatalf("precondition: the round's snapshot does not read the tracker ahead of test-1's view: %+v", snap.Boundary)
+			}
+			c := mm.MarkCallRound()
+			if !c.TrackerAhead() || !c.InTest() {
+				t.Fatalf("precondition: the store's mark does not read the tracker ahead of test-1's view (ahead %v, in a test %v)", c.TrackerAhead(), c.InTest())
+			}
+			for name, c := range map[string]integrations.CallRound{"the store's mark": c, "the round snapshot's": snap.CallRound()} {
+				r := &models.MockMismatchReport{}
+				integrations.StampMark(r, c)
+				if c.Test() != "" || r.MarkedTest != "" {
+					t.Errorf("WRONG TEST: %s of a call read with the tracker ahead names %q (report %q) as the test it was made in; want none", name, c.Test(), r.MarkedTest)
+				}
+			}
+		})
+	}
+}
+
 // A call waiting for the round to move (the learn tracker ahead of a store
 // still showing test-1's view: MockManager.AwaitRoundMove) is woken by every
 // move of the round, through no clock: the store opening test-2, the

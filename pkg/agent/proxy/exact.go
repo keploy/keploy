@@ -1033,15 +1033,18 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	if ended != nil {
 		held = func(name string) bool { return v.holds(name) || ended.holds(name) }
 	}
-	c := integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).OfTest(v.test).WithSequence(m.sequenceViewOf(v))
+	c := integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).WithSequence(m.sequenceViewOf(v))
 	if ahead {
 		// The tracker began a test whose view the store has not
 		// installed (integrations.RoundSnapshot.TrackerAhead): nothing
 		// tells which recordings are that test's own, so every one is
-		// held, and the call's miss names none made elsewhere.
-		c = c.HoldingEvery()
+		// held, and the call's miss names none made elsewhere. Nor does
+		// it name the test whose view is in force: the call is the pool's
+		// or the tracker's test's, never that one's, so a test's end
+		// charges its miss by the view it was read in (fails closed).
+		return c.HoldingEvery().WithTrackerAhead(true)
 	}
-	return c.WithTrackerAhead(ahead)
+	return c.OfTest(v.test).WithTrackerAhead(false)
 }
 
 // endedName is the test of v, the view the store ended while the learn

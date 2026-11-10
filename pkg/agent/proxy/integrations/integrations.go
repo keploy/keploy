@@ -967,7 +967,9 @@ func (c CallRound) OfTest(test string) CallRound {
 	return c
 }
 
-// Test is the test whose view c's read found (OfTest): "" for a pool view, and
+// Test is the test whose view c's read found (OfTest): "" for a pool view, for
+// a read made with the learn tracker ahead of the store
+// (RoundSnapshot.TrackerAhead: the call is no call of the view's test), and
 // for a store that names none.
 func (c CallRound) Test() string { return c.test }
 

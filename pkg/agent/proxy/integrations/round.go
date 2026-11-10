@@ -481,7 +481,10 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 // installed, so nothing tells which recordings are that test's own, the
 // pool's call (PoolsCall) among them, and a lookup that named one made elsewhere would let
 // record's judging bake a test's own recording into the worker scope. It
-// names none, and pairs none, which only fails closed.
+// names none, and pairs none, which only fails closed. Nor does its mark
+// name the test whose view is in force (CallRound.Test): the call is no call
+// of that test's, so a test's end charges its miss by the view it was read
+// in, never to no test as that test's late call.
 //
 // Each carries the store's token of the view the snapshot read
 // (RoundParts.View, CallRound.InStoreView): a store held to the call is held
@@ -494,7 +497,9 @@ func (s RoundSnapshot) CallRound() CallRound {
 	// store's MarkCallRound says (its sequence view's Worker).
 	worker := s.Test != "" && len(s.worker) > 0
 	if s.TrackerAhead() {
-		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).OfTest(s.Test).InStoreView(s.view)
+		// Its mark names no test (OfTest): the call is the pool's or the
+		// tracker's test's, never the test whose view is in force.
+		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).InStoreView(s.view)
 	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {

@@ -615,9 +615,12 @@ type UnmatchedCall struct {
 	// window it lands in; the receipt lists it, by this name, so a reader
 	// sees where it landed. It also names the test a call was marked in
 	// (Marked.Test) when its miss reached keploy only after that test's end was
-	// read and before the test that read it began being served: that test's
-	// own call, which keploy decided late, is charged to no test it did not
-	// make (the test that read it), and is listed under this name. Empty for
+	// read, and the call was marked before the test that read it began being
+	// served: that test's own call, which keploy decided late, is charged to no
+	// test it did not make (the test that read it), and is listed under this
+	// name, filed between two tests or, as the next test set began, as made
+	// outside every test alike. A background repeat with a mark is listed under
+	// the test whose view it was marked in, none for a pool view. Empty for
 	// every other call, and for one made before that test began being served,
 	// whose window is not known.
 	WindowOf string `json:"window_of,omitempty" yaml:"window_of,omitempty"`

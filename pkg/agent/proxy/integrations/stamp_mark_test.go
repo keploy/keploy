@@ -38,6 +38,33 @@ func TestAMissReportCarriesTheRoundItsCallWasMarkedIn(t *testing.T) {
 			t.Errorf("%s: the report names %q as the test its call was made in; want %q", c.name, r.MarkedTest, c.test)
 		}
 	}
+	// A round snapshot's mark names the test whose view it read, except where
+	// the learn tracker is ahead of the store (TrackerAhead): the call is the
+	// pool's or the tracker's test's, never that of the test whose view is in
+	// force, so its miss names none.
+	at := RoundAt{Epoch: 3, Gen: 7, Bounds: 10}
+	for _, c := range []struct {
+		name  string
+		s     RoundSnapshot
+		ahead bool
+		test  string
+	}{
+		{"read in a test", RoundSnapshot{At: at, Phase: RoundInTest, Test: "o::TestA", Open: true}, false, "o::TestA"},
+		{"read with the tracker ahead of a test's view", RoundSnapshot{At: at, Phase: RoundBoundary, Test: "o::TestA", Learn: LearnRead{Bound: true, Open: true}}, true, ""},
+		{"read with the tracker ahead of the pool view", RoundSnapshot{At: at, Phase: RoundBoundary, Learn: LearnRead{Bound: true, Open: true}}, true, ""},
+	} {
+		if c.s.TrackerAhead() != c.ahead {
+			t.Fatalf("precondition: %s reads the tracker ahead: %v", c.name, c.s.TrackerAhead())
+		}
+		r := &models.MockMismatchReport{}
+		StampMark(r, c.s.CallRound())
+		if !r.MarkRound || r.MarkBounds != 10 {
+			t.Fatalf("%s: the report carries no round: %+v", c.name, r)
+		}
+		if r.MarkedTest != c.test {
+			t.Errorf("%s: the report names %q as the test its call was made in; want %q", c.name, r.MarkedTest, c.test)
+		}
+	}
 	r := &models.MockMismatchReport{}
 	StampMark(r, CallRound{})
 	if r.Mark != models.RoundUnmarked || r.MarkRound || r.MarkEpoch != 0 || r.MarkBounds != 0 || r.MarkedTest != "" || r.MarkedInTest {

@@ -1847,6 +1847,58 @@ func TestAMissCarriesTheRoundItsCallWasMarkedIn(t *testing.T) {
 	}
 }
 
+// The install a test's end reads (ExactTestInstalled) is the round's boundary
+// count, as a call's mark reads it (MarkCallRound), never the round's
+// generation: a test process that claims its key again (RestartExactKey)
+// moves the generation with no boundary, before the install and after it, so
+// the two part. A call marked in the test's view after its install, one made
+// as the test ended among them, reads as made in that view, never before it:
+// it stays the test's.
+func TestATestsInstallIsReadAsACallsMarkReadsIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	p.setMockManager(mm)
+	mm.StageExactBackground(models.RecordedWithS12Routing)
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	for i := 0; i < 3; i++ {
+		mm.RestartExactKey(models.PoolKeyNone, nil)
+	}
+	mm.ServeExactTest("T1", nil)
+	epoch, bounds, ok := p.ExactTestInstalled("T1")
+	if !ok {
+		t.Fatal("precondition: T1's view does not serve")
+	}
+	for _, claimedAfter := range []int{0, 2} {
+		for i := 0; i < claimedAfter; i++ {
+			mm.RestartExactKey(models.PoolKeyNone, nil)
+		}
+		c := mm.MarkCallRound()
+		at, known := c.Round()
+		if !known || at.Gen == at.Bounds {
+			t.Fatalf("precondition: a key claimed again does not part the round's generation from its boundary count: %+v (known %v)", at, known)
+		}
+		if at.Epoch != epoch || at.Bounds != bounds {
+			t.Fatalf("WRONG INSTALL: T1's install reads %d/%d; a call marked in its view (key claimed again %d times since) reads %d/%d", epoch, bounds, claimedAfter, at.Epoch, at.Bounds)
+		}
+		r := &models.MockMismatchReport{}
+		integrations.StampMark(r, c)
+		if mark := missMark(r); !mark.Known || mark.Test != "T1" || mark.Before(epoch, bounds) {
+			t.Fatalf("WRONG ROUND: a call marked in T1's view after its install (key claimed again %d times since) reads as marked before it, or not in T1: %+v; install %d/%d", claimedAfter, mark, epoch, bounds)
+		}
+	}
+	// Made as T1 ended: marked in the pool view installed after T1's.
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	r := &models.MockMismatchReport{}
+	integrations.StampMark(r, mm.MarkCallRound())
+	if mark := missMark(r); !mark.Known || mark.Test != "" || mark.Before(epoch, bounds) {
+		t.Fatalf("WRONG ROUND: a call made as T1 ended reads as marked before T1's install, or in a test: %+v; install %d/%d", mark, epoch, bounds)
+	}
+}
+
 // Whether a call's set was served by proven routing is read from the view
 // the call's first read found (integrations.S12BackgroundIn), through the
 // store's mark, a round snapshot and a scoped view alike, never from the
