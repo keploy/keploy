@@ -1517,7 +1517,7 @@ func (m *MockManager) NoteExactTest(test, name, why string) error {
 
 // NoteExactTestAtOpen leaves notes, by variable name, for the scope of test's
 // variables to begin with, as its variables begin (OpenExactTest,
-// OpenExactTestConcurrent; variables.Table.StartOpeningNoted), in the same
+// OpenExactTestConcurrent; variables.Table.StartOpeningTest), in the same
 // step: each says why the variable is not bound (variables.Table.Note). A
 // client test's begin gives the test's cases before it opens the test's view
 // (the agent's ProvenBegin), so a note taken into the scope in force then
@@ -1651,7 +1651,7 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		// variables' lock is taken: the scope they bound in reads the run's
 		// of vars, and so locks vars first (variables.Table.ReadRunOf).
 		// The scope begins with the notes left for it (NoteExactTestAtOpen).
-		m.vars.StartOpeningNoted(install, given, m.carriedInto(v), m.takeCaseNotes(test))
+		m.vars.StartOpeningTest(test, install, given, m.carriedInto(v), m.takeCaseNotes(test))
 		m.aheadVars.Reset()
 	} else {
 		install()

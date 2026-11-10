@@ -624,13 +624,14 @@ func (t *Table) StartCarrying(given, carried []Binding) {
 //
 // open must call none of t's methods: it holds t's lock.
 func (t *Table) StartOpening(open func(), given, carried []Binding) {
-	t.StartOpeningNoted(open, given, carried, nil)
+	t.StartOpeningTest("", open, given, carried, nil)
 }
 
-// StartOpeningNoted is StartOpening with notes, by variable name, noted in
-// the scope as it begins (Note), in the same step: a call checked in the
-// scope reads them from its first.
-func (t *Table) StartOpeningNoted(open func(), given, carried []Binding, notes map[string]string) {
+// StartOpeningTest is StartOpening for the scope of a test, named by its
+// first argument ("" for none named), with notes, by variable name, noted
+// in the scope as it begins (Note), in the same step: a call checked in the
+// scope reads them from its first. Nothing here reads the test's name.
+func (t *Table) StartOpeningTest(_ string, open func(), given, carried []Binding, notes map[string]string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	open()
