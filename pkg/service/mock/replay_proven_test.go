@@ -141,6 +141,21 @@ func TestWithEvidence(t *testing.T) {
 	require.Len(t, got[0].Evidence.Misses, 1)
 	require.Equal(t, []string{"mock-3"}, got[0].Evidence.Unconsumed)
 	require.Nil(t, got[1].Evidence, "no evidence, nothing attached")
+	require.False(t, got[0].Evidence.FailedOnItsOwn, "no attempt's harness failed it")
+
+	// One attempt its harness failed on its own marks the test's evidence,
+	// whichever attempt it was.
+	own := ev("", "mock-4")
+	own.FailedOnItsOwn = true
+	for _, ws := range [][]models.ScopeWindow{
+		{{Name: "o::D", Evidence: own}, {Name: "o::D", Evidence: ev("", "mock-5")}},
+		{{Name: "o::D", Evidence: ev("", "mock-5")}, {Name: "o::D", Evidence: own}},
+	} {
+		got = withEvidence([]TestReceipt{{Name: "o::D", Outcome: "failed"}}, ws)
+		require.NotNil(t, got[0].Evidence)
+		require.True(t, got[0].Evidence.FailedOnItsOwn)
+		require.ElementsMatch(t, []string{"mock-4", "mock-5"}, got[0].Evidence.Unconsumed)
+	}
 
 	// Evidence with only keploy's reason (the test's process exited) is
 	// keploy's verdict too.
