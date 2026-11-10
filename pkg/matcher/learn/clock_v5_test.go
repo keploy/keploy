@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/base64"
 	"reflect"
 	"slices"
 	"strconv"
@@ -1948,7 +1949,10 @@ func TestAClockReadsEchoIsExplainedOnlyByASourceOfTheAnswersInstant(t *testing.T
 		return ds[0]
 	}
 	const upd, day, hdr = "resp.0.0.value.updated_at", "resp.0.0.value.day", "header.Date"
+	const seen, link, token = "resp.0.0.value.seen", "resp.0.0.value.link", "resp.0.0.value.token"
 	const second, fSecond = "2026-11-09 07:01:42", "2026-11-09 09:19:05"
+	const isoSecond, fIsoSecond, httpSecond = "2026-11-09T07:01:42Z", "2026-11-09T09:19:05Z", "Mon, 09 Nov 2026 07:01:42 GMT"
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	const unixS, fUnixS = "1794207702", "1794215945"
 	const filter = "body.cmd.pipeline.0.$match.expiration.$gt.$numberLong"
 	setsRead := map[string][2]string{"body.cmd.update.$set.updated_at.$date.$numberLong": {"", ""}}
@@ -1980,6 +1984,23 @@ func TestAClockReadsEchoIsExplainedOnlyByASourceOfTheAnswersInstant(t *testing.T
 		{"an HTTP answer's Date of the read's second, an earlier Date of it", hdr, "Mon, 09 Nov 2026 07:01:42 GMT", nil, []func(time.Time) Earlier{answered("header.Date", "Mon, 09 Nov 2026 07:01:42 GMT")}, true},
 		{"an HTTP answer's Date of the read's second, the request holding it", hdr, "Mon, 09 Nov 2026 07:01:42 GMT", map[string][2]string{"header.X-Sent": {unixS, fUnixS}}, nil, true},
 		{"an HTTP answer's Last-Modified of the read's second", "header.Last-Modified", "Mon, 09 Nov 2026 07:01:42 GMT", nil, nil, false},
+		{"a stored answer's Date of the read's second, held nowhere else", "resp.0.0.value.response.header.Date", httpSecond, nil, nil, false},
+		{"a Date the answer's body holds of the read's second, held nowhere else", "body.header.Date", httpSecond, nil, nil, false},
+		// A source is read in the form the answer's instant was: as written,
+		// or decoded and case-folded where the answer's was.
+		{"an ISO second, an earlier insert of it", upd, isoSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.updated_at", isoSecond, fIsoSecond, false, nil)}, true},
+		{"an HTTP date of the second, an earlier insert of it", seen, httpSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.seen", httpSecond, "Mon, 09 Nov 2026 09:19:05 GMT", false, nil)}, true},
+		{"a percent-encoded ISO second, an earlier insert of it plain", link, "at=2026-11-09T07%3A01%3A42Z", nil, []func(time.Time) Earlier{sent("body.docs.0.updated_at", isoSecond, fIsoSecond, false, nil)}, true},
+		{"a percent-encoded ISO second, an earlier request of it encoded", link, "at=2026-11-09T07%3A01%3A42Z", nil, []func(time.Time) Earlier{sent("body.cmd.query.link", "at=2026-11-09T07%3A01%3A42Z", "at=2026-11-09T09%3A19%3A05Z", false, nil)}, true},
+		{"a percent-encoded DATETIME second, an earlier insert of it plain", link, "2026-11-09%2007%3A01%3A42", nil, []func(time.Time) Earlier{sent("body.docs.0.updated_at", second, fSecond, false, nil)}, true},
+		{"a DATETIME second in a base64 envelope, held nowhere else", token, b64(second), nil, nil, false},
+		{"a DATETIME second in a base64 envelope, an earlier request of the envelope", token, b64(second), nil, []func(time.Time) Earlier{sent("body.cmd.query.token", b64(second), b64(fSecond), false, nil)}, true},
+		{"a DATETIME second in a base64 envelope, an earlier request of the envelope the same in round F", token, b64(second), nil, []func(time.Time) Earlier{sent("body.cmd.query.token", b64(second), b64(second), false, nil)}, false},
+		{"an ISO second, an earlier insert of it as a DATETIME", upd, isoSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.updated_at", second, fSecond, false, nil)}, false},
+		{"an ISO second, an earlier request of it percent-encoded alone", upd, isoSecond, nil, []func(time.Time) Earlier{sent("body.cmd.query.link", "at=2026-11-09T07%3A01%3A42Z", "at=2026-11-09T09%3A19%3A05Z", false, nil)}, false},
+		{"an ISO second, an insert of the second as a DATETIME beside its ISO text encoded", upd, isoSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.at", second+" 2026-11-09T07%3A01%3A42Z", fSecond+" 2026-11-09T09%3A19%3A05Z", false, nil)}, false},
+		{"a lower-case ISO second beside an escape, an earlier insert of it", link, "2026-11-09t07:01:42z p%20q", nil, []func(time.Time) Earlier{sent("body.docs.0.at", "2026-11-09t07:01:42z", "2026-11-09t09:19:05z", false, nil)}, true},
+		{"a DATETIME second beside an escape, an insert of it beside the read in base64", link, second + " p%20q", nil, []func(time.Time) Earlier{sent("body.docs.0.at", second+" "+b64("2026-11-09 07:01:42.600"), fSecond+" "+b64("2026-11-09 09:19:05.750"), false, nil)}, false},
 	} {
 		d := decide(c.path, c.val, c.also, c.earlier...)
 		switch {
@@ -2116,7 +2137,7 @@ func TestAnEchoOfAClockReadIsTheReadCutInItsOwnZoneOrTheApplications(t *testing.
 		dc := NewDriftCache()
 		dc.zone = c.zone
 		d := &decider{dr: dc, x: newReaderIndex(dc)}
-		if got := d.echoesMoment(d.x.text(c.answer), momentOf(t, c.read), func(moment, time.Duration, string) bool { return false }); got != c.want {
+		if got := d.echoesMoment(d.x.text(c.answer), momentOf(t, c.read), func(moment, time.Duration, string, bool) bool { return false }); got != c.want {
 			t.Errorf("%s: %q beside the read %q echoes it %v; want %v", c.name, c.answer, c.read, got, c.want)
 		}
 	}
@@ -2136,7 +2157,7 @@ func TestAnEchoOfAClockReadIsTheReadCutInItsOwnZoneOrTheApplications(t *testing.
 		dc.zone = ist
 		d := &decider{dr: dc, x: newReaderIndex(dc)}
 		var asked []time.Duration
-		got := d.echoesMoment(d.x.text(c.answer), momentOf(t, c.read), func(_ moment, unit time.Duration, _ string) bool {
+		got := d.echoesMoment(d.x.text(c.answer), momentOf(t, c.read), func(_ moment, unit time.Duration, _ string, _ bool) bool {
 			asked = append(asked, unit)
 			return false
 		})
@@ -2154,13 +2175,13 @@ func TestAnEchoOfAClockReadIsTheReadCutInItsOwnZoneOrTheApplications(t *testing.
 		{"x2026-11-09 07:01:42", true},
 		{"x2026-11-09 07:01:43", false},
 	} {
-		if got := textHoldsInstant(x.text(c.answer), "2026-11-09 07:01:42"); got != c.want {
+		if got := textHoldsInstant(x.text(c.answer), "2026-11-09 07:01:42", false); got != c.want {
 			t.Errorf("%q holds the read 2026-11-09 07:01:42 by its text: %v; want %v", c.answer, got, c.want)
 		}
 	}
 	// An instant of one word is held only as a word: inside a longer one
 	// it is another value's digits.
-	if textHoldsInstant(x.text("x1794207702683"), "1794207702683") {
+	if textHoldsInstant(x.text("x1794207702683"), "1794207702683", false) {
 		t.Errorf("x1794207702683 holds the read 1794207702683 by its text; want a word of one word held only as a word")
 	}
 	// An answer that holds the read's text where no instant of it is read
@@ -2207,7 +2228,7 @@ func TestARequestHoldingTheReadInTheAppsZoneIsNoSource(t *testing.T) {
 		dc := NewDriftCache()
 		dc.zone = ist
 		d := &decider{dr: dc, x: newReaderIndex(dc), in: Input{Rec: leaf(c.rec), Live: leaf(c.live)}}
-		if got := d.heldElsewhere(momentOf(t, c.answer), momentOf(t, c.read), c.unit, c.text); got != c.want {
+		if got := d.heldElsewhere(momentOf(t, c.answer), momentOf(t, c.read), c.unit, c.text, false); got != c.want {
 			t.Errorf("%s: a request %q (round F %q) is a source of the answer's %q beside the read %q: %v; want %v", c.name, c.rec, c.live, c.answer, c.read, got, c.want)
 		}
 	}
