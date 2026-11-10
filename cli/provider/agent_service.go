@@ -31,6 +31,9 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 	p := proxy.New(logger, h, cfg)
 	ip := incoming.New(logger, h, cfg)
 	p.SetLiveHandler(ip.ServeLive)
+	// The learn step reads a client test's requests as places of its calls:
+	// the ingress gives it each one before the app is given it.
+	ip.SetRequestTaker(p)
 
 	instrumentation := agent.New(logger, h, p, client, ip, cfg)
 

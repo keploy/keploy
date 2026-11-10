@@ -216,7 +216,11 @@ func payloadless(in Input) (mock, why string) {
 // placesOf lists in's places before the call and each one's state, and the
 // first place keploy could not read ("" where it read every one): every
 // change of the call is then refused.
-func placesOf(in Input) (ps []evPlace, unread string) {
+//
+// byWords are the client tests' requests keploy could not read that keep
+// their words (Earlier.unreadWords): each is unread for a value whose change
+// it may hold (mayHold), and no source of any other (decider.leaf).
+func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 	// Sized once: a call of a long test has thousands of places, and grown
 	// by append the list was copied at each growth (a quarter more each
 	// time past 256), about five times its size allocated per call.
@@ -237,6 +241,10 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			}
 		}
 		if bad != "" {
+			if e.unreadWords != nil {
+				byWords = append(byWords, e)
+				continue
+			}
 			unread = cmp.Or(unread, unreadName(e.Mock, e)+" ("+bad+")")
 			continue
 		}
@@ -332,7 +340,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		}
 		ps = append(ps, p)
 	}
-	return ps, unread
+	return ps, unread, byWords
 }
 
 // rawOutsideTest is evPlace.outsideTest of r: why F's serve of it says
@@ -1219,8 +1227,10 @@ func namesApart(ms []givenMoment, m, other moment) bool {
 // of the set (GivenPlaces.fView: what F's serve of it was told to give)
 // holds F's moment so; mock "" where no one recording names it alone. An
 // instant there is a copy of what F gave the application, or a pick from
-// it, never a read of the clock.
-func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
+// it, never a read of the clock. served is the call's earlier places the
+// echo reads: dc.in.Earlier, or those without a client test's requests where
+// a read of the clock goes before them (readOverClients).
+func (dc *decider) echoedOutside(c changedInstant, served []Earlier) (mock string, ok bool) {
 	if c.rm == nil || c.lm == nil {
 		return "", false
 	}
@@ -1229,7 +1239,7 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 	}
 	op := dc.outside()
 	pair := []driftedInstant{{rec: *c.rm, live: *c.lm}}
-	if len(op.answers) == 0 || dc.dr.echoedElsewhere(pair, dc.in.At, dc.in.Earlier, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
+	if len(op.answers) == 0 || dc.dr.echoedElsewhere(pair, dc.in.At, served, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
 		return "", false
 	}
 	if i := slices.IndexFunc(op.answers, func(g givenMoment) bool {
@@ -1833,11 +1843,15 @@ func viewNew(g givenWords) bool {
 }
 
 // BoundWord is a variable of a test bound at one word of an earlier request
-// leaf: the word's index and its text in each run.
+// leaf: the word's index, its text in each run, and the leaf's variable
+// place the variable is bound at (Place: "<Place>#<Word>" names it there).
+// A caller names the bind by Place, never by the Seen it asked of: a client
+// test's request leaf has no Seen.Place (BoundWords).
 type BoundWord struct {
 	Name           string
 	Word           int
 	Recorded, Live string
+	Place          string
 }
 
 // BoundWords is each variable of test number n bound at a word of s, a
@@ -1846,8 +1860,12 @@ type BoundWord struct {
 // An adapter answers a later answer leaf that holds s's recorded text whole
 // at the same words. Two runs' texts of different word counts name none: no
 // word of one is known to be the other's, and the answer stays as recorded.
+// A leaf of a client test's request (Earlier.incoming: mock is one the
+// running test took) is read at the place its test case binds a variable
+// at (seenVar), as the learn step bound it there (Place.Var): its leaves are
+// named by their paths alone (GivenRequest), so Seen.Place holds none.
 func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
-	if t == nil || s.Side != Request || s.Place == "" {
+	if t == nil || s.Side != Request {
 		return nil
 	}
 	rec, live := variables.Words(s.Leaf.Value), variables.Words(s.Live)
@@ -1856,9 +1874,16 @@ func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	place := s.Place
+	if place == "" && t.tookRequestLocked(mock) {
+		place = seenVar(Earlier{incoming: true}, s)
+	}
+	if place == "" {
+		return nil
+	}
 	var out []BoundWord
 	for k := range rec {
-		key := mock + "\x00" + s.Place + "#" + strconv.Itoa(k)
+		key := mock + "\x00" + place + "#" + strconv.Itoa(k)
 		name, ok := "", false
 		if n >= t.setEpoch {
 			name, ok = t.runNames[key]
@@ -1867,10 +1892,21 @@ func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
 			name, ok = t.names[key]
 		}
 		if ok {
-			out = append(out, BoundWord{Name: name, Word: k, Recorded: s.Leaf.Value[rec[k][0]:rec[k][1]], Live: s.Live[live[k][0]:live[k][1]]})
+			out = append(out, BoundWord{Name: name, Word: k, Recorded: s.Leaf.Value[rec[k][0]:rec[k][1]], Live: s.Live[live[k][0]:live[k][1]], Place: place})
 		}
 	}
 	return out
+}
+
+// tookRequestLocked reports whether mock is the place of a client test's
+// request the running test took (Incoming): one of t.incoming. t.mu is held.
+func (t *Tracker) tookRequestLocked(mock string) bool {
+	for _, e := range t.incoming {
+		if e.Mock == mock {
+			return true
+		}
+	}
+	return false
 }
 
 // RecBegan is the instant the running test began at in its recording

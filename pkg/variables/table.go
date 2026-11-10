@@ -1,6 +1,7 @@
 package variables
 
 import (
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -56,6 +57,9 @@ type Table struct {
 	// gen counts the scopes the table has begun (Reset): a call checked in
 	// one scope never binds in the next (BindAll).
 	gen uint64
+	// notes say, by name, why a variable of the scope is not bound (Note):
+	// the scope's alone, forgotten when the next begins.
+	notes map[string]string
 	// ended is what the set's ended scopes of a named test bound themselves
 	// (EndedOf): each such scope's own bindings with its test, appended as
 	// the next scope begins, until NewSet. Only a table that keeps them
@@ -637,22 +641,23 @@ func (t *Table) StartCarrying(given, carried []Binding) {
 //
 // open must call none of t's methods: it holds t's lock.
 func (t *Table) StartOpening(open func(), given, carried []Binding) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	open()
-	t.start("", given, carried)
+	t.StartOpeningTest("", open, given, carried, nil)
 }
 
-// StartOpeningTest is StartOpening for the scope of the test named test:
-// once the next scope begins, what this one bound itself is that test's
-// (EndedOf), on a table that keeps it (KeepEnded). The name is the scope's
-// from the step that begins it, so no binding of another scope is ever
-// kept as test's.
-func (t *Table) StartOpeningTest(test string, open func(), given, carried []Binding) {
+// StartOpeningTest is StartOpening for the scope of the test named test
+// ("" for none named): once the next scope begins, what this one bound
+// itself is that test's (EndedOf), on a table that keeps it (KeepEnded). The
+// name is the scope's from the step that begins it, so no binding of another
+// scope is ever kept as test's.
+//
+// notes, by variable name, are noted in the scope as it begins (Note), in
+// the same step: a call checked in the scope reads them from its first.
+func (t *Table) StartOpeningTest(test string, open func(), given, carried []Binding, notes map[string]string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	open()
 	t.start(test, given, carried)
+	t.notes = maps.Clone(notes)
 }
 
 // start begins a scope (StartCarrying), of test ("" for none named). t.mu
@@ -661,7 +666,7 @@ func (t *Table) start(test string, given, carried []Binding) {
 	t.end()
 	t.test = test
 	t.gen++
-	t.vals = nil
+	t.vals, t.notes = nil, nil
 	t.began = true
 	if len(given)+len(carried) == 0 {
 		return
@@ -705,13 +710,43 @@ func (t *Table) Give(b Binding) (Binding, bool) {
 	return b, true
 }
 
+// Note says why, in the open scope, the variable name is not bound: where
+// the test binds it in a place no call is (a client test case's request,
+// models.ClientCaseBind), why that place bound nothing, so a call that uses
+// it misses saying so (Unbound) rather than naming a call that binds it.
+// It refuses, noting nothing, when no scope has begun. A later Note of the
+// name replaces it; the next scope forgets it.
+func (t *Table) Note(name, why string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.began {
+		return false
+	}
+	if t.notes == nil {
+		t.notes = make(map[string]string)
+	}
+	t.notes[name] = why
+	return true
+}
+
+// Unbound is the scope's note on name (Note) while name is not bound: ""
+// where it is bound, or the scope noted nothing.
+func (t *Table) Unbound(name string) string {
+	from := t.lock()
+	defer t.unlock(from)
+	if _, ok := t.lookup(from, name); ok {
+		return ""
+	}
+	return t.notes[name]
+}
+
 // Reset forgets every binding of the scope: a new scope begins. The run's
 // stay.
 func (t *Table) Reset() {
 	t.mu.Lock()
 	t.end()
 	t.test = ""
-	t.vals = nil
+	t.vals, t.notes = nil, nil
 	t.began = true
 	t.gen++
 	t.mu.Unlock()
@@ -721,7 +756,7 @@ func (t *Table) Reset() {
 // next test set's replay starts (as learn.Tracker.NewSet).
 func (t *Table) NewSet() {
 	t.mu.Lock()
-	t.vals, t.run, t.ended = nil, nil, nil
+	t.vals, t.run, t.ended, t.notes = nil, nil, nil, nil
 	t.began, t.test = false, ""
 	t.gen++
 	t.mu.Unlock()
@@ -733,7 +768,7 @@ func (t *Table) NewSet() {
 func (t *Table) Clone() *Table {
 	from := t.lock()
 	defer t.unlock(from)
-	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun}
+	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun, notes: maps.Clone(t.notes)}
 	if t.vals != nil {
 		c.vals = make(map[string]Binding, len(t.vals))
 		for k, v := range t.vals {

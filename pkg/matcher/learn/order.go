@@ -50,7 +50,7 @@ func decideOrder(in Input) []Decision {
 // either reading refuses is refused, as is one the two readings learn
 // differently, naming both (bothWays).
 func decideBoth(in Input, allScope bool) ([]Decision, []string) {
-	in.Earlier, in.Raw = timedEarlier(in.Earlier, in.At), timedRaw(in.Raw, in.At)
+	in.Earlier, in.Raw = timedEarlier(arrivedBefore(ofOwnCall(in, in.Earlier), in.At, in.Arrived), in.At), timedRaw(in.Raw, in.At)
 	in.Earlier, in.Raw = leafedAfterCall(in.Earlier, in.Raw, in.At)
 	ds, fields := decideWords(in, allScope)
 	kept, late := leafedAtCall(in.Earlier, in.At)
@@ -113,6 +113,10 @@ type decider struct {
 	allScope bool
 	// unread names what of the call keploy could not read, "" where none.
 	unread string
+	// byWords are the client tests' requests keploy could not read that keep
+	// their words (placesOf): unread for a value whose change one may hold
+	// (unreadByWords).
+	byWords []Earlier
 	// noPayload is payloadless(in): an exchange before the call whose
 	// payload keploy has not read, and why; its mock "" where none.
 	noPayload struct{ mock, why string }
@@ -168,9 +172,9 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 // newDecider is the decider of the call in, reading its texts through x;
 // allScope as decideWords takes it.
 func newDecider(in Input, allScope bool, x *readerIndex) *decider {
-	ps, unread := placesOf(in)
+	ps, unread, byWords := placesOf(in)
 	set, setNotRead := setUnread(in)
-	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead)}
+	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead), byWords: byWords}
 	dc.noPayload.mock, dc.noPayload.why = payloadless(in)
 	if dc.dr == nil {
 		dc.dr = NewDriftCache()
@@ -261,10 +265,29 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 // its path spells, which the line says.
 const unnamedWhy = "no path names this field alone: its key holds '.', '[' or ']', or its document holds that key twice, so its noise in keploy.yml also names the other field its path spells"
 
+// unreadByWords names the first of dc.byWords that may hold the change of
+// a value from rec to live (mayHold), as placesOf names a place keploy
+// could not read; "" where none may.
+func (dc *decider) unreadByWords(rec, live Leaf) string {
+	var c valueChange
+	for i, e := range dc.byWords {
+		if i == 0 {
+			c = dc.dr.changeOf(rec, live)
+		}
+		if e.unreadWords.mayHold(c) {
+			return unreadName(e.Mock, e) + " (" + e.Unread + ")"
+		}
+	}
+	return ""
+}
+
 // leaf decides the changed words of the drifted leaf at path.
 func (dc *decider) leaf(path, unread string) []Decision {
 	rec, live := dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path]
 	at := dc.in.AddressOf(rec, false)
+	if unread == "" {
+		unread = dc.unreadByWords(rec, live)
+	}
 	switch {
 	case unread != "":
 		return []Decision{dc.refuse(path, at, -1, rec.Value, live.Value, RefusalUnread,
@@ -1412,7 +1435,7 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 		c.li = typedInstant{at: time.Unix(0, iw.Live.key.at).UTC(), res: iw.Live.res, names: namesMoment}
 	}
 	c.echo, c.unnamed = dc.readBack(path, w.At, w, rec, true)
-	c.rec = rec
+	c.rec, c.live = rec, live
 	if w.Rec != rec {
 		c.valueEcho = c.echo
 	}
@@ -1493,12 +1516,22 @@ type changedInstant struct {
 	// echo is where the call's answer reads the word back (readBack, whole
 	// values too), valueEcho the same for a Value (the text whole is the
 	// adapter's echo), unnamed the first such place keploy cannot name, rec
-	// the leaf's recorded text.
-	echo, valueEcho []variables.Address
-	unnamed, rec    string
+	// the leaf's recorded text and live its text in round F (an instant in a
+	// text's; leaf reads them).
+	echo, valueEcho    []variables.Address
+	unnamed, rec, live string
 	// aside names the earlier places that held R's value where F's does
 	// not stand: a Clock's line says it set them aside.
 	aside []string
+}
+
+// leaf is the changed leaf's whole text in each run: the instant's own,
+// where it is no instant in a text.
+func (c changedInstant) leaf() (rec, live string) {
+	if c.text {
+		return c.rec, c.live
+	}
+	return c.r, c.l
 }
 
 // clockWordOf is where iw, an instant rd reads, stands in rec, its leaf's
@@ -2024,6 +2057,14 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	defer dc.letGoHalves()
 	r, l := c.r, c.l
 	inScope := dc.inScope
+	// A read of the application's clock that the call's own window holds in
+	// both runs goes before a client test's request (readOverClients): no
+	// place of the request is read for the moment, as main reads the call.
+	earlier := dc.in.Earlier
+	if c.rm != nil && c.lm != nil {
+		earlier = readOverClients(earlier, dc.in.Window, []driftedInstant{{rec: *c.rm, live: *c.lm}}, dc.dr.zone)
+	}
+	overClients := len(earlier) < len(dc.in.Earlier)
 	// untold: answers of the scope before the call, whose view in round F
 	// keploy cannot tell, that hold F's moment and not R's.
 	var hs []instantHold
@@ -2045,6 +2086,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			ps = []evPlace{req, ans}
 		}
 		for _, p := range ps {
+			if overClients && dc.clientCase(p.mock) {
+				continue
+			}
 			hr, fr, okR := dc.holds(p, p.t.rec, r, c.rm, c.byText)
 			hl, fl, okL := dc.holds(p, p.t.live, l, c.lm, c.byText)
 			if !okR || !okL {
@@ -2167,7 +2211,30 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 	}
 	if c.rm != nil && c.lm != nil {
-		reqs := slices.DeleteFunc(slices.Clone(dc.in.Earlier), func(e Earlier) bool { return !e.Given || e.Gave || e.Unread != "" })
+		// A client test's request is the client's own in each run, never
+		// one keploy sent as recorded. A leaf of it that shows the value by
+		// its text in both runs moved with the value: a slot (2), whatever
+		// unit its digits end at (a UnixNano that ends in 0 beside one that
+		// does not). One that holds the recorded moment only as a cut of a
+		// finer instant (the UnixNano in a name the client made, beside the
+		// second the application read from its own clock a moment later)
+		// gave the application no value at that cut to pick, as in the loop
+		// above. Neither is a place the recorded moment stands at by a rule
+		// round F's does not follow: the later steps read the value, and
+		// one no window holds stays refused, naming the place.
+		followed := map[[2]string]bool{}
+		for _, h := range hs {
+			if p := h.p; h.hr && request(p) && dc.clientCase(p.mock) &&
+				(h.hl && asText(p.t.rec, r) && asText(p.t.live, l) || dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm)) {
+				followed[[2]string{p.mock, p.path}] = true
+			}
+		}
+		reqs := slices.DeleteFunc(slices.Clone(earlier), func(e Earlier) bool { return !e.Given || e.Gave || e.Unread != "" })
+		for i, e := range reqs {
+			if len(followed) > 0 && e.incoming {
+				reqs[i].Seen = slices.DeleteFunc(slices.Clone(e.Seen), func(s Seen) bool { return followed[[2]string{e.Mock, s.Leaf.Path}] })
+			}
+		}
 		if where, _ := dc.dr.requestHolds([]moment{*c.rm}, []moment{*c.lm}, reqs); where != "" {
 			return dc.refuse(path, at, n, r, l, RefusalPick,
 				"the recorded moment stands in the test case at "+where+", and no cut there gives round F's", []string{where}, dc.fieldNoise(path))
@@ -2176,15 +2243,31 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 
 	// A given's text, and 2. one templated slot of the test case's request
 	// that shows it in both runs: a Value bound there; two slots, refused.
+	// A client test's request that holds the moment in both runs only as a
+	// coarse cut of a finer instant (the UnixNano in a name, beside a
+	// second) is no slot keploy can bind: a variable holds one text. Where
+	// the call's own window holds the read, or the test's since its begin,
+	// the value is that read (5, 7), as an answer's is at step 3 and as main
+	// reads it; with no such read it stays a slot, which the adapter that
+	// cannot bind another form refuses.
+	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
+	windowRead := func() bool {
+		return c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	}
+	cutSlot := func(p evPlace) bool {
+		return c.rm != nil && c.lm != nil && dc.clientCase(p.mock) && dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm) && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && windowRead()
+	}
 	gave := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && h.p.gave })
-	slots := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() })
+	slots, again := oneSource(oneSlotEach(heldWhere(hs, func(h instantHold) bool {
+		return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() && !cutSlot(h.p)
+	})), c)
 	if len(gave) > 0 {
 		return dc.bound(path, at, n, c, gave, ": a value the test gave keploy, which the call sends as given in both runs")
 	}
 	switch len(slots) {
 	case 0:
 	case 1:
-		return dc.bound(path, at, n, c, slots, ": the test case's request holds it, templated, in both runs")
+		return dc.bound(path, at, n, c, slots, ": the test case's request holds it, templated, in both runs"+again)
 	default:
 		return dc.refuse(path, at, n, r, l, RefusalTwoSources,
 			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.fieldNoise(path))
@@ -2211,8 +2294,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	cutOnly := len(heldWhere(hs, func(h instantHold) bool {
 		return answer(h) && !h.fr && c.rm != nil && dc.cutOfFinerOnly(h.p.t.rec, h.p.t.live, r, *c.rm)
 	})) == len(answers)
-	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
-	ownRead := cutOnly && c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	ownRead := cutOnly && windowRead()
 	// An answer that only reads back what a send of the scope wrote, where
 	// that send holds the moment at a cut coarser than a millisecond in both
 	// runs and its own call learned it as its read of the clock (clockSrc,
@@ -2226,8 +2308,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// millisecond or finer still makes the answer a copy's (4), an answer no
 	// such send came before still binds, and another test's answer is never
 	// one of these.
-	if !ownRead && len(answers) > 0 && c.rm != nil && c.lm != nil && max(c.rm.res, c.lm.res) > time.Millisecond &&
-		(readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin())) {
+	if !ownRead && len(answers) > 0 && c.rm != nil && c.lm != nil && max(c.rm.res, c.lm.res) > time.Millisecond && windowRead() {
 		if coarse := copies(false); len(coarse) > 0 && earliest(coarse).clock && earliest(coarse).at.Before(earliest(answers).at) {
 			ownRead = true
 		}
@@ -2283,7 +2364,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			gaveOutside, fine = append(gaveOutside, p.mock), fine || h.fr || h.fl
 		}
 	}
-	if mock, ok := dc.echoedOutside(c); ok {
+	if mock, ok := dc.echoedOutside(c, earlier); ok {
 		gaveOutside, fine = append(gaveOutside, mock), fine || fineCut(c.rm.res) || fineCut(c.lm.res)
 	}
 	if len(gaveOutside) > 0 {
@@ -2693,14 +2774,16 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 
 // bound is a Value bound at the earliest of src, rule following that
 // place's name; From says Run where it is the start-up's or an earlier
-// test's (the run's variable).
+// test's (the run's variable), and Given (Client) where it is the test
+// case's request (a client test's).
 func (dc *decider) bound(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
 	if first.trailed {
 		rule += ", sent in " + dc.in.Trails.Test + ", which this call trails"
 	}
 	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+rule+answeredAt(c.valueEcho, c.rec), names(src))
-	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp}
+	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
+		Given: first.given, Client: dc.clientCase(first.mock)}
 	d.FromAt = dc.fromAt(first, c.r)
 	d.Echo = c.valueEcho
 	return d

@@ -5283,17 +5283,19 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 // recording kept for its browser (models.TestBeginsReq). They are given again
 // to a restarted agent, like the scope table. An agent that cannot take them
 // is an error: the tests would run on another clock, or their browsers on
-// other numbers, than their recording's.
-func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string) (retErr error) {
+// other numbers, than their recording's. The requests each client test sent
+// in its recording (cases) go with them; an agent that does not read them
+// learns as it did before it could.
+func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string, cases map[string][]models.ClientCase) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded, recordedReal, recordedSeeds := maps.Clone(begins), maps.Clone(real), maps.Clone(seeds)
+			recorded, recordedReal, recordedSeeds, recordedCases := maps.Clone(begins), maps.Clone(real), maps.Clone(seeds), maps.Clone(cases)
 			a.session().record(stepTestBegins, func(c context.Context) error {
-				return a.PushTestBegins(c, recorded, recordedReal, recordedSeeds)
+				return a.PushTestBegins(c, recorded, recordedReal, recordedSeeds, recordedCases)
 			})
 		}
 	}()
-	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real, Seeds: seeds})
+	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real, Seeds: seeds, Cases: cases})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests' recorded begins: %w", err)
 	}

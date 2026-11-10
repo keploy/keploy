@@ -985,6 +985,15 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				}
 			}
 			why := fmt.Sprintf("variable %s is used at %s before the call that binds it was made in this test", d.name, place)
+			if note := table.Unbound(d.name); note != "" {
+				// Bound at a client test case's request, which no call is:
+				// the request bound nothing this run, and the note says why.
+				return nil, &varProblem{
+					mock: m.Name, name: d.name, place: place, actual: sent,
+					why:  fmt.Sprintf("variable %s is used at %s, and %s", d.name, place, note),
+					next: fmt.Sprintf("the test's request that sends variable %s did not bind it: if the test now sends its requests in another order or shape, re-record the test", d.name),
+				}
+			}
 			if models.RunVariable(d.name) {
 				// The test set's variable: bound by the start-up's call or
 				// an earlier test's, which this replay did not make first.

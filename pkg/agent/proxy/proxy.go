@@ -138,6 +138,10 @@ type Proxy struct {
 	// whenever its error capture window opens (openTestErrorCapture). Under
 	// the proven switch the parsers find it on their connection's context.
 	learnTracker *learn.Tracker
+	// caseBinds are the running client test's recorded requests and the
+	// variables of the test bound at them, which its requests bind as they
+	// reach the application (TakeClientCases, bindCase).
+	caseBinds caseBinds
 	// serveClock tells, with the proven switch off, a call's span on the
 	// application's clock for the background check alone (learn.
 	// CallSpanOf): the managers note their serves to it, and the parsers
@@ -5121,6 +5125,79 @@ var _ agent.TestRequestTaker = (*Proxy)(nil)
 func (p *Proxy) ClientTests() bool { return p.learnTracker.ClientTests() }
 
 var _ agent.ClientTestsReader = (*Proxy)(nil)
+
+// TakeClientCases gives the learn step the requests the running client
+// test, test, sent the application in its recording (agent.ClientCasesTaker;
+// learn.Tracker.SetCases), and the test's variables bound at them
+// (caseBinds), under the proven switch.
+func (p *Proxy) TakeClientCases(test string, cases []models.ClientCase) {
+	if !provenswitch.On() {
+		return
+	}
+	cs := make([]learn.ClientCase, 0, len(cases))
+	for i := range cases {
+		cs = append(cs, learn.ClientCase{Name: cases[i].Name, Req: &cases[i].Req})
+	}
+	p.learnTracker.SetCases(cs)
+	p.setCaseBinds(test, cases)
+}
+
+var _ agent.ClientCasesTaker = (*Proxy)(nil)
+
+// WantsIncoming reports whether the learn step takes the running client
+// test's requests now (incoming.RequestTaker; learn.Tracker.WantsIncoming),
+// or a variable of the test is bound at one not yet paired (caseBinds), under
+// the proven switch.
+func (p *Proxy) WantsIncoming() bool {
+	return provenswitch.On() && (p.learnTracker.WantsIncoming() || p.caseBinds.wants())
+}
+
+// TakeIncoming gives the learn step a request of the running client test
+// that reached the application's ingress at the real instant at, before any
+// byte of it reached the application (incoming.RequestTaker;
+// learn.Tracker.Incoming), and binds the test's variables bound at the
+// recorded request it pairs with (bindCase), under the proven switch.
+// unread says why keploy could not read it, "" where it could, and words
+// are the words of what it could not read (learn.Tracker.IncomingWords).
+func (p *Proxy) TakeIncoming(req *models.HTTPReq, unread string, words *learn.RequestWords, at time.Time) {
+	if provenswitch.On() {
+		p.learnTracker.IncomingWords(req, unread, words, at)
+		p.bindCase(req, unread)
+	}
+}
+
+// TakeComing gives the learn step a request of the running client test
+// whose body is still coming as it reaches the application's ingress
+// (incoming.RequestTaker; learn.Tracker.IncomingComing), with passed, the
+// words of its body that passed so far, and pairs it with the recorded
+// request whose variables it binds (pairCase), under the proven switch: a
+// variable bound in its URL or a header binds at once, and one bound in its
+// body is noted, until the body ended, as bound at a request keploy has not
+// read yet (learn.ComingUnread). done, once it ended, gives the learn step
+// the request whole, with the words of what keploy could not read of it,
+// and binds the body's variables from it. nil where it takes nothing of
+// it; words says whether the learn step took it, which alone reads a
+// body's words.
+func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time, passed func() *learn.RequestWords) (done func(*models.HTTPReq, string, *learn.RequestWords), words bool) {
+	if !provenswitch.On() {
+		return nil, false
+	}
+	learned, bind := p.learnTracker.IncomingComing(req, at, passed), p.pairCase(req, learn.ComingUnread)
+	if learned == nil && bind == nil {
+		return nil, false
+	}
+	if bind != nil {
+		bind(req, learn.ComingUnread)
+	}
+	return func(live *models.HTTPReq, unread string, words *learn.RequestWords) {
+		if learned != nil {
+			learned(live, unread, words)
+		}
+		if bind != nil {
+			bind(live, unread)
+		}
+	}, learned != nil
+}
 
 // TakeRecordedBegin gives the learn step the instant the next test began at
 // in its recording (agent.RecordedBeginTaker; learn.Tracker.RecordedBegin),

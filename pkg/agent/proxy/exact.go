@@ -1503,6 +1503,53 @@ func (m *MockManager) GiveExactTest(test string, b models.VariableBinding) error
 	return nil
 }
 
+// NoteExactTest notes, in the open test's scope, why its variable name is
+// not bound (variables.Table.Note): test must be the test the view serves.
+func (m *MockManager) NoteExactTest(test, name, why string) error {
+	if v := m.exactView(); v == nil || v.test != test || test == "" {
+		return fmt.Errorf("%s is not the test keploy serves now", test)
+	}
+	if !m.vars.Note(name, why) {
+		return fmt.Errorf("no scope of %s's variables has begun", test)
+	}
+	return nil
+}
+
+// NoteExactTestAtOpen leaves notes, by variable name, for the scope of test's
+// variables to begin with, as its variables begin (OpenExactTest,
+// OpenExactTestConcurrent; variables.Table.StartOpeningTest), in the same
+// step: each says why the variable is not bound (variables.Table.Note). A
+// client test's begin gives the test's cases before it opens the test's view
+// (the agent's ProvenBegin), so a note taken into the scope in force then
+// would be refused, or forgotten by the open. The next call replaces them,
+// and the next open of any test's variables takes them: another test's drops
+// them.
+func (m *MockManager) NoteExactTestAtOpen(test string, notes map[string]string) {
+	m.caseNotesMu.Lock()
+	defer m.caseNotesMu.Unlock()
+	m.caseNotes = pendingNotes{test: test, notes: maps.Clone(notes)}
+}
+
+// takeCaseNotes returns the notes left for test's scope
+// (NoteExactTestAtOpen), and leaves none for any.
+func (m *MockManager) takeCaseNotes(test string) map[string]string {
+	m.caseNotesMu.Lock()
+	defer m.caseNotesMu.Unlock()
+	n := m.caseNotes
+	m.caseNotes = pendingNotes{}
+	if n.test != test {
+		return nil
+	}
+	return n.notes
+}
+
+// pendingNotes are the notes the scope of test's variables begins with
+// (NoteExactTestAtOpen).
+type pendingNotes struct {
+	test  string
+	notes map[string]string
+}
+
 // ServeExactTestConcurrent is ServeExactTest for a test that shares
 // recordings with the tests whose requests were open beside its own at
 // record time (keploy record's full round, models.ExactServing.Concurrent):
@@ -1604,8 +1651,9 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		// variables' lock is taken: the scope they bound in reads the run's
 		// of vars, and so locks vars first (variables.Table.ReadRunOf).
 		// The scope is test's: what it binds itself is test's once the next
-		// begins (variables.Table.EndedOf).
-		m.vars.StartOpeningTest(test, install, given, m.carriedInto(v))
+		// begins (variables.Table.EndedOf). It begins with the notes left
+		// for it (NoteExactTestAtOpen).
+		m.vars.StartOpeningTest(test, install, given, m.carriedInto(v), m.takeCaseNotes(test))
 		m.aheadVars.Reset()
 	} else {
 		install()

@@ -509,6 +509,33 @@ type TestBeginsReq struct {
 	// random numbers (MappedTestCase.Seed): a begin that asks for one is
 	// answered it (ScopeBeginResp.Seed). Absent when no test kept one.
 	Seeds map[string]string `json:"seeds,omitempty"`
+	// Cases is, by test, the requests its client test sent the application
+	// in its recording, in the order it sent them (MappedTestCase.Cases, each
+	// read from its test case): under the proven switch the agent pairs each
+	// request of the test that reaches the application with one of them, as
+	// an earlier place of the test's calls (learn.Tracker.Incoming). Absent
+	// when no test's recording kept its requests.
+	Cases map[string][]ClientCase `json:"cases,omitempty"`
+}
+
+// ClientCase is one request a client test sent the application in its
+// recording: its test case's name and its request as recorded, and each
+// variable of the test bound at that request (MappedTestCase.Variables,
+// CaseBind): a replay binds it from the request of the test that pairs with
+// this one, before the application is given it.
+type ClientCase struct {
+	Name  string           `json:"name"`
+	Req   HTTPReq          `json:"req"`
+	Binds []ClientCaseBind `json:"binds,omitempty"`
+}
+
+// ClientCaseBind is one variable a client test case's request binds: its
+// name, its recorded value, and its place in the request (CaseBind's place,
+// in the grammar of a MockVariable's places).
+type ClientCaseBind struct {
+	Name     string `json:"name"`
+	Recorded string `json:"recorded"`
+	Place    string `json:"place"`
 }
 
 type SetTable struct {
