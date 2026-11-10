@@ -293,6 +293,7 @@ func start(ctx context.Context) {
 	// does not have points at `keploy record --help`, where record's flags
 	// are, not at the root's, which lists only commands.
 	if cmd, err := rootCmd.ExecuteC(); err != nil {
+		err = cli.HintUnknownCommand(rootCmd, err)
 		utils.ErrCode = finalExitCode(err, utils.ErrCode, cmd.CommandPath(), os.Stderr)
 	}
 
