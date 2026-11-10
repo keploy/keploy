@@ -1953,6 +1953,7 @@ func TestAClockReadsEchoIsExplainedOnlyByASourceOfTheAnswersInstant(t *testing.T
 	const seen, link, token = "resp.0.0.value.seen", "resp.0.0.value.link", "resp.0.0.value.token"
 	const second, fSecond = "2026-11-09 07:01:42", "2026-11-09 09:19:05"
 	const isoSecond, fIsoSecond, httpSecond = "2026-11-09T07:01:42Z", "2026-11-09T09:19:05Z", "Mon, 09 Nov 2026 07:01:42 GMT"
+	const encSecond = "at=2026-11-09T07%3A01%3A42Z"
 	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	const unixS, fUnixS = "1794207702", "1794215945"
 	const filter = "body.cmd.pipeline.0.$match.expiration.$gt.$numberLong"
@@ -2002,6 +2003,18 @@ func TestAClockReadsEchoIsExplainedOnlyByASourceOfTheAnswersInstant(t *testing.T
 		{"an ISO second, an insert of the second as a DATETIME beside its ISO text encoded", upd, isoSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.at", second+" 2026-11-09T07%3A01%3A42Z", fSecond+" 2026-11-09T09%3A19%3A05Z", false, nil)}, false},
 		{"a lower-case ISO second beside an escape, an earlier insert of it", link, "2026-11-09t07:01:42z p%20q", nil, []func(time.Time) Earlier{sent("body.docs.0.at", "2026-11-09t07:01:42z", "2026-11-09t09:19:05z", false, nil)}, true},
 		{"a DATETIME second beside an escape, an insert of it beside the read in base64", link, second + " p%20q", nil, []func(time.Time) Earlier{sent("body.docs.0.at", second+" "+b64("2026-11-09 07:01:42.600"), fSecond+" "+b64("2026-11-09 09:19:05.750"), false, nil)}, false},
+		{"a percent-encoded ISO second, an earlier insert of it as a DATETIME", link, encSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.updated_at", second, fSecond, false, nil)}, false},
+		// A source is made anew in one form: its recorded instant pairs with
+		// one of round F read the same way, as written or in the same form.
+		{"an ISO second, an insert of it plain in the recording and in base64 in round F", upd, isoSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.at", isoSecond, b64(fIsoSecond), false, nil)}, false},
+		{"an ISO second, an insert of it plain beside its base64, round F's in base64 alone", upd, isoSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.at", isoSecond+" "+b64(isoSecond), "x "+b64(fIsoSecond), false, nil)}, false},
+		{"a percent-encoded ISO second, an insert of it plain in the recording and in base64 in round F", link, encSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.at", isoSecond, b64(fIsoSecond), false, nil)}, false},
+		{"a percent-encoded ISO second, an insert of it plain in the recording, a DATETIME in base64 beside other text in round F", link, encSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.at", isoSecond, "x "+b64(fSecond), false, nil)}, false},
+		{"a percent-encoded ISO second, a request of it encoded in the recording and plain in round F", link, encSecond, nil, []func(time.Time) Earlier{sent("body.cmd.query.link", encSecond, "at="+fIsoSecond, false, nil)}, false},
+		{"a percent-encoded ISO second, an insert of it plain beside another time in base64, round F's in base64 alone", link, encSecond, nil, []func(time.Time) Earlier{sent("body.docs.0.at", isoSecond+" "+b64("2026-11-08T01:02:03Z"), "x "+b64(fIsoSecond), false, nil)}, false},
+		// A place that holds the read in a declared form holds the read,
+		// however the answer's instant was read.
+		{"a DATETIME second, an insert of it beside the read in base64", upd, second, nil, []func(time.Time) Earlier{sent("body.docs.0.at", second+" "+b64("2026-11-09 07:01:42.600"), fSecond+" "+b64("2026-11-09 09:19:05.750"), false, nil)}, false},
 	} {
 		d := decide(c.path, c.val, c.also, c.earlier...)
 		switch {

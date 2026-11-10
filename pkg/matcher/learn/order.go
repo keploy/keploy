@@ -2850,11 +2850,14 @@ func (dc *decider) echoesMoment(t *readerText, m moment, elsewhere func(a moment
 //
 // A place that holds the read itself is the read: a request that sets the
 // read and filters by it, answered with what it set, is still the read's
-// echo, as is the leaf the read stands in.
+// echo, as is the leaf the read stands in. The read is looked for in the
+// place as written and in its declared forms, however the answer's instant
+// was read: a place that holds the read in base64 beside its second holds
+// the read.
 func (dc *decider) heldElsewhere(a, read moment, unit time.Duration, text string, declared bool) bool {
 	dc.asked++
 	holds := func(t *readerText) bool {
-		return dc.holdsMomentOf(t, a, declared) && !dc.holdsMomentOf(t, read, declared) && (text == "" || textHoldsInstant(t, text, declared))
+		return dc.holdsMomentOf(t, a, declared) && !dc.holdsMomentOf(t, read, true) && (text == "" || textHoldsInstant(t, text, declared))
 	}
 	source := func(rec, live *readerText) bool { return holds(rec) && dc.movedOn(rec, live, a, declared) }
 	for path, l := range dc.in.Rec.Leaves {
@@ -2884,16 +2887,44 @@ func (dc *decider) heldElsewhere(a, read moment, unit time.Duration, text string
 // rec writes a in: a value made anew each run, in one form. A layout's
 // instants are all keyed or none (a time-ordered UUID's), and one that
 // names a is keyed, so an instant of live in its layout is too. declared:
-// both texts are read in their declared forms too (formSpans).
+// both texts are read in their declared forms too, and an instant of rec
+// pairs only with one of live read the same way (kindSpans): as written
+// with as written, a form with that form. A place plain in the recording
+// and in base64 in round F is not one value written anew in one form.
 func (dc *decider) movedOn(rec, live *readerText, a moment, declared bool) bool {
 	if dc.holdsMomentOf(live, a, declared) {
 		return false
 	}
-	rs, ls := formSpans(rec, declared), formSpans(live, declared)
-	return slices.ContainsFunc(rs, func(r instant) bool {
-		return dc.namedIn([]instant{r}, a, func(h, m moment) bool { return h.key == m.key }) > 0 &&
-			slices.ContainsFunc(ls, func(l instant) bool { return l.layout == r.layout })
-	})
+	rs, ls := kindSpans(rec, declared), kindSpans(live, declared)
+	for k, spans := range rs {
+		if slices.ContainsFunc(spans, func(r instant) bool {
+			return dc.namedIn([]instant{r}, a, func(h, m moment) bool { return h.key == m.key }) > 0 &&
+				slices.ContainsFunc(ls[k], func(l instant) bool { return l.layout == r.layout })
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+// kindSpans are t's instants by the way they are read: as written first,
+// and, where declared, those of each of its declared forms at that form's
+// place (decoded.kinds); none of a text keploy could not read.
+func kindSpans(t *readerText, declared bool) (out [1 + formKinds][]instant) {
+	spans, ok := t.spansOf()
+	out[0] = spans
+	if !declared || !ok {
+		return out
+	}
+	s, _ := t.textNow()
+	x := t.x.dc
+	d := derivedOfText(x, textDecoded, s, func(own string) decoded { return decodeForms(own) }, func(d decoded) int64 { return d.size() })
+	for k, form := range d.kinds(s) {
+		if form != "" {
+			out[1+k] = x.spansOf(form)
+		}
+	}
+	return out
 }
 
 // clockCut reports whether o, the read of the clock a place's call learned
