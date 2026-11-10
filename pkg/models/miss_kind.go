@@ -19,6 +19,13 @@ const (
 	MissOutsideTest = "outside_test"
 )
 
+// KindOutsideEveryTest names a call no recording answered that is charged to
+// no test because the application made it outside every test (between two
+// tests; UnmatchedCall.Between): it fails the run, and no test. It is the
+// kind field of the line keploy prints for such a call, in the form keploy's
+// docs document ("outside every test").
+const KindOutsideEveryTest = "outside_every_test"
+
 // MissMark is where a miss's call was when its parser marked it, its first
 // read of the round under the proven switch (MockMismatchReport.Mark): the
 // staging (Epoch) and the round's boundary count (Bounds) the read was made

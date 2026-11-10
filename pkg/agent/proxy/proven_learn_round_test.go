@@ -2401,6 +2401,78 @@ func TestAnEarlierSetsTestsCallKeptByTwoSetStartsIsReadOnce(t *testing.T) {
 	}
 }
 
+// A set's last test's window that no read took still holds the calls its
+// opening carried as made between two tests (betweenTestsMiss) or late in a
+// test (lateInTestMiss). The next set's start keeps one marked in a test's
+// view as that earlier set's test's call alone: the next read returns it
+// naming that test, neither between this set's tests nor late in one of
+// them, so it fails the run and no set of this run.
+func TestALastWindowsLateOrBetweenCallIsKeptAtTheSetsStartAsAnEarlierSetsAlone(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	for name, wrap := range map[string]func(error) error{
+		"late":    func(e error) error { return lateInTestMiss{e} },
+		"between": func(e error) error { return betweenTestsMiss{e} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, _ := heldOrdersLogging(t, true, zap.NewNop())
+			p.dnsCache = newDNSCache()
+			m := mockMiss("POST /orders test-1's call")
+			m.MissKind = models.MissInTest
+			m.MismatchReport.MarkedTest = "test-1"
+			m.MismatchReport.MarkedInTest = true
+			acc := &testErrorAccumulator{}
+			acc.addBounded(wrap(m), maxPendingMockErrors)
+			p.captureMu.Lock()
+			p.activeTestErrors.Store(acc)
+			p.captureMu.Unlock()
+			p.cutMissesAtSetStart(context.Background())
+			p.BeginTestErrorCapture()
+			got, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ActualSummary != "POST /orders test-1's call" || got[0].Protocol != "HTTP" ||
+				got[0].EarlierSetTest != "test-1" || got[0].BeforeSet || got[0].Between || got[0].Late || got[0].MadeIn != "" {
+				t.Fatalf("the next set's first read %+v; want test-1's call alone, as an earlier set's test's", got)
+			}
+		})
+	}
+}
+
+// An earlier set's test's call (earlierSetMiss) that reaches the next set's
+// first window after its read is carried by the second test's window as it
+// is: keploy test's read of that test's end returns it naming the earlier
+// set's test, not as made late in a test of this set, which would fail this
+// set with a call it did not make, and not read whole as a call of no
+// protocol.
+func TestAnEarlierSetsTestsCallFiledAfterTheFirstReadKeepsItsWrap(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := heldOrdersLogging(t, true, zap.NewNop())
+	p.dnsCache = newDNSCache()
+	p.BeginTestErrorCapture()
+	if got, err := p.GetMockErrors(context.Background()); err != nil || len(got) != 0 {
+		t.Fatalf("the first read %+v (%v); want none", got, err)
+	}
+	m := mockMiss("POST /orders test-1's call")
+	m.MissKind = models.MissInTest
+	m.MismatchReport.MarkedTest = "test-1"
+	m.MismatchReport.MarkedInTest = true
+	m.MismatchReport.MarkRound = true
+	// Filed with no test's window open: the read took the first one.
+	p.captureMu.Lock()
+	p.pendingMockErrors.addBounded(earlierSetMiss{m}, maxPendingMockErrors)
+	p.captureMu.Unlock()
+	p.ContinueTestErrorCapture()
+	got, err := p.GetMockErrors(models.WithTestEndRead(context.Background(), "test-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ActualSummary != "POST /orders test-1's call" || got[0].Protocol != "HTTP" ||
+		got[0].EarlierSetTest != "test-1" || got[0].Marked.Test != "test-1" || got[0].Late || got[0].Between || got[0].MadeIn != "" {
+		t.Fatalf("the second read %+v; want test-1's call, as an earlier set's test's", got)
+	}
+}
+
 // A call read between tests (the store's pool view, the learn tracker's
 // test ended) that is exactly a recording the round does not offer, the
 // test before's own (test-1's mock-own1, its late call, whether or not

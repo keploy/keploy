@@ -440,3 +440,153 @@ func TestAWithdrawnWindowEndsTheTrackersTestInTheManagersRound(t *testing.T) {
 		t.Fatalf("the round reads phase %v, test %q (%s); want T2's test, the one the tracker began over the view", snap.Phase, snap.Test, snap.Boundary)
 	}
 }
+
+// kindedMiss is a miss its proxy placed (models.ParserError.MissKind).
+func kindedMiss(summary, kind string) models.ParserError {
+	m := mockMiss(summary)
+	m.MissKind = kind
+	return m
+}
+
+// Under the proven switch a miss made between two tests, filed while no
+// test's window was open and made while no test's view served
+// (models.MissOutsideTest), is the set's: the next test's read carries it
+// marked Between, for the replay to fail the set with, charging that test
+// nothing. A miss made in the previous test and filed after its read
+// (models.MissInTest, models.MissExtraCall) is the set's too: it is carried
+// marked Late, named under the test its mark names (MadeIn). With the switch
+// off every miss is carried unmarked.
+func TestUnderTheSwitchAMissBetweenTwoTestsIsTheSets(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("switch=%v", on), func(t *testing.T) {
+			if on {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+
+			p.BeginTestErrorCapture()
+			if got, _ := p.GetMockErrors(context.Background()); len(got) != 0 {
+				t.Fatalf("the first test read %+v; want nothing", got)
+			}
+			p.pendingMockErrors.addBounded(kindedMiss("delete on sessions", models.MissOutsideTest), maxPendingMockErrors)
+			p.pendingMockErrors.addBounded(kindedMiss("find on carts", models.MissInTest), maxPendingMockErrors)
+			p.pendingMockErrors.addBounded(markedMiss("count on carts", models.MissExtraCall, "t1"), maxPendingMockErrors)
+			p.ContinueTestErrorCapture()
+			p.errChannel <- kindedMiss("POST /t2", models.MissInTest)
+
+			got, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatalf("GetMockErrors: %v", err)
+			}
+			read := map[string]models.UnmatchedCall{}
+			for _, c := range got {
+				read[c.ActualSummary] = c
+			}
+			if len(got) != 4 || len(read) != 4 {
+				t.Fatalf("the second test read %+v; want the three carried misses and its own", got)
+			}
+			if c := read["delete on sessions"]; c.Between != on || c.Kind != models.MissOutsideTest || c.BeforeSet {
+				t.Errorf("the miss made between the tests reads %+v; want Between=%v, %s, not BeforeSet", c, on, models.MissOutsideTest)
+			}
+			if c := read["delete on sessions"]; c.Late {
+				t.Errorf("the miss made between the tests reads %+v; want it not Late", c)
+			}
+			if c := read["find on carts"]; c.Between || c.Late != on || c.MadeIn != "" {
+				t.Errorf("the previous test's late miss reads %+v; want Late=%v, no mark to name its test, not Between", c, on)
+			}
+			if c := read["count on carts"]; c.Between || c.Late != on || (on && c.MadeIn != "t1") {
+				t.Errorf("the previous test's late extra call reads %+v; want Late=%v, made in t1, not Between", c, on)
+			}
+			if c := read["POST /t2"]; c.Between || c.Late {
+				t.Errorf("the test's own miss reads %+v; want it unmarked", c)
+			}
+		})
+	}
+}
+
+// markedMiss is a miss its parser marked in test (models.MockMismatchReport
+// MarkedTest, with a known round), of kind.
+func markedMiss(summary, kind, test string) models.ParserError {
+	m := kindedMiss(summary, kind)
+	m.MismatchReport.Mark = models.RoundMarkedSettled
+	m.MismatchReport.MarkedInTest = test != ""
+	m.MismatchReport.MarkRound = true
+	m.MismatchReport.MarkedTest = test
+	return m
+}
+
+// Under the proven switch keploy test's read of a test's end
+// (models.WithTestEndRead) returns a miss whose mark names another test as
+// made in that test (Late, MadeIn): keploy decided it after that test's end
+// was read, and it reached the window of the test being read. A miss marked
+// in the test read, or with no test in its mark, is that test's. A read that
+// names no test (the scope agent's, the set's end) leaves every miss as it
+// is, and so does a read with the switch off.
+func TestATestsEndReadNamesAMissMarkedInAnEarlierTest(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		on     bool
+		ctx    context.Context
+		isLate bool
+	}{
+		{"switch on, keploy test's end read", true, models.WithTestEndRead(context.Background(), "t2"), true},
+		{"switch on, a read naming no test", true, context.Background(), false},
+		{"switch off", false, models.WithTestEndRead(context.Background(), "t2"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.on {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+			p.BeginTestErrorCapture()
+			if got, _ := p.GetMockErrors(models.WithTestEndRead(context.Background(), "t1")); len(got) != 0 {
+				t.Fatalf("the first test read %+v; want nothing", got)
+			}
+			p.ContinueTestErrorCapture()
+			p.errChannel <- markedMiss("GET /t1-late", models.MissInTest, "t1")
+			p.errChannel <- markedMiss("GET /t2-own", models.MissInTest, "t2")
+			p.errChannel <- kindedMiss("GET /t2-unmarked", models.MissInTest)
+
+			got, err := p.GetMockErrors(tc.ctx)
+			if err != nil {
+				t.Fatalf("GetMockErrors: %v", err)
+			}
+			read := map[string]models.UnmatchedCall{}
+			for _, c := range got {
+				read[c.ActualSummary] = c
+			}
+			if len(got) != 3 || len(read) != 3 {
+				t.Fatalf("the second test read %+v; want its three misses", got)
+			}
+			if c := read["GET /t1-late"]; c.Late != tc.isLate || (tc.isLate && c.MadeIn != "t1") || c.Between || c.BeforeSet {
+				t.Errorf("the miss marked in t1 reads %+v; want Late=%v, made in t1", c, tc.isLate)
+			}
+			for _, own := range []string{"GET /t2-own", "GET /t2-unmarked"} {
+				if c := read[own]; c.Late || c.MadeIn != "" {
+					t.Errorf("t2's own miss %s reads %+v; want it unmarked", own, c)
+				}
+			}
+		})
+	}
+}
+
+// A miss marked in a test that a set's first window carries is made before
+// the set (BeforeSet), never Late, even when the read names another test:
+// the set's start keeps it as the set's.
+func TestASetsFirstReadKeepsAMarkedMissBeforeTheSetNotLate(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+	p.pendingMockErrors.addBounded(markedMiss("GET /last-sets-test", models.MissInTest, "t9"), maxPendingMockErrors)
+	p.BeginTestErrorCapture()
+	got, err := p.GetMockErrors(models.WithTestEndRead(context.Background(), "t1"))
+	if err != nil {
+		t.Fatalf("GetMockErrors: %v", err)
+	}
+	if len(got) != 1 || !got[0].BeforeSet || got[0].Late || got[0].MadeIn != "" {
+		t.Fatalf("the set's first read %+v; want the marked miss BeforeSet, not Late", got)
+	}
+}

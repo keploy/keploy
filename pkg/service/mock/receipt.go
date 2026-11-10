@@ -280,6 +280,14 @@ type TestsReceipt struct {
 	// MocksDigest is the receipt's: which recording these results are about.
 	MocksDigest string        `yaml:"mocksDigest" json:"mocksDigest"`
 	Tests       []TestReceipt `yaml:"tests" json:"tests"`
+	// Windows are, under the proven switch, every test window of the run
+	// (testWindows: an app a test started is not one) in the order they
+	// began, a test run twice once per run: what places a call no test was
+	// charged with (Receipt.UnchargedMisses, by its time) before the first
+	// test, between two or after the last. keploy's verdict, not this
+	// receipt, says what such a call does to the run. nil with the switch
+	// off.
+	Windows []TestWindow `yaml:"windows,omitempty" json:"windows,omitempty"`
 	// Refusals are, in a record's file, what keploy refused during it
 	// (Receipt.Refusals): a record that reported no test says why.
 	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
@@ -346,6 +354,14 @@ type LearnedElsewhere = learn.Taught
 // capture).
 func (r TestsReceipt) empty() bool {
 	return len(r.Tests) == 0 && len(r.Refusals) == 0
+}
+
+// TestWindow is one run of a test (TestsReceipt.Windows): when its window
+// began and ended. Ended is zero for a window still open at the run's end.
+type TestWindow struct {
+	Test  string    `yaml:"test" json:"test"`
+	Began time.Time `yaml:"began" json:"began"`
+	Ended time.Time `yaml:"ended,omitempty" json:"ended,omitzero"`
 }
 
 // TestReceipt is one test's line in a TestsReceipt. Outcome is its latest

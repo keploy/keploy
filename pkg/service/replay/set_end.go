@@ -53,6 +53,19 @@ type SetAnswersHook interface {
 	SetAnswers(testSetID string, answers []models.UnmatchedCall)
 }
 
+// EarlierSetCallHook is an optional TestHooks extension, under the proven
+// switch: it is told each call a test of an earlier test set made that no
+// mock answered and that fails the run, which keploy decided only after that
+// set had ended (models.UnmatchedCall.EarlierSetTest), as a read of the set
+// readIn returns it. set is the set the test was in: the one the run ran
+// before readIn, "" when it ran none. No set's report holds such a call (the
+// set it was made in has its verdict already, and it is no call of readIn's),
+// so a hook that judges the run from its sets' reports sees it only here.
+// A notification only.
+type EarlierSetCallHook interface {
+	EarlierSetCall(set, readIn string, call models.UnmatchedCall)
+}
+
 // noteSetEnd keeps how a final report of the set RunTestSet is running ends
 // it, for tellSetEnd: each place RunTestSet writes one (the end of the set,
 // a set with no test case to run, a set ignored whole, a set refused when it

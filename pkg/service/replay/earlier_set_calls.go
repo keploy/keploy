@@ -70,23 +70,24 @@ func (e *earlierSetCalls) take(read []models.UnmatchedCall) (rest []models.Unmat
 
 // takeEarlierSetCalls is read without the calls an earlier set's test made
 // (earlierSetCalls.take), which the run keeps to fail with. It says each one
-// that fails the run, at ERROR, as it takes it, naming the test and the set
-// it was made in and the set whose read returned it.
+// that fails the run, at ERROR, as it takes it, in the documented form of a
+// call outside every test (outsideFields): named under the test and the set
+// it was made in, with the set whose read returned it, and tells the hooks
+// each (EarlierSetCallHook).
 func (r *Replayer) takeEarlierSetCalls(read []models.UnmatchedCall) []models.UnmatchedCall {
 	rest, taken := r.earlierSetCalls.take(read)
+	readIn := r.earlierSetCalls.reading()
+	h, telling := r.hookImpl.(EarlierSetCallHook)
 	for _, c := range taken {
 		if !c.call.CountsAgainstTest() {
 			continue
 		}
-		r.logger.Error("test run failed: a test of an earlier test set made a call that no mock answered, which keploy decided only after that set had ended ("+provenswitch.Env+"=1)",
-			zap.String("made-in-test", c.call.EarlierSetTest),
-			zap.String("made-in-test-set", c.set),
-			zap.String("read-in-test-set", r.earlierSetCalls.reading()),
-			zap.String("protocol", c.call.Protocol),
-			zap.String("call", c.call.Named()),
-			zap.String("destination", c.call.Destination),
-			zap.String("diff", c.call.Diff),
-			zap.String("next_step", "the call is that test's, not the set whose read returned it: it changed or is new since the recording; fix the application, or re-record that test if the change is intended"))
+		r.logger.Error("test run failed: a test of an earlier test set made a call that no mock answered, which keploy decided only after that set had ended; it is charged to no test and no set, so it fails the run ("+provenswitch.Env+"=1)",
+			append(r.outsideFields(c.set, c.call.EarlierSetTest, c.call),
+				zap.String("read-in-test-set", readIn))...)
+		if telling {
+			h.EarlierSetCall(c.set, readIn, c.call)
+		}
 	}
 	return rest
 }
@@ -130,8 +131,8 @@ func earlierSetCallsWhy(calls []earlierSetCall) string {
 		}
 		named = append(named, fmt.Sprintf("%s (made in %s of %s)", describeUnclaimed(c.call), c.call.EarlierSetTest, set))
 	}
-	return fmt.Sprintf("the application made %d call(s) in a test of an earlier test set that no mock answered, which keploy decided only after that set had ended: %s",
-		len(calls), strings.Join(named, "; "))
+	return fmt.Sprintf("the application made %d call(s) in a test of an earlier test set that no mock answered, which keploy decided only after that set had ended (%s): %s",
+		len(calls), models.KindOutsideEveryTest, strings.Join(named, "; "))
 }
 
 // passesEarlierSetCalls is the run's verdict pass, false where a call an

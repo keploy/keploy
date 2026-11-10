@@ -605,6 +605,33 @@ type UnmatchedCall struct {
 	// test's: whichever read takes it, the replay fails the set with it,
 	// naming it as held, and charges no test.
 	Held bool `json:"held,omitempty" yaml:"held,omitempty"`
+	// Between says, under the proven switch, that the call was made between
+	// two tests of its set: its miss was filed while no test's window was
+	// open, and the call was made while no test's view served (Kind is
+	// MissOutsideTest). The next test's read carries it. It is the set's, no
+	// test's: the replay fails the set with it (outside every test), naming
+	// the call and the tests it was made between, and charges no test.
+	Between bool `json:"between,omitempty" yaml:"between,omitempty"`
+	// MadeAfter and MadeBefore name, for a call made Between two tests, the
+	// test whose end the replay read last before the call (empty when none
+	// of the set's tests had ended) and the test whose read carried it, which
+	// began after it was made. Set by the replay; names, never a value.
+	MadeAfter  string `json:"made_after,omitempty" yaml:"made_after,omitempty"`
+	MadeBefore string `json:"made_before,omitempty" yaml:"made_before,omitempty"`
+	// Late says, under the proven switch, that keploy test read the call at
+	// the end of a later test than the one it was made in: the call was made
+	// while a test's view served (Kind is MissInTest or MissExtraCall), and
+	// keploy decided its miss only after that test's end was read. It is the
+	// set's, no test's: the replay fails the set with it (outside every
+	// test), named under the test it was made in (MadeIn), and charges no
+	// test, nor the test whose read took it, which did not make it.
+	Late bool `json:"late,omitempty" yaml:"late,omitempty"`
+	// MadeIn names, for a Late call, the test it was made in: the test whose
+	// view its parser's first read found (MissMark.Test). For a parser that
+	// marks no round the replay names the test whose end it read last before
+	// the call's (MadeAfter): the view keploy decided the miss under. A
+	// name, never a value.
+	MadeIn string `json:"made_in,omitempty" yaml:"made_in,omitempty"`
 	// ChargedTo names, under the proven switch, the test whose end charged
 	// the call to it: the call counts against that test (CountsAgainstTest)
 	// and that test's evidence lists it. Empty for a call no test was

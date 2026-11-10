@@ -2,10 +2,12 @@ package replay
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -27,6 +29,19 @@ import (
 // any test's window. Whichever read takes it, it fails the set, named as
 // held, and charges no test: the test open when its connection ended did not
 // make it.
+//
+// A call the application made between two tests of the set, while no test's
+// window was open and no test's view served (models.UnmatchedCall.Between),
+// is the set's too: the next test's read carries it, and it was that test's
+// failure, though the test framework opens each test and that test did not
+// make it. It fails the set, outside every test, named with the tests it was
+// made between, and charges no test. So is a call the application made in a
+// test that keploy decided only after that test's end was read
+// (models.UnmatchedCall.Late): a later test's read takes it, though that test
+// did not make it. It fails the set, outside every test, named under the test
+// it was made in (MadeIn), and charges no test. A miss of the set's background
+// (models.UnmatchedCall.Background: the same request as a background
+// recording) counts against no set (dataPlaneCalls).
 
 // setCalls are the calls of the set RunTestSet is running that no mock
 // answered and that are the set's, no test's (setsCall): a read hands them
@@ -35,33 +50,57 @@ import (
 type setCalls struct {
 	mu    sync.Mutex
 	calls []models.UnmatchedCall
+	// last is the test whose end was read last in the set (takeOf; "" after
+	// the set's end read): the test a call made between two tests was made
+	// after.
+	last string
 }
 
 // setsCall reports whether c is the set's, no test's: made before the set's
-// first test (models.UnmatchedCall.BeforeSet), or held by a parser for a
-// later test's recording that none answered (models.UnmatchedCall.Held).
-func setsCall(c models.UnmatchedCall) bool { return c.BeforeSet || c.Held }
+// first test (models.UnmatchedCall.BeforeSet), held by a parser for a later
+// test's recording that none answered (models.UnmatchedCall.Held), or made
+// between two tests (models.UnmatchedCall.Between), or made in an earlier
+// test and decided after its end was read (models.UnmatchedCall.Late).
+func setsCall(c models.UnmatchedCall) bool { return c.BeforeSet || c.Held || c.Between || c.Late }
 
 // reset forgets the previous set's calls.
 func (s *setCalls) reset() {
 	s.mu.Lock()
 	s.calls = nil
+	s.last = ""
 	s.mu.Unlock()
 }
 
-// take keeps the calls of read that are the set's (setsCall), and returns the
-// others: the test's own.
+// take keeps the calls of read, a read that is no test's end (the set's end),
+// that are the set's (setsCall), and returns the others.
 func (s *setCalls) take(read []models.UnmatchedCall) []models.UnmatchedCall {
+	return s.takeOf(read, "")
+}
+
+// takeOf keeps the calls of read, the read of test's end ("" for the set's
+// end), that are the set's (setsCall), and returns the others: the test's
+// own. A call made between two tests is named with the test read before it
+// (MadeAfter) and test (MadeBefore); so is a call made in an earlier test
+// (Late), and named under the test read before it when no mark named the
+// test it was made in (MadeIn).
+func (s *setCalls) takeOf(read []models.UnmatchedCall, test string) []models.UnmatchedCall {
 	var rest []models.UnmatchedCall
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, c := range read {
 		if setsCall(c) {
+			if c.Between || c.Late {
+				c.MadeAfter, c.MadeBefore = s.last, test
+			}
+			if c.Late && c.MadeIn == "" {
+				c.MadeIn = s.last
+			}
 			s.calls = append(s.calls, c)
 			continue
 		}
 		rest = append(rest, c)
 	}
+	s.last = test
 	if len(rest) == len(read) {
 		return read
 	}
@@ -91,18 +130,31 @@ func (s *setCalls) answers() []models.UnmatchedCall {
 // recording that none answered (models.UnmatchedCall.Held), wherever they
 // were made.
 func setCallsWhy(calls []models.UnmatchedCall) string {
-	var before, held []string
+	var before, held, between, late []string
 	for _, c := range calls {
-		if c.Held {
+		switch {
+		case c.Held:
 			held = append(held, describeUnclaimed(c))
-			continue
+		case c.Between:
+			between = append(between, describeUnclaimed(c)+" ("+betweenWhere(c)+")")
+		case c.Late:
+			late = append(late, describeUnclaimed(c)+" ("+lateWhere(c)+")")
+		default:
+			before = append(before, describeUnclaimed(c))
 		}
-		before = append(before, describeUnclaimed(c))
 	}
 	var why []string
 	if len(before) > 0 {
 		why = append(why, fmt.Sprintf("the application made %d call(s) before the set's first test that no mock answered: %s",
 			len(before), strings.Join(before, "; ")))
+	}
+	if len(between) > 0 {
+		why = append(why, fmt.Sprintf("the application made %d call(s) between two tests that no mock answered (%s): %s",
+			len(between), models.KindOutsideEveryTest, strings.Join(between, "; ")))
+	}
+	if len(late) > 0 {
+		why = append(why, fmt.Sprintf("the application made %d call(s) in a test that no mock answered and keploy decided only after that test ended, so no test is charged (%s): %s",
+			len(late), models.KindOutsideEveryTest, strings.Join(late, "; ")))
 	}
 	if len(held) > 0 {
 		why = append(why, fmt.Sprintf("the application made %d call(s) that keploy held for a later test's recording, which no test of the set answered: %s",
@@ -111,9 +163,80 @@ func setCallsWhy(calls []models.UnmatchedCall) string {
 	return strings.Join(why, "; ")
 }
 
-// logSetCalls says, at ERROR, each of the set's calls that fails it.
+// betweenWhere says between which tests c, a call made Between two, was
+// made.
+func betweenWhere(c models.UnmatchedCall) string {
+	if c.MadeAfter == "" {
+		return "made before test " + c.MadeBefore + " began"
+	}
+	return "made after test " + c.MadeAfter + " ended and before test " + c.MadeBefore + " began"
+}
+
+// lateWhere says where c, a call made in a test and decided after its end
+// (Late), was made, and which test's read took it.
+func lateWhere(c models.UnmatchedCall) string {
+	where := "made in a test of the set"
+	if c.MadeIn != "" {
+		where = "made in test " + c.MadeIn
+	}
+	where += ", decided after that test ended"
+	if c.MadeBefore != "" {
+		where += ", read at test " + c.MadeBefore + "'s end"
+	}
+	return where
+}
+
+// betweenFacts is what keploy knows of the recording closest to c, a call
+// made Between two tests: its name and the fields c differs from it in, each
+// in its shape (models.FieldShapes, never a value), or that none came close.
+func betweenFacts(c models.UnmatchedCall) string {
+	differs := models.FieldShapes(c.Differs)
+	switch {
+	case c.ClosestMock != "" && len(differs) > 0:
+		return "the closest recording is " + c.ClosestMock + ", which it differs from in " + strings.Join(differs, ", ")
+	case c.ClosestMock != "":
+		return "the closest recording is " + c.ClosestMock + ", which it does not match"
+	}
+	return "no recording of this call in the set"
+}
+
+// betweenNextStep is the one next step for c, a call made Between two tests,
+// chosen from its facts (betweenFacts): with a recording that came close, the
+// set is recorded again if the application changed the call on purpose;
+// with none, it is recorded again. record is the command that records it.
+func betweenNextStep(c models.UnmatchedCall, record string) string {
+	if c.ClosestMock != "" {
+		return "if the application changed this call on purpose, record the test set again: " + record
+	}
+	return "record the test set again: " + record
+}
+
+// recordAgainCommand is the command that records the set again: keploy
+// record with the application's command, when keploy test was given one.
+func recordAgainCommand(appCmd string) string {
+	if appCmd == "" {
+		return repeatRecordCommand
+	}
+	return repeatRecordCommand + " -c " + strconv.Quote(appCmd)
+}
+
+// logSetCalls says, at ERROR, each of the set's calls that fails it. A call
+// made between two tests is said in the documented form of a call outside
+// every test (keploy's docs, "outside every test"): kind, the call's shape,
+// between which tests, what keploy knows of its closest recording and the
+// one next step, each a field of the line. So is a call made in a test and
+// decided after its end (Late), with the test it was made in (made_in); a
+// held one is said as held.
 func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 	for _, c := range calls {
+		if c.Between || (c.Late && !c.Held) {
+			msg := "test-set failed: the application made a call between two tests that no mock answered; it is outside every test, so it fails the set and no test (" + provenswitch.Env + "=1)"
+			if !c.Between {
+				msg = "test-set failed: the application made a call in a test that no mock answered, and keploy decided it only after that test ended; it is charged to no test, so it fails the set and no test (" + provenswitch.Env + "=1)"
+			}
+			r.logger.Error(msg, r.outsideFields(testSetID, c.MadeIn, c)...)
+			continue
+		}
 		msg := "test-set failed: the application made a call before its first test that no mock answered (KEPLOY_PROVEN=1)"
 		next := "a call the application makes before the set's first test (as it starts, or while it waits for the set) is no test's; it changed or is new since the recording: fix the application, or re-record if the change is intended"
 		if c.Held {
@@ -127,5 +250,32 @@ func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 			zap.String("destination", c.Destination),
 			zap.String("diff", c.Diff),
 			zap.String("next_step", next))
+	}
+}
+
+// outsideFields is c, a call outside every test, in its documented form
+// (keploy's docs, "outside every test"), as the fields of its ERROR line:
+// kind, the test set whose call it is (testSetID), the call's shape, the test
+// it was made in (madeIn) or between which tests, what keploy knows of its
+// closest recording and the one next step.
+func (r *Replayer) outsideFields(testSetID, madeIn string, c models.UnmatchedCall) []zap.Field {
+	appCmd := ""
+	if r.config != nil {
+		appCmd = r.config.Command
+	}
+	return []zap.Field{
+		zap.String("kind", models.KindOutsideEveryTest),
+		zap.String("test-set", testSetID),
+		zap.String("protocol", c.Protocol),
+		zap.String("call", c.Sanitized().ActualSummary),
+		zap.String("destination", c.Destination),
+		zap.String("made_in", madeIn),
+		zap.String("after", c.MadeAfter),
+		zap.String("before", c.MadeBefore),
+		zap.Time("at", c.At),
+		zap.String("closest", c.ClosestMock),
+		zap.Strings("differs", models.FieldShapes(c.Differs)),
+		zap.String("facts", betweenFacts(c)),
+		zap.String("next_step", betweenNextStep(c, recordAgainCommand(appCmd))),
 	}
 }

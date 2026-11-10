@@ -10003,10 +10003,11 @@ func (r *Replayer) readMockErrors(ctx context.Context, test string) testMisses {
 	// A call an earlier set's test made is the run's, not this test's nor
 	// this set's (earlier_set_calls.go).
 	calls = r.takeEarlierSetCalls(calls)
-	// What was missed before the set's first test, and a call a parser held
-	// for a later test that none answered (its connection ended in this
-	// test), are the set's, not this test's (before_set_calls.go).
-	calls = r.setCalls.take(calls)
+	// What was missed before the set's first test, a call a parser held for
+	// a later test that none answered (its connection ended in this test),
+	// and a call made between the previous test and this one, are the set's,
+	// not this test's (before_set_calls.go).
+	calls = r.setCalls.takeOf(calls, test)
 	// An answered call is no miss: it is the test's answer (TestResult.Answers).
 	calls, answers := splitAnswers(calls)
 	read := testMisses{calls: calls, answers: answers, err: err, asked: true}
