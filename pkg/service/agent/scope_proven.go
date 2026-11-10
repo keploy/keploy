@@ -1585,6 +1585,9 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty() && a.replaying():
 		ev.Reason = a.evidenceText(id, ev, beganAt)
+		// The harness's own verdict, before keploy's evidence fails the
+		// test: a failure keploy imposes (why) is not the test's own.
+		ev.FailedOnItsOwn = why == "" && outcome == models.ScopeOutcomeFailed
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty():
 		// A record never fails a test: what keploy could not capture is
