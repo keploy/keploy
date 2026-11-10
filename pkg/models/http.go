@@ -119,6 +119,27 @@ type FormData struct {
 	Captured []string `json:"-" bson:"-" yaml:"-"`
 }
 
+// FormPartLeftOut names a form file part a test case was stored without:
+// the test store had nothing to keep the part's file from (no file a capture
+// left, no contents, and no file in the recording at the path it names).
+// Path is the path the part named, empty when it named none.
+type FormPartLeftOut struct {
+	TestSet  string
+	TestCase string
+	Key      string
+	FileName string
+	Path     string
+}
+
+// String says the part as a recording's summary lists it.
+func (p FormPartLeftOut) String() string {
+	path := "no path"
+	if p.Path != "" {
+		path = fmt.Sprintf("path %q", p.Path)
+	}
+	return fmt.Sprintf("%s/%s: form part %q (file %q, %s)", p.TestSet, p.TestCase, p.Key, p.FileName, path)
+}
+
 // HTTPResp is an HTTP response. StreamBody is a streamed body's frames, as a
 // recording keeps them in YAML (MarshalYAML). JSON carries the body alone, one
 // form of the stream: Keploy Cloud receives and serves a test case as JSON and

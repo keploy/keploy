@@ -53,6 +53,12 @@ type TestYaml struct {
 	// Only used by the sequential naming path; descriptive mode keys
 	// per-slug indices off NextIndexForPrefix instead.
 	lastIndex sync.Map // map[string]*atomic.Int64
+	// leftOut is the form file parts test cases were stored without, until
+	// TakeFormPartsLeftOut takes them; leftOutMore counts those past
+	// formPartsLeftOutMax.
+	leftOutMu   sync.Mutex
+	leftOut     []models.FormPartLeftOut
+	leftOutMore int
 	// slugIndex is the descriptive-naming twin of lastIndex: one
 	// monotonically-increasing counter per (tests-dir, slug), so a test
 	// case name can never be re-minted after auto-replay deletes the
@@ -1198,6 +1204,48 @@ func (ts *TestYaml) keptAsset(paths []string, j int) (string, bool) {
 	return p, true
 }
 
+// formPartsLeftOutMax bounds the parts kept for TakeFormPartsLeftOut: a
+// caller that never takes them (a replay, a normalize) holds no more.
+const formPartsLeftOutMax = 64
+
+// pathAt is paths[j], or "" when the part names no path.
+func pathAt(paths []string, j int) string {
+	if j < len(paths) {
+		return paths[j]
+	}
+	return ""
+}
+
+// leaveOutFormPart says, at ERROR, that a test case is stored without a form
+// part's file, naming the part and the path it named, and keeps the part for
+// TakeFormPartsLeftOut.
+func (ts *TestYaml) leaveOutFormPart(p models.FormPartLeftOut) {
+	utils.LogError(ts.logger, fmt.Errorf("nothing to keep the form part's file from"), "the test case is stored without a form part's file: the part named no file a capture of this run left, carried no contents, and its path names no file in the recording",
+		zap.String("testSet", p.TestSet),
+		zap.String("testCase", p.TestCase),
+		zap.String("key", p.Key),
+		zap.String("fileName", p.FileName),
+		zap.String("path", p.Path))
+	ts.leftOutMu.Lock()
+	defer ts.leftOutMu.Unlock()
+	if len(ts.leftOut) >= formPartsLeftOutMax {
+		ts.leftOutMore++
+		return
+	}
+	ts.leftOut = append(ts.leftOut, p)
+}
+
+// TakeFormPartsLeftOut returns the form file parts test cases were stored
+// without since the last call, oldest first, and how many more there were
+// past the first formPartsLeftOutMax. A recording says them in its summary.
+func (ts *TestYaml) TakeFormPartsLeftOut() (parts []models.FormPartLeftOut, more int) {
+	ts.leftOutMu.Lock()
+	defer ts.leftOutMu.Unlock()
+	parts, more = ts.leftOut, ts.leftOutMore
+	ts.leftOut, ts.leftOutMore = nil, 0
+	return parts, more
+}
+
 func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName string) error {
 	// 1. Offload large request body (>1MB) to assets directory
 	if len(tc.HTTPReq.Body) > LargeBodyThreshold {
@@ -1406,9 +1454,9 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					allFilesPersisted = false
 					// Do not append non-existent paths to newPaths — they would
 					// cause replay failures when the system tries to read them.
-					utils.LogError(ts.logger, fmt.Errorf("file entry could not be persisted"), "skipping file entry - check that the source file exists and is accessible",
-						zap.String("fileName", form.FileNames[j]),
-						zap.String("key", form.Key))
+					// The test case is stored without the part's file: said
+					// here, and kept for the caller's summary.
+					ts.leaveOutFormPart(models.FormPartLeftOut{TestSet: testSetID, TestCase: tcsName, Key: form.Key, FileName: fileName, Path: pathAt(form.Paths, j)})
 				}
 			}
 

@@ -2188,6 +2188,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				zap.String("next_step", "the lines above say why (the agent made no progress, went away before it said it had handed everything over, a second interrupt stopped the saving, or the mock store could not write every mock); re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
+		// Test cases stored without a form part's file: every insert is
+		// over (the drains above), so the list is whole.
+		r.sayFormPartsLeftOut(newTestSetID)
 		// Under the proven switch: test cases recorded while the agent could
 		// not capture every call, or that could not be checked, and
 		// connections to a mock.real destination neither captured nor
@@ -3727,4 +3730,33 @@ func pcapDir(keployDir, set string) (string, error) {
 		return destDir, fmt.Errorf("%s: %w", refused, err)
 	}
 	return destDir, nil
+}
+
+// sayFormPartsLeftOut says once, where the recording ends, each form file
+// part a test case of this recording was stored without, by test case, part
+// and the path the part named: such a test case replays without that file.
+// The test store keeps the list (testdb.TestYaml); one that keeps none has
+// nothing to say here.
+func (r *Recorder) sayFormPartsLeftOut(testSetID string) {
+	td, ok := r.testDB.(interface {
+		TakeFormPartsLeftOut() ([]models.FormPartLeftOut, int)
+	})
+	if !ok {
+		return
+	}
+	parts, more := td.TakeFormPartsLeftOut()
+	if len(parts) == 0 && more == 0 {
+		return
+	}
+	said := make([]string, 0, len(parts))
+	for _, p := range parts {
+		said = append(said, p.String())
+	}
+	r.logger.Error("recording summary: test cases were stored without a form part's file, and replay without it",
+		zap.String("testSetID", testSetID),
+		zap.Int("parts", len(parts)+more),
+		zap.Strings("stored_without", said),
+		zap.Int("not_listed", more),
+		zap.String("why", "each part named no file a capture of this run left, carried no contents, and its path names no file in the recording"),
+		zap.String("next_step", "re-record these test cases with the parts' files sent"))
 }

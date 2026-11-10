@@ -6,12 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // formCase is a test case with one form file part, a.txt, as form says.
@@ -278,5 +280,132 @@ func TestAFormFilePathNamingAFolderIsNotKept(t *testing.T) {
 	}
 	if p := tc.HTTPReq.Form[0].Paths; len(p) != 0 {
 		t.Errorf("the stored test case names %q, a folder", p)
+	}
+}
+
+// A form file part that names a relative path leading out of the recording,
+// or naming no file in it, and carries no contents, costs the part, not the
+// test case: the case is stored without the part, the file outside is neither
+// read nor removed, and the store keeps the part, with the path it named, for
+// the recording's summary. It hands each part over once.
+func TestARelativeFormFilePathWithNoFileIsLeftOutAndNamed(t *testing.T) {
+	for name, tt := range map[string]struct {
+		path    func(base string) string
+		outside bool
+	}{
+		"leads out of the recording": {func(string) string { return filepath.Join("..", "outside.txt") }, true},
+		"names no file in it":        {func(string) string { return filepath.Join("set", "assets", "test-1", "file", "a.txt") }, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "keploy")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			out := filepath.Join(base, "outside.txt")
+			if tt.outside {
+				if err := os.WriteFile(out, []byte("KEEP ME\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			named := tt.path(base)
+			tc := formCase("test-1", models.FormData{Key: "file", FileNames: []string{"a.txt"}, Paths: []string{named}})
+			core, logs := observer.New(zap.ErrorLevel)
+			ts := NewWithFormat(zap.New(core), root, yaml.FormatJSON)
+			if err := ts.InsertTestCase(context.Background(), tc, "set", false); err != nil {
+				t.Fatalf("insert = %v, want the test case stored without the part", err)
+			}
+			said := logs.FilterMessageSnippet("stored without a form part's file").All()
+			if len(said) != 1 || said[0].ContextMap()["path"] != named || said[0].ContextMap()["key"] != "file" || said[0].ContextMap()["fileName"] != "a.txt" || said[0].ContextMap()["testCase"] != "test-1" {
+				t.Errorf("the store said %v, want one ERROR line naming the test case, the part, its file and the path", logs.All())
+			}
+			if files, _ := filepath.Glob(filepath.Join(root, "set", "tests", "*")); len(files) != 1 {
+				t.Fatalf("stored %q, want the test case", files)
+			}
+			if p := tc.HTTPReq.Form[0].Paths; len(p) != 0 {
+				t.Errorf("the stored test case names %q, want no file for the part", p)
+			}
+			if tt.outside {
+				requireFileIs(t, "the file outside the recording", out, "KEEP ME\n")
+				requireNothingHolds(t, root, "KEEP ME")
+			}
+			parts, more := ts.TakeFormPartsLeftOut()
+			want := models.FormPartLeftOut{TestSet: "set", TestCase: "test-1", Key: "file", FileName: "a.txt", Path: named}
+			if len(parts) != 1 || parts[0] != want || more != 0 {
+				t.Fatalf("left out = %+v (and %d more), want only %+v", parts, more, want)
+			}
+			if s := parts[0].String(); !strings.Contains(s, "set/test-1") || !strings.Contains(s, `form part "file"`) || !strings.Contains(s, `"a.txt"`) || !strings.Contains(s, "path "+strconv.Quote(named)) {
+				t.Errorf("the summary's line %q does not name the test case, the part, its file and the path", s)
+			}
+			if parts, more := ts.TakeFormPartsLeftOut(); len(parts) != 0 || more != 0 {
+				t.Errorf("a second take = %+v (and %d more), want each part handed over once", parts, more)
+			}
+		})
+	}
+}
+
+// A part that names no path is left out the same way, said with no path. A
+// part whose file is kept (contents the test case carries, or a file in the
+// recording it names) is not in the list.
+func TestOnlyAPartWithNoFileIsLeftOut(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "keploy")
+	kept := filepath.Join("set", "assets", "test-3", "file", "a.txt")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, kept)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, kept), []byte("kept"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ts := NewWithFormat(zap.NewNop(), root, yaml.FormatJSON)
+	for _, tc := range []*models.TestCase{
+		formCase("test-1", models.FormData{Key: "file", FileNames: []string{"a.txt"}}),
+		formCase("test-2", models.FormData{Key: "file", FileNames: []string{"a.txt"}, FileContents: [][]byte{[]byte("sent")}}),
+		formCase("test-3", models.FormData{Key: "file", FileNames: []string{"a.txt"}, Paths: []string{kept}}),
+	} {
+		if err := ts.InsertTestCase(context.Background(), tc, "set", false); err != nil {
+			t.Fatalf("insert %s: %v", tc.Name, err)
+		}
+	}
+	parts, more := ts.TakeFormPartsLeftOut()
+	want := models.FormPartLeftOut{TestSet: "set", TestCase: "test-1", Key: "file", FileName: "a.txt"}
+	if len(parts) != 1 || parts[0] != want || more != 0 {
+		t.Fatalf("left out = %+v (and %d more), want only %+v", parts, more, want)
+	}
+	if s := parts[0].String(); !strings.Contains(s, "no path") {
+		t.Errorf("the summary's line %q does not say the part named no path", s)
+	}
+}
+
+// The store keeps a bounded list: past it, parts are counted, not held.
+func TestTheLeftOutListIsBounded(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "keploy")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ts := NewWithFormat(zap.NewNop(), root, yaml.FormatJSON)
+	names := make([]string, formPartsLeftOutMax+3)
+	paths := make([]string, len(names))
+	for i := range names {
+		names[i] = "f" + strconv.Itoa(i) + ".txt"
+		paths[i] = filepath.Join("..", names[i])
+	}
+	tc := formCase("test-1", models.FormData{Key: "file", FileNames: names, Paths: paths})
+	if err := ts.InsertTestCase(context.Background(), tc, "set", false); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	parts, more := ts.TakeFormPartsLeftOut()
+	if len(parts) != formPartsLeftOutMax || more != 3 {
+		t.Fatalf("left out %d parts and %d more, want %d and 3", len(parts), more, formPartsLeftOutMax)
+	}
+	for i, got := range parts {
+		if got.Path != paths[i] {
+			t.Fatalf("part %d is listed with the path %q, want its own, %q", i, got.Path, paths[i])
+		}
+	}
+	if parts[0].FileName != "f0.txt" || parts[len(parts)-1].FileName != "f"+strconv.Itoa(formPartsLeftOutMax-1)+".txt" {
+		t.Errorf("the list holds %q..%q, want the first parts in order", parts[0].FileName, parts[len(parts)-1].FileName)
+	}
+	if parts, more := ts.TakeFormPartsLeftOut(); len(parts) != 0 || more != 0 {
+		t.Errorf("a second take = %d parts and %d more, want the count handed over once", len(parts), more)
 	}
 }
