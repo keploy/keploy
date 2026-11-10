@@ -87,21 +87,21 @@ func (w *missWindow) noteSetStart(s setStart) {
 // keptAsEarlierSet reports, for err, a miss filed in w whose call was marked
 // before the running test set's staging (markedBeforeSet), whether it is kept
 // as an earlier set's call (earlierSetMiss): one marked in a test's view
-// (markedInATest), that test's own; or one marked while that set's mocks
-// served (models.RoundMarkedSettled), with no test's view named (the pool
-// view between two of its tests, after its last, or a view the store names no
-// test of), before that set's last read of w (models.MockMismatchReport.
+// (markedInATest), that test's own; or one marked in an earlier set with no
+// test's view named (the pool view between two of its tests, after its last,
+// a view the store names no test of, or one installed as its mocks were
+// staged) before that set's last read of w (models.MockMismatchReport.
 // MarkReads), which at zero latency that read, or an earlier one, would have
-// returned for keploy test to fail the set with. A call marked while a set's
-// mocks were being staged, before a set's first staging on w, or after its
-// set's last read of w, which at zero latency the next set's start cuts too,
-// is not kept, nor is one whose parser marks no round.
+// returned for keploy test to fail the set with. A call marked before the
+// first set start w noted, or after its set's last read of w (as the next
+// set's mocks were staged, say), which at zero latency the next set's start
+// cuts too, is not kept, nor is one whose parser marks no round.
 func (w *missWindow) keptAsEarlierSet(err error) bool {
 	if markedInATest(err) {
 		return true
 	}
 	var pe models.ParserError
-	if !errors.As(err, &pe) || pe.MismatchReport == nil || pe.MismatchReport.Mark != models.RoundMarkedSettled {
+	if !errors.As(err, &pe) || pe.MismatchReport == nil || pe.MismatchReport.Mark == models.RoundUnmarked {
 		return false
 	}
 	r := pe.MismatchReport

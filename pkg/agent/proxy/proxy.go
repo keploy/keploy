@@ -5659,9 +5659,9 @@ var (
 // whichever way its report and the staging fall: it is that test's own call,
 // made in an earlier set and decided by keploy only after that test's end
 // was read. Dropped, the test passed with an unanswered call of its own, and
-// no receipt listed it. Nor is one marked while an earlier set's mocks
-// served with no test's view named (the pool view between two of its tests,
-// or after its last) before that set's last read of the window it was filed
+// no receipt listed it. Nor is one marked in an earlier set with no test's
+// view named (the pool view between two of its tests, or after its last)
+// before that set's last read of the window it was filed
 // in: at zero latency that read would have failed the set with it, and
 // dropped, the set passed with an unanswered call it made
 // (missWindow.keptAsEarlierSet). Each is kept, in the window it was filed in
