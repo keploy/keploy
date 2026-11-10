@@ -1044,7 +1044,7 @@ func TestOutcomeAVariableBoundAtAWordIsNamedAtThatWord(t *testing.T) {
 		t.Fatal("the tracker named no variable")
 	}
 	seen := Seen{Side: Request, Leaf: oText(place, "[E2E] app-crud-1793224420036884439"), Live: "[E2E] app-crud-1793311234567890123", Place: place}
-	want := []BoundWord{{Name: name, Word: 3, Recorded: "1793224420036884439", Live: "1793311234567890123"}}
+	want := []BoundWord{{Name: name, Word: 3, Recorded: "1793224420036884439", Live: "1793311234567890123", Place: place}}
 	if got := tr.BoundWords(n, "mock-201", seen); !reflect.DeepEqual(got, want) {
 		t.Fatalf("FALSE RED: the words of the first send: %+v; want %+v", got, want)
 	}
@@ -1123,11 +1123,18 @@ func TestOutcomeAWordBoundAtAClientTestsRequestIsNamedAtThatWord(t *testing.T) {
 	if !ok {
 		t.Fatal("the tracker named no variable")
 	}
-	want := []BoundWord{{Name: name, Word: 2, Recorded: "1794311366512792518", Live: "1794311434794323879"}}
+	want := []BoundWord{{Name: name, Word: 2, Recorded: "1794311366512792518", Live: "1794311434794323879", Place: "body.name"}}
 	if got := tr.BoundWords(n, e.Mock, seen); !reflect.DeepEqual(got, want) {
 		t.Fatalf("FALSE RED (TestTestSuiteCRUD's GET answers the recorded name): the words of the client's request: %+v; want %+v", got, want)
 	}
-	if got := tr.BoundWords(n, givenPlace("post-client-v1-apps-by-id-test-suites-6"), seen); len(got) != 0 {
+	// A variable named at the same word of a test case whose request the
+	// running test never took: the leaf is not that request's, so it names
+	// nothing there.
+	other := givenPlace("post-client-v1-apps-by-id-test-suites-6")
+	if _, ok := tr.Name(n, other, "body.name#2", nil); !ok {
+		t.Fatal("the tracker named no variable at the other test case")
+	}
+	if got := tr.BoundWords(n, other, seen); len(got) != 0 {
 		t.Errorf("a test case the tracker took no request of: %+v; want no variable", got)
 	}
 
@@ -1155,7 +1162,7 @@ func TestOutcomeARunVariableBoundAtAWordIsNamedInEveryTest(t *testing.T) {
 	}
 	tr.Begin()
 	seen := Seen{Side: Request, Leaf: oText(place, "sess-0b1e"), Live: "sess-77c4", Place: place}
-	want := []BoundWord{{Name: name, Word: 1, Recorded: "0b1e", Live: "77c4"}}
+	want := []BoundWord{{Name: name, Word: 1, Recorded: "0b1e", Live: "77c4", Place: place}}
 	if got := tr.BoundWords(tr.Epoch(), "mock-1", seen); !reflect.DeepEqual(got, want) {
 		t.Errorf("a run's variable in a later test: %+v; want %+v", got, want)
 	}

@@ -1835,11 +1835,15 @@ func viewNew(g givenWords) bool {
 }
 
 // BoundWord is a variable of a test bound at one word of an earlier request
-// leaf: the word's index and its text in each run.
+// leaf: the word's index, its text in each run, and the leaf's variable
+// place the variable is bound at (Place: "<Place>#<Word>" names it there).
+// A caller names the bind by Place, never by the Seen it asked of: a client
+// test's request leaf has no Seen.Place (BoundWords).
 type BoundWord struct {
 	Name           string
 	Word           int
 	Recorded, Live string
+	Place          string
 }
 
 // BoundWords is each variable of test number n bound at a word of s, a
@@ -1880,7 +1884,7 @@ func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
 			name, ok = t.names[key]
 		}
 		if ok {
-			out = append(out, BoundWord{Name: name, Word: k, Recorded: s.Leaf.Value[rec[k][0]:rec[k][1]], Live: s.Live[live[k][0]:live[k][1]]})
+			out = append(out, BoundWord{Name: name, Word: k, Recorded: s.Leaf.Value[rec[k][0]:rec[k][1]], Live: s.Live[live[k][0]:live[k][1]], Place: place})
 		}
 	}
 	return out
