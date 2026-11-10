@@ -216,6 +216,9 @@ type DiskCandidate struct {
 // round lock (RoundReader.RoundSnapshot): every field is of one instant.
 type RoundSnapshot struct {
 	At RoundAt
+	// Reads is how many reads of the misses window the store files its
+	// misses in had begun at the snapshot (CallRound.AfterReads).
+	Reads uint64
 	// Test is the store's open test, "" for a pool view; Ahead is a pool
 	// view that answers the next test's calls in flight.
 	Test  string
@@ -491,7 +494,7 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 // to that view, never to one installed after the snapshot.
 func (s RoundSnapshot) CallRound() CallRound {
 	if s.SetUnstaged() {
-		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(true).InView(false, s.Background).InStoreView(s.view)
+		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(true).InView(false, s.Background).InStoreView(s.view).AfterReads(s.Reads)
 	}
 	// A test's view with a worker scope shows it the worker scope, as the
 	// store's MarkCallRound says (its sequence view's Worker).
@@ -499,13 +502,13 @@ func (s RoundSnapshot) CallRound() CallRound {
 	if s.TrackerAhead() {
 		// Its mark names no test (OfTest): the call is the pool's or the
 		// tracker's test's, never the test whose view is in force.
-		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).InStoreView(s.view)
+		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).InStoreView(s.view).AfterReads(s.Reads)
 	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {
 		_, own := ended[name]
 		return own || owners[name] != OwnerNone
-	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).OfTest(s.Test).InStoreView(s.view)
+	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).OfTest(s.Test).InStoreView(s.view).AfterReads(s.Reads)
 }
 
 // HoldsEvery holds every recording as a call's own (NewCallRound): the mark

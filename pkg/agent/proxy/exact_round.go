@@ -674,6 +674,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	n := len(l.takes)
 	s := integrations.RoundSnapshot{
 		At:         integrations.RoundAt{Epoch: l.epoch, Gen: r.gen, Bounds: r.bounds, Taken: n},
+		Reads:      m.windowReads.Load(),
 		Test:       v.test,
 		Ahead:      v.test == "" && len(v.owned) > 0,
 		Fired:      m.exact.fired.Load(),

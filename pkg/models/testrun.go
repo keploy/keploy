@@ -598,6 +598,19 @@ type UnmatchedCall struct {
 	// and the set it was made in; keploy mock's agent lists it under that
 	// test (WindowOf), charged to no test. Empty for every other call.
 	EarlierSetTest string `json:"earlier_set_test,omitempty" yaml:"earlier_set_test,omitempty"`
+	// EarlierSet is, under the proven switch, for a call of an earlier test
+	// set that keploy decided only after the next set's mocks were staged,
+	// how many sets before the one whose read returns it the call was made
+	// in (1: the set run just before), by the agent's count of set starts:
+	// a call with EarlierSetTest, or one of no test, made in that set while
+	// no test's view named one (between two of its tests, or after its
+	// last), before that set's last read, which at zero latency would have
+	// failed that set with it. Its Kind is MissOutsideTest and BeforeSet is
+	// false, as for EarlierSetTest: keploy test fails the run with it,
+	// naming the set it was made in (and its test, where it names one), and
+	// charges no set or test; keploy mock's agent lists it, charged to no
+	// test. 0 for every other call.
+	EarlierSet int `json:"earlier_set,omitempty" yaml:"earlier_set,omitempty"`
 	// Held mirrors MockMismatchReport.HeldPastWindow: a parser held the call
 	// past its own window for a later test's recording, and none answered it
 	// by the set's end or its connection's end, where its miss was filed. It

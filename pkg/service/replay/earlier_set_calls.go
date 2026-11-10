@@ -10,56 +10,78 @@ import (
 	"go.uber.org/zap"
 )
 
-// The calls a test of an earlier test set made that no mock answered, which
-// keploy decided only after that set had ended (under the proven switch).
-// keploy test serves each test case by name, so the agent knows the test a
-// call was made in however late it decides the call. When that is after the
-// set's end was read, no read of the set can take it any more: the agent
-// keeps it for the next set's first read, naming its test
-// (models.UnmatchedCall.EarlierSetTest). It is no call of the set that read
-// it, nor of that set's tests, and the set it was made in has its verdict
-// already: the run fails with it, naming the call, the test and the set it
-// was made in, and no set's verdict counts it.
+// The calls of an earlier test set that no mock answered, which keploy
+// decided only after that set had ended (under the proven switch). keploy
+// test serves each test case by name, so the agent knows the test a call was
+// made in however late it decides the call. When that is after the set's end
+// was read, no read of the set can take it any more: the agent keeps it for
+// the next set's first read, naming its test
+// (models.UnmatchedCall.EarlierSetTest) and the set
+// (models.UnmatchedCall.EarlierSet), and so it keeps a call the set made
+// while no test's view named one (between two of its tests, or after its
+// last) that its reads would have returned at zero latency, naming the set
+// alone. It is no call of the set that read it, nor of that set's tests, and
+// the set it was made in has its verdict already: the run fails with it,
+// naming the call, the set it was made in and its test, where it names one,
+// and no set's verdict counts it.
 
-// earlierSetCalls are the calls of earlier sets' tests the run's reads
-// returned (models.UnmatchedCall.EarlierSetTest), with the set each was made
-// in: the set the run ran before the one whose read returned it.
+// earlierSetCalls are the calls of earlier sets the run's reads returned
+// (models.UnmatchedCall.EarlierSet, EarlierSetTest), with the set each was
+// made in: the set the agent names, counted back from the one whose read
+// returned it.
 type earlierSetCalls struct {
 	mu sync.Mutex
-	// running is the set whose reads RunTestSet takes now, before the one
-	// the run ran before it.
-	running, before string
-	calls           []earlierSetCall
+	// sets are the sets RunTestSet began, in order; running, the last, is
+	// the one whose reads it takes now.
+	sets    []string
+	running string
+	calls   []earlierSetCall
 }
 
-// earlierSetCall is a call of an earlier set's test, with the set it was
-// made in ("" when the run ran no set before the one that read it).
+// earlierSetCall is a call of an earlier set, with the set it was made in
+// ("" when the run began no such set).
 type earlierSetCall struct {
 	set  string
 	call models.UnmatchedCall
 }
 
-// begin notes that the run now reads set's calls: an earlier set's test's
-// call read from here was made in the set the run ran before it (an earlier
-// attempt of the same set, for a set run again).
+// begin notes that the run now reads set's calls: an earlier set's call read
+// from here was made in a set the run began before it (an earlier attempt of
+// the same set, for a set run again).
 func (e *earlierSetCalls) begin(set string) {
 	e.mu.Lock()
-	e.before, e.running = e.running, set
+	e.sets = append(e.sets, set)
+	e.running = set
 	e.mu.Unlock()
 }
 
-// take keeps the calls of read that an earlier set's test made
-// (models.UnmatchedCall.EarlierSetTest), and returns the others, and those it
-// kept.
+// madeIn is the set an earlier set's call c was made in: the agent's count
+// back from the running set (models.UnmatchedCall.EarlierSet; 1 from an
+// agent that names only the test), "" when the run began no such set. Called
+// under mu.
+func (e *earlierSetCalls) madeIn(c models.UnmatchedCall) string {
+	back := c.EarlierSet
+	if back < 1 {
+		back = 1
+	}
+	if i := len(e.sets) - 1 - back; i >= 0 {
+		return e.sets[i]
+	}
+	return ""
+}
+
+// take keeps the calls of read that an earlier set made
+// (models.UnmatchedCall.EarlierSet, EarlierSetTest), and returns the others,
+// and those it kept.
 func (e *earlierSetCalls) take(read []models.UnmatchedCall) (rest []models.UnmatchedCall, taken []earlierSetCall) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, c := range read {
-		if c.EarlierSetTest == "" {
+		if c.EarlierSet < 1 && c.EarlierSetTest == "" {
 			rest = append(rest, c)
 			continue
 		}
-		taken = append(taken, earlierSetCall{set: e.before, call: c})
+		taken = append(taken, earlierSetCall{set: e.madeIn(c), call: c})
 	}
 	if len(taken) == 0 {
 		return read, nil
@@ -68,12 +90,13 @@ func (e *earlierSetCalls) take(read []models.UnmatchedCall) (rest []models.Unmat
 	return rest, taken
 }
 
-// takeEarlierSetCalls is read without the calls an earlier set's test made
+// takeEarlierSetCalls is read without the calls an earlier set made
 // (earlierSetCalls.take), which the run keeps to fail with. It says each one
 // that fails the run, at ERROR, as it takes it, in the documented form of a
-// call outside every test (outsideFields): named under the test and the set
-// it was made in, with the set whose read returned it, and tells the hooks
-// each (EarlierSetCallHook).
+// call outside every test (outsideFields): named under the set it was made in
+// and its test (none for a call made while no test's view named one), with
+// the set whose read returned it, and tells the hooks each
+// (EarlierSetCallHook).
 func (r *Replayer) takeEarlierSetCalls(read []models.UnmatchedCall) []models.UnmatchedCall {
 	rest, taken := r.earlierSetCalls.take(read)
 	readIn := r.earlierSetCalls.reading()
@@ -82,7 +105,7 @@ func (r *Replayer) takeEarlierSetCalls(read []models.UnmatchedCall) []models.Unm
 		if !c.call.CountsAgainstTest() {
 			continue
 		}
-		r.logger.Error("test run failed: a test of an earlier test set made a call that no mock answered, which keploy decided only after that set had ended; it is charged to no test and no set, so it fails the run ("+provenswitch.Env+"=1)",
+		r.logger.Error("test run failed: an earlier test set made a call that no mock answered, which keploy decided only after that set had ended; it is charged to no test and no set, so it fails the run ("+provenswitch.Env+"=1)",
 			append(r.outsideFields(c.set, c.call.EarlierSetTest, c.call),
 				zap.String("read-in-test-set", readIn))...)
 		if telling {
@@ -116,7 +139,7 @@ func (e *earlierSetCalls) failing() []earlierSetCall {
 // reset forgets every call, and the sets read, for a new run.
 func (e *earlierSetCalls) reset() {
 	e.mu.Lock()
-	e.running, e.before, e.calls = "", "", nil
+	e.sets, e.running, e.calls = nil, "", nil
 	e.mu.Unlock()
 }
 
@@ -129,15 +152,19 @@ func earlierSetCallsWhy(calls []earlierSetCall) string {
 		if set == "" {
 			set = "an earlier test set"
 		}
-		named = append(named, fmt.Sprintf("%s (made in %s of %s)", describeUnclaimed(c.call), c.call.EarlierSetTest, set))
+		test := c.call.EarlierSetTest
+		if test == "" {
+			test = "no test (between two of its tests, or after its last)"
+		}
+		named = append(named, fmt.Sprintf("%s (made in %s of %s)", describeUnclaimed(c.call), test, set))
 	}
-	return fmt.Sprintf("the application made %d call(s) in a test of an earlier test set that no mock answered, which keploy decided only after that set had ended (%s): %s",
+	return fmt.Sprintf("the application made %d call(s) in an earlier test set that no mock answered, which keploy decided only after that set had ended (%s): %s",
 		len(calls), models.KindOutsideEveryTest, strings.Join(named, "; "))
 }
 
 // passesEarlierSetCalls is the run's verdict pass, false where a call an
-// earlier set's test made fails the run (earlierSetCalls.failing), which it
-// says at ERROR, naming each call, its test and that test's set.
+// earlier set made fails the run (earlierSetCalls.failing), which it says at
+// ERROR, naming each call, its set and its test, where it names one.
 func (r *Replayer) passesEarlierSetCalls(pass bool) bool {
 	late := r.earlierSetCalls.failing()
 	if len(late) == 0 {

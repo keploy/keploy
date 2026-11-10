@@ -760,7 +760,25 @@ type CallRound struct {
 	// test is the test whose view the read found (OfTest), "" for a pool
 	// view or a store that names none.
 	test string
+	// reads is how many reads of its misses window had begun when the read
+	// was made (AfterReads).
+	reads uint64
 }
+
+// AfterReads is c, of a read made when n reads of the misses window its
+// store files its misses in had begun (the proxy's GetMockErrors of the run,
+// or of the test worker the store serves): the proxy tells from it whether
+// the call was marked before its test set's last read of that window, which
+// no boundary count tells (nothing installs a view between a set's last
+// test's end and the set's end read).
+func (c CallRound) AfterReads(n uint64) CallRound {
+	c.reads = n
+	return c
+}
+
+// Reads is how many reads of its misses window had begun when c's read was
+// made (AfterReads): 0 from a store that counts none.
+func (c CallRound) Reads() uint64 { return c.reads }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
 // name, the recordings its view held as its own (nil: none).
@@ -1016,6 +1034,7 @@ func StampMark(r *models.MockMismatchReport, call CallRound) {
 		r.MarkBounds, r.MarkRound = at.Bounds, true
 	}
 	r.MarkedTest = call.Test()
+	r.MarkReads = call.Reads()
 }
 
 // MarkCallRound is mockDb's CallRound now (StagedFinder.MarkCallRound): the

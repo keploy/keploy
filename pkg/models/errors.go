@@ -421,6 +421,13 @@ type MockMismatchReport struct {
 	// a store that keeps no boundary count. Never written to a report.
 	MarkBounds uint64 `json:"-" yaml:"-"`
 	MarkRound  bool   `json:"-" yaml:"-"`
+	// MarkReads is, with Mark set, how many reads of the misses window the
+	// call's store files its misses in had begun when the call's first read
+	// was made (integrations.CallRound.Reads): with MarkEpoch, it tells
+	// whether the call was marked before or after its test set's last read
+	// of that window, however late its report reaches the proxy (the
+	// proxy's set-start cut). Never written to a report.
+	MarkReads uint64 `json:"-" yaml:"-"`
 	// MarkedTest is, with Mark set, the test whose view the call's first
 	// read found (integrations.CallRound.Test): "" for a pool view, and where
 	// the store did not name it. Never written to a report.

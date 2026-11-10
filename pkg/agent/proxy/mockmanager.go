@@ -481,6 +481,14 @@ type MockManager struct {
 	// is valid for one epoch. Written under swapMu, read lock-free.
 	stagingEpoch atomic.Uint64
 
+	// windowReads is how many reads have begun of the misses window this
+	// manager's calls file their misses in (the run's, or the test worker's
+	// it serves): the proxy's getMockErrorsOn moves it as each read begins,
+	// and a call's mark carries it (integrations.CallRound.AfterReads), so
+	// the set-start cut tells a call marked before its set's last read of
+	// that window from one marked after it (missWindow.keptAsEarlierSet).
+	windowReads atomic.Uint64
+
 	// carry is the carry-over tier: carry-over mocks (models.IsCarryOver: a
 	// RegisterCarryOver kind's, a StagingRelease need's) that stay reachable
 	// outside their own window (carryover.go). Empty, and never touched, while

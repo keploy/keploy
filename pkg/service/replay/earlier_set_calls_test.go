@@ -1,11 +1,16 @@
 package replay
 
 import (
+	"context"
+	"fmt"
+	"maps"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -62,7 +67,7 @@ func TestRunTestSet_AnEarlierSetsTestsLateCallFailsTheRunNotTheSetThatReadIt(t *
 	}
 	// Said once, in the documented form of a call outside every test, named
 	// under the test and the set it was made in.
-	said := logs.FilterMessageSnippet("a test of an earlier test set made a call that no mock answered").All()
+	said := logs.FilterMessageSnippet("an earlier test set made a call that no mock answered").All()
 	if len(said) != 1 {
 		t.Fatalf("the call was said %d times; want once: %+v", len(said), logs.All())
 	}
@@ -83,7 +88,7 @@ func TestRunTestSet_AnEarlierSetsTestsLateCallFailsTheRunNotTheSetThatReadIt(t *
 	if h.replayer.passesEarlierSetCalls(true) {
 		t.Fatal("the run passes with set A's test-2's call no mock answered")
 	}
-	why := logs.FilterMessageSnippet("test run failed: the application made 1 call(s) in a test of an earlier test set").All()
+	why := logs.FilterMessageSnippet("test run failed: the application made 1 call(s) in an earlier test set").All()
 	if len(why) != 1 || !strings.Contains(why[0].Message, "HTTP POST /orders to orders:80 (made in test-2 of test-set-a)") ||
 		!strings.Contains(why[0].Message, "("+models.KindOutsideEveryTest+")") {
 		t.Fatalf("the run's failure said %+v; want the call, test-2 and test-set-a named once, as outside every test", why)
@@ -198,5 +203,145 @@ func TestRunTestSet_AnEarlierSetsTestsLateCallAtTheSetsEndFailsTheRunNotTheSet(t
 	}
 	if late := h.replayer.earlierSetCalls.failing(); len(late) != 1 || late[0].set != "test-set-a" {
 		t.Fatalf("the run holds %+v; want set A's test-2's call, made in test-set-a", late)
+	}
+}
+
+// setsReportDB is the harness's report store, keeping each set's report status
+// by its set's name: a run of two sets writes two reports.
+type setsReportDB struct {
+	*prReportDB
+	statuses map[string]string
+}
+
+func (f *setsReportDB) InsertReport(ctx context.Context, run, set string, rep *models.TestReport) error {
+	f.mu.Lock()
+	f.statuses[set] = rep.Status
+	f.mu.Unlock()
+	return f.prReportDB.InsertReport(ctx, run, set, rep)
+}
+
+// startEarlierSetRun runs Start over test-set-0 and test-set-1, two sets of the
+// harness's two tests, with keploy test's settings, and returns the code the
+// process exits with and each set's report status. Each run starts with its
+// sets' statuses cleared.
+func startEarlierSetRun(t *testing.T, h *prRun, reports *setsReportDB) (int, map[string]string) {
+	t.Helper()
+	reports.mu.Lock()
+	reports.statuses = map[string]string{}
+	reports.mu.Unlock()
+	saved := utils.ErrCode
+	t.Cleanup(func() { utils.ErrCode = saved })
+	utils.ErrCode = 0
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	if err := h.replayer.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	reports.mu.Lock()
+	defer reports.mu.Unlock()
+	return utils.ErrCode, maps.Clone(reports.statuses)
+}
+
+// keploy test, over a whole run: a call test-set-0's test-2 made, which keploy
+// decided only after test-set-0 had ended, reaches test-set-1's first read
+// naming its test. Both sets pass, as neither is charged with it, and the
+// run exits non-zero for it, naming the call, test-2 and test-set-0: removed
+// from every set's report, it is in the run's verdict alone. A call the
+// parser also held past its window (Held) is taken the same way, not as the
+// reading set's held call: it was made in an earlier set's test. A second
+// run on the same Replayer, with no such call, passes: the first run's call
+// is not the second's.
+func TestStart_AnEarlierSetsTestsLateCallFailsTheRunWithEverySetPassed(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		t.Run(fmt.Sprintf("held=%v", held), func(t *testing.T) {
+			provenOn(t, true)
+			h := newPartialRunHarness(t, 2, 0)
+			reports := &setsReportDB{prReportDB: h.report}
+			h.replayer.reportDB = reports
+			h.replayer.testDB = twoPRSetsDB{&prTestDB{cases: h.cases}}
+			h.replayer.config.Command = "./app"
+			h.replayer.config.CommandType = string(utils.Native)
+			h.replayer.config.Test.MaxFlakyChecks = 1
+			core, logs := observer.New(zap.ErrorLevel)
+			h.replayer.logger = zap.New(core)
+			// The first read of test-set-1 returns test-set-0's test-2's call.
+			var handed atomic.Bool
+			h.instr.mockErrorsFor = func() ([]models.UnmatchedCall, error) {
+				if h.replayer.earlierSetCalls.reading() != "test-set-1" || handed.Swap(true) {
+					return nil, nil
+				}
+				calls, _ := lateOfSetA()
+				calls[0].Held = held
+				return calls, nil
+			}
+
+			code, statuses := startEarlierSetRun(t, h, reports)
+			if !handed.Load() {
+				t.Fatal("test-set-1 read nothing: the case needs its first read to return the call")
+			}
+			for _, set := range []string{"test-set-0", "test-set-1"} {
+				if statuses[set] != string(models.TestSetStatusPassed) {
+					t.Fatalf("%s is %q (all %v); neither set is charged with test-set-0's test-2's call", set, statuses[set], statuses)
+				}
+			}
+			if code == 0 {
+				t.Fatal("the run exits 0 with test-set-0's test-2's call no mock answered")
+			}
+			why := logs.FilterMessageSnippet("test run failed: the application made 1 call(s) in an earlier test set").All()
+			if len(why) != 1 || !strings.Contains(why[0].Message, "HTTP POST /orders to orders:80 (made in test-2 of test-set-0)") {
+				t.Fatalf("the run's failure said %+v; want the call, test-2 and test-set-0 named once", why)
+			}
+
+			// The same Replayer runs again, and no read returns such a call.
+			h.instr.mockErrorsFor = nil
+			code, statuses = startEarlierSetRun(t, h, reports)
+			if statuses["test-set-0"] != string(models.TestSetStatusPassed) || statuses["test-set-1"] != string(models.TestSetStatusPassed) {
+				t.Fatalf("the second run's sets are %v; want both PASSED", statuses)
+			}
+			if code != 0 {
+				t.Fatalf("the second run, with no earlier set's call, exits %d: the first run's call failed it", code)
+			}
+		})
+	}
+}
+
+// A call of an earlier set made while no test's view named one (between two
+// of its tests, or after its last), which keploy decided only after that set
+// ended, reaches the run's reads naming no test and how many sets back it was
+// made (EarlierSet): the read does not keep it as its set's or its test's, and
+// the run fails with it, naming the set the agent counts back to and no test.
+// A count past the sets the run began names none.
+func TestAnEarlierSetsCallOfNoTestFailsTheRunNamingTheSetItWasMadeIn(t *testing.T) {
+	core, logs := observer.New(zap.ErrorLevel)
+	r := &Replayer{logger: zap.New(core)}
+	for _, set := range []string{"test-set-a", "test-set-b", "test-set-c"} {
+		r.earlierSetCalls.begin(set)
+	}
+	own := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /own"}
+	twoBack := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /between-tests-of-a", Kind: models.MissOutsideTest, EarlierSet: 2}
+	oneBack := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /after-the-last-of-b", Kind: models.MissOutsideTest, EarlierSet: 1}
+	tooFar := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /before-the-run", Kind: models.MissOutsideTest, EarlierSet: 3}
+	rest := r.takeEarlierSetCalls([]models.UnmatchedCall{twoBack, own, oneBack, tooFar})
+	if len(rest) != 1 || rest[0].ActualSummary != "GET /own" {
+		t.Fatalf("the read keeps %+v; want the running set's own call alone", rest)
+	}
+	if r.passesEarlierSetCalls(true) {
+		t.Fatal("the run passes with an earlier set's call of no test that no mock answered")
+	}
+	got := r.earlierSetCalls.failing()
+	if len(got) != 3 || got[0].set != "test-set-a" || got[1].set != "test-set-b" || got[2].set != "" {
+		t.Fatalf("the run holds %+v; want the calls made in test-set-a, test-set-b and no set the run began", got)
+	}
+	why := earlierSetCallsWhy(got)
+	for _, want := range []string{"(made in no test (between two of its tests, or after its last) of test-set-a)", "(made in no test (between two of its tests, or after its last) of test-set-b)", "of an earlier test set)"} {
+		if !strings.Contains(why, want) {
+			t.Fatalf("the run's failure says %q; want %q", why, want)
+		}
+	}
+	// Said in the documented form of a call outside every test: kind, the set
+	// it was made in, no test, and the set whose read returned it.
+	if n := logs.FilterField(zap.String("kind", models.KindOutsideEveryTest)).FilterField(zap.String("test-set", "test-set-a")).
+		FilterField(zap.String("made_in", "")).FilterField(zap.String("read-in-test-set", "test-set-c")).Len(); n != 1 {
+		t.Fatalf("the call made in test-set-a was said %d times as failing the run outside every test, of no test, read in test-set-c; want once: %+v", n, logs.All())
 	}
 }

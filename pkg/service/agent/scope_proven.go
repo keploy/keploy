@@ -1997,10 +1997,11 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began 
 	all, err := a.missesOf(ctx, a.scopeInstance(id))
 	var misses, outside []models.UnmatchedCall
 	for _, m := range all {
-		if m.EarlierSetTest != "" {
-			// An earlier set's test's own call, which keploy decided only
-			// after this set's mocks were staged: listed under that test,
-			// however its round and this test's install fall.
+		if m.EarlierSetTest != "" || m.EarlierSet > 0 {
+			// An earlier set's call, which keploy decided only after this
+			// set's mocks were staged: listed under the test it was made
+			// in, where it names one, however its round and this test's
+			// install fall, and charged to none.
 			m.WindowOf = m.EarlierSetTest
 			outside = append(outside, m)
 			continue

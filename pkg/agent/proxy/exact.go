@@ -1006,6 +1006,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	r.mu.Lock()
 	v := m.exact.view.Load()
 	at := integrations.RoundAt{Epoch: m.stagingEpoch.Load(), Gen: r.gen, Bounds: r.bounds}
+	reads := m.windowReads.Load()
 	var ended *exactView
 	ahead, unstaged := false, false
 	if v != nil && r.learn.routed {
@@ -1027,13 +1028,13 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// (integrations.RoundSnapshot.SetUnstaged): the call the staging
 		// note describes, outside every test, its miss naming none made
 		// elsewhere.
-		return integrations.NewCallRound(at.Epoch, nil).HoldingEvery().ReadAt(at).InStaging(true).InView(false, v.bg != nil).WithSequence(m.sequenceViewOf(v))
+		return integrations.NewCallRound(at.Epoch, nil).HoldingEvery().ReadAt(at).InStaging(true).InView(false, v.bg != nil).WithSequence(m.sequenceViewOf(v)).AfterReads(reads)
 	}
 	held := v.holds
 	if ended != nil {
 		held = func(name string) bool { return v.holds(name) || ended.holds(name) }
 	}
-	c := integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).WithSequence(m.sequenceViewOf(v))
+	c := integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).WithSequence(m.sequenceViewOf(v)).AfterReads(reads)
 	if ahead {
 		// The tracker began a test whose view the store has not
 		// installed (integrations.RoundSnapshot.TrackerAhead): nothing

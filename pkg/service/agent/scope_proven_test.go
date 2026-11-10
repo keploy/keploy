@@ -2078,7 +2078,9 @@ func TestAMissOutsideEveryTestIsChargedToNoTest(t *testing.T) {
 // this set's first read naming that test as an earlier set's,
 // EarlierSetTest), is charged to no test and names the test it was made in,
 // also when that test has the ending test's name, with or without its round,
-// and whether or not the install or the begin is known. A call made before
+// and whether or not the install or the begin is known; one of that set made
+// while no test's view named one (EarlierSet, no test) is charged to no test
+// and names none, the same way. A call made before
 // the set's first test whose mark names a test is listed under it where the
 // install is known. A miss with no mark, and every other miss read when the
 // install's round is not known, keep the time rule.
@@ -2097,6 +2099,7 @@ func TestAMissIsChargedByTheRoundItsCallWasMarkedIn(t *testing.T) {
 		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "set-before-last:27017", Kind: models.MissOutsideTest, EarlierSetTest: lastOfSetBefore, At: late, Marked: of(lastOfSetBefore, 2, 40)},
 		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "set-before-same-name:27017", Kind: models.MissOutsideTest, EarlierSetTest: ending, At: late, Marked: of(ending, 2, 40)},
 		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "set-before-unrounded:27017", Kind: models.MissOutsideTest, EarlierSetTest: lastOfSetBefore, At: late},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "set-before-no-test:27017", Kind: models.MissOutsideTest, EarlierSet: 1, At: late},
 		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "before-set-named:27017", Kind: models.MissOutsideTest, BeforeSet: true, At: late, Marked: of(previous, 3, 8)},
 		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "previous:27017", Kind: models.MissInTest, At: late, Marked: of(previous, 3, 8)},
 		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "previous-extra:27017", Kind: models.MissExtraCall, At: late, Marked: of(previous, 3, 8)},
@@ -2118,10 +2121,10 @@ func TestAMissIsChargedByTheRoundItsCallWasMarkedIn(t *testing.T) {
 		uncharged map[string]string
 	}{
 		{"install known", installed, map[string]string{
-			"between:27017": "", "earlier-set:27017": "", "set-before-last:27017": lastOfSetBefore, "set-before-same-name:27017": ending, "set-before-unrounded:27017": lastOfSetBefore, "before-set-named:27017": previous, "previous:27017": previous, "previous-extra:27017": previous, "filed-early:27017": "", "unmarked-before:80": "",
+			"between:27017": "", "earlier-set:27017": "", "set-before-last:27017": lastOfSetBefore, "set-before-same-name:27017": ending, "set-before-unrounded:27017": lastOfSetBefore, "set-before-no-test:27017": "", "before-set-named:27017": previous, "previous:27017": previous, "previous-extra:27017": previous, "filed-early:27017": "", "unmarked-before:80": "",
 		}},
-		{"install not known", testBegin{at: began}, map[string]string{"set-before-last:27017": lastOfSetBefore, "set-before-same-name:27017": ending, "set-before-unrounded:27017": lastOfSetBefore, "filed-early:27017": "", "unmarked-before:80": ""}},
-		{"begin not known", testBegin{}, map[string]string{"set-before-last:27017": lastOfSetBefore, "set-before-same-name:27017": ending, "set-before-unrounded:27017": lastOfSetBefore}},
+		{"install not known", testBegin{at: began}, map[string]string{"set-before-last:27017": lastOfSetBefore, "set-before-same-name:27017": ending, "set-before-unrounded:27017": lastOfSetBefore, "set-before-no-test:27017": "", "filed-early:27017": "", "unmarked-before:80": ""}},
+		{"begin not known", testBegin{}, map[string]string{"set-before-last:27017": lastOfSetBefore, "set-before-same-name:27017": ending, "set-before-unrounded:27017": lastOfSetBefore, "set-before-no-test:27017": ""}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a, p := wireAgent(t, models.MODE_TEST)

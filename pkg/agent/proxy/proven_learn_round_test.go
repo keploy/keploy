@@ -3005,3 +3005,93 @@ func TestARetryCyclesLateCallKeepsNoPairingWithTheTestsOwnRecordingAndLearnsNoth
 		})
 	}
 }
+
+// A call set A makes in the pool view after its last test's end, before set
+// A's end read, which keploy decides only after the next set's mocks were
+// staged, is kept as set A's call, of no test: its report reaching the drain
+// before that staging (the set start's cut keeps it), after it, or after a
+// second set's staging, the next read returns it, and only it, outside every
+// test, naming no test and how many sets back it was made (EarlierSet), on the
+// wire too, never as made before the running set (BeforeSet). At zero latency
+// set A's end read would have failed set A with it. One marked after set A's
+// end read is cut and said, as at zero latency. Before, both were cut to a log
+// line: set A passed with an unanswered call it made.
+func TestASetsCallOfNoTestBeforeItsEndReadIsKeptAtTheNextSetsStart(t *testing.T) {
+	for _, when := range []string{"before the staging", "after the staging", "after a second set's staging"} {
+		t.Run("the report "+when, func(t *testing.T) {
+			ctx := context.Background()
+			core, logs := observer.New(zap.DebugLevel)
+			p, mm := heldOrdersLogging(t, true, zap.New(core))
+			p.dnsCache = newDNSCache()
+			// Set A's start, as its staging cuts.
+			p.cutMissesAtSetStart(ctx)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			if got, err := p.GetMockErrors(ctx); err != nil || len(got) != 0 {
+				t.Fatalf("precondition: test-1's end read %v %+v", err, got)
+			}
+			p.EndTestErrorCapture()
+			mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			gap := mockMiss("POST /after-test-1")
+			call := mm.MarkCallRound()
+			if call.Test() != "" || call.Staging() {
+				t.Fatalf("precondition: the call is not marked in set A's pool view: test %q, staging %v", call.Test(), call.Staging())
+			}
+			integrations.StampMark(gap.MismatchReport, call)
+			if got, err := p.GetMockErrors(ctx); err != nil || len(got) != 0 {
+				t.Fatalf("precondition: set A's end read %v %+v", err, got)
+			}
+			after := mockMiss("POST /after-the-end-read")
+			integrations.StampMark(after.MismatchReport, mm.MarkCallRound())
+			send := func() {
+				p.SendError(gap)
+				p.SendError(after)
+				flushDrain(p)
+			}
+			stageNext := func() {
+				p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+				p.missCutPending.Store(true)
+				if err := p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now().Add(time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if when == "before the staging" {
+				send()
+			}
+			stageNext()
+			back := 1
+			if when == "after a second set's staging" {
+				stageNext()
+				back = 2
+			}
+			if when != "before the staging" {
+				send()
+			}
+			p.BeginTestErrorCapture()
+			got, err := p.GetMockErrors(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ActualSummary != "POST /after-test-1" || got[0].BeforeSet || got[0].EarlierSetTest != "" || got[0].EarlierSet != back || got[0].Kind != models.MissOutsideTest {
+				t.Fatalf("the next set's first read %+v; want only set A's call of no test, %d set(s) back, outside every test, not made before the set", got, back)
+			}
+			b, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire []models.UnmatchedCall
+			if err := json.Unmarshal(b, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if len(wire) != 1 || wire[0].BeforeSet || wire[0].EarlierSet != back {
+				t.Fatalf("on the wire the next set's first read %s; want set A's call, %d set(s) back", b, back)
+			}
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /after-the-end-read"})).Len(); n != 1 {
+				t.Fatalf("the cut of the call marked after set A's end read was said %d times; want once: %+v", n, logs.All())
+			}
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /after-test-1"})).Len(); n != 0 {
+				t.Fatalf("the call marked before set A's end read was said cut %d times: %+v", n, logs.All())
+			}
+		})
+	}
+}

@@ -3425,8 +3425,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// What the previous set's application missed before its first test is
 	// not this set's, nor are the tests whose request its agent did not read.
 	r.setCalls.reset()
-	// An earlier set's test's call this set's reads return was made in the
-	// set the run ran before it.
+	// An earlier set's call this set's reads return was made in a set the
+	// run began before it, the one the agent counts back to.
 	r.earlierSetCalls.begin(testSetID)
 	r.requestsUnread.reset()
 	// var to store the error in the loop
