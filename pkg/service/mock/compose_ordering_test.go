@@ -105,8 +105,19 @@ type composeInstr struct {
 
 	consumedMocks []models.MockState
 	consumedErr   error
-	mockErrors    []models.UnmatchedCall
-	mockErrorsErr error
+	// consumedReads are what the agent hands the reads of what it consumed
+	// before consumedMocks, one each, in order: a read hands back only what
+	// was consumed since the one before.
+	consumedReads [][]models.MockState
+	// runsOn, when set, is what the test command left of the application
+	// running once it exited (models.RunOptions.BeforeStop's running): Run
+	// calls BeforeStop while it says true, as the agent client does.
+	runsOn func() bool
+	// consumedReadCount is how many reads of what the agent consumed were
+	// made.
+	consumedReadCount int
+	mockErrors        []models.UnmatchedCall
+	mockErrorsErr     error
 
 	// What the agent left as compose stopped it (ComposeOutcomeReader): under
 	// compose, the only account of the run there is.
@@ -193,7 +204,7 @@ func (f *composeInstr) counts() (runs, healthHits int) {
 
 func (f *composeInstr) Setup(context.Context, string, models.SetupOptions) error { return nil }
 
-func (f *composeInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+func (f *composeInstr) Run(ctx context.Context, opts models.RunOptions) models.AppError {
 	f.mu.Lock()
 	f.runs++
 	f.events = append(f.events, "run")
@@ -222,6 +233,9 @@ func (f *composeInstr) Run(ctx context.Context, _ models.RunOptions) models.AppE
 			return models.AppError{AppErrorType: models.ErrCtxCanceled}
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+	if opts.BeforeStop != nil && f.runsOn != nil && ctx.Err() == nil && f.runsOn() {
+		opts.BeforeStop(ctx, f.runsOn)
 	}
 	return f.runResult
 }
@@ -321,6 +335,14 @@ func (f *composeInstr) UpdateMockParams(context.Context, models.MockFilterParams
 	return nil
 }
 func (f *composeInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.consumedReadCount++
+	if len(f.consumedReads) > 0 {
+		read := f.consumedReads[0]
+		f.consumedReads = f.consumedReads[1:]
+		return read, nil
+	}
 	return f.consumedMocks, f.consumedErr
 }
 

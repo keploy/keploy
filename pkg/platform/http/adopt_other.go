@@ -14,3 +14,7 @@ func adoptDaemons(*zap.Logger) {}
 
 // stopAdopted ends what adoptDaemons adopted: nothing here.
 func stopAdopted(*zap.Logger, []utils.Reached, *utils.TeardownScope) (string, string) { return "", "" }
+
+// appRunsOn says whether a daemon the application left runs: never known
+// here, where nothing is adopted.
+func appRunsOn(*zap.Logger) bool { return false }

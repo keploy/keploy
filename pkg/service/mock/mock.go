@@ -88,6 +88,9 @@ type mockService struct {
 	// pushProvenTable read the set's mappings: each is required once per run
 	// when it is due (requiredNotMade).
 	series map[string]seriesDue
+	// seriesRead is what the agent consumed that the wait for the series the
+	// run owes read (awaitRequiredSeries), before the run's end's read.
+	seriesRead []models.MockState
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil

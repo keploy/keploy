@@ -88,23 +88,12 @@ func requiredNotMade(req map[string]seriesDue, tests []TestReceipt, consumed []m
 	}
 	ran := make(map[string]bool, len(tests))
 	for _, t := range tests {
-		if t.Outcome == models.ScopeOutcomePassed || t.Outcome == models.ScopeOutcomeFailed {
+		if ranOutcome(t.Outcome) {
 			ran[t.Name] = true
 		}
 	}
-	used := make(map[string]bool, len(consumed))
-	for _, c := range consumed {
-		used[c.Name] = true
-	}
-	for _, id := range slices.Sorted(maps.Keys(req)) {
+	for _, id := range owedSeries(req, ran, usedNames(consumed)) {
 		s := req[id]
-		due := ran[s.Trails]
-		if s.Trails == "" {
-			due = s.Place == "" || ran[s.Place]
-		}
-		if !due || slices.ContainsFunc(s.Names, func(n string) bool { return used[n] }) {
-			continue
-		}
 		if !known {
 			if s.Trails == "" {
 				unreadSets = append(unreadSets, id)
@@ -119,6 +108,41 @@ func requiredNotMade(req map[string]seriesDue, tests []TestReceipt, consumed []m
 		notMade = append(notMade, RequiredNotMade{Series: id, Rule: s.Rule, Trails: s.Trails, Names: s.Names})
 	}
 	return notMade, unread, unreadSets
+}
+
+// ranOutcome is whether a test whose outcome is outcome ran: it passed or
+// failed. One skipped, gated or never begun did not.
+func ranOutcome(outcome string) bool {
+	return outcome == models.ScopeOutcomePassed || outcome == models.ScopeOutcomeFailed
+}
+
+// usedNames is the set of the recordings consumed holds.
+func usedNames(consumed []models.MockState) map[string]bool {
+	used := make(map[string]bool, len(consumed))
+	for _, c := range consumed {
+		used[c.Name] = true
+	}
+	return used
+}
+
+// owedSeries is, in series order, each series of req that is due, by the
+// tests that ran (ran), and none of whose recordings used holds. A trailing
+// series is due when the test it trails ran; a background one when the run
+// reached its place: the set's start, or the test of that ID ran.
+func owedSeries(req map[string]seriesDue, ran, used map[string]bool) []string {
+	var owed []string
+	for _, id := range slices.Sorted(maps.Keys(req)) {
+		s := req[id]
+		due := ran[s.Trails]
+		if s.Trails == "" {
+			due = s.Place == "" || ran[s.Place]
+		}
+		if !due || slices.ContainsFunc(s.Names, func(n string) bool { return used[n] }) {
+			continue
+		}
+		owed = append(owed, id)
+	}
+	return owed
 }
 
 // notMadeByName is, by recording, the test each trailing series of notMade
