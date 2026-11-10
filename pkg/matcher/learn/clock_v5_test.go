@@ -1914,6 +1914,7 @@ func TestAClockReadsEchoIsExplainedOnlyByASourceOfTheAnswersInstant(t *testing.T
 				Seen: []Seen{{Side: Request, Leaf: str(path, v), Live: live, Clock: o != nil && o.Plain(), Offset: o}}}
 		}
 	}
+	typ := String // the type of the answer's leaf
 	decide := func(apath, aval string, also map[string][2]string, earlier ...func(time.Time) Earlier) Decision {
 		rAt := time.UnixMilli(read + 2).UTC()
 		fAt := rAt.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 150*ms)
@@ -1939,7 +1940,7 @@ func TestAClockReadsEchoIsExplainedOnlyByASourceOfTheAnswersInstant(t *testing.T
 		dc.appClock = true
 		ds := Decide(Input{
 			Drifts: dc, Drift: []string{p}, Live: leaf(fAt.Add(-2*ms).UnixMilli(), true), Rec: leaf(read, false),
-			At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-1007", Mode: ModeOwn, Resp: []Leaf{str(apath, aval)}, Earlier: es,
+			At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-1007", Mode: ModeOwn, Resp: []Leaf{{Path: apath, Noise: apath, Type: typ, Value: aval}}, Earlier: es,
 			Window: v5Window(v5Call(rAt, 20*ms, 0), v5Call(fAt, 20*ms, 0)), Landed: Landed{Where: LandedBetween},
 			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
 		})
@@ -2009,6 +2010,16 @@ func TestAClockReadsEchoIsExplainedOnlyByASourceOfTheAnswersInstant(t *testing.T
 		case !c.clock && (d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalCannotCheck || !strings.Contains(d.Refusal.Why, "its own call's recorded answer holds")):
 			t.Errorf("%s: %v %+v; want refused, an echo", c.name, d.Outcome, d.Refusal)
 		}
+	}
+	// A typed instant of the answer (a BSON date) is read as written, and so
+	// is its source: an insert that wrote the second plain is one, a request
+	// that holds it percent-encoded alone, in a declared form, is none.
+	typ = Instant
+	if d := decide(upd, isoSecond, nil, sent("body.docs.0.updated_at", isoSecond, fIsoSecond, false, nil)); d.Outcome != OutcomeClock || d.Clock == nil {
+		t.Errorf("a typed second, an earlier insert of it: %v %+v; want a Clock", d.Outcome, d.Refusal)
+	}
+	if d := decide(upd, isoSecond, nil, sent("body.cmd.query.link", "at=2026-11-09T07%3A01%3A42Z", "at=2026-11-09T09%3A19%3A05Z", false, nil)); d.Outcome != OutcomeRefused || d.Refusal == nil || !strings.Contains(d.Refusal.Why, "its own call's recorded answer holds") {
+		t.Errorf("a typed second, an earlier request of it percent-encoded alone: %v %+v; want refused, an echo", d.Outcome, d.Refusal)
 	}
 }
 
