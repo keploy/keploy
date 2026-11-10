@@ -155,6 +155,20 @@ func TestASecondConsumeOfATrailingWriteIsRefused(t *testing.T) {
 			t.Fatal("with no trails sent the reads between tests hide a worker recording a call used")
 		}
 	})
+	t.Run("the set staged again: the trailing write answers again", func(t *testing.T) {
+		mm, byName := trailPolls(t)
+		mm.ServeExactPool("k", nil)
+		if got := answer(mm, byName, "tr"); got != "tr" {
+			t.Fatalf("first answer %q", got)
+		}
+		// A new staging of the set, the same view in force, before any
+		// door builds its outside answers: what the old staging used is
+		// not this staging's.
+		mm.stagingEpoch.Add(1)
+		if mocks, _ := mm.GetSessionScopedMocks(); !slices.ContainsFunc(mocks, func(mk *models.Mock) bool { return mk.Name == "tr" }) {
+			t.Fatal("the reads of a new staging hide a trailing write the staging before it used")
+		}
+	})
 	t.Run("the reads hide a used trailing write", func(t *testing.T) {
 		mm, byName := trailPolls(t)
 		mm.ServeExactPool("k", nil)
