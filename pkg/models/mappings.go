@@ -111,8 +111,10 @@ type MockEntry struct {
 	// answers one canonical request with one answer. keploy mock replay
 	// serves a series' last-placed entry again once all of its entries
 	// answered, and requires each series once per run when it is due
-	// (models.ScopeTableReq.Series, RequiredSeries). Empty when Rule is,
-	// and kept as Rule is.
+	// (models.ScopeTableReq.Series, RequiredSeries). Also set, with no
+	// Rule, on an entry keploy record moved as trailing a test on its own
+	// ("trail/<trailed test>/<request>"); empty on every other entry, and
+	// kept as Rule is.
 	Series string `json:"series,omitempty" yaml:"series,omitempty" bson:"series,omitempty"`
 	// Read is, on an entry of a Series, that keploy mock record judged the
 	// series' request to read only (no insert, update, delete or other

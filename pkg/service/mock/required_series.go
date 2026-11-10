@@ -191,9 +191,16 @@ func RuleNotMadeLine(n RequiredNotMade) string {
 		what = fmt.Sprintf("the run reached its background series %s (%s), which answered no call by the run's end; the app no longer makes it, or makes another request; the set fails and CI would be red",
 			num, strings.Join(n.Names, ", "))
 	}
+	label := n.Rule
+	if label == "" {
+		// keploy record moved the series as trailing a test on its own (no
+		// declared rule): a write it trails is required as a rule's is.
+		label, fields["by"] = "(keploy record's trail move)", "record"
+		delete(fields, "id")
+	}
 	b, err := json.Marshal(fields)
 	if err != nil {
 		b = []byte(`{"event":"unwritable"}`)
 	}
-	return fmt.Sprintf("RULE NOT MADE %s: %s. rule=%s", n.Rule, what, b)
+	return fmt.Sprintf("RULE NOT MADE %s: %s. rule=%s", label, what, b)
 }

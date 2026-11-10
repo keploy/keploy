@@ -3,8 +3,10 @@ package mock
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -287,4 +289,25 @@ func TestARequiredSeriesOfAReadIsServedNotRequired(t *testing.T) {
 	require.Equal(t, []RequiredNotMade{{Series: "seen/o::TestA/1", Rule: "seen@44aa55bb", Trails: "o::TestA", Names: []string{"mock-8", "mock-9"}}}, r.RequiredNotMade)
 	require.Equal(t, []string{"mock-8", "mock-9"}, testLine(t, tr, "o::TestA").Evidence.Unconsumed)
 	require.Len(t, ruleNotMadeLines(logs), 1)
+}
+
+// A series keploy record moved as trailing a test on its own (no declared
+// rule) is required as a rule's is when it writes, and served only when it
+// reads; its RULE NOT MADE line names the record's trail move, no rule.
+func TestATrailMoveSeriesIsRequiredWithNoRule(t *testing.T) {
+	mp := &models.Mapping{Worker: []models.MockEntry{
+		{Name: "mock-3", Trails: "o::TestA", Series: "trail/o::TestA/0123456789abcdef"},
+		{Name: "mock-4", Trails: "o::TestA", Series: "trail/o::TestA/0123456789abcdef"},
+		{Name: "mock-5", Trails: "o::TestA", Series: "trail/o::TestA/fedcba9876543210", Read: true},
+		{Name: "mock-6", Trails: "o::TestA"},
+	}}
+	req := requiredSeries(mp, map[string][]string{"o::TestA": nil})
+	require.Equal(t, []string{"trail/o::TestA/0123456789abcdef"}, slices.Sorted(maps.Keys(req)))
+	require.Equal(t, []string{"mock-3", "mock-4"}, req["trail/o::TestA/0123456789abcdef"].Names)
+	line := RuleNotMadeLine(RequiredNotMade{Series: "trail/o::TestA/0123456789abcdef", Trails: "o::TestA", Names: []string{"mock-3", "mock-4"}})
+	require.Contains(t, line, "RULE NOT MADE (keploy record's trail move): o::TestA ran and its trailing series 0123456789abcdef (mock-3, mock-4) answered no call by the run's end")
+	require.Contains(t, line, `rule={"by":"record","event":"not-made","series":"trail/o::TestA/0123456789abcdef","trails":"o::TestA"}`)
+	ruled := RuleNotMadeLine(RequiredNotMade{Series: "cleanup/o::TestA/1", Rule: "cleanup@3f2a91c0", Trails: "o::TestA", Names: []string{"mock-3"}})
+	require.NotContains(t, ruled, `"by"`)
+	require.Contains(t, ruled, "RULE NOT MADE cleanup@3f2a91c0: ")
 }
