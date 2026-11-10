@@ -2163,7 +2163,30 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 	}
 	if c.rm != nil && c.lm != nil {
+		// A client test's request is the client's own in each run, never
+		// one keploy sent as recorded. A leaf of it that shows the value by
+		// its text in both runs moved with the value: a slot (2), whatever
+		// unit its digits end at (a UnixNano that ends in 0 beside one that
+		// does not). One that holds the recorded moment only as a cut of a
+		// finer instant (the UnixNano in a name the client made, beside the
+		// second the application read from its own clock a moment later)
+		// gave the application no value at that cut to pick, as in the loop
+		// above. Neither is a place the recorded moment stands at by a rule
+		// round F's does not follow: the later steps read the value, and
+		// one no window holds stays refused, naming the place.
+		followed := map[[2]string]bool{}
+		for _, h := range hs {
+			if p := h.p; h.hr && request(p) && dc.clientCase(p.mock) &&
+				(h.hl && asText(p.t.rec, r) && asText(p.t.live, l) || dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm)) {
+				followed[[2]string{p.mock, p.path}] = true
+			}
+		}
 		reqs := slices.DeleteFunc(slices.Clone(dc.in.Earlier), func(e Earlier) bool { return !e.Given || e.Gave || e.Unread != "" })
+		for i, e := range reqs {
+			if len(followed) > 0 && e.incoming {
+				reqs[i].Seen = slices.DeleteFunc(slices.Clone(e.Seen), func(s Seen) bool { return followed[[2]string{e.Mock, s.Leaf.Path}] })
+			}
+		}
 		if where, _ := dc.dr.requestHolds([]moment{*c.rm}, []moment{*c.lm}, reqs); where != "" {
 			return dc.refuse(path, at, n, r, l, RefusalPick,
 				"the recorded moment stands in the test case at "+where+", and no cut there gives round F's", []string{where}, dc.fieldNoise(path))
@@ -2172,8 +2195,24 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 
 	// A given's text, and 2. one templated slot of the test case's request
 	// that shows it in both runs: a Value bound there; two slots, refused.
+	// A client test's request that holds the moment in both runs only as a
+	// coarse cut of a finer instant (the UnixNano in a name, beside a
+	// second) is no slot keploy can bind: a variable holds one text. Where
+	// the call's own window holds the read, or the test's since its begin,
+	// the value is that read (5, 7), as an answer's is at step 3 and as main
+	// reads it; with no such read it stays a slot, which the adapter that
+	// cannot bind another form refuses.
+	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
+	windowRead := func() bool {
+		return c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	}
+	cutSlot := func(p evPlace) bool {
+		return c.rm != nil && c.lm != nil && dc.clientCase(p.mock) && dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm) && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && windowRead()
+	}
 	gave := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && h.p.gave })
-	slots := oneSlotEach(heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() }))
+	slots := oneSlotEach(heldWhere(hs, func(h instantHold) bool {
+		return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() && !cutSlot(h.p)
+	}))
 	if len(gave) > 0 {
 		return dc.bound(path, at, n, c, gave, ": a value the test gave keploy, which the call sends as given in both runs")
 	}
@@ -2207,8 +2246,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	cutOnly := len(heldWhere(hs, func(h instantHold) bool {
 		return answer(h) && !h.fr && c.rm != nil && dc.cutOfFinerOnly(h.p.t.rec, h.p.t.live, r, *c.rm)
 	})) == len(answers)
-	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
-	ownRead := cutOnly && c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	ownRead := cutOnly && windowRead()
 	if len(answers) > 0 && !ownRead {
 		// An answer recorded after the call that round F gave the
 		// application before it, holding F's moment, is a second source:
