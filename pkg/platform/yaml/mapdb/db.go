@@ -464,7 +464,9 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 // moved it, and its undo) is written on the entry as given: the entry's line
 // is the last placement's. So are its Drift (MockEntry.Drift: the move rests
 // on its owner's quarantine) and its Trails (MockEntry.Trails: the earlier
-// test whose call it trails, which only the move that proved it names). Under the switch a mock taken out of a test's list
+// test whose call it trails, which only the move that proved it names), and
+// its Rule and Series (MockEntry.Rule, Series: the declared rule that placed
+// it and its series, which only that rule's move names). Under the switch a mock taken out of a test's list
 // names that test as its Owner (MockEntry.Owner), unless the move names one;
 // a worker entry placed again keeps its owner unless the move names one.
 // Without the switch no owner is written, so a move writes what it wrote
@@ -535,6 +537,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			mapping.Worker[i].Reason = mv.Reason
 			mapping.Worker[i].Drift = mv.Drift
 			mapping.Worker[i].Trails = mv.Trails
+			mapping.Worker[i].Rule, mapping.Worker[i].Series = mv.Rule, mv.Series
 			if mv.Owner != "" {
 				mapping.Worker[i].Owner = mv.Owner
 			}
@@ -570,6 +573,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	entry.Reason = mv.Reason
 	entry.Drift = mv.Drift
 	entry.Trails = mv.Trails
+	entry.Rule, entry.Series = mv.Rule, mv.Series
 	// A replay serves a worker entry only while a test process of its key
 	// holds the run, and a moved entry with none would sit in the slice no
 	// test process holds: the move's key, else the test's. A test with no
@@ -624,6 +628,44 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 		return nil
 	}
 	mapping.RecordedWith = append(mapping.RecordedWith, feature)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// SetRules writes digest as the set's rules digest (models.Mapping.Rules:
+// the rules declared in keploy.yml that keploy mock record placed the set's
+// entries by), keeping every other section, comment and hand edit as it is.
+// An empty digest removes the key, and a digest the file carries already
+// writes nothing. A set with no mapping file is refused, not created: its
+// record wrote no entry a rule could place.
+func (db *MappingDb) SetRules(ctx context.Context, testSetID, digest string) error {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("write %s's rules digest: the set has no mappings file", testSetID)
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return err
+	}
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
+	if err != nil {
+		return err
+	}
+	if mapping.Rules == digest {
+		return nil
+	}
+	mapping.Rules = digest
 	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
 	if err != nil {
 		return err

@@ -99,6 +99,21 @@ type MockEntry struct {
 	// entry given back to its Owner drops it. Read and kept by each rewrite,
 	// whatever the switch.
 	Trails string `json:"trails,omitempty" yaml:"trails,omitempty" bson:"trails,omitempty"`
+	// Rule is, on a worker-scope entry a rule the user declared in
+	// keploy.yml placed there (keploy mock record, under the proven switch),
+	// that rule as "<id>@<first 8 hex of its digest>". Empty on every other
+	// entry, and an entry given back to its list drops it. Read and kept by
+	// each rewrite, whatever the switch. Not Group, which is the concurrency
+	// group.
+	Rule string `json:"rule,omitempty" yaml:"rule,omitempty" bson:"rule,omitempty"`
+	// Series is, on an entry Rule placed, the series it belongs to, as
+	// "<rule id>/<trailed test, or ->/<n>": every entry of one series
+	// answers one canonical request with one answer. keploy mock replay
+	// serves a series' last-placed entry again once all of its entries
+	// answered, and requires each series once per run when it is due
+	// (models.ScopeTableReq.Series, RequiredSeries). Empty when Rule is,
+	// and kept as Rule is.
+	Series string `json:"series,omitempty" yaml:"series,omitempty" bson:"series,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy's
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's
@@ -289,6 +304,13 @@ type Mapping struct {
 	// names none; omitted when empty, so a file without it is written as
 	// before. Only its use is under the switch.
 	RecordedWith []string `json:"recordedWith,omitempty" yaml:"recordedWith,omitempty" bson:"recorded_with,omitempty"`
+	// Rules is the digest ("sha256:<hex>") of the rules declared in
+	// keploy.yml (mock.rules) that keploy mock record placed the set's
+	// entries by (MockEntry.Rule); a lock published from the set pins it,
+	// and a replay whose keploy.yml digests otherwise refuses. Empty for a
+	// set recorded with none. Read and kept by each rewrite, whatever the
+	// switch.
+	Rules string `json:"rules,omitempty" yaml:"rules,omitempty" bson:"rules,omitempty"`
 }
 
 // Group is the concurrency group id names, nil when there is none.
