@@ -471,6 +471,19 @@ type ScopeTableReq struct {
 	// extra-call line names (UnmatchedCall.SkippedReads). Absent from an
 	// older CLI and when the gate skips no test.
 	SkippedReads map[string]string `json:"skippedReads,omitempty"`
+	// Background is, under the proven switch, the names of the set's
+	// background recordings, the calls the application made on its own
+	// rather than for a test's request: its mappings.yaml worker: mocks,
+	// then its startup: mocks, each a pool slice holds, as keploy test's
+	// staging names them (MockFilterParams.BackgroundMocks). The agent's
+	// staging hands them to the proxy read-only, served or not, so a parser
+	// can tell a miss is one more run of one of them
+	// (MockMismatchReport.Background): listed, it counts against no test.
+	// No call is served differently for it. The reads keploy mock replay
+	// moved to Worker from the tests its gate skips (SkippedReads) are none
+	// of them: they are tests' calls. Absent from an older CLI and from a
+	// set with none: every miss stays its test's.
+	Background []string `json:"background,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its

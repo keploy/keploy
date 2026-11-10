@@ -5242,18 +5242,19 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // (models.ScopeTableReq.Trails). repeats are each test's repeated reads
 // (models.ScopeTableReq.RepeatReads). notRequired is, by test, the names of
 // its list keploy's judging marked served, not required
-// (models.ScopeTableReq.NotRequired).
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) (retErr error) {
+// (models.ScopeTableReq.NotRequired). background names the set's background
+// recordings, its worker: and startup: mocks (models.ScopeTableReq.Background).
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p, wk, sr, tr, w, g, r, nr := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr) })
+			t, p, wk, sr, tr, w, g, r, nr, bg := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired), slices.Clone(background)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr, bg) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
