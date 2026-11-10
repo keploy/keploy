@@ -89,6 +89,9 @@ type composeInstr struct {
 	// notRequired are the names of each test's own list that push said
 	// marked served, not required.
 	notRequired map[string][]string
+	// background are the names of the set's background recordings that
+	// push sent (models.ScopeTableReq.Background).
+	background []string
 	// begins and seeds are what the last push of the tests' recorded begins
 	// sent, and beginsErr what it fails with.
 	begins    map[string]time.Time
@@ -242,10 +245,11 @@ func (f *composeInstr) PushScopeTable(_ context.Context, _ map[string][]string, 
 
 // PushProvenTable takes the per-test table, the pool slices, the worker
 // scope, the names of it that are skipped tests' reads, the trails, the
-// recorded test windows, the recorded givens, the named repeated reads and
-// the not-required marks (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error {
-	f.table, f.pool, f.worker, f.skippedReads, f.trails, f.recordedWindows, f.given, f.repeats, f.notRequired = table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired
+// recorded test windows, the recorded givens, the named repeated reads, the
+// not-required marks and the background recordings' names
+// (ProvenTablePusher), and keeps them.
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string) error {
+	f.table, f.pool, f.worker, f.skippedReads, f.trails, f.recordedWindows, f.given, f.repeats, f.notRequired, f.background = table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background
 	return nil
 }
 

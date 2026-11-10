@@ -375,6 +375,18 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a recording served, not required", http.StatusNotImplemented)
 			return
 		}
+		// The set's background recordings (its worker: and startup:
+		// mocks), before the pool is served, whose serving stages the set
+		// and hands them to the proxy with it. Every table says it, an
+		// empty one too: a set never keeps the previous set's. An agent
+		// that cannot take them marks no miss background: every miss stays
+		// its test's, failing closed.
+		if bs, ok := a.svc.(scopeBackgroundSetter); ok {
+			if err := bs.SetScopeBackground(r.Context(), req.Background); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		if err := s.SetScopePool(r.Context(), req.Pool); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -405,6 +417,12 @@ type scopePoolSetter interface {
 // (models.ScopeTableReq.Worker, proven wire).
 type scopeWorkerSetter interface {
 	SetScopeWorker(ctx context.Context, worker map[string][]string) error
+}
+
+// scopeBackgroundSetter installs a replay's background recordings by name
+// (models.ScopeTableReq.Background, proven wire).
+type scopeBackgroundSetter interface {
+	SetScopeBackground(ctx context.Context, names []string) error
 }
 
 // scopeSkippedReadsSetter installs which of a replay's worker scope are the

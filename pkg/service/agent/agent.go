@@ -2339,9 +2339,11 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	storage.mu.RUnlock()
 
 	// The staging call (recordedSetShape populated, as for the cursors'
-	// reset above) hands the proxy the set's background recordings, read
-	// from every mock held for the set, served or not.
-	if !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
+	// reset above), and keploy mock replay's own staging of a set
+	// (ExactStaging) whatever windows its table sent, hands the proxy the
+	// set's background recordings, read from every mock held for the set,
+	// served or not: a set that names none clears the previous set's.
+	if params.ExactStaging || !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
 		a.seedBackgroundRecordings(params, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk)
 	}
 
