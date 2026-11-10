@@ -403,6 +403,45 @@ func TestAClientTestsUnixNanoNameIsBoundAtItsRequest(t *testing.T) {
 	}
 }
 
+// TestClassifyNamesAClientTestsRequestAndTheVariableItBinds: the learn
+// step's classify (ClassifyArrived) reads the app name a client test sent as
+// a variable of the request that sent it, a client test's (Place.Client),
+// bound at the place a replay reads in the paired request (Place.Var,
+// body.name of a JSON body). A body that declares no media type is read by
+// its bytes: its leaf is the name's place still, and binds no variable.
+func TestClassifyNamesAClientTestsRequestAndTheVariableItBinds(t *testing.T) {
+	rNanos := int64(1794207702156240454)
+	rReq := time.Unix(0, rNanos).Add(131 * time.Microsecond)
+	gap := 69*time.Second + 3*time.Millisecond
+	fNanos, fReq := rNanos+gap.Nanoseconds(), rReq.Add(gap)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	name := func(n int64) string { return "[E2E] app-crud-" + strconv.FormatInt(n, 10) }
+	const p = "body.docs.msgs.0.name"
+	sh := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	undeclared := func(n int64, at time.Time) *models.HTTPReq {
+		r := appNameCase(n, at)
+		delete(r.Header, "Content-Type")
+		return r
+	}
+	for _, c := range []struct {
+		what    string
+		req     func(int64, time.Time) *models.HTTPReq
+		wantVar string
+	}{
+		{"a JSON body", appNameCase, "body.name"},
+		{"a body that declares no media type", undeclared, ""},
+	} {
+		earlier := clientPlaced(t, "post-client-v1-apps-1", c.req(rNanos, rReq), c.req(fNanos, fReq), fReq)
+		ln := ClassifyArrived(oClientDrifts(), []string{p}, sh(name(fNanos)), sh(name(rNanos)), rCall, fCall, earlier, nil, nil, nil, nil)[0]
+		if ln.Kind != KindVariable || ln.From.Mock != "test case post-client-v1-apps-1" || ln.From.Path != "body.name" || !ln.From.Client || ln.From.Var != c.wantVar {
+			t.Errorf("the app name sent in %s: %s (%s) from %s %s, a client test's request: %v, variable place %q; want a variable of test case post-client-v1-apps-1's body.name, a client test's, variable place %q",
+				c.what, ln.Kind, ln.Why, ln.From.Mock, ln.From.Path, ln.From.Client, ln.From.Var, c.wantVar)
+		}
+	}
+}
+
 // TestARequestKeployTestSentIsNoClientTestsRequest: the auth_time a keploy
 // test case's request carries in its token binds there as it does in a
 // client test's, but the place is a request keploy test sent, no client
