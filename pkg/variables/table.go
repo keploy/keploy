@@ -1,6 +1,7 @@
 package variables
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -791,6 +792,46 @@ func (t *Table) EndedOf(test string) []Binding {
 		}
 	}
 	return out
+}
+
+// LookupOf is the binding of name that test's own scope made: the running
+// scope's own (Own) while that scope is test's (StartOpeningTest), else what
+// test's ended scopes bound (EndedOf), the latest of them that bound it.
+// ended says the binding is not the running scope's: test's scope has ended,
+// or is not running. Never the run's (KeepRun), nor another test's scope's,
+// nor one of a scope begun with no test named: ok is false for test "", for
+// a name test's scopes never bound, and where two of test's ended scopes
+// bound name with two values (no one value is test's). A recording that
+// trails test (a clean-up the application runs for it once it answered
+// it) reads the variables the learn step wrote in test's scope here,
+// whichever test's window its call lands in.
+func (t *Table) LookupOf(test, name string) (b Binding, ended, ok bool) {
+	if test == "" {
+		return Binding{}, false, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.began && t.test == test {
+		b, ok = t.vals[name]
+		return b, false, ok
+	}
+	for i := len(t.ended) - 1; i >= 0; i-- {
+		e := t.ended[i]
+		if e.test != test {
+			continue
+		}
+		j, found := slices.BinarySearchFunc(e.bindings, name, func(x Binding, n string) int { return strings.Compare(x.Name, n) })
+		if !found {
+			continue
+		}
+		if ok && e.bindings[j].Value != b.Value {
+			return Binding{}, true, false
+		}
+		if !ok {
+			b, ok = e.bindings[j], true
+		}
+	}
+	return b, true, ok
 }
 
 // end keeps the running scope's own bindings as its test's ended scope's

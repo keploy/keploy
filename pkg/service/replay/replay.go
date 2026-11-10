@@ -6197,8 +6197,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// so its worker scope still fails it, named, and then it is no
 		// partial run's APP_FAULT either (partialRunDowngrade, below).
 		// Under the background rules the set's end requires none of it
-		// (exactPlan.background): nothing waits for it.
-		checkWorker := r.exact != nil && !r.exact.background && captureOpened &&
+		// (exactPlan.background) but its trailing writes (models.MockEntry.
+		// Trails, exactPlan.unansweredWorker): nothing waits for a set with
+		// none.
+		checkWorker := r.exact != nil && (!r.exact.background || len(r.exact.trailingWrites()) > 0) && captureOpened &&
 			(testSetStatus == models.TestSetStatusPassed || failedForNotFoundAlone(testSetStatus, failure, len(missing), realWhy, unclaimedReason))
 		if checkWorker {
 			workerMissing, workerUnread = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks.Map(), func(read []models.MockState) {
@@ -6285,7 +6287,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// not caught, and nothing waits for one still to
 		// come.
 		if r.exact != nil && r.exact.background && captureOpened {
-			if unanswered := r.exact.unansweredWorkerOf(totalConsumedMocks.Map(), stopDrained); len(unanswered) > 0 {
+			// A trailing write is required all the same (unansweredWorker),
+			// and is not said here.
+			trailing := r.exact.trailingWrites()
+			unanswered := slices.DeleteFunc(r.exact.unansweredWorkerOf(totalConsumedMocks.Map(), stopDrained), func(n string) bool { return trailing[n] })
+			if len(unanswered) > 0 {
 				r.logger.Info("background recordings of this test set that its end had not read answered: proven routing neither requires nor waits for them, so a background call the application stopped making is not caught ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID),
 					zap.Int("count", len(unanswered)),

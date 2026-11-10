@@ -1038,3 +1038,68 @@ func TestTableEndedOfIsNoneWhereTheTableKeepsNone(t *testing.T) {
 		t.Fatalf("EndedOf after NewSet = %+v; want none", got)
 	}
 }
+
+// LookupOf reads a name in one test's own scope alone: the running scope's
+// own while it is that test's, else that test's latest ended scope that
+// bound it, never the run's nor another test's scope's, even one that bound
+// the same name. A test that ran twice and bound the name with two values
+// names no one value. The real shape: TestAuthorizationDirectives bound its
+// app id word by word (appId0) at mock-807; its clean-up aggregate trails it
+// and lands in TestGetSubscription's window, which bound its own appId0.
+func TestTableLookupOfReadsOnlyTheNamedTestsOwnScope(t *testing.T) {
+	var tb Table
+	tb.KeepEnded()
+	tb.KeepRun()
+	tb.Bind(Binding{Name: "tenant", Value: "boot", Recorded: "boot-rec", Mock: "mock-1", Place: "body.id"})
+	if _, _, ok := tb.LookupOf(".::TestAuthorizationDirectives", "tenant"); ok {
+		t.Fatal("LookupOf read the run's binding before any scope began")
+	}
+	openTest(&tb, ".::TestAuthorizationDirectives")
+	if _, _, ok := tb.LookupOf(".::TestAuthorizationDirectives", "tenant"); ok {
+		t.Fatal("LookupOf read the run's binding as the running test's own")
+	}
+	tb.Bind(Binding{Name: "appId0", Value: "9f8886db", Recorded: "983ad2db", Mock: "mock-807", Place: "body.docs.msgs.0.appId#0"})
+	b, ended, ok := tb.LookupOf(".::TestAuthorizationDirectives", "appId0")
+	if !ok || ended || b.Value != "9f8886db" || b.Mock != "mock-807" {
+		t.Fatalf("LookupOf while the test runs = %+v ended=%v ok=%v; want its own appId0, not ended", b, ended, ok)
+	}
+	if _, _, ok := tb.LookupOf(".::TestGetSubscription", "appId0"); ok {
+		t.Fatal("LookupOf read the running test's binding as a test that has not run")
+	}
+	if _, _, ok := tb.LookupOf("", "appId0"); ok {
+		t.Fatal("LookupOf read a binding for no test named")
+	}
+	openTest(&tb, ".::TestGetSubscription")
+	tb.Bind(Binding{Name: "appId0", Value: "1a2b3c4d", Recorded: "5e6f7a8b", Mock: "mock-474", Place: "body.docs.msgs.0.appId#0"})
+	b, ended, ok = tb.LookupOf(".::TestAuthorizationDirectives", "appId0")
+	if !ok || !ended || b.Value != "9f8886db" || b.Mock != "mock-807" {
+		t.Fatalf("LookupOf of the ended test = %+v ended=%v ok=%v; want its own appId0 from its ended scope", b, ended, ok)
+	}
+	if got, _ := tb.Lookup("appId0"); got.Mock != "mock-474" {
+		t.Fatalf("Lookup = %+v; want the running test's own appId0", got)
+	}
+	if _, _, ok := tb.LookupOf(".::TestAuthorizationDirectives", "appId1"); ok {
+		t.Fatal("LookupOf read a name the test never bound")
+	}
+	tb.Reset()
+	if b, ended, ok := tb.LookupOf(".::TestGetSubscription", "appId0"); !ok || !ended || b.Mock != "mock-474" {
+		t.Fatalf("LookupOf after Reset = %+v ended=%v ok=%v; want the second test's ended appId0", b, ended, ok)
+	}
+	// The same test again, the same value: still one value.
+	openTest(&tb, ".::TestAuthorizationDirectives")
+	tb.Bind(Binding{Name: "appId0", Value: "9f8886db", Recorded: "983ad2db", Mock: "mock-807", Place: "body.docs.msgs.0.appId#0"})
+	tb.Reset()
+	if b, _, ok := tb.LookupOf(".::TestAuthorizationDirectives", "appId0"); !ok || b.Value != "9f8886db" {
+		t.Fatalf("LookupOf of a test that bound one value twice = %+v ok=%v; want that value", b, ok)
+	}
+	// Again, another value: two values name none.
+	openTest(&tb, ".::TestAuthorizationDirectives")
+	tb.Bind(Binding{Name: "appId0", Value: "0c0c0c0c", Recorded: "983ad2db", Mock: "mock-807", Place: "body.docs.msgs.0.appId#0"})
+	if b, ended, ok := tb.LookupOf(".::TestAuthorizationDirectives", "appId0"); !ok || ended || b.Value != "0c0c0c0c" {
+		t.Fatalf("LookupOf while the test runs again = %+v ended=%v ok=%v; want the running scope's own", b, ended, ok)
+	}
+	tb.Reset()
+	if b, ended, ok := tb.LookupOf(".::TestAuthorizationDirectives", "appId0"); ok || !ended {
+		t.Fatalf("LookupOf of two ended scopes with two values = %+v ended=%v ok=%v; want none", b, ended, ok)
+	}
+}
