@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -101,8 +102,9 @@ func TestMoveToWorkerWritesRuleAndSeries(t *testing.T) {
 }
 
 // SetRules writes the set's digest over the file a person edited, keeping
-// their comment, and an empty digest removes the key; a set with no
-// mapping file is refused, not created.
+// their comment, also through a db that names no file name, and an empty
+// digest removes the key; the digest the file carries already writes
+// nothing; a set with no mapping file is refused for that, not created.
 func TestSetRulesKeepsHandEditsAndRefusesAMissingSet(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	ctx := context.Background()
@@ -143,10 +145,30 @@ func TestSetRulesKeepsHandEditsAndRefusesAMissingSet(t *testing.T) {
 	if got.Rules != "" {
 		t.Errorf("an empty digest left rules %q", got.Rules)
 	}
-	if err := db.SetRules(ctx, "test-set-9", "sha256:feed"); err == nil {
-		t.Error("SetRules on a set with no mapping file returned no error")
+	if err := db.SetRules(ctx, "test-set-9", "sha256:feed"); err == nil || !strings.Contains(err.Error(), "the set has no mappings file") {
+		t.Errorf("SetRules on a set with no mapping file: %v, want it refused for that", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "test-set-9")); err == nil {
 		t.Error("SetRules created a set that had no mapping file")
+	}
+	// A db that names no file name (as keploy mock record's caller opens
+	// it) writes the set's mappings file.
+	if err := New(zap.NewNop(), dir, "").SetRules(ctx, "test-set-0", "sha256:beef"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.GetMapping(ctx, "test-set-0"); err != nil || got.Rules != "sha256:beef" {
+		t.Fatalf("SetRules through a db with no file name: rules %q, %v", got.Rules, err)
+	}
+	// The digest the file carries already writes nothing: the file keeps
+	// its modification time.
+	old := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetRules(ctx, "test-set-0", "sha256:beef"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(path); err != nil || !fi.ModTime().Equal(old) {
+		t.Errorf("SetRules of the digest the file carries rewrote it: %v, %v", fi.ModTime(), err)
 	}
 }
