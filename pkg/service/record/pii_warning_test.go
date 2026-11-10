@@ -82,3 +82,57 @@ func TestPIIWarningDecodesAnEscapedPath(t *testing.T) {
 		t.Errorf("warning %q does not report the email in the decoded path", got[0])
 	}
 }
+
+func TestPIIWarningDoesNotRepeatPIIFromThePath(t *testing.T) {
+	for _, rawURL := range []string{
+		"http://localhost:8080/users/user@example.com",
+		"http://localhost:8080/users/user%40example.com",
+	} {
+		got := piiWarnings(t, &models.TestCase{
+			HTTPReq: models.HTTPReq{Method: models.Method("GET"), URL: rawURL},
+		})
+		if len(got) != 1 {
+			t.Fatalf("%s: got %d warnings, want 1: %q", rawURL, len(got), got)
+		}
+		if strings.Contains(got[0], "user@example.com") || strings.Contains(got[0], "user%40example.com") {
+			t.Errorf("warning %q repeats the email from the path", got[0])
+		}
+		if !strings.Contains(got[0], "GET http://localhost:8080 (path withheld") {
+			t.Errorf("warning %q does not name the call by method and host", got[0])
+		}
+	}
+}
+
+func TestPIIWarningDoesNotRepeatPIIFromTheTestName(t *testing.T) {
+	got := piiWarnings(t, &models.TestCase{
+		Name: "signup-user@example.com",
+		HTTPReq: models.HTTPReq{
+			Method: models.Method("POST"),
+			URL:    "http://localhost:8080/users",
+			Body:   `{"email":"user@example.com"}`,
+		},
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d warnings, want 1: %q", len(got), got)
+	}
+	if strings.Contains(got[0], "user@example.com") {
+		t.Errorf("warning %q repeats the email from the test name", got[0])
+	}
+	if !strings.Contains(got[0], "POST http://localhost:8080/users") {
+		t.Errorf("warning %q does not fall back to the method and path", got[0])
+	}
+}
+
+func TestPIIWarningKeepsACleanTestName(t *testing.T) {
+	got := piiWarnings(t, &models.TestCase{
+		Name: "create-user",
+		HTTPReq: models.HTTPReq{
+			Method: models.Method("POST"),
+			URL:    "http://localhost:8080/users",
+			Body:   `{"email":"user@example.com"}`,
+		},
+	})
+	if len(got) != 1 || !strings.Contains(got[0], "create-user") {
+		t.Fatalf("warning %q does not name the test case", got)
+	}
+}

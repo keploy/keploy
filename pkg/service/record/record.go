@@ -3685,22 +3685,45 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	r.logger.Info("Created test-set config file with metadata")
 }
 
+// piiSafeLabel names a test case in PII warnings without copying PII into the
+// log. The scan runs before the insert that names the test case, so a
+// recording usually has only the call to go by. The query string is left out
+// because it can hold the very values being reported, and a name or path that
+// itself holds PII is replaced by the method and host.
+func piiSafeLabel(testCase *models.TestCase) string {
+	if name := strings.TrimSpace(testCase.Name); name != "" && !holdsPII(name) {
+		return name
+	}
+	method := strings.TrimSpace(string(testCase.HTTPReq.Method))
+	target, _, _ := strings.Cut(testCase.HTTPReq.URL, "?")
+	if label := strings.TrimSpace(method + " " + target); label != "" && !holdsPII(label) {
+		return label
+	}
+	if u, err := url.Parse(target); err == nil && u.Host != "" {
+		return strings.TrimSpace(method + " " + u.Scheme + "://" + u.Host + " (path withheld: it contains PII)")
+	}
+	if method != "" {
+		return method + " request (path withheld: it contains PII)"
+	}
+	return "unknown-test-case"
+}
+
+func holdsPII(value string) bool {
+	if len(pii.DetectValue("label", value)) > 0 {
+		return true
+	}
+	if decoded, err := url.PathUnescape(value); err == nil && decoded != value {
+		return len(pii.DetectValue("label", decoded)) > 0
+	}
+	return false
+}
+
 func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string) {
 	if testCase == nil {
 		return
 	}
 
-	// The scan runs before the insert that names the test case, so a recording
-	// usually has only the call to go by. The query string is left out because
-	// it can hold the very values being reported.
-	label := strings.TrimSpace(testCase.Name)
-	if label == "" {
-		target, _, _ := strings.Cut(testCase.HTTPReq.URL, "?")
-		label = strings.TrimSpace(string(testCase.HTTPReq.Method) + " " + target)
-	}
-	if label == "" {
-		label = "unknown-test-case"
-	}
+	label := piiSafeLabel(testCase)
 
 	detections := make([]pii.Detection, 0)
 	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.Header, "request.header")...)
