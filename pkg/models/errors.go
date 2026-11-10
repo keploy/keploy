@@ -256,6 +256,12 @@ type MockMismatchReport struct {
 	// registered reader names it (HTTPOperationLabel): "query GetAppLabels".
 	// "" when it carries none. ActualSummary never holds it.
 	Operation string
+	// Command is the name of the call, as its parser reads it from the
+	// request, for a protocol keploy has no shape of (CallShape ""): a cache
+	// command ("GET"), a broker API ("Produce"), a queue operation
+	// ("SendMessage"), a DNS query type ("A"). Never a value the call sent,
+	// and "" when the parser names none. A miss's shape is it (MissShape).
+	Command string
 	// DestinationScope is the verdict on whether any mock the matcher
 	// compared against targeted this call's upstream (DestinationScope*
 	// constants; empty means the question was never answered). It is a
@@ -337,6 +343,11 @@ type MockMismatchReport struct {
 	// that no recording was left to answer. Its miss is listed, and counts
 	// against no test (UnmatchedCall.Background).
 	Background bool
+	// BackgroundBound, of a Background miss, names each place at which the
+	// call differs from its background recording only by a value the call's
+	// own test bound before it (BackgroundBinding). Empty when the call is
+	// that recording's request apart from noise and clock reads alone.
+	BackgroundBound []BackgroundBinding
 	// Reason is why the call missed, when the learn step decided it, or
 	// MissViewReplaced when a test's begin or end, or another view served
 	// between tests, replaced its view before its miss was diagnosed

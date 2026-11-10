@@ -83,3 +83,22 @@ func fillEveryField(v reflect.Value) {
 		}
 	}
 }
+
+// The report keeps a background miss's bound places as its own copy
+// (BackgroundBound): the replay goes on reading and rewriting the miss it
+// was made from, and a report that shared the slice would change with it.
+func TestTheMismatchReportCopiesTheBoundPlacesOfTheMiss(t *testing.T) {
+	bound := []models.BackgroundBinding{{Recording: "mock-469", Place: "body.docs.msgs.0.q.app_id", BoundMock: "mock-326", BoundPlace: "body.docs.msgs.0.appId", BoundTest: "TestAppCRUD"}}
+	want := bound[0]
+	s := NewTestFailureStore()
+	s.AddUnmatchedCallForTest("test-set-0", "test-1", models.UnmatchedCall{Protocol: "Redis", Command: "GET", Background: true, BackgroundBound: bound})
+	bound[0].Place = "body.rewritten"
+
+	report := s.GetFailures()[0].MismatchReport
+	if report.Command != "GET" {
+		t.Errorf("the report names the call %q, want GET", report.Command)
+	}
+	if len(report.BackgroundBound) != 1 || report.BackgroundBound[0] != want {
+		t.Errorf("the report's bound places are %+v, want its own copy of %+v", report.BackgroundBound, want)
+	}
+}

@@ -404,3 +404,27 @@ func TestSendError_QueuesAMissWithRoomAfterTheDrainStops(t *testing.T) {
 		t.Fatalf("a miss with room in the channel was recorded as lost: %s", *cause)
 	}
 }
+
+// The command a parser names its call by (MockMismatchReport.Command) is
+// kept on the miss the proxy files for it, so the miss's shape is that
+// command (models.MissShape), with the proven switch on or off.
+func TestAMissKeepsTheCommandItsParserNamed(t *testing.T) {
+	eitherSwitch(t, func(t *testing.T) {
+		p := startedDrainProxy(t, 4)
+		p.BeginTestErrorCapture()
+		p.SendError(models.ParserError{
+			ParserErrorType: models.ErrMockNotFound,
+			MismatchReport:  &models.MockMismatchReport{Protocol: "Redis", ActualSummary: "GET", Command: "GET"},
+		})
+		got, err := p.GetMockErrors(context.Background())
+		if err != nil {
+			t.Fatalf("GetMockErrors = %v", err)
+		}
+		if len(got) != 1 || got[0].Command != "GET" {
+			t.Fatalf("got %+v, want one miss with Command GET", got)
+		}
+		if s := got[0].Sanitized(); s.ActualSummary != "GET" || s.Command != "GET" {
+			t.Fatalf("sanitized miss %+v, want it named GET", s)
+		}
+	})
+}

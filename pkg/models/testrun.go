@@ -528,6 +528,11 @@ type UnmatchedCall struct {
 	// sanitized call keeps it. A line for a person names the call with it
 	// (Named); ActualSummary never holds it, so no shape or identity does.
 	Operation string `json:"operation,omitempty" yaml:"operation,omitempty"`
+	// Command mirrors MockMismatchReport.Command: the name of a call of a
+	// protocol keploy has no shape of ("GET", "Produce"), "" when its parser
+	// names none. It names no value, so a sanitized call keeps it
+	// (CommandName) and its shape is it (MissShape).
+	Command string `json:"command,omitempty" yaml:"command,omitempty"`
 	// LiveDestination is, under the proven switch, the address the call was
 	// made to when Destination names it as the recording does instead (the
 	// mocks' destAddr: 127.0.0.1:27017 where the app reached [::1]:27017,
@@ -629,6 +634,11 @@ type UnmatchedCall struct {
 	// application's background work made it, so it fails no test and no set,
 	// and holds back no noise learning.
 	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
+	// BackgroundBound mirrors MockMismatchReport.BackgroundBound: of a
+	// background miss, each place at which it differs from its background
+	// recording only by a value its own test bound before it, and where the
+	// test bound it. Names only, never a value.
+	BackgroundBound []BackgroundBinding `json:"background_bound,omitempty" yaml:"background_bound,omitempty"`
 	// RecordedIn names, under the proven switch, the other test of the set
 	// that owns the recording a NotOwned call is (ClosestMock): the call is
 	// likely one that test recorded, such as a later exchange of a connection

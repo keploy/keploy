@@ -1650,7 +1650,9 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		// What the test's calls in flight bound is read before the
 		// variables' lock is taken: the scope they bound in reads the run's
 		// of vars, and so locks vars first (variables.Table.ReadRunOf).
-		// The scope begins with the notes left for it (NoteExactTestAtOpen).
+		// The scope is test's: what it binds itself is test's once the next
+		// begins (variables.Table.EndedOf). It begins with the notes left
+		// for it (NoteExactTestAtOpen).
 		m.vars.StartOpeningTest(test, install, given, m.carriedInto(v), m.takeCaseNotes(test))
 		m.aheadVars.Reset()
 	} else {

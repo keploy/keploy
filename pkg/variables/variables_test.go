@@ -888,3 +888,189 @@ func TestTable_ARunsVariableAnEarlierTestBindsIsTheSets(t *testing.T) {
 		t.Fatalf("a run's variable carried into a test is forgotten at the next: %+v (%v)", b, ok)
 	}
 }
+
+// Own is the running scope's own bindings: none before the first scope
+// began (a start-up binding is the run's under KeepRun, and no test runs),
+// then the scope's alone, never the run's, nor a run variable bound in the
+// scope; and the next scope begins with none of the last one's.
+func TestTableOwnIsTheRunningScopesBindingsAlone(t *testing.T) {
+	var tb Table
+	tb.KeepRun()
+	tb.Bind(Binding{Name: "boot", Value: "b-live", Recorded: "b-rec", Mock: "mock-1", Place: "body.id"})
+	if got := tb.Own(); got != nil {
+		t.Fatalf("Own before the first scope = %+v; want none", got)
+	}
+	tb.Start(nil)
+	tb.Bind(Binding{Name: "appId", Value: "edf54684", Recorded: "459916c7", Mock: "mock-226", Place: "body.docs.msgs.0.appId"})
+	tb.Bind(Binding{Name: models.RunVariablePrefix + "tenant", Value: "t-live", Recorded: "t-rec", Mock: "mock-227", Place: "body.tenant"})
+	got := tb.Own()
+	if len(got) != 1 || got[0].Name != "appId" || got[0].Mock != "mock-226" {
+		t.Fatalf("Own in the scope = %+v; want appId alone", got)
+	}
+	if _, ok := tb.Lookup("boot"); !ok {
+		t.Fatal("the run's binding is not in force in the scope")
+	}
+	tb.Start(nil)
+	if got := tb.Own(); len(got) != 0 {
+		t.Fatalf("Own in the next scope = %+v; want none", got)
+	}
+}
+
+// openTest begins test's scope on tb, as exact serving opens a test
+// (StartOpeningTest), with nothing to open.
+func openTest(tb *Table, test string) { tb.StartOpeningTest(test, func() {}, nil, nil, nil) }
+
+// EndedOf is what the set's ended scopes of a test bound themselves, scope
+// by scope: nothing while the test's scope runs (its bindings are Own's),
+// nor what was bound before it began or a run variable bound in it (the
+// run's); the scope's own bindings once the next began, Reset ending one
+// as a begin does; and none after NewSet.
+func TestTableEndedOfIsWhatEachEndedScopeOfTheTestBoundItself(t *testing.T) {
+	var tb Table
+	tb.KeepEnded()
+	tb.KeepRun()
+	tb.Bind(Binding{Name: "boot", Value: "b-live", Recorded: "b-rec", Mock: "mock-1", Place: "body.id"})
+	openTest(&tb, ".::TestAppCRUD")
+	tb.Bind(Binding{Name: "appId", Value: "94e00a23", Recorded: "c2e52a70", Mock: "mock-226", Place: "body.docs.msgs.0.appId"})
+	tb.Bind(Binding{Name: models.RunVariablePrefix + "tenant", Value: "t-live", Recorded: "t-rec", Mock: "mock-227", Place: "body.tenant"})
+	if got := tb.EndedOf(".::TestAppCRUD"); len(got) != 0 {
+		t.Fatalf("EndedOf while the test's scope runs = %+v; want none", got)
+	}
+	openTest(&tb, ".::TestListApps")
+	got := tb.EndedOf(".::TestAppCRUD")
+	if len(got) != 1 || got[0].Name != "appId" || got[0].Mock != "mock-226" || got[0].Value != "94e00a23" {
+		t.Fatalf("EndedOf once the next scope began = %+v; want the test's appId alone", got)
+	}
+	if own := tb.Own(); len(own) != 0 {
+		t.Fatalf("the ended scope's binding is still Own's: %+v", own)
+	}
+	tb.Bind(Binding{Name: "appId", Value: "5f1e0c11", Recorded: "6a0b3d2e", Mock: "mock-301", Place: "body.docs.msgs.0.appId"})
+	tb.Reset()
+	if got := tb.EndedOf(".::TestListApps"); len(got) != 1 || got[0].Mock != "mock-301" {
+		t.Fatalf("EndedOf after Reset = %+v; want the second test's appId alone", got)
+	}
+	got = tb.EndedOf(".::TestAppCRUD")
+	got[0].Value = "changed"
+	if again := tb.EndedOf(".::TestAppCRUD"); again[0].Value != "94e00a23" {
+		t.Fatal("EndedOf hands out the table's own slice")
+	}
+	tb.NewSet()
+	if got := tb.EndedOf(".::TestAppCRUD"); len(got) != 0 {
+		t.Fatalf("EndedOf after NewSet = %+v; want none", got)
+	}
+	openTest(&tb, ".::TestAppCRUD")
+	tb.Bind(Binding{Name: "appId", Value: "0b1c2d3e", Recorded: "c2e52a70", Mock: "mock-226", Place: "body.docs.msgs.0.appId"})
+	tb.Reset()
+	if got := tb.EndedOf(".::TestAppCRUD"); len(got) != 1 || got[0].Value != "0b1c2d3e" {
+		t.Fatalf("EndedOf in the next set = %+v; want the test's new appId: NewSet must not undo KeepEnded", got)
+	}
+}
+
+// EndedOf reads only the named test's scopes: a binding another test's
+// scope made, at the same recording and of the same name and recorded
+// value, is never the test's, however the scopes interleave. A test that
+// ran twice in the set has both scopes' bindings, in the order they ended.
+// A scope begun with no test named (Start, StartCarrying, StartOpening,
+// Reset) is no test's, and no test is named "".
+func TestTableEndedOfNeverReadsAnotherScopesBinding(t *testing.T) {
+	var tb Table
+	tb.KeepEnded()
+	at := func(value string) Binding {
+		return Binding{Name: "appId", Value: value, Recorded: "c2e52a70", Mock: "mock-500", Place: "body.docs.msgs.0.appId"}
+	}
+	openTest(&tb, ".::TestAppCRUD")
+	openTest(&tb, ".::TestListApps")
+	tb.Bind(at("list-live"))
+	openTest(&tb, ".::TestAppCRUD")
+	tb.Bind(at("crud-live"))
+	tb.Reset()
+	tb.Bind(at("unnamed-reset"))
+	tb.Start(nil)
+	tb.Bind(at("unnamed-start"))
+	tb.StartCarrying(nil, nil)
+	tb.Bind(at("unnamed-carrying"))
+	tb.StartOpening(func() {}, nil, nil)
+	tb.Bind(at("unnamed-opening"))
+	openTest(&tb, ".::TestAppCRUD")
+	if got := tb.EndedOf(".::TestAppCRUD"); len(got) != 1 || got[0].Value != "crud-live" {
+		t.Fatalf("EndedOf(TestAppCRUD) = %+v; want its own crud-live alone", got)
+	}
+	if got := tb.EndedOf(".::TestListApps"); len(got) != 1 || got[0].Value != "list-live" {
+		t.Fatalf("EndedOf(TestListApps) = %+v; want its own list-live alone", got)
+	}
+	if got := tb.EndedOf(""); len(got) != 0 {
+		t.Fatalf("EndedOf(\"\") = %+v; want none", got)
+	}
+	tb.Bind(at("crud-again"))
+	openTest(&tb, ".::TestGetCurrentUser")
+	if got := tb.EndedOf(".::TestAppCRUD"); len(got) != 2 || got[0].Value != "crud-live" || got[1].Value != "crud-again" {
+		t.Fatalf("EndedOf(TestAppCRUD) after its second scope = %+v; want both, in order", got)
+	}
+}
+
+// A table that does not keep ended scopes (KeepEnded), such as the one the
+// next test's calls in flight bind in, keeps none; and no table keeps what
+// was bound before the first scope began, which no test bound, in the
+// table's first set or after NewSet.
+func TestTableEndedOfIsNoneWhereTheTableKeepsNone(t *testing.T) {
+	var ahead Table
+	openTest(&ahead, ".::TestAppCRUD")
+	ahead.Bind(Binding{Name: "appId", Value: "94e00a23", Recorded: "c2e52a70", Mock: "mock-226", Place: "body.docs.msgs.0.appId"})
+	ahead.Reset()
+	if got := ahead.EndedOf(".::TestAppCRUD"); len(got) != 0 {
+		t.Fatalf("EndedOf on a table that keeps none = %+v; want none", got)
+	}
+	var tb Table
+	tb.KeepEnded()
+	tb.Bind(Binding{Name: "boot", Value: "b-live", Recorded: "b-rec", Mock: "mock-1", Place: "body.id"})
+	openTest(&tb, ".::TestAppCRUD")
+	openTest(&tb, ".::TestListApps")
+	if got := tb.EndedOf(".::TestAppCRUD"); len(got) != 0 {
+		t.Fatalf("EndedOf = %+v; want none", got)
+	}
+	// Nor, after NewSet, what is bound before the new set's first scope:
+	// the last test of the set before is no scope's of the new set.
+	openTest(&tb, ".::TestAppCRUD")
+	tb.NewSet()
+	tb.Bind(Binding{Name: "appId", Value: "94e00a23", Recorded: "c2e52a70", Mock: "mock-226", Place: "body.docs.msgs.0.appId"})
+	openTest(&tb, ".::TestListApps")
+	if got := tb.EndedOf(".::TestAppCRUD"); len(got) != 0 {
+		t.Fatalf("EndedOf after NewSet = %+v; want none", got)
+	}
+}
+
+// One step opens a test's scope with both its name and its notes: the notes
+// are read in the scope from its first call, and what the scope bound itself
+// is the test's once the next begins, whose notes are its own alone. Reset
+// ends a scope as a begin does, notes and name.
+func TestAScopeOpenedForATestWithNotesKeepsItsNotesAndItsBindings(t *testing.T) {
+	var tb Table
+	tb.KeepEnded()
+	opened := false
+	tb.StartOpeningTest(".::TestAppCRUD", func() { opened = true }, nil, nil, map[string]string{"appName": "the test's request has not come"})
+	if !opened {
+		t.Fatal("open did not run")
+	}
+	if got := tb.Unbound("appName"); got != "the test's request has not come" {
+		t.Fatalf("Unbound in the scope = %q; want the note it began with", got)
+	}
+	tb.Bind(Binding{Name: "appId", Value: "94e00a23", Recorded: "c2e52a70", Mock: "mock-226", Place: "body.id"})
+	tb.StartOpeningTest(".::TestListApps", func() {}, nil, nil, map[string]string{"suite": "no pair"})
+	if got := tb.EndedOf(".::TestAppCRUD"); len(got) != 1 || got[0].Name != "appId" {
+		t.Fatalf("EndedOf once the next scope began = %+v; want the test's appId alone", got)
+	}
+	if tb.Unbound("appName") != "" || tb.Unbound("suite") != "no pair" {
+		t.Fatalf("the next scope's notes = appName %q, suite %q; want its own alone", tb.Unbound("appName"), tb.Unbound("suite"))
+	}
+	tb.Bind(Binding{Name: "suiteId", Value: "5f1e0c11", Recorded: "6a0b3d2e", Mock: "mock-301", Place: "body.id"})
+	tb.Reset()
+	if got := tb.EndedOf(".::TestListApps"); len(got) != 1 || got[0].Name != "suiteId" || tb.Unbound("suite") != "" {
+		t.Fatalf("after Reset: EndedOf = %+v, suite's note %q; want the test's suiteId alone and no note", got, tb.Unbound("suite"))
+	}
+	tb.StartOpening(func() {}, nil, nil)
+	tb.Bind(Binding{Name: "x", Value: "1", Recorded: "2", Mock: "mock-9", Place: "body.x"})
+	tb.Reset()
+	if got := tb.EndedOf(""); len(got) != 0 {
+		t.Fatalf("EndedOf of no test = %+v; want none (a scope with no test named keeps nothing)", got)
+	}
+}

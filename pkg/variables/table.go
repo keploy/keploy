@@ -60,6 +60,23 @@ type Table struct {
 	// notes say, by name, why a variable of the scope is not bound (Note):
 	// the scope's alone, forgotten when the next begins.
 	notes map[string]string
+	// ended is what the set's ended scopes of a named test bound themselves
+	// (EndedOf): each such scope's own bindings with its test, appended as
+	// the next scope begins, until NewSet. Only a table that keeps them
+	// (KeepEnded) does.
+	ended []endedScope
+	// keepEnded: the table keeps its ended scopes' bindings (KeepEnded).
+	keepEnded bool
+	// test is the test whose scope is running (StartOpeningTest), "" for a
+	// scope begun with no test named, or before the first.
+	test string
+}
+
+// endedScope is an ended scope's own bindings (Own as it ended), by name,
+// and the test it was the scope of.
+type endedScope struct {
+	test     string
+	bindings []Binding
 }
 
 // lock takes t.mu, and before it the lock of the table whose run's t reads
@@ -608,7 +625,7 @@ func (t *Table) Start(given []Binding) {
 func (t *Table) StartCarrying(given, carried []Binding) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.start(given, carried)
+	t.start("", given, carried)
 }
 
 // StartOpening is StartCarrying in the step that opens the scope: open, what
@@ -627,20 +644,27 @@ func (t *Table) StartOpening(open func(), given, carried []Binding) {
 	t.StartOpeningTest("", open, given, carried, nil)
 }
 
-// StartOpeningTest is StartOpening for the scope of a test, named by its
-// first argument ("" for none named), with notes, by variable name, noted
-// in the scope as it begins (Note), in the same step: a call checked in the
-// scope reads them from its first. Nothing here reads the test's name.
-func (t *Table) StartOpeningTest(_ string, open func(), given, carried []Binding, notes map[string]string) {
+// StartOpeningTest is StartOpening for the scope of the test named test
+// ("" for none named): once the next scope begins, what this one bound
+// itself is that test's (EndedOf), on a table that keeps it (KeepEnded). The
+// name is the scope's from the step that begins it, so no binding of another
+// scope is ever kept as test's.
+//
+// notes, by variable name, are noted in the scope as it begins (Note), in
+// the same step: a call checked in the scope reads them from its first.
+func (t *Table) StartOpeningTest(test string, open func(), given, carried []Binding, notes map[string]string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	open()
-	t.start(given, carried)
+	t.start(test, given, carried)
 	t.notes = maps.Clone(notes)
 }
 
-// start begins a scope (StartCarrying). t.mu is held.
-func (t *Table) start(given, carried []Binding) {
+// start begins a scope (StartCarrying), of test ("" for none named). t.mu
+// is held.
+func (t *Table) start(test string, given, carried []Binding) {
+	t.end()
+	t.test = test
 	t.gen++
 	t.vals, t.notes = nil, nil
 	t.began = true
@@ -720,6 +744,8 @@ func (t *Table) Unbound(name string) string {
 // stay.
 func (t *Table) Reset() {
 	t.mu.Lock()
+	t.end()
+	t.test = ""
 	t.vals, t.notes = nil, nil
 	t.began = true
 	t.gen++
@@ -730,8 +756,8 @@ func (t *Table) Reset() {
 // next test set's replay starts (as learn.Tracker.NewSet).
 func (t *Table) NewSet() {
 	t.mu.Lock()
-	t.vals, t.run, t.notes = nil, nil, nil
-	t.began = false
+	t.vals, t.run, t.ended, t.notes = nil, nil, nil, nil
+	t.began, t.test = false, ""
 	t.gen++
 	t.mu.Unlock()
 }
@@ -751,6 +777,66 @@ func (t *Table) Clone() *Table {
 	}
 	c.run = t.runInForce(from)
 	return c
+}
+
+// Own is the bindings the running scope made itself, sorted by name: each
+// value a call of the running test (or of the gap after it) bound, never one
+// of the run's (KeepRun), nor one of the table whose run's it reads
+// (ReadRunOf). Before the first scope began it is none: no test is running.
+// A background miss reads it: only a value the call's own test bound before
+// it may stand where its background recording holds the recorded value.
+func (t *Table) Own() []Binding {
+	from := t.lock()
+	defer t.unlock(from)
+	if !t.began {
+		return nil
+	}
+	return sorted(t.vals)
+}
+
+// KeepEnded makes the table keep what each ended scope of a named test
+// bound itself (EndedOf), from its next scope on, until NewSet; NewSet
+// does not undo it. Only the table a background miss reads keeps them (the
+// mock manager's test variables): any other table, such as the one the
+// next test's calls in flight bind in, keeps none.
+func (t *Table) KeepEnded() {
+	t.mu.Lock()
+	t.keepEnded = true
+	t.mu.Unlock()
+}
+
+// EndedOf is what the set's ended scopes of test bound themselves, scope
+// by scope in the order they ended, each scope's by name: every binding
+// Own gave in a scope begun for test (StartOpeningTest) until the next
+// began, never the run's (KeepRun), nor another test's scope's, nor one of
+// a scope begun with no test named, which is kept as no test's: none for
+// test "", and none on a table that does not keep them (KeepEnded). A
+// test's scope ends only when the next begins, so the running scope's are
+// Own's, not these; NewSet forgets them. A background miss reads them: a
+// call the application makes for a test that has ended (a clean-up it runs
+// once it answered the test) carries a value that test bound, which only
+// these still hold, and only test's scope can have bound it.
+func (t *Table) EndedOf(test string) []Binding {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []Binding
+	for _, e := range t.ended {
+		if e.test == test {
+			out = append(out, e.bindings...)
+		}
+	}
+	return out
+}
+
+// end keeps the running scope's own bindings as its test's ended scope's
+// (EndedOf), as the next scope begins, on a table that keeps them
+// (KeepEnded): nothing of a scope begun with no test named, nor before the
+// first scope began (no test is named then: NewSet forgets the name), which
+// no test bound. t.mu is held.
+func (t *Table) end() {
+	if t.keepEnded && t.test != "" {
+		t.ended = append(t.ended, endedScope{test: t.test, bindings: sorted(t.vals)})
+	}
 }
 
 // Snapshot returns the bindings in force, the run's included, by name.
