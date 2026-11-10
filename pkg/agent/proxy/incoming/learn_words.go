@@ -21,12 +21,12 @@ import (
 // words the learn step keeps of it (learn.RequestWords), as the application
 // reads it: decoded as its Content-Encoding says (gzip, deflate as zlib or
 // raw, br, zstd), a multipart form whole, its file parts too. The body is
-// never kept: it passes through a filter of a fixed size. A nil bodyWords
-// takes nothing, and gives no words (wordsOf).
+// never kept: it passes through a filter of a fixed size, read by a
+// goroutine of its own (decodeWords). A nil bodyWords takes nothing, and
+// gives no words (wordsOf).
 type bodyWords struct {
 	words *learn.RequestWords
-	// pw is where the body goes to be decoded (decodeWords): nil where it
-	// goes to words as it is.
+	// pw is where the body goes to be read (decodeWords).
 	pw *io.PipeWriter
 	// ended is closed once the decode ended, err then its end: nil where
 	// it read the body to its end or words held any word.
@@ -49,12 +49,13 @@ const (
 
 // newBodyWords is a bodyWords of a body sent with headers h: nil where h
 // names an encoding (Content-Encoding) it does not decode, more than one,
-// or where no decoder is free (wordDecoders).
+// or where no decoder is free (wordDecoders). A body sent as it is takes
+// no decoder.
 func newBodyWords(h http.Header) *bodyWords {
 	var open func(io.Reader) (io.ReadCloser, error)
 	switch strings.ToLower(strings.TrimSpace(h.Get("Content-Encoding"))) {
 	case "", "identity":
-		return &bodyWords{words: learn.NewRequestWords()}
+		return startWords(func(r io.Reader) (io.ReadCloser, error) { return io.NopCloser(r), nil }, func() {})
 	case "gzip", "x-gzip":
 		open = func(r io.Reader) (io.ReadCloser, error) { return gzip.NewReader(r) }
 	case "deflate":
@@ -71,9 +72,15 @@ func newBodyWords(h http.Header) *bodyWords {
 	default:
 		return nil
 	}
+	return startWords(open, func() { <-wordDecoders })
+}
+
+// startWords is a bodyWords whose body is read as open reads it, by a
+// goroutine that calls release once it ended (decodeWords).
+func startWords(open func(io.Reader) (io.ReadCloser, error), release func()) *bodyWords {
 	pr, pw := io.Pipe()
 	b := &bodyWords{words: learn.NewRequestWords(), pw: pw, ended: make(chan struct{})}
-	go b.decodeWords(open, pr)
+	go b.decodeWords(open, release, pr)
 	return b
 }
 
@@ -83,11 +90,11 @@ var errWordsRead = errors.New("the body's words were read")
 
 // decodeWords decodes what comes through pr as open does into b.words,
 // until it ends, fails or b.words holds any word, and then frees its
-// decoder (wordDecoders) and ends the pipe, so a write after it returns at
+// decoder (release) and ends the pipe, so a write after it returns at
 // once.
-func (b *bodyWords) decodeWords(open func(io.Reader) (io.ReadCloser, error), pr *io.PipeReader) {
+func (b *bodyWords) decodeWords(open func(io.Reader) (io.ReadCloser, error), release func(), pr *io.PipeReader) {
 	defer close(b.ended)
-	defer func() { <-wordDecoders }()
+	defer release()
 	r, err := open(pr)
 	if err == nil {
 		buf := make([]byte, 32<<10)
@@ -128,12 +135,8 @@ func openZstd(r io.Reader) (io.ReadCloser, error) {
 
 // write gives b the next piece of the body.
 func (b *bodyWords) write(p []byte) {
-	switch {
-	case b == nil:
-	case b.pw != nil:
+	if b != nil {
 		_, _ = b.pw.Write(p) // fails only once the decode ended
-	default:
-		_, _ = b.words.Write(p)
 	}
 }
 
@@ -144,12 +147,10 @@ func (b *bodyWords) wordsOf() *learn.RequestWords {
 	if b == nil {
 		return nil
 	}
-	if b.pw != nil {
-		_ = b.pw.Close()
-		<-b.ended
-		if b.err != nil {
-			return nil
-		}
+	_ = b.pw.Close()
+	<-b.ended
+	if b.err != nil {
+		return nil
 	}
 	b.words.End()
 	return b.words
@@ -157,7 +158,7 @@ func (b *bodyWords) wordsOf() *learn.RequestWords {
 
 // abort ends a body that did not come whole: its decode stops.
 func (b *bodyWords) abort() {
-	if b != nil && b.pw != nil {
+	if b != nil {
 		_ = b.pw.CloseWithError(io.ErrUnexpectedEOF)
 	}
 }

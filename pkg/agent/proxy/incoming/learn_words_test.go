@@ -257,6 +257,7 @@ func TestTakeRequestGivesNoWordsWhereItCannotReadThem(t *testing.T) {
 	t.Run("gzip not sent whole", func(t *testing.T) { cut(t, "Content-Encoding: gzip\r\n", encode(t, "gzip", big), false) })
 	t.Run("gzip closed before its end", func(t *testing.T) { cut(t, "Content-Encoding: gzip\r\n", encode(t, "gzip", big), true) })
 	t.Run("every decoder taken", func(t *testing.T) {
+		freed(t)
 		for i := 0; i < cap(wordDecoders); i++ {
 			wordDecoders <- struct{}{}
 		}
@@ -302,9 +303,15 @@ func TestTakeRequestGivesNoWordsWhereItCannotReadThem(t *testing.T) {
 		pr, pw := io.Pipe()
 		req := readRequest(t, fmt.Sprintf("POST /u HTTP/1.1\r\nHost: api\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n", 2<<20))
 		req.Body = pr
-		pm.takeRequest(req, time.Now())
-		go func() { _, _ = io.Copy(io.Discard, req.Body) }()
 		t.Cleanup(func() { _ = pw.CloseWithError(io.ErrUnexpectedEOF) })
+		taken := make(chan struct{})
+		go func() { pm.takeRequest(req, time.Now()); close(taken) }()
+		select {
+		case <-taken:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the ingress waits to read a body declared larger than it reads before it forwards any of it")
+		}
+		go func() { _, _ = io.Copy(io.Discard, req.Body) }()
 		if _, err := pw.Write(bomb.Bytes()); err != nil {
 			t.Fatal(err)
 		}
