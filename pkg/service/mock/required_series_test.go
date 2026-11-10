@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,13 +38,20 @@ const seriesMappings = "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\n
 // and the logs.
 func seriesRun(t *testing.T, windows []models.ScopeWindow, consumed []models.MockState, consumedErr error) (int, *Receipt, *TestsReceipt, *observer.ObservedLogs) {
 	t.Helper()
+	return seriesRunOf(t, seriesMappings, windows, consumed, consumedErr)
+}
+
+// seriesRunOf is seriesRun of the set mappings names, whose recordings are
+// mock-0 to mock-9.
+func seriesRunOf(t *testing.T, mappings string, windows []models.ScopeWindow, consumed []models.MockState, consumedErr error) (int, *Receipt, *TestsReceipt, *observer.ObservedLogs) {
+	t.Helper()
 	provenOn(t)
 	repo := t.TempDir()
 	t.Chdir(repo)
 	keployDir := filepath.Join(repo, "keploy")
 	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(seriesMappings), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(mappings), 0o644))
 	core, logs := observer.New(zapcore.DebugLevel)
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 	instr.consumedMocks, instr.consumedErr, instr.windows = consumed, consumedErr, windows
@@ -51,7 +59,7 @@ func seriesRun(t *testing.T, windows []models.ScopeWindow, consumed []models.Moc
 	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	_ = New(zap.New(core), instr, named("mock-0", "mock-1", "mock-3", "mock-4", "mock-5", "mock-6", "mock-7"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	_ = New(zap.New(core), instr, named("mock-0", "mock-1", "mock-3", "mock-4", "mock-5", "mock-6", "mock-7", "mock-8", "mock-9"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
 	tests, err := ReadTestsReceipt(keployDir, "set")
 	require.NoError(t, err)
 	require.NotNil(t, tests)
@@ -99,6 +107,23 @@ func TestRequiredSeriesNotMadeFailsRun(t *testing.T) {
 	require.Contains(t, lines[0], "RULE NOT MADE cleanup@3f2a91c0: o::TestA ran and its trailing series 1 (mock-3, mock-5) answered no call by the run's end")
 	require.Contains(t, lines[0], `rule={"event":"not-made","id":"cleanup","series":"cleanup/o::TestA/1","trails":"o::TestA"}`)
 	require.Zero(t, logs.FilterMessageSnippet("never made a call keploy recorded as a trailing write").Len(), "a series member is not required on its own")
+	require.Zero(t, logs.FilterMessageSnippet(trailsUnreadReason).Len(), "what the run used was read")
+}
+
+// A due trailing series whose making cannot be read, with no background
+// series due (the run never reached o::TestB), still fails the run, as a
+// rule's requirement, leaving its test unread, not failed.
+func TestATrailingSeriesUnreadAloneFailsTheRun(t *testing.T) {
+	code, r, tr, logs := seriesRun(t, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomeSkipped), nil, errors.New("connection reset by peer"))
+	require.Equal(t, 1, code)
+	require.Equal(t, FailedByRuleNotMade, r.FailedBy)
+	require.Nil(t, r.RequiredNotMade)
+	a := testLine(t, tr, "o::TestA")
+	require.Equal(t, models.ScopeOutcomePassed, a.Outcome)
+	require.NotNil(t, a.Evidence)
+	require.True(t, a.Evidence.Unread)
+	require.Equal(t, 1, logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessageSnippet(trailsUnreadReason).Len())
+	require.Zero(t, logs.FilterMessageSnippet("cannot tell whether the run made the background series").Len(), "no background series was due")
 }
 
 // Guard 1 per series: one answered recording of a series makes it, whichever
@@ -173,9 +198,10 @@ func TestRequiredSeriesUnreadIsNotSaidNotMade(t *testing.T) {
 }
 
 // requiredSeries groups a set's worker entries by series in worker: order,
-// leaves out an entry with no series (M1's requiredTrails keeps a plain
-// trail) and a series trailing a test the set does not have, and keeps a
-// background series' first place; requiredTrails leaves series members out.
+// leaves out an entry with no series (a trail move's, served, not required),
+// a series trailing a test the set does not have, and a series every entry
+// of which says it reads; one entry without read makes its series required.
+// It keeps a background series' first place.
 func TestRequiredSeriesGroupsTheWorkerScope(t *testing.T) {
 	mp := &models.Mapping{Worker: []models.MockEntry{
 		{Name: "m1", Trails: "o::TestA", Rule: "r@1", Series: "r/o::TestA/2"},
@@ -185,15 +211,20 @@ func TestRequiredSeriesGroupsTheWorkerScope(t *testing.T) {
 		{Name: "m5", Place: "o::TestA", Rule: "b@2", Series: "b/-/1"},
 		{Name: "m6", Place: "o::TestB", Rule: "b@2", Series: "b/-/1"},
 		{Name: "m7"},
+		{Name: "m8", Trails: "o::TestA", Rule: "f@3", Series: "f/o::TestA/1", Read: true},
+		{Name: "m9", Trails: "o::TestA", Rule: "f@3", Series: "f/o::TestA/1", Read: true},
+		{Name: "m10", Place: "o::TestB", Rule: "g@4", Series: "g/-/1"},
+		{Name: "m11", Place: "o::TestB", Rule: "g@4", Series: "g/-/1", Read: true},
 	}}
 	table := map[string][]string{"o::TestA": {}, "o::TestB": {}}
 	require.Equal(t, map[string]seriesDue{
-		"r/o::TestA/2": {Names: []string{"m1", "m3"}, Rule: "r@1", Trails: "o::TestA"},
-		"b/-/1":        {Names: []string{"m5", "m6"}, Rule: "b@2", Place: "o::TestA"},
+		"r/o::TestA/2": {Names: []string{"m1", "m3"}, Rule: "r@1", Trails: "o::TestA", write: true},
+		"b/-/1":        {Names: []string{"m5", "m6"}, Rule: "b@2", Place: "o::TestA", write: true},
+		"g/-/1":        {Names: []string{"m10", "m11"}, Rule: "g@4", Place: "o::TestB", write: true},
 	}, requiredSeries(mp, table))
-	require.Equal(t, map[string]string{"m2": "o::TestA"}, requiredTrails(mp, table))
 	require.Nil(t, requiredSeries(nil, table))
 	require.Nil(t, requiredSeries(&models.Mapping{Worker: []models.MockEntry{{Name: "m7"}}}, table))
+	require.Nil(t, requiredSeries(&models.Mapping{Worker: []models.MockEntry{mp.Worker[7], mp.Worker[8]}}, table), "a set whose only series reads requires none")
 }
 
 // A background series placed at the set's start is due in every run, and
@@ -225,4 +256,35 @@ func TestABackgroundSeriesFailsNoTestLine(t *testing.T) {
 	require.Equal(t, models.ScopeOutcomeFailed, tests[1].Outcome)
 	require.Equal(t, []string{"m2"}, tests[1].Evidence.Unconsumed)
 	require.Equal(t, map[string]string{"m2": "o::TestA"}, notMadeByName(notMade))
+}
+
+// readSeriesMappings is seriesMappings with each series a read: every entry
+// of cleanup/o::TestA/1 and of emptied/-/1 says read. mock-8 and mock-9 are
+// seen/o::TestA/1, a series of whose entries only mock-8 says read.
+var readSeriesMappings = strings.ReplaceAll(strings.ReplaceAll(seriesMappings,
+	"series: cleanup/o::TestA/1\n", "series: cleanup/o::TestA/1\n      read: true\n"),
+	"series: emptied/-/1\n", "series: emptied/-/1\n      read: true\n")
+
+// Required once per run covers writes only: a trailing or a background
+// series keploy mock record judged a read is served, not required, so a run
+// that never made either passes with no RULE NOT MADE; a series one entry of
+// which does not say read is required, and fails the run when not made.
+func TestARequiredSeriesOfAReadIsServedNotRequired(t *testing.T) {
+	none := []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
+	code, r, tr, logs := seriesRunOf(t, readSeriesMappings, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), none, nil)
+	require.Equal(t, 0, code)
+	require.Empty(t, r.FailedBy)
+	require.Nil(t, r.RequiredNotMade)
+	require.Equal(t, models.ScopeOutcomePassed, testLine(t, tr, "o::TestA").Outcome)
+	require.Empty(t, ruleNotMadeLines(logs))
+
+	mixed := readSeriesMappings +
+		"    - name: mock-8\n      trails: o::TestA\n      rule: seen@44aa55bb\n      series: seen/o::TestA/1\n      read: true\n" +
+		"    - name: mock-9\n      trails: o::TestA\n      rule: seen@44aa55bb\n      series: seen/o::TestA/1\n"
+	code, r, tr, logs = seriesRunOf(t, mixed, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), none, nil)
+	require.Equal(t, 1, code)
+	require.Equal(t, FailedByRuleNotMade, r.FailedBy)
+	require.Equal(t, []RequiredNotMade{{Series: "seen/o::TestA/1", Rule: "seen@44aa55bb", Trails: "o::TestA", Names: []string{"mock-8", "mock-9"}}}, r.RequiredNotMade)
+	require.Equal(t, []string{"mock-8", "mock-9"}, testLine(t, tr, "o::TestA").Evidence.Unconsumed)
+	require.Len(t, ruleNotMadeLines(logs), 1)
 }
