@@ -1049,7 +1049,20 @@ func (a *Agent) replaying() bool {
 // beside one gives none, and one begun in another worker stops the run's
 // window's test pairing from then (nil). The requests already paired stay
 // its places: each reached the application while its test alone was open.
+//
+// The agent then keeps the test's requests only where a variable is bound
+// at one: the test begun again binds it again. The rest it forgets at this
+// begin, so over a session it holds the requests of the tests still to
+// begin and of those that bind, not the recording's: the learn step reads
+// them in this run of the test alone, and a test begun again ends it
+// (keepRecordedOrder).
 func (a *Agent) giveClientCases(id string, worker uint32, overlaps bool) {
+	a.scopeMu.Lock()
+	cases := a.testCases[id]
+	if !slices.ContainsFunc(cases, func(c models.ClientCase) bool { return len(c.Binds) > 0 }) {
+		delete(a.testCases, id)
+	}
+	a.scopeMu.Unlock()
 	taker, ok := a.Proxy.(coreAgent.ClientCasesTaker)
 	if !ok {
 		return
@@ -1058,9 +1071,6 @@ func (a *Agent) giveClientCases(id string, worker uint32, overlaps bool) {
 		taker.TakeClientCases(id, nil)
 		return
 	}
-	a.scopeMu.Lock()
-	cases := a.testCases[id]
-	a.scopeMu.Unlock()
 	taker.TakeClientCases(id, cases)
 }
 

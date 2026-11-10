@@ -61,6 +61,19 @@ func TestABeginGivesTheLearnStepTheRequestsItsTestSent(t *testing.T) {
 	require.Len(t, p.taken[0], 1)
 	require.Equal(t, "post-apps-1", p.taken[0][0].Name, "the agent keeps its own copy of the requests")
 	require.Nil(t, p.taken[1], "a test whose recording kept no request")
+	require.NotContains(t, a.testCases, "o::TestA", "a test begun, none of whose requests binds a variable, has its requests kept")
+	require.Contains(t, a.testCases, "o::TestC", "a test still to begin lost its requests")
+	// A request a variable is bound at stays for the test begun again; the
+	// test's other requests stay with it, as it pairs by its order among them.
+	binds := []models.ClientCase{sent[0], {Name: "post-apps-2", Req: sent[0].Req, Binds: []models.ClientCaseBind{{Name: "appName", Recorded: "app-1", Place: "body.name"}}}}
+	a.SetTestCases(ctx, map[string][]models.ClientCase{"o::TestA": binds, "o::TestC": sent})
+	a.giveClientCases("o::TestA", 0, false)
+	a.giveClientCases("o::TestA", 0, false)
+	require.Len(t, p.taken[3], 2, "a test begun again, a variable bound at its request, was given none")
+	a.giveClientCases("o::TestC", 3, false)
+	require.NotContains(t, a.testCases, "o::TestC", "a test begun in another worker, which pairs none, has its requests kept")
+	require.Len(t, a.testCases["o::TestA"], 2)
+	p.taken = p.taken[:2]
 	a.SetTestCases(ctx, map[string][]models.ClientCase{"o::TestA": sent})
 	a.resetScopeState()
 	a.giveClientCases("o::TestA", 0, false)
@@ -81,14 +94,18 @@ func TestATestBesideAnotherWorkersGivesTheLearnStepNoRequests(t *testing.T) {
 	p := &casesProxy{wireProxy: wp}
 	a.Proxy = p
 	sent := []models.ClientCase{{Name: "post-apps-1", Req: models.HTTPReq{Method: "POST", URL: "http://api/apps"}}}
-	a.SetTestCases(context.Background(), map[string][]models.ClientCase{"o::TestA": sent})
-	a.giveClientCases("o::TestA", 0, false)
-	a.giveClientCases("o::TestA", 0, true)
-	a.giveClientCases("o::TestA", 2, false)
+	for _, begun := range []struct {
+		worker   uint32
+		overlaps bool
+	}{{0, false}, {0, true}, {2, false}} {
+		a.SetTestCases(context.Background(), map[string][]models.ClientCase{"o::TestA": sent})
+		a.giveClientCases("o::TestA", begun.worker, begun.overlaps)
+	}
 	require.Len(t, p.taken, 3)
 	require.Len(t, p.taken[0], 1, "the run's window's test alone")
 	require.Nil(t, p.taken[1], "begun beside another worker's test")
 	require.Nil(t, p.taken[2], "begun in another worker")
+	require.Empty(t, a.testCases)
 	a.Proxy = wp
 	a.giveClientCases("o::TestA", 0, false)
 }

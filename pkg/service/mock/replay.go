@@ -1879,24 +1879,28 @@ func (m *mockService) pushTestBegins(ctx context.Context, name string) error {
 // each request of the test this run with one of them (models.ClientCase). A
 // recording whose test cases keploy cannot read gives none, and says so:
 // its tests' requests are then no place of their calls, as in a recording
-// that kept no requests.
+// that kept no requests. Only record's full round, which learns, reads every
+// test's requests as places; any other replay sends those of the tests a
+// variable is bound at a request of, and reads no test case where no test
+// that kept requests has a variable.
 func (m *mockService) testClientCases(ctx context.Context, name string, mapping *models.Mapping) map[string][]models.ClientCase {
 	if mapping == nil || m.testDB == nil {
 		return nil
 	}
 	kept := false
 	for _, tc := range mapping.TestCases {
-		kept = kept || len(tc.Cases) > 0
+		kept = kept || len(tc.Cases) > 0 && (len(tc.Variables) > 0 || m.learning())
 	}
 	if !kept {
 		return nil
 	}
+	all := m.learning()
 	tcs, err := m.testDB.GetTestCases(ctx, name)
 	if err != nil {
 		m.logger.Warn("keploy cannot read the requests the recording's tests sent: a value a test sent is read from no request of it", zap.String("mock-set", name), zap.Error(err))
 		return nil
 	}
-	cases, unbound := clientCases(mapping, tcs)
+	cases, unbound := clientCases(mapping, tcs, all)
 	if len(unbound) > 0 {
 		m.logger.Warn("keploy binds these variables of the recording's tests from no request of the test, so each call that uses one misses: re-record the test", zap.String("mock-set", name), zap.Strings("variables", unbound))
 	}
@@ -1910,8 +1914,9 @@ func (m *mockService) testClientCases(ctx context.Context, name string, mapping 
 // hold, or not of HTTP, is left out. unbound names each variable of a test
 // whose bind is at none of the cases kept (one of another form, one naming a
 // case the test does not list or tcs does not hold): no request of the test
-// binds it at replay, so every use of it misses.
-func clientCases(mapping *models.Mapping, tcs []*models.TestCase) (out map[string][]models.ClientCase, unbound []string) {
+// binds it at replay, so every use of it misses. Where all is false a test
+// none of whose requests binds a variable is left out.
+func clientCases(mapping *models.Mapping, tcs []*models.TestCase, all bool) (out map[string][]models.ClientCase, unbound []string) {
 	byName := make(map[string]models.HTTPReq, len(tcs))
 	for _, tc := range tcs {
 		if tc != nil && tc.Kind == models.HTTP {
@@ -1935,7 +1940,7 @@ func clientCases(mapping *models.Mapping, tcs []*models.TestCase) (out map[strin
 			}
 			cs[at].Binds = append(cs[at].Binds, models.ClientCaseBind{Name: name, Recorded: v.Recorded, Place: place})
 		}
-		if len(cs) == 0 {
+		if len(cs) == 0 || !all && !slices.ContainsFunc(cs, func(c models.ClientCase) bool { return len(c.Binds) > 0 }) {
 			continue
 		}
 		sort.SliceStable(cs, func(i, j int) bool { return cs[i].Req.Timestamp.Before(cs[j].Req.Timestamp) })
