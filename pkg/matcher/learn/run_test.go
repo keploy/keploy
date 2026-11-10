@@ -390,6 +390,41 @@ func TestNamedMarksAPlainClockReadOfARequestOnly(t *testing.T) {
 	}
 }
 
+// Named gives each request leaf its call's learn step learned as a read of
+// the clock the read it learned (Seen.Offset), a plain read's and an
+// offset's alike, without its learned line: not an answer's leaf at the same
+// path, not a leaf the clocks do not hold, and a read the exchange held
+// before is not kept. The run counts each read it keeps (runPlaceBytes).
+func TestNamedGivesARequestsClockReadItsOffset(t *testing.T) {
+	month := 30 * 24 * time.Hour
+	ttl := models.ClockOffset{Min: month - 771*time.Microsecond, Max: month + 379*time.Microsecond, Res: time.Millisecond, Why: "body.expiresAt = clock + 30d"}
+	stale := &models.ClockOffset{Res: time.Second}
+	e := Earlier{Mock: "mock-1", Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.expiresAt"}},
+		{Side: Request, Leaf: Leaf{Path: "body.lastUsedAt"}},
+		{Side: Response, Leaf: Leaf{Path: "body.expiresAt"}},
+		{Side: Request, Leaf: Leaf{Path: "body.id"}, Offset: stale},
+	}}
+	named := Named(e, nil, map[string]models.ClockOffset{"body.expiresAt": ttl, "body.lastUsedAt": {Res: time.Second}})
+	if o := named.Seen[0].Offset; o == nil || o.Min != ttl.Min || o.Max != ttl.Max || o.Res != ttl.Res || o.Why != "" {
+		t.Errorf("a request's time to live is given %+v; want its learned offset, %s to %s at %s, with no learned line", o, ttl.Min, ttl.Max, ttl.Res)
+	}
+	if o := named.Seen[1].Offset; o == nil || !o.Plain() || o.Res != time.Second {
+		t.Errorf("a request's plain read is given %+v; want a plain read at a second", o)
+	}
+	for _, s := range named.Seen[2:] {
+		if s.Offset != nil {
+			t.Errorf("%s %s is given %+v; want no read", s.Side, s.Leaf.Path, *s.Offset)
+		}
+	}
+	if e.Seen[0].Offset != nil || e.Seen[3].Offset != stale {
+		t.Fatalf("Named wrote its reads into the exchange it was given: %+v", e.Seen)
+	}
+	if with, without := runPlaceBytes(named), runPlaceBytes(Named(e, nil, nil)); with-without != 2*int64(unsafe.Sizeof(models.ClockOffset{})) {
+		t.Errorf("the run counts %d bytes more of the exchange with two reads; want %d, the two reads it keeps", with-without, 2*unsafe.Sizeof(models.ClockOffset{}))
+	}
+}
+
 // wrote is an exchange of the run that wrote rec, made live, into record at
 // path (Seen.Written, Seen.Record), typed typ.
 func wrote(mock string, at time.Time, record, path string, typ Type, rec, live string) Earlier {

@@ -12,6 +12,7 @@ import (
 	"unsafe"
 	"weak"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
@@ -59,6 +60,9 @@ type evPlace struct {
 	// clock: the earlier call learned this place as its own read of the
 	// application's clock: a separate read, never a copy of another.
 	gave, undeclared, clock bool
+	// offset: the read of the clock, with its offset, the earlier call
+	// learned this place as (Seen.Offset); nil where it learned none.
+	offset *models.ClockOffset
 	// raw is the index in Input.Raw plus one of a recording's place; 0 for
 	// any other.
 	raw int
@@ -260,7 +264,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			ps = append(ps, evPlace{
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
-				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, startUp: startUp, otherTest: other, trailed: trailed, scope: scope,
+				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, offset: s.Offset, startUp: startUp, otherTest: other, trailed: trailed, scope: scope,
 				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: outsideTest, lateCall: lateCall,
 				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
 				rBefore:  s.Side != Response && sentBefore || s.Side == Response && answeredBefore,

@@ -3,6 +3,7 @@ package learn
 import (
 	"cmp"
 	"maps"
+	"math"
 	"regexp"
 	"slices"
 	"sort"
@@ -137,6 +138,10 @@ type decider struct {
 	// it is made, and walked the bytes it walks to place them: what keeps
 	// its work linear in them.
 	passes, walked int
+	// asked counts the call's asks of heldElsewhere: one for each moment,
+	// cut and text its answers ask of a read (instantEchoed), however many
+	// instants hold them, so an answer of many is linear in them.
+	asked int
 	// halved: each place's halves, by its index in ps, kept for the call
 	// (halves); laid: the fields of each half kept, laidNow of each built
 	// past the budget for the instant being decided. halfBuilds counts the
@@ -1423,6 +1428,17 @@ func clockCarriedWhy(path string, o models.ClockOffset, place string) string {
 	return path + " = " + o.String() + " in both runs, but " + place + " sent that moment before this call in both runs: the offset is the gap between the two calls, which a replay moves, so keploy reads it as that call's value carried, never a read of this call's clock"
 }
 
+// sameRead reports whether learned, the read of the clock an earlier call's
+// learn step learned its send as (evPlace.offset), is a read plus the same
+// offset as off, the one this call's window holds a value written at res
+// at in both runs: learned at a cut (one with no Res holds nothing) finer
+// than res, of an offset no meet emptied, and sharing with off an offset
+// both hold (their ranges meet; a plain read's never meets an offset's: the
+// reading signs every offset).
+func sameRead(learned *models.ClockOffset, off models.ClockOffset, res time.Duration) bool {
+	return learned != nil && learned.Res > 0 && learned.Res < res && !learned.Empty() && max(learned.Min, off.Min) < min(learned.Max, off.Max)
+}
+
 // heldWhere is the place of each of hs that keep keeps, in order.
 func heldWhere(hs []instantHold, keep func(instantHold) bool) []evPlace {
 	var out []evPlace
@@ -1980,7 +1996,7 @@ func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool)
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
 	defer dc.letGoHalves()
 	r, l := c.r, c.l
-	inScope := func(p evPlace) bool { return dc.allScope || !p.otherTest || p.given }
+	inScope := dc.inScope
 	// untold: answers of the scope before the call, whose view in round F
 	// keploy cannot tell, that hold F's moment and not R's.
 	var hs []instantHold
@@ -2316,10 +2332,17 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// is the gap between the two calls, which a replay moves, so it is no
 	// read of this call's clock. It is refused naming that call, as a source
 	// outside the scope is (keploy binds only within a test and the
-	// start-up); a plain read its own window holds stays a read.
+	// start-up); a plain read its own window holds stays a read. So is a
+	// send that call's learn step learned as its own read of the clock plus
+	// this one's offset at a finer cut (sameRead): two reads of one time to
+	// live (a grant's expires_at at the millisecond, then a refresh token's
+	// expiration at the second, both clock + 30d), which share this word's
+	// cut only as the runs' timing falls. A copy of it shows the offset its
+	// own read added only where the gap fits in this word's cut, and a
+	// replay where it does not goes red.
 	if inWindow && !off.Plain() {
 		if carried := heldWhere(hs, func(h instantHold) bool {
-			return h.hr && h.hl && h.p.otherTest && !dc.allScope && before(h.p)
+			return h.hr && h.hl && h.p.otherTest && !dc.allScope && before(h.p) && !sameRead(h.p.offset, off, max(c.rm.res, c.lm.res))
 		}); len(carried) > 0 {
 			off, cutWhy, inWindow = models.ClockOffset{}, clockCarriedWhy(path, off, carried[0].name), false
 		}
@@ -2674,15 +2697,265 @@ func (dc *decider) copied(path string, at variables.Address, n int, c changedIns
 	return dc.bound(path, at, n, c, src, rule)
 }
 
-// instantEchoed is the first leaf of the call's recorded answer that holds
-// the recorded instant, by its text or its moment; "" where none does.
+// instantEchoed is the first leaf of the call's recorded answer that echoes
+// the recorded instant of the request leaf: holds its text, or an instant
+// that echoes its moment (echoesMoment) and that no source holds
+// (heldElsewhere); "" where none does. An HTTP answer's Date header is no
+// echo: it is the server's clock at its answer, never the stored form of
+// what the application sent. What heldElsewhere answers is kept for each
+// moment, cut, text and form the answer asks of it, so an answer of many
+// instants of one second asks it once.
 func (dc *decider) instantEchoed(c changedInstant) string {
+	type ask struct {
+		key      instantKey
+		unit     time.Duration
+		text     string
+		declared bool
+	}
+	held := map[ask]bool{}
 	for _, a := range dc.in.Resp {
-		if h, _, _ := dc.holds(evPlace{}, dc.x.text(a.Value), c.r, c.rm, c.byText); h {
+		if httpDateHeader(a.Path) {
+			continue
+		}
+		typed := a.Type == Instant
+		if t := dc.x.text(a.Value); textHoldsInstant(t, c.r, false) || c.rm != nil && dc.echoesMoment(t, *c.rm, func(e moment, unit time.Duration, w string, declared bool) bool {
+			if typed {
+				w = ""
+			}
+			k := ask{e.key, unit, w, declared}
+			h, ok := held[k]
+			if !ok {
+				h = dc.heldElsewhere(e, *c.rm, unit, w, declared)
+				held[k] = h
+			}
+			return h
+		}) {
 			return a.Path
 		}
 	}
 	return ""
+}
+
+// httpDateHeader reports whether path is an HTTP answer's Date header.
+func httpDateHeader(path string) bool {
+	name, ok := strings.CutPrefix(path, "header.")
+	return ok && strings.EqualFold(name, "Date")
+}
+
+// textHoldsInstant reports whether t holds w, an instant's text, as its
+// words (holds' reading of a text); declared: in t as written or in one of
+// its declared forms (formsOf: decoded, case-folded, an encoded run's
+// text), w being read in such a form of another text.
+func textHoldsInstant(t *readerText, w string, declared bool) bool {
+	h, ok := t.holdsWord(w)
+	if ok && !h && len(variables.Words(w)) > 1 {
+		h, ok = t.contains(w)
+		if ok && !h && declared {
+			s, _ := t.textNow()
+			h = strings.Contains(t.formsOf(s), w)
+		}
+	}
+	return ok && h
+}
+
+// echoesMoment reports whether an instant of t echoes m, a value's moment,
+// or m read in the run's zone (inZone): the instant is m, or m cut,
+// truncated or rounded at one unit (cuts' coarser rule, m held, the
+// instant the value), and elsewhere, asked with the finest such unit (0 of
+// m itself), the instant's text and whether it was read in a declared form
+// (the text decoded or case-folded, an encoded run's text: elsewhere then
+// reads the source in its forms too), does not explain it. A database stores
+// what a call sent, or that cut to what it keeps: a second of a read of
+// milliseconds (a DATETIME), a day of it (a date kept as its midnight). An
+// instant that m is a cut of is another moment, finer: a row's created_at
+// of 597 ms that m, a read of 600, rounds at 10 ms. The unit an instant is
+// written at does not say whether it is m's stored form (the read's second
+// as Unix seconds may be a sign-in time the request sets beside the read),
+// so an instant a source holds is that source's value (heldElsewhere),
+// which its own binding binds. t's instants are read as holdsMoment reads
+// them, its escapes read and its declared forms too; one as written that
+// its escapes change (openedOnly: a percent-encoded time's date alone) is
+// none. A text with no escapes opens to itself, read once, as written.
+func (dc *decider) echoesMoment(t *readerText, m moment, elsewhere func(a moment, unit time.Duration, text string, declared bool) bool) bool {
+	text, ok := t.textNow()
+	if !ok {
+		return false
+	}
+	spans, ok := t.spansOf()
+	if !ok {
+		return false
+	}
+	ms := []moment{m}
+	if z, ok := dc.inZone(m); ok {
+		ms = append(ms, z)
+	}
+	echoes := func(in string, declared bool) func(sp instant) bool {
+		return func(sp instant) bool {
+			if !sp.keyed {
+				return false
+			}
+			a := sp.moment()
+			unit, echo := time.Duration(math.MaxInt64), false
+			for _, m := range ms {
+				if a.key == m.key {
+					unit, echo = 0, true
+					continue
+				}
+				cuts(m, a, func(c cutRule) bool {
+					if c.finer {
+						return false
+					}
+					unit, echo = min(unit, time.Duration(c.unit)), true
+					return true
+				})
+			}
+			return echo && !elsewhere(a, unit, in[sp.start:sp.end], declared)
+		}
+	}
+	x := t.x.dc
+	open := unescaped(text)
+	extra := x.rawExtra(text)
+	return slices.ContainsFunc(spans, func(sp instant) bool { return echoes(text, false)(sp) && !escapeMoves(text, sp) }) ||
+		open != text && slices.ContainsFunc(x.spansOf(open), echoes(open, true)) || slices.ContainsFunc(x.spansOf(extra), echoes(extra, true))
+}
+
+// heldElsewhere reports whether a, an instant of the call's recorded answer
+// that echoes the read (moment read) at unit (echoesMoment), is held by a
+// source: a place the application sent before the call that holds a and
+// not the read, so the answer holds that place's value (a sign-in time the
+// request sets, a created_at an earlier insert wrote), which its own
+// binding binds, and not the read's stored form. A source is, by
+// construction, one that could have made the value:
+//   - a place the application sent: a leaf of the call's request, or of a
+//     request of its scope sent before it (an exchange's, a recording's
+//     request half, a client test's own request), never an answer or a
+//     header a dependency gave (an HTTP Date is the server's own clock), nor
+//     a value the test gave keploy;
+//   - one that holds a as the answer writes it, a variable holding one text
+//     (text, "" of a typed instant, held by its moment), read in the form
+//     the answer's instant was read in: as written, or, where declared (the
+//     answer decoded or case-folded, an encoded run's text), as written and
+//     in its own declared forms, its instants and its text alike (an ISO
+//     time stored as sent is held case-folded too, a percent-encoded one
+//     by its plain source);
+//   - a value made anew each run: in round F it holds another moment, written
+//     the same way. One the same in both runs, or that F wrote otherwise,
+//     binds nothing, so a replay would serve the answer's recorded moment,
+//     the hazard an echo is refused for;
+//   - not another read of the application's clock that its call learned at
+//     a cut no finer than unit (evPlace.offset): a and the read's cut are
+//     then two reads that cut alike, two sources. A leaf of the call's own
+//     request that is such a read is refused itself, as an echo of its own
+//     moment, which the answer holds.
+//
+// A place that holds the read itself is the read: a request that sets the
+// read and filters by it, answered with what it set, is still the read's
+// echo, as is the leaf the read stands in. The read is looked for in the
+// place as written and in its declared forms, however the answer's instant
+// was read: a place that holds the read in base64 beside its second holds
+// the read.
+func (dc *decider) heldElsewhere(a, read moment, unit time.Duration, text string, declared bool) bool {
+	dc.asked++
+	holds := func(t *readerText) bool {
+		return dc.holdsMomentOf(t, a, declared) && !dc.holdsMomentOf(t, read, true) && (text == "" || textHoldsInstant(t, text, declared))
+	}
+	source := func(rec, live *readerText) bool { return holds(rec) && dc.movedOn(rec, live, a, declared) }
+	for path, l := range dc.in.Rec.Leaves {
+		if source(dc.x.text(l.Value), dc.x.text(dc.in.Live.Leaves[path].Value)) {
+			return true
+		}
+	}
+	for i, p := range dc.ps {
+		if !dc.inScope(p) || p.gave {
+			continue
+		}
+		if p.raw > 0 {
+			if !holds(p.t.rec) {
+				continue
+			}
+			p, _ = dc.halves(i, p)
+		}
+		if p.side == Request && p.state == stateBefore && !clockCut(p.offset, unit) && source(p.t.rec, p.t.live) {
+			return true
+		}
+	}
+	return false
+}
+
+// movedOn reports whether live, a place's text in round F, holds another
+// moment than a where rec, its recorded text, holds a, written in a layout
+// rec writes a in: a value made anew each run, in one form. A layout's
+// instants are all keyed or none (a time-ordered UUID's), and one that
+// names a is keyed, so an instant of live in its layout is too. declared:
+// both texts are read in their declared forms too, and an instant of rec
+// pairs only with one of live read the same way (kindSpans): as written
+// with as written, a form with that form. A place plain in the recording
+// and in base64 in round F is not one value written anew in one form.
+func (dc *decider) movedOn(rec, live *readerText, a moment, declared bool) bool {
+	if dc.holdsMomentOf(live, a, declared) {
+		return false
+	}
+	rs, ls := kindSpans(rec, declared), kindSpans(live, declared)
+	for k, spans := range rs {
+		if slices.ContainsFunc(spans, func(r instant) bool {
+			return dc.namedIn([]instant{r}, a, func(h, m moment) bool { return h.key == m.key }) > 0 &&
+				slices.ContainsFunc(ls[k], func(l instant) bool { return l.layout == r.layout })
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+// kindSpans are t's instants by the way they are read: as written first,
+// and, where declared, those of each of its declared forms at that form's
+// place (decoded.kinds); none of a text keploy could not read.
+func kindSpans(t *readerText, declared bool) (out [1 + formKinds][]instant) {
+	spans, ok := t.spansOf()
+	out[0] = spans
+	if !declared || !ok {
+		return out
+	}
+	s, _ := t.textNow()
+	x := t.x.dc
+	d := derivedOfText(x, textDecoded, s, func(own string) decoded { return decodeForms(own) }, func(d decoded) int64 { return d.size() })
+	for k, form := range d.kinds(s) {
+		if form != "" {
+			out[1+k] = x.spansOf(form)
+		}
+	}
+	return out
+}
+
+// clockCut reports whether o, the read of the clock a place's call learned
+// it as (evPlace.offset), is one cut no finer than unit: nil where it
+// learned none, and one of no Res is taken for one.
+func clockCut(o *models.ClockOffset, unit time.Duration) bool {
+	return o != nil && (o.Res <= 0 || o.Res >= unit)
+}
+
+// inScope reports whether p is a place of the call's scope: its own test's,
+// the start-up's, or one the test gave (every place under ModeAll).
+func (dc *decider) inScope(p evPlace) bool { return dc.allScope || !p.otherTest || p.given }
+
+// holdsMomentOf reports whether an instant of t, as written (declared: or
+// in a declared form, formSpans), is m itself, or m in the application's
+// zone (inZone). A text keploy could not read gives no instants, and holds
+// none.
+func (dc *decider) holdsMomentOf(t *readerText, m moment, declared bool) bool {
+	return dc.namedIn(formSpans(t, declared), m, func(h, m moment) bool { return h.key == m.key }) > 0
+}
+
+// formSpans are t's instants as written, and, where declared, those of its
+// declared forms (formsOf: decoded, case-folded, an encoded run's text)
+// too; none of a text keploy could not read.
+func formSpans(t *readerText, declared bool) []instant {
+	spans, ok := t.spansOf()
+	if !declared || !ok {
+		return spans
+	}
+	s, _ := t.textNow()
+	return slices.Concat(spans, t.x.dc.spansOf(t.formsOf(s)))
 }
 
 // readBack is where the call's own answer reads back w, a word of the

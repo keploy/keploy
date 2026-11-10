@@ -389,10 +389,11 @@ func TestReaderIndexHoldsAMomentAtItsFinestCut(t *testing.T) {
 
 // An instant whose word count changes between the runs is one instant read
 // whole in each run: a zero fraction dropped (RFC3339Nano, Java's
-// Instant.toString), or a ' ' to 'T' with a zone added. Its moved words are
-// an unequal stretch, and the instants each run's words lie in pair by
-// position. Where the runs' words there lie in unequal counts of instants,
-// nothing pairs, and each run's instant stays one-sided.
+// Instant.toString), or a ' ' to 'T' with a zone added. The two instants
+// align as units, and its moved words are an unequal stretch inside them.
+// Where one run holds more instants there, the first of each align in order
+// and the one left over stands in its run alone: the text changes shape,
+// and that instant reads no moment in the other run.
 func TestReaderAnInstantWhoseWordCountChangesIsOneInstant(t *testing.T) {
 	for _, c := range []struct{ rec, live, rInst, lInst string }{
 		{"x 2026-10-31T10:50:13.305Z y", "x 2026-10-31T10:51:27Z y", "2026-10-31T10:50:13.305Z", "2026-10-31T10:51:27Z"},
@@ -426,15 +427,56 @@ func TestReaderAnInstantWhoseWordCountChangesIsOneInstant(t *testing.T) {
 			t.Errorf("%q: F's instant %q; want %q", c.live, got, c.lInst)
 		}
 	}
-	// R's moved words lie in two instants, F's in one: nothing pairs.
+	// R holds two instants there, F one: R's second stands alone.
 	rd := readText("at 10:50:13.305 10:50:14 b", "at 10:51:27 b")
-	for _, iw := range rd.Instants {
-		if iw.Rec != nil && iw.Live != nil {
-			t.Errorf("an instant paired across unequal counts of instants: %+v", iw)
+	if !rd.ChangedShape {
+		t.Errorf("an instant only R holds at its place: no changed shape")
+	}
+	if iw := instantOf(t, rd, "14", ""); iw == nil || iw.Live != nil || iw.LiveAt[0] >= 0 {
+		t.Errorf("R's second instant reads %+v; want R's alone", iw)
+	}
+}
+
+// Two instants side by side each align with the other run's at its place,
+// whole, before any word is diffed, so the diff never pairs a word of one
+// with a word of the other: a time whose words the other run's neighbour
+// holds ("08:06 08:08" to "08:08 08:09"), the minute of one moving onto the
+// seconds or the hour of the next, two HTTP dates of one text, and a
+// constructed pair whose second instant moves back (01:02:03 04:05:06 to
+// 01:07:08 03:05:09): two instants, each read whole with a moment in each
+// run, and no change of shape. A text of the same words with no instant is
+// still diffed word by word, and its word only one run has changes it.
+func TestReaderInstantsSideBySideAlignWhole(t *testing.T) {
+	const d1, d2 = "Mon, 09 Nov 2026 07:06:07 GMT", "Mon, 09 Nov 2026 07:07:09 GMT"
+	for _, c := range []struct{ rec, live string }{
+		{"08:06 08:08", "08:08 08:09"},
+		{"09:57:55 09:59:11", "09:59:01 10:00:30"},
+		{"from 11:58:29 to 12:00:12", "from 12:00:02 to 12:01:45"},
+		{"from 07:22:16 to 07:22:23", "from 07:23:31 to 07:23:39"},
+		{"from 07:06:07 to 07:07:09", "from 07:07:09 to 07:08:10"},
+		{d1 + "; " + d2, d2 + "; Mon, 09 Nov 2026 07:08:11 GMT"},
+		{"01:02:03 04:05:06", "01:07:08 03:05:09"},
+	} {
+		rd := readText(c.rec, c.live)
+		if rd.ChangedShape {
+			t.Errorf("%q -> %q: changed shape; want each instant aligned whole with its own", c.rec, c.live)
+		}
+		if len(rd.Instants) != 2 {
+			t.Errorf("%q -> %q: %d instants; want two", c.rec, c.live, len(rd.Instants))
+		}
+		for _, iw := range rd.Instants {
+			if iw.Rec == nil || iw.Live == nil {
+				t.Errorf("%q -> %q: an instant %q -> %q without a moment in each run", c.rec, c.live, c.rec[max(iw.RecAt[0], 0):max(iw.RecAt[1], 0)], c.live[max(iw.LiveAt[0], 0):max(iw.LiveAt[1], 0)])
+			}
 		}
 	}
-	if len(rd.Instants) < 2 {
-		t.Errorf("%d instants; want each run's own", len(rd.Instants))
+	for _, c := range []struct{ rec, live string }{
+		{"08 06 08 08", "08 08 08 09"},
+		{"seq 07 06 07", "seq 07 07 09"},
+	} {
+		if rd := readText(c.rec, c.live); !rd.ChangedShape || len(rd.Instants) != 0 {
+			t.Errorf("%q -> %q: changed shape %v, %d instants; want a text of no instant diffed word by word, its lone words a change of shape", c.rec, c.live, rd.ChangedShape, len(rd.Instants))
+		}
 	}
 }
 
@@ -452,23 +494,94 @@ func instantOf(t *testing.T, rd textReading, rec, live string) *instantWord {
 	return nil
 }
 
-// An instant that two instants of the other run claim keeps no partner: a
-// word only one run has there reads no moment in the other run, whichever
-// instant claimed it first or last, and an instant whose partner names
-// another back takes none from it. R's 10:50:13.305 pairs with F's 10:51
-// by 50>51 and with F's 13:52 by its unequal stretch (305 and 52 9).
-func TestReaderAnInstantGivenTwoPartnersKeepsNone(t *testing.T) {
-	for _, c := range []struct{ rec, live, recOnly, liveOnly string }{
-		{"10:50:13.305", "10:51 13:52 9", "305", "52"},
-		{"10:51 13:52 9", "10:50:13.305", "52", "305"},
+// An instant aligns with one instant of the other run at most, in order:
+// R's 10:50:13.305 aligns with F's 10:51 (its words 50>51 and 305 read that
+// one instant, with a moment in each run), and F's 13:52 and 9, which R has
+// nothing at, stand in F alone: the text changes shape, and 52 reads no
+// moment in R. The same the other way.
+func TestReaderAnInstantAlignsWithOneInstantAtMost(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"10:50:13.305", "10:51 13:52 9"},
+		{"10:51 13:52 9", "10:50:13.305"},
 	} {
 		rd := readText(c.rec, c.live)
-		for _, iw := range []*instantWord{instantOf(t, rd, c.recOnly, ""), instantOf(t, rd, "", c.liveOnly)} {
-			if iw == nil {
-				t.Errorf("%q -> %q: a one-sided word reads no instant; want its own run's", c.rec, c.live)
-			} else if iw.Rec != nil && iw.Live != nil || iw.RecAt[0] >= 0 && iw.LiveAt[0] >= 0 {
-				t.Errorf("%q -> %q: a one-sided word's instant pairs across runs: %+v", c.rec, c.live, iw)
-			}
+		if !rd.ChangedShape {
+			t.Errorf("%q -> %q: no changed shape; want an instant one run alone holds to change it", c.rec, c.live)
+		}
+		var first, alone *instantWord
+		if c.rec == "10:50:13.305" {
+			first, alone = instantOf(t, rd, "305", ""), instantOf(t, rd, "", "52")
+		} else {
+			first, alone = instantOf(t, rd, "", "305"), instantOf(t, rd, "52", "")
+		}
+		if first == nil || first.Rec == nil || first.Live == nil {
+			t.Errorf("%q -> %q: the first instants read %+v; want one instant, a moment in each run", c.rec, c.live, first)
+		}
+		if alone == nil || alone == first || alone.RecAt[0] >= 0 && alone.LiveAt[0] >= 0 {
+			t.Errorf("%q -> %q: 13:52 reads %+v; want its own run's alone", c.rec, c.live, alone)
+		}
+	}
+}
+
+// A word beside an aligned instant pairs with the other run's word at its
+// place, never with a word of the instant: the instant's bounds end the
+// stretch before it and start the one after it. R's "1" stands just before
+// an instant none of whose words stay (09:59:59.305 to 10:00:01, a
+// fraction dropped), or just after one whose last words change (10:50:13.305
+// to 10:51:27): 1>2 is one changed word, paired, of no instant, and the
+// text keeps its shape.
+func TestReaderAWordBesideAnAlignedInstantPairsWithItsOwn(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"attempt 1 09:59:59.305", "attempt 2 10:00:01"},
+		{"10:50:13.305 1 attempt", "10:51:27 2 attempt"},
+	} {
+		rd := readText(c.rec, c.live)
+		if rd.ChangedShape || len(rd.Instants) != 1 {
+			t.Errorf("%q -> %q: changed shape %v, %d instants; want one instant aligned whole and no change of shape", c.rec, c.live, rd.ChangedShape, len(rd.Instants))
+		}
+		if iw := instantOf(t, rd, "1", "2"); iw != nil {
+			t.Errorf("%q -> %q: 1>2 reads an instant %+v; want a word of none", c.rec, c.live, iw)
+		}
+	}
+}
+
+// An instant the alignment aligns with none of the other run's changes the
+// text's shape, whatever words stand at its place in the other run, either
+// way round: R's 10:50 is an instant, F's "10 50" or "10:77" at its place
+// none (its 11:00, the text's one instant, aligns with R's 11:00). The
+// words are as many in both runs, and the separators the same where F
+// holds 10:77, yet R's instant stands alone. Its words, and the other
+// run's at its place, pair with none: none is read as changed in place
+// (50 to 77), and no separator between them as changed (":" to " ").
+func TestReaderAnInstantAlignedWithNoneChangesShapeWhateverItsWords(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"from 10:50 to 11:00", "from 10 50 to 11:00"},
+		{"from 10 50 to 11:00", "from 10:50 to 11:00"},
+		{"from 10:50 to 11:00", "from 10:77 to 11:00"},
+		{"from 10:77 to 11:00", "from 10:50 to 11:00"},
+	} {
+		rd := readText(c.rec, c.live)
+		if !rd.ChangedShape {
+			t.Errorf("%q -> %q: no changed shape; want an instant one run alone holds at its place to change it", c.rec, c.live)
+		}
+		if slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx >= 0 && w.LiveIdx >= 0 }) || len(rd.Separators) > 0 {
+			t.Errorf("%q -> %q: words %+v, separators %+v; want the words at the lone instant's place to pair with none", c.rec, c.live, rd.Words, rd.Separators)
+		}
+	}
+}
+
+// A stretch that ends at an aligned instant and holds an instant of one run
+// alone changes the shape, whatever its words: 10:50 in R and no instant in
+// F before the aligned 10:51>10:52.
+func TestReaderALoneInstantBeforeAnAlignedOneChangesShape(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"x 10:50 a 10:51 y", "x b 10:52 y"},
+		{"x 07:06:07 a 07:06:08 y", "x b 07:07:09 y"},
+		{"x 07:06:07 a b 07:06:08 y", "x c 07:07:09 y"},
+	} {
+		rd := readText(c.rec, c.live)
+		if !rd.ChangedShape || !slices.ContainsFunc(rd.Stretches, func(st wordStretch) bool { return st.Loose }) {
+			t.Errorf("%q -> %q: changed shape %v, stretches %+v; want a loose stretch, a changed shape", c.rec, c.live, rd.ChangedShape, rd.Stretches)
 		}
 	}
 }
@@ -489,12 +602,25 @@ func TestReaderAOneSidedWordOfAnInstantTakesItsPairedWordsPartner(t *testing.T) 
 // 09:00:01) is one instant read whole, judged by its moment: the "00" of
 // R's seconds and of F's minutes stays in the word alignment, which leaves
 // a word only F has there, and that word is the instant's, not a change of
-// the text's shape. A word only one run has outside any instant still is.
+// the text's shape. So is one where no paired word changed, whose minute
+// moved to the value its seconds were recorded at (an HTTP date, 07:06:07
+// to 07:07:09) or whose hour to its minute's (06:07 to 07:09, and back):
+// the word that stayed ties the two runs' instants, of as many words, R's
+// first word or F's first. A word only one run has outside any instant
+// still changes the shape, and so does one an instant gained or lost, or
+// one of an instant whose word that stayed lies in no instant in the other
+// run (07 x 10:50 to 07:09 x): it ties nothing. An instant's words are its
+// own, never the words that stand before it (12:00 to 12:00:13.5, after
+// three words of no instant in R, 10:61 x, and one in F).
 func TestReaderAnInstantThatCrossesAMinuteIsOneInstant(t *testing.T) {
 	for _, c := range []struct{ rec, live string }{
 		{"2026-10-31T08:59:00.000Z", "2026-10-31T09:00:01.000Z"},
 		{"at 2026-10-31T08:59:00.000Z ok", "at 2026-10-31T09:00:01.000Z ok"},
 		{"10:50:13.305 x", "10:51:13 x"},
+		{"Mon, 09 Nov 2026 07:06:07 GMT", "Mon, 09 Nov 2026 07:07:09 GMT"},
+		{"at Mon, 09 Nov 2026 15:29:30 GMT ok", "at Mon, 09 Nov 2026 15:30:32 GMT ok"},
+		{"06:07", "07:09"},
+		{"07:09", "06:07"},
 	} {
 		rd := readText(c.rec, c.live)
 		if rd.ChangedShape {
@@ -514,6 +640,9 @@ func TestReaderAnInstantThatCrossesAMinuteIsOneInstant(t *testing.T) {
 		{"at 2026-10-31T08:59:00.000Z ok", "at 2026-10-31T09:00:01.000Z ok 7"},
 		{"id 10:50", "id 10:50:13"},
 		{"id 10:50:13", "id 10:50"},
+		{"07 x 10:50", "07:09 x"},
+		{"07:09 x", "07 x 10:50"},
+		{"10:61 x 12:00", "10:50 x 12:00:13.5"},
 	} {
 		if rd := readText(c.rec, c.live); !rd.ChangedShape {
 			t.Errorf("%q -> %q: no changed shape; want a word only one run has, that no paired instant holds, to change it", c.rec, c.live)

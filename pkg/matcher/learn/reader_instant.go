@@ -67,56 +67,64 @@ func spanAt(spans []instant, at [2]int) int {
 	return spanHolding(spans, func(sp instant) (int, int) { return sp.start, sp.end }, at)
 }
 
-// spanPartners pairs R's instants (rSpans) with F's (lSpans): the two a
-// paired word lies in, and, in a stretch of unequal counts, the instants
-// R's moved words lie in with those F's lie in, by position, where they
-// are as many. An instant given two partners, or a paired word whose other
-// run's word lies in none, keeps no partner (-1).
-func (rd *textReading) spanPartners(rSpans, lSpans []instant) (rp, lp map[int]int) {
-	rp, lp = map[int]int{}, map[int]int{}
-	add := func(ri, li int) {
-		if v, ok := rp[ri]; ri >= 0 && (!ok || v == li) {
-			rp[ri] = li
-		} else if ri >= 0 {
-			rp[ri] = -1
-		}
-		if v, ok := lp[li]; li >= 0 && (!ok || v == ri) {
-			lp[li] = ri
-		} else if li >= 0 {
-			lp[li] = -1
-		}
-	}
-	for _, w := range rd.Words {
-		if w.RecIdx >= 0 && w.LiveIdx >= 0 {
-			add(spanAt(rSpans, w.RecAt), spanAt(lSpans, w.LiveAt))
-		}
-	}
-	for _, st := range rd.Stretches {
-		if st.Shape != stretchUnequal {
-			continue
-		}
-		rs := spansOfWords(rSpans, rd.RecWords, st.Rec)
-		ls := spansOfWords(lSpans, rd.LiveWords, st.Live)
-		if len(rs) != len(ls) {
-			continue
-		}
-		for k := range rs {
-			add(rs[k], ls[k])
-		}
-	}
-	return rp, lp
-}
+// textUnit is one unit of a run's text in the alignment of its instants
+// (alignedCuts): the run's words [from, to), and the instant of the run's
+// spans that holds them whole (span; -1 for a word no instant holds, a unit
+// of its own).
+type textUnit struct{ from, to, span int }
 
-// spansOfWords are the instants of spans that the words [from, to) of a
-// run lie in, each once, in order.
-func spansOfWords(spans []instant, words [][2]int, r [2]int) []int {
-	var out []int
-	for i := r[0]; i < r[1]; i++ {
-		if k := spanAt(spans, words[i]); k >= 0 && (len(out) == 0 || out[len(out)-1] != k) {
-			out = append(out, k)
+// textUnits are a run's words (in order) as units: each instant of spans
+// (disjoint, in order) one unit of the words it holds whole, each other word
+// one unit.
+func textUnits(words [][2]int, spans []instant) []textUnit {
+	var out []textUnit
+	k := 0
+	for i, w := range words {
+		var in bool
+		k, in = instantNext(spans, w, k)
+		if in && len(out) > 0 && out[len(out)-1].span == k {
+			out[len(out)-1].to = i + 1
+			continue
 		}
+		u := textUnit{from: i, to: i + 1, span: -1}
+		if in {
+			u.span = k
+		}
+		out = append(out, u)
 	}
 	return out
+}
+
+// instantNext is k moved past the instants of spans (disjoint, in order) that
+// end at or before w begins, and whether the instant it then names holds w
+// whole: from k on, the first that may. Read over a run's words in order,
+// it walks spans once.
+func instantNext(spans []instant, w [2]int, k int) (int, bool) {
+	for k < len(spans) && spans[k].end <= w[0] {
+		k++
+	}
+	return k, k < len(spans) && spans[k].start <= w[0] && w[1] <= spans[k].end
+}
+
+// innerTied reports whether two aligned instants, of R's words rw and F's
+// lw, are one instant read whole across the runs: they hold as many words
+// (one shape in both runs, whatever stayed: 07:06:07 to 07:07:09 keeps R's
+// seconds with F's minute), or a stretch of their word diff (kept, inner
+// indices) holds words of both runs, a word that changed or moved. Where
+// neither holds, one run's instant gained or lost words and nothing else
+// ("10:50" to "10:50:13"): its words are a change of the text's shape.
+func innerTied(rw, lw []string, kept [][2]int) bool {
+	if len(rw) == len(lw) {
+		return true
+	}
+	pr, pl := 0, 0
+	for _, k := range append(kept[:len(kept):len(kept)], [2]int{len(rw), len(lw)}) {
+		if k[0] > pr && k[1] > pl {
+			return true
+		}
+		pr, pl = k[0]+1, k[1]+1
+	}
+	return false
 }
 
 // partner is m[k] where k's partner names k back (the other map), -1
@@ -132,10 +140,14 @@ func partner(m, back map[int]int, k int) int {
 // of lSpans (instantSpans of each run) that holds it, one instantWord per
 // pair of them, and a number of an epoch's length in either run, parsed or
 // not. A word only one run has takes its instant's partner in the other
-// run (spanPartners).
-func (rd *textReading) readInstants(rSpans, lSpans []instant) {
+// run: tied, the instants the alignment paired (alignedCuts, innerTied), one
+// partner each at most; an instant it left alone has none.
+func (rd *textReading) readInstants(rSpans, lSpans []instant, tied [][2]int) {
 	byPair := map[[2]int]*instantWord{}
-	rp, lp := rd.spanPartners(rSpans, lSpans)
+	rp, lp := map[int]int{}, map[int]int{}
+	for _, t := range tied {
+		rp[t[0]], lp[t[1]] = t[1], t[0]
+	}
 	for k := range rd.Words {
 		w := &rd.Words[k]
 		ri, li := spanAt(rSpans, w.RecAt), spanAt(lSpans, w.LiveAt)
