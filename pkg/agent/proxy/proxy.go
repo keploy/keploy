@@ -5764,7 +5764,7 @@ func asEarlierSet(err error) error {
 	case earlierSetMiss:
 		return e
 	case beforeSetMiss:
-		return earlierSetMiss{e.error}
+		return earlierSetMiss(e)
 	}
 	return earlierSetMiss{err}
 }
