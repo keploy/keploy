@@ -1,11 +1,13 @@
 package http
 
 import (
-	"errors"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -191,11 +193,17 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 // acknowledge them: an older agent answers 200 with no body or with no
 // served field, and would serve each recording of a series once. The CLI
 // errors (ErrAgentIgnoresRules), so the replay does not run on it. An agent
-// that names series is taken, and a table with no series takes any 200.
+// that names series is taken, and a table with no series takes any 200. An
+// answer that names series but does not decode as the ack (a field of
+// another type) is no ack. The table posted carries the series.
 func TestScopeTableWithoutAckIsRefused(t *testing.T) {
 	var answer string
+	var posted models.ScopeTableReq
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
+		posted = models.ScopeTableReq{}
+		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+			t.Errorf("the posted table does not decode: %v", err)
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, answer)
 	}))
@@ -206,7 +214,7 @@ func TestScopeTableWithoutAckIsRefused(t *testing.T) {
 	push := func(series map[string][]string) error {
 		return a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series)
 	}
-	for _, old := range []string{"", `{"status":"ok"}`, `{"status":"ok","served":["trails"]}`, `not json`, `{"status":"ok","served":["series"],`} {
+	for _, old := range []string{"", `{"status":"ok"}`, `{"status":"ok","served":["trails"]}`, `not json`, `{"status":"ok","served":["series"],`, `{"status":1,"served":["series"]}`} {
 		answer = old
 		if err := push(series); !errors.Is(err, ErrAgentIgnoresRules) {
 			t.Fatalf("answer %q to a table with series: got %v, want ErrAgentIgnoresRules", old, err)
@@ -218,5 +226,8 @@ func TestScopeTableWithoutAckIsRefused(t *testing.T) {
 	answer = `{"status":"ok","served":["series"]}`
 	if err := push(series); err != nil {
 		t.Fatalf("an agent that acknowledges series was refused: %v", err)
+	}
+	if !reflect.DeepEqual(posted.Series, series) {
+		t.Fatalf("the posted table's series %v, want %v", posted.Series, series)
 	}
 }

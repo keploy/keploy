@@ -219,3 +219,36 @@ func TestSetPoolSeriesNameInTwoSeries(t *testing.T) {
 		t.Fatalf("z is %+v, want the last of b", got)
 	}
 }
+
+// The consume is the guard a read cannot be (two calls may read one member
+// before either consumes it): in a window, a second consume of a series'
+// member is refused until every member answered, a member that is not the
+// last is refused again after that, and the last then answers each repeat,
+// counted.
+func TestASecondConsumeOfASeriesMemberWaitsForTheSeries(t *testing.T) {
+	mm := seriesSweep(t)
+	mm.prepareOutside()
+	byName := map[string]*models.Mock{}
+	mocks, _ := mm.GetSessionScopedMocks()
+	for _, mk := range mocks {
+		byName[mk.Name] = mk
+	}
+	for i, step := range []struct {
+		name string
+		want exactVerdict
+	}{
+		{"s2", exactServed},
+		{"s2", exactRefused},
+		{"s1", exactServed},
+		{"s1", exactRefused},
+		{"s2", exactServed},
+		{"s2", exactServed},
+	} {
+		if v := mm.consumeOutside(byName[step.name], true); v != step.want {
+			t.Fatalf("consume %d of %s in a window: %v, want %v", i, step.name, v, step.want)
+		}
+	}
+	if got := mm.SeriesRepeats()["sweep/TestA/1"]; got != 2 {
+		t.Fatalf("repeats %d, want 2", got)
+	}
+}
