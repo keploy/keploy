@@ -306,6 +306,23 @@ func arrivedBefore(earlier []Earlier, rec, live time.Time) []Earlier {
 	return out
 }
 
+// ofOwnCall is earlier without each client test's request (Earlier.incoming)
+// where in's call is no call of its test's own list: one keploy record
+// marked trailing a test (Input.Trails: a worker: recording, which no test
+// lists), or one mappings.yaml places outside the test's list (Input.Scope,
+// where it tells). A client test's request is a place of the test's own
+// calls only: a value bound there is a variable of the test whose list holds
+// the call (models.CaseBind, on that test's mappings entry), and a call no
+// test lists reads none. Such a call reads its words as main does, with no
+// client's request among their sources: a value the trailed test's own call
+// sent stays bound there, as the run's variable.
+func ofOwnCall(in Input, earlier []Earlier) []Earlier {
+	if s := in.ScopeOf(in.Mock); in.Trails.Test == "" && (s == ScopeUnknown || s == ScopeTest(in.Test)) {
+		return earlier
+	}
+	return slices.DeleteFunc(slices.Clone(earlier), func(e Earlier) bool { return e.incoming })
+}
+
 // comingRequest is a client test's request whose body is still coming
 // (Tracker.IncomingComing): what a call that reaches keploy meanwhile can
 // read of it. The application has its URL and headers whole, and of its body
