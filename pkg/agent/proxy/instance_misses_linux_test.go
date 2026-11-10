@@ -232,6 +232,33 @@ func TestAWorkersTailLostForRoomIsSaidAtTheSetsStart(t *testing.T) {
 	}
 }
 
+// The run's tail lost for room is said at the next set's start beside a test
+// worker whose tail lost none, and a loss the run's window or a worker's
+// recorded since the previous set's last read leaves no read of the new set
+// short: it was of the previous set's tail.
+func TestARunsTailLostForRoomIsSaidBesideAWorkersAtTheSetsStart(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50094"))
+	core, logs := observer.New(zap.WarnLevel)
+	p.logger = zap.New(core)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartErrorDrain(ctx)
+	servedWorker(t, p, 1)
+	p.captureMu.Lock()
+	p.pendingLost = true
+	p.captureMu.Unlock()
+	p.missLoss.Store(&missLostListFull)
+	p.missWindowOf(1).missLoss.Store(&missLostListFull)
+	p.cutMissesAtSetStart(ctx)
+	if n := logs.FilterMessageSnippet("than keploy keeps; the rest were dropped").Len(); n != 1 {
+		t.Fatalf("the set start said %d times that the run's tail was dropped for room, want once", n)
+	}
+	if p.missLoss.Load() != nil || p.missWindowOf(1).missLoss.Load() != nil {
+		t.Fatalf("a loss of the previous set's tail outlived the set start: the run's %v, worker 1's %v", p.missLoss.Load() != nil, p.missWindowOf(1).missLoss.Load() != nil)
+	}
+}
+
 // A worker's miss says whether its test was open from the worker's own
 // manager, not the run's.
 func TestAWorkersMissIsKindedByItsOwnManager(t *testing.T) {
