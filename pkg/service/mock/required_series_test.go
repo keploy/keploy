@@ -291,6 +291,61 @@ func TestARequiredSeriesOfAReadIsServedNotRequired(t *testing.T) {
 	require.Len(t, ruleNotMadeLines(logs), 1)
 }
 
+// unchangedSeriesMappings is seriesMappings with each series a write that
+// changed nothing when recorded: every entry of cleanup/o::TestA/1 and of
+// emptied/-/1 says unchanged.
+var unchangedSeriesMappings = strings.ReplaceAll(strings.ReplaceAll(seriesMappings,
+	"series: cleanup/o::TestA/1\n", "series: cleanup/o::TestA/1\n      unchanged: true\n"),
+	"series: emptied/-/1\n", "series: emptied/-/1\n      unchanged: true\n")
+
+// A write whose every recording changed nothing (n 0) cannot hide a missing
+// data change: a trailing or a background series every entry of which says
+// unchanged (or read) is served, not required, so a run that never made
+// either passes with no RULE NOT MADE. One entry that says neither, a write
+// that changed data when recorded, keeps the whole series required, and the
+// run that never made it fails.
+func TestASeriesOfWritesThatChangedNothingIsServedNotRequired(t *testing.T) {
+	none := []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
+	code, r, tr, logs := seriesRunOf(t, unchangedSeriesMappings, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), none, nil)
+	require.Equal(t, 0, code)
+	require.Empty(t, r.FailedBy)
+	require.Nil(t, r.RequiredNotMade)
+	require.Equal(t, models.ScopeOutcomePassed, testLine(t, tr, "o::TestA").Outcome)
+	require.Empty(t, ruleNotMadeLines(logs))
+
+	mixed := unchangedSeriesMappings +
+		"    - name: mock-8\n      trails: o::TestA\n      rule: seen@44aa55bb\n      series: seen/o::TestA/1\n      unchanged: true\n" +
+		"    - name: mock-9\n      trails: o::TestA\n      rule: seen@44aa55bb\n      series: seen/o::TestA/1\n"
+	code, r, tr, logs = seriesRunOf(t, mixed, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), none, nil)
+	require.Equal(t, 1, code)
+	require.Equal(t, FailedByRuleNotMade, r.FailedBy)
+	require.Equal(t, []RequiredNotMade{{Series: "seen/o::TestA/1", Rule: "seen@44aa55bb", Trails: "o::TestA", Names: []string{"mock-8", "mock-9"}}}, r.RequiredNotMade)
+	require.Equal(t, []string{"mock-8", "mock-9"}, testLine(t, tr, "o::TestA").Evidence.Unconsumed)
+	require.Len(t, ruleNotMadeLines(logs), 1)
+}
+
+// requiredSeries leaves out a series every entry of which says read or
+// unchanged, in any mix, and keeps one an entry of which says neither:
+// a read entry beside it does not make it served.
+func TestRequiredSeriesLeavesOutOnlyWritesThatChangedNothing(t *testing.T) {
+	mp := &models.Mapping{Worker: []models.MockEntry{
+		{Name: "m1", Trails: "o::TestA", Series: "trail/o::TestA/1", Unchanged: true},
+		{Name: "m2", Trails: "o::TestA", Series: "trail/o::TestA/1", Unchanged: true},
+		{Name: "m3", Trails: "o::TestA", Series: "trail/o::TestA/2", Unchanged: true},
+		{Name: "m4", Trails: "o::TestA", Series: "trail/o::TestA/2"},
+		{Name: "m5", Trails: "o::TestA", Series: "trail/o::TestA/3", Unchanged: true},
+		{Name: "m6", Trails: "o::TestA", Series: "trail/o::TestA/3", Read: true},
+		{Name: "m7", Trails: "o::TestA", Series: "trail/o::TestA/4", Read: true},
+		{Name: "m8", Trails: "o::TestA", Series: "trail/o::TestA/4"},
+		{Name: "m9", Place: "o::TestA", Rule: "b@2", Series: "b/-/1", Unchanged: true},
+	}}
+	req := requiredSeries(mp, map[string][]string{"o::TestA": nil})
+	require.Equal(t, []string{"trail/o::TestA/2", "trail/o::TestA/4"}, slices.Sorted(maps.Keys(req)))
+	require.Equal(t, []string{"m3", "m4"}, req["trail/o::TestA/2"].Names)
+	require.Equal(t, []string{"m7", "m8"}, req["trail/o::TestA/4"].Names)
+	require.Nil(t, requiredSeries(&models.Mapping{Worker: mp.Worker[:2]}, map[string][]string{"o::TestA": nil}), "a set whose only series changed nothing requires none")
+}
+
 // A series keploy record moved as trailing a test on its own (no declared
 // rule) is required as a rule's is when it writes, and served only when it
 // reads; its RULE NOT MADE line names the record's trail move, no rule.
