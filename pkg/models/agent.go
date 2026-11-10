@@ -397,6 +397,20 @@ type ScopeWindow struct {
 // (design v14 U21).
 const PoolKeyNone = "-"
 
+// ScopeTableResp is the answer to POST /agent/scope/table: Served names the
+// fields of the table the agent applied that an older agent ignores
+// ("series"). An older agent answers with none, and the CLI refuses it for
+// a table that has one of them: it would serve every recording of a series
+// once, and a slower replay's repeat would miss.
+type ScopeTableResp struct {
+	Status string   `json:"status"`
+	Served []string `json:"served,omitempty"`
+}
+
+// ScopeTableServedSeries is ScopeTableResp.Served's name for
+// ScopeTableReq.Series.
+const ScopeTableServedSeries = "series"
+
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
@@ -443,6 +457,18 @@ type ScopeTableReq struct {
 	// own (learn.Trail). Absent when no entry trails a test, and from an
 	// older CLI: every call then reads only its own test's places.
 	Trails map[string]string `json:"trails,omitempty"`
+	// Series is, under the proven switch, by series (MockEntry.Series), the
+	// names of the worker-scope recordings a rule the user declared in
+	// keploy.yml placed there, in placement order: only names Worker holds.
+	// Every recording of one series answers one request with one answer.
+	// Inside the windows each answers at most once, as the rest of Worker
+	// does, until every recording of its series has; from then on the
+	// series' last-placed recording answers each repeat of the request.
+	// Between tests they answer again, as the rest of Worker does. Absent
+	// when no rule placed any. The agent's answer to the table names it
+	// (ScopeTableResp.Served) when it serves it; the CLI refuses an agent
+	// that does not.
+	Series map[string][]string `json:"series,omitempty"`
 	// RepeatReads is, under the proven switch, each test's repeated reads
 	// by test ID, as whatever names them for the replay named them
 	// (mock.RegisterRepeatReadNamer): recordings of one read the test made

@@ -232,8 +232,13 @@ func (a *Agent) HandleScopeWindows(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleScopeTable installs the replay-time per-test name→mock-names table.
+//
+// Its answer names the table's fields the agent applied that an older agent
+// ignores (models.ScopeTableResp.Served), so the CLI can refuse an agent
+// that would serve them otherwise.
 func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 	var req models.ScopeTableReq
+	var served []string
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid scope-table request: %v", err), http.StatusBadRequest)
 		return
@@ -362,6 +367,19 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot learn a worker: call that trails an earlier test", http.StatusNotImplemented)
 			return
 		}
+		// The series of the recordings a declared rule placed, with the
+		// worker scope. Every table says it, an empty one too. An agent
+		// that cannot serve one refuses a table that has one.
+		if ss, ok := a.svc.(scopeSeriesSetter); ok {
+			if err := ss.SetScopeSeries(r.Context(), req.Series); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedSeries)
+		} else if len(req.Series) > 0 {
+			http.Error(w, "this keploy agent cannot serve a series of recordings a declared rule placed", http.StatusNotImplemented)
+			return
+		}
 		// The recordings keploy's judging marked served, not required, by test, before
 		// the pool is served. Every table says it, an empty one too: a set
 		// never keeps the previous set's. An agent that cannot take them
@@ -393,7 +411,7 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	render.Status(r, http.StatusOK)
-	render.JSON(w, r, map[string]string{"status": "ok"})
+	render.JSON(w, r, models.ScopeTableResp{Status: "ok", Served: served})
 }
 
 // scopeRepeatReadsSetter installs each test's repeated reads
@@ -436,6 +454,13 @@ type scopeSkippedReadsSetter interface {
 // for a replay (models.ScopeTableReq.Trails, proven wire).
 type scopeTrailsSetter interface {
 	SetScopeTrails(ctx context.Context, trails map[string]string) error
+}
+
+// scopeSeriesSetter installs, by series, the worker-scope recordings a
+// declared rule placed for a replay, in placement order
+// (models.ScopeTableReq.Series, proven wire).
+type scopeSeriesSetter interface {
+	SetScopeSeries(ctx context.Context, series map[string][]string) error
 }
 
 // scopeNotRequiredSetter installs, by test, the recordings keploy's judging

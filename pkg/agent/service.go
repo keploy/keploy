@@ -1113,6 +1113,14 @@ type PoolTrailsSetter interface {
 	SetPoolTrails(trails map[string]string) error
 }
 
+// PoolSeriesSetter is implemented by a proxy that serves a series of
+// worker-scope recordings a declared rule placed: SetPoolSeries installs, of
+// keploy mock replay's scope table under the proven switch, each series'
+// recordings in placement order (models.ScopeTableReq.Series).
+type PoolSeriesSetter interface {
+	SetPoolSeries(series map[string][]string) error
+}
+
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
 // is ServeExactPool that also answers, while no test is open, the next test's
 // mocks that were in flight when it began (ahead, models.ExactServing.Ahead),

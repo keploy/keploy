@@ -92,6 +92,9 @@ type composeInstr struct {
 	// background are the names of the set's background recordings that
 	// push sent (models.ScopeTableReq.Background).
 	background []string
+	// series is, by series, the worker-scope recordings a declared rule
+	// placed that push sent (models.ScopeTableReq.Series).
+	series map[string][]string
 	// begins and seeds are what the last push of the tests' recorded begins
 	// sent, and beginsErr what it fails with.
 	begins    map[string]time.Time
@@ -246,10 +249,11 @@ func (f *composeInstr) PushScopeTable(_ context.Context, _ map[string][]string, 
 // PushProvenTable takes the per-test table, the pool slices, the worker
 // scope, the names of it that are skipped tests' reads, the trails, the
 // recorded test windows, the recorded givens, the named repeated reads, the
-// not-required marks and the background recordings' names
+// not-required marks, the background recordings' names and the series
 // (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string) error {
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string) error {
 	f.table, f.pool, f.worker, f.skippedReads, f.trails, f.recordedWindows, f.given, f.repeats, f.notRequired, f.background = table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background
+	f.series = series
 	return nil
 }
 

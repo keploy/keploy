@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"context"
 	"io"
 	"net/http"
@@ -80,38 +81,38 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	defer srv.Close()
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, nil, nil, nil, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The recorded test windows go with them, in the same request.
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil, nil, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The values each test gave when it was recorded ride the same request.
 	given := map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, given, nil, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, given, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// So do each test's repeated reads.
 	repeats := map[string][]models.RepeatRead{"o::TestA": {{Name: "onboarding", Mocks: []string{"mock-3", "mock-4"}}}}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3", "mock-4"}}, nil, nil, nil, nil, nil, nil, repeats, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3", "mock-4"}}, nil, nil, nil, nil, nil, nil, repeats, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The test each worker recording trails rides it with the worker scope.
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}, "o::TestB": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, map[string]string{"mock-2": "o::TestA"}, nil, nil, nil, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}, "o::TestB": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, map[string]string{"mock-2": "o::TestA"}, nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The names each test's own list marks served, not required, too.
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, nil, nil, map[string][]string{"o::TestA": {"mock-3"}}, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, nil, nil, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// So do the names of the worker scope that are the reads of tests the
 	// replay's gate skips.
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, map[string]string{"mock-2": "o::TestCRUD"}, nil, nil, nil, nil, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, map[string]string{"mock-2": "o::TestCRUD"}, nil, nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -129,7 +130,7 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	}
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushProvenTable(ctx, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil); err == nil {
+		if err := a.PushProvenTable(ctx, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil); err == nil {
 			t.Fatalf("status %d: want an error", s)
 		}
 	}
@@ -167,7 +168,7 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	notRequired := map[string][]string{"o::TestA": {"mock-3"}}
 	skipped := map[string]string{"mock-1": "o::TestCRUD"}
 	background := []string{"mock-1"}
-	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, map[string][]string{"o": {"mock-1"}}, skipped, trails, windows, given, repeats, notRequired, background); err != nil {
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, map[string][]string{"o": {"mock-1"}}, skipped, trails, windows, given, repeats, notRequired, background, nil); err != nil {
 		t.Fatal(err)
 	}
 	windows[0].TestCase = "o::Changed" // the caller's slice is its own
@@ -183,5 +184,39 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}],"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]},"worker":{"o":["mock-1"]},"trails":{"mock-1":"o::TestA"},"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-3"]}]},"notRequired":{"o::TestA":["mock-3"]},"skippedReads":{"mock-1":"o::TestCRUD"},"background":["mock-1"]}`
 	if !slices.Equal(bodies, []string{want, want}) {
 		t.Fatalf("posted %q, want the table, its windows, its givens, its worker scope, its trails, its repeated reads, its not-required marks, its skipped reads and its background recordings twice: %q", bodies, want)
+	}
+}
+
+// A table with series is refused by an agent whose answer does not
+// acknowledge them: an older agent answers 200 with no body or with no
+// served field, and would serve each recording of a series once. The CLI
+// errors (ErrAgentIgnoresRules), so the replay does not run on it. An agent
+// that names series is taken, and a table with no series takes any 200.
+func TestScopeTableWithoutAckIsRefused(t *testing.T) {
+	var answer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, answer)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	ctx := context.Background()
+	series := map[string][]string{"sweep/o::TestA/1": {"mock-2"}}
+	push := func(series map[string][]string) error {
+		return a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series)
+	}
+	for _, old := range []string{"", `{"status":"ok"}`, `{"status":"ok","served":["trails"]}`, `not json`, `{"status":"ok","served":["series"],`} {
+		answer = old
+		if err := push(series); !errors.Is(err, ErrAgentIgnoresRules) {
+			t.Fatalf("answer %q to a table with series: got %v, want ErrAgentIgnoresRules", old, err)
+		}
+		if err := push(nil); err != nil {
+			t.Fatalf("answer %q to a table with no series: %v", old, err)
+		}
+	}
+	answer = `{"status":"ok","served":["series"]}`
+	if err := push(series); err != nil {
+		t.Fatalf("an agent that acknowledges series was refused: %v", err)
 	}
 }

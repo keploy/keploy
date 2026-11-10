@@ -854,6 +854,28 @@ func TestTheReplayPushesTheTestEachWorkerRecordingTrails(t *testing.T) {
 		"mock-2's trail names no test of the set, mock-0 is TestA's own, mock-4 trails none")
 }
 
+// Under the switch the replay hands the agent, with the worker scope, the
+// series of the recordings a rule declared in keploy.yml placed there
+// (mappings' worker: series:), in worker:'s order; an entry with none is in
+// no series.
+func TestTheReplayPushesTheSeriesOfTheRecordingsARulePlaced(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\nworker:\n    - name: mock-3\n      rule: sweep@0123abcd\n      series: sweep/o::TestA/1\n    - name: mock-4\n    - name: mock-2\n      rule: sweep@0123abcd\n      series: sweep/o::TestA/1\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-2", "mock-3", "mock-4"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, map[string][]string{"sweep/o::TestA/1": {"mock-3", "mock-2"}}, instr.series)
+}
+
 // workerTrails reads a trail only off an entry that names one: a set whose
 // table holds a test with an empty ID trails none to it.
 func TestWorkerTrailsReadsOnlyAnEntryThatNamesATest(t *testing.T) {

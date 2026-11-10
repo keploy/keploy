@@ -5244,17 +5244,20 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // its list keploy's judging marked served, not required
 // (models.ScopeTableReq.NotRequired). background names the set's background
 // recordings, its worker: and startup: mocks (models.ScopeTableReq.Background).
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string) (retErr error) {
+// series is, by series, the worker-scope recordings a declared rule placed
+// (models.ScopeTableReq.Series): an agent whose answer does not name it
+// (models.ScopeTableResp.Served) is refused with ErrAgentIgnoresRules.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p, wk, sr, tr, w, g, r, nr, bg := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired), slices.Clone(background)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr, bg) })
+			t, p, wk, sr, tr, w, g, r, nr, bg, se := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired), slices.Clone(background), maps.Clone(series)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr, bg, se) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
@@ -5275,8 +5278,21 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("the agent refused the per-test table and pool slices (status %d): %s", res.StatusCode, strings.TrimSpace(string(b)))
 	}
+	if len(series) == 0 {
+		return nil
+	}
+	// An older agent answers with no field named: it would serve a series'
+	// recordings once each, so a slower replay's repeat would miss.
+	var ack models.ScopeTableResp
+	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&ack); err != nil || !slices.Contains(ack.Served, models.ScopeTableServedSeries) {
+		return ErrAgentIgnoresRules
+	}
 	return nil
 }
+
+// ErrAgentIgnoresRules is PushProvenTable's refusal of an agent that does
+// not acknowledge a scope table's series (models.ScopeTableResp.Served).
+var ErrAgentIgnoresRules = errors.New("this keploy agent does not acknowledge the scope table's series (an older agent ignores them): keploy mock does not run a set with declared rules on it; update the agent")
 
 // PushTestBegins hands the agent when each test of the replayed recording
 // began, so it moves the run's clock per test, and the seed each test's

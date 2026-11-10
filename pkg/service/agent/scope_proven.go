@@ -116,6 +116,11 @@ type provenWire struct {
 	// SetScopePool hands the proxy with the table's tests. nil when the
 	// table had none.
 	trails map[string]string
+	// series is, in a replay, the series of the worker-scope recordings a
+	// declared rule placed, by series (the CLI's scope table,
+	// models.ScopeTableReq.Series), which SetScopePool hands the proxy.
+	// nil when the table had none.
+	series map[string][]string
 	// notRequired is, in a replay, by test ID, the names of the test's own
 	// list keploy's judging marked served, not required (the CLI's scope table,
 	// models.ScopeTableReq.NotRequired): its end does not charge the test
@@ -634,12 +639,19 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 			return err
 		}
 	}
-	// The test each worker recording trails, read with the tests above.
+	// The test each worker recording trails, read with the tests above,
+	// and the series of the recordings a declared rule placed.
 	a.provenMu.Lock()
 	trails := maps.Clone(a.proven.trails)
+	series := maps.Clone(a.proven.series)
 	a.provenMu.Unlock()
 	if ts, ok := a.Proxy.(coreAgent.PoolTrailsSetter); ok {
 		if err := ts.SetPoolTrails(trails); err != nil {
+			return err
+		}
+	}
+	if ss, ok := a.Proxy.(coreAgent.PoolSeriesSetter); ok {
+		if err := ss.SetPoolSeries(series); err != nil {
 			return err
 		}
 	}
@@ -661,6 +673,31 @@ func (a *Agent) SetScopeTrails(ctx context.Context, trails map[string]string) er
 	defer a.wire.unlock()
 	a.provenMu.Lock()
 	a.proven.trails = maps.Clone(trails)
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeSeries installs the series of the worker-scope recordings a
+// declared rule placed for a replay (models.ScopeTableReq.Series), which the
+// pool slices sent next hand the proxy (SetScopePool): inside the windows a
+// series' last-placed recording answers its repeats once every recording of
+// it answered there. None leaves the set none, never the previous set's. A
+// proxy that cannot serve a series refuses one: the CLI refuses an agent
+// that does not acknowledge it.
+func (a *Agent) SetScopeSeries(ctx context.Context, series map[string][]string) error {
+	if _, ok := a.Proxy.(coreAgent.PoolSeriesSetter); !ok && len(series) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a series of recordings a declared rule placed")
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	cp := make(map[string][]string, len(series))
+	for id, names := range series {
+		cp[id] = append([]string(nil), names...)
+	}
+	a.provenMu.Lock()
+	a.proven.series = cp
 	a.provenMu.Unlock()
 	return nil
 }

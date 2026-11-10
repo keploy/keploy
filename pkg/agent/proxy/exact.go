@@ -59,6 +59,15 @@ import (
 //     (exact_background.go) one of the pool's is spent through a door that
 //     keeps it too, and the worker scope, staged apart from the pool, is
 //     not.
+//   - A series of the worker scope (SetPoolSeries: recordings a rule the
+//     user declared in keploy.yml placed, every one answering one request
+//     with one answer) keeps that rule, with one change inside the windows:
+//     once every recording of the series has answered there, its
+//     last-placed recording answers each repeat of the request. A clean-up
+//     the application repeats on a timer then never misses when the replay
+//     is slower than the record, and the count of repeats moves nothing.
+//     Each repeat must still be the request itself: the parser matches it
+//     as any other. A trail move's answer-once rule does not hold a series.
 //
 // A data-plane recording a parser consumes through a delete door while no
 // test is open (a call before the first test or between tests) is consumed
@@ -220,6 +229,11 @@ type exactView struct {
 	// trail move put there, each answering at most once in the staging
 	// (outsideState.trailUsed). nil on a view no manager installed.
 	trails *atomic.Pointer[map[string]string]
+	// series is the manager's poolSeries: a series' last-placed recording
+	// shows again in the windows once every recording of its series
+	// answered there (seriesIndex.againIn). nil on a view no manager
+	// installed.
+	series *atomic.Pointer[seriesIndex]
 	// kept is the manager's kept learning (SetKeptLearning): each staged
 	// recording the view hands out carries it (learned). nil on a view no
 	// manager installed.
@@ -355,6 +369,11 @@ type exactState struct {
 	// recording trails (SetPoolTrails): what the learn step reads such a
 	// call's scope by (TrailOf). nil until a replay sent one.
 	poolTrails atomic.Pointer[map[string]string]
+	// poolSeries is, of the same scope table, the series the worker-scope
+	// recordings a declared rule placed belong to (SetPoolSeries): what
+	// answers a series' repeats past its recorded count in the windows
+	// (seriesIndex.againIn). nil until a replay sent one.
+	poolSeries atomic.Pointer[seriesIndex]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
 	// cached for one staging generation of the trees (StagingGeneration: an
 	// exact serve does not move it), one scope table, one recording's times
@@ -718,6 +737,11 @@ type outsideState struct {
 	// a second call of it, wherever it lands, is not answered from it, and
 	// neither inTests nor between gives it again.
 	trailUsed sync.Map
+	// seriesRepeats counts, by series (poolSeries), the calls in the
+	// windows its last-placed recording answered again once every recording
+	// of the series had answered there (seriesIndex.againIn): each a
+	// *atomic.Int64.
+	seriesRepeats sync.Map
 	// unstaged holds the names of the recordings a door named that staged
 	// does not hold, once each is said (MockManager.servedAsNamed).
 	unstaged sync.Map
@@ -870,14 +894,20 @@ func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict 
 		return exactRefused
 	}
 	// A trailing write answers once in the staging, wherever its call lands
-	// (outsideState.trailUsed).
-	if isTrail(&m.exact.poolTrails, mk.Name) {
+	// (outsideState.trailUsed). A declared rule's series answers by its own
+	// rule instead (seriesIndex.againIn).
+	series := m.exact.poolSeries.Load()
+	if isTrail(&m.exact.poolTrails, mk.Name) && !series.has(mk.Name) {
 		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
 			return exactRefused
 		}
 	}
 	if inTest {
 		if _, taken := st.inTests.LoadOrStore(mk.Name, true); taken {
+			if series.againIn(st, mk.Name) {
+				st.countRepeat(series.of[mk.Name].id)
+				return exactServed
+			}
 			return exactRefused
 		}
 		return exactServed
@@ -909,7 +939,9 @@ func (m *MockManager) consumeBetween(mk *models.Mock) (verdict exactVerdict, fir
 	}
 	// A trailing write answers once in the staging, between tests too
 	// (outsideState.trailUsed): it is no call the app repeats between tests.
-	if isTrail(&m.exact.poolTrails, mk.Name) {
+	// A declared rule's series answers again here, as the rest of the worker
+	// scope does.
+	if isTrail(&m.exact.poolTrails, mk.Name) && !m.exact.poolSeries.Load().has(mk.Name) {
 		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
 			return exactRefused, false
 		}
@@ -1856,6 +1888,125 @@ func (m *MockManager) SetPoolTrails(trails map[string]string) {
 	m.exact.poolTrails.Store(&cp)
 }
 
+// seriesIndex is a replay's series of worker-scope recordings a declared
+// rule placed (models.ScopeTableReq.Series): every recording of one series
+// answers one request with one answer.
+type seriesIndex struct {
+	// of is each recording's series and whether it is the series'
+	// last-placed recording.
+	of map[string]seriesMember
+	// members is, by series, its recordings in placement order.
+	members map[string][]string
+}
+
+type seriesMember struct {
+	id   string
+	last bool
+}
+
+// SetPoolSeries installs, of the replay's scope table, the series the
+// worker-scope recordings a declared rule placed belong to
+// (models.ScopeTableReq.Series: series -> recording names in placement
+// order). Inside the windows each recording answers at most once, as the
+// rest of the worker scope does, until every recording of its series has
+// answered there; from then on the series' last-placed recording answers
+// each repeat of the call (seriesIndex.againIn). Between tests they answer
+// again, as the rest of the worker scope does, and a trail move's
+// answer-once rule (outsideState.trailUsed) does not hold them. A name in
+// two series is held by the first in series order; an empty name is
+// skipped. None leaves the set none, never the previous set's.
+func (m *MockManager) SetPoolSeries(series map[string][]string) {
+	idx := &seriesIndex{of: map[string]seriesMember{}, members: map[string][]string{}}
+	ids := make([]string, 0, len(series))
+	for id := range series {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		var names []string
+		for _, n := range series[id] {
+			if _, dup := idx.of[n]; n == "" || dup {
+				continue
+			}
+			idx.of[n] = seriesMember{id: id}
+			names = append(names, n)
+		}
+		if len(names) == 0 {
+			continue
+		}
+		idx.of[names[len(names)-1]] = seriesMember{id: id, last: true}
+		idx.members[id] = names
+	}
+	m.exact.poolSeries.Store(idx)
+}
+
+// has reports whether name is a recording of a series of s.
+func (s *seriesIndex) has(name string) bool {
+	if s == nil {
+		return false
+	}
+	_, ok := s.of[name]
+	return ok
+}
+
+// againIn reports whether name is its series' last-placed recording and
+// every recording of the series answered a call in the windows of st
+// (outsideState.inTests): name then answers each repeat of the call there.
+// Its answer is the series' one answer (a series of two answers is never
+// placed), so a repeat the application makes because the replay is slower
+// than the record never misses, and how many it makes does not move what
+// a window is answered.
+func (s *seriesIndex) againIn(st *outsideState, name string) bool {
+	if s == nil || st == nil {
+		return false
+	}
+	mem, ok := s.of[name]
+	if !ok || !mem.last {
+		return false
+	}
+	for _, n := range s.members[mem.id] {
+		if _, used := st.inTests.Load(n); !used {
+			return false
+		}
+	}
+	return true
+}
+
+// seriesAgain is seriesIndex.againIn on the staging epoch is.
+func (o *outsideAnswers) seriesAgain(s *seriesIndex, name string, epoch uint64) bool {
+	st := o.cur.Load()
+	if st == nil || st.epoch != epoch {
+		return false
+	}
+	return s.againIn(st, name)
+}
+
+// countRepeat counts one call series' last-placed recording answered again
+// (outsideState.seriesRepeats).
+func (st *outsideState) countRepeat(series string) {
+	n, _ := st.seriesRepeats.LoadOrStore(series, new(atomic.Int64))
+	n.(*atomic.Int64).Add(1)
+}
+
+// SeriesRepeats is, by series, how many calls in the windows of the
+// current staging its last-placed recording answered past the series'
+// recorded count (SetPoolSeries). nil when none did.
+func (m *MockManager) SeriesRepeats() map[string]int64 {
+	st := m.exact.outside.cur.Load()
+	if st == nil || st.epoch != m.stagingEpoch.Load() {
+		return nil
+	}
+	var out map[string]int64
+	st.seriesRepeats.Range(func(k, v any) bool {
+		if out == nil {
+			out = map[string]int64{}
+		}
+		out[k.(string)] = v.(*atomic.Int64).Load()
+		return true
+	})
+	return out
+}
+
 var _ integrations.TrailedTests = (*MockManager)(nil)
 
 // TrailOf implements integrations.TrailedTests: the test the recording
@@ -2024,6 +2175,7 @@ func (m *MockManager) installExact(v *exactView) { m.installExactWith(v, nil) }
 // what it changes is seen by a snapshot with v, never before it.
 func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) {
 	v.outside, v.epoch, v.kept, v.trails = &m.exact.outside, &m.stagingEpoch, &m.exact.kept, &m.exact.poolTrails
+	v.series = &m.exact.poolSeries
 	if v.test == "" {
 		key := v.poolKey
 		m.exact.poolCursor.Store(&key)
@@ -2734,13 +2886,19 @@ func (v *exactView) spentOutsideIn(name string, windowed bool) bool {
 		return false
 	}
 	e := v.epoch.Load()
-	if isTrail(v.trails, name) {
+	var series *seriesIndex
+	if v.series != nil {
+		series = v.series.Load()
+	}
+	if isTrail(v.trails, name) && !series.has(name) {
 		// A trailing write that answered once is spent for the staging,
 		// in every window and between tests (outsideState.trailUsed).
 		return v.outside.trailUsed(name, e)
 	}
 	if windowed && v.isWorker(name) {
-		return v.outside.hiddenInTests(name, e)
+		// A series' last-placed recording shows again once its series
+		// answered in the windows (seriesIndex.againIn).
+		return v.outside.hiddenInTests(name, e) && !v.outside.seriesAgain(series, name, e)
 	}
 	return v.outside.hidden(name, e)
 }

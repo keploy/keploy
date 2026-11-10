@@ -1356,7 +1356,9 @@ func (m *mockService) matchNoise(name string) models.OutgoingOptions {
 // startup: or worker:), else models.PoolKeyNone. Those worker: lists are
 // each key's worker scope too, which answers in a test's window as well,
 // each at most once, and is required of no test; with the test each of them
-// trails (workerTrails). A mapping that cannot be
+// trails (workerTrails), and the series of those a rule declared in
+// keploy.yml placed (workerSeries), which an agent must acknowledge. A
+// mapping that cannot be
 // read, or that names a mock the recording does not have, refuses, and so
 // does an agent that refuses the table: nothing is served from a whole pool
 // instead. The values each test gave when it was recorded go in the same
@@ -1431,7 +1433,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool)); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -1871,6 +1873,34 @@ func workerTrails(mp *models.Mapping, worker map[string][]string, table map[stri
 			out = map[string]string{}
 		}
 		out[e.Name] = e.Trails
+	}
+	return out
+}
+
+// workerSeries is, by series (models.MockEntry.Series), the names of the
+// recordings of mp's worker scope a declared rule placed, in the order
+// worker: lists them, which is the order they were placed in: only a name
+// worker serves (a name the agent does not hold answers nothing). nil when
+// no served entry has a series.
+func workerSeries(mp *models.Mapping, worker map[string][]string) map[string][]string {
+	if mp == nil {
+		return nil
+	}
+	served := map[string]bool{}
+	for _, names := range worker {
+		for _, n := range names {
+			served[n] = true
+		}
+	}
+	var out map[string][]string
+	for _, e := range mp.Worker {
+		if e.Series == "" || !served[e.Name] {
+			continue
+		}
+		if out == nil {
+			out = map[string][]string{}
+		}
+		out[e.Series] = append(out[e.Series], e.Name)
 	}
 	return out
 }
