@@ -588,6 +588,16 @@ type UnmatchedCall struct {
 	// no test's: the replay fails the set with it, naming the call, and
 	// charges no test (the read of the set's first test carries it).
 	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
+	// EarlierSetTest names, under the proven switch, the test of an earlier
+	// test set whose view the call was marked in (Marked.Test), when keploy
+	// decided the call only after the next set's mocks were staged: that
+	// test's own call, which no read of its set could take any more. Its Kind
+	// is MissOutsideTest and BeforeSet is false: it is no call of the set
+	// whose read returns it, nor of any of that set's tests, and none of them
+	// is charged with it. keploy test fails the run with it, naming the test
+	// and the set it was made in; keploy mock's agent lists it under that
+	// test (WindowOf), charged to no test. Empty for every other call.
+	EarlierSetTest string `json:"earlier_set_test,omitempty" yaml:"earlier_set_test,omitempty"`
 	// Held mirrors MockMismatchReport.HeldPastWindow: a parser held the call
 	// past its own window for a later test's recording, and none answered it
 	// by the set's end or its connection's end, where its miss was filed. It
@@ -620,7 +630,7 @@ type UnmatchedCall struct {
 	// test it did not make (the test that read it), and is listed under this
 	// name, filed in or between tests alike, and when keploy decided it only
 	// after the next test set's mocks were staged (the next set's first read
-	// then carries it as made before that set, BeforeSet). A background
+	// then carries it as an earlier set's test's call, EarlierSetTest). A background
 	// repeat with a mark is listed under
 	// the test whose view it was marked in, none for a pool view. Empty for
 	// every other call, and for one made before that test began being served,

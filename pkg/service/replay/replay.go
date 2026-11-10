@@ -819,6 +819,11 @@ type Replayer struct {
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
 	setCalls setCalls
+	// earlierSetCalls are the calls of earlier sets' tests that keploy
+	// decided only after their set had ended, which a later set's read
+	// returned (proven switch): they fail the run, and no set
+	// (earlier_set_calls.go).
+	earlierSetCalls earlierSetCalls
 	// keptInside is each destination the app called that no mock answered,
 	// over the whole run, for the run's report of them (kept_inside.go).
 	keptInside keptInside
@@ -942,6 +947,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.refusedSets = nil
 	r.completeTestReportMu.Unlock()
 	r.forgetQuarantined()
+	r.earlierSetCalls.reset()
 	r.failedTCsBySetID = make(map[string][]string)
 	r.mockMismatchFailures = NewTestFailureStore()
 	defer func() { r.armStartExitCode(stoppedByItsUser(parentCtx), err, testRunResult, verdictReached) }()
@@ -1661,6 +1667,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			zap.Strings("test_sets", testSets),
 			zap.String("next_step", "take a test set or test out of test.ignoredTests (or out of quarantine), or run only the test sets that should run with --test-sets"))
 	}
+	// A call an earlier set's test made that keploy decided only after that
+	// set had ended fails the run: no set's verdict counts it.
+	testRunResult = r.passesEarlierSetCalls(testRunResult)
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
@@ -3416,6 +3425,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// What the previous set's application missed before its first test is
 	// not this set's, nor are the tests whose request its agent did not read.
 	r.setCalls.reset()
+	// An earlier set's test's call this set's reads return was made in the
+	// set the run ran before it.
+	r.earlierSetCalls.begin(testSetID)
 	r.requestsUnread.reset()
 	// var to store the error in the loop
 	var loopErr error
@@ -9988,6 +10000,9 @@ func (r *Replayer) readMockErrors(ctx context.Context, test string) testMisses {
 	// proven switch off too (models.WithTestEndRead).
 	calls, err := r.instrumentation.GetMockErrors(models.WithTestEndRead(ctx, test))
 	r.keptInside.add(calls)
+	// A call an earlier set's test made is the run's, not this test's nor
+	// this set's (earlier_set_calls.go).
+	calls = r.takeEarlierSetCalls(calls)
 	// What was missed before the set's first test, and a call a parser held
 	// for a later test that none answered (its connection ended in this
 	// test), are the set's, not this test's (before_set_calls.go).

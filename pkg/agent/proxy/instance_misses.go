@@ -47,6 +47,16 @@ type missWindow struct {
 	// checks — is still discarded), and the buffer is bounded so it can't grow
 	// unboundedly.
 	pendingMockErrors testErrorAccumulator
+	// setStaged is, under the proven switch, the staging
+	// (MockManager.StagingEpoch) of the running test set's first on the
+	// manager this window's calls are marked on (the run's, or the test
+	// worker's own), which cut what was missed until then
+	// (cutMissesAtSetStart); 0 before any. A miss whose call was marked in an
+	// earlier staging (models.MockMismatchReport.MarkEpoch) is not the set's,
+	// and the drain cuts it as the set's start did, however late it arrives
+	// (markedBeforeSet), or keeps it as the start did, one marked in a test's
+	// view (markedInATest).
+	setStaged atomic.Uint64
 }
 
 // missInstance is the test worker whose process made the miss err (0: none).
@@ -124,14 +134,23 @@ func (p *Proxy) sendDNSMiss(miss error, question dns.Question) {
 	p.SendError(miss)
 }
 
-// workerMissWindows is every served test worker's misses window.
-func (p *Proxy) workerMissWindows() []*missWindow {
+// markedOn is a misses window with the manager its calls are marked on.
+type markedOn struct {
+	w *missWindow
+	m *MockManager
+}
+
+// missWindowsMarkedOn is the run's misses window, with the run's manager,
+// and each served test worker's, with the worker's own manager (nil for
+// none): a worker's call is marked on its own manager's stagings, never the
+// run's (setStaged).
+func (p *Proxy) missWindowsMarkedOn() []markedOn {
+	out := []markedOn{{&p.missWindow, p.getMockManager()}}
 	s := &p.instances
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]*missWindow, 0, len(s.misses))
-	for _, w := range s.misses {
-		out = append(out, w)
+	for inst, w := range s.misses {
+		out = append(out, markedOn{w, s.mgrs[inst]})
 	}
 	return out
 }

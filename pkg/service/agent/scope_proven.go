@@ -1957,11 +1957,12 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // charged to no test, and the run's receipt lists it
 // (Receipt.UnchargedMisses), so a reader who finds it the test's own call
 // edits the set's mappings rather than keploy guessing. Where its mark names
-// the test whose view it was made in (a test set's last test's call keploy
-// decided only after the next set's mocks were staged, which the proxy keeps
-// for that set's first read as made before it), it is listed under that test
-// (models.UnmatchedCall.WindowOf), even where the test that read it has the
-// same name.
+// the test whose view it was made in, it is listed under that test
+// (models.UnmatchedCall.WindowOf). So is an earlier test set's test's own
+// call that keploy decided only after this set's mocks were staged, which the
+// proxy keeps for this set's first read naming that test
+// (models.UnmatchedCall.EarlierSetTest), even where the test that read it has
+// the same name.
 //
 // A miss marked in another test's view before this test's was installed
 // (markedInAnotherTest) is that test's own call, which keploy decided only
@@ -1985,11 +1986,17 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began 
 	all, err := a.missesOf(ctx, a.scopeInstance(id))
 	var misses, outside []models.UnmatchedCall
 	for _, m := range all {
+		if m.EarlierSetTest != "" {
+			// An earlier set's test's own call, which keploy decided only
+			// after this set's mocks were staged: listed under that test,
+			// however its round and this test's install fall.
+			m.WindowOf = m.EarlierSetTest
+			outside = append(outside, m)
+			continue
+		}
 		if outsideEveryTest(m, began) {
 			// Listed under the test whose view it was marked in, where
-			// it names one: a previous set's last test's call keploy
-			// decided after this set's mocks were staged (the proxy
-			// keeps it as made before this set).
+			// it names one.
 			m.WindowOf = m.Marked.Test
 			outside = append(outside, m)
 			continue
