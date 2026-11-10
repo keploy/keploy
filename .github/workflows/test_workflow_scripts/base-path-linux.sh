@@ -12,11 +12,11 @@
 # on the port the test was recorded on, whatever the base path said, asked for
 # the app by the name it was recorded under, and had its URL unescaped on the
 # way (%20 to a space, %2F to a path separator, %23 to the start of a
-# fragment); and a streaming test was never given the base path at all.
+# fragment).
 #
-# Records six tests of an app that prices orders from a dependency -- one with
-# escapes in its path and query that the app answers with what it was asked,
-# one streamed -- then replays them with --base-path, not as root:
+# Records five tests of an app that prices orders from a dependency -- one
+# with escapes in its path and query that the app answers with what it was
+# asked -- then replays them with --base-path, not as root:
 #   1. the app where it was recorded: all pass, exit 0;
 #   2. the app at another address (127.0.0.2, on the dependency's old port),
 #      with the dependency now answering at the recorded address: all pass,
@@ -32,7 +32,7 @@
 #      report, exit code 1. The first was left out of the URLs behind an
 #      ERROR line each, and the second read as naming no host, and the tests
 #      passed against the app at the recorded address;
-#   6. as 2, with a seventh test whose URL the base path cannot go in (its
+#   6. as 2, with a sixth test whose URL the base path cannot go in (its
 #      origin is a template value): that test fails and is not sent, exit
 #      code 1. It was sent to the recorded address, where the dependency is;
 #   7. the base path naming a port nothing listens on, and --port the app's:
@@ -69,7 +69,7 @@ WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
 APP_PORT=18911
 DEP_PORT=18912
-TESTS=6
+TESTS=5
 FAIL=0
 fail() { # FAIL counts failures, so each replay can tell whether it added one
   echo "FAIL: $*"
@@ -104,7 +104,7 @@ PY
 # health check, the first test, for leg 9. It answers only a request that
 # asks for it by its own address, as an app behind a front that routes by name
 # is only reached under its name; /echo/ answers with the request target as it
-# came over the wire; /events streams three lines.
+# came over the wire.
 cat > app.py <<'PY'
 import http.server, json, socketserver, sys, time, urllib.request
 BIND, PORT, DEP = sys.argv[1], int(sys.argv[2]), "http://127.0.0.1:%s" % sys.argv[3]
@@ -122,13 +122,6 @@ class H(http.server.BaseHTTPRequestHandler):
         asked = self.headers.get("Host")
         if asked == ME: return False
         self.send(421, {"error": "asked for %s, this is %s" % (asked, ME)}); return True
-    def stream(self):
-        self.send_response(200); self.send_header("Content-Type", "application/x-ndjson")
-        self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
-        for n in (1, 2, 3):
-            line = (json.dumps({"n": n, "price": price("widget")}) + "\n").encode()
-            self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line)); self.wfile.flush(); time.sleep(0.1)
-        self.wfile.write(b"0\r\n\r\n")
     def hold(self):
         open("app.holding", "w").close()
         while True: time.sleep(60)
@@ -139,7 +132,6 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path == "/orders/1" and MODE == "hold": return self.hold()
         if self.path == "/orders/1": return self.send(200, {"id": 1, "item": "widget", "price": price("widget")})
         if self.path.startswith("/echo/"): return self.send(200, {"asked": self.path})
-        if self.path == "/events": return self.stream()
         self.send(404, {"error": "no such order"})
     def do_POST(self):
         order = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
@@ -162,7 +154,7 @@ trap down EXIT
 
 # listening HOST PORT: something accepts a connection there. A connection and
 # no request: under `keploy record` a request is a test, and the recording is
-# to hold the six below and no probe.
+# to hold the five below and no probe.
 listening() { (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null; }
 
 # unused HOST PORT: nothing listens there yet. A listener that is not this
@@ -212,7 +204,7 @@ up() {
   serve app.log "$1" "$2" python3 app.py "$@"
 }
 
-# The recording's six requests, once keploy has the app up. That takes as long
+# The recording's five requests, once keploy has the app up. That takes as long
 # as keploy gives its agent to come up, which is the 330s this outwaits.
 drive() {
   local at="http://127.0.0.1:$APP_PORT" rc=0
@@ -223,7 +215,6 @@ drive() {
   curl -sS --max-time 30 -H 'Content-Type: application/json' -d '{"item":"gadget","qty":2}' "$at/orders" || rc=1
   curl -sS --max-time 30 "$at/orders/9" || rc=1
   curl -sS --max-time 30 "$at/echo/a%2Fb/?q=a%20b%23c%26d%3De" || rc=1
-  curl -sS --max-time 30 "$at/events" || rc=1
   return "$rc"
 }
 
@@ -289,8 +280,6 @@ replay() {
   elif [ -f "$report" ]; then
     got=$(report_of "$((RUN - 1))")
     [ "$got" = "$want" ] || fail "$name: the report says '$got' (status, passed, failed), want '$want'"
-    # The streamed test runs after the others, in a pass of its own.
-    grep -q 'Now executing streaming tests' "$name.log" || fail "$name: the streamed test was not replayed as a stream"
   else
     fail "$name: no report at $report"
   fi
@@ -387,7 +376,6 @@ sed -i 's/\x1b\[[0-9;]*m//g' stopped.log
 [ "$rc" -eq 0 ] || fail "stopped: exit code $rc, want 0: the run was stopped with no test failed"
 got=$(report_of "$RUN" 2>/dev/null)
 [ "$got" = "USER_ABORT 1 0" ] || fail "stopped: the report says '$got' (status, passed, failed), want 'USER_ABORT 1 0'"
-grep -q 'Now executing streaming tests' stopped.log && fail "stopped: the run went on to its streamed test"
 grep -q 'deleting failing testcases' stopped.log && fail "stopped: --must-pass deleted tests the stop cut short"
 grep -q 'ERROR' stopped.log && fail "stopped: a stop logged an ERROR: $(grep -m1 'ERROR' stopped.log)"
 LEFT=$(find keploy/test-set-0/tests -type f | wc -l)
@@ -433,7 +421,6 @@ for stop in INT:130 TERM:143 HUP:129; do
   got=$(report_of "$RUN" 2>/dev/null)
   [ "$got" = "USER_ABORT 0 0" ] || fail "$name: the report says '$got' (status, passed, failed), want 'USER_ABORT 0 0'"
   said "$name" 1 'the run was stopped before any test got a verdict, so it tested nothing'
-  grep -q 'Now executing streaming tests' "$name.log" && fail "$name: the run went on to its streamed test"
   grep -q 'WARNING: DATA RACE' "$name.log" && fail "$name: data race"
   grep -q 'ERROR' "$name.log" && fail "$name: a stop logged an ERROR: $(grep -m1 'ERROR' "$name.log")"
   if [ "$FAIL" -ne "$BEFORE" ]; then

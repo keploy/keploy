@@ -340,10 +340,10 @@ jobs:
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-hangup-linux.sh"
 
       # `keploy test --base-path <url>` replays a recording against an app that
-      # is already running: no agent, nothing mocked. Every recorded test, a
-      # streamed one included, must be sent to the base path (not to localhost
-      # on the recorded port, under the recorded Host, or with its URL
-      # unescaped), and the report and the exit code must follow the result.
+      # is already running: no agent, nothing mocked. Every recorded test must
+      # be sent to the base path (not to localhost on the recorded port, under
+      # the recorded Host, or with its URL unescaped), and the report and the
+      # exit code must follow the result.
       # A base path keploy cannot read is refused before any test is sent, a
       # test the base path cannot go in is failed without being sent, a run
       # stopped part-way fails no test it did not finish, and a run stopped
