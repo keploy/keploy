@@ -35,6 +35,6 @@ func TestBeforeStopIsCalledOnlyForAnAppThatRunsOn(t *testing.T) {
 	// No hook: nothing to call, and nothing is asked.
 	beforeStop(context.Background(), nil, func() bool {
 		t.Error("running was asked with no hook to call")
-		return true
+		return false
 	})
 }
