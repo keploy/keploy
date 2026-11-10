@@ -2753,13 +2753,9 @@ func (d *leftOutTestDB) TakeFormPartsLeftOut() ([]models.FormPartLeftOut, int) {
 
 // A recording whose test store kept a test case without a form part's file
 // says so once where it ends, at ERROR, naming the test case, the part and
-// the path the part named, and how many it does not list. The recording is
-// kept: the run ends with the exit code it would have had. One that left no
+// the path the part named, and how many it does not list. One that left no
 // part out says nothing.
 func TestStart_FormPartsLeftOutAreNamedInTheSummary(t *testing.T) {
-	// The exit code this harness's run ends with when no part is left out
-	// (the "none" row, run first): a part left out must not change it.
-	exitWithNone := -1
 	for _, row := range []struct {
 		name string
 		db   *leftOutTestDB
@@ -2823,7 +2819,6 @@ func TestStart_FormPartsLeftOutAreNamedInTheSummary(t *testing.T) {
 				if len(said) != 0 {
 					t.Fatalf("a recording that left no part out said %v", said)
 				}
-				exitWithNone = utils.ErrCode
 				return
 			}
 			if len(said) != 1 || said[0].Level != zapcore.ErrorLevel {
@@ -2845,10 +2840,28 @@ func TestStart_FormPartsLeftOutAreNamedInTheSummary(t *testing.T) {
 			if fields["parts"] != int64(2+wantMore) || fields["not_listed"] != int64(wantMore) {
 				t.Errorf("the summary counts parts=%v not_listed=%v, want %d and %d", fields["parts"], fields["not_listed"], 2+wantMore, wantMore)
 			}
-			if utils.ErrCode != exitWithNone {
-				t.Errorf("exit code %d, and %d with no part left out: the recording is kept, a part left out does not change how the run ends", utils.ErrCode, exitWithNone)
-			}
 		})
+	}
+}
+
+// Saying the parts left out fails no run: the harness above ends its run with
+// an exit code of its own, set before the summary, so the exit code is checked
+// here, on a run that has none yet.
+func TestSayingFormPartsLeftOutSetsNoExitCode(t *testing.T) {
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+
+	core, logs := observer.New(zapcore.ErrorLevel)
+	r := &Recorder{logger: zap.New(core), testDB: &leftOutTestDB{recTestDB: &recTestDB{}, parts: []models.FormPartLeftOut{
+		{TestSet: "test-set-0", TestCase: "test-1", Key: "file", FileName: "a.txt", Path: "../outside.txt"},
+	}}}
+	r.sayFormPartsLeftOut("test-set-0")
+	if logs.FilterMessageSnippet("stored without a form part's file").Len() != 1 {
+		t.Fatalf("the summary said %v, want its one line", logs.All())
+	}
+	if utils.ErrCode != 0 {
+		t.Errorf("exit code %d, want 0: the recording is kept, a part left out does not fail the run", utils.ErrCode)
 	}
 }
 
