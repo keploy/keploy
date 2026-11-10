@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -3705,6 +3706,11 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string
 	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.Header, "request.header")...)
 	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.URLParams, "request.url_param")...)
 	detections = append(detections, pii.DetectValue("request.url", testCase.HTTPReq.URL)...)
+	// The recorded URL keeps the path escaped as it arrived, so an email sent
+	// as user%40example.com is only visible once the path is decoded.
+	if u, err := url.Parse(testCase.HTTPReq.URL); err == nil && u.Path != u.EscapedPath() {
+		detections = append(detections, pii.DetectValue("request.url_path", u.Path)...)
+	}
 
 	// Bodies over 1 MB can't be scanned once they have left the test case, so
 	// say so instead of reporting nothing. A request body is only moved to an

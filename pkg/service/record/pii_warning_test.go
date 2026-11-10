@@ -70,3 +70,15 @@ func TestPIIWarningQuietWithNothingToReport(t *testing.T) {
 		t.Fatalf("got warnings for a clean test case: %q", got)
 	}
 }
+
+func TestPIIWarningDecodesAnEscapedPath(t *testing.T) {
+	got := piiWarnings(t, &models.TestCase{
+		HTTPReq: models.HTTPReq{Method: models.Method("GET"), URL: "http://localhost:8080/users/user%40example.com"},
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d warnings, want 1: %q", len(got), got)
+	}
+	if !strings.Contains(got[0], "request.url_path (email)") {
+		t.Errorf("warning %q does not report the email in the decoded path", got[0])
+	}
+}
