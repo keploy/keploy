@@ -801,15 +801,19 @@ const ComingUnread = "its body was still coming from its client, and keploy read
 // IncomingComing is Incoming of live, a request of the running client test
 // whose body is still coming as it reaches the application (one of no
 // declared length, one its client sends only once the application answered
-// 100): it pairs now, as Incoming does, and is until done a place keploy
-// could not read (ComingUnread), so every value that changed in a call that
-// reaches keploy before its body ended is refused. done gives the request
-// with its body once it ended (unread, where not "", why keploy could not
-// read it, and words, where not nil, the words of what it could not read:
-// IncomingWords), and the place is from then what IncomingWords makes of
-// it. A done after the next test began, or a second one, does nothing. It
-// is nil where live pairs with none (Incoming's false).
-func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time) (done func(live *models.HTTPReq, unread string, words *RequestWords)) {
+// 100, one larger than the ingress reads ahead): it pairs now, as Incoming
+// does, and is until done a place keploy could not read (ComingUnread) that
+// a call reads as its URL and headers, which keploy has, and the words of
+// its body that passed to the application so far (passed; comingRequest):
+// a value that changed in a call that reaches keploy before its body ended
+// is refused where those words may hold its change, and every one where
+// passed is nil or tells none. done gives the request with its body once it
+// ended (unread, where not "", why keploy could not read it, and words,
+// where not nil, the words of what it could not read: IncomingWords), and
+// the place is from then what IncomingWords makes of it. A done after the
+// next test began, or a second one, does nothing. It is nil where live
+// pairs with none (Incoming's false).
+func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time, passed func() *RequestWords) (done func(live *models.HTTPReq, unread string, words *RequestWords)) {
 	if t == nil || live == nil || at.IsZero() {
 		return nil
 	}
@@ -819,6 +823,7 @@ func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time) (done func(
 	if !ok {
 		return nil
 	}
+	t.incoming[k].coming = &comingRequest{head: headPlace(c, live, at), passed: passed}
 	gen := t.incomingGen
 	var once sync.Once
 	return func(live *models.HTTPReq, unread string, words *RequestWords) {

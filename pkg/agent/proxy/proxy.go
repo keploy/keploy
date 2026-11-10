@@ -5167,19 +5167,23 @@ func (p *Proxy) TakeIncoming(req *models.HTTPReq, unread string, words *learn.Re
 
 // TakeComing gives the learn step a request of the running client test
 // whose body is still coming as it reaches the application's ingress
-// (incoming.RequestTaker; learn.Tracker.IncomingComing), and pairs it with
-// the recorded request whose variables it binds (pairCase), under the proven
-// switch: until its body ended each is noted as bound at a request keploy
-// has not read yet (learn.ComingUnread), and done, once it ended, gives the
-// learn step the request whole, with the words of what keploy could not
-// read of it, and binds them from it. nil where it takes nothing of it.
-func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPReq, string, *learn.RequestWords) {
+// (incoming.RequestTaker; learn.Tracker.IncomingComing), with passed, the
+// words of its body that passed so far, and pairs it with the recorded
+// request whose variables it binds (pairCase), under the proven switch: a
+// variable bound in its URL or a header binds at once, and one bound in its
+// body is noted, until the body ended, as bound at a request keploy has not
+// read yet (learn.ComingUnread). done, once it ended, gives the learn step
+// the request whole, with the words of what keploy could not read of it,
+// and binds the body's variables from it. nil where it takes nothing of
+// it; words says whether the learn step took it, which alone reads a
+// body's words.
+func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time, passed func() *learn.RequestWords) (done func(*models.HTTPReq, string, *learn.RequestWords), words bool) {
 	if !provenswitch.On() {
-		return nil
+		return nil, false
 	}
-	learned, bind := p.learnTracker.IncomingComing(req, at), p.pairCase(req, learn.ComingUnread)
+	learned, bind := p.learnTracker.IncomingComing(req, at, passed), p.pairCase(req, learn.ComingUnread)
 	if learned == nil && bind == nil {
-		return nil
+		return nil, false
 	}
 	if bind != nil {
 		bind(req, learn.ComingUnread)
@@ -5191,7 +5195,7 @@ func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPR
 		if bind != nil {
 			bind(live, unread)
 		}
-	}
+	}, learned != nil
 }
 
 // TakeRecordedBegin gives the learn step the instant the next test began at

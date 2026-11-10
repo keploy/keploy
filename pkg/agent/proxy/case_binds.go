@@ -7,6 +7,7 @@ import (
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
 
@@ -22,8 +23,10 @@ import (
 // (httpint.RequestPlace), before the application is given any byte of the
 // request: no call the request leads to is checked without it. A request
 // that pairs with none binds nothing; a place the live request holds no
-// value at, one its recording does not hold the variable's recorded value
-// at, and a request keploy could not read bind nothing either. A variable
+// value at, and one its recording does not hold the variable's recorded
+// value at, bind nothing either. Of a request whose body keploy could not
+// read, or has not yet (it is still coming), a place in its URL or a header
+// binds all the same (atHead), and one in its body binds nothing. A variable
 // left unbound so is noted in the test's scope (variables.Table.Note), so
 // every call that uses it misses saying why, never naming a call that binds
 // it.
@@ -104,38 +107,56 @@ func (p *Proxy) setCaseBinds(test string, cases []models.ClientCase) {
 // bindCase binds, before live is forwarded, each variable of the running
 // client test bound at the recorded request live pairs with (caseBinds),
 // from live at its place; unread, where not "", says why keploy could not
-// read live, which then binds nothing. A variable it cannot bind is noted
-// with why in the test's scope (MockManager.NoteExactTest).
+// read live's body, which then binds nothing at a place in it. A variable
+// it cannot bind is noted with why in the test's scope
+// (MockManager.NoteExactTest).
 func (p *Proxy) bindCase(live *models.HTTPReq, unread string) {
 	if bind := p.pairCase(live, unread); bind != nil {
 		bind(live, unread)
 	}
 }
 
+// atHead reports whether place, a bind place of a variable in the request
+// rec, is in the request's URL or one of its headers, which keploy reads as
+// the request arrives, whatever becomes of its body. One that does not read
+// is not.
+func atHead(rec *models.HTTPReq, place string) bool {
+	a, err := variables.ReadPlace(place, variables.InRequest(rec))
+	return err == nil && a.Place.Part != variables.PartBody
+}
+
 // pairCase pairs live, a request of the running client test, with the
 // recorded request it pairs with (caseBinds), and is what binds that
-// request's variables from live as bindCase does, once keploy has live's
-// body: nil where it pairs with none. unread, where not "", says why keploy
-// has not read live's body as it pairs, which then pairs by its URL alone,
-// as the learn step paired it (learn.Tracker.Incoming).
+// request's variables from live as bindCase does: nil where it pairs with
+// none. unread, where not "", says why keploy has not read live's body as
+// it pairs, which then pairs by its URL alone, as the learn step paired it
+// (learn.Tracker.Incoming). Called as the request arrives with its body
+// still coming, it binds the variables bound in its URL and headers
+// (atHead) and notes the others; called again once keploy has the body, it
+// binds those, and leaves the ones it bound.
 func (p *Proxy) pairCase(live *models.HTTPReq, unread string) func(*models.HTTPReq, string) {
 	test, rec, binds, ok := p.caseBinds.pair(live, unread == "")
 	if !ok {
 		return nil
 	}
+	bound := make([]bool, len(binds))
 	return func(live *models.HTTPReq, unread string) {
 		m := p.getMockManager()
 		if m == nil {
 			return
 		}
-		for _, b := range binds {
+		for i, b := range binds {
+			if bound[i] {
+				continue
+			}
 			value, why := "", "keploy could not read it: "+unread
-			if unread == "" {
+			if unread == "" || atHead(rec.Req, b.Place) {
 				value, why = httpint.RequestPlace(rec.Req, live, b.Place, b.Recorded)
 			}
 			if why == "" {
-				bound := models.VariableBinding{Name: b.Name, Value: value, Recorded: b.Recorded, Mock: "test case " + rec.Name, Place: "request " + b.Place}
-				if err := m.GiveExactTest(test, bound); err != nil {
+				bound[i] = true
+				binding := models.VariableBinding{Name: b.Name, Value: value, Recorded: b.Recorded, Mock: "test case " + rec.Name, Place: "request " + b.Place}
+				if err := m.GiveExactTest(test, binding); err != nil {
 					p.warnCaseBind(test, rec.Name, b, err.Error())
 				}
 				continue

@@ -144,7 +144,13 @@ type Earlier struct {
 	// value whose change they cannot hold (RequestWords.mayHold) reads
 	// the place as no source of it, not as unread (requestUnreadOf).
 	unreadWords *RequestWords
-	Seen        []Seen
+	// coming, of an incoming place whose body was still coming as the place
+	// was read (Tracker.IncomingComing; Unread is then ComingUnread), is what
+	// keploy read of the request as it arrived and the words of its body
+	// that passed since: a call's learn step reads the place through it
+	// (arrivedBefore).
+	coming *comingRequest
+	Seen   []Seen
 	// noTime: the exchange's recorded time keploy cannot read (At was the
 	// zero time), read as one made at the call's own instant
 	// (timedEarlier), and named so.

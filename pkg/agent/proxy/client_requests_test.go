@@ -69,7 +69,7 @@ func TestTheProxyGivesItsLearnStepTheWordsOfARequestItCouldNotRead(t *testing.T)
 	p.TakeClientCases("test-1", cases)
 	whole, coming := learn.NewRequestWords(), learn.NewRequestWords()
 	p.TakeIncoming(live(), why, whole, at)
-	done := p.TakeComing(live(), at)
+	done, _ := p.TakeComing(live(), at, nil)
 	if done == nil {
 		t.Fatal("the coming request did not pair")
 	}

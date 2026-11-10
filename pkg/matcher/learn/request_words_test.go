@@ -157,7 +157,7 @@ func TestAnUnreadClientRequestKeepsItsWordsAndItsURLAndHeaders(t *testing.T) {
 	if !tr.IncomingWords(live(), "its body is larger than keploy reads", body(), at) {
 		t.Fatal("the request did not pair")
 	}
-	done := tr.IncomingComing(live(), at)
+	done := tr.IncomingComing(live(), at, nil)
 	got := tr.Placed().Earlier
 	if len(got) != 2 || got[0].unreadWords == nil || got[1].unreadWords != nil {
 		t.Fatalf("placed %+v", got)

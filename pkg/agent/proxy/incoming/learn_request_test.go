@@ -39,8 +39,11 @@ type takenRequest struct {
 // requestLog is a RequestTaker that wants requests while wants is set and
 // keeps each one given.
 type requestLog struct {
-	// noComing: TakeComing takes nothing (a nil done).
+	// noComing: TakeComing takes nothing (a nil done). noWords: it reads
+	// no words of a body. passed: what TakeComing was last given.
 	noComing bool
+	noWords  bool
+	passed   func() *learn.RequestWords
 	wants    atomic.Bool
 	mu       sync.Mutex
 	got      []takenRequest
@@ -56,11 +59,12 @@ func (l *requestLog) TakeIncoming(req *models.HTTPReq, unread string, words *lea
 	l.taken.Add(1)
 }
 
-func (l *requestLog) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPReq, string, *learn.RequestWords) {
+func (l *requestLog) TakeComing(req *models.HTTPReq, at time.Time, passed func() *learn.RequestWords) (func(*models.HTTPReq, string, *learn.RequestWords), bool) {
 	if l.noComing {
-		return nil
+		return nil, false
 	}
 	l.mu.Lock()
+	l.passed = passed
 	k := len(l.got)
 	l.got = append(l.got, takenRequest{req: req, at: at, coming: true})
 	l.mu.Unlock()
@@ -69,7 +73,7 @@ func (l *requestLog) TakeComing(req *models.HTTPReq, at time.Time) func(*models.
 		l.mu.Lock()
 		l.got[k] = takenRequest{req: r, unread: unread, words: words, at: at, dones: l.got[k].dones + 1}
 		l.mu.Unlock()
-	}
+	}, !l.noWords
 }
 
 func (l *requestLog) list() []takenRequest {

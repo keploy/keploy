@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -421,4 +422,172 @@ func TestTheIngressGivesTheWordsOfALargeClientRequestBeforeTheAppHasItWhole(t *t
 			}
 		})
 	}
+}
+
+// The taker of a request whose body is still coming is told, whenever it
+// asks, the words of the body that passed to the application so far: each
+// piece is among them before the forward is given it, the text the last
+// piece was cut in too, and no word of what has not come. Once the body
+// ended they are the whole body's, whether keploy read it (a body within
+// the bound) or not, and the taker is given its own copy of the ones it
+// keeps. A body sent encoded tells none until it ended, and one that did
+// not come whole tells none at all: each may hold any word. A taker that
+// reads no words is read none, of a body over the bound too.
+func TestTheTakerOfAComingBodyIsToldTheWordsThatPassed(t *testing.T) {
+	holds := func(w *learn.RequestWords, word string) bool { return w != nil && w.MayHoldChange("x", word) }
+	take := func(t *testing.T, log *requestLog, raw string) (*http.Request, *comingBody) {
+		t.Helper()
+		log.wants.Store(true)
+		pm := &IngressProxyManager{logger: zap.NewNop()}
+		pm.SetRequestTaker(log)
+		req := readRequest(t, raw)
+		pm.takeRequest(req, time.Now())
+		cb, ok := req.Body.(*comingBody)
+		if !ok {
+			t.Fatal("the body was not read as it passed")
+		}
+		return req, cb
+	}
+	filler := strings.Repeat("rowvalue n17 ", (2<<20)/13)
+	upload := `{"first":"earlyword3q ` + filler + ` cutword5k lateword7z"}`
+	declared := "POST /u HTTP/1.1\r\nHost: api\r\nContent-Length: " + strconv.Itoa(len(upload)) + "\r\n\r\n" + upload
+
+	t.Run("an upload over the bound", func(t *testing.T) {
+		log := &requestLog{}
+		req, cb := take(t, log, declared)
+		if !cb.over {
+			t.Fatal("a body declared over the bound is kept as it passes until it is over it")
+		}
+		if w := log.passed(); w == nil || w.MayHoldAny() || holds(w, "earlyword3q") {
+			t.Fatalf("before a byte passed the words are %v", w)
+		}
+		// Up to the middle of cutword5k.
+		half := make([]byte, strings.Index(upload, "cutword5k")+6)
+		if _, err := io.ReadFull(req.Body, half); err != nil {
+			t.Fatal(err)
+		}
+		w := log.passed()
+		if !holds(w, "earlyword3q") || !holds(w, "rowvalue") || !holds(w, "cutwor") || holds(w, "cutword5k") || holds(w, "lateword7z") {
+			t.Fatalf("mid-upload the words hold early %v, row %v, the cut text %v, the cut word whole %v, a later word %v",
+				holds(w, "earlyword3q"), holds(w, "rowvalue"), holds(w, "cutwor"), holds(w, "cutword5k"), holds(w, "lateword7z"))
+		}
+		if got := log.list(); len(got) != 1 || !got[0].coming {
+			t.Fatalf("mid-upload taken %+v", got)
+		}
+		if _, err := io.ReadAll(req.Body); err != nil {
+			t.Fatal(err)
+		}
+		got := log.list()
+		if len(got) != 1 || got[0].dones != 1 || got[0].unread != tooLarge || !holds(got[0].words, "lateword7z") || !holds(got[0].words, "cutword5k") {
+			t.Fatalf("once it ended taken %+v", got)
+		}
+		end := log.passed()
+		if !holds(end, "lateword7z") || !holds(end, "earlyword3q") || holds(end, "cutwor") {
+			t.Fatal("once it ended the words that passed are not the whole body's")
+		}
+		if end == got[0].words || end != cb.words.final {
+			t.Fatal("the taker was given the words the ingress still tells, not its own copy")
+		}
+		_, _ = got[0].words.Write([]byte(" takerword2m "))
+		got[0].words.End()
+		if holds(log.passed(), "takerword2m") {
+			t.Fatal("a word the taker wrote to its copy shows in the words that passed")
+		}
+		if w := log.passed(); w != end {
+			t.Fatal("the ended body's words were copied again")
+		}
+	})
+	t.Run("asked while it passes", func(t *testing.T) {
+		log := &requestLog{}
+		req, _ := take(t, log, declared)
+		stop, asked := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(asked)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = holds(log.passed(), "lateword7z")
+				}
+			}
+		}()
+		_, err := io.ReadAll(req.Body)
+		close(stop)
+		<-asked
+		if err != nil || !holds(log.passed(), "lateword7z") {
+			t.Fatalf("read with %v; the whole body's words hold its last word: %v", err, holds(log.passed(), "lateword7z"))
+		}
+	})
+	t.Run("a chunked body within the bound", func(t *testing.T) {
+		log := &requestLog{}
+		req, _ := take(t, log, "POST /u HTTP/1.1\r\nHost: api\r\nTransfer-Encoding: chunked\r\n\r\nb\r\nearlyword3q\r\nb\r\n lateword7z\r\n0\r\n\r\n")
+		if _, err := io.ReadFull(req.Body, make([]byte, 11)); err != nil {
+			t.Fatal(err)
+		}
+		if w := log.passed(); !holds(w, "earlyword3q") || holds(w, "lateword7z") {
+			t.Fatal("mid-body the words are not those that passed")
+		}
+		if _, err := io.ReadAll(req.Body); err != nil {
+			t.Fatal(err)
+		}
+		got := log.list()
+		if len(got) != 1 || got[0].dones != 1 || got[0].unread != "" || got[0].words != nil || got[0].req.Body != "earlyword3q lateword7z" {
+			t.Fatalf("once it ended taken %+v", got)
+		}
+		if w := log.passed(); !holds(w, "lateword7z") {
+			t.Fatal("a body keploy read tells no words to a call made while it came")
+		}
+	})
+	t.Run("a body sent encoded", func(t *testing.T) {
+		var z bytes.Buffer
+		zw := gzip.NewWriter(&z)
+		_, _ = zw.Write([]byte("earlyword3q lateword7z"))
+		_ = zw.Close()
+		log := &requestLog{}
+		req, _ := take(t, log, "POST /u HTTP/1.1\r\nHost: api\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n"+fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", z.Len(), z.String()))
+		if _, err := io.ReadFull(req.Body, make([]byte, z.Len()-1)); err != nil {
+			t.Fatal(err)
+		}
+		if w := log.passed(); w != nil {
+			t.Fatalf("an encoded body still coming tells the words %v", w)
+		}
+		if _, err := io.ReadAll(req.Body); err != nil {
+			t.Fatal(err)
+		}
+		if w := log.passed(); !holds(w, "earlyword3q") || !holds(w, "lateword7z") {
+			t.Fatal("once it ended an encoded body tells no words")
+		}
+	})
+	t.Run("a body that did not come whole", func(t *testing.T) {
+		log := &requestLog{}
+		req, _ := take(t, log, "POST /u HTTP/1.1\r\nHost: api\r\nTransfer-Encoding: chunked\r\n\r\nb\r\nearlyword3q\r\n4\r\nab")
+		_, _ = io.ReadAll(req.Body)
+		if got := log.list(); len(got) != 1 || !strings.Contains(got[0].unread, "did not come whole") || got[0].words != nil {
+			t.Fatalf("taken %+v", got)
+		}
+		if w := log.passed(); w != nil {
+			t.Fatalf("a body that did not come whole tells the words %v", w)
+		}
+		log = &requestLog{}
+		req, _ = take(t, log, "POST /u HTTP/1.1\r\nHost: api\r\nTransfer-Encoding: chunked\r\n\r\nb\r\nearlyword3q\r\n0\r\n\r\n")
+		_, _ = io.ReadFull(req.Body, make([]byte, 5))
+		_ = req.Body.Close()
+		if w := log.passed(); w != nil {
+			t.Fatalf("a body closed before its end tells the words %v", w)
+		}
+	})
+	t.Run("a taker that reads no words", func(t *testing.T) {
+		log := &requestLog{noWords: true}
+		req, cb := take(t, log, declared)
+		if cb.words != nil || log.passed() != nil {
+			t.Fatal("words were read for a taker that reads none")
+		}
+		if _, err := io.ReadAll(req.Body); err != nil {
+			t.Fatal(err)
+		}
+		if got := log.list(); len(got) != 1 || got[0].unread != tooLarge || got[0].words != nil || cb.words != nil || log.passed() != nil {
+			t.Fatalf("taken %+v, words %v", got, cb.words)
+		}
+	})
 }

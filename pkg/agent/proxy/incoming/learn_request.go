@@ -29,13 +29,18 @@ import (
 // real instant at, unread saying why keploy could not read it ("" where it
 // could) and words, where not nil, the words of the body it could not read
 // (bodyWords). TakeComing takes one whose body is still coming
-// (comingBody): the place is one keploy could not read until done gives the
-// request with its body, once the body ended, unread and words as
-// TakeIncoming's; done is nil where the taker takes nothing of it.
+// (comingBody): its URL and headers are read as it is taken, and its body is
+// one keploy could not read until done gives the request with its body,
+// once the body ended, unread and words as TakeIncoming's; done is nil
+// where the taker takes nothing of it. passed gives, whenever it is asked,
+// the words of the body that passed to the application so far
+// (comingBody.passed), and words says whether the taker reads a body's
+// words at all: where it does not, the ingress reads none (passed and
+// done's words are nil).
 type RequestTaker interface {
 	WantsIncoming() bool
 	TakeIncoming(req *models.HTTPReq, unread string, words *learn.RequestWords, at time.Time)
-	TakeComing(req *models.HTTPReq, at time.Time) (done func(req *models.HTTPReq, unread string, words *learn.RequestWords))
+	TakeComing(req *models.HTTPReq, at time.Time, passed func() *learn.RequestWords) (done func(req *models.HTTPReq, unread string, words *learn.RequestWords), words bool)
 }
 
 // SetRequestTaker makes the ingress give t each HTTP/1 request it forwards
@@ -62,8 +67,9 @@ const maxTakenBody = hooksUtils.LargeBodyThreshold
 // whole first and put back for the forward. One its client sends only after
 // the application answers 100 (Continue), one of no declared length
 // (chunked), and one of a declared length larger than maxTakenBody, are read
-// as they pass to the application (comingBody): until they end the request
-// is a place keploy could not read (TakeComing). A body larger than
+// as they pass to the application (comingBody): until they end the request's
+// body is a place keploy could not read (TakeComing), of which the taker is
+// told the words that passed so far. A body larger than
 // maxTakenBody, and one readTakenBody cannot read, is given as unread, so
 // the learn step reads nothing from the request rather than part of it, with
 // its words (bodyWords) where it came whole. A body of a declared length its
@@ -88,13 +94,18 @@ func (pm *IngressProxyManager) takeRequest(req *http.Request, at time.Time) {
 	case req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0:
 		t.TakeIncoming(live, "", nil, at)
 	case expectsContinue(req) || req.ContentLength < 0 || req.ContentLength > maxTakenBody:
-		if done := t.TakeComing(live, at); done != nil {
-			b := &comingBody{ReadCloser: req.Body, live: live, header: req.Header, left: req.ContentLength, done: done}
-			if req.ContentLength > maxTakenBody {
-				b.over, b.words = true, newBodyWords(req.Header)
-			}
-			req.Body = b
+		b := &comingBody{ReadCloser: req.Body, live: live, header: req.Header, left: req.ContentLength, over: req.ContentLength > maxTakenBody}
+		done, words := t.TakeComing(live, at, b.passed)
+		if done == nil {
+			return
 		}
+		b.done = done
+		if words {
+			b.mu.Lock()
+			b.words = newBodyWords(req.Header)
+			b.mu.Unlock()
+		}
+		req.Body = b
 	default:
 		body, err := io.ReadAll(io.LimitReader(req.Body, req.ContentLength))
 		rest := io.Reader(bytes.NewReader(body))
@@ -209,8 +220,10 @@ func formTextParts(ct string, body []byte) ([]models.FormData, string) {
 // comingBody is a request body the ingress gives the application as it
 // comes (takeRequest), read as it passes for the learn step: up to
 // maxTakenBody bytes of it, given to done (readTakenBody) once the body
-// ended, and the words of one larger (bodyWords, from its first byte
-// where its declared length is larger), or one keploy cannot read. Where its length is declared (left), done is given it before the
+// ended, and its words from its first byte (bodyWords), where its taker
+// reads a body's words: those that passed so far whenever the taker asks
+// (passed), and, once it ended, those of one larger than maxTakenBody or
+// one keploy cannot read. Where its length is declared (left), done is given it before the
 // read that brings its last byte returns, so before the application has
 // it; where not (chunked), as the read meets its end, before the forward
 // sends its last chunk, which the application waits for to know the body
@@ -230,8 +243,9 @@ type comingBody struct {
 	mu   sync.Mutex
 	got  []byte
 	over bool
-	// words, once over, take the body's bytes as they pass (nil where
-	// they take none: newBodyWords).
+	// words take the body's bytes as they pass: nil where the taker reads
+	// no words of a body (TakeComing), and where they take none
+	// (newBodyWords).
 	words *bodyWords
 	ended bool
 }
@@ -244,13 +258,12 @@ func (b *comingBody) Read(p []byte) (int, error) {
 		return n, err
 	}
 	if !b.over && len(b.got)+n > maxTakenBody {
-		b.over, b.words = true, newBodyWords(b.header)
-		b.words.write(b.got)
-		b.got = nil
+		b.over, b.got = true, nil
 	}
-	if b.over {
-		b.words.write(p[:n])
-	} else {
+	// The words take the piece before the forward is given it: what the
+	// application has read is among the words that passed.
+	b.words.write(p[:n])
+	if !b.over {
 		b.got = append(b.got, p[:n]...)
 	}
 	if b.left >= 0 {
@@ -277,10 +290,16 @@ func (b *comingBody) Read(p []byte) (int, error) {
 		case over:
 			why, kept = tooLarge, words.wordsOf()
 		default:
-			why = readTakenBody(b.live, b.header, got)
-			kept = unreadWords(why, b.header, got)
+			// The words end whether keploy read the body or not: a call
+			// that read the request while it came asks them (passed).
+			kept = words.wordsOf()
+			if why = readTakenBody(b.live, b.header, got); why == "" {
+				kept = nil
+			}
 		}
-		b.done(b.live, why, kept)
+		// done's taker writes to the words it keeps, and passed still
+		// gives these: it is given its own.
+		b.done(b.live, why, kept.Passed())
 	}
 	return n, err
 }
@@ -297,6 +316,16 @@ func (b *comingBody) Close() error {
 		b.done(b.live, "its body did not come whole: it was closed before its end", nil)
 	}
 	return b.ReadCloser.Close()
+}
+
+// passed are the words of the body that passed to the application so far,
+// and of the whole body once it ended (bodyWords.passed): nil where keploy
+// cannot tell them, or reads none.
+func (b *comingBody) passed() *learn.RequestWords {
+	b.mu.Lock()
+	words := b.words
+	b.mu.Unlock()
+	return words.passed()
 }
 
 // readCloser reads from Reader and closes Closer: a body read ahead, put

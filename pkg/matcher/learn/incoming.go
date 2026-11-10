@@ -279,25 +279,80 @@ func clientFormParts(rec, live []models.FormData) (parts []models.TestRequestPar
 // the call reached keploy). One whose recorded instant is not known, or
 // whose call's is not (the zero time, which every request is after), is
 // left out too: keploy cannot show the client sent it before the call.
-// earlier is returned as it is where none is left out.
+// One whose body was still coming as its place was read is read as the
+// places it is by now (comingRequest.places). earlier is returned as it is
+// where none is left out and none was coming.
 func arrivedBefore(earlier []Earlier, rec, live time.Time) []Earlier {
 	var out []Earlier
 	for i, e := range earlier {
 		keep := !e.incoming || !e.arrivedRec.IsZero() && !e.arrivedRec.After(rec) && !e.arrivedLive.After(live)
-		if keep {
+		if keep && e.coming == nil {
 			if out != nil {
 				out = append(out, e)
 			}
 			continue
 		}
 		if out == nil {
-			out = append(make([]Earlier, 0, len(earlier)-1), earlier[:i]...)
+			out = append(make([]Earlier, 0, len(earlier)+1), earlier[:i]...)
+		}
+		if keep {
+			out = append(out, e.coming.places(e)...)
 		}
 	}
 	if out == nil {
 		return earlier
 	}
 	return out
+}
+
+// comingRequest is a client test's request whose body is still coming
+// (Tracker.IncomingComing): what a call that reaches keploy meanwhile can
+// read of it. The application has its URL and headers whole, and of its body
+// no more than what passed to it by the time the call is judged.
+type comingRequest struct {
+	// head is the request's URL and headers, which keploy read as it
+	// arrived, as an earlier place of the test's calls (headPlace).
+	head Earlier
+	// passed gives the words of the body that passed to the application so
+	// far (RequestWords.Passed), of the whole body once it ended; nil where
+	// keploy cannot tell them (a body sent encoded that has not ended, one
+	// that did not come whole). nil where the request's taker reads none.
+	passed func() *RequestWords
+}
+
+// places are the places a call reads e as, a request whose body was still
+// coming as the call read its test's places (e.coming is c): its URL and
+// headers (head), then its body, a place keploy could not read
+// (ComingUnread) holding the words that passed of it by now, so a value
+// whose change they cannot hold reads the body as no source of it
+// (requestUnreadOf), as a call after a request keploy could not read does.
+// Where keploy cannot tell those words the body may hold any, and the
+// request is one place keploy could not read: every value that changed is
+// refused.
+func (c *comingRequest) places(e Earlier) []Earlier {
+	e.coming = nil
+	if c.passed != nil {
+		e.unreadWords = c.passed()
+	}
+	if e.unreadWords.MayHoldAny() {
+		e.unreadWords = nil
+		return []Earlier{e}
+	}
+	return []Earlier{c.head, e}
+}
+
+// headPlace is the URL and headers of live, a request of a client test that
+// reached the application at at, paired with c, its recorded request, as an
+// earlier place of the test's calls (incomingPlace), with no body on either
+// side: what keploy read of a request whose body is still coming.
+func headPlace(c ClientCase, live *models.HTTPReq, at time.Time) Earlier {
+	head := func(r *models.HTTPReq) *models.HTTPReq {
+		return &models.HTTPReq{Method: r.Method, ProtoMajor: r.ProtoMajor, ProtoMinor: r.ProtoMinor, URL: r.URL, URLParams: r.URLParams, Header: r.Header, Timestamp: r.Timestamp}
+	}
+	req := IncomingRequest(c.Name, head(c.Req), head(live))
+	e := GivenRequest(req)
+	e.incoming, e.arrivedRec, e.arrivedLive = true, req.RecordedAt, at
+	return e
 }
 
 // clientCase reports whether mock, a place among the call's earlier places

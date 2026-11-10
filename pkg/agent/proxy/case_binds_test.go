@@ -259,13 +259,17 @@ func TestAComingRequestBindsItsVariableOnceItsBodyEnded(t *testing.T) {
 	p.learnTracker.Begin()
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
 	open()
-	if done := p.TakeComing(&models.HTTPReq{Method: "GET", URL: "http://api/other"}, at); done != nil {
+	if done, _ := p.TakeComing(&models.HTTPReq{Method: "GET", URL: "http://api/other"}, at, nil); done != nil {
 		t.Fatal("a request that pairs with none is taken as coming")
 	}
 	live := liveApps("")
-	done := p.TakeComing(live, at)
-	if done == nil || p.WantsIncoming() {
-		t.Fatal("a coming request did not pair")
+	sofar := learn.NewRequestWords()
+	done, words := p.TakeComing(live, at, func() *learn.RequestWords { return sofar })
+	if done == nil || !words || p.WantsIncoming() {
+		t.Fatal("a coming request did not pair, or the learn step that took it reads no words")
+	}
+	if got := p.learnTracker.Placed().Earlier; len(got) != 1 || got[0].Words() != sofar {
+		t.Fatalf("the learn step is not told the words that passed of the coming body: %+v", got)
 	}
 	if _, ok := mm.vars.Lookup("key"); ok {
 		t.Fatal("bound before its body came")
@@ -292,7 +296,7 @@ func TestAComingRequestBindsItsVariableOnceItsBodyEnded(t *testing.T) {
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
 	open()
 	t.Setenv(provenswitch.Env, "0")
-	if p.TakeComing(liveApps(""), at) != nil {
+	if done, words := p.TakeComing(liveApps(""), at, nil); done != nil || words {
 		t.Fatal("the switch off took a coming request")
 	}
 	t.Setenv(provenswitch.Env, "1")
@@ -300,12 +304,101 @@ func TestAComingRequestBindsItsVariableOnceItsBodyEnded(t *testing.T) {
 	p, mm, _, open = caseBindsProxy(t)
 	p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName)})
 	open()
-	p.TakeComing(liveApps(""), at)(liveApps(""), "its body did not come whole: unexpected EOF", nil)
+	// No test of the learn step is open: the request pairs for its
+	// variables alone, and no words of its body are read for it.
+	done, words = p.TakeComing(liveApps(""), at, nil)
+	if done == nil || words {
+		t.Fatalf("a request that pairs for its variables alone: taken %v, its words read %v", done != nil, words)
+	}
+	done(liveApps(""), "its body did not come whole: unexpected EOF", nil)
 	if _, ok := mm.vars.Lookup("key"); ok {
 		t.Fatal("a body that did not come whole bound its variable")
 	}
 	if why := mm.vars.Unbound("key"); !strings.Contains(why, "did not come whole") {
 		t.Fatalf("noted %q", why)
+	}
+}
+
+// A variable bound in a header or the URL of a request binds as the request
+// arrives, though its body is still coming, or is one keploy could not
+// read: keploy has its URL and headers whole. The call the application
+// makes from them before the body ended is answered. Once the body ended
+// the variable stays as bound, bound once; one bound in the body binds
+// then, and not where keploy could not read the body.
+func TestAComingRequestBindsAVariableOfItsHeadersAsItArrives(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
+	keyAtHeader := models.ClientCaseBind{Name: "key", Recorded: "app-1", Place: "header.X-App"}
+	idAtPath := models.ClientCaseBind{Name: "id", Recorded: "apps", Place: "url.path[0]"}
+	otherAtName := models.ClientCaseBind{Name: "other", Recorded: "app-1", Place: "body.name"}
+	recorded := func() models.ClientCase {
+		c := appsCase("post-apps-1", keyAtHeader, idAtPath, otherAtName)
+		c.Req.Header["X-App"] = "app-1"
+		return c
+	}
+	sent := func(body string) *models.HTTPReq {
+		live := liveApps(body)
+		live.Header["X-App"] = "app-2"
+		return live
+	}
+	bound := func(t *testing.T, mm *MockManager, name, value, place string) {
+		t.Helper()
+		if b, ok := mm.vars.Lookup(name); !ok || b.Value != value || b.Mock != "test case post-apps-1" || b.Place != "request "+place {
+			t.Fatalf("%s bound %+v (%v), want %q at %s", name, b, ok, value, place)
+		}
+	}
+	for _, end := range []string{"", "its body is larger than keploy reads"} {
+		p, mm, logs, open := caseBindsProxy(t)
+		p.learnTracker.Begin()
+		p.TakeClientCases("test-1", []models.ClientCase{recorded()})
+		open()
+		done, _ := p.TakeComing(sent(""), at, nil)
+		if done == nil {
+			t.Fatal("the coming request did not pair")
+		}
+		bound(t, mm, "key", "app-2", "header.X-App")
+		bound(t, mm, "id", "apps", "url.path[0]")
+		if _, ok := mm.vars.Lookup("other"); ok {
+			t.Fatal("a variable of the body bound before the body came")
+		}
+		if why := mm.vars.Unbound("other"); !strings.Contains(why, "at body.name, which bound nothing this run: keploy could not read it: "+learn.ComingUnread) {
+			t.Fatalf("while the body came its variable is noted %q", why)
+		}
+		if got := postKey(t, mm, "/apps", "app-2"); got != `200 {"echo":"app-2"}` {
+			t.Fatalf("the call made from the headers before the body ended was answered %s", got)
+		}
+		// The body ends with another value in the header's place: what
+		// bound as the request arrived stays.
+		whole := sent(`{"name":"app-3"}`)
+		whole.Header["X-App"] = "app-9"
+		done(whole, end, nil)
+		bound(t, mm, "key", "app-2", "header.X-App")
+		if _, ok := mm.vars.Lookup("other"); ok != (end == "") {
+			t.Fatalf("the body ended %q: its variable bound %v", end, ok)
+		}
+		if end == "" {
+			bound(t, mm, "other", "app-3", "body.name")
+		} else if why := mm.vars.Unbound("other"); !strings.Contains(why, "keploy could not read it: "+end) {
+			t.Fatalf("a body keploy could not read: its variable is noted %q", why)
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("binding at the headers, then at the body, warned: %+v", logs.All())
+		}
+	}
+
+	// A request that came whole whose body keploy could not read binds the
+	// variables of its URL and headers too, and none of its body.
+	p, mm, _, open := caseBindsProxy(t)
+	p.TakeClientCases("test-1", []models.ClientCase{recorded()})
+	open()
+	p.TakeIncoming(sent(""), "its body is encoded", nil, at)
+	bound(t, mm, "key", "app-2", "header.X-App")
+	if _, ok := mm.vars.Lookup("other"); ok {
+		t.Fatal("a body keploy could not read bound its variable")
+	}
+	// A place that does not read is no place of the headers.
+	if atHead(&models.HTTPReq{URL: "http://api/apps"}, "trailer.X") {
+		t.Fatal("a place that does not read is read as one of the headers")
 	}
 }
 

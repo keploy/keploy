@@ -1,6 +1,9 @@
 package learn
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // RequestWords is a filter of the words of a client test's request whose
 // body keploy could not read whole (Tracker.Incoming's unread: a body
@@ -166,6 +169,22 @@ func (w *RequestWords) End() {
 	w.buf = nil
 }
 
+// Passed is a filter of the words of the text written so far, read as if
+// the text ended where it stands (End); w goes on taking its text. It is
+// the words of a body still coming that passed to the application
+// (Tracker.IncomingComing): every word and form the application can have
+// read whole of what passed, and the text the last one was cut in, as a
+// word. nil of a nil w.
+func (w *RequestWords) Passed() *RequestWords {
+	if w == nil {
+		return nil
+	}
+	c := *w
+	c.f = slices.Clone(w.f)
+	c.End()
+	return &c
+}
+
 // MayHoldAny reports whether w may hold any word: it is nil, or it could
 // not read its text in every form (undecoded). A writer may stop writing
 // to one that does.
@@ -288,8 +307,15 @@ func movedOf(rec, live []string) []string {
 }
 
 // Words are the words of the place's request keploy could not read that it
-// keeps (unreadWords; Tracker.IncomingWords): nil where it keeps none.
-func (e Earlier) Words() *RequestWords { return e.unreadWords }
+// keeps (unreadWords; Tracker.IncomingWords): nil where it keeps none. Of
+// one whose body is still coming they are the words that passed of it so
+// far, as its taker tells them (comingRequest.passed).
+func (e Earlier) Words() *RequestWords {
+	if e.coming != nil && e.coming.passed != nil {
+		return e.coming.passed()
+	}
+	return e.unreadWords
+}
 
 // unreadWordsIn says whether one of served is a client test's request keploy
 // could not read that keeps its words (Earlier.unreadWords).

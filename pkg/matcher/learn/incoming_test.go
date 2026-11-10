@@ -484,10 +484,10 @@ func TestAClientRequestStillComingIsUnreadUntilItsBodyEnds(t *testing.T) {
 	tr := NewTracker()
 	tr.Begin()
 	tr.SetCases([]ClientCase{{Name: "post-apps-1", Req: rec}})
-	if done := tr.IncomingComing(&models.HTTPReq{Method: "GET", URL: "http://api/other"}, at); done != nil {
+	if done := tr.IncomingComing(&models.HTTPReq{Method: "GET", URL: "http://api/other"}, at, nil); done != nil {
 		t.Fatal("a request that pairs with none is taken as coming")
 	}
-	done := tr.IncomingComing(live, at)
+	done := tr.IncomingComing(live, at, nil)
 	if done == nil || tr.WantsIncoming() {
 		t.Fatal("a coming request did not pair")
 	}
@@ -515,13 +515,13 @@ func TestAClientRequestStillComingIsUnreadUntilItsBodyEnds(t *testing.T) {
 
 	// Its body ends once the next test began: that test's places stay,
 	// though its first place stands where the coming request's stood.
-	done = tr.IncomingComing(live, at)
+	done = tr.IncomingComing(live, at, nil)
 	if done != nil {
 		t.Fatal("a request with no recorded request left paired")
 	}
 	tr.Begin()
 	tr.SetCases([]ClientCase{{Name: "post-apps-1", Req: rec}})
-	done = tr.IncomingComing(live, at)
+	done = tr.IncomingComing(live, at, nil)
 	tr.Begin()
 	tr.SetCases([]ClientCase{{Name: "post-apps-2", Req: rec}})
 	if !tr.Incoming(&whole, "", at) {
@@ -535,7 +535,7 @@ func TestAClientRequestStillComingIsUnreadUntilItsBodyEnds(t *testing.T) {
 	tr.NewSet()
 	tr.Begin()
 	tr.SetCases([]ClientCase{{Name: "post-apps-3", Req: rec}, {Name: "post-apps-4", Req: rec}})
-	done = tr.IncomingComing(live, at)
+	done = tr.IncomingComing(live, at, nil)
 	tr.NewSet()
 	tr.Begin()
 	tr.SetCases([]ClientCase{{Name: "post-apps-5", Req: rec}})
@@ -717,7 +717,7 @@ func TestTwoWorkersRequestsArrivingSwappedAreEachPlacedAtTheirOwn(t *testing.T) 
 	}
 	tr.Begin()
 	tr.SetCases(cases)
-	if tr.IncomingComing(req(""), at) == nil {
+	if tr.IncomingComing(req(""), at, nil) == nil {
 		t.Fatal("a request whose body is coming paired with none")
 	}
 	if placed := tr.Placed().Earlier; len(placed) != 1 || placed[0].Mock != "test case post-apps-1" {
