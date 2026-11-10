@@ -650,8 +650,8 @@ func TestRequestsOfOneCallPairByTheirWordsThenByOrder(t *testing.T) {
 func TestAPairingWordIsAWholeValue(t *testing.T) {
 	var got []string
 	pairWords(&models.HTTPReq{URL: "u:1", Body: "a\tb\nc\"d'e`f,g;h&i=j?k/l{m}n[o]p(q)r<s>t\x00v 2026-11-09T10:00:01.5Z n_1+x%20y@z:w|!~*#$^"}, true, func(w string) { got = append(got, w) })
-	if want := "u:1 a b c d e f g h i j k l m n o p q r s t v 2026-11-09T10:00:01.5Z n_1+x%20y@z:w|!~*#$^"; strings.Join(got, " ") != want {
-		t.Fatalf("words %q; want %q", strings.Join(got, " "), want)
+	if want := "u:1 a b c d e f g h i j k l m n o p q r s t v 2026-11-09T10:00:01.5Z n_1+x%20y@z:w|!~*#$^"; strings.Join(got, "\n") != strings.ReplaceAll(want, " ", "\n") {
+		t.Fatalf("words %q; want those of %q", got, want)
 	}
 }
 
