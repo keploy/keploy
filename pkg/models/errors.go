@@ -324,6 +324,15 @@ type MockMismatchReport struct {
 	// it chose, never a value, and the miss's evidence names it
 	// (UnmatchedCall.Sanitized). Set by the HTTP matcher's variable check.
 	Given string
+	// VariableWhy is, under the proven switch, why the variable pass refused
+	// the call as ClosestMock's own call (MatchPhaseVariable): which of that
+	// recording's variables does not hold in this run, at which place, and
+	// which recording or test bound it, by their names, never a value. A
+	// parser that cannot say why without a value leaves it empty. The miss's
+	// evidence keeps it, each field path it names in its shape
+	// (UnmatchedCall.Sanitized), so the next step a reader of the run gets
+	// says what to fix.
+	VariableWhy string
 	// NotOwned says, under the proven switch, the call is ClosestMock, a
 	// recording the open test does not own (byte for byte, or at the per-test
 	// similarity): likely one another test recorded, which the replay names

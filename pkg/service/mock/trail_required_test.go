@@ -96,3 +96,18 @@ func TestATrailMovesRecordingWithNoSeriesIsServedNotRequired(t *testing.T) {
 		require.NotContains(t, a.Evidence.Reason, trailsUnreadReason)
 	}
 }
+
+// failUnmadeTrails touches only a test with a trailing write the run did not
+// make, or one it could not read: every other test's line is left as the run
+// wrote it, with no evidence added.
+func TestFailingUnmadeTrailsLeavesEveryOtherTestAsTheRunWroteIt(t *testing.T) {
+	got := failUnmadeTrails([]TestReceipt{
+		{Name: "o::TestA", Outcome: models.ScopeOutcomePassed},
+		{Name: "o::TestB", Outcome: models.ScopeOutcomePassed},
+		{Name: "o::TestC", Outcome: models.ScopeOutcomeFailed},
+	}, map[string]string{"mock-3": "o::TestA"}, nil)
+	require.Equal(t, models.ScopeOutcomeFailed, got[0].Outcome)
+	require.Equal(t, []string{"mock-3"}, got[0].Evidence.Unconsumed)
+	require.Equal(t, TestReceipt{Name: "o::TestB", Outcome: models.ScopeOutcomePassed}, got[1], "a test with no trailing write gets no evidence")
+	require.Equal(t, TestReceipt{Name: "o::TestC", Outcome: models.ScopeOutcomeFailed}, got[2])
+}
