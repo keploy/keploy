@@ -225,6 +225,68 @@ func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T)
 	}
 }
 
+// A test worker's manager, served after the run's manager staged several
+// sets, is staged only with the latest staging of each kind, so it has
+// counted fewer stagings than the run's. The set start's cut and the drain
+// compare a worker's marks with its own manager's count, never the run's: a
+// call the worker makes after the next set's staging, filed after it, is
+// that set's and its next read returns it, and its pool-view call made
+// before the staging, filed after it, is cut and said.
+func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50102"))
+	core, logs := observer.New(zap.DebugLevel)
+	p.logger = zap.New(core)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := exactMock("a", 0, models.LifetimeSession)
+	stageSet := func() {
+		t.Helper()
+		if err := p.SetMocksWithWindow(ctx, nil, []*models.Mock{a}, models.BaseTime, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		stageSet()
+	}
+	p.StartErrorDrain(ctx)
+	w := servedWorker(t, p, 1)
+	m1 := instanceMgrOf(t, p, 1)
+	run := p.getMockManager()
+	if run.StagingEpoch() <= m1.StagingEpoch() {
+		t.Fatalf("precondition: the run's manager counted %d stagings, worker 1's %d; want the run's ahead", run.StagingEpoch(), m1.StagingEpoch())
+	}
+	m1.ServeExactPool(models.PoolKeyNone, nil)
+	before := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /worker-before"}
+	integrations.StampMark(before, m1.MarkCallRound())
+	p.missCutPending.Store(true)
+	stageSet()
+	if run.StagingEpoch() <= m1.StagingEpoch() {
+		t.Fatalf("precondition: after the staging the run's manager counted %d stagings, worker 1's %d; want the run's ahead", run.StagingEpoch(), m1.StagingEpoch())
+	}
+	m1.ServeExactPool(models.PoolKeyNone, nil)
+	after := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /worker-after"}
+	integrations.StampMark(after, m1.MarkCallRound())
+	if after.Mark == models.RoundUnmarked || after.MarkEpoch != m1.StagingEpoch() {
+		t.Fatalf("precondition: worker 1's call after the staging is marked %v at staging %d, want marked at %d", after.Mark, after.MarkEpoch, m1.StagingEpoch())
+	}
+	for _, r := range []*models.MockMismatchReport{before, after} {
+		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
+		flushDrain(p)
+	}
+	p.ContinueTestErrorCapture()
+	if got := readCalls(t, "the run", p); len(got) != 0 {
+		t.Fatalf("the run's next-set read %v; worker 1's calls are no calls of the run's", got)
+	}
+	w.ContinueTestErrorCapture()
+	if got := readCalls(t, "worker 1", w); len(got) != 1 || got[0] != "GET /worker-after@1" {
+		t.Fatalf("worker 1's next-set read %v; want only its call made after the staging", got)
+	}
+	if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"GET /worker-before"})).Len(); n != 1 {
+		t.Fatalf("the cut of worker 1's call made before the staging was said %d times; want once: %+v", n, logs.All())
+	}
+}
+
 // A test worker's own late calls kept at the next set's start that its window
 // has no room for make the worker's next read incomplete, naming the loss,
 // and leave the run's read whole: the loss is the worker's. The window's
