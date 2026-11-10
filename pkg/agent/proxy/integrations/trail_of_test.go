@@ -68,6 +68,9 @@ func TestTrailRecordingsOfAreTheBackgroundRecordingsThatTrailATest(t *testing.T)
 	got := TrailRecordingsOf(s, models.Mongo)
 	var names []string
 	for _, r := range got {
+		if r.Mock == nil {
+			t.Fatalf("TrailRecordingsOf = %+v; it holds a recording with no mock", got)
+		}
 		names = append(names, r.Mock.Name+"->"+r.Trails)
 	}
 	if want := []string{"mock-3->o::TestB", "mock-1->o::TestA"}; !reflect.DeepEqual(names, want) {

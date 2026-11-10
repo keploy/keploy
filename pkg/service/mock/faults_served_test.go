@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -49,7 +50,11 @@ func TestTheReplaySummaryNamesEachFaultServed(t *testing.T) {
 	type read struct {
 		inst Instrumentation
 		wait []models.MockState
+		// proven runs it under the switch, where the agent first finishes
+		// its end of the run (settleRun).
+		proven bool
 	}
+	var calls []string
 	for name, c := range map[string]read{
 		"the whole read":                          {inst: outcomeInstr{consumed: consumed}},
 		"a read cut short":                        {inst: partialConsumed{outcomeInstr{consumed: consumed}}},
@@ -57,8 +62,14 @@ func TestTheReplaySummaryNamesEachFaultServed(t *testing.T) {
 		"the wait read one, the end the rest":     {inst: outcomeInstr{consumed: consumed[:2]}, wait: consumed[2:]},
 		"the wait read one, the end cut short":    {inst: partialConsumed{outcomeInstr{consumed: consumed[:2]}}, wait: consumed[2:]},
 		"the wait read one, the end read nothing": {inst: partialConsumed{outcomeInstr{}}, wait: consumed},
+		// The agent did not finish its end of the run: nothing more is
+		// read, and what the wait read was still served.
+		"the wait read all, the end did not finish": {inst: settleInstr{outcomeInstr: outcomeInstr{consumed: consumed}, calls: &calls, err: errors.New("agent gone")}, wait: consumed, proven: true},
 	} {
 		t.Run(name, func(t *testing.T) {
+			if c.proven {
+				t.Setenv(provenswitch.Env, "1")
+			}
 			core, logs := observer.New(zap.InfoLevel)
 			m := &mockService{config: &config.Config{}, logger: zap.New(core), instrumentation: c.inst, seriesRead: c.wait}
 			m.reportOutcome(context.Background(), 4, replayDetail{set: "s", faults: faults}, func() bool { return false })
