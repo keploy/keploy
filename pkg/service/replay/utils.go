@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1739,6 +1740,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			Protocol:      call.Protocol,
 			ActualSummary: call.ActualSummary,
 			Operation:     call.Operation,
+			Command:       call.Command,
 			Destination:   call.Destination,
 			ClosestMock:   call.ClosestMock,
 			Diff:          call.Diff,
@@ -1761,6 +1763,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			Given:            call.Given,
 			NotOwned:         call.NotOwned,
 			Background:       call.Background,
+			BackgroundBound:  slices.Clone(call.BackgroundBound), // a copy, as the proxy's: the report shares no slice with the miss
 			Reason:           call.Reason,
 			Concurrent:       call.Concurrent,
 			Answer:           call.Answer,
