@@ -488,6 +488,27 @@ func TestAnEndSaysWhetherTheTestFailedOnItsOwn(t *testing.T) {
 			require.Equal(t, c.own, w.Evidence.FailedOnItsOwn)
 		})
 	}
+	// A test that met keploy's error answer to a call (a miss) may have failed
+	// on that answer, so its harness's failure is not its own, and the
+	// recorded call it did not make stays its evidence.
+	t.Run("failed beside a miss", func(t *testing.T) {
+		a, p := wireAgent(t, models.MODE_TEST)
+		ctx := context.Background()
+		storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
+		a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+		claimSelf(t, a)
+		_, serr := a.ProvenBegin(ctx, begin("TestA"))
+		require.Nil(t, serr)
+		p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit", Destination: "127.0.0.1:18282"}}
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "failed"})
+		require.Nil(t, serr)
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		w := windowOf(t, a, "o::TestA")
+		require.NotNil(t, w.Evidence)
+		require.Len(t, w.Evidence.Misses, 1)
+		require.Equal(t, []string{"mock-1"}, w.Evidence.Unconsumed)
+		require.False(t, w.Evidence.FailedOnItsOwn, "a test keploy failed a call of did not fail on its own")
+	})
 	// keploy's own failure of a test it closes (why) is not the test's.
 	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
