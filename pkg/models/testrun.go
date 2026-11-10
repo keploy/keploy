@@ -568,6 +568,9 @@ type UnmatchedCall struct {
 	// Given mirrors MockMismatchReport.Given: the given a variable miss is
 	// about, by its name, never its value.
 	Given string `json:"given,omitempty" yaml:"given,omitempty"`
+	// VariableWhy mirrors MockMismatchReport.VariableWhy: why the variable
+	// pass refused the call as ClosestMock's, by names, never a value.
+	VariableWhy string `json:"variable_why,omitempty" yaml:"variable_why,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 	// Kind is where the call was made, under the proven switch (MissInTest,

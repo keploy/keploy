@@ -1761,6 +1761,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			FieldReasons:     call.FieldReasons,
 			VariablePlaces:   call.VariablePlaces,
 			Given:            call.Given,
+			VariableWhy:      call.VariableWhy,
 			NotOwned:         call.NotOwned,
 			Background:       call.Background,
 			BackgroundBound:  slices.Clone(call.BackgroundBound), // a copy, as the proxy's: the report shares no slice with the miss
