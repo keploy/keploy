@@ -2186,6 +2186,25 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	})) == len(answers)
 	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
 	ownRead := cutOnly && c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	// An answer that only reads back what a send of the scope wrote, where
+	// that send holds the moment at a cut coarser than a millisecond in both
+	// runs and its own call learned it as its read of the clock (clockSrc,
+	// as step 6 reads a send), is no source either: every such answer comes
+	// after the send, so it holds the moment because the test wrote it there
+	// a few milliseconds before, and two reads of one coarse cut are no copy
+	// (step 6). Where the call's own window holds the read, or a client
+	// test's window since its begin does, the moment goes on to steps 5, 7
+	// and 6 as with no answer, each checked at replay; where neither does,
+	// the value is a copy and the answer still binds it. A send at a
+	// millisecond or finer still makes the answer a copy's (4), an answer no
+	// such send came before still binds, and another test's answer is never
+	// one of these.
+	if !ownRead && len(answers) > 0 && c.rm != nil && c.lm != nil && max(c.rm.res, c.lm.res) > time.Millisecond &&
+		(readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin())) {
+		if coarse := copies(false); len(coarse) > 0 && earliest(coarse).clock && earliest(coarse).at.Before(earliest(answers).at) {
+			ownRead = true
+		}
+	}
 	if len(answers) > 0 && !ownRead {
 		// An answer recorded after the call that round F gave the
 		// application before it, holding F's moment, is a second source:
