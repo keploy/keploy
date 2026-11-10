@@ -1408,7 +1408,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table)); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -1719,6 +1719,30 @@ func workerSlices(mp *models.Mapping, pool map[string][]string) map[string][]str
 			out = map[string][]string{}
 		}
 		out[key] = append(out[key], e.Name)
+	}
+	return out
+}
+
+// backgroundNames is the names of the set's background recordings
+// (models.ScopeTableReq.Background), as keploy test names them
+// (models.Mapping.BackgroundMockNames: worker:, then startup:, each once):
+// those of mp, the set's mappings as recorded, that a slice of pool holds.
+// A name a test lists is in no slice: that call is the test's, never one
+// more run of the application's own. Nor is a read this replay moved to
+// worker: from a test its gate skips (skippedReads), which mp does not list
+// there: a test made it. nil when there is none.
+func backgroundNames(mp *models.Mapping, pool map[string][]string) []string {
+	inPool := map[string]bool{}
+	for _, names := range pool {
+		for _, n := range names {
+			inPool[n] = true
+		}
+	}
+	var out []string
+	for _, n := range mp.BackgroundMockNames() {
+		if inPool[n] {
+			out = append(out, n)
+		}
 	}
 	return out
 }

@@ -127,6 +127,14 @@ type provenWire struct {
 	// SetScopeSkippedReads): a test's extra-call line names that test
 	// (evidenceReason). Empty when the table had none.
 	skippedReads map[string]string
+	// background is, in a replay, the names of the set's background
+	// recordings (the CLI's scope table, models.ScopeTableReq.Background):
+	// its worker: and startup: mocks, which the staging hands the proxy
+	// (stageForExactServing, models.MockFilterParams.BackgroundMocks).
+	// stagedBackground is the names the last staging handed it. nil when
+	// the table had none.
+	background       []string
+	stagedBackground []string
 	// staged: the replay's mocks are staged on the proxy, which serves them
 	// exactly (exact_proven.go). Once per session, and again when the CLI
 	// sends a pool slice naming a recording the staging did not read.
@@ -696,6 +704,30 @@ func (a *Agent) SetScopeSkippedReads(ctx context.Context, reads map[string]strin
 	reads = maps.Clone(reads)
 	a.provenMu.Lock()
 	a.proven.skippedReads = reads
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeBackground installs, for a replay, the names of the set's
+// background recordings (models.ScopeTableReq.Background): its worker: and
+// startup: mocks. The set's staging hands them to the proxy read-only
+// (stageForExactServing), so a parser marks a miss that is one more run of
+// one of them (models.MockMismatchReport.Background), as keploy test's
+// staging does (models.MockFilterParams.BackgroundMocks). A set already
+// staged with other names is staged again before it is served, so the
+// proxy never keeps the previous names. None leaves the set none, never the
+// previous set's.
+func (a *Agent) SetScopeBackground(ctx context.Context, names []string) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	names = slices.Clone(names)
+	a.provenMu.Lock()
+	a.proven.background = names
+	if a.proven.staged && !slices.Equal(a.proven.stagedBackground, names) {
+		a.proven.staged = false
+	}
 	a.provenMu.Unlock()
 	return nil
 }

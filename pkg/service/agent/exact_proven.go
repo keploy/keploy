@@ -189,6 +189,8 @@ func showWorker(es coreAgent.ExactServer, names, skipped []string) error {
 // whole session). With no recorded window (a CLI that sends none) the
 // staging reads the whole window, as before. The reads of the recordings
 // the trees then do not hold go to the on-disk store (readUnstagedFromDisk).
+// The set's background recordings the CLI's table named
+// (SetScopeBackground) are handed to the proxy with the staging.
 func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	if _, stored := a.clientMocks.Load(uint64(0)); !stored {
 		// Nothing to stage yet: the CLI stores the recording before it
@@ -199,15 +201,20 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 		r.ResetStatefulCursors()
 	}
 	a.provenMu.Lock()
-	first, pool := a.proven.firstRecorded, a.proven.pool
+	first, pool, background := a.proven.firstRecorded, a.proven.pool, a.proven.background
 	a.provenMu.Unlock()
 	names := poolNames(pool)
+	// The set's background recordings (its worker: and startup: mocks, as
+	// the CLI's table names them) go with the staging, as keploy test's
+	// staging sends them: the proxy keeps them read-only, so a parser can
+	// tell a miss is one more run of one of them.
 	params := models.MockFilterParams{
 		AfterTime:              models.BaseTime,
 		BeforeTime:             time.Now(),
 		StrictMockWindow:       true,
 		ExactStaging:           true,
 		FirstRecordedTestStart: first,
+		BackgroundMocks:        background,
 	}
 	if err := a.stageMocks(ctx, params, names, nil); err != nil {
 		return false, fmt.Errorf("stage the recording's mocks: %w", err)
@@ -221,6 +228,7 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	}
 	a.provenMu.Lock()
 	a.proven.stagedPool = staged
+	a.proven.stagedBackground = background
 	a.provenMu.Unlock()
 	// The learn step reads the set's recordings now, in the background, not
 	// on its first drifted call's answer path: keploy mock's replay of
