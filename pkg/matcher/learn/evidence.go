@@ -787,6 +787,14 @@ func evidenceOf(p evPlace, h evHeld, r, f string, piece bool) (ev wordEvidence, 
 		return evUnknown, true
 	case same:
 		return evDisproven, true
+	case hr && hf && piece && unchangedFieldsFor(p, r, f):
+		// A piece of a longer value that the place holds only in fields
+		// round F gave as recorded (a start-up list of every suite's id,
+		// holding one id with the recorded 4-hex group and another with
+		// round F's, the recording changed elsewhere): those fields show
+		// no change, so the place reads as a wholly unchanged one does for
+		// a piece (above), and the value's long words judge it.
+		return evDisproven, true
 	case hr && hf:
 		return evShown, true
 	case nothingNew(p):
@@ -1874,4 +1882,51 @@ func (t *Tracker) RecBegan() time.Time {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.recBegan
+}
+
+// unchangedFieldsFor reports whether every field of p that holds the changed
+// word r in the recording, or f in round F's view of it (fieldsWith), holds
+// the same text in both runs: such a field gave round F's application what
+// it gave the recorded one, so neither run's word there shows the change,
+// though p changed elsewhere. false where a text was not read or no field
+// holds the word (fail closed: the place stays as its texts read).
+func unchangedFieldsFor(p evPlace, r, f string) bool {
+	if p.t == nil || p.t.rec == nil || p.t.live == nil {
+		return false
+	}
+	rf, okR := p.t.rec.fieldsWith(r)
+	lf, okL := p.t.live.fieldsWith(f)
+	if !okR || !okL || len(rf) == 0 || len(lf) == 0 {
+		return false
+	}
+	want := append(slices.Clone(rf), lf...)
+	rt, okR := fieldTexts(p.t.rec, want)
+	lt, okL := fieldTexts(p.t.live, want)
+	if !okR || !okL {
+		return false
+	}
+	for _, a := range want {
+		x, inR := rt[a]
+		y, inL := lt[a]
+		if !inR || !inL || x != y {
+			return false
+		}
+	}
+	return true
+}
+
+// fieldTexts is the text, read now, of each field of want that t's text has
+// (eachField); false where the text was not read.
+func fieldTexts(t *readerText, want []fieldAt) (map[fieldAt]string, bool) {
+	s, fields, ok := t.read()
+	if !ok {
+		return nil, false
+	}
+	out := make(map[fieldAt]string, len(want))
+	eachField(s, fields, func(a fieldAt, text string) {
+		if slices.Contains(want, a) {
+			out[a] = text
+		}
+	})
+	return out, true
 }

@@ -436,20 +436,39 @@ const tokenBits = 64
 // separators, so the runs' words do not pair and replay could never write
 // them: the token is one value, read as a word whole. A word of 32 bits or
 // more that an earlier place holds, where no place shows the whole token,
-// may be carried inside it, so it is left to the word rules. ok is false
-// where the field is no such token.
+// may be carried inside it, so it is left to the word rules.
+//
+// Where the runs' words happen to pair, the token is still one value when
+// it is a standard base64 encoder's output in both runs (whole groups of
+// four, the same '=' padding: a 256-bit key with no '+' or '/' in either
+// run, or one '+' in each at another spot) and every one of its words
+// changed: learned word by word, the next run's key, whose '+' and '/'
+// fall elsewhere, could never be written back. Unless a place shows the
+// whole token, no earlier place may hold any of its words, of any size: a
+// word handed to the call or sent before may be carried inside it. A
+// paired text with a word that stayed ("user-" before an id), or of the
+// URL-safe alphabet, whose '-' and '_' separate an id's parts as often as
+// they are letters of a token, is read word by word as before. ok is false
+// where the field is no such token (randomToken: two alphabets mixed,
+// another length or padding, a run that decodes to text).
 func (dc *decider) oneToken(path string, bare variables.Address, rec, live string, rd textReading) (Decision, bool) {
-	paired := !rd.ChangedShape && len(rd.Separators) == 0 && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 })
-	if paired || len(rd.Instants) > 0 || len(bare.Steps) > 0 || !randomToken(rec, live) {
+	if len(rd.Instants) > 0 || len(bare.Steps) > 0 || !randomToken(rec, live) {
 		return Decision{}, false
 	}
 	whole := readWord{At: bare, Rec: rec, Live: live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rec, Live: live}}}
 	shown := slices.ContainsFunc(dc.ps, func(p evPlace) bool { return tokenShown(placedFor(p, rec), whole) })
-	if !shown && slices.ContainsFunc(rd.Words, func(w readWord) bool {
-		return slices.ContainsFunc(dc.ps, func(p evPlace) bool {
-			return wordBits(w.Rec) >= chanceBits && evHolds(p.t.rec, w.Rec) || wordBits(w.Live) >= chanceBits && evHolds(p.t.live, w.Live)
+	held := func(least float64) bool {
+		return slices.ContainsFunc(rd.Words, func(w readWord) bool {
+			return slices.ContainsFunc(dc.ps, func(p evPlace) bool {
+				return wordBits(w.Rec) >= least && evHolds(p.t.rec, w.Rec) || wordBits(w.Live) >= least && evHolds(p.t.live, w.Live)
+			})
 		})
-	}) {
+	}
+	paired := !rd.ChangedShape && len(rd.Separators) == 0 && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 })
+	if paired && (!stdGroups(rec, live) || len(rd.Words) != len(rd.RecWords) || len(rd.Words) != len(rd.LiveWords) || !shown && held(0)) {
+		return Decision{}, false
+	}
+	if !shown && held(chanceBits) {
 		return Decision{}, false
 	}
 	return dc.word(path, bare, rec, live, rec, whole, false, nil), true
@@ -500,6 +519,14 @@ func tokenAlphabet(rec, live string) bool {
 	if strings.Trim(rec, "-_"+letters) == "" && strings.Trim(live, "-_"+letters) == "" {
 		return true
 	}
+	return stdGroups(rec, live)
+}
+
+// stdGroups reports whether rec and live are both of the standard base64
+// alphabet ('+' and '/'), whole groups of four characters with the same '='
+// padding in each run, at most two: what Go's base64.StdEncoding writes.
+func stdGroups(rec, live string) bool {
+	const letters = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	r, l := strings.TrimRight(rec, "="), strings.TrimRight(live, "=")
 	return len(rec)%4 == 0 && len(rec)-len(r) <= 2 && len(rec)-len(r) == len(live)-len(l) &&
 		strings.Trim(r, "+/"+letters) == "" && strings.Trim(l, "+/"+letters) == ""
@@ -2186,6 +2213,25 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	})) == len(answers)
 	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
 	ownRead := cutOnly && c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	// An answer that only reads back what a send of the scope wrote, where
+	// that send holds the moment at a cut coarser than a millisecond in both
+	// runs and its own call learned it as its read of the clock (clockSrc,
+	// as step 6 reads a send), is no source either: every such answer comes
+	// after the send, so it holds the moment because the test wrote it there
+	// a few milliseconds before, and two reads of one coarse cut are no copy
+	// (step 6). Where the call's own window holds the read, or a client
+	// test's window since its begin does, the moment goes on to steps 5, 7
+	// and 6 as with no answer, each checked at replay; where neither does,
+	// the value is a copy and the answer still binds it. A send at a
+	// millisecond or finer still makes the answer a copy's (4), an answer no
+	// such send came before still binds, and another test's answer is never
+	// one of these.
+	if !ownRead && len(answers) > 0 && c.rm != nil && c.lm != nil && max(c.rm.res, c.lm.res) > time.Millisecond &&
+		(readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin())) {
+		if coarse := copies(false); len(coarse) > 0 && earliest(coarse).clock && earliest(coarse).at.Before(earliest(answers).at) {
+			ownRead = true
+		}
+	}
 	if len(answers) > 0 && !ownRead {
 		// An answer recorded after the call that round F gave the
 		// application before it, holding F's moment, is a second source:
