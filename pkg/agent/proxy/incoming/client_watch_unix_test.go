@@ -42,7 +42,7 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 			t.Parallel()
 			gone := make(chan struct{})
 			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
@@ -351,7 +351,7 @@ func serveApp(t *testing.T, ln net.Listener, h http.HandlerFunc) {
 func streamUntilGone(gone chan struct{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 		w.(http.Flusher).Flush()
@@ -600,7 +600,7 @@ func TestAnAnswerCutShortByItsClientsGoingIsToldAsNotRecorded(t *testing.T) {
 				t.Fatal(err)
 			}
 			rawApp(t, appLn, func(_ int, c net.Conn, br *bufio.Reader) {
-				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
 				untilEnd(br) // told of its client's going: it ends its answer
 			})
 			_, client, served, logs := serveWatched(t, synchronous, appLn, nil)
@@ -667,7 +667,7 @@ func TestAnAppThatDiesMidAnswerIsNoClientsGoing(t *testing.T) {
 				t.Fatal(err)
 			}
 			rawApp(t, appLn, func(_ int, c net.Conn, _ *bufio.Reader) {
-				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
 				// it dies here: no last chunk, and its client is still there
 			})
 			_, client, served, logs := serveWatched(t, synchronous, appLn, nil)
@@ -696,7 +696,7 @@ var hangUps = []struct {
 	{"closes, the answer cut short",
 		func(t *testing.T, ln net.Listener, told chan struct{}) {
 			rawApp(t, ln, func(_ int, c net.Conn, br *bufio.Reader) {
-				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
 				untilEnd(br)
 				close(told)
 			})
@@ -706,7 +706,7 @@ var hangUps = []struct {
 	{"half-closes, the answer ended whole",
 		func(t *testing.T, ln net.Listener, told chan struct{}) {
 			serveApp(t, ln, func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
@@ -849,7 +849,7 @@ func TestAnExchangeAPauseCostIsCountedOnceHoweverItEnds(t *testing.T) {
 	cutThenDropped.name = "closes, one more event sent and the answer cut short"
 	cutThenDropped.serve = func(t *testing.T, ln net.Listener, told chan struct{}) {
 		rawApp(t, ln, func(_ int, c net.Conn, br *bufio.Reader) {
-			_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+			_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
 			untilEnd(br)
 			close(told)
 			_, _ = io.WriteString(c, "19\r\n{\"status\":\"CLIENT GONE\"}\n\r\n")

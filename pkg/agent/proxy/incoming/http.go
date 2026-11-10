@@ -689,6 +689,12 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// body's last byte moves it on, after resp.Write.
 		respTimestamp := clockNow()
 
+		// A stream is no test case, and that is known at its headers
+		// (notRecordedStream): its body is not captured.
+		if captureEligible && pm.notRecordedStream(logger, req, resp, &win) {
+			captureEnabled = false
+		}
+
 		// The app has answered. The rest of a body it answered before it came
 		// is forwarded, within bounds, before the answer (requestRelay.finish).
 		// A request that still did not reach the app whole (an upload its
@@ -1072,6 +1078,27 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 	}
+}
+
+// notRecordedStream reports whether resp, the app's answer to req, is a stream
+// (models.IsHTTPStreamResponse): keploy does not support a stream as a test
+// case, so it records none. It is known at the answer's headers, so the
+// exchange's window, *win, ends here, and the mock manager holds nothing for
+// the stream however long it lasts. It is told at Info, unless the
+// recording's filters leave the request out anyway.
+func (pm *IngressProxyManager) notRecordedStream(logger *zap.Logger, req *http.Request, resp *http.Response, win **syncMock.Window) bool {
+	if !models.IsHTTPStreamResponse(resp) {
+		return false
+	}
+	(*win).Close()
+	*win = nil
+	if !hooksUtils.IsFiltered(logger, req, pm.loadIncomingOpts()) {
+		logger.Info("Not recording a streaming response as a test case: keploy does not support streaming test cases",
+			zap.String("method", req.Method),
+			zap.String("url", req.URL.String()),
+			zap.String("content_type", resp.Header.Get("Content-Type")))
+	}
+	return true
 }
 
 func isHTTPUpgrade(req *http.Request) bool {
@@ -1794,6 +1821,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 
 		// The response's headers are read: the earliest its exchange can end.
 		headersAt := clockNow()
+
+		// A stream is no test case, and that is known at its headers
+		// (notRecordedStream): its body is not captured.
+		if captureEnabled && pm.notRecordedStream(logger, req, resp, &win) {
+			captureEnabled = false
+		}
 
 		// The app has answered. The rest of a body it answered before it came
 		// is forwarded, within bounds, before the answer (requestRelay.finish).
