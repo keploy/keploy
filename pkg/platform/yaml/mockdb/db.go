@@ -288,7 +288,7 @@ func resolveMockFileMode(targetPath string) (os.FileMode, error) {
 		return info.Mode().Perm(), nil
 	}
 	if os.IsNotExist(err) {
-		return 0o777, nil
+		return 0o644, nil
 	}
 	return 0, err
 }
@@ -1346,7 +1346,7 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 		// counted as such (gobQueued less gobWritten).
 		ys.gobFinishFileLocked()
 	}
-	if err := os.MkdirAll(mockPath, 0o777); err != nil {
+	if err := os.MkdirAll(mockPath, 0o755); err != nil {
 		return fmt.Errorf("mkdir mock dir: %w", err)
 	}
 	filePath := filepath.Join(mockPath, mockFileName+".gob")
@@ -2456,7 +2456,7 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 		return fmt.Errorf("nothing staged to promote for %q; leaving %q untouched", stagingID, targetID)
 	}
 
-	if err := os.MkdirAll(targetDir, 0o777); err != nil {
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return fmt.Errorf("creating target set dir %q: %w", targetDir, err)
 	}
 
