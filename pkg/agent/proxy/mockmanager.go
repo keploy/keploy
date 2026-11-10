@@ -5277,28 +5277,33 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 		m.consumedMu.Unlock()
 		return errPreviousSet
 	}
-	// Under the proven switch what record's full round learned onto a mock
-	// is cumulative across its states: a reusable recording the learn step
-	// pairs twice keeps both pairings' variables, binds and noise, whichever
-	// door each left through (a door that keeps the pool's copy, as
-	// MarkMockAsUsed does, hands the second pairing a copy without the
-	// first's).
-	if provenswitch.On() {
-		var prev models.MockState
-		var ok bool
-		if m.consumedPersistent != nil {
-			prev, ok = m.consumedPersistent[mock.Name]
-		} else if idx, exists := m.consumedIndex[mock.Name]; exists {
-			prev, ok = m.consumedList[idx], true
-		}
-		if ok {
-			mock.Variables = models.MergeVariables(prev.Variables, mock.Variables)
-			mock.Clocks = models.MergeClocks(prev.Clocks, mock.Clocks)
-			mock.Binds = models.MergeBinds(prev.Binds, mock.Binds)
-			if len(prev.ReqBodyNoise) > 0 {
-				mock.ReqBodyNoise = mocknoise.MergeLearned(mock.ReqBodyNoise, prev.ReqBodyNoise)
-			}
-		}
+	// What a reusable mock learns is cumulative across its states, because the
+	// match path can pair it more than once and some doors hand the later
+	// pairing the pool's copy (as MarkMockAsUsed does) rather than one carrying
+	// the earlier pairing's learning — so a later, emptier state would otherwise
+	// overwrite and drop it.
+	var prev models.MockState
+	var havePrev bool
+	if m.consumedPersistent != nil {
+		prev, havePrev = m.consumedPersistent[mock.Name]
+	} else if idx, exists := m.consumedIndex[mock.Name]; exists {
+		prev, havePrev = m.consumedList[idx], true
+	}
+	// Request-body noise merges regardless of the proven switch: HTTP/2 and gRPC
+	// both reach here through the pool-copy door, so without this a second clean
+	// hit on a reusable stream loses the noise an earlier drifting hit learned
+	// (Mongo is unaffected — it writes noise through UpdateUnFilteredMock first).
+	// The new state's own learning wins on conflicting paths; prior-only paths
+	// are carried forward.
+	if havePrev && len(prev.ReqBodyNoise) > 0 {
+		mock.ReqBodyNoise = mocknoise.MergeLearned(mock.ReqBodyNoise, prev.ReqBodyNoise)
+	}
+	// Variables/clocks/binds stay proven-switch-gated: that is where record's
+	// full-round learning accumulates them across a reusable recording's pairings.
+	if provenswitch.On() && havePrev {
+		mock.Variables = models.MergeVariables(prev.Variables, mock.Variables)
+		mock.Clocks = models.MergeClocks(prev.Clocks, mock.Clocks)
+		mock.Binds = models.MergeBinds(prev.Binds, mock.Binds)
 	}
 	if inScope && m.scopeConsumed != nil {
 		m.scopeConsumed[mock.Name] = struct{}{}
