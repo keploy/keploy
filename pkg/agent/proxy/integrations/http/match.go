@@ -21,7 +21,6 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -204,21 +203,10 @@ func ownedBy(ctx context.Context) func(*models.Mock) bool {
 // matchCascade is match without its proven-switch report additions.
 func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 
-	// Mock-noise engine for this match, built from HTTP's own adapter so it is
-	// ALWAYS present. keploy.yml request-body patterns (PatternDrift) are a user
-	// feature that must hold whether or not schema-noise detection/strict are on,
-	// so the engine cannot come from ctx (the proxy attaches none when both noise
-	// flags are off) — it is built here, like main, with the flags gating only
-	// learning and strict enforcement. The per-call schemaNoiseDetection turns
-	// learning OFF for THIS match (never on): the proven-switch fallback and the
-	// dry own/extra-call matches pass false because record's learn step is the
-	// one noise learner. Other parsers (MySQL) read the proxy's ctx-attached
-	// engine via EngineFrom; HTTP's match path is also driven directly in tests
-	// with no ctx engine, so it owns its construction from the same adapter.
-	// h.MockNoise() (not the httpNoiseAdapter{} literal) so the declaration and
-	// the use stay one source of truth; it never returns nil for HTTP, so New
-	// cannot be handed a nil adapter here.
-	noiseEngine := mocknoise.New(h.MockNoise(), schemaNoiseDetection, schemaNoiseStrict)
+	// Shared schema-noise engine for this match. HTTP is a full client of the
+	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
+	// only the HTTP-specific bits (body extraction, JSON/form diff).
+	noiseEngine := schemanoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
 
 	// Under the proven switch no path segment or query value is relaxed for
 	// its shape (design v14 row S1): what may differ between record and

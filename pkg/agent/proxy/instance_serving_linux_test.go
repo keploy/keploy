@@ -13,7 +13,6 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -28,7 +27,6 @@ func (storeParser) MatchType(context.Context, []byte) bool { return true }
 func (storeParser) RecordOutgoing(context.Context, *integrations.RecordSession) error {
 	return nil
 }
-func (storeParser) MockNoise() mocknoise.Adapter { return nil }
 func (s storeParser) MockOutgoing(_ context.Context, _ net.Conn, _ *models.ConditionalDstCfg, db integrations.MockMemDb, _ models.OutgoingOptions) error {
 	s.saw <- db
 	return nil

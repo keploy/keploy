@@ -760,41 +760,6 @@ func TestASecondStagingsFilingIsNotServedInItsRetryCycle(t *testing.T) {
 	}
 }
 
-// A reusable mock read more than once through the pool-copy door
-// (MarkMockAsUsed) keeps the request-body noise an earlier read learned when a
-// later, clean read carries none — the two states' noise is merged, not
-// overwritten. Unlike variables/clocks/binds this holds with the proven switch
-// off, because HTTP/2 and gRPC reach this door on every reusable-stream replay
-// (Mongo avoids the loss by writing noise through UpdateUnFilteredMock first).
-// Without the merge the second read's empty noise overwrites the entry and
-// body.at is never saved, so the next replay run false-fails on a drifting field.
-func TestAReusableMockKeepsLearnedNoiseAcrossConsumesWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
-	state := func(mm *MockManager) models.MockState {
-		for _, st := range mm.GetConsumedMocks() {
-			if st.Name == "beat" {
-				return st
-			}
-		}
-		t.Fatal("beat's consume is not reported")
-		return models.MockState{}
-	}
-	mm := stagedManager(t, nil, []*models.Mock{beatMock("beat")})
-
-	// A first read learns body.at as noise; a later clean read carries none.
-	learned := beatMock("beat")
-	learned.Spec.ReqBodyNoise = map[string][]string{"body.at": {}}
-	if !mm.MarkMockAsUsed(*learned) {
-		t.Fatal("precondition: the first read was not consumed")
-	}
-	if !mm.MarkMockAsUsed(*beatMock("beat")) {
-		t.Fatal("precondition: the second read was not consumed")
-	}
-	if _, ok := state(mm).ReqBodyNoise["body.at"]; !ok {
-		t.Fatalf("a later clean read dropped the noise an earlier read learned: %v", state(mm).ReqBodyNoise)
-	}
-}
-
 // asStaged gives a matcher's copy the staged recording's clock reads, never
 // the ones the learn step learned on the copy, as it does noise and
 // variables.

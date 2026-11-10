@@ -17,7 +17,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
@@ -96,11 +95,6 @@ func New(logger *zap.Logger) integrations.Integrations {
 		ptRecorder: &ptRecorder{logger: logger},
 	}
 }
-
-// MockNoise returns HTTP's field-level request-body mock-noise adapter, wiring
-// the parser into the shared mocknoise engine (auto-replay learns
-// req_body_noise). Satisfies integrations.Integrations.
-func (h *HTTP) MockNoise() mocknoise.Adapter { return httpNoiseAdapter{} }
 
 type FinalHTTP struct {
 	Req              []byte

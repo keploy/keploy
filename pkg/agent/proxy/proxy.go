@@ -37,7 +37,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -1423,7 +1422,6 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	// The replayer makes the client's TLS handshake itself, on its
 	// SSLRequest: charged as the proxy's own client handshakes are.
 	reportCtx := p.withClientTLS(parserCtx, dstAddr, srcProcess(outgoingOpts))
-	reportCtx = withNoiseEngine(reportCtx, mysqlMocker, outgoingOpts)
 	mysqlDst := &models.ConditionalDstCfg{Addr: dstAddr}
 	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, mysqlDst, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
@@ -4069,7 +4067,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if tracked != nil {
 				tracked.servedBy(parserType, matchedParser)
 			}
-			testCtx = withNoiseEngine(testCtx, matchedParser, outgoingOpts)
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			p.countParserPanic(err, parserType, dstAddr)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
@@ -6953,30 +6950,4 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	}
 	util.RelayRawPassthrough(srcConn, dstConn)
 	return true, nil, nil
-}
-
-// withNoiseEngine attaches the mock-noise Engine built from a parser's DECLARED
-// adapter (Integrations.MockNoise()) to ctx, so the parser matches with the
-// engine the contract specifies rather than constructing its own. This is the
-// consume side of the MockNoise() contract: a parser that declares nil gets no
-// engine (noise off); one that declares an adapter gets an engine built from
-// exactly that adapter, with detection/strict resolved from opts. Built once per
-// outgoing connection; the Engine is immutable, so parsers may reuse it across
-// the connection's requests.
-func withNoiseEngine(ctx context.Context, parser integrations.Integrations, opts models.OutgoingOptions) context.Context {
-	if parser == nil {
-		return ctx
-	}
-	adapter := parser.MockNoise()
-	if adapter == nil {
-		return ctx
-	}
-	// Noise off (neither detection nor strict): inject nothing, so EngineFrom
-	// returns nil — a do-nothing engine is never attached. This keeps "no engine
-	// == noise disabled" uniform across parsers (some, e.g. HBase, branch on a
-	// nil engine), and is equivalent for the nil-safe ones.
-	if !opts.NoiseDetection() && !opts.NoiseStrict() {
-		return ctx
-	}
-	return mocknoise.WithEngine(ctx, mocknoise.New(adapter, opts.NoiseDetection(), opts.NoiseStrict()))
 }

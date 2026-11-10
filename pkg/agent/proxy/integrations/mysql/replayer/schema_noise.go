@@ -63,11 +63,6 @@ func (mysqlNoiseAdapter) DiffJSONBodies(_ *models.Mock, recorded, live *mocknois
 	return mocknoise.DetectJSONBodyDrift(recorded, live, known, typeStrict, valueChangesOnly, valIsNoise)
 }
 
-// NoiseAdapter exposes MySQL's mock-noise adapter so the top-level MySQL parser
-// can hand it to the shared engine from its MockNoise() method (the adapter
-// type itself stays unexported in this sub-package).
-func NoiseAdapter() mocknoise.Adapter { return mysqlNoiseAdapter{} }
-
 // RecordedBody returns the canonical JSON body of the mock's recorded request.
 // Command-phase data mocks carry exactly one request; multi-request bundles
 // (handshake config mocks) and non-drift-capable commands return ok=false.

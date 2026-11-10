@@ -124,22 +124,6 @@ func New(a Adapter, detection, strict bool) *Engine {
 	return &Engine{adapter: a, detection: detection, strict: strict}
 }
 
-// WithoutDetection returns a copy of e with auto-learning turned off, strict
-// enforcement unchanged. A matcher that must not learn on a particular call —
-// the proven-switch fallback and the dry own/extra-call matches, which pass
-// detection=false because record's learn step is the one noise learner — derives
-// one so a per-call "don't learn" still holds even though the connection-level
-// Engine on ctx was built with detection on. Returns e unchanged when it is nil
-// or already detection-off, so no allocation happens on the common path.
-func (e *Engine) WithoutDetection() *Engine {
-	if e == nil || !e.detection {
-		return e
-	}
-	cp := *e
-	cp.detection = false
-	return &cp
-}
-
 // DetectionEnabled reports whether auto-learning is on. nil-safe.
 func (e *Engine) DetectionEnabled() bool { return e != nil && e.detection }
 
@@ -341,12 +325,6 @@ func (e *Engine) userGuardedDrift(m *models.Mock, recorded, live *JSONBody, user
 // live body lacks. A pass that excuses the obfuscator's redacted values (the HTTP
 // parser's noise-aware exact body match) serves m only when it is empty.
 func (e *Engine) PatternDrift(m *models.Mock, liveBody []byte, userNoise map[string][]string) map[string][]string {
-	// nil engine == noise off: no adapter means no keploy.yml patterns to hold,
-	// so nothing drifts beyond them. Keeps the "every method is nil-safe"
-	// contract (see context.go) that match.go relies on when both flags are off.
-	if e == nil {
-		return nil
-	}
 	recorded, _ := e.adapter.RecordedBody(m)
 	return e.patternDrift(m, NewJSONBody(recorded), NewJSONBody(liveBody), userNoise)
 }

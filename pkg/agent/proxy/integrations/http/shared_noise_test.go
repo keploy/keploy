@@ -84,9 +84,6 @@ func serveOne(t *testing.T, h *HTTP, db integrations.MockMemDb, opts models.Outg
 	t.Helper()
 	app, proxy := tcpPair(t)
 	done := runDecode(t, proxy, func(ctx context.Context) error {
-		// HTTP builds its own mock-noise engine from httpNoiseAdapter{} in
-		// matchCascade (gated by opts' noise flags) and does not read a ctx
-		// engine, so none is attached here.
 		return h.decodeHTTP(ctx, []byte(raw), proxy, nil, db, opts)
 	})
 	resp, err := http.ReadResponse(bufio.NewReader(app), nil)

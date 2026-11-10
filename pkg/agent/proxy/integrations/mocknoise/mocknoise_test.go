@@ -207,51 +207,6 @@ func TestEngineDetectDisabled(t *testing.T) {
 	}
 }
 
-// TestEngineWithoutDetection covers the per-call "don't learn on this match"
-// opt-out: a connection-level engine built with detection ON yields a copy that
-// learns nothing (the proven-switch fallback and dry own/extra-call matches rely
-// on this so "no other replay learns noise" holds), while the original engine is
-// left untouched and strict enforcement is preserved on the copy.
-func TestEngineWithoutDetection(t *testing.T) {
-	a := &fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}
-	on := New(a, true, true)
-
-	off := on.WithoutDetection()
-	if off.DetectionEnabled() {
-		t.Fatal("WithoutDetection copy must have detection off")
-	}
-	if !off.StrictEnabled() {
-		t.Fatal("WithoutDetection must leave strict enforcement unchanged")
-	}
-	if drift, comparable := off.Detect(&models.Mock{}, []byte(`{"a":2}`), nil); drift != nil || comparable {
-		t.Fatalf("detection-off copy must not learn, got drift=%v comparable=%v", drift, comparable)
-	}
-	// The original engine is unaffected — the detection-on path still learns.
-	if drift, _ := on.Detect(&models.Mock{}, []byte(`{"a":2}`), nil); len(drift) == 0 {
-		t.Fatal("WithoutDetection must not mutate the original engine")
-	}
-
-	// Already detection-off (and nil) are returned as-is, no allocation.
-	alreadyOff := New(a, false, true)
-	if alreadyOff.WithoutDetection() != alreadyOff {
-		t.Fatal("a detection-off engine must be returned unchanged")
-	}
-	var nilEngine *Engine
-	if nilEngine.WithoutDetection() != nil {
-		t.Fatal("nil engine WithoutDetection must stay nil")
-	}
-}
-
-// The default config attaches no engine, so EngineFrom returns nil and the
-// match path (http/match.go) calls PatternDrift on it directly. It must report
-// no drift rather than dereference a nil adapter and panic.
-func TestEngineNilPatternDriftIsNoop(t *testing.T) {
-	var nilEngine *Engine
-	if drift := nilEngine.WithoutDetection().PatternDrift(&models.Mock{}, []byte(`{"a":2}`), nil); drift != nil {
-		t.Fatalf("nil engine PatternDrift must be a no-op, got %v", drift)
-	}
-}
-
 func TestEngineLearnMonotonicAndDeepCopied(t *testing.T) {
 	stored := map[string][]string{"body.a": {}}
 	a := &fakeAdapter{stored: stored}
