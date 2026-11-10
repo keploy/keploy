@@ -261,6 +261,10 @@ type Proxy struct {
 	// models.BaseTime), which cuts what was missed until then
 	// (cutMissesAtSetStart).
 	missCutPending atomic.Bool
+	// setStarts counts, under the proven switch, the test sets' starts
+	// (cutMissesAtSetStart): an earlier set's call is read naming how many
+	// sets before the running one it was made in (missWindow.setsBack).
+	setStarts atomic.Uint64
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
 	// no longer needed since the proxy serves a single client-app.
@@ -5653,22 +5657,32 @@ var (
 //
 // A miss whose call was marked in a test's view (markedInATest) is not cut,
 // whichever way its report and the staging fall: it is that test's own call,
-// made in the previous set and decided by keploy only after that test's end
+// made in an earlier set and decided by keploy only after that test's end
 // was read. Dropped, the test passed with an unanswered call of its own, and
-// no receipt listed it. It is kept, in the window it was filed in (the run's,
-// or the test worker's that made it), as an earlier set's test's call
+// no receipt listed it. Nor is one marked while an earlier set's mocks
+// served with no test's view named (the pool view between two of its tests,
+// or after its last) before that set's last read of the window it was filed
+// in: at zero latency that read would have failed the set with it, and
+// dropped, the set passed with an unanswered call it made
+// (missWindow.keptAsEarlierSet). Each is kept, in the window it was filed in
+// (the run's, or the test worker's that made it), as an earlier set's call
 // (earlierSetMiss), never as this set's: the next read returns it as made
-// outside every test of this set, naming the test it was made in
-// (models.UnmatchedCall.EarlierSetTest), and neither that read's test nor this
+// outside every test of this set, naming the test it was made in, where it
+// names one (models.UnmatchedCall.EarlierSetTest), and how many sets back
+// (models.UnmatchedCall.EarlierSet), and neither that read's test nor this
 // set, which did not make it, is charged with it.
 func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
 	windows := p.missWindowsMarkedOn()
+	set := p.setStarts.Add(1)
 	for _, o := range windows {
 		if o.m != nil {
 			// Before the flush: a marked miss the drain files after this is
-			// cut there (markedBeforeSet), one it filed before, here. Each
-			// window against its own manager's staging.
-			o.w.setStaged.Store(o.m.StagingEpoch())
+			// cut or kept there (markedBeforeSet), one it filed before, here.
+			// Each window against its own manager's staging, and its own
+			// reads: the previous set's last read of it came before this.
+			e := o.m.StagingEpoch()
+			o.w.noteSetStart(setStart{epoch: e, reads: o.m.windowReads.Load(), set: set})
+			o.w.setStaged.Store(e)
 		}
 	}
 	if p.errDrainActive.Load() && p.errChannel != nil {
@@ -5691,12 +5705,13 @@ func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
 		// of this set is short of it.
 		w.missLoss.Store(nil)
 		for _, err := range all {
-			if !markedInATest(err) {
+			if !w.keptAsEarlierSet(err) {
 				tail = append(tail, err)
 				continue
 			}
-			// A test's own call: kept for the next read, which a loss
-			// for room leaves short of it.
+			// A test's own call, or one the previous set's reads would
+			// have taken: kept for the next read, which a loss for room
+			// leaves short of it.
 			if !w.pendingMockErrors.addBounded(asEarlierSet(err), maxPendingMockErrors) {
 				p.pendingDroppedForRoom(w, err)
 			}
@@ -5755,8 +5770,8 @@ func asBeforeSet(err error) error {
 	return beforeSetMiss{err}
 }
 
-// asEarlierSet is err, a miss whose call was marked in a test's view
-// (markedInATest), as that earlier set's test's call (earlierSetMiss), in
+// asEarlierSet is err, a miss an earlier set made (keptAsEarlierSet), as
+// that earlier set's call (earlierSetMiss), in
 // place of a wrap as made before the running set's first test: a read
 // unwraps one wrap alone.
 func asEarlierSet(err error) error {
@@ -5769,14 +5784,16 @@ func asEarlierSet(err error) error {
 	return earlierSetMiss{err}
 }
 
-// earlierSetMiss is a miss whose call was marked in the view of a test of an
-// earlier test set (models.MockMismatchReport.MarkedTest), which keploy
-// decided only after the running set's mocks were staged: that test's own
-// call, which no read of its set can take any more (cutMissesAtSetStart). It
-// is no call of the running set's, nor of any of its tests: the read returns
-// it outside every test, naming the test it was made in
-// (models.UnmatchedCall.EarlierSetTest), for keploy test to fail the run
-// with, naming that test and its set. It is not carried as made before the
+// earlierSetMiss is a miss whose call was marked in an earlier test set, in
+// the view of one of its tests (models.MockMismatchReport.MarkedTest), or
+// with no test's view named before that set's last read
+// (missWindow.keptAsEarlierSet), which keploy decided only after the running
+// set's mocks were staged: that set's call, which no read of its set can take
+// any more (cutMissesAtSetStart). It is no call of the running set's, nor of
+// any of its tests: the read returns it outside every test, naming the test
+// it was made in, where it names one (models.UnmatchedCall.EarlierSetTest),
+// and how many sets back (models.UnmatchedCall.EarlierSet), for keploy test
+// to fail the run with, naming that set and its test. It is not carried as made before the
 // running set (beforeSetMiss): keploy test would fail that set with it, a set
 // that did not make it.
 type earlierSetMiss struct{ error }
@@ -5976,7 +5993,7 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 					// manager's staging, the run's against the
 					// run's (missWindow.setStaged).
 					if w.markedBeforeSet(err) {
-						if !markedInATest(err) {
+						if !w.keptAsEarlierSet(err) {
 							// Made before the running set's mocks
 							// were staged: cut as the set's start
 							// cut what it held, whichever way the
@@ -5984,9 +6001,9 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 							p.logDroppedMisses(missesCutAtSetStart, []error{err})
 							continue
 						}
-						// A previous set's test's own call, kept as
-						// the set's start cut keeps it: as that
-						// earlier set's test's (cutMissesAtSetStart).
+						// An earlier set's call, kept as the set's
+						// start cut keeps it: as that earlier set's
+						// (cutMissesAtSetStart).
 						err = asEarlierSet(err)
 					}
 					// Route under captureMu so the window can't be swapped
@@ -6031,9 +6048,11 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // a set's last test is not left for the next set's first window: under the
 // proven switch the replayer reads it at the set's end (GetMockErrors) and it
 // fails the set. One keploy decides after that read, whose call was marked in
-// a test's view, is that test's: the next set's first read returns it as an
-// earlier set's test's call (earlierSetMiss), which fails keploy test's run,
-// not that set. Any other made after that read reaches no verdict.
+// a test's view, is that test's, and one marked with no test's view named
+// before that read is the set's: the next set's first read returns either as
+// an earlier set's call (earlierSetMiss), which fails keploy test's run, not
+// that set. One marked after that read is cut at the next set's start, as at
+// zero latency (cutMissesAtSetStart).
 // GetMockErrors retrieves and the next Begin/ContinueTestErrorCapture resets
 // the window.
 func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false, false) }
@@ -6286,6 +6305,12 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 	// skipped the marker: either left a miss the drain had not routed yet to
 	// be read with the next test's, on a loaded runner, charging it to that
 	// test, which neither failed for it nor kept auto-noise from masking it.
+	// A call marked from here on is marked after this read began
+	// (MockManager.windowReads): the set-start cut keeps one marked before
+	// its set's last read of w (missWindow.keptAsEarlierSet).
+	if m := p.managerOf(w); m != nil {
+		m.windowReads.Add(1)
+	}
 	unreadCause := ""
 	rendezvousOK := false
 	drainActive := p.errDrainActive.Load()
@@ -6472,13 +6497,17 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 		}
 		if isEarlier {
 			// The test whose view the call was marked in: an earlier
-			// set's (markedInATest), named with or without its round.
+			// set's (markedInATest), named with or without its round;
+			// none for a call of the set's marked with no test's view
+			// named. And the set: how many before the running one.
 			var test string
 			if pe, ok := err.(models.ParserError); ok && pe.MismatchReport != nil {
 				test = pe.MismatchReport.MarkedTest
 			}
+			back := w.setsBack(err, p.setStarts.Load())
 			for i := first; i < len(errs); i++ {
 				errs[i].EarlierSetTest = test
+				errs[i].EarlierSet = back
 				errs[i].Kind = models.MissOutsideTest
 			}
 		}

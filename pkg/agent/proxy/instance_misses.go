@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/miekg/dns"
@@ -55,8 +56,93 @@ type missWindow struct {
 	// earlier staging (models.MockMismatchReport.MarkEpoch) is not the set's,
 	// and the drain cuts it as the set's start did, however late it arrives
 	// (markedBeforeSet), or keeps it as the start did, one marked in a test's
-	// view (markedInATest).
+	// view (markedInATest), or one its set's reads of this window would have
+	// taken (keptAsEarlierSet).
 	setStaged atomic.Uint64
+	// starts are, under the proven switch, the test sets' starts this
+	// window's calls were marked against, oldest first (noteSetStart): where
+	// each set's mocks were staged on the manager its calls are marked on, and
+	// how many reads of this window had begun by then. Read and written under
+	// startsMu.
+	startsMu sync.Mutex
+	starts   []setStart
+}
+
+// setStart is a test set's start on a misses window (cutMissesAtSetStart):
+// the staging of the set's mocks on the manager the window's calls are marked
+// on (MockManager.StagingEpoch), how many reads of the window had begun by
+// then (MockManager.windowReads), so the previous set's last, and the set's
+// place in the proxy's count of set starts (Proxy.setStarts).
+type setStart struct {
+	epoch, reads, set uint64
+}
+
+// noteSetStart notes s, a test set's start, on w (missWindow.starts).
+func (w *missWindow) noteSetStart(s setStart) {
+	w.startsMu.Lock()
+	w.starts = append(w.starts, s)
+	w.startsMu.Unlock()
+}
+
+// keptAsEarlierSet reports, for err, a miss filed in w whose call was marked
+// before the running test set's staging (markedBeforeSet), whether it is kept
+// as an earlier set's call (earlierSetMiss): one marked in a test's view
+// (markedInATest), that test's own; or one marked while that set's mocks
+// served (models.RoundMarkedSettled), with no test's view named (the pool
+// view between two of its tests, after its last, or a view the store names no
+// test of), before that set's last read of w (models.MockMismatchReport.
+// MarkReads), which at zero latency that read, or an earlier one, would have
+// returned for keploy test to fail the set with. A call marked while a set's
+// mocks were being staged, before a set's first staging on w, or after its
+// set's last read of w, which at zero latency the next set's start cuts too,
+// is not kept, nor is one whose parser marks no round.
+func (w *missWindow) keptAsEarlierSet(err error) bool {
+	if markedInATest(err) {
+		return true
+	}
+	var pe models.ParserError
+	if !errors.As(err, &pe) || pe.MismatchReport == nil || pe.MismatchReport.Mark != models.RoundMarkedSettled {
+		return false
+	}
+	r := pe.MismatchReport
+	w.startsMu.Lock()
+	defer w.startsMu.Unlock()
+	k := w.startOfLocked(r.MarkEpoch)
+	if k < 0 || k+1 >= len(w.starts) {
+		return false
+	}
+	return r.MarkReads < w.starts[k+1].reads
+}
+
+// setsBack is, for err, an earlier set's call read in w (earlierSetMiss), how
+// many test sets before the running one its call was marked in: 1 for the
+// set that ran just before, and 1 where w keeps no start before the mark's.
+func (w *missWindow) setsBack(err error, running uint64) int {
+	var pe models.ParserError
+	if !errors.As(err, &pe) || pe.MismatchReport == nil {
+		return 1
+	}
+	w.startsMu.Lock()
+	defer w.startsMu.Unlock()
+	k := w.startOfLocked(pe.MismatchReport.MarkEpoch)
+	if k < 0 || w.starts[k].set >= running {
+		return 1
+	}
+	return int(running - w.starts[k].set)
+}
+
+// startOfLocked is the index in w.starts of the set start a call marked in
+// staging epoch belongs to (the last one staged at or before it), -1 for none.
+// Called under startsMu.
+func (w *missWindow) startOfLocked(epoch uint64) int {
+	k := -1
+	for i, s := range w.starts {
+		if s.epoch > epoch {
+			break
+		}
+		k = i
+	}
+	return k
 }
 
 // missInstance is the test worker whose process made the miss err (0: none).
@@ -153,6 +239,18 @@ func (p *Proxy) missWindowsMarkedOn() []markedOn {
 		out = append(out, markedOn{w, s.mgrs[inst]})
 	}
 	return out
+}
+
+// managerOf is the manager the calls whose misses w files are marked on
+// (missWindowsMarkedOn): the run's for the run's window, a served test
+// worker's own for its, nil for none.
+func (p *Proxy) managerOf(w *missWindow) *MockManager {
+	for _, o := range p.missWindowsMarkedOn() {
+		if o.w == w {
+			return o.m
+		}
+	}
+	return nil
 }
 
 // missManager is the manager that served the call a miss of test worker

@@ -153,8 +153,11 @@ func TestAWorkersMarkedMissIsNotCutByTheRunsSetStaging(t *testing.T) {
 // worker's manager's staging), the worker's next read returns it as the
 // earlier set's o::TestX's call, outside every test, so a next-set test of
 // the same name is not charged with it; the run's read never returns it. A
-// worker's call marked in the pool view before the staging and filed after
-// it is cut, and said, as the run's is.
+// worker's call marked in its pool view before o::TestX's end read, its set's
+// last read of the worker's window, is kept the same way, as the earlier
+// set's call of no test (EarlierSet): at zero latency that read would have
+// returned it. One marked in its pool view after that read is cut, and said,
+// as the run's is.
 func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T) {
 	for i, when := range []string{"before the staging", "after the staging"} {
 		t.Run(when, func(t *testing.T) {
@@ -165,6 +168,8 @@ func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			a := exactMock("a", 0, models.LifetimeSession)
+			// Set A's start: its staging, which the worker is served in.
+			p.missCutPending.Store(true)
 			if err := p.SetMocksWithWindow(ctx, nil, []*models.Mock{a}, models.BaseTime, time.Now()); err != nil {
 				t.Fatal(err)
 			}
@@ -195,8 +200,13 @@ func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T)
 			if got := readCalls(t, "worker 1's o::TestX end", w); len(got) != 0 {
 				t.Fatalf("precondition: o::TestX's end read %v", got)
 			}
+			m1.ServeExactPool(models.PoolKeyNone, nil)
+			after := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /worker-after-end"}
+			integrations.StampMark(after, m1.MarkCallRound())
 			if when == "before the staging" {
 				send(late)
+				send(pool)
+				send(after)
 			}
 			p.missCutPending.Store(true)
 			if err := p.SetMocksWithWindow(ctx, nil, []*models.Mock{a}, models.BaseTime, time.Now()); err != nil {
@@ -204,8 +214,9 @@ func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T)
 			}
 			if when == "after the staging" {
 				send(late)
+				send(pool)
+				send(after)
 			}
-			send(pool)
 			p.ContinueTestErrorCapture()
 			if got := readCalls(t, "the run", p); len(got) != 0 {
 				t.Fatalf("the run's next-set read %v; worker 1's call is no call of the run's", got)
@@ -215,11 +226,17 @@ func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(got) != 1 || got[0].ActualSummary != "POST /late" || got[0].Instance != 1 || got[0].EarlierSetTest != "o::TestX" || got[0].BeforeSet || got[0].Kind != models.MissOutsideTest {
-				t.Fatalf("worker 1's next-set first read %+v; want only o::TestX's late call, as the earlier set's o::TestX's, outside every test", got)
+			if len(got) != 2 || got[0].ActualSummary != "POST /late" || got[0].Instance != 1 || got[0].EarlierSetTest != "o::TestX" || got[0].EarlierSet != 1 || got[0].BeforeSet || got[0].Kind != models.MissOutsideTest {
+				t.Fatalf("worker 1's next-set first read %+v; want o::TestX's late call first, as the earlier set's o::TestX's, outside every test", got)
 			}
-			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"GET /worker-pool"})).Len(); n != 1 {
-				t.Fatalf("the cut of worker 1's pool view miss was said %d times; want once: %+v", n, logs.All())
+			if got[1].ActualSummary != "GET /worker-pool" || got[1].Instance != 1 || got[1].EarlierSetTest != "" || got[1].EarlierSet != 1 || got[1].BeforeSet || got[1].Kind != models.MissOutsideTest {
+				t.Fatalf("worker 1's next-set first read %+v; want its pool view call marked before o::TestX's end read next, as the earlier set's call of no test, outside every test", got)
+			}
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"GET /worker-after-end"})).Len(); n != 1 {
+				t.Fatalf("the cut of worker 1's pool view miss marked after its end read was said %d times; want once: %+v", n, logs.All())
+			}
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"GET /worker-pool"})).Len(); n != 0 {
+				t.Fatalf("worker 1's pool view miss marked before its end read was said cut %d times: %+v", n, logs.All())
 			}
 		})
 	}

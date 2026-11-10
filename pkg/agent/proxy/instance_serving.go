@@ -180,7 +180,14 @@ func (p *Proxy) ServeInstance(inst uint32) (agent.ExactServer, error) {
 	if s.misses == nil {
 		s.misses = make(map[uint32]*missWindow)
 	}
-	s.misses[inst] = &missWindow{}
+	w := &missWindow{}
+	if set := p.setStarts.Load(); set > 0 {
+		// Served in a running test set, under the proven switch: the
+		// worker's calls are that set's from its manager's staging here,
+		// before any read of its window (missWindow.keptAsEarlierSet).
+		w.noteSetStart(setStart{epoch: wm.StagingEpoch(), set: set})
+	}
+	s.misses[inst] = w
 	s.on = true
 	s.mu.Unlock()
 	return instanceExact{p: p, inst: inst}, nil
