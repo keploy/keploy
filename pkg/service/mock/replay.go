@@ -684,6 +684,29 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			failedBy = FailedByTrailUnmade
 		}
 	}
+	// A series a declared rule placed in the worker scope that was due and
+	// never answered fails the run, whatever the test command exits, and its
+	// trailed test (failUnmadeTrails); a background one fails the set: the
+	// application stopped making a call keploy.yml says it makes, and a
+	// replay that serves it if made but never asks for it would pass without
+	// it. A failure already named keeps its name.
+	if len(counts.requiredNotMade) > 0 || len(counts.seriesUnread) > 0 {
+		for _, n := range counts.requiredNotMade {
+			m.logger.Error(RuleNotMadeLine(n), zap.String("mock-set", name),
+				zap.String("next_step", "if the application no longer makes this call, record the set again; if it makes another request, change the rule in keploy.yml and record again"))
+		}
+		if len(counts.seriesUnread) > 0 {
+			m.logger.Error("replay failed: keploy could not read which recordings the run used, so it cannot tell whether the run made the background series keploy.yml's rules require ("+provenswitch.Env+"=1)",
+				zap.String("mock-set", name), zap.Strings("series", counts.seriesUnread),
+				zap.String("next_step", "check the agent logs for why the read failed, then replay again"))
+		}
+		if utils.ErrCode == 0 {
+			utils.ErrCode = 1
+		}
+		if failedBy == "" {
+			failedBy = FailedByRuleNotMade
+		}
+	}
 	// What the run compares is short of requests the agent captured, or,
 	// under the proven switch, the agent did not finish checking the run's
 	// tests (settleRun: its end-of-run hook refused, or the agent was gone),
@@ -995,6 +1018,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Refusals:        m.refusals,
 		CannotCapture:   lostNotJudged,
 		UnchargedMisses: counts.uncharged,
+		RequiredNotMade: counts.requiredNotMade,
 
 		ProcessTrackingUnread: trackingUnread,
 		CallCaptureUnread:     captureUnread,
@@ -1439,6 +1463,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	m.mockOwners = models.MockOwners(table)
 	m.skippedReadOf = moved
 	m.trails = requiredTrails(served, table)
+	m.series = requiredSeries(served, table)
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.Int("tests with a repeated read", len(repeats)), zap.String("mock-set", name))
 	return nil
 }
@@ -1910,14 +1935,17 @@ func workerSeries(mp *models.Mapping, worker map[string][]string) map[string][]s
 // table, the set's: a trailing write keploy requires once per run of that
 // test (unmadeTrails), whether or not the agent holds it (one it cannot
 // serve is never used, and fails that test). A trail naming any other test
-// trails none, as workerTrails reads it. nil when no entry trails one.
+// trails none, as workerTrails reads it. An entry of a series a declared
+// rule placed (models.MockEntry.Series) is required with its series, once
+// per run however many recordings the series has (requiredSeries), not on
+// its own. nil when no entry trails one.
 func requiredTrails(mp *models.Mapping, table map[string][]string) map[string]string {
 	if mp == nil {
 		return nil
 	}
 	var out map[string]string
 	for _, e := range mp.Worker {
-		if _, ok := table[e.Trails]; e.Trails == "" || !ok {
+		if _, ok := table[e.Trails]; e.Trails == "" || !ok || e.Series != "" {
 			continue
 		}
 		if out == nil {
@@ -2576,6 +2604,15 @@ type replayCounts struct {
 	// what the run consumed could not be read: whether each was made is not
 	// known, and each is left unread. nil for none.
 	trailsUnread map[string]bool
+	// requiredNotMade are, under the proven switch, the series declared
+	// rules placed in the worker scope that were due in the run and that it
+	// never answered (requiredNotMade): a trailing one failed its test, and
+	// each fails the run. nil for none.
+	requiredNotMade []RequiredNotMade
+	// seriesUnread names each background series that was due when what the
+	// run consumed could not be read: whether the run made it is not known,
+	// and the run fails. nil for none.
+	seriesUnread []string
 }
 
 // settleRun, under the proven switch, calls the agent's AfterTestRun
@@ -2830,7 +2867,22 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		// as it was.
 		counts.tests = withBegan(counts.tests, detail.windows)
 		counts.unmadeTrails, counts.trailsUnread = unmadeTrails(m.trails, counts.tests, consumed, consumedErr == nil)
-		counts.tests = failUnmadeTrails(counts.tests, counts.unmadeTrails, counts.trailsUnread)
+		var seriesUnread map[string]bool
+		counts.requiredNotMade, seriesUnread, counts.seriesUnread = requiredNotMade(m.series, counts.tests, consumed, consumedErr == nil)
+		for test := range seriesUnread {
+			if counts.trailsUnread == nil {
+				counts.trailsUnread = map[string]bool{}
+			}
+			counts.trailsUnread[test] = true
+		}
+		unmade := maps.Clone(counts.unmadeTrails)
+		for name, test := range notMadeByName(counts.requiredNotMade) {
+			if unmade == nil {
+				unmade = map[string]string{}
+			}
+			unmade[name] = test
+		}
+		counts.tests = failUnmadeTrails(counts.tests, unmade, counts.trailsUnread)
 	}
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned.byTest[counts.tests[i].Name]

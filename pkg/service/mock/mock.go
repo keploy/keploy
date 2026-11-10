@@ -83,6 +83,11 @@ type mockService struct {
 	// trails, as pushProvenTable read the set's mappings: each is required
 	// once per run of that test (unmadeTrails).
 	trails map[string]string
+	// series is, under the proven switch, each series a declared rule
+	// placed in the worker scope (models.MockEntry.Series), as
+	// pushProvenTable read the set's mappings: each is required once per run
+	// when it is due (requiredNotMade).
+	series map[string]seriesDue
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil
