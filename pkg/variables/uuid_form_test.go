@@ -335,3 +335,72 @@ func TestTable_ClockWordsBesideTheUUIDForm(t *testing.T) {
 		}
 	}
 }
+
+// NameUUIDs names a word bind its recorded text (Of) only where the call's
+// binds cover every word of that text and the text is one canonical UUID:
+// with the carry's twins too, and a second UUID of the call bound at every
+// word is named its own. A UUID bound at four of its five words, a text that
+// is no UUID ("APP:" before it, or "/3" after it with every word bound: an id
+// beside a count), a bind of a value whole, and a bind already named are left
+// as they are.
+func TestNameUUIDs_EveryWordOfOneUUID(t *testing.T) {
+	words := func(text, rec, live string, from int, skip map[int]bool) []WordBind {
+		var ws []WordBind
+		rw, lw := strings.Split(rec, "-"), strings.Split(live, "-")
+		for k := range rw {
+			if skip[k] {
+				continue
+			}
+			ws = append(ws, WordBind{Text: text, Word: from + k, Live: lw[k], Recorded: rw[k], RecordedText: rec})
+		}
+		return ws
+	}
+	prefixed := func(ws []WordBind) []WordBind {
+		for i := range ws {
+			ws[i].RecordedText = "APP:" + ws[i].RecordedText
+		}
+		return ws
+	}
+	suffixed := func(ws []WordBind) []WordBind {
+		for i := range ws {
+			ws[i].RecordedText += "/3"
+		}
+		return ws
+	}
+	cat := func(parts ...[]WordBind) []WordBind {
+		var out []WordBind
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	whole := WordBind{Text: "body.id", Word: -1, Live: formTLive, Recorded: formTRec, RecordedText: formTRec}
+	named := words("body.id", formTRec, formTLive, 0, nil)
+	named[2].Of = "an earlier name"
+	for _, c := range []struct {
+		name string
+		ws   []WordBind
+		want []string
+	}{
+		{"every word", words("body.id", formTRec, formTLive, 0, nil), []string{formTRec, formTRec, formTRec, formTRec, formTRec}},
+		{"every word, each with its run twin", cat(words("body.id", formTRec, formTLive, 0, nil), words("body.id", formTRec, formTLive, 0, nil)), []string{formTRec, formTRec, formTRec, formTRec, formTRec, formTRec, formTRec, formTRec, formTRec, formTRec}},
+		{"two UUIDs, one at four words", cat(words("body.a", formSRec, formSLive, 0, nil), words("body.b", formTRec, formTLive, 0, map[int]bool{4: true})), []string{formSRec, formSRec, formSRec, formSRec, formSRec, "", "", "", ""}},
+		{"four of five words", words("body.id", formTRec, formTLive, 0, map[int]bool{0: true}), []string{"", "", "", ""}},
+		{"no UUID: APP: before it", prefixed(words("body.id", formTRec, formTLive, 1, nil)), []string{"", "", "", "", ""}},
+		{"no UUID: an id and a count, every word bound", cat(suffixed(words("body.id", formTRec, formTLive, 0, nil)), []WordBind{{Text: "body.id", Word: 5, Live: "7", Recorded: "3", RecordedText: formTRec + "/3"}}), []string{"", "", "", "", "", ""}},
+		{"a bind of the value whole, beside every word", cat([]WordBind{whole}, words("body.id", formTRec, formTLive, 0, nil)), []string{"", formTRec, formTRec, formTRec, formTRec, formTRec}},
+		{"a bind of the value whole, beside four words", cat([]WordBind{whole}, words("body.id", formTRec, formTLive, 0, map[int]bool{3: true})), []string{"", "", "", "", ""}},
+		{"a bind already named", named, []string{formTRec, formTRec, "an earlier name", formTRec, formTRec}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			NameUUIDs(c.ws)
+			var got []string
+			for _, w := range c.ws {
+				got = append(got, w.Of)
+			}
+			if strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Fatalf("named %q, want %q", got, c.want)
+			}
+		})
+	}
+}

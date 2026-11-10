@@ -651,6 +651,35 @@ func spansOf(ws []WordBind, run [][]int) [][2]int {
 	return spans
 }
 
+// NameUUIDs names each word bind of ws (the binds of one call) a word of its
+// recorded text (Of) where ws bind every word of that text and the text is
+// one canonical UUID: a minted id bound word by word, whose words WordRuns
+// then reads as one value by its form. A text bound at only some of its
+// words, and a text that is no UUID, is named nothing: each of its words
+// stays its own value, checked word by word. A bind already named keeps its
+// name.
+func NameUUIDs(ws []WordBind) {
+	bound := map[string]map[int]bool{}
+	for _, w := range ws {
+		if bound[w.Text] == nil {
+			bound[w.Text] = map[int]bool{}
+		}
+		bound[w.Text][w.Word] = true
+	}
+	for i, w := range ws {
+		if w.Word < 0 || w.Of != "" || !canonicalUUID(w.RecordedText) {
+			continue
+		}
+		every := true
+		for k := range Words(w.RecordedText) {
+			every = every && bound[w.Text][k]
+		}
+		if every {
+			ws[i].Of = w.RecordedText
+		}
+	}
+}
+
 // uuidStretch reports whether a stretch of a run (its positions), recorded
 // as text and live as live gives it, is one UUID by its form: both texts are
 // each one canonical UUID and its first bind names the recorded one (Of; a
