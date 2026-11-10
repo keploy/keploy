@@ -1541,6 +1541,8 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
+	// The harness failed the test before keploy's evidence did (below).
+	ownFailed := false
 	// The test's calls are settled before it is judged (settle_proven.go):
 	// a call it made that the proxy has not yet taken or answered is its
 	// own, whatever the load. One keploy cannot settle leaves the test
@@ -1587,7 +1589,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		ev.Reason = a.evidenceText(id, ev, beganAt)
 		// The harness's own verdict, before keploy's evidence fails the
 		// test: a failure keploy imposes (why) is not the test's own.
-		ev.FailedOnItsOwn = why == "" && outcome == models.ScopeOutcomeFailed
+		ownFailed = why == "" && outcome == models.ScopeOutcomeFailed
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty():
 		// A record never fails a test: what keploy could not capture is
@@ -1645,6 +1647,15 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		}
 		ev.Reason = strings.TrimSpace("keploy: " + why + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
 		outcome = models.ScopeOutcomeFailed
+	}
+	// It failed on its own only when keploy answered every call it made:
+	// after the losses and the settle above (a settle keploy could not
+	// finish leaves it Unread), the evidence holds nothing but the
+	// recordings it did not make. A test that met keploy's error answer to
+	// a call (a miss), or made one keploy could not capture, may have failed
+	// on that: what it did not make stays evidence against it.
+	if ownFailed {
+		ev.FailedOnItsOwn = !ev.Unanswered()
 	}
 	a.NoteScopeOutcome(id, 0, outcome)
 	if ev != nil && (ev.Reason != "" || !ev.Empty()) {
