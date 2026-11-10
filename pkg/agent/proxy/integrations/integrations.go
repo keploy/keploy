@@ -757,6 +757,9 @@ type CallRound struct {
 	// view is the store's own token of the view the read was made in
 	// (InStoreView), nil where the read kept none.
 	view any
+	// test is the test whose view the read found (OfTest), "" for a pool
+	// view or a store that names none.
+	test string
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -955,6 +958,19 @@ func (c CallRound) InTest() bool { return c.inTest }
 // (S12Background of the store then).
 func (c CallRound) Background() bool { return c.background }
 
+// OfTest is c, of a read whose view was test's view (InView's inTest): a store
+// sets it as it marks the call, from the view it read, so the call's miss
+// names the test it was made in (StampMark), wherever the replay is when the
+// miss is reported.
+func (c CallRound) OfTest(test string) CallRound {
+	c.test = test
+	return c
+}
+
+// Test is the test whose view c's read found (OfTest): "" for a pool view, and
+// for a store that names none.
+func (c CallRound) Test() string { return c.test }
+
 // S12BackgroundIn is S12Background as the call marked call found it: the
 // view its first read found (CallRound.Background), never the one serving
 // when the parser asks, which can be the next set's. A parser that says of a
@@ -977,9 +993,13 @@ func S12BackgroundIn(call CallRound, db MockMemDb) bool {
 // the next staging's, the staged set's after the call's staging, or the pool
 // view after the call's test ended. The staging it was marked in too
 // (models.MockMismatchReport.MarkEpoch): a miss marked before a test set's
-// staging is not that set's, whenever its report arrives. Nothing for the
-// zero CallRound (a store that marks no round): the proxy reads the view
-// serving then.
+// staging is not that set's, whenever its report arrives. The round's
+// boundary count it was marked at too (models.MockMismatchReport.MarkBounds,
+// where the store keeps one), and the test whose view it found
+// (models.MockMismatchReport.MarkedTest): a test's end charges a miss marked
+// before that test's view was installed to no test it did not make, however
+// late keploy decided the call. Nothing for the zero CallRound (a store that
+// marks no round): the proxy reads the view serving then.
 func StampMark(r *models.MockMismatchReport, call CallRound) {
 	if r == nil || !call.Read() {
 		return
@@ -990,6 +1010,10 @@ func StampMark(r *models.MockMismatchReport, call CallRound) {
 	}
 	r.MarkedInTest = call.InTest()
 	r.MarkEpoch = call.Epoch()
+	if at, known := call.Round(); known {
+		r.MarkBounds, r.MarkRound = at.Bounds, true
+	}
+	r.MarkedTest = call.Test()
 }
 
 // MarkCallRound is mockDb's CallRound now (StagedFinder.MarkCallRound): the

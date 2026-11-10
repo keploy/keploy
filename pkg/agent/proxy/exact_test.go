@@ -1729,6 +1729,124 @@ func TestAMissIsFiledWhereItsCallWasMade(t *testing.T) {
 	}
 }
 
+// A miss carries the round its call was marked in (models.MissMark): the
+// staging and boundary count of its first read, and the test whose view it
+// found, never the view serving when keploy decided the call. A test's end
+// reads the install of its own view (ExactTestInstalled) to tell a miss
+// marked before it, however late its report came: a call made between tests
+// whose miss is reported once the next test opened, and one made in a test
+// whose miss is reported once the test ended and the next one opened, were
+// both marked before that next test's view, and the second names its own
+// test. A call made in the open test was not. HTTP (replay's matcher and
+// record's full round) and Generic alike.
+func TestAMissCarriesTheRoundItsCallWasMarkedIn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	staged := func(mm *MockManager) {
+		mm.StageExactBackground(models.RecordedWithS12Routing)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+	}
+	serve := map[string]func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport{
+		"HTTP replay": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return sendForMiss(t, db, models.OutgoingOptions{}, learn.NewTracker(), jobsCall)
+		},
+		"HTTP record's full round": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return sendForMiss(t, db, models.OutgoingOptions{Learn: true, LearnPool: true}, learn.NewTracker(), jobsCall)
+		},
+		"Generic": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return genericServeIn(t, context.Background(), db, "AUTH step4")
+		},
+	}
+	for _, tc := range []struct {
+		name          string
+		before, under func(mm *MockManager)
+		// open is the test whose view serves as the miss is read.
+		open     string
+		markedIn string
+		before0  bool
+	}{
+		{"made between tests, reported once the next test opened",
+			func(mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, nil) },
+			func(mm *MockManager) { mm.ServeExactTest("T2", nil) },
+			"T2", "", true},
+		{"made in a test, reported once it ended and the next opened",
+			func(mm *MockManager) { mm.ServeExactTest("T1", nil) },
+			func(mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, nil); mm.ServeExactTest("T2", nil) },
+			"T2", "T1", true},
+		{"made in the open test",
+			func(mm *MockManager) { mm.ServeExactTest("T2", nil) },
+			func(mm *MockManager) {},
+			"T2", "T2", false},
+	} {
+		for parser, send := range serve {
+			t.Run(parser+": "+tc.name, func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				p.setMockManager(mm)
+				staged(mm)
+				tc.before(mm)
+				db := &heldFirstRead{MockManager: mm, moved: func() { tc.under(mm) }}
+				r := send(t, db)
+				if r == nil {
+					t.Fatal("the call was answered")
+				}
+				if !db.fired.Load() {
+					t.Fatal("precondition: the call's first read was never reached")
+				}
+				epoch, bounds, ok := p.ExactTestInstalled(tc.open)
+				if !ok {
+					t.Fatalf("precondition: %s's view does not serve as the miss is read", tc.open)
+				}
+				if _, _, other := p.ExactTestInstalled("T9"); other {
+					t.Fatal("WRONG INSTALL: a test whose view does not serve is said installed")
+				}
+				if _, _, none := (&Proxy{logger: zap.NewNop()}).ExactTestInstalled(tc.open); none {
+					t.Fatal("WRONG INSTALL: a proxy that serves no replay says a test's view was installed")
+				}
+				p.BeginTestErrorCapture()
+				p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, r))
+				got, err := p.GetMockErrors(context.Background())
+				if err != nil || len(got) != 1 {
+					t.Fatalf("want the one call, got %+v (%v)", got, err)
+				}
+				mark := got[0].Marked
+				if !mark.Known {
+					t.Fatalf("WRONG MARK: the miss carries no round its call was marked in: %+v", got[0])
+				}
+				if mark.Test != tc.markedIn {
+					t.Fatalf("WRONG TEST: the miss names %q as the test its call was made in; want %q", mark.Test, tc.markedIn)
+				}
+				if b := mark.Before(epoch, bounds); b != tc.before0 {
+					t.Fatalf("WRONG ROUND: the miss reads as marked before %s's view was installed: %v; want %v (mark %+v, install %d/%d)", tc.open, b, tc.before0, mark, epoch, bounds)
+				}
+			})
+		}
+	}
+	// A pool view is no test's: no install is said of it. A miss of a parser
+	// that marks no round carries no known mark: a test's end places it by
+	// when it was filed.
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	p.setMockManager(mm)
+	staged(mm)
+	if _, _, ok := p.ExactTestInstalled(""); ok {
+		t.Fatal("WRONG INSTALL: the pool view is said to be a test's")
+	}
+	mm.ServeExactTest("T2", nil)
+	p.BeginTestErrorCapture()
+	p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /unmarked"}))
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("want the one call, got %+v (%v)", got, err)
+	}
+	if got[0].Marked != (models.MissMark{}) {
+		t.Fatalf("WRONG MARK: a miss of a parser that marks no round carries %+v", got[0].Marked)
+	}
+}
+
 // Whether a call's set was served by proven routing is read from the view
 // the call's first read found (integrations.S12BackgroundIn), through the
 // store's mark, a round snapshot and a scoped view alike, never from the

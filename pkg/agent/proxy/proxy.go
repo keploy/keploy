@@ -5489,6 +5489,16 @@ func (p *Proxy) ExactTestServed() string {
 	return m.ExactTestServed()
 }
 
+// ExactTestInstalled implements agent.ExactTestInstallReader
+// (MockManager.ExactTestInstalled).
+func (p *Proxy) ExactTestInstalled(test string) (epoch, bounds uint64, ok bool) {
+	m := p.getMockManager()
+	if m == nil {
+		return 0, 0, false
+	}
+	return m.ExactTestInstalled(test)
+}
+
 // ExactTestOutcome implements agent.ExactServer (exact.go).
 func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
 	m := p.getMockManager()
@@ -5512,6 +5522,7 @@ var _ agent.ExactSkippedReadsReader = (*Proxy)(nil)
 var (
 	_ agent.ExactServer            = (*Proxy)(nil)
 	_ agent.ExactTestOpener        = (*Proxy)(nil)
+	_ agent.ExactTestInstallReader = (*Proxy)(nil)
 	_ agent.WindowedTestOpener     = (*Proxy)(nil)
 	_ agent.LearnedElsewhereReader = (*Proxy)(nil)
 )
@@ -6346,6 +6357,9 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					RecordedIn: parserErr.MismatchReport.RecordedIn,
 					Earlier:    parserErr.MismatchReport.Earlier,
 					Repeat:     parserErr.MismatchReport.Repeat.Clone(),
+					// Where its parser marked the call: a test's end places
+					// the miss by it, not by when it was filed.
+					Marked: missMark(parserErr.MismatchReport),
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach
@@ -6377,6 +6391,18 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 		return errs, fmt.Errorf("%w: %s", models.ErrUnmatchedCallsUnread, unreadCause)
 	}
 	return errs, nil
+}
+
+// missMark is the round the call of report r (not nil) was marked in
+// (models.UnmatchedCall.Marked), from where its parser marked it
+// (integrations.StampMark, which sets MarkRound only with Mark): not known
+// for a parser that marks no round, nor for a store that keeps no boundary
+// count.
+func missMark(r *models.MockMismatchReport) models.MissMark {
+	if !r.MarkRound {
+		return models.MissMark{}
+	}
+	return models.MissMark{Epoch: r.MarkEpoch, Bounds: r.MarkBounds, Test: r.MarkedTest, Known: true}
 }
 
 // flushOnEvents is GetMockErrors' rendezvous with the error drain, with the

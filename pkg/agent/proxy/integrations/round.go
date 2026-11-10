@@ -494,13 +494,13 @@ func (s RoundSnapshot) CallRound() CallRound {
 	// store's MarkCallRound says (its sequence view's Worker).
 	worker := s.Test != "" && len(s.worker) > 0
 	if s.TrackerAhead() {
-		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).InStoreView(s.view)
+		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).OfTest(s.Test).InStoreView(s.view)
 	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {
 		_, own := ended[name]
 		return own || owners[name] != OwnerNone
-	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).InStoreView(s.view)
+	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).OfTest(s.Test).InStoreView(s.view)
 }
 
 // HoldsEvery holds every recording as a call's own (NewCallRound): the mark

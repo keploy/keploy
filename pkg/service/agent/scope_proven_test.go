@@ -1514,7 +1514,7 @@ func TestASelfSkippedTestIsNotFailedForCallsItNeverMade(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "POST", "http://h/audit"))
 	a.scopeTable = map[string][]string{"t": {"mock-1"}}
-	ev, err := a.testEvidence(context.Background(), "t", false, time.Time{})
+	ev, err := a.testEvidence(context.Background(), "t", false, testBegin{})
 	require.NoError(t, err)
 	require.True(t, ev.Empty())
 }
@@ -1636,7 +1636,7 @@ func TestAnUnmadeRecordedCallIsEvidence(t *testing.T) {
 	require.NoError(t, a.serveTestExactly(context.Background(), "orders::TestPlaceOrder"))
 	p.served["mock-2"]++
 
-	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true, time.Time{})
+	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true, testBegin{})
 	require.NoError(t, err)
 	require.Equal(t, []string{"mock-1"}, ev.Unconsumed, "the audit call was not made; DNS is protocol-phase")
 
@@ -1984,7 +1984,7 @@ func TestAFailedConsumptionReadKeepsTheTestsMisses(t *testing.T) {
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
 	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}
-	ev, err := a.testEvidence(context.Background(), "o::TestA", true, time.Time{})
+	ev, err := a.testEvidence(context.Background(), "o::TestA", true, testBegin{})
 	require.ErrorContains(t, err, "was not serving o::TestA exactly")
 	require.NotNil(t, ev)
 	require.Len(t, ev.Misses, 1)
@@ -2016,7 +2016,7 @@ func TestAMissOutsideEveryTestIsChargedToNoTest(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			a, p := wireAgent(t, models.MODE_TEST)
 			p.misses = append([]models.UnmatchedCall(nil), misses...)
-			ev, err := a.testEvidence(context.Background(), "o::TestA", false, c.beganAt)
+			ev, err := a.testEvidence(context.Background(), "o::TestA", false, testBegin{at: c.beganAt})
 			require.NoError(t, err)
 			var listed, uncharged []string
 			for _, m := range ev.Misses {
@@ -2033,6 +2033,85 @@ func TestAMissOutsideEveryTestIsChargedToNoTest(t *testing.T) {
 			var want []string
 			for _, m := range misses {
 				if !slices.Contains(c.uncharged, m.Destination) {
+					want = append(want, m.Destination)
+				}
+			}
+			require.Equal(t, want, listed, "the misses the ending test's evidence lists")
+		})
+	}
+}
+
+// A miss is placed by the round its call was marked in (models.MissMark),
+// never by when keploy decided it: under load keploy answers a call after
+// the replay began the next test, and that test, which never made the call,
+// must not fail for it. The rows are the shapes of a loaded replay: a
+// delete the application made between two tests, decided 3 ms after the next
+// test's view was installed, is charged to no test; a call of the previous
+// test's, read after that test's end was read and decided after the next
+// one's install, is charged to no test and names the test it was made in. A
+// call marked in the ending test's own view, one marked in the pool view
+// after it (made as it ended), one of an earlier opening of the same test,
+// one marked in a later staging, and an in-test one whose mark names no test
+// stay its own. A miss with no mark, and every miss read when the install's
+// round is not known, keep the time rule.
+func TestAMissIsChargedByTheRoundItsCallWasMarkedIn(t *testing.T) {
+	const ending, previous = "o::TestUnauthenticated", "o::TestDashboardAppOperations"
+	began := time.Now()
+	installed := testBegin{at: began, epoch: 3, bounds: 10, round: true}
+	late := began.Add(3200 * time.Microsecond)
+	pool := func(bounds uint64) models.MissMark { return models.MissMark{Epoch: 3, Bounds: bounds, Known: true} }
+	of := func(test string, epoch, bounds uint64) models.MissMark {
+		return models.MissMark{Epoch: epoch, Bounds: bounds, Test: test, Known: true}
+	}
+	misses := []models.UnmatchedCall{
+		{Protocol: "Mongo", ActualSummary: "delete on api-server.{}", Destination: "between:27017", Kind: models.MissOutsideTest, At: late, Marked: pool(9)},
+		{Protocol: "Mongo", ActualSummary: "delete on {}", Destination: "earlier-set:27017", Kind: models.MissOutsideTest, At: late, Marked: models.MissMark{Epoch: 2, Bounds: 40, Known: true}},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "previous:27017", Kind: models.MissInTest, At: late, Marked: of(previous, 3, 8)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "previous-extra:27017", Kind: models.MissExtraCall, At: late, Marked: of(previous, 3, 8)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "own:27017", Kind: models.MissInTest, At: late, Marked: of(ending, 3, 10)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "own-earlier-opening:27017", Kind: models.MissInTest, At: late, Marked: of(ending, 3, 6)},
+		{Protocol: "Mongo", ActualSummary: "delete on api-server.{}", Destination: "as-it-ended:27017", Kind: models.MissOutsideTest, At: late, Marked: pool(11)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "another-after:27017", Kind: models.MissInTest, At: late, Marked: of(previous, 3, 10)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "unnamed:27017", Kind: models.MissInTest, At: late, Marked: of("", 3, 8)},
+		{Protocol: "Mongo", ActualSummary: "delete on api-server.{}", Destination: "next-staging:27017", Kind: models.MissOutsideTest, At: late, Marked: models.MissMark{Epoch: 4, Bounds: 5, Known: true}},
+		{Protocol: "Mongo", ActualSummary: "delete on api-server.{}", Destination: "filed-early:27017", Kind: models.MissOutsideTest, At: began.Add(-time.Millisecond), Marked: pool(9)},
+		{Protocol: "HTTP", ActualSummary: "GET /tick", Destination: "unmarked-before:80", Kind: models.MissOutsideTest, At: began.Add(-time.Millisecond)},
+		{Protocol: "HTTP", ActualSummary: "GET /tick", Destination: "unmarked-late:80", Kind: models.MissOutsideTest, At: late},
+	}
+	for _, c := range []struct {
+		name  string
+		began testBegin
+		// uncharged is, by destination, each miss charged to no test, with
+		// the window it names.
+		uncharged map[string]string
+	}{
+		{"install known", installed, map[string]string{
+			"between:27017": "", "earlier-set:27017": "", "previous:27017": previous, "previous-extra:27017": previous, "filed-early:27017": "", "unmarked-before:80": "",
+		}},
+		{"install not known", testBegin{at: began}, map[string]string{"filed-early:27017": "", "unmarked-before:80": ""}},
+		{"begin not known", testBegin{}, map[string]string{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, p := wireAgent(t, models.MODE_TEST)
+			p.misses = append([]models.UnmatchedCall(nil), misses...)
+			ev, err := a.testEvidence(context.Background(), ending, false, c.began)
+			require.NoError(t, err)
+			var listed []string
+			for _, m := range ev.Misses {
+				listed = append(listed, m.Destination)
+			}
+			uncharged := map[string]string{}
+			for _, m := range a.takeChargedMisses() {
+				if m.ChargedTo == "" {
+					uncharged[m.Destination] = m.WindowOf
+				} else {
+					require.Equal(t, ending, m.ChargedTo)
+				}
+			}
+			require.Equal(t, c.uncharged, uncharged, "the misses charged to no test, and the window each names")
+			var want []string
+			for _, m := range misses {
+				if _, ok := c.uncharged[m.Destination]; !ok {
 					want = append(want, m.Destination)
 				}
 			}

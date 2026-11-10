@@ -613,9 +613,18 @@ type UnmatchedCall struct {
 	// test's own is that call (it is no extra call of the test's, nor a
 	// recording another test made). Such a call never fails the test whose
 	// window it lands in; the receipt lists it, by this name, so a reader
-	// sees where it landed. Empty for every other call, and for one made
-	// before that test began being served, whose window is not known.
+	// sees where it landed. It also names the test a call was marked in
+	// (Marked.Test) when its miss reached keploy only after that test's end was
+	// read and before the test that read it began being served: that test's
+	// own call, which keploy decided late, is charged to no test it did not
+	// make (the test that read it), and is listed under this name. Empty for
+	// every other call, and for one made before that test began being served,
+	// whose window is not known.
 	WindowOf string `json:"window_of,omitempty" yaml:"window_of,omitempty"`
+	// Marked is, under the proven switch, the round the call's parser marked it
+	// in (MockMismatchReport.Mark): the zero MissMark for a parser that marks
+	// no round. Never written to a report: the agent reads it at a test's end.
+	Marked MissMark `json:"-" yaml:"-"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
