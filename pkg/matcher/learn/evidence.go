@@ -1848,8 +1848,12 @@ type BoundWord struct {
 // An adapter answers a later answer leaf that holds s's recorded text whole
 // at the same words. Two runs' texts of different word counts name none: no
 // word of one is known to be the other's, and the answer stays as recorded.
+// A leaf of a client test's request (Earlier.incoming: mock is one the
+// running test took) is read at the place its test case binds a variable
+// at (seenVar), as the learn step bound it there (Place.Var): its leaves are
+// named by their paths alone (GivenRequest), so Seen.Place holds none.
 func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
-	if t == nil || s.Side != Request || s.Place == "" {
+	if t == nil || s.Side != Request {
 		return nil
 	}
 	rec, live := variables.Words(s.Leaf.Value), variables.Words(s.Live)
@@ -1858,9 +1862,16 @@ func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	place := s.Place
+	if place == "" && t.tookRequestLocked(mock) {
+		place = seenVar(Earlier{incoming: true}, s)
+	}
+	if place == "" {
+		return nil
+	}
 	var out []BoundWord
 	for k := range rec {
-		key := mock + "\x00" + s.Place + "#" + strconv.Itoa(k)
+		key := mock + "\x00" + place + "#" + strconv.Itoa(k)
 		name, ok := "", false
 		if n >= t.setEpoch {
 			name, ok = t.runNames[key]
@@ -1873,6 +1884,17 @@ func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
 		}
 	}
 	return out
+}
+
+// tookRequestLocked reports whether mock is the place of a client test's
+// request the running test took (Incoming): one of t.incoming. t.mu is held.
+func (t *Tracker) tookRequestLocked(mock string) bool {
+	for _, e := range t.incoming {
+		if e.Mock == mock {
+			return true
+		}
+	}
+	return false
 }
 
 // RecBegan is the instant the running test began at in its recording
