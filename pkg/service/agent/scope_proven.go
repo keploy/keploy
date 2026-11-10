@@ -1960,6 +1960,12 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // It is charged to no test the same way, and names the window it was made
 // in (missWindow), so a background call keploy cannot answer never fails
 // the test whose window it lands in.
+//
+// A miss that carries another test's kept value (trailsAnother: a trailing
+// clean-up of that test, models.UnmatchedCall.TrailsOf) is charged to no
+// test the same way, naming its window. It still counts against the tests,
+// so the run fails on it and judging fails the trailed test, not the one
+// whose window it landed in.
 func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganAt time.Time) (*models.ScopeEvidence, error) {
 	if a.Proxy == nil {
 		return nil, errors.New("no proxy")
@@ -1969,6 +1975,11 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	var misses, outside []models.UnmatchedCall
 	for _, m := range all {
 		if outsideEveryTest(m, beganAt) {
+			outside = append(outside, m)
+			continue
+		}
+		if trailsAnother(m, id) {
+			m.WindowOf = missWindow(m, id, beganAt)
 			outside = append(outside, m)
 			continue
 		}
@@ -2053,6 +2064,14 @@ func outsideEveryTest(m models.UnmatchedCall, beganAt time.Time) bool {
 // the test that made it is judged on.
 func backgroundRepeat(m models.UnmatchedCall) bool {
 	return m.Repeat != nil && m.Repeat.Background != "" && m.Kind != models.MissExtraCall && !m.NotOwned
+}
+
+// trailsAnother reports whether miss m, read at test id's end, carries the
+// kept value of another test it trails (models.UnmatchedCall.TrailsOf): that
+// test's clean-up, landed in id's window. One that trails id itself is id's
+// own call, and stays its miss.
+func trailsAnother(m models.UnmatchedCall, id string) bool {
+	return m.TrailsOf != "" && m.TrailsOf != id
 }
 
 // missWindow is the test whose window miss m was made in, for a miss read

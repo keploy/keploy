@@ -639,6 +639,14 @@ type UnmatchedCall struct {
 	// recording only by a value its own test bound before it, and where the
 	// test bound it. Names only, never a value.
 	BackgroundBound []BackgroundBinding `json:"background_bound,omitempty" yaml:"background_bound,omitempty"`
+	// TrailsOf mirrors MockMismatchReport.TrailsOf: the test whose kept value
+	// the call carries, whose clean-up it is. Charged to no test's window
+	// (ChargedTo is empty, WindowOf names the window it landed in), it still
+	// counts against the tests (CountsAgainstTest), so the run's receipt
+	// lists it (Receipt.UnchargedMisses) and the run fails on it; judging
+	// fails the trailed test. A test ID, never a value, so a sanitized call
+	// keeps it.
+	TrailsOf string `json:"trailsOf,omitempty" yaml:"trailsOf,omitempty"`
 	// RecordedIn names, under the proven switch, the other test of the set
 	// that owns the recording a NotOwned call is (ClosestMock): the call is
 	// likely one that test recorded, such as a later exchange of a connection

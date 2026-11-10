@@ -94,3 +94,28 @@ func TestBackgroundRecordingsFollowTheSetsStaging(t *testing.T) {
 		t.Fatalf("an aborted set's parked background recordings were installed for the next set: %v", bgNames(got))
 	}
 }
+
+// The agent's read of a test's misses keeps a parser's trail mark
+// (MockMismatchReport.TrailsOf): the call carries the named test's kept
+// value, and still counts against the tests. An unmarked miss names none.
+func TestTheMissReadKeepsTheTrailMark(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+	p.BeginTestErrorCapture()
+	tr := mockMiss("delete uiTestSetJoins")
+	tr.MismatchReport.TrailsOf = "o::TestA"
+	p.errChannel <- tr
+	p.errChannel <- mockMiss("find users")
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil || len(got) != 2 {
+		t.Fatalf("read %+v, %v; want both misses", got, err)
+	}
+	for _, c := range got {
+		want := ""
+		if c.ActualSummary == "delete uiTestSetJoins" {
+			want = "o::TestA"
+		}
+		if c.TrailsOf != want || !c.CountsAgainstTest() {
+			t.Errorf("%s: TrailsOf %q, counts against the tests %v; want %q, true", c.ActualSummary, c.TrailsOf, c.CountsAgainstTest(), want)
+		}
+	}
+}
