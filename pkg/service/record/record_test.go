@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -2840,6 +2841,15 @@ func TestStart_FormPartsLeftOutAreNamedInTheSummary(t *testing.T) {
 			if fields["parts"] != int64(2+wantMore) || fields["not_listed"] != int64(wantMore) {
 				t.Errorf("the summary counts parts=%v not_listed=%v, want %d and %d", fields["parts"], fields["not_listed"], 2+wantMore, wantMore)
 			}
+			if fields["testSetID"] != "test-set-0" {
+				t.Errorf("the summary names test set %v, want this recording's test-set-0", fields["testSetID"])
+			}
+			if why, _ := fields["why"].(string); !strings.Contains(why, "carried no contents") || !strings.Contains(why, "names no file in the recording") {
+				t.Errorf("the summary's why %q does not say the part came with no contents and no file in the recording", why)
+			}
+			if next, _ := fields["next_step"].(string); !strings.Contains(next, "re-record") {
+				t.Errorf("the summary's next_step %q does not say to re-record", next)
+			}
 		})
 	}
 }
@@ -2862,6 +2872,44 @@ func TestSayingFormPartsLeftOutSetsNoExitCode(t *testing.T) {
 	}
 	if utils.ErrCode != 0 {
 		t.Errorf("exit code %d, want 0: the recording is kept, a part left out does not fail the run", utils.ErrCode)
+	}
+}
+
+// The summary reads the parts from the store keploy records with, not only
+// from a test double: a test case the real test store keeps without a form
+// part's file is named by the recorder's summary, with the test set the
+// recorder was given.
+func TestTheRealTestStoresFormPartsLeftOutReachTheSummary(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "keploy")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ts := testdb.New(zap.NewNop(), root)
+	tc := &models.TestCase{Version: models.GetVersion(), Name: "test-1", Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{Method: "POST", URL: "http://x/u",
+			Header: map[string]string{"Content-Type": "multipart/form-data; boundary=b"},
+			Form:   []models.FormData{{Key: "file", FileNames: []string{"a.txt"}, Paths: []string{"../outside.txt"}}}}}
+	if err := ts.InsertTestCase(context.Background(), tc, "set", false); err != nil {
+		t.Fatalf("the test case was not stored: %v", err)
+	}
+	core, logs := observer.New(zapcore.ErrorLevel)
+	r := &Recorder{logger: zap.New(core), testDB: ts}
+	r.sayFormPartsLeftOut("set")
+	said := logs.FilterMessageSnippet("stored without a form part's file").All()
+	if len(said) != 1 {
+		t.Fatalf("the summary said %d lines, want 1: the real store's parts did not reach it", len(said))
+	}
+	fields := said[0].ContextMap()
+	list, _ := fields["stored_without"].([]interface{})
+	if len(list) != 1 {
+		t.Fatalf("the summary lists %v, want the one part", fields["stored_without"])
+	}
+	line, _ := list[0].(string)
+	if !strings.Contains(line, "set/test-1") || !strings.Contains(line, `form part "file"`) || !strings.Contains(line, `path "../outside.txt"`) {
+		t.Errorf("the summary's line %q does not name the test case, the part and the path", line)
+	}
+	if fields["testSetID"] != "set" {
+		t.Errorf("the summary names test set %v, want the one the recorder was given", fields["testSetID"])
 	}
 }
 
