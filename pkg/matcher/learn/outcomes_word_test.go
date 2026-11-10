@@ -250,7 +250,12 @@ func TestOutcomeAWordCopiedFromAnswersGivenInAnotherOrderIsUnknown(t *testing.T)
 
 // A place whose answer time keploy cannot read, or that was answered at the
 // call's own instant, is no evidence either way: refused, naming it, never
-// chance (90457abcd word_coincidence_test.go:151-153).
+// chance (90457abcd word_coincidence_test.go:151-153), wherever it holds the
+// word as a value of its own. A fresh id's 16-bit group that the place holds
+// only inside another id, beside nothing of the id's 32-bit and 48-bit
+// groups, is the one exception: the application copies an id whole, so
+// whenever the place was answered it cannot be where the id came from, and
+// the group there is chance, its line naming the place.
 func TestOutcomeAPlaceOfUnknownStateRefusesTheWord(t *testing.T) {
 	const (
 		p     = "body.docs.msgs.0._id"
@@ -259,16 +264,27 @@ func TestOutcomeAPlaceOfUnknownStateRefusesTheWord(t *testing.T) {
 		other = "b0fd3b58-3ff5-48d1-a1b2-c3d4e5f60718"
 	)
 	id := oText("body.cursor.firstBatch.0._id", other)
+	code := oText("body.cursor.firstBatch.0.code", "48d1")
 	for _, tc := range []struct {
 		what, rec, live, r, f string
 		earlier               []Earlier
 	}{
-		{"no answer time", rec, live, "48d1", "4b8a", oServed("mock-231", true, false, Response, id, other, 0)},
-		{"answered at the call", rec, live, "48d1", "4b8a", oServed("mock-231", true, false, Response, id, other, 2*time.Second)},
+		{"the group as a value of its own, no answer time", rec, live, "48d1", "4b8a", oServed("mock-231", true, false, Response, code, "48d1", 0)},
+		{"the group as a value of its own, answered at the call", rec, live, "48d1", "4b8a", oServed("mock-231", true, false, Response, code, "48d1", 2*time.Second)},
 		{"a short count, no answer time", "46", "4499", "46", "4499", oServed("mock-231", true, false, Response, oText("body.count", "46"), "46", 0)},
 	} {
 		d := oWord(t, Decide(oInput(p, tc.rec, tc.live, tc.earlier, nil)), tc.r, tc.f)
 		oRefused(t, tc.what, d, "unknown", "mock-231")
+	}
+	for _, tc := range []struct {
+		what     string
+		answered time.Duration
+	}{{"no answer time", 0}, {"answered at the call", 2 * time.Second}} {
+		d := oWord(t, Decide(oInput(p, rec, live, oServed("mock-231", true, false, Response, id, other, tc.answered), nil)), "48d1", "4b8a")
+		costFresh(t, "the group inside another id, "+tc.what, d)
+		if !strings.Contains(d.Line, "mock-231") || !strings.Contains(d.Line, "piece of an id") {
+			t.Errorf("the group inside another id, %s: the line %q must name mock-231 and say the piece is chance", tc.what, d.Line)
+		}
 	}
 }
 

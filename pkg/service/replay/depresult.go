@@ -435,6 +435,21 @@ type depAssertion struct {
 // TestResult.MockMismatches, both of which carry the full expected set.
 const depMissingRowCap = 50
 
+// mockMismatchesFor is a test's TestResult.MockMismatches on the main replay
+// loop: the asserted mocks its mapping names and the mocks it consumed,
+// present whenever what it consumed was read, even when both are empty. On
+// that loop, absent means the consumed mocks could not be read (the per-test
+// GetConsumedMocks failed, in either mode, so nothing stale is reported), so
+// a reader can tell a test that consumed nothing from one whose consumption
+// is unknown; left out when empty, the two looked the same. (Other paths,
+// such as streaming tests and results built before the loop, never set it.)
+func mockMismatchesFor(consumedKnown bool, expected, actual []models.MockMismatchMock) *models.MockMismatchInfo {
+	if !consumedKnown {
+		return nil
+	}
+	return &models.MockMismatchInfo{ExpectedMocks: expected, ActualMocks: actual}
+}
+
 // depTypeFor resolves the normalised protocol family of a mapping entry,
 // preferring the entry's own Kind and falling back to the loaded-mock lookup
 // for entries recorded without one.

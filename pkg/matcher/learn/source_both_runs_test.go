@@ -203,7 +203,9 @@ func TestAReasonSaysTheFullRoundNeverServedTheValuesSource(t *testing.T) {
 	millis := func(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) }
 	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
 	escaped := func(at time.Time) string { return url.QueryEscape(at.Format(time.RFC3339)) }
-	const echo = "the moment it was recorded with stands in mock-31%s, and the moment record's full round saw in it stands earlier in the test too; "
+	// The echo's reason names both halves: where the recorded moment
+	// stands, and where the moment F saw does (mock-11).
+	const echo = "the moment it was recorded with stands in mock-31%s, and the moment record's full round saw in it stands earlier in the test too, in mock-11 at spec.resp.body; "
 	for _, tc := range []struct {
 		name      string
 		body      string // what the recording's message holds

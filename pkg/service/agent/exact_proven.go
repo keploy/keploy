@@ -279,6 +279,11 @@ func (a *Agent) readUnstagedFromDisk() error {
 		}
 	}
 	if rb, ok := a.Proxy.(coreAgent.RecordedBeforeSetter); ok {
+		if rk, ok := a.Proxy.(coreAgent.RecordingKeeper); ok {
+			if disk := a.stagedDisk(); disk != nil {
+				disk.SetRecordingKeeper(rk.KeepRecording)
+			}
+		}
 		if err := rb.SetRecordedBefore(a.diskRecordedBefore()); err != nil {
 			return fmt.Errorf("set the test set's recordings before an instant: %w", err)
 		}

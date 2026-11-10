@@ -12,6 +12,7 @@ import (
 	"unsafe"
 	"weak"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
@@ -59,6 +60,9 @@ type evPlace struct {
 	// clock: the earlier call learned this place as its own read of the
 	// application's clock: a separate read, never a copy of another.
 	gave, undeclared, clock bool
+	// offset: the read of the clock, with its offset, the earlier call
+	// learned this place as (Seen.Offset); nil where it learned none.
+	offset *models.ClockOffset
 	// raw is the index in Input.Raw plus one of a recording's place; 0 for
 	// any other.
 	raw int
@@ -102,8 +106,12 @@ type evPlace struct {
 	// request's time instead (req), as an exchange's request leaf is.
 	// views: the views round F's serves gave where they differ
 	// (Raw.ServedChanged); one that holds F's word leaves it unknown.
-	fUnstated, fMay, fGave, recAfter bool
-	views                            []*Raw
+	// rBefore: the recording gave the application this place before the
+	// call, by times keploy reads (its answer's, answerState, where it holds
+	// one): R's application had it to cut a value from. Unlike recAfter, a
+	// place with no time keploy reads, or at the call's own instant, is not.
+	fUnstated, fMay, fGave, recAfter, rBefore bool
+	views                                     []*Raw
 	// req: a recording's state by its request's time, where that is not
 	// its state by its answer's (rawRequestState): a word its request
 	// holds is placed so (placedFor), as an exchange's request leaf is.
@@ -130,10 +138,14 @@ type placeText struct {
 
 // withTexts gives each of ps the handles its texts are read by, in x.
 func withTexts(x *readerIndex, ps []evPlace) []evPlace {
+	// One block for the places' handles: one allocation per call, not one
+	// per place.
+	ts := make([]placeText, len(ps))
 	for i := range ps {
-		p := &ps[i]
-		t := &placeText{rec: x.text(p.rec), live: x.text(p.live)}
-		if p.src != nil {
+		p, t := &ps[i], &ts[i]
+		if p.src == nil {
+			t.rec, t.live = x.text(p.rec), x.text(p.live)
+		} else {
 			t.rec = x.textOf(*p.src)
 			t.live = t.rec
 			if p.fSrc != p.src {
@@ -205,6 +217,14 @@ func payloadless(in Input) (mock, why string) {
 // first place keploy could not read ("" where it read every one): every
 // change of the call is then refused.
 func placesOf(in Input) (ps []evPlace, unread string) {
+	// Sized once: a call of a long test has thousands of places, and grown
+	// by append the list was copied at each growth (a quarter more each
+	// time past 256), about five times its size allocated per call.
+	n := len(in.Raw)
+	for _, e := range in.Earlier {
+		n += len(e.Seen)
+	}
+	ps = make([]evPlace, 0, n)
 	for _, e := range in.Earlier {
 		// An exchange keploy could not read (Earlier.Unread), or one F
 		// served with no leaf and no payload keploy read, is a place it
@@ -232,14 +252,22 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		if trailed {
 			other = false
 		}
+		// Of the exchange, not of a leaf: built once for its leaves.
+		outsideTest, lateCall := earlierOutsideTest(e), earlierLateCall(e)
+		// rBefore of its leaves: a request leaf by the request's time, an
+		// answer leaf by the answer's (none where keploy was given no
+		// payload: the zero time).
+		sentBefore := e.alwaysEarlier() || !e.noTime && e.At.Before(in.At)
+		answeredBefore := e.alwaysEarlier() || sentBefore && answeredBy(e.At, e.Payload.answered, in.At)
 		for _, s := range e.Seen {
 			path := cmp.Or(s.Leaf.Path, s.Place)
 			ps = append(ps, evPlace{
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
-				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, startUp: startUp, otherTest: other, trailed: trailed, scope: scope,
-				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: earlierOutsideTest(e), lateCall: earlierLateCall(e),
+				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, offset: s.Offset, startUp: startUp, otherTest: other, trailed: trailed, scope: scope,
+				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: outsideTest, lateCall: lateCall,
 				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
+				rBefore:  s.Side != Response && sentBefore || s.Side == Response && answeredBefore,
 			})
 			// What the application got in an answer it got at the answer's
 			// time (answerState), its request before or at the call's instant.
@@ -297,6 +325,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
 			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
 			fGave: r.served && !r.servedAfter, recAfter: !r.noTime && (r.at.After(in.At) || r.answered.After(in.At)),
+			rBefore: !r.noTime && answeredBy(r.at, r.answered, in.At),
 		}
 		if rst, rwhy := rawRequestState(in, r); !r.noTime && (rst != st || rwhy != why) {
 			p.req = &reqPlace{state: rst, why: rwhy, after: r.at.After(in.At)}
@@ -376,15 +405,18 @@ func placedFor(p evPlace, r string) evPlace {
 // the places the postings name (placeIndex), the places of a candidate's
 // mock (orderUnknown) and those a late call's search names
 // (lateCallTook): it copies and places those alone, not every place of the
-// call for every word (placeCopies counts each copy).
+// call for every word (placeCopies counts each copy). It keeps them by
+// place (of, made at the first copy): a slot for each place of the call,
+// made for every word, cost a call of thousands of places and hundreds of
+// words more than the few places each word reads.
 type wordPlaces struct {
 	base []evPlace
 	r    string
-	of   []*evPlace
+	of   map[int]*evPlace
 }
 
 func newWordPlaces(base []evPlace, r string) *wordPlaces {
-	return &wordPlaces{base: base, r: r, of: make([]*evPlace, len(base))}
+	return &wordPlaces{base: base, r: r}
 }
 
 // at is the i-th place, placed for the word.
@@ -395,6 +427,9 @@ func (ps *wordPlaces) at(i int) *evPlace {
 	placeCopies.Add(1)
 	p := new(evPlace)
 	*p = placedFor(ps.base[i], ps.r)
+	if ps.of == nil {
+		ps.of = map[int]*evPlace{}
+	}
 	ps.of[i] = p
 	return p
 }
@@ -607,6 +642,13 @@ const recordedAfterWhy = "answered after the call, it shows nothing of the recor
 // keploy knows where it can read no answer time too.
 const askedAfterWhy = "asked after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there"
 
+// answeredBy reports whether answerState places the answer before the call
+// at at.
+func answeredBy(req, answered, at time.Time) bool {
+	st, _ := answerState(req, answered, at)
+	return st == stateBefore
+}
+
 // untimedAnswer: a recording's answer time keploy cannot read, none or one
 // before its own request was recorded (follows.go's recordedGave), so it
 // cannot place the answer before the call.
@@ -664,6 +706,10 @@ const (
 	atCallWhy  = "recorded at the call's own instant"
 	noTimeWhy  = "recorded at a time keploy cannot read"
 	noAnswerAt = "no answer time keploy can read"
+	// servedAfterWhy: round F served a recording of the set only after the
+	// call reached keploy, or in a request still aloft then
+	// (givenWords.fAfter).
+	servedAfterWhy = "round F gave it to the application only after the call reached keploy"
 )
 
 // swapUnknown marks unknown each place of ps, before the call in both runs,
@@ -676,17 +722,19 @@ const (
 // start-up carries alike is no swap's, and reads as any recording's. Only
 // a place whose recorded text holds the word is asked: swapHolds reads a
 // match it finds in no one field as a swap's. A recording that is no
-// start-up is no swap's, and is not loaded to ask. held is what each
-// place's texts hold of w (heldAt), asked once for the word.
-func swapUnknown(in Input, ps *wordPlaces, w readWord, held []evHeld) {
+// start-up is no swap's, and is not loaded to ask. at is the places the
+// word's check reads (placeIndex.asked), held what each of their texts
+// holds of w (heldAt, held[k] of at[k]), asked once for the word: a place
+// it does not read holds neither word.
+func swapUnknown(in Input, ps *wordPlaces, w readWord, at []int32, held []evHeld) {
 	holds := func(own string) bool {
 		return holdsToken(own, w.Rec) || slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return holdsToken(own, t.Rec) })
 	}
-	for i := range ps.base {
-		if !held[i].hr {
+	for k, i := range at {
+		if !held[k].hr {
 			continue
 		}
-		p := ps.at(i)
+		p := ps.at(int(i))
 		if p.raw == 0 || p.state != stateBefore {
 			continue
 		}
@@ -975,7 +1023,7 @@ type wordsEntry struct {
 func keptWordsOf(k wordsKey, g givenWords) *wordsEntry {
 	e := &wordsEntry{}
 	n := allocBytes(unsafe.Sizeof(*e), true)
-	e.key.served, e.key.asRecorded, e.key.unseen = k.served, k.asRecorded, k.unseen
+	e.key.served, e.key.asRecorded, e.key.unseen, e.key.servedAfter = k.served, k.asRecorded, k.unseen, k.servedAfter
 	if k.live != nil {
 		b, bn := keptPayload(*k.live)
 		e.key.live, n = &b, n+bn+allocBytes(unsafe.Sizeof(b), true)
@@ -1066,16 +1114,18 @@ func keptPayload(b rawBody) (rawBody, int64) {
 
 // wordsKey is what makes a recording's words (wordsOf) past its identity,
 // which fixes its own payload: how round F served it (Raw.served,
-// asRecorded, unseen) and the payloads of F's view of it (live) and of the
-// views F's serves of it gave (views).
+// asRecorded, unseen), whether only after the call reached keploy
+// (servedAfter: a later call it was served before reads it apart), and the
+// payloads of F's view of it (live) and of the views F's serves of it gave
+// (views).
 type wordsKey struct {
-	served, asRecorded, unseen bool
-	live                       *rawBody
-	views                      []rawBody
+	served, asRecorded, unseen, servedAfter bool
+	live                                    *rawBody
+	views                                   []rawBody
 }
 
 func wordsKeyOf(x Raw) wordsKey {
-	k := wordsKey{served: x.served, asRecorded: x.asRecorded, unseen: x.unseen}
+	k := wordsKey{served: x.served, asRecorded: x.asRecorded, unseen: x.unseen, servedAfter: x.servedAfter}
 	if x.live != nil {
 		b := x.live.payload()
 		k.live = &b
@@ -1087,7 +1137,7 @@ func wordsKeyOf(x Raw) wordsKey {
 }
 
 func (k wordsKey) equal(o wordsKey) bool {
-	return k.served == o.served && k.asRecorded == o.asRecorded && k.unseen == o.unseen &&
+	return k.served == o.served && k.asRecorded == o.asRecorded && k.unseen == o.unseen && k.servedAfter == o.servedAfter &&
 		(k.live == nil) == (o.live == nil) && (k.live == nil || sameBody(*k.live, *o.live)) && slices.EqualFunc(k.views, o.views, sameBody)
 }
 
@@ -1192,9 +1242,22 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 func setEvidence(g givenWords, inR, inF heldRoles, at time.Time, piece bool) (ev wordEvidence, changed bool) {
 	// A recording answered after the call gave R's application nothing
 	// before it: R's word there decides nothing (F's still does).
-	hr := inR&inOwn != 0 && (g.noTime || !g.at.After(at) && !g.answered.After(at))
-	before := g.at.Before(at) && !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
+	hr := inR&inOwn != 0 && g.givenBefore(at)
+	before := g.answeredBefore(at)
 	switch {
+	case g.fAfter:
+		// Round F served it only after the call reached keploy, or in a
+		// request still aloft then: it gave the application nothing there
+		// before the call, whatever its serves stated. So round F's word in
+		// what round F gave there shows nothing of where round F's
+		// application took it. Round F's word in the recording's own text,
+		// written in the recording run, is no word round F's application
+		// made: it shows nothing either way, as a serve told as recorded
+		// stays so for a Raw place (Raw.asOfArrival).
+		if hr || inF&inOwn != 0 {
+			return evUnknown, false
+		}
+		return evNone, false
 	case g.unstated || g.unread:
 		// Round F served it and keploy cannot tell what it gave there.
 		return evUnknown, true
@@ -1234,6 +1297,21 @@ func setEvidence(g givenWords, inR, inF heldRoles, at time.Time, piece bool) (ev
 	return evNone, false
 }
 
+// givenBefore reports whether g's answer was given R's application before
+// the call at at: recorded and answered at or before it, or with no answer
+// time keploy can read (fail closed).
+func (g *givenWords) givenBefore(at time.Time) bool {
+	return g.noTime || !g.at.After(at) && !g.answered.After(at)
+}
+
+// answeredBefore reports whether g's answer was given R's application
+// before the call at at, by times keploy reads: answered before it, after
+// its own request (so that was before it too). Unlike givenBefore, one with
+// no time keploy reads is not.
+func (g *givenWords) answeredBefore(at time.Time) bool {
+	return !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
+}
+
 // gluedAt reports whether p, a body that declares no media type, holds R's
 // or F's word glued to the bytes around it, in any form it declares (main's
 // gluedIn): keploy cannot tell its words from the bytes that frame them.
@@ -1245,11 +1323,14 @@ func (dc *decider) gluedAt(p evPlace, w readWord) bool {
 	return gluedIn(ed, w.Rec, true) || gluedIn(ed, w.Live, false)
 }
 
-// setUnknownWhy is why a recording of the set shows nothing of a word: its
-// time, where keploy cannot place it before the call (rawState), else that
+// setUnknownWhy is why a recording of the set shows nothing of a word:
+// that round F gave it the application only after the call (fAfter); its
+// time, where keploy cannot place it before the call (rawState); else that
 // keploy keeps only its words.
 func setUnknownWhy(g givenWords, at time.Time) string {
 	switch st, why := answerState(g.at, g.answered, at); {
+	case g.fAfter:
+		return servedAfterWhy
 	case g.noTime:
 		return noAnswerAt
 	case st != stateBefore:
@@ -1589,11 +1670,21 @@ func (oh *outsideHeld) asked(state bool, in ...map[int32]heldRoles) []int32 {
 // the places always read: any other holds neither word, so it shows
 // nothing of it (evidenceOf: evNone) and no token around it (tokenShown),
 // as the filter of its texts would tell (ruledOut), with no lookup per
-// place. Read always: a place whose texts the postings do not hold (a text
-// shorter than filterTextMin, one keploy could not read, one past the
-// set's budget, a call in no set), and one a word may show at without its
-// texts holding it: F's side unstated (its views and fMay decide), a body
-// that declares no media type (gluedAt), a given (glued inside the word).
+// place. The postings hold a text shorter than filterTextMin too, by its
+// words alone (shortEntry): an exchange's leaves are mostly such texts,
+// and read always, each was copied and asked for every word of every call,
+// nearly all of a word's check on api-server's round F. Read always: a
+// place whose texts the postings do not hold (one keploy could not read,
+// one past the set's budget, a call in no set), and one a word may show at
+// without its texts holding it (showsUntold): F's side unstated where F served it with no
+// view told or read (fMay) or with views (its views decide), a body that
+// declares no media type (gluedAt), a given (glued inside the word). A
+// place F's side leaves unstated otherwise (a recording round F never
+// served) shows a word only where one of its texts holds it (evidenceOf), so
+// the postings name it as they name any place: read for every word, each of
+// thousands of recordings round F had not served was copied and asked for
+// every word of every call, most of the learn step's work on api-server's
+// round F.
 type placeIndex struct {
 	rec, live map[int32][]int32
 	always    []int32
@@ -1613,7 +1704,7 @@ func (dc *decider) places() *placeIndex {
 	placeBuilds.Add(1)
 	for i, p := range dc.ps {
 		r, l := int32(-1), int32(-1)
-		if !p.fUnstated && !p.undeclared && !p.gave {
+		if !p.showsUntold() {
 			r, l = p.t.rec.postID(), p.t.live.postID()
 		}
 		if r < 0 || l < 0 {
@@ -1626,7 +1717,17 @@ func (dc *decider) places() *placeIndex {
 	return pi
 }
 
-// asked reports, by place, whether a check of w reads it (placeIndex); nil
+// showsUntold reports whether a word may show at p without either of its
+// texts holding it (placeIndex's read always): round F served it with no
+// view told (fMay) or with views of its own (evidenceOf reads both as
+// unknown whatever its texts hold; placesOf sets either only where F's side
+// is unstated), a body that declares no media type (gluedAt), or a given
+// (glued inside the word).
+func (p evPlace) showsUntold() bool {
+	return p.fMay || len(p.views) > 0 || p.undeclared || p.gave
+}
+
+// asked is the places a check of w reads (placeIndex), ascending; all
 // where it reads every place: R's word or F's has no run of letters and
 // digits the postings can name. A place that shows a whole token around
 // R's word (tokenShown) is among those the postings name for R's word:
@@ -1635,43 +1736,56 @@ func (dc *decider) places() *placeIndex {
 // (holdsToken; an instant never starts or ends glued to a letter or digit,
 // so a base64 run cut at one's bound ends a run of letters and digits
 // there too).
-func (pi *placeIndex) asked(n int, w readWord) []bool {
-	ask := make([]bool, n)
-	if !pi.mark(ask, pi.rec, runsOf(w.Rec)) || !pi.mark(ask, pi.live, runsOf(w.Live)) {
-		return nil
+func (pi *placeIndex) asked(w readWord) (at []int32, all bool) {
+	if !pi.mark(&at, pi.rec, runsOf(w.Rec)) || !pi.mark(&at, pi.live, runsOf(w.Live)) {
+		return nil, true
 	}
-	for _, i := range pi.always {
-		ask[i] = true
-	}
-	return ask
+	return pi.ascending(at), false
 }
 
-// recAsked reports, by place, whether its recorded text may hold r as a
-// word (holdsWord), as asked's does for R's word, or is read always; nil
-// where r has no run of letters and digits the postings can name. A text
+// recAsked is the places whose recorded text may hold r as a word
+// (holdsWord), as asked's does for R's word, and those read always,
+// ascending; all where r has no run of letters and digits the postings can name. A text
 // that holds r as a word in any reading holds each of r's runs whole: every
 // reading reads a letter or digit as a word byte, so none stands right
 // before or after r.
-func (pi *placeIndex) recAsked(n int, r string) []bool {
-	ask := make([]bool, n)
-	if !pi.mark(ask, pi.rec, runsOf(r)) {
-		return nil
+func (pi *placeIndex) recAsked(r string) (at []int32, all bool) {
+	if !pi.mark(&at, pi.rec, runsOf(r)) {
+		return nil, true
 	}
-	for _, i := range pi.always {
-		ask[i] = true
-	}
-	return ask
+	return pi.ascending(at), false
 }
 
-// mark marks in ask the places whose text on side (rec or live) the set's
+// ascending is at and the places read always, each once, in the call's
+// order of places: a check reads them in that order, as it read every
+// place before the postings named any. It is as long as the places the
+// word's check reads, never the call's: a slot per place of the call for
+// every word of a call of thousands of places cost more than the reads.
+func (pi *placeIndex) ascending(at []int32) []int32 {
+	at = append(at, pi.always...)
+	slices.Sort(at)
+	return slices.Compact(at)
+}
+
+// askedPlaces is at, or where all is set every place of n, in order.
+func askedPlaces(at []int32, all bool, n int) []int32 {
+	if !all {
+		return at
+	}
+	at = make([]int32, n)
+	for i := range at {
+		at[i] = int32(i)
+	}
+	return at
+}
+
+// mark adds to ask the places whose text on side (rec or live) the set's
 // postings say may hold every run of runs; false where runs is empty, which
 // every text may hold.
-func (pi *placeIndex) mark(ask []bool, side map[int32][]int32, runs []string) bool {
+func (pi *placeIndex) mark(ask *[]int32, side map[int32][]int32, runs []string) bool {
 	ids, ok := pi.fs.holdingRuns(runs)
 	for _, id := range ids {
-		for _, i := range side[id] {
-			ask[i] = true
-		}
+		*ask = append(*ask, side[id]...)
 	}
 	return ok
 }

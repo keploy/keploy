@@ -3,6 +3,8 @@ package integrations
 import (
 	"context"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -280,6 +282,9 @@ type RoundSnapshot struct {
 	viewGen   uint64
 	endedOwn  map[string]struct{}
 	view      any
+	// taken is what Taken says of each recording, read once for the
+	// snapshot and its copies (takenOf).
+	taken *takenIndex
 }
 
 // RoundParts is what a store fills a RoundSnapshot's unexported answers
@@ -319,6 +324,7 @@ func (s RoundSnapshot) WithParts(p RoundParts) RoundSnapshot {
 	s.viewGen = p.ViewGen
 	s.endedOwn = p.EndedOwn
 	s.view = p.View
+	s.taken = &takenIndex{}
 	return s
 }
 
@@ -731,32 +737,99 @@ func (s RoundSnapshot) Voided() []*models.Mock {
 // keeps it from the candidates). One is in two, by design: a voided ahead
 // answer (Voided) a later view of the test it named shows, which the store
 // serves again as before, and a learn step counts as spent.
+//
+// A learn step asks it of each recording a call's take log names, so a
+// scan of the log for each ask read the log once per entry, its square in
+// all: the snapshot's index (takenOf) reads it once for every ask.
 func (s RoundSnapshot) AnsweredInRound(name string) bool {
-	// The entries of name that answered, and are not given back.
+	if x := s.takenOf(); x != nil {
+		return x.answered[name] > 0
+	}
+	return answeredIn(s.Taken, s.viewGen)[name] > 0
+}
+
+// answeredIn is, by recording, how many entries of log answered a call and
+// are not given back (AnsweredInRound): a consume, or a spend that holds
+// for the view in force (gen), that no TakeRestored of the same recording
+// gave back.
+func answeredIn(log []Take, gen uint64) map[string]int {
+	n := map[string]int{}
 	live := map[int]bool{}
-	for i, t := range s.Taken {
-		if t.Mock == nil || t.Mock.Name != name {
+	for i, t := range log {
+		takeReads.Add(1)
+		if t.Mock == nil {
 			continue
 		}
 		switch t.How {
 		case TakeConsumed:
 			live[i] = true
+			n[t.Mock.Name]++
 		case TakeSpent:
-			if !t.ForView || t.Gen == s.viewGen {
+			if !t.ForView || t.Gen == gen {
 				live[i] = true
+				n[t.Mock.Name]++
 			}
 		case TakeRestored:
-			delete(live, t.Of)
+			// A give-back names the entry it gives back: one of its own
+			// recording's, or none it counts.
+			if live[t.Of] && log[t.Of].Mock.Name == t.Mock.Name {
+				delete(live, t.Of)
+				n[t.Mock.Name]--
+			}
 		}
 	}
-	return len(live) > 0
+	return n
 }
+
+// takenIndex is what a snapshot's take log says of each recording, by
+// name, read once for the snapshot and every copy of it (WithParts makes
+// it, empty): AnsweredInRound's count and ClaimedInRound's claims.
+type takenIndex struct {
+	once     sync.Once
+	log      []Take
+	answered map[string]int
+	claimed  map[string]bool
+}
+
+// takenOf is s's takenIndex, read at its first ask; nil where s has none (a
+// snapshot no store filled, WithParts) or where s's log is not the one it
+// was read from (a copy whose Taken was cut or replaced): each ask then
+// reads the log itself.
+func (s RoundSnapshot) takenOf() *takenIndex {
+	x := s.taken
+	if x == nil {
+		return nil
+	}
+	x.once.Do(func() {
+		x.log = s.Taken
+		x.answered = answeredIn(s.Taken, s.viewGen)
+		x.claimed = map[string]bool{}
+		for _, t := range s.Taken {
+			takeReads.Add(1)
+			if t.How == TakeClaimed && t.Mock != nil {
+				x.claimed[t.Mock.Name] = true
+			}
+		}
+	})
+	if len(x.log) != len(s.Taken) || len(s.Taken) > 0 && &x.log[0] != &s.Taken[0] {
+		return nil
+	}
+	return x
+}
+
+// takeReads counts the take log's entries AnsweredInRound and ClaimedInRound
+// read, for the rows that bound a call's work.
+var takeReads atomic.Int64
 
 // ClaimedInRound reports whether a pairing claimed name in the staging
 // (TakeClaimed): no pairing takes it again. The claim is no consumption: a
 // view of its owner shows it unconsumed, until the owner's call takes it.
 func (s RoundSnapshot) ClaimedInRound(name string) bool {
+	if x := s.takenOf(); x != nil {
+		return x.claimed[name]
+	}
 	for _, t := range s.Taken {
+		takeReads.Add(1)
 		if t.How == TakeClaimed && t.Mock != nil && t.Mock.Name == name {
 			return true
 		}

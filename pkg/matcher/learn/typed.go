@@ -502,11 +502,12 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	served = withoutGave(served)
 	// The echo, before any provenance excuses the instant.
 	if echoed := echoedPairs([]driftedInstant{{rec: rec, live: live}}, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)); len(echoed) > 0 {
+		where := dc.heldAt(echoed, at, served, raw)
 		if from, ok := dc.instantEchoFrom(r, echoed, at, served, raw); ok {
+			from.liveAt = where
 			ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
 			return ln
 		}
-		where := dc.heldAt(echoed, at, served, raw)
 		if where == "" {
 			where = "earlier in the test"
 		}
@@ -1591,7 +1592,7 @@ func (dc *DriftCache) holdsExact(text string, m moment) bool {
 func instantEvidence(from Place) string {
 	at := placeAt(from)
 	if from.Echo {
-		return echoFound(at) + "; " + echoProvenance + ", so keploy follows it as a value from there. " + correction(from.Mock, from.unserved)
+		return echoFound(at, from.liveAt) + "; " + echoProvenance + ", so keploy follows it as a value from there. " + correction(from.Mock, from.unserved)
 	}
 	return "the moment it was recorded with stands in " + at + ", as an instant of its own; an instant equal to one an earlier place holds is followed as a value from there, whether or not it is a read of the clock. " + correction(from.Mock, from.unserved)
 }

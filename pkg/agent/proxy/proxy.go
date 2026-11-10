@@ -5244,12 +5244,20 @@ func (p *Proxy) SetRecordingTimes(src func(visit func(name string, place time.Ti
 
 var _ agent.RecordingTimesSetter = (*Proxy)(nil)
 
+// KeepRecording implements agent.RecordingKeeper: the learn tracker's set
+// keeps the recordings the agent's on-disk store decodes for its reads,
+// within the set's budget (learn.Tracker.KeepRecording).
+func (p *Proxy) KeepRecording(key string, size int64, decode func() (*models.Mock, error)) (*models.Mock, error) {
+	return p.learnTracker.KeepRecording(key, size, decode)
+}
+
 // SetRecordedBefore implements agent.RecordedBeforeSetter (exact.go).
 func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
 	return p.stageOn("recordedBefore", func(m *MockManager) { m.SetRecordedBefore(src) })
 }
 
 var _ agent.RecordedBeforeSetter = (*Proxy)(nil)
+var _ agent.RecordingKeeper = (*Proxy)(nil)
 
 // lastRecorded is the latest instant a recording's request can be read at
 // (time.Time.UnixNano's last): every recording is recorded before it.

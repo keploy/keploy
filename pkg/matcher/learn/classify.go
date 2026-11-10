@@ -70,6 +70,16 @@ type Seen struct {
 	// (unaccounted), as one found there as a word is, never learned as
 	// noise. A body that declares a text media type is read by its words.
 	Undeclared bool
+	// Offset is the read of the application's clock the learn step learned
+	// the leaf, a request's, as, with its offset and the cut it was learned
+	// at (MockSpec.Clocks' entry, its Why left out: Named), a plain read
+	// too, which Clock marks; nil where it learned none. A later test's call
+	// whose own window holds its value plus that same offset at a coarser
+	// cut is a second read of one time to live, not that call's value
+	// carried (the order's step 5). A pointer after the flags: every leaf
+	// the run keeps costs 8 bytes more, and one learned as a read the
+	// models.ClockOffset it points to as well (runPlaceBytes).
+	Offset *models.ClockOffset
 }
 
 // Earlier is an HTTP mock the learn step served earlier in the same test,
@@ -673,6 +683,14 @@ func (r Raw) viewOf(live Raw) (*Raw, bool) {
 // (ServedLive; WithServed(false) drops it).
 func (r Raw) Live() bool { return r.live != nil }
 
+// readBefore is what r says of what F gave the application there before
+// the call (givenWords.fRead, fAfter): read where F served it as recorded
+// or changed with the one view it stated, and not only after the call
+// reached keploy; after where every serve of it was (servedAfter).
+func (r Raw) readBefore() (read, after bool) {
+	return (r.AsRecorded() || r.Live()) && !r.servedAfter, r.servedAfter
+}
+
 // ServedAs is r as served once, the n-th serve of F's in the running set
 // (ServedIn(n, n)).
 func (r Raw) ServedAs(n int) Raw { return r.ServedIn(n, n) }
@@ -847,6 +865,11 @@ type Place struct {
 	// stands in the value, never by its text.
 	Field, Held string
 	Echo        bool
+	// liveAt, of an echo's place (Echo), is the earliest earlier place that
+	// holds the moment F saw in the value (heldAt: "in <mock> at <field>"),
+	// "" where none does: the other half of the echo's evidence, which a
+	// reason names beside the place (echoFound).
+	liveAt string
 	// SetAside, of a place found in a raw mock's payload (Side ""): the
 	// search found the recorded value there, and the rule a copy follows
 	// its source sets it aside, as F gave the application nothing there
@@ -3806,6 +3829,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// then a raw mock (below).
 	echoed := dc.echoedIn(v, at, served, raw, eh)
 	if from, ok := dc.echoServed(echoed, recorded, served); ok {
+		from.liveAt = dc.heldAt(echoed, at, served, raw)
 		return from, true
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:
@@ -3880,6 +3904,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		if from, ok := dc.echoRaw(x, echoed); ok {
 			from.AtCall, from.noTime, from.unserved = atCall, x.noTime, !x.served
 			from.startUp = x.swapHolds(x.payload().text, raw, func(own string) bool { return dc.holdsRecorded(own, echoed) })
+			from.liveAt = dc.heldAt(echoed, at, served, raw)
 			return from, true
 		}
 		if words, ok := dc.searchWords(x, keep); ok {
@@ -4128,7 +4153,7 @@ func evidence(v *valueDrift, from Place) string {
 	var found, provenance string
 	switch {
 	case from.Echo:
-		found, provenance = echoFound(at), echoProvenance
+		found, provenance = echoFound(at, from.liveAt), echoProvenance
 	case from.Held == v.rec || from.Held == v.decRec:
 		found = "its recorded value stands whole in " + at
 	default:
@@ -4150,7 +4175,7 @@ func startUpWhy(v *valueDrift, from Place) string {
 	var found string
 	switch {
 	case from.Echo:
-		found = echoFound(at)
+		found = echoFound(at, from.liveAt)
 	case from.Held == v.rec || from.Held == v.decRec:
 		found = "its recorded value stands whole in " + at
 	default:
@@ -4179,10 +4204,16 @@ func placeAt(from Place) string {
 	return from.Mock + "'s payload" + note
 }
 
-// echoFound is what the echo found, at at (evidence); echoProvenance why
+// echoFound is what the echo found, at at (evidence), and where the moment
+// F saw stands (liveAt, heldAt's "in <mock> at <field>"; not named where ""):
+// both halves of the echo, so a reader can check each. echoProvenance is why
 // that move shows no read of the clock.
-func echoFound(at string) string {
-	return "the moment it was recorded with stands in " + at + ", and the moment record's full round saw in it stands earlier in the test too"
+func echoFound(at, liveAt string) string {
+	found := "the moment it was recorded with stands in " + at + ", and the moment record's full round saw in it stands earlier in the test too"
+	if liveAt != "" {
+		found += ", " + liveAt
+	}
+	return found
 }
 
 const echoProvenance = "a pick from what the application was given, by its clock, moves as a read of the clock does, so its move shows no read of the clock"
@@ -4430,11 +4461,16 @@ func WholeEcho(r, a Leaf) bool {
 }
 
 // payloadKeys are the fields of a mock's spec that say where and when it was
-// recorded, not what it carried: a value found in them did not flow from the
-// mock.
+// recorded, or what keploy learned of it (its noise, correlations, variables
+// and clock reads, each with the line the learn step wrote for it), not what
+// it carried: a value found in them did not flow from the mock. A clock
+// read's line quotes what both runs read at its place: read as payload, the
+// moment record's full round read there was a moment the application was
+// given, and the echo paired a read of the clock made in the same second
+// with it.
 var payloadKeys = map[string]bool{
 	"metadata": true, "created": true, "reqtimestampmock": true, "restimestampmock": true,
-	"reqbodynoise": true, "correlations": true, "variables": true, "timestamp": true, "async": true,
+	"reqbodynoise": true, "correlations": true, "variables": true, "clocks": true, "timestamp": true, "async": true,
 }
 
 // RawOf is a mock as Classify reads it when no leaf names its values: its
@@ -5182,7 +5218,8 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 // a use) naming that variable (Seen.Name), the first by name when two hold
 // one place, and each request leaf clocks (the call's learn step's clock
 // reads, by leaf path, as MockSpec.Clocks keys them) holds as a plain read
-// marked so (Seen.Clock). An echo is not named: it is its call's alone, and
+// marked so (Seen.Clock), and each such leaf with the read it holds
+// (Seen.Offset). An echo is not named: it is its call's alone, and
 // a later call that reads its value back binds it there as a variable of the
 // test (ReadBack). e's own Seen is left as it was: the result holds a copy,
 // with no name or mark at any other place.
@@ -5215,6 +5252,11 @@ func Named(e Earlier, vars models.MockVariables, clocks map[string]models.ClockO
 		}
 		o, clock := clocks[s.Leaf.Path]
 		e.Seen[i].Clock = s.Side == Request && clock && o.Plain()
+		e.Seen[i].Offset = nil
+		if s.Side == Request && clock {
+			o.Why = ""
+			e.Seen[i].Offset = &o
+		}
 	}
 	return e
 }
