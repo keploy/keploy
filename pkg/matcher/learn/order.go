@@ -266,15 +266,15 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 const unnamedWhy = "no path names this field alone: its key holds '.', '[' or ']', or its document holds that key twice, so its noise in keploy.yml also names the other field its path spells"
 
 // unreadByWords names the first of dc.byWords that may hold the change of
-// a value from rec to live (MayHoldChange), as placesOf names a place keploy
+// a value from rec to live (mayHold), as placesOf names a place keploy
 // could not read; "" where none may.
 func (dc *decider) unreadByWords(rec, live Leaf) string {
-	moments, read := false, false
-	for _, e := range dc.byWords {
-		if !read {
-			moments, read = dc.dr.momentsIn(rec, live), true
+	var c valueChange
+	for i, e := range dc.byWords {
+		if i == 0 {
+			c = dc.dr.changeOf(rec, live)
 		}
-		if e.unreadWords.MayHoldChange(rec.Value, live.Value, moments) {
+		if e.unreadWords.mayHold(c) {
 			return unreadName(e.Mock, e) + " (" + e.Unread + ")"
 		}
 	}

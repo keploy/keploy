@@ -141,7 +141,7 @@ type Earlier struct {
 	// unreadWords, of an incoming place keploy could not read (Unread), are
 	// the words of its request (Tracker.IncomingWords, which keeps them for
 	// no other place: keepWordsLocked; nil: none read): a
-	// value whose change they cannot hold (RequestWords.MayHoldChange) reads
+	// value whose change they cannot hold (RequestWords.mayHold) reads
 	// the place as no source of it, not as unread (requestUnreadOf).
 	unreadWords *RequestWords
 	Seen        []Seen

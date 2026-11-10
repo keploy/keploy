@@ -219,7 +219,7 @@ func payloadless(in Input) (mock, why string) {
 //
 // byWords are the client tests' requests keploy could not read that keep
 // their words (Earlier.unreadWords): each is unread for a value whose change
-// it may hold (MayHoldChange), and no source of any other (decider.leaf).
+// it may hold (mayHold), and no source of any other (decider.leaf).
 func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 	// Sized once: a call of a long test has thousands of places, and grown
 	// by append the list was copied at each growth (a quarter more each

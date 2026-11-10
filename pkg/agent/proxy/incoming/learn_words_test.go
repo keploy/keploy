@@ -37,10 +37,10 @@ func holdsWords(t *testing.T, words *learn.RequestWords) {
 	if words == nil {
 		t.Fatal("no words of the body keploy could not read")
 	}
-	if !words.MayHoldChange("tok-1a2b3c4d5e6f", "tok-"+presentWord, false) {
+	if !words.MayHoldChange("tok-1a2b3c4d5e6f", "tok-"+presentWord) {
 		t.Errorf("the words lack %q, which the body holds", presentWord)
 	}
-	if words.MayHoldChange("tok-1a2b3c4d5e6f", "tok-"+absentWord, false) {
+	if words.MayHoldChange("tok-1a2b3c4d5e6f", "tok-"+absentWord) {
 		t.Errorf("the words may hold %q, which the body lacks", absentWord)
 	}
 }

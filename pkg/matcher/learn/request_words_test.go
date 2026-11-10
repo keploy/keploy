@@ -125,7 +125,7 @@ func TestRequestWordsReadAFormAWindowEndsInsideWhole(t *testing.T) {
 	}
 	_, _ = w.Write([]byte("omega"))
 	w.End()
-	if !w.mayHoldWord("zz9absent") || !w.MayHoldChange("a-1", "a-2", false) {
+	if !w.mayHoldWord("zz9absent") || !w.MayHoldChange("a-1", "a-2") {
 		t.Fatal("past the most bytes read, the filter says a word is absent")
 	}
 }
@@ -316,6 +316,42 @@ func TestAClientRequestKeployCouldNotReadIsNoSourceOfAValueItsWordsLack(t *testi
 	// An instant read of the application's clock: it moved by the lead.
 	r, l := iMs(rAt.Add(-120*time.Millisecond)), iMs(fAt.Add(-120*time.Millisecond))
 	rt, lt := rAt.Add(-120*time.Millisecond).Format(time.RFC3339Nano), fAt.Add(-120*time.Millisecond).Format(time.RFC3339Nano)
+	// A value that holds a moment beside a word: the request is asked for
+	// the word that changed, whatever the moment did (it changed, it stayed,
+	// it is a time of day, an epoch or a date), and is no source of a read
+	// of the clock beside a word that stayed, though it holds that word, nor
+	// beside one that changed to a word it lacks.
+	for _, v := range [][2]string{
+		{"app tok-1a2b3c4d5e6f at " + rt, "app tok-q7w8e9r0t1y2 at " + lt},
+		{"app tok-1a2b3c4d5e6f at " + rt, "app tok-q7w8e9r0t1y2 at " + rt},
+		{"tok-1a2b3c4d5e6f 07:01:41", "tok-q7w8e9r0t1y2 07:02:50"},
+		{"tok-1a2b3c4d5e6f-1762671701", "tok-q7w8e9r0t1y2-1762671770"},
+		{"tok-1a2b3c4d5e6f 2026-11-09", "tok-q7w8e9r0t1y2 2026-11-09"},
+		{"app tok-1a2b3c4d5e6f at " + rt, "app TOK-ZQ5UPPER at " + lt},
+	} {
+		refuses(String, v[0], v[1], earlier)
+	}
+	keeps(String, "app tok-q7w8e9r0t1y2 at "+rt, "app tok-q7w8e9r0t1y2 at "+lt, earlier)
+	keeps(String, "app tok-1a2b3c4d5e6f at "+rt, "app tok-9f8e7d6c5b4a at "+lt, earlier)
+	keeps(String, "tok-q7w8e9r0t1y2-1762671701", "tok-q7w8e9r0t1y2-1762671770", earlier)
+	// A mark that changed beside the moment, and a word the recorded value
+	// held and the live one lost: no word tells either apart from a change
+	// the request made.
+	refuses(String, "booked at "+rt, "booked_at "+lt, earlier)
+	refuses(String, "booked at noon", "booked at "+lt, earlier)
+	// A moment's own words are not asked: a request that holds the words
+	// the clock's instant changed to ("02", "50"), none of them shaped as an
+	// instant, is no source of it, inside a base64 run of the value too.
+	// It is the source of a value those words changed in with no moment.
+	ownWords := placed(big(`"rowvalue","n17",`, `50","02","88Z","2026`))
+	keeps(String, "booked at "+rt, "booked at "+lt, ownWords)
+	keeps(String, b64(`{"k":"tok","at":"`+rt+`"}`), b64(`{"k":"tok","at":"`+lt+`"}`), ownWords)
+	refuses(String, "row 41 of 01", "row 50 of 02", ownWords)
+	// A time-ordered UUID names no moment: a request that holds an instant
+	// and none of the UUID's words is no source of it.
+	dated := placed(big(`"rowvalue","n17",`, "2026-11-09T10:00:00Z"))
+	keeps(String, "id 018f6a1e-7c3b-7a10-8f21-3c5d7e9a1b2c", "id 019a6b2f-8d4c-7b21-9a32-4d6e8fab2c3d", dated)
+	keeps(String, "tok-1a2b3c4d5e6f", "tok-9f8e7d6c5b4a", dated)
 	if ln, _ := read(Instant, r, l, nil); ln.Kind == KindUnaccounted {
 		t.Fatalf("%s -> %s with no request: %s (%s); want learned, a read of the clock", r, l, ln.Kind, ln.Why)
 	}
@@ -332,6 +368,7 @@ func TestAClientRequestKeployCouldNotReadIsNoSourceOfAValueItsWordsLack(t *testi
 		refuses(Instant, r, l, earlier)
 		refuses(String, "booked at "+rt, "booked at "+lt, earlier)
 		refuses(String, "booked at "+rt, "booked at noon", earlier)
+		refuses(String, "booked at noon", "booked at noon "+lt, earlier)
 		// Classify reads a time of day as no read of the clock, whatever
 		// came before it (unaccounted); the decider refuses it for the
 		// request.
@@ -345,6 +382,8 @@ func TestAClientRequestKeployCouldNotReadIsNoSourceOfAValueItsWordsLack(t *testi
 		keeps(Instant, r, l, earlier)
 		keeps(String, "booked at "+rt, "booked at "+lt, earlier)
 		keeps(String, "booked at "+rt, "booked at noon", earlier)
+		keeps(String, "booked at noon", "booked at noon "+lt, earlier)
+		keeps(String, "booked for noon", "booked "+lt+" for noon", earlier)
 		keeps(Instant, rT, lT, earlier)
 	}
 	// The body's digits ("n17", "q7w8e9r0t1y2") are no instant's.

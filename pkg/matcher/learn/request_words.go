@@ -27,7 +27,7 @@ type RequestWords struct {
 	n int64
 	// instant says a form of the text held a token shaped as an instant
 	// (instantShaped), which a value's instant in another layout may be
-	// written from (MayHoldChange).
+	// written from (mayHold).
 	instant bool
 	// undecoded says the text held a window with no place to cut it, a run
 	// of a form longer than a window (a file sent as one base64 string), or
@@ -171,46 +171,113 @@ func (w *RequestWords) End() {
 // to one that does.
 func (w *RequestWords) MayHoldAny() bool { return w == nil || w.undecoded }
 
-// MayHoldChange reports whether the request may be the source of a value's
-// change from rec, as recorded, to live, as record's full round saw it:
-// where the value holds an instant (moments: an instant leaf, or a text
-// that holds a moment in a layout keploy reads), in any layout, where a
+// valueChange is a value's change from its recorded run to record's full
+// round, as a request's words are asked for it (RequestWords.mayHold).
+type valueChange struct {
+	// moments says the value holds an instant in either run: it is an
+	// instant leaf, or a form of its text holds a moment in a layout keploy
+	// reads (apartFromMoments).
+	moments bool
+	// moved are the words that changed (movedOf) and are no part of an
+	// instant the value holds.
+	moved []string
+	// marks says the value changed outside its instants where no word of
+	// record's full round did: a mark between two words, or a word it held
+	// as recorded and no longer does.
+	marks bool
+}
+
+// changeOf is the change of a value from r to l (valueChange): what moved
+// in it apart from the instants it holds, each read once for the test where
+// dc keeps it (spansOf). An instant leaf is an instant whole: nothing of it
+// is apart from one.
+func (dc *DriftCache) changeOf(r, l Leaf) valueChange {
+	rest := func(x Leaf) ([]string, bool) {
+		if x.Type == Instant {
+			return []string{""}, true
+		}
+		return dc.apartFromMoments(x.Value)
+	}
+	rec, rm := rest(r)
+	live, lm := rest(l)
+	c := valueChange{moments: rm || lm, moved: movedOf(rec, live)}
+	c.marks = len(c.moved) == 0 && strings.Trim(rec[0], " ") != strings.Trim(live[0], " ")
+	return c
+}
+
+// apartFromMoments are the forms of text (textForms, the first as written)
+// with each instant a form holds (spansOf, a keyed one: a time-ordered
+// UUID's time groups name no moment) cut out of it, one space in the place
+// of it and of the spaces around it (so a value with an instant more reads
+// as it does without it), and whether a form held one.
+func (dc *DriftCache) apartFromMoments(text string) (forms []string, held bool) {
+	forms = append(forms, textForms(text)...)
+	for i, f := range forms {
+		var b strings.Builder
+		at := 0
+		for _, sp := range dc.spansOf(f) {
+			if !sp.keyed {
+				continue
+			}
+			b.WriteString(strings.TrimRight(f[at:sp.start], " "))
+			b.WriteByte(' ')
+			for at = sp.end; at < len(f) && f[at] == ' '; at++ {
+			}
+			held = true
+		}
+		if b.Len() > 0 {
+			forms[i] = b.String() + f[at:]
+		}
+	}
+	return forms, held
+}
+
+// MayHoldChange reports whether the request may be the source of the change
+// of a value that is no instant leaf from rec, as recorded, to live, as
+// record's full round saw it (mayHold of its change).
+func (w *RequestWords) MayHoldChange(rec, live string) bool {
+	return w.mayHold((*DriftCache)(nil).changeOf(Leaf{Value: rec}, Leaf{Value: live}))
+}
+
+// mayHold reports whether the request may be the source of a value's change
+// c: where the value holds an instant (c.moments), in any layout, and a
 // form of the request held a token shaped as an instant (instantShaped);
-// else where it may hold a word of what changed (movedOf), as written or
-// case-folded, and where no word changed. A nil or undecoded RequestWords
+// where it may hold a word of what changed apart from the value's instants
+// (c.moved), as written or case-folded; and where the value changed outside
+// its instants with no word gained (c.marks), a change no word tells apart
+// from one the request made. So a read of the clock beside a word the
+// request holds is its own where that word did not change, and the
+// request's where it did. A nil or undecoded RequestWords
 // may hold any change. A value the application made from the request's
 // words by an offset from its clock ("in 5 days") has that read of the
 // clock as its source, not the request.
-func (w *RequestWords) MayHoldChange(rec, live string, moments bool) bool {
+func (w *RequestWords) mayHold(c valueChange) bool {
 	if w == nil || w.undecoded {
 		return true
 	}
-	if moments {
-		return w.instant
-	}
-	moved := movedOf(rec, live)
-	if len(moved) == 0 {
+	if c.moments && w.instant {
 		return true
 	}
-	for _, m := range moved {
+	for _, m := range c.moved {
 		if w.f.has(m) || w.f.has(strings.ToLower(m)) {
 			return true
 		}
 	}
-	return false
+	return c.marks
 }
 
-// movedOf are the words of live, a value as record's full round saw
-// it, that changed from rec, as recorded: those between the words both
-// begin and end with (movedWords), and each word of a form of live
-// (textForms) no form of rec holds.
-func movedOf(rec, live string) []string {
-	_, out := movedWords(wordsBy(rec, isWord), wordsBy(live, isWord))
+// movedOf are the words of live, the forms of a value as record's full
+// round saw it (textForms, the first as written), that changed from rec,
+// the forms of it as recorded: those between the words both begin and end
+// with as written (movedWords), and each word of a form of live no form of
+// rec holds.
+func movedOf(rec, live []string) []string {
+	_, out := movedWords(wordsBy(rec[0], isWord), wordsBy(live[0], isWord))
 	held := map[string]bool{}
-	for _, f := range textForms(rec) {
+	for _, f := range rec {
 		eachWord(f, func(w string) { held[w] = true })
 	}
-	for _, f := range textForms(live) {
+	for _, f := range live {
 		eachWord(f, func(w string) {
 			if !held[w] {
 				out = append(out, w)
@@ -218,22 +285,6 @@ func movedOf(rec, live string) []string {
 		})
 	}
 	return out
-}
-
-// momentsIn says whether a value's change from r to l is of an instant: an
-// instant leaf, or a text either run of which holds a moment in a layout
-// keploy reads (heldIn), which a request may hold in another layout.
-func (dc *DriftCache) momentsIn(r, l Leaf) bool {
-	if r.Type == Instant || l.Type == Instant {
-		return true
-	}
-	for _, s := range []string{r.Value, l.Value} {
-		var h heldMoments
-		if dc.heldIn(&h, s, dc.rawExtra(s)); len(h.list) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 // Words are the words of the place's request keploy could not read that it
@@ -253,16 +304,17 @@ func unreadWordsIn(served []Earlier) bool {
 
 // requestUnreadOf is requestUnread of served for one value's change from r
 // to l: a client test's request keploy could not read whose words cannot
-// hold the change (MayHoldChange) is no source of it, and the value is read
+// hold the change (mayHold) is no source of it, and the value is read
 // as it is where that request never came.
 func (dc *DriftCache) requestUnreadOf(served []Earlier, r, l Leaf) string {
-	moments, read := false, false
+	var c valueChange
+	read := false
 	for _, e := range served {
 		if e.unreadWords != nil {
 			if !read {
-				moments, read = dc.momentsIn(r, l), true
+				c, read = dc.changeOf(r, l), true
 			}
-			if !e.unreadWords.MayHoldChange(r.Value, l.Value, moments) {
+			if !e.unreadWords.mayHold(c) {
 				continue
 			}
 		}

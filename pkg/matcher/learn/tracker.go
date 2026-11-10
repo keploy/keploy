@@ -782,7 +782,7 @@ func (t *Tracker) Incoming(live *models.HTTPReq, unread string, at time.Time) bo
 // whose words it read as they passed (words; nil where it read none): the
 // place is one keploy could not read that holds those words, and a value
 // that changed in a call after it none of whose words it may hold
-// (RequestWords.MayHoldChange) is not refused for it (requestUnreadOf). Past
+// (RequestWords.mayHold) is not refused for it (requestUnreadOf). Past
 // maxRequestWords such places in a test, a place keeps no words.
 func (t *Tracker) IncomingWords(live *models.HTTPReq, unread string, words *RequestWords, at time.Time) bool {
 	if t == nil || live == nil || at.IsZero() {
