@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,7 +121,8 @@ type Earlier struct {
 	// places, past its bound (Tracker.keepRun), the reason itself. It has
 	// no Seen, and every value that changed is refused (ClassifyIn,
 	// requestUnread), never learned as noise or an echo, and names no late
-	// call (lateServes).
+	// call (lateServes): of a client test's request that keeps its words
+	// (unreadWords), every value whose change they may hold.
 	Unread string
 	// Gave, of a Given place, says it is a value the running test gave keploy
 	// (POST /agent/scope/given; TestGiven) rather than its test case's
@@ -130,7 +132,26 @@ type Earlier struct {
 	// (withoutGave): never a moment it names, so a read of the application's
 	// own clock learns as it does with no given.
 	Gave bool
-	Seen []Seen
+	// incoming, of a Given place, says it is a client test's request
+	// (Tracker.Incoming) rather than a keploy test case's: it reached the
+	// application at arrivedRec in its recording and at arrivedLive (a real
+	// instant) in record's full round, and a call reads it only where it
+	// came before the call in both (arrivedBefore).
+	incoming                bool
+	arrivedRec, arrivedLive time.Time
+	// unreadWords, of an incoming place keploy could not read (Unread), are
+	// the words of its request (Tracker.IncomingWords, which keeps them for
+	// no other place: keepWordsLocked; nil: none read): a
+	// value whose change they cannot hold (RequestWords.mayHold) reads
+	// the place as no source of it, not as unread (requestUnreadOf).
+	unreadWords *RequestWords
+	// coming, of an incoming place whose body was still coming as the place
+	// was read (Tracker.IncomingComing; Unread is then ComingUnread), is what
+	// keploy read of the request as it arrived and the words of its body
+	// that passed since: a call's learn step reads the place through it
+	// (arrivedBefore).
+	coming *comingRequest
+	Seen   []Seen
 	// noTime: the exchange's recorded time keploy cannot read (At was the
 	// zero time), read as one made at the call's own instant
 	// (timedEarlier), and named so.
@@ -847,6 +868,14 @@ type Place struct {
 	// Gave: the Given place is a value the test gave keploy (Earlier.Gave),
 	// named by its variable (Path).
 	Gave bool
+	// Client: the Given place is a client test's request, which reached the
+	// application from the test (Tracker.Incoming), not a request keploy
+	// test sent: its test case binds a variable at Var, from the request
+	// that pairs with it in each replay (models.MappedTestCase.Variables).
+	// Decide (Input.Arrived) and ClassifyArrived set it: a reading told no
+	// arrival in record's full round (ClassifyGiven, ClassifyIn) reads no
+	// client test's request (arrivedBefore).
+	Client bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
 	// Clock: the learn step learned the leaf as a plain read of the
@@ -1096,8 +1125,21 @@ type GivenEarlier func() ([]GivenPlaces, error)
 // ClassifyGiven is ClassifyIn with the recordings F gave the application
 // earlier in the set (given; nil: none), which the offset rule, the word rule
 // and the echo of what F gave there read beside raw's.
+//
+// Its call's arrival is not told: no client test's request is a place of it
+// (arrivedBefore). ClassifyArrived reads them.
 func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
-	return classifyGiven(dc, drift, live, rec, at, earlier, raw, resp, w, given, false)
+	return classifyGiven(dc, drift, live, rec, at, time.Time{}, earlier, raw, resp, w, given, false)
+}
+
+// ClassifyArrived is ClassifyGiven of a call that reached keploy at the
+// real instant arrived in record's full round: each client test's request
+// (Tracker.Incoming) that reached the application before the call in both
+// runs (arrivedBefore) is an earlier place of it, as Decide reads them
+// (Input.Arrived), where the request's test case binds a value the call
+// carries whole (Place.Client). A zero arrived is ClassifyGiven.
+func ClassifyArrived(dc *DriftCache, drift []string, live, rec Shape, at, arrived time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
+	return classifyGiven(dc, drift, live, rec, at, arrived, earlier, raw, resp, w, given, false)
 }
 
 // classifyGiven is ClassifyGiven, its word rule read under the rule a copy
@@ -1127,7 +1169,7 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 // both ways (leafedAtCall). Its leaves would otherwise read as an earlier
 // place both runs were given, where a minute F's run rounded from what F
 // served there names both moments and is learned as noise.
-func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
+func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at, arrived time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
@@ -1135,7 +1177,10 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 		return heldLearned(drift, live, rec)
 	}
 	given = givenOnce(given)
-	earlier = timedEarlier(earlier, at)
+	// A client test's request is a place of the call only where it reached
+	// the application before the call in both runs (arrivedBefore): with
+	// no arrival told (ClassifyGiven), none is.
+	earlier = timedEarlier(arrivedBefore(earlier, at, arrived), at)
 	raw = timedRaw(raw, at)
 	earlier, raw = leafedAfterCall(earlier, raw, at)
 	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, follow)
@@ -1598,7 +1643,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		dc.warm(raw)
 	}
 	unreadRaw := rawUnread(raw)
-	unreadReq := requestUnread(served)
+	// unreadOf is requestUnread of the change of one value from r to l: of
+	// the call where no client test's request keploy could not read keeps
+	// its words, else of that change (requestUnreadOf).
+	callUnread, byWords := requestUnread(served), unreadWordsIn(served)
+	unreadOf := func(r, l Leaf) string {
+		if !byWords {
+			return callUnread
+		}
+		return dc.requestUnreadOf(served, r, l)
+	}
 	all := raw
 	// The places F gave the application earlier in the set (given), read
 	// once for the call, and only where the offset rule reads them.
@@ -1656,6 +1710,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
+		unreadReq := unreadOf(r, l)
 		if r.Type == Instant || l.Type == Instant {
 			return dc.classifyInstant(r, l, at, placed, raw, resp, w, unreadReq, places, skip)
 		}
@@ -1701,9 +1756,19 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			v := dc.ofIn(r.Value, l.Value, w, at)
 			why, sourced, offWhy := "", false, ""
+			// A client test's request is no place of the moments where the
+			// call's own window holds each changed instant as a read of the
+			// clock (readOverClients), and each moment the value lost is one
+			// of those instants: the read goes before it, as main reads it.
+			lost, inst := lostMoments(v), served
+			if !slices.ContainsFunc(lost, func(m moment) bool {
+				return !slices.ContainsFunc(v.instants, func(p driftedInstant) bool { return p.rec.key == m.key })
+			}) {
+				inst = readOverClients(served, w, v.instants, dc.zone)
+			}
 			if unreadReq != "" {
 				why = unreadReq
-			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
+			} else if where, asRecorded := dc.requestHolds(lost, v.liveMoments, inst); where != "" {
 				why = requestHoldsWhy(where, asRecorded)
 			} else if m, ok := offsetOfValue(v, places); ok && skip&skipOffset == 0 {
 				// An instant of it built on a moved place by an offset, before
@@ -1722,7 +1787,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// which the word rule leaves to the clock (the echo of
 				// those places).
 				if why = givenWhy(dc, v, at, served, raw, places, fol); why == "" {
-					why = dc.echoedElsewhere(v.instants, at, served, raw, places)
+					why = dc.echoedElsewhere(v.instants, at, inst, raw, places)
 				} else if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
 				}
@@ -4309,8 +4374,23 @@ func withoutGave(earlier []Earlier) []Earlier {
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Name: s.Name, Clock: s.Clock,
+		Var: seenVar(e, s), Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Client: e.incoming, Name: s.Name, Clock: s.Clock,
 		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
+}
+
+// seenVar is the variable place of s, a leaf of e (Seen.Place). A client
+// test's request (Earlier.incoming, its leaves named by their paths alone,
+// GivenRequest) binds a variable of its test case at the place a replay
+// reads in the request that pairs with it (VarPlace; its body's leaves are
+// those of a JSON body, jsonSeen), none at a leaf of a body that declares no
+// media type (Seen.Undeclared), nor at one no place names (the body whole,
+// the request's names).
+func seenVar(e Earlier, s Seen) string {
+	if !e.incoming || s.Undeclared {
+		return s.Place
+	}
+	v, _ := VarPlace(s.Leaf, true)
+	return v
 }
 
 // echoedIn are v's changed instants the echo takes for a copy of what the

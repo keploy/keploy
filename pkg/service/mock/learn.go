@@ -195,9 +195,14 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 			zap.String("test", t.Test), zap.String("variable", t.Own), zap.String("setVariable", t.Run), zap.String("mock", t.Mock), zap.String("field", t.Place))
 	}
 	states := make(map[string]models.MockState, len(written))
+	caseVars := map[string]models.MockVariables{}
 	for _, st := range all {
 		if !m.learnsOnto(owner[st.Name]) {
 			continue
+		}
+		var err error
+		if st, err = takeCaseBinds(st, owner[st.Name], caseVars); err != nil {
+			return learnedOut{}, err
 		}
 		// A variable is bound at an earlier call of the same test, which the
 		// record made too; one bound at a recording it did not make cannot
@@ -208,6 +213,9 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 			}
 		}
 		states[st.Name] = st
+	}
+	if err := m.writeCaseVariables(ctx, set, caseVars); err != nil {
+		return learnedOut{}, err
 	}
 	added, err := p.PersistLearned(ctx, set, states)
 	if err != nil {
@@ -225,6 +233,9 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 			if len(added[st.Name]) > 0 {
 				seen[st.Name] = true
 			}
+		}
+		for _, name := range slices.Sorted(maps.Keys(caseVars[f.Flow])) {
+			fields = append(fields, "variable "+name+" bound at "+caseVars[f.Flow][name].Bind)
 		}
 		if len(fields) > 0 {
 			byTest[f.Flow] = fields
@@ -248,6 +259,59 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 	// keploy mock record serves a worker: entry as the pool's (unknownBesideTests).
 	learn.SayLearnedElsewhere(m.logger, taught, voided, owner, nil)
 	return learnedOut{byTest: byTest, pool: rest, elsewhere: taught}, nil
+}
+
+// takeCaseBinds takes out of st's binds those at a client test case's
+// request (learn.Place.Client: a bind at "test case <name>", which no
+// recording is): they are variables of test, st's test, which its mappings
+// entry keeps (models.MappedTestCase.Variables), bound there as
+// models.CaseBind, and are added to vars under test. A test's client
+// request is a place of its own calls only, so one st no test lists binds
+// at fails the round, as one two of the test's calls bind apart does.
+func takeCaseBinds(st models.MockState, test string, vars map[string]models.MockVariables) (models.MockState, error) {
+	rest := make(map[string]models.MockVariables, len(st.Binds))
+	for target, bound := range st.Binds {
+		testCase, ok := learn.GivenPlaceCase(target)
+		if !ok {
+			rest[target] = bound
+			continue
+		}
+		if test == "" {
+			return st, fmt.Errorf("the learn step learned a variable of %s bound at %s, from a recording no test lists", st.Name, target)
+		}
+		if vars[test] == nil {
+			vars[test] = models.MockVariables{}
+		}
+		for name, v := range bound {
+			at := models.MockVariable{Recorded: v.Recorded, Bind: models.CaseBind(testCase, v.Bind)}
+			if had, ok := vars[test][name]; ok && (had.Recorded != at.Recorded || had.Bind != at.Bind) {
+				return st, fmt.Errorf("the learn step bound the variable %s of test %s at %s and at %s", name, test, had.Bind, at.Bind)
+			}
+			vars[test][name] = at
+		}
+	}
+	st.Binds = rest
+	return st, nil
+}
+
+// writeCaseVariables writes, onto each test's mappings entry, the variables
+// its client test cases' requests bind (takeCaseBinds).
+func (m *mockService) writeCaseVariables(ctx context.Context, set string, vars map[string]models.MockVariables) error {
+	if len(vars) == 0 {
+		return nil
+	}
+	mapper, ok := m.mappingDB.(CaseMapper)
+	if !ok {
+		return errors.New("keploy's mappings store cannot write the variables a client test's request binds")
+	}
+	byTest := make(map[string]models.MappedTestCase, len(vars))
+	for test, v := range vars {
+		byTest[test] = models.MappedTestCase{ID: test, Variables: v}
+	}
+	if err := mapper.UpsertCases(ctx, set, byTest, nil, nil); err != nil {
+		return fmt.Errorf("writing the variables client tests' requests bind onto keploy/%s mappings: %w", set, err)
+	}
+	return nil
 }
 
 // learnsOnto reports whether what the learn step learned is kept on a mock

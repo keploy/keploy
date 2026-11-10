@@ -273,7 +273,7 @@ func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker ma
 
 // PushTestBegins takes the tests' recorded begins (TestBeginsPusher), or
 // fails with beginsErr.
-func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string, seeds map[string]string) error {
+func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string, seeds map[string]string, _ map[string][]models.ClientCase) error {
 	f.begins, f.seeds = begins, seeds
 	return f.beginsErr
 }

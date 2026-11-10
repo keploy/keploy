@@ -498,8 +498,10 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.From = KindVariable, from
 		return ln
 	}
-	// No other rule reads a value the test gave (classifyRead).
-	served = withoutGave(served)
+	// No other rule reads a value the test gave (classifyRead), nor a client
+	// test's request where the call's own window holds the read
+	// (readOverClients).
+	served = readOverClients(withoutGave(served), w, []driftedInstant{{rec: rec, live: live}}, dc.zone)
 	// The echo, before any provenance excuses the instant.
 	if echoed := echoedPairs([]driftedInstant{{rec: rec, live: live}}, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)); len(echoed) > 0 {
 		where := dc.heldAt(echoed, at, served, raw)
