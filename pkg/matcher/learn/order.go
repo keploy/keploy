@@ -2020,6 +2020,14 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	defer dc.letGoHalves()
 	r, l := c.r, c.l
 	inScope := dc.inScope
+	// A read of the application's clock that the call's own window holds in
+	// both runs goes before a client test's request (readOverClients): no
+	// place of the request is read for the moment, as main reads the call.
+	earlier := dc.in.Earlier
+	if c.rm != nil && c.lm != nil {
+		earlier = readOverClients(earlier, dc.in.Window, []driftedInstant{{rec: *c.rm, live: *c.lm}}, dc.dr.zone)
+	}
+	overClients := len(earlier) < len(dc.in.Earlier)
 	// untold: answers of the scope before the call, whose view in round F
 	// keploy cannot tell, that hold F's moment and not R's.
 	var hs []instantHold
@@ -2041,6 +2049,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			ps = []evPlace{req, ans}
 		}
 		for _, p := range ps {
+			if overClients && dc.clientCase(p.mock) {
+				continue
+			}
 			hr, fr, okR := dc.holds(p, p.t.rec, r, c.rm, c.byText)
 			hl, fl, okL := dc.holds(p, p.t.live, l, c.lm, c.byText)
 			if !okR || !okL {
@@ -2181,7 +2192,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				followed[[2]string{p.mock, p.path}] = true
 			}
 		}
-		reqs := slices.DeleteFunc(slices.Clone(dc.in.Earlier), func(e Earlier) bool { return !e.Given || e.Gave || e.Unread != "" })
+		reqs := slices.DeleteFunc(slices.Clone(earlier), func(e Earlier) bool { return !e.Given || e.Gave || e.Unread != "" })
 		for i, e := range reqs {
 			if len(followed) > 0 && e.incoming {
 				reqs[i].Seen = slices.DeleteFunc(slices.Clone(e.Seen), func(s Seen) bool { return followed[[2]string{e.Mock, s.Leaf.Path}] })
@@ -2298,7 +2309,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			gaveOutside, fine = append(gaveOutside, p.mock), fine || h.fr || h.fl
 		}
 	}
-	if mock, ok := dc.echoedOutside(c); ok {
+	if mock, ok := dc.echoedOutside(c, earlier); ok {
 		gaveOutside, fine = append(gaveOutside, mock), fine || fineCut(c.rm.res) || fineCut(c.lm.res)
 	}
 	if len(gaveOutside) > 0 {

@@ -3,6 +3,7 @@ package learn
 import (
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -366,4 +367,31 @@ func (dc *decider) clientCase(mock string) bool {
 		}
 	}
 	return false
+}
+
+// readOverClients is served without the requests of client tests
+// (Earlier.incoming) where the call's own window w holds each of pairs, the
+// changed instants of a value as recorded and as round F saw them, as a read
+// of the application's clock in both runs (Window.holdsRead, in zone). That
+// read explains the value at its cut, as main reads the call: a client's
+// request that holds the same moment (a token signed in that second, a Date
+// header it uploads, the digits of a UnixNano name it made) holds it by the
+// coincidence of one second, and is no source beside the read, so no pick,
+// copy, two sources or source outside the scope comes from it. The value is
+// still a Clock that replay compares in its own window, so a wrong reading
+// fails as a miss, never as a pass. Where no read explains every pair (no
+// window, a moment outside it, no pair), served is as given: the client's
+// request stays a source of the moment (a sign-in time a token carries), and
+// a pick from it is refused. Words are not read here: a client's request
+// stays a source of the words it holds.
+func readOverClients(served []Earlier, w *Window, pairs []driftedInstant, zone *time.Location) []Earlier {
+	if len(pairs) == 0 || !slices.ContainsFunc(served, func(e Earlier) bool { return e.incoming }) {
+		return served
+	}
+	for _, p := range pairs {
+		if !w.holdsRead(p.rec, p.live, zone) {
+			return served
+		}
+	}
+	return slices.DeleteFunc(slices.Clone(served), func(e Earlier) bool { return e.incoming })
 }

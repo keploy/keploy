@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1755,9 +1756,19 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			v := dc.ofIn(r.Value, l.Value, w, at)
 			why, sourced, offWhy := "", false, ""
+			// A client test's request is no place of the moments where the
+			// call's own window holds each changed instant as a read of the
+			// clock (readOverClients), and each moment the value lost is one
+			// of those instants: the read goes before it, as main reads it.
+			lost, inst := lostMoments(v), served
+			if !slices.ContainsFunc(lost, func(m moment) bool {
+				return !slices.ContainsFunc(v.instants, func(p driftedInstant) bool { return p.rec.key == m.key })
+			}) {
+				inst = readOverClients(served, w, v.instants, dc.zone)
+			}
 			if unreadReq != "" {
 				why = unreadReq
-			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
+			} else if where, asRecorded := dc.requestHolds(lost, v.liveMoments, inst); where != "" {
 				why = requestHoldsWhy(where, asRecorded)
 			} else if m, ok := offsetOfValue(v, places); ok && skip&skipOffset == 0 {
 				// An instant of it built on a moved place by an offset, before
@@ -1776,7 +1787,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// which the word rule leaves to the clock (the echo of
 				// those places).
 				if why = givenWhy(dc, v, at, served, raw, places, fol); why == "" {
-					why = dc.echoedElsewhere(v.instants, at, served, raw, places)
+					why = dc.echoedElsewhere(v.instants, at, inst, raw, places)
 				} else if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
 				}

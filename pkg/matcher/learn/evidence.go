@@ -1219,8 +1219,10 @@ func namesApart(ms []givenMoment, m, other moment) bool {
 // of the set (GivenPlaces.fView: what F's serve of it was told to give)
 // holds F's moment so; mock "" where no one recording names it alone. An
 // instant there is a copy of what F gave the application, or a pick from
-// it, never a read of the clock.
-func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
+// it, never a read of the clock. served is the call's earlier places the
+// echo reads: dc.in.Earlier, or those without a client test's requests where
+// a read of the clock goes before them (readOverClients).
+func (dc *decider) echoedOutside(c changedInstant, served []Earlier) (mock string, ok bool) {
 	if c.rm == nil || c.lm == nil {
 		return "", false
 	}
@@ -1229,7 +1231,7 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 	}
 	op := dc.outside()
 	pair := []driftedInstant{{rec: *c.rm, live: *c.lm}}
-	if len(op.answers) == 0 || dc.dr.echoedElsewhere(pair, dc.in.At, dc.in.Earlier, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
+	if len(op.answers) == 0 || dc.dr.echoedElsewhere(pair, dc.in.At, served, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
 		return "", false
 	}
 	if i := slices.IndexFunc(op.answers, func(g givenMoment) bool {
