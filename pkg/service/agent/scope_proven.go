@@ -1957,9 +1957,11 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // charged to no test, and the run's receipt lists it
 // (Receipt.UnchargedMisses), so a reader who finds it the test's own call
 // edits the set's mappings rather than keploy guessing. Where its mark names
-// the test whose view it was made in (a set's last test's call keploy
-// decided only as the next set began, which the proxy files as that set's),
-// it is listed under that test (models.UnmatchedCall.WindowOf).
+// the test whose view it was made in (a test set's last test's call keploy
+// decided only after the next set's mocks were staged, which the proxy keeps
+// for that set's first read as made before it), it is listed under that test
+// (models.UnmatchedCall.WindowOf), even where the test that read it has the
+// same name.
 //
 // A miss marked in another test's view before this test's was installed
 // (markedInAnotherTest) is that test's own call, which keploy decided only
@@ -1985,8 +1987,9 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began 
 	for _, m := range all {
 		if outsideEveryTest(m, began) {
 			// Listed under the test whose view it was marked in, where
-			// it names one: a set's last test's call keploy decided as
-			// the next set began (the proxy files it as the set's).
+			// it names one: a previous set's last test's call keploy
+			// decided after this set's mocks were staged (the proxy
+			// keeps it as made before this set).
 			m.WindowOf = m.Marked.Test
 			outside = append(outside, m)
 			continue

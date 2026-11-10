@@ -1285,6 +1285,12 @@ func TestACallReadWithTheTrackerAheadNamesNoTestItWasMadeIn(t *testing.T) {
 				if c.Test() != "" || r.MarkedTest != "" {
 					t.Errorf("WRONG TEST: %s of a call read with the tracker ahead names %q (report %q) as the test it was made in; want none", name, c.Test(), r.MarkedTest)
 				}
+				// Named no test, the call stays in a test (the ending
+				// test's view is in force): filed outside every test, its
+				// miss would be charged to no test at all.
+				if !c.InTest() || !r.MarkedInTest {
+					t.Errorf("FALSE GREEN: %s of a call read with the tracker ahead of test-1's view is in a test %v (report %v); want in a test", name, c.InTest(), r.MarkedInTest)
+				}
 			}
 		})
 	}
@@ -2152,6 +2158,80 @@ func TestAMissMarkedBeforeASetsStagingIsCountedTheSameEitherWay(t *testing.T) {
 				t.Fatalf("the cut of the miss marked before the staging was said %d times; want once: %+v", n, logs.All())
 			}
 		})
+	}
+}
+
+// A set's last test's own call (marked in test-1's view) that keploy decides
+// only after test-1's end was read is kept at the next set's start, not cut:
+// its report reaching the drain before the set's staging (the set start's cut
+// keeps it), after it, or after the set's first test began (the drain keeps
+// it), the next read returns it, and only it, as made before the set
+// (BeforeSet, outside every test), naming test-1, whichever way that test's
+// window opens (keploy test's begin, or the carry keploy's scope begins use).
+// A call marked in the pool view before the staging is still cut, and said.
+// Before, test-1's call was cut and said only in a log: test-1 passed with an
+// unanswered call of its own, and no receipt listed it.
+func TestASetsLastTestsLateCallIsKeptAtTheNextSetsStart(t *testing.T) {
+	for _, when := range []string{"before the staging", "after the staging", "after the first test began"} {
+		for _, carry := range []bool{false, true} {
+			t.Run("the report "+when+", the window opened carrying "+strconv.FormatBool(carry), func(t *testing.T) {
+				core, logs := observer.New(zap.DebugLevel)
+				p, mm := heldOrdersLogging(t, true, zap.New(core))
+				p.dnsCache = newDNSCache()
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				call := mm.MarkCallRound()
+				if !call.InTest() || call.Test() != "test-1" {
+					t.Fatalf("precondition: the call is not marked in test-1's view: in test %v, test %q", call.InTest(), call.Test())
+				}
+				late := mockMiss("POST /orders test-1's own late call")
+				integrations.StampMark(late.MismatchReport, call)
+				if got, err := p.GetMockErrors(context.Background()); err != nil || len(got) != 0 {
+					t.Fatalf("precondition: test-1's end read %v %+v", err, got)
+				}
+				p.EndTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				pool := mockMiss("POST /between-sets")
+				integrations.StampMark(pool.MismatchReport, mm.MarkCallRound())
+				p.SendError(pool)
+				// The next set's Mock, then its staging.
+				p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+				p.missCutPending.Store(true)
+				if when == "before the staging" {
+					p.SendError(late)
+				}
+				flushDrain(p)
+				if err := p.SetMocksWithWindow(context.Background(), nil, nil, models.BaseTime, time.Now().Add(time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+				if when == "after the staging" {
+					p.SendError(late)
+					flushDrain(p)
+				}
+				if carry {
+					p.ContinueTestErrorCapture()
+				} else {
+					p.BeginTestErrorCapture()
+				}
+				if when == "after the first test began" {
+					p.SendError(late)
+					flushDrain(p)
+				}
+				got, err := p.GetMockErrors(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got) != 1 || got[0].ActualSummary != "POST /orders test-1's own late call" || !got[0].BeforeSet || got[0].Kind != models.MissOutsideTest || got[0].Marked.Test != "test-1" || !got[0].Marked.Known {
+					t.Fatalf("the next set's first test read %+v; want only test-1's own late call, as made before the set, outside every test, naming test-1", got)
+				}
+				if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /between-sets"})).Len(); n != 1 {
+					t.Fatalf("the cut of the pool view's miss was said %d times; want once: %+v", n, logs.All())
+				}
+				if n := logs.FilterMessage(missesCutAtSetStart).Len(); n != 1 {
+					t.Fatalf("the set start's cut was said %d times; want once, of the pool view's miss alone: %+v", n, logs.All())
+				}
+			})
+		}
 	}
 }
 

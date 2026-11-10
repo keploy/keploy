@@ -618,8 +618,10 @@ type UnmatchedCall struct {
 	// read, and the call was marked before the test that read it began being
 	// served: that test's own call, which keploy decided late, is charged to no
 	// test it did not make (the test that read it), and is listed under this
-	// name, filed between two tests or, as the next test set began, as made
-	// outside every test alike. A background repeat with a mark is listed under
+	// name, filed in or between tests alike, and when keploy decided it only
+	// after the next test set's mocks were staged (the next set's first read
+	// then carries it as made before that set, BeforeSet). A background
+	// repeat with a mark is listed under
 	// the test whose view it was marked in, none for a pool view. Empty for
 	// every other call, and for one made before that test began being served,
 	// whose window is not known.

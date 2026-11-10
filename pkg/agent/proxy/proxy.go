@@ -267,7 +267,8 @@ type Proxy struct {
 	// whose call was marked in an earlier staging
 	// (models.MockMismatchReport.MarkEpoch) is not the set's, and the drain
 	// cuts it as the set's start did, however late it arrives
-	// (markedBeforeSet).
+	// (markedBeforeSet), or keeps it as the start did, one marked in a
+	// test's view (markedInATest).
 	setStaged atomic.Uint64
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
@@ -5658,6 +5659,15 @@ var (
 // on the scheduler. An unmarked call matched before the staging whose miss
 // reaches the drain only after the flush is not cut: nothing tells it from
 // the set's, so it is read as the set's, red, never green.
+//
+// A miss whose call was marked in a test's view (markedInATest) is not cut,
+// whichever way its report and the staging fall: it is that test's own call,
+// made in the previous set and decided by keploy only after that test's end
+// was read. Dropped, the test passed with an unanswered call of its own, and
+// no receipt listed it. It is kept, in the window it was filed in, as made
+// before this set (beforeSetMiss): the next read returns it as made outside
+// every test, naming the test it was made in (models.UnmatchedCall.Marked),
+// and that read's test, which did not make it, is never charged with it.
 func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
 	if m := p.getMockManager(); m != nil {
 		// Before the flush: a marked miss the drain files after this is cut
@@ -5669,24 +5679,30 @@ func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
 	}
 	p.captureMu.Lock()
 	var tail []error
-	if acc := p.activeTestErrors.Swap(nil); acc != nil {
-		tail = acc.drain()
-	}
-	tail = append(tail, p.pendingMockErrors.drain()...)
-	lost := p.pendingLost
-	p.pendingLost = false
-	// A loss since the previous set's last read was of its tail: no read of
-	// this set is short of it.
-	p.missLoss.Store(nil)
+	lost := false
 	// Each test worker's tail is cut with the run's.
-	for _, w := range p.workerMissWindows() {
+	for _, w := range append([]*missWindow{&p.missWindow}, p.workerMissWindows()...) {
+		var all []error
 		if acc := w.activeTestErrors.Swap(nil); acc != nil {
-			tail = append(tail, acc.drain()...)
+			all = acc.drain()
 		}
-		tail = append(tail, w.pendingMockErrors.drain()...)
+		all = append(all, w.pendingMockErrors.drain()...)
 		lost = lost || w.pendingLost
 		w.pendingLost = false
+		// A loss since the previous set's last read was of its tail: no read
+		// of this set is short of it.
 		w.missLoss.Store(nil)
+		for _, err := range all {
+			if !markedInATest(err) {
+				tail = append(tail, err)
+				continue
+			}
+			// A test's own call: kept for the next read, which a loss
+			// for room leaves short of it.
+			if !w.pendingMockErrors.addBounded(asBeforeSet(err), maxPendingMockErrors) {
+				p.pendingDroppedForRoom(w, err)
+			}
+		}
 	}
 	p.captureMu.Unlock()
 	p.logDroppedMisses(missesCutAtSetStart, tail)
@@ -5717,6 +5733,24 @@ func (p *Proxy) markedBeforeSet(err error) bool {
 	}
 	r := pe.MismatchReport
 	return r.Mark != models.RoundUnmarked && r.MarkEpoch < at
+}
+
+// markedInATest reports whether err is a miss whose call's parser marked it
+// in a test's view (models.MockMismatchReport.MarkedTest, which only
+// integrations.StampMark sets, with the mark): that test's own call, however
+// late keploy decided it. The set start's cut keeps it (cutMissesAtSetStart).
+func markedInATest(err error) bool {
+	var pe models.ParserError
+	return errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.MarkedTest != ""
+}
+
+// asBeforeSet is err as made before the running test set's first test
+// (beforeSetMiss), err itself when it already is one: a read unwraps one.
+func asBeforeSet(err error) error {
+	if b, ok := err.(beforeSetMiss); ok {
+		return b
+	}
+	return beforeSetMiss{err}
 }
 
 // stagingMissNote is what a miss made while the replay was staging a test
@@ -5908,11 +5942,18 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 						continue
 					}
 					if w == &p.missWindow && p.markedBeforeSet(err) {
-						// Made before the running set's mocks were
-						// staged: cut as the set's start cut what it
-						// held, whichever way the two fell.
-						p.logDroppedMisses(missesCutAtSetStart, []error{err})
-						continue
+						if !markedInATest(err) {
+							// Made before the running set's mocks
+							// were staged: cut as the set's start
+							// cut what it held, whichever way the
+							// two fell.
+							p.logDroppedMisses(missesCutAtSetStart, []error{err})
+							continue
+						}
+						// A previous set's test's own call, kept as
+						// the set's start cut keeps it: as made
+						// before this set (cutMissesAtSetStart).
+						err = asBeforeSet(err)
 					}
 					// Route under captureMu so the window can't be swapped
 					// between the Load and the add. The accumulator is bounded
@@ -6032,7 +6073,7 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 		}
 	case beforeSet:
 		for _, err := range between {
-			if !acc.addBounded(beforeSetMiss{err}, maxPendingMockErrors) {
+			if !acc.addBounded(asBeforeSet(err), maxPendingMockErrors) {
 				p.noteMissLost(err, missLostBeforeSetFull)
 			}
 		}
