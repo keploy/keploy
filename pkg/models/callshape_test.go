@@ -475,6 +475,7 @@ func TestMissShapeOfAProtocolWithNoShapeIsItsCommand(t *testing.T) {
 		{"address", UnmatchedCall{Protocol: "Redis", Command: "alice@example.com"}, ""},
 		{"key with a colon", UnmatchedCall{Protocol: "Redis", Command: "user:42"}, ""},
 		{"dashed uuid", UnmatchedCall{Protocol: "Redis", Command: "e3b0c442-98fc-1c14-9afb-f4c8996fb924"}, ""},
+		{"path", UnmatchedCall{Protocol: "SQS", Command: "queue/orders"}, ""},
 		{"digit first", UnmatchedCall{Protocol: "Kafka", Command: "42"}, ""},
 		{"unparsed", UnmatchedCall{Protocol: "Redis", Command: "(unparsed command)"}, ""},
 		{"too long", UnmatchedCall{Protocol: "SQS", Command: strings.Repeat("A", maxCommandName+1)}, ""},
