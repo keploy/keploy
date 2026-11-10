@@ -288,6 +288,14 @@ func (s instanceExact) RestartExactKey(key string, names []string) error {
 	return nil
 }
 
+func (s instanceExact) ExactTestInstalled(test string) (epoch, bounds uint64, ok bool) {
+	m, err := s.mgr()
+	if err != nil {
+		return 0, 0, false
+	}
+	return m.ExactTestInstalled(test)
+}
+
 func (s instanceExact) ExactTestOutcome() (string, []string, []string, bool) {
 	m, err := s.mgr()
 	if err != nil {
@@ -314,6 +322,8 @@ var (
 	_ agent.ExactAheadServer      = instanceExact{}
 	_ agent.ExactWorkerServer     = instanceExact{}
 	_ agent.ExactKeyRestarter     = instanceExact{}
+
+	_ agent.ExactTestInstallReader = instanceExact{}
 )
 
 // refuseUnserved is the error that ends a connection no test worker's

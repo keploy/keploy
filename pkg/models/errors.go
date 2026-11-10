@@ -413,6 +413,18 @@ type MockMismatchReport struct {
 	// report reaches the proxy (the proxy's set-start cut). Never written
 	// to a report.
 	MarkEpoch uint64 `json:"-" yaml:"-"`
+	// MarkBounds is, with Mark set and MarkRound, the round's boundary count
+	// the call's first read was made at (integrations.CallRound.Round,
+	// RoundAt.Bounds): with MarkEpoch, it tells whether the call was marked
+	// before or after a test's view was installed, however late its report
+	// reaches the proxy (UnmatchedCall.Marked). MarkRound is false for a mark of
+	// a store that keeps no boundary count. Never written to a report.
+	MarkBounds uint64 `json:"-" yaml:"-"`
+	MarkRound  bool   `json:"-" yaml:"-"`
+	// MarkedTest is, with Mark set, the test whose view the call's first
+	// read found (integrations.CallRound.Test): "" for a pool view, and where
+	// the store did not name it. Never written to a report.
+	MarkedTest string `json:"-" yaml:"-"`
 	// Repeat says the call is identical to a recording an earlier test of
 	// the set made, which already answered that test's call at this replay
 	// (RepeatNote); nil otherwise. ClosestMock is then that recording, but

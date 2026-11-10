@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -117,9 +118,9 @@ func TestAWorkersMissBetweenItsTestsIsCarriedIntoItsNextTestAlone(t *testing.T) 
 }
 
 // The set start's cut of a miss marked before the set's staging compares the
-// mark with the run's manager's staging. A worker's call is marked on its
-// own manager, so that cut does not apply to it: its miss is read by its
-// test (red, never green), not dropped.
+// mark with the staging of the manager it was marked on. A worker's call is
+// marked on its own manager, so the run's manager's staging does not cut it:
+// its miss is read by its test (red, never green), not dropped.
 func TestAWorkersMarkedMissIsNotCutByTheRunsSetStaging(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50083"))
@@ -141,6 +142,191 @@ func TestAWorkersMarkedMissIsNotCutByTheRunsSetStaging(t *testing.T) {
 	}
 	if got := readCalls(t, "the run", p); len(got) != 0 {
 		t.Fatalf("the run's test read %v, a miss marked before its set's staging", got)
+	}
+}
+
+// A test worker's test's own late call (marked in o::TestX's view on the
+// worker's manager) that keploy decides after o::TestX's end was read is kept
+// at the next set's start for the worker's own next read, as the run's is:
+// its report reaching the drain before the set's staging (the cut keeps it in
+// the worker's window) or after it (the drain compares the mark with the
+// worker's manager's staging), the worker's next read returns it as the
+// earlier set's o::TestX's call, outside every test, so a next-set test of
+// the same name is not charged with it; the run's read never returns it. A
+// worker's call marked in the pool view before the staging and filed after
+// it is cut, and said, as the run's is.
+func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T) {
+	for i, when := range []string{"before the staging", "after the staging"} {
+		t.Run(when, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", "1")
+			p, _ := storeProxy(t, ipv4Dest(t, fmt.Sprintf("127.0.0.1:%d", 50098+i)))
+			core, logs := observer.New(zap.DebugLevel)
+			p.logger = zap.New(core)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			a := exactMock("a", 0, models.LifetimeSession)
+			if err := p.SetMocksWithWindow(ctx, nil, []*models.Mock{a}, models.BaseTime, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			p.StartErrorDrain(ctx)
+			w := servedWorker(t, p, 1)
+			es, ok := w.(agent.ExactServer)
+			if !ok {
+				t.Fatal("worker 1's window is not its exact server")
+			}
+			m1 := instanceMgrOf(t, p, 1)
+			m1.ServeExactPool(models.PoolKeyNone, nil)
+			pool := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /worker-pool"}
+			integrations.StampMark(pool, m1.MarkCallRound())
+			if err := es.ServeExactTest("o::TestX", []*models.Mock{a}); err != nil {
+				t.Fatal(err)
+			}
+			w.ContinueTestErrorCapture()
+			call := m1.MarkCallRound()
+			if !call.InTest() || call.Test() != "o::TestX" {
+				t.Fatalf("precondition: worker 1's call is not marked in o::TestX's view: in test %v, %q", call.InTest(), call.Test())
+			}
+			late := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "POST /late"}
+			integrations.StampMark(late, call)
+			send := func(r *models.MockMismatchReport) {
+				p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
+				flushDrain(p)
+			}
+			if got := readCalls(t, "worker 1's o::TestX end", w); len(got) != 0 {
+				t.Fatalf("precondition: o::TestX's end read %v", got)
+			}
+			if when == "before the staging" {
+				send(late)
+			}
+			p.missCutPending.Store(true)
+			if err := p.SetMocksWithWindow(ctx, nil, []*models.Mock{a}, models.BaseTime, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if when == "after the staging" {
+				send(late)
+			}
+			send(pool)
+			p.ContinueTestErrorCapture()
+			if got := readCalls(t, "the run", p); len(got) != 0 {
+				t.Fatalf("the run's next-set read %v; worker 1's call is no call of the run's", got)
+			}
+			w.ContinueTestErrorCapture()
+			got, err := w.GetMockErrors(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ActualSummary != "POST /late" || got[0].Instance != 1 || got[0].EarlierSetTest != "o::TestX" || got[0].BeforeSet || got[0].Kind != models.MissOutsideTest {
+				t.Fatalf("worker 1's next-set first read %+v; want only o::TestX's late call, as the earlier set's o::TestX's, outside every test", got)
+			}
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"GET /worker-pool"})).Len(); n != 1 {
+				t.Fatalf("the cut of worker 1's pool view miss was said %d times; want once: %+v", n, logs.All())
+			}
+		})
+	}
+}
+
+// A test worker's manager, served after the run's manager staged several
+// sets, is staged only with the latest staging of each kind, so it has
+// counted fewer stagings than the run's. The set start's cut and the drain
+// compare a worker's marks with its own manager's count, never the run's: a
+// call the worker makes after the next set's staging, filed after it, is
+// that set's and its next read returns it, and its pool-view call made
+// before the staging, filed after it, is cut and said.
+func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50102"))
+	core, logs := observer.New(zap.DebugLevel)
+	p.logger = zap.New(core)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := exactMock("a", 0, models.LifetimeSession)
+	stageSet := func() {
+		t.Helper()
+		if err := p.SetMocksWithWindow(ctx, nil, []*models.Mock{a}, models.BaseTime, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		stageSet()
+	}
+	p.StartErrorDrain(ctx)
+	w := servedWorker(t, p, 1)
+	m1 := instanceMgrOf(t, p, 1)
+	run := p.getMockManager()
+	if run.StagingEpoch() <= m1.StagingEpoch() {
+		t.Fatalf("precondition: the run's manager counted %d stagings, worker 1's %d; want the run's ahead", run.StagingEpoch(), m1.StagingEpoch())
+	}
+	m1.ServeExactPool(models.PoolKeyNone, nil)
+	before := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /worker-before"}
+	integrations.StampMark(before, m1.MarkCallRound())
+	p.missCutPending.Store(true)
+	stageSet()
+	if run.StagingEpoch() <= m1.StagingEpoch() {
+		t.Fatalf("precondition: after the staging the run's manager counted %d stagings, worker 1's %d; want the run's ahead", run.StagingEpoch(), m1.StagingEpoch())
+	}
+	m1.ServeExactPool(models.PoolKeyNone, nil)
+	after := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /worker-after"}
+	integrations.StampMark(after, m1.MarkCallRound())
+	if after.Mark == models.RoundUnmarked || after.MarkEpoch != m1.StagingEpoch() {
+		t.Fatalf("precondition: worker 1's call after the staging is marked %v at staging %d, want marked at %d", after.Mark, after.MarkEpoch, m1.StagingEpoch())
+	}
+	for _, r := range []*models.MockMismatchReport{before, after} {
+		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
+		flushDrain(p)
+	}
+	p.ContinueTestErrorCapture()
+	if got := readCalls(t, "the run", p); len(got) != 0 {
+		t.Fatalf("the run's next-set read %v; worker 1's calls are no calls of the run's", got)
+	}
+	w.ContinueTestErrorCapture()
+	if got := readCalls(t, "worker 1", w); len(got) != 1 || got[0] != "GET /worker-after@1" {
+		t.Fatalf("worker 1's next-set read %v; want only its call made after the staging", got)
+	}
+	if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"GET /worker-before"})).Len(); n != 1 {
+		t.Fatalf("the cut of worker 1's call made before the staging was said %d times; want once: %+v", n, logs.All())
+	}
+}
+
+// A test worker's own late calls kept at the next set's start that its window
+// has no room for make the worker's next read incomplete, naming the loss,
+// and leave the run's read whole: the loss is the worker's. The window's
+// state is set here: through the drain a window holds misses either in its
+// open test's list or with none open, never in both, so the set start re-files
+// no more than a window keeps.
+func TestAWorkersLateCallsLostForRoomAtTheSetsStartAreItsNextReadsLoss(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50101"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartErrorDrain(ctx)
+	w := servedWorker(t, p, 1)
+	named := func(i int) error {
+		r := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: fmt.Sprintf("POST /late/%d", i), MarkedTest: "o::TestX", MarkedInTest: true, Mark: models.RoundMarkedSettled, MarkEpoch: 1}
+		return models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: models.ErrNoMockMatched, Instance: 1, MismatchReport: r, MissKind: models.MissInTest, At: time.Now()}
+	}
+	// Worker 1's last test's window, read, and its tail: one more of its
+	// own calls than a window keeps.
+	w1 := p.missWindowOf(1)
+	acc := &testErrorAccumulator{read: true}
+	p.captureMu.Lock()
+	for i := 0; i < maxPendingMockErrors; i++ {
+		acc.addBounded(named(i), maxPendingMockErrors)
+	}
+	w1.activeTestErrors.Store(acc)
+	w1.pendingMockErrors.addBounded(named(maxPendingMockErrors), maxPendingMockErrors)
+	p.captureMu.Unlock()
+	p.cutMissesAtSetStart(ctx)
+	p.ContinueTestErrorCapture()
+	if got, err := p.GetMockErrors(ctx); err != nil || len(got) != 0 {
+		t.Fatalf("the run's read %v %+v; want it whole and empty: the loss is worker 1's", err, got)
+	}
+	w.ContinueTestErrorCapture()
+	got, err := w.GetMockErrors(ctx)
+	if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostBetweenFull) {
+		t.Fatalf("worker 1's read returned %v; want it incomplete: %s", err, missLostBetweenFull)
+	}
+	if len(got) != maxPendingMockErrors {
+		t.Fatalf("worker 1's read has %d calls; want the %d its window kept", len(got), maxPendingMockErrors)
 	}
 }
 
@@ -229,6 +415,33 @@ func TestAWorkersTailLostForRoomIsSaidAtTheSetsStart(t *testing.T) {
 	}
 	if w := p.missWindowOf(1); w.pendingLost {
 		t.Fatal("worker 1's loss outlived the set start that said it")
+	}
+}
+
+// The run's tail lost for room is said at the next set's start beside a test
+// worker whose tail lost none, and a loss the run's window or a worker's
+// recorded since the previous set's last read leaves no read of the new set
+// short: it was of the previous set's tail.
+func TestARunsTailLostForRoomIsSaidBesideAWorkersAtTheSetsStart(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50094"))
+	core, logs := observer.New(zap.WarnLevel)
+	p.logger = zap.New(core)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartErrorDrain(ctx)
+	servedWorker(t, p, 1)
+	p.captureMu.Lock()
+	p.pendingLost = true
+	p.captureMu.Unlock()
+	p.missLoss.Store(&missLostListFull)
+	p.missWindowOf(1).missLoss.Store(&missLostListFull)
+	p.cutMissesAtSetStart(ctx)
+	if n := logs.FilterMessageSnippet("than keploy keeps; the rest were dropped").Len(); n != 1 {
+		t.Fatalf("the set start said %d times that the run's tail was dropped for room, want once", n)
+	}
+	if p.missLoss.Load() != nil || p.missWindowOf(1).missLoss.Load() != nil {
+		t.Fatalf("a loss of the previous set's tail outlived the set start: the run's %v, worker 1's %v", p.missLoss.Load() != nil, p.missWindowOf(1).missLoss.Load() != nil)
 	}
 }
 

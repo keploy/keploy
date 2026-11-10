@@ -232,6 +232,10 @@ type exactView struct {
 	round       uint64
 	learnNumber uint64
 	learnBound  bool
+	// installed is the staging and the round's boundary count this view was
+	// installed at (ExactTestInstalled), set with round: a call marked in a
+	// view before this one carries a lower one (integrations.CallRound.Round).
+	installed integrations.RoundAt
 	// shared is the view's SharedGen's View, which a test's view reports:
 	// what it shows of the trees beyond the protocol-phase recordings, the
 	// last view's number when that view's was the same (sharedViews.of).
@@ -1034,10 +1038,13 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// The tracker began a test whose view the store has not
 		// installed (integrations.RoundSnapshot.TrackerAhead): nothing
 		// tells which recordings are that test's own, so every one is
-		// held, and the call's miss names none made elsewhere.
-		c = c.HoldingEvery()
+		// held, and the call's miss names none made elsewhere. Nor does
+		// it name the test whose view is in force: the call is the pool's
+		// or the tracker's test's, never that one's, so a test's end
+		// charges its miss by the view it was read in (fails closed).
+		return c.HoldingEvery().WithTrackerAhead(true)
 	}
-	return c.WithTrackerAhead(ahead)
+	return c.OfTest(v.test).WithTrackerAhead(false)
 }
 
 // endedName is the test of v, the view the store ended while the learn
@@ -2055,6 +2062,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	r := &m.exact.round
 	r.boundary("a view was installed")
 	v.round = r.gen
+	v.installed = integrations.RoundAt{Epoch: m.stagingEpoch.Load(), Gen: r.gen, Bounds: r.bounds}
 	m.exact.shared.of(v, w)
 	if v.test != "" {
 		r.bindLocked(v)
@@ -2199,6 +2207,21 @@ func (m *MockManager) ExactTestServed() string {
 		return v.test
 	}
 	return ""
+}
+
+// ExactTestInstalled is, under exact serving, the staging and the round's
+// boundary count the view in force was installed at, when it is test's view
+// (agent.ExactTestInstallReader): ok is false when no view of test's is in
+// force. They are read under the round lock with the install, as a call's
+// mark reads them (MarkCallRound), so a call marked in any view before this
+// one carries an earlier round (models.MissMark.Before), and one marked in
+// this view or after it never does.
+func (m *MockManager) ExactTestInstalled(test string) (epoch, bounds uint64, ok bool) {
+	v := m.exactView()
+	if v == nil || test == "" || v.test != test {
+		return 0, 0, false
+	}
+	return v.installed.Epoch, v.installed.Bounds, true
 }
 
 // testOutcome is a test view's outcome, by name (ExactTestOutcome).
