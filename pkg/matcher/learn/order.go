@@ -1408,7 +1408,7 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 		c.li = typedInstant{at: time.Unix(0, iw.Live.key.at).UTC(), res: iw.Live.res, names: namesMoment}
 	}
 	c.echo, c.unnamed = dc.readBack(path, w.At, w, rec, true)
-	c.rec = rec
+	c.rec, c.live = rec, live
 	if w.Rec != rec {
 		c.valueEcho = c.echo
 	}
@@ -1489,12 +1489,22 @@ type changedInstant struct {
 	// echo is where the call's answer reads the word back (readBack, whole
 	// values too), valueEcho the same for a Value (the text whole is the
 	// adapter's echo), unnamed the first such place keploy cannot name, rec
-	// the leaf's recorded text.
-	echo, valueEcho []variables.Address
-	unnamed, rec    string
+	// the leaf's recorded text and live its text in round F (an instant in a
+	// text's; leaf reads them).
+	echo, valueEcho    []variables.Address
+	unnamed, rec, live string
 	// aside names the earlier places that held R's value where F's does
 	// not stand: a Clock's line says it set them aside.
 	aside []string
+}
+
+// leaf is the changed leaf's whole text in each run: the instant's own,
+// where it is no instant in a text.
+func (c changedInstant) leaf() (rec, live string) {
+	if c.text {
+		return c.rec, c.live
+	}
+	return c.r, c.l
 }
 
 // clockWordOf is where iw, an instant rd reads, stands in rec, its leaf's
@@ -2221,16 +2231,16 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		return c.rm != nil && c.lm != nil && dc.clientCase(p.mock) && dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm) && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && windowRead()
 	}
 	gave := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && h.p.gave })
-	slots := oneSlotEach(heldWhere(hs, func(h instantHold) bool {
+	slots, again := oneSource(oneSlotEach(heldWhere(hs, func(h instantHold) bool {
 		return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() && !cutSlot(h.p)
-	}))
+	})), c)
 	if len(gave) > 0 {
 		return dc.bound(path, at, n, c, gave, ": a value the test gave keploy, which the call sends as given in both runs")
 	}
 	switch len(slots) {
 	case 0:
 	case 1:
-		return dc.bound(path, at, n, c, slots, ": the test case's request holds it, templated, in both runs")
+		return dc.bound(path, at, n, c, slots, ": the test case's request holds it, templated, in both runs"+again)
 	default:
 		return dc.refuse(path, at, n, r, l, RefusalTwoSources,
 			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.fieldNoise(path))

@@ -70,6 +70,60 @@ func oneSlotEach(slots []evPlace) []evPlace {
 	})
 }
 
+// oneSource is the one of slots (oneSlotEach's) a value is bound at where
+// more than one shows its moment and keploy can tell which the application
+// read, and what the value's line adds; slots as they are, and "", where it
+// cannot (two sources). c's leaf is the changed field's whole text.
+//
+// (a) A slot whose whole text is the field's in both runs is its source: one
+// that holds only the moment's word in another text does not compete (a
+// suite renamed from "e2e-vh-<nanos>" to "e2e-vh-<nanos>-renamed", the name
+// written the second's).
+//
+// (b) Slots that hold one and the same whole text in both runs are one value
+// the client sent again (a name, a session cookie), its place the first
+// sent: only where that text is more than the moment, or shows it finer than
+// a second. A bare stamp of a second sent twice may be two reads of the
+// clock in one second, and stays two sources; so do two different texts that
+// each hold the word.
+//
+// Fail closed by construction: a replay binds the variable at the place's
+// live value and compares the call that sends the word with it, so where the
+// client sends the slots apart and the application read another, the call
+// misses.
+func oneSource(slots []evPlace, c changedInstant) ([]evPlace, string) {
+	if len(slots) < 2 {
+		return slots, ""
+	}
+	rec, live := c.leaf()
+	src := slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool { return p.rec != rec || p.live != live })
+	if len(src) == 1 {
+		word := slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool { return p.name == src[0].name })
+		return src, "; " + strings.Join(names(word), ", ") + " held only its word"
+	}
+	if len(src) == 0 {
+		src = slots
+	}
+	first := earliest(src)
+	for _, p := range src {
+		if p.rec != first.rec || p.live != first.live || bareStamp(p.t.rec) || bareStamp(p.t.live) {
+			return slots, ""
+		}
+	}
+	again := slices.DeleteFunc(slices.Clone(src), func(p evPlace) bool { return p.name == first.name })
+	return []evPlace{first}, "; sent again: " + strings.Join(names(again), ", ") + ", first sent at " + first.name
+}
+
+// bareStamp reports whether t's text is, whole, one instant of a second or a
+// coarser unit, or could not be read.
+func bareStamp(t *readerText) bool {
+	text, ok := t.textNow()
+	spans, read := t.spansOf()
+	return !ok || !read || slices.ContainsFunc(spans, func(sp instant) bool {
+		return sp.start == 0 && sp.end == len(text) && sp.res >= time.Second
+	})
+}
+
 // unsentRequest is why a test case's request could not be read when the
 // filter that opened it carried none.
 const unsentRequest = "keploy test sent the agent no copy of the test case's request, as a keploy older than its agent does"

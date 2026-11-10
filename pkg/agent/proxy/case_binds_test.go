@@ -449,3 +449,39 @@ func TestSwappedRequestsOfOneCallBindAtTheirOwnTestCase(t *testing.T) {
 		t.Fatalf("the request left for the second test case bound %+v (%v); want app-3", b, ok)
 	}
 }
+
+// A value the client sent again is bound at its first send, as the learn step
+// binds it (learn's oneSource): the call that sends it is compared with that
+// send's value this run, so where the client sends the two apart and the
+// application took the second, the call misses (fail closed), and where it
+// sends one value again, the call is answered.
+func TestAValueSentAgainBindsAtItsFirstSendAndMissesWhereTheSecondDiffers(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
+	for _, tc := range []struct {
+		name, first, second, answered, missed string
+	}{
+		{name: "sent again", first: "app-2", second: "app-2", answered: "app-2", missed: "app-1"},
+		{name: "the second differs", first: "app-2", second: "app-3", answered: "app-2", missed: "app-3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, mm, logs, open := caseBindsProxy(t)
+			p.TakeClientCases("test-1", []models.ClientCase{appsCase("post-apps-1", keyAtName), appsCase("post-apps-2")})
+			open()
+			p.TakeIncoming(liveApps(`{"name":"`+tc.first+`"}`), "", nil, at)
+			p.TakeIncoming(liveApps(`{"name":"`+tc.second+`"}`), "", nil, at.Add(time.Millisecond))
+			if b, ok := mm.vars.Lookup("key"); !ok || b.Value != tc.first || b.Mock != "test case post-apps-1" {
+				t.Fatalf("bound %+v (%v); want %s, the first send's", b, ok, tc.first)
+			}
+			if got := postKey(t, mm, "/apps", tc.missed); strings.HasPrefix(got, "200 ") {
+				t.Fatalf("a call carrying %s, not the first send's %s, was answered %s", tc.missed, tc.first, got)
+			}
+			if got := postKey(t, mm, "/apps", tc.answered); got != `200 {"echo":"`+tc.answered+`"}` {
+				t.Fatalf("the call carrying the first send's value was answered %s", got)
+			}
+			if logs.Len() != 0 {
+				t.Fatalf("warned %v", logs.All())
+			}
+		})
+	}
+}

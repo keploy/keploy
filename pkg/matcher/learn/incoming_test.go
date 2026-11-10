@@ -348,8 +348,11 @@ func TestAClientTestsUnixNanoNameIsBoundAtItsRequest(t *testing.T) {
 	}
 
 	// The body read whole holds it only through its JSON's name: one slot.
-	// Two leaves of the body, or two requests, that hold it are two slots,
-	// two separate places the application could have read it from.
+	// Two leaves of the body, or two requests, that hold it are two slots:
+	// where each holds the one name whole in both runs, the client sent it
+	// again, and it is bound at the first (oneSource); where they hold it in
+	// two different texts, neither the name whole, two separate places the
+	// application could have read it from.
 	twoSlots := func(rec, live []*models.HTTPReq) []Decision {
 		tr := NewTracker()
 		tr.Begin()
@@ -382,14 +385,37 @@ func TestAClientTestsUnixNanoNameIsBoundAtItsRequest(t *testing.T) {
 		return &models.HTTPReq{Method: "PUT", URL: "http://localhost:8083/client/v1/apps/917ded3b-8816-4ebe-84f9-16d652f87600/title", Timestamp: at,
 			Header: map[string]string{"Content-Type": "text/plain"}, Body: name(n)}
 	}
-	for what, ds := range map[string][]Decision{
-		"two leaves of the body":                       twoSlots([]*models.HTTPReq{withSlug(rNanos, rReq)}, []*models.HTTPReq{withSlug(fNanos, fReq)}),
-		"two leaves, one name the other's start":       twoSlots([]*models.HTTPReq{withNames(rNanos, rReq)}, []*models.HTTPReq{withNames(fNanos, fReq)}),
-		"a plain body and another request's JSON leaf": twoSlots([]*models.HTTPReq{plain(rNanos, rReq), appNameCase(rNanos, rReq)}, []*models.HTTPReq{plain(fNanos, fReq), appNameCase(fNanos, fReq)}),
+	for what, tc := range map[string]struct {
+		ds        []Decision
+		mock, at  string
+		sentAgain string
+	}{
+		"two leaves of the body": {twoSlots([]*models.HTTPReq{withSlug(rNanos, rReq)}, []*models.HTTPReq{withSlug(fNanos, fReq)}),
+			"test case case-0", "body.name", "test case case-0 body.slug"},
+		"two leaves, one name the other's start": {twoSlots([]*models.HTTPReq{withNames(rNanos, rReq)}, []*models.HTTPReq{withNames(fNanos, fReq)}),
+			"test case case-0", "body.name", "test case case-0 body.names"},
+		"a plain body and another request's JSON leaf": {twoSlots([]*models.HTTPReq{plain(rNanos, rReq), appNameCase(rNanos, rReq.Add(time.Millisecond))}, []*models.HTTPReq{plain(fNanos, fReq), appNameCase(fNanos, fReq)}),
+			"test case case-0", "body", "test case case-1 body.name"},
 	} {
-		if len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
-			t.Errorf("the app name held at %s: %s; want refused, two sources", what, oDescribe(ds))
+		ds := tc.ds
+		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != tc.mock || ds[0].From.Path != tc.at || !strings.Contains(ds[0].Line, "; sent again: "+tc.sentAgain+", first sent at "+tc.mock+" "+tc.at) {
+			t.Errorf("the app name sent again at %s: %s; want a Value of %s's %s, sent again at %s", what, oDescribe(ds), tc.mock, tc.at, tc.sentAgain)
 		}
+	}
+	// The name and a slug the client made of it: two different texts.
+	withShortSlug := func(n int64, at time.Time) *models.HTTPReq {
+		r := appNameCase(n, at)
+		r.Body = `{"name":"` + name(n) + `","slug":"app-crud-` + strconv.FormatInt(n, 10) + `"}`
+		return r
+	}
+	tr := NewTracker()
+	tr.Begin()
+	tr.SetCases([]ClientCase{{Name: "case-0", Req: withShortSlug(rNanos, rReq)}})
+	tr.Incoming(withShortSlug(fNanos, fReq), "", fReq)
+	slugIn := iCall(p, String, "copy of "+name(rNanos), "copy of "+name(fNanos), rCall, fCall, nil, tr.Placed().Earlier, nil)
+	slugIn.Drifts = oClientDrifts()
+	if ds := Decide(slugIn); len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
+		t.Errorf("the app name held at two leaves in two different texts, neither the field's: %s; want refused, two sources", oDescribe(ds))
 	}
 
 	// An id the call took from a recording's answer, beside a client
