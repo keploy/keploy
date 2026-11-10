@@ -216,6 +216,10 @@ type exactView struct {
 	// outside is the manager's outsideAnswers, and epoch its stagingEpoch.
 	outside *outsideAnswers
 	epoch   *atomic.Uint64
+	// trails is the manager's poolTrails: the worker scope's recordings a
+	// trail move put there, each answering at most once in the staging
+	// (outsideState.trailUsed). nil on a view no manager installed.
+	trails *atomic.Pointer[map[string]string]
 	// kept is the manager's kept learning (SetKeptLearning): each staged
 	// recording the view hands out carries it (learned). nil on a view no
 	// manager installed.
@@ -707,6 +711,13 @@ type outsideState struct {
 	// The windows never read it (inTests is theirs).
 	between  sync.Map
 	betweenN atomic.Int64
+	// trailUsed holds the names of the worker scope's recordings a trail
+	// move put there (poolTrails: models.MockEntry.Trails) that answered a
+	// call in the staging, in a test's window or between tests, through any
+	// door: a trailing write answers once per run of the test it trails, so
+	// a second call of it, wherever it lands, is not answered from it, and
+	// neither inTests nor between gives it again.
+	trailUsed sync.Map
 	// unstaged holds the names of the recordings a door named that staged
 	// does not hold, once each is said (MockManager.servedAsNamed).
 	unstaged sync.Map
@@ -721,6 +732,32 @@ func (o *outsideAnswers) hidden(name string, epoch uint64) bool {
 	}
 	_, spent := st.spent.Load(name)
 	return spent
+}
+
+// trailUsed reports whether name, one of the worker scope's recordings a
+// trail move put there, answered a call in the staging epoch is
+// (outsideState.trailUsed).
+func (o *outsideAnswers) trailUsed(name string, epoch uint64) bool {
+	st := o.cur.Load()
+	if st == nil || st.epoch != epoch {
+		return false
+	}
+	_, used := st.trailUsed.Load(name)
+	return used
+}
+
+// isTrail reports whether name is, in trails (the manager's poolTrails), a
+// recording a trail move put in the worker scope.
+func isTrail(trails *atomic.Pointer[map[string]string], name string) bool {
+	if trails == nil {
+		return false
+	}
+	t := trails.Load()
+	if t == nil {
+		return false
+	}
+	_, ok := (*t)[name]
+	return ok
 }
 
 // hiddenInTests reports whether name, one of the worker scope's, answered a
@@ -786,6 +823,7 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 		for _, n := range names {
 			st.spent.Delete(n)
 			st.inTests.Delete(n)
+			st.trailUsed.Delete(n)
 			if _, was := st.between.LoadAndDelete(n); was {
 				st.betweenN.Add(-1)
 			}
@@ -831,6 +869,13 @@ func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict 
 		!staged.Spec.ResTimestampMock.Equal(mk.Spec.ResTimestampMock) {
 		return exactRefused
 	}
+	// A trailing write answers once in the staging, wherever its call lands
+	// (outsideState.trailUsed).
+	if isTrail(&m.exact.poolTrails, mk.Name) {
+		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
+			return exactRefused
+		}
+	}
 	if inTest {
 		if _, taken := st.inTests.LoadOrStore(mk.Name, true); taken {
 			return exactRefused
@@ -861,6 +906,13 @@ func (m *MockManager) consumeBetween(mk *models.Mock) (verdict exactVerdict, fir
 	if staged == nil || staged.Kind != mk.Kind || !staged.Spec.ReqTimestampMock.Equal(mk.Spec.ReqTimestampMock) ||
 		!staged.Spec.ResTimestampMock.Equal(mk.Spec.ResTimestampMock) {
 		return exactRefused, false
+	}
+	// A trailing write answers once in the staging, between tests too
+	// (outsideState.trailUsed): it is no call the app repeats between tests.
+	if isTrail(&m.exact.poolTrails, mk.Name) {
+		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
+			return exactRefused, false
+		}
 	}
 	if _, was := st.between.LoadOrStore(mk.Name, true); !was {
 		st.betweenN.Add(1)
@@ -1971,7 +2023,7 @@ func (m *MockManager) installExact(v *exactView) { m.installExactWith(v, nil) }
 // round lock in the step that moves the round's generation and swaps v in:
 // what it changes is seen by a snapshot with v, never before it.
 func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) {
-	v.outside, v.epoch, v.kept = &m.exact.outside, &m.stagingEpoch, &m.exact.kept
+	v.outside, v.epoch, v.kept, v.trails = &m.exact.outside, &m.stagingEpoch, &m.exact.kept, &m.exact.poolTrails
 	if v.test == "" {
 		key := v.poolKey
 		m.exact.poolCursor.Store(&key)
@@ -2682,6 +2734,11 @@ func (v *exactView) spentOutsideIn(name string, windowed bool) bool {
 		return false
 	}
 	e := v.epoch.Load()
+	if isTrail(v.trails, name) {
+		// A trailing write that answered once is spent for the staging,
+		// in every window and between tests (outsideState.trailUsed).
+		return v.outside.trailUsed(name, e)
+	}
 	if windowed && v.isWorker(name) {
 		return v.outside.hiddenInTests(name, e)
 	}

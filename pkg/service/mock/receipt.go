@@ -65,6 +65,11 @@ const (
 	// (models.ScopeWindow.BeginRefused), and the test fails whatever its
 	// harness did next.
 	FailedByBeginRefused = "begin_refused"
+	// FailedByTrailUnmade: under the proven switch, a recording a trail move
+	// put in the worker scope (models.MockEntry.Trails) was never used in a
+	// run of the test it trails, which fails that test, or whether it was
+	// used could not be read, which leaves that test unread.
+	FailedByTrailUnmade = "trail_unmade"
 )
 
 // Receipt is what one `keploy mock replay` proved.

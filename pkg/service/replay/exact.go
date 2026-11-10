@@ -286,14 +286,44 @@ func (p *exactPlan) takeWorker(counted, rearm []models.MockState) ([]models.Mock
 // so because no mappings.yaml says which calls the stop made (stopsDerived)
 // as well.
 func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState, stopped bool) []string {
-	// Under the background rules the set's end requires none: what a
-	// background call answered is judged by record's judging,
-	// and a background call that stops happening is a limit the run says
-	// (unansweredBackground) and NEXT names.
-	if p == nil || p.background {
+	if p == nil {
 		return nil
 	}
-	return p.unansweredWorkerOf(consumed, stopped)
+	if !p.background {
+		return p.unansweredWorkerOf(consumed, stopped)
+	}
+	// Under the background rules the set's end requires none but the
+	// trailing writes: what a background call answered is judged by record's
+	// judging, and a background call that stops happening is a limit the run
+	// says (unansweredBackground) and NEXT names. A recording a trail move
+	// put in the worker scope (models.MockEntry.Trails) is no call the
+	// application repeats on its own schedule: it made it for the test it
+	// trails, and keploy requires it once per run that reached its place, as
+	// without the background rules.
+	trailing := p.trailingWrites()
+	var out []string
+	for _, n := range p.unansweredWorkerOf(consumed, stopped) {
+		if trailing[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// trailingWrites names the set's worker-scope recordings a trail move put
+// there (models.MockEntry.Trails): each is required by the set's end under
+// the background rules too (unansweredWorker).
+func (p *exactPlan) trailingWrites() map[string]bool {
+	if p == nil {
+		return nil
+	}
+	out := make(map[string]bool)
+	for _, e := range p.worker {
+		if e.Trails != "" {
+			out[e.Name] = true
+		}
+	}
+	return out
 }
 
 // unansweredWorkerOf is the worker-scope recordings today's rule requires by

@@ -661,6 +661,29 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			failedBy = FailedByBeginRefused
 		}
 	}
+	// A trailing write keploy requires once per run of its test that the run
+	// never made fails that test (failUnmadeTrails), and the run, whatever
+	// the test command exits: the application stopped making a call it made
+	// for that test at record, and a replay that serves it if made but never
+	// asks for it would pass without it. A failure already named keeps its
+	// name.
+	if len(counts.unmadeTrails) > 0 || len(counts.trailsUnread) > 0 {
+		for _, n := range slices.Sorted(maps.Keys(counts.unmadeTrails)) {
+			m.logger.Error("replay failed: the application never made a call keploy recorded as a trailing write of a test, so that test fails ("+provenswitch.Env+"=1): at record the application made it for that test after answering it (a clean-up it runs in the background), and keploy requires it once per run of that test",
+				zap.String("mock-set", name), zap.String("mock", n), zap.String("test", counts.unmadeTrails[n]),
+				zap.String("next_step", "if the application no longer makes this call, record the set again; the mapping entry's reason says why keploy moved it to worker: as that test's trailing write"))
+		}
+		if len(counts.trailsUnread) > 0 {
+			m.logger.Error("replay failed: "+trailsUnreadReason, zap.String("mock-set", name), zap.Strings("tests", slices.Sorted(maps.Keys(counts.trailsUnread))),
+				zap.String("next_step", "check the agent logs for why the read failed, then replay again"))
+		}
+		if utils.ErrCode == 0 {
+			utils.ErrCode = 1
+		}
+		if failedBy == "" {
+			failedBy = FailedByTrailUnmade
+		}
+	}
 	// What the run compares is short of requests the agent captured, or,
 	// under the proven switch, the agent did not finish checking the run's
 	// tests (settleRun: its end-of-run hook refused, or the agent was gone),
@@ -1413,6 +1436,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	m.mockOwners = models.MockOwners(table)
 	m.skippedReadOf = moved
+	m.trails = requiredTrails(served, table)
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.Int("tests with a repeated read", len(repeats)), zap.String("mock-set", name))
 	return nil
 }
@@ -1825,6 +1849,104 @@ func workerTrails(mp *models.Mapping, worker map[string][]string, table map[stri
 		out[e.Name] = e.Trails
 	}
 	return out
+}
+
+// requiredTrails is, by name, the test each recording of mp's worker scope
+// that a trail move put there trails (models.MockEntry.Trails), for a test of
+// table, the set's: a trailing write keploy requires once per run of that
+// test (unmadeTrails), whether or not the agent holds it (one it cannot
+// serve is never used, and fails that test). A trail naming any other test
+// trails none, as workerTrails reads it. nil when no entry trails one.
+func requiredTrails(mp *models.Mapping, table map[string][]string) map[string]string {
+	if mp == nil {
+		return nil
+	}
+	var out map[string]string
+	for _, e := range mp.Worker {
+		if _, ok := table[e.Trails]; e.Trails == "" || !ok {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[e.Name] = e.Trails
+	}
+	return out
+}
+
+// unmadeTrails is, of trails (requiredTrails: recording -> the test it
+// trails), each recording whose test ran in this run (its line in tests
+// passed or failed) that consumed does not hold: the application made that
+// call for the test at record, after answering it (a clean-up it runs in the
+// background), and a trailing write is required once per run of its test,
+// or a replay that stopped making it would pass. A test the run did not run
+// (skipped, gated, never begun) makes none required. unread names each test
+// that ran with such a recording when what the run consumed could not be
+// read (known false): it cannot be said made.
+func unmadeTrails(trails map[string]string, tests []TestReceipt, consumed []models.MockState, known bool) (unmade map[string]string, unread map[string]bool) {
+	ran := make(map[string]bool, len(tests))
+	for _, t := range tests {
+		if t.Outcome == models.ScopeOutcomePassed || t.Outcome == models.ScopeOutcomeFailed {
+			ran[t.Name] = true
+		}
+	}
+	used := make(map[string]bool, len(consumed))
+	for _, c := range consumed {
+		used[c.Name] = true
+	}
+	for name, test := range trails {
+		switch {
+		case !ran[test] || used[name]:
+			continue
+		case !known:
+			if unread == nil {
+				unread = map[string]bool{}
+			}
+			unread[test] = true
+			continue
+		}
+		if unmade == nil {
+			unmade = map[string]string{}
+		}
+		unmade[name] = test
+	}
+	return unmade, unread
+}
+
+// trailsUnreadReason is why failUnmadeTrails leaves a trailed test unread.
+const trailsUnreadReason = "keploy could not read which recordings the run used, so it cannot tell whether the run made this test's trailing writes (" + provenswitch.Env + "=1)"
+
+// failUnmadeTrails fails, in tests, each test a trailing write of unmade
+// trails (unmadeTrails), naming each such recording as one of its calls the
+// run did not make (models.ScopeEvidence.Unconsumed), in name order, and
+// leaves each test of unread unread: keploy could not read whether the run
+// made its trailing writes.
+func failUnmadeTrails(tests []TestReceipt, unmade map[string]string, unread map[string]bool) []TestReceipt {
+	for i := range tests {
+		t := &tests[i]
+		var names []string
+		for _, n := range slices.Sorted(maps.Keys(unmade)) {
+			if unmade[n] == t.Name {
+				names = append(names, n)
+			}
+		}
+		trailed := unread[t.Name]
+		if len(names) == 0 && !trailed {
+			continue
+		}
+		if t.Evidence == nil {
+			t.Evidence = &models.ScopeEvidence{}
+		}
+		if len(names) > 0 {
+			t.Outcome = models.ScopeOutcomeFailed
+			t.Evidence.Unconsumed = append(t.Evidence.Unconsumed, names...)
+		}
+		if trailed {
+			t.Evidence.Unread = true
+			t.Evidence.Reason = strings.TrimPrefix(t.Evidence.Reason+"; "+trailsUnreadReason, "; ")
+		}
+	}
+	return tests
 }
 
 // countNames is how many names slices hold.
@@ -2391,6 +2513,15 @@ type replayCounts struct {
 	// settleErr is why the agent's end-of-run hook failed (settleRun): the
 	// run did not complete, and what it served was not read.
 	settleErr error
+	// unmadeTrails are, under the proven switch, the recordings a trail move
+	// put in the worker scope whose test ran and that the run never used
+	// (unmadeTrails), by name with that test; each failed its test. nil for
+	// none.
+	unmadeTrails map[string]string
+	// trailsUnread names the tests that ran with a trail to require when
+	// what the run consumed could not be read: whether each was made is not
+	// known, and each is left unread. nil for none.
+	trailsUnread map[string]bool
 }
 
 // settleRun, under the proven switch, calls the agent's AfterTestRun
@@ -2644,6 +2775,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		// round (the last test begun): without the switch the receipt stays
 		// as it was.
 		counts.tests = withBegan(counts.tests, detail.windows)
+		counts.unmadeTrails, counts.trailsUnread = unmadeTrails(m.trails, counts.tests, consumed, consumedErr == nil)
+		counts.tests = failUnmadeTrails(counts.tests, counts.unmadeTrails, counts.trailsUnread)
 	}
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned.byTest[counts.tests[i].Name]
