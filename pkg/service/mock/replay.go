@@ -2707,10 +2707,13 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				// so no test is judged on it.
 				settleErr = m.settleRun(outcomeCtx)
 				if consumedErr = settleErr; consumedErr == nil {
-					if consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx); consumedErr == nil {
-						consumed = m.withSeriesRead(consumed)
-					}
+					consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
 				}
+				// What the wait for the owed series read was served,
+				// whatever this read gives: a read cut short still names
+				// each fault served (logFaultsServed), and every verdict
+				// on consumed reads it only when consumedErr is nil.
+				consumed = m.withSeriesRead(consumed)
 				if consumedErr == nil && m.learning() {
 					elsewhere = learn.ReadLearnedElsewhere(outcomeCtx, m.instrumentation, m.logger)
 				}
