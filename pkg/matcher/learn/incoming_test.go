@@ -145,7 +145,7 @@ func TestAClientTestsRequestPairsByOrderMethodAndPath(t *testing.T) {
 		{Name: "delete-client-v1-apps-by-id-1", Req: req("DELETE", "http://localhost:8083/client/v1/apps/68d4148edcd121253694486c", "")},
 	}
 	cases = append([]ClientCase{{Name: "post-client-v1-apps-0"}}, cases...)
-	if i, ok := PairCase(cases, nil, nil); ok {
+	if i, ok := PairCase(cases, nil, nil, true); ok {
 		t.Fatalf("no request paired with %d", i)
 	}
 	tr := NewTracker()
@@ -547,5 +547,149 @@ func TestAClientRequestsFormTextPartsArePlacesOfItsCalls(t *testing.T) {
 		if req := IncomingRequest("post-apps-1", rec, live); !strings.Contains(req.Unread, "form part "+f.Key+" sends a file or a value kept apart") || len(req.Parts) != 0 {
 			t.Fatalf("a form part %+v gave %+v", f, req)
 		}
+	}
+}
+
+// TestRequestsOfOneCallPairByTheirWordsThenByOrder: where a test sent a
+// call more than once, a request of the run pairs with the recorded one
+// that holds the most of its words, so two workers' requests that
+// reach the application in the other order than in the recording each pair
+// with their own; requests keploy cannot tell apart pair by order.
+func TestRequestsOfOneCallPairByTheirWordsThenByOrder(t *testing.T) {
+	req := func(url, body string, form ...string) *models.HTTPReq {
+		r := &models.HTTPReq{Method: "POST", URL: url, Body: body, Header: map[string]string{"Content-Type": "application/json", "X-Trace": "beta"}}
+		if len(form) > 0 {
+			r.Form = []models.FormData{{Key: "kind", Values: form}}
+		}
+		return r
+	}
+	hdr := func(r *models.HTTPReq, trace string) *models.HTTPReq {
+		r.Header["X-Trace"] = trace
+		return r
+	}
+	far := strings.Repeat("x ", pairWordsBytes/2)
+	for _, c := range []struct {
+		name string
+		recs []*models.HTTPReq
+		used []bool
+		live *models.HTTPReq
+		body bool
+		want int
+	}{
+		{name: "a fixed word of the body tells the second from the first, arriving first",
+			recs: []*models.HTTPReq{req("http://api/apps", `{"kind":"alpha","name":"n-111"}`), req("http://api/apps", `{"kind":"beta","name":"n-222"}`)},
+			live: req("http://api/apps", `{"kind":"beta","name":"n-999"}`), body: true, want: 1},
+		{name: "and the first, arriving second",
+			recs: []*models.HTTPReq{req("http://api/apps", `{"kind":"alpha","name":"n-111"}`), req("http://api/apps", `{"kind":"beta","name":"n-222"}`)},
+			live: req("http://api/apps", `{"kind":"alpha","name":"n-999"}`), body: true, want: 0},
+		{name: "only the values the run made differ: by order",
+			recs: []*models.HTTPReq{req("http://api/apps", `{"kind":"alpha","name":"n-111"}`), req("http://api/apps", `{"kind":"alpha","name":"n-222"}`)},
+			live: req("http://api/apps", `{"kind":"alpha","name":"n-999"}`), body: true, want: 0},
+		{name: "a word of the query tells",
+			recs: []*models.HTTPReq{req("http://api/apps?page=1", ""), req("http://api/apps?page=2", "")},
+			live: req("http://api/apps?page=2", ""), body: true, want: 1},
+		{name: "a piece of an instant the run made tells nothing: by order",
+			recs: []*models.HTTPReq{req("http://api/apps?since=2026-11-09T10:00:01Z", `{"at":"10:00:01","id":"0c1d-fade"}`), req("http://api/apps?since=2026-11-09T10:00:03Z", `{"at":"10:00:03","id":"77aa-beef"}`)},
+			live: req("http://api/apps?since=2026-11-10T04:30:03Z", `{"at":"04:30:03","id":"1234-beef"}`), body: true, want: 0},
+		{name: "a record's id in the path tells",
+			recs: []*models.HTTPReq{req("http://api/apps/12", ""), req("http://api/apps/13", "")},
+			live: req("http://api/apps/13", ""), body: true, want: 1},
+		{name: "a body keploy has not read tells nothing: by order",
+			recs: []*models.HTTPReq{req("http://api/apps", `{"kind":"alpha"}`), req("http://api/apps", `{"kind":"beta"}`)},
+			live: req("http://api/apps", `{"kind":"beta"}`), body: false, want: 0},
+		{name: "its URL still tells",
+			recs: []*models.HTTPReq{req("http://api/apps?page=1", `{"kind":"beta"}`), req("http://api/apps?page=2", `{"kind":"alpha"}`), req("http://api/apps?page=3", `{"kind":"beta"}`)},
+			live: req("http://api/apps?page=2", `{"kind":"beta"}`), body: false, want: 1},
+		{name: "a value of a form part tells",
+			recs: []*models.HTTPReq{req("http://api/apps", "", "alpha"), req("http://api/apps", "", "beta")},
+			live: req("http://api/apps", "", "beta"), body: true, want: 1},
+		{name: "a form keploy has not read tells nothing",
+			recs: []*models.HTTPReq{req("http://api/apps", "", "alpha"), req("http://api/apps", "", "beta")},
+			live: req("http://api/apps", "", "beta"), body: false, want: 0},
+		{name: "a header's word tells nothing",
+			recs: []*models.HTTPReq{hdr(req("http://api/apps", ""), "alpha"), hdr(req("http://api/apps", ""), "gamma")},
+			live: hdr(req("http://api/apps", ""), "gamma"), body: true, want: 0},
+		{name: "the most words win over the first that holds one",
+			recs: []*models.HTTPReq{req("http://api/apps", `{"kind":"alpha","size":"big"}`), req("http://api/apps", `{"kind":"beta","size":"big"}`), req("http://api/apps", `{"kind":"beta","size":"small"}`)},
+			live: req("http://api/apps", `{"kind":"beta","size":"small"}`), body: true, want: 2},
+		{name: "a word counts once however often its recording holds it",
+			recs: []*models.HTTPReq{req("http://api/apps", `{"kind":"alpha alpha alpha","size":"big"}`), req("http://api/apps", `{"kind":"beta","size":"small"}`), req("http://api/apps", `{"kind":"gamma","size":"big"}`)},
+			live: req("http://api/apps", `{"kind":"alpha beta","size":"small"}`), body: true, want: 1},
+		{name: "a paired request is not among those left",
+			recs: []*models.HTTPReq{req("http://api/apps", `{"kind":"beta","size":"small"}`), req("http://api/apps", `{"kind":"alpha","size":"big"}`), req("http://api/apps", `{"kind":"gamma","size":"big"}`)},
+			used: []bool{true, false, false},
+			live: req("http://api/apps", `{"kind":"beta","size":"small"}`), body: true, want: 1},
+		{name: "one left pairs whatever it holds",
+			recs: []*models.HTTPReq{req("http://api/apps", `{"kind":"beta"}`), req("http://api/apps", `{"kind":"alpha"}`)},
+			used: []bool{true, false},
+			live: req("http://api/apps", `{"kind":"beta"}`), body: true, want: 1},
+		{name: "a word within the first 64 KiB of a body tells",
+			recs: []*models.HTTPReq{req("http://api/apps", far[:len(far)-6]+" alpha"), req("http://api/apps", far[:len(far)-6]+"  beta")},
+			live: req("http://api/apps", far[:len(far)-6]+"  beta"), body: true, want: 1},
+		{name: "one past them does not: by order",
+			recs: []*models.HTTPReq{req("http://api/apps", far+"alpha"), req("http://api/apps", far+"beta")},
+			live: req("http://api/apps", far+"beta"), body: true, want: 0},
+		{name: "none left of the call",
+			recs: []*models.HTTPReq{req("http://api/apps", ""), req("http://api/apps", "")},
+			used: []bool{true, true},
+			live: req("http://api/apps", ""), body: true, want: -1},
+	} {
+		var cases []ClientCase
+		for i, r := range c.recs {
+			cases = append(cases, ClientCase{Name: strconv.Itoa(i), Req: r})
+		}
+		if got, ok := PairCase(cases, c.used, c.live, c.body); got != c.want || ok != (c.want >= 0) {
+			t.Errorf("%s: paired with %d (%v); want %d", c.name, got, ok, c.want)
+		}
+	}
+}
+
+// TestAPairingWordIsAWholeValue: a word requests pair by ends at a space, a
+// control byte and each mark that parts values, and at nothing else, so a
+// value a run made stays one word.
+func TestAPairingWordIsAWholeValue(t *testing.T) {
+	var got []string
+	pairWords(&models.HTTPReq{URL: "u:1", Body: "a\tb\nc\"d'e`f,g;h&i=j?k/l{m}n[o]p(q)r<s>t\x00v 2026-11-09T10:00:01.5Z n_1+x%20y@z:w|!~*#$^"}, true, func(w string) { got = append(got, w) })
+	if want := "u:1 a b c d e f g h i j k l m n o p q r s t v 2026-11-09T10:00:01.5Z n_1+x%20y@z:w|!~*#$^"; strings.Join(got, " ") != want {
+		t.Fatalf("words %q; want %q", strings.Join(got, " "), want)
+	}
+}
+
+// TestTwoWorkersRequestsArrivingSwappedAreEachPlacedAtTheirOwn: the learn
+// step is given each of two requests of one call, sent by two workers of
+// the test in the other order than in its recording, as a place of the
+// recorded request that holds its fixed word; a body still coming pairs by
+// order, as the replay's bind does.
+func TestTwoWorkersRequestsArrivingSwappedAreEachPlacedAtTheirOwn(t *testing.T) {
+	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
+	req := func(body string) *models.HTTPReq {
+		return &models.HTTPReq{Method: "POST", URL: "http://api/apps", Body: body, Timestamp: at}
+	}
+	cases := []ClientCase{{Name: "post-apps-1", Req: req(`{"kind":"alpha","name":"n-111"}`)}, {Name: "post-apps-2", Req: req(`{"kind":"beta","name":"n-222"}`)}}
+	tr := NewTracker()
+	tr.Begin()
+	tr.SetCases(cases)
+	if !tr.Incoming(req(`{"kind":"beta","name":"n-888"}`), "", at) || !tr.Incoming(req(`{"kind":"alpha","name":"n-999"}`), "", at.Add(time.Millisecond)) {
+		t.Fatal("a request of the run paired with none")
+	}
+	placed := tr.Placed().Earlier
+	if len(placed) != 2 || placed[0].Mock != "test case post-apps-2" || placed[1].Mock != "test case post-apps-1" {
+		t.Fatalf("placed %+v; want the first at post-apps-2 and the second at post-apps-1", placed)
+	}
+	tr.Begin()
+	tr.SetCases(cases)
+	if tr.IncomingComing(req(""), at) == nil {
+		t.Fatal("a request whose body is coming paired with none")
+	}
+	if placed := tr.Placed().Earlier; len(placed) != 1 || placed[0].Mock != "test case post-apps-1" {
+		t.Fatalf("a request whose body is coming placed %+v; want post-apps-1, the first in order", placed)
+	}
+	tr.Begin()
+	tr.SetCases(cases)
+	if !tr.Incoming(req(`{"kind":"beta","name":"n-888"}`), "its body is larger than keploy reads", at) {
+		t.Fatal("a request keploy could not read paired with none")
+	}
+	if placed := tr.Placed().Earlier; len(placed) != 1 || placed[0].Mock != "test case post-apps-1" {
+		t.Fatalf("a request keploy could not read placed %+v; want post-apps-1, the first in order", placed)
 	}
 }

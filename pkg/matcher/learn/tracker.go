@@ -833,15 +833,15 @@ func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time) (done func(
 }
 
 // pairIncomingLocked pairs live, which reached the application at at, with
-// the running client test's recorded request it pairs with (PairCase), and
-// notes it as an earlier place of the test's calls (incomingPlace): its
+// the running client test's recorded request it pairs with (PairCase, by
+// its body's words too where keploy read it: unread is ""), and notes it as an earlier place of the test's calls (incomingPlace): its
 // index among t.incoming, and the case. ok is false where no test is open or
 // live pairs with none. t.mu is held.
 func (t *Tracker) pairIncomingLocked(live *models.HTTPReq, unread string, words *RequestWords, at time.Time) (k int, c ClientCase, ok bool) {
 	if !t.open {
 		return -1, ClientCase{}, false
 	}
-	i, ok := PairCase(t.cases.cases, t.cases.used, live)
+	i, ok := PairCase(t.cases.cases, t.cases.used, live, unread == "")
 	if !ok {
 		return -1, ClientCase{}, false
 	}

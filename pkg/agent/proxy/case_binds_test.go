@@ -308,3 +308,51 @@ func TestAComingRequestBindsItsVariableOnceItsBodyEnded(t *testing.T) {
 		t.Fatalf("noted %q", why)
 	}
 }
+
+// Two requests of one call that two workers of a test send, reaching the
+// application in the other order than in its recording, each pair with
+// their own recorded request by its fixed word, as the learn step paired
+// them: the variable bound at the second binds from the run's request that
+// holds its word, though it came first, and the other request leaves it. A
+// request keploy could not read pairs by order, as the learn step's does.
+func TestSwappedRequestsOfOneCallBindAtTheirOwnTestCase(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Date(2026, 11, 9, 7, 1, 42, 0, time.UTC)
+	cases := func() []models.ClientCase {
+		first, second := appsCase("post-apps-1"), appsCase("post-apps-2", keyAtName)
+		first.Req.Body, second.Req.Body = `{"kind":"alpha","name":"app-0"}`, `{"kind":"beta","name":"app-1"}`
+		return []models.ClientCase{first, second}
+	}
+	p, mm, logs, open := caseBindsProxy(t)
+	p.TakeClientCases("test-1", cases())
+	open()
+	p.TakeIncoming(liveApps(`{"kind":"beta","name":"app-2"}`), "", nil, at)
+	if b, ok := mm.vars.Lookup("key"); !ok || b.Value != "app-2" || b.Mock != "test case post-apps-2" {
+		t.Fatalf("the second test case's request, sent first, bound %+v (%v); want app-2 at test case post-apps-2", b, ok)
+	}
+	if p.WantsIncoming() {
+		t.Fatal("the request the variable is bound at was paired: the proxy still asks for requests")
+	}
+	p.TakeIncoming(liveApps(`{"kind":"alpha","name":"app-3"}`), "", nil, at.Add(time.Millisecond))
+	if b, _ := mm.vars.Lookup("key"); b.Value != "app-2" {
+		t.Fatalf("the first test case's request, sent second, bound %+v", b)
+	}
+	if got := postKey(t, mm, "/apps", "app-2"); got != `200 {"echo":"app-2"}` {
+		t.Fatalf("the call carrying the value its own request sent was answered %s", got)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("warned %v", logs.All())
+	}
+
+	p, mm, _, open = caseBindsProxy(t)
+	p.TakeClientCases("test-1", cases())
+	open()
+	p.TakeIncoming(liveApps(`{"kind":"beta","name":"app-2"}`), "its body is larger than keploy reads", nil, at)
+	if _, ok := mm.vars.Lookup("key"); ok || !p.WantsIncoming() {
+		t.Fatal("a request keploy could not read paired by its body's words, not with the first test case in order")
+	}
+	p.TakeIncoming(liveApps(`{"kind":"alpha","name":"app-3"}`), "", nil, at.Add(time.Millisecond))
+	if b, ok := mm.vars.Lookup("key"); !ok || b.Value != "app-3" || b.Mock != "test case post-apps-2" {
+		t.Fatalf("the request left for the second test case bound %+v (%v); want app-3", b, ok)
+	}
+}

@@ -16,7 +16,8 @@ import (
 // of its requests, and that a call of the test then carries, at that
 // request (models.MappedTestCase.Variables, models.CaseBind): no call binds
 // it. So each replay binds it from the request of the test that pairs with
-// that recorded one (learn.PairCase: by order, method and path), read at
+// that recorded one (learn.PairCase: by method and path, then by its words,
+// then by order), read at
 // the variable's place as the HTTP replay reads a bind place
 // (httpint.RequestPlace), before the application is given any byte of the
 // request: no call the request leads to is checked without it. A request
@@ -64,13 +65,14 @@ func (c *caseBinds) wants() bool {
 	return false
 }
 
-// pair pairs live with the first recorded request not yet paired whose key
-// is its (learn.PairCase), and returns the test, that request and the
-// variables bound at it; ok is false where none is left.
-func (c *caseBinds) pair(live *models.HTTPReq) (test string, rec learn.ClientCase, binds []models.ClientCaseBind, ok bool) {
+// pair pairs live with the recorded request not yet paired it pairs with
+// (learn.PairCase, as the learn step paired it: by its body's words too
+// where body says keploy read it), and returns the test, that request and
+// the variables bound at it; ok is false where none is left.
+func (c *caseBinds) pair(live *models.HTTPReq, body bool) (test string, rec learn.ClientCase, binds []models.ClientCaseBind, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	i, ok := learn.PairCase(c.cases, c.used, live)
+	i, ok := learn.PairCase(c.cases, c.used, live, body)
 	if !ok {
 		return "", learn.ClientCase{}, nil, false
 	}
@@ -105,7 +107,7 @@ func (p *Proxy) setCaseBinds(test string, cases []models.ClientCase) {
 // read live, which then binds nothing. A variable it cannot bind is noted
 // with why in the test's scope (MockManager.NoteExactTest).
 func (p *Proxy) bindCase(live *models.HTTPReq, unread string) {
-	if bind := p.pairCase(live); bind != nil {
+	if bind := p.pairCase(live, unread); bind != nil {
 		bind(live, unread)
 	}
 }
@@ -113,9 +115,11 @@ func (p *Proxy) bindCase(live *models.HTTPReq, unread string) {
 // pairCase pairs live, a request of the running client test, with the
 // recorded request it pairs with (caseBinds), and is what binds that
 // request's variables from live as bindCase does, once keploy has live's
-// body: nil where it pairs with none.
-func (p *Proxy) pairCase(live *models.HTTPReq) func(*models.HTTPReq, string) {
-	test, rec, binds, ok := p.caseBinds.pair(live)
+// body: nil where it pairs with none. unread, where not "", says why keploy
+// has not read live's body as it pairs, which then pairs by its URL alone,
+// as the learn step paired it (learn.Tracker.Incoming).
+func (p *Proxy) pairCase(live *models.HTTPReq, unread string) func(*models.HTTPReq, string) {
+	test, rec, binds, ok := p.caseBinds.pair(live, unread == "")
 	if !ok {
 		return nil
 	}

@@ -24,9 +24,9 @@ import (
 // the application made.
 //
 // So each request of a test that reaches the application in record's full
-// round, paired with the request the test sent in its recording (by order,
-// method and path: PairCase), is an earlier place of the test's calls from
-// its arrival (Tracker.Incoming), read as a keploy test case's request is
+// round, paired with the request the test sent in its recording (by method
+// and path, then by its words, then by order: PairCase), is an earlier place
+// of the test's calls from its arrival (Tracker.Incoming), read as a keploy test case's request is
 // (GivenRequest). A call reads it only where it reached the application
 // before the call in both runs (arrivedBefore): a request the client sent
 // after the call held nothing the call could have taken. A request with no
@@ -71,27 +71,104 @@ type caseCursor struct {
 }
 
 // PairCase is the recorded request of cases that live, a request of the
-// test that reached the application now, pairs with, and its index: the
-// first of cases not yet paired (used) whose key (CaseKey) is live's. So the
-// n-th request of the run with a key pairs with the n-th recorded request of
-// the test with that key, whatever the test's other requests did between
-// them. ok is false where none is left: the run sent the call more times
-// than its recording did, or a call its recording never made.
-func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq) (int, bool) {
+// test that reached the application now, pairs with, and its index: one of
+// cases not yet paired (used) whose key (CaseKey) is live's. ok is false
+// where none is left: the run sent the call more times than its recording
+// did, or a call its recording never made.
+//
+// Where one is left, live pairs with it. Where more are, the test sent the
+// call more than once, and a run may send them in another order than its
+// recording did (two workers of the test, each with its own request): live
+// pairs with the one whose recording holds the most of live's words
+// (pairWords: of its URL, and of its body where body says keploy read it),
+// each counted once, and with the first of those in the recording's order.
+// A word every request left holds tells none from another, and one none
+// holds (a value this run made: a name from its clock, an id) is no nearer
+// one than another. So requests that send the same words but for the values
+// their run made pair by order, the n-th of the run with the n-th of the
+// recording, as do the requests of a test that keploy cannot tell apart; a
+// request paired with another's recording binds no variable there (the
+// recording does not hold the variable's value at its place) or a value no
+// call carries, and the call misses.
+func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq, body bool) (int, bool) {
 	if live == nil {
 		return -1, false
 	}
 	want := CaseKey(live.Method, live.URL)
+	var left []int
 	for i, c := range cases {
 		if i < len(used) && used[i] || c.Req == nil {
 			continue
 		}
 		if CaseKey(c.Req.Method, c.Req.URL) == want {
-			return i, true
+			left = append(left, i)
 		}
 	}
-	return -1, false
+	switch len(left) {
+	case 0:
+		return -1, false
+	case 1:
+		return left[0], true
+	}
+	sent := map[string]bool{}
+	pairWords(live, body, func(w string) { sent[w] = true })
+	best, most := left[0], 0
+	for _, i := range left {
+		held := map[string]bool{}
+		pairWords(cases[i].Req, body, func(w string) {
+			if sent[w] {
+				held[w] = true
+			}
+		})
+		if len(held) > most {
+			best, most = i, len(held)
+		}
+	}
+	return best, true
 }
+
+// pairWordsBytes is the most of a request's body PairCase reads the words
+// of: two requests of a call that differ only past it pair by order.
+const pairWordsBytes = 64 << 10
+
+// pairWords hands each word of what tells req from another request of its
+// call: of its URL, and, where body says keploy read it, of the first
+// pairWordsBytes of its body and of the values of its form's parts. Its
+// headers are not read: they hold what every run makes anew (a date, a
+// trace id, a signature).
+//
+// A word here is a whole value as its text delimits it: a run of bytes
+// with no space, quote, bracket, comma, nor a mark that parts a URL's or a
+// form's values (pairWordEnds) among them. So an instant, an id or a name a
+// run made is one word, which no other run's holds: a word of letters and
+// digits (eachWord) would cut it into pieces (a second, a hex group) that
+// another run's value holds by chance, pairing the request with a
+// recording that is not its own.
+func pairWords(req *models.HTTPReq, body bool, each func(string)) {
+	words := func(s string) {
+		for _, w := range strings.FieldsFunc(s, func(r rune) bool { return r <= ' ' || strings.ContainsRune(pairWordEnds, r) }) {
+			each(w)
+		}
+	}
+	words(req.URL)
+	if !body {
+		return
+	}
+	text := req.Body
+	if len(text) > pairWordsBytes {
+		text = text[:pairWordsBytes]
+	}
+	words(text)
+	for _, f := range req.Form {
+		for _, v := range f.Values {
+			words(v)
+		}
+	}
+}
+
+// pairWordEnds are the marks, beside a space and a control byte, that end a
+// word of pairWords.
+const pairWordEnds = "\"'`,;&=?/{}[]()<>"
 
 // IncomingRequest is the client test's request live, which reached the
 // application in record's full round, beside the one rec it pairs with in

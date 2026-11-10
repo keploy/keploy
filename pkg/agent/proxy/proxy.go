@@ -5177,7 +5177,7 @@ func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time) func(*models.HTTPR
 	if !provenswitch.On() {
 		return nil
 	}
-	learned, bind := p.learnTracker.IncomingComing(req, at), p.pairCase(req)
+	learned, bind := p.learnTracker.IncomingComing(req, at), p.pairCase(req, learn.ComingUnread)
 	if learned == nil && bind == nil {
 		return nil
 	}
