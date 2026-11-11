@@ -40,6 +40,32 @@ func DeclaredSources(sources []models.DeclaredSource, placeOf func(path string) 
 	}
 }
 
+// DeclaredBodySources is DeclaredSources of sources for a recording's
+// leaves read by their exact leaf path (Leaf.Path): a rule names a field of
+// the body by its place, which a replay reads at its leaf path
+// (DeclaredClocks: placeLeafPath), so the learn step reads it there too. A
+// rule of another part, or a place keploy does not parse, names no leaf. nil
+// where none of sources names a body leaf, or as DeclaredSources.
+func DeclaredBodySources(sources []models.DeclaredSource) func(path string) (Source, bool) {
+	fields := map[string]string{}
+	for _, s := range sources {
+		p, err := variables.Parse(s.Field)
+		if err != nil || p.Part != variables.PartBody {
+			continue
+		}
+		if leaf, ok := placeLeafPath(p); ok {
+			fields[leaf] = s.Field
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return DeclaredSources(sources, func(path string) (string, bool) {
+		f, ok := fields[path]
+		return f, ok
+	})
+}
+
 // DeclaredClocks is learned, a recording's clocks as the learn step stored
 // them (models.MockSpec.Clocks, by leaf path), with the check each clock
 // rule of sources makes at its field: the rule's range as learning stores a

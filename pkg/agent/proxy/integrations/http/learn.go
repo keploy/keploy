@@ -464,6 +464,31 @@ func (n learnNoise) known(m *models.Mock) learn.Known {
 	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.sources)}
 }
 
+// declaredClocksOf is learned, the drifted leaves of a call paired with m,
+// each one a clock rule keploy.yml declares at its body field (the sources
+// the scope table gives m, read at each leaf's path as a replay reads them:
+// learn.DeclaredBodySources) decided by that rule
+// (learn.DeclaredClockLearned): in w, the call's window, and under the time
+// default where timeForm is set. learned as it is where no rule declares a
+// body field of m, and, with the time default off, at a leaf whose recorded
+// value answered holds (the call's recorded answer: learn.Echoes), whose
+// recorded moment a replay would serve, as Mongo's learning refuses it.
+func declaredClocksOf(learned []learn.Learned, sources func(mock string) []models.DeclaredSource, m *models.Mock, w *learn.Window, timeForm bool, drifts *learn.DriftCache, answered []learn.Leaf) []learn.Learned {
+	if sources == nil {
+		return learned
+	}
+	src := learn.DeclaredBodySources(sources(m.Name))
+	if src == nil {
+		return learned
+	}
+	for i, l := range learned {
+		if s, ok := src(l.Recorded.Path); ok && (timeForm || len(learn.Echoes(drifts, l.Recorded, answered)) == 0) {
+			learned[i] = learn.DeclaredClockLearned(l, s, w, timeForm)
+		}
+	}
+	return learned
+}
+
 // knownAsRecorded is known without the noise learned onto m: the recording
 // as the learn step first compared it, for a spent mock (learn.Candidate).
 func (n learnNoise) knownAsRecorded(m *models.Mock) learn.Known {
@@ -1866,7 +1891,9 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// A client test's request that reached the application before
 			// the call in both runs is a place of it (learn.ClassifyArrived),
 			// where its test case binds a value the call carries whole.
-			return learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order)), answered, earlier, ""
+			answer := classifiedAnswer(answered)
+			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
+			return declaredClocksOf(learned, n.sources, m, w, integrations.TimeFormOf(mockDb), tracker.DriftsOf(ctx), answer), answered, earlier, ""
 		}
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {

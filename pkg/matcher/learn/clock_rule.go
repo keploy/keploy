@@ -1,6 +1,9 @@
 package learn
 
 import (
+	"cmp"
+	"strings"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 )
@@ -94,4 +97,95 @@ func (dc *decider) clockOnly(path string, src Source, ds []Decision) []Decision 
 		}
 	}
 	return ds
+}
+
+// DeclaredClockLearned is ln, a drifted leaf the classify path learned
+// (ClassifyArrived: the HTTP adapter's learn step), as src, a clock rule
+// keploy.yml declares at its field, decides it, the way Decide decides a
+// changed instant a rule declares (declaredClock, then timeDefault). A
+// declared clock is a time field, so it settles what learning could not
+// tell of the value's source: an echo (a variable From.Echo: learning found
+// the value's moment in what the application was given earlier, and cannot
+// tell a copy of it, or a pick from it by the clock, from a read of the
+// clock: echoProvenance), noise, and a drift refused for its source alone
+// (Learned.sourceWhy). Such a value is a read of the clock when the rule's
+// range holds both runs' values in the call's span (w: Rec and F), in one
+// layout, as a replay checks it (CheckClockRead); else, under the time
+// default (timeForm), an instant both runs write in one form (TimeForm), an
+// epoch number near its call in both (nearSpan), checked by that form alone,
+// as is a read the range holds. One neither check holds is refused, naming
+// the rule: noise becomes unaccounted (a value the rule's own check refuses
+// is never let pass unchecked), and an echo or a refused drift keeps
+// learning's refusal. The caller leaves out, where the time default is off,
+// a value its call's recorded answer holds (a replay would serve that
+// answer's recorded moment). Every other decision stands: a value bound to an
+// earlier place that holds it whole, a read of the clock or an offset from
+// it learning found, an echo the answer carries, and every other refusal
+// (two layouts or zone forms, a value its call's answer holds, what keploy
+// could not read).
+func DeclaredClockLearned(ln Learned, src Source, w *Window, timeForm bool) Learned {
+	settles := ln.Kind == KindVariable && ln.From.Echo || ln.Kind == KindNoise ||
+		ln.Kind == KindUnaccounted && ln.sourceWhy != "" && ln.sourceWhy == ln.Why
+	if src.Kind != SourceClock || !settles {
+		return ln
+	}
+	rec, live := ln.Recorded, ln.Live
+	why := "keploy.yml's rule " + src.Rule + " declares it a read of the clock"
+	var read *models.ClockOffset
+	off, ok := declaredOffset(src.Clock)
+	lay := models.ClockOffset{Layout: leafLayout(rec)}.MeetLayout(leafLayout(live))
+	var no string // why the range check refuses it
+	switch {
+	case !ok:
+		no = "its range is one keploy does not check (a resolution of none, or a max below its min)"
+	case w == nil:
+		no = "keploy knows no span of the call"
+	case !isInstant(rec) || !isInstant(live):
+		no = "keploy reads no moment in its value in a run"
+	case lay == "" || lay == models.LayoutApart:
+		no = "its two runs write it in different layouts"
+	default:
+		off.Layout = lay
+		recHeld, recNo := CheckClockRead(rec.Path, off, rec, w.Rec, true)
+		liveHeld, liveNo := CheckClockRead(live.Path, off, live, w.F, true)
+		switch {
+		case recHeld && liveHeld:
+			off.Why = why + ", and both runs' values are such reads in the call's span"
+			read = &off
+		case !recHeld:
+			no = "the recorded value is no such read in its run: " + recNo
+		default:
+			no = "round F's value is no such read in its run: " + liveNo
+		}
+	}
+	if timeForm {
+		// The time default checks a time by its form alone, a read the
+		// rule's range holds too (timeDefault).
+		form := TimeForm(rec)
+		switch {
+		case TimeForm(live) != form || !isInstant(rec) || !isInstant(live):
+			no += "; and its two runs write no one form of an instant (" + cmp.Or(form, "none") + " recorded, " + cmp.Or(TimeForm(live), "none") + " in round F)"
+		case strings.HasPrefix(leafLayout(rec), "epoch-") && (w == nil || !nearSpan(rec, w.Rec) || !nearSpan(live, w.F)):
+			no += "; and, an epoch number, it names no moment near its call in both runs"
+		case read != nil:
+			read.Form = form
+			read.Why += "; a time, checked by its form alone (" + form + ", keploy.yml's times setting at its default)"
+		default:
+			read = &models.ClockOffset{Form: form, Why: why + ": a time, checked by its form alone (" + form + ", keploy.yml's times setting at its default); its range alone would refuse it: " + no}
+		}
+	}
+	switch {
+	case read != nil:
+		return Learned{Kind: KindClockRead, Recorded: rec, Live: live, Read: read, Why: read.Why, Refuted: ln.Refuted}
+	case ln.Kind == KindNoise:
+		return Learned{Kind: KindUnaccounted, Recorded: rec, Live: live, Why: why + ", and " + no, Refuted: ln.Refuted}
+	}
+	return ln
+}
+
+// isInstant reports whether l names a moment keploy reads (clockReadOf): a
+// time of day, which names no day, does not.
+func isInstant(l Leaf) bool {
+	_, _, _, ok := clockReadOf(l)
+	return ok
 }
