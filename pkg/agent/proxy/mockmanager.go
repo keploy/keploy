@@ -3022,6 +3022,9 @@ func (r keptFor) Own() []variables.Binding {
 
 func (r keptFor) EndedOf(test string) []variables.Binding { return r.k.vars.EndedOf(test) }
 func (r keptFor) TrailOf(mock string) learn.Trail         { return trailIn(r.k.scope, mock) }
+func (r keptFor) LookupOf(test, name string) (variables.Binding, bool, bool) {
+	return r.k.vars.LookupOf(test, name)
+}
 
 // BoundValuesIn returns the bound values of the set the call was marked in
 // (integrations.RoundBoundReader): the set's in force (Variables, TrailOf)

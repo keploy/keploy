@@ -565,6 +565,10 @@ type UnmatchedCall struct {
 	// VariablePlaces mirrors MockMismatchReport.VariablePlaces: the URL path
 	// places of a test variable on this call, under the proven switch only.
 	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
+	// BoundIn mirrors MockMismatchReport.BoundIn: the recordings at which
+	// this run bound the test variables a variable miss's refusal read, by
+	// name, never a value.
+	BoundIn []string `json:"bound_in,omitempty" yaml:"bound_in,omitempty"`
 	// Given mirrors MockMismatchReport.Given: the given a variable miss is
 	// about, by its name, never its value.
 	Given string `json:"given,omitempty" yaml:"given,omitempty"`
