@@ -165,3 +165,88 @@ func TestALateWindowCallRefusedAnUpdateOfNoRecordingReadsOnInItsWindow(t *testin
 		t.Errorf("after the refused update the call walks %q's view (worker band %v); want TestA's, with the worker band", sv.Test, sv.Worker != nil)
 	}
 }
+
+// offeredNamed is the copy of the recording named name db's session reads
+// offer; nil for none.
+func offeredNamed(db integrations.MockMemDb, name string) *models.Mock {
+	got, _ := db.GetSessionScopedMocks()
+	for _, mk := range got {
+		if mk != nil && mk.Name == name {
+			return mk
+		}
+	}
+	return nil
+}
+
+// A call read in the pool view whose copy of the pool's p-0 another pool
+// call re-filed under a new key before its consume (a stale copy, which the
+// update tier refuses) reads on in the pool view, offered the re-filed copy
+// and answered by it, whether its consume lands before the replay begins T2
+// or after. After, T2's view refuses p-0 (it shows no pool recording under
+// today's rules), the pool view the call was read in settles it
+// (roundGuard.shownIn), and its tier refuses the stale copy: a refusal its
+// own view decided, so the call reads on there (heldScope.settled). Moved to
+// the view in force, it was offered no p-0 and missed, where at once it was
+// answered.
+func TestAPoolCallWhoseCopyWasRefiledReadsOnInThePoolViewAsAtOnce(t *testing.T) {
+	type outcome struct{ stale, offeredAgain, answered bool }
+	var got [2]outcome
+	for i, late := range []bool{false, true} {
+		p := httpCall("p-0", time.Second, "/p")
+		mm := stagedManager(t, nil, []*models.Mock{p})
+		mm.ServeExactPool("k", []string{p.Name})
+		h, _ := mm.HoldToRound(mm.MarkCallRound())
+		other, _ := mm.HoldToRound(mm.MarkCallRound())
+		stale := offeredNamed(h, p.Name)
+		mine := offeredNamed(other, p.Name)
+		if stale == nil || mine == nil {
+			t.Fatal("precondition: a pool view's call was not offered the pool's p-0")
+		}
+		staleCopy := *stale
+		refiled := *mine
+		refiled.TestModeInfo.ID += 1000
+		refiled.TestModeInfo.SortOrder += 1000
+		if !other.UpdateUnFilteredMock(mine, &refiled) {
+			t.Fatal("precondition: the other pool call's update of p-0 was refused")
+		}
+		if late {
+			mm.ServeExactTest("T2", nil)
+		}
+		served := staleCopy
+		got[i].stale = h.UpdateUnFilteredMock(&staleCopy, &served)
+		again := offeredNamed(h, p.Name)
+		got[i].offeredAgain = again != nil
+		if again != nil {
+			upd := *again
+			got[i].answered = h.UpdateUnFilteredMock(again, &upd)
+		}
+	}
+	if want := (outcome{stale: false, offeredAgain: true, answered: true}); got[0] != want {
+		t.Fatalf("precondition: at once the call's stale update answered %v, it was offered p-0 again %v and answered by it %v; want %v, %v, %v", got[0].stale, got[0].offeredAgain, got[0].answered, want.stale, want.offeredAgain, want.answered)
+	}
+	if got[1] != got[0] {
+		t.Errorf("late the call's stale update answered %v, it was offered p-0 again %v and answered by it %v; want %v, %v, %v, as at once: its tier's refusal was its own view's, where it reads on", got[1].stale, got[1].offeredAgain, got[1].answered, got[0].stale, got[0].offeredAgain, got[0].answered)
+	}
+}
+
+// A consume the view settling it passes is its tier's to decide, in one run:
+// a tier that refuses it refuses the consume, and the view the call was read
+// in never runs it again, at once or late (exactConsumeAt). Late, T2's view
+// refuses the pool's p-0 by what it shows, and the tier runs once, in the
+// pool view the call was read in (roundGuard.shownIn).
+func TestATierThatRefusesAConsumeRunsOnce(t *testing.T) {
+	for _, late := range []bool{false, true} {
+		mm, h, p := poolCallHeld(t, late)
+		hs, ok := h.(*heldScope)
+		if !ok {
+			t.Fatalf("HoldToRound gave %T; want *heldScope", h)
+		}
+		runs := 0
+		if v := mm.exactConsumeAt(p, false, &hs.g, func() bool { runs++; return false }, nil); v != exactRefused {
+			t.Errorf("late=%v: a consume its tier refused settled %v; want it refused", late, v)
+		}
+		if runs != 1 {
+			t.Errorf("late=%v: the tier ran %d times; want once: its refusal is final, never asked again of the view the call was read in", late, runs)
+		}
+	}
+}
