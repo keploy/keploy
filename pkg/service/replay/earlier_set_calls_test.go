@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,8 +77,9 @@ func TestRunTestSet_AnEarlierSetsTestsLateCallFailsTheRunNotTheSetThatReadIt(t *
 	for k, want := range map[string]string{
 		"kind": models.KindOutsideEveryTest, "made_in": "test-2", "test-set": "test-set-a", "read-in-test-set": "test-set-b",
 		"protocol": "HTTP", "call": "POST /orders", "destination": "orders:80", "after": "", "before": "", "closest": "",
-		"facts":     "no recording of this call in the set",
-		"next_step": "record the test set again: " + repeatRecordCommand,
+		"facts": "no recording of this call in the set",
+		"next_step": "record the test set again in its place: rm -rf -- " + utils.ShellWord(filepath.Join(h.replayer.config.Path, "test-set-a")) +
+			" && keploy record --path " + utils.ShellWord(filepath.Dir(h.replayer.config.Path)) + " --metadata name=test-set-a",
 	} {
 		if got := f[k]; got != want {
 			t.Errorf("line field %s = %v; want %q", k, got, want)

@@ -2,13 +2,14 @@ package replay
 
 import (
 	"fmt"
+	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -236,24 +237,39 @@ func betweenFacts(c models.UnmatchedCall) string {
 	return "no recording of this call in the set"
 }
 
-// betweenNextStep is the one next step for c, a call made Between two tests,
+// betweenNextStep is the one next step for c, a call outside every test,
 // chosen from its facts (betweenFacts): with a recording that came close, the
 // set is recorded again if the application changed the call on purpose;
-// with none, it is recorded again. record is the command that records it.
+// with none, it is recorded again. record is the command that records the
+// set again in its place (recordAgainCommand); "" when keploy cannot name
+// the set's folder, an earlier set's call in a run that ran no such set:
+// then the set that made the call is recorded again with the command that
+// recorded it, which keploy cannot print.
 func betweenNextStep(c models.UnmatchedCall, record string) string {
-	if c.ClosestMock != "" {
-		return "if the application changed this call on purpose, record the test set again: " + record
+	if record == "" {
+		return "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call"
 	}
-	return "record the test set again: " + record
+	if c.ClosestMock != "" {
+		return "if the application changed this call on purpose, record the test set again in its place: " + record
+	}
+	return "record the test set again in its place: " + record
 }
 
-// recordAgainCommand is the command that records the set again: keploy
-// record with the application's command, when keploy test was given one.
-func recordAgainCommand(appCmd string) string {
-	if appCmd == "" {
-		return repeatRecordCommand
+// recordAgainCommand is the command that records testSetID again in its
+// place (utils.RecordSetAgainCommand): it removes the set's folder in the
+// run's keploy folder, then keploy record records under the set's name with
+// the application's command and the keploy folder and keploy.yml the run
+// read, each word quoted for a POSIX shell. "" when keploy cannot name the
+// set's folder.
+func (r *Replayer) recordAgainCommand(testSetID string) string {
+	if r.config == nil {
+		return ""
 	}
-	return repeatRecordCommand + " -c " + strconv.Quote(appCmd)
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	return utils.RecordSetAgainCommand(r.config.Path, r.config.ConfigPath, cwd, testSetID, r.config.Command)
 }
 
 // logSetCalls says, at ERROR, each of the set's calls that fails it. A call
@@ -295,10 +311,6 @@ func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 // it was made in (madeIn) or between which tests, what keploy knows of its
 // closest recording and the one next step.
 func (r *Replayer) outsideFields(testSetID, madeIn string, c models.UnmatchedCall) []zap.Field {
-	appCmd := ""
-	if r.config != nil {
-		appCmd = r.config.Command
-	}
 	return []zap.Field{
 		zap.String("kind", models.KindOutsideEveryTest),
 		zap.String("test-set", testSetID),
@@ -312,6 +324,6 @@ func (r *Replayer) outsideFields(testSetID, madeIn string, c models.UnmatchedCal
 		zap.String("closest", c.ClosestMock),
 		zap.Strings("differs", models.FieldShapes(c.Differs)),
 		zap.String("facts", betweenFacts(c)),
-		zap.String("next_step", betweenNextStep(c, recordAgainCommand(appCmd))),
+		zap.String("next_step", betweenNextStep(c, r.recordAgainCommand(testSetID))),
 	}
 }

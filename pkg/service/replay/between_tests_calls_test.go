@@ -1,10 +1,12 @@
 package replay
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -25,12 +27,24 @@ func betweenWrite() ([]models.UnmatchedCall, error) {
 }
 
 // observeSetLogs has h's replayer log to an observer, at ERROR, and gives it
-// the application's command.
+// the application's command and a keploy.yml folder that is not the cwd.
 func observeSetLogs(h *prRun) *observer.ObservedLogs {
 	core, logs := observer.New(zapcore.ErrorLevel)
 	h.replayer.logger = zap.New(core)
 	h.replayer.config.Command = "go run ./cmd/api"
+	h.replayer.config.ConfigPath = "/w/conf"
 	return logs
+}
+
+// recordAgainOf is the command h's lines name to record set again in its
+// place: remove its folder in h's keploy folder, then keploy record under
+// its name with the app's command (single-quoted), the keploy folder's
+// parent (the tests' keploy folder is a temporary one, not under the cwd)
+// and the keploy.yml folder observeSetLogs gave.
+func recordAgainOf(h *prRun, set string) string {
+	return "rm -rf -- " + utils.ShellWord(filepath.Join(h.replayer.config.Path, set)) +
+		" && keploy record -c 'go run ./cmd/api' --path " + utils.ShellWord(filepath.Dir(h.replayer.config.Path)) +
+		" --config-path /w/conf --metadata name=" + set
 }
 
 // outsideLines are the ERROR lines of logs said in the documented form of a
@@ -88,7 +102,7 @@ func TestRunTestSet_ACallBetweenTwoTestsFailsTheSetAndNoTest(t *testing.T) {
 		"test-set": "test-set-0", "protocol": "Mongo", "call": "delete on sessions", "destination": "mongo:27017",
 		"after": "test-1", "before": "test-2", "closest": "", "made_in": "",
 		"facts":     "no recording of this call in the set",
-		"next_step": `record the test set again: keploy record -c "go run ./cmd/api"`,
+		"next_step": "record the test set again in its place: " + recordAgainOf(h, "test-set-0"),
 	} {
 		if got := f[k]; got != want {
 			t.Errorf("line field %s = %v; want %q", k, got, want)
@@ -128,7 +142,7 @@ func TestRunTestSet_ACallBetweenTestsNamesItsClosestRecordingsFields(t *testing.
 	if got := f["facts"]; got != "the closest recording is mock-7, which it differs from in body.items[0].qty" {
 		t.Errorf("facts %v", got)
 	}
-	if got := f["next_step"]; got != `if the application changed this call on purpose, record the test set again: keploy record -c "go run ./cmd/api"` {
+	if got := f["next_step"]; got != "if the application changed this call on purpose, record the test set again in its place: "+recordAgainOf(h, "test-set-0") {
 		t.Errorf("next_step %v", got)
 	}
 }
@@ -233,8 +247,11 @@ func TestSetCallsPlaceACallBetweenTestsByTheReads(t *testing.T) {
 	if w := betweenWhere(s.failing()[0]); w != "made before test test-1 began" {
 		t.Fatalf("where %q", w)
 	}
-	if got := recordAgainCommand(""); got != "keploy record" {
-		t.Fatalf("record command with no app command %q", got)
+	if got := (&Replayer{}).recordAgainCommand("test-set-0"); got != "" {
+		t.Fatalf("record command with no config %q; want none", got)
+	}
+	if got := betweenNextStep(models.UnmatchedCall{ClosestMock: "mock-1"}, ""); got != "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call" {
+		t.Fatalf("next step with no command %q; want the earlier set's", got)
 	}
 }
 
@@ -306,10 +323,10 @@ func TestRunTestSet_ALateInTestMissFailsTheSetNamedUnderItsTest(t *testing.T) {
 	}
 	for i, want := range []map[string]string{
 		{"protocol": "Mongo", "call": "find on carts", "made_in": "test-1", "after": "test-1", "before": "test-2", "closest": "",
-			"facts": "no recording of this call in the set", "next_step": `record the test set again: keploy record -c "go run ./cmd/api"`},
+			"facts": "no recording of this call in the set", "next_step": "record the test set again in its place: " + recordAgainOf(h, "test-set-0")},
 		{"protocol": "HTTP", "call": "POST /charge", "made_in": "test-1", "after": "test-2", "before": "test-3", "closest": "mock-2",
 			"facts":     "the closest recording is mock-2, which it differs from in body.qty",
-			"next_step": `if the application changed this call on purpose, record the test set again: keploy record -c "go run ./cmd/api"`},
+			"next_step": "if the application changed this call on purpose, record the test set again in its place: " + recordAgainOf(h, "test-set-0")},
 	} {
 		if !strings.Contains(lines[i].Message, "decided it only after that test ended") {
 			t.Errorf("line %d says %q; want the late in-test form", i, lines[i].Message)
