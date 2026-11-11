@@ -1834,6 +1834,24 @@ type WindowPacer interface {
 	StagingEpoch() uint64
 }
 
+// WindowRewindCounter is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it) for a WindowPacer consumer that must tell
+// a replay going back to an earlier recorded window (a retry cycle, the
+// deferred streaming tests) from one moving on, however many window changes
+// it did not wake for in between.
+//
+//   - WindowRewinds counts the test-window changes whose start went back to
+//     before the start set before them, within one staging. It never goes
+//     down; a window set again at the same start is not counted.
+//
+// Read it with the state WindowChanged guards: take the channel, read the
+// count, the window and the trees, and read again if the channel closed
+// meanwhile. A store that wraps another without the facet reports zero, so a
+// consumer still treats a window start that went back as a rewind.
+type WindowRewindCounter interface {
+	WindowRewinds() uint64
+}
+
 // SetEndFiler is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
 // MockManager implements it) for a parser that holds a call for a test window
 // that has not opened yet, past the call's own window: a consumer's poll whose
