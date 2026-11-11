@@ -176,6 +176,86 @@ func TestLearnMatchBindsAtACallThatSentTheIdWholeBeforeTheClaim(t *testing.T) {
 	}
 }
 
+// TestLearnMatchBindsAtAWholeClientBodyAnEarlierTokenCarried: in an earlier
+// test the application sent a token it minted, which holds a new cluster's
+// id in a claim, to an auth check; the next client test sends the id whole
+// in its request body, and the find carries it whole. The earlier call sent
+// the id only inside a longer value, which binds nothing, and a call's
+// token's claim is no bind place: it never hides the test case's body. The
+// find is served, its id bound at the test case's body.cluster_id, where the
+// test case's request reads this run's id (RequestPlace), and nothing is
+// bound at the earlier call.
+func TestLearnMatchBindsAtAWholeClientBodyAnEarlierTokenCarried(t *testing.T) {
+	const recID, fullID = "6af47add8a9351dfdb7c457a", "6af47b1e0c22d4e8a91b03f6"
+	recTok := callBearer(`{"cid":"e2e-free-company","cluster_id":"`+recID+`"}`, "recorded-signature")
+	liveTok := callBearer(`{"cid":"e2e-free-company","cluster_id":"`+fullID+`"}`, "this-run-signature")
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.NewSet()
+	tr.SetClientTests(true)
+	ctx := learn.WithTracker(context.Background(), tr)
+	sent := time.Now()
+	clientTest := func(name, url, recBody, liveBody string, recAt, at time.Time) *models.HTTPReq {
+		rec := &models.HTTPReq{Method: "POST", URL: "http://localhost:8083" + url, Timestamp: recAt,
+			Header: map[string]string{"Content-Type": "application/json"}, Body: recBody}
+		l := *rec
+		l.Body, l.Timestamp = liveBody, at
+		tr.SetCases([]learn.ClientCase{{Name: name, Req: rec}})
+		if !tr.Incoming(&l, "", at) {
+			t.Fatalf("the run's request to %s paired with none of the test's recorded requests", url)
+		}
+		return rec
+	}
+	tr.Begin()
+	clientTest("post-cluster-login-1", "/cluster/login", `{"cluster_name":"e2e-old-proxy"}`, `{"cluster_name":"e2e-old-proxy"}`, learnAt.Add(-time.Second), sent)
+	a := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "GET", "/v1/auth/verify", "", map[string]string{"Authorization": recTok}, `{"ok":true}`),
+	}}
+	in0 := live("GET", "/v1/auth/verify", "", map[string]string{"Authorization": liveTok})
+	in0.arrived = sent.Add(time.Millisecond)
+	if s0, m0, _ := h.learnMatch(ctx, in0, a, n, opts); s0 == nil || m0 != nil {
+		t.Fatalf("the earlier test's auth check: served %v, miss %+v", s0 != nil, m0)
+	}
+	tr.End()
+	tr.Begin()
+	body := func(id string) string { return `{"cluster_id":"` + id + `","status":"active"}` }
+	recReq := clientTest("post-cluster-status-3", "/cluster/status", body(recID), body(fullID), learnAt.Add(time.Second), sent.Add(time.Second))
+	liveReq := *recReq
+	liveReq.Body = body(fullID)
+	b := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-1", 2*time.Second, "POST", "/v1/clusters/find", `{"filter":{"_id":"`+recID+`"}}`, nil, `{"found":1}`),
+	}}
+	in1 := live("POST", "/v1/clusters/find", `{"filter":{"_id":"`+fullID+`"}}`, nil)
+	in1.arrived = sent.Add(time.Second + 2*time.Millisecond)
+	if s1, m1, _ := h.learnMatch(ctx, in1, b, n, opts); s1 == nil || m1 != nil {
+		t.Fatalf("the find: served %v, miss %+v; want it served, bound at the test case's body.cluster_id", s1 != nil, m1)
+	}
+	tr.End()
+	var found bool
+	for _, c := range append(append([]models.Mock{}, a.consumed...), b.consumed...) {
+		for target, vs := range c.Spec.LearnedBinds() {
+			for _, v := range vs {
+				if target == "mock-0" {
+					t.Fatalf("%s binds %+v at mock-0, which sent the id only inside a longer value", c.Name, v)
+				}
+				if c.Name != "mock-1" || v.Recorded != recID {
+					continue
+				}
+				if target != "test case post-cluster-status-3" || v.Bind != "body.cluster_id" {
+					t.Fatalf("the find binds the id at %s %s; want the test case's body.cluster_id, which sent it whole", target, v.Bind)
+				}
+				if got, why := RequestPlace(recReq, &liveReq, v.Bind, v.Recorded); got != fullID || why != "" {
+					t.Fatalf("the test case's request reads %q (%q) at %s; want this run's %s", got, why, v.Bind, fullID)
+				}
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the find binds no id at the test case: %+v", b.consumed)
+	}
+}
+
 // TestSentTextIsTheRecordedLeafOfThatMocksRequest: a refusal reads the
 // claim in the text the named mock's request was recorded with at the
 // path: not another mock's, not an answer's, not another leaf's.

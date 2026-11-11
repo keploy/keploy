@@ -3873,15 +3873,17 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// The place is where the value was sent whole, not where it was answered
 	// or sent inside a longer value (a variable is bound where the
 	// application sent it, whole): the test's own call that sent it first,
-	// else the run's, else another's; then the same inside a longer value;
-	// an answer that gave it only when no call sent it. Earliest within each.
+	// else the run's, else another's; then a client test's request that sent
+	// it whole; then a call inside a longer value, in the same order; an
+	// answer that gave it only when no call sent it. Earliest within each.
 	// A client test's request whose JWT claim holds the value (Place.Claim)
 	// is a place to bind it, ranked after a call that sent it whole and
-	// before one that sent it inside a longer value, which binds nothing:
+	// before the test's request that sent it whole (clientWholeRank), so
+	// before a call that sent it inside a longer value, which binds nothing:
 	// such a call (an auth check, a forwarded token) never hides the claim.
 	// rank is twice placeRank's, so the claim's rank lies between the two.
 	var best Place
-	rank := 14
+	rank := 2 * noPlaceRank
 	for _, e := range served {
 		for _, s := range e.Seen {
 			// A place F saw hold its recorded value did not drift: the
@@ -3908,7 +3910,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			p, r := seenPlace(e, s, whole), 2*placeRank(e, s, whole)
 			if !whole {
 				if p.Claim = claimAt(p, s.Leaf.Value, s.Live, recorded, v.live); p.Claim != "" {
-					r = 2*placeRank(Earlier{Own: true}, Seen{Side: Request}, false) - 1
+					r = 2*clientWholeRank - 1
 				}
 			}
 			if r < rank {
@@ -3925,7 +3927,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 		}
 	}
-	if rank < 14 {
+	if rank < 2*noPlaceRank {
 		return best, true
 	}
 	// No other rule reads a value the test gave (classifyRead).
@@ -4148,7 +4150,7 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 		return Place{}, false
 	}
 	var best Place
-	rank := 7
+	rank := noPlaceRank
 	for _, e := range served {
 		for _, s := range e.Seen {
 			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
@@ -4161,7 +4163,7 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 			}
 		}
 	}
-	return best, rank < 7
+	return best, rank < noPlaceRank
 }
 
 // echoRaw is the place of payload x that holds the recorded moment of one of
@@ -4367,20 +4369,30 @@ func partOf(value, part string) string {
 
 // placeRank orders the places a value may have come from (appearedIn): the
 // request that sent it whole first, the test's own call before the run's,
-// the run's before another's; then the same inside a longer value; then an
-// answer, or the test case's own request, the earlier first. A place that
-// uses the run's variable (Seen.Name) is none (7): its value came from the
-// run's place that binds it, which a later call uses too, never a second
-// variable bound at the use.
+// the run's before another's; then a client test's request that sent it
+// whole, where its test case binds it (clientWholeRank); then a call that
+// sent it inside a longer value, in the same order; then an answer, or the
+// test case's own request, the earlier first. A place that uses the run's
+// variable (Seen.Name) is none (noPlaceRank): its value came from the run's
+// place that binds it, which a later call uses too, never a second variable
+// bound at the use.
 func placeRank(e Earlier, s Seen, whole bool) int {
 	if models.RunVariable(s.Name) {
-		return 7
+		return noPlaceRank
+	}
+	// A client test's request that sent the value whole binds it at the
+	// place a replay reads in the request that pairs with its test case
+	// (seenVar), whoever made the value. A call that sent it inside a
+	// longer value (an auth check, a forwarded token) binds nothing there
+	// (Place.BindAt): it never hides the place that binds the value.
+	if e.incoming && whole && seenVar(e, s) != "" {
+		return clientWholeRank
 	}
 	// The test case's own request is what the application was given, as an
 	// answer is: a call that sent the value, where it can be bound, is
 	// named before it.
 	if s.Side != Request || e.Given {
-		return 6
+		return noPlaceRank - 1
 	}
 	r := 2
 	switch {
@@ -4390,10 +4402,20 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 		r = 1
 	}
 	if !whole {
-		r += 3
+		r += clientWholeRank + 1
 	}
 	return r
 }
+
+// clientWholeRank is placeRank's of a client test's request that sent the
+// value whole where its test case binds it: after every call that sent it
+// whole (0 to 2), before every call that sent it inside a longer value.
+// noPlaceRank is placeRank's of a place that uses the run's variable, which
+// is no place: a search starts at it and names a place only below it.
+const (
+	clientWholeRank = 3
+	noPlaceRank     = 8
+)
 
 // withoutGave is earlier without the values the test gave keploy
 // (Earlier.Gave), earlier itself where it holds none: what every rule but

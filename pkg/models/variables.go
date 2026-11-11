@@ -346,12 +346,20 @@ type ClockOffset struct {
 	// any value of this form, whatever instant it names, with no range, cut,
 	// zone or provenance checked (learn's TimeForm names it: the decoder's
 	// type, and the text's layout with every digit and letter abstracted, so
-	// an epoch keeps its unit and a text its field order, separators, zone
-	// form and whether it writes a fraction of a second). "" checks the read
+	// an epoch keeps its unit and a text its field order, separators and zone
+	// form; a fraction of a second is no part of a form). "" checks the read
 	// by every field above, as before the default was. Two learnings of one
-	// place in two forms meet as FormApart, which Empty refuses; one with a
-	// Form and one without meet as the one without (its checks).
+	// place meet with the forms both checked by (Meet): FormApart, which
+	// Empty refuses, where they share none; one with a Form and one without
+	// meet as the one without (its checks).
 	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
+	// FormF, set only beside a Form, is the second form of a time whose two
+	// record runs wrote it in two: a replay passes a value written in either
+	// (WrittenAs), never checking its range. The two stand in one order, the
+	// lesser in Form (FormsOf), so learnings that saw the same two forms
+	// hold one offset, whichever run wrote which. "" where both runs wrote
+	// one form.
+	FormF string `json:"form_f,omitempty" yaml:"form_f,omitempty" bson:"form_f,omitempty"`
 	// Claim, of a time the learn step read as the value whole of one claim
 	// of a JWT its place holds (a token the application signed and sent),
 	// names that claim: a replay opens the JWT its call carries there and
@@ -1685,20 +1693,66 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 		// either zone held, met with one in UTC) names none.
 		m.AppZone = ""
 	}
-	// A form both learnings checked by is kept; two forms are no one form
-	// (FormApart); one learning that checked the read by its range keeps
-	// that check (Form ""), the stricter of the two.
+	// The forms both learnings checked by are kept: of a learning that
+	// passes two (FormF) and one that passes one of them, that one, the
+	// stricter. Two that share none are no one check (FormApart; a meet
+	// that was apart shares none, as no time's form is FormApart). One
+	// learning that checked the read by its range keeps that check (Form
+	// ""), the stricter of the two.
 	switch {
-	case o.Form == p.Form:
-		m.Form = o.Form
-	case o.Form != "" && p.Form != "":
-		m.Form = FormApart
+	case o.Form == "" || p.Form == "":
+	default:
+		var both []string
+		for _, f := range []string{o.Form, o.FormF} {
+			if p.WrittenAs(f) {
+				both = append(both, f)
+			}
+		}
+		switch len(both) {
+		case 0:
+			m.Form = FormApart
+		case 1:
+			m.Form = both[0]
+		default:
+			m.Form, m.FormF = FormsOf(both[0], both[1])
+		}
 	}
 	return m
 }
 
-// FormApart is the Form of a Meet of two learnings of one place that saw
-// it written in two forms (ClockOffset.Form): Empty refuses it.
+// FormsOf is the Form and FormF of a time two record runs wrote in forms a
+// and b (learn's TimeForm): the one form where a and b are one, else the
+// two, the lesser first, so that two learnings of one place that saw the
+// same two forms hold one ClockOffset whichever run wrote which (Meet is
+// the same in either order).
+func FormsOf(a, b string) (form, formF string) {
+	switch {
+	case a == b:
+		return a, ""
+	case b < a:
+		return b, a
+	}
+	return a, b
+}
+
+// WrittenAs reports whether form, a time's form (learn's TimeForm), is one
+// o's time default checks by: its Form, or FormF beside it. False for "",
+// which names no time.
+func (o ClockOffset) WrittenAs(form string) bool {
+	return form != "" && (form == o.Form || form == o.FormF)
+}
+
+// Forms is how a message names the forms o checks by: its Form, or "Form
+// or FormF".
+func (o ClockOffset) Forms() string {
+	if o.FormF == "" {
+		return o.Form
+	}
+	return o.Form + " or " + o.FormF
+}
+
+// FormApart is the Form of a Meet of two learnings of one place that share
+// no form (ClockOffset.Form, FormF): Empty refuses it.
 const FormApart = "apart"
 
 // Empty reports whether o is the Meet of learnings of one place that share
@@ -2192,6 +2246,12 @@ type VariableBinding struct {
 	// (MockVariable.Minted): the table binds it only to a value that is
 	// new and keeps that shape (variables.MintedWhy).
 	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty"`
+	// Call marks a binding of this call alone (an echo, MockVariable.Echo:
+	// a recording no test owns that each serve mints a value at anew). The
+	// table never binds its name in a scope; a minted one's value is still
+	// checked against the run's minted values and kept among them, so a
+	// later reuse of it is refused (variables.Table.BindAll).
+	Call bool `json:"call,omitempty" yaml:"call,omitempty"`
 	// WordRun is, for a binding at a word of a value (a word address), the
 	// value span its word is in: the words its call binds at consecutive
 	// words of that text, its own among them, that hold one value (a

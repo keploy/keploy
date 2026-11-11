@@ -54,6 +54,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		defer close(errCh)
 		defer integrations.RecoverIntoCtx(ctx, h.Logger, clientConn, nil, errCh)
+		// chain is the once chain this connection began, if any: its next
+		// recording answers the connection's next call ahead of any other
+		// (chainNext).
+		var chain integrations.OnceChainOnConn
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
@@ -105,6 +109,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// 	return req, err
 			// }
 			request.Header.Set("Host", request.Host)
+
+			// The recording a once chain this connection began names next
+			// (integrations.OnceChainOnConn): this call's to be answered
+			// with, ahead of any other, when it is that call (chainNext).
+			// Taken, the chain ends here unless this call's answer carries
+			// it on (chain.Answered, after the match): a call passed
+			// through, answered by no recording or by another ends it.
+			follow, followSeries := chain.Take()
 
 			// A bypassRule that names this call (its host, path and port)
 			// passes it to its server, and the server's answer back, unmocked.
@@ -441,20 +453,33 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// replay stages another set, the request finds nothing
 					// to be answered with, and misses saying so.
 					db, _ = integrations.HoldToRound(mockDb, call)
-					// A call one of the open test's own recordings is,
-					// answered or not (ownCall), is read with the set's
-					// background hidden once the background is about to
-					// answer it: no pool or worker recording answers a call
-					// one more than the test recorded, which then misses as
-					// such (extraCall), its background copy left unspent,
-					// even when two of them are made at once. A call the
-					// test's own recordings answer never asks.
-					held := db
-					db = integrations.OwnRepeatRead(db, call, func() bool {
-						return h.ownCall(reqCtx, input, held, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
-					})
-					stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(mockDb), opts)
-					ok = stub != nil
+					// On a connection whose once chain is in progress, the
+					// chain's next recording answers the call first when the
+					// call is that recording, whatever the open test owns of
+					// it, and a line says the chain decided it (chainNext).
+					if follow != "" {
+						stub, err = h.chainNext(reqCtx, input, db, chainCall{next: follow, series: followSeries, call: request.Method + " " + utils.URLPathShape(input.url)},
+							h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), func() bool {
+								return h.ownCall(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
+							})
+						ok = stub != nil
+					}
+					if !ok && err == nil {
+						// A call one of the open test's own recordings is,
+						// answered or not (ownCall), is read with the set's
+						// background hidden once the background is about to
+						// answer it: no pool or worker recording answers a
+						// call one more than the test recorded, which then
+						// misses as such (extraCall), its background copy left
+						// unspent, even when two of them are made at once. A
+						// call the test's own recordings answer never asks.
+						held := db
+						db = integrations.OwnRepeatRead(db, call, func() bool {
+							return h.ownCall(reqCtx, input, held, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
+						})
+						stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(mockDb), opts)
+						ok = stub != nil
+					}
 				}
 				if !ok && err == nil {
 					// Under the switch the learn step of record's full round
@@ -763,6 +788,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- errors.New("matched mock is nil")
 				return
 			}
+
+			// A once series' first recording begins its chain on this
+			// connection, and the recording the chain named carries it on
+			// (integrations.OnceChainOnConn); any other answer, and a call
+			// that ended above, leave it ended.
+			chain.Answered(mockDb, stub.Name, follow)
 
 			// A mock whose call ended in a fault gets the fault, as the
 			// upstream gave it (serveFault), not its head as a whole answer.

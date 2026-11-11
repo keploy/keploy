@@ -30,6 +30,10 @@ func TestAppRunsOnOffLinuxReadsTheCommandsGroup(t *testing.T) {
 		models.SetupOptions{CommandType: string(utils.Native)})
 	require.False(t, appRunsOn(zap.NewNop(), ap), "an app not run yet runs on")
 
+	// Registered before the run, so a require that fails anywhere below
+	// still kills the sleep the command leaves.
+	t.Cleanup(func() { killLeftSleep(pidFile) })
+
 	appErr := ap.Run(context.Background())
 	require.Equal(t, models.ErrAppStopped, appErr.AppErrorType, "%v", appErr.Err)
 	raw, err := os.ReadFile(pidFile)
@@ -38,7 +42,8 @@ func TestAppRunsOnOffLinuxReadsTheCommandsGroup(t *testing.T) {
 	require.NoError(t, err)
 	pgid, err := syscall.Getpgid(pid)
 	require.NoError(t, err, "the sleep the command left is gone")
-	t.Cleanup(func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
+	require.True(t, pgid > 1 && pgid != syscall.Getpgrp(),
+		"the sleep runs in group %d, this test's own or none: the native command was not given a group of its own", pgid)
 
 	require.True(t, appRunsOn(zap.NewNop(), ap),
 		"the command exited and left a sleep in its group: the run would stop the app without waiting")
@@ -52,4 +57,29 @@ func TestAppRunsOnOffLinuxReadsTheCommandsGroup(t *testing.T) {
 	require.NoError(t, syscall.Kill(-pgid, syscall.SIGKILL))
 	require.Eventually(t, func() bool { return !appRunsOn(zap.NewNop(), ap) }, 10*time.Second, 20*time.Millisecond,
 		"the app runs on after its group was killed")
+}
+
+// killLeftSleep kills the sleep whose pid a command wrote to path, if it
+// still runs: its whole process group when that group is its own, and the
+// sleep alone otherwise. It never signals this test's own group: a native
+// command that lost its Setpgid leaves the sleep in go test's group, where a
+// group kill would kill go test.
+func killLeftSleep(path string) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 1 {
+		return
+	}
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		return
+	}
+	if pgid > 1 && pgid != syscall.Getpgrp() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
 }

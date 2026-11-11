@@ -187,7 +187,7 @@ func ReplayClocks(sources []models.DeclaredSource, learned map[string]models.Clo
 		switch {
 		case ok && !isInstant(rec):
 			delete(out, k) // compares as recorded
-		case timeForm && ok && !(strings.HasPrefix(leafLayout(rec), "epoch-") && !nearSpan(rec, span)):
+		case timeForm && ok && (!strings.HasPrefix(leafLayout(rec), "epoch-") || nearSpan(rec, span)):
 			out[k] = models.ClockOffset{Form: TimeForm(rec)} // an instant has a form
 		case RangeNeverChecked(off):
 			delete(out, k)

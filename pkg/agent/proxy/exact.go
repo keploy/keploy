@@ -2136,6 +2136,32 @@ func (s *seriesIndex) once(name string) bool {
 	return s != nil && s.of[name].once
 }
 
+var _ integrations.OnceChains = (*MockManager)(nil)
+
+// OnceLink implements integrations.OnceChains: where the recording named
+// name stands in its once series (SetPoolOnce, SetPoolSeries), in
+// placement order, which is a declared chain's order on its connection and
+// then the covered call's. false for a recording of no once series.
+func (m *MockManager) OnceLink(name string) (integrations.OnceLink, bool) {
+	return m.exact.poolSeries.Load().link(name)
+}
+
+// link is OnceLink of s.
+func (s *seriesIndex) link(name string) (integrations.OnceLink, bool) {
+	if !s.once(name) {
+		return integrations.OnceLink{}, false
+	}
+	// SetPoolSeries files a name in of only with its series' members.
+	id := s.of[name].id
+	names := s.members[id]
+	i := slices.Index(names, name)
+	l := integrations.OnceLink{Series: id, First: i == 0}
+	if i+1 < len(names) {
+		l.Next = names[i+1]
+	}
+	return l, true
+}
+
 // has reports whether name is a recording of a series of s.
 func (s *seriesIndex) has(name string) bool {
 	if s == nil {

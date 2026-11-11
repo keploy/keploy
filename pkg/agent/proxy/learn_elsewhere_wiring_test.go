@@ -29,6 +29,7 @@ func TestAClockReadTaughtAcrossWindowsReachesTheMockOnDiskWhole(t *testing.T) {
 		Why: "name reads the clock: the rule, both values and the undo", Step: time.Hour, Phase: 30 * time.Minute,
 		WallWord: models.ClockWordOf(name, len("[E2E] stop-"), len(name)-2),
 		Form:     "text 9999999999999999999",
+		FormF:    "typed 9999-99-99a99:99:99a",
 	}
 	fields := reflect.ValueOf(whole)
 	for i := 0; i < fields.NumField(); i++ {

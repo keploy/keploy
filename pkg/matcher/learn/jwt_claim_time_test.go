@@ -101,6 +101,26 @@ func TestDecideATimeInAClaimOfASignedTokenIsCheckedByItsFormAtTheClaim(t *testin
 		}
 	}
 	oRefused(t, "a time that is one word of a longer claim", oWord(t, ds, secs(rRead), secs(fRead)), "cannot-check", "a part of the text keploy opened")
+	// The two runs write auth_time in two forms (seconds, then milliseconds):
+	// a replay passes either, at the claim.
+	ms := func(t time.Time) string { return strconv.FormatInt(t.UnixMilli(), 10) }
+	two := func(at time.Time, s string) string {
+		return signedToken(`{"sub":"u-1","auth_time":`+s+`,"jti":"`+secs(at)+`x"}`, "sig-"+secs(at))
+	}
+	rec2, live2 := two(rRead, secs(rRead)), two(fRead, ms(fRead))
+	ds = decide(true, true, rec2, live2)
+	d := oWord(t, ds, secs(rRead), ms(fRead))
+	msForm := TimeForm(Leaf{Type: Number, Value: ms(fRead)})
+	wantF, wantFF := models.FormsOf(form, msForm)
+	if d.Outcome != OutcomeClock || d.Clock == nil || d.Clock.Claim != "auth_time" || d.Clock.Form != wantF || d.Clock.FormF != wantFF {
+		t.Fatalf("auth_time in seconds, then in milliseconds: %s; want a Clock at the claim checked by either form (%q, %q)", oDescribe(ds), wantF, wantFF)
+	}
+	if !HoldsClaimByForm(*d.Clock, rec2, true) || !HoldsClaimByForm(*d.Clock, live2, true) {
+		t.Error("a token of either recorded form fails the claim's check by form")
+	}
+	if HoldsClaimByForm(*d.Clock, two(fRead, `"`+secs(fRead)+`"`), true) {
+		t.Error("FALSE GREEN? a string claim passes a check by two number forms")
+	}
 }
 
 // A replay checks a time in a claim by the claim's form in round F's token
@@ -112,6 +132,7 @@ func TestHoldsClaimByFormReadsTheClaimOfTheLiveToken(t *testing.T) {
 	sec := strconv.FormatInt(at.Unix(), 10)
 	form := TimeForm(Leaf{Type: Number, Value: sec})
 	o := models.ClockOffset{Form: form, Claim: "exp"}
+	msForm := TimeForm(Leaf{Type: Number, Value: strconv.FormatInt(at.UnixMilli(), 10)})
 	tok := func(exp string) string { return signedToken(`{"sub":"u-1","exp":`+exp+`}`, "sig") }
 	for _, tc := range []struct {
 		what     string
@@ -131,6 +152,9 @@ func TestHoldsClaimByFormReadsTheClaimOfTheLiveToken(t *testing.T) {
 		{"no claim learned", models.ClockOffset{Form: form}, tok(sec), true, false},
 		{"no form learned", models.ClockOffset{Claim: "exp"}, tok(sec), true, false},
 		{"a word's check", models.ClockOffset{Form: form, Claim: "exp", Word: models.ClockWord{Start: 1, End: 2}}, tok(sec), true, false},
+		{"either of two forms: the second", models.ClockOffset{Form: form, FormF: msForm, Claim: "exp"}, tok(strconv.FormatInt(at.UnixMilli(), 10)), true, true},
+		{"either of two forms: the first", models.ClockOffset{Form: form, FormF: msForm, Claim: "exp"}, tok(sec), true, true},
+		{"either of two forms: neither", models.ClockOffset{Form: form, FormF: msForm, Claim: "exp"}, tok(`"` + sec + `"`), true, false},
 	} {
 		if got := HoldsClaimByForm(tc.o, tc.live, tc.timeForm); got != tc.want {
 			t.Errorf("%s: HoldsClaimByForm %v; want %v", tc.what, got, tc.want)
