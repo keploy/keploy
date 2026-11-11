@@ -13,11 +13,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// Each move's Rule and Series (the declared rule that placed the entry, and
-// the series of one canonical request it answers in) are written on the
+// Each move's Rule, Series and Read (the declared rule that placed the entry,
+// the series of one canonical request it answers in, and whether that
+// request only reads) are written on the
 // entry it moves or places as given, with or without the proven switch, as
 // its Trails is: a move that names none leaves a placed entry none. Every
-// later rewrite of mappings.yaml keeps both, and the set's rules digest
+// later rewrite of mappings.yaml keeps them, and the set's rules digest
 // (SetRules) with them.
 func TestMoveToWorkerWritesRuleAndSeries(t *testing.T) {
 	for _, sw := range []string{"1", ""} {
@@ -27,14 +28,15 @@ func TestMoveToWorkerWritesRuleAndSeries(t *testing.T) {
 				ctx := context.Background()
 				db := NewWithFormat(zap.NewNop(), t.TempDir(), "mappings", format)
 				m := goldenMapping()
-				m.Worker[0].Rule, m.Worker[0].Series = "r-old@00000000", "r-old/-/0" // mock-2: placed again by a move that names none
-				m.Worker[1].Rule, m.Worker[1].Series = "r-bg@0badcafe", "r-bg/-/0"   // mock-5: no move names it
+				m.Worker[0].Rule, m.Worker[0].Series, m.Worker[0].Read = "r-old@00000000", "r-old/-/0", true // mock-2: placed again by a move that names none
+				m.Worker[1].Rule, m.Worker[1].Series, m.Worker[1].Read = "r-bg@0badcafe", "r-bg/-/0", true   // mock-5: no move names it
 				if err := db.Insert(ctx, m); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := db.MoveToWorker(ctx, "test-set-0", []models.MockEntry{
 					{Name: "mock-7", Place: "post-url-0", Trails: "post-url-0", Rule: "cleanup@3f2a91c0", Series: "cleanup/post-url-0/0", Reason: "trailing from post-url-0"},
 					{Name: "mock-2"},
+					{Name: "mock-6", Place: "post-url-0", Rule: "seen@44aa55bb", Series: "seen/-/0", Read: true},
 				}); err != nil {
 					t.Fatal(err)
 				}
@@ -60,12 +62,16 @@ func TestMoveToWorkerWritesRuleAndSeries(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				type marks struct{ rule, series string }
+				type marks struct {
+					rule, series string
+					read         bool
+				}
 				want := map[string]marks{
-					"mock-7": {"cleanup@3f2a91c0", "cleanup/post-url-0/0"},
+					"mock-7": {"cleanup@3f2a91c0", "cleanup/post-url-0/0", false},
 					"mock-2": {},
-					"mock-5": {"r-bg@0badcafe", "r-bg/-/0"},
+					"mock-5": {"r-bg@0badcafe", "r-bg/-/0", true},
 					"mock-3": {},
+					"mock-6": {"seen@44aa55bb", "seen/-/0", true},
 				}
 				seen := map[string]bool{}
 				for _, e := range got.Worker {
@@ -74,8 +80,8 @@ func TestMoveToWorkerWritesRuleAndSeries(t *testing.T) {
 					if !ok {
 						continue
 					}
-					if e.Rule != w.rule || e.Series != w.series {
-						t.Errorf("worker entry %s has rule %q series %q after the rewrites; want %q %q", e.Name, e.Rule, e.Series, w.rule, w.series)
+					if e.Rule != w.rule || e.Series != w.series || e.Read != w.read {
+						t.Errorf("worker entry %s has rule %q series %q read %v after the rewrites; want %q %q %v", e.Name, e.Rule, e.Series, e.Read, w.rule, w.series, w.read)
 					}
 				}
 				for name := range want {

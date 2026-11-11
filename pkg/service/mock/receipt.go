@@ -65,11 +65,6 @@ const (
 	// (models.ScopeWindow.BeginRefused), and the test fails whatever its
 	// harness did next.
 	FailedByBeginRefused = "begin_refused"
-	// FailedByTrailUnmade: under the proven switch, a recording a trail move
-	// put in the worker scope (models.MockEntry.Trails) was never used in a
-	// run of the test it trails, which fails that test, or whether it was
-	// used could not be read, which leaves that test unread.
-	FailedByTrailUnmade = "trail_unmade"
 	// FailedByRuleNotMade: under the proven switch, a series a declared rule
 	// placed in the worker scope (models.MockEntry.Series) was due and the
 	// run never answered it (Receipt.RequiredNotMade), or whether it did

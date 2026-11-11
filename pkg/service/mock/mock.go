@@ -78,11 +78,6 @@ type mockService struct {
 	// past such a read (models.RepeatNote.SkippedRead), its test
 	// (withSkippedTest).
 	skippedReadOf map[string]string
-	// trails is, under the proven switch, each recording of the worker scope
-	// a trail move put there (models.MockEntry.Trails), with the test it
-	// trails, as pushProvenTable read the set's mappings: each is required
-	// once per run of that test (unmadeTrails).
-	trails map[string]string
 	// series is, under the proven switch, each series a declared rule
 	// placed in the worker scope (models.MockEntry.Series), as
 	// pushProvenTable read the set's mappings: each is required once per run

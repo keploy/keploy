@@ -23,6 +23,9 @@ type seriesDue struct {
 	// test after whose beginning the run reaches it; empty for the set's
 	// start.
 	Place string
+	// write is whether an entry of the series does not say it reads
+	// (models.MockEntry.Read): such a series is required.
+	write bool
 }
 
 // RequiredNotMade is a series a declared rule placed in the worker scope that
@@ -46,9 +49,12 @@ type RequiredNotMade struct {
 // cannot serve is never used). A series is one requirement however many
 // recordings it has: the application repeats its call a number of times that
 // depends on how long the run takes (a sweep that runs every minute), and
-// one answered recording makes the series. A series trailing a test that is
-// not one of table's, the set's, is never due and is left out, as
-// requiredTrails leaves such a trail out. nil when no entry has a series.
+// one answered recording makes the series. Only a series of a write is
+// required: one every entry of which says it reads (models.MockEntry.Read)
+// is served, not required, as every read is, and is left out; one entry
+// without it makes its series required. A series trailing a test that is
+// not one of table's, the set's, is never due and is left out. nil when no
+// entry has a required series.
 func requiredSeries(mp *models.Mapping, table map[string][]string) map[string]seriesDue {
 	if mp == nil {
 		return nil
@@ -69,7 +75,12 @@ func requiredSeries(mp *models.Mapping, table map[string][]string) map[string]se
 			s = seriesDue{Rule: e.Rule, Trails: e.Trails, Place: e.Place}
 		}
 		s.Names = append(s.Names, e.Name)
+		s.write = s.write || !e.Read
 		out[e.Series] = s
+	}
+	maps.DeleteFunc(out, func(_ string, s seriesDue) bool { return !s.write })
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

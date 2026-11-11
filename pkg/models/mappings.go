@@ -114,6 +114,14 @@ type MockEntry struct {
 	// (models.ScopeTableReq.Series, RequiredSeries). Empty when Rule is,
 	// and kept as Rule is.
 	Series string `json:"series,omitempty" yaml:"series,omitempty" bson:"series,omitempty"`
+	// Read is, on an entry of a Series, that keploy mock record judged the
+	// series' request to read only (no insert, update, delete or other
+	// write): keploy mock replay serves it as any series and requires it
+	// never, as it serves every read and requires none. False, the default
+	// an entry without the key reads as, requires the series once per run
+	// when it is due, so a series is required unless every entry of it says
+	// read. Kept as Series is.
+	Read bool `json:"read,omitempty" yaml:"read,omitempty" bson:"read,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy's
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's
