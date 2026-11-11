@@ -1220,6 +1220,28 @@ func BackgroundRecordingsOf(db MockMemDb, kind models.Kind) []models.BackgroundR
 	return nil
 }
 
+// RoundBackgroundReader is an optional MockMemDb capability: the background
+// recordings of kind (BackgroundRecordingReader) of the set the call was
+// marked in (call, from MarkCallRound), not of the set staged when its miss
+// is decided: the replay can stage the next set first, and the next set's
+// recordings tell nothing of a call of the set before it. nil when that set
+// has none, or when the call was marked in a staging older than the store
+// keeps (the call is then read as no background call, and counts); the
+// current set's for the zero CallRound (a store that marks no round).
+type RoundBackgroundReader interface {
+	BackgroundRecordingsIn(call CallRound, kind models.Kind) []models.BackgroundRecording
+}
+
+// BackgroundRecordingsAt is db's background recordings of kind of the set
+// call was marked in (RoundBackgroundReader); of a store that keeps no
+// earlier set's, those of the set staged now (BackgroundRecordingsOf).
+func BackgroundRecordingsAt(db MockMemDb, call CallRound, kind models.Kind) []models.BackgroundRecording {
+	if r, ok := db.(RoundBackgroundReader); ok {
+		return r.BackgroundRecordingsIn(call, kind)
+	}
+	return BackgroundRecordingsOf(db, kind)
+}
+
 // LearnEnder is an optional MockMemDb capability: whether the test set's
 // learn step has ended (models.MockFilterParams.LearnEnded). keploy replay's
 // mock-consistency retry cycles run the passing test cases again, test-1
