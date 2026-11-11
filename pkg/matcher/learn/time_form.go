@@ -39,10 +39,15 @@ import (
 // refusal only where both sources are reads of the clock. A Value, a Fresh
 // value and every other refusal stay as learned: a moment an earlier answer
 // or request also holds (pick, unknown, two sources that are no reads) is a
-// bound value, which variables decide, never the time default. A value whose
-// two runs write it in two forms, or in no form keploy reads, keeps its
-// refusal: a time of another type or form is refused, as is anything that
-// is no time.
+// bound value, which variables decide, never the time default. A value
+// whose two runs write it in two forms of an instant (a zone offset in one
+// run where the other wrote Z, an epoch in seconds in one and milliseconds
+// in the other) is checked by its forms alone too: a replay passes a value
+// of either form (models.ClockOffset's FormF), never its range. A fraction
+// of a second is no part of a form (TimeForm), so a time a run wrote with
+// its all-zero fraction dropped is of one form with the other. One a run
+// writes in no form of an instant keeps its refusal: a time of another type
+// or form is refused, as is anything that is no time.
 //
 // A time learning bound to an earlier place that holds its value (a Value,
 // a variable bound whole) keeps that bind wherever the bind holds. Where it
@@ -50,10 +55,12 @@ import (
 // to; the place holds the moment in another form, which a variable cannot
 // hold), two reads of the clock that fell in one second when recorded are
 // no copy, and the field falls back to the time default: checked by its form
-// alone (ByForm), as above. A time here is a decoder-typed time in both runs,
-// a field a clock rule declares, or a value bound to a place learning read
-// as a plain read of the application's clock (Place.Clock): never a value's
-// name or shape. Every other refusal of the bind stands.
+// alone (ByForm), as above, where both runs write it in one form (a bound
+// value written in two keeps its refusal). A time here is a decoder-typed
+// time in both runs, a field a clock rule declares, or a value bound to a
+// place learning read as a plain read of the application's clock
+// (Place.Clock): never a value's name or shape. Every other refusal of the
+// bind stands.
 
 // timeSettles are the refusals the time default settles on a time field.
 var timeSettles = map[RefusalKind]bool{
@@ -79,9 +86,9 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 		return d
 	}
 	if d.Outcome == OutcomeClock && d.Clock != nil {
-		if form := dc.timeFormOf(path, c); form != "" {
+		if form, formF := dc.timeFormOf(path, c); form != "" {
 			off := *d.Clock
-			off.Form = form
+			off.Form, off.FormF = form, formF
 			d.Clock = &off
 		}
 		return d
@@ -102,15 +109,15 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	default:
 		return d
 	}
-	form := dc.timeFormOf(path, c)
+	form, formF := dc.timeFormOf(path, c)
 	if form == "" {
 		return d
 	}
-	off := models.ClockOffset{Form: form}
+	off := models.ClockOffset{Form: form, FormF: formF}
 	if c.text {
 		off.Word = c.word
 	}
-	rule := "a time, checked by its form alone (" + form + ", keploy.yml's times setting at its default); the clock checks would refuse it " + string(d.Refusal.Kind) + ": " + d.Refusal.Why
+	rule := "a time, checked by its form alone (" + off.Forms() + ", keploy.yml's times setting at its default); the clock checks would refuse it " + string(d.Refusal.Kind) + ": " + d.Refusal.Why
 	nd := dc.learned(path, at, n, c.r, c.l, OutcomeClock, rule, nil)
 	off.Why = nd.Line
 	nd.Clock = &off
@@ -128,8 +135,10 @@ func (dc *decider) valueByForm(path string, at variables.Address, n int, c chang
 	if why == "" || c.text && c.noWord != "" {
 		return d
 	}
-	form := dc.timeFormOf(path, c)
-	if form == "" {
+	// One form in both runs only: a bound value its runs wrote in two forms
+	// keeps its refusal, failing closed.
+	form, formF := dc.timeFormOf(path, c)
+	if form == "" || formF != "" {
 		return d
 	}
 	off := models.ClockOffset{Form: form}
@@ -207,38 +216,55 @@ func formIn(rec, live Leaf, w *Window) (form, no string) {
 	return form, ""
 }
 
-// timeFormOf is the form of the changed instant c, a time field at path, in
-// both runs: "" where its runs write two forms or one keploy reads as no
-// instant, where a run's value names no moment, and where an epoch number's
-// moment lies far from its call in a run (nearCall).
-func (dc *decider) timeFormOf(path string, c changedInstant) string {
+// timeFormOf is the form of the changed instant c, a time field at path,
+// and formF the second where its two runs write two (timeForms): "" where
+// a run's value is in no form keploy reads as an instant or names no
+// moment, and where an epoch number's moment lies far from its call in a
+// run.
+func (dc *decider) timeFormOf(path string, c changedInstant) (form, formF string) {
 	rl, ll := dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path]
 	rec, live := rl, ll
 	if c.text {
 		// A word of the text: its form, of the leaf's own type.
 		rec, live = Leaf{Type: String, Value: c.r}, Leaf{Type: String, Value: c.l}
 	}
-	form := timeFormAs(rl.Type, rec)
-	switch {
-	case form == "" || timeFormAs(ll.Type, live) != form:
-		return ""
-	case c.rm == nil || c.lm == nil:
-		return ""
-	case strings.HasPrefix(leafLayout(rec), "epoch-") && !dc.nearCall(rec, live):
-		return ""
+	if c.rm == nil || c.lm == nil {
+		return "", ""
 	}
-	return form
+	return timeForms(timeFormAs(rl.Type, rec), timeFormAs(ll.Type, live), rec, live, dc.in.Window)
 }
 
-// nearCall reports whether rec and live, an epoch number as recorded and in
-// round F, each name a moment within epochNear of its run's span of the
-// call; false where keploy knows no span.
-func (dc *decider) nearCall(rec, live Leaf) bool {
-	w := dc.in.Window
+// timeForms is the forms the time default checks a time by, of rec and live,
+// its leaf as recorded and in round F, written recForm and liveForm
+// (TimeForm): the one form where the two runs wrote one, else the two
+// (models.FormsOf: a replay passes a value of either, FormF). "" where a
+// run's leaf has no form (no time keploy reads), and where a run's epoch
+// number names no moment within epochNear of its run's span of the call
+// (w: Rec and F; nil knows no span).
+func timeForms(recForm, liveForm string, rec, live Leaf, w *Window) (form, formF string) {
+	switch {
+	case recForm == "" || liveForm == "":
+		return "", ""
+	case !epochNearIn(rec, w, false) || !epochNearIn(live, w, true):
+		return "", ""
+	}
+	return models.FormsOf(recForm, liveForm)
+}
+
+// epochNearIn reports whether l, a run's leaf (round F's: f), is no epoch
+// number, or one that names a moment within epochNear of that run's span of
+// the call in w; false for an epoch number where w is nil.
+func epochNearIn(l Leaf, w *Window, f bool) bool {
+	if !strings.HasPrefix(leafLayout(l), "epoch-") {
+		return true
+	}
 	if w == nil {
 		return false
 	}
-	return nearSpan(rec, w.Rec) && nearSpan(live, w.F)
+	if f {
+		return nearSpan(l, w.F)
+	}
+	return nearSpan(l, w.Rec)
 }
 
 // nearSpan reports whether l, an epoch number, names a moment within
@@ -252,10 +278,13 @@ func nearSpan(l Leaf, s Span) bool {
 // (models.ClockOffset.Form): its leaf's type, then its text with every
 // digit written 9 and every letter a, so that a form keeps an epoch's unit
 // (its count of digits), a text's field order, separators and zone form
-// ("Z", "+99:99", a zone's name), and whether it writes a fraction of a
-// second, written f whatever its digits (a Go application's RFC 3339 drops
-// a fraction's trailing zeros). A UUID's time is its layout ("uuid1").
-// "" for a leaf keploy reads as no instant and no time of day.
+// ("Z", "+99:99", a zone's name). A fraction of a second is no part of it:
+// a Go application's RFC 3339 drops a fraction's trailing zeros, and the
+// whole fraction where every digit is 0, so one application writes a time
+// with a fraction or without as its moment falls (a time read at the
+// millisecond is whole one time in a thousand). A UUID's time is its
+// layout ("uuid1"). "" for a leaf keploy reads as no instant and no time of
+// day.
 func TimeForm(l Leaf) string { return timeFormAs(l.Type, l) }
 
 // timeFormAs is TimeForm of l, a word of a leaf of type t, read as t.
@@ -278,18 +307,21 @@ func timeFormAs(t Type, l Leaf) string {
 	return kind + " " + timeSkeleton(l.Value)
 }
 
-// timeSkeleton is s with every digit written 9, every ASCII letter a, and
-// a run of digits after a '.' or ',' that follows a digit written f.
+// timeSkeleton is s, an instant or a time of day keploy reads
+// (clockLayouts), with every digit written 9, every ASCII letter a, and a
+// fraction of a second, a '.' or ',' and the run of digits after it, left
+// out. In every such layout a '.' or ',' before a digit begins a fraction:
+// of an ISO time's or a time of day's seconds, or of an epoch number; an
+// RFC 1123 date's comma has a space after it.
 func timeSkeleton(s string) string {
 	b := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
 		switch {
-		case isDigit(ch) && i > 1 && (s[i-1] == '.' || s[i-1] == ',') && isDigit(s[i-2]):
+		case (ch == '.' || ch == ',') && i+1 < len(s) && isDigit(s[i+1]):
 			for i+1 < len(s) && isDigit(s[i+1]) {
 				i++
 			}
-			b = append(b, 'f')
 		case isDigit(ch):
 			b = append(b, '9')
 		case ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z':

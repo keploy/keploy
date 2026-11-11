@@ -1,6 +1,8 @@
 package learn
 
 import (
+	"cmp"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 )
@@ -108,9 +110,10 @@ func (dc *decider) clockOnly(path string, src Source, ds []Decision) []Decision 
 // (Learned.sourceWhy). Such a value is a read of the clock when the rule's
 // range holds both runs' values in the call's span (w: Rec and F), in one
 // layout, as a replay checks it (CheckClockRead); else, under the time
-// default (timeForm), an instant both runs write in one form (TimeForm), an
-// epoch number near its call in both (nearSpan), checked by that form alone,
-// as is a read the range holds. One neither check holds is refused, naming
+// default (timeForm), an instant each run writes in a form (TimeForm), an
+// epoch number near its call in its run (nearSpan), checked by that form
+// alone, or by either of the two its runs wrote (FormF), as is a read the
+// range holds. One neither check holds is refused, naming
 // the rule: noise becomes unaccounted (a value the rule's own check refuses
 // is never let pass unchecked), and an echo or a refused drift keeps
 // learning's refusal. The caller leaves out, where the time default is off,
@@ -157,16 +160,21 @@ func DeclaredClockLearned(ln Learned, src Source, w *Window, timeForm bool) Lear
 	}
 	if timeForm {
 		// The time default checks a time by its form alone, a read the
-		// rule's range holds too (timeDefault).
-		form, noForm := formIn(rec, live, w)
+		// rule's range holds too (timeDefault), and one its two runs wrote
+		// in two forms by either (timeForms), never by the range.
+		recForm, liveForm := TimeForm(rec), TimeForm(live)
+		form, formF := timeForms(recForm, liveForm, rec, live, w)
+		forms := models.ClockOffset{Form: form, FormF: formF}.Forms()
 		switch {
-		case noForm != "":
-			no += noForm
+		case !isInstant(rec) || !isInstant(live): // an instant has a form
+			no += "; and a run writes it in no form of an instant (" + cmp.Or(recForm, "none") + " recorded, " + cmp.Or(liveForm, "none") + " in round F)"
+		case form == "":
+			no += "; and, an epoch number, it names no moment near its call in both runs"
 		case read != nil:
-			read.Form = form
-			read.Why += "; a time, checked by its form alone (" + form + ", keploy.yml's times setting at its default)"
+			read.Form, read.FormF = form, formF
+			read.Why += "; a time, checked by its form alone (" + forms + ", keploy.yml's times setting at its default)"
 		default:
-			read = &models.ClockOffset{Form: form, Why: why + ": a time, checked by its form alone (" + form + ", keploy.yml's times setting at its default); its range alone would refuse it: " + no}
+			read = &models.ClockOffset{Form: form, FormF: formF, Why: why + ": a time, checked by its form alone (" + forms + ", keploy.yml's times setting at its default); its range alone would refuse it: " + no}
 		}
 	}
 	switch {
