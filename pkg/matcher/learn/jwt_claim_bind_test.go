@@ -3,6 +3,7 @@ package learn
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,10 +59,13 @@ func TestAnIdAClientTestCarriesInAJWTClaimIsBoundAtTheClaim(t *testing.T) {
 	in.Drifts = oClientDrifts()
 	d := oWord(t, Decide(in), rID, fID)
 	if d.Outcome != OutcomeValue || d.From.Mock != "test case post-cluster-status-3" || d.From.Path != "header.Authorization" || !d.From.Client {
-		t.Fatalf("the cluster id the token's cid claim carries: %s (client test's request: %v); want a Value of test case post-cluster-status-3's header.Authorization, a client test's", oDescribe([]Decision{d}), d.From.Client)
+		t.Fatalf("the cluster id the token's cluster_id claim carries: %s (client test's request: %v); want a Value of test case post-cluster-status-3's header.Authorization, a client test's", oDescribe([]Decision{d}), d.From.Client)
 	}
 	if got, want := d.FromAt.String(), "header.Authorization|jwt.cluster_id#0"; got != want {
 		t.Fatalf("the cluster id is bound at %q; want %q, the claim that holds it", got, want)
+	}
+	if want := "bound to test case post-cluster-status-3 header.Authorization, its JWT's cluster_id claim"; !strings.Contains(d.Line, want) {
+		t.Fatalf("the learned line %q does not name the claim; want it to say %q", d.Line, want)
 	}
 	if v, ok := d.FromAt.WordOf("Bearer " + rTok); !ok || v != rID {
 		t.Fatalf("the bind place reads %q (%v) in the recorded header; want the recorded id %q", v, ok, rID)
@@ -95,18 +99,18 @@ func TestAClaimIsTheBindPlaceOnlyWhereItHoldsTheValueInBothRuns(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		rHeader, fHeader string
-		want             string
+		want, claim      string
 	}{
 		{"the claim, a word of its text", "Bearer " + tok(map[string]any{"sub": "cluster:" + rID}, "sig-r"), "Bearer " + tok(map[string]any{"sub": "cluster:" + fID}, "sig-f"),
-			"header.Authorization|jwt.sub#1"},
+			"header.Authorization|jwt.sub#1", "sub"},
 		{"of two claims, the first by name", "Bearer " + tok(map[string]any{"cid": rID, "aud": rID}, "sig-r"), "Bearer " + tok(map[string]any{"cid": fID, "aud": fID}, "sig-f"),
-			"header.Authorization|jwt.aud#0"},
+			"header.Authorization|jwt.aud#0", "aud"},
 		{"a plain word of the leaf, before a claim", rID + " " + tok(map[string]any{"cid": rID}, "sig-r"), fID + " " + tok(map[string]any{"cid": fID}, "sig-f"),
-			"header.Authorization#0"},
+			"header.Authorization#0", ""},
 		{"round F's claim at another word: the leaf whole", "Bearer " + tok(map[string]any{"sub": "cluster:" + rID}, "sig-r"), "Bearer " + tok(map[string]any{"sub": "cluster:proxy:" + fID}, "sig-f"),
-			"header.Authorization"},
+			"header.Authorization", ""},
 		{"round F's claim under another name: the leaf whole", "Bearer " + tok(map[string]any{"cid": rID, "n": 1}, "sig-r"), "Bearer " + tok(map[string]any{"cluster": fID, "n": 2}, "sig-f"),
-			"header.Authorization"},
+			"header.Authorization", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := decide(tc.rHeader, tc.fHeader)
@@ -116,7 +120,69 @@ func TestAClaimIsTheBindPlaceOnlyWhereItHoldsTheValueInBothRuns(t *testing.T) {
 			if got := d.FromAt.String(); got != tc.want {
 				t.Fatalf("bound at %q; want %q", got, tc.want)
 			}
+			// The line names the claim the place reads, and no claim where
+			// it reads none.
+			if named := strings.Contains(d.Line, "JWT's"); tc.claim == "" && named || tc.claim != "" && !strings.Contains(d.Line, "header.Authorization, its JWT's "+tc.claim+" claim") {
+				t.Fatalf("the learned line %q; want it to name the claim %q (none: no claim)", d.Line, tc.claim)
+			}
 		})
+	}
+}
+
+// TestFromAtReadsTheTextItsAddressOpens: where an adapter names a leaf's
+// place with a decode step (a header a client sends base64, as its PlaceOf
+// says), the word or the claim that holds the value is read in the text
+// that step opens, and the claim's step follows it: the bind place reads
+// the value there in both runs. A leaf the step does not open is named
+// whole, with its step, as before.
+func TestFromAtReadsTheTextItsAddressOpens(t *testing.T) {
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	tok := func(id string) string { return claimToken(t, map[string]any{"cid": id}, "sig") }
+	dc := &decider{in: Input{PlaceOf: func(Leaf, bool) (string, bool) { return "header.X-Proxy|b64", true }}}
+	for _, tc := range []struct {
+		name      string
+		rec, live string
+		want      string
+	}{
+		{"a claim of the opened text", b64("Bearer " + tok("a1")), b64("Bearer " + tok("b2")), "header.X-Proxy|b64|jwt.cid#0"},
+		{"a word of the opened text", b64("u-a1"), b64("u-b2"), "header.X-Proxy|b64#1"},
+		{"round F's text is not opened: no claim", b64("Bearer " + tok("a1")), "Bearer " + tok("b2"), "header.X-Proxy|b64"},
+		{"the step does not open the leaf: whole", "u-a1", "u-b2", "header.X-Proxy|b64"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			at := dc.fromAt(evPlace{leaf: Leaf{Path: "header.X-Proxy", Type: String, Value: tc.rec}, live: tc.live}, "a1", "b2")
+			if got := at.String(); got != tc.want {
+				t.Fatalf("fromAt = %q; want %q", got, tc.want)
+			}
+			if at.Word < 0 {
+				return
+			}
+			if v, ok := at.WordOf(tc.rec); !ok || v != "a1" {
+				t.Fatalf("%q reads %q (%v) in the recorded leaf; want a1", tc.want, v, ok)
+			}
+			if v, ok := at.WordOf(tc.live); !ok || v != "b2" {
+				t.Fatalf("%q reads %q (%v) in round F's leaf; want b2", tc.want, v, ok)
+			}
+		})
+	}
+}
+
+// TestClaimNameIsTheClaimABindPlaceReads: a learned line names the JWT claim
+// its bind place reads; a place that reads none (a plain place, a decode
+// step only) names none.
+func TestClaimNameIsTheClaimABindPlaceReads(t *testing.T) {
+	for _, tc := range []struct {
+		steps []variables.Step
+		want  string
+	}{
+		{nil, ""},
+		{[]variables.Step{variables.StepB64}, ""},
+		{[]variables.Step{variables.JWTClaim("cluster_id")}, "cluster_id"},
+		{[]variables.Step{variables.StepB64, variables.JWTClaim("cid")}, "cid"},
+	} {
+		if got := claimName(variables.Address{Steps: tc.steps, Word: 0}); got != tc.want {
+			t.Fatalf("claimName(%v) = %q; want %q", tc.steps, got, tc.want)
+		}
 	}
 }
 
