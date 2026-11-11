@@ -53,7 +53,7 @@ func TestACaptureLossFailsTheOpenTestAndEveryLaterOne(t *testing.T) {
 	// The windows last: reading them ends the run.
 	w := windowOf(t, a, "o::TestDuring")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 3, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full"}}, w.Evidence.CaptureIncomplete)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 3, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full", Err: -7}}, w.Evidence.CaptureIncomplete)
 	require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "o::TestAfter").Outcome)
 	require.Nil(t, windowOf(t, a, "o::TestBefore").Evidence, "a test that ended before the loss is not charged")
 }
@@ -193,6 +193,29 @@ func TestCaptureLossesAreTheHooksAndTheProxys(t *testing.T) {
 	a.Proxy = p
 	_, err = a.CaptureLosses(ctx)
 	require.ErrorIs(t, err, models.ErrCaptureLossesUnsupported)
+}
+
+// Each PID map's loss carries the kernel's errno for its own map's latest
+// refusal as data (models.CaptureLoss.Err), so a reader of both maps' losses
+// takes each one's cause from its own record, never from words.
+func TestEachPIDMapsLossCarriesItsOwnErrno(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 4, LastTargetErr: -7, Excluded: 2, LastExcludedErr: -110}}
+	got, err := a.CaptureLosses(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{
+		{Kind: models.CaptureLossPIDMap, Count: 4, What: "target_namespace_pids, " + models.PIDMapRefusalCause(-7), Err: -7},
+		{Kind: models.CaptureLossPIDMapExcluded, Count: 2, What: "excluded_pids, " + models.PIDMapRefusalCause(-110), Err: -110},
+	}, got)
+}
+
+// Two sources of one kind keep the first errno either of them says.
+func TestMergeKindsKeepsTheFirstErrnoSaid(t *testing.T) {
+	k := models.CaptureLossPIDMap
+	require.Equal(t, models.CaptureLosses{{Kind: k, Count: 3, Err: -7}},
+		mergeKinds(models.CaptureLosses{{Kind: k, Count: 1}, {Kind: k, Count: 2, Err: -7}}), "the first that says one")
+	require.Equal(t, models.CaptureLosses{{Kind: k, Count: 3, Err: -110}},
+		mergeKinds(models.CaptureLosses{{Kind: k, Count: 1, Err: -110}, {Kind: k, Count: 2, Err: -7}}), "never a later one over it")
 }
 
 // lossReporter is a downstream build's own capture-loss count

@@ -472,3 +472,16 @@ func TestARecordChargesEachTestOpenAtACallFromNoWorker(t *testing.T) {
 		notJudged(t, models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}, 3)
 	})
 }
+
+// The run's PID map losses each carry their own map's errno as data, beside
+// the run's verdict as words, so a reader of both never takes one map's
+// cause for the other's.
+func TestTheRunsPIDMapLossesCarryEachMapsOwnErrno(t *testing.T) {
+	refused := models.PIDMapRefusals{Target: 4, LastTargetErr: -7, Excluded: 2, LastExcludedErr: -110}
+	got, err := (&mockService{}).runLosses(context.Background(), lossBase{checked: true}, nil, nil, refused)
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{
+		{Kind: models.CaptureLossPIDMap, Count: 4, What: refused.CaptureIncomplete(), Err: -7},
+		{Kind: models.CaptureLossPIDMapExcluded, Count: 2, What: refused.CaptureIncomplete(), Err: -110},
+	}, got)
+}
