@@ -2765,9 +2765,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		// as it was.
 		counts.tests = withBegan(counts.tests, detail.windows)
 	}
-	for i := range counts.tests {
-		counts.tests[i].Learned = learned.byTest[counts.tests[i].Name]
-	}
+	withLearned(counts.tests, learned)
 	counts.learnedPool = learned.pool
 	counts.learnedElsewhere = learned.elsewhere
 	counts.learnErr = learnErr

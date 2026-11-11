@@ -112,6 +112,56 @@ func TestALearnedFieldIsListedOnceInItsRecordingsOwnScope(t *testing.T) {
 	}
 }
 
+// A test's own recording that only other tests' calls consumed (mock-3,
+// o::A's, which o::B and o::C consumed) is listed once, on its owner's
+// line, marked as answered elsewhere (answeredElsewhere), never on the
+// lines of the tests that consumed it nor with the set's. A recording
+// whose owner did not run in the round (mock-4, o::Z's) and one no test
+// owns (session-0) are the set's. The test lines carry both lists
+// (withLearned).
+func TestALearnedFieldOfARecordingThatAnsweredOnlyOtherTestsIsOnItsOwnersLine(t *testing.T) {
+	store := &learnedStore{}
+	m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.NewNop()}
+	consumed := []models.MockState{{Name: "mock-1"}, {Name: "session-0"}, {Name: "mock-3"}, {Name: "mock-4"}, {Name: "mock-2"}}
+	flows := []FlowMocks{
+		{Flow: "o::A", Consumed: []models.MockState{{Name: "mock-1"}, {Name: "session-0"}}},
+		{Flow: "o::B", Consumed: []models.MockState{{Name: "mock-3"}, {Name: "session-0"}, {Name: "mock-4"}, {Name: "mock-2"}}},
+		{Flow: "o::C", Consumed: []models.MockState{{Name: "mock-3"}}},
+	}
+	expected := map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}, {Name: "mock-3"}}, "o::B": {{Name: "mock-2"}}, "o::Z": {{Name: "mock-4"}}}
+	out, err := m.persistLearned(context.Background(), "s", consumed, nil, flows, expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string][]string{"o::A": {"mock-1 body.ts (noise)"}, "o::B": {"mock-2 body.ts (noise)"}}; !reflect.DeepEqual(out.byTest, want) {
+		t.Fatalf("by test %v, want each test's own recording its own calls consumed on its line alone", out.byTest)
+	}
+	if want := map[string][]string{"o::A": {"mock-3 body.ts (noise)"}}; !reflect.DeepEqual(out.answeredElsewhere, want) {
+		t.Fatalf("answered elsewhere %v, want o::A's mock-3 once, on its owner's line", out.answeredElsewhere)
+	}
+	if want := []string{"mock-4 body.ts (noise)", "session-0 body.ts (noise)"}; !reflect.DeepEqual(out.pool, want) {
+		t.Fatalf("the set's %v, want the recording of a test that did not run and the session's", out.pool)
+	}
+	tests := []TestReceipt{{Name: "o::A"}, {Name: "o::B"}, {Name: "o::C"}}
+	withLearned(tests, out)
+	if want := []TestReceipt{
+		{Name: "o::A", Learned: []string{"mock-1 body.ts (noise)"}, LearnedAnsweredElsewhere: []string{"mock-3 body.ts (noise)"}},
+		{Name: "o::B", Learned: []string{"mock-2 body.ts (noise)"}},
+		{Name: "o::C"},
+	}; !reflect.DeepEqual(tests, want) {
+		t.Fatalf("test lines %+v, want %+v", tests, want)
+	}
+	// A test whose own calls consumed its recording too lists it on its line
+	// as its own, not as answered elsewhere.
+	flows[0].Consumed = append(flows[0].Consumed, models.MockState{Name: "mock-3"})
+	if out, err = m.persistLearned(context.Background(), "s", consumed, nil, flows, expected); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"mock-1 body.ts (noise)", "mock-3 body.ts (noise)"}; !reflect.DeepEqual(out.byTest["o::A"], want) || len(out.answeredElsewhere) != 0 {
+		t.Fatalf("o::A's line %v and answered elsewhere %v, want both its recordings its own", out.byTest["o::A"], out.answeredElsewhere)
+	}
+}
+
 // clientTestsInstr is keploy mock's agent client, which says whether the
 // agent's answer to the session's MockOutgoing said its learn step reads the
 // session's tests as client tests (pkg.ClientTestsReader), and the version

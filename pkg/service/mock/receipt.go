@@ -383,10 +383,13 @@ type TestReceipt struct {
 	// when the replay saw it begin no run. The test with the latest Began is
 	// the last test begun: the one a run cut short was in, or left last.
 	Began time.Time `yaml:"began,omitempty" json:"began,omitzero"`
-	// Ended is when the test's latest run ended (its window's end), on the
-	// clock the agent stamps windows and answers with
-	// (TestsReceipt.Answered); zero when the replay saw no run of it end,
-	// or a run of it that did not end (cut short).
+	// Ended is when the test's latest run ended (its window's end); zero
+	// when the replay saw no run of it end, or a run of it that did not end
+	// (cut short). Under the proven wire it is on the clock the agent stamps
+	// answers with (TestsReceipt.Answered): the agent stamps the window's
+	// end too, and the wire refuses a runner's own time. With the switch
+	// off a runner may send its own time for the end (models.ScopeReq.At),
+	// and Ended is then on the runner's clock.
 	Ended time.Time `yaml:"ended,omitempty" json:"ended,omitzero"`
 	// Evidence is, under the proven wire, what failed the test at its end:
 	// its misses, the recorded calls of its mapping it never made, and the
@@ -404,8 +407,14 @@ type TestReceipt struct {
 	RealListed []string `yaml:"realListed,omitempty" json:"realListed,omitempty"`
 	// Learned is what the learn step of a record's full round wrote onto the
 	// test's recording, each field as "<mock> <path> (<kind>)" (design v14
-	// §7.2 step 10). Only that round has any.
+	// §7.2 step 10), onto the recordings of its own its own calls consumed.
+	// Only that round has any.
 	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
+	// LearnedAnsweredElsewhere is, as Learned, what that learn step wrote
+	// onto the test's own recordings that only other tests' calls consumed:
+	// each recording is listed once, under the test that owns it, and this
+	// key marks that it answered elsewhere.
+	LearnedAnsweredElsewhere []string `yaml:"learnedAnsweredElsewhere,omitempty" json:"learnedAnsweredElsewhere,omitempty"`
 	// SkippedReads is, under the proven switch, each read of a test this
 	// replay's gate skips that answered one of the test's calls, whatever
 	// its outcome, in the order they did (models.ScopeWindow.SkippedReads),
