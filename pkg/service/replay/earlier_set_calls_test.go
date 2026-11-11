@@ -307,10 +307,22 @@ func (f *failingSetReportDB) InsertReport(ctx context.Context, run, set string, 
 // agent does, at its staging, so a set that ends after its staging and before
 // any of its tests runs is counted on both sides: with sets [P, X, H, Y], H
 // ended so, X's call of no test that Y's first read returns two sets back is
-// named as X's, never as P's.
+// named as X's, never as P's. The native and the docker compose path stage a
+// set each in their own place, and each counts it there.
 func TestASetEndedAfterItsStagingIsCountedAsTheAgentCountsIt(t *testing.T) {
 	provenOn(t, true)
-	h := newPartialRunHarness(t, 2, 0)
+	for _, path := range []struct {
+		name    string
+		harness func(*testing.T) *prRun
+	}{
+		{"native", func(t *testing.T) *prRun { return newPartialRunHarness(t, 2, 0) }},
+		{"compose", func(t *testing.T) *prRun { return composeHarness(t, &composeInstr{}) }},
+	} {
+		t.Run(path.name, func(t *testing.T) { aSetEndedAfterItsStagingIsCountedAsTheAgentCountsIt(t, path.harness(t)) })
+	}
+}
+
+func aSetEndedAfterItsStagingIsCountedAsTheAgentCountsIt(t *testing.T, h *prRun) {
 	core, logs := observer.New(zap.ErrorLevel)
 	h.replayer.logger = zap.New(core)
 	h.replayer.reportDB = &failingSetReportDB{prReportDB: h.report, fail: "test-set-h"}
