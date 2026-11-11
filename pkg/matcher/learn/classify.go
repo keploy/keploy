@@ -1040,8 +1040,9 @@ type Learned struct {
 	// call's window, an instant where keploy cannot tell the application's
 	// clock, which only the time default's check by form settles, a
 	// moment the start-up, an older test or an earlier read of the clock
-	// gave): what a clock rule keploy.yml declares at its field settles
-	// (DeclaredClockLearned). "" for every other refusal, and stale (not
+	// gave, an instant built by an offset on a place that moved, as a read
+	// of the clock plus that offset is: offsetWhy): what a clock rule
+	// keploy.yml declares at its field settles (DeclaredClockLearned). "" for every other refusal, and stale (not
 	// Why) once a later step refuses it for another reason.
 	sourceWhy string
 	// byOffset: the offset rule refused it (offsetWhy: built by an offset on
@@ -1882,6 +1883,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 				ln.Bindable = bindable
 				ln.byOffset = why == offWhy
+				if ln.byOffset {
+					// Which source its moment has is all the offset rule
+					// cannot tell: a read of the clock plus that offset
+					// moves as the place moved, so a clock rule settles it.
+					ln.sourceWhy = why
+				}
 			}
 		}
 		// Noise only where no word of what changed comes back in the
