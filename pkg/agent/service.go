@@ -1136,6 +1136,14 @@ type PoolSeriesSetter interface {
 	SetPoolSeries(series map[string][]string) error
 }
 
+// SeriesRepeatReader is implemented by a proxy that serves the series
+// SetPoolSeries installs: SeriesRepeats is, by series, how many calls in the
+// current staging's tests its last-placed recording answered past the
+// series' recorded count (models.MockStats.SeriesRepeats).
+type SeriesRepeatReader interface {
+	SeriesRepeats() (map[string]int64, error)
+}
+
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
 // is ServeExactPool that also answers, while no test is open, the next test's
 // mocks that were in flight when it began (ahead, models.ExactServing.Ahead),

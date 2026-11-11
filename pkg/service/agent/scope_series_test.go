@@ -75,3 +75,46 @@ func TestTheScopeSeriesReachTheProxyWithThePool(t *testing.T) {
 	require.Error(t, b.SetScopeSeries(ctx, map[string][]string{"r/o::TestA/1": {"mock-2"}}), "a proxy that cannot serve series refuses them")
 	require.NoError(t, b.SetScopeSeries(ctx, map[string][]string{}), "and takes a table with none")
 }
+
+// repeatProxy is seriesProxy that counts the calls each series answered
+// past its recorded count (coreAgent.SeriesRepeatReader).
+type repeatProxy struct {
+	*seriesProxy
+	repeats map[string]int64
+	err     error
+}
+
+var _ coreAgent.SeriesRepeatReader = (*repeatProxy)(nil)
+
+func (p *repeatProxy) SeriesRepeats() (map[string]int64, error) {
+	return p.repeats, p.err
+}
+
+// The mock stats carry the proxy's count of each series' repeats, with
+// SeriesCounted set. A proxy that cannot count them, or whose read fails
+// (no mock manager yet), leaves SeriesCounted false and never fails the
+// stats: the loaded count the compose bring-up checks stays read.
+func TestTheMockStatsCarryTheSeriesRepeats(t *testing.T) {
+	a, wp := wireAgent(t, models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"))
+	p := &repeatProxy{seriesProxy: &seriesProxy{wireProxy: wp}, repeats: map[string]int64{"r/o::TestA/1": 3}}
+	a.Proxy = p
+	stats, err := a.MockStats(context.Background())
+	require.NoError(t, err)
+	require.True(t, stats.SeriesCounted)
+	require.Equal(t, map[string]int64{"r/o::TestA/1": 3}, stats.SeriesRepeats)
+	loaded := stats.Loaded
+
+	p.err = errors.New("no mock manager")
+	stats, err = a.MockStats(context.Background())
+	require.NoError(t, err)
+	require.False(t, stats.SeriesCounted)
+	require.Nil(t, stats.SeriesRepeats)
+	require.Equal(t, loaded, stats.Loaded)
+
+	a.Proxy = p.seriesProxy
+	stats, err = a.MockStats(context.Background())
+	require.NoError(t, err)
+	require.False(t, stats.SeriesCounted)
+	require.Equal(t, loaded, stats.Loaded)
+}

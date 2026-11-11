@@ -696,6 +696,14 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			failedBy = FailedByRuleNotMade
 		}
 	}
+	// What each rule's series did in the run, one RULE USED line per rule
+	// and the RULES line for them together, whatever the run's outcome.
+	for _, u := range counts.ruleUses {
+		m.logger.Info(RuleUsedLine(u), zap.String("mock-set", name))
+	}
+	if len(counts.ruleUses) > 0 {
+		m.logger.Info(RulesLine(counts.ruleUses), zap.String("mock-set", name))
+	}
 	// What the run compares is short of requests the agent captured, or,
 	// under the proven switch, the agent did not finish checking the run's
 	// tests (settleRun: its end-of-run hook refused, or the agent was gone),
@@ -1452,6 +1460,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	m.mockOwners = models.MockOwners(table)
 	m.skippedReadOf = moved
 	m.series = requiredSeries(served, table)
+	m.placed = placedSeries(served, table)
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.Int("tests with a repeated read", len(repeats)), zap.String("mock-set", name))
 	return nil
 }
@@ -2612,6 +2621,10 @@ type replayCounts struct {
 	// run consumed could not be read: whether the run made it is not known,
 	// and the run fails. nil for none.
 	seriesUnread []string
+	// ruleUses is, under the proven switch, what each rule's series did in
+	// the run (ruleUses): its RULE USED line and the RULES line. nil when no
+	// rule placed a series.
+	ruleUses []ruleUse
 }
 
 // settleRun, under the proven switch, calls the agent's AfterTestRun
@@ -2672,6 +2685,9 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		outcome, err := composeOutcome.ComposeAgentOutcome()
 		consumed, misses, consumedErr, missesErr = outcome.Consumed, outcome.Missed, err, err
 		elsewhere = outcome.LearnedElsewhere
+		// The agent stopped with the project: its account carries no count
+		// of the series' repeats, and the RULE USED lines say so.
+		m.repeats = seriesRepeats{unread: "under docker compose the agent stops with the run, and its account of the run does not carry them"}
 		if err == nil && outcome.MissedUnread != "" {
 			// As the agent's own read would have said it: incomplete, with
 			// what was read.
@@ -2707,6 +2723,9 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				// each fault served (logFaultsServed), and every verdict
 				// on consumed reads it only when consumedErr is nil.
 				consumed = m.withSeriesRead(consumed)
+				if len(m.placed) > 0 {
+					m.repeats = readSeriesRepeats(outcomeCtx, m.instrumentation)
+				}
 				if consumedErr == nil && m.learning() {
 					elsewhere = learn.ReadLearnedElsewhere(outcomeCtx, m.instrumentation, m.logger)
 				}
@@ -2872,6 +2891,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.tests = withBegan(counts.tests, detail.windows)
 		counts.requiredNotMade, counts.trailsUnread, counts.seriesUnread = requiredNotMade(m.series, counts.tests, consumed, consumedErr == nil)
 		counts.tests = failUnmadeTrails(counts.tests, notMadeByName(counts.requiredNotMade), counts.trailsUnread)
+		counts.ruleUses = ruleUses(m.placed, counts.tests, consumed, consumedErr == nil, m.repeats, misses, missesErr == nil)
 	}
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned.byTest[counts.tests[i].Name]

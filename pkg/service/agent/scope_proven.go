@@ -658,6 +658,26 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	return a.applyPool(ctx)
 }
 
+// withSeriesRepeats is stats with, from a proxy that serves declared rules'
+// series (coreAgent.SeriesRepeatReader), how many calls each answered past
+// its recorded count, and SeriesCounted set. A proxy that cannot say, or
+// whose read fails (it holds no mock manager yet), leaves stats as they are,
+// SeriesCounted false: no count, which the run's RULE USED line says, and
+// never a reason to fail the loaded count the compose bring-up checks.
+func (a *Agent) withSeriesRepeats(stats models.MockStats) (models.MockStats, error) {
+	r, ok := a.Proxy.(coreAgent.SeriesRepeatReader)
+	if !ok {
+		return stats, nil
+	}
+	repeats, err := r.SeriesRepeats()
+	if err != nil {
+		a.logger.Debug("could not read how many calls each declared rule's series answered past its recorded count", zap.Error(err))
+		return stats, nil
+	}
+	stats.SeriesCounted, stats.SeriesRepeats = true, repeats
+	return stats, nil
+}
+
 // SetScopeTrails installs the test each worker-scope recording trails for a
 // replay (models.ScopeTableReq.Trails), which the pool slices sent next hand
 // the proxy (SetScopePool): its learn step reads such a call's scope by it.

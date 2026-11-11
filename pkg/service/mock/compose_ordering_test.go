@@ -118,6 +118,11 @@ type composeInstr struct {
 	consumedReadCount int
 	mockErrors        []models.UnmatchedCall
 	mockErrorsErr     error
+	// mockStats and mockStatsErr are what GetMockStats answers: the
+	// agent's count of each series' repeats (models.MockStats).
+	mockStats      models.MockStats
+	mockStatsErr   error
+	mockStatsReads int
 
 	// What the agent left as compose stopped it (ComposeOutcomeReader): under
 	// compose, the only account of the run there is.
@@ -344,6 +349,13 @@ func (f *composeInstr) GetConsumedMocks(context.Context) ([]models.MockState, er
 		return read, nil
 	}
 	return f.consumedMocks, f.consumedErr
+}
+
+func (f *composeInstr) GetMockStats(context.Context) (models.MockStats, error) {
+	f.mu.Lock()
+	f.mockStatsReads++
+	f.mu.Unlock()
+	return f.mockStats, f.mockStatsErr
 }
 
 func (f *composeInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {

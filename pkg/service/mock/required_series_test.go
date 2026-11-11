@@ -47,6 +47,13 @@ func seriesRun(t *testing.T, windows []models.ScopeWindow, consumed []models.Moc
 // mock-0 to mock-9.
 func seriesRunOf(t *testing.T, mappings string, windows []models.ScopeWindow, consumed []models.MockState, consumedErr error) (int, *Receipt, *TestsReceipt, *observer.ObservedLogs) {
 	t.Helper()
+	return seriesRunWith(t, mappings, windows, consumed, consumedErr, nil)
+}
+
+// seriesRunWith is seriesRunOf whose agent also answers as with sets it
+// (its stats, its misses); a nil with changes nothing.
+func seriesRunWith(t *testing.T, mappings string, windows []models.ScopeWindow, consumed []models.MockState, consumedErr error, with func(*composeInstr)) (int, *Receipt, *TestsReceipt, *observer.ObservedLogs) {
+	t.Helper()
 	provenOn(t)
 	repo := t.TempDir()
 	t.Chdir(repo)
@@ -57,6 +64,9 @@ func seriesRunOf(t *testing.T, mappings string, windows []models.ScopeWindow, co
 	core, logs := observer.New(zapcore.DebugLevel)
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 	instr.consumedMocks, instr.consumedErr, instr.windows = consumed, consumedErr, windows
+	if with != nil {
+		with(instr)
+	}
 	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
 	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
 	utils.ErrCode = 0

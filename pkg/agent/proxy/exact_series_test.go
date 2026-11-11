@@ -252,3 +252,26 @@ func TestASecondConsumeOfASeriesMemberWaitsForTheSeries(t *testing.T) {
 		t.Fatalf("repeats %d, want 2", got)
 	}
 }
+
+// The proxy reports its mock manager's count of each series' repeats
+// (agent.SeriesRepeatReader), and fails with no mock manager: a proxy that
+// has none serves no series, and its count is no count of none.
+func TestProxySeriesRepeatsReadsItsMockManager(t *testing.T) {
+	p := &Proxy{}
+	if got, err := p.SeriesRepeats(); err == nil || got != nil {
+		t.Fatalf("a proxy with no mock manager answered %v, %v; want an error", got, err)
+	}
+	mm := seriesSweep(t)
+	mm.ServeExactTest("TestB", nil)
+	for i := 0; i < 4; i++ {
+		callURL(t, mm, sweepURL, false)
+	}
+	p.mockManager = mm
+	got, err := p.SeriesRepeats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]int64{"sweep/TestA/1": 2}; !maps.Equal(got, want) {
+		t.Fatalf("the proxy answered %v, want %v", got, want)
+	}
+}
