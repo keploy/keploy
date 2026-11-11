@@ -27,6 +27,13 @@ type seriesDue struct {
 	// (models.MockEntry.Read) nor that its write changed nothing when
 	// recorded (models.MockEntry.Unchanged): such a series is required.
 	write bool
+	// served are, of Names, the entries that say they read or that their
+	// write changed nothing: served, never what makes a required series
+	// (madeIn). Only a once series holds such entries beside a write: the
+	// reads its write follows on its connection (keploy.yml mock.rules
+	// chain), whose answers do not make a write the application stopped
+	// making.
+	served []string
 }
 
 // RequiredNotMade is a series a declared rule placed in the worker scope that
@@ -39,7 +46,9 @@ type RequiredNotMade struct {
 	// Trails is the test it trails, which fails; empty for a background
 	// series, which fails the set.
 	Trails string `yaml:"trails,omitempty" json:"trails,omitempty"`
-	// Names are the series' recordings, none of which the run used.
+	// Names are the series' recordings that make it required (its writes
+	// that changed data: all of them, but for a once series' chain reads),
+	// none of which the run used.
 	Names []string `yaml:"names" json:"names"`
 }
 
@@ -91,7 +100,11 @@ func placedSeries(mp *models.Mapping, table map[string][]string) map[string]seri
 			s = seriesDue{Rule: e.Rule, Trails: e.Trails, Place: e.Place}
 		}
 		s.Names = append(s.Names, e.Name)
-		s.write = s.write || (!e.Read && !e.Unchanged)
+		if e.Read || e.Unchanged {
+			s.served = append(s.served, e.Name)
+		} else {
+			s.write = true
+		}
 		out[e.Series] = s
 	}
 	return out
@@ -122,7 +135,7 @@ func requiredNotMade(req map[string]seriesDue, tests []TestReceipt, consumed []m
 			unread[s.Trails] = true
 			continue
 		}
-		notMade = append(notMade, RequiredNotMade{Series: id, Rule: s.Rule, Trails: s.Trails, Names: s.Names})
+		notMade = append(notMade, RequiredNotMade{Series: id, Rule: s.Rule, Trails: s.Trails, Names: s.makers()})
 	}
 	return notMade, unread, unreadSets
 }
@@ -168,10 +181,18 @@ func (s seriesDue) dueIn(ran map[string]bool) bool {
 	return ran[s.Trails]
 }
 
-// madeIn is whether used holds a recording of s: one answered call makes
-// the series.
+// madeIn is whether used holds a recording of s that makes it (makers):
+// one such answered call makes the series. A series of one request has the
+// same marks on every entry, so any of its recordings makes it; a read of a
+// once series' chain does not.
 func (s seriesDue) madeIn(used map[string]bool) bool {
-	return slices.ContainsFunc(s.Names, func(n string) bool { return used[n] })
+	return slices.ContainsFunc(s.makers(), func(n string) bool { return used[n] })
+}
+
+// makers are s's recordings but those it serves only (seriesDue.served):
+// the writes that changed data when recorded.
+func (s seriesDue) makers() []string {
+	return slices.DeleteFunc(slices.Clone(s.Names), func(n string) bool { return slices.Contains(s.served, n) })
 }
 
 // notMadeByName is, by recording, the test each trailing series of notMade
