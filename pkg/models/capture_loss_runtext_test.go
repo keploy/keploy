@@ -183,3 +183,30 @@ func TestARunSentenceSaysEachRemedyOnceAfterItsLosses(t *testing.T) {
 		t.Errorf("no loss: %q", got)
 	}
 }
+
+// RunLost is RunText's words for what was lost, every kind's, with nothing
+// of what to do: a line that gives the remedy apart (a verdict's fix, a PID
+// map's remedy from its record) takes it, and says the remedy once.
+func TestTheRunsLostWordsAreItsSentenceWithoutWhatToDo(t *testing.T) {
+	for _, k := range captureLossKinds(t) {
+		l := CaptureLosses{{Kind: k, Count: 37, What: "to db:5432", Err: -7}}
+		lost, whole := l.RunLost(), l.RunText()
+		if lost == "" || !strings.HasPrefix(whole, lost) {
+			t.Errorf("%s: RunLost %q is not RunText's head: %s", k, lost, whole)
+		}
+		if strings.Contains(lost, "What to do") {
+			t.Errorf("%s: RunLost says what to do: %s", k, lost)
+		}
+		if rest := strings.TrimPrefix(whole, lost); rest != "" && !strings.HasPrefix(rest, ". What to do: ") {
+			t.Errorf("%s: RunText adds more than what to do: %q", k, rest)
+		}
+	}
+	two := CaptureLosses{{Kind: CaptureLossUnixSocket, Count: 2}, {Kind: CaptureLossPIDMap, Count: 3, Err: -linuxE2BIG}}
+	if lost := two.RunLost(); !strings.Contains(lost, "Unix socket") || !strings.Contains(lost, "target_namespace_pids refused 3 insert(s)") ||
+		strings.Contains(lost, pidMapRemedy) || !strings.HasPrefix(two.RunText(), lost+". What to do: ") {
+		t.Errorf("two losses: %s", lost)
+	}
+	if got := CaptureLosses(nil).RunLost(); got != "" {
+		t.Errorf("no loss: %q", got)
+	}
+}

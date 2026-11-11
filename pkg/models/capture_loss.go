@@ -804,22 +804,32 @@ func (l CaptureLosses) Text() string {
 // its kind and count. It carries no "capture incomplete: " or "not judged: "
 // head, as it says losses of both. "" for none.
 func (l CaptureLosses) RunText() string {
-	var lost, do []string
+	var do []string
+	for _, c := range l {
+		if r := runLossRemedy(c); r != "" && !slices.Contains(do, r) {
+			do = append(do, r)
+		}
+	}
+	s := l.RunLost()
+	if len(do) > 0 {
+		s += ". What to do: " + strings.Join(do, "; and ")
+	}
+	return s
+}
+
+// RunLost is RunText without what to do: what was lost, for a line that
+// gives the remedy apart (a verdict's fix, a PID map's remedy from its
+// record). "" for none.
+func (l CaptureLosses) RunLost() string {
+	var lost []string
 	for _, c := range l {
 		s := runCaptureLossText(c)
 		if w := captureWhatShape(c.What); w != "" && !c.Kind.pidMap() {
 			s += " (" + w + ")"
 		}
 		lost = append(lost, s)
-		if r := runLossRemedy(c); r != "" && !slices.Contains(do, r) {
-			do = append(do, r)
-		}
 	}
-	s := strings.Join(lost, "; ")
-	if len(do) > 0 {
-		s += ". What to do: " + strings.Join(do, "; and ")
-	}
-	return s
+	return strings.Join(lost, "; ")
 }
 
 // pidMap says a loss of kind k is a PID map's refusal (pid_map_refused,
