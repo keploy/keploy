@@ -214,3 +214,15 @@ func TestRequiredBackgroundSeriesDueByPlace(t *testing.T) {
 	require.Nil(t, unread)
 	require.Nil(t, sets)
 }
+
+// A background series not made fails no test, the line of a window the
+// framework named no test included; a trailing one fails its test alone.
+func TestABackgroundSeriesFailsNoTestLine(t *testing.T) {
+	notMade := []RequiredNotMade{{Series: "b/-/1", Rule: "b@1", Names: []string{"m1"}}, {Series: "r/o::TestA/1", Rule: "r@1", Trails: "o::TestA", Names: []string{"m2"}}}
+	tests := failUnmadeTrails([]TestReceipt{{Name: "", Outcome: models.ScopeOutcomePassed}, {Name: "o::TestA", Outcome: models.ScopeOutcomePassed}}, notMadeByName(notMade), nil)
+	require.Equal(t, models.ScopeOutcomePassed, tests[0].Outcome)
+	require.Nil(t, tests[0].Evidence)
+	require.Equal(t, models.ScopeOutcomeFailed, tests[1].Outcome)
+	require.Equal(t, []string{"m2"}, tests[1].Evidence.Unconsumed)
+	require.Equal(t, map[string]string{"m2": "o::TestA"}, notMadeByName(notMade))
+}

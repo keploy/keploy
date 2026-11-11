@@ -47,3 +47,16 @@ func TestAProxySetsItsTrailsOnItsMockManager(t *testing.T) {
 	require.NoError(t, p.SetPoolTrails(map[string]string{"mock-9": "o::TestA"}))
 	require.Equal(t, learn.Trail{Test: "o::TestA", Mocks: []string{"mock-1"}}, mm.TrailOf("mock-9"))
 }
+
+// The proxy installs the series on its mock manager, and refuses them with
+// none.
+func TestAProxySetsItsSeriesOnItsMockManager(t *testing.T) {
+	p := &Proxy{learnTracker: learn.NewTracker()}
+	require.ErrorIs(t, p.SetPoolSeries(map[string][]string{"sweep/o::TestA/1": {"mock-8", "mock-9"}}), errNoMockManager)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	p.mockManager = mm
+	require.NoError(t, p.SetPoolSeries(map[string][]string{"sweep/o::TestA/1": {"mock-8", "mock-9"}}))
+	s := mm.exact.poolSeries.Load()
+	require.True(t, s.has("mock-8") && s.has("mock-9"))
+	require.True(t, s.of["mock-9"].last)
+}

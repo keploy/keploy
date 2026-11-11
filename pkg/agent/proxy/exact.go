@@ -1960,8 +1960,8 @@ func (s *seriesIndex) againIn(st *outsideState, name string) bool {
 	if s == nil || st == nil {
 		return false
 	}
-	mem, ok := s.of[name]
-	if !ok || !mem.last {
+	mem := s.of[name] // a name of no series is the zero member, never the last
+	if !mem.last {
 		return false
 	}
 	for _, n := range s.members[mem.id] {
