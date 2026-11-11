@@ -1,6 +1,10 @@
 package models
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
 
 func httpMock(method, url string, vars MockVariables) *Mock {
 	return &Mock{Kind: HTTP, Spec: MockSpec{HTTPReq: &HTTPReq{Method: Method(method), URL: url}, Variables: vars}}
@@ -25,6 +29,8 @@ func TestRecordedCallOfReadsHTTPAndMongoCommands(t *testing.T) {
 		{"mongo $cmd", mongoMock(`{ SectionSingle msg: {"isMaster":"$cmd"} }`), RecordedCall{Kind: Mongo, Shape: "isMaster", Read: true}},
 		{"mongo sequence first", mongoMock(`{ SectionSingle identifier: documents }`, `{ SectionSingle msg: {"insert":"carts"} }`), RecordedCall{Kind: Mongo, Shape: "insert on carts", Read: true}},
 		{"mongo unreadable body", mongoMock(`{ SectionSingle msg: [1] }`), RecordedCall{Kind: Mongo}},
+		{"mongo body no document", mongoMock(`{ SectionSingle msg: ["find","sessions"] }`), RecordedCall{Kind: Mongo}},
+		{"mongo body with an empty key", mongoMock(`{ SectionSingle msg: {"":"sessions"} }`), RecordedCall{Kind: Mongo}},
 		{"mongo no OP_MSG", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{Message: &MongoOpQuery{FullCollectionName: "api.sessions"}}}}}, RecordedCall{Kind: Mongo}},
 		{"mongo no request", &Mock{Kind: Mongo}, RecordedCall{Kind: Mongo}},
 		{"http no request", &Mock{Kind: HTTP}, RecordedCall{Kind: HTTP}},
@@ -67,6 +73,16 @@ func TestSetShapeRecordingsReadsTheWholeSet(t *testing.T) {
 		{"a protocol keploy reads no shape of", UnmatchedCall{Protocol: "Redis", Command: "GET"}, nil, ""},
 		{"http2", UnmatchedCall{Protocol: "HTTP2", ActualSummary: "GET /api/tick"}, []RecordedCall{tick}, ""},
 		{"no summary", UnmatchedCall{Protocol: "HTTP"}, nil, ""},
+		// A path segment a recording holds as ciphertext (a secret Keploy
+		// Enterprise encrypted, read as on disk) reads as any segment, so
+		// the set is never said to have none for it.
+		{"a segment recorded as ciphertext", get, []RecordedCall{RecordedCallOf(httpMock("GET", "http://clock:80/api/ENC:dGljaw", nil))}, RecordedShape},
+		{"another kind with its shape", get, []RecordedCall{{Kind: Mongo, Shape: CallShape("HTTP", "GET /api/tick"), Read: true}}, RecordedNone},
+		{"a shorter path", UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /api"}, []RecordedCall{tick}, RecordedNone},
+		{"a place the call holes", UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /u/bob", VariablePlaces: []string{"url.path[1]"}},
+			[]RecordedCall{RecordedCallOf(httpMock("GET", "http://users/u/alice", nil))}, RecordedShape},
+		{"mongo as received, with its database", UnmatchedCall{Protocol: "Mongo", ActualSummary: "delete on sessions", ReceivedReq: `{"cmd":{"delete":"sessions","$db":"api"}}`},
+			[]RecordedCall{del}, RecordedShape},
 	} {
 		if got := SetShapeRecordings(c.call, c.recorded); got != c.want {
 			t.Errorf("%s: SetShapeRecordings = %q; want %q", c.name, got, c.want)
@@ -97,5 +113,64 @@ func TestShapeRecordingsNeedsTheWholeSetToSayNone(t *testing.T) {
 	}
 	if got := (UnmatchedCall{MatchPhase: MatchPhaseNoMocks, SetRecorded: RecordedNone}).Sanitized().ShapeRecordings(); got != RecordedNone {
 		t.Errorf("a sanitized call says %q; it keeps what the set read found", got)
+	}
+}
+
+// onDiskSource is a mock file holding one recording, which it reads back, or
+// fails to with err.
+type onDiskSource struct {
+	recorded *Mock
+	err      error
+}
+
+func (s onDiskSource) LoadPayload(context.Context, PayloadAt) (*Mock, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.recorded.DeepCopy(), nil
+}
+func (onDiskSource) SetPayloadMutator(PayloadMutator) {}
+func (onDiskSource) PayloadMutator() PayloadMutator   { return nil }
+
+// A recording whose payload a read left on disk is read from its payload
+// read back; one whose payload cannot be read back is not read.
+func TestRecordedCallOfReadsAPayloadLeftOnDisk(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+		want RecordedCall
+	}{
+		{"read back", nil, RecordedCall{Kind: HTTP, Shape: CallShape("HTTP", "GET /api/tick"), Read: true}},
+		{"file replaced", ErrPayloadFileReplaced, RecordedCall{Kind: HTTP}},
+		{"unreadable", errors.New("the file is cut"), RecordedCall{Kind: HTTP}},
+	} {
+		recorded := httpMock("GET", "http://clock:80/api/tick", nil)
+		m := recorded.DeepCopy()
+		m.LeavePayloadOnDisk(onDiskSource{recorded: recorded, err: c.err}, PayloadAt{Name: "tick"})
+		if m.Spec.HTTPReq != nil {
+			t.Fatalf("%s: the mock kept its payload in memory", c.name)
+		}
+		if got := RecordedCallOf(m); got != c.want {
+			t.Errorf("%s: RecordedCallOf = %+v; want %+v", c.name, got, c.want)
+		}
+	}
+}
+
+// Two shapes are one call's where they are equal segment by segment, either
+// side writing a segment {} for any, and of one length.
+func TestSameCallShapeHolesEitherSide(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{
+		{"GET /u/{}", "GET /u/alice", true},
+		{"GET /u/alice", "GET /u/{}", true},
+		{"GET /u/alice", "GET /u/bob", false},
+		{"GET /u", "GET /u/{}", false},
+		{"delete on sessions", "delete on sessions", true},
+	} {
+		if got := sameCallShape(c.a, c.b); got != c.want {
+			t.Errorf("sameCallShape(%q, %q) = %v; want %v", c.a, c.b, got, c.want)
+		}
 	}
 }

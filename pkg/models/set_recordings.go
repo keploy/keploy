@@ -77,8 +77,9 @@ func mongoRecordedSummary(reqs []MongoRequest) (string, bool) {
 	if len(reqs) == 0 {
 		return "", false
 	}
-	msg, ok := reqs[0].Message.(*MongoOpMessage)
-	if !ok || msg == nil {
+	// A request that is no OP_MSG (or a nil one) is a nil msg.
+	msg, _ := reqs[0].Message.(*MongoOpMessage)
+	if msg == nil {
 		return "", false
 	}
 	for _, sec := range msg.Sections {
@@ -86,17 +87,19 @@ func mongoRecordedSummary(reqs []MongoRequest) (string, bool) {
 		if !ok {
 			continue
 		}
+		// A token that is not there (a read error) is nil, which is
+		// neither the document's "{" nor a name.
 		dec := json.NewDecoder(strings.NewReader(body))
-		if open, err := dec.Token(); err != nil || open != json.Delim('{') {
+		if open, _ := dec.Token(); open != json.Delim('{') {
 			return "", false
 		}
-		key, err := dec.Token()
-		cmd, named := key.(string)
-		if err != nil || !named || cmd == "" {
+		key, _ := dec.Token()
+		cmd, _ := key.(string)
+		if cmd == "" {
 			return "", false
 		}
-		value, err := dec.Token()
-		if coll, isName := value.(string); err == nil && isName && coll != "" && coll != "$cmd" {
+		value, _ := dec.Token()
+		if coll, _ := value.(string); coll != "" && coll != "$cmd" {
 			return cmd + " on " + coll, true
 		}
 		return cmd, true

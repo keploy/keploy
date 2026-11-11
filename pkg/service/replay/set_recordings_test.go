@@ -1,9 +1,12 @@
 package replay
 
 import (
+	"context"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A call outside every test whose matcher found no recording to compare is
@@ -63,5 +66,122 @@ func TestRunTestSet_ACallOutsideEveryTestIsToldWhatItsWholeSetRecorded(t *testin
 				t.Errorf("the report's call %+v; want it to say the set read %q", got, c.recorded)
 			}
 		})
+	}
+}
+
+// setWalk is a mock store that walks the set's recordings (recorded), as a
+// read of its mock file does, counting its walks; err fails each walk once it
+// has visited them.
+type setWalk struct {
+	*prMockDB
+	recorded func() []*models.Mock
+	walks    *int
+	err      error
+}
+
+func (w setWalk) WalkTestSetMocks(_ context.Context, _ string, visit func(m *models.Mock, perTest, session bool)) error {
+	*w.walks++
+	for _, m := range w.recorded() {
+		visit(m, true, false)
+	}
+	return w.err
+}
+
+func setRecordingsReplayer(hooks TestHooks, walk setWalk) *Replayer {
+	return &Replayer{logger: zap.NewNop(), mockDB: walk, hookImpl: hooks}
+}
+
+func tickRecording(url string) func() []*models.Mock {
+	return func() []*models.Mock {
+		return []*models.Mock{{Name: "mock-tick", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: url}}}}
+	}
+}
+
+// The set's recordings are read once, and only for a call (each fails the run
+// outside every test) that names no closest recording and whose phase
+// compared none of its shape; every other call is left as it came, and a read
+// that fails sets nothing. A call an earlier set made in its test, decided
+// after that set ended, is read as one between tests is: it fails the run
+// outside every test of the set that read it.
+func TestWithSetRecordingsReadsOnlyForACallThatNeedsIt(t *testing.T) {
+	tick := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /api/tick", MatchPhase: models.MatchPhaseNoMocks}
+	closest := tick
+	closest.Between, closest.ClosestMock = true, "mock-tick"
+	compared := tick
+	compared.Between, compared.MatchPhase = true, models.MatchPhaseBody
+	between := tick
+	between.Between = true
+	late := tick
+	late.Late = true
+	earlierSets := tick
+	earlierSets.EarlierSet, earlierSets.EarlierSetTest = 1, "test-2"
+	strict := between
+	strict.MatchPhase = models.MatchPhaseStrict
+
+	walks := 0
+	r := setRecordingsReplayer(prHooks{}, setWalk{prMockDB: &prMockDB{}, recorded: tickRecording("http://clock:80/api/tick"), walks: &walks})
+	got := r.withSetRecordings(context.Background(), "test-set-0", []models.UnmatchedCall{closest, compared, between, late, earlierSets, strict})
+	for i, want := range []string{"", "", models.RecordedShape, models.RecordedShape, models.RecordedShape, ""} {
+		if got[i].SetRecorded != want {
+			t.Errorf("call %d: SetRecorded %q; want %q", i, got[i].SetRecorded, want)
+		}
+	}
+	if walks != 1 {
+		t.Errorf("the set was read %d times; want once", walks)
+	}
+
+	walks = 0
+	if got := r.withSetRecordings(context.Background(), "test-set-0", []models.UnmatchedCall{closest, compared, strict}); walks != 0 || got[0].SetRecorded != "" {
+		t.Errorf("the set was read %d times for calls none of which needs it", walks)
+	}
+
+	walks = 0
+	failing := setRecordingsReplayer(prHooks{}, setWalk{prMockDB: &prMockDB{}, recorded: tickRecording("http://clock:80/api/tick"), walks: &walks, err: errPRMockReads})
+	if got := failing.withSetRecordings(context.Background(), "test-set-0", []models.UnmatchedCall{between}); got[0].SetRecorded != "" {
+		t.Errorf("a read that failed set %q; it sets nothing", got[0].SetRecorded)
+	}
+}
+
+// setsWalk is a mock store that walks the recordings of the set it is asked
+// for, and notes which sets it was asked for.
+type setsWalk struct {
+	*prMockDB
+	recorded map[string][]*models.Mock
+	asked    *[]string
+}
+
+func (w setsWalk) WalkTestSetMocks(_ context.Context, set string, visit func(m *models.Mock, perTest, session bool)) error {
+	*w.asked = append(*w.asked, set)
+	for _, m := range w.recorded[set] {
+		visit(m, true, false)
+	}
+	return nil
+}
+
+// A call an earlier set made is told what THAT set recorded of its shape, read
+// from that set's every recording, not the reading set's: the timer recorded
+// in test-set-a, made between its tests and read in test-set-b, which has no
+// recording of it, is told the set it was made in has its shape.
+func TestAnEarlierSetsCallIsToldWhatThatSetRecorded(t *testing.T) {
+	core, logs := observer.New(zap.ErrorLevel)
+	var asked []string
+	r := &Replayer{logger: zap.New(core), mockDB: setsWalk{prMockDB: &prMockDB{}, asked: &asked,
+		recorded: map[string][]*models.Mock{"test-set-a": tickRecording("http://clock:80/api/tick")()}}}
+	for _, set := range []string{"test-set-a", "test-set-b"} {
+		r.earlierSetCalls.begin(set)
+	}
+	call := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /api/tick", Kind: models.MissOutsideTest, EarlierSet: 1, MatchPhase: models.MatchPhaseNoMocks}
+	if rest := r.takeEarlierSetCalls([]models.UnmatchedCall{call}); len(rest) != 0 {
+		t.Fatalf("the read keeps %+v; the call is test-set-a's", rest)
+	}
+	if len(asked) != 1 || asked[0] != "test-set-a" {
+		t.Fatalf("the sets read for the call: %v; want test-set-a alone", asked)
+	}
+	said := logs.FilterField(zap.String("kind", models.KindOutsideEveryTest)).FilterField(zap.String("test-set", "test-set-a")).All()
+	if len(said) != 1 {
+		t.Fatalf("the call was said %d times; want once: %+v", len(said), logs.All())
+	}
+	if got := said[0].ContextMap()["recorded"]; got != models.RecordedShape {
+		t.Errorf("the line says recorded=%v; want %q, what test-set-a recorded", got, models.RecordedShape)
 	}
 }

@@ -52,12 +52,12 @@ func TestASetRecordAgainerNamesHowItsSetIsRecordedAgain(t *testing.T) {
 		call models.UnmatchedCall
 		want string
 	}{
-		{"test-set-1", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema}, say},
+		{"test-set-1", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema, SetRecorded: models.RecordedNone}, say},
 		{"test-set-1", models.UnmatchedCall{Between: true, ClosestMock: "mock-4"}, "if the application changed this call on purpose, " + say},
-		{"test-set-2", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema}, "record the test set again in its place: cluster-record test-set-2"},
-		{"test-set-4", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema}, "record the test set again in its place: cluster-record test-set-4"},
-		{"test-set-3", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema}, "record the test set test-set-3 again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"},
-		{"test-set-5", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema}, "record the test set again in its place: " + utils.RecordSetAgain("/w/keploy", "", "", "test-set-5", "test-run-2", "go run .").Text()},
+		{"test-set-2", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema, SetRecorded: models.RecordedNone}, "record the test set again in its place: cluster-record test-set-2"},
+		{"test-set-4", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema, SetRecorded: models.RecordedNone}, "record the test set again in its place: cluster-record test-set-4"},
+		{"test-set-3", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema, SetRecorded: models.RecordedNone}, "record the test set test-set-3 again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"},
+		{"test-set-5", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema, SetRecorded: models.RecordedNone}, "record the test set again in its place: " + utils.RecordSetAgain("/w/keploy", "", "", "test-set-5", "test-run-2", "go run .").Text()},
 		{"", models.UnmatchedCall{Between: true}, "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call"},
 	} {
 		core, logs := observer.New(zapcore.ErrorLevel)

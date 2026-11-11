@@ -570,7 +570,7 @@ func TestOutsideFieldsRecordTheSetTheyNameAgain(t *testing.T) {
 	} {
 		r := &Replayer{config: &config.Config{Path: "/w/keploy", Command: "go run ."}, setRunID: c.run}
 		core, logs := observer.New(zapcore.ErrorLevel)
-		zap.New(core).Error("call outside every test", r.outsideFields(c.set, "", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema})...)
+		zap.New(core).Error("call outside every test", r.outsideFields(c.set, "", models.UnmatchedCall{Between: true, MatchPhase: models.MatchPhaseSchema, SetRecorded: models.RecordedNone})...)
 		if got := logs.All()[0].ContextMap()["next_step"]; got != c.want {
 			t.Fatalf("set %q: next step %q; want %q", c.set, got, c.want)
 		}

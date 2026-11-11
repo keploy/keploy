@@ -224,8 +224,9 @@ func lateWhere(c models.UnmatchedCall) string {
 	return where
 }
 
-// withSetRecordings is calls with what their set's recordings hold of the
-// shape of each call outside every test that names no closest recording and
+// withSetRecordings is calls, each a call that fails the run outside every
+// test (a set's own, or one an earlier set made), with what their set's
+// recordings hold of the shape of each that names no closest recording and
 // whose match phase compared no recording of its shape
 // (models.UnmatchedCall.SetRecorded). Such a call's matcher read one test's
 // window and the session's, less what was spent: a call whose shape the set
@@ -235,7 +236,7 @@ func lateWhere(c models.UnmatchedCall) string {
 // that fails sets nothing: no call then says the set has none.
 func (r *Replayer) withSetRecordings(ctx context.Context, testSetID string, calls []models.UnmatchedCall) []models.UnmatchedCall {
 	needs := func(c models.UnmatchedCall) bool {
-		return c.OutsideEveryTest() && c.ClosestMock == "" && c.ShapeRecordings() != models.RecordedShape
+		return c.ClosestMock == "" && c.ShapeRecordings() != models.RecordedShape
 	}
 	if !slices.ContainsFunc(calls, needs) {
 		return calls

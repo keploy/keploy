@@ -102,6 +102,7 @@ var notInTheReport = map[string]string{
 	"Instance":        "the test worker that made the call: the failure names the test it is charged to (TestID)",
 	"BeforeSet":       "where the call was made (before the set's first test): the replay fails the set with it from the miss, never from the report",
 	"EarlierSetTest":  "where the call was made (an earlier set's test): the replay fails the run with it from the miss, never from the report",
+	"SetRecorded":     "what the call's whole set recorded of its shape, read only for a call that fails the run outside every test, after its set ran: no test's report holds such a call",
 	"EarlierSet":      "where the call was made (sets back): the replay names that set from the miss, never from the report",
 	"Between":         "where the call was made (between two tests): the replay fails the set with it from the miss, never from the report",
 	"Late":            "when keploy decided the call (after the end of the test it was made in): the replay fails the set with it from the miss, never from the report",
