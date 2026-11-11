@@ -2,6 +2,7 @@ package replay
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -439,7 +440,9 @@ func TestLateWhereSaysWhatKeployKnows(t *testing.T) {
 // charges a set's own failure to all its tests charges them nothing. A set
 // that fails for something else as well (a call before its first test, one a
 // parser held for a later test's recording, one after its last test), or
-// that holds no call outside every test, does not say it.
+// that holds no call outside every test, does not say it. The set's end the
+// hooks are told (SetEndHook) says the same: a hook that never sees the
+// report (one whose replay writes its reports elsewhere) reads it there.
 func TestRunTestSet_ASetFailedOnlyOutsideEveryTestSaysSo(t *testing.T) {
 	read := func(c models.UnmatchedCall) func() ([]models.UnmatchedCall, error) {
 		return func() ([]models.UnmatchedCall, error) { return []models.UnmatchedCall{c}, nil }
@@ -466,12 +469,20 @@ func TestRunTestSet_ASetFailedOnlyOutsideEveryTestSaysSo(t *testing.T) {
 			provenOn(t, true)
 			h := newPartialRunHarness(t, 3, 0)
 			h.instr.mockErrorsFor = misses(tc.reads...)
-			if status := h.run(t); status != models.TestSetStatusFailed {
+			told := &setEndRecorder{TestHooks: h.replayer.GetTestHooks()}
+			h.replayer.SetTestHooks(told)
+			status := h.run(t)
+			if status != models.TestSetStatusFailed {
 				t.Fatalf("status %s, want FAILED", status)
 			}
 			rep := h.report.report
 			if rep.OutsideOnly != tc.want {
 				t.Fatalf("OutsideOnly %v, want %v (reason %q, calls %+v)", rep.OutsideOnly, tc.want, rep.FailureReason, rep.UnclaimedCalls)
+			}
+			h.replayer.tellSetEnd("test-set-0", status, nil)
+			want := []setEndCall{{"test-set-0", models.SetEnd{Status: status, Why: rep.FailureReason, OutsideOnly: tc.want}}}
+			if got := told.told(); !slices.Equal(got, want) {
+				t.Fatalf("told %+v, want %+v", got, want)
 			}
 			for _, r := range rep.Tests {
 				want := models.TestStatusPassed

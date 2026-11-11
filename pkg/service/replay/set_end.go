@@ -105,7 +105,7 @@ type OutsideCallsLogger interface {
 // a set with no test case to run, a set ignored whole, a set refused when it
 // loaded) notes it before writing it.
 func (r *Replayer) noteSetEnd(rep *models.TestReport) {
-	r.setEnd = &models.SetEnd{Status: models.TestSetStatus(rep.Status), Why: rep.FailureReason}
+	r.setEnd = &models.SetEnd{Status: models.TestSetStatus(rep.Status), Why: rep.FailureReason, OutsideOnly: rep.OutsideOnly}
 	r.setEndCalls = rep.UnclaimedCalls
 	r.setEndAnswers = rep.SetAnswers
 }
@@ -115,6 +115,7 @@ func (r *Replayer) noteSetEnd(rep *models.TestReport) {
 // noted when it says that status (noteSetEnd), else from err, the error that
 // ended it first: one before any final report, or the failure to write the
 // one at the set's end, which ends the set INTERNAL_ERR whatever it said.
+// OutsideOnly is the noted report's, and false with no such report.
 func (r *Replayer) tellSetEnd(testSetID string, status models.TestSetStatus, err error) {
 	if h, ok := r.hookImpl.(SetSharesHook); ok {
 		if shares, sharing := r.exact.setShares(status); sharing {
@@ -142,7 +143,7 @@ func (r *Replayer) tellSetEnd(testSetID string, status models.TestSetStatus, err
 	end := models.SetEnd{Status: status}
 	switch noted := r.setEnd; {
 	case noted != nil && noted.Status == status:
-		end.Why = noted.Why
+		end.Why, end.OutsideOnly = noted.Why, noted.OutsideOnly
 	case err != nil:
 		end.Why = err.Error()
 	}

@@ -1076,9 +1076,12 @@ const (
 // with only passing results (the app halted after some tests passed, or
 // keploy could not judge the set), and FAILED with none failing (a capture
 // loss after its last test): its results alone do not say how it ended.
+// OutsideOnly is the final report's TestReport.OutsideOnly: the calls the
+// set's application made outside every test alone failed it.
 type SetEnd struct {
-	Status TestSetStatus `json:"status" yaml:"status"`
-	Why    string        `json:"why,omitempty" yaml:"why,omitempty"`
+	Status      TestSetStatus `json:"status" yaml:"status"`
+	Why         string        `json:"why,omitempty" yaml:"why,omitempty"`
+	OutsideOnly bool          `json:"outsideOnly,omitempty" yaml:"outside_only,omitempty"`
 }
 
 func StringToTestSetStatus(s string) (TestSetStatus, error) {
