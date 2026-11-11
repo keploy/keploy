@@ -161,6 +161,19 @@ func TestAReplayThatLostACallFailsUnderTheSwitchOnly(t *testing.T) {
 	require.Contains(t, r.IsolationNote, refused.CaptureIncomplete())
 	require.Contains(t, r.IsolationNote, "to db:5432")
 
+	// A loss keploy judges, one it cannot capture at all and the kernel's
+	// evidence, in one run: only the judged loss fails the run, so only it is
+	// the receipt's CaptureIncomplete; the one keploy cannot capture is its
+	// CannotCapture alone, and the evidence is neither.
+	unix := models.CaptureLoss{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}
+	skip := models.CaptureLoss{Kind: models.CaptureLossKernelSkip, Count: 3}
+	dir, code, _ = replayIn(t, replayCase{losses: &lossCounter{after: models.CaptureLosses{tls[0], unix, skip}}, mapped: true, keployFails: true})
+	require.Equal(t, 1, code)
+	r = mustReceipt(t, dir)
+	require.Equal(t, FailedByCaptureIncomplete, r.FailedBy)
+	require.Equal(t, tls, r.CaptureIncomplete, "only what fails the run")
+	require.Equal(t, models.CaptureLosses{unix}, r.CannotCapture)
+
 	// Lost before the test command ran: not this run's.
 	before := &lossCounter{before: tls, after: tls}
 	dir, code, _ = replayIn(t, replayCase{losses: before, mapped: true})
