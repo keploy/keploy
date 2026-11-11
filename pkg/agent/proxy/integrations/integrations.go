@@ -1241,26 +1241,6 @@ func BackgroundRecordingsOf(db MockMemDb, kind models.Kind) []models.BackgroundR
 	return nil
 }
 
-// TrailRecordingsOf is, of db's background recordings of kind
-// (BackgroundRecordingsOf: the set's worker: and startup: recordings), each
-// that trails a test of the replay's scope table (TrailOf), with that test,
-// in recorded order. For a parser to tell a miss carries a trailed test's
-// kept value (MockMismatchReport.TrailsOf). Nothing it returns is served,
-// consumed or to be changed. nil where none trails a test, or db tells
-// neither.
-func TrailRecordingsOf(db MockMemDb, kind models.Kind) []models.TrailRecording {
-	var out []models.TrailRecording
-	for _, r := range BackgroundRecordingsOf(db, kind) {
-		if r.Mock == nil {
-			continue
-		}
-		if tr := TrailOf(db, r.Mock.Name); tr.Test != "" {
-			out = append(out, models.TrailRecording{Mock: r.Mock, Trails: tr.Test})
-		}
-	}
-	return out
-}
-
 // RoundBackgroundReader is an optional MockMemDb capability: the background
 // recordings of kind (BackgroundRecordingReader) of the set the call was
 // marked in (call, from MarkCallRound), not of the set staged when its miss
@@ -1291,11 +1271,15 @@ func BackgroundRecordingsAt(db MockMemDb, call CallRound, kind models.Kind) []mo
 // same test's next run, first; a pool view's call between tests is the
 // ended test's, whose scope runs until the next begins; variables.Table.
 // OwnOf, by the mark's test, for a mark that keeps no scope), what each ended test of the set
-// bound itself (variables.Table.EndedOf), and the test each recording
-// trails by the set's scope table (TrailedTests).
+// bound itself (variables.Table.EndedOf), the binding of a name a test's own
+// scope made (variables.Table.LookupOf: the running scope's while it is that
+// test's, else the latest of its ended scopes'; Mongo's markTrails reads a
+// trailed test's values so), and the test each recording trails by the
+// set's scope table (TrailedTests).
 type BoundValues interface {
 	Own() []variables.Binding
 	EndedOf(test string) []variables.Binding
+	LookupOf(test, name string) (b variables.Binding, ended, ok bool)
 	TrailOf(mock string) learn.Trail
 }
 
@@ -1359,6 +1343,9 @@ func (b boundNow) Own() []variables.Binding {
 
 func (b boundNow) EndedOf(test string) []variables.Binding { return b.table.EndedOf(test) }
 func (b boundNow) TrailOf(mock string) learn.Trail         { return TrailOf(b.db, mock) }
+func (b boundNow) LookupOf(test, name string) (variables.Binding, bool, bool) {
+	return b.table.LookupOf(test, name)
+}
 
 // LearnEnder is an optional MockMemDb capability: whether the test set's
 // learn step has ended (models.MockFilterParams.LearnEnded). keploy replay's

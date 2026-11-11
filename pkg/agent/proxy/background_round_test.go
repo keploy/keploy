@@ -95,7 +95,10 @@ func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
 	bind := func(name, value, mock string) models.VariableBinding {
 		return models.VariableBinding{Name: name, Value: value, Recorded: "rec-" + name, Mock: mock, Place: "body.id"}
 	}
-	type read struct{ own, ended, trail, trailMocks string }
+	// look is what each test's own scope bound of a name, as a trailing
+	// call's mark reads it (LookupOf): set A's ended test-a1's app, its
+	// running test-a2's own, and set B's test-b1's own.
+	type read struct{ own, ended, look, trail, trailMocks string }
 	text := func(bv integrations.BoundValues, endedTest, mock string) *read {
 		if bv == nil {
 			return nil
@@ -107,8 +110,14 @@ func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
 			}
 			return out
 		}
+		look := ""
+		for _, q := range [][2]string{{endedTest, "app"}, {"test-a2", "own"}, {"test-b1", "own"}} {
+			if b, ended, ok := bv.LookupOf(q[0], q[1]); ok {
+				look += fmt.Sprintf("%s.%s=%s ended=%v;", q[0], q[1], b.Value, ended)
+			}
+		}
 		tr := bv.TrailOf(mock)
-		return &read{own: names(bv.Own()), ended: names(bv.EndedOf(endedTest)), trail: tr.Test, trailMocks: fmt.Sprint(tr.Mocks)}
+		return &read{own: names(bv.Own()), ended: names(bv.EndedOf(endedTest)), look: look, trail: tr.Test, trailMocks: fmt.Sprint(tr.Mocks)}
 	}
 	reads := func(what string, call integrations.CallRound, endedTest, mock string, want *read) {
 		t.Helper()
@@ -132,7 +141,7 @@ func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
 	mm.Variables().StartOpeningTest("test-a2", func() {}, nil, nil, nil)
 	mm.Variables().Bind(bind("own", "a2", "mock-2"))
 	a := mark()
-	setA := &read{own: "own=a2;", ended: "app=a1;", trail: "test-a1", trailMocks: "[mock-1]"}
+	setA := &read{own: "own=a2;", ended: "app=a1;", look: "test-a1.app=a1 ended=true;test-a2.own=a2 ended=false;", trail: "test-a1", trailMocks: "[mock-1]"}
 	reads("a call of set A", a, "test-a1", "mock-9", setA)
 
 	// Set B begins (twice: the replay's re-registration before staging),
@@ -153,7 +162,7 @@ func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
 	mm.Variables().StartOpeningTest("test-b1", func() {}, nil, nil, nil)
 	mm.Variables().Bind(bind("own", "b1", "mock-1"))
 	b := mark()
-	setB := &read{own: "own=b1;", trailMocks: "[]"}
+	setB := &read{own: "own=b1;", look: "test-b1.own=b1 ended=false;", trailMocks: "[]"}
 	reads("a call of set A decided in set B", a, "test-a1", "mock-9", setA)
 	reads("a call of set B", b, "test-a1", "mock-9", setB)
 	reads("a call of no mark", integrations.CallRound{}, "test-a1", "mock-9", setB)
