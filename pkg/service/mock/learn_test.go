@@ -86,6 +86,32 @@ func TestPersistLearnedSaysEveryField(t *testing.T) {
 	}
 }
 
+// A recording's learned fields are listed once, in its own scope, whatever
+// tests it answered in: a session's recording (no test's own, the set's)
+// that answered tests A and B is listed with the set's, under neither test,
+// and a test's own recording that also answered another test is listed on
+// its own test's line alone. So a reader counts each field once.
+func TestALearnedFieldIsListedOnceInItsRecordingsOwnScope(t *testing.T) {
+	store := &learnedStore{}
+	m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.NewNop()}
+	consumed := []models.MockState{{Name: "mock-1"}, {Name: "session-0"}, {Name: "mock-2"}}
+	flows := []FlowMocks{
+		{Flow: "o::A", Consumed: []models.MockState{{Name: "mock-1"}, {Name: "session-0"}}},
+		{Flow: "o::B", Consumed: []models.MockState{{Name: "session-0"}, {Name: "mock-1"}, {Name: "mock-2"}}},
+	}
+	expected := map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}, "o::B": {{Name: "mock-2"}}}
+	out, err := m.persistLearned(context.Background(), "s", consumed, nil, flows, expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string][]string{"o::A": {"mock-1 body.ts (noise)"}, "o::B": {"mock-2 body.ts (noise)"}}; !reflect.DeepEqual(out.byTest, want) {
+		t.Fatalf("by test %v, want each test's own recording on its line alone", out.byTest)
+	}
+	if want := []string{"session-0 body.ts (noise)"}; !reflect.DeepEqual(out.pool, want) {
+		t.Fatalf("the set's %v, want the session's recording listed once", out.pool)
+	}
+}
+
 // clientTestsInstr is keploy mock's agent client, which says whether the
 // agent's answer to the session's MockOutgoing said its learn step reads the
 // session's tests as client tests (pkg.ClientTestsReader), and the version

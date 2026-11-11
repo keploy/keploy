@@ -227,6 +227,12 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 	for _, f := range flows {
 		var fields []string
 		for _, st := range f.Consumed {
+			if owner[st.Name] != f.Flow {
+				// A recording is listed once, in its own scope: a test's own
+				// on its line, the set's (a session's, a worker's) with the
+				// set's, never under each test it answered in.
+				continue
+			}
 			for _, a := range added[st.Name] {
 				fields = append(fields, st.Name+" "+a)
 			}
@@ -253,7 +259,7 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 	}
 	if len(rest) > 0 {
 		sort.Strings(rest)
-		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", rest))
+		m.logger.Info("learned fields that changed between record and replay, on the set's mocks (start-up, session, worker) and mocks their test did not consume", zap.Strings("fields", rest))
 	}
 	voided = slices.DeleteFunc(voided, func(v models.MockState) bool { return !m.learnsOnto(owner[v.Name]) })
 	// keploy mock record serves a worker: entry as the pool's (unknownBesideTests).

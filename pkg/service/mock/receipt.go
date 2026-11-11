@@ -333,9 +333,11 @@ type TestsReceipt struct {
 	// failed is never "none").
 	CaptureLossesUnread string `yaml:"captureLossesUnread,omitempty" json:"captureLossesUnread,omitempty"`
 	// Learned is what the learn step of a record's full round wrote onto
-	// mocks no test consumed (the set's start-up and pool), each field as
-	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14
-	// §7.2 step 10). What a call made in another window than its
+	// the set's mocks no test owns (its start-up and pool: a session's or a
+	// worker's recording, listed here once whatever tests it answered) and
+	// onto a test's mock its test did not consume, each field as "<mock>
+	// <path> (<kind>)"; a test's own is on its line (design v14 §7.2 step
+	// 10). What a call made in another window than its
 	// recording's taught it is LearnedElsewhere's, not this.
 	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
 	// LearnedElsewhere is what the learn step of a record's full round
