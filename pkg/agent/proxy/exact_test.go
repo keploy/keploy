@@ -4487,7 +4487,7 @@ func aheadCallHeldAcrossNextTest(t *testing.T, next ...*models.Mock) (*MockManag
 
 // aheadOffered is the first a-0 copy db's per-test reads offer; nil for none.
 func aheadOffered(db integrations.MockMemDb) *models.Mock {
-	for _, read := range []func() ([]*models.Mock, error){db.GetFilteredMocks, db.GetPerTestMocksInWindow} {
+	for _, read := range []func() ([]*models.Mock, error){db.GetFilteredMocks, db.GetPerTestMocksInWindow} { //nolint:staticcheck // SA1019: a parser's per-test read (the generic matcher's) is one of the reads checked.
 		got, _ := read()
 		for _, mk := range got {
 			if mk != nil && mk.Name == "a-0" {

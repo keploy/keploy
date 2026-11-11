@@ -33,7 +33,7 @@ func TestAPoolCallRefusedTheNextTestsCopyIsAnsweredInTheViewInForce(t *testing.T
 			mm.ServeExactPool(models.PoolKeyNone, nil, roundMock(mm, a.Name))
 			held, _ := mm.HoldToRound(mm.MarkCallRound())
 			first := func(db integrations.MockMemDb) *models.Mock {
-				for _, read := range []func() ([]*models.Mock, error){db.GetFilteredMocks, db.GetPerTestMocksInWindow} {
+				for _, read := range []func() ([]*models.Mock, error){db.GetFilteredMocks, db.GetPerTestMocksInWindow} { //nolint:staticcheck // SA1019: a parser's per-test read (the generic matcher's) is one of the reads checked.
 					got, _ := read()
 					for _, mk := range got {
 						if strings.HasPrefix(mk.Name, "a-") {
@@ -101,7 +101,7 @@ func TestAPoolCallBeatenToTheNextTestsCopyMissesAsAtOnce(t *testing.T) {
 			other, _ := mm.HoldToRound(mm.MarkCallRound())
 			held, _ := mm.HoldToRound(mm.MarkCallRound())
 			first := func(db integrations.MockMemDb) *models.Mock {
-				for _, read := range []func() ([]*models.Mock, error){db.GetFilteredMocks, db.GetPerTestMocksInWindow} {
+				for _, read := range []func() ([]*models.Mock, error){db.GetFilteredMocks, db.GetPerTestMocksInWindow} { //nolint:staticcheck // SA1019: a parser's per-test read (the generic matcher's) is one of the reads checked.
 					got, _ := read()
 					for _, mk := range got {
 						if strings.HasPrefix(mk.Name, "a-") {
