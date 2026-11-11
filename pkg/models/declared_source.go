@@ -1,6 +1,7 @@
 package models
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"time"
@@ -26,18 +27,22 @@ const (
 // DeclaredSourceMinted, Field the place it names (keploy's place grammar:
 // body.<path>, url.path[n], url.query.<name>, header.<name>), and Clock, on
 // a clock source only, the range the read lies in around the call's span
-// and the cut it is read at.
+// and the cut it is read at. Minted, on a minted source only, is the form of
+// every value the set's recordings hold at the rule's places (MintedForm),
+// which round F's value and a replay's must keep.
 type DeclaredSource struct {
-	Rule  string       `json:"rule" yaml:"rule" bson:"rule"`
-	Kind  string       `json:"kind" yaml:"kind" bson:"kind"`
-	Field string       `json:"field" yaml:"field" bson:"field"`
-	Clock *ClockOffset `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	Rule   string       `json:"rule" yaml:"rule" bson:"rule"`
+	Kind   string       `json:"kind" yaml:"kind" bson:"kind"`
+	Field  string       `json:"field" yaml:"field" bson:"field"`
+	Clock  *ClockOffset `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	Minted *MintedForm  `json:"minted,omitempty" yaml:"minted,omitempty" bson:"minted,omitempty"`
 }
 
 // Check is why s is no source this keploy can decide a field by, nil when
 // it is one: a rule and a field named, a kind this keploy knows, a clock
 // range with a cut on a clock source, no wider than two cuts and a second
-// (keploy.yml's own bound), and none on a minted one. A source a
+// (keploy.yml's own bound), and no form; a form keploy can check a value by
+// (MintedForm.Check) and no range on a minted one. A source a
 // newer keploy wrote of a kind this one does not know is refused, never
 // read as no source: the recording was judged with it.
 func (s DeclaredSource) Check() error {
@@ -59,9 +64,16 @@ func (s DeclaredSource) Check() error {
 		if c.Max-c.Min > 2*c.Res+time.Second {
 			return fmt.Errorf("rule %s declares %s a read of the clock over a range wider than two cuts and a second", s.Rule, s.Field)
 		}
+		if s.Minted != nil {
+			return fmt.Errorf("rule %s declares %s a read of the clock with a minted form", s.Rule, s.Field)
+		}
 	case DeclaredSourceMinted:
 		if s.Clock != nil {
 			return fmt.Errorf("rule %s declares %s minted with a clock range", s.Rule, s.Field)
+		}
+		// No form is the empty one, which names no class.
+		if err := cmp.Or(s.Minted, &MintedForm{}).Check(); err != nil {
+			return fmt.Errorf("rule %s declares %s minted: %w", s.Rule, s.Field, err)
 		}
 	default:
 		return fmt.Errorf("rule %s declares %s of a kind this keploy does not know (%q)", s.Rule, s.Field, s.Kind)

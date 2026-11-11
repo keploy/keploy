@@ -19,7 +19,7 @@ import (
 func TestTheMockManagerAnswersARecordingsDeclaredSources(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	require.Nil(t, mm.SourcesOf("mock-9"), "before any table")
-	minted := models.DeclaredSource{Rule: "id@0a1b2c3d", Kind: models.DeclaredSourceMinted, Field: "body.docs.msgs.0._id"}
+	minted := models.DeclaredSource{Rule: "id@0a1b2c3d", Kind: models.DeclaredSourceMinted, Field: "body.docs.msgs.0._id", Minted: &models.MintedForm{Classes: []string{"-", "digit", "lower"}}}
 	mm.SetPoolSources(map[string][]models.DeclaredSource{"mock-9": {minted}, "mock-8": {}, "": {minted}})
 	got := mm.SourcesOf("mock-9")
 	require.Equal(t, []models.DeclaredSource{minted}, got)

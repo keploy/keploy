@@ -14,8 +14,8 @@ import (
 // keeps b's, and a use marked is no minted bind. Neither a clone nor a
 // merge shares a mark with its input.
 func TestMergeVariablesKeepsAMintedMarkWithItsBind(t *testing.T) {
-	hex := &MintedShape{Rule: "audit-id", Alphabet: "hex"}
-	digits := &MintedShape{Rule: "audit-id", Alphabet: "digits"}
+	hex := &MintedShape{Rule: "audit-id", MintedForm: MintedForm{Classes: []string{"-", "digit", "lower"}}}
+	digits := &MintedShape{Rule: "audit-id", MintedForm: MintedForm{Classes: []string{"digit"}}}
 	for _, c := range []struct {
 		name string
 		a, b MockVariable
@@ -33,16 +33,16 @@ func TestMergeVariablesKeepsAMintedMarkWithItsBind(t *testing.T) {
 			t.Errorf("%s: merged Minted %+v, want %+v", c.name, got.Minted, c.want)
 		}
 		if got.Minted != nil {
-			got.Minted.Alphabet = "base64"
-			if in["id"].Minted != nil && in["id"].Minted.Alphabet == "base64" || other["id"].Minted != nil && other["id"].Minted.Alphabet == "base64" {
+			got.Minted.Classes[0] = "+"
+			if in["id"].Minted != nil && in["id"].Minted.Classes[0] == "+" || other["id"].Minted != nil && other["id"].Minted.Classes[0] == "+" {
 				t.Errorf("%s: the merged block shares its mark with an input", c.name)
 			}
 		}
 	}
-	in := MockVariables{"id": {Recorded: "r", Bind: "body._id", Minted: &MintedShape{Rule: "audit-id", Alphabet: "hex"}}}
+	in := MockVariables{"id": {Recorded: "r", Bind: "body._id", Minted: &MintedShape{Rule: "audit-id", MintedForm: MintedForm{Classes: []string{"-", "digit", "lower"}}}}}
 	c := in.Clone()
-	c["id"].Minted.Rule = "other"
-	if in["id"].Minted.Rule != "audit-id" {
+	c["id"].Minted.Rule, c["id"].Minted.Classes[0] = "other", "+"
+	if in["id"].Minted.Rule != "audit-id" || in["id"].Minted.Classes[0] != "-" {
 		t.Error("a clone shares its mark with the block it copies")
 	}
 }
@@ -50,7 +50,7 @@ func TestMergeVariablesKeepsAMintedMarkWithItsBind(t *testing.T) {
 // A minted mark is written in a mock, and read back, in each of its
 // encodings; a variable with none writes no mark.
 func TestAMintedMarkSurvivesItsEncodings(t *testing.T) {
-	v := MockVariables{"auditId": {Recorded: "0f8a", Bind: "documents[0]._id", Minted: &MintedShape{Rule: "audit-id", Alphabet: "hex"}}, "appId": {Recorded: "7d3b", Use: []string{"filter._id"}}}
+	v := MockVariables{"auditId": {Recorded: "0f8a", Bind: "documents[0]._id", Minted: &MintedShape{Rule: "audit-id", MintedForm: MintedForm{Prefix: "kepreq_", Classes: []string{"-", "digit", "lower"}}}}, "appId": {Recorded: "7d3b", Use: []string{"filter._id"}}}
 	y, err := yaml.Marshal(v)
 	if err != nil {
 		t.Fatal(err)

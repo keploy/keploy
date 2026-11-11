@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,13 +100,12 @@ type MockVariable struct {
 }
 
 // MintedShape is what a minted rule decided of a variable's value
-// (MockVariable.Minted): the id of the rule (Rule), and the alphabet its
-// value is made of (Alphabet: a name variables.ParseAlphabet reads), which
-// a value bound there keeps at each position its recorded value holds a
-// letter of it, every other byte as recorded.
+// (MockVariable.Minted): the id of the rule (Rule), and the form a value
+// bound there keeps (MintedForm: the recorded value's length, the prefix,
+// and the classes of the bytes after it).
 type MintedShape struct {
-	Rule     string `json:"rule" yaml:"rule" bson:"rule"`
-	Alphabet string `json:"alphabet" yaml:"alphabet" bson:"alphabet"`
+	Rule       string `json:"rule" yaml:"rule" bson:"rule"`
+	MintedForm `yaml:",inline" bson:",inline"`
 }
 
 // clone is a copy of s that shares nothing with it; nil for nil.
@@ -114,6 +114,7 @@ func (s *MintedShape) clone() *MintedShape {
 		return nil
 	}
 	c := *s
+	c.Classes = slices.Clone(s.Classes)
 	return &c
 }
 

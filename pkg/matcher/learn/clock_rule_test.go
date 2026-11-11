@@ -126,7 +126,8 @@ func TestAClockRuleDecidesAReadWhereAnAnswerOutsideTheScopeHoldsTheMoment(t *tes
 	}
 
 	// A minted rule on the field: minted's checks, never the clock's.
-	in.Source = func(f string) (Source, bool) { return Source{Kind: SourceMinted, Rule: cRule}, f == cPath }
+	tf, _ := models.MintedFormOf(cR, cF)
+	in.Source = func(f string) (Source, bool) { return Source{Kind: SourceMinted, Rule: cRule, Minted: tf}, f == cPath }
 	if ds := Decide(in); len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalNotMinted {
 		t.Errorf("a minted rule on the field: %s; want refused not-minted, naming the answer that holds it", oDescribe(ds))
 	}

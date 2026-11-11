@@ -4,7 +4,6 @@ import (
 	"slices"
 
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // A source keploy.yml's mock.rules declares for a field of a call
@@ -20,7 +19,9 @@ import (
 //     or keploy's limit);
 //   - the value is a string or a number read as written in both runs (no
 //     step opens it);
-//   - round F's value keeps the recorded one's shape (variables.Alphabet):
+//   - both runs' values keep the rule's form (models.MintedForm.Keeps:
+//     Source.Minted, of every value the set's recordings hold at the
+//     rule's places, its prefix cut to what both runs' values share):
 //     else it is refused as of another shape;
 //   - no earlier place holds the whole value: neither one the recording
 //     gave the application before the call holding the recorded value,
@@ -48,19 +49,22 @@ const (
 // Source is what keploy.yml's rules declare of a drifted field of the call
 // (Input.Source): its Kind, the id of the rule that declares it (Rule),
 // which every line it decides names, and, of a clock, the range its rule
-// declares (Clock: Min, Max and Res; every other field unset).
+// declares (Clock: Min, Max and Res; every other field unset), and, of a
+// minted field, the form of the values the set's recordings hold at the
+// rule's places (Minted).
 type Source struct {
-	Kind  SourceKind
-	Rule  string
-	Clock models.ClockOffset
+	Kind   SourceKind
+	Rule   string
+	Clock  models.ClockOffset
+	Minted models.MintedForm
 }
 
 // Minted is what a minted rule decided of its field (Decision.Minted): the
-// rule's id and the alphabet its value keeps (variables.MintedAlphabet),
-// which the replay checks at the bind place.
+// rule's id and the form its value keeps (models.MintedForm), which the
+// replay checks at the bind place.
 type Minted struct {
-	Rule     string
-	Alphabet variables.Alphabet
+	Rule string
+	Form models.MintedForm
 }
 
 // source is the source keploy.yml declares for the field at path, ok false
@@ -95,17 +99,17 @@ func (dc *decider) minted(path string, src Source, ds []Decision) []Decision {
 		return []Decision{dc.refuse(path, at, -1, r, f, RefusalNotMinted,
 			why+", and keploy reads a minted value as one string or number in each run, as written: this one is not", nil, dc.fieldNoise(path))}
 	}
-	alphabet, ok := variables.MintedAlphabet(r, f)
-	if !ok {
+	form := src.Minted.Cut(r, f)
+	if !form.Keeps(r, r) || !form.Keeps(r, f) {
 		return []Decision{dc.refuse(path, at, -1, r, f, RefusalChangedShape,
-			why+", and round F's value has another shape than the recorded one (its length, or a byte that is no letter or digit, or its letters' alphabet): minted value of another shape", nil, dc.fieldNoise(path))}
+			why+", and a run's value does not keep the rule's form ("+form.Where()+", at the recorded value's length): minted value of another shape", nil, dc.fieldNoise(path))}
 	}
 	if held := dc.mintedHeld(r, f); len(held) > 0 {
 		return []Decision{dc.refuse(path, at, -1, r, f, RefusalNotMinted,
 			why+", yet an earlier place holds its whole value in a run: the application copied it from there, so it is a variable's use, not a value made at this call", held, dc.fieldNoise(path))}
 	}
 	d := dc.learned(path, at, -1, r, f, OutcomeFresh, why+": no earlier place holds its whole value in either run; bound at its first call, and a replay checks it is new and keeps its shape", nil)
-	d.Minted = &Minted{Rule: src.Rule, Alphabet: alphabet}
+	d.Minted = &Minted{Rule: src.Rule, Form: form}
 	d.AnsweredAfter = dc.answeredAfter(r)
 	return []Decision{d}
 }

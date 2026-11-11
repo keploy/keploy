@@ -14,40 +14,26 @@ const (
 )
 
 // mintedB is a binding of the minted variable name at mock-1's body._id,
-// recorded mintRec, bound to value, in alphabet hex.
+// recorded mintRec, bound to value, of a UUID's form: '-', digits and
+// lower-case letters.
 func mintedB(name, value string) Binding {
-	return Binding{Name: name, Value: value, Recorded: mintRec, Mock: "mock-1", Place: "body._id", Minted: &models.MintedShape{Rule: "audit-id", Alphabet: "hex"}}
-}
-
-// An alphabet's name in a mock reads back as the alphabet; a name keploy
-// does not know, and no alphabet, read as none.
-func TestAlphabetNames(t *testing.T) {
-	names := map[Alphabet]string{AlphabetDigits: "digits", AlphabetHex: "hex", AlphabetAlnum: "alnum", AlphabetBase64: "base64", AlphabetBase64URL: "base64url"}
-	for a := AlphabetDigits; a <= AlphabetBase64URL; a++ {
-		if got, ok := ParseAlphabet(a.String()); !ok || got != a || a.String() != names[a] {
-			t.Errorf("alphabet %d: named %q, read back %d %v", a, a.String(), got, ok)
-		}
-	}
-	for _, s := range []string{"", "Hex", "base32"} {
-		if _, ok := ParseAlphabet(s); ok {
-			t.Errorf("ParseAlphabet(%q) read an alphabet", s)
-		}
-	}
-	if Alphabet(0).String() != "" || (AlphabetBase64URL+1).String() != "" {
-		t.Error("no alphabet has a name")
-	}
+	return Binding{Name: name, Value: value, Recorded: mintRec, Mock: "mock-1", Place: "body._id", Minted: &models.MintedShape{Rule: "audit-id", MintedForm: models.MintedForm{Classes: []string{"-", "digit", "lower"}}}}
 }
 
 // A minted value is new and keeps its recorded shape: its recorded value,
 // the value of a minted variable bound earlier, and a value of another
-// shape (or in an alphabet keploy does not know) are refused, each saying
+// shape (or of a form keploy cannot check) are refused, each saying
 // which. A binding of no minted variable, and an earlier binding that is
 // no minted variable's or holds another value, refuse nothing.
 func TestMintedWhy(t *testing.T) {
 	plain := mintedB("auditId", mintLive)
 	plain.Minted = nil
 	odd := mintedB("auditId", mintLive)
-	odd.Minted.Alphabet = "base32"
+	odd.Minted.Classes = []string{"hex"}
+	prefixed := mintedB("auditId", "kepreq_"+mintLive[7:])
+	prefixed.Minted.Prefix, prefixed.Recorded = "kepreq_", "kepreq_"+mintRec[7:]
+	unprefixed := prefixed
+	unprefixed.Value = "kepreg_" + mintLive[7:]
 	for _, c := range []struct {
 		name    string
 		b       Binding
@@ -60,9 +46,13 @@ func TestMintedWhy(t *testing.T) {
 		{"a minted value bound earlier", mintedB("auditId", mintLive), []Binding{mintedB("clusterId", mintNext), mintedB("otherId", mintLive)}, "minted value reused: keploy.yml's rule audit-id declares variable auditId made anew at body._id of mock-1, and this call sends \"" + mintLive + "\" there, the value variable otherId was bound to earlier in this run, at body._id of mock-1"},
 		{"an earlier value of no minted variable", mintedB("auditId", mintLive), []Binding{plain}, ""},
 		{"another length", mintedB("auditId", mintLive[:35]), nil, "minted value of another shape: keploy.yml's rule audit-id declares variable auditId made anew at body._id of mock-1, and this call sends"},
-		{"a dash moved", mintedB("auditId", "5c1e7a9b3-d2f-4e8a-b6c4-9f0a1b2c3d4e"), nil, "which does not keep the shape of the recorded \"" + mintRec + "\""},
-		{"a letter out of its alphabet", mintedB("auditId", "5c1e7a9b-3d2f-4e8a-b6c4-9f0a1b2c3d4g"), nil, "the alphabet hex where the recorded value holds one"},
-		{"an alphabet keploy does not know", odd, nil, `minted value of another shape: keploy.yml's rule audit-id declares variable auditId made anew at body._id of mock-1, in an alphabet keploy does not know ("base32")`},
+		{"a dash moved: the form names no byte's place", mintedB("auditId", "5c1e7a9b3-d2f-4e8a-b6c4-9f0a1b2c3d4e"), nil, ""},
+		{"any lower-case letter", mintedB("auditId", "5c1e7a9b-3d2f-4e8a-b6c4-9f0a1b2c3d4z"), nil, ""},
+		{"a capital, a class none of its values held", mintedB("auditId", "5c1e7a9b-3d2f-4e8a-b6c4-9f0a1b2c3d4E"), nil, "which does not keep the rule's form: the recorded value's length (36), then only bytes of the classes - digit lower"},
+		{"a ':', a class none of its values held", mintedB("auditId", "5c1e7a9b:3d2f-4e8a-b6c4-9f0a1b2c3d4e"), nil, "does not keep the rule's form"},
+		{"its prefix", prefixed, nil, ""},
+		{"no prefix", unprefixed, nil, `then the prefix "kepreq_", then only bytes`},
+		{"a form keploy cannot check", odd, nil, `minted value of another shape: keploy.yml's rule audit-id declares variable auditId made anew at body._id of mock-1, in a minted form names a class keploy does not know ("hex")`},
 	} {
 		got := MintedWhy(c.b, c.earlier...)
 		if c.want == "" && got != "" || c.want != "" && !strings.Contains(got, c.want) {

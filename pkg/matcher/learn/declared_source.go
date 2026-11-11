@@ -1,6 +1,10 @@
 package learn
 
-import "go.keploy.io/server/v3/pkg/models"
+import (
+	"cmp"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
 
 // DeclaredSources is Input.Source of sources, the sources keploy.yml's
 // rules declare for one recording's fields (models.MockEntry.Sources, as
@@ -17,11 +21,13 @@ func DeclaredSources(sources []models.DeclaredSource, placeOf func(path string) 
 	}
 	by := make(map[string]Source, len(sources))
 	for _, s := range sources {
-		src := Source{Kind: SourceMinted, Rule: s.Rule}
+		// CheckSources held: a clock source has its range, a minted one
+		// its form.
 		if s.Kind == models.DeclaredSourceClock {
-			src = Source{Kind: SourceClock, Rule: s.Rule, Clock: *s.Clock}
+			by[s.Field] = Source{Kind: SourceClock, Rule: s.Rule, Clock: *cmp.Or(s.Clock, &models.ClockOffset{})}
+		} else {
+			by[s.Field] = Source{Kind: SourceMinted, Rule: s.Rule, Minted: *cmp.Or(s.Minted, &models.MintedForm{})}
 		}
-		by[s.Field] = src
 	}
 	return func(path string) (Source, bool) {
 		place, ok := placeOf(path)

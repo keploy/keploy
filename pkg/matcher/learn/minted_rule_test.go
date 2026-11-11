@@ -3,12 +3,12 @@ package learn
 import (
 	"encoding/base64"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/variables"
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 )
 
@@ -27,9 +27,21 @@ const (
 	mRec, mLiv = "1111aaaa-2222-48d1-9444-444455556666", "9999cccc-7777-4a2e-8888-000011112222"
 )
 
-// mMinted declares path minted by mRule.
+// mForm is the form of mRule's values: a UUID's, as the set's recordings
+// give it ('-', digits and lower-case letters).
+var mForm = models.MintedForm{Classes: []string{"-", "digit", "lower"}}
+
+// mB64 is the form of a key in standard base64.
+var mB64 = models.MintedForm{Classes: []string{"+", "/", "=", "digit", "lower", "upper"}}
+
+// mMinted declares path minted by mRule, of the form mForm.
 func mMinted(path string) func(string) (Source, bool) {
-	return func(f string) (Source, bool) { return Source{Kind: SourceMinted, Rule: mRule}, f == path }
+	return mMintedAs(path, mForm)
+}
+
+// mMintedAs declares path minted by mRule, of the form f.
+func mMintedAs(path string, f models.MintedForm) func(string) (Source, bool) {
+	return func(p string) (Source, bool) { return Source{Kind: SourceMinted, Rule: mRule, Minted: f}, p == path }
 }
 
 // mChance is an earlier call of the test whose text holds the id's
@@ -61,15 +73,15 @@ func mAnsweredAfter(name string, before, after time.Duration, id string) Raw {
 }
 
 // mFresh checks ds is the field decided made anew whole by mRule, rec and
-// live its values, a in its check.
-func mFresh(t *testing.T, what string, ds []Decision, rec, live string, a variables.Alphabet) {
+// live its values, f the form its replay checks.
+func mFresh(t *testing.T, what string, ds []Decision, rec, live string, f models.MintedForm) {
 	t.Helper()
 	if len(ds) != 1 || ds[0].Outcome != OutcomeFresh || ds[0].At.Word != -1 || ds[0].Recorded != rec || ds[0].Full != live {
 		t.Errorf("%s: %s; want the field made anew whole", what, oDescribe(ds))
 		return
 	}
-	if m := ds[0].Minted; m == nil || m.Rule != mRule || m.Alphabet != a {
-		t.Errorf("%s: minted %+v; want rule %s, alphabet %d", what, ds[0].Minted, mRule, a)
+	if m := ds[0].Minted; m == nil || m.Rule != mRule || !reflect.DeepEqual(m.Form, f) {
+		t.Errorf("%s: minted %+v; want rule %s, form %+v", what, ds[0].Minted, mRule, f)
 	}
 	if !strings.Contains(ds[0].Line, mRule) || !strings.Contains(ds[0].Line, "declares it minted") {
 		t.Errorf("%s: the line must name the rule: %q", what, ds[0].Line)
@@ -108,7 +120,7 @@ func TestAMintedRuleDecidesANewIdWholeWhereLearningRefusedAPieceOfIt(t *testing.
 		t.Fatalf("with no rule: %s; want the id's group refused", oDescribe(before))
 	}
 	in.Source = mMinted(mPath)
-	mFresh(t, "a piece of the id stands in another id", Decide(in), mRec, mLiv, variables.AlphabetHex)
+	mFresh(t, "a piece of the id stands in another id", Decide(in), mRec, mLiv, mForm)
 
 	// No rule of a kind keploy knows, or none for this field: as before.
 	for name, src := range map[string]func(string) (Source, bool){
@@ -129,13 +141,32 @@ func TestAMintedRuleDecidesANewIdWholeWhereLearningRefusedAPieceOfIt(t *testing.
 		t.Fatalf("with no rule and no earlier place: %s; want each word made anew", oDescribe(ds))
 	}
 	in.Source = mMinted(mPath)
-	mFresh(t, "every word made anew", Decide(in), mRec, mLiv, variables.AlphabetHex)
+	mFresh(t, "every word made anew", Decide(in), mRec, mLiv, mForm)
 
 	// A number the application mints.
 	num := oInput(mPath, "4821375", "9057713", nil, nil)
 	num.Rec.Leaves[mPath], num.Live.Leaves[mPath] = Leaf{Path: mPath, Noise: mPath, Type: Number, Value: "4821375"}, Leaf{Path: mPath, Noise: mPath, Type: Number, Value: "9057713"}
-	num.Source = mMinted(mPath)
-	mFresh(t, "a number", Decide(num), "4821375", "9057713", variables.AlphabetDigits)
+	digits := models.MintedForm{Classes: []string{"digit"}}
+	num.Source = mMintedAs(mPath, digits)
+	mFresh(t, "a number", Decide(num), "4821375", "9057713", digits)
+
+	// A prefix is cut to what both runs' values share: one recorded value
+	// alone was all prefix (up to its last '-'), and the bytes cut off are
+	// of the form's classes. A prefix both runs keep stays.
+	whole := models.MintedForm{Prefix: mRec[:24], Classes: []string{"digit", "lower"}}
+	in = oInput(mPath, mRec, mLiv, nil, nil)
+	in.Source = mMintedAs(mPath, whole)
+	mFresh(t, "one recorded value's form", Decide(in), mRec, mLiv, mForm)
+	const kRec, kLiv = "kepreq_uamfMJBud4Q7D2dpiTWWtg5vnhG5v-jDYXUBeo0jS6Y", "kepreq_siMFUFEA8nOk70O88nz4QCLT-Kb0ucbqCNzRe_kaPWQ"
+	kForm := models.MintedForm{Prefix: "kepreq_", Classes: []string{"-", "_", "digit", "lower", "upper"}}
+	in = oInput(mPath, kRec, kLiv, nil, nil)
+	in.Source = mMintedAs(mPath, kForm)
+	mFresh(t, "a prefixed id", Decide(in), kRec, kLiv, kForm)
+	// A recorded value that lacks the rule's prefix cuts it too: the
+	// prefix is no literal part of the values made there.
+	in = oInput(mPath, "kepcod"+kRec[6:], kLiv, nil, nil)
+	in.Source = mMintedAs(mPath, kForm)
+	mFresh(t, "a recorded value with no prefix", Decide(in), "kepcod"+kRec[6:], kLiv, models.MintedForm{Classes: kForm.Classes})
 }
 
 // Learned facts come first: a word learning bound to an earlier place, or
@@ -206,11 +237,20 @@ func TestAMintedRuleRefusesAValueOfAnotherKindOrShape(t *testing.T) {
 		"a character more": mLiv + "0",
 		"a ':' for a '-'":  "9999cccc:7777-4a2e-8888-000011112222",
 		"a '+' for a '-'":  "9999cccc+7777-4a2e-8888-000011112222",
+		"a capital":        "9999cccC-7777-4a2e-8888-000011112222",
 	} {
 		in := oInput(mPath, mRec, live, nil, nil)
 		in.Source = mMinted(mPath)
 		mRefused(t, name, Decide(in), RefusalChangedShape)
 	}
+	// The recorded value itself out of the rule's form (a form of other
+	// recordings), and a prefix round F's value lacks: refused too.
+	in := oInput(mPath, mRec, "99990000-7777-4222-8888-000011112222", nil, nil)
+	in.Source = mMintedAs(mPath, models.MintedForm{Classes: []string{"-", "digit"}})
+	mRefused(t, "the recorded value out of the form, round F's in it", Decide(in), RefusalChangedShape)
+	in = oInput(mPath, mRec, mLiv, nil, nil)
+	in.Source = mMintedAs(mPath, models.MintedForm{Classes: []string{"digit", "lower"}})
+	mRefused(t, "a '-' no recorded value held after the prefix", Decide(in), RefusalChangedShape)
 }
 
 // An earlier place that holds the whole value in a run is where the
@@ -228,7 +268,7 @@ func TestAMintedRuleRefusesAValueAnEarlierPlaceHoldsWhole(t *testing.T) {
 		t.Helper()
 		in := oInput(mPath, mRec, mLiv, nil, raw)
 		in.Source = mMinted(mPath)
-		mFresh(t, what, Decide(in), mRec, mLiv, variables.AlphabetHex)
+		mFresh(t, what, Decide(in), mRec, mLiv, mForm)
 	}
 	caps := Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}
 	sent := func(r, f string) []Earlier {
@@ -251,7 +291,7 @@ func TestAMintedRuleRefusesAValueAnEarlierPlaceHoldsWhole(t *testing.T) {
 		{"a value of the standard base64 alphabet at an earlier send", plus, plusLive},
 	} {
 		in := oInput(mPath, tc.r, tc.f, []Earlier{oCarried("mock-5", "body.ref", "key "+tc.r+" end", "other", 2*time.Second, time.Second, 1)}, nil)
-		in.Source = mMinted(mPath)
+		in.Source = mMintedAs(mPath, mB64)
 		mRefused(t, tc.what, Decide(in), RefusalNotMinted, "mock-5")
 	}
 }
@@ -271,17 +311,19 @@ func TestAMintedFieldBindsTheValueTheCallSendsAtAnotherField(t *testing.T) {
 	if len(ds) != 2 || ds[0].Outcome != OutcomeFresh || ds[1].Outcome != OutcomeValue || ds[1].From.Path != a {
 		t.Fatalf("with no rule, a key sent at two fields: %s; want the first bound, the second its use", oDescribe(ds))
 	}
-	in.Source = mMinted(b)
+	in.Source = mMintedAs(b, mB64)
 	ds = Decide(in)
 	if len(ds) != 2 || ds[0].Outcome != OutcomeValue || ds[0].From.Path != b || ds[1].Outcome != OutcomeFresh || ds[1].Minted == nil {
 		t.Errorf("a key sent at two fields, the second minted: %s; want the minted field bound, the other its use", oDescribe(ds))
 	}
-	in.Source = mMinted(a)
+	in.Source = mMintedAs(a, mB64)
 	ds = Decide(in)
 	if len(ds) != 2 || ds[0].Outcome != OutcomeFresh || ds[0].Minted == nil || ds[1].Outcome != OutcomeValue || ds[1].From.Path != a {
 		t.Errorf("a key sent at two fields, the first minted: %s; want the minted field bound, the other its use", oDescribe(ds))
 	}
-	in.Source = func(f string) (Source, bool) { return Source{Kind: SourceMinted, Rule: mRule}, f == a || f == b }
+	in.Source = func(f string) (Source, bool) {
+		return Source{Kind: SourceMinted, Rule: mRule, Minted: mB64}, f == a || f == b
+	}
 	ds = Decide(in)
 	if len(ds) != 2 || ds[0].Outcome != OutcomeFresh || ds[0].Minted == nil || ds[1].Outcome != OutcomeValue || ds[1].From.Path != a {
 		t.Errorf("a key sent at two fields, both minted: %s; want the first bound, the other its use", oDescribe(ds))

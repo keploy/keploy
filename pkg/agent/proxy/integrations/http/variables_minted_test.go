@@ -20,7 +20,7 @@ func TestVariables_AMintedVariableOfAnHTTPCallIsRefused(t *testing.T) {
 		return &varDb{perTest: []*models.Mock{at(varMock("mock-1", "POST", "http://store/audits", `{"id":"`+rec+`"}`, 201, `{}`,
 			models.MockVariables{"auditId": v}), 1)}}
 	}
-	ok, _, diag := matchVar(t, newHTTP(), mock(&models.MintedShape{Rule: "audit-id", Alphabet: "hex"}), liveReq("POST", "/audits", `{"id":"`+live+`"}`))
+	ok, _, diag := matchVar(t, newHTTP(), mock(&models.MintedShape{Rule: "audit-id", MintedForm: models.MintedForm{Classes: []string{"-", "digit", "lower"}}}), liveReq("POST", "/audits", `{"id":"`+live+`"}`))
 	wantProblem(t, ok, diag, "variable auditId is declared minted by keploy.yml's rule audit-id, and keploy checks a minted value on MongoDB calls only")
 	if ok, _, diag := matchVar(t, newHTTP(), mock(nil), liveReq("POST", "/audits", `{"id":"`+live+`"}`)); !ok {
 		t.Fatalf("the recording with no minted mark should answer the call, got %+v", diag)
