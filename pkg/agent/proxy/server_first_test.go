@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -208,7 +207,8 @@ func TestAServerFirstRelayServesEveryWayAConnectionGoes(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	served := make(chan string, 8)
 	addr, conns, clientFirst := servingOnOnePort(t, smtpServer(served), silentUntilAsked)
-	p := recordingProxy(t, addr, zap.NewNop())
+	core, logs := observer.New(zap.DebugLevel)
+	p := recordingProxy(t, addr, zap.New(core))
 
 	t.Run("the destination closes", func(t *testing.T) {
 		callServerFirst(t, p, served, true)
@@ -295,16 +295,23 @@ func TestAServerFirstRelayServesEveryWayAConnectionGoes(t *testing.T) {
 	// The port is learned not to be MySQL, as it always was, so the probe
 	// is skipped for another destination on it: a client-first one is
 	// dispatched as before (and a server-first one would hang as before
-	// P250, a known limit).
+	// P250, a known limit). The row makes one call to the server first, so
+	// the port is learned however many rows above ran.
 	t.Run("a client-first destination on the same port", func(t *testing.T) {
 		if clientFirst == "" {
 			t.Skip("127.0.0.3 is not an address here")
 		}
-		if _, port, _ := net.SplitHostPort(clientFirst); !strings.HasSuffix(addr, ":"+port) {
+		_, port, _ := net.SplitHostPort(addr)
+		if _, at, _ := net.SplitHostPort(clientFirst); at != port {
 			t.Fatalf("the client-first destination %s is not on the server's port, %s (this row's premise)", clientFirst, addr)
+		}
+		callServerFirst(t, p, served, false)
+		if n, _ := strconv.ParseUint(port, 10, 32); !p.mysqlPorts.IsKnownNotMysql(uint32(n)) {
+			t.Fatalf("the server's port %s is not learned not to be MySQL after a call to it (this row's premise)", port)
 		}
 		p.to(t, clientFirst)
 		t.Cleanup(func() { p.to(t, addr) })
+		before := logs.FilterMessage("mysql probe result").Len()
 		app, src := acceptedConn(t)
 		done := make(chan error, 1)
 		go func() { done <- p.handleConnection(context.Background(), src) }()
@@ -317,6 +324,13 @@ func TestAServerFirstRelayServesEveryWayAConnectionGoes(t *testing.T) {
 		}
 		_ = app.Close()
 		awaitEvent(t, done, "the handling ending")
+		var verdicts []any
+		for _, e := range logs.FilterMessage("mysql probe result").All()[before:] {
+			verdicts = append(verdicts, e.ContextMap()["reason"])
+		}
+		if len(verdicts) != 1 || verdicts[0] != "known-not-mysql" {
+			t.Fatalf("the probe's verdicts on the client-first destination: %v; want [known-not-mysql], the probe skipped on the learned port", verdicts)
+		}
 	})
 }
 
@@ -344,12 +358,12 @@ func servingOnOnePort(t *testing.T, serve, other func(net.Conn)) (addr string, c
 			addr, conns, _ = acceptingOn(t, ln, serve)
 			otherAddr, _, _ = acceptingOn(t, ln3, other)
 			return addr, conns, otherAddr
-		case errors.Is(err, syscall.EADDRNOTAVAIL):
+		case errors.Is(err, errAddrNotHere):
 			addr, conns, _ = acceptingOn(t, ln, serve)
 			return addr, conns, ""
 		}
 		_ = ln.Close()
-		if !errors.Is(err, syscall.EADDRINUSE) {
+		if !errors.Is(err, errAddrInUse) {
 			t.Fatalf("listen at %s beside %s: %v", at, ln.Addr(), err)
 		}
 	}

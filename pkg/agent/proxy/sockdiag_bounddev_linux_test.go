@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -144,7 +145,9 @@ func onOnePort(t *testing.T, socks ...boundSock) ([]int, uint16) {
 // is all of them, bound (and listening): on an error, a skip or a failure.
 // A first socket that listens at an address that is not here
 // (EADDRNOTAVAIL: ::1 where lo has no IPv6) skips the test, whose case has
-// no listener there; any other error is the caller's.
+// no listener there, or, at an IPv6 address, fails it under
+// KEPLOY_TEST_IPV6_REQUIRED=1 (withoutIPv6); any other error is the
+// caller's.
 func bindOnOnePort(t *testing.T, socks []boundSock) (fds []int, port uint16, err error) {
 	t.Helper()
 	held := false
@@ -165,6 +168,9 @@ func bindOnOnePort(t *testing.T, socks []boundSock) (fds []int, port uint16, err
 		at := netip.AddrPortFrom(s.addr, port)
 		if err := unix.Bind(fd, sockaddrOf(s.family, at)); err != nil {
 			if i == 0 && s.listen && errors.Is(err, unix.EADDRNOTAVAIL) {
+				if s.addr.Is6() {
+					withoutIPv6(t, "no listener at %s here: %v", at, err)
+				}
 				t.Skipf("no listener at %s here: %v", at, err)
 			}
 			return fds, 0, fmt.Errorf("bind socket %d of %d to %s: %w", i+1, len(socks), at, err)
@@ -184,6 +190,18 @@ func bindOnOnePort(t *testing.T, socks []boundSock) (fds []int, port uint16, err
 	}
 	held = true
 	return fds, port, nil
+}
+
+// withoutIPv6 skips t where IPv6 is not here (no IPv6 socket, or no ::1 on
+// lo). KEPLOY_TEST_IPV6_REQUIRED=1, which go-test.yaml sets, fails it
+// instead, as util's requireIPv6 does, so a runner that lost IPv6 fails its
+// IPv6 cases instead of passing without them.
+func withoutIPv6(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("KEPLOY_TEST_IPV6_REQUIRED") == "1" {
+		t.Fatalf("KEPLOY_TEST_IPV6_REQUIRED=1 but "+format, args...)
+	}
+	t.Skipf(format, args...)
 }
 
 // sockaddrOf is ap as a socket of family takes it: an IPv4 address
@@ -291,11 +309,16 @@ func boundSocket(t *testing.T, family int, dev string) int {
 
 // newSocket is a TCP socket of family (an IPv6 one takes v4-mapped addresses
 // too), bound to the device dev unless dev is "", for the caller to close. It
-// skips the test where there is no such socket, closing it first.
+// skips the test where there is no such socket, closing it first, and fails
+// it where there is no IPv6 one and KEPLOY_TEST_IPV6_REQUIRED=1
+// (withoutIPv6).
 func newSocket(t *testing.T, family int, dev string) int {
 	t.Helper()
 	fd, err := unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, unix.IPPROTO_TCP)
 	if err != nil {
+		if family == unix.AF_INET6 {
+			withoutIPv6(t, "no IPv6 TCP socket here: %v", err)
+		}
 		t.Skipf("no TCP socket of family %d here: %v", family, err)
 	}
 	if family == unix.AF_INET6 {
