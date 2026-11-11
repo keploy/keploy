@@ -3077,6 +3077,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if served {
 		return err
 	}
+	// keploy test of a call the app makes to a port it listens on itself:
+	// passed through to the app, as keploy record did, before anything reads
+	// the connection (serveReplayOwnListener). Every other call goes on.
+	if served, err := p.serveReplayOwnListener(parserCtx, rule.Mode, srcConn, destInfo, dstAddr, predialed); served {
+		return err
+	}
 
 	// A mock.real destination (proven switch only) is decided here, before
 	// the MySQL probe or anything else reads the connection, and relayed to
