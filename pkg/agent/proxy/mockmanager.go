@@ -2857,11 +2857,14 @@ func (m *MockManager) AheadVariables() *variables.Table {
 // is one of the next test's calls in flight the pool view answers, between
 // tests under exact serving. Satisfies integrations.VariableScopes.
 func (m *MockManager) InAheadScope(mk *models.Mock) bool {
-	if mk == nil {
-		return false
-	}
-	v := m.exactView()
-	if v == nil || v.test != "" || len(v.owned) == 0 {
+	return m.exactView().answersAhead(mk)
+}
+
+// answersAhead reports whether mk is one of the next test's calls in flight
+// v answers (InAheadScope): v is a view between tests that holds the next
+// test's own.
+func (v *exactView) answersAhead(mk *models.Mock) bool {
+	if mk == nil || v == nil || v.test != "" || len(v.owned) == 0 {
 		return false
 	}
 	_, ahead := v.index[mk.Name]

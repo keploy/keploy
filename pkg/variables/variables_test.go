@@ -1265,3 +1265,134 @@ func TestTableOwnInIsTheScopeTheCallWasMadeIn(t *testing.T) {
 	reads("the new set before its first scope", vals(tb.OwnIn(next)), "")
 	reads("the kept set of a set no scope began in", vals(tb.NewSetKeeping(nil).OwnIn(next)), "")
 }
+
+// keploy can decide a call after the replay began the next scope: the call
+// reads and binds in the table of the scope it was made in (Table.In), as
+// when keploy decides it at once, never in the scope in force. That table
+// is the table in force while its scope runs; once a later scope began, the
+// scope's own as it ended: what it bound itself, the run's in force, and
+// what its late calls bind, which EndedOf and OwnIn read after and the
+// scope in force never reads; a run's variable it binds is the run's. A
+// call answered as the next scope's call in flight binds in the scope begun
+// after its own (Table.After), none while none began.
+func TestALateCallReadsAndBindsInTheTableOfTheScopeItWasMadeIn(t *testing.T) {
+	var tb Table
+	tb.KeepEnded()
+	tb.KeepRun()
+	at := func(name, value string) Binding {
+		return Binding{Name: name, Value: value, Recorded: "rec-" + name, Mock: "mock-" + name, Place: "body." + name}
+	}
+	vals := func(bs []Binding) string {
+		out := ""
+		for _, b := range bs {
+			out += b.Name + "=" + b.Value + ";"
+		}
+		return out
+	}
+	reads := func(what, got, want string) {
+		t.Helper()
+		if got != want {
+			t.Fatalf("%s: %q; want %q", what, got, want)
+		}
+	}
+	open := func(test string) uint64 {
+		var n uint64
+		tb.StartOpeningScope(test, func(scope uint64) { n = scope }, nil, nil, nil)
+		return n
+	}
+	tb.Bind(at("run-token", "t-0"))
+	one := open("test-1")
+	tb.Bind(at("key", "x-1"))
+	if tb.In(one) != &tb {
+		t.Fatal("a call made in the running scope does not read the table in force")
+	}
+	if nx, began := tb.After(one); began || nx != nil {
+		t.Fatalf("After the running scope = %p, %v; want none: no scope began since", nx, began)
+	}
+	two := open("test-2")
+	if nx, began := tb.After(one); !began || nx != &tb {
+		t.Fatalf("After test-1's scope, with test-2's running = %p, %v; want the table in force", nx, began)
+	}
+	late := tb.In(one)
+	if late == &tb || late == nil {
+		t.Fatal("a call made in test-1's scope reads the table in force once test-2's began")
+	}
+	if tb.In(one) != late {
+		t.Fatal("two late calls of one scope read two tables: what one binds the other never reads")
+	}
+	tb.Bind(at("key", "x-2"))
+	reads("test-1's late call reads key", vals(late.Snapshot()), "key=x-1;run-token=t-0;")
+	if bad, with, stale, ok := late.BindAll(late.Gen(), []Binding{at("key", "x-9")}); ok || stale || bad.Value != "x-9" || with.Value != "x-1" {
+		t.Fatalf("a late key=x-9 beside test-1's key=x-1: bad %+v with %+v stale %v ok %v; want refused over x-1", bad, with, stale, ok)
+	}
+	if _, _, stale, ok := late.BindAll(late.Gen(), []Binding{at("id", "x-5"), at("run-next", "r-1")}); !ok || stale {
+		t.Fatalf("a late call's binds in its own scope: stale %v ok %v; want bound", stale, ok)
+	}
+	reads("test-2's scope after test-1's late binds", vals(tb.Snapshot()), "key=x-2;run-next=r-1;run-token=t-0;")
+	reads("test-1's ended scope", vals(tb.EndedOf("test-1")), "id=x-5;key=x-1;")
+	reads("test-1's scope by number", vals(tb.OwnIn(one)), "id=x-5;key=x-1;")
+	reads("test-1's scope as the set's bound values read it", vals(tb.Bound().OwnIn(one)), "id=x-5;key=x-1;")
+	reads("test-2's own", vals(tb.OwnIn(two)), "key=x-2;")
+	c := late.Clone()
+	c.Bind(at("only-clone", "c-1"))
+	reads("test-1's scope after a bind in its clone", vals(tb.EndedOf("test-1")), "id=x-5;key=x-1;")
+
+	three := open("test-3")
+	if nx, began := tb.After(one); !began || nx != tb.In(two) || nx == &tb {
+		t.Fatalf("After test-1's scope, with test-3's running = %p, %v; want test-2's ended table", nx, began)
+	}
+	if tb.In(one) != late {
+		t.Fatal("test-1's ended table changed once another scope began")
+	}
+	none := tb.In(three + 7)
+	if none == &tb || none == late {
+		t.Fatal("a scope that never began reads a scope's table")
+	}
+	reads("a scope that never began", vals(none.Snapshot()), "run-next=r-1;run-token=t-0;")
+	tb.Bind(at("key", "x-3"))
+	tb.Reset()
+	if tb.In(three) != &tb {
+		t.Fatal("a scope begun with no test named keeps the number in force, and its calls read the table in force")
+	}
+	tb.Bind(at("key", "x-reset"))
+	open("test-4")
+	reads("test-3's scope once a scope begun with no test named and test-4's began", vals(tb.In(three).Snapshot()), "key=x-3;run-next=r-1;run-token=t-0;")
+	tb.NewSet()
+	reads("test-1's scope once the set ended", vals(tb.In(one).Snapshot()), "")
+}
+
+// A run's variable a late call binds is the run's only where the table its
+// scope ended in keeps the run's (KeepRun), as at once: on a table that
+// keeps none it is the call's scope's. A table that reads another's run's
+// (ReadRunOf) and is no ended scope's binds a run's variable in its own
+// scope, never in the run's it reads.
+func TestALateCallBindsARunsVariableWhereItsScopeWould(t *testing.T) {
+	at := func(name, value string) Binding {
+		return Binding{Name: name, Value: value, Recorded: "rec-" + name, Mock: "mock-" + name, Place: "body." + name}
+	}
+	var tb Table
+	tb.KeepEnded()
+	var one uint64
+	tb.StartOpeningScope("test-1", func(scope uint64) { one = scope }, nil, nil, nil)
+	tb.StartOpeningTest("test-2", func() {}, nil, nil, nil)
+	if _, ok := tb.In(one).Bind(at("run-x", "r-1")); !ok {
+		t.Fatal("a late run's variable was not bound")
+	}
+	if _, ok := tb.Lookup("run-x"); ok {
+		t.Fatal("a table that keeps no run's reads a late call's run's variable in the scope in force")
+	}
+	if got := tb.EndedOf("test-1"); len(got) != 1 || got[0].Name != "run-x" {
+		t.Fatalf("test-1's ended scope holds %+v; want run-x", got)
+	}
+
+	var run Table
+	run.KeepRun()
+	var ahead Table
+	ahead.ReadRunOf(&run)
+	if _, ok := ahead.Bind(at("run-y", "r-2")); !ok {
+		t.Fatal("the reader's run's variable was not bound")
+	}
+	if _, ok := run.Lookup("run-y"); ok {
+		t.Fatal("a table that reads another's run's bound a run's variable in that table's run's")
+	}
+}

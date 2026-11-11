@@ -77,14 +77,26 @@ type Table struct {
 	// call made in it reads the running scope (OwnIn), as when keploy
 	// decides it at once.
 	scope uint64
+	// ofEnded says t is an ended scope's own table (In), whose run's are
+	// those of the table it ended in (runOf): a run's variable a late call
+	// of the scope binds is bound there, as at once (put).
+	ofEnded bool
 }
 
-// endedScope is an ended scope's own bindings (Own as it ended), by name,
-// the test it was the scope of, and its number (InScope).
+// endedScope is an ended scope's own table (In: what it bound itself, Own
+// as it ended, and what a call made in it that keploy decided later bound
+// in it since), the test it was the scope of, and its number (InScope).
 type endedScope struct {
-	test     string
-	scope    uint64
-	bindings []Binding
+	test  string
+	scope uint64
+	t     *Table
+}
+
+// own is the bindings e's scope made itself, by name.
+func (e endedScope) own() []Binding {
+	e.t.mu.Lock()
+	defer e.t.mu.Unlock()
+	return sorted(e.t.vals)
 }
 
 // lock takes t.mu, and before it the lock of the table whose run's t reads
@@ -235,7 +247,7 @@ func (t *Table) Bind(b Binding) (Binding, bool) {
 	if with, ok := collides(t.all(from), t.readersScopes(), b, nil); ok {
 		return with, false
 	}
-	t.put(b)
+	t.put(from, b)
 	return b, true
 }
 
@@ -320,13 +332,24 @@ func (t *Table) ReadRunOf(from *Table) {
 // put binds b in the scope, or the run's where the table keeps the run's
 // (KeepRun) and b is one: bound before any scope began (the start-up's), or
 // a run's variable (models.RunVariable) an earlier test's call binds for the
-// tests after it. t is locked (lock).
-func (t *Table) put(b Binding) {
+// tests after it. An ended scope's table (In) binds a run's variable in the
+// run's of from, the table it ended in, where that table keeps the run's: a
+// call keploy decides after its scope ended binds it for the tests after,
+// as at once (an ended scope's table always reads that table's run's). t is
+// locked (lock), with from, the table whose run's it reads.
+func (t *Table) put(from *Table, b Binding) {
 	if t.keepRun && (!t.began || models.RunVariable(b.Name)) {
 		if t.run == nil {
 			t.run = make(map[string]Binding)
 		}
 		t.run[b.Name] = b
+		return
+	}
+	if t.ofEnded && from.keepRun && models.RunVariable(b.Name) {
+		if from.run == nil {
+			from.run = make(map[string]Binding)
+		}
+		from.run[b.Name] = b
 		return
 	}
 	if t.vals == nil {
@@ -360,7 +383,7 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 	}
 	for _, b := range bs {
 		if _, bound := t.lookup(from, b.Name); !bound {
-			t.put(b)
+			t.put(from, b)
 		}
 	}
 	return Binding{}, Binding{}, false, true
@@ -836,7 +859,7 @@ func (t *Table) start(test string, given, carried []Binding) {
 	}
 	for _, b := range carried {
 		if _, dup := t.vals[b.Name]; !dup {
-			t.put(b)
+			t.put(nil, b)
 		}
 	}
 }
@@ -927,7 +950,9 @@ func (t *Table) newSet() {
 // SetBound is what a table had bound as its set ended (NewSetKeeping), as
 // a background miss reads it: the running scope's own bindings, as Own gave
 // them then, and what the set's ended scopes of each named test bound, as
-// EndedOf gave them then. It changes no more. A nil SetBound holds none.
+// EndedOf reads them (their tables, In, which a call of the set that keploy
+// decides later binds in still). The running scope's change no more. A nil
+// SetBound holds none.
 type SetBound struct {
 	own   []Binding
 	ended []endedScope
@@ -1026,7 +1051,7 @@ func endedOf(ended []endedScope, test string) []Binding {
 	var out []Binding
 	for _, e := range ended {
 		if e.test == test {
-			out = append(out, e.bindings...)
+			out = append(out, e.own()...)
 		}
 	}
 	return out
@@ -1037,7 +1062,7 @@ func endedOf(ended []endedScope, test string) []Binding {
 func endedIn(ended []endedScope, scope uint64) []Binding {
 	for _, e := range ended {
 		if e.scope == scope {
-			return append([]Binding(nil), e.bindings...)
+			return e.own()
 		}
 	}
 	return nil
@@ -1158,8 +1183,69 @@ func ownScope(running, test string) bool {
 // no test bound. t.mu is held.
 func (t *Table) end() {
 	if t.keepEnded && t.test != "" {
-		t.ended = append(t.ended, endedScope{test: t.test, scope: t.scope, bindings: sorted(t.vals)})
+		t.ended = append(t.ended, endedScope{test: t.test, scope: t.scope, t: t.endedTable(t.test, t.scope, maps.Clone(t.vals), maps.Clone(t.notes))})
 	}
+}
+
+// In is the table a call made while scope was in force (InScope,
+// StartOpeningScope) reads and binds in, however late keploy decides it: t
+// while scope runs, as when keploy decides the call at once; once a later
+// scope began (keploy decided the call after the replay began the set's
+// next test, or the same test's next run), scope's own table as it ended
+// (kept for a named test's scope, on a table that keeps them: KeepEnded),
+// never the scope in force. That table holds what scope bound itself
+// (OwnIn), reads t's run's in force, and binds what the call binds in
+// scope, where EndedOf and OwnIn read it after, and a run's variable in t's
+// run's (put), as at once. For a scope ended unkept, or one t's set never
+// began, it is a table holding no scope's bindings, whose binds no scope
+// keeps: nothing of another scope is read as the call's.
+func (t *Table) In(scope uint64) *Table {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if scope == t.scope {
+		return t
+	}
+	return t.scopeTable(scope)
+}
+
+// After is the table a call made while scope was in force binds in when it
+// is answered as the next scope's call in flight (a pool view's call between
+// tests, answered with the next test's recording): the table of the scope
+// begun next after scope, t while that scope runs, its ended table (In)
+// once another began; ok is false while no scope began since scope (the
+// call binds in the table begun early for the next: the caller's).
+func (t *Table) After(scope uint64) (*Table, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.scope <= scope {
+		return nil, false
+	}
+	if t.scope == scope+1 {
+		return t, true
+	}
+	return t.scopeTable(scope + 1), true
+}
+
+// scopeTable is the ended table of scope (In): the one t kept as scope ended,
+// else one holding nothing. t.mu is held.
+func (t *Table) scopeTable(scope uint64) *Table {
+	for _, e := range t.ended {
+		if e.scope == scope {
+			return e.t
+		}
+	}
+	return t.endedTable("", scope, nil, nil)
+}
+
+// endedTable is an ended scope's own table (In), of test's scope numbered
+// scope, holding vals and notes: begun, in a scope that never moves (Gen),
+// reading t's run's (ReadRunOf, without t checking a bind of its run's
+// beside it: t binds its run's beside no scope once one began). t.mu is
+// held.
+func (t *Table) endedTable(test string, scope uint64, vals map[string]Binding, notes map[string]string) *Table {
+	e := &Table{vals: vals, notes: notes, test: test, scope: scope, gen: t.gen, began: true, ofEnded: true}
+	e.runOf.Store(t)
+	return e
 }
 
 // Snapshot returns the bindings in force, the run's included, by name.

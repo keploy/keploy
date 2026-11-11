@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // THE ROUND LOCK (integrations.RoundReader).
@@ -996,6 +997,9 @@ var (
 	// A parser's per-generation index serves only a store that tells whose
 	// a recording is (the HTTP strict index).
 	_ integrations.TestOwner = (*heldScope)(nil)
+	// A late call's variables are its own test's (Variables).
+	_ integrations.VariableStore  = (*heldScope)(nil)
+	_ integrations.VariableScopes = (*heldScope)(nil)
 )
 
 // heldScope is the manager held to one call's staging (HoldToRound): its
@@ -1141,6 +1145,48 @@ func (h *heldScope) IsTestWindowActive() bool {
 		return v.test != ""
 	}
 	return h.MockManager.IsTestWindowActive()
+}
+
+// Variables implements integrations.VariableStore for h's call: the table of
+// the variable scope the view its call was read in was stamped with
+// (exactView.scope, variables.Table.In) while it reads there (readIn), as
+// when keploy decides the call at once. While that scope runs, the table in
+// force; once the replay began the next test, the call's own test's scope
+// as it ended, which the variable pass checks the call in and binds what it
+// binds in, and the own-call check and the miss read: never the next test's
+// bindings, which a call of the test before neither reads nor binds in. The
+// table in force for a call that reads the view in force (readView), or one
+// read in a view stamped with no scope.
+func (h *heldScope) Variables() *variables.Table {
+	if v := h.g.readIn; v != nil && v.scoped {
+		return h.vars.In(v.scope)
+	}
+	return h.MockManager.Variables()
+}
+
+// InAheadScope and AheadVariables implement integrations.VariableScopes for
+// h's call, read in the view it was read in (readIn) as Variables is: a call
+// of the gap that the pool view answers with one of the next test's calls in
+// flight binds in the table begun early for that test (MockManager.
+// AheadVariables) until that test begins, and in that test's scope once it
+// began (variables.Table.After), which carried in what the table begun early
+// had bound, as at once. The manager's for a call that reads the view in
+// force.
+func (h *heldScope) InAheadScope(mk *models.Mock) bool {
+	if v := h.g.readIn; v != nil {
+		return v.answersAhead(mk)
+	}
+	return h.MockManager.InAheadScope(mk)
+}
+
+// AheadVariables: see InAheadScope.
+func (h *heldScope) AheadVariables() *variables.Table {
+	if v := h.g.readIn; v != nil && v.scoped {
+		if t, began := h.vars.After(v.scope); began {
+			return t
+		}
+	}
+	return h.MockManager.AheadVariables()
 }
 
 // restaged reports whether a read or a consume door of h found the staging
