@@ -5095,6 +5095,20 @@ func (p *Proxy) SetPoolSeries(series map[string][]string) error {
 	return nil
 }
 
+var _ agent.PoolSourcesSetter = (*Proxy)(nil)
+
+// SetPoolSources implements agent.PoolSourcesSetter: the sources rules
+// declared in keploy.yml give fields of the recordings' requests, on the
+// mock manager (MockManager.SetPoolSources).
+func (p *Proxy) SetPoolSources(sources map[string][]models.DeclaredSource) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolSources(sources)
+	return nil
+}
+
 var _ agent.SeriesRepeatReader = (*Proxy)(nil)
 
 // SeriesRepeats implements agent.SeriesRepeatReader: the mock manager's

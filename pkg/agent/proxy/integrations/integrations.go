@@ -1569,6 +1569,28 @@ func TrailOf(db MockMemDb, mock string) learn.Trail {
 	return t.TrailOf(mock)
 }
 
+// DeclaredSourcesOf is an optional MockMemDb capability under the proven
+// switch: by keploy mock replay's scope table, the sources rules the user
+// declared in keploy.yml give fields of a recording's request
+// (models.ScopeTableReq.Sources, from models.MockEntry.Sources). A learn
+// step decides the call that recording answers by them
+// (learn.DeclaredSources). None where no rule declares one, and from a
+// store that cannot tell.
+type DeclaredSourcesOf interface {
+	SourcesOf(mock string) []models.DeclaredSource
+}
+
+// SourcesOf is the sources rules declared give fields of the request of
+// the recording named mock by db (DeclaredSourcesOf); none for a db that
+// cannot tell.
+func SourcesOf(db MockMemDb, mock string) []models.DeclaredSource {
+	s, ok := db.(DeclaredSourcesOf)
+	if !ok {
+		return nil
+	}
+	return s.SourcesOf(mock)
+}
+
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of
 // the open test's own, which its mapping lists, rather than the pool's. A view
 // that scopes the pool to a test (`keploy mock replay`'s) knows; known is

@@ -1136,6 +1136,15 @@ type PoolSeriesSetter interface {
 	SetPoolSeries(series map[string][]string) error
 }
 
+// PoolSourcesSetter is implemented by a proxy whose learn step decides a
+// field by the source a rule declared in keploy.yml gives it
+// (integrations.DeclaredSourcesOf): SetPoolSources installs, of keploy mock
+// replay's scope table under the proven switch, by recording name, the
+// sources of its request's fields (models.ScopeTableReq.Sources).
+type PoolSourcesSetter interface {
+	SetPoolSources(sources map[string][]models.DeclaredSource) error
+}
+
 // SeriesRepeatReader is implemented by a proxy that serves the series
 // SetPoolSeries installs: SeriesRepeats is, by series, how many calls in the
 // current staging's tests its last-placed recording answered past the

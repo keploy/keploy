@@ -380,6 +380,20 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a series of recordings a declared rule placed", http.StatusNotImplemented)
 			return
 		}
+		// The sources rules declared in keploy.yml give fields of the
+		// recordings' requests. Every table says them, an empty one too.
+		// An agent that cannot learn by them, or that does not know a
+		// source's kind, refuses a table that has one.
+		if ss, ok := a.svc.(scopeSourcesSetter); ok {
+			if err := ss.SetScopeSources(r.Context(), req.Sources); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedSources)
+		} else if len(req.Sources) > 0 {
+			http.Error(w, "this keploy agent cannot learn a field by the source a rule in keploy.yml declares", http.StatusNotImplemented)
+			return
+		}
 		// The recordings keploy's judging marked served, not required, by test, before
 		// the pool is served. Every table says it, an empty one too: a set
 		// never keeps the previous set's. An agent that cannot take them
@@ -461,6 +475,13 @@ type scopeTrailsSetter interface {
 // (models.ScopeTableReq.Series, proven wire).
 type scopeSeriesSetter interface {
 	SetScopeSeries(ctx context.Context, series map[string][]string) error
+}
+
+// scopeSourcesSetter installs, by recording name, the sources rules
+// declared in keploy.yml give fields of its request for a replay
+// (models.ScopeTableReq.Sources, proven wire).
+type scopeSourcesSetter interface {
+	SetScopeSources(ctx context.Context, sources map[string][]models.DeclaredSource) error
 }
 
 // scopeNotRequiredSetter installs, by test, the recordings keploy's judging

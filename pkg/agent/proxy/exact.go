@@ -369,6 +369,11 @@ type exactState struct {
 	// recording trails (SetPoolTrails): what the learn step reads such a
 	// call's scope by (TrailOf). nil until a replay sent one.
 	poolTrails atomic.Pointer[map[string]string]
+	// poolSources is, of the same scope table, by recording name, the
+	// sources rules declared in keploy.yml give fields of its request
+	// (SetPoolSources): what the learn step decides such a field by
+	// (SourcesOf). nil until a replay sent one.
+	poolSources atomic.Pointer[map[string][]models.DeclaredSource]
 	// poolSeries is, of the same scope table, the series the worker-scope
 	// recordings a declared rule placed belong to (SetPoolSeries): what
 	// answers a series' repeats past its recorded count in the windows
@@ -1934,6 +1939,35 @@ func (m *MockManager) SetPoolTrails(trails map[string]string) {
 		}
 	}
 	m.exact.poolTrails.Store(&cp)
+}
+
+// SetPoolSources installs, of the replay's scope table, by recording name,
+// the sources rules declared in keploy.yml give fields of its request
+// (models.ScopeTableReq.Sources; keploy mock replay under the proven
+// switch). The learn step reads them through SourcesOf. None leaves the set
+// none, never the previous set's.
+func (m *MockManager) SetPoolSources(sources map[string][]models.DeclaredSource) {
+	cp := make(map[string][]models.DeclaredSource, len(sources))
+	for n, of := range sources {
+		if n != "" && len(of) > 0 {
+			cp[n] = slices.Clone(of)
+		}
+	}
+	m.exact.poolSources.Store(&cp)
+}
+
+var _ integrations.DeclaredSourcesOf = (*MockManager)(nil)
+
+// SourcesOf implements integrations.DeclaredSourcesOf: the sources rules
+// declared in keploy.yml give fields of the request of the recording named
+// mock (SetPoolSources), a copy; none for a recording no rule declares one
+// of, and until a replay sent them.
+func (m *MockManager) SourcesOf(mock string) []models.DeclaredSource {
+	sources := m.exact.poolSources.Load()
+	if sources == nil {
+		return nil
+	}
+	return slices.Clone((*sources)[mock])
 }
 
 // seriesIndex is a replay's series of worker-scope recordings a declared

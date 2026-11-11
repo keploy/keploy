@@ -411,6 +411,10 @@ type ScopeTableResp struct {
 // ScopeTableReq.Series.
 const ScopeTableServedSeries = "series"
 
+// ScopeTableServedSources is ScopeTableResp.Served's name for
+// ScopeTableReq.Sources.
+const ScopeTableServedSources = "sources"
+
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
@@ -469,6 +473,16 @@ type ScopeTableReq struct {
 	// (ScopeTableResp.Served) when it serves it; the CLI refuses an agent
 	// that does not.
 	Series map[string][]string `json:"series,omitempty"`
+	// Sources is, under the proven switch, by recording name, the sources
+	// rules the user declared in keploy.yml give fields of the recording's
+	// request (MockEntry.Sources): only names the agent holds. The learn
+	// step decides such a field by its source where learning alone could
+	// not tell which source the value has. Absent when no rule declares
+	// one. The agent's answer to the table names it
+	// (ScopeTableResp.Served) when it learns by it, and refuses a source
+	// of a kind it does not know (DeclaredSource.Check); the CLI refuses an
+	// agent that does not name it.
+	Sources map[string][]DeclaredSource `json:"sources,omitempty"`
 	// RepeatReads is, under the proven switch, each test's repeated reads
 	// by test ID, as whatever names them for the replay named them
 	// (mock.RegisterRepeatReadNamer): recordings of one read the test made

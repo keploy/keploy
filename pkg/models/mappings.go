@@ -106,6 +106,15 @@ type MockEntry struct {
 	// each rewrite, whatever the switch. Not Group, which is the concurrency
 	// group.
 	Rule string `json:"rule,omitempty" yaml:"rule,omitempty" bson:"rule,omitempty"`
+	// Sources is, on an entry of any list whose recording a source rule the
+	// user declared in keploy.yml matched (kind clock or minted; keploy mock
+	// record, under the proven switch, before its full round), the source
+	// each rule gives one field of the request (DeclaredSource). keploy
+	// mock replay tells the agent (models.ScopeTableReq.Sources), whose
+	// learn step decides such a field by it. Empty on every other entry.
+	// Read and kept by each rewrite, whatever the switch, and kept by a
+	// move to worker:.
+	Sources []DeclaredSource `json:"sources,omitempty" yaml:"sources,omitempty" bson:"sources,omitempty"`
 	// Series is, on an entry Rule placed, the series it belongs to, as
 	// "<rule id>/<trailed test, or ->/<n>": every entry of one series
 	// answers one canonical request with one answer. keploy mock replay

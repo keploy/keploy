@@ -121,6 +121,11 @@ type provenWire struct {
 	// models.ScopeTableReq.Series), which SetScopePool hands the proxy.
 	// nil when the table had none.
 	series map[string][]string
+	// sources is, in a replay, by recording name, the sources rules
+	// declared in keploy.yml give fields of its request (the CLI's scope
+	// table, models.ScopeTableReq.Sources), which SetScopePool hands the
+	// proxy. nil when the table had none.
+	sources map[string][]models.DeclaredSource
 	// notRequired is, in a replay, by test ID, the names of the test's own
 	// list keploy's judging marked served, not required (the CLI's scope table,
 	// models.ScopeTableReq.NotRequired): its end does not charge the test
@@ -644,6 +649,7 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	a.provenMu.Lock()
 	trails := maps.Clone(a.proven.trails)
 	series := maps.Clone(a.proven.series)
+	sources := maps.Clone(a.proven.sources)
 	a.provenMu.Unlock()
 	if ts, ok := a.Proxy.(coreAgent.PoolTrailsSetter); ok {
 		if err := ts.SetPoolTrails(trails); err != nil {
@@ -652,6 +658,11 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	}
 	if ss, ok := a.Proxy.(coreAgent.PoolSeriesSetter); ok {
 		if err := ss.SetPoolSeries(series); err != nil {
+			return err
+		}
+	}
+	if ss, ok := a.Proxy.(coreAgent.PoolSourcesSetter); ok {
+		if err := ss.SetPoolSources(sources); err != nil {
 			return err
 		}
 	}
@@ -693,6 +704,37 @@ func (a *Agent) SetScopeTrails(ctx context.Context, trails map[string]string) er
 	defer a.wire.unlock()
 	a.provenMu.Lock()
 	a.proven.trails = maps.Clone(trails)
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeSources installs, by recording name, the sources rules declared
+// in keploy.yml give fields of its request for a replay
+// (models.ScopeTableReq.Sources), which the pool slices sent next hand the
+// proxy (SetScopePool): its learn step decides such a field by its source.
+// None leaves the set none, never the previous set's. Sources this keploy
+// cannot decide a field by (models.CheckSources: a kind a newer keploy
+// knows) are refused, and so are any for a proxy that cannot learn by
+// them: the CLI judged the recordings with them.
+func (a *Agent) SetScopeSources(ctx context.Context, sources map[string][]models.DeclaredSource) error {
+	if _, ok := a.Proxy.(coreAgent.PoolSourcesSetter); !ok && len(sources) > 0 {
+		return errors.New("this keploy agent's proxy cannot learn a field by the source a rule in keploy.yml declares")
+	}
+	for name, of := range sources {
+		if err := models.CheckSources(of); err != nil {
+			return fmt.Errorf("recording %s: %w", name, err)
+		}
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	cp := make(map[string][]models.DeclaredSource, len(sources))
+	for name, of := range sources {
+		cp[name] = slices.Clone(of)
+	}
+	a.provenMu.Lock()
+	a.proven.sources = cp
 	a.provenMu.Unlock()
 	return nil
 }

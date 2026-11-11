@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"time"
 
@@ -673,6 +675,74 @@ func (db *MappingDb) SetRules(ctx context.Context, testSetID, digest string) err
 		return nil
 	}
 	mapping.Rules = digest
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// SetSources writes, on every entry of the set's mapping file, the sources
+// rules declared in keploy.yml give fields of its recording's request
+// (models.MockEntry.Sources), by recording name: an entry sources names
+// gets them in every list that holds it, and every other entry loses any
+// it had, so a set never keeps an earlier record's. Every other section,
+// comment and hand edit stays as it is, and a file that holds them already
+// writes nothing. Sources this keploy cannot decide a field by
+// (models.CheckSources), a name no entry has, and a set with no mapping
+// file are refused, writing nothing.
+func (db *MappingDb) SetSources(ctx context.Context, testSetID string, sources map[string][]models.DeclaredSource) error {
+	for name, of := range sources {
+		if err := models.CheckSources(of); err != nil {
+			return fmt.Errorf("write %s's declared sources of %s: %w", testSetID, name, err)
+		}
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("write %s's declared sources: the set has no mappings file", testSetID)
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return err
+	}
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
+	if err != nil {
+		return err
+	}
+	lists := [][]models.MockEntry{mapping.Startup, mapping.Runner, mapping.Worker, mapping.Shared}
+	for i := range mapping.TestCases {
+		lists = append(lists, mapping.TestCases[i].Mocks)
+	}
+	for i := range mapping.Boots {
+		lists = append(lists, mapping.Boots[i].Mocks)
+	}
+	changed, seen := false, make(map[string]bool, len(sources))
+	for _, list := range lists {
+		for i := range list {
+			want := sources[list[i].Name]
+			seen[list[i].Name] = true
+			if !reflect.DeepEqual(list[i].Sources, want) {
+				list[i].Sources = slices.Clone(want)
+				changed = true
+			}
+		}
+	}
+	for name := range sources {
+		if !seen[name] {
+			return fmt.Errorf("write %s's declared sources: its mappings file lists no recording %s", testSetID, name)
+		}
+	}
+	if !changed {
+		return nil
+	}
 	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
 	if err != nil {
 		return err
