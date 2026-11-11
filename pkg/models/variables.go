@@ -326,6 +326,17 @@ type ClockOffset struct {
 	Zone    string        `json:"zone,omitempty" yaml:"zone,omitempty" bson:"zone,omitempty"`
 	Layout  string        `json:"layout,omitempty" yaml:"layout,omitempty" bson:"layout,omitempty"`
 	AppZone string        `json:"app_zone,omitempty" yaml:"app_zone,omitempty" bson:"app_zone,omitempty"`
+	// Form, where set, is the time default's check (keploy.yml's times
+	// setting left at its default): the place is a time, and a replay passes
+	// any value of this form, whatever instant it names, with no range, cut,
+	// zone or provenance checked (learn's TimeForm names it: the decoder's
+	// type, and the text's layout with every digit and letter abstracted, so
+	// an epoch keeps its unit and a text its field order, separators, zone
+	// form and whether it writes a fraction of a second). "" checks the read
+	// by every field above, as before the default was. Two learnings of one
+	// place in two forms meet as FormApart, which Empty refuses; one with a
+	// Form and one without meet as the one without (its checks).
+	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
 	// Since is where a replay's span for the read starts: "" at its call's
 	// window (after the previous data-plane call); SinceTestBegin at the
 	// running test's begin, for a read the learn step saw made before its
@@ -1644,8 +1655,21 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 		// either zone held, met with one in UTC) names none.
 		m.AppZone = ""
 	}
+	// A form both learnings checked by is kept; two forms are no one form
+	// (FormApart); one learning that checked the read by its range keeps
+	// that check (Form ""), the stricter of the two.
+	switch {
+	case o.Form == p.Form:
+		m.Form = o.Form
+	case o.Form != "" && p.Form != "":
+		m.Form = FormApart
+	}
 	return m
 }
+
+// FormApart is the Form of a Meet of two learnings of one place that saw
+// it written in two forms (ClockOffset.Form): Empty refuses it.
+const FormApart = "apart"
 
 // Empty reports whether o is the Meet of learnings of one place that share
 // no offset: a Max not above its Min, other than a Plain o's (a Plain and
@@ -1654,7 +1678,7 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 // written in different layouts (LayoutApart); or at different Steps
 // (StepApart). Holds holds nothing for it, and String says why.
 func (o ClockOffset) Empty() bool {
-	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart || o.Step < 0
+	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart || o.Step < 0 || o.Form == FormApart
 }
 
 // MergeClocks is a and b, two sets of the places a call's learn steps
