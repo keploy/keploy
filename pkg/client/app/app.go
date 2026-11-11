@@ -121,6 +121,10 @@ type App struct {
 	// their way out, the compose project's down -- is a movement of it,
 	// which that run's drains wait on (utils.DrainErrGroupProgress).
 	teardown atomic.Pointer[utils.TeardownScope]
+	// native is the command the app's last run started, which leads a
+	// process group of its own (utils.ExecuteCommand): GroupRunsOn reads it
+	// where keploy adopts nothing (group_other.go).
+	native atomic.Pointer[exec.Cmd]
 	// newComposeStack overrides how the runner is built. Production leaves it
 	// nil and gets the registered in-process runner; tests substitute a fake so the
 	// in-memory path keeps unit coverage without a docker daemon.
@@ -2371,6 +2375,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	// Define the function to cancel the command
 	cmdCancel := func(cmd *exec.Cmd) func() error {
+		a.native.Store(cmd)
 		return func() error {
 			// keploy's stop at a test set's end (setend_stop.go) is the
 			// teardown's stop, which says whether it had to kill the app.

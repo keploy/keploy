@@ -878,19 +878,19 @@ func TestAppRunsOnOnlyWhatKeployAdopted(t *testing.T) {
 	was := adopting.Load()
 	t.Cleanup(func() { adopting.Store(was) })
 	adopting.Store(false)
-	if appRunsOn(zap.NewNop()) {
+	if appRunsOn(zap.NewNop(), nil) {
 		t.Fatal("a child keploy did not adopt reads as the application running on")
 	}
 	adopting.Store(true)
 	scan := scanChildren
 	t.Cleanup(func() { scanChildren = scan })
 	scanChildren = func() ([]child, error) { return nil, errors.New("proc is gone") }
-	if appRunsOn(zap.NewNop()) {
+	if appRunsOn(zap.NewNop(), nil) {
 		t.Fatal("a read of the children that failed says the application runs on")
 	}
 	n := 0
 	scanChildren = func() ([]child, error) { n++; return []child{{pid: 1<<22 + n}}, nil }
-	if !appRunsOn(zap.NewNop()) {
+	if !appRunsOn(zap.NewNop(), nil) {
 		t.Fatal("children that kept changing over every read say nothing runs on")
 	}
 }
