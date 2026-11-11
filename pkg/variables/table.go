@@ -286,28 +286,31 @@ func (t *Table) keepMinted(from *Table, b Binding) {
 // to make of a minted variable (Binding.Minted), beside the run's minted
 // values and earlier (bound with b, before it): the package's MintedWhy of
 // b and the binding whose value it reuses; "" where BindAll would not, or
-// where b is none. A call checks it before it takes the recording that
-// binds b. A name already bound binds nothing new (BindAll holds it to its
-// value by its name), and is not checked here. A nil table checks b beside
+// where b is none. with is that binding, as BindAll's refusal names it, so
+// the call's miss names where the run bound the value (its Mock): none where
+// b's own value refuses it (its recorded one, or another shape), or where
+// nothing does. A call checks it before it takes the recording that binds
+// b. A name already bound binds nothing new (BindAll holds it to its value
+// by its name), and is not checked here. A nil table checks b beside
 // earlier alone.
-func (t *Table) MintedWhy(b Binding, earlier []Binding) string {
+func (t *Table) MintedWhy(b Binding, earlier []Binding) (why string, with Binding) {
 	if b.Minted == nil {
-		return ""
+		return "", Binding{}
 	}
 	var minted map[string]Binding
 	if t != nil {
 		from := t.lock()
 		defer t.unlock(from)
 		if _, ok := t.lookup(from, b.Name); ok {
-			return ""
+			return "", Binding{}
 		}
 		minted = t.mintedOf(from)
 	}
 	with, bad := mintedBeside(minted, b, earlier)
 	if !bad {
-		return ""
+		return "", Binding{}
 	}
-	return MintedWhy(b, with)
+	return MintedWhy(b, with), with
 }
 
 // KeepRun makes what is bound before the first scope begins the run's, which

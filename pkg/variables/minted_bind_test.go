@@ -71,10 +71,10 @@ func TestMintedWhy(t *testing.T) {
 // it is refused beside.
 func bindMinted(t *testing.T, tb *Table, want bool, bs ...Binding) (bad, with Binding) {
 	t.Helper()
-	pre := ""
+	pre, preWith := "", Binding{}
 	for i, b := range bs {
-		if why := tb.MintedWhy(b, bs[:i]); why != "" {
-			pre = why
+		if why, with := tb.MintedWhy(b, bs[:i]); why != "" {
+			pre, preWith = why, with
 			break
 		}
 	}
@@ -88,7 +88,16 @@ func bindMinted(t *testing.T, tb *Table, want bool, bs ...Binding) (bad, with Bi
 	if !ok && MintedWhy(bad, with) != pre {
 		t.Fatalf("BindAll's refusal reads %q, the check before it %q", MintedWhy(bad, with), pre)
 	}
+	if !ok && !sameBinding(preWith, with) {
+		t.Fatalf("the check before the bind names %+v, BindAll's refusal %+v", preWith, with)
+	}
 	return bad, with
+}
+
+// sameBinding reports whether a and b are one binding: the same variable
+// and value, bound at the same place of the same recording.
+func sameBinding(a, b Binding) bool {
+	return a.Name == b.Name && a.Value == b.Value && a.Mock == b.Mock && a.Place == b.Place && (a.Minted == nil) == (b.Minted == nil)
 }
 
 // The run's minted values outlive a test's scope and a test set: a minted
@@ -168,11 +177,38 @@ func TestTable_AMintedValueIsNewInItsCall(t *testing.T) {
 	tb.Reset()
 	const three = "3c4d5e6f-1a2b-4a5b-8c9d-0e1f2a3b4c5d"
 	bindMinted(t, &tb, true, Binding{Name: "refId", Value: three, Recorded: mintRec}, mintedB("auditId", three))
-	if why := (*Table)(nil).MintedWhy(mintedB("auditId", mintRec), nil); !strings.HasPrefix(why, "minted value reused") {
-		t.Fatalf("a nil table's check of a recorded value said %q", why)
+	if why, with := (*Table)(nil).MintedWhy(mintedB("auditId", mintRec), nil); !strings.HasPrefix(why, "minted value reused") || with.Name != "" {
+		t.Fatalf("a nil table's check of a recorded value said %q beside %+v", why, with)
 	}
-	if why := (*Table)(nil).MintedWhy(mintedB("clusterId", mintLive), []Binding{mintedB("auditId", mintLive)}); !strings.HasPrefix(why, "minted value reused") {
-		t.Fatalf("a nil table's check of a value bound with it said %q", why)
+	if why, with := (*Table)(nil).MintedWhy(mintedB("clusterId", mintLive), []Binding{mintedB("auditId", mintLive)}); !strings.HasPrefix(why, "minted value reused") || with.Name != "auditId" {
+		t.Fatalf("a nil table's check of a value bound with it said %q beside %+v", why, with)
+	}
+}
+
+// The check before the bind names the binding whose value a minted value
+// reuses, as BindAll's refusal does: the recording that bound it first in
+// the run (an earlier test's), so the call's miss can say where. A value
+// refused by itself (its recorded one, another shape) names none, and so
+// does a value that may be bound.
+func TestTable_AMintedReuseNamesTheEarlierBinding(t *testing.T) {
+	var tb Table
+	first := mintedB("auditId", mintLive)
+	first.Mock, first.Place = "mock-insert", "body.cmd.documents.0._id"
+	if why, with := tb.MintedWhy(first, nil); why != "" || with.Name != "" {
+		t.Fatalf("a new value's check said %q beside %+v", why, with)
+	}
+	bindMinted(t, &tb, true, first)
+	tb.Reset() // the next test
+	again := mintedB("clusterId", mintLive)
+	again.Mock = "mock-later"
+	why, with := tb.MintedWhy(again, nil)
+	if !strings.HasPrefix(why, "minted value reused") || with.Mock != "mock-insert" || with.Name != "auditId" || with.Place != first.Place {
+		t.Fatalf("the check of a reused value said %q beside %+v, want the earlier test's binding at mock-insert", why, with)
+	}
+	for _, own := range []Binding{mintedB("clusterId", mintRec), mintedB("clusterId", mintNext[:35])} {
+		if why, with := tb.MintedWhy(own, nil); why == "" || with.Name != "" || with.Mock != "" {
+			t.Fatalf("the check of %q said %q beside %+v, want a refusal beside none", own.Value, why, with)
+		}
 	}
 }
 
