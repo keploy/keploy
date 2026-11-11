@@ -48,10 +48,10 @@ func DeclaredSources(sources []models.DeclaredSource, placeOf func(path string) 
 // cut-off a few seconds before it) whose unit is a second or finer
 // (models.ClockOffset.Unit). models.ClockOffset.Holds holds no such offset
 // (an application that cuts its value to that unit makes an offset changed
-// by one look the same), so the check would refuse every value. DeclaredClocks
-// leaves such a field out: it compares as a field no rule names. A range
-// around zero (a plain read of the clock) is checked, and so is one whose
-// unit is a minute or coarser.
+// by one look the same), so the check would refuse every value. ReplayClocks
+// leaves such a field out where it does not check it by its form: it
+// compares as a field no rule names. A range around zero (a plain read of
+// the clock) is checked, and so is one whose unit is a minute or coarser.
 func RangeNeverChecked(o models.ClockOffset) bool {
 	off, _ := declaredOffset(o) // a range it refuses is empty: Plain
 	return !off.Plain() && off.Unit() <= time.Second
@@ -94,8 +94,7 @@ func DeclaredBodySources(sources []models.DeclaredSource) func(path string) (Sou
 // onto it. What the learn step learned at a place stays: learning read the
 // call there. Only a field in the body counts (an index keyed by a URL or a
 // header reads no declared source; such a field compares as recorded, which
-// refuses a changed value), and only a range a replay checks
-// (RangeNeverChecked). learned itself where sources declare no clock
+// refuses a changed value). learned itself where sources declare no clock
 // this keploy checks (models.CheckSources refuses them all, or none is a
 // clock in the body the learn step learned nothing at); otherwise a new map.
 func DeclaredClocks(sources []models.DeclaredSource, learned map[string]models.ClockOffset) map[string]models.ClockOffset {
@@ -117,9 +116,6 @@ func DeclaredClocks(sources []models.DeclaredSource, learned map[string]models.C
 		}
 		// CheckSources held each clock source's range: a cut above zero,
 		// its min at most its max (models.DeclaredSource.Check).
-		if RangeNeverChecked(*s.Clock) {
-			continue
-		}
 		off, _ := declaredOffset(*s.Clock)
 		if out == nil {
 			out = make(map[string]models.ClockOffset, len(learned)+1)
@@ -147,39 +143,58 @@ func DeclaredClocks(sources []models.DeclaredSource, learned map[string]models.C
 // time a variable binds, a zero stamp) would refuse the very value it
 // learned.
 //
+// A declared field whose recorded value (recorded, by leaf path) names no
+// moment (a zero stamp, a time of day) compares as recorded: the rule does
+// not describe that recording, and its range would refuse the very value
+// recorded.
+//
 // Under the time default (timeForm), a declared field of the background's
 // recording is checked by its form alone, as the learn step learns a
 // declared field under it: the form of the recording's leaf there
-// (recorded, by leaf path: TimeForm), so a call passes with any value of
-// that type and form, whatever the rule's range. Only a leaf that names a
-// moment (a time of day names none), and, for an epoch number, one near
-// the recording's own call (span: its request and response times, within
-// epochNear), as the learn step requires of a recorded value; the call's
-// value is checked by its form alone (CheckClockRead). Any other recorded
-// value, and a field recorded cannot read, keeps the rule's range: the
-// default never passes more than its form says. With the time default off
-// (keploy.yml's mock.times: strict) the rule's range decides. learned
-// itself where nothing is added; otherwise a new map.
+// (TimeForm), so a call passes with any value of that type and form,
+// whatever the rule's range, a range a replay never holds
+// (RangeNeverChecked) included. Only a leaf that names a moment, and, for
+// an epoch number, one near the recording's own call (span: its request
+// and response times, within epochNear), as the learn step requires of a
+// recorded value; the call's value is checked by its form alone
+// (CheckClockRead). An epoch number far from its call, and a field
+// recorded cannot read, keep the rule's range: the default never passes
+// more than its form says. With the time default off (keploy.yml's
+// mock.times: strict) the rule's range decides. A range a replay never
+// holds is left out wherever no form checks its field: the field compares
+// as one no rule names. learned itself where nothing is added; otherwise a
+// new map.
 func ReplayClocks(sources []models.DeclaredSource, learned map[string]models.ClockOffset, background, timeForm bool, recorded func(leaf string) (Leaf, bool), span Span) map[string]models.ClockOffset {
 	if !background {
 		return learned
 	}
 	out := DeclaredClocks(sources, learned)
-	if len(out) == len(learned) || !timeForm || recorded == nil {
-		return out
+	if len(out) == len(learned) {
+		return learned
 	}
 	if span.To.IsZero() {
 		span.To = span.From
 	}
-	for k := range out {
+	for k, off := range out {
 		if _, has := learned[k]; has {
 			continue
 		}
-		rec, ok := recorded(k)
-		if !ok || !isInstant(rec) || strings.HasPrefix(leafLayout(rec), "epoch-") && !nearSpan(rec, span) {
-			continue
+		var rec Leaf
+		ok := false
+		if recorded != nil {
+			rec, ok = recorded(k)
 		}
-		out[k] = models.ClockOffset{Form: TimeForm(rec)} // an instant has a form
+		switch {
+		case ok && !isInstant(rec):
+			delete(out, k) // compares as recorded
+		case timeForm && ok && !(strings.HasPrefix(leafLayout(rec), "epoch-") && !nearSpan(rec, span)):
+			out[k] = models.ClockOffset{Form: TimeForm(rec)} // an instant has a form
+		case RangeNeverChecked(off):
+			delete(out, k)
+		}
+	}
+	if len(out) == len(learned) {
+		return learned
 	}
 	return out
 }

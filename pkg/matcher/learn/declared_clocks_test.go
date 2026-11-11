@@ -30,13 +30,11 @@ func TestDeclaredClocksNameAClockRulesFieldWhereverItStands(t *testing.T) {
 			map[string]models.ClockOffset{"body.data.lastUsedAt": {Res: time.Second}, "body.data.updatedAt": {Res: time.Second}}},
 		{"a range all before the call is a read plus that offset", []models.DeclaredSource{clock("cutoff", "body.cutoff", &models.ClockOffset{Min: -30 * time.Minute, Max: -30*time.Minute + time.Second, Res: time.Second})}, nil,
 			map[string]models.ClockOffset{"body.cutoff": {Min: -30 * time.Minute, Max: -30*time.Minute + time.Second, Res: time.Second}}},
-		// models.ClockOffset.Holds holds no offset off zero whose unit is a
-		// second or finer, so such a range is left out (it compares as a
-		// field no rule names), whatever its resolution.
-		{"an off-zero range of seconds is never checked", []models.DeclaredSource{clock("cutoff", "body.cutoff", &models.ClockOffset{Min: -3 * time.Second, Max: -2 * time.Second, Res: time.Second})}, nil, nil},
-		{"an off-zero range of milliseconds is never checked", []models.DeclaredSource{clock("cutoff", "body.cutoff", &models.ClockOffset{Min: 1500 * time.Millisecond, Max: 2 * time.Second, Res: time.Millisecond})}, nil, nil},
-		{"an off-zero range of seconds beside a plain read", []models.DeclaredSource{lastUsed, clock("cutoff", "body.cutoff", &models.ClockOffset{Min: -3 * time.Second, Max: -2 * time.Second, Res: time.Second})}, nil,
-			map[string]models.ClockOffset{"body.data.lastUsedAt": {Res: time.Second}}},
+		// DeclaredClocks names every declared range, one a replay never
+		// holds (RangeNeverChecked) too: ReplayClocks decides what a
+		// replay checks there, and a rule's field bars learned noise.
+		{"an off-zero range of seconds is still declared", []models.DeclaredSource{clock("cutoff", "body.cutoff", &models.ClockOffset{Min: -3 * time.Second, Max: -2 * time.Second, Res: time.Second})}, nil,
+			map[string]models.ClockOffset{"body.cutoff": {Min: -3 * time.Second, Max: -2 * time.Second, Res: time.Second}}},
 		{"what learning learned stays", []models.DeclaredSource{lastUsed, updated}, map[string]models.ClockOffset{"body.data.lastUsedAt": ttl},
 			map[string]models.ClockOffset{"body.data.lastUsedAt": ttl, "body.data.updatedAt": {Res: time.Second}}},
 		{"a minted source is no clock", []models.DeclaredSource{{Rule: "id", Kind: models.DeclaredSourceMinted, Field: "body.data._id"}}, nil, nil},
@@ -104,8 +102,11 @@ func TestRangeNeverCheckedIsAnOffZeroRangeOfASecondOrFiner(t *testing.T) {
 // stored time an update copies (a variable binds it) is never refused by a
 // rule's range. Under the time default a declared field of the background's
 // recording is checked by the form its recorded value is written in; one
-// whose recorded value keploy reads as no time, or cannot read, keeps the
-// range, and with the time default off the range decides.
+// keploy cannot read, or whose epoch is far from its call, keeps the range,
+// and with the time default off the range decides. A recorded value that
+// names no moment (a zero stamp, a time of day) compares as recorded under
+// either, and a range a replay never holds is left out wherever no form
+// checks its field.
 func TestReplayClocksReadADeclaredRangeOnTheBackgroundOnlyAndItsFormUnderTheDefault(t *testing.T) {
 	plain := &models.ClockOffset{Min: -time.Second, Res: time.Second}
 	ranged := models.ClockOffset{Res: time.Second}
@@ -149,16 +150,20 @@ func TestReplayClocksReadADeclaredRangeOnTheBackgroundOnlyAndItsFormUnderTheDefa
 			map[string]models.ClockOffset{"body.data.lastUsedAt": {Form: epoch}, "body.data.updatedAt": {Form: rfc}}},
 		{"what learning learned on it stays", map[string]models.ClockOffset{"body.data.lastUsedAt": ttl}, true, true, read(touch),
 			map[string]models.ClockOffset{"body.data.lastUsedAt": ttl, "body.data.updatedAt": {Form: rfc}}},
-		{"a recorded value that is no time keeps the range", nil, true, true, read(map[string]Leaf{
+		{"a recorded value that is no time compares as recorded", nil, true, true, read(map[string]Leaf{
 			"body.data.lastUsedAt": touch["body.data.lastUsedAt"],
 			"body.data.updatedAt":  {Path: "body.data.updatedAt", Noise: "body.data.updatedAt", Type: String, Value: "never"},
-		}), map[string]models.ClockOffset{"body.data.lastUsedAt": {Form: epoch}, "body.data.updatedAt": ranged}},
+		}), map[string]models.ClockOffset{"body.data.lastUsedAt": {Form: epoch}}},
+		{"a recorded zero stamp compares as recorded", nil, true, true, read(with("body.data.updatedAt", Leaf{Type: Number, Value: "0"})),
+			map[string]models.ClockOffset{"body.data.lastUsedAt": {Form: epoch}}},
+		{"a recorded zero stamp compares as recorded, strict", nil, true, false, read(with("body.data.updatedAt", Leaf{Type: Number, Value: "0"})),
+			map[string]models.ClockOffset{"body.data.lastUsedAt": ranged}},
 		{"a field the recording does not hold keeps the range", nil, true, true, read(map[string]Leaf{"body.data.updatedAt": touch["body.data.updatedAt"]}),
 			map[string]models.ClockOffset{"body.data.lastUsedAt": ranged, "body.data.updatedAt": {Form: rfc}}},
 		{"an epoch two years before its call keeps the range", nil, true, true, read(with("body.data.lastUsedAt", Leaf{Type: Number, Value: "1731334599"})),
 			map[string]models.ClockOffset{"body.data.lastUsedAt": ranged, "body.data.updatedAt": {Form: rfc}}},
-		{"a time of day keeps the range", nil, true, true, read(with("body.data.updatedAt", Leaf{Type: String, Value: "14:06:39"})),
-			map[string]models.ClockOffset{"body.data.lastUsedAt": {Form: epoch}, "body.data.updatedAt": ranged}},
+		{"a time of day compares as recorded", nil, true, true, read(with("body.data.updatedAt", Leaf{Type: String, Value: "14:06:39"})),
+			map[string]models.ClockOffset{"body.data.lastUsedAt": {Form: epoch}}},
 		{"a text instant far from its call is checked by its form", nil, true, true, read(with("body.data.updatedAt", Leaf{Type: String, Value: "2024-11-11T14:06:39Z"})),
 			map[string]models.ClockOffset{"body.data.lastUsedAt": {Form: epoch}, "body.data.updatedAt": {Form: rfc}}},
 		{"no reader keeps the ranges", nil, true, true, nil,
@@ -187,6 +192,40 @@ func TestReplayClocksReadADeclaredRangeOnTheBackgroundOnlyAndItsFormUnderTheDefa
 				}
 			}
 		})
+	}
+	// A range a replay never holds (a cut-off 3 s to 2 s before the call, at
+	// a second): under the time default an instant recorded there is checked
+	// by its form; wherever no form checks it, the field is left out and
+	// compares as one no rule names, never by a range that refuses every
+	// value.
+	cutoff := models.DeclaredSource{Rule: "ptw-claim-dirty-at", Kind: models.DeclaredSourceClock, Field: "body.cutoff", Clock: &models.ClockOffset{Min: -3 * time.Second, Max: -2 * time.Second, Res: time.Second}}
+	withCutoff := append([]models.DeclaredSource{cutoff}, both...)
+	for _, c := range []struct {
+		name     string
+		timeForm bool
+		recorded func(string) (Leaf, bool)
+		want     models.ClockOffset
+		has      bool
+	}{
+		{"the time default, an instant: its form", true, read(with("body.cutoff", Leaf{Type: Number, Value: "1794406597"})), models.ClockOffset{Form: epoch}, true},
+		{"strict, an instant: left out", false, read(with("body.cutoff", Leaf{Type: Number, Value: "1794406597"})), models.ClockOffset{}, false},
+		{"the time default, an epoch far from its call: left out", true, read(with("body.cutoff", Leaf{Type: Number, Value: "1731334597"})), models.ClockOffset{}, false},
+		{"the time default, the recording does not hold it: left out", true, read(touch), models.ClockOffset{}, false},
+		{"the time default, no reader: left out", true, nil, models.ClockOffset{}, false},
+	} {
+		got := ReplayClocks(withCutoff, nil, true, c.timeForm, c.recorded, span)
+		if g, ok := got["body.cutoff"]; ok != c.has || g != c.want {
+			t.Errorf("never-held range, %s: got %+v (%v); want %+v (%v)", c.name, g, ok, c.want, c.has)
+		}
+		if _, ok := got["body.data.lastUsedAt"]; !ok {
+			t.Errorf("never-held range, %s: the plain rule beside it was dropped: %+v", c.name, got)
+		}
+	}
+	// A background recording whose every declared field is left out adds
+	// nothing: learned itself.
+	learned := map[string]models.ClockOffset{"body.since": ttl}
+	if got := ReplayClocks([]models.DeclaredSource{cutoff}, learned, true, false, read(touch), span); len(got) != 1 || got["body.since"] != ttl {
+		t.Errorf("all left out: got %+v; want learned alone", got)
 	}
 	// A recording with no response time is near its call at its request.
 	got := ReplayClocks(both, nil, true, true, read(touch), Span{From: span.From})
