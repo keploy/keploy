@@ -31,16 +31,8 @@ func TestAppRunsOnOffLinuxReadsTheCommandsGroup(t *testing.T) {
 	require.False(t, appRunsOn(zap.NewNop(), ap), "an app not run yet runs on")
 
 	// Registered before the run, so a require that fails anywhere below
-	// still kills the sleep the command leaves in its group.
-	pgid := 0
-	t.Cleanup(func() {
-		if pgid == 0 {
-			pgid = groupOfPidFile(pidFile)
-		}
-		if pgid > 1 {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		}
-	})
+	// still kills the sleep the command leaves.
+	t.Cleanup(func() { killLeftSleep(pidFile) })
 
 	appErr := ap.Run(context.Background())
 	require.Equal(t, models.ErrAppStopped, appErr.AppErrorType, "%v", appErr.Err)
@@ -48,8 +40,10 @@ func TestAppRunsOnOffLinuxReadsTheCommandsGroup(t *testing.T) {
 	require.NoError(t, err, "the command wrote no sleep pid")
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	require.NoError(t, err)
-	pgid, err = syscall.Getpgid(pid)
+	pgid, err := syscall.Getpgid(pid)
 	require.NoError(t, err, "the sleep the command left is gone")
+	require.True(t, pgid > 1 && pgid != syscall.Getpgrp(),
+		"the sleep runs in group %d, this test's own or none: the native command was not given a group of its own", pgid)
 
 	require.True(t, appRunsOn(zap.NewNop(), ap),
 		"the command exited and left a sleep in its group: the run would stop the app without waiting")
@@ -65,20 +59,27 @@ func TestAppRunsOnOffLinuxReadsTheCommandsGroup(t *testing.T) {
 		"the app runs on after its group was killed")
 }
 
-// groupOfPidFile reads the process group of the pid a command wrote to
-// path, or 0 when there is no such file, pid or process.
-func groupOfPidFile(path string) int {
+// killLeftSleep kills the sleep whose pid a command wrote to path, if it
+// still runs: its whole process group when that group is its own, and the
+// sleep alone otherwise. It never signals this test's own group: a native
+// command that lost its Setpgid leaves the sleep in go test's group, where a
+// group kill would kill go test.
+func killLeftSleep(path string) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return 0
+		return
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil || pid <= 1 {
-		return 0
+		return
 	}
 	pgid, err := syscall.Getpgid(pid)
 	if err != nil {
-		return 0
+		return
 	}
-	return pgid
+	if pgid > 1 && pgid != syscall.Getpgrp() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
 }
