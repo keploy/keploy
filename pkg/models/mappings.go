@@ -122,8 +122,18 @@ type MockEntry struct {
 	// never, as it serves every read and requires none. False, the default
 	// an entry without the key reads as, requires the series once per run
 	// when it is due, so a series is required unless every entry of it says
-	// read. Kept as Series is.
+	// read, or read or unchanged (Unchanged). Kept as Series is.
 	Read bool `json:"read,omitempty" yaml:"read,omitempty" bson:"read,omitempty"`
+	// Unchanged is, on an entry of a Series keploy mock record judged a
+	// write, that the entry's recorded answer says the write changed nothing
+	// (a MongoDB reply of n 0: no document matched, none was inserted or
+	// upserted). keploy mock replay serves the entry as any series' and
+	// requires a series once per run only while one entry of it is neither
+	// Read nor Unchanged: a write whose every recording changed nothing
+	// cannot hide a missing data change, so such a series is served, not
+	// required. False, the default an entry without the key reads as, keeps
+	// a write's series required. Kept as Series is.
+	Unchanged bool `json:"unchanged,omitempty" yaml:"unchanged,omitempty" bson:"unchanged,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy's
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's
