@@ -143,7 +143,11 @@ type FakeConn struct {
 	partial         bool
 	lastReadNano    atomic.Int64
 	lastWrittenNano atomic.Int64
-	closed          atomic.Bool
+	// heldNano is HoldFrom's: the capture time (ReadAt, UnixNano) of the
+	// first chunk of the earliest call the parser holds parsed with its mock
+	// not handed on, 0 while it holds none.
+	heldNano atomic.Int64
+	closed   atomic.Bool
 	// first is the first floor DropBefore was given (guarded by mu), 0 until
 	// then: the stream's start is what was captured before it (started). In
 	// the padding after closed.
@@ -536,8 +540,9 @@ func (f *FakeConn) SkipThrough(t time.Time) (n int64, last time.Time, err error)
 // beforeWait, when set, runs on a reader's goroutine as it is about to wait:
 // after Waiting reports it waiting, before the wait. It is for tests, which put
 // what arrives in that window there every time instead of by chance; nil
-// outside them. It is the package's, not a FakeConn field: a FakeConn is 288
-// bytes, a size class, and one more field would put each in the 320 byte one.
+// outside them. It is the package's, not a FakeConn field: a FakeConn is 304
+// bytes, in the 320 byte size class, and three more fields would put each in
+// the 352 byte one.
 var beforeWait atomic.Pointer[func(*FakeConn)]
 
 // closeHook, when set (SetCloseHookForTest), is called by Close with the
@@ -800,7 +805,8 @@ func (f *FakeConn) ReadThrough() int64 {
 // Waiting reports whether the reader is blocked for the next chunk with
 // nothing buffered for it, and how many times it has blocked so. A reader that
 // reads one message at a time and is blocked so is done with everything it
-// was handed. A caller that sees the same count before and after checking
+// was handed, unless it holds a call it parsed (HoldFrom). A caller that sees
+// the same count before and after checking
 // other state knows the reader stayed blocked in between.
 func (f *FakeConn) Waiting() (waiting bool, waits uint64) {
 	return f.waiting.Load(), f.waits.Load()
@@ -884,6 +890,39 @@ func (f *FakeConn) Write(p []byte) (int, error) {
 // or the zero time if none carried one.
 func (f *FakeConn) LastReadTime() time.Time {
 	n := f.lastReadNano.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+
+// HoldFrom says the parser holds a call it has parsed and whose mock it has
+// not handed on, and that the call's first chunk was captured at `at` (its
+// ReadAt). Whoever follows the capture (the relay's watermark) then takes the
+// parser as not done with anything captured from `at` on, whatever it reads
+// past it. A parser needs it only when it reads on while it holds such a call:
+// to reach the verdict that lets it hand the call on, or with calls queued
+// behind it. Its reads alone would say it is past the call. The zero time
+// clears it.
+//
+// It is a plain store: a parser that holds several calls passes the earliest
+// first chunk among them, and sets it on either of its streams. It sets it
+// before it takes the chunk that moves its reads past the call's window, so a
+// look that sees that read (LastReadTime) sees the hold too. It clears it only
+// once the call's mock is handed on.
+func (f *FakeConn) HoldFrom(at time.Time) {
+	if at.IsZero() {
+		f.heldNano.Store(0)
+		return
+	}
+	f.heldNano.Store(at.UnixNano())
+}
+
+// HeldFrom is what HoldFrom last set: the capture time of the first chunk of
+// the earliest call the parser holds parsed with its mock not handed on, or
+// the zero time while it holds none.
+func (f *FakeConn) HeldFrom() time.Time {
+	n := f.heldNano.Load()
 	if n == 0 {
 		return time.Time{}
 	}
