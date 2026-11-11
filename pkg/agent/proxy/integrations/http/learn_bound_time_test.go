@@ -94,11 +94,19 @@ func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 				if !strings.Contains(o.Why, "checked by its form alone") || !strings.HasSuffix(o.Why, ": "+refusal) {
 					t.Errorf("the clock's why %q; want the time default named, then the bind that did not hold", o.Why)
 				}
-				if held, no := learn.CheckClockRead(field, o, learn.Leaf{Path: field, Value: secs(liveAt.Add(time.Hour)), Type: learn.Number}, learn.Span{}, true); !held {
+				// A replay checks it as it reads the store's times setting
+				// (CheckClockReadForm): at the default, any value of the form
+				// passes and another form does not; under strict a time
+				// learned by its form alone is refused.
+				later := learn.Leaf{Path: field, Value: secs(liveAt.Add(time.Hour)), Type: learn.Number}
+				if held, no := learn.CheckClockReadForm(field, o, later, learn.Span{}, true, true); !held {
 					t.Errorf("a later replay's createdAt of the same form is refused: %s", no)
 				}
-				if held, _ := learn.CheckClockRead(field, o, learn.Leaf{Path: field, Value: strconv.FormatInt(liveAt.UnixMilli(), 10), Type: learn.Number}, learn.Span{}, true); held {
+				if held, _ := learn.CheckClockReadForm(field, o, learn.Leaf{Path: field, Value: strconv.FormatInt(liveAt.UnixMilli(), 10), Type: learn.Number}, learn.Span{}, true, true); held {
 					t.Error("a later replay's createdAt in milliseconds passes; want it refused by its form")
+				}
+				if held, no := learn.CheckClockReadForm(field, o, later, learn.Span{}, true, false); held || !strings.Contains(no, "re-record with mock.times: strict") {
+					t.Errorf("a later replay under strict times: held %v (%q); want it refused, saying to re-record under strict", held, no)
 				}
 			}
 		})
