@@ -43,7 +43,7 @@ func TestAtWindowCloseCallsOnceAtTheNextBoundary(t *testing.T) {
 					t.Errorf("at %s the call read a test open; want the window it closes closed", name)
 				}
 			}
-			if stopA() || stopB() {
+			if stopped(t, func() func() bool { return stopA }) || stopped(t, func() func() bool { return stopB }) {
 				t.Errorf("stop after the window closed reports the call taken back; want false")
 			}
 			tr.End()
@@ -76,7 +76,7 @@ func TestAtWindowCloseStopTakesTheCallBack(t *testing.T) {
 	if !slices.Equal(calls, []string{"b", "c"}) {
 		t.Errorf("calls = %v, want [b c]", calls)
 	}
-	if stopC() {
+	if stopped(t, func() func() bool { return stopC }) {
 		t.Error("stop after the call was made reports true")
 	}
 }
