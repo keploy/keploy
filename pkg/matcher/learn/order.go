@@ -2814,12 +2814,18 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	if first.trailed {
 		rule += ", sent in " + dc.in.Trails.Test + ", which this call trails"
 	}
-	fromAt, name := dc.fromAt(first, c.r, c.l), first.name
+	fromAt, name, places := dc.fromAt(first, c.r, c.l), first.name, names(src)
 	if claim := claimName(fromAt); claim != "" {
-		// Bound inside a token, the line names the claim that holds it.
+		// Bound inside a token, the line names the claim that holds it,
+		// and so does its place in the line's places.
 		name += ", its JWT's " + claim + " claim"
+		for i, p := range places {
+			if p == first.name {
+				places[i] += " (its JWT's " + claim + " claim)"
+			}
+		}
 	}
-	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), names(src))
+	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), places)
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
 		Given: first.given, Client: dc.clientCase(first.mock)}
 	d.FromAt = fromAt

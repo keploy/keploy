@@ -64,6 +64,9 @@ func TestAnIdAClientTestCarriesInAJWTClaimIsBoundAtTheClaim(t *testing.T) {
 	if got, want := d.FromAt.String(), "header.Authorization|jwt.cluster_id#0"; got != want {
 		t.Fatalf("the cluster id is bound at %q; want %q, the claim that holds it", got, want)
 	}
+	if want := "Places: test case post-cluster-status-3 header.Authorization (its JWT's cluster_id claim)"; !strings.Contains(d.Line, want) {
+		t.Errorf("line %q; want the claim named in its places (%q)", d.Line, want)
+	}
 	if want := "bound to test case post-cluster-status-3 header.Authorization, its JWT's cluster_id claim"; !strings.Contains(d.Line, want) {
 		t.Fatalf("the learned line %q does not name the claim; want it to say %q", d.Line, want)
 	}
