@@ -1175,6 +1175,26 @@ func BackgroundRecordingsOf(db MockMemDb, kind models.Kind) []models.BackgroundR
 	return nil
 }
 
+// TrailRecordingsOf is, of db's background recordings of kind
+// (BackgroundRecordingsOf: the set's worker: and startup: recordings), each
+// that trails a test of the replay's scope table (TrailOf), with that test,
+// in recorded order. For a parser to tell a miss carries a trailed test's
+// kept value (MockMismatchReport.TrailsOf). Nothing it returns is served,
+// consumed or to be changed. nil where none trails a test, or db tells
+// neither.
+func TrailRecordingsOf(db MockMemDb, kind models.Kind) []models.TrailRecording {
+	var out []models.TrailRecording
+	for _, r := range BackgroundRecordingsOf(db, kind) {
+		if r.Mock == nil {
+			continue
+		}
+		if tr := TrailOf(db, r.Mock.Name); tr.Test != "" {
+			out = append(out, models.TrailRecording{Mock: r.Mock, Trails: tr.Test})
+		}
+	}
+	return out
+}
+
 // LearnEnder is an optional MockMemDb capability: whether the test set's
 // learn step has ended (models.MockFilterParams.LearnEnded). keploy replay's
 // mock-consistency retry cycles run the passing test cases again, test-1

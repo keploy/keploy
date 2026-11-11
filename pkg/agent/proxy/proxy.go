@@ -6266,6 +6266,9 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					// Of a background miss, the places it differs from
 					// its recording only by its test's bound values.
 					BackgroundBound: slices.Clone(parserErr.MismatchReport.BackgroundBound),
+					// A call carrying a trailed test's kept value: that
+					// test's clean-up, charged to no window, counting.
+					TrailsOf: parserErr.MismatchReport.TrailsOf,
 					// A call the parser held for a later test's recording
 					// that none answered: missed only at the set's end.
 					Held: parserErr.MismatchReport.HeldPastWindow,

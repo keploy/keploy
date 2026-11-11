@@ -348,6 +348,16 @@ type MockMismatchReport struct {
 	// own test bound before it (BackgroundBinding). Empty when the call is
 	// that recording's request apart from noise and clock reads alone.
 	BackgroundBound []BackgroundBinding
+	// TrailsOf names, under the proven switch, the test whose kept value the
+	// missed call carries: the call is of a worker: recording's command and
+	// collection that trails that test (mappings.yaml trails:), and at each
+	// use place of every variable of that test the recording holds, the call
+	// holds the value that test bound in this run. Such a call is that
+	// test's clean-up, whichever window it lands in: its miss is charged to
+	// no test's window and still counts (CountsAgainstTest), and judging
+	// fails the trailed test on it. A test ID, never a value; "" for every
+	// other miss (UnmatchedCall.TrailsOf).
+	TrailsOf string
 	// Reason is why the call missed, when the learn step decided it, or
 	// MissViewReplaced when a test's begin or end, or another view served
 	// between tests, replaced its view before its miss was diagnosed
