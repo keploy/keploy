@@ -191,6 +191,16 @@ func BoundTimeLearned(ln Learned, declared bool, w *Window, timeForm bool) Learn
 	return ln
 }
 
+// HoldsByForm reports whether live, the value a replay's call carries at a
+// use place of a variable bound whole where it does not hold the variable's
+// value, passes that place's check by form (models.MockVariable.ByForm, o):
+// under the time default (timeForm) alone, a whole value (no word), and a
+// time of o's form (TimeForm). HTTP and MongoDB replays both check a use's
+// fallback with it, so the two agree.
+func HoldsByForm(o models.ClockOffset, live Leaf, timeForm bool) bool {
+	return timeForm && o.Form != "" && o.Word.IsZero() && TimeForm(live) == o.Form
+}
+
 // formIn is the form rec and live, a time field's leaf as recorded and in
 // round F, are both written in (TimeForm), as the time default checks it;
 // else "" and why not, after "; and": its runs write no one form of an
