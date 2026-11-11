@@ -1057,6 +1057,16 @@ type ExactTestServedReader interface {
 	ExactTestServed() string
 }
 
+// ExactTestInstallReader is an optional ExactServer capability of a proxy
+// whose parsers mark each call's round (models.MissMark): ExactTestInstalled
+// is the staging and the round's boundary count the view in force was
+// installed at, when it is test's view (ok false otherwise). A test's end
+// tells by them whether a miss was marked before that test's view was
+// installed, however late its call was decided.
+type ExactTestInstallReader interface {
+	ExactTestInstalled(test string) (epoch, bounds uint64, ok bool)
+}
+
 // ExactTestOpener is an optional ExactServer capability of a proxy that keeps
 // the test variables a replay binds (VariableBinder): OpenExactTest opens test
 // as ServeExactTest does, and begins its variables with given bound in the

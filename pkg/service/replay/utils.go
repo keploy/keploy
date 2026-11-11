@@ -1763,6 +1763,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			Given:            call.Given,
 			VariableWhy:      call.VariableWhy,
 			NotOwned:         call.NotOwned,
+			HeldPastWindow:   call.Held, // the proxy's copy of the parser's HeldPastWindow
 			Background:       call.Background,
 			BackgroundBound:  slices.Clone(call.BackgroundBound), // a copy, as the proxy's: the report shares no slice with the miss
 			Reason:           call.Reason,

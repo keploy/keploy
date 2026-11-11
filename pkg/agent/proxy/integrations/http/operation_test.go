@@ -273,7 +273,7 @@ func TestAPairingNamesItsOperation(t *testing.T) {
 		}
 	})
 	in := &req{method: "POST", url: &url.URL{Path: "/query"}, header: http.Header{"Host": {"localhost:8083"}, "Content-Type": {"application/json"}}, body: []byte(gqlBody("GetAppLabels"))}
-	reportPairing(ctx, in, gqlMock("labels", "GetAppLabels"), integrations.AnsweredCall{}, false)
+	reportPairing(ctx, in, gqlMock("labels", "GetAppLabels"), integrations.AnsweredCall{}, false, integrations.CallRound{})
 	if len(got) != 1 || got[0].ActualSummary != "POST /query" || got[0].Operation != "query GetAppLabels" {
 		t.Fatalf("reports %+v", got)
 	}

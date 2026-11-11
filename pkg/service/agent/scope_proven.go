@@ -157,10 +157,11 @@ type provenWire struct {
 	// recorded before it, and the pool by name. Zero when the CLI sent no
 	// window.
 	firstRecorded time.Time
-	// servedSince is when exact serving began serving each open test, by
-	// its ID (serveTestExactly): a miss made before it is no call of the
+	// servedSince is where exact serving began serving each open test, by
+	// its ID (serveTestExactly): when, and the round its view was installed
+	// at. A miss marked, or with no mark made, before it is no call of the
 	// test's.
-	servedSince map[string]time.Time
+	servedSince map[string]testBegin
 	// realSaid names the recorded mocks already said to go to a mock.real
 	// destination (notReal).
 	realSaid map[string]bool
@@ -1690,9 +1691,10 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		real = t.EndTestOf(a.scopeInstance(id))
 	}
 	uses, incomplete := real.Uses, real.Incomplete
-	// When exact serving began serving the test: a miss made before it is
-	// no call of the test's (evidenceReason).
-	beganAt := a.servedSince(id)
+	// Where exact serving began serving the test: a miss made before it is
+	// no call of the test's (testEvidence, evidenceReason).
+	began := a.servedBegin(id)
+	beganAt := began.at
 	if a.replaying() {
 		// The test stops being served before what it did is read: a call
 		// that lands after the read cannot consume one of its mocks, so the
@@ -1703,7 +1705,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		if err := a.servePoolExactly(ctx, a.scopeInstance(id)); err != nil {
 			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), zap.Error(err))
 		}
-		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped, beganAt)
+		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped, began)
 	}
 	if len(incomplete) > 0 {
 		if ev == nil {
@@ -2058,12 +2060,27 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // consume while it was open (exact serving tells which). A failed read is an
 // error. Every miss is still charged to the run, so its next step is said.
 //
-// beganAt is when exact serving began serving the test (zero when it is not
-// known). A miss made outside every test before it (outsideEveryTest) is no
-// call of the test's: the test framework set the test's window, and keploy
-// does not move a call into it. It is charged to no test, and the run's
-// receipt lists it (Receipt.UnchargedMisses), so a reader who finds it the
-// test's own call edits the set's mappings rather than keploy guessing.
+// began is where exact serving began serving the test (its time zero, and
+// its round not known, when it is not known). A miss made outside every test
+// before it (outsideEveryTest) is no call of the test's: the test framework
+// set the test's window, and keploy does not move a call into it. It is
+// charged to no test, and the run's receipt lists it
+// (Receipt.UnchargedMisses), so a reader who finds it the test's own call
+// edits the set's mappings rather than keploy guessing. Where its mark names
+// the test whose view it was made in, it is listed under that test
+// (models.UnmatchedCall.WindowOf). So is an earlier test set's test's own
+// call that keploy decided only after this set's mocks were staged, which the
+// proxy keeps for this set's first read naming that test
+// (models.UnmatchedCall.EarlierSetTest), even where the test that read it has
+// the same name.
+//
+// A miss marked in another test's view before this test's was installed
+// (markedInAnotherTest) is that test's own call, which keploy decided only
+// after that test's end was read: it is charged to no test, and names the
+// test it was made in (models.UnmatchedCall.WindowOf), never failing this
+// one, which did not make it. Each is placed by where its call was marked,
+// never by when keploy decided it, so how fast keploy answers never moves a
+// miss into another test.
 //
 // A miss that repeats a spent recording of the set's background
 // (backgroundRepeat) is no call of the test's either: the application made
@@ -2077,7 +2094,7 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // test the same way, naming its window. It still counts against the tests,
 // so the run fails on it and judging fails the trailed test, not the one
 // whose window it landed in.
-func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganAt time.Time) (*models.ScopeEvidence, error) {
+func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began testBegin) (*models.ScopeEvidence, error) {
 	if a.Proxy == nil {
 		return nil, errors.New("no proxy")
 	}
@@ -2085,17 +2102,34 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	all, err := a.missesOf(ctx, a.scopeInstance(id))
 	var misses, outside []models.UnmatchedCall
 	for _, m := range all {
-		if outsideEveryTest(m, beganAt) {
+		if m.EarlierSetTest != "" || m.EarlierSet > 0 {
+			// An earlier set's call, which keploy decided only after this
+			// set's mocks were staged: listed under the test it was made
+			// in, where it names one, however its round and this test's
+			// install fall, and charged to none.
+			m.WindowOf = m.EarlierSetTest
+			outside = append(outside, m)
+			continue
+		}
+		if outsideEveryTest(m, began) {
+			// Listed under the test whose view it was marked in, where
+			// it names one.
+			m.WindowOf = m.Marked.Test
+			outside = append(outside, m)
+			continue
+		}
+		if test, ok := markedInAnotherTest(m, id, began); ok {
+			m.WindowOf = test
 			outside = append(outside, m)
 			continue
 		}
 		if trailsAnother(m, id) {
-			m.WindowOf = missWindow(m, id, beganAt)
+			m.WindowOf = missWindow(m, id, began)
 			outside = append(outside, m)
 			continue
 		}
 		if backgroundRepeat(m) {
-			m.WindowOf = missWindow(m, id, beganAt)
+			m.WindowOf = missWindow(m, id, began)
 			outside = append(outside, m)
 			continue
 		}
@@ -2152,14 +2186,63 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	return ev, nil
 }
 
+// testBegin is where exact serving began serving a test (serveTestExactly):
+// at is when (zero when it is not known), and epoch and bounds the staging
+// and the round's boundary count its view was installed at
+// (agent.ExactTestInstallReader), round false when the proxy did not say.
+type testBegin struct {
+	at            time.Time
+	epoch, bounds uint64
+	round         bool
+}
+
+// markedBefore reports whether miss m's call was marked (models.MissMark) in
+// a round before the view of the test begun at b was installed; known is
+// false when the mark or the install's round is not known.
+func (b testBegin) markedBefore(m models.UnmatchedCall) (before, known bool) {
+	if !b.round || !m.Marked.Known {
+		return false, false
+	}
+	return m.Marked.Before(b.epoch, b.bounds), true
+}
+
 // outsideEveryTest reports whether miss m was made outside every test, before
-// the test that began being served at beganAt: filed while no test was open
-// (models.MissOutsideTest) at a time before beganAt. A miss without a time,
-// or read when beganAt is not known, is not told so: it stays the ending
-// test's, as a miss of another kind made before beganAt does (a call of the
-// previous test's still in flight as it ended), and fails it.
-func outsideEveryTest(m models.UnmatchedCall, beganAt time.Time) bool {
-	return m.Kind == models.MissOutsideTest && !beganAt.IsZero() && !m.At.IsZero() && m.At.Before(beganAt)
+// the test begun at b: filed while no test was open (models.MissOutsideTest)
+// and marked (models.MissMark) before that test's view was installed,
+// however late keploy decided it. One marked at or after the install was
+// made as the test ended, and is the test's. A miss with no known mark is
+// told by when it was filed, before b's time. A miss without a time, or read
+// when b is not known, is not told so: it stays the ending test's, as a miss
+// of another kind made before the begin does (a call of the previous test's
+// still in flight as it ended, unmarked or marked in no named test), and
+// fails it.
+func outsideEveryTest(m models.UnmatchedCall, b testBegin) bool {
+	if m.Kind != models.MissOutsideTest {
+		return false
+	}
+	if before, known := b.markedBefore(m); known {
+		return before
+	}
+	return !b.at.IsZero() && !m.At.IsZero() && m.At.Before(b.at)
+}
+
+// markedInAnotherTest is the test whose view miss m's call was marked in
+// (models.MissMark.Test), with ok, when that is another test than id, begun
+// at b, and the mark came before id's view was installed: that test's own
+// call, which keploy decided after that test's end was read (its report
+// reached keploy too late for it). It is no call of id's, so it never fails
+// id. ok is false for a mark that names no test, names id (a call of an
+// earlier opening of id's own: id's), or is not known, and when id's
+// install is not known: such a miss stays id's.
+func markedInAnotherTest(m models.UnmatchedCall, id string, b testBegin) (string, bool) {
+	if m.Marked.Test == "" || m.Marked.Test == id {
+		return "", false
+	}
+	// Not known, a mark is never before (markedBefore).
+	if before, _ := b.markedBefore(m); !before {
+		return "", false
+	}
+	return m.Marked.Test, true
 }
 
 // backgroundRepeat reports whether miss m repeats a spent recording of the
@@ -2186,12 +2269,17 @@ func trailsAnother(m models.UnmatchedCall, id string) bool {
 }
 
 // missWindow is the test whose window miss m was made in, for a miss read
-// at test id's end that began being served at beganAt: id when m was made
-// at or after it, "" when it was made before it (another test's window, or
-// none) or when either time is not known (a miss without a time is before
-// every begin).
-func missWindow(m models.UnmatchedCall, id string, beganAt time.Time) string {
-	if beganAt.IsZero() || m.At.Before(beganAt) {
+// at test id's end that began being served at b. A miss with a known mark
+// (models.MissMark) was made in the view its call was marked in: that view's
+// test, "" for a pool view. One with none: id when m was filed at or after
+// b's time, "" when it was filed before it (another test's window, or none)
+// or when either time is not known (a miss without a time is before every
+// begin).
+func missWindow(m models.UnmatchedCall, id string, b testBegin) string {
+	if m.Marked.Known {
+		return m.Marked.Test
+	}
+	if b.at.IsZero() || m.At.Before(b.at) {
 		return ""
 	}
 	return id
@@ -2257,7 +2345,11 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 
 // servedSince is when exact serving began serving open test id; zero when
 // it does not.
-func (a *Agent) servedSince(id string) time.Time {
+func (a *Agent) servedSince(id string) time.Time { return a.servedBegin(id).at }
+
+// servedBegin is where exact serving began serving open test id: the zero
+// testBegin when it does not.
+func (a *Agent) servedBegin(id string) testBegin {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
 	return a.proven.servedSince[id]

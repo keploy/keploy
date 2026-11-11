@@ -392,11 +392,19 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	if err := a.openExactTest(es, id, owned, nil); err != nil {
 		return err
 	}
+	// When the test began being served, and the round its view was
+	// installed at, read once the view is in force: its end files a miss
+	// marked before that install as no call of the test's, whenever keploy
+	// decided it (testEvidence).
+	began := testBegin{at: time.Now()}
+	if r, ok := es.(coreAgent.ExactTestInstallReader); ok {
+		began.epoch, began.bounds, began.round = r.ExactTestInstalled(id)
+	}
 	a.provenMu.Lock()
 	if a.proven.servedSince == nil {
-		a.proven.servedSince = map[string]time.Time{}
+		a.proven.servedSince = map[string]testBegin{}
 	}
-	a.proven.servedSince[id] = time.Now()
+	a.proven.servedSince[id] = began
 	a.provenMu.Unlock()
 	return nil
 }
