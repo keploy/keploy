@@ -1766,6 +1766,22 @@ func SourcesOf(db MockMemDb, mock string) []models.DeclaredSource {
 	return s.SourcesOf(mock)
 }
 
+// TimeFormReader is an optional MockMemDb capability under the proven
+// switch: whether keploy mock replay's scope table turned on the learn
+// step's time default (models.ScopeTableReq.TimeForm), which checks a
+// changed time by its type and form alone (learn.Input.TimeForm).
+type TimeFormReader interface {
+	TimeForm() bool
+}
+
+// TimeFormOf is whether db's replay turned the time default on
+// (TimeFormReader); off for a db that cannot tell, which decides times by
+// the clock checks alone: it refuses more, never passes more.
+func TimeFormOf(db MockMemDb) bool {
+	t, ok := db.(TimeFormReader)
+	return ok && t.TimeForm()
+}
+
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of
 // the open test's own, which its mapping lists, rather than the pool's. A view
 // that scopes the pool to a test (`keploy mock replay`'s) knows; known is

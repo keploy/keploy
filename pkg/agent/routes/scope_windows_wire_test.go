@@ -76,7 +76,7 @@ func TestTheSkippedReadsAndTheMarksCrossTheScopeTableWire(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	client := agenthttp.New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv.URL}})
-	if err := client.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-2"}}, map[string]string{"mock-2": "o::TestCRUD"}, nil, nil, nil, nil, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil); err != nil {
+	if err := client.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-2"}}, map[string]string{"mock-2": "o::TestCRUD"}, nil, nil, nil, nil, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(body, `"skippedReads":{"mock-2":"o::TestCRUD"}`) || !strings.Contains(body, `"notRequired":{"o::TestA":["mock-3"]}`) {
@@ -118,7 +118,7 @@ func TestTheSkippedReadsAndTheTrailsCrossTheScopeTableWireApart(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := agenthttp.New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv.URL}})
 	worker := map[string][]string{"o": {"mock-1", "mock-2"}}
-	if err := client.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, worker, worker, map[string]string{"mock-2": "o::TestCRUD"}, map[string]string{"mock-1": "o::TestA"}, nil, nil, nil, nil, nil, nil, nil); err != nil {
+	if err := client.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, worker, worker, map[string]string{"mock-2": "o::TestCRUD"}, map[string]string{"mock-1": "o::TestA"}, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(body, `"skippedReads":{"mock-2":"o::TestCRUD"}`) || !strings.Contains(body, `"trails":{"mock-1":"o::TestA"}`) {
@@ -167,7 +167,7 @@ func TestTheBackgroundRecordingsCrossTheScopeTableWireBeforeThePool(t *testing.T
 	client := agenthttp.New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv.URL}})
 	pool := map[string][]string{".": {"mock-0", "mock-3733", "mock-3735"}}
 	worker := map[string][]string{".": {"mock-3733", "mock-3735"}}
-	if err := client.PushProvenTable(context.Background(), map[string][]string{".::TestGetCurrentUser": {"mock-3734"}}, pool, worker, nil, nil, nil, nil, nil, nil, []string{"mock-3733", "mock-3735", "mock-0"}, nil, nil); err != nil {
+	if err := client.PushProvenTable(context.Background(), map[string][]string{".::TestGetCurrentUser": {"mock-3734"}}, pool, worker, nil, nil, nil, nil, nil, nil, []string{"mock-3733", "mock-3735", "mock-0"}, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(body, `"background":["mock-3733","mock-3735","mock-0"]`) {
@@ -176,7 +176,7 @@ func TestTheBackgroundRecordingsCrossTheScopeTableWireBeforeThePool(t *testing.T
 	if !slices.Equal(background, []string{"mock-3733", "mock-3735", "mock-0"}) || !slices.Equal(ps.order, []string{"windows", "worker", "background", "pool"}) {
 		t.Fatalf("the agent installed the background recordings %v, in the order %v; want them, before the pool", background, ps.order)
 	}
-	if err := client.PushProvenTable(context.Background(), map[string][]string{".::TestGetCurrentUser": {"mock-3734"}}, pool, worker, nil, nil, nil, nil, nil, nil, nil, nil, nil); err != nil {
+	if err := client.PushProvenTable(context.Background(), map[string][]string{".::TestGetCurrentUser": {"mock-3734"}}, pool, worker, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(body, `"background"`) || background != nil || set != 2 {
@@ -187,7 +187,7 @@ func TestTheBackgroundRecordingsCrossTheScopeTableWireBeforeThePool(t *testing.T
 	srv2 := httptest.NewServer(http.HandlerFunc(b.HandleScopeTable))
 	t.Cleanup(srv2.Close)
 	client2 := agenthttp.New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv2.URL}})
-	if err := client2.PushProvenTable(context.Background(), map[string][]string{".::TestGetCurrentUser": {"mock-3734"}}, pool, worker, nil, nil, nil, nil, nil, nil, []string{"mock-3733"}, nil, nil); err != nil {
+	if err := client2.PushProvenTable(context.Background(), map[string][]string{".::TestGetCurrentUser": {"mock-3734"}}, pool, worker, nil, nil, nil, nil, nil, nil, []string{"mock-3733"}, nil, nil, false); err != nil {
 		t.Fatalf("an agent that takes no background recordings refused the table: %v", err)
 	}
 }

@@ -38,6 +38,32 @@ func TestTheReplayPushesTheDeclaredSourcesOfTheRecordings(t *testing.T) {
 	}, instr.sources)
 }
 
+// Under the switch the replay hands the agent, with the table, whether the
+// learn step checks a changed time by its form alone: on only where the
+// command that runs the replay turned it on (config.MockCmd.TimeForm,
+// keploy's T2 commands), off for every other caller.
+func TestTheReplayPushesTheTimeDefaultItsCommandSet(t *testing.T) {
+	provenOn(t)
+	for _, on := range []bool{true, false} {
+		repo := t.TempDir()
+		t.Chdir(repo)
+		keployDir := filepath.Join(repo, "keploy")
+		require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\n"), 0o644))
+		instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+		instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+		instr.timeForm = !on // the push must set it, whichever it was
+		cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+		cfg.Path, cfg.Mock.OnMiss, cfg.Mock.TimeForm = keployDir, "fail", on
+		utils.ErrCode = 0
+		t.Cleanup(func() { utils.ErrCode = 0 })
+		require.NoError(t, New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+		require.NotNil(t, instr.table, "the replay pushed its table (time default %v)", on)
+		require.Equal(t, on, instr.timeForm, "the time default the command set")
+	}
+}
+
 // declaredSources reads every list of the mapping, and only a name the
 // agent holds: a recording it never holds answers no call to learn. A
 // mapping with no source, and none, gives none.

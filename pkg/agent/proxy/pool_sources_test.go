@@ -40,3 +40,27 @@ func TestTheMockManagerAnswersARecordingsDeclaredSources(t *testing.T) {
 	require.NoError(t, p.SetPoolSources(map[string][]models.DeclaredSource{"mock-9": {minted}}))
 	require.Equal(t, []models.DeclaredSource{minted}, mm.SourcesOf("mock-9"))
 }
+
+// The mock manager answers whether the replay's scope table turned the
+// time default on: off before any table, on once one did, off again once a
+// table turned it off. The worker's view forwards it, a store that cannot
+// tell has it off, and a proxy sets it on its mock manager (none:
+// errNoMockManager).
+func TestTheMockManagerAnswersTheTimeDefault(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	require.False(t, mm.TimeForm(), "before any table")
+	var db integrations.MockMemDb = &scopedMockDb{MockMemDb: mm}
+	mm.SetPoolTimeForm(true)
+	require.True(t, mm.TimeForm())
+	require.True(t, integrations.TimeFormOf(db), "the wrapper forwards it")
+	mm.SetPoolTimeForm(false)
+	require.False(t, mm.TimeForm(), "a table that turns it off")
+	require.False(t, integrations.TimeFormOf(db))
+	require.False(t, integrations.TimeFormOf(nil), "a store that cannot tell has it off")
+
+	p := &Proxy{learnTracker: learn.NewTracker()}
+	require.ErrorIs(t, p.SetPoolTimeForm(true), errNoMockManager)
+	p.mockManager = mm
+	require.NoError(t, p.SetPoolTimeForm(true))
+	require.True(t, mm.TimeForm())
+}

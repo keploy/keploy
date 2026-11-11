@@ -5262,18 +5262,23 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // sources declared rules give fields of its request
 // (models.ScopeTableReq.Sources): an agent whose answer does not name each
 // of them the table has (models.ScopeTableResp.Served) is refused with
-// ErrAgentIgnoresRules.
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource) (retErr error) {
+// ErrAgentIgnoresRules. timeForm turns on the learn step's time default
+// (models.ScopeTableReq.TimeForm); an agent that does not take it decides
+// times by the clock checks alone, which refuses more and never passes
+// more, so it is not refused.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, timeForm bool) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			t, p, wk, sr, tr, w, g, r, nr, bg, se, so := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired), slices.Clone(background), maps.Clone(series), maps.Clone(sources)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so) })
+			a.session().record(stepScopeTable, func(c context.Context) error {
+				return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so, timeForm)
+			})
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, TimeForm: timeForm})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

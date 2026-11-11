@@ -387,6 +387,10 @@ type exactState struct {
 	// (SetPoolSources): what the learn step decides such a field by
 	// (SourcesOf). nil until a replay sent one.
 	poolSources atomic.Pointer[map[string][]models.DeclaredSource]
+	// poolTimeForm is, of the same scope table, whether the learn step
+	// checks a changed time by its form alone (SetPoolTimeForm, TimeForm).
+	// false until a replay sent it on.
+	poolTimeForm atomic.Bool
 	// poolSeries is, of the same scope table, the series the worker-scope
 	// recordings a declared rule placed belong to (SetPoolSeries): what
 	// answers a series' repeats past its recorded count in the windows
@@ -1998,6 +2002,24 @@ func (m *MockManager) SourcesOf(mock string) []models.DeclaredSource {
 		return nil
 	}
 	return slices.Clone((*sources)[mock])
+}
+
+// SetPoolTimeForm installs, of the replay's scope table, whether the learn
+// step checks a changed time by its form alone, the time default
+// (models.ScopeTableReq.TimeForm; keploy mock replay under the proven
+// switch). The learn step reads it through TimeForm. Every table sets it,
+// off too: a set never keeps the previous set's.
+func (m *MockManager) SetPoolTimeForm(on bool) {
+	m.exact.poolTimeForm.Store(on)
+}
+
+var _ integrations.TimeFormReader = (*MockManager)(nil)
+
+// TimeForm implements integrations.TimeFormReader: whether the replay's
+// scope table turned the time default on (SetPoolTimeForm); off until a
+// replay did.
+func (m *MockManager) TimeForm() bool {
+	return m.exact.poolTimeForm.Load()
 }
 
 // seriesIndex is a replay's series of worker-scope recordings a declared

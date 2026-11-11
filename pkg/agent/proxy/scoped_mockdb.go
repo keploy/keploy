@@ -1050,6 +1050,14 @@ func (s *scopedMockDb) SourcesOf(mock string) []models.DeclaredSource {
 
 var _ integrations.DeclaredSourcesOf = (*scopedMockDb)(nil)
 
+// TimeForm forwards integrations.TimeFormReader: whether the replay turned
+// the time default on is the store's, whatever view a worker reads.
+func (s *scopedMockDb) TimeForm() bool {
+	return integrations.TimeFormOf(s.MockMemDb)
+}
+
+var _ integrations.TimeFormReader = (*scopedMockDb)(nil)
+
 // RecordedWindowIndex forwards integrations.RecordedWindowIndex.
 func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
 	if w, ok := s.MockMemDb.(integrations.RecordedWindowIndex); ok {

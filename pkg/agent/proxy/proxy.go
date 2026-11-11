@@ -5108,6 +5108,20 @@ func (p *Proxy) SetPoolSources(sources map[string][]models.DeclaredSource) error
 	return nil
 }
 
+var _ agent.PoolTimeFormSetter = (*Proxy)(nil)
+
+// SetPoolTimeForm implements agent.PoolTimeFormSetter: whether the learn
+// step checks a changed time by its form alone, on the mock manager
+// (MockManager.SetPoolTimeForm).
+func (p *Proxy) SetPoolTimeForm(on bool) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolTimeForm(on)
+	return nil
+}
+
 var _ agent.SeriesRepeatReader = (*Proxy)(nil)
 
 // SeriesRepeats implements agent.SeriesRepeatReader: the mock manager's
