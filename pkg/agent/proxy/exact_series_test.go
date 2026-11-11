@@ -275,3 +275,25 @@ func TestProxySeriesRepeatsReadsItsMockManager(t *testing.T) {
 		t.Fatalf("the proxy answered %v, want %v", got, want)
 	}
 }
+
+// One test's clean-ups of two values are two series (keploy mock record
+// keys a declared series by the value it carries too): once each has
+// answered, a repeat of either value is answered by its own series'
+// recording, whichever answered last, so a slower replay's sweep repeat of
+// the first value never misses. Merged into one series, only its
+// last-placed member (the second value's) would answer again, and the
+// repeat of the first value would miss. Mutation: SetPoolSeries leaves a
+// series of one recording out of the index, so it never answers again.
+func TestTwoValuesSeriesEachAnswerTheirOwnRepeat(t *testing.T) {
+	const a1, a2 = "/delete?app=a1&limit=1", "/delete?app=a2&limit=1"
+	mks := []*models.Mock{httpCall("s1", time.Second, a1), httpCall("s2", 2*time.Second, a2)}
+	mm := stagedManager(t, nil, mks)
+	mm.ServeExactWorker([]string{"s1", "s2"})
+	mm.SetPoolTrails(map[string]string{"s1": "TestA", "s2": "TestA"})
+	mm.SetPoolSeries(map[string][]string{"app-ui-data-cleanup/TestA/1": {"s1"}, "app-ui-data-cleanup/TestA/2": {"s2"}})
+	mm.ServeExactTest("TestB", nil)
+	got := []string{callURL(t, mm, a1, false), callURL(t, mm, a2, false), callURL(t, mm, a2, false), callURL(t, mm, a1, false), callURL(t, mm, a1, false)}
+	if want := []string{"s1", "s2", "s2", "s1", "s1"}; !slices.Equal(got, want) {
+		t.Fatalf("answers %v, want %v: each value's repeat is its own series'", got, want)
+	}
+}
