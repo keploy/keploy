@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -64,6 +65,7 @@ func (s spanParser) MockOutgoing(ctx context.Context, _ net.Conn, _ *models.Cond
 	s.saw <- ok
 	return nil
 }
+func (spanParser) MockNoise() mocknoise.Adapter { return nil }
 
 // spanThrough hands a kept connection to handleConnection on a proxy whose
 // serve clock reads the real clock and noted a serve, and returns the proxy
