@@ -2,6 +2,7 @@ package learn
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -198,6 +199,9 @@ type Tracker struct {
 	// waiting counts the calls waiting for the running test's request
 	// (AwaitRequest).
 	waiting int
+	// atClose are the calls to make as the running window closes (End, the
+	// next Begin, NewSet), each once, in the order given (AtWindowClose).
+	atClose []*windowHook
 	// clientTests: the agent serves keploy mock (SetClientTests), whose
 	// tests a test harness runs and gives the application its inputs; every
 	// DriftCache the tracker makes says so (DriftCache.ClientTests).
@@ -273,7 +277,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.answered, t.drifts = nil, t.newDrifts()
 	t.servedAt, t.serveAt = nil, nil
 	t.given, t.gave = nil, nil
-	say := t.closeUnread()
+	say := t.closeWindow()
 	t.open, t.began = false, false
 	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
 	t.setBegan = at
@@ -371,6 +375,55 @@ func (t *Tracker) OnUnreadClose(f func(waiting int)) {
 	t.mu.Lock()
 	t.onUnread = f
 	t.mu.Unlock()
+}
+
+// windowHook is one call AtWindowClose holds for the running window.
+type windowHook struct{ f func() }
+
+// AtWindowClose makes the tracker call f once, without its lock, as the
+// running window closes: at the next End, Begin or NewSet, whichever comes
+// first, before that call returns. An adapter whose serve is still under way
+// there (a stream the application keeps open past its test's end) states then
+// what the serve gave the application so far (ServedMockLive), so the calls
+// read after it see the serve told. f must take no lock that End, Begin or
+// NewSet's caller holds. It returns stop, which takes f back: true where f was
+// not called and never will be, false where the window closed already and f
+// was called or is being called. f must not be nil. A nil tracker holds
+// nothing: stop reports true.
+func (t *Tracker) AtWindowClose(f func()) (stop func() bool) {
+	if t == nil {
+		return func() bool { return true }
+	}
+	h := &windowHook{f: f}
+	t.mu.Lock()
+	t.atClose = append(t.atClose, h)
+	t.mu.Unlock()
+	return func() bool {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		i := slices.Index(t.atClose, h)
+		if i < 0 {
+			return false
+		}
+		t.atClose = slices.Delete(t.atClose, i, i+1)
+		return true
+	}
+}
+
+// closeWindow closes the running window (End, the next Begin, NewSet): it
+// ends the running test's wait for its request (closeUnread) and takes the
+// calls AtWindowClose holds. It returns what to call once t.mu is released:
+// those calls, in the order given, then closeUnread's. t.mu is held.
+func (t *Tracker) closeWindow() func() {
+	say := t.closeUnread()
+	hooks := t.atClose
+	t.atClose = nil
+	return func() {
+		for _, h := range hooks {
+			h.f()
+		}
+		say()
+	}
 }
 
 // OnAwait makes the tracker call f as a call starts to wait for the running
@@ -576,7 +629,7 @@ func (t *Tracker) BeginAwaitingAt(at time.Time) {
 // beginAt is BeginAt, t.mu held. It returns what to call once t.mu is
 // released (closeUnread).
 func (t *Tracker) beginAt(at time.Time) func() {
-	say := t.closeUnread()
+	say := t.closeWindow()
 	t.epoch++
 	if provenswitch.On() {
 		t.keepRun(ranCalls(t.served, t.orderLocked()))
@@ -717,7 +770,7 @@ func (t *Tracker) End() {
 	}
 	t.mu.Lock()
 	t.open = false
-	say := t.closeUnread()
+	say := t.closeWindow()
 	t.mu.Unlock()
 	say()
 }
