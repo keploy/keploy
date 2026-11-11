@@ -92,9 +92,32 @@ type GrpcResp struct {
 	// omitempty, and false is the pre-existing meaning: every mock recorded
 	// before this field existed decodes with NoMessages=false and keeps exactly
 	// the old behaviour.
-	NoMessages bool        `json:"no_messages,omitempty" yaml:"no_messages,omitempty"`
-	Trailers   GrpcHeaders `json:"trailers" yaml:"trailers"`
-	Timestamp  time.Time   `json:"timestamp" yaml:"timestamp"`
+	NoMessages bool `json:"no_messages,omitempty" yaml:"no_messages,omitempty"`
+	// SentAfter says when the server wrote on a stream whose client sent a
+	// message after it had one of the server's: a bidi stream that sends a
+	// message, waits for its reply and sends the next. Replay answers such a
+	// stream as the server did, each write once as many of the client's
+	// messages have come as had come when the server made it, where it would
+	// otherwise wait for the client's whole side while the client waits for
+	// its reply.
+	//
+	// It holds one entry for each write the server made before the client
+	// half-closed, in wire order: how many of the client's messages the server
+	// had been sent when it made it. The writes are its messages and then, when
+	// it ended the stream before the client half-closed, that end: an entry
+	// past the last message is the end. The messages past the entries came
+	// after the half-close.
+	//
+	// It is empty for every other call (unary, server- and client-streaming
+	// calls among them) and for every recording made before it existed:
+	// replay then reads the client's whole side before it answers, as it
+	// always has, and omitempty keeps it off disk, so such a mock is
+	// byte-identical to one written before it existed. One list, not a list
+	// and an end count: gob drops a field holding its zero value, and an end
+	// after none of the client's messages is a real one.
+	SentAfter []uint32    `json:"sent_after,omitempty" yaml:"sent_after,omitempty"`
+	Trailers  GrpcHeaders `json:"trailers" yaml:"trailers"`
+	Timestamp time.Time   `json:"timestamp" yaml:"timestamp"`
 }
 
 // AllMessages returns the direction's messages in wire order.

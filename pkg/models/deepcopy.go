@@ -94,8 +94,8 @@ func (r *GrpcReq) clone() *GrpcReq {
 	return &c
 }
 
-// clone is r with its headers, further messages and trailers its own; nil
-// for nil.
+// clone is r with its headers, further messages, write points and trailers
+// its own; nil for nil.
 func (r *GrpcResp) clone() *GrpcResp {
 	if r == nil {
 		return nil
@@ -103,6 +103,7 @@ func (r *GrpcResp) clone() *GrpcResp {
 	c := *r
 	c.Headers = r.Headers.clone()
 	c.AdditionalMessages = slices.Clone(r.AdditionalMessages)
+	c.SentAfter = slices.Clone(r.SentAfter)
 	c.Trailers = r.Trailers.clone()
 	return &c
 }
