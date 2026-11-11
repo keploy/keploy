@@ -39,6 +39,12 @@ var missMarkWaivers = map[string]string{
 //   - builds a models.ParserError, the proxy's own miss, with a report it
 //     stamps no round on (as a miss built with its report above), or with
 //     no report at all;
+//   - builds a report inline where it builds a miss or reports an answer (a
+//     MismatchReport literal, its address, or new(...), as the report of a
+//     models.ParserError, models.NewMockMismatchError or models.ReportAnswer):
+//     nothing else holds that report, so no stamp in the function can be on
+//     it. A report made by a call there (a builder's) still counts as built,
+//     stamped by any stamp in the function;
 //   - stamps a report only under a condition (an if, a case of a switch or
 //     a select) that does not build that report itself: where the
 //     condition fails, the report goes unstamped.
@@ -129,7 +135,9 @@ func missUnstamped(body *ast.BlockStmt, models, integ string) string {
 	// The references to ErrNoMockMatched that only test an error for it
 	// (errors.Is): no error is made of them.
 	tests := map[ast.Expr]bool{}
-	noReport := false
+	// noReport: a ParserError built with no report; inline: a report built
+	// inline at a miss or an answer, which no stamp can reach.
+	noReport, inline := false, false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if lit, ok := n.(*ast.CompositeLit); ok && refers(lit.Type, models, "ParserError") {
 			r := fieldOf(lit, "MismatchReport")
@@ -143,7 +151,11 @@ func missUnstamped(body *ast.BlockStmt, models, integ string) string {
 					built[r.Name] = true
 				}
 			default:
-				builds = true
+				if inlineReport(r) {
+					inline = true
+				} else {
+					builds = true
+				}
 			}
 			return true
 		}
@@ -161,7 +173,11 @@ func missUnstamped(body *ast.BlockStmt, models, integ string) string {
 					built[r.Name] = true
 				}
 			default:
-				builds = true
+				if inlineReport(r) {
+					inline = true
+				} else {
+					builds = true
+				}
 			}
 		case calls(call, integ, "StampMark") && len(call.Args) == 2:
 			stamps = true
@@ -191,6 +207,8 @@ func missUnstamped(body *ast.BlockStmt, models, integ string) string {
 		return "a miss with a nil report"
 	case noReport:
 		return "a ParserError miss with no report built at it"
+	case inline:
+		return "a report built inline at the miss, which no stamp can reach"
 	case stampedUnderCondition(body, integ):
 		return "a report stamped only under a condition that does not build it"
 	case builds && !stamps:
@@ -199,6 +217,29 @@ func missUnstamped(body *ast.BlockStmt, models, integ string) string {
 		return "an ErrNoMockMatched error with no report"
 	}
 	return ""
+}
+
+// inlineReport reports whether e builds its report right where it is used:
+// a literal, the address of one, or new(...), in parentheses or not. Nothing
+// else holds such a report, so nothing can stamp it.
+func inlineReport(e ast.Expr) bool {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		e = p.X
+	}
+	switch e := e.(type) {
+	case *ast.CompositeLit:
+		return true
+	case *ast.UnaryExpr:
+		return e.Op == token.AND && inlineReport(e.X)
+	case *ast.CallExpr:
+		id, ok := e.Fun.(*ast.Ident)
+		return ok && id.Name == "new"
+	}
+	return false
 }
 
 // fieldOf is the value lit gives its field name, nil where it gives none.
@@ -339,4 +380,46 @@ func funcName(fd *ast.FuncDecl) string {
 		return id.Name + "." + fd.Name.Name
 	}
 	return fd.Name.Name
+}
+
+// The guard's own rows: each shape a function can report a miss or an answer
+// in, read as the guard reads a file that calls the models and integrations
+// packages by those names, and what it says of it.
+func TestTheMissMarkGuardReadsEveryShape(t *testing.T) {
+	const (
+		inline  = "a report built inline at the miss, which no stamp can reach"
+		noRound = "a report with no round"
+		cond    = "a report stamped only under a condition that does not build it"
+	)
+	for _, c := range []struct{ name, body, want string }{
+		{"a report built by name and stamped by that name", "report := build()\nintegrations.StampMark(report, mark)\nreturn models.NewMockMismatchError(err, report)", ""},
+		{"a report built by name while another is stamped", "integrations.StampMark(other, mark)\nreturn models.NewMockMismatchError(err, report)", noRound},
+		{"a ParserError's inline report while another is stamped", "integrations.StampMark(report, mark)\nreturn models.ParserError{Err: err, MismatchReport: &models.MockMismatchReport{At: at}}", inline},
+		{"a miss's inline report while another is stamped", "integrations.StampMark(report, mark)\nreturn models.NewMockMismatchError(err, &models.MockMismatchReport{At: at})", inline},
+		{"an answer's inline report while another is stamped", "integrations.StampMark(report, mark)\nmodels.ReportAnswer(ctx, &models.MockMismatchReport{})", inline},
+		{"a ParserError's report made by new", "integrations.StampMark(report, mark)\nreturn &models.ParserError{Err: err, MismatchReport: new(models.MockMismatchReport)}", inline},
+		{"an inline report in parentheses", "integrations.StampMark(report, mark)\nreturn models.NewMockMismatchError(err, (&(models.MockMismatchReport{})))", inline},
+		{"a report a call makes, with a stamp in the function", "integrations.StampMark(report, mark)\nreturn models.NewMockMismatchError(err, buildReport(req))", ""},
+		{"a report a call makes, with no stamp", "return models.NewMockMismatchError(err, b.Report())", noRound},
+		{"the address of a report stamped by its address", "var report models.MockMismatchReport\nintegrations.StampMark(&report, mark)\nreturn models.NewMockMismatchError(err, &report)", ""},
+		{"a report received from a channel made there", "integrations.StampMark(report, mark)\nmodels.ReportAnswer(ctx, <-new(chan *models.MockMismatchReport))", ""},
+		{"a nil report", "return models.NewMockMismatchError(err, nil)", "a miss with a nil report"},
+		{"a ParserError with a nil report", "return &models.ParserError{Err: err, MismatchReport: nil}", "a miss with a nil report"},
+		{"a ParserError with no report", "return models.ParserError{Err: err}", "a ParserError miss with no report built at it"},
+		{"a stamp in an else", "report := build()\nif ok {\n\tlog()\n} else {\n\tintegrations.StampMark(report, mark)\n}\nreturn models.NewMockMismatchError(err, report)", cond},
+		{"a stamp in a switch case", "report := build()\nswitch {\ncase ok:\n\tintegrations.StampMark(report, mark)\n}\nreturn models.NewMockMismatchError(err, report)", cond},
+		{"a stamp under the if that builds the report", "if report := build(); report != nil {\n\tintegrations.StampMark(report, mark)\n\treturn models.NewMockMismatchError(err, report)\n}", ""},
+		{"a stamp in a function literal under an if", "if ok {\n\tgo func() {\n\t\treport := build()\n\t\tintegrations.StampMark(report, mark)\n\t\tsend(models.NewMockMismatchError(err, report))\n\t}()\n}", ""},
+		{"an ErrNoMockMatched error with no report", "return fmt.Errorf(\"%w: x\", models.ErrNoMockMatched)", "an ErrNoMockMatched error with no report"},
+		{"an error only tested for ErrNoMockMatched", "if errors.Is(err, models.ErrNoMockMatched) {\n\treturn nil\n}", ""},
+		{"no miss", "return nil", ""},
+	} {
+		f, err := parser.ParseFile(token.NewFileSet(), "shape.go", "package p\n\nfunc f() {\n"+c.body+"\n}\n", parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := missUnstamped(f.Decls[0].(*ast.FuncDecl).Body, "models", "integrations"); got != c.want {
+			t.Errorf("%s: the guard says %q, want %q", c.name, got, c.want)
+		}
+	}
 }
