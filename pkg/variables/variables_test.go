@@ -1116,7 +1116,7 @@ func TestTableOwnOfIsTheScopeOfTheTestTheCallWasMarkedIn(t *testing.T) {
 	reads("a call of a test whose scope never ran", vals(tb.OwnOf(".::TestNever")), "")
 	reads("a call that names no test, the next scope running", vals(tb.OwnOf("")), "list-live;")
 
-	kept := tb.NewSetKeeping()
+	kept := tb.NewSetKeeping(nil)
 	reads("the kept set: the ended test's call", vals(kept.OwnOf(".::TestAppCRUD")), "crud-live;")
 	reads("the kept set: the test running at its end", vals(kept.OwnOf(".::TestListApps")), "list-live;")
 	reads("the kept set: a test that never ran", vals(kept.OwnOf(".::TestNever")), "")
@@ -1133,12 +1133,12 @@ func TestTableOwnOfIsTheScopeOfTheTestTheCallWasMarkedIn(t *testing.T) {
 	tb.Reset()
 	tb.Bind(at("unnamed"))
 	reads("a test's call while an unnamed scope runs", vals(tb.OwnOf(".::TestAppCRUD")), "unnamed;")
-	unnamed := tb.NewSetKeeping()
+	unnamed := tb.NewSetKeeping(nil)
 	reads("the kept set ended in an unnamed scope", vals(unnamed.OwnOf(".::TestAppCRUD")), "unnamed;")
 
 	// A set that ended before any scope began kept none as a test's own.
 	tb.Bind(at("before-any-scope"))
-	reads("the kept set of a set no scope began in", vals(tb.NewSetKeeping().OwnOf("")), "")
+	reads("the kept set of a set no scope began in", vals(tb.NewSetKeeping(nil).OwnOf("")), "")
 }
 
 // OwnIn reads the scope a call was made in, by its number (InScope,
@@ -1230,10 +1230,22 @@ func TestTableOwnInIsTheScopeTheCallWasMadeIn(t *testing.T) {
 		t.Fatalf("StartCarrying moved the scope number from %d to %d", named, got)
 	}
 
-	// The kept set reads as the table did when it ended.
+	// What the table has bound now reads as the table does, and the table
+	// forgets none of it.
 	last := open(".::TestLast")
 	tb.Bind(at("last"))
-	kept := tb.NewSetKeeping()
+	now := tb.Bound()
+	reads("the set in force: the running scope", vals(now.OwnIn(last)), "last;")
+	reads("the set in force: an ended scope", vals(now.OwnIn(crud2)), "crud-2;")
+	reads("the set in force, read again", vals(tb.OwnIn(last)), "last;")
+	// The kept set reads as the table did when it ended, and is published
+	// before the table forgets it.
+	var published *SetBound
+	kept := tb.NewSetKeeping(func(k *SetBound) { published = k })
+	if published != kept {
+		t.Fatalf("NewSetKeeping published %p; want the set it kept, %p", published, kept)
+	}
+	reads("the set in force, read before the new set", vals(now.OwnIn(last)), "last;")
 	reads("the kept set: the scope running at its end", vals(kept.OwnIn(last)), "last;")
 	reads("the kept set: an ended scope", vals(kept.OwnIn(crud2)), "crud-2;")
 	reads("the kept set: its first run's", vals(kept.OwnIn(crud1)), "crud-1;")
@@ -1251,5 +1263,5 @@ func TestTableOwnInIsTheScopeTheCallWasMadeIn(t *testing.T) {
 	tb.Bind(at("next-set"))
 	reads("a call of the ending set read in the new one", vals(tb.OwnIn(last)), "")
 	reads("the new set before its first scope", vals(tb.OwnIn(next)), "")
-	reads("the kept set of a set no scope began in", vals(tb.NewSetKeeping().OwnIn(next)), "")
+	reads("the kept set of a set no scope began in", vals(tb.NewSetKeeping(nil).OwnIn(next)), "")
 }

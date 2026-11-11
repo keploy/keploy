@@ -249,6 +249,14 @@ type MockManager struct {
 	testHookOwnerRead func()
 	testHookKeep      func()
 	testHookMark      func()
+	// testHookBoundRead, set only by a test before the manager is shared,
+	// runs in BoundValuesIn once it read which set's bound values are kept
+	// and which scope table the session reset kept, before it reads the set
+	// in force; testHookSetSwitch in NewVariableSet once the table forgot the
+	// ending set, before the rest of the switch. Neither holds a lock: a
+	// session reset or a new set may land there.
+	testHookBoundRead func()
+	testHookSetSwitch func()
 	// usedUp are the recordings a worker's test consumed, held for the test
 	// instead of deleted, so a run of the same test again is served them
 	// (scopedMockDb.DeleteFilteredMock); by its scope and the name. Guarded by
@@ -434,10 +442,13 @@ type MockManager struct {
 	// boundKept is the bound values of the set whose variables the last new
 	// set forgot (NewVariableSet), for that set's calls keploy decides after
 	// (BoundValuesIn), and scopeEnded the scope table's trails and tests the
-	// session reset cleared as that set ended (ResetForReplaySession), kept
-	// with them. Stored under swapMu, read lock-free.
+	// session reset cleared as that set ended (ResetForReplaySession), with
+	// the staging epoch it was cleared in, until the new set keeps them
+	// with its bound values. boundKept is stored under the variable table's
+	// lock and swapMu, scopeEnded before the reset clears the table; both
+	// are read lock-free.
 	boundKept  atomic.Pointer[boundKept]
-	scopeEnded atomic.Pointer[scopeTrails]
+	scopeEnded atomic.Pointer[trailsCleared]
 	// repeatNoise is the header noise the session's matcher compares the
 	// set's calls with, which proves a test's repeated reads
 	// (SetRepeatReadNoise); nil, none, until the session sets it.
@@ -823,7 +834,10 @@ func (m *MockManager) ResetForReplaySession() {
 	// known. The trails and tests the ended set's table gave are kept with
 	// its bound values (NewVariableSet): a call of that set keploy decides
 	// after reads its recordings' trails by them (BoundValuesIn).
-	m.scopeEnded.Store(&scopeTrails{trails: m.exact.poolTrails.Load(), tests: m.exact.poolTests.Load()})
+	m.scopeEnded.Store(&trailsCleared{
+		scopeTrails: scopeTrails{trails: m.exact.poolTrails.Load(), tests: m.exact.poolTests.Load()},
+		upTo:        m.stagingEpoch.Load(),
+	})
 	m.exact.poolNames.Store(nil)
 	m.exact.poolOwners.Store(nil)
 	m.exact.poolTests.Store(nil)
@@ -2923,22 +2937,34 @@ func (m *MockManager) ResetVariables() {
 // What the ending set had bound is kept, with the trails and tests its
 // scope table gave (scopeEnded), for its calls keploy decides after
 // (BoundValuesIn): every call marked in a staging up to now is that set's.
-// A new set begun again with no staging since the last (the replay's
-// re-registration of a set's mocks before it stages them) keeps the set
-// kept then: each set's first staging starts an epoch, so no test of the
-// set begun since has opened, and the calls marked up to now are still the
-// set's before.
+// It is kept in the step the table forgets it (variables.Table.
+// NewSetKeeping), so a call of the ending set decided while the set
+// switches reads its set's, as at once. A new set begun again with no
+// staging since the last (the replay's re-registration of a set's mocks
+// before it stages them) keeps the set kept then: each set's first staging
+// starts an epoch, so no test of the set begun since has opened, and the
+// calls marked up to now are still the set's before.
 func (m *MockManager) NewVariableSet() {
-	vars := m.vars.NewSetKeeping()
+	m.vars.NewSetKeeping(m.keepBound)
+	if m.testHookSetSwitch != nil {
+		m.testHookSetSwitch()
+	}
 	m.vars.KeepRun()
 	m.aheadVars.NewSet()
 	m.aheadVars.ReadRunOf(&m.vars)
+}
+
+// keepBound keeps vars, what the ending set had bound, with the trails and
+// tests its scope table gave (scopeEnded), as the set the calls marked up to
+// now read (boundKept). It runs under the variable table's lock, before the
+// table forgets vars (NewVariableSet).
+func (m *MockManager) keepBound(vars *variables.SetBound) {
 	scope := m.scopeEnded.Swap(nil)
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	k := &boundKept{vars: vars, upTo: m.stagingEpoch.Load()}
 	if scope != nil {
-		k.scope = *scope
+		k.scope = scope.scopeTrails
 	}
 	if prev := m.boundKept.Load(); prev != nil {
 		if prev.upTo == k.upTo {
@@ -2947,6 +2973,14 @@ func (m *MockManager) NewVariableSet() {
 		k.after, k.older = prev.upTo, true
 	}
 	m.boundKept.Store(k)
+}
+
+// trailsCleared is a scope table's trails and tests as the session reset
+// cleared them (scopeEnded), and the staging epoch they were cleared in
+// (upTo): the trails a call marked up to then reads (BoundValuesIn).
+type trailsCleared struct {
+	scopeTrails
+	upTo uint64
 }
 
 // scopeTrails is a scope table's trails (SetPoolTrails) and tests
@@ -3000,16 +3034,37 @@ func (r keptFor) TrailOf(mock string) learn.Trail         { return trailIn(r.k.s
 // OwnIn): the replay can begin the set's next test before keploy decides a
 // test's call, or a pool view's call between tests (the ended test's: its
 // scope runs until the next begins), and a test can run again in its set.
+//
+// Each is read in one step, as keploy decides the call: what the set in
+// force has bound then (variables.Table.Bound), read again where a new set
+// or a session reset landed while it was read, and the trails the session
+// reset cleared for a call marked up to it (scopeEnded): a call of the
+// ending set decided while the set switches reads its set's, as at once.
 func (m *MockManager) BoundValuesIn(call integrations.CallRound) integrations.BoundValues {
-	k := m.boundKept.Load()
-	if !call.Read() || k == nil || call.Epoch() > k.upTo {
+	if !call.Read() {
 		return integrations.BoundNow(&m.vars, m, call)
 	}
-	if k.older && call.Epoch() <= k.after {
-		return nil
-	}
 	scope, scoped := call.VariableScope()
-	return keptFor{k: k, test: call.Test(), scope: scope, scoped: scoped}
+	for {
+		k, cleared := m.boundKept.Load(), m.scopeEnded.Load()
+		if k != nil && call.Epoch() <= k.upTo {
+			if k.older && call.Epoch() <= k.after {
+				return nil
+			}
+			return keptFor{k: k, test: call.Test(), scope: scope, scoped: scoped}
+		}
+		if m.testHookBoundRead != nil {
+			m.testHookBoundRead()
+		}
+		now := &boundKept{scope: scopeTrails{trails: m.exact.poolTrails.Load(), tests: m.exact.poolTests.Load()}}
+		if cleared != nil && call.Epoch() <= cleared.upTo {
+			now.scope = cleared.scopeTrails
+		}
+		now.vars = m.vars.Bound()
+		if m.boundKept.Load() == k && m.scopeEnded.Load() == cleared {
+			return keptFor{k: now, test: call.Test(), scope: scope, scoped: scoped}
+		}
+	}
 }
 
 var _ integrations.RoundBoundReader = (*MockManager)(nil)

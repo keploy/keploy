@@ -941,14 +941,36 @@ type SetBound struct {
 // (SetBound), read in the same step: no binding is made after it is read
 // and before NewSet forgets it. A call of the ending set that keploy
 // decides once the next set began reads its set's bindings from it.
-func (t *Table) NewSetKeeping() *SetBound {
+// publish, unless nil, is given it in that step too, before NewSet forgets
+// it, under the table's lock: a reader that reads the table in force
+// (Bound) and then finds nothing new published read the set before NewSet
+// forgot it, never the next set's with the ending set's not yet published.
+func (t *Table) NewSetKeeping(publish func(*SetBound)) *SetBound {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	kept := &SetBound{ended: t.ended, scope: t.scope}
+	kept := t.bound()
+	if publish != nil {
+		publish(kept)
+	}
+	t.newSet()
+	return kept
+}
+
+// Bound is what the table has bound now, as NewSetKeeping would keep it
+// (SetBound), without forgetting it: a call keploy decides reads the
+// bindings of its set in force from it, all in one step.
+func (t *Table) Bound() *SetBound {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.bound()
+}
+
+// bound is Bound's step. t.mu is held.
+func (t *Table) bound() *SetBound {
+	kept := &SetBound{ended: t.ended[:len(t.ended):len(t.ended)], scope: t.scope}
 	if t.began {
 		kept.own, kept.test = sorted(t.vals), t.test
 	}
-	t.newSet()
 	return kept
 }
 
