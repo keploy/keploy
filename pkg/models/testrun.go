@@ -628,7 +628,12 @@ type UnmatchedCall struct {
 	// MadeAfter and MadeBefore name, for a call made Between two tests, the
 	// test whose end the replay read last before the call (empty when none
 	// of the set's tests had ended) and the test whose read carried it, which
-	// began after it was made. Set by the replay; names, never a value.
+	// began after it was made. For an earlier set's call of no test
+	// (EarlierSet, no EarlierSetTest) they name tests of the attempt of that
+	// set that made it, placed by the call's time (At): the test that ended
+	// last before it and the first that began after it, each empty where
+	// there is none, and both when keploy cannot place it. Set by the
+	// replay; names, never a value.
 	MadeAfter  string `json:"made_after,omitempty" yaml:"made_after,omitempty"`
 	MadeBefore string `json:"made_before,omitempty" yaml:"made_before,omitempty"`
 	// Late says, under the proven switch, that keploy test read the call at

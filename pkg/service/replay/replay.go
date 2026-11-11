@@ -4077,7 +4077,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// What is sent: the request with this run's template values, on a
 			// copy. testCase stays as written.
 			sent := toSend(tmplRun, testCase)
-			resp, loopErr := r.hookImpl.SimulateRequest(runTestSetCtx, &sent, testSetID)
+			resp, loopErr := r.simulate(runTestSetCtx, &sent, testSetID)
 
 			// A "connection reset by peer" / unexpected EOF while exchanging
 			// the request is, under loaded CI replaying a DOCKER app, dominated
@@ -5296,7 +5296,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// expected to stream, likewise (a streamed response never
 			// captures).
 			sent := toSend(tmplRun, tc)
-			resp, simErr := r.hookImpl.SimulateRequest(runTestSetCtx, &sent, testSetID)
+			resp, simErr := r.simulate(runTestSetCtx, &sent, testSetID)
 			expectedStream := streamView(tmplRun, &sent)
 			// What the stream delivered, kept only when a recorded frame
 			// holds a use (streamTemplateFailures).
@@ -9739,7 +9739,7 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 		// (ContinueTestErrorCapture), those made as its mock window moved,
 		// and any the failed try made (it consumed no mock) — and reopening
 		// it would drop them.
-		resp, err := r.hookImpl.SimulateRequest(ctx, testCase, testSetID)
+		resp, err := r.simulate(ctx, testCase, testSetID)
 		if err == nil {
 			return resp, true, nil, nil
 		}

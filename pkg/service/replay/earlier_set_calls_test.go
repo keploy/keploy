@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -333,7 +334,8 @@ func TestAnEarlierSetsCallOfNoTestFailsTheRunNamingTheSetItWasMadeIn(t *testing.
 		t.Fatalf("the run holds %+v; want the calls made in test-set-a, test-set-b and no set the run began", got)
 	}
 	why := earlierSetCallsWhy(got)
-	for _, want := range []string{"(made in no test (between two of its tests, or after its last) of test-set-a)", "(made in no test (between two of its tests, or after its last) of test-set-b)", "of an earlier test set)"} {
+	// None has a time: each is unplaced, failing the run all the same.
+	for _, want := range []string{"(made in no test of test-set-a, at a time keploy cannot place among its tests)", "(made in no test of test-set-b, at a time keploy cannot place among its tests)", "(made in no test of an earlier test set, at a time keploy cannot place among its tests)"} {
 		if !strings.Contains(why, want) {
 			t.Fatalf("the run's failure says %q; want %q", why, want)
 		}
@@ -431,9 +433,159 @@ func aSetEndedAfterItsStagingIsCountedAsTheAgentCountsIt(t *testing.T, h *prRun)
 		t.Fatalf("the run holds %+v; want test-set-x's call, two sets back from test-set-y", late)
 	}
 	said := logs.FilterMessageSnippet("an earlier test set made a call that no mock answered").
-		FilterField(zap.String("made-in-test-set", "test-set-x")).
+		FilterField(zap.String("kind", models.KindOutsideEveryTest)).
+		FilterField(zap.String("test-set", "test-set-x")).
 		FilterField(zap.String("read-in-test-set", "test-set-y"))
 	if said.Len() != 1 {
 		t.Fatalf("the call was said %d times naming test-set-x and test-set-y; want once: %+v", said.Len(), logs.All())
+	}
+}
+
+// spanAt is a test's span from a to b, offsets from at0.
+func spanAt(at0 time.Time, a, b time.Duration) testSpan {
+	return testSpan{began: at0.Add(a), ended: at0.Add(b)}
+}
+
+// An earlier set's call of no test is placed among the tests of the attempt
+// that made it by its time alone: before the first test that began after
+// it, after the test that ended last at or before it, or both. A call keploy
+// cannot place so (no time, no spans, a time inside a test's span) names no
+// test there: keploy would guess the test it was made in. The tests are named
+// against their order in time, so a placement by name order is told apart.
+func TestPlaceByTimePlacesACallAmongOneAttemptsTests(t *testing.T) {
+	at0 := time.Date(2026, 11, 11, 6, 0, 0, 0, time.UTC)
+	spans := map[string]testSpan{
+		"c-first":  spanAt(at0, 0, 10*time.Millisecond),
+		"b-second": spanAt(at0, 20*time.Millisecond, 30*time.Millisecond),
+		"a-third":  spanAt(at0, 40*time.Millisecond, 50*time.Millisecond),
+	}
+	for _, c := range []struct {
+		name          string
+		at            time.Time
+		spans         map[string]testSpan
+		after, before string
+	}{
+		{"before the first test", at0.Add(-5 * time.Millisecond), spans, "", "c-first"},
+		{"between two tests", at0.Add(15 * time.Millisecond), spans, "c-first", "b-second"},
+		{"between the last two", at0.Add(35 * time.Millisecond), spans, "b-second", "a-third"},
+		{"as a test ends", at0.Add(10 * time.Millisecond), spans, "c-first", "b-second"},
+		{"after the last test", at0.Add(60 * time.Millisecond), spans, "a-third", ""},
+		{"inside a test", at0.Add(25 * time.Millisecond), spans, "", ""},
+		{"as a test begins", at0.Add(20 * time.Millisecond), spans, "", ""},
+		{"with no time", time.Time{}, spans, "", ""},
+		{"with no spans", at0.Add(15 * time.Millisecond), nil, "", ""},
+	} {
+		after, before := placeByTime(c.at, c.spans)
+		if after != c.after || before != c.before {
+			t.Errorf("a call made %s is placed after %q and before %q; want after %q and before %q", c.name, after, before, c.after, c.before)
+		}
+	}
+}
+
+// An earlier set's call of no test is placed by the spans of the attempt of
+// that set that made it, as the agent counts back: not by a later attempt's
+// of the same set, nor by a test of another set run since, and the one of
+// its test is named under its test, wherever its time falls. Each is said in
+// the documented form, after and before naming that set's tests, and the
+// run's failure says where each was made.
+func TestAnEarlierSetsCallOfNoTestIsPlacedByTheAttemptThatMadeIt(t *testing.T) {
+	core, logs := observer.New(zap.ErrorLevel)
+	r := &Replayer{logger: zap.New(core)}
+	at0 := time.Date(2026, 11, 11, 6, 0, 0, 0, time.UTC)
+	e := &r.earlierSetCalls
+	e.noteSpan("test-set-a", "test-0", spanAt(at0, -20*time.Millisecond, -10*time.Millisecond))
+	e.begin("test-set-a")
+	e.noteSpan("test-set-a", "test-1", spanAt(at0, 0, 10*time.Millisecond))
+	e.noteSpan("test-set-a", "test-2", spanAt(at0, 20*time.Millisecond, 30*time.Millisecond))
+	e.noteSpan("test-set-z", "test-9", spanAt(at0, 12*time.Millisecond, 14*time.Millisecond))
+	// test-set-a again: its second attempt's tests come later.
+	e.begin("test-set-a")
+	e.noteSpan("test-set-a", "test-1", spanAt(at0, 100*time.Millisecond, 110*time.Millisecond))
+	e.noteSpan("test-set-a", "test-2", spanAt(at0, 120*time.Millisecond, 130*time.Millisecond))
+	e.begin("test-set-b")
+	between := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "DELETE /sessions", Destination: "auth:8080",
+		Kind: models.MissOutsideTest, EarlierSet: 2, At: at0.Add(15 * time.Millisecond)}
+	before := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /warm", Kind: models.MissOutsideTest,
+		EarlierSet: 1, At: at0.Add(15 * time.Millisecond)}
+	after := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /flush", Kind: models.MissOutsideTest,
+		EarlierSet: 1, At: at0.Add(140 * time.Millisecond)}
+	named := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /orders", Kind: models.MissOutsideTest,
+		EarlierSet: 2, EarlierSetTest: "test-2", At: at0.Add(15 * time.Millisecond)}
+	r.takeEarlierSetCalls([]models.UnmatchedCall{between, before, after, named})
+	got := e.failing()
+	if len(got) != 4 {
+		t.Fatalf("the run holds %+v; want the four calls", got)
+	}
+	for i, want := range []struct{ set, after, before string }{
+		{"test-set-a", "test-1", "test-2"},
+		{"test-set-a", "", "test-1"},
+		{"test-set-a", "test-2", ""},
+		{"test-set-a", "", ""},
+	} {
+		if c := got[i]; c.set != want.set || c.call.MadeAfter != want.after || c.call.MadeBefore != want.before {
+			t.Errorf("%s is held made in %q after %q and before %q; want made in %q after %q and before %q",
+				c.call.ActualSummary, c.set, c.call.MadeAfter, c.call.MadeBefore, want.set, want.after, want.before)
+		}
+	}
+	said := logs.FilterField(zap.String("kind", models.KindOutsideEveryTest)).FilterField(zap.String("test-set", "test-set-a")).
+		FilterField(zap.String("call", "DELETE /sessions")).FilterField(zap.String("made_in", "")).
+		FilterField(zap.String("after", "test-1")).FilterField(zap.String("before", "test-2")).
+		FilterField(zap.String("read-in-test-set", "test-set-b"))
+	if said.Len() != 1 {
+		t.Fatalf("the call between test-1 and test-2 of test-set-a was said %d times in the documented form; want once: %+v", said.Len(), logs.All())
+	}
+	why := earlierSetCallsWhy(got)
+	for _, want := range []string{
+		"DELETE /sessions to auth:8080 (made in no test of test-set-a, after test test-1 ended and before test test-2 began)",
+		"GET /warm (made in no test of test-set-a, before its first test test-1 began)",
+		"POST /flush (made in no test of test-set-a, after its last test test-2 ended)",
+		"POST /orders (made in test-2 of test-set-a)",
+	} {
+		if !strings.Contains(why, want) {
+			t.Errorf("the run's failure says %q; want %q", why, want)
+		}
+	}
+}
+
+// Through keploy test's run of two sets: the run notes when it sent each of
+// set A's tests' requests and read their answers, so a call set A made between
+// its two tests, which keploy decided only after set A had ended, is placed
+// between them when set B's first read returns it, and said so.
+func TestRunTestSet_AnEarlierSetsCallOfNoTestIsPlacedAmongThatSetsTests(t *testing.T) {
+	provenOn(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	core, logs := observer.New(zap.ErrorLevel)
+	h.replayer.logger = zap.New(core)
+	h.set = "test-set-a"
+	if status := h.runServing(t); status != models.TestSetStatusPassed {
+		t.Fatalf("set A is %s (reason %q), want PASSED", status, h.report.report.FailureReason)
+	}
+	e := &h.replayer.earlierSetCalls
+	e.mu.Lock()
+	spans := maps.Clone(e.spans[len(e.spans)-1])
+	e.mu.Unlock()
+	one, two := spans["test-1"], spans["test-2"]
+	if one.ended.IsZero() || !two.began.After(one.ended) {
+		t.Fatalf("set A's spans are %+v; want test-1 ended before test-2 began", spans)
+	}
+	// The agent's time carries no monotonic reading.
+	at := one.ended.Add(two.began.Sub(one.ended) / 2).Round(0)
+	h.instr.mockErrorsFor = misses(func() ([]models.UnmatchedCall, error) {
+		return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "DELETE /sessions", Destination: "auth:8080",
+			Kind: models.MissOutsideTest, EarlierSet: 1, At: at}}, nil
+	})
+	h.set = "test-set-b"
+	if status := h.runServing(t); status != models.TestSetStatusPassed {
+		t.Fatalf("set B is %s (reason %q); set A's call is no call of set B", status, h.report.report.FailureReason)
+	}
+	if late := e.failing(); len(late) != 1 || late[0].set != "test-set-a" || late[0].call.MadeAfter != "test-1" || late[0].call.MadeBefore != "test-2" {
+		t.Fatalf("the run holds %+v; want set A's call, placed after test-1 and before test-2", late)
+	}
+	if n := logs.FilterField(zap.String("kind", models.KindOutsideEveryTest)).FilterField(zap.String("test-set", "test-set-a")).
+		FilterField(zap.String("after", "test-1")).FilterField(zap.String("before", "test-2")).Len(); n != 1 {
+		t.Fatalf("set A's call was said %d times placed between test-1 and test-2; want once: %+v", n, logs.All())
+	}
+	if h.replayer.passesEarlierSetCalls(true) {
+		t.Fatal("the run passes with set A's call no mock answered")
 	}
 }
