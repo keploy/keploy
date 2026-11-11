@@ -202,7 +202,7 @@ func TestUpdateMockParamsHandsTheConsumedRewindsBeforeTheWindow(t *testing.T) {
 		if err := a.UpdateMockParams(context.Background(), s.params); err != nil {
 			t.Fatalf("%s: UpdateMockParams: %v", s.name, err)
 		}
-		if got := mm.WindowRewinds(); got != s.rewinds {
+		if got, _ := mm.WindowRewinds(); got != s.rewinds {
 			t.Fatalf("%s: WindowRewinds = %d, want %d", s.name, got, s.rewinds)
 		}
 	}
