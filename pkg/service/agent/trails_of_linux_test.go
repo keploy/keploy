@@ -27,7 +27,7 @@ func TestTrailsOfMissIsChargedToNoTestAndCounts(t *testing.T) {
 		{Protocol: "MongoDB", ActualSummary: "delete uiTestSetJoins", Destination: "own:27017", Kind: models.MissInTest, At: began.Add(time.Second), TrailsOf: "o::TestU"},
 		{Protocol: "MongoDB", ActualSummary: "find apps", Destination: "plain:27017", Kind: models.MissInTest, At: began.Add(time.Second)},
 	}
-	ev, err := a.testEvidence(context.Background(), "o::TestU", false, began)
+	ev, err := a.testEvidence(context.Background(), "o::TestU", false, testBegin{at: began})
 	require.NoError(t, err)
 	var listed []string
 	for _, m := range ev.Misses {

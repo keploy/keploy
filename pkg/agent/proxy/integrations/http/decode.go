@@ -419,7 +419,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 							// Its repeat note is asked as a miss's is
 							// (repeatNoteOf).
 							a, repeat := repeatNoteOf(reqCtx, input, db, strict, extra)
-							reportPairing(reqCtx, input, x, a, repeat)
+							reportPairing(reqCtx, input, x, a, repeat, call)
 							stub, ok, lmiss = answer, true, nil
 						}
 					}
