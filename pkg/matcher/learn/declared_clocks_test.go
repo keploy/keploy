@@ -28,8 +28,15 @@ func TestDeclaredClocksNameAClockRulesFieldWhereverItStands(t *testing.T) {
 	}{
 		{"both fields of the PAT touch", []models.DeclaredSource{lastUsed, updated}, nil,
 			map[string]models.ClockOffset{"body.data.lastUsedAt": {Res: time.Second}, "body.data.updatedAt": {Res: time.Second}}},
-		{"a range all before the call is a read plus that offset", []models.DeclaredSource{clock("cutoff", "body.cutoff", &models.ClockOffset{Min: -31 * time.Second, Max: -30 * time.Second, Res: time.Second})}, nil,
-			map[string]models.ClockOffset{"body.cutoff": {Min: -31 * time.Second, Max: -30 * time.Second, Res: time.Second}}},
+		{"a range all before the call is a read plus that offset", []models.DeclaredSource{clock("cutoff", "body.cutoff", &models.ClockOffset{Min: -30 * time.Minute, Max: -30*time.Minute + time.Second, Res: time.Second})}, nil,
+			map[string]models.ClockOffset{"body.cutoff": {Min: -30 * time.Minute, Max: -30*time.Minute + time.Second, Res: time.Second}}},
+		// models.ClockOffset.Holds holds no offset off zero whose unit is a
+		// second or finer, so such a range is left out (it compares as a
+		// field no rule names), whatever its resolution.
+		{"an off-zero range of seconds is never checked", []models.DeclaredSource{clock("cutoff", "body.cutoff", &models.ClockOffset{Min: -3 * time.Second, Max: -2 * time.Second, Res: time.Second})}, nil, nil},
+		{"an off-zero range of milliseconds is never checked", []models.DeclaredSource{clock("cutoff", "body.cutoff", &models.ClockOffset{Min: 1500 * time.Millisecond, Max: 2 * time.Second, Res: time.Millisecond})}, nil, nil},
+		{"an off-zero range of seconds beside a plain read", []models.DeclaredSource{lastUsed, clock("cutoff", "body.cutoff", &models.ClockOffset{Min: -3 * time.Second, Max: -2 * time.Second, Res: time.Second})}, nil,
+			map[string]models.ClockOffset{"body.data.lastUsedAt": {Res: time.Second}}},
 		{"what learning learned stays", []models.DeclaredSource{lastUsed, updated}, map[string]models.ClockOffset{"body.data.lastUsedAt": ttl},
 			map[string]models.ClockOffset{"body.data.lastUsedAt": ttl, "body.data.updatedAt": {Res: time.Second}}},
 		{"a minted source is no clock", []models.DeclaredSource{{Rule: "id", Kind: models.DeclaredSourceMinted, Field: "body.data._id"}}, nil, nil},
@@ -64,5 +71,30 @@ func TestDeclaredClocksNameAClockRulesFieldWhereverItStands(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A replay checks a clock rule's range unless Holds never holds it: a range
+// all on one side of zero whose unit is a second or finer. A range around
+// zero, one of minutes or hours, and one a rule cannot declare (no
+// resolution, a max below its min) are no such range.
+func TestRangeNeverCheckedIsAnOffZeroRangeOfASecondOrFiner(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		o    models.ClockOffset
+		want bool
+	}{
+		{"a cut-off 3 s to 2 s before the call", models.ClockOffset{Min: -3 * time.Second, Max: -2 * time.Second, Res: time.Second}, true},
+		{"an expiry 1.5 s to 2 s after it, in ms", models.ClockOffset{Min: 1500 * time.Millisecond, Max: 2 * time.Second, Res: time.Millisecond}, true},
+		{"a plain read", models.ClockOffset{Min: -time.Second, Res: time.Second}, false},
+		{"a range around zero", models.ClockOffset{Min: -3 * time.Second, Max: 2 * time.Second, Res: time.Second}, false},
+		{"a cut-off of minutes", models.ClockOffset{Min: -30 * time.Minute, Max: -30*time.Minute + time.Second, Res: time.Second}, false},
+		{"an expiry an hour on", models.ClockOffset{Min: time.Hour, Max: time.Hour + time.Second, Res: time.Second}, false},
+		{"no resolution", models.ClockOffset{Min: -3 * time.Second, Max: -2 * time.Second}, false},
+		{"a max below its min", models.ClockOffset{Min: -2 * time.Second, Max: -3 * time.Second, Res: time.Second}, false},
+	} {
+		if got := RangeNeverChecked(c.o); got != c.want {
+			t.Errorf("%s: RangeNeverChecked(%+v) = %v; want %v", c.name, c.o, got, c.want)
+		}
 	}
 }

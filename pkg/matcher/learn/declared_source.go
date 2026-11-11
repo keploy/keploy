@@ -2,6 +2,7 @@ package learn
 
 import (
 	"cmp"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -40,6 +41,21 @@ func DeclaredSources(sources []models.DeclaredSource, placeOf func(path string) 
 	}
 }
 
+// RangeNeverChecked reports whether a replay never checks o, a clock rule's
+// range (models.DeclaredSource.Clock), at a recording no learning read: a
+// range all on one side of zero (an offset from the call's moment, as a
+// cut-off a few seconds before it) whose unit is a second or finer
+// (models.ClockOffset.Unit). models.ClockOffset.Holds holds no such offset
+// (an application that cuts its value to that unit makes an offset changed
+// by one look the same), so the check would refuse every value. DeclaredClocks
+// leaves such a field out: it compares as a field no rule names. A range
+// around zero (a plain read of the clock) is checked, and so is one whose
+// unit is a minute or coarser.
+func RangeNeverChecked(o models.ClockOffset) bool {
+	off, _ := declaredOffset(o) // a range it refuses is empty: Plain
+	return !off.Plain() && off.Unit() <= time.Second
+}
+
 // DeclaredClocks is learned, a recording's clocks as the learn step stored
 // them (models.MockSpec.Clocks, by leaf path), with the check each clock
 // rule of sources makes at its field: the rule's range as learning stores a
@@ -51,7 +67,8 @@ func DeclaredSources(sources []models.DeclaredSource, placeOf func(path string) 
 // onto it. What the learn step learned at a place stays: learning read the
 // call there. Only a field in the body counts (an index keyed by a URL or a
 // header reads no declared source; such a field compares as recorded, which
-// refuses a changed value). learned itself where sources declare no clock
+// refuses a changed value), and only a range a replay checks
+// (RangeNeverChecked). learned itself where sources declare no clock
 // this keploy checks (models.CheckSources refuses them all, or none is a
 // clock in the body the learn step learned nothing at); otherwise a new map.
 func DeclaredClocks(sources []models.DeclaredSource, learned map[string]models.ClockOffset) map[string]models.ClockOffset {
@@ -73,6 +90,9 @@ func DeclaredClocks(sources []models.DeclaredSource, learned map[string]models.C
 		}
 		// CheckSources held each clock source's range: a cut above zero,
 		// its min at most its max (models.DeclaredSource.Check).
+		if RangeNeverChecked(*s.Clock) {
+			continue
+		}
 		off, _ := declaredOffset(*s.Clock)
 		if out == nil {
 			out = make(map[string]models.ClockOffset, len(learned)+1)
