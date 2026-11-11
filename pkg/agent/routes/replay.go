@@ -107,6 +107,27 @@ func (a *Agent) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 	render.JSON(w, r, consumedMocks)
 }
 
+// HandleOwnListenerCalls answers the destinations keploy test passed through,
+// since the set's mocks were loaded, as calls of the app to its own listener:
+// what /consumedmocks names in models.OwnListenerCallsHeader, read without
+// taking anything away (models.OwnListenerCallsPath). 501 from an agent that
+// cannot say, so the caller keeps what its consumed-mocks reads named.
+func (a *Agent) HandleOwnListenerCalls(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s, ok := a.svc.(ownListenerReporter)
+	if !ok {
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": "this agent cannot name the calls it passed through as the application's own"})
+		return
+	}
+	dests := s.OwnListenerCalls()
+	if dests == nil {
+		dests = []string{}
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, dests)
+}
+
 func (a *Agent) GetMockErrors(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 

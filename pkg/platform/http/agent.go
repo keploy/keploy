@@ -1913,6 +1913,43 @@ func (a *AgentClient) OwnListenerCalls() []string {
 	return calls
 }
 
+// ReadOwnListenerCalls asks the agent, without draining anything
+// (models.OwnListenerCallsPath), which destinations it has passed through
+// since the set's mocks were loaded as calls of the app to its own listener,
+// and keeps them for OwnListenerCalls, as a consumed-mocks read does. An agent
+// that cannot say (404, 501) leaves what the last consumed-mocks read named.
+func (a *AgentClient) ReadOwnListenerCalls(ctx context.Context) error {
+	url := a.conf.Agent.AgentURI + models.OwnListenerCallsPath
+	req, err := newAgentRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	res, err := doAgent(&a.client, req)
+	if err != nil {
+		return fmt.Errorf("failed to ask keploy's agent which calls it passed through as the application's own: %s", err.Error())
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for own-listener-calls")
+		}
+	}()
+	switch res.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound, http.StatusNotImplemented:
+		return nil
+	default:
+		rawBody, _ := readAgentBody(res)
+		return agentRespErr("get the calls passed through as the application's own", res, rawBody)
+	}
+	var named []string
+	if err := json.NewDecoder(res.Body).Decode(&named); err != nil {
+		return fmt.Errorf("failed to decode the calls keploy's agent passed through as the application's own: %s", err.Error())
+	}
+	// The same bound and spelling as the header's (ownListenerCallsOf).
+	a.ownListenerCalls.Store(ownListenerCallsOf(http.Header{models.OwnListenerCallsHeader: {strings.Join(named, ",")}}))
+	return nil
+}
+
 // ownListenerCallsOf is the destinations header names in
 // models.OwnListenerCallsHeader, each in models.OwnListenerDestination's
 // spelling, at most models.MaxOwnListenerCalls of them: one that is no

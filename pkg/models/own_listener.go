@@ -36,6 +36,14 @@ func (m *Mock) OwnListenerCall() bool {
 // has reported none: each mock is then judged as before.
 const OwnListenerCallsHeader = "X-Keploy-Own-Listener-Calls"
 
+// OwnListenerCallsPath is the agent's read of the destinations it names in
+// OwnListenerCallsHeader, which takes nothing away (unlike /consumedmocks):
+// keploy test reads it once at a set's end, before the set is judged, so a
+// call the app made to its own listener after the last read of what it
+// consumed is named too. An agent that does not answer it (404, 501) names
+// none there; its consumed-mocks answers still do.
+const OwnListenerCallsPath = "/mock/own-listener-calls"
+
 // MaxOwnListenerCalls is how many destinations the agent reports in
 // OwnListenerCallsHeader for one set, and how many the replay reads from it.
 // An app calls a handful of its own addresses; one past the bound is not

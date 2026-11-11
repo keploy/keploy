@@ -216,6 +216,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// made in other windows than theirs: no consumption, read once
 		// at the round's end beside /consumedmocks.
 		r.Get("/mock/learned-elsewhere", a.HandleLearnedElsewhere)
+		// The calls keploy test passed through as the app's own, named
+		// without draining anything (models.OwnListenerCallsPath).
+		r.Get(models.OwnListenerCallsPath, a.HandleOwnListenerCalls)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		r.Post("/stop-begun", a.HandleStopBegun)

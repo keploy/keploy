@@ -2218,10 +2218,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.String("next_step", "check the AfterTestCaseRun implementation and anything it writes to (e.g. a progress file on a full disk)"))
 		}
 	}
+	// ownCharges are the tests whose judge charged them only recordings the
+	// agent may yet name as the app's calls to its own listener
+	// (own_listener_reports.go): the set's end judges them again, and
+	// reports their verdicts then.
+	ownCharges := ownListenerCharges{}
 	recordVerdict := func(tc *models.TestCase, res *models.TestResult) {
 		if tc == nil || res == nil || tc.Name == "" {
 			return
 		}
+		ownCharges.recorded(tc.Name, res)
 		settledVerdicts[tc.Name] = settledVerdict{tc: tc, result: res}
 		// REPORTED AS IT SETTLES, in test order, on a live context.
 		//
@@ -2236,7 +2242,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// last verdict is the one that counts, and reporting each cycle as it
 		// happened would report a case as many times as it ran. Those are left
 		// to the drain, which sends one verdict per case.
-		if !r.config.RetryPassing {
+		//
+		// And except a test charged only recordings the agent may yet name as
+		// the app's own calls (ownCharges): its verdict may change at the
+		// set's end, which reports it.
+		if _, charged := ownCharges[tc.Name]; !r.config.RetryPassing && !charged {
 			reportVerdict(runTestSetCtx, tc, res)
 		}
 	}
@@ -4596,6 +4606,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//     --format json — only the verdict differs.
 			//   - StrictFailure: the pre-existing veto of the OBSOLETE
 			//     demotion for a response-failing test.
+			// Whether its verdict is PASSED had it made every recorded call:
+			// a charge the agent may yet lift at the set's end
+			// (ownCharges) is noted only then.
+			passedWithoutCharge := passesWithoutDependencyCharge(testPass, len(templateFailures) > 0, earlyMissed, lostCapture, r.config.Test.NoiseStrict(), r.assertTestMocks(), r.strictFailure())
 			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.NoiseStrict(), r.assertTestMocks(), r.strictFailure())
 			if mockSetMismatch {
 				leftRecordedUnconsumed = appendOnce(leftRecordedUnconsumed, testCase.Name)
@@ -4979,6 +4993,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if testStatus == models.TestStatusObsolete {
 						testCaseResult.FailureInfo.MappingStale = mappingStaleReason
 					}
+					ownCharges.note(testCase.Name, ownReports, mockSetMismatch && passedWithoutCharge, unconsumedOf(filteredExpectedNames, filteredMockNames), consumedMocks, testCaseResult,
+						depsAgainOf(expectedMocks, perTestConsumed, depAssertionValid && perTestConsumedKnown, reusableMockNames, mockKindByName, mockLookup))
 					finalTestCaseResults.put(testCase.Name, testCaseResult)
 					recordVerdict(testCase, testCaseResult)
 				} else {
@@ -5983,8 +5999,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// and a Warn per test would add hundreds of lines per run to any suite
 	// with a drifting mock pool — a CLI-output regression for users who never
 	// opted into the assertion. The count and a sample still surface here.
-	r.warnUnexercisedDependencies(testSetID, depMissingTests)
-
 	timeTaken := time.Since(startTime)
 
 	testCaseResults, resultsErr := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
@@ -6005,6 +6019,57 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// the set ran its tests, for the hooks, the failure reason and the report.
 	// A test's own rows keep their order, cycle by cycle (insertNow).
 	runOrder.sort(testCaseResults)
+	// A test charged only recordings the agent may yet name as the app's
+	// calls to its own listener (ownCharges) is judged again now, before the
+	// shares, the evidence floor, the hook and the counts read its verdict:
+	// the agent is asked once more which calls it passed through as the
+	// app's own, and a test whose charge it now names all of is PASSED. A
+	// call the app makes after this read is judged as before.
+	if len(ownCharges) > 0 && resultsErr == nil {
+		r.refreshOwnListenerReport(runTestSetCtx, testSetID)
+		applyOwnListenerReport()
+		passedNow, lifted := liftOwnListenerCharges(testCaseResults, ownCharges, ownReports.marked)
+		for _, name := range passedNow {
+			failure--
+			success++
+			for _, m := range ownCharges[name].consumed {
+				passingTotalConsumedMocks[m.Name] = m
+			}
+		}
+		for _, name := range lifted {
+			leftRecordedUnconsumed = slices.DeleteFunc(leftRecordedUnconsumed, func(n string) bool { return n == name })
+			delete(depMissingTests, name)
+			if v, ok := settledVerdicts[name]; ok {
+				for i := len(testCaseResults) - 1; i >= 0; i-- {
+					if testCaseResults[i].TestCaseID == name {
+						row := testCaseResults[i]
+						settledVerdicts[name] = settledVerdict{tc: v.tc, result: &row}
+						break
+					}
+				}
+			}
+		}
+		if len(passedNow) > 0 {
+			r.logger.Info("tests passed at the test set's end: every recorded call they did not make is a call the application made to its own listener, which keploy passed through to it",
+				zap.String("testSetID", testSetID), zap.Strings("tests", passedNow))
+			if testSetStatus == models.TestSetStatusFailed && failure == 0 {
+				testSetStatus = models.TestSetStatusPassed
+			}
+		}
+	}
+	// Their verdicts, as they stand now, in the set's order: the live report
+	// held them back (recordVerdict). A retry-passing run's drain sends them.
+	if !r.config.RetryPassing {
+		for _, tr := range lastResultOfEachTest(testCaseResults) {
+			if _, charged := ownCharges[tr.TestCaseID]; !charged || reported[tr.TestCaseID] {
+				continue
+			}
+			if v, ok := settledVerdicts[tr.TestCaseID]; ok {
+				reportVerdict(runTestSetCtx, v.tc, v.result)
+			}
+		}
+	}
+	r.warnUnexercisedDependencies(testSetID, depMissingTests)
 	// The prune's connection-error rule reads these back: unreadable or short of
 	// the verdicts, they cannot vouch for anything (fail closed). They are
 	// counted by test, as the verdicts count them (verdictCounts): a test
