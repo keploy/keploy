@@ -6468,6 +6468,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
+					BoundIn:          slices.Clone(parserErr.MismatchReport.BoundIn),
 					Given:            parserErr.MismatchReport.Given,
 					VariableWhy:      parserErr.MismatchReport.VariableWhy,
 					NotOwned:         parserErr.MismatchReport.NotOwned,

@@ -30,13 +30,13 @@ import (
 // names a given (Given), or says the variable pass's why (VariableWhy: the
 // variable by its name, which is a field path, its places in their shape,
 // and what bound it, never a value). ChargedTo, WindowOf and TrailsOf
-// stay: each names a test, no value. A background miss's bound places
-// (BackgroundBound) keep the recordings' names and each place's shape
-// (BackgroundBinding.Sanitized).
+// stay: each names a test, no value; so does BoundIn, each a recording. A
+// background miss's bound places (BackgroundBound) keep the recordings'
+// names and each place's shape (BackgroundBinding.Sanitized).
 func (m UnmatchedCall) Sanitized() UnmatchedCall {
 	out := UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Operation: SanitizedOperation(m.Operation), Command: CommandName(m.Command), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
-		Kind: m.Kind, Recorded: m.Recorded, SkippedReads: slices.Clone(m.SkippedReads), NotOwned: m.NotOwned, Background: m.Background, BackgroundBound: sanitizedBindings(m.BackgroundBound), Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
+		Kind: m.Kind, Recorded: m.Recorded, SkippedReads: slices.Clone(m.SkippedReads), BoundIn: slices.Clone(m.BoundIn), NotOwned: m.NotOwned, Background: m.Background, BackgroundBound: sanitizedBindings(m.BackgroundBound), Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.
 		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn, OrderDependent: m.OrderDependent, Earlier: m.Earlier, EarlierIn: m.EarlierIn, ChargedTo: m.ChargedTo, WindowOf: m.WindowOf, TrailsOf: m.TrailsOf,
