@@ -57,3 +57,30 @@ func (k MissMark) Before(epoch, bounds uint64) bool {
 // that test ended (Late), unless a parser held it for a later test's
 // recording (Held), which the replay says as held.
 func (c UnmatchedCall) OutsideEveryTest() bool { return c.Between || c.Late && !c.Held }
+
+// What a miss's match phase says of its set's recordings of the call's shape
+// (UnmatchedCall.ShapeRecordings), as the line of a call outside every test
+// says it.
+const (
+	// RecordedShape: the matcher compared recordings of the call's shape and
+	// refused each: by its body (MatchPhaseBody), by strict noise
+	// (MatchPhaseStrict), or by a test variable (MatchPhaseVariable).
+	RecordedShape = "shape"
+	// RecordedNone: the matcher found no recording of the call's shape to
+	// compare (MatchPhaseNoMocks, MatchPhaseSchema).
+	RecordedNone = "none"
+)
+
+// ShapeRecordings says what c's match phase tells of its set's recordings of
+// the call's shape: RecordedShape, RecordedNone, or "" when the phase says
+// neither (none, a protocol error, a full cascade that names no closest
+// recording): then keploy knows only that no recording came close.
+func (c UnmatchedCall) ShapeRecordings() string {
+	switch c.MatchPhase {
+	case MatchPhaseBody, MatchPhaseStrict, MatchPhaseVariable:
+		return RecordedShape
+	case MatchPhaseNoMocks, MatchPhaseSchema:
+		return RecordedNone
+	}
+	return ""
+}

@@ -225,7 +225,10 @@ func lateWhere(c models.UnmatchedCall) string {
 
 // betweenFacts is what keploy knows of the recording closest to c, a call
 // made Between two tests: its name and the fields c differs from it in, each
-// in its shape (models.FieldShapes, never a value), or that none came close.
+// in its shape (models.FieldShapes, never a value); with none named, what
+// c's match phase says of the set's recordings of its shape
+// (UnmatchedCall.ShapeRecordings): that it has some and c matches none, that
+// it has none, or, when the phase says neither, only that none came close.
 func betweenFacts(c models.UnmatchedCall) string {
 	differs := models.FieldShapes(c.Differs)
 	switch {
@@ -234,13 +237,21 @@ func betweenFacts(c models.UnmatchedCall) string {
 	case c.ClosestMock != "":
 		return "the closest recording is " + c.ClosestMock + ", which it does not match"
 	}
-	return "no recording of this call in the set"
+	switch c.ShapeRecordings() {
+	case models.RecordedShape:
+		return "the set has recordings of this call's shape, and it matches none of them"
+	case models.RecordedNone:
+		return "no recording of this call in the set"
+	}
+	return "no recording came close to this call, and keploy's matcher did not say whether the set has one of its shape"
 }
 
 // betweenNextStep is the one next step for c, a call outside every test,
-// chosen from its facts (betweenFacts): with a recording that came close, the
-// set is recorded again if the application changed the call on purpose;
-// with none, it is recorded again. set is the test set whose call it is, ""
+// chosen from its facts (betweenFacts): the set is recorded again with no
+// condition only when keploy knows it has no recording of c's shape
+// (models.RecordedNone); with one that came close, recordings of its shape,
+// or a phase that says neither, it is recorded again if the application
+// changed the call on purpose. set is the test set whose call it is, ""
 // for an earlier set's call in a run that ran no such set, and record the
 // command that records set again in its place (recordAgainCommand), with
 // where it moves the set's recordings. record has no command when keploy
@@ -261,7 +272,7 @@ func betweenNextStep(c models.UnmatchedCall, set string, record utils.RecordAgai
 	case record.Command == "":
 		again = "record the test set " + set + " again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"
 	}
-	if c.ClosestMock != "" {
+	if c.ClosestMock != "" || c.ShapeRecordings() != models.RecordedNone {
 		return "if the application changed this call on purpose, " + again
 	}
 	return again
@@ -343,7 +354,9 @@ func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 // (keploy's docs, "outside every test"), as the fields of its ERROR line:
 // kind, the test set whose call it is (testSetID), the call's shape, the test
 // it was made in (madeIn) or between which tests, what keploy knows of its
-// closest recording and the one next step.
+// closest recording, what its match phase says of the set's recordings of
+// its shape (recorded: models.RecordedShape, models.RecordedNone, or "") and
+// the one next step.
 func (r *Replayer) outsideFields(testSetID, madeIn string, c models.UnmatchedCall) []zap.Field {
 	return []zap.Field{
 		zap.String("kind", models.KindOutsideEveryTest),
@@ -357,6 +370,7 @@ func (r *Replayer) outsideFields(testSetID, madeIn string, c models.UnmatchedCal
 		zap.Time("at", c.At),
 		zap.String("closest", c.ClosestMock),
 		zap.Strings("differs", models.FieldShapes(c.Differs)),
+		zap.String("recorded", c.ShapeRecordings()),
 		zap.String("facts", betweenFacts(c)),
 		zap.String("next_step", betweenNextStep(c, testSetID, r.recordAgainCommand(testSetID))),
 	}

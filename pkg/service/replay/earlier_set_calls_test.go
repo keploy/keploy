@@ -22,7 +22,7 @@ import (
 // set's test (models.UnmatchedCall.EarlierSetTest), as the agent hands it.
 func lateOfSetA() ([]models.UnmatchedCall, error) {
 	return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /orders", Destination: "orders:80",
-		Kind: models.MissOutsideTest, EarlierSetTest: "test-2"}}, nil
+		Kind: models.MissOutsideTest, EarlierSetTest: "test-2", MatchPhase: models.MatchPhaseSchema}}, nil
 }
 
 // A call set A's last test made that keploy decided only after set A had
