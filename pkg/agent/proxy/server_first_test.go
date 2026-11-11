@@ -358,12 +358,12 @@ func servingOnOnePort(t *testing.T, serve, other func(net.Conn)) (addr string, c
 			addr, conns, _ = acceptingOn(t, ln, serve)
 			otherAddr, _, _ = acceptingOn(t, ln3, other)
 			return addr, conns, otherAddr
-		case errors.Is(err, errAddrNotHere):
+		case errors.Is(err, testnet.ErrAddrNotAvail):
 			addr, conns, _ = acceptingOn(t, ln, serve)
 			return addr, conns, ""
 		}
 		_ = ln.Close()
-		if !errors.Is(err, errAddrInUse) {
+		if !errors.Is(err, testnet.ErrAddrInUse) {
 			t.Fatalf("listen at %s beside %s: %v", at, ln.Addr(), err)
 		}
 	}
