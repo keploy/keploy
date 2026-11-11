@@ -33,7 +33,9 @@ func init() { decideBy = decideOrder }
 func decideOrder(in Input) []Decision {
 	if in.Mode == ModeElsewhere {
 		ds, fields := decideBoth(in, true)
-		return elsewhere(in, ds, fields)
+		out := elsewhere(in, ds, fields)
+		(&decider{in: in}).ruled(out, fields)
+		return out
 	}
 	ds, _ := decideBoth(in, false)
 	return ds
@@ -188,7 +190,11 @@ func (dc *decider) decide() ([]Decision, []string) {
 	var out []Decision
 	var fields []string // fields[i] is the field out[i] decides
 	for _, path := range dc.in.Drift {
-		out = append(out, dc.leaf(path, dc.unread)...)
+		ds := dc.leaf(path, dc.unread)
+		if src, ok := dc.source(path); ok {
+			ds = dc.minted(path, src, ds)
+		}
+		out = append(out, ds...)
 		for len(fields) < len(out) {
 			fields = append(fields, path)
 		}
@@ -215,6 +221,7 @@ func (dc *decider) decide() ([]Decision, []string) {
 				Edit{Kind: EditReRecord}, dc.fieldNoise(fields[i]))
 		}
 	}
+	dc.ruled(out, fields)
 	return out, fields
 }
 
@@ -224,9 +231,16 @@ func (dc *decider) decide() ([]Decision, []string) {
 // the places apart misses. A value recorded at several places that round F
 // sent as two different new values is two reads keploy cannot tell apart:
 // each such place is refused, naming the first. Each keeps the recordings
-// it set aside as answered after the call.
+// it set aside as answered after the call. A place a minted rule decided
+// (Decision.Minted) is the first wherever it stands, so the rule's check
+// binds the value and the others use it.
 func (dc *decider) oneValue(out []Decision, fields []string) {
 	first := map[string]int{}
+	for i, d := range out {
+		if _, ok := first[d.Recorded]; !ok && d.Minted != nil {
+			first[d.Recorded] = i
+		}
+	}
 	name := func(i int) string {
 		if w := out[i].At.Word; w >= 0 {
 			return dc.in.Mock + " " + fields[i] + " word " + strconv.Itoa(w)
@@ -236,7 +250,7 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 	for i, d := range out {
 		j, ok := first[d.Recorded]
 		switch {
-		case d.Outcome != OutcomeFresh:
+		case d.Outcome != OutcomeFresh || ok && j == i:
 		case !ok:
 			first[d.Recorded] = i
 		case out[j].Outcome == OutcomeFresh && out[j].Full == d.Full:

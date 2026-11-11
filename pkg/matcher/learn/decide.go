@@ -34,10 +34,10 @@ const (
 	OutcomeFresh
 )
 
-// RefusalKind is why a word is refused: one of the ten below.
+// RefusalKind is why a word is refused: one of the eleven below.
 type RefusalKind string
 
-// The ten refusals.
+// The eleven refusals.
 const (
 	RefusalPick            RefusalKind = "pick"
 	RefusalNoClockRead     RefusalKind = "no-clock-read"
@@ -49,6 +49,10 @@ const (
 	RefusalChangedShape    RefusalKind = "changed-shape"
 	RefusalCannotCheck     RefusalKind = "cannot-check"
 	RefusalLandedElsewhere RefusalKind = "landed-elsewhere"
+	// RefusalNotMinted: keploy.yml declares the field minted (Input.Source),
+	// yet its value is no new one keploy can check: an earlier place holds it
+	// whole in a run, or it is no string or number read as written.
+	RefusalNotMinted RefusalKind = "not-minted"
 )
 
 // EditKind is an edit a person or a tool makes to accept a refused word.
@@ -93,6 +97,9 @@ type Refusal struct {
 	Why      string      `json:"why,omitempty"`
 	Places   []string    `json:"places,omitempty"`
 	Edits    []Edit      `json:"edits,omitempty"`
+	// Rule is the id of the keploy.yml rule that declares the field's
+	// source (Input.Source), "" where none does.
+	Rule string `json:"rule,omitempty"`
 }
 
 // Mode is where a word's sources may be.
@@ -177,8 +184,9 @@ func (l Landed) String() string {
 // VarPlace; read it through AddressOf), and the instant a client test
 // began at in its recording (RecBegan: the tracker's recorded begin, zero
 // where none is known), which the test's own value must precede where no
-// window tells it, and the test the call trails (Trails; the zero Trail:
-// none).
+// window tells it, the test the call trails (Trails; the zero Trail:
+// none), and the source keploy.yml's rules declare for a drifted field, by
+// its path in Drift (Source; nil: none declared).
 type Input struct {
 	Drifts    *DriftCache
 	Drift     []string
@@ -200,6 +208,7 @@ type Input struct {
 	Landed    Landed
 	PlaceOf   func(l Leaf, answer bool) (string, bool)
 	Trails    Trail
+	Source    func(field string) (Source, bool)
 }
 
 // Trail is the test a call trails: keploy record marked the call's
@@ -275,6 +284,9 @@ type Decision struct {
 	// the decision set aside because they were asked at or before the
 	// call and answered after it: R's word there decided nothing.
 	AnsweredAfter []Place
+	// Minted is set on a field a minted rule decided made anew (Input.Source):
+	// the replay checks the value it binds there against it.
+	Minted *Minted
 }
 
 // Decide is every changed word of in, decided (see above).
