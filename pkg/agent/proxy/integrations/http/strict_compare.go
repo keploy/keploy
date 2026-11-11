@@ -425,8 +425,11 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 // clockDiffs are the places the learn step learned as reads of the
 // application's clock (k.clocks) at which the call carries no such read made
 // in its own window on the application's clock (learn.ClockSpanOf for the
-// recording m it is checked against, learn.CheckClockRead), each with the
-// reason it gives; none where keploy.yml's noise reaches the place, which
+// recording m it is checked against, learn.CheckClockReadForm), each with the
+// reason it gives. A place learned by its form passes by that form where the
+// store says the replay turned the time default on (k.n.timeForm); otherwise
+// the form is set aside, which fails closed. None where keploy.yml's noise
+// reaches the place, which
 // the user declared not compared. A url place is read as the learn step
 // read it (clockReads): a path segment in the path that url noise masked
 // whole, and a url pattern excuses only the read it covers. Every place is
@@ -469,7 +472,7 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 				f.why, f.clock = learn.ClockReadAbsent(f.shape, k.clocks[p]), true
 				break
 			}
-			if ok, why := learn.CheckClockRead(f.shape, k.clocks[p], r.live, span, known); !ok {
+			if ok, why := learn.CheckClockReadForm(f.shape, k.clocks[p], r.live, span, known, k.n.timeForm); !ok {
 				f.why, f.clock = why, true
 				break
 			}
