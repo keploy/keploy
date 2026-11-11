@@ -188,11 +188,16 @@ func TestEachSpentReadOfAHeldCallHidesTheBackgroundAlone(t *testing.T) {
 }
 
 // A held call's decision that it is one of the open test's own hides the
-// background only while a test is open in the view in force: there is no
-// test whose recordings the call could be one more than. A call held
-// between tests, given a decision anyway, and a call held in a test whose
-// reads come after the test closed, both read the pool's and the worker's
-// recordings as unspent: between tests the background answers the calls.
+// background only while a test is open in the view the call reads in
+// (heldScope.readView): a call held between tests, given a decision anyway,
+// reads the pool's and the worker's recordings as unspent, as there is no
+// test whose recordings it could be one more than, and between tests the
+// background answers it. A call held in a test whose reads come after the
+// test closed reads in its test's view still, as on time, and keeps the
+// background hidden: its test's recordings are the ones it is one more
+// than. Before, it read whether a recording was the background's in the
+// view in force, between tests, and a call one more than its test recorded
+// was answered by the background's copy once the test ended under it.
 func TestAHeldCallHidesTheBackgroundOnlyWhileATestIsOpen(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, shape := range []string{"held between tests", "held in a test, read after it"} {
@@ -200,7 +205,8 @@ func TestAHeldCallHidesTheBackgroundOnlyWhileATestIsOpen(t *testing.T) {
 			s := stageBackground(t, true, true)
 			s.betweenTests(t)
 			var held integrations.MockMemDb
-			if shape == "held between tests" {
+			inTest := shape != "held between tests"
+			if !inTest {
 				held = heldWithDecision(t, s.mm)
 			} else {
 				s.openTest(t)
@@ -212,7 +218,10 @@ func TestAHeldCallHidesTheBackgroundOnlyWhileATestIsOpen(t *testing.T) {
 			}
 			spent, mockSpent := hiddenBy(t, held, s.pool, s.worker)
 			for _, mk := range []*models.Mock{s.pool, s.worker} {
-				if spent[mk.Name] || mockSpent[mk.Name] {
+				if inTest && (!spent[mk.Name] || !mockSpent[mk.Name]) {
+					t.Errorf("after its test ended the held call shows the background's %s (Spent %v, MockSpent %v); want it hidden, as in the test", mk.Name, spent[mk.Name], mockSpent[mk.Name])
+				}
+				if !inTest && (spent[mk.Name] || mockSpent[mk.Name]) {
 					t.Errorf("between tests the held call hides the background's %s (Spent %v, MockSpent %v)", mk.Name, spent[mk.Name], mockSpent[mk.Name])
 				}
 			}

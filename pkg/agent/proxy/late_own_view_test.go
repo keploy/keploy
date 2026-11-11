@@ -125,6 +125,64 @@ func TestALateCallTheTestNeverRecordedIsNotCountedByTheNextTestsRecordings(t *te
 	}
 }
 
+// A GET /x one more than test-1 recorded, read in test-1's view and decided
+// after test-1 ended (the replay installed the view between tests), is
+// hidden from the background test-1's view showed, as on time: the reached
+// worker scope's copy under today's rules, the pool's under the background
+// rules. It misses as one call more than test-1 recorded, marked in test-1,
+// and the copy stays unspent: between tests it answers the GET /x. Before,
+// whether a recording was the background's was read in the view in force,
+// which between tests shows a test none, while the call read in test-1's:
+// the copy answered the duplicate.
+func TestALateCallOneMoreThanRecordedIsHiddenFromTheBackgroundAsItsTestEnds(t *testing.T) {
+	for _, worker := range []bool{true, false} {
+		name := "the pool, under the background rules"
+		if worker {
+			name = "the reached worker scope, under today's rules"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			own := workerProbe("mock-own-x", 4*time.Second, "/x", "own")
+			copyOf := workerProbe("mock-bg-x", time.Second, "/x", "bg")
+			mm := stagedManager(t, []*models.Mock{own}, []*models.Mock{copyOf})
+			mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+			var poolNames []string
+			if worker {
+				mm.ServeExactWorker([]string{copyOf.Name})
+			} else {
+				poolNames = []string{copyOf.Name}
+				mm.ServeExactBackground(models.RecordedWithS12Routing, poolNames, nil)
+			}
+			mm.ServeExactPool(models.PoolKeyNone, poolNames)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, own.Name)})
+			if !mm.ExactServing() || integrations.S12Background(mm) == worker {
+				t.Fatalf("precondition: test-1 is not served exactly, with the %s", name)
+			}
+			db := &viewMovedAtMark{MockManager: mm}
+			if got, miss := httpMissSend(t, db, "GET /x HTTP/1.1\r\nHost: deps\r\n\r\n"); got != "own" {
+				t.Fatalf("test-1's GET /x was answered %q (miss %+v); want its own", got, miss)
+			}
+			db.move = func() { mm.ServeExactPool(models.PoolKeyNone, poolNames) }
+			got, miss := httpMissSend(t, db, "GET /x HTTP/1.1\r\nHost: deps\r\n\r\n")
+			if db.move != nil {
+				t.Fatal("the call was never marked; the row is about a call decided after its mark")
+			}
+			if got != "" {
+				t.Fatalf("test-1's GET /x once more, decided after test-1 ended, was answered %q; want a miss: one call more than test-1 recorded", got)
+			}
+			if miss.MissKind != models.MissExtraCall || miss.Recorded != 1 || !miss.MarkedInTest || miss.MarkedTest != "test-1" {
+				t.Fatalf("its miss is kind %q, recorded %d, marked in test %v %q; want %q, recorded 1, marked in test-1", miss.MissKind, miss.Recorded, miss.MarkedInTest, miss.MarkedTest, models.MissExtraCall)
+			}
+			if mm.MockSpent(copyOf.Name) {
+				t.Fatal("the background's GET /x was spent on a call it did not answer")
+			}
+			if got, miss := httpMissSend(t, db, "GET /x HTTP/1.1\r\nHost: deps\r\n\r\n"); got != "bg" {
+				t.Fatalf("the GET /x between tests was answered %q (miss %+v); want the background's, unspent", got, miss)
+			}
+		})
+	}
+}
+
 // A held store marked in a test's view reads that view's own recordings
 // (integrations.SharedReads' owned reads) while the next test's view is in
 // force, as it reads the view's other recordings (heldScope.readView): the
