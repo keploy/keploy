@@ -189,9 +189,12 @@ type ScopeEvidence struct {
 	Unread bool `json:"unread,omitempty" yaml:"unread,omitempty"`
 	// FailedOnItsOwn: in a replay, the test's harness ended it failed on
 	// its own (its own assertion, or an end with no verdict, which keploy
-	// counts failed) before this evidence failed it. The recorded calls it
-	// never made may then be calls it never reached, so they say nothing of
-	// where the app makes them. It is no evidence: Empty ignores it.
+	// counts failed) before this evidence failed it, and keploy answered
+	// every call it made (not Unanswered: the evidence is only the
+	// recordings it never made). Those may then be calls it never reached,
+	// so they say nothing of where the app makes them. A test that met
+	// keploy's error answer to a call (a miss) may have failed on that
+	// answer: it never has it. It is no evidence: Empty ignores it.
 	FailedOnItsOwn bool `json:"failedOnItsOwn,omitempty" yaml:"failedOnItsOwn,omitempty"`
 }
 
@@ -222,6 +225,19 @@ func IDPart(s string) bool {
 // Empty reports whether there is no evidence.
 func (e *ScopeEvidence) Empty() bool {
 	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0 && len(e.CaptureIncomplete) == 0 && len(e.Incomplete) == 0 && len(e.CannotCapture) == 0)
+}
+
+// Unanswered reports whether the evidence holds a call of the test keploy
+// did not answer from a recording, or could not tell it answered: any
+// evidence but the recordings the test did not make (a miss, a call keploy
+// could not capture), or keploy could not read all the test did (Unread).
+func (e *ScopeEvidence) Unanswered() bool {
+	if e == nil {
+		return false
+	}
+	rest := *e
+	rest.Unconsumed = nil
+	return e.Unread || !rest.Empty()
 }
 
 // ChargeNotJudged charges the test with losses that leave it without a
