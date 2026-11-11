@@ -3454,19 +3454,44 @@ func claimAt(at, rec, live, v, f string) string {
 	return a.String()
 }
 
+// ClaimHolding is the name of the claim of the JWT text holds (a token, or
+// "Bearer <token>") whose value holds v whole or at a word, the first such
+// claim by name: "" where text holds no JWT, v is "", or no claim holds v.
+// A refusal reads it to name the claim it found no place to bind at.
+func ClaimHolding(text, v string) string {
+	_, claims, ok := jwtClaims(text)
+	if !ok || v == "" {
+		return ""
+	}
+	for _, n := range slices.Sorted(maps.Keys(claims)) {
+		c, ok := variables.Decode(variables.StepJSON, string(claims[n]))
+		if !ok {
+			continue
+		}
+		if c == v {
+			return n
+		}
+		for _, w := range variables.Words(c) {
+			if c[w[0]:w[1]] == v {
+				return n
+			}
+		}
+	}
+	return ""
+}
+
 // BindAt is where a variable binds at p, and the value F saw there: its
 // variable place (Var) and Live, where p held the value whole; the word of
 // its JWT claim (Claim) and that word of Live, where it held the value
 // inside the claim. ok is false where p has no variable place, or held the
-// value inside a longer value otherwise: no place a replay can bind at.
+// value inside a longer value otherwise (Claim "", which names no place): no
+// place a replay can bind at.
 func (p Place) BindAt() (at, live string, ok bool) {
 	switch {
 	case p.Var == "":
 		return "", "", false
 	case p.Whole:
 		return p.Var, p.Live, true
-	case p.Claim == "":
-		return "", "", false
 	}
 	a, err := variables.ParseAddress(p.Claim)
 	if err != nil {

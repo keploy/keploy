@@ -240,6 +240,8 @@ func TestClaimAtAddressesTheClaimAtTheLeafsVariablePlace(t *testing.T) {
 	}{
 		{"the header's claim", "header.Authorization", "6af47b1e0c22d4e8a91b03f6", "header.Authorization|jwt.cluster_id#0"},
 		{"no variable place", "", "6af47b1e0c22d4e8a91b03f6", ""},
+		{"a place keploy cannot read", "header.", "6af47b1e0c22d4e8a91b03f6", ""},
+		{"a place of no part keploy reads", "nowhere", "6af47b1e0c22d4e8a91b03f6", ""},
 		{"a place that names a word", "header.Authorization#1", "6af47b1e0c22d4e8a91b03f6", ""},
 		{"a place that names a step", "header.Authorization|b64", "6af47b1e0c22d4e8a91b03f6", ""},
 		{"round F's claim holds another value", "header.Authorization", "6af47b1e0c22d4e8a91b03f7", ""},
@@ -281,6 +283,33 @@ func TestBindAtIsTheWholePlaceOrItsClaimsWord(t *testing.T) {
 		at, live, ok := tc.p.BindAt()
 		if at != tc.at || live != tc.live || ok != tc.ok {
 			t.Errorf("%s: BindAt = %q, %q, %v; want %q, %q, %v", tc.name, at, live, ok, tc.at, tc.live, tc.ok)
+		}
+	}
+}
+
+// TestClaimHoldingNamesTheClaimThatHoldsAValue: the claim of a token (bare or
+// "Bearer <token>") whose value holds v whole or at a word, the first such
+// by name; none where the text is no JWT, v is empty, or no claim holds v
+// (a part of a word is no word).
+func TestClaimHoldingNamesTheClaimThatHoldsAValue(t *testing.T) {
+	tok := claimToken(t, map[string]any{"cid": "e2e-free-company", "cluster_id": "6af47add8a9351dfdb7c457a", "iat": 1793561053, "sub": "proxy:a20b6921-24c6-4a03"}, "sig")
+	for _, tc := range []struct{ name, text, v, want string }{
+		{"a claim whole, in a header", "Bearer " + tok, "6af47add8a9351dfdb7c457a", "cluster_id"},
+		{"a bare token", tok, "6af47add8a9351dfdb7c457a", "cluster_id"},
+		{"a number claim", tok, "1793561053", "iat"},
+		{"a word of a claim", tok, "proxy", "sub"},
+		{"several words of a claim", tok, "a20b6921-24c6-4a03", ""},
+		{"a claim of several words whole", tok, "proxy:a20b6921-24c6-4a03", "sub"},
+		{"the first claim by name", claimToken(t, map[string]any{"b": "x-1a2b", "a": "1a2b"}, "sig"), "1a2b", "a"},
+		{"a part of a word", tok, "6af47add", ""},
+		{"no claim holds it", tok, "6af47b1e0c22d4e8a91b03f6", ""},
+		{"an empty value", tok, "", ""},
+		{"an empty value, an empty claim", claimToken(t, map[string]any{"nonce": ""}, "sig"), "", ""},
+		{"a claim that is no text, before the one that holds it", claimToken(t, map[string]any{"a": map[string]any{"x": 1}, "b": "1a2b"}, "sig"), "1a2b", "b"},
+		{"no JWT", "Bearer opaque-6af47add8a9351dfdb7c457a", "6af47add8a9351dfdb7c457a", ""},
+	} {
+		if got := ClaimHolding(tc.text, tc.v); got != tc.want {
+			t.Errorf("%s: ClaimHolding(%q) = %q; want %q", tc.name, tc.v, got, tc.want)
 		}
 	}
 }
