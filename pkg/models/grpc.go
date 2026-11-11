@@ -94,12 +94,12 @@ type GrpcResp struct {
 	// the old behaviour.
 	NoMessages bool `json:"no_messages,omitempty" yaml:"no_messages,omitempty"`
 	// SentAfter says when the server wrote on a stream whose client sent a
-	// message after it had one of the server's: a bidi stream that sends a
-	// message, waits for its reply and sends the next. Replay answers such a
-	// stream as the server did, each write once as many of the client's
-	// messages have come as had come when the server made it, where it would
-	// otherwise wait for the client's whole side while the client waits for
-	// its reply.
+	// message or half-closed after it had one of the server's: a bidi stream
+	// that sends a message and waits for its reply before it sends the next
+	// or half-closes. Replay answers such a stream as the server did, each
+	// write once as many of the client's messages have come as had come when
+	// the server made it, where it would otherwise wait for the client's
+	// whole side while the client waits for its reply.
 	//
 	// It holds one entry for each write the server made before the client
 	// half-closed, in wire order: how many of the client's messages the server
