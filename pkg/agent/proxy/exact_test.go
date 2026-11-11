@@ -5197,21 +5197,21 @@ func TestACallMarkedByARoundSnapshotSpendsTheWorkerScopeInTheViewInForce(t *test
 	}
 }
 
-// A call read in TestA's window whose consume the view in force refuses
-// once TestA ended (heldScope.settled) reads, from then on, what a call made
-// between tests reads, and spends and walks there too. The call is offered
-// w-0, and another of TestA's calls is answered w-0 before it consumes: a
-// worker: recording is no test's own, so the consume settles in the view in
-// force (roundGuard.ownView), spending for the windows (the call was read in
-// one), which spent w-0, and is refused. Read again between tests, the call
-// is answered w-0, which answers again there, spent for the calls between
-// tests (nothing), so TestB's window is answered w-1, the next the windows
-// did not spend. Spent as TestA's window, or read on in TestA's view, the
-// call is refused w-0 again, or answered w-1 for the windows and TestB's
-// window misses.
-func TestACallRefusedAfterItsTestEndedSpendsTheWorkerScopeAsTheCallsBetweenTests(t *testing.T) {
+// A call read in TestA's window that another of TestA's calls beats to a
+// worker recording is decided as at zero latency, whether its consume lands
+// while TestA is open or after TestA ended (heldScope.settled). It is
+// offered w-0, another of TestA's calls is answered w-0 before it consumes,
+// and its consume is refused: the windows spent w-0. Read again, the call
+// is answered by the next worker recording the windows left, w-1, or, with
+// w-0 the only one recorded, misses. It walks TestA's window throughout, and
+// its consume spends w-1 for the windows (it was read in one), so TestB's
+// window is answered w-2, then misses. Before, a call refused once TestA
+// ended read on between tests, where a worker recording the windows spent
+// answers again: it was answered w-0 (with one recorded, a call more than
+// the windows recorded passed) and spent nothing for the windows, so TestB's
+// window was answered w-1 and w-2.
+func TestACallRefusedAWorkerRecordingAfterItsTestEndedReadsOnInItsWindow(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	names := []string{"w-0", "w-1"}
 	for _, door := range []struct {
 		name    string
 		consume func(integrations.MockMemDb, *models.Mock) bool
@@ -5220,43 +5220,84 @@ func TestACallRefusedAfterItsTestEndedSpendsTheWorkerScopeAsTheCallsBetweenTests
 		{"delete door", func(db integrations.MockMemDb, mk *models.Mock) bool { return db.DeleteUnFilteredMock(*mk) }, pollFirst},
 		{"keeping door", func(db integrations.MockMemDb, mk *models.Mock) bool { return db.MarkMockAsUsed(*mk) }, markFirst},
 	} {
-		t.Run(door.name, func(t *testing.T) {
-			w0 := httpCall("w-0", time.Second, "/poll")
-			mm := stagedManager(t, nil, []*models.Mock{w0, httpCall("w-1", 2*time.Second, "/poll")})
-			mm.ServeExactWorker(names)
-			mm.ServeExactTest("TestA", nil)
-			call := mm.MarkCallRound()
-			held, _ := mm.HoldToRound(call)
-			if got := door.ask(t, mm, "w-"); got != "w-0" {
-				t.Fatalf("precondition: TestA's window was answered %s; want w-0", got)
-			}
-			mm.ServeExactWorker(names)
-			mm.ServeExactPool(models.PoolKeyNone, nil)
-			if door.consume(held, w0) {
-				t.Fatal("precondition: the pool view took w-0 for TestA's window after TestA's window spent it")
-			}
-			if sv, ok := integrations.SequenceViewOf(held); !ok || sv.Test != "" || sv.Worker != nil {
-				t.Errorf("after the refusal the call walks %q's view (worker band %v); want the pool view's", sv.Test, sv.Worker != nil)
-			}
-			first := "a miss"
-			mocks, _ := held.GetSessionScopedMocks()
-			for _, mk := range mocks {
-				if strings.HasPrefix(mk.Name, "w-") {
-					if door.consume(held, mk) {
-						first = mk.Name
-					}
-					break
+		for _, recorded := range []int{1, 3} {
+			for _, late := range []bool{false, true} {
+				when := "at once"
+				if late {
+					when = "late"
 				}
+				t.Run(fmt.Sprintf("%s/%d recorded/%s", door.name, recorded, when), func(t *testing.T) {
+					var names []string
+					var mocks []*models.Mock
+					for i := 0; i < recorded; i++ {
+						name := fmt.Sprintf("w-%d", i)
+						names = append(names, name)
+						mocks = append(mocks, httpCall(name, time.Duration(i+1)*time.Second, "/poll"))
+					}
+					first := func(db integrations.MockMemDb) *models.Mock {
+						read, _ := db.GetSessionScopedMocks()
+						for _, mk := range read {
+							if strings.HasPrefix(mk.Name, "w-") {
+								return mk
+							}
+						}
+						return nil
+					}
+					mm := stagedManager(t, nil, mocks)
+					mm.ServeExactWorker(names)
+					mm.ServeExactTest("TestA", nil)
+					held, _ := mm.HoldToRound(mm.MarkCallRound())
+					offered := first(held)
+					if offered == nil || offered.Name != "w-0" {
+						t.Fatalf("precondition: the call read in TestA's window was offered %v; want w-0", offered)
+					}
+					if got := door.ask(t, mm, "w-"); got != "w-0" {
+						t.Fatalf("precondition: another of TestA's calls was answered %s; want w-0", got)
+					}
+					endA := func() {
+						mm.ServeExactWorker(names)
+						mm.ServeExactPool(models.PoolKeyNone, nil)
+					}
+					if late {
+						endA()
+					}
+					if door.consume(held, offered) {
+						t.Fatal("precondition: the call was answered w-0 after another of TestA's calls took it")
+					}
+					got := ""
+					for i := 0; i < 10 && got == ""; i++ {
+						mk := first(held)
+						if mk == nil {
+							got = "a miss"
+						} else if door.consume(held, mk) {
+							got = mk.Name
+						}
+					}
+					want := "w-1"
+					if recorded == 1 {
+						want = "a miss"
+					}
+					if got != want {
+						t.Errorf("the call read again was answered %q; want %s, as a call whose consume lands before TestA ends: it reads on in TestA's window, which spent w-0", got, want)
+					}
+					if sv, ok := integrations.SequenceViewOf(held); !ok || sv.Test != "TestA" || sv.Worker == nil {
+						t.Errorf("after the refusal the call walks %q's view (worker band %v); want TestA's, with the worker band", sv.Test, sv.Worker != nil)
+					}
+					if !late {
+						endA()
+					}
+					mm.ServeExactWorker(names)
+					mm.ServeExactTest("TestB", nil)
+					gotB := []string{door.ask(t, mm, "w-"), door.ask(t, mm, "w-")}
+					wantB := []string{"w-2", "a miss"}
+					if recorded == 1 {
+						wantB = []string{"a miss", "a miss"}
+					}
+					if !reflect.DeepEqual(gotB, wantB) {
+						t.Errorf("TestB's window was answered %v; want %v: the late call spent its answer for the windows, as at once", gotB, wantB)
+					}
+				})
 			}
-			if first != "w-0" {
-				t.Errorf("the call read again between tests was answered %s; want w-0: between tests a worker recording the windows spent answers again", first)
-			}
-			mm.ServeExactWorker(names)
-			mm.ServeExactTest("TestB", nil)
-			got := []string{door.ask(t, mm, "w-"), door.ask(t, mm, "w-")}
-			if want := []string{"w-1", "a miss"}; !reflect.DeepEqual(got, want) {
-				t.Errorf("TestB's window was answered %v; want %v (the call between tests spent nothing for the windows)", got, want)
-			}
-		})
+		}
 	}
 }

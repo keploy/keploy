@@ -1195,14 +1195,17 @@ func (h *heldScope) SequenceView() (integrations.SequenceView, bool) {
 // it, and the next test's never does. Before, it settled in the view in
 // force, which refused it, and the call missed with its own recording
 // unanswered, or read on in the view in force and was answered by the next
-// test's. Its other consumes settle in the view in force (roundGuard): one
-// the view in force refuses is a miss, as a consume that lands after a
-// test's begin or end is. A call marked where the learn tracker had begun a
-// test the store had not opened is decided in the test the store opens next
-// (integrations.CallRound.TrackerAhead): it reads the view in force, and
-// walks and spends the worker scope there too, as does a call whose mark
-// kept no view, and one whose consume the view in force refused (settled:
-// one of a recording not its own test's).
+// test's. Its other consumes settle in the view in force (roundGuard),
+// spending the worker scope for the view the call was read in (windowed):
+// one the view in force refuses because that spend says another call took
+// the recording keeps the call reading in its own view, which no longer
+// offers it, so the call is answered by the next recording its own view
+// offers, or misses there, as at zero latency (settled). A call marked where
+// the learn tracker had begun a test the store had not opened is decided in
+// the test the store opens next (integrations.CallRound.TrackerAhead): it
+// reads the view in force, and walks and spends the worker scope there too,
+// as does a call whose mark kept no view, and one whose consume the view in
+// force refused while its own view still offers the recording (settled).
 // One rule for the three, so one worker recording never answers two calls
 // in the windows, wherever a test's begin lands between a call's mark and
 // its read.

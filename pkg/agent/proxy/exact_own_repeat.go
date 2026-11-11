@@ -232,26 +232,50 @@ func (h *heldScope) MarkMockAsUsed(mock models.Mock) bool {
 }
 
 // settled is ok, a consume door's answer for mk, after h took a refusal into
-// its reads: once a consume the view in force settles is refused while h
-// reads in another view (readIn: a test's begin or end installed the view in
-// force after the call's read), h reads, walks and spends in the view in
-// force from then on (heldScope.readView). A parser takes a refused consume
-// for a recording another call took, and reads again: read in the view the
-// call was read in, the recording the view in force refused was offered
-// again, and refused again, without end (the Generic parser's matcher spun
-// on a test's own exchange once the test ended under the call). Read in the
-// view in force, the call reads what any call made now reads: that
-// recording is not offered, and the call is answered by another or misses,
-// as a call read after the begin or end is. A consume of one of the call's
-// own test's recordings settles in the view it was read in
-// (roundGuard.ownView), so one refused there keeps h reading there: that
-// view no longer offers the recording, and the call is answered by another
-// of its own or misses there, as at once, never by the next test's.
+// its reads. A parser takes a refused consume for a recording another call
+// took, and reads again. While h reads in another view (readIn: a test's
+// begin or end installed the view in force after the call's read), a
+// consume the view in force settles and refuses keeps h reading there when
+// that view no longer offers mk either (offers): it refused what the call's
+// own view refuses, a recording another call took. A worker recording is
+// spent for the view the call was read in (roundGuard.windowed), so one
+// another window's call took is refused in the view in force and in the
+// call's window alike: read on in its window, the call is answered by the
+// next worker recording the windows left, or misses there, as at zero
+// latency. Read in the view in force instead, a call whose test ended under
+// it read the worker scope as a call between tests does, where a recording the windows
+// spent answers again, so a call one more than the windows recorded passed,
+// and a later window missed a recording the late call took. When the
+// call's view still offers mk, h reads, walks and spends in the view in
+// force from then on (heldScope.readView): read in its own view, the
+// recording the view in force refused would be offered again, and refused
+// again, without end (the Generic parser's matcher spun on a test's own
+// exchange once the test ended under the call). Read in the view in force,
+// the call reads what any call made now reads: that recording is not
+// offered, and the call is answered by another or misses, as a call read
+// after the begin or end is. A consume of one of the call's own test's
+// recordings settles in the view it was read in (roundGuard.ownView), so one
+// refused there keeps h reading there: that view no longer offers the
+// recording, and the call is answered by another of its own or misses
+// there, as at once, never by the next test's.
 func (h *heldScope) settled(mk *models.Mock, ok bool) bool {
-	if !ok && h.elsewhere() && h.g.ownView(mk) == nil {
+	if !ok && h.elsewhere() && h.g.ownView(mk) == nil && h.g.readIn.offers(mk) {
 		h.g.readIn = nil
 	}
 	return ok
+}
+
+// offers reports whether a read of v hands mk out: one of v's own (the open
+// test's, a pool view's ahead) it has not answered, or one v shows
+// (exactView.shows: unspent, and of what v serves). False for a nil v.
+func (v *exactView) offers(mk *models.Mock) bool {
+	if v == nil || mk == nil {
+		return false
+	}
+	if v.owns(mk.Name) {
+		return !v.spentNow(mk.Name)
+	}
+	return v.shows(mk)
 }
 
 // OnConsume is a test seam: f, when not nil, runs on a consuming call's
