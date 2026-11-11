@@ -748,6 +748,18 @@ type RecordedWindowsSeeder interface {
 	SeedRecordedWindows(ws []models.TestWindow)
 }
 
+// ConsumedRewindsSeeder is the optional extension implemented by proxies whose
+// mock manager counts the passes a replay starts over its set
+// (integrations.WindowRewindCounter): SeedConsumedRewinds hands it, before the
+// call's window is set, how many times keploy test rewound the set's consumed
+// history for a retry cycle (models.MockFilterParams.ConsumedRewinds), so a
+// retry cycle that starts at the window the last one ended in starts a pass
+// too. An agent whose proxy lacks it counts a pass only where a window start
+// went back, as before.
+type ConsumedRewindsSeeder interface {
+	SeedConsumedRewinds(n uint64)
+}
+
 // RunPlaceSeeder is the optional extension implemented by proxies that hold
 // an answer's write until the replay's run reaches its recorded place
 // (integrations.RunPlacer), for a replay that seeds no recorded windows

@@ -2260,6 +2260,13 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 			seeder.SeedRecordedWindows(params.RecordedWindows)
 		}
 	}
+	// And at every call, the retry cycles the history the filter is built
+	// from was rewound for: the staging below counts a change of it with the
+	// window it sets, as a new pass over the set
+	// (integrations.WindowRewindCounter).
+	if seeder, ok := a.Proxy.(coreAgent.ConsumedRewindsSeeder); ok {
+		seeder.SeedConsumedRewinds(params.ConsumedRewinds)
+	}
 	// A staging call (recordedSetShape populated: FirstRecordedTestStart and/or
 	// RecordedWindows) marks a new test-set. Reset the stateful-dependency
 	// cursors so each test-set replays its sequences (1,2,3…) from the start
