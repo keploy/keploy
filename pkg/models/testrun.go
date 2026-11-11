@@ -53,6 +53,16 @@ type TestReport struct {
 	// (UnmatchedCall.Held). They fail the set; JUnit fails a case of its own
 	// with them, and another with the held ones.
 	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
+	// OutsideOnly says, under the proven switch, that keploy's replay failed
+	// the set for the calls its application made outside every test alone
+	// (UnclaimedCalls that are OutsideEveryTest: made between two tests, or
+	// made in a test and decided after it ended): with them left out, the
+	// set's reason is empty and it ends as its tests' verdicts end it
+	// (PASSED when none of them failed). Those calls fail the run and no
+	// test, so a reader that charges a set's own failure to every test of
+	// the set charges these tests nothing for them. false for every other
+	// set, and without the switch.
+	OutsideOnly bool `json:"outsideOnly,omitempty" yaml:"outside_only,omitempty"`
 	// AppNotStopped, under the proven switch, says why keploy read the set's
 	// end with its application still running (a stack kept across test-sets,
 	// --keep-app-alive, an application keploy did not start): a call the

@@ -2,6 +2,7 @@ package replay
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -163,6 +164,41 @@ func setCallsWhy(calls []models.UnmatchedCall) string {
 	return strings.Join(why, "; ")
 }
 
+// notOutsideEveryTest is the calls of calls the replay does not fail the set
+// with as calls outside every test (models.UnmatchedCall.OutsideEveryTest),
+// in order: made before the set's first test, or held for a later test's
+// recording.
+func notOutsideEveryTest(calls []models.UnmatchedCall) []models.UnmatchedCall {
+	var rest []models.UnmatchedCall
+	for _, c := range calls {
+		if !c.OutsideEveryTest() {
+			rest = append(rest, c)
+		}
+	}
+	return rest
+}
+
+// joinWhy is why and more, each a reason the set fails for, joined as the
+// set's reason joins them.
+func joinWhy(why, more string) string {
+	if why == "" {
+		return more
+	}
+	return why + "; " + more
+}
+
+// failedOutsideOnly reports whether the replay failed a set it ended status,
+// with the calls unclaimed charged to the set, for its calls outside every
+// test alone (models.TestReport.OutsideOnly): the set is FAILED, one of
+// unclaimed is such a call, whyWithout (the set's reason with those calls
+// left out) is empty, and without them the set ends as its tests' verdicts
+// end it (endsAsTests: those calls turned a PASSED set FAILED, or a test of
+// it failed).
+func failedOutsideOnly(status models.TestSetStatus, unclaimed []models.UnmatchedCall, endsAsTests bool, whyWithout string) bool {
+	return status == models.TestSetStatusFailed && endsAsTests && whyWithout == "" &&
+		slices.ContainsFunc(unclaimed, models.UnmatchedCall.OutsideEveryTest)
+}
+
 // betweenWhere says between which tests c, a call made Between two, was
 // made.
 func betweenWhere(c models.UnmatchedCall) string {
@@ -229,7 +265,7 @@ func recordAgainCommand(appCmd string) string {
 // held one is said as held.
 func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 	for _, c := range calls {
-		if c.Between || (c.Late && !c.Held) {
+		if c.OutsideEveryTest() {
 			msg := "test-set failed: the application made a call between two tests that no mock answered; it is outside every test, so it fails the set and no test (" + provenswitch.Env + "=1)"
 			if !c.Between {
 				msg = "test-set failed: the application made a call in a test that no mock answered, and keploy decided it only after that test ended; it is charged to no test, so it fails the set and no test (" + provenswitch.Env + "=1)"

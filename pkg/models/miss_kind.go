@@ -50,3 +50,10 @@ func (k MissMark) Before(epoch, bounds uint64) bool {
 	}
 	return k.Epoch < epoch || (k.Epoch == epoch && k.Bounds < bounds)
 }
+
+// OutsideEveryTest reports whether keploy's replay fails the set with c as a
+// call outside every test (KindOutsideEveryTest), under the proven switch:
+// made between two tests (Between), or made in a test and decided only after
+// that test ended (Late), unless a parser held it for a later test's
+// recording (Held), which the replay says as held.
+func (c UnmatchedCall) OutsideEveryTest() bool { return c.Between || c.Late && !c.Held }

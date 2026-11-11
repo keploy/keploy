@@ -6151,6 +6151,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// (unclaimed_calls.go, before_set_calls.go).
 	var unclaimed []models.UnmatchedCall
 	unclaimedReason := ""
+	// ownWhy is unclaimedReason less the calls of unclaimed made outside
+	// every test (models.UnmatchedCall.OutsideEveryTest), and
+	// failedBySetCalls says the set's calls (before_set_calls.go) turned a
+	// PASSED set FAILED: what TestReport.OutsideOnly is read from.
+	ownWhy, failedBySetCalls := "", false
 	// setAnswers are the answered calls the set's end charges to the set, no
 	// test (proven switch): made before its first test or after its last.
 	// They fail nothing (TestReport.SetAnswers, SetAnswersHook). They are
@@ -6395,6 +6400,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			} else if len(workerMissing) > 0 {
 				derivedWhy := r.exact.stopsDerivedWhy(workerMissing)
 				unclaimedReason = workerWhy(workerMissing) + derivedWhy
+				ownWhy = unclaimedReason
 				next := "if the application no longer makes these calls on its own, record the test set again"
 				if derivedWhy != "" {
 					next = "record the test set again with " + provenswitch.Env + "=1, without --sync and with mapping on: keploy record's mappings.yaml marks the calls the application makes as it is stopped, and the set's end then waits for the others"
@@ -6412,9 +6418,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					unclaimedReason += "; "
 				}
 				unclaimedReason += setCallsWhy(own) + r.exact.returnedWhy(own)
+				if rest := notOutsideEveryTest(own); len(rest) > 0 {
+					ownWhy = joinWhy(ownWhy, setCallsWhy(rest)+r.exact.returnedWhy(rest))
+				}
 				r.logSetCalls(testSetID, own)
 				if testSetStatus == models.TestSetStatusPassed {
 					testSetStatus = models.TestSetStatusFailed
+					failedBySetCalls = true
 				}
 			}
 			if len(calls) > 0 {
@@ -6423,6 +6433,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					unclaimedReason += "; "
 				}
 				unclaimedReason += unclaimedWhy(calls) + r.exact.returnedWhy(calls)
+				ownWhy = joinWhy(ownWhy, unclaimedWhy(calls)+r.exact.returnedWhy(calls))
 				r.logUnclaimed(testSetID, calls)
 				switch {
 				case conf.RecordStopKilled != "":
@@ -7062,6 +7073,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// INTERNAL_ERR is noted past this point (a failed report write returns
 	// it).
 	r.setInternalErr = internalFailure
+	shape := runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, notFoundWhy: notFoundWhy, staleWhy: staleWhy}
+	failureReason := withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, shape)))
+	shape.unclaimedWhy = ownWhy
+	outsideOnly := failedOutsideOnly(testSetStatus, unclaimed, failedBySetCalls || failure > 0,
+		withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, shape))))
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,
@@ -7073,7 +7089,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, notFoundWhy: notFoundWhy, staleWhy: staleWhy}))),
+		FailureReason: failureReason,
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
@@ -7085,6 +7101,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		RealListed:          realListed,
 		RealFailure:         realWhy,
 		UnclaimedCalls:      unclaimed,
+		OutsideOnly:         outsideOnly,
 		AppNotStopped:       appNotStopped,
 		Proven:              provenswitch.On(),
 		SetAnswers:          setAnswers,

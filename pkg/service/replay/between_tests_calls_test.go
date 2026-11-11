@@ -372,3 +372,77 @@ func TestLateWhereSaysWhatKeployKnows(t *testing.T) {
 		}
 	}
 }
+
+// A set the replay failed for its calls outside every test alone says so in
+// its report (OutsideOnly), whether every test of it passed or one failed for
+// a call of its own: those calls fail the run and no test, so a reader that
+// charges a set's own failure to all its tests charges them nothing. A set
+// that fails for something else as well (a call before its first test, one a
+// parser held for a later test's recording), or that holds no call outside
+// every test, does not say it.
+func TestRunTestSet_ASetFailedOnlyOutsideEveryTestSaysSo(t *testing.T) {
+	read := func(c models.UnmatchedCall) func() ([]models.UnmatchedCall, error) {
+		return func() ([]models.UnmatchedCall, error) { return []models.UnmatchedCall{c}, nil }
+	}
+	before := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "hello", Kind: models.MissOutsideTest, BeforeSet: true}
+	late := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /charge", Kind: models.MissInTest, Late: true, MadeIn: "test-1"}
+	held := models.UnmatchedCall{Protocol: "Kafka", ActualSummary: "fetch orders", Kind: models.MissInTest, Late: true, MadeIn: "test-1", Held: true}
+	own := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "find on carts", Kind: models.MissInTest}
+	for _, tc := range []struct {
+		name   string
+		reads  []func() ([]models.UnmatchedCall, error)
+		failed string
+		want   bool
+	}{
+		{name: "a call between two tests", reads: []func() ([]models.UnmatchedCall, error){nil, betweenWrite}, want: true},
+		{name: "a late in-test call", reads: []func() ([]models.UnmatchedCall, error){nil, read(late)}, want: true},
+		{name: "a call between two tests and a test's own miss", reads: []func() ([]models.UnmatchedCall, error){nil, betweenWrite, read(own)}, failed: "test-3", want: true},
+		{name: "a call between two tests and one before the first", reads: []func() ([]models.UnmatchedCall, error){read(before), betweenWrite}},
+		{name: "a call between two tests and a held one", reads: []func() ([]models.UnmatchedCall, error){nil, betweenWrite, read(held)}},
+		{name: "a test's own miss alone", reads: []func() ([]models.UnmatchedCall, error){nil, read(own)}, failed: "test-2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provenOn(t, true)
+			h := newPartialRunHarness(t, 3, 0)
+			h.instr.mockErrorsFor = misses(tc.reads...)
+			if status := h.run(t); status != models.TestSetStatusFailed {
+				t.Fatalf("status %s, want FAILED", status)
+			}
+			rep := h.report.report
+			if rep.OutsideOnly != tc.want {
+				t.Fatalf("OutsideOnly %v, want %v (reason %q, calls %+v)", rep.OutsideOnly, tc.want, rep.FailureReason, rep.UnclaimedCalls)
+			}
+			for _, r := range rep.Tests {
+				want := models.TestStatusPassed
+				if r.TestCaseID == tc.failed {
+					want = models.TestStatusFailed
+				}
+				if r.Status != want {
+					t.Fatalf("test %s is %s, want %s", r.TestCaseID, r.Status, want)
+				}
+			}
+		})
+	}
+}
+
+// failedOutsideOnly holds only for a FAILED set whose reason, its calls
+// outside every test left out, is empty, that ends as its tests end without
+// them, and that holds such a call.
+func TestFailedOutsideOnlyNeedsEachOfItsFacts(t *testing.T) {
+	between := []models.UnmatchedCall{{Protocol: "Mongo", Between: true}}
+	if !failedOutsideOnly(models.TestSetStatusFailed, between, true, "") {
+		t.Fatal("a FAILED set with only a call between two tests is not OutsideOnly")
+	}
+	for name, got := range map[string]bool{
+		"PASSED":       failedOutsideOnly(models.TestSetStatusPassed, between, true, ""),
+		"INTERNAL_ERR": failedOutsideOnly(models.TestSetStatusInternalErr, between, true, ""),
+		"FAILED before the calls, no test failed": failedOutsideOnly(models.TestSetStatusFailed, between, false, ""),
+		"a reason of its own":                     failedOutsideOnly(models.TestSetStatusFailed, between, true, "the run never reached mock.real"),
+		"no call outside every test":              failedOutsideOnly(models.TestSetStatusFailed, []models.UnmatchedCall{{BeforeSet: true}}, true, ""),
+		"a held late call":                        failedOutsideOnly(models.TestSetStatusFailed, []models.UnmatchedCall{{Late: true, Held: true}}, true, ""),
+	} {
+		if got {
+			t.Errorf("%s: OutsideOnly; want not", name)
+		}
+	}
+}
