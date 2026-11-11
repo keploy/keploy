@@ -860,6 +860,41 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 	}
 }
 
+// What the application left runs on only where keploy adopts it: a child
+// keploy holds no pidfd on (one a library forked) is not the application's
+// when keploy adopts nothing; a read of its children that fails says nothing
+// runs on, and one whose children keep changing that something may.
+func TestAppRunsOnOnlyWhatKeployAdopted(t *testing.T) {
+	pid, err := syscall.ForkExec("/bin/sh", []string{"sh", "-c", "sleep 30"}, &syscall.ProcAttr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		var ws syscall.WaitStatus
+		_, _ = syscall.Wait4(pid, &ws, 0, nil)
+	})
+	await(t, "the child running", func() bool { return parentIs(pid, os.Getpid()) })
+	was := adopting.Load()
+	t.Cleanup(func() { adopting.Store(was) })
+	adopting.Store(false)
+	if appRunsOn(zap.NewNop()) {
+		t.Fatal("a child keploy did not adopt reads as the application running on")
+	}
+	adopting.Store(true)
+	scan := scanChildren
+	t.Cleanup(func() { scanChildren = scan })
+	scanChildren = func() ([]child, error) { return nil, errors.New("proc is gone") }
+	if appRunsOn(zap.NewNop()) {
+		t.Fatal("a read of the children that failed says the application runs on")
+	}
+	n := 0
+	scanChildren = func() ([]child, error) { n++; return []child{{pid: 1<<22 + n}}, nil }
+	if !appRunsOn(zap.NewNop()) {
+		t.Fatal("children that kept changing over every read say nothing runs on")
+	}
+}
+
 // An application whose command exits on its own, leaving a daemon that
 // runs on, is waited on before keploy stops that daemon: the run's
 // BeforeStop is called while the daemon runs, says so, and says so no more

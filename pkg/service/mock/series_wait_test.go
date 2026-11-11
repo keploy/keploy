@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -82,7 +83,7 @@ func TestASeriesMadeAfterTheCommandExitedIsWaitedFor(t *testing.T) {
 // one) starts the count again.
 func TestASeriesTheAppNoLongerMakesIsNotMadeAfterTheStall(t *testing.T) {
 	code, r, _, logs, instr := seriesWaitRun(t, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed),
-		[][]models.MockState{{{Name: "mock-0"}, {Name: "mock-1"}}, nil, nil, {{Name: "mock-7"}}}, nil, runsOnForGood, 3)
+		[][]models.MockState{{{Name: "mock-0"}, {Name: "mock-1"}}, nil, nil, {{Name: "mock-7"}}}, nil, stopsAfter(1000), 3)
 	require.Equal(t, 1, code)
 	require.Equal(t, []RequiredNotMade{{Series: "cleanup/o::TestA/1", Rule: "cleanup@3f2a91c0", Trails: "o::TestA", Names: []string{"mock-3", "mock-5"}}}, r.RequiredNotMade)
 	require.Len(t, ruleNotMadeLines(logs), 1)
@@ -142,4 +143,55 @@ func TestTheSeriesWaitWakesSoonThenAtMostItsLongest(t *testing.T) {
 	for n, want := range map[int]time.Duration{0: seriesWakeFirst, 1: 2 * seriesWakeFirst, 3: 8 * seriesWakeFirst, 4: seriesWakeMost, 40: seriesWakeMost} {
 		require.Equal(t, want, seriesWakeAfter(n), "wake-up %d", n)
 	}
+}
+
+// awaitAlone runs the wait alone on a service whose series are seriesMappings'
+// and whose agent is instr, waking at once and stopping after three wake-ups
+// with no progress, the application running on for good.
+func awaitAlone(t *testing.T, instr Instrumentation) *mockService {
+	t.Helper()
+	wake, limit := seriesWake, seriesStallLimit
+	t.Cleanup(func() { seriesWake, seriesStallLimit = wake, limit })
+	seriesStallLimit = 3
+	seriesWake = func(context.Context) (func() <-chan time.Time, func()) {
+		return func() <-chan time.Time {
+			c := make(chan time.Time, 1)
+			c <- time.Now()
+			return c
+		}, func() {}
+	}
+	m := &mockService{logger: zap.NewNop(), instrumentation: instr, series: map[string]seriesDue{
+		"start/-/1": {Names: []string{"mock-8"}, Rule: "start@01234567"},
+	}}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("the wait failed on its own: %v", r)
+		}
+	}()
+	m.awaitRequiredSeries(context.Background(), runsOnForGood)
+	return m
+}
+
+// The wait ends with no read of what was consumed when it cannot read which
+// tests ran: from an agent that cannot say (no ScopeReader), or whose read
+// fails. A series placed at the set's start, due whatever ran, is then not
+// waited for; the run's end judges it.
+func TestTheSeriesWaitEndsWhenItCannotReadWhichTestsRan(t *testing.T) {
+	failed := newInstr(t, agentUpFromSetup, false, models.AppError{})
+	failed.windowsErr = errors.New("the agent is gone")
+	awaitAlone(t, failed)
+	require.Zero(t, failed.consumedReadCount)
+	silent := newInstr(t, agentUpFromSetup, false, models.AppError{})
+	awaitAlone(t, struct{ Instrumentation }{silent})
+	require.Zero(t, silent.consumedReadCount)
+}
+
+// A read of what was consumed that fails ends the wait: nothing is known of
+// the owed series' progress, and the run's end reads again.
+func TestTheSeriesWaitEndsOnAReadThatFails(t *testing.T) {
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{})
+	instr.consumedErr = errors.New("connection reset")
+	m := awaitAlone(t, instr)
+	require.Equal(t, 1, instr.consumedReadCount)
+	require.Empty(t, m.seriesRead)
 }
