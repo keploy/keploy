@@ -3,6 +3,7 @@ package learn
 import (
 	"slices"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
@@ -33,16 +34,25 @@ import (
 // SourceKind is what a declared source says of a field's value.
 type SourceKind uint8
 
-// SourceMinted: the application makes the field's whole value anew at the
-// call (keploy.yml's kind: minted).
-const SourceMinted SourceKind = iota + 1
+// The kinds of source keploy reads.
+const (
+	// SourceMinted: the application makes the field's whole value anew at
+	// the call (keploy.yml's kind: minted).
+	SourceMinted SourceKind = iota + 1
+	// SourceClock: the application reads the field's value from its clock
+	// for the call, within Source.Clock of the call's span (keploy.yml's
+	// kind: clock; see declaredClock).
+	SourceClock
+)
 
 // Source is what keploy.yml's rules declare of a drifted field of the call
-// (Input.Source): its Kind and the id of the rule that declares it (Rule),
-// which every line it decides names.
+// (Input.Source): its Kind, the id of the rule that declares it (Rule),
+// which every line it decides names, and, of a clock, the range its rule
+// declares (Clock: Min, Max and Res; every other field unset).
 type Source struct {
-	Kind SourceKind
-	Rule string
+	Kind  SourceKind
+	Rule  string
+	Clock models.ClockOffset
 }
 
 // Minted is what a minted rule decided of its field (Decision.Minted): the
@@ -60,7 +70,10 @@ func (dc *decider) source(path string) (Source, bool) {
 		return Source{}, false
 	}
 	s, ok := dc.in.Source(path)
-	return s, ok && s.Kind == SourceMinted
+	if !ok || s.Kind != SourceMinted && s.Kind != SourceClock {
+		return Source{}, false
+	}
+	return s, true
 }
 
 // minted decides the drifted leaf at path, which src declares minted, from

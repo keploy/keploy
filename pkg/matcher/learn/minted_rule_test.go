@@ -2,6 +2,7 @@ package learn
 
 import (
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -113,7 +114,7 @@ func TestAMintedRuleDecidesANewIdWholeWhereLearningRefusedAPieceOfIt(t *testing.
 	for name, src := range map[string]func(string) (Source, bool){
 		"a rule of another field": mMinted("body.docs.msgs.0.appId"),
 		"a kind keploy does not know": func(string) (Source, bool) {
-			return Source{Kind: SourceMinted + 1, Rule: mRule}, true
+			return Source{Kind: SourceClock + 1, Rule: mRule}, true
 		},
 	} {
 		in.Source = src
@@ -160,6 +161,17 @@ func TestAMintedRuleLeavesWhatLearningPlacedOrCouldNotRead(t *testing.T) {
 	ds := Decide(unread)
 	oRefused(t, "an earlier place keploy could not read", ds[0], RefusalUnread, "mock-7")
 	mNamesRule(t, "an earlier place keploy could not read", ds)
+
+	// A recording of the set keploy could not read back: no exchange of the
+	// call lacks its payload, so only the minted check keeps the refusal.
+	set := oInput(mPath, mRec, mLiv, nil, nil)
+	set.Given = func() ([]GivenPlaces, error) { return nil, errors.New("mock-31 is gone") }
+	set.Source = mMinted(mPath)
+	ds = Decide(set)
+	mRefused(t, "a recording of the set keploy could not read back", ds, RefusalUnread)
+	if ds[0].Minted != nil || !strings.Contains(ds[0].Line, "mock-31 is gone") {
+		t.Errorf("a recording of the set keploy could not read back: %s; want learning's unread refusal kept", oDescribe(ds))
+	}
 
 	unnamed := oInput(mPath, mRec, mLiv, nil, nil)
 	l := unnamed.Rec.Leaves[mPath]

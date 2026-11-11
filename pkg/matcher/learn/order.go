@@ -191,8 +191,10 @@ func (dc *decider) decide() ([]Decision, []string) {
 	var fields []string // fields[i] is the field out[i] decides
 	for _, path := range dc.in.Drift {
 		ds := dc.leaf(path, dc.unread)
-		if src, ok := dc.source(path); ok {
+		if src, ok := dc.source(path); ok && src.Kind == SourceMinted {
 			ds = dc.minted(path, src, ds)
+		} else if ok {
+			ds = dc.clockOnly(path, src, ds)
 		}
 		out = append(out, ds...)
 		for len(fields) < len(out) {
@@ -2066,8 +2068,18 @@ func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool)
 // a fine cut (0), a pick (1), a given's text, one templated slot of the
 // test case's request (2), an answer (3), a fine copy (4), a Clock its
 // call's window holds (5), a coarse copy (6), a read since its test began
-// (7), a client test's own value (8); else refused.
+// (7), a client test's own value (8); else refused. A field keploy.yml
+// declares a read of the clock is then decided by its rule (declaredClock).
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
+	d := dc.instantLearned(path, at, n, c)
+	if src, ok := dc.source(path); ok && src.Kind == SourceClock {
+		return dc.declaredClock(path, at, n, c, src, d)
+	}
+	return d
+}
+
+// instantLearned is instant as learning alone decides it.
+func (dc *decider) instantLearned(path string, at variables.Address, n int, c changedInstant) Decision {
 	defer dc.letGoHalves()
 	r, l := c.r, c.l
 	inScope := dc.inScope
