@@ -60,6 +60,10 @@ var credentialHeaders = map[string]bool{
 
 // learnNoise is the noise keploy.yml declares, as the learn step reads it.
 type learnNoise struct {
+	// sources is the declared sources keploy mock replay's scope table
+	// gives a recording, by name (sourcesIn): its clock rules are checked as
+	// reads of the clock (clocksWith). nil reads none.
+	sources func(mock string) []models.DeclaredSource
 	// headers are the header names never compared: keploy.yml's, and the
 	// static list's (models.FlakyHeaders) but the credentials.
 	headers map[string]bool
@@ -91,6 +95,13 @@ type learnNoise struct {
 	// candidate; one held LearnEchoOnly is learned only as an echo
 	// (heldLearned).
 	hold func(leaf string) LearnHold
+}
+
+// withSources is n reading the declared sources db's scope table gives each
+// recording (sourcesIn).
+func (n learnNoise) withSources(db integrations.MockMemDb) learnNoise {
+	n.sources = sourcesIn(db)
+	return n
 }
 
 func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][]string, urlNoise []string) learnNoise {
@@ -450,7 +461,7 @@ func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string
 // known is what a comparison with the recorded mock m excuses: keploy.yml's
 // noise, the noise learned onto m, and m's obfuscated values (Mock.Noise).
 func (n learnNoise) known(m *models.Mock) learn.Known {
-	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m)}
+	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.sources)}
 }
 
 // knownAsRecorded is known without the noise learned onto m: the recording

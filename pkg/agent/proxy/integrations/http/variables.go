@@ -1926,7 +1926,7 @@ func (h *HTTP) exactOnly(ctx context.Context, input *req, pool []*models.Mock, m
 	if len(pool) == 0 {
 		return nil, false, false, nil
 	}
-	served, _, retry, err := h.strictServe(ctx, input, pool, pool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise), statefulMocks)
+	served, _, retry, err := h.strictServe(ctx, input, pool, pool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise).withSources(mockDb), statefulMocks)
 	if err != nil || retry || served == nil {
 		return nil, false, retry, err
 	}

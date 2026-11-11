@@ -228,7 +228,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 	var strict strictNoise
 	if provenswitch.On() {
 		autoURLDynamic = false
-		strict = h.newStrictNoise(headerNoise, userBodyNoise, urlNoise)
+		strict = h.newStrictNoise(headerNoise, userBodyNoise, urlNoise).withSources(mockDb)
 	}
 
 	// reread: a claim through the strict pass's index failed (another call

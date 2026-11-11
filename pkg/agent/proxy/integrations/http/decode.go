@@ -360,7 +360,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// (a retry cycle, integrations.LearnEnder) a request is
 				// served as a replay serves it, below: nothing is paired,
 				// nor learned.
-				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, integrations.CallRound{}, &call)
+				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(mockDb), opts, integrations.CallRound{}, &call)
 				ok = stub != nil
 				if !ok {
 					// The call's one hold: the variable pass, the
@@ -413,7 +413,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// whose test recorded none of its kind still pairs; one
 					// whose view moved (-1) pairs nothing.
 					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
-					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(mockDb)
 					if extra == 0 {
 						if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
 							// Its repeat note is asked as a miss's is
@@ -453,7 +453,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					db = integrations.OwnRepeatRead(db, call, func() bool {
 						return h.ownCall(reqCtx, input, held, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
 					})
-					stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+					stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(mockDb), opts)
 					ok = stub != nil
 				}
 				if !ok && err == nil {
@@ -533,7 +533,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if lmiss == nil && provenswitch.On() {
 					// A call that came with an array in another order is
 					// unstable_order in every round, not only the full one.
-					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise))
+					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(db))
 				}
 				if lmiss != nil {
 					diag = lmiss.diag()
@@ -589,7 +589,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				var elsewhere *models.Mock
 				staged := false
 				if report != nil && provenswitch.On() && (n == 0 || !nAt.IsZero()) {
-					elsewhere, staged = notOwnedRecordingBefore(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call, nAt)
+					elsewhere, staged = notOwnedRecordingBefore(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), call, nAt)
 				} else if report != nil {
 					// A call no lookup is asked for (its view moved, or
 					// keploy cannot place the test's own recording of it)
@@ -616,7 +616,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				var earlier integrations.AnsweredCall
 				repeated := false
 				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
-					earlier, repeated = repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n)
+					earlier, repeated = repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), n)
 				}
 				// A call of the test's own that changed (it is no
 				// recording made elsewhere, nor one call more than the test
@@ -627,7 +627,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// likely follows. The miss stays the test's own.
 				var earlierRec *models.Mock
 				if elsewhere == nil && !staged && n == 0 && report != nil && provenswitch.On() {
-					earlierRec = earlierRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+					earlierRec = earlierRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), call)
 				}
 				// The call's view went after the call was decided: a
 				// test's begin or end replaced it before the miss was

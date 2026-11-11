@@ -1,6 +1,9 @@
 package learn
 
-import "go.keploy.io/server/v3/pkg/models"
+import (
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
+)
 
 // DeclaredSources is Input.Source of sources, the sources keploy.yml's
 // rules declare for one recording's fields (models.MockEntry.Sources, as
@@ -31,4 +34,55 @@ func DeclaredSources(sources []models.DeclaredSource, placeOf func(path string) 
 		src, ok := by[place]
 		return src, ok
 	}
+}
+
+// DeclaredClocks is learned, a recording's clocks as the learn step stored
+// them (models.MockSpec.Clocks, by leaf path), with the check each clock
+// rule of sources makes at its field: the rule's range as learning stores a
+// clock read (declaredOffset), keyed by the field's leaf path (LeafPath). A
+// clock rule names a read of the application's clock wherever its field
+// stands, so a replay checks it as one in a recording no learning read: a
+// worker: series a judge placed, whose call the app makes only inside a
+// test, where the background answers a call exactly and nothing is learned
+// onto it. What the learn step learned at a place stays: learning read the
+// call there. Only a field in the body counts (an index keyed by a URL or a
+// header reads no declared source; such a field compares as recorded, which
+// refuses a changed value). learned itself where sources declare no clock
+// this keploy checks (models.CheckSources refuses them all, or none is a
+// clock in the body the learn step learned nothing at); otherwise a new map.
+func DeclaredClocks(sources []models.DeclaredSource, learned map[string]models.ClockOffset) map[string]models.ClockOffset {
+	if models.CheckSources(sources) != nil {
+		return learned
+	}
+	var out map[string]models.ClockOffset
+	for _, s := range sources {
+		if s.Kind != models.DeclaredSourceClock {
+			continue
+		}
+		p, err := variables.Parse(s.Field)
+		if err != nil || p.Part != variables.PartBody {
+			continue
+		}
+		leaf, ok := placeLeafPath(p)
+		if !ok {
+			continue
+		}
+		if _, has := learned[leaf]; has {
+			continue
+		}
+		// CheckSources held each clock source's range: a cut above zero,
+		// its min at most its max (models.DeclaredSource.Check).
+		off, _ := declaredOffset(*s.Clock)
+		if out == nil {
+			out = make(map[string]models.ClockOffset, len(learned)+1)
+			for k, v := range learned {
+				out[k] = v
+			}
+		}
+		out[leaf] = off
+	}
+	if out == nil {
+		return learned
+	}
+	return out
 }

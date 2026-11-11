@@ -106,7 +106,7 @@ func (h *HTTP) ownCall(ctx context.Context, input *req, db, base integrations.Mo
 	if !ok {
 		return false
 	}
-	n := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+	n := h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db)
 	ix, _, owned, ok := h.strictIx.owned.of(base, sr, urlNoiseKey(n.url), func(owned []*models.Mock) *strictOwned { return buildStrictOwned(owned, n) })
 	if !ok {
 		return false
@@ -167,7 +167,7 @@ func (h *HTTP) answeredDiag(ctx context.Context, input *req, mockDb integrations
 		return diag
 	}
 	live := liveDestination(ctx, input)
-	_, near, err := strictCompare(ctx, input, live, answered, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+	_, near, err := strictCompare(ctx, input, live, answered, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(mockDb))
 	if err != nil {
 		return diag
 	}
