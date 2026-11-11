@@ -458,8 +458,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// both when its last thread exits, and the sweep (skipwatch.go) what a
 	// skipped run of it left. Without it the maps only grow, and once
 	// target_namespace_pids is full (10240 TGIDs: seconds of process churn,
-	// and it takes every process in the agent's PID namespace, the whole host
-	// for a native agent) no new process is intercepted, so its calls go to the real dependency with
+	// and it takes every process in the agent's PID namespace that calls
+	// socket(), of the keploy client's tree only for a native agent) no new
+	// process is intercepted, so its calls go to the real dependency with
 	// nothing recorded or mocked. (A refused insert is counted and reported,
 	// pidmaps.go; with this hook it takes more live processes than the map
 	// holds.) Attached in every mode,

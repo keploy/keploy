@@ -5,10 +5,10 @@
 #
 # The agent tracks the processes it may intercept in a BPF map,
 # target_namespace_pids (10240 entries), which sys_enter_socket fills with
-# every process that calls socket() (for a native agent, every process on the
-# host). Nothing took exited processes out, so once 10240 processes had called
-# socket() in one session (shell loops, curl per request, test-runner workers,
-# anything else on the host) it was full, and from then on every NEW process's
+# every process that calls socket() (for a native agent, every process of the
+# keploy command's own tree). Nothing took exited processes out, so once 10240
+# processes had called socket() in one session (shell loops, curl per request,
+# test-runner workers) it was full, and from then on every NEW process's
 # calls went straight to the real dependency: in record nothing was recorded, in replay the call
 # went live and passed, and nothing said so. The map now loses a process when
 # its last thread exits (k_process_exit in keploy/ebpf).
