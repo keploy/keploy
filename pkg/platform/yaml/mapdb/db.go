@@ -203,7 +203,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 // keepEntries gives each test entry Insert rebuilt from the tests' mocks
 // alone the rest of its entry (models.MappedTestCase): what the caller wrote
 // for it, else what the file held for it, so a write of a test's mocks keeps
-// its cases, dir, starts, at, real, given, key and seed. The mocks stay the
+// its cases, dir, starts, at, real, given, variables, key and seed. The mocks stay the
 // rebuild's.
 func keepEntries(rebuilt *models.Mapping, onDisk, written []models.MappedTestCase) {
 	before := make(map[string]models.MappedTestCase, len(onDisk))
@@ -257,6 +257,9 @@ func entryOver(o, w models.MappedTestCase) models.MappedTestCase {
 	}
 	if len(w.Given) > 0 {
 		o.Given = w.Given
+	}
+	if len(w.Variables) > 0 {
+		o.Variables = w.Variables
 	}
 	if w.Key != "" {
 		o.Key = w.Key
@@ -768,10 +771,18 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 			// replace what an earlier record wrote, none included, as they
 			// pair with this record's calls.
 			tc.Given = in.Given
+			// The variables a client test's request binds pair with the
+			// calls of the record that learned them: record's full round
+			// writes this record's below, none included.
+			tc.Variables = nil
 			// The seed its browser drew from in this record, none included
 			// (seeding off): the calls it pairs with were drawn from it.
 			tc.Seed = in.Seed
 		}
+		// What record's full round learned a client test's request binds
+		// (proven switch only), beside what it learned before in the round:
+		// none leaves them as they are.
+		tc.Variables = models.MergeVariables(tc.Variables, in.Variables)
 		// The mock.real destinations this record's run of the test used
 		// (proven switch only): they replace what an earlier record wrote.
 		if len(in.Real) > 0 {

@@ -918,7 +918,7 @@ func TestTableOwnIsTheRunningScopesBindingsAlone(t *testing.T) {
 
 // openTest begins test's scope on tb, as exact serving opens a test
 // (StartOpeningTest), with nothing to open.
-func openTest(tb *Table, test string) { tb.StartOpeningTest(test, func() {}, nil, nil) }
+func openTest(tb *Table, test string) { tb.StartOpeningTest(test, func() {}, nil, nil, nil) }
 
 // EndedOf is what the set's ended scopes of a test bound themselves, scope
 // by scope: nothing while the test's scope runs (its bindings are Own's),
@@ -1101,5 +1101,41 @@ func TestTableLookupOfReadsOnlyTheNamedTestsOwnScope(t *testing.T) {
 	tb.Reset()
 	if b, ended, ok := tb.LookupOf(".::TestAuthorizationDirectives", "appId0"); ok || !ended {
 		t.Fatalf("LookupOf of two ended scopes with two values = %+v ended=%v ok=%v; want none", b, ended, ok)
+	}
+}
+
+// One step opens a test's scope with both its name and its notes: the notes
+// are read in the scope from its first call, and what the scope bound itself
+// is the test's once the next begins, whose notes are its own alone. Reset
+// ends a scope as a begin does, notes and name.
+func TestAScopeOpenedForATestWithNotesKeepsItsNotesAndItsBindings(t *testing.T) {
+	var tb Table
+	tb.KeepEnded()
+	opened := false
+	tb.StartOpeningTest(".::TestAppCRUD", func() { opened = true }, nil, nil, map[string]string{"appName": "the test's request has not come"})
+	if !opened {
+		t.Fatal("open did not run")
+	}
+	if got := tb.Unbound("appName"); got != "the test's request has not come" {
+		t.Fatalf("Unbound in the scope = %q; want the note it began with", got)
+	}
+	tb.Bind(Binding{Name: "appId", Value: "94e00a23", Recorded: "c2e52a70", Mock: "mock-226", Place: "body.id"})
+	tb.StartOpeningTest(".::TestListApps", func() {}, nil, nil, map[string]string{"suite": "no pair"})
+	if got := tb.EndedOf(".::TestAppCRUD"); len(got) != 1 || got[0].Name != "appId" {
+		t.Fatalf("EndedOf once the next scope began = %+v; want the test's appId alone", got)
+	}
+	if tb.Unbound("appName") != "" || tb.Unbound("suite") != "no pair" {
+		t.Fatalf("the next scope's notes = appName %q, suite %q; want its own alone", tb.Unbound("appName"), tb.Unbound("suite"))
+	}
+	tb.Bind(Binding{Name: "suiteId", Value: "5f1e0c11", Recorded: "6a0b3d2e", Mock: "mock-301", Place: "body.id"})
+	tb.Reset()
+	if got := tb.EndedOf(".::TestListApps"); len(got) != 1 || got[0].Name != "suiteId" || tb.Unbound("suite") != "" {
+		t.Fatalf("after Reset: EndedOf = %+v, suite's note %q; want the test's suiteId alone and no note", got, tb.Unbound("suite"))
+	}
+	tb.StartOpening(func() {}, nil, nil)
+	tb.Bind(Binding{Name: "x", Value: "1", Recorded: "2", Mock: "mock-9", Place: "body.x"})
+	tb.Reset()
+	if got := tb.EndedOf(""); len(got) != 0 {
+		t.Fatalf("EndedOf of no test = %+v; want none (a scope with no test named keeps nothing)", got)
 	}
 }

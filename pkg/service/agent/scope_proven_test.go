@@ -462,6 +462,48 @@ func TestAnEndJudgesAgainstTheCountsAtItsBegin(t *testing.T) {
 	require.Contains(t, e.Reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
 }
 
+// A replayed test keploy fails for a recorded call it never made says, on its
+// evidence, whether its own harness had failed it already: such a call may be
+// one it never reached. A failure keploy imposes (a test the run cut) is not
+// the test's own.
+func TestAnEndSaysWhetherTheTestFailedOnItsOwn(t *testing.T) {
+	for _, c := range []struct {
+		outcome string
+		own     bool
+	}{{"failed", true}, {"passed", false}} {
+		t.Run(c.outcome, func(t *testing.T) {
+			a, _ := wireAgent(t, models.MODE_TEST)
+			ctx := context.Background()
+			storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
+			a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+			claimSelf(t, a)
+			_, serr := a.ProvenBegin(ctx, begin("TestA"))
+			require.Nil(t, serr)
+			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: c.outcome})
+			require.Nil(t, serr)
+			require.Equal(t, models.ScopeActionFail, e.Action)
+			w := windowOf(t, a, "o::TestA")
+			require.NotNil(t, w.Evidence)
+			require.Equal(t, []string{"mock-1"}, w.Evidence.Unconsumed)
+			require.Equal(t, c.own, w.Evidence.FailedOnItsOwn)
+		})
+	}
+	// keploy's own failure of a test it closes (why) is not the test's.
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	ev, outcome, err := a.closeOpen(ctx, "o::TestA", models.ScopeOutcomeFailed, time.Now(), "the test process exited")
+	require.NoError(t, err)
+	require.Equal(t, models.ScopeOutcomeFailed, outcome)
+	require.NotNil(t, ev)
+	require.Equal(t, []string{"mock-1"}, ev.Unconsumed)
+	require.False(t, ev.FailedOnItsOwn)
+}
+
 // A recording keploy's judging marked served, not required is not charged when
 // the test that lists it did not make its call; a mark another test's table
 // carries charges this one as before, and so does a mark on another name.

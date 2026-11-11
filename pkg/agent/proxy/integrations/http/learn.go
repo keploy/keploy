@@ -1852,7 +1852,10 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				}
 				w = oc.Window(input.arrived)
 			}
-			return learn.ClassifyGiven(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order)), answered, earlier, ""
+			// A client test's request that reached the application before
+			// the call in both runs is a place of it (learn.ClassifyArrived),
+			// where its test case binds a value the call carries whole.
+			return learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order)), answered, earlier, ""
 		}
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
@@ -2450,6 +2453,10 @@ func newPairing() pairing {
 //   - A variable is bound at its earlier place, a request place of one of
 //     the test's own HTTP mocks F served, which held the value whole, and is
 //     used here: it holds when the live value here is the one F saw there.
+//     A client test's request (learn.Place.Client) is such a place: the
+//     bind is its test case's ("test case <name>" in binds), which record's
+//     full round writes on the test's mappings entry, and each replay binds
+//     from the request that pairs with the test case.
 //   - An echo is a variable of this call alone (echo: true), bound here and
 //     answered where the recorded answer holds the value whole. Leaves of
 //     this call that drifted from the same recorded value are one variable.
@@ -2532,9 +2539,12 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 					why += "; " + l.Why
 				}
 				return p, why
-			case from.Given:
-				// The test case's own request (learn.Earlier.Given): what
+			case from.Given && !from.Client:
+				// The request keploy test sent (learn.Earlier.Given): what
 				// the application was given, which no variable binds at.
+				// A client test's request (from.Client) is the test's own
+				// first place: its test case binds the variable there,
+				// below, as an earlier call of the test does.
 				why := r.Path + " carries a value the test case's own request holds (" + from.Mock + " at " + from.Path + "), which keploy cannot follow into a call yet"
 				if l.Why != "" {
 					why += "; " + l.Why
@@ -2564,7 +2574,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 					why += "; " + l.Why
 				}
 				return p, why
-			case !own || !from.Own && (!from.Run || !provenswitch.On()):
+			case !own || !from.Own && !from.Client && (!from.Run || !provenswitch.On()):
 				// A value the run made, sent by the set's start-up or an
 				// earlier test's own call (from.Run), is the run's variable:
 				// bound there, used here, under the proven switch; without

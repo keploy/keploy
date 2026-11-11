@@ -187,6 +187,12 @@ type ScopeEvidence struct {
 	// or the mocks it consumed), so the test has no verdict of its own;
 	// keploy's verdict on the run is "not judged", never the test's fault.
 	Unread bool `json:"unread,omitempty" yaml:"unread,omitempty"`
+	// FailedOnItsOwn: in a replay, the test's harness ended it failed on
+	// its own (its own assertion, or an end with no verdict, which keploy
+	// counts failed) before this evidence failed it. The recorded calls it
+	// never made may then be calls it never reached, so they say nothing of
+	// where the app makes them. It is no evidence: Empty ignores it.
+	FailedOnItsOwn bool `json:"failedOnItsOwn,omitempty" yaml:"failedOnItsOwn,omitempty"`
 }
 
 // escapeTestName escapes a test's name for its ID (TestID), so that the ID

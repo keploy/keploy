@@ -79,7 +79,9 @@ func TestKeployMockReplayNamesTheSetsBackgroundRecordings(t *testing.T) {
 	keployDir := filepath.Join(repo, "keploy")
 	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(x2Mappings), 0o644))
-	mongo := func(name string) *models.Mock { return &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.Mongo, Name: name} }
+	mongo := func(name string) *models.Mock {
+		return &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.Mongo, Name: name}
+	}
 	db := namedMockDB{mocks: []*models.Mock{mongo("mock-0"), mongo("mock-326"), mongo("mock-463"), mongo("mock-3733"), mongo("mock-3734"), mongo("mock-3735"), mongo("mock-dup"), httpMock("mock-pat", "GET"), httpMock("mock-put", "PUT")}}
 	for _, skip := range []map[string]string{{".::TestCRUD": "flaky: flipped"}, nil} {
 		RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
