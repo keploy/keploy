@@ -404,3 +404,103 @@ func TestClaimRefusedSaysWhyAClaimIsNoPlace(t *testing.T) {
 		}
 	}
 }
+
+// TestACallListedBeforeTheClientCaseNeverHidesItsClaim: an earlier place
+// that sent the same token and is no client test's request is listed before
+// the client case: a run's call (the set's start-up, or an earlier test's)
+// or another test's call 30s before the case, or the test's own call just
+// before or after it. The call's claim is no place (a replay cannot write a
+// claim into a call's token), and the call, which sent the id only inside a
+// longer value, never hides the test case's claim, whenever it was sent:
+// both Decide (the Mongo adapter's learn step) and ClassifyArrived (the HTTP
+// adapter's) bind the id at test case post-cluster-status-3's
+// header.Authorization|jwt.cluster_id#0.
+func TestACallListedBeforeTheClientCaseNeverHidesItsClaim(t *testing.T) {
+	const rID, fID = "6af47add8a9351dfdb7c457a", "6af47b1e0c22d4e8a91b03f6"
+	rReq := time.Date(2026, 11, 11, 14, 24, 31, 630_000_000, time.UTC)
+	fReq := rReq.Add(67 * time.Second)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	token := func(id string, iat int64, sig string) string {
+		return claimToken(t, map[string]any{"cid": "e2e-free-company", "cluster_id": id, "role": "ADMIN", "iat": iat, "exp": iat + 3600}, sig)
+	}
+	rTok, fTok := token(rID, rReq.Unix(), "recorded-signature-bytes-0001"), token(fID, fReq.Unix(), "round-f-signature-bytes-00002")
+	const p, claim = "body.cmd.filter._id", "header.Authorization|jwt.cluster_id#0"
+	for _, tc := range []struct {
+		name              string
+		own, run, startUp bool
+		before            time.Duration
+	}{
+		{"a run call 30s before the case", false, true, false, -30 * time.Second},
+		{"a start-up call 30s before the case", false, true, true, -30 * time.Second},
+		{"another test's call 30s before the case", false, false, false, -30 * time.Second},
+		{"an own call 1ms after the case", true, false, false, time.Millisecond},
+		{"an own call 1ms before the case", true, false, false, -time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			at := rReq.Add(tc.before)
+			sent := Earlier{Mock: "mock-0", At: at, Own: tc.own, Run: tc.run, StartUp: tc.startUp, Payload: oPayload("mock-0", at), Seen: []Seen{{Side: Request,
+				Leaf: Leaf{Path: "header.Authorization", Noise: "header.Authorization", Type: String, Value: "Bearer " + rTok}, Live: "Bearer " + fTok, Place: "header.Authorization"}}}
+			earlier := append([]Earlier{sent}, clientPlaced(t, "post-cluster-status-3", heartbeatCase(rTok, rReq), heartbeatCase(fTok, fReq), fReq)...)
+			in := iCall(p, String, rID, fID, rCall, fCall, nil, earlier, nil)
+			in.Drifts = oClientDrifts()
+			d := oWord(t, Decide(in), rID, fID)
+			if d.Outcome != OutcomeValue || !d.From.Client || d.From.Mock != "test case post-cluster-status-3" || d.FromAt.String() != claim {
+				t.Errorf("Decide: outcome %v from %s (client %v) at %q; want a Value bound at the test case's %s", d.Outcome, d.From.Mock, d.From.Client, d.FromAt.String(), claim)
+			}
+			sh := func(v string) Shape {
+				return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+			}
+			ln := ClassifyArrived(oClientDrifts(), []string{p}, sh(fID), sh(rID), rCall, fCall, earlier, nil, nil, nil, nil)[0]
+			if ln.Kind != KindVariable || ln.From.Mock != "test case post-cluster-status-3" || !ln.From.Client || ln.From.Claim != claim {
+				t.Errorf("ClassifyArrived: %s (%s) from %s (client %v, claim %q); want a variable of the test case bound at its %s", ln.Kind, ln.Why, ln.From.Mock, ln.From.Client, ln.From.Claim, claim)
+			}
+		})
+	}
+}
+
+// TestACallsClaimNeverHidesAWholePlace: a call's request whose header the
+// run's variable is used at (the run's token, sent by every call) carries,
+// in a claim of that token, the id the find carries. A place where the run's
+// variable is used is no place of the id (placeRank), and its claim is none
+// either (claimAt: no client test's request): the id is found where it was
+// sent or given whole, a client test's request body or a call's answer, and
+// never refused as a claim of the call's token.
+func TestACallsClaimNeverHidesAWholePlace(t *testing.T) {
+	const rID, fID = "6af47add8a9351dfdb7c457a", "6af47b1e0c22d4e8a91b03f6"
+	rReq := time.Date(2026, 11, 11, 14, 24, 31, 630_000_000, time.UTC)
+	fReq := rReq.Add(67 * time.Second)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	token := func(id string, sig string) string {
+		return "Bearer " + claimToken(t, map[string]any{"cid": "e2e-free-company", "cluster_id": id}, sig)
+	}
+	sent := iSent("mock-0", rReq.Add(time.Millisecond), "header.Authorization", String, token(rID, "recorded-signature"), token(fID, "this-run-signature"))
+	sent.Seen[0].Place, sent.Seen[0].Name = "header.Authorization", models.RunVariablePrefix+"token"
+	const p = "body.cmd.filter._id"
+	sh := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	clientCase := func(id string, at time.Time) *models.HTTPReq {
+		return &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/cluster/status", Timestamp: at,
+			Header: map[string]string{"Content-Type": "application/json", "Host": "localhost:8083"}, Body: `{"cluster_id":"` + id + `","status":"active"}`}
+	}
+	answered := Earlier{Mock: "mock-1", At: rReq.Add(time.Millisecond), Own: true, Payload: oPayload("mock-1", rReq.Add(time.Millisecond)), Seen: []Seen{{Side: Response,
+		Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: rID}, Live: fID}}}
+	for _, tc := range []struct {
+		name       string
+		earlier    func(t *testing.T) []Earlier
+		dc         *DriftCache
+		mock, path string
+	}{
+		{"a client test's request body", func(t *testing.T) []Earlier {
+			return append([]Earlier{sent}, clientPlaced(t, "post-cluster-status-3", clientCase(rID, rReq), clientCase(fID, fReq), fReq)...)
+		}, oClientDrifts(), "test case post-cluster-status-3", "body.cluster_id"},
+		{"a call's answer", func(*testing.T) []Earlier { return []Earlier{sent, answered} }, oDrifts(), "mock-1", "body.id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln := ClassifyArrived(tc.dc, []string{p}, sh(fID), sh(rID), rCall, fCall, tc.earlier(t), nil, nil, nil, nil)[0]
+			if ln.From.Mock != tc.mock || ln.From.Path != tc.path || !ln.From.Whole || ln.From.Claim != "" {
+				t.Fatalf("%s (%s) from %s %s (whole %v, claim %q); want the id found whole at %s %s, not at a claim of mock-0's token", ln.Kind, ln.Why, ln.From.Mock, ln.From.Path, ln.From.Whole, ln.From.Claim, tc.mock, tc.path)
+			}
+		})
+	}
+}
