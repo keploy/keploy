@@ -263,3 +263,41 @@ func TestTable_AReaderCarriesTheRunsMintedValuesWhenItTurnsToAnotherTable(t *tes
 		t.Fatalf("the reader itself: refused beside %+v, want its own earlier binding", with)
 	}
 }
+
+// A binding of the call alone (Binding.Call: a recording no test owns,
+// whose value each serve mints anew) binds no name, so each serve binds
+// a new value under the one name; its value is still checked against the
+// run's minted values and kept among them, so a later reuse of it, by a
+// call's binding or a test's variable, is refused, naming it. A test's
+// variable at its own place of its recording, bound beside it in one call,
+// is no reuse; one at another place is.
+func TestTable_ACallsMintedBindingIsKeptInTheRunAndBindsNoName(t *testing.T) {
+	var tb Table
+	call := func(value string) Binding {
+		b := mintedB("poolId", value)
+		b.Call = true
+		return b
+	}
+	bindMinted(t, &tb, true, call(mintLive))
+	if b, ok := tb.Lookup("poolId"); ok {
+		t.Fatalf("a call's binding bound its name: %+v", b)
+	}
+	bindMinted(t, &tb, true, call(mintNext))
+	if bad, with := bindMinted(t, &tb, false, call(mintLive)); bad.Name != "poolId" || with.Value != mintLive || with.Name != "poolId" {
+		t.Fatalf("a call's reuse refused %s beside %+v, want poolId beside the run's first", bad.Name, with)
+	}
+	if _, with := bindMinted(t, &tb, false, mintedB("auditId", mintNext)); with.Name != "poolId" || !with.Call {
+		t.Fatalf("a test's reuse of a call's value refused beside %+v, want the call's binding", with)
+	}
+	tb.Reset() // the next test: the run's minted values stay
+	if bad, _ := bindMinted(t, &tb, false, call(mintNext)); bad.Name != "poolId" {
+		t.Fatalf("a reuse in the next test refused %s, want poolId", bad.Name)
+	}
+	const one, two = "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d", "6f5e4d3c-2b1a-4a5b-8c9d-0e1f2a3b4c5d"
+	bindMinted(t, &tb, true, mintedB("auditId", one), call(one))
+	elsewhere := call(two)
+	elsewhere.Place = "body.ref"
+	if bad, with := bindMinted(t, &tb, false, mintedB("clusterId", two), elsewhere); bad.Name != "poolId" || with.Name != "clusterId" {
+		t.Fatalf("one call's value at two places refused %s beside %s, want poolId beside clusterId", bad.Name, with.Name)
+	}
+}

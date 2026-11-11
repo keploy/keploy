@@ -451,6 +451,14 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 	}
 	inForce, beside, minted := t.all(from), t.readersScopes(), t.mintedOf(from)
 	for i, b := range bs {
+		if b.Call {
+			// A binding of this call alone binds no name: its minted
+			// value is checked against the run's and is kept below.
+			if with, bad := mintedBeside(minted, b, bs[:i]); bad {
+				return b, with, false, false
+			}
+			continue
+		}
 		have, bound := inForce[b.Name]
 		if bound && have.Value != b.Value {
 			return b, have, false, false
@@ -463,6 +471,10 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 		}
 	}
 	for _, b := range bs {
+		if b.Call {
+			t.keepMinted(from, b)
+			continue
+		}
 		if _, bound := t.lookup(from, b.Name); !bound {
 			t.put(b)
 			t.keepMinted(from, b)
@@ -476,7 +488,10 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 // earlier (bound with it, before it), and the binding whose value it
 // reuses: none where its own value refuses it (its recorded one, or
 // another shape). MintedWhy(b, with) says why. A binding of earlier with
-// b's name and value is b's own, bound twice by the call.
+// b's name and value is b's own, bound twice by the call, and so is one
+// at b's own place of b's recording where either is a binding of the call
+// alone (Binding.Call) beside a test's variable there: one value at one
+// place is no reuse.
 func mintedBeside(minted map[string]Binding, b Binding, earlier []Binding) (with Binding, bad bool) {
 	if b.Minted == nil {
 		return Binding{}, false
@@ -485,7 +500,7 @@ func mintedBeside(minted map[string]Binding, b Binding, earlier []Binding) (with
 		return had, true
 	}
 	for _, e := range earlier {
-		if e.Minted != nil && e.Value == b.Value && e.Name != b.Name {
+		if e.Minted != nil && e.Value == b.Value && e.Name != b.Name && !((e.Call || b.Call) && e.Mock == b.Mock && e.Place == b.Place) {
 			return e, true
 		}
 	}

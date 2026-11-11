@@ -2126,6 +2126,12 @@ type VariableBinding struct {
 	// (MockVariable.Minted): the table binds it only to a value that is
 	// new and keeps that shape (variables.MintedWhy).
 	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty"`
+	// Call marks a binding of this call alone (an echo, MockVariable.Echo:
+	// a recording no test owns that each serve mints a value at anew). The
+	// table never binds its name in a scope; a minted one's value is still
+	// checked against the run's minted values and kept among them, so a
+	// later reuse of it is refused (variables.Table.BindAll).
+	Call bool `json:"call,omitempty" yaml:"call,omitempty"`
 	// WordRun is, for a binding at a word of a value (a word address), the
 	// value span its word is in: the words its call binds at consecutive
 	// words of that text, its own among them, that hold one value (a
