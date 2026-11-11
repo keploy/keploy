@@ -95,6 +95,13 @@ type composeInstr struct {
 	// series is, by series, the worker-scope recordings a declared rule
 	// placed that push sent (models.ScopeTableReq.Series).
 	series map[string][]string
+	// sources is the declared sources the last PushProvenTable carried.
+	sources map[string][]models.DeclaredSource
+	// once is the once series the last PushProvenTable carried.
+	once []string
+	// timeForm is whether the last PushProvenTable turned the time
+	// default on.
+	timeForm bool
 	// begins and seeds are what the last push of the tests' recorded begins
 	// sent, and beginsErr what it fails with.
 	begins    map[string]time.Time
@@ -268,11 +275,12 @@ func (f *composeInstr) PushScopeTable(_ context.Context, _ map[string][]string, 
 // PushProvenTable takes the per-test table, the pool slices, the worker
 // scope, the names of it that are skipped tests' reads, the trails, the
 // recorded test windows, the recorded givens, the named repeated reads, the
-// not-required marks, the background recordings' names and the series
+// not-required marks, the background recordings' names, the series, the
+// declared sources, the once series and the time default
 // (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string) error {
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm bool) error {
 	f.table, f.pool, f.worker, f.skippedReads, f.trails, f.recordedWindows, f.given, f.repeats, f.notRequired, f.background = table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background
-	f.series = series
+	f.series, f.sources, f.once, f.timeForm = series, sources, once, timeForm
 	return nil
 }
 

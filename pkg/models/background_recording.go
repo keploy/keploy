@@ -22,6 +22,14 @@ type BackgroundRecording struct {
 	From time.Time
 }
 
+// TrailRecording is a background recording (BackgroundRecording.Mock) that
+// trails a test of the replay's scope table (MockEntry.Trails): Trails is
+// that test's ID. Read, never served (integrations.TrailRecordingsOf).
+type TrailRecording struct {
+	Mock   *Mock
+	Trails string
+}
+
 // BackgroundBinding names one place at which a background miss
 // (MockMismatchReport.Background) differs from the background recording it
 // is the same request as: the recording holds the recorded value of a

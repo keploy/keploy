@@ -851,12 +851,23 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 		return false, path + " was learned at more than one call as " + o.String() + ": no one read of the application's clock explains them all, so keploy refuses the value whatever it is. Record the test again; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
 	learned := learnedAs(path, o)
+	if o.Form != "" {
+		learned = path + " was learned as a time written as " + o.Form
+	}
 	if !o.Word.IsZero() {
 		word, why := wordIn(o.Word, live)
 		if why != "" {
 			return false, learned + why
 		}
 		o.Word, live = models.ClockWord{}, word
+	}
+	if o.Form != "" {
+		// The time default: any instant of the form passes (TimeForm); a
+		// word keeps its leaf's type (wordIn).
+		if f := TimeForm(live); f != o.Form {
+			return false, learned + ", and the value this call carries is " + formWhy(f) + ": it changed"
+		}
+		return true, ""
 	}
 	ok, why := checkClockRead(o, live, s, known, learned)
 	if ok || s.TestFrom.IsZero() || !s.TestFrom.Before(s.From) {
@@ -915,6 +926,9 @@ func ReadsAsClockRead(o models.ClockOffset, live Leaf) bool {
 			return false
 		}
 		live = word
+	}
+	if o.Form != "" {
+		return TimeForm(live) == o.Form
 	}
 	if models.LayoutTimeOfDay(o.Layout) {
 		_, _, lay, ok := timeOfDayOf(live)

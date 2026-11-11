@@ -33,7 +33,9 @@ func init() { decideBy = decideOrder }
 func decideOrder(in Input) []Decision {
 	if in.Mode == ModeElsewhere {
 		ds, fields := decideBoth(in, true)
-		return elsewhere(in, ds, fields)
+		out := elsewhere(in, ds, fields)
+		(&decider{in: in}).ruled(out, fields)
+		return out
 	}
 	ds, _ := decideBoth(in, false)
 	return ds
@@ -131,6 +133,10 @@ type decider struct {
 	// places' words (places), built at its first ask.
 	oh *outsideHeld
 	pi *placeIndex
+	// readClock: the refusal instantLearned last gave is one where learning
+	// read the value as the application's clock (heldRead), which the time
+	// default settles on any field (timeDefault).
+	readClock bool
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
@@ -188,7 +194,13 @@ func (dc *decider) decide() ([]Decision, []string) {
 	var out []Decision
 	var fields []string // fields[i] is the field out[i] decides
 	for _, path := range dc.in.Drift {
-		out = append(out, dc.leaf(path, dc.unread)...)
+		ds := dc.leaf(path, dc.unread)
+		if src, ok := dc.source(path); ok && src.Kind == SourceMinted {
+			ds = dc.minted(path, src, ds)
+		} else if ok {
+			ds = dc.clockOnly(path, src, ds)
+		}
+		out = append(out, ds...)
 		for len(fields) < len(out) {
 			fields = append(fields, path)
 		}
@@ -215,6 +227,7 @@ func (dc *decider) decide() ([]Decision, []string) {
 				Edit{Kind: EditReRecord}, dc.fieldNoise(fields[i]))
 		}
 	}
+	dc.ruled(out, fields)
 	return out, fields
 }
 
@@ -224,9 +237,16 @@ func (dc *decider) decide() ([]Decision, []string) {
 // the places apart misses. A value recorded at several places that round F
 // sent as two different new values is two reads keploy cannot tell apart:
 // each such place is refused, naming the first. Each keeps the recordings
-// it set aside as answered after the call.
+// it set aside as answered after the call. A place a minted rule decided
+// (Decision.Minted) is the first wherever it stands, so the rule's check
+// binds the value and the others use it.
 func (dc *decider) oneValue(out []Decision, fields []string) {
 	first := map[string]int{}
+	for i, d := range out {
+		if _, ok := first[d.Recorded]; !ok && d.Minted != nil {
+			first[d.Recorded] = i
+		}
+	}
 	name := func(i int) string {
 		if w := out[i].At.Word; w >= 0 {
 			return dc.in.Mock + " " + fields[i] + " word " + strconv.Itoa(w)
@@ -236,7 +256,7 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 	for i, d := range out {
 		j, ok := first[d.Recorded]
 		switch {
-		case d.Outcome != OutcomeFresh:
+		case d.Outcome != OutcomeFresh || ok && j == i:
 		case !ok:
 			first[d.Recorded] = i
 		case out[j].Outcome == OutcomeFresh && out[j].Full == d.Full:
@@ -2052,8 +2072,21 @@ func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool)
 // a fine cut (0), a pick (1), a given's text, one templated slot of the
 // test case's request (2), an answer (3), a fine copy (4), a Clock its
 // call's window holds (5), a coarse copy (6), a read since its test began
-// (7), a client test's own value (8); else refused.
+// (7), a client test's own value (8); else refused. A field keploy.yml
+// declares a read of the clock is then decided by its rule (declaredClock).
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
+	dc.readClock = false
+	d := dc.instantLearned(path, at, n, c)
+	src, declared := dc.source(path)
+	declared = declared && src.Kind == SourceClock
+	if declared {
+		d = dc.declaredClock(path, at, n, c, src, d)
+	}
+	return dc.timeDefault(path, at, n, c, d, declared)
+}
+
+// instantLearned is instant as learning alone decides it.
+func (dc *decider) instantLearned(path string, at variables.Address, n int, c changedInstant) Decision {
 	defer dc.letGoHalves()
 	r, l := c.r, c.l
 	inScope := dc.inScope
@@ -2448,7 +2481,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				if gaveRefusal != nil {
 					return *gaveRefusal
 				}
-				return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
+				return dc.heldRead(dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path)))
 			case g != "":
 				off, cutWhy, guardWhy, inWindow = models.ClockOffset{}, "", g, false
 			}
@@ -2525,7 +2558,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			if ln, sok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &off}); sok && ln.Offset != nil {
 				switch g, uncompared := dc.offsetGuard(path, *ln.Offset, enc, wb); {
 				case uncompared:
-					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
+					return dc.heldRead(dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path)))
 				case g == "":
 					return dc.clock(path, at, n, c, *ln.Offset, "a read of the application's clock made since its test began in both runs, before its call's window", false)
 				}
@@ -2738,7 +2771,7 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 		return dc.noPayloadRefusal(path, at, n, r, l)
 	}
 	if echo := dc.instantEchoed(c); echo != "" {
-		return dc.cannotCheck(path, at, n, r, l, "keploy cannot check a clock read its own call's recorded answer holds ("+echo+"): it would serve that answer's recorded moment")
+		return dc.heldRead(dc.cannotCheck(path, at, n, r, l, "keploy cannot check a clock read its own call's recorded answer holds ("+echo+"): it would serve that answer's recorded moment"))
 	}
 	if c.text {
 		lay := models.ClockOffset{Layout: clockTextLayout(r)}.MeetLayout(clockTextLayout(l))
@@ -2820,8 +2853,13 @@ func twoClockReads(src []evPlace) bool {
 func (dc *decider) copied(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
 	if i := slices.IndexFunc(src, func(p evPlace) bool { return p.clock && p.name != first.name }); i >= 0 {
-		return dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
+		d := dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
 			"the same moment was sent at "+first.name+" and "+src[i].name+", two separate reads", []string{first.name, src[i].name}, dc.fieldNoise(path))
+		if first.clock {
+			// Each source its own call's read of the clock: a copy of a read.
+			d = dc.heldRead(d)
+		}
+		return d
 	}
 	return dc.bound(path, at, n, c, src, rule)
 }

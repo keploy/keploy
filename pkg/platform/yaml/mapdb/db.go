@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"time"
 
@@ -468,10 +470,11 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 // is the last placement's. So are its Drift (MockEntry.Drift: the move rests
 // on its owner's quarantine) and its Trails (MockEntry.Trails: the earlier
 // test whose call it trails, which only the move that proved it names), and
-// its Rule, Series, Read and Unchanged (MockEntry.Rule, Series, Read,
-// Unchanged: the declared rule that placed it, its series, whether that
-// series only reads, and whether the write it recorded changed nothing,
-// which only that rule's move names). Under the switch a mock taken out of a test's list
+// its Rule, Series, Read, Unchanged and Once (MockEntry.Rule, Series, Read,
+// Unchanged, Once: the declared rule that placed it, its series, whether
+// that series only reads, whether the write it recorded changed nothing,
+// and whether the series answers once in a run, which only that rule's
+// move names). Under the switch a mock taken out of a test's list
 // names that test as its Owner (MockEntry.Owner), unless the move names one;
 // a worker entry placed again keeps its owner unless the move names one.
 // Without the switch no owner is written, so a move writes what it wrote
@@ -543,7 +546,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			mapping.Worker[i].Drift = mv.Drift
 			mapping.Worker[i].Trails = mv.Trails
 			mapping.Worker[i].Rule, mapping.Worker[i].Series, mapping.Worker[i].Read = mv.Rule, mv.Series, mv.Read
-			mapping.Worker[i].Unchanged = mv.Unchanged
+			mapping.Worker[i].Unchanged, mapping.Worker[i].Once = mv.Unchanged, mv.Once
 			if mv.Owner != "" {
 				mapping.Worker[i].Owner = mv.Owner
 			}
@@ -580,7 +583,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	entry.Drift = mv.Drift
 	entry.Trails = mv.Trails
 	entry.Rule, entry.Series, entry.Read = mv.Rule, mv.Series, mv.Read
-	entry.Unchanged = mv.Unchanged
+	entry.Unchanged, entry.Once = mv.Unchanged, mv.Once
 	// A replay serves a worker entry only while a test process of its key
 	// holds the run, and a moved entry with none would sit in the slice no
 	// test process holds: the move's key, else the test's. A test with no
@@ -673,6 +676,74 @@ func (db *MappingDb) SetRules(ctx context.Context, testSetID, digest string) err
 		return nil
 	}
 	mapping.Rules = digest
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// SetSources writes, on every entry of the set's mapping file, the sources
+// rules declared in keploy.yml give fields of its recording's request
+// (models.MockEntry.Sources), by recording name: an entry sources names
+// gets them in every list that holds it, and every other entry loses any
+// it had, so a set never keeps an earlier record's. Every other section,
+// comment and hand edit stays as it is, and a file that holds them already
+// writes nothing. Sources this keploy cannot decide a field by
+// (models.CheckSources), a name no entry has, and a set with no mapping
+// file are refused, writing nothing.
+func (db *MappingDb) SetSources(ctx context.Context, testSetID string, sources map[string][]models.DeclaredSource) error {
+	for name, of := range sources {
+		if err := models.CheckSources(of); err != nil {
+			return fmt.Errorf("write %s's declared sources of %s: %w", testSetID, name, err)
+		}
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("write %s's declared sources: the set has no mappings file", testSetID)
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return err
+	}
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
+	if err != nil {
+		return err
+	}
+	lists := [][]models.MockEntry{mapping.Startup, mapping.Runner, mapping.Worker, mapping.Shared}
+	for i := range mapping.TestCases {
+		lists = append(lists, mapping.TestCases[i].Mocks)
+	}
+	for i := range mapping.Boots {
+		lists = append(lists, mapping.Boots[i].Mocks)
+	}
+	changed, seen := false, make(map[string]bool, len(sources))
+	for _, list := range lists {
+		for i := range list {
+			want := sources[list[i].Name]
+			seen[list[i].Name] = true
+			if !reflect.DeepEqual(list[i].Sources, want) {
+				list[i].Sources = slices.Clone(want)
+				changed = true
+			}
+		}
+	}
+	for name := range sources {
+		if !seen[name] {
+			return fmt.Errorf("write %s's declared sources: its mappings file lists no recording %s", testSetID, name)
+		}
+	}
+	if !changed {
+		return nil
+	}
 	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
 	if err != nil {
 		return err

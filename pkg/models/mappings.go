@@ -106,6 +106,15 @@ type MockEntry struct {
 	// each rewrite, whatever the switch. Not Group, which is the concurrency
 	// group.
 	Rule string `json:"rule,omitempty" yaml:"rule,omitempty" bson:"rule,omitempty"`
+	// Sources is, on an entry of any list whose recording a source rule the
+	// user declared in keploy.yml matched (kind clock or minted; keploy mock
+	// record, under the proven switch, before its full round), the source
+	// each rule gives one field of the request (DeclaredSource). keploy
+	// mock replay tells the agent (models.ScopeTableReq.Sources), whose
+	// learn step decides such a field by it. Empty on every other entry.
+	// Read and kept by each rewrite, whatever the switch, and kept by a
+	// move to worker:.
+	Sources []DeclaredSource `json:"sources,omitempty" yaml:"sources,omitempty" bson:"sources,omitempty"`
 	// Series is, on an entry Rule placed, the series it belongs to, as
 	// "<rule id>/<trailed test, or ->/<n>": every entry of one series
 	// answers one canonical request with one answer. keploy mock replay
@@ -116,6 +125,16 @@ type MockEntry struct {
 	// ("trail/<trailed test>/<request>"); empty on every other entry, and
 	// kept as Rule is.
 	Series string `json:"series,omitempty" yaml:"series,omitempty" bson:"series,omitempty"`
+	// Once is, on an entry of a Series, that the rule which placed it says
+	// the application makes the series' calls once per process, for
+	// whichever test needs them first (keploy.yml mock.rules once: true on
+	// a background rule). keploy mock replay serves each entry of such a
+	// series once in the run, in a test's window or between tests, and
+	// never again: a second call of the request misses, so an application
+	// that starts making it per request is seen (models.ScopeTableReq.Once).
+	// It is required as any series is. A series is once when one entry of
+	// it says so. Kept as Series is.
+	Once bool `json:"once,omitempty" yaml:"once,omitempty" bson:"once,omitempty"`
 	// Read is, on an entry of a Series, that keploy mock record judged the
 	// series' request to read only (no insert, update, delete or other
 	// write): keploy mock replay serves it as any series and requires it

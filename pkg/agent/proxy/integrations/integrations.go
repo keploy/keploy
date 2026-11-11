@@ -1251,6 +1251,26 @@ func BackgroundRecordingsOf(db MockMemDb, kind models.Kind) []models.BackgroundR
 	return nil
 }
 
+// TrailRecordingsOf is, of db's background recordings of kind
+// (BackgroundRecordingsOf: the set's worker: and startup: recordings), each
+// that trails a test of the replay's scope table (TrailOf), with that test,
+// in recorded order. For a parser to tell a miss carries a trailed test's
+// kept value (MockMismatchReport.TrailsOf). Nothing it returns is served,
+// consumed or to be changed. nil where none trails a test, or db tells
+// neither.
+func TrailRecordingsOf(db MockMemDb, kind models.Kind) []models.TrailRecording {
+	var out []models.TrailRecording
+	for _, r := range BackgroundRecordingsOf(db, kind) {
+		if r.Mock == nil {
+			continue
+		}
+		if tr := TrailOf(db, r.Mock.Name); tr.Test != "" {
+			out = append(out, models.TrailRecording{Mock: r.Mock, Trails: tr.Test})
+		}
+	}
+	return out
+}
+
 // RoundBackgroundReader is an optional MockMemDb capability: the background
 // recordings of kind (BackgroundRecordingReader) of the set the call was
 // marked in (call, from MarkCallRound), not of the set staged when its miss
@@ -1729,6 +1749,44 @@ func TrailOf(db MockMemDb, mock string) learn.Trail {
 		return learn.Trail{}
 	}
 	return t.TrailOf(mock)
+}
+
+// DeclaredSourcesOf is an optional MockMemDb capability under the proven
+// switch: by keploy mock replay's scope table, the sources rules the user
+// declared in keploy.yml give fields of a recording's request
+// (models.ScopeTableReq.Sources, from models.MockEntry.Sources). A learn
+// step decides the call that recording answers by them
+// (learn.DeclaredSources). None where no rule declares one, and from a
+// store that cannot tell.
+type DeclaredSourcesOf interface {
+	SourcesOf(mock string) []models.DeclaredSource
+}
+
+// SourcesOf is the sources rules declared give fields of the request of
+// the recording named mock by db (DeclaredSourcesOf); none for a db that
+// cannot tell.
+func SourcesOf(db MockMemDb, mock string) []models.DeclaredSource {
+	s, ok := db.(DeclaredSourcesOf)
+	if !ok {
+		return nil
+	}
+	return s.SourcesOf(mock)
+}
+
+// TimeFormReader is an optional MockMemDb capability under the proven
+// switch: whether keploy mock replay's scope table turned on the learn
+// step's time default (models.ScopeTableReq.TimeForm), which checks a
+// changed time by its type and form alone (learn.Input.TimeForm).
+type TimeFormReader interface {
+	TimeForm() bool
+}
+
+// TimeFormOf is whether db's replay turned the time default on
+// (TimeFormReader); off for a db that cannot tell, which decides times by
+// the clock checks alone: it refuses more, never passes more.
+func TimeFormOf(db MockMemDb) bool {
+	t, ok := db.(TimeFormReader)
+	return ok && t.TimeForm()
 }
 
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of

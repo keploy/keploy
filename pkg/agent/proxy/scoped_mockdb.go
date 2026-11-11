@@ -1041,6 +1041,23 @@ func (s *scopedMockDb) TrailOf(mock string) learn.Trail {
 
 var _ integrations.TrailedTests = (*scopedMockDb)(nil)
 
+// SourcesOf forwards integrations.DeclaredSourcesOf: the sources rules
+// declared give a recording's fields by the replay's scope table are the
+// store's, whatever view a worker reads.
+func (s *scopedMockDb) SourcesOf(mock string) []models.DeclaredSource {
+	return integrations.SourcesOf(s.MockMemDb, mock)
+}
+
+var _ integrations.DeclaredSourcesOf = (*scopedMockDb)(nil)
+
+// TimeForm forwards integrations.TimeFormReader: whether the replay turned
+// the time default on is the store's, whatever view a worker reads.
+func (s *scopedMockDb) TimeForm() bool {
+	return integrations.TimeFormOf(s.MockMemDb)
+}
+
+var _ integrations.TimeFormReader = (*scopedMockDb)(nil)
+
 // RecordedWindowIndex forwards integrations.RecordedWindowIndex.
 func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
 	if w, ok := s.MockMemDb.(integrations.RecordedWindowIndex); ok {

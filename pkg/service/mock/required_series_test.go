@@ -232,7 +232,7 @@ func TestRequiredSeriesGroupsTheWorkerScope(t *testing.T) {
 	require.Equal(t, map[string]seriesDue{
 		"r/o::TestA/2": {Names: []string{"m1", "m3"}, Rule: "r@1", Trails: "o::TestA", write: true},
 		"b/-/1":        {Names: []string{"m5", "m6"}, Rule: "b@2", Place: "o::TestA", write: true},
-		"g/-/1":        {Names: []string{"m10", "m11"}, Rule: "g@4", Place: "o::TestB", write: true},
+		"g/-/1":        {Names: []string{"m10", "m11"}, Rule: "g@4", Place: "o::TestB", write: true, served: []string{"m11"}},
 	}, requiredSeries(mp, table))
 	require.Nil(t, requiredSeries(nil, table))
 	require.Nil(t, requiredSeries(&models.Mapping{Worker: []models.MockEntry{{Name: "m7"}}}, table))
@@ -280,7 +280,8 @@ var readSeriesMappings = strings.ReplaceAll(strings.ReplaceAll(seriesMappings,
 // Required once per run covers writes only: a trailing or a background
 // series keploy mock record judged a read is served, not required, so a run
 // that never made either passes with no RULE NOT MADE; a series one entry of
-// which does not say read is required, and fails the run when not made.
+// which does not say read is required, and fails the run when not made,
+// naming the write it owed (the read entry beside it is served only).
 func TestARequiredSeriesOfAReadIsServedNotRequired(t *testing.T) {
 	none := []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
 	code, r, tr, logs := seriesRunOf(t, readSeriesMappings, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), none, nil)
@@ -296,8 +297,8 @@ func TestARequiredSeriesOfAReadIsServedNotRequired(t *testing.T) {
 	code, r, tr, logs = seriesRunOf(t, mixed, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), none, nil)
 	require.Equal(t, 1, code)
 	require.Equal(t, FailedByRuleNotMade, r.FailedBy)
-	require.Equal(t, []RequiredNotMade{{Series: "seen/o::TestA/1", Rule: "seen@44aa55bb", Trails: "o::TestA", Names: []string{"mock-8", "mock-9"}}}, r.RequiredNotMade)
-	require.Equal(t, []string{"mock-8", "mock-9"}, testLine(t, tr, "o::TestA").Evidence.Unconsumed)
+	require.Equal(t, []RequiredNotMade{{Series: "seen/o::TestA/1", Rule: "seen@44aa55bb", Trails: "o::TestA", Names: []string{"mock-9"}}}, r.RequiredNotMade)
+	require.Equal(t, []string{"mock-9"}, testLine(t, tr, "o::TestA").Evidence.Unconsumed)
 	require.Len(t, ruleNotMadeLines(logs), 1)
 }
 
@@ -313,7 +314,7 @@ var unchangedSeriesMappings = strings.ReplaceAll(strings.ReplaceAll(seriesMappin
 // unchanged (or read) is served, not required, so a run that never made
 // either passes with no RULE NOT MADE. One entry that says neither, a write
 // that changed data when recorded, keeps the whole series required, and the
-// run that never made it fails.
+// run that never made it fails, naming that write.
 func TestASeriesOfWritesThatChangedNothingIsServedNotRequired(t *testing.T) {
 	none := []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
 	code, r, tr, logs := seriesRunOf(t, unchangedSeriesMappings, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), none, nil)
@@ -329,8 +330,8 @@ func TestASeriesOfWritesThatChangedNothingIsServedNotRequired(t *testing.T) {
 	code, r, tr, logs = seriesRunOf(t, mixed, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), none, nil)
 	require.Equal(t, 1, code)
 	require.Equal(t, FailedByRuleNotMade, r.FailedBy)
-	require.Equal(t, []RequiredNotMade{{Series: "seen/o::TestA/1", Rule: "seen@44aa55bb", Trails: "o::TestA", Names: []string{"mock-8", "mock-9"}}}, r.RequiredNotMade)
-	require.Equal(t, []string{"mock-8", "mock-9"}, testLine(t, tr, "o::TestA").Evidence.Unconsumed)
+	require.Equal(t, []RequiredNotMade{{Series: "seen/o::TestA/1", Rule: "seen@44aa55bb", Trails: "o::TestA", Names: []string{"mock-9"}}}, r.RequiredNotMade)
+	require.Equal(t, []string{"mock-9"}, testLine(t, tr, "o::TestA").Evidence.Unconsumed)
 	require.Len(t, ruleNotMadeLines(logs), 1)
 }
 
@@ -375,4 +376,43 @@ func TestATrailMoveSeriesIsRequiredWithNoRule(t *testing.T) {
 	ruled := RuleNotMadeLine(RequiredNotMade{Series: "cleanup/o::TestA/1", Rule: "cleanup@3f2a91c0", Trails: "o::TestA", Names: []string{"mock-3"}})
 	require.NotContains(t, ruled, `"by"`)
 	require.Contains(t, ruled, "RULE NOT MADE cleanup@3f2a91c0: ")
+}
+
+// A once series (keploy.yml mock.rules once: true with a chain) holds the
+// reads its write follows on its connection and the write: only an answered
+// write makes it. A run that answered the chain's reads and never made the
+// write is RULE NOT MADE, naming the write alone; one that answered the
+// write is made, with or without the reads.
+func TestAOnceSeriesIsMadeByItsWriteAlone(t *testing.T) {
+	mp := &models.Mapping{Worker: []models.MockEntry{
+		{Name: "mock-216", Place: "o::TestA", Rule: "touch@1a2b3c4d", Series: "touch/-/1", Once: true, Read: true},
+		{Name: "mock-219", Place: "o::TestA", Rule: "touch@1a2b3c4d", Series: "touch/-/1", Once: true, Read: true},
+		{Name: "mock-221", Place: "o::TestA", Rule: "touch@1a2b3c4d", Series: "touch/-/1", Once: true},
+	}}
+	req := requiredSeries(mp, map[string][]string{"o::TestA": nil})
+	require.Equal(t, []string{"mock-216", "mock-219", "mock-221"}, req["touch/-/1"].Names)
+	ran := []TestReceipt{{Name: "o::TestA", Outcome: models.ScopeOutcomePassed}}
+	for _, row := range []struct {
+		used    []string
+		notMade []RequiredNotMade
+	}{
+		{[]string{"mock-216", "mock-219"}, []RequiredNotMade{{Series: "touch/-/1", Rule: "touch@1a2b3c4d", Names: []string{"mock-221"}}}},
+		{[]string{"mock-216"}, []RequiredNotMade{{Series: "touch/-/1", Rule: "touch@1a2b3c4d", Names: []string{"mock-221"}}}},
+		{nil, []RequiredNotMade{{Series: "touch/-/1", Rule: "touch@1a2b3c4d", Names: []string{"mock-221"}}}},
+		{[]string{"mock-221"}, nil},
+		{[]string{"mock-216", "mock-219", "mock-221"}, nil},
+	} {
+		var consumed []models.MockState
+		for _, n := range row.used {
+			consumed = append(consumed, models.MockState{Name: n})
+		}
+		notMade, unread, unreadSets := requiredNotMade(req, ran, consumed, true)
+		require.Equal(t, row.notMade, notMade, "used %v", row.used)
+		require.Nil(t, unread)
+		require.Nil(t, unreadSets)
+		uses := ruleUses(req, ran, consumed, true, seriesRepeats{}, nil, true)
+		require.Len(t, uses, 1)
+		require.Equal(t, len(row.notMade), uses[0].NotMade, "used %v", row.used)
+		require.Equal(t, 1-len(row.notMade), uses[0].Made, "used %v", row.used)
+	}
 }

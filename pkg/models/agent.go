@@ -411,6 +411,14 @@ type ScopeTableResp struct {
 // ScopeTableReq.Series.
 const ScopeTableServedSeries = "series"
 
+// ScopeTableServedSources is ScopeTableResp.Served's name for
+// ScopeTableReq.Sources.
+const ScopeTableServedSources = "sources"
+
+// ScopeTableServedOnce is ScopeTableResp.Served's name for
+// ScopeTableReq.Once.
+const ScopeTableServedOnce = "once"
+
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
@@ -469,6 +477,33 @@ type ScopeTableReq struct {
 	// (ScopeTableResp.Served) when it serves it; the CLI refuses an agent
 	// that does not.
 	Series map[string][]string `json:"series,omitempty"`
+	// Once is, under the proven switch, the series of Series whose
+	// recordings each answer once in the run (MockEntry.Once): in a test's
+	// window or between tests, through any door, and never again, so no
+	// last-placed recording answers a repeat and a second call of the
+	// request misses. Only ids Series holds. Absent when no series is once.
+	// The agent's answer to the table names it (ScopeTableResp.Served) when
+	// it serves it; the CLI refuses an agent that does not: an older agent
+	// would answer the request again and again.
+	Once []string `json:"once,omitempty"`
+	// Sources is, under the proven switch, by recording name, the sources
+	// rules the user declared in keploy.yml give fields of the recording's
+	// request (MockEntry.Sources): only names the agent holds. The learn
+	// step decides such a field by its source where learning alone could
+	// not tell which source the value has. Absent when no rule declares
+	// one. The agent's answer to the table names it
+	// (ScopeTableResp.Served) when it learns by it, and refuses a source
+	// of a kind it does not know (DeclaredSource.Check); the CLI refuses an
+	// agent that does not name it.
+	Sources map[string][]DeclaredSource `json:"sources,omitempty"`
+	// TimeForm, under the proven switch, turns on the learn step's time
+	// default (learn.Input.TimeForm): a changed time passes with any value
+	// of the type and form it was recorded in. A caller that sets
+	// MockCmd.TimeForm (keploy's T2 commands, unless keploy.yml asks for
+	// strict times) sends it; every other caller sends none. An agent that
+	// cannot take it decides times by the clock checks alone, as with none:
+	// it refuses more, never passes more.
+	TimeForm bool `json:"timeForm,omitempty"`
 	// RepeatReads is, under the proven switch, each test's repeated reads
 	// by test ID, as whatever names them for the replay named them
 	// (mock.RegisterRepeatReadNamer): recordings of one read the test made

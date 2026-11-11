@@ -1454,7 +1454,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker)); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker), declaredSources(served, loaded), onceSeries(served, worker), m.config.Mock.TimeForm); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -1923,6 +1923,64 @@ func workerSeries(mp *models.Mapping, worker map[string][]string) map[string][]s
 			out = map[string][]string{}
 		}
 		out[e.Series] = append(out[e.Series], e.Name)
+	}
+	return out
+}
+
+// onceSeries is, of workerSeries(mp, worker), the series one entry of
+// which says it answers once in a run (models.MockEntry.Once), sorted. One
+// entry is enough: answering once is the stricter serving, so an entry
+// that lost the mark serves no more than it would with it. nil when none.
+func onceSeries(mp *models.Mapping, worker map[string][]string) []string {
+	series := workerSeries(mp, worker)
+	if len(series) == 0 {
+		return nil
+	}
+	served := map[string]bool{}
+	for _, names := range series {
+		for _, n := range names {
+			served[n] = true
+		}
+	}
+	var out []string
+	for _, e := range mp.Worker {
+		if e.Once && served[e.Name] && !slices.Contains(out, e.Series) {
+			out = append(out, e.Series)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// declaredSources is, by recording name, the sources rules declared in
+// keploy.yml give fields of its request (models.MockEntry.Sources), of
+// every list of mp that holds one: only a name the agent holds (loaded).
+// An entry several lists hold says them once. nil when no held entry has
+// one.
+func declaredSources(mp *models.Mapping, loaded []*models.Mock) map[string][]models.DeclaredSource {
+	if mp == nil {
+		return nil
+	}
+	held := make(map[string]bool, len(loaded))
+	for _, mk := range loaded {
+		if mk != nil && mk.Name != "" {
+			held[mk.Name] = true
+		}
+	}
+	lists := [][]models.MockEntry{mp.Startup, mp.Runner, mp.Worker, mp.Shared}
+	for _, tc := range mp.TestCases {
+		lists = append(lists, tc.Mocks)
+	}
+	out := map[string][]models.DeclaredSource{}
+	for _, list := range lists {
+		for _, e := range list {
+			if len(e.Sources) > 0 && held[e.Name] {
+				out[e.Name] = e.Sources
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

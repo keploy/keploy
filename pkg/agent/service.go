@@ -1146,6 +1146,32 @@ type PoolSeriesSetter interface {
 	SetPoolSeries(series map[string][]string) error
 }
 
+// PoolOnceSetter is implemented by a proxy that serves a series of
+// worker-scope recordings once in a run: SetPoolOnce installs, of keploy
+// mock replay's scope table under the proven switch, the series whose
+// recordings each answer once, in a window or between tests, and never
+// again (models.ScopeTableReq.Once).
+type PoolOnceSetter interface {
+	SetPoolOnce(once []string) error
+}
+
+// PoolSourcesSetter is implemented by a proxy whose learn step decides a
+// field by the source a rule declared in keploy.yml gives it
+// (integrations.DeclaredSourcesOf): SetPoolSources installs, of keploy mock
+// replay's scope table under the proven switch, by recording name, the
+// sources of its request's fields (models.ScopeTableReq.Sources).
+type PoolSourcesSetter interface {
+	SetPoolSources(sources map[string][]models.DeclaredSource) error
+}
+
+// PoolTimeFormSetter is implemented by a proxy whose learn step can check a
+// changed time by its form alone (the time default, learn.Input.TimeForm):
+// SetPoolTimeForm installs, of keploy mock replay's scope table under the
+// proven switch, whether it does (models.ScopeTableReq.TimeForm).
+type PoolTimeFormSetter interface {
+	SetPoolTimeForm(on bool) error
+}
+
 // SeriesRepeatReader is implemented by a proxy that serves the series
 // SetPoolSeries installs: SeriesRepeats is, by series, how many calls in the
 // current staging's tests its last-placed recording answered past the

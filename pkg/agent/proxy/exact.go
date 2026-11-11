@@ -67,7 +67,12 @@ import (
 //     the application repeats on a timer then never misses when the replay
 //     is slower than the record, and the count of repeats moves nothing.
 //     Each repeat must still be the request itself: the parser matches it
-//     as any other. A trail move's answer-once rule does not hold a series.
+//     as any other. A trail move's answer-once rule does not hold a series,
+//     but for a once series (SetPoolOnce: a call the application makes once
+//     per process, for whichever test needs it first): each of its
+//     recordings answers one call in the staging, in a window or between
+//     tests, and its last-placed recording answers no repeat, so a second
+//     call of the request misses.
 //
 // A data-plane recording a parser consumes through a delete door while no
 // test is open (a call before the first test or between tests) is consumed
@@ -382,11 +387,25 @@ type exactState struct {
 	// recording trails (SetPoolTrails): what the learn step reads such a
 	// call's scope by (TrailOf). nil until a replay sent one.
 	poolTrails atomic.Pointer[map[string]string]
+	// poolSources is, of the same scope table, by recording name, the
+	// sources rules declared in keploy.yml give fields of its request
+	// (SetPoolSources): what the learn step decides such a field by
+	// (SourcesOf). nil until a replay sent one.
+	poolSources atomic.Pointer[map[string][]models.DeclaredSource]
+	// poolTimeForm is, of the same scope table, whether the learn step
+	// checks a changed time by its form alone (SetPoolTimeForm, TimeForm).
+	// false until a replay sent it on.
+	poolTimeForm atomic.Bool
 	// poolSeries is, of the same scope table, the series the worker-scope
 	// recordings a declared rule placed belong to (SetPoolSeries): what
 	// answers a series' repeats past its recorded count in the windows
 	// (seriesIndex.againIn). nil until a replay sent one.
 	poolSeries atomic.Pointer[seriesIndex]
+	// poolOnce is, of the same scope table, the series whose recordings
+	// each answer once in the run (SetPoolOnce): what SetPoolSeries marks
+	// once on the index it builds (seriesMember.once). nil until a replay
+	// sent one.
+	poolOnce atomic.Pointer[map[string]bool]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
 	// cached for one staging generation of the trees (StagingGeneration: an
 	// exact serve does not move it), one scope table, one recording's times
@@ -912,9 +931,11 @@ func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict 
 	// answers once in the staging, wherever its call lands
 	// (outsideState.trailUsed). A trailing write in a series, a declared
 	// rule's or a trail move's, answers by its series instead
-	// (seriesIndex.againIn).
+	// (seriesIndex.againIn), and a once series' recording once in the
+	// staging, as a trailing write with no series does
+	// (seriesIndex.answersOnce).
 	series := m.exact.poolSeries.Load()
-	if isTrail(&m.exact.poolTrails, mk.Name) && !series.has(mk.Name) {
+	if answersOnce(&m.exact.poolTrails, series, mk.Name) {
 		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
 			return exactRefused
 		}
@@ -958,8 +979,10 @@ func (m *MockManager) consumeBetween(mk *models.Mock) (verdict exactVerdict, fir
 	// answers once in the staging, between tests too
 	// (outsideState.trailUsed): it is no call the app repeats between tests.
 	// A trailing write in a series, a declared rule's or a trail move's,
-	// answers again here, as the rest of the worker scope does.
-	if isTrail(&m.exact.poolTrails, mk.Name) && !m.exact.poolSeries.Load().has(mk.Name) {
+	// answers again here, as the rest of the worker scope does, but for a
+	// once series' recording, which answers once in the staging wherever
+	// its call lands (seriesIndex.answersOnce).
+	if answersOnce(&m.exact.poolTrails, m.exact.poolSeries.Load(), mk.Name) {
 		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
 			return exactRefused, false
 		}
@@ -1971,6 +1994,53 @@ func (m *MockManager) SetPoolTrails(trails map[string]string) {
 	m.exact.poolTrails.Store(&cp)
 }
 
+// SetPoolSources installs, of the replay's scope table, by recording name,
+// the sources rules declared in keploy.yml give fields of its request
+// (models.ScopeTableReq.Sources; keploy mock replay under the proven
+// switch). The learn step reads them through SourcesOf. None leaves the set
+// none, never the previous set's.
+func (m *MockManager) SetPoolSources(sources map[string][]models.DeclaredSource) {
+	cp := make(map[string][]models.DeclaredSource, len(sources))
+	for n, of := range sources {
+		if n != "" && len(of) > 0 {
+			cp[n] = slices.Clone(of)
+		}
+	}
+	m.exact.poolSources.Store(&cp)
+}
+
+var _ integrations.DeclaredSourcesOf = (*MockManager)(nil)
+
+// SourcesOf implements integrations.DeclaredSourcesOf: the sources rules
+// declared in keploy.yml give fields of the request of the recording named
+// mock (SetPoolSources), a copy; none for a recording no rule declares one
+// of, and until a replay sent them.
+func (m *MockManager) SourcesOf(mock string) []models.DeclaredSource {
+	sources := m.exact.poolSources.Load()
+	if sources == nil {
+		return nil
+	}
+	return slices.Clone((*sources)[mock])
+}
+
+// SetPoolTimeForm installs, of the replay's scope table, whether the learn
+// step checks a changed time by its form alone, the time default
+// (models.ScopeTableReq.TimeForm; keploy mock replay under the proven
+// switch). The learn step reads it through TimeForm. Every table sets it,
+// off too: a set never keeps the previous set's.
+func (m *MockManager) SetPoolTimeForm(on bool) {
+	m.exact.poolTimeForm.Store(on)
+}
+
+var _ integrations.TimeFormReader = (*MockManager)(nil)
+
+// TimeForm implements integrations.TimeFormReader: whether the replay's
+// scope table turned the time default on (SetPoolTimeForm); off until a
+// replay did.
+func (m *MockManager) TimeForm() bool {
+	return m.exact.poolTimeForm.Load()
+}
+
 // seriesIndex is a replay's series of worker-scope recordings a declared
 // rule placed (models.ScopeTableReq.Series): every recording of one series
 // answers one request with one answer.
@@ -1985,6 +2055,12 @@ type seriesIndex struct {
 type seriesMember struct {
 	id   string
 	last bool
+	// once is that the member's series answers once in a run (SetPoolOnce):
+	// each recording once in the staging, wherever its call lands
+	// (answersOnce), so its last-placed recording answers no repeat: the
+	// answer-once check refuses a second consume, and hides the recording
+	// from the reads, before againIn is asked.
+	once bool
 }
 
 // SetPoolSeries installs, of the replay's scope table, the series the
@@ -2000,6 +2076,10 @@ type seriesMember struct {
 // skipped. None leaves the set none, never the previous set's.
 func (m *MockManager) SetPoolSeries(series map[string][]string) {
 	idx := &seriesIndex{of: map[string]seriesMember{}, members: map[string][]string{}}
+	var once map[string]bool
+	if p := m.exact.poolOnce.Load(); p != nil {
+		once = *p
+	}
 	ids := make([]string, 0, len(series))
 	for id := range series {
 		ids = append(ids, id)
@@ -2011,16 +2091,49 @@ func (m *MockManager) SetPoolSeries(series map[string][]string) {
 			if _, dup := idx.of[n]; n == "" || dup {
 				continue
 			}
-			idx.of[n] = seriesMember{id: id}
+			idx.of[n] = seriesMember{id: id, once: once[id]}
 			names = append(names, n)
 		}
 		if len(names) == 0 {
 			continue
 		}
-		idx.of[names[len(names)-1]] = seriesMember{id: id, last: true}
+		idx.of[names[len(names)-1]] = seriesMember{id: id, last: true, once: once[id]}
 		idx.members[id] = names
 	}
 	m.exact.poolSeries.Store(idx)
+}
+
+// SetPoolOnce installs, of the replay's scope table, the series whose
+// recordings each answer once in the run (models.ScopeTableReq.Once): the
+// next SetPoolSeries marks their members once (seriesMember.once), so the
+// agent sends these first. Each such recording answers one call in the
+// staging, in a test's window or between tests, through any door, and never
+// again; no last-placed recording answers a repeat. None leaves the set
+// none, never the previous set's.
+func (m *MockManager) SetPoolOnce(once []string) {
+	set := make(map[string]bool, len(once))
+	for _, id := range once {
+		if id != "" {
+			set[id] = true
+		}
+	}
+	m.exact.poolOnce.Store(&set)
+}
+
+// answersOnce reports whether name answers one call in the staging,
+// wherever it lands (outsideState.trailUsed): a recording a trail move put
+// in the worker scope that no declared rule's series holds, or a recording
+// of a once series (seriesMember.once).
+func answersOnce(trails *atomic.Pointer[map[string]string], series *seriesIndex, name string) bool {
+	if series.once(name) {
+		return true
+	}
+	return isTrail(trails, name) && !series.has(name)
+}
+
+// once reports whether name is a recording of a once series of s.
+func (s *seriesIndex) once(name string) bool {
+	return s != nil && s.of[name].once
 }
 
 // has reports whether name is a recording of a series of s.
@@ -3005,9 +3118,10 @@ func (v *exactView) spentOutsideIn(name string, windowed bool) bool {
 	if v.series != nil {
 		series = v.series.Load()
 	}
-	if isTrail(v.trails, name) && !series.has(name) {
-		// A trailing write with no series that answered once is spent for
-		// the staging, in every window and between tests
+	if answersOnce(v.trails, series, name) {
+		// A trailing write with no series, or a once series' recording,
+		// that answered once is spent for the staging, in every window and
+		// between tests
 		// (outsideState.trailUsed).
 		return v.outside.trailUsed(name, e)
 	}

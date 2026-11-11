@@ -83,11 +83,36 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// Minted is, for a variable keploy.yml's rule of kind minted declares
+	// made anew at its Bind (an id the application mints there), the rule
+	// and the shape the learn step read the value with: a replay binds it
+	// only to a value that is not its recorded one, that no minted
+	// variable bound earlier in the run, and that keeps the rule's form
+	// (variables.Table.BindAll). Only the learn step sets
+	// it, with a Bind; none for any other variable.
+	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty" bson:"minted,omitempty"`
 	// Why is, for a variable the learn step wrote, why it is one and how to
 	// undo it, for a person or a tool reading the mock (the legibility
 	// rule). Only given variables (GivenPrefix) carry one for now
 	// (learn.GivenWhy). Nothing replays it.
 	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
+}
+
+// MintedShape is what a minted rule decided of a variable's value
+// (MockVariable.Minted): the id of the rule (Rule), and the form a value
+// bound there keeps (MintedForm: the prefix and the range of lengths).
+type MintedShape struct {
+	Rule       string `json:"rule" yaml:"rule" bson:"rule"`
+	MintedForm `yaml:",inline" bson:",inline"`
+}
+
+// clone is a copy of s that shares nothing with it; nil for nil.
+func (s *MintedShape) clone() *MintedShape {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	return &c
 }
 
 // ClockRead is one clock read a recorded value holds, as the learn step read
@@ -299,6 +324,17 @@ type ClockOffset struct {
 	Zone    string        `json:"zone,omitempty" yaml:"zone,omitempty" bson:"zone,omitempty"`
 	Layout  string        `json:"layout,omitempty" yaml:"layout,omitempty" bson:"layout,omitempty"`
 	AppZone string        `json:"app_zone,omitempty" yaml:"app_zone,omitempty" bson:"app_zone,omitempty"`
+	// Form, where set, is the time default's check (keploy.yml's times
+	// setting left at its default): the place is a time, and a replay passes
+	// any value of this form, whatever instant it names, with no range, cut,
+	// zone or provenance checked (learn's TimeForm names it: the decoder's
+	// type, and the text's layout with every digit and letter abstracted, so
+	// an epoch keeps its unit and a text its field order, separators, zone
+	// form and whether it writes a fraction of a second). "" checks the read
+	// by every field above, as before the default was. Two learnings of one
+	// place in two forms meet as FormApart, which Empty refuses; one with a
+	// Form and one without meet as the one without (its checks).
+	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
 	// Since is where a replay's span for the read starts: "" at its call's
 	// window (after the previous data-plane call); SinceTestBegin at the
 	// running test's begin, for a read the learn step saw made before its
@@ -1617,8 +1653,21 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 		// either zone held, met with one in UTC) names none.
 		m.AppZone = ""
 	}
+	// A form both learnings checked by is kept; two forms are no one form
+	// (FormApart); one learning that checked the read by its range keeps
+	// that check (Form ""), the stricter of the two.
+	switch {
+	case o.Form == p.Form:
+		m.Form = o.Form
+	case o.Form != "" && p.Form != "":
+		m.Form = FormApart
+	}
 	return m
 }
+
+// FormApart is the Form of a Meet of two learnings of one place that saw
+// it written in two forms (ClockOffset.Form): Empty refuses it.
+const FormApart = "apart"
 
 // Empty reports whether o is the Meet of learnings of one place that share
 // no offset: a Max not above its Min, other than a Plain o's (a Plain and
@@ -1627,7 +1676,7 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 // written in different layouts (LayoutApart); or at different Steps
 // (StepApart). Holds holds nothing for it, and String says why.
 func (o ClockOffset) Empty() bool {
-	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart || o.Step < 0
+	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart || o.Step < 0 || o.Form == FormApart
 }
 
 // MergeClocks is a and b, two sets of the places a call's learn steps
@@ -1963,6 +2012,7 @@ func (v MockVariables) Clone() MockVariables {
 		mv.Use = append([]string(nil), mv.Use...)
 		mv.Answer = append([]string(nil), mv.Answer...)
 		mv.Clock = append([]ClockRead(nil), mv.Clock...)
+		mv.Minted = mv.Minted.clone()
 		out[name] = mv
 	}
 	return out
@@ -1972,7 +2022,8 @@ func (v MockVariables) Clone() MockVariables {
 // both keeps a's bind and both's uses and answers, and is an echo only when
 // both say so. Clock goes with the bind it was read at: a's bind keeps a's,
 // one taken from b keeps b's, and a variable both bind is a clock read only
-// when both say so.
+// when both say so. Minted goes with the bind as well: a's bind keeps a's
+// (a variable both bind is checked as a says), one taken from b keeps b's.
 func MergeVariables(a, b MockVariables) MockVariables {
 	out := a.Clone()
 	for name, v := range b {
@@ -1986,6 +2037,7 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		}
 		if cur.Bind == "" {
 			cur.Bind, cur.Clock = v.Bind, append([]ClockRead(nil), v.Clock...)
+			cur.Minted = v.Minted.clone()
 		} else if v.Bind != "" && len(v.Clock) == 0 {
 			cur.Clock = nil
 		}
@@ -2070,6 +2122,10 @@ type VariableBinding struct {
 	// variable's binding whose reads were made in the same second
 	// (ReadInOneSecond), and with no other.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty"`
+	// Minted is, for a binding of a minted variable, its shape
+	// (MockVariable.Minted): the table binds it only to a value that is
+	// new and keeps that shape (variables.MintedWhy).
+	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty"`
 	// WordRun is, for a binding at a word of a value (a word address), the
 	// value span its word is in: the words its call binds at consecutive
 	// words of that text, its own among them, that hold one value (a

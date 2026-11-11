@@ -5081,6 +5081,18 @@ func (p *Proxy) SetPoolTrails(trails map[string]string) error {
 }
 
 var _ agent.PoolSeriesSetter = (*Proxy)(nil)
+var _ agent.PoolOnceSetter = (*Proxy)(nil)
+
+// SetPoolOnce implements agent.PoolOnceSetter: the series whose recordings
+// each answer once in a run, on the mock manager (MockManager.SetPoolOnce).
+func (p *Proxy) SetPoolOnce(once []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolOnce(once)
+	return nil
+}
 
 // SetPoolSeries implements agent.PoolSeriesSetter: the series of the
 // worker-scope recordings a declared rule placed, on the mock manager
@@ -5091,6 +5103,34 @@ func (p *Proxy) SetPoolSeries(series map[string][]string) error {
 		return errNoMockManager
 	}
 	m.SetPoolSeries(series)
+	return nil
+}
+
+var _ agent.PoolSourcesSetter = (*Proxy)(nil)
+
+// SetPoolSources implements agent.PoolSourcesSetter: the sources rules
+// declared in keploy.yml give fields of the recordings' requests, on the
+// mock manager (MockManager.SetPoolSources).
+func (p *Proxy) SetPoolSources(sources map[string][]models.DeclaredSource) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolSources(sources)
+	return nil
+}
+
+var _ agent.PoolTimeFormSetter = (*Proxy)(nil)
+
+// SetPoolTimeForm implements agent.PoolTimeFormSetter: whether the learn
+// step checks a changed time by its form alone, on the mock manager
+// (MockManager.SetPoolTimeForm).
+func (p *Proxy) SetPoolTimeForm(on bool) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolTimeForm(on)
 	return nil
 }
 

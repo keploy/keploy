@@ -380,6 +380,43 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a series of recordings a declared rule placed", http.StatusNotImplemented)
 			return
 		}
+		// The series that answer once in a run. Every table says them, an
+		// empty one too. An agent that cannot serve them refuses a table
+		// that has one: it would answer such a series' request again.
+		if os, ok := a.svc.(scopeOnceSetter); ok {
+			if err := os.SetScopeOnce(r.Context(), req.Once); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedOnce)
+		} else if len(req.Once) > 0 {
+			http.Error(w, "this keploy agent cannot serve a series of recordings once in a run", http.StatusNotImplemented)
+			return
+		}
+		// The sources rules declared in keploy.yml give fields of the
+		// recordings' requests. Every table says them, an empty one too.
+		// An agent that cannot learn by them, or that does not know a
+		// source's kind, refuses a table that has one.
+		if ss, ok := a.svc.(scopeSourcesSetter); ok {
+			if err := ss.SetScopeSources(r.Context(), req.Sources); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedSources)
+		} else if len(req.Sources) > 0 {
+			http.Error(w, "this keploy agent cannot learn a field by the source a rule in keploy.yml declares", http.StatusNotImplemented)
+			return
+		}
+		// Whether the learn step checks a changed time by its form alone.
+		// Every table says it, off too: a set never keeps the previous
+		// set's. An agent that cannot take it decides times by the clock
+		// checks alone: it refuses more, never passes more.
+		if ts, ok := a.svc.(scopeTimeFormSetter); ok {
+			if err := ts.SetScopeTimeForm(r.Context(), req.TimeForm); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		// The recordings keploy's judging marked served, not required, by test, before
 		// the pool is served. Every table says it, an empty one too: a set
 		// never keeps the previous set's. An agent that cannot take them
@@ -461,6 +498,26 @@ type scopeTrailsSetter interface {
 // (models.ScopeTableReq.Series, proven wire).
 type scopeSeriesSetter interface {
 	SetScopeSeries(ctx context.Context, series map[string][]string) error
+}
+
+// scopeOnceSetter installs the series of a replay whose recordings each
+// answer once in the run (models.ScopeTableReq.Once, proven wire).
+type scopeOnceSetter interface {
+	SetScopeOnce(ctx context.Context, once []string) error
+}
+
+// scopeSourcesSetter installs, by recording name, the sources rules
+// declared in keploy.yml give fields of its request for a replay
+// (models.ScopeTableReq.Sources, proven wire).
+type scopeSourcesSetter interface {
+	SetScopeSources(ctx context.Context, sources map[string][]models.DeclaredSource) error
+}
+
+// scopeTimeFormSetter installs whether a replay's learn step checks a
+// changed time by its form alone (models.ScopeTableReq.TimeForm, proven
+// wire).
+type scopeTimeFormSetter interface {
+	SetScopeTimeForm(ctx context.Context, on bool) error
 }
 
 // scopeNotRequiredSetter installs, by test, the recordings keploy's judging

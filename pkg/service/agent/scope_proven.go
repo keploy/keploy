@@ -121,6 +121,20 @@ type provenWire struct {
 	// models.ScopeTableReq.Series), which SetScopePool hands the proxy.
 	// nil when the table had none.
 	series map[string][]string
+	// once is, in a replay, the series of series whose recordings each
+	// answer once in the run (the CLI's scope table,
+	// models.ScopeTableReq.Once), which SetScopePool hands the proxy before
+	// the series. nil when the table had none.
+	once []string
+	// sources is, in a replay, by recording name, the sources rules
+	// declared in keploy.yml give fields of its request (the CLI's scope
+	// table, models.ScopeTableReq.Sources), which SetScopePool hands the
+	// proxy. nil when the table had none.
+	sources map[string][]models.DeclaredSource
+	// timeForm is, in a replay, whether the learn step checks a changed
+	// time by its form alone (the CLI's scope table,
+	// models.ScopeTableReq.TimeForm), which SetScopePool hands the proxy.
+	timeForm bool
 	// notRequired is, in a replay, by test ID, the names of the test's own
 	// list keploy's judging marked served, not required (the CLI's scope table,
 	// models.ScopeTableReq.NotRequired): its end does not charge the test
@@ -645,14 +659,36 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	a.provenMu.Lock()
 	trails := maps.Clone(a.proven.trails)
 	series := maps.Clone(a.proven.series)
+	once := slices.Clone(a.proven.once)
+	sources := maps.Clone(a.proven.sources)
+	timeForm := a.proven.timeForm
 	a.provenMu.Unlock()
 	if ts, ok := a.Proxy.(coreAgent.PoolTrailsSetter); ok {
 		if err := ts.SetPoolTrails(trails); err != nil {
 			return err
 		}
 	}
+	// The once series go first: the series index the proxy builds next
+	// reads them (MockManager.SetPoolOnce).
+	if os, ok := a.Proxy.(coreAgent.PoolOnceSetter); ok {
+		if err := os.SetPoolOnce(once); err != nil {
+			return err
+		}
+	} else if len(once) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a series of recordings once in a run")
+	}
 	if ss, ok := a.Proxy.(coreAgent.PoolSeriesSetter); ok {
 		if err := ss.SetPoolSeries(series); err != nil {
+			return err
+		}
+	}
+	if ss, ok := a.Proxy.(coreAgent.PoolSourcesSetter); ok {
+		if err := ss.SetPoolSources(sources); err != nil {
+			return err
+		}
+	}
+	if ts, ok := a.Proxy.(coreAgent.PoolTimeFormSetter); ok {
+		if err := ts.SetPoolTimeForm(timeForm); err != nil {
 			return err
 		}
 	}
@@ -698,6 +734,54 @@ func (a *Agent) SetScopeTrails(ctx context.Context, trails map[string]string) er
 	return nil
 }
 
+// SetScopeSources installs, by recording name, the sources rules declared
+// in keploy.yml give fields of its request for a replay
+// (models.ScopeTableReq.Sources), which the pool slices sent next hand the
+// proxy (SetScopePool): its learn step decides such a field by its source.
+// None leaves the set none, never the previous set's. Sources this keploy
+// cannot decide a field by (models.CheckSources: a kind a newer keploy
+// knows) are refused, and so are any for a proxy that cannot learn by
+// them: the CLI judged the recordings with them.
+func (a *Agent) SetScopeSources(ctx context.Context, sources map[string][]models.DeclaredSource) error {
+	if _, ok := a.Proxy.(coreAgent.PoolSourcesSetter); !ok && len(sources) > 0 {
+		return errors.New("this keploy agent's proxy cannot learn a field by the source a rule in keploy.yml declares")
+	}
+	for name, of := range sources {
+		if err := models.CheckSources(of); err != nil {
+			return fmt.Errorf("recording %s: %w", name, err)
+		}
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	cp := make(map[string][]models.DeclaredSource, len(sources))
+	for name, of := range sources {
+		cp[name] = slices.Clone(of)
+	}
+	a.provenMu.Lock()
+	a.proven.sources = cp
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeTimeForm installs whether a replay's learn step checks a changed
+// time by its form alone (models.ScopeTableReq.TimeForm), which the pool
+// slices sent next hand the proxy (SetScopePool). Every table says it, off
+// too: a set never keeps the previous set's. A proxy that cannot take it
+// is handed nothing and decides times by the clock checks alone, which
+// refuses more and never passes more.
+func (a *Agent) SetScopeTimeForm(ctx context.Context, on bool) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.timeForm = on
+	a.provenMu.Unlock()
+	return nil
+}
+
 // SetScopeSeries installs the series of the worker-scope recordings a
 // declared rule placed for a replay (models.ScopeTableReq.Series), which the
 // pool slices sent next hand the proxy (SetScopePool): inside the windows a
@@ -719,6 +803,26 @@ func (a *Agent) SetScopeSeries(ctx context.Context, series map[string][]string) 
 	}
 	a.provenMu.Lock()
 	a.proven.series = cp
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeOnce installs the series of a replay whose recordings each answer
+// once in the run (models.ScopeTableReq.Once), which the pool slices sent
+// next hand the proxy (SetScopePool): in a test's window or between tests,
+// and never again. None leaves the set none, never the previous set's. A
+// proxy that cannot serve them refuses some: the CLI refuses an agent that
+// does not acknowledge them.
+func (a *Agent) SetScopeOnce(ctx context.Context, once []string) error {
+	if _, ok := a.Proxy.(coreAgent.PoolOnceSetter); !ok && len(once) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a series of recordings once in a run")
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.once = slices.Clone(once)
 	a.provenMu.Unlock()
 	return nil
 }
