@@ -2320,7 +2320,7 @@ func (a *AgentClient) Run(ctx context.Context, opts models.RunOptions) (ret mode
 		// The application's command exited on its own, and what it left runs
 		// on: the run's caller waits on it (models.RunOptions.BeforeStop)
 		// before keploy stops it. Not once keploy or the user stopped the run.
-		beforeStop(runAppCtx, opts.BeforeStop, func() bool { return appRunsOn(a.logger) })
+		beforeStop(runAppCtx, opts.BeforeStop, func() bool { return appRunsOn(a.logger, app) })
 		// The daemons the app left are part of its run, and end with it
 		// (adopt_linux.go): none is judged in the next test set, and the app
 		// started again can bind their ports. An app whose shell died on
