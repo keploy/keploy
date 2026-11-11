@@ -360,6 +360,16 @@ type ClockOffset struct {
 	// hold one offset, whichever run wrote which. "" where both runs wrote
 	// one form.
 	FormF string `json:"form_f,omitempty" yaml:"form_f,omitempty" bson:"form_f,omitempty"`
+	// Claim, of a time the learn step read as the value whole of one claim
+	// of a JWT its place holds (a token the application signed and sent),
+	// names that claim: a replay opens the JWT its call carries there and
+	// checks that claim's value by Form alone (learn.HoldsClaimByForm), the
+	// claim's JSON type kept. It is learned under keploy.yml's times setting
+	// at its default only, so Form is set; every other part of the token is
+	// checked as its own learning says. "" otherwise, and then omitted. A
+	// keploy that does not read Claim checks the whole value by Form, which
+	// a token is not: it refuses it (fail closed).
+	Claim string `json:"claim,omitempty" yaml:"claim,omitempty" bson:"claim,omitempty"`
 	// Since is where a replay's span for the read starts: "" at its call's
 	// window (after the previous data-plane call); SinceTestBegin at the
 	// running test's begin, for a read the learn step saw made before its
@@ -1644,6 +1654,11 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 	// with its zone after a space, UTC's, are one read in UTC.
 	var ok bool
 	if m.Word, m.WallWord, m.Zone, ok = meetWord(o, p); !ok {
+		m.Layout = LayoutApart
+	}
+	// A read in one claim of a token and one in another, or one whole, were
+	// written in two forms too.
+	if m.Claim = o.Claim; o.Claim != p.Claim {
 		m.Layout = LayoutApart
 	}
 	// A learning whose value a replay reads in no zone of the application's

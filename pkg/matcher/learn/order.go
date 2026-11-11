@@ -1449,6 +1449,7 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 		return dc.cannotCheck(path, w.At, w.At.Word, c.r, c.l, "one run's value here is no instant")
 	}
 	c.word, c.noWord = clockWordOf(rec, live, rd, iw)
+	c.claim = claimWhole(rd, iw)
 	if iw.Rec != nil && iw.Live != nil && !iw.ByText {
 		c.rm, c.lm = iw.Rec, iw.Live
 		c.ri = typedInstant{at: time.Unix(0, iw.Rec.key.at).UTC(), res: iw.Rec.res, names: namesMoment}
@@ -1533,6 +1534,9 @@ type changedInstant struct {
 	byText, text bool
 	word         models.ClockWord
 	noWord       string
+	// claim is the JWT claim whose value whole the instant is, where the
+	// text is one claim of a token keploy opened (claimWhole); "" otherwise.
+	claim string
 	// echo is where the call's answer reads the word back (readBack, whole
 	// values too), valueEcho the same for a Value (the text whole is the
 	// adapter's echo), unnamed the first such place keploy cannot name, rec
@@ -1573,6 +1577,21 @@ func clockWordOf(rec, live string, rd textReading, iw *instantWord) (word models
 		return word, "the text around it changed too"
 	}
 	return models.ClockWordOf(rec, rs, re), ""
+}
+
+// claimWhole is the claim of a JWT that rd, a reading of a leaf's text,
+// opened as its one step, where iw, an instant rd reads, is that claim's
+// value whole in both runs: "" otherwise (a word of a claim, a claim of a
+// token inside another decoded text, any other step).
+func claimWhole(rd textReading, iw *instantWord) string {
+	if len(rd.At.Steps) != 1 || iw.RecAt != [2]int{0, len(rd.Rec)} || iw.LiveAt != [2]int{0, len(rd.Live)} {
+		return ""
+	}
+	claim, ok := strings.CutPrefix(string(rd.At.Steps[0]), string(variables.JWTClaim("")))
+	if !ok {
+		return ""
+	}
+	return claim
 }
 
 // inZone is m, a wall clock of no zone, read in the application's zone, as
@@ -2779,6 +2798,16 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 			return dc.cannotCheck(path, at, n, r, l, "its two runs write it in different layouts")
 		}
 		if c.noWord != "" {
+			if form := dc.claimForm(path, c); form != "" {
+				// The time default checks a time in a claim of a token the
+				// application signed by its form alone, at that claim.
+				off.Layout, off.Form, off.Claim = lay, form, c.claim
+				rule = "a time in the " + c.claim + " claim of a JWT, checked by its form alone (" + form + ", keploy.yml's times setting at its default), the rest of the token checked as learned; learned as " + rule
+				d := dc.learned(path, at, n, r, l, OutcomeClock, rule, c.aside)
+				off.Why = d.Line
+				d.Clock = &off
+				return d
+			}
 			return dc.cannotCheck(path, at, n, r, l, "a replay checks a clock read inside a text only as one word of the text as recorded, and "+c.noWord)
 		}
 		off.Layout, off.Word = lay, c.word
