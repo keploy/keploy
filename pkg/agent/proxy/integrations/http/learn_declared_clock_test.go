@@ -133,3 +133,56 @@ func TestLearnMatchHoldsADeclaredClockAnEarlierNameEchoes(t *testing.T) {
 		t.Fatalf("time default, the answer holds lastUsedAt: served %v, miss %+v; want the PUT answered", served != nil, miss)
 	}
 }
+
+// A key's createdAt that the application copies from the app it made, the
+// two stamped in one second when recorded and in two seconds in record's
+// full round, so the copy's bind does not hold. With a clock rule that
+// declares the key's field a read of the clock, under the time default, the
+// field is checked by its form alone and the PUT is answered. With
+// keploy.yml's times strict, or where the declared field's values are no
+// time, the PUT is refused on the bind as before.
+func TestLearnMatchChecksADeclaredTimeByFormWhereItsBindDoesNotHold(t *testing.T) {
+	run := func(field, rec, liveApp, liveKey string, timeForm bool) (*models.Mock, *learnMiss, *learnDb) {
+		h, n, opts := learnOn(t)
+		n.sources = func(mock string) []models.DeclaredSource {
+			if mock == "mock-1" {
+				return []models.DeclaredSource{{Rule: "key-created-at", Kind: models.DeclaredSourceClock, Field: "body." + field, Clock: &models.ClockOffset{Min: -time.Second, Res: time.Second}}}
+			}
+			return nil
+		}
+		body := func(v string) string { return `{"` + field + `":"` + v + `","name":"k1"}` }
+		tr := clockedTracker()
+		tr.Begin()
+		db := &learnDb{perTest: []*models.Mock{
+			learnRecorded("mock-0", 0, "POST", "/v1/apps", body(rec), nil, `{}`),
+			learnRecorded("mock-1", time.Second, "PUT", "/v1/keys/k1", body(rec), nil, `{}`),
+		}}
+		var store integrations.MockMemDb = db
+		if timeForm {
+			store = timeFormDb{db}
+		}
+		ctx := learn.WithTracker(context.Background(), tr)
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/apps", body(liveApp), nil), store, n, opts); served == nil || miss != nil {
+			t.Fatalf("the create is paired: %+v", miss)
+		}
+		served, miss, _ := h.learnMatch(ctx, live("PUT", "/v1/keys/k1", body(liveKey), nil), store, n, opts)
+		return served, miss, db
+	}
+	const rec, liveApp, liveKey = "2026-10-14T10:00:00Z", "2026-11-12T01:00:00Z", "2026-11-12T01:00:01Z"
+	served, miss, db := run("createdAt", rec, liveApp, liveKey, true)
+	if served == nil || miss != nil || len(db.consumed) != 2 {
+		t.Fatalf("a declared time, the time default on: served %v, miss %+v; want the PUT answered", served != nil, miss)
+	}
+	o, ok := db.consumed[1].Spec.Clocks["body.createdAt"]
+	if !ok || o.Form != "text 9999-99-99a99:99:99a" || !o.Plain() || !strings.Contains(o.Why, "checked by its form alone") {
+		t.Fatalf("body.createdAt learned as %+v (clocks %v); want it checked by its form alone", o, db.consumed[1].Spec.Clocks)
+	}
+	if served, miss, _ := run("createdAt", rec, liveApp, liveKey, false); served != nil || miss == nil ||
+		!strings.Contains(miss.res.Why, "body.createdAt does not hold the value the test sent at body.createdAt of mock-0") {
+		t.Errorf("FALSE GREEN? a declared time, keploy.yml's times strict: served %v, miss %+v; want the PUT refused on its bind", served != nil, miss)
+	}
+	if served, miss, _ := run("ref", "r-1", "r-9", "r-10", true); served != nil || miss == nil ||
+		!strings.Contains(miss.res.Why, "body.ref does not hold the value the test sent at body.ref of mock-0") {
+		t.Errorf("FALSE GREEN? a declared field whose values are no time, the time default on: served %v, miss %+v; want the PUT refused on its bind", served != nil, miss)
+	}
+}

@@ -93,3 +93,75 @@ func TestVariables_ATimeWhoseBindDoesNotHoldInAReplayIsCheckedByItsForm(t *testi
 		})
 	}
 }
+
+// A use's check by form (models.MockVariable.ByForm) is read only at a whole
+// use of a variable an earlier call bound: an epoch number there passes by
+// its number form. At an echo's use, at a place that binds the variable, or
+// at a word of a longer text the call must hold the bound value, whatever
+// check by form the mock names there.
+func TestVariables_ACheckByFormHoldsOnlyAtAWholeUseOfAnEarlierBind(t *testing.T) {
+	const rec, live, next = "1794429625", "1794500000", "1794500001"
+	numForm := models.ClockOffset{Form: learn.TimeForm(learn.Leaf{Type: learn.Number, Value: rec})}
+	textForm := models.ClockOffset{Form: learn.TimeForm(learn.Leaf{Type: learn.String, Value: rec})}
+	if numForm.Form == "" || textForm.Form == "" || numForm.Form == textForm.Form {
+		t.Fatalf("forms %q and %q; want an epoch's number form and its text form", numForm.Form, textForm.Form)
+	}
+	create := func(quoted bool) *models.Mock {
+		v := rec
+		if quoted {
+			v = `"` + rec + `"`
+		}
+		return at(varMock("mock-1", "POST", "http://store/apps", `{"createdAt":`+v+`}`, 201, `{}`,
+			models.MockVariables{"appCreated": bindV(rec, "body.createdAt")}), 1)
+	}
+	put := func(body string, vars models.MockVariables) *models.Mock {
+		return at(varMock("mock-2", "PUT", "http://store/keys/k1", body, 200, `{}`, vars), 2)
+	}
+	recBody := `{"createdAt":` + rec + `,"updatedAt":` + rec + `}`
+	for _, tc := range []struct {
+		what   string
+		pool   []*models.Mock
+		create string // the create's body in this replay; "" makes none
+		body   string
+		served bool
+	}{
+		{what: "an epoch number at a whole use", pool: []*models.Mock{create(false), put(recBody, models.MockVariables{
+			"appCreated": {Recorded: rec, Use: []string{"body.createdAt"}, ByForm: map[string]models.ClockOffset{"body.createdAt": numForm}}})},
+			create: `{"createdAt":` + live + `}`, body: `{"createdAt":` + next + `,"updatedAt":` + rec + `}`, served: true},
+		{what: "an epoch number at a place that binds the variable", pool: []*models.Mock{create(false), put(recBody, models.MockVariables{
+			"appCreated": {Recorded: rec, Bind: "body.createdAt", ByForm: map[string]models.ClockOffset{"body.createdAt": numForm}}})},
+			create: `{"createdAt":` + live + `}`, body: `{"createdAt":` + next + `,"updatedAt":` + rec + `}`},
+		{what: "an echo's use", pool: []*models.Mock{put(recBody, models.MockVariables{
+			"stamped": {Recorded: rec, Echo: true, Bind: "body.createdAt", Use: []string{"body.updatedAt"}, ByForm: map[string]models.ClockOffset{"body.updatedAt": numForm}}})},
+			body: `{"createdAt":` + live + `,"updatedAt":` + next + `}`},
+		{what: "a word of a longer text", pool: []*models.Mock{create(true), put(`{"note":"made at `+rec+` by k"}`, models.MockVariables{
+			"appCreated": {Recorded: rec, Use: []string{"body.note#2"}, ByForm: map[string]models.ClockOffset{"body.note#2": textForm}}})},
+			create: `{"createdAt":"` + live + `"}`, body: `{"note":"made at ` + next + ` by k"}`},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			h := newHTTP()
+			db := timedVarDb{varDb: &varDb{perTest: tc.pool}, timeForm: true}
+			match := func(r *req) (bool, *models.Mock, *matchDiag) {
+				ok, stub, diag, err := h.match(t.Context(), r, db, nil, nil, nil, true, false, false, true, true)
+				if err != nil {
+					t.Fatalf("match: %v", err)
+				}
+				return ok, stub, diag
+			}
+			if tc.create != "" {
+				if ok, stub, diag := match(liveReq("POST", "/apps", tc.create)); !ok || stub.Name != "mock-1" {
+					t.Fatalf("the create should be answered by mock-1: ok=%v stub=%v diag=%+v", ok, stub, diag)
+				}
+			}
+			ok, stub, diag := match(liveReq("PUT", "/keys/k1", tc.body))
+			if tc.served {
+				if !ok || stub.Name != "mock-2" {
+					t.Fatalf("the PUT should be answered by mock-2 by the use's number form: ok=%v stub=%v diag=%+v", ok, stub, diag)
+				}
+				return
+			}
+			wantProblem(t, ok, diag, "this call sent")
+		})
+	}
+}
