@@ -293,6 +293,12 @@ type Decision struct {
 	// Minted is set on a field a minted rule decided made anew (Input.Source):
 	// the replay checks the value it binds there against it.
 	Minted *Minted
+	// ByForm, of a Value whose field is a time (boundTime), is the time
+	// default's check of it by its form alone, which an adapter takes where
+	// it cannot hold the Value's bind (Mongo: the earlier place holds the
+	// moment in another form, and a variable holds one text); nil
+	// otherwise, and where the time default is off (Input.TimeForm).
+	ByForm *models.ClockOffset
 }
 
 // Decide is every changed word of in, decided (see above).

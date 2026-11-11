@@ -2807,8 +2807,9 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 
 // bound is a Value bound at the earliest of src, rule following that
 // place's name; From says Run where it is the start-up's or an earlier
-// test's (the run's variable), and Given (Client) where it is the test
-// case's request (a client test's).
+// test's (the run's variable), Given (Client) where it is the test case's
+// request (a client test's), and Clock where its call's learn step learned
+// it as a plain read of the clock (valueByForm reads it).
 func (dc *decider) bound(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
 	if first.trailed {
@@ -2827,7 +2828,7 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	}
 	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), places)
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
-		Given: first.given, Client: dc.clientCase(first.mock)}
+		Given: first.given, Client: dc.clientCase(first.mock), Clock: first.clock}
 	d.FromAt = fromAt
 	d.Echo = c.valueEcho
 	return d

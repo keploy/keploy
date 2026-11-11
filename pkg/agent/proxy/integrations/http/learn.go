@@ -490,6 +490,29 @@ func declaredClocksOf(learned []learn.Learned, sources func(mock string) []model
 	return learned
 }
 
+// boundTimesOf is learned, the drifted leaves of a call paired with m, each
+// variable bound whole whose field is a time given its time default's check
+// by form (learn.BoundTimeLearned: declared where a clock rule keploy.yml
+// declares names its body field, as declaredClocksOf reads the rules), in w,
+// the call's window, under the time default where timeForm is set. learnPlan
+// takes that check where round F's call does not carry the bound place's
+// value.
+func boundTimesOf(learned []learn.Learned, sources func(mock string) []models.DeclaredSource, m *models.Mock, w *learn.Window, timeForm bool) []learn.Learned {
+	var src func(path string) (learn.Source, bool)
+	if sources != nil {
+		src = learn.DeclaredBodySources(sources(m.Name))
+	}
+	for i, l := range learned {
+		declared := false
+		if src != nil {
+			s, ok := src(l.Recorded.Path)
+			declared = ok && s.Kind == learn.SourceClock
+		}
+		learned[i] = learn.BoundTimeLearned(l, declared, w, timeForm)
+	}
+	return learned
+}
+
 // knownAsRecorded is known without the noise learned onto m: the recording
 // as the learn step first compared it, for a spent mock (learn.Candidate).
 func (n learnNoise) knownAsRecorded(m *models.Mock) learn.Known {
@@ -1899,7 +1922,9 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// where its test case binds a value the call carries whole.
 			answer := classifiedAnswer(answered)
 			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
-			return declaredClocksOf(learned, n.sources, m, w, integrations.TimeFormOf(mockDb), tracker.DriftsOf(ctx), answer), answered, earlier, ""
+			timeForm := integrations.TimeFormOf(mockDb)
+			learned = declaredClocksOf(learned, n.sources, m, w, timeForm, tracker.DriftsOf(ctx), answer)
+			return boundTimesOf(learned, n.sources, m, w, timeForm), answered, earlier, ""
 		}
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
@@ -2640,7 +2665,21 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
 			}
 			if !variables.SameValue(bindLive, l.Live.Value, r.Type == learn.Number) {
-				return p, r.Path + " does not hold the value the test sent at " + bindAt + " of " + from.Mock + ", which it held when recorded"
+				held := r.Path + " does not hold the value the test sent at " + bindAt + " of " + from.Mock + ", which it held when recorded"
+				if l.ByForm != nil {
+					// A time whose bind does not hold in round F: two reads
+					// of the clock that fell in one second when recorded,
+					// no copy. The time default checks it by its form alone
+					// (learn.BoundTimeLearned).
+					o := *l.ByForm
+					o.Why += ": " + held
+					if p.clocks == nil {
+						p.clocks = map[string]models.ClockOffset{}
+					}
+					p.clocks[r.Path] = o
+					continue
+				}
+				return p, held
 			}
 			// A claim's word is its own variable: named by the place it
 			// binds at, never as the leaf whole.

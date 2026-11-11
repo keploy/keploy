@@ -1068,6 +1068,11 @@ type Learned struct {
 	// sends at one call only is bound and used nowhere, and the binding
 	// place names it.
 	Bindable bool
+	// ByForm, of a variable bound whole whose field is a time (boundTime),
+	// is the time default's check of it by its form alone, which a caller
+	// takes where round F's call does not carry the bound place's value
+	// (BoundTimeLearned); nil otherwise.
+	ByForm *models.ClockOffset
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
