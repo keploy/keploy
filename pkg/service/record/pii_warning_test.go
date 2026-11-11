@@ -136,3 +136,30 @@ func TestPIIWarningKeepsACleanTestName(t *testing.T) {
 		t.Fatalf("warning %q does not name the test case", got)
 	}
 }
+
+func TestPIIWarningScansMultipartFormFields(t *testing.T) {
+	got := piiWarnings(t, &models.TestCase{
+		HTTPReq: models.HTTPReq{
+			Method: models.Method("POST"),
+			URL:    "http://localhost:8080/signup",
+			Form: []models.FormData{
+				{Key: "contact", Values: []string{"user@example.com"}},
+				{Key: "password", Values: []string{"hunter2"}},
+				{Key: "plan", Values: []string{"basic"}},
+			},
+		},
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d warnings, want 1: %q", len(got), got)
+	}
+	for _, want := range []string{"request.form.contact (email)", "request.form.password ("} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("warning %q does not say %q", got[0], want)
+		}
+	}
+	for _, leak := range []string{"user@example.com", "hunter2", "request.form.plan"} {
+		if strings.Contains(got[0], leak) {
+			t.Errorf("warning %q should not contain %q", got[0], leak)
+		}
+	}
+}

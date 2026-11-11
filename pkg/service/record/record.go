@@ -3747,6 +3747,17 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string
 		))
 	}
 	detections = append(detections, pii.DetectBody(reqBody, "request.body")...)
+	// Capture moves multipart fields into Form and clears Body, so scan each
+	// form value under its field name as well.
+	for _, field := range testCase.HTTPReq.Form {
+		name := "request.form." + field.Key
+		if len(field.Values) == 0 {
+			detections = append(detections, pii.DetectValue(name, "")...)
+		}
+		for _, value := range field.Values {
+			detections = append(detections, pii.DetectValue(name, value)...)
+		}
+	}
 
 	detections = append(detections, pii.DetectHeaders(testCase.HTTPResp.Header, "response.header")...)
 	if testCase.HTTPResp.BodySkipped {
