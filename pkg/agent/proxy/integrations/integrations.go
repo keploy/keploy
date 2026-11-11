@@ -1840,9 +1840,14 @@ type WindowPacer interface {
 // deferred streaming tests) from one moving on, however many window changes
 // it did not wake for in between.
 //
-//   - WindowRewinds counts the test-window changes whose start went back to
-//     before the start set before them, within one staging. It never goes
-//     down; a window set again at the same start is not counted.
+//   - WindowRewinds counts the test-window changes that start a pass over
+//     the set again, within one staging: a window whose start went back to
+//     before the start set before it, and the first window set after
+//     keploy test rewound the set's consumed history for a retry cycle
+//     (models.MockFilterParams.ConsumedRewinds), at any start, the same one
+//     included. Each window change counts one at most, and the count never
+//     goes down. A window set again at the same start with no rewind of the
+//     history (the window loaded again within the pass) is not counted.
 //
 // Read it with the state WindowChanged guards: take the channel, read the
 // count, the window and the trees, and read again if the channel closed

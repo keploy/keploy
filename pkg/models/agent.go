@@ -633,6 +633,14 @@ type MockFilterParams struct {
 	// (which is O(testcases^2) marshaling). Default false = legacy behaviour.
 	AgentOwnsConsumed  bool                 `json:"agentOwnsConsumed,omitempty"`
 	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	// ConsumedRewinds is how many times keploy test rewound the set's
+	// consumed history for a retry cycle (ConsumedHistory.RewoundTo) to
+	// reach the history this filter is built from, whether or not the map is
+	// sent. A change of it starts a pass over the set again, at the window
+	// the call sets, even one at the start the last pass ended in (the
+	// agent's integrations.WindowRewindCounter). Zero for a set's own
+	// history, and from a client that predates it.
+	ConsumedRewinds uint64 `json:"consumedRewinds,omitempty"`
 	// ConsumedHistory, when set, is the history TotalConsumedMocks is the live
 	// map of (ConsumedHistory.Map). It lets the client send an agent that
 	// already holds an earlier state of it only the entries written since

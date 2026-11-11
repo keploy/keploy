@@ -111,6 +111,14 @@ func TestRewindConsumedForRetryCycleMarksAgentHistoryStale(t *testing.T) {
 		t.Fatal("the finished cycle's consumption was not folded into the across-cycles record; the " +
 			"post-loop telemetry and PersistMockNoise readers would be incomplete")
 	}
+	// Each rewind is counted on the history it hands back, which every
+	// filter of the cycle carries to the agent (MockFilterParams.ConsumedRewinds).
+	if got := next.Rewinds(); got != 1 {
+		t.Fatalf("the rewound history counts %d rewinds, want 1", got)
+	}
+	if got := r.rewindConsumedForRetryCycle(next, baseline, across).Rewinds(); got != 2 {
+		t.Fatalf("a second cycle's history counts %d rewinds, want 2", got)
+	}
 }
 
 // A run that stopped early for a reason that ALREADY has an honest diagnosis

@@ -167,6 +167,7 @@ func (p *mgrProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock, st
 	return nil
 }
 func (p *mgrProxy) SeedStartupCutoff(t time.Time)              { p.mm.SeedStartupCutoff(t) }
+func (p *mgrProxy) SeedConsumedRewinds(n uint64)               { p.mm.SeedConsumedRewinds(n) }
 func (p *mgrProxy) SeedRecordedWindows(ws []models.TestWindow) { p.mm.SeedRecordedWindows(ws) }
 func (p *mgrProxy) FirstTestWindowStart() time.Time            { return p.mm.FirstTestWindowStart() }
 func (p *mgrProxy) GetPersistentConsumed() map[string]models.MockState {
@@ -174,6 +175,37 @@ func (p *mgrProxy) GetPersistentConsumed() map[string]models.MockState {
 }
 func (p *mgrProxy) CarryOverLoadRange(start time.Time) (time.Time, time.Time, bool) {
 	return p.mm.CarryOverLoadRange(start)
+}
+
+// A retry cycle's filter carries the consumed history's rewinds: the agent
+// hands them to the proxy before it sets the cycle's first window, so the
+// manager counts a pass there even at the start the last cycle ended in. The
+// same window filtered again within the pass, or within the retry, is none.
+func TestUpdateMockParamsHandsTheConsumedRewindsBeforeTheWindow(t *testing.T) {
+	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	a := residentAgent(&mgrProxy{mm: mm}, nil, nil)
+	base := time.Date(2026, 9, 30, 9, 0, 0, 0, time.UTC)
+	steps := []struct {
+		name    string
+		params  models.MockFilterParams
+		rewinds uint64
+	}{
+		{"staging", models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()}, 0},
+		{"test-2", models.MockFilterParams{AfterTime: base, BeforeTime: base.Add(time.Second)}, 0},
+		{"test-2 filtered again within the pass", models.MockFilterParams{AfterTime: base, BeforeTime: base.Add(time.Second)}, 0},
+		{"the retry cycle's test-2", models.MockFilterParams{AfterTime: base, BeforeTime: base.Add(time.Second), ConsumedRewinds: 1}, 1},
+		{"test-2 filtered again within the retry", models.MockFilterParams{AfterTime: base, BeforeTime: base.Add(time.Second), ConsumedRewinds: 1}, 1},
+	}
+	for _, s := range steps {
+		if err := a.UpdateMockParams(context.Background(), s.params); err != nil {
+			t.Fatalf("%s: UpdateMockParams: %v", s.name, err)
+		}
+		if got := mm.WindowRewinds(); got != s.rewinds {
+			t.Fatalf("%s: WindowRewinds = %d, want %d", s.name, got, s.rewinds)
+		}
+	}
 }
 
 const agentPulsar models.Kind = "AgentTestPulsar"

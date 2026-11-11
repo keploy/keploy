@@ -4907,6 +4907,13 @@ func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
 	_ = p.stageOn("recordedWindows", func(m *MockManager) { m.SeedRecordedWindows(ws) })
 }
 
+// SeedConsumedRewinds hands the underlying MockManager how many times the set's
+// consumed history was rewound for a retry cycle (MockManager.SeedConsumedRewinds).
+// Satisfies the agent's optional ConsumedRewindsSeeder extension interface.
+func (p *Proxy) SeedConsumedRewinds(n uint64) {
+	_ = p.stageOn("consumedRewinds", func(m *MockManager) { m.SeedConsumedRewinds(n) })
+}
+
 // SeedRunPlaceWindows hands the underlying MockManager the recorded window of
 // every test of the set a replay serves, for the run's place alone
 // (MockManager.SeedRunPlaceWindows). Satisfies the agent's optional

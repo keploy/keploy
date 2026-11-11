@@ -1595,6 +1595,34 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	}
 }
 
+// Every filter carries the rewinds of the history it is built from, sent or
+// not: a set's own history none, a retry cycle's its count, so the agent
+// starts a pass at the cycle's first window whatever its start.
+func TestSendMockFilterParamsCarriesTheHistorysRewinds(t *testing.T) {
+	for _, owns := range []string{"", "1"} {
+		t.Run("agent owns consumed="+owns, func(t *testing.T) {
+			t.Setenv("KEPLOY_AGENT_OWNS_CONSUMED", owns)
+			h := newPartialRunHarness(t, 1, 0)
+			r := h.replayer
+			own := models.ConsumedHistoryOf(map[string]models.MockState{"mock-1": {Name: "mock-1", Usage: models.Deleted}})
+			at := models.BaseTime.Add(time.Hour)
+			if err := r.SendMockFilterParamsToAgent(context.Background(), nil, at, at.Add(time.Second), own, nil, false, recordedSetShape{}, nil); err != nil {
+				t.Fatalf("SendMockFilterParamsToAgent: %v", err)
+			}
+			if got := h.instr.lastParams.ConsumedRewinds; got != 0 {
+				t.Fatalf("the set's own history sent %d rewinds, want 0", got)
+			}
+			retry := r.rewindConsumedForRetryCycle(own, map[string]models.MockState{}, map[string]models.MockState{})
+			if err := r.SendMockFilterParamsToAgent(context.Background(), nil, at, at.Add(time.Second), retry, nil, false, recordedSetShape{}, nil); err != nil {
+				t.Fatalf("SendMockFilterParamsToAgent: %v", err)
+			}
+			if got := h.instr.lastParams.ConsumedRewinds; got != 1 {
+				t.Fatalf("the retry cycle's history sent %d rewinds, want 1", got)
+			}
+		})
+	}
+}
+
 // The per-case reporter must actually be CALLED by RunTestSet, once per test,
 // with the settled verdict. Asserted through the real loop rather than against
 // the interface, because the defect this guards is the hook being declared and

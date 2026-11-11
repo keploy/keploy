@@ -310,12 +310,16 @@ type MockManager struct {
 	// it under swapMu, so WindowSnapshot reads it with testFiredThisSet
 	// tear-free.
 	scopeOpen bool
-	// rewinds counts the window changes whose start went back to before the
-	// start set before them in the same staging (WindowRewinds); rewindFrom
-	// is that start, zero again at every staging call. Guarded by windowMu,
-	// written with windowStart.
-	rewinds    uint64
-	rewindFrom time.Time
+	// rewinds counts the window changes that start a pass over the set again
+	// (WindowRewinds); rewindFrom is the start set before, zero again at every
+	// staging call. consumedRewinds is the count of retry cycles the set's
+	// consumed history was rewound for, as the agent last handed it
+	// (SeedConsumedRewinds), and consumedRewindsAt its value at the window
+	// set last. Guarded by windowMu, written with windowStart.
+	rewinds           uint64
+	rewindFrom        time.Time
+	consumedRewinds   uint64
+	consumedRewindsAt uint64
 
 	// firstWindowStart caches the earliest windowStart observed across
 	// all SetMocksWithWindow calls for this manager's lifetime. It's
@@ -4604,31 +4608,53 @@ func (m *MockManager) StagingEpoch() uint64 {
 	return m.stagingEpoch.Load()
 }
 
-// WindowRewinds counts the test-window changes, over the manager's life, whose
-// start went back to before the start set before them in the same staging: a
-// retry cycle, or the deferred streaming tests, going back to an earlier
-// recorded window (integrations.WindowRewindCounter). Every SetMocksWithWindow,
-// SetMocksWithWindowThreeTier and SetCurrentTestWindow that sets a non-zero
-// start is compared; a staging call (models.BaseTime) starts the comparison
-// over, and a window set again at the same start is not counted. The count
-// never goes down, and it moves under windowMu with the window it compares, in
-// the same staging step as the trees, before WindowChanged's channel closes.
+// WindowRewinds counts the test-window changes, over the manager's life, that
+// start a pass over the set again (integrations.WindowRewindCounter): a window
+// whose start went back to before the start set before it in the same staging
+// (a retry cycle, or the deferred streaming tests, going back to an earlier
+// recorded window), and the first window set after the set's consumed history
+// was rewound for a retry cycle (SeedConsumedRewinds), at whatever start, the
+// same one included. Every SetMocksWithWindow, SetMocksWithWindowThreeTier,
+// OpenTestWithWindow and SetCurrentTestWindow that sets a non-zero start is
+// compared, and counts one at most; a staging call (models.BaseTime) starts
+// the comparison over. A window set again at the same start with no rewind of
+// the history (a test's window loaded again within the pass) is not counted.
+// The count never goes down, and it moves under windowMu with the window it
+// compares, in the same staging step as the trees, before WindowChanged's
+// channel closes.
 func (m *MockManager) WindowRewinds() uint64 {
 	m.windowMu.RLock()
 	defer m.windowMu.RUnlock()
 	return m.rewinds
 }
 
+// SeedConsumedRewinds hands the manager the count of retry cycles the consumed
+// history of the set being served was rewound for
+// (models.MockFilterParams.ConsumedRewinds), before the call that carries it
+// sets its window: the next window set counts a change of it as a rewind
+// (WindowRewinds).
+func (m *MockManager) SeedConsumedRewinds(n uint64) {
+	m.windowMu.Lock()
+	m.consumedRewinds = n
+	m.windowMu.Unlock()
+}
+
 // noteWindowStartLocked counts start, the window start being set, when it
-// went back (WindowRewinds). Caller holds windowMu for write.
+// went back or the consumed history was rewound since the last window set
+// (WindowRewinds). Caller holds windowMu for write.
 func (m *MockManager) noteWindowStartLocked(start time.Time) {
 	if start.IsZero() {
 		return
 	}
-	if start.Before(m.rewindFrom) { // never, while rewindFrom is zero
+	// Neither counts while rewindFrom is zero: the set's first window, after
+	// its staging, starts its first pass.
+	wentBack := start.Before(m.rewindFrom)
+	replayed := !m.rewindFrom.IsZero() && m.consumedRewinds != m.consumedRewindsAt
+	if wentBack || replayed {
 		m.rewinds++
 	}
 	m.rewindFrom = start
+	m.consumedRewindsAt = m.consumedRewinds
 }
 
 // signalWindowChange wakes every WindowChanged waiter and arms a fresh channel.
