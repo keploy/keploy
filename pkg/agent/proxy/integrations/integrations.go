@@ -1243,10 +1243,12 @@ func BackgroundRecordingsAt(db MockMemDb, call CallRound, kind models.Kind) []mo
 }
 
 // BoundValues is what a set's test variables had bound, as a background
-// miss reads them (Mongo's markBackground): the bindings the call's own
-// test's running scope made (variables.Table.Own), what each ended test of
-// the set bound itself (variables.Table.EndedOf), and the test each
-// recording trails by the set's scope table (TrailedTests).
+// miss reads them (Mongo's markBackground): the bindings the scope of the
+// test the call was marked in made itself (variables.Table.OwnOf: the
+// running scope's while it is that test's, its ended scopes' once the
+// replay began the set's next test first), what each ended test of the set
+// bound itself (variables.Table.EndedOf), and the test each recording
+// trails by the set's scope table (TrailedTests).
 type BoundValues interface {
 	Own() []variables.Binding
 	EndedOf(test string) []variables.Binding
@@ -1260,7 +1262,8 @@ type BoundValues interface {
 // every binding of the set before (as RoundBackgroundReader is to the
 // background recordings). nil when the call was marked in a set older than
 // the store keeps (no value is bound for it, so a background miss counts);
-// the set's in force for the zero CallRound.
+// the set's in force for the zero CallRound. Own is the scope's of the test
+// call names (CallRound.Test).
 type RoundBoundReader interface {
 	BoundValuesIn(call CallRound) BoundValues
 }
@@ -1281,21 +1284,23 @@ func BoundValuesAt(db MockMemDb, call CallRound) BoundValues {
 	if table == nil {
 		return nil
 	}
-	return BoundNow(table, db)
+	return BoundNow(table, db, call)
 }
 
 // BoundNow is the bound values in force in table, with the trails db tells
-// (TrailOf): a store's current set's.
-func BoundNow(table *variables.Table, db MockMemDb) BoundValues {
-	return boundNow{table: table, db: db}
+// (TrailOf), as call reads them (Own: the scope's of the test call names):
+// a store's current set's.
+func BoundNow(table *variables.Table, db MockMemDb, call CallRound) BoundValues {
+	return boundNow{table: table, db: db, test: call.Test()}
 }
 
 type boundNow struct {
 	table *variables.Table
 	db    MockMemDb
+	test  string
 }
 
-func (b boundNow) Own() []variables.Binding                { return b.table.Own() }
+func (b boundNow) Own() []variables.Binding                { return b.table.OwnOf(b.test) }
 func (b boundNow) EndedOf(test string) []variables.Binding { return b.table.EndedOf(test) }
 func (b boundNow) TrailOf(mock string) learn.Trail         { return TrailOf(b.db, mock) }
 

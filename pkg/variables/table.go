@@ -889,6 +889,9 @@ func (t *Table) newSet() {
 type SetBound struct {
 	own   []Binding
 	ended []endedScope
+	// test is the test the running scope was begun for then ("" for none
+	// named, or before the first scope began).
+	test string
 }
 
 // NewSetKeeping is NewSet, returning what the ending set had bound
@@ -900,7 +903,7 @@ func (t *Table) NewSetKeeping() *SetBound {
 	defer t.mu.Unlock()
 	kept := &SetBound{ended: t.ended}
 	if t.began {
-		kept.own = sorted(t.vals)
+		kept.own, kept.test = sorted(t.vals), t.test
 	}
 	t.newSet()
 	return kept
@@ -915,14 +918,36 @@ func (s *SetBound) Own() []Binding {
 	return append([]Binding(nil), s.own...)
 }
 
+// OwnOf is what a call marked in test's view read as its own test's
+// bindings when the set ended (Table.OwnOf then).
+func (s *SetBound) OwnOf(test string) []Binding {
+	if s == nil {
+		return nil
+	}
+	if !ownScope(s.test, test) {
+		return endedOf(s.ended, test)
+	}
+	return append([]Binding(nil), s.own...)
+}
+
 // EndedOf is what the set's ended scopes of test had bound themselves when
 // it ended (Table.EndedOf then): none for test "".
 func (s *SetBound) EndedOf(test string) []Binding {
-	if s == nil || test == "" {
+	if s == nil {
+		return nil
+	}
+	return endedOf(s.ended, test)
+}
+
+// endedOf is the bindings of the scopes of ended begun for test, scope by
+// scope in the order they ended: none for test "" (a scope begun with no
+// test named is kept as no test's).
+func endedOf(ended []endedScope, test string) []Binding {
+	if test == "" {
 		return nil
 	}
 	var out []Binding
-	for _, e := range s.ended {
+	for _, e := range ended {
 		if e.test == test {
 			out = append(out, e.bindings...)
 		}
@@ -987,13 +1012,34 @@ func (t *Table) KeepEnded() {
 func (t *Table) EndedOf(test string) []Binding {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	var out []Binding
-	for _, e := range t.ended {
-		if e.test == test {
-			out = append(out, e.bindings...)
-		}
+	return endedOf(t.ended, test)
+}
+
+// OwnOf is what a call marked in test's view reads as its own test's
+// bindings (Own), read in one step. keploy can decide a test's call after
+// the replay began the set's next test, whose scope's are not the call's:
+// once a scope begun for another named test is running, they are what
+// test's ended scopes bound (EndedOf), none where it bound none. The
+// running scope's own (Own) while it is test's, as when keploy decides the
+// call at once, and while it names no test (one begun with no test named,
+// or none begun), or for a mark that names none (test ""), which no scope
+// tells apart.
+func (t *Table) OwnOf(test string) []Binding {
+	from := t.lock()
+	defer t.unlock(from)
+	if !ownScope(t.test, test) {
+		return endedOf(t.ended, test)
 	}
-	return out
+	if !t.began {
+		return nil
+	}
+	return sorted(t.vals)
+}
+
+// ownScope reports whether a call marked in test's view reads the running
+// scope, begun for running ("" for none named), as its own test's (OwnOf).
+func ownScope(running, test string) bool {
+	return test == "" || running == "" || running == test
 }
 
 // end keeps the running scope's own bindings as its test's ended scope's

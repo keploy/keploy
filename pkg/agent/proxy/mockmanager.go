@@ -2957,8 +2957,8 @@ type scopeTrails struct {
 }
 
 // boundKept is the bound values of a set whose variables a new set forgot
-// (NewVariableSet), as a background miss reads them
-// (integrations.BoundValues): what its table had bound (vars) and its scope
+// (NewVariableSet), as a background miss reads them (integrations.
+// BoundValues, through keptFor): what its table had bound (vars) and its scope
 // table's trails (scope), for the calls marked in a staging epoch after
 // after (any, where older is false) and up to upTo.
 type boundKept struct {
@@ -2968,25 +2968,35 @@ type boundKept struct {
 	older       bool
 }
 
-func (k *boundKept) Own() []variables.Binding                { return k.vars.Own() }
-func (k *boundKept) EndedOf(test string) []variables.Binding { return k.vars.EndedOf(test) }
-func (k *boundKept) TrailOf(mock string) learn.Trail         { return trailIn(k.scope, mock) }
+// keptFor is k as a call marked in test's view reads it (Own: that test's
+// scope's, variables.SetBound.OwnOf).
+type keptFor struct {
+	k    *boundKept
+	test string
+}
+
+func (r keptFor) Own() []variables.Binding                { return r.k.vars.OwnOf(r.test) }
+func (r keptFor) EndedOf(test string) []variables.Binding { return r.k.vars.EndedOf(test) }
+func (r keptFor) TrailOf(mock string) learn.Trail         { return trailIn(r.k.scope, mock) }
 
 // BoundValuesIn returns the bound values of the set the call was marked in
 // (integrations.RoundBoundReader): the set's in force (Variables, TrailOf)
 // for a call marked after the last new set began, or of no mark; the set's
 // before it (boundKept) for a call marked up to then, which keploy decides
 // once the replay began the next set; nil for a call marked before both
-// (no value is bound for it: its background miss counts).
+// (no value is bound for it: its background miss counts). Each reads, as
+// the call's own test's, the scope of the test the call was marked in
+// (variables.Table.OwnOf): the replay can begin the set's next test before
+// keploy decides a test's call too.
 func (m *MockManager) BoundValuesIn(call integrations.CallRound) integrations.BoundValues {
 	k := m.boundKept.Load()
 	if !call.Read() || k == nil || call.Epoch() > k.upTo {
-		return integrations.BoundNow(&m.vars, m)
+		return integrations.BoundNow(&m.vars, m, call)
 	}
 	if k.older && call.Epoch() <= k.after {
 		return nil
 	}
-	return k
+	return keptFor{k: k, test: call.Test()}
 }
 
 var _ integrations.RoundBoundReader = (*MockManager)(nil)

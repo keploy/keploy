@@ -1074,3 +1074,69 @@ func TestAScopeOpenedForATestWithNotesKeepsItsNotesAndItsBindings(t *testing.T) 
 		t.Fatalf("EndedOf of no test = %+v; want none (a scope with no test named keeps nothing)", got)
 	}
 }
+
+// OwnOf is what a call marked in a test's view reads as its own test's
+// bindings: the running scope's own while it is that test's, or names no
+// test, or the mark names none; once a scope of another named test began,
+// that test's ended scopes' (none where it bound none, never the running
+// scope's). The set kept at NewSetKeeping reads them as the table did then.
+func TestTableOwnOfIsTheScopeOfTheTestTheCallWasMarkedIn(t *testing.T) {
+	var tb Table
+	tb.KeepEnded()
+	at := func(value string) Binding {
+		return Binding{Name: "appId", Value: value, Recorded: "c2e52a70", Mock: "mock-500", Place: "body.docs.msgs.0.appId"}
+	}
+	vals := func(bs []Binding) string {
+		out := ""
+		for _, b := range bs {
+			out += b.Value + ";"
+		}
+		return out
+	}
+	reads := func(what, got, want string) {
+		t.Helper()
+		if got != want {
+			t.Fatalf("%s: OwnOf = %q; want %q", what, got, want)
+		}
+	}
+	tb.Bind(at("before-any-scope"))
+	for _, test := range []string{".::TestAppCRUD", ""} {
+		if got := tb.OwnOf(test); len(got) != 0 {
+			t.Fatalf("OwnOf(%q) before any scope began = %+v; want none (no test is running)", test, got)
+		}
+	}
+	openTest(&tb, ".::TestAppCRUD")
+	tb.Bind(at("crud-live"))
+	reads("the test's call while its scope runs", vals(tb.OwnOf(".::TestAppCRUD")), "crud-live;")
+	reads("a call that names no test", vals(tb.OwnOf("")), "crud-live;")
+	openTest(&tb, ".::TestListApps")
+	tb.Bind(at("list-live"))
+	reads("the test's call once the next test's scope began", vals(tb.OwnOf(".::TestAppCRUD")), "crud-live;")
+	reads("the running test's call", vals(tb.OwnOf(".::TestListApps")), "list-live;")
+	reads("a call of a test whose scope never ran", vals(tb.OwnOf(".::TestNever")), "")
+	reads("a call that names no test, the next scope running", vals(tb.OwnOf("")), "list-live;")
+
+	kept := tb.NewSetKeeping()
+	reads("the kept set: the ended test's call", vals(kept.OwnOf(".::TestAppCRUD")), "crud-live;")
+	reads("the kept set: the test running at its end", vals(kept.OwnOf(".::TestListApps")), "list-live;")
+	reads("the kept set: a test that never ran", vals(kept.OwnOf(".::TestNever")), "")
+	reads("the kept set: a call that names no test", vals(kept.OwnOf("")), "list-live;")
+	if got := (*SetBound)(nil).OwnOf(".::TestAppCRUD"); got != nil {
+		t.Fatalf("a nil kept set's OwnOf = %+v; want none", got)
+	}
+	got := kept.OwnOf(".::TestListApps")
+	got[0].Value = "changed"
+	reads("the kept set hands out a copy", vals(kept.OwnOf(".::TestListApps")), "list-live;")
+
+	// A scope begun with no test named: nothing tells it is not the call's.
+	openTest(&tb, ".::TestAppCRUD")
+	tb.Reset()
+	tb.Bind(at("unnamed"))
+	reads("a test's call while an unnamed scope runs", vals(tb.OwnOf(".::TestAppCRUD")), "unnamed;")
+	unnamed := tb.NewSetKeeping()
+	reads("the kept set ended in an unnamed scope", vals(unnamed.OwnOf(".::TestAppCRUD")), "unnamed;")
+
+	// A set that ended before any scope began kept none as a test's own.
+	tb.Bind(at("before-any-scope"))
+	reads("the kept set of a set no scope began in", vals(tb.NewSetKeeping().OwnOf("")), "")
+}

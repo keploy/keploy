@@ -8,6 +8,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
 
@@ -163,4 +165,90 @@ func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
 	reads("a call of set B decided in set C", b, "test-a1", "mock-9", setB)
 	reads("a call of set A, two sets back", a, "test-a1", "mock-9", nil)
 	reads("a call of set C", mark(), "test-a1", "mock-9", &read{trailMocks: "[]"})
+}
+
+// A test's call keploy decides after the replay began the set's next test
+// reads, as its own test's bindings, the scope of the test its mark names
+// (variables.Table.OwnOf), not the next test's, which is running when keploy
+// decides it: at once, it read its own test's scope. So too once the next
+// set began (the kept set's). A pool view's call decided at once reads the
+// running scope, the ended test's; a mark of a test whose scope bound
+// nothing reads none (its background miss counts); and while the running
+// scope names no test, nothing tells it is not the call's, so it is read.
+func TestACallReadsTheBindingsOfTheTestItWasMarkedIn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	own1 := varMockOf("own-1", "/apps", "app-1", true, models.LifetimePerTest)
+	own2 := varMockOf("own-2", "/apps", "app-2", true, models.LifetimePerTest)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	var view integrations.MockMemDb = &scopedMockDb{MockMemDb: mm}
+	mm.NewVariableSet()
+	mm.SetMocksWithWindow([]*models.Mock{own1, own2}, nil, models.BaseTime, time.Now())
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	own := func(what string, call integrations.CallRound, want string) {
+		t.Helper()
+		names := func(bv integrations.BoundValues) string {
+			if bv == nil {
+				return "<no set>"
+			}
+			out := ""
+			for _, b := range bv.Own() {
+				out += b.Name + "=" + b.Value + ";"
+			}
+			return out
+		}
+		if got := names(mm.BoundValuesIn(call)); got != want {
+			t.Fatalf("%s: the manager reads %q as the call's own test's; want %q", what, got, want)
+		}
+		if got := names(integrations.BoundValuesAt(view, call)); got != want {
+			t.Fatalf("%s: a test's view reads %q as the call's own test's; want %q", what, got, want)
+		}
+	}
+	bind := func(name, value, mock string) {
+		t.Helper()
+		if _, ok := mm.Variables().Bind(variables.Binding{Name: name, Value: value, Recorded: "rec-" + name, Mock: mock, Place: "body.key"}); !ok {
+			t.Fatalf("the running scope did not bind %s (this case's premise)", name)
+		}
+	}
+
+	mm.OpenExactTest("test-1", []*models.Mock{own1}, nil)
+	bind("key", "one", "own-1")
+	in1 := integrations.MarkCallRound(mm)
+	if in1.Test() != "test-1" {
+		t.Fatalf("a call read in test-1's view is marked of test %q; want test-1 (this case's premise)", in1.Test())
+	}
+	own("test-1's call decided in test-1", in1, "key=one;")
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	gap := integrations.MarkCallRound(mm)
+	if gap.Test() != "" {
+		t.Fatalf("a call read in the pool view is marked of test %q; want none (this case's premise)", gap.Test())
+	}
+	own("a call of the pool view after test-1, decided then", gap, "key=one;")
+	mm.OpenExactTest("test-2", []*models.Mock{own2}, nil)
+	bind("other", "two", "own-2")
+	in2 := integrations.MarkCallRound(mm)
+	own("test-1's call decided after test-2 began", in1, "key=one;")
+	own("test-2's call", in2, "other=two;")
+	ghost := integrations.NewCallRound(in1.Epoch(), nil).OfTest("test-9")
+	own("a call of a test whose scope bound nothing", ghost, "")
+	own("a call of no mark", integrations.CallRound{}, "other=two;")
+
+	// The next set begins: the set's calls read the kept set's.
+	mm.ResetForReplaySession()
+	mm.NewVariableSet()
+	mm.SetMocksWithWindow([]*models.Mock{own1, own2}, nil, models.BaseTime, time.Now())
+	if mm.StagingEpoch() == in1.Epoch() {
+		t.Fatal("the next set's staging started no staging epoch (this case's premise)")
+	}
+	own("test-1's call decided in the next set", in1, "key=one;")
+	own("test-2's call decided in the next set", in2, "other=two;")
+	own("a call of a test whose scope bound nothing, in the next set", ghost, "")
+
+	// A scope begun with no test named: nothing tells it is not test-3's.
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.OpenExactTest("test-3", []*models.Mock{own1}, nil)
+	in3 := integrations.MarkCallRound(mm)
+	mm.ResetVariables()
+	bind("unnamed", "u", "own-1")
+	own("test-3's call while a scope that names no test runs", in3, "unnamed=u;")
 }
