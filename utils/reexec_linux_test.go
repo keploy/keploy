@@ -185,6 +185,37 @@ func TestShouldReexecWithSudo_NotForDockerStart(t *testing.T) {
 	}
 }
 
+// The command ShouldReexecWithSudo judges is the one cobra runs: the last -c,
+// and a value joined to the shorthand. Judging the first -c ran a docker
+// command unprivileged, which failed writing
+// /proc/sys/kernel/perf_event_paranoid, and asked for sudo for a native one.
+//
+// Pins the wiring, not just the argv helper.
+func TestShouldReexecWithSudo_JudgesTheCommandCobraRuns(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root; ShouldReexecWithSudo short-circuits")
+	}
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"a docker command after a native one", []string{"keploy", "record", "-c", "python app.py", "-c", "docker compose up"}, true},
+		{"a native command after a docker one", []string{"keploy", "record", "-c", "docker compose up", "-c", "python app.py"}, false},
+		{"a docker command joined to the shorthand", []string{"keploy", "record", "-cdocker compose up"}, true},
+	}
+	orig := os.Args
+	defer func() { os.Args = orig }()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			os.Args = tc.args
+			if got := ShouldReexecWithSudo(); got != tc.want {
+				t.Errorf("ShouldReexecWithSudo() = %v, want %v for %q", got, tc.want, tc.args)
+			}
+		})
+	}
+}
+
 // The run goes on in the process the sudo exec starts, which keeps a log of
 // its own. This process's log, a temp file, is gone by the exec: nothing would
 // be left to remove it, one log left in the temp directory per Docker or cloud
