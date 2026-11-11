@@ -2692,14 +2692,14 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			v := p.vars[name]
 			v.Recorded, v.Use = r.Value, appendNew(v.Use, use)
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
-			earlierAns := earlierAnswers(earlier, from.Mock, r)
-			if l.ByForm != nil && len(earlierAns) == 0 {
+			if l.ByForm != nil && !learn.AnsweredWhole(earlier, from.Mock, r) {
 				// A time the application stamped, whose bind holds in round
 				// F: a replay checks the bind, and where it does not hold
 				// (two reads of the clock that fell in one second here, in
 				// two there) the time default checks it by its form alone
 				// (models.MockVariable.ByForm). One the bound call answered
-				// may be a copy of that answer: checked exactly.
+				// whole, at any leaf, may be a copy of that answer: checked
+				// exactly (learn.AnsweredWhole).
 				if v.ByForm == nil {
 					v.ByForm = map[string]models.ClockOffset{}
 				}
@@ -2720,7 +2720,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			// tests, where the lead shows no read of the app's clock
 			// (learn.DriftCache.ClockReads).
 			bv.Clock = tracker.Drifts().ClockReads(r.Value, bindLive)
-			bv.Answer = appendNew(bv.Answer, earlierAns...)
+			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
 			b[name] = bv
 			p.values[name] = variables.Binding{Name: name, Value: bindLive, Recorded: r.Value, Mock: from.Mock, Place: bindAt}
 

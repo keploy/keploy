@@ -49,3 +49,29 @@ func TestAUseCheckedByFormPassesOnlyATimeOfItsFormUnderTheTimeDefault(t *testing
 		t.Fatalf("a learning that checks %s exactly merges to %v; want it exact", at, got)
 	}
 }
+
+// A use of a value the bound call answered whole, at any leaf of its answer
+// (placed or not), may be a copy of that answer: AnsweredWhole says so, and
+// the use keeps its exact bind. The call's request, another call's answer,
+// and an answer leaf of another value say nothing.
+func TestAValueTheBoundCallAnsweredWholeIsAnsweredWhole(t *testing.T) {
+	r := Leaf{Path: "body.createdAt", Type: String, Value: "2026-11-11T18:35:46Z"}
+	seen := func(mock string, side Side, place, value string) []Earlier {
+		return []Earlier{{Mock: mock, Seen: []Seen{{Side: side, Place: place, Leaf: Leaf{Path: "body.at", Type: String, Value: value}}}}}
+	}
+	for _, tc := range []struct {
+		what    string
+		earlier []Earlier
+		want    bool
+	}{
+		{what: "answered at a placed leaf", earlier: seen("mock-1", Response, "body.at", r.Value), want: true},
+		{what: "answered at a leaf with no place", earlier: seen("mock-1", Response, "", r.Value), want: true},
+		{what: "sent in its request only", earlier: seen("mock-1", Request, "body.at", r.Value)},
+		{what: "another call answered it", earlier: seen("mock-0", Response, "body.at", r.Value)},
+		{what: "its answer holds another value", earlier: seen("mock-1", Response, "body.at", "2026-11-11T18:35:47Z")},
+	} {
+		if got := AnsweredWhole(tc.earlier, "mock-1", r); got != tc.want {
+			t.Errorf("%s: AnsweredWhole = %v; want %v", tc.what, got, tc.want)
+		}
+	}
+}
