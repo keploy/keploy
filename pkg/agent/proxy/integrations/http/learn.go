@@ -60,10 +60,11 @@ var credentialHeaders = map[string]bool{
 
 // learnNoise is the noise keploy.yml declares, as the learn step reads it.
 type learnNoise struct {
-	// sources is the declared sources keploy mock replay's scope table
-	// gives a recording, by name (sourcesIn): its clock rules are checked as
-	// reads of the clock (clocksWith). nil reads none.
-	sources func(mock string) []models.DeclaredSource
+	// declaredRules are what keploy mock replay's scope table declares of
+	// each recording (declaredIn): its clock rules are checked as reads of
+	// the clock (clocksWith, declaredClocksOf). The zero value declares
+	// none.
+	declaredRules
 	// headers are the header names never compared: keploy.yml's, and the
 	// static list's (models.FlakyHeaders) but the credentials.
 	headers map[string]bool
@@ -97,10 +98,10 @@ type learnNoise struct {
 	hold func(leaf string) LearnHold
 }
 
-// withSources is n reading the declared sources db's scope table gives each
-// recording (sourcesIn).
+// withSources is n reading what db's scope table declares of each
+// recording (declaredIn).
 func (n learnNoise) withSources(db integrations.MockMemDb) learnNoise {
-	n.sources = sourcesIn(db)
+	n.declaredRules = declaredIn(db)
 	return n
 }
 
@@ -461,7 +462,32 @@ func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string
 // known is what a comparison with the recorded mock m excuses: keploy.yml's
 // noise, the noise learned onto m, and m's obfuscated values (Mock.Noise).
 func (n learnNoise) known(m *models.Mock) learn.Known {
-	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.sources)}
+	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.declaredRules), declared: declaredClockFields(m, n.declaredRules)}
+}
+
+// declaredClocksOf is learned, the drifted leaves of a call paired with m,
+// each one a clock rule keploy.yml declares at its body field (the sources
+// the scope table gives m, read at each leaf's path as a replay reads them:
+// learn.DeclaredBodySources) decided by that rule
+// (learn.DeclaredClockLearned): in w, the call's window, and under the time
+// default where timeForm is set. learned as it is where no rule declares a
+// body field of m, and, with the time default off, at a leaf whose recorded
+// value answered holds (the call's recorded answer: learn.Echoes), whose
+// recorded moment a replay would serve, as Mongo's learning refuses it.
+func declaredClocksOf(learned []learn.Learned, sources func(mock string) []models.DeclaredSource, m *models.Mock, w *learn.Window, timeForm bool, drifts *learn.DriftCache, answered []learn.Leaf) []learn.Learned {
+	if sources == nil {
+		return learned
+	}
+	src := learn.DeclaredBodySources(sources(m.Name))
+	if src == nil {
+		return learned
+	}
+	for i, l := range learned {
+		if s, ok := src(l.Recorded.Path); ok && (timeForm || len(learn.Echoes(drifts, l.Recorded, answered)) == 0) {
+			learned[i] = learn.DeclaredClockLearned(l, s, w, timeForm)
+		}
+	}
+	return learned
 }
 
 // knownAsRecorded is known without the noise learned onto m: the recording
@@ -478,6 +504,10 @@ type httpKnown struct {
 	// application's clock (clocksOf): no learned noise excuses them, so the
 	// learn step reads each again, in this call's window.
 	clocks map[string]models.ClockOffset
+	// declared are the body fields a clock rule names in the mock
+	// (declaredClockFields): no learned noise excuses one, so the learn
+	// step reads it again and the rule decides it (declaredClocksOf).
+	declared map[string]models.ClockOffset
 }
 
 // Excused implements learn.Known: ExcusedPair of one value.
@@ -505,7 +535,8 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	// noise learned there excuses a value its patterns refuse.
 	_, guarded := k.n.userPatterns(ref.Noise)
 	_, clock := k.clocks[ref.Path]
-	if !guarded && !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && hasKey(k.learned, ref.Noise)) {
+	_, declared := k.declared[ref.Path]
+	if !guarded && !clock && !declared && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && hasKey(k.learned, ref.Noise)) {
 		return true, true
 	}
 	both := inRec && inLive
@@ -1866,7 +1897,9 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// A client test's request that reached the application before
 			// the call in both runs is a place of it (learn.ClassifyArrived),
 			// where its test case binds a value the call carries whole.
-			return learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order)), answered, earlier, ""
+			answer := classifiedAnswer(answered)
+			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
+			return declaredClocksOf(learned, n.sources, m, w, integrations.TimeFormOf(mockDb), tracker.DriftsOf(ctx), answer), answered, earlier, ""
 		}
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {

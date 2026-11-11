@@ -1022,6 +1022,15 @@ type Learned struct {
 	// refusal of a caller whose replay checks no read), so a caller that
 	// learns the read names them from here where it says what it learned.
 	Refuted string
+	// sourceWhy, of a KindUnaccounted leaf, is its Why where it was refused
+	// for which source its moment has alone (a read of the clock outside its
+	// call's window, an instant where keploy cannot tell the application's
+	// clock, which only the time default's check by form settles, a
+	// moment the start-up, an older test or an earlier read of the clock
+	// gave): what a clock rule keploy.yml declares at its field settles
+	// (DeclaredClockLearned). "" for every other refusal, and stale (not
+	// Why) once a later step refuses it for another reason.
+	sourceWhy string
 	// byOffset: the offset rule refused it (offsetWhy: built by an offset on
 	// what the application was given, before any lead or window excused
 	// it), which the rule's rescue in keploy mock's client tests reads
@@ -1727,6 +1736,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				}
 				if from.startUp {
 					ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, startUpWhy(dc.ofIn(r.Value, l.Value, w, at), from)
+					ln.sourceWhy = ln.Why
 				} else if from.Side == "" && !from.Echo {
 					// Nothing F gave at from holds what the call carries
 					// now: refused as before, naming the older test's
@@ -1739,6 +1749,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					switch why, late := dc.notFromWhy(dc.ofIn(r.Value, l.Value, w, at), from, at, placed, raw, places); {
 					case late:
 						ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, why
+						ln.sourceWhy = ln.Why
 					case why != "":
 						ln.From.SetAside, ln.Why = true, why
 					}
@@ -1964,10 +1975,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				switch {
 				case w == nil && !dc.appClock:
 					ln.Kind, ln.Why = KindUnaccounted, noAppClockWhy
+					ln.sourceWhy = ln.Why
 				case w == nil || dc.windowHolds(dc.ofIn(r.Value, l.Value, w, at), w):
 					ln.Read = read
 				default:
 					ln.Kind, ln.Why = KindUnaccounted, outsideWindowWhy
+					ln.sourceWhy = ln.Why
 				}
 			}
 		}
@@ -2103,6 +2116,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		if ln.From.Clock {
 			ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, clockSourceWhy(ln.From)
+			ln.sourceWhy = ln.Why
 		}
 		return ln
 	}

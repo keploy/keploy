@@ -133,11 +133,14 @@ func (dc *decider) nearCall(rec, live Leaf) bool {
 	if w == nil {
 		return false
 	}
-	near := func(l Leaf, s Span) bool {
-		at, _, _, ok := clockReadOf(l)
-		return ok && !s.From.IsZero() && !at.Before(s.From.Add(-epochNear)) && !at.After(s.To.Add(epochNear))
-	}
-	return near(rec, w.Rec) && near(live, w.F)
+	return nearSpan(rec, w.Rec) && nearSpan(live, w.F)
+}
+
+// nearSpan reports whether l, an epoch number, names a moment within
+// epochNear of s, its run's span of the call; false where s is unknown.
+func nearSpan(l Leaf, s Span) bool {
+	at, _, _, ok := clockReadOf(l)
+	return ok && !s.From.IsZero() && !at.Before(s.From.Add(-epochNear)) && !at.After(s.To.Add(epochNear))
 }
 
 // TimeForm is the form the time default checks a time by
