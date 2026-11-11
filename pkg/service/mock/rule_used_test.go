@@ -163,14 +163,17 @@ func TestRuleUsedNamesRecordMovesAndIsSilentWithoutSeries(t *testing.T) {
 	plain := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n" +
 		"    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\n" +
 		"worker:\n    - name: mock-4\n"
-	var reads int
+	var agent *composeInstr
 	_, _, _, logs = seriesRunWith(t, plain, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), used, nil, func(f *composeInstr) {
 		counted(nil)(f)
-		t.Cleanup(func() { reads = f.mockStatsReads })
+		agent = f
 	})
 	require.Empty(t, ruleLines(logs, "RULE USED "))
 	require.Empty(t, ruleLines(logs, "RULES: "))
-	t.Cleanup(func() { require.Zero(t, reads, "a set with no series never asks the agent for their repeats") })
+	agent.mu.Lock()
+	reads := agent.mockStatsReads
+	agent.mu.Unlock()
+	require.Zero(t, reads, "a set with no series never asks the agent for their repeats")
 }
 
 // K-RU7: under docker compose the agent's account carries no repeat count:
