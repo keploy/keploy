@@ -1,6 +1,7 @@
 package http
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -62,5 +63,69 @@ func TestAValueAClientTestsRequestSentIsBoundAtItsTestCase(t *testing.T) {
 	other.Live = "app-1794211111000000003"
 	if p, why := learnPlan(tr, test, m, jsonReq, true, learned(other), nil, nil); !strings.Contains(why, "does not hold the value the test sent") || len(p.vars) != 0 {
 		t.Errorf("a call that does not carry the request's live value: why %q, variables %v; want it refused, nothing learned", why, p.vars)
+	}
+}
+
+// A value a client test's request sent inside its token, in a JWT claim
+// (learn.Place.Claim), binds at the claim's word of its test case's request
+// place, with that word as the value the call must carry: each claim of one
+// token is a variable of its own, and a claim's clock evidence is read from
+// its word. A claim the live token does not open stays refused as a value
+// inside a longer one.
+func TestAValueAClientTestsTokenSentInAClaimIsBoundAtTheClaim(t *testing.T) {
+	enc := base64.RawURLEncoding
+	token := func(payload string) string {
+		return "Bearer " + enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + enc.EncodeToString([]byte(payload)) + ".c2ln"
+	}
+	liveTok := token(`{"cid":"e2e-company-2","cluster_id":"6af47b1e0c22d4e8a91b03f6","login_at":"2026-11-11T10:05Z"}`)
+	jsonReq := learn.Shape{Fixed: map[string]string{"body": "json"}}
+	from := func(claim, live string) learn.Place {
+		return learn.Place{Mock: "test case post-cluster-status-3", Side: learn.Request, Path: "header.Authorization", Var: "header.Authorization", Live: live,
+			Given: true, Client: true, Claim: claim}
+	}
+	variable := func(path, rec, live string, f learn.Place) learn.Learned {
+		return learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: path, Value: rec, Type: learn.String}, Live: learn.Leaf{Path: path, Value: live, Type: learn.String}, From: f}
+	}
+
+	tr := learn.NewTracker()
+	tr.Begin()
+	test := tr.Epoch()
+	p, why := learnPlan(tr, test, &models.Mock{Name: "mock-3"}, jsonReq, true, []learn.Learned{
+		variable("body.filter._id", "6af47add8a9351dfdb7c457a", "6af47b1e0c22d4e8a91b03f6", from("header.Authorization|jwt.cluster_id#0", liveTok)),
+		variable("body.filter.company", "e2e-company-1", "e2e-company-2", from("header.Authorization|jwt.cid", liveTok)),
+	}, nil, nil)
+	if why != "" || len(p.vars) != 2 || len(p.binds["test case post-cluster-status-3"]) != 2 {
+		t.Fatalf("why %q, variables %v, binds %v; want two variables, each bound at its claim of the test case's token", why, p.vars, p.binds)
+	}
+	for name, b := range p.binds["test case post-cluster-status-3"] {
+		v, g := p.vars[name], p.values[name]
+		want := map[string]string{"header.Authorization|jwt.cluster_id#0": "6af47b1e0c22d4e8a91b03f6", "header.Authorization|jwt.cid": "e2e-company-2"}[b.Bind]
+		if want == "" || v.Recorded != b.Recorded || g.Place != b.Bind || g.Value != want || g.Mock != "test case post-cluster-status-3" {
+			t.Errorf("%s: bind %+v, binding %+v; want it bound at a claim of the token, its live value the claim's word", name, b, g)
+		}
+	}
+
+	// login_at, the minute the application minted the token at: a read of its
+	// clock that moved by the lead, carried by the call as the claim holds it.
+	tr = learn.NewTracker()
+	tr.Begin()
+	p, why = learnPlan(tr, tr.Epoch(), &models.Mock{Name: "mock-3"}, jsonReq, true, []learn.Learned{
+		variable("body.since", "2026-11-11T10:04Z", "2026-11-11T10:05Z", from("header.Authorization|jwt.login_at", liveTok)),
+	}, nil, nil)
+	if b := p.binds["test case post-cluster-status-3"]; why != "" || len(b) != 1 {
+		t.Fatalf("why %q, binds %v; want login_at bound at its claim", why, p.binds)
+	}
+	for _, b := range p.binds["test case post-cluster-status-3"] {
+		if len(b.Clock) == 0 {
+			t.Errorf("bind %+v; want the clock evidence of the claim's moments", b)
+		}
+	}
+
+	tr = learn.NewTracker()
+	tr.Begin()
+	if p, why := learnPlan(tr, tr.Epoch(), &models.Mock{Name: "mock-3"}, jsonReq, true, []learn.Learned{
+		variable("body.filter._id", "6af47add8a9351dfdb7c457a", "6af47b1e0c22d4e8a91b03f6", from("header.Authorization|jwt.cluster_id#0", "Bearer opaque-token")),
+	}, nil, nil); !strings.Contains(why, "inside a longer value or at a place keploy cannot bind it") || len(p.vars) != 0 {
+		t.Errorf("a claim the live token does not open: why %q, variables %v; want it refused, nothing learned", why, p.vars)
 	}
 }

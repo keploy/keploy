@@ -2524,6 +2524,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 
 		case learn.KindVariable:
 			from := l.From
+			// A place that held the value whole binds at its variable
+			// place; one that held it inside a JWT claim, at the claim's
+			// word (learn.Place.Claim), and its live value is that word.
+			bindAt, bindLive, bindable := from.BindAt()
 			switch {
 			case from.Given && from.Gave:
 				// A value made from one the test gave keploy
@@ -2568,7 +2572,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 					why += "; " + l.Why
 				}
 				return p, why
-			case !from.Whole || from.Var == "":
+			case !bindable:
 				why := r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
 				if l.Why != "" {
 					why += "; " + l.Why
@@ -2585,10 +2589,14 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			if !ok {
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
 			}
-			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
-				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
+			if !variables.SameValue(bindLive, l.Live.Value, r.Type == learn.Number) {
+				return p, r.Path + " does not hold the value the test sent at " + bindAt + " of " + from.Mock + ", which it held when recorded"
 			}
-			name, ok := tracker.PlaceName(test, from, reserved)
+			// A claim's word is its own variable: named by the place it
+			// binds at, never as the leaf whole.
+			named := from
+			named.Var = bindAt
+			name, ok := tracker.PlaceName(test, named, reserved)
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
@@ -2602,17 +2610,17 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				p.binds[from.Mock] = b
 			}
 			bv := b[name]
-			bv.Recorded, bv.Bind = r.Value, from.Var
+			bv.Recorded, bv.Bind = r.Value, bindAt
 			// F's clock evidence, read where the variable is bound: a clock
 			// read that moved by the lead there may share its live value with
 			// another one read in the same second in a replay
 			// (models.MockVariable.Clock). None in keploy mock's client
 			// tests, where the lead shows no read of the app's clock
 			// (learn.DriftCache.ClockReads).
-			bv.Clock = tracker.Drifts().ClockReads(r.Value, from.Live)
+			bv.Clock = tracker.Drifts().ClockReads(r.Value, bindLive)
 			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
 			b[name] = bv
-			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}
+			p.values[name] = variables.Binding{Name: name, Value: bindLive, Recorded: r.Value, Mock: from.Mock, Place: bindAt}
 
 		case learn.KindUnaccounted:
 			return p, r.Path + " changed, and " + l.Why

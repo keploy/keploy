@@ -876,6 +876,16 @@ type Place struct {
 	// arrival in record's full round (ClassifyGiven, ClassifyIn) reads no
 	// client test's request (arrivedBefore).
 	Client bool
+	// Claim, of a place that held the value inside a longer value (Whole
+	// false), is the word of the leaf's JWT claim that held the recorded
+	// value in the recording and the value F saw in record's full round, at
+	// one word (claimWord: a token the application minted with an id in a
+	// claim, sent back to it), addressed at the place Var names
+	// ("header.Authorization|jwt.cluster_id#0"): a replay decodes the claim
+	// there and binds a variable to its word, as at any place (BindAt). ""
+	// where the leaf is no JWT in either run, no claim holds the two values
+	// at one word, or the leaf has no variable place.
+	Claim string
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
 	// Clock: the learn step learned the leaf as a plain read of the
@@ -3870,6 +3880,9 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 			if r := placeRank(e, s, whole); r < rank {
 				best, rank = seenPlace(e, s, whole), r
+				if !whole {
+					best.Claim = claimAt(best.Var, s.Leaf.Value, s.Live, recorded, v.live)
+				}
 				// A leaf its protocol types as one instant, its instant whole
 				// in the value's own layout (a findAndModify's createdAt
 				// copied as epoch seconds): a whole copy too.

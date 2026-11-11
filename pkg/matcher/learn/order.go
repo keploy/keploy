@@ -3405,8 +3405,10 @@ func claimName(at variables.Address) string {
 // claimWord is the claim of the JWTs rec and live, two runs of one leaf,
 // that holds v in rec and f in live at one word n, as a step: the first
 // such claim by name (jwtSpan reads the claims that differ, in that order).
-// ok is false where either is no JWT (jwtSpan then opens no claim), or no
-// claim holds them so: the leaf is then named whole, as before.
+// Where no claim holds them at a word, the first claim that is v in rec and
+// f in live whole (an id of several words, a UUID in a sub claim), at word
+// -1. ok is false where either is no JWT (jwtSpan then opens no claim), or
+// no claim holds them so: the leaf is then named whole, as before.
 func claimWord(rec, live, v, f string) (variables.Step, int, bool) {
 	span, _ := jwtSpan(rec, live)
 	for _, part := range span.Parts {
@@ -3419,7 +3421,56 @@ func claimWord(rec, live, v, f string) (variables.Step, int, bool) {
 			}
 		}
 	}
+	for _, part := range span.Parts {
+		if part.Rec == v && part.Live == f {
+			return part.Step, -1, true
+		}
+	}
 	return "", 0, false
+}
+
+// claimAt is Place.Claim of a leaf at the variable place at, recorded rec and
+// seen live in record's full round, that holds the recorded value v and the
+// value f F saw inside a longer value: at, at the word of the claim that
+// holds them (claimWord), "" where none does, or at is no place (""). A
+// place that already names a step or a word is none: its claim would stand
+// in text it decodes.
+func claimAt(at, rec, live, v, f string) string {
+	a, err := variables.ParseAddress(at)
+	if err != nil || !a.Whole() {
+		return ""
+	}
+	st, n, ok := claimWord(rec, live, v, f)
+	if !ok {
+		return ""
+	}
+	a.Steps, a.Word = []variables.Step{st}, n
+	return a.String()
+}
+
+// BindAt is where a variable binds at p, and the value F saw there: its
+// variable place (Var) and Live, where p held the value whole; the word of
+// its JWT claim (Claim) and that word of Live, where it held the value
+// inside the claim. ok is false where p has no variable place, or held the
+// value inside a longer value otherwise: no place a replay can bind at.
+func (p Place) BindAt() (at, live string, ok bool) {
+	switch {
+	case p.Var == "":
+		return "", "", false
+	case p.Whole:
+		return p.Var, p.Live, true
+	case p.Claim == "":
+		return "", "", false
+	}
+	a, err := variables.ParseAddress(p.Claim)
+	if err != nil {
+		return "", "", false
+	}
+	w, ok := a.WordOf(p.Live)
+	if !ok {
+		return "", "", false
+	}
+	return p.Claim, w, true
 }
 
 // learned is a decided word and its line.

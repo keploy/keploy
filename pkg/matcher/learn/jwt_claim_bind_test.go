@@ -179,6 +179,8 @@ func TestClaimNameIsTheClaimABindPlaceReads(t *testing.T) {
 		{[]variables.Step{variables.StepB64}, ""},
 		{[]variables.Step{variables.JWTClaim("cluster_id")}, "cluster_id"},
 		{[]variables.Step{variables.StepB64, variables.JWTClaim("cid")}, "cid"},
+		// A token inside a claim of a token: the inner claim, the last read.
+		{[]variables.Step{variables.JWTClaim("outer"), variables.JWTClaim("inner")}, "inner"},
 	} {
 		if got := claimName(variables.Address{Steps: tc.steps, Word: 0}); got != tc.want {
 			t.Fatalf("claimName(%v) = %q; want %q", tc.steps, got, tc.want)
@@ -208,6 +210,10 @@ func TestClaimWordReadsTheTwoRunsOfOneClaim(t *testing.T) {
 		{"round F's claim holds another value", tok(map[string]any{"cid": "a1"}), tok(map[string]any{"cid": "b9"}), "a1", "b2", "", 0, false},
 		{"round F's claim holds it at another word", tok(map[string]any{"sub": "u-a1"}), tok(map[string]any{"sub": "b2-u"}), "a1", "b2", "", 0, false},
 		{"round F's claim has no such word, an empty value", tok(map[string]any{"sub": "u-a1"}), tok(map[string]any{"sub": "u"}), "a1", "", "", 0, false},
+		{"one claim whole, an id of several words", tok(map[string]any{"sub": "a20b6921-24c6-4a03"}), tok(map[string]any{"sub": "b9c1d2e3-77aa-4b10"}), "a20b6921-24c6-4a03", "b9c1d2e3-77aa-4b10", variables.JWTClaim("sub"), -1, true},
+		{"a claim at a word before another whole", tok(map[string]any{"a": "x-1a2b", "b": "1a2b"}), tok(map[string]any{"a": "x-9z8y", "b": "9z8y"}), "1a2b", "9z8y", variables.JWTClaim("a"), 1, true},
+		{"round F's claim holds another value whole", tok(map[string]any{"sub": "a20b6921-24c6-4a03"}), tok(map[string]any{"sub": "b9c1d2e3-77aa-4b10"}), "a20b6921-24c6-4a03", "b9c1d2e3-77aa-4b11", "", 0, false},
+		{"the recorded claim holds another value whole", tok(map[string]any{"sub": "a20b6921-24c6-4a04"}), tok(map[string]any{"sub": "b9c1d2e3-77aa-4b10"}), "a20b6921-24c6-4a03", "b9c1d2e3-77aa-4b10", "", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st, n, ok := claimWord(tc.rec, tc.live, tc.v, tc.f)
@@ -215,5 +221,63 @@ func TestClaimWordReadsTheTwoRunsOfOneClaim(t *testing.T) {
 				t.Fatalf("claimWord = %q, %d, %v; want %q, %d, %v", st, n, ok, tc.step, tc.word, tc.ok)
 			}
 		})
+	}
+}
+
+// TestClaimAtAddressesTheClaimAtTheLeafsVariablePlace: Classify's place of a
+// value held inside a leaf (Place.Claim) is the leaf's variable place at the
+// word of the claim that holds the two runs' values; none where the leaf
+// has no variable place, its place already names a word or a step, or no
+// claim holds them so.
+func TestClaimAtAddressesTheClaimAtTheLeafsVariablePlace(t *testing.T) {
+	rec := "Bearer " + claimToken(t, map[string]any{"cid": "e2e-free-company", "cluster_id": "6af47add8a9351dfdb7c457a"}, "recorded")
+	live := "Bearer " + claimToken(t, map[string]any{"cid": "e2e-free-company", "cluster_id": "6af47b1e0c22d4e8a91b03f6"}, "this-run")
+	for _, tc := range []struct {
+		name, at, f, want string
+	}{
+		{"the header's claim", "header.Authorization", "6af47b1e0c22d4e8a91b03f6", "header.Authorization|jwt.cluster_id#0"},
+		{"no variable place", "", "6af47b1e0c22d4e8a91b03f6", ""},
+		{"a place that names a word", "header.Authorization#1", "6af47b1e0c22d4e8a91b03f6", ""},
+		{"a place that names a step", "header.Authorization|b64", "6af47b1e0c22d4e8a91b03f6", ""},
+		{"round F's claim holds another value", "header.Authorization", "6af47b1e0c22d4e8a91b03f7", ""},
+	} {
+		if got := claimAt(tc.at, rec, live, "6af47add8a9351dfdb7c457a", tc.f); got != tc.want {
+			t.Errorf("%s: claimAt(%q) = %q; want %q", tc.name, tc.at, got, tc.want)
+		}
+	}
+	// An id of several words, the claim whole: no word.
+	rec = "Bearer " + claimToken(t, map[string]any{"sub": "a20b6921-24c6-4a03-bcf9-b409842a88d0"}, "recorded")
+	live = "Bearer " + claimToken(t, map[string]any{"sub": "0c9e1f7a-5b2d-4e8c-9a61-3d7f0b2c4e19"}, "this-run")
+	if got := claimAt("header.Authorization", rec, live, "a20b6921-24c6-4a03-bcf9-b409842a88d0", "0c9e1f7a-5b2d-4e8c-9a61-3d7f0b2c4e19"); got != "header.Authorization|jwt.sub" {
+		t.Errorf("claimAt of a UUID claim = %q; want header.Authorization|jwt.sub", got)
+	}
+}
+
+// TestBindAtIsTheWholePlaceOrItsClaimsWord: a place that held the value
+// whole binds at its variable place, with the value F saw there; one that
+// held it inside a JWT claim (Place.Claim), at the claim's word, with that
+// word of what F saw; any other, or one whose claim F's text does not open,
+// is no place to bind at.
+func TestBindAtIsTheWholePlaceOrItsClaimsWord(t *testing.T) {
+	tok := "Bearer " + claimToken(t, map[string]any{"cluster_id": "6af47b1e0c22d4e8a91b03f6"}, "this-run")
+	claim := "header.Authorization|jwt.cluster_id#0"
+	for _, tc := range []struct {
+		name     string
+		p        Place
+		at, live string
+		ok       bool
+	}{
+		{"whole", Place{Var: "body.name", Live: "app-2", Whole: true}, "body.name", "app-2", true},
+		{"whole, no variable place", Place{Live: "app-2", Whole: true}, "", "", false},
+		{"inside a claim", Place{Var: "header.Authorization", Live: tok, Claim: claim}, claim, "6af47b1e0c22d4e8a91b03f6", true},
+		{"inside a claim, no variable place", Place{Live: tok, Claim: claim}, "", "", false},
+		{"inside a longer value, no claim", Place{Var: "header.Authorization", Live: tok}, "", "", false},
+		{"a claim that is no place", Place{Var: "header.Authorization", Live: tok, Claim: "nowhere"}, "", "", false},
+		{"a claim F's text does not open", Place{Var: "header.Authorization", Live: "Bearer opaque", Claim: claim}, "", "", false},
+	} {
+		at, live, ok := tc.p.BindAt()
+		if at != tc.at || live != tc.live || ok != tc.ok {
+			t.Errorf("%s: BindAt = %q, %q, %v; want %q, %q, %v", tc.name, at, live, ok, tc.at, tc.live, tc.ok)
+		}
 	}
 }
