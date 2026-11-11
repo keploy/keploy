@@ -293,6 +293,20 @@ func TestTheReceiptNamesTheCallsChargedToNoTest(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tests.Tests, 1)
 	require.True(t, tests.Tests[0].Began.Equal(t0.Add(2*time.Second)), "began %v", tests.Tests[0].Began)
+	// The receipt keeps the run's test windows, which a call charged to no
+	// test is placed by (between two tests, before the first, after the
+	// last): each run of the test, in the order they began, the app's
+	// window left out. Without them every such call would be unplaced.
+	want := []TestWindow{
+		{Test: "o::TestA", Began: t0, Ended: t0.Add(time.Second)},
+		{Test: "o::TestA", Began: t0.Add(2 * time.Second), Ended: t0.Add(3 * time.Second)},
+	}
+	require.Len(t, tests.Windows, len(want), "windows %+v", tests.Windows)
+	for i, w := range want {
+		got := tests.Windows[i]
+		require.Equal(t, w.Test, got.Test)
+		require.True(t, got.Began.Equal(w.Began) && got.Ended.Equal(w.Ended), "window %d %+v; want %+v", i, got, w)
+	}
 }
 
 // Without the proven switch the tests receipt (last-replay-tests.yaml, what

@@ -240,19 +240,25 @@ func betweenFacts(c models.UnmatchedCall) string {
 // betweenNextStep is the one next step for c, a call outside every test,
 // chosen from its facts (betweenFacts): with a recording that came close, the
 // set is recorded again if the application changed the call on purpose;
-// with none, it is recorded again. record is the command that records the
-// set again in its place (recordAgainCommand); "" when keploy cannot name
-// the set's folder, an earlier set's call in a run that ran no such set:
-// then the set that made the call is recorded again with the command that
-// recorded it, which keploy cannot print.
-func betweenNextStep(c models.UnmatchedCall, record string) string {
-	if record == "" {
+// with none, it is recorded again. set is the test set whose call it is, ""
+// for an earlier set's call in a run that ran no such set, and record the
+// command that records set again in its place (recordAgainCommand). record
+// is "" when keploy cannot print one: for set "", the set that made the call
+// is recorded again with the command that recorded it, which keploy cannot
+// name; for a set whose name keploy record would not record under, set is
+// recorded again under its own name with the command that recorded it.
+func betweenNextStep(c models.UnmatchedCall, set, record string) string {
+	if record == "" && set == "" {
 		return "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call"
 	}
-	if c.ClosestMock != "" {
-		return "if the application changed this call on purpose, record the test set again in its place: " + record
+	again := "record the test set again in its place: " + record
+	if record == "" {
+		again = "record the test set " + set + " again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"
 	}
-	return "record the test set again in its place: " + record
+	if c.ClosestMock != "" {
+		return "if the application changed this call on purpose, " + again
+	}
+	return again
 }
 
 // recordAgainCommand is the command that records testSetID again in its
@@ -324,6 +330,6 @@ func (r *Replayer) outsideFields(testSetID, madeIn string, c models.UnmatchedCal
 		zap.String("closest", c.ClosestMock),
 		zap.Strings("differs", models.FieldShapes(c.Differs)),
 		zap.String("facts", betweenFacts(c)),
-		zap.String("next_step", betweenNextStep(c, r.recordAgainCommand(testSetID))),
+		zap.String("next_step", betweenNextStep(c, testSetID, r.recordAgainCommand(testSetID))),
 	}
 }

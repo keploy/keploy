@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -250,8 +251,24 @@ func TestSetCallsPlaceACallBetweenTestsByTheReads(t *testing.T) {
 	if got := (&Replayer{}).recordAgainCommand("test-set-0"); got != "" {
 		t.Fatalf("record command with no config %q; want none", got)
 	}
-	if got := betweenNextStep(models.UnmatchedCall{ClosestMock: "mock-1"}, ""); got != "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call" {
+	if got := betweenNextStep(models.UnmatchedCall{ClosestMock: "mock-1"}, "", ""); got != "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call" {
 		t.Fatalf("next step with no command %q; want the earlier set's", got)
+	}
+	// A set keploy names, whose name keploy record would not record under
+	// (it reads 123 as a number), is recorded again under its own name: the
+	// step names that set, never an earlier one, and prints no command that
+	// would record another set.
+	cannot := "record the test set 123 again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"
+	for _, c := range []struct {
+		call models.UnmatchedCall
+		want string
+	}{
+		{models.UnmatchedCall{ClosestMock: "mock-1"}, "if the application changed this call on purpose, " + cannot},
+		{models.UnmatchedCall{}, cannot},
+	} {
+		if got := betweenNextStep(c.call, "123", ""); got != c.want {
+			t.Fatalf("next step for set 123 %q; want %q", got, c.want)
+		}
 	}
 }
 
@@ -498,5 +515,24 @@ func TestUnderTheSwitchASetWhoseWorkerScopeIsNotMadeIsNotOutsideOnly(t *testing.
 				t.Fatalf("reason %q: the worker scope said %v, want %v", rep.FailureReason, worker, !tc.want)
 			}
 		})
+	}
+}
+
+// The ERROR line's next step names the set it fails: a set the run names,
+// whose name keploy record would not record under (it reads 123 as a
+// number), is recorded again under its own name, never named as an earlier
+// set's; a call of an earlier set the run cannot name (set "") says that
+// set. Mutation: hand betweenNextStep no set.
+func TestOutsideFieldsRecordTheSetTheyNameAgain(t *testing.T) {
+	r := &Replayer{config: &config.Config{Path: "/w/keploy", Command: "go run ."}}
+	for _, c := range []struct{ set, want string }{
+		{"123", "record the test set 123 again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"},
+		{"", "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call"},
+	} {
+		core, logs := observer.New(zapcore.ErrorLevel)
+		zap.New(core).Error("call outside every test", r.outsideFields(c.set, "", models.UnmatchedCall{Between: true})...)
+		if got := logs.All()[0].ContextMap()["next_step"]; got != c.want {
+			t.Fatalf("set %q: next step %q; want %q", c.set, got, c.want)
+		}
 	}
 }
