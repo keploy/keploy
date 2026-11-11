@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -91,6 +93,21 @@ type MockVariable struct {
 	// (variables.Table.BindAll). Only the learn step sets
 	// it, with a Bind; none for any other variable.
 	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty" bson:"minted,omitempty"`
+	// ByForm is, by use place (one of Use, never Bind), the time default's
+	// check of a time the application stamped there (keploy.yml's times
+	// setting at its default; ClockOffset.Form, learned by the learn step's
+	// BoundTimeLearned): a replay whose call does not hold the variable's
+	// value at that place passes it where its value is a time of that form,
+	// and refuses it otherwise, as at a use with no entry. Two reads of the
+	// application's clock that fell in one second when recorded may fall in
+	// two in a replay: one is no copy of the other. The learn step sets it
+	// only for a field that is a time (a decoder-typed time, a field a clock
+	// rule declares, or a value bound where keploy learned a read of the
+	// application's clock) whose bound place no earlier answer holds: never
+	// for an echo, a value copied from an answer, an id or a minted value. A
+	// replay under mock.times: strict, and a keploy that does not read it,
+	// checks the place exactly.
+	ByForm map[string]ClockOffset `json:"by_form,omitempty" yaml:"by_form,omitempty" bson:"by_form,omitempty"`
 	// Why is, for a variable the learn step wrote, why it is one and how to
 	// undo it, for a person or a tool reading the mock (the legibility
 	// rule). Only given variables (GivenPrefix) carry one for now
@@ -2067,7 +2084,40 @@ func (v MockVariables) Clone() MockVariables {
 		mv.Answer = append([]string(nil), mv.Answer...)
 		mv.Clock = append([]ClockRead(nil), mv.Clock...)
 		mv.Minted = mv.Minted.clone()
+		mv.ByForm = maps.Clone(mv.ByForm)
 		out[name] = mv
+	}
+	return out
+}
+
+// MergeByForm is the check by form (MockVariable.ByForm) of a variable
+// whose uses are aUse, with a's checks aBy, and bUse, with bBy, as one: a
+// use only one of them names keeps its check; one both name keeps it only
+// where both learned it, in one form, and is checked exactly otherwise. A
+// learning that checks a use exactly is never loosened by another's. nil
+// where none is left.
+func MergeByForm(aUse []string, aBy map[string]ClockOffset, bUse []string, bBy map[string]ClockOffset) map[string]ClockOffset {
+	in := func(uses []string, place string) bool { return slices.Contains(uses, place) }
+	var out map[string]ClockOffset
+	keep := func(place string, o ClockOffset) {
+		if out == nil {
+			out = map[string]ClockOffset{}
+		}
+		out[place] = o
+	}
+	for place, o := range aBy {
+		if !in(bUse, place) {
+			keep(place, o)
+			continue
+		}
+		if p, ok := bBy[place]; ok && p.Form == o.Form {
+			keep(place, o)
+		}
+	}
+	for place, o := range bBy {
+		if !in(aUse, place) {
+			keep(place, o)
+		}
 	}
 	return out
 }
@@ -2095,6 +2145,7 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		} else if v.Bind != "" && len(v.Clock) == 0 {
 			cur.Clock = nil
 		}
+		cur.ByForm = MergeByForm(cur.Use, cur.ByForm, v.Use, v.ByForm)
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
 		cur.Echo = cur.Echo && v.Echo

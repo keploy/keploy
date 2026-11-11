@@ -200,6 +200,36 @@ func BoundTimeLearned(ln Learned, declared bool, w *Window, timeForm bool) Learn
 	return ln
 }
 
+// HoldsByForm reports whether live, the value a replay's call carries at a
+// use place of a variable bound whole where it does not hold the variable's
+// value, passes that place's check by form (models.MockVariable.ByForm, o):
+// under the time default (timeForm) alone, a whole value (no word), and a
+// time of o's form (TimeForm). HTTP and MongoDB replays both check a use's
+// fallback with it, so the two agree.
+func HoldsByForm(o models.ClockOffset, live Leaf, timeForm bool) bool {
+	return timeForm && o.Form != "" && o.Word.IsZero() && TimeForm(live) == o.Form
+}
+
+// AnsweredWhole reports whether mock, an earlier call of the test (one of
+// earlier), answered r's recorded value whole at any leaf of its answer
+// (WholeEcho), placed or not: a later call may have copied the value from
+// that answer, which is recorded and holds in every replay, so a use of it
+// keeps its exact bind and gets no check by form (models.MockVariable.ByForm).
+// HTTP and MongoDB learning both ask it, so the two agree.
+func AnsweredWhole(earlier []Earlier, mock string, r Leaf) bool {
+	for _, e := range earlier {
+		if e.Mock != mock {
+			continue
+		}
+		for _, s := range e.Seen {
+			if s.Side == Response && WholeEcho(r, s.Leaf) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // formIn is the form rec and live, a time field's leaf as recorded and in
 // round F, are both written in (TimeForm), as the time default checks it;
 // else "" and why not, after "; and": its runs write no one form of an

@@ -79,6 +79,10 @@ type varDecl struct {
 	bind   *varPlace
 	use    []varPlace
 	answer []varPlace
+	// byForm: a use's check by form, by its raw place, where the call does
+	// not hold the variable's value there (models.MockVariable.ByForm). Read
+	// at a use alone, never at the bind.
+	byForm map[string]models.ClockOffset
 }
 
 // requestPlaces is the variable's bind place (first) and uses.
@@ -161,7 +165,7 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 			// calls alone: unchecked here, it would pass as any value.
 			return nil, fmt.Sprintf("variable %s is declared minted by keploy.yml's rule %s, and keploy checks a minted value on MongoDB calls only: it cannot check this HTTP call's", name, mv.Minted.Rule)
 		}
-		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock}
+		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock, byForm: mv.ByForm}
 		if mv.Bind != "" {
 			p, why := parse(name, "bind", mv.Bind, false)
 			if why != "" {
@@ -613,6 +617,11 @@ type varScope struct {
 	ahead    *variables.Table
 	aheadGen uint64
 	inAhead  func(*models.Mock) bool
+	// rules: what the store's scope table declares of its recordings, and
+	// whether the time default is on (declaredIn), which a call that fits
+	// a recording with variables is compared under, as the strict pass
+	// compares every other call.
+	rules declaredRules
 }
 
 // readVarScope reads the scopes of mockDb, before the pool is read: a scope
@@ -621,6 +630,7 @@ type varScope struct {
 func readVarScope(mockDb integrations.MockMemDb) varScope {
 	var s varScope
 	s.table = variableTable(mockDb)
+	s.rules = declaredIn(mockDb)
 	if s.table != nil {
 		s.gen = s.table.Gen()
 	}
@@ -662,7 +672,7 @@ func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock
 			return nil, nil, ctx.Err()
 		}
 		table, gen := scope.of(m)
-		hit, problem := h.fitVariables(ctx, input, live, m, table, headerNoise, userBodyNoise, urlNoise)
+		hit, problem := h.fitVariables(ctx, input, live, m, table, scope.rules, headerNoise, userBodyNoise, urlNoise)
 		switch {
 		case hit != nil:
 			hit.table, hit.gen = table, gen
@@ -682,7 +692,7 @@ func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock
 // fitVariables reads the live call against one mock. It returns a hit, or the
 // evidence why a mock the call fits cannot answer it, or neither when the call
 // is not this mock's.
-func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *models.Mock, table *variables.Table, headerNoise, userBodyNoise map[string][]string, urlNoise []string) (*varHit, *varProblem) {
+func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *models.Mock, table *variables.Table, rules declaredRules, headerNoise, userBodyNoise map[string][]string, urlNoise []string) (*varHit, *varProblem) {
 	if m.Spec.HTTPReq == nil {
 		return nil, nil
 	}
@@ -883,6 +893,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	// those patterns decide it in the comparison below, and no noise
 	// learned there excuses a value they refuse.
 	user := h.newStrictNoise(headerNoise, userBodyNoise, urlNoise)
+	user.declaredRules = rules
 	for k := range m.Spec.ReqBodyNoise {
 		raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody)
 		if !ok {
@@ -929,7 +940,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	if table == nil {
 		return nil, &varProblem{mock: m.Name, why: "this keploy's mock store keeps no variables, so it cannot follow them", next: "run the keploy agent of this keploy version"}
 	}
-	return holdVariables(m, decls, liveAt, table, refuse)
+	return holdVariables(m, decls, liveAt, table, user.timeForm, refuse)
 }
 
 // typeChanged is the evidence of a call that sent actual, a value of another
@@ -950,7 +961,7 @@ func typeChanged(mock, name string, vp varPlace, expected, actual string) *varPr
 // (liveAt holds the call's values at m's places): it returns the hit and what
 // it binds, or the evidence why they do not hold, or neither when the call is
 // another test's.
-func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
+func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, timeForm bool, refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
 	// 2. The variables hold.
 	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}, saw: map[string]string{}}
 	taken := map[string]variables.Binding{} // this call's new bindings, by name
@@ -962,7 +973,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			if v.empty() {
 				return nil, emptyBind(m.Name, d, v)
 			}
-			if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt); p != nil {
+			if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt, timeForm); p != nil {
 				return nil, p
 			}
 			hit.local[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw}
@@ -984,7 +995,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				// another test's too.
 				return nil, nil
 			}
-			if p := holdsAt(m.Name, d, places, bound.Value, bound.Mock, bound.Place, liveAt); p != nil {
+			if p := holdsAt(m.Name, d, places, bound.Value, bound.Mock, bound.Place, liveAt, timeForm); p != nil {
 				return nil, p
 			}
 			continue
@@ -1030,7 +1041,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 		if v.empty() {
 			return nil, emptyBind(m.Name, d, v)
 		}
-		if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt); p != nil {
+		if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt, timeForm); p != nil {
 			return nil, p
 		}
 		// Two variables are two values: a value the test bound already, as
@@ -1156,10 +1167,13 @@ func placeKey(p variables.Place) string {
 
 // holdsAt checks that every request place of d holds want, the value the
 // variable has (taken at boundMock boundPlace).
-func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPlace string, liveAt map[string]held) *varProblem {
+func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPlace string, liveAt map[string]held, timeForm bool) *varProblem {
 	for _, vp := range places {
 		l := liveAt[vp.key()]
 		if variables.SameValue(want, l.value, l.number()) {
+			continue
+		}
+		if heldByForm(d, vp, l, timeForm) {
 			continue
 		}
 		verb := "sent"
@@ -1183,6 +1197,24 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 		}).say("variable %s is %q in this test (taken at %s %s), and this call %s %q at %s", d.name, said{want, vp.place}, boundMock, boundPlace, verb, said{l.value, vp.place}, vp.raw).boundAt(boundMock)
 	}
 	return nil
+}
+
+// heldByForm reports whether l, what the call carries at vp, a use of d
+// that does not hold d's value, passes the use's check by form under the
+// time default (timeForm; models.MockVariable.ByForm, learn.HoldsByForm): a
+// time the application stamped there, two reads of its clock that fell in
+// one second when recorded and in two in this replay. Never at d's bind, at
+// an echo's place, or at a use the learn step gave no such check.
+func heldByForm(d varDecl, vp varPlace, l held, timeForm bool) bool {
+	o, ok := d.byForm[vp.raw]
+	if !ok || d.echo || d.bind != nil && vp.raw == d.bind.raw || !vp.whole() {
+		return false
+	}
+	t := learn.String
+	if l.number() {
+		t = learn.Number
+	}
+	return learn.HoldsByForm(o, learn.Leaf{Path: vp.raw, Type: t, Value: l.value}, timeForm)
 }
 
 func emptyBind(mock string, d varDecl, v held) *varProblem {
@@ -1413,7 +1445,7 @@ func (h *HTTP) variableMember(ctx context.Context, input *req, scope varScope, h
 			live = &v
 		}
 		table, _ := scope.of(m)
-		hit, problem := h.fitVariables(ctx, input, *live, m, table, headerNoise, userBodyNoise, urlNoise)
+		hit, problem := h.fitVariables(ctx, input, *live, m, table, scope.rules, headerNoise, userBodyNoise, urlNoise)
 		return hit != nil || problem != nil
 	}
 }

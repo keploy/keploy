@@ -47,6 +47,11 @@ func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 		w          *learn.Window
 		refused    string
 		bound      bool
+		// answered: the bound call answered the value too; byForm: the
+		// bound variable's use keeps a check by form for a replay where
+		// the bind does not hold (models.MockVariable.ByForm).
+		answered bool
+		byForm   bool
 	}{
 		{what: "bound to a read of the clock, two seconds apart in round F", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), clock: true, timeForm: true, w: window},
 		{what: "a field a clock rule declares", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), rules: clockRule(field), timeForm: true, w: window},
@@ -59,7 +64,11 @@ func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 		{what: "milliseconds in round F", live: strconv.FormatInt(liveAt.UnixMilli(), 10), sourceLive: secs(liveAt.Add(-time.Second)), clock: true, timeForm: true, w: window, refused: refusal},
 		{what: "an epoch far from its call", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), clock: true, timeForm: true, w: &learn.Window{Rec: window.Rec, F: learn.Span{From: liveAt.AddDate(2, 0, 0), To: liveAt.AddDate(2, 0, 0)}}, refused: refusal},
 		{what: "no window", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), clock: true, timeForm: true, refused: refusal},
-		{what: "a bind that holds", live: secs(liveAt), sourceLive: secs(liveAt), clock: true, timeForm: true, w: window, bound: true},
+		{what: "a bind that holds", live: secs(liveAt), sourceLive: secs(liveAt), clock: true, timeForm: true, w: window, bound: true, byForm: true},
+		{what: "a bind that holds, of a field a clock rule declares", live: secs(liveAt), sourceLive: secs(liveAt), rules: clockRule(field), timeForm: true, w: window, bound: true, byForm: true},
+		{what: "a bind that holds, of a value that is no time", live: secs(liveAt), sourceLive: secs(liveAt), timeForm: true, w: window, bound: true},
+		{what: "a bind that holds, the time default off", live: secs(liveAt), sourceLive: secs(liveAt), clock: true, w: window, bound: true},
+		{what: "a bind that holds, of a value the bound call answered", live: secs(liveAt), sourceLive: secs(liveAt), clock: true, timeForm: true, w: window, bound: true, answered: true},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			tr := learn.NewTracker()
@@ -73,7 +82,11 @@ func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 			updated := learn.Leaf{Path: "body.data.updatedAt", Value: secs(recAt), Type: learn.Number}
 			read := learn.Learned{Kind: learn.KindClockRead, Recorded: updated, Live: learn.Leaf{Path: updated.Path, Value: tc.live, Type: learn.Number}, Read: &models.ClockOffset{Res: time.Second}}
 			learned := boundTimesOf([]learn.Learned{read, {Kind: learn.KindVariable, Recorded: rec, Live: live, From: from}}, tc.rules, m, tc.w, tc.timeForm)
-			p, why := learnPlan(tr, test, m, jsonReq, true, learned, nil, nil)
+			var earlier []learn.Earlier
+			if tc.answered {
+				earlier = []learn.Earlier{{Mock: "mock-3232", Own: true, Seen: []learn.Seen{{Side: learn.Response, Place: "body.app.createdAt", Leaf: learn.Leaf{Path: "body.app.createdAt", Value: secs(recAt), Type: learn.Number}}}}}
+			}
+			p, why := learnPlan(tr, test, m, jsonReq, true, learned, earlier, nil)
 			switch {
 			case tc.refused != "":
 				if why != tc.refused || len(p.clocks) > 1 || len(p.vars) != 0 {
@@ -82,6 +95,22 @@ func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 			case tc.bound:
 				if why != "" || len(p.clocks) != 1 || len(p.vars) != 1 {
 					t.Fatalf("why %q, clocks %v, variables %v; want the variable bound", why, p.clocks, p.vars)
+				}
+				for name, v := range p.vars {
+					o, ok := v.ByForm[field]
+					if !tc.byForm {
+						if len(v.ByForm) != 0 {
+							t.Fatalf("variable %s's use is checked by form %+v; want it checked exactly", name, v.ByForm)
+						}
+						continue
+					}
+					if !ok || len(v.ByForm) != 1 || o.Form != "number 9999999999" || !strings.Contains(o.Why, "checked by its form alone") {
+						t.Fatalf("variable %s (uses %v) is checked by form %+v; want %s checked by its form where the bind does not hold", name, v.Use, v.ByForm, field)
+					}
+					later := learn.Leaf{Path: field, Value: secs(liveAt.Add(time.Second)), Type: learn.Number}
+					if !learn.HoldsByForm(o, later, true) || learn.HoldsByForm(o, later, false) {
+						t.Errorf("a replay's next second passes by form %v under the time default, %v under strict; want only the time default", learn.HoldsByForm(o, later, true), learn.HoldsByForm(o, later, false))
+					}
 				}
 			default:
 				o, ok := p.clocks[field]

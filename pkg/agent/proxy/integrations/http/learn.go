@@ -2692,6 +2692,19 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			v := p.vars[name]
 			v.Recorded, v.Use = r.Value, appendNew(v.Use, use)
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			if l.ByForm != nil && !learn.AnsweredWhole(earlier, from.Mock, r) {
+				// A time the application stamped, whose bind holds in round
+				// F: a replay checks the bind, and where it does not hold
+				// (two reads of the clock that fell in one second here, in
+				// two there) the time default checks it by its form alone
+				// (models.MockVariable.ByForm). One the bound call answered
+				// whole, at any leaf, may be a copy of that answer: checked
+				// exactly (learn.AnsweredWhole).
+				if v.ByForm == nil {
+					v.ByForm = map[string]models.ClockOffset{}
+				}
+				v.ByForm[use] = *l.ByForm
+			}
 			p.vars[name] = v
 			b := p.binds[from.Mock]
 			if b == nil {
