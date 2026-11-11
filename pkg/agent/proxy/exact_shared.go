@@ -244,7 +244,7 @@ func (h *heldScope) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
 // ownedView is the view h's owned reads are made in, while it is a test's
 // (nil otherwise): the view h's reads are made in (readView: its mark's, or
 // the view in force for a call decided in the test the store opens next and
-// for one whose consume the view in force refused), or, for a call marked
+// for one whose consume the view in force refused, settled), or, for a call marked
 // from a round snapshot, whose other reads are made in the view in force,
 // the view that snapshot read (heldIn).
 func (h *heldScope) ownedView() *exactView {

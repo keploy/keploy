@@ -1,7 +1,10 @@
 package replayer_test
 
 import (
+	"fmt"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,23 +165,24 @@ func debugText(logs *observer.ObservedLogs) string {
 	return lines.String()
 }
 
-// Under exact serving a command marked in T1's view matches T1's recording,
-// which redacted the key and has not answered, while the replay ends T1:
-// right after the mark, before the command is held, or right after the hold.
-// The view in force refuses the consume, so the command reads the view in
-// force from then on and misses there, its pool none of T1's recordings. Its
-// reads were made in two views, and its miss and every debug line show it
-// redacted whole, wherever between the mark and the hold T1 ended. Before,
-// a command held after T1 ended was taken as held in the view in force, its
-// view never moved: the miss and a debug line showed the key as sent.
+// Under exact serving a command marked in the pool view matches the pool's
+// recording, which redacted the key, while the replay begins T1: right after
+// the mark, before the command is held, or right after the hold. A pool
+// view's command is no test's, and the recording is not T1's, so its
+// consume settles in T1's view, which refuses it: the command reads the view
+// in force from then on and misses there. Its reads were made in two views,
+// and its miss and every debug line show it redacted whole, wherever between
+// the mark and the hold T1 began. Before, a command held after T1 began was
+// taken as held in the view in force, its view never moved: the miss and a
+// debug line showed the key as sent.
 func TestMySQLAMissMovedOntoTheViewInForceByARefusedConsumeIsRedactedWhole(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
 		name string
 		hold bool
 	}{
-		{name: "T1 ends between the mark and the hold"},
-		{name: "T1 ends right after the hold", hold: true},
+		{name: "T1 begins between the mark and the hold"},
+		{name: "T1 begins right after the hold", hold: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			replayer.ForgetAnsweredForTest()
@@ -189,37 +193,89 @@ func TestMySQLAMissMovedOntoTheViewInForceByARefusedConsumeIsRedactedWhole(t *te
 			t.Cleanup(mm.Close)
 			mm.SetMocksWithWindow(nil, []*models.Mock{first}, models.BaseTime, time.Now().Add(time.Hour))
 			seedWindows(mm, 2)
-			mm.ServeExactTest("T1", []*models.Mock{first})
+			mm.ServeExactPool("pool", []string{first.Name})
 			if !mm.ExactServing() {
-				t.Fatal("precondition: T1 is not served exactly")
+				t.Fatal("precondition: the pool view is not served exactly")
 			}
+			db := &viewMover{MockManager: mm}
+			began := false
+			begin := func() {
+				mm.ServeExactTest("T1", nil)
+				began = true
+			}
+			if tc.hold {
+				db.afterHold = begin
+			} else {
+				db.afterMark = begin
+			}
+			var consumes atomic.Int32
+			mm.OnConsume(func(name string) {
+				if name == first.Name {
+					consumes.Add(1)
+				}
+			})
+			t.Cleanup(func() { mm.OnConsume(nil) })
+			core, logs := observer.New(zapcore.DebugLevel)
+			ok, miss, shown, err := replayer.MatchShownForTest(closeConn, zap.New(core), queryReq(orderLiveFirst), db, closeDctx())
+			if !began {
+				t.Fatal("precondition: T1 did not begin inside the match")
+			}
+			if consumes.Load() == 0 {
+				t.Fatal("precondition: the command never went to consume the pool's recording; the row is about a refused consume")
+			}
+			if err != nil || ok || miss == "" {
+				t.Fatalf("precondition: the command was not a miss: ok %v, err %v, miss %q", ok, err, miss)
+			}
+			if strings.Contains(shown+miss, closeSecret) {
+				t.Errorf("the miss shows the key the pool's recording redacted: shown %q\nmiss: %s", shown, miss)
+			}
+			if shown != "(redacted)" {
+				t.Errorf("the miss, read in two views, is shown %q; want it redacted whole", shown)
+			}
+			if text := debugText(logs); strings.Contains(text, closeSecret) {
+				t.Errorf("a debug line shows the key the pool's recording redacted:\n%s", text)
+			}
+		})
+	}
+}
+
+// Under exact serving a command marked in T1's view matches T1's recording,
+// unanswered, while the replay ends T1: right after the mark, before the
+// command is held, or right after the hold. Its consume of its own test's
+// recording settles in T1's view, as at once, and it is answered.
+func TestMySQLACommandOfAnEndedTestIsAnsweredByItsOwnRecording(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, hold := range []bool{false, true} {
+		t.Run(fmt.Sprintf("hold=%v", hold), func(t *testing.T) {
+			replayer.ForgetAnsweredForTest()
+			t.Cleanup(replayer.ForgetAnsweredForTest)
+			s1, _ := diffWindow(1)
+			first, _ := orderMocks(s1.Add(time.Millisecond), s1.Add(2*time.Millisecond))
+			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SetMocksWithWindow(nil, []*models.Mock{first}, models.BaseTime, time.Now().Add(time.Hour))
+			seedWindows(mm, 2)
+			mm.ServeExactTest("T1", []*models.Mock{first})
 			db := &viewMover{MockManager: mm}
 			ended := false
 			end := func() {
 				mm.ServeExactPool("pool", nil)
 				ended = true
 			}
-			if tc.hold {
+			if hold {
 				db.afterHold = end
 			} else {
 				db.afterMark = end
 			}
-			core, logs := observer.New(zapcore.DebugLevel)
-			ok, miss, shown, err := replayer.MatchShownForTest(closeConn, zap.New(core), queryReq(orderLiveFirst), db, closeDctx())
+			ok, miss, _, err := replayer.MatchShownForTest(closeConn, zap.NewNop(), queryReq(orderLiveFirst), db, closeDctx())
 			if !ended {
 				t.Fatal("precondition: T1 did not end inside the match")
 			}
-			if err != nil || ok || miss == "" {
-				t.Fatalf("precondition: the command was not a miss: ok %v, err %v, miss %q", ok, err, miss)
+			if err != nil || !ok {
+				t.Fatalf("T1's late command was not answered by T1's own recording: ok %v, err %v, miss %q", ok, err, miss)
 			}
-			if strings.Contains(shown+miss, closeSecret) {
-				t.Errorf("the miss shows the key T1's recording redacted: shown %q\nmiss: %s", shown, miss)
-			}
-			if shown != "(redacted)" {
-				t.Errorf("the miss, read in two views, is shown %q; want it redacted whole", shown)
-			}
-			if text := debugText(logs); strings.Contains(text, closeSecret) {
-				t.Errorf("a debug line shows the key T1's recording redacted:\n%s", text)
+			if test, consumed, _, known := mm.ExactTestOutcome(); !known || test != "T1" || !slices.Equal(consumed, []string{first.Name}) {
+				t.Fatalf("T1's outcome is %q, answered %v (%v); want T1 with %s answered", test, consumed, known, first.Name)
 			}
 		})
 	}

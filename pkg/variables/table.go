@@ -1208,24 +1208,6 @@ func (t *Table) In(scope uint64) *Table {
 	return t.scopeTable(scope)
 }
 
-// After is the table a call made while scope was in force binds in when it
-// is answered as the next scope's call in flight (a pool view's call between
-// tests, answered with the next test's recording): the table of the scope
-// begun next after scope, t while that scope runs, its ended table (In)
-// once another began; ok is false while no scope began since scope (the
-// call binds in the table begun early for the next: the caller's).
-func (t *Table) After(scope uint64) (*Table, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.scope <= scope {
-		return nil, false
-	}
-	if t.scope == scope+1 {
-		return t, true
-	}
-	return t.scopeTable(scope + 1), true
-}
-
 // scopeTable is the ended table of scope (In): the one t kept as scope ended,
 // else one holding nothing. t.mu is held.
 func (t *Table) scopeTable(scope uint64) *Table {

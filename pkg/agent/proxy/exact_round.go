@@ -428,11 +428,13 @@ func (m *MockManager) bumpStagingEpoch() {
 // call's mark (HoldToRound) that checks the staging alone (at.Epoch): a view
 // replaced within it, at a test's begin or end, is still the call's set, and
 // a consume that finds its view closed is settled in the view that replaces
-// it, as one with no guard is. restaged: a staging guard found the staging
-// moved. readIn: the view a staging guard's call was read in (its mark's),
-// in which the call's reads, walk and worker spend are made
-// (heldScope.readView, heldScope.SequenceView, windowed); nil when they are
-// made in the view in force (heldScope.readView says when).
+// it, as one with no guard is, but for a consume of one of the call's own
+// test's recordings, settled in the view the call was read in (ownView).
+// restaged: a staging guard found the staging moved. readIn: the view a
+// staging guard's call was read in (its mark's), in which the call's reads,
+// walk, worker spend and own test's consumes are made (heldScope.readView,
+// heldScope.SequenceView, windowed, ownView); nil when they are made in the
+// view in force (heldScope.readView says when).
 type roundGuard struct {
 	at       integrations.RoundAt
 	moved    string
@@ -448,7 +450,8 @@ type roundGuard struct {
 // scope the consume reads and makes (exactView.spendsInTests,
 // spentOutsideIn): the windows' or the calls' between tests. A staging
 // guard's call (HoldToRound) settles in the view in force, which a test's
-// begin or end may have installed since its read; its spend is made in the
+// begin or end may have installed since its read (one of its own test's
+// recordings in the view it was read in, ownView); its spend is made in the
 // view its reads are (heldScope.readView), as its walk is
 // (heldScope.SequenceView): the view it was read in (readIn) while it reads
 // there. So a call read between tests that commits after the next test
@@ -465,6 +468,34 @@ func (g *roundGuard) windowed(v *exactView) bool {
 		return g.readIn.test != ""
 	}
 	return v.test != ""
+}
+
+// ownView is the view a consume of mk by g's call settles in when mk is one
+// of the recordings of the test whose view the call was read in (readIn):
+// that view, whether or not it is still in force. keploy can decide a call
+// after the replay ended its test, or began the next: at zero latency the
+// call would have been decided in its own view, so it is still answered by
+// its own test's recording, unanswered there, and never by the next test's
+// (which the view in force would refuse it, or hand it). One its view's
+// test answered already is refused there, as at once. A restage refuses it
+// (guardLocked): the staging's recordings are another set's then. nil once
+// the agent reset the replay session the view was of (sessionEnded): the
+// consume settles in the view in force, which refuses it, as it refuses
+// every call of an ended session (consumeOwnedLocked checks it again under
+// the round lock, for a reset that lands after this). nil for any other
+// consume, which settles in the view in force: a call that reads
+// the view in force, one read in a pool view (its ahead recordings are the
+// next test's, carried into that test's view as it opens), and a recording
+// the call's view does not own (the pool's, the worker scope's, the
+// start-up's).
+func (g *roundGuard) ownView(mk *models.Mock) *exactView {
+	if g == nil || mk == nil {
+		return nil
+	}
+	if v := g.readIn; v != nil && v.test != "" && v.owns(mk.Name) && !v.sessionEnded() {
+		return v
+	}
+	return nil
 }
 
 // checks says g checks its take against a round: a guard, not ServingFor's.
@@ -1035,8 +1066,9 @@ type heldScope struct {
 	// mark kept one, the round snapshot's its mark was made from
 	// (integrations.CallRound.StoreView), else the view in force as h was
 	// held (HoldToRound). A call that reads the view in force (readIn nil:
-	// from its hold on, or since a refused consume, settled) is told it
-	// moved from it (CallViewMoved). Views are installed new and never
+	// from its hold on, or since the view in force refused a consume,
+	// settled) is told it moved from it (CallViewMoved). Views are installed
+	// new and never
 	// again, so one still in force is the one the call was read in.
 	heldIn *exactView
 	// snapped says h's call was marked from a round snapshot, not one
@@ -1120,13 +1152,20 @@ func (h *heldScope) SequenceView() (integrations.SequenceView, bool) {
 // that landed on time: a call read between tests reads the worker scope in
 // gap order and whatever a window spent of it, a test's call what the windows
 // left, and neither reads the recordings of a test whose view came or went
-// meanwhile. Its consumes settle in the view in force (roundGuard): one the
-// view in force refuses is a miss, as a consume that lands after a test's
-// begin or end is. A call marked where the learn tracker had begun a test
-// the store had not opened is decided in the test the store opens next
+// meanwhile. A consume of one of its own test's recordings settles in that
+// view too (roundGuard.ownView), in force or not: at zero latency keploy
+// decides the call there, so a recording its test left unanswered answers
+// it, and the next test's never does. Before, it settled in the view in
+// force, which refused it, and the call missed with its own recording
+// unanswered, or read on in the view in force and was answered by the next
+// test's. Its other consumes settle in the view in force (roundGuard): one
+// the view in force refuses is a miss, as a consume that lands after a
+// test's begin or end is. A call marked where the learn tracker had begun a
+// test the store had not opened is decided in the test the store opens next
 // (integrations.CallRound.TrackerAhead): it reads the view in force, and
 // walks and spends the worker scope there too, as does a call whose mark
-// kept no view, and one whose consume the view in force refused (settled).
+// kept no view, and one whose consume the view in force refused (settled:
+// one of a recording not its own test's).
 // One rule for the three, so one worker recording never answers two calls
 // in the windows, wherever a test's begin lands between a call's mark and
 // its read.
@@ -1164,29 +1203,21 @@ func (h *heldScope) Variables() *variables.Table {
 	return h.MockManager.Variables()
 }
 
-// InAheadScope and AheadVariables implement integrations.VariableScopes for
-// h's call, read in the view it was read in (readIn) as Variables is: a call
-// of the gap that the pool view answers with one of the next test's calls in
+// InAheadScope implements integrations.VariableScopes' question for h's
+// call, read in the view it was read in (readIn) as Variables is: a call of
+// the gap that the pool view answers with one of the next test's calls in
 // flight binds in the table begun early for that test (MockManager.
-// AheadVariables) until that test begins, and in that test's scope once it
-// began (variables.Table.After), which carried in what the table begun early
-// had bound, as at once. The manager's for a call that reads the view in
-// force.
+// AheadVariables). The manager's for a call that reads the view in force.
+// The table begun early is the manager's for every call (MockManager.
+// AheadVariables): one decided after that test began has its consume of the
+// pool view's copy refused in that test's view (a copy another view served,
+// TestModeInfo.ServedIn), and is decided again in the view in force, where
+// it binds in that test's scope (settled, Variables), as at once.
 func (h *heldScope) InAheadScope(mk *models.Mock) bool {
 	if v := h.g.readIn; v != nil {
 		return v.answersAhead(mk)
 	}
 	return h.MockManager.InAheadScope(mk)
-}
-
-// AheadVariables: see InAheadScope.
-func (h *heldScope) AheadVariables() *variables.Table {
-	if v := h.g.readIn; v != nil && v.scoped {
-		if t, began := h.vars.After(v.scope); began {
-			return t
-		}
-	}
-	return h.MockManager.AheadVariables()
 }
 
 // restaged reports whether a read or a consume door of h found the staging

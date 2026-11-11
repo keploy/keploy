@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -402,13 +403,30 @@ func TestACallHeldWhileTheNextSetIsStagedIsDiagnosedAgainstNoRecordingOfIt(t *te
 // A call whose first read of the round was in its test's view, held while
 // the replay ends that test, is never named as its own test's recording made
 // elsewhere, nor paired with it as another test's: the call is that test's,
-// not one judging moves to the worker scope.
+// not one judging moves to the worker scope. In the replay it is answered by
+// its own test's recording, unanswered, in its test's view
+// (roundGuard.ownView), as at once; with that recording answered it misses
+// there as its test's call. In record's full round its learn step reads the
+// view in force (HoldToRound): the claim is refused there and the call
+// misses, still its test's.
 func TestACallWhoseTestEndedUnderItIsNotItsOwnRecordingMadeElsewhere(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
 		name string
 		opts models.OutgoingOptions
-	}{{"replay", models.OutgoingOptions{}}, {"record's full round", models.OutgoingOptions{Learn: true, LearnPool: true}}} {
+		// answeredFirst: T's own call answered own on time, before the
+		// late call.
+		answeredFirst bool
+		// consumes: how often the late call asks the store to consume own.
+		consumes int32
+	}{
+		{name: "replay", consumes: 1},
+		{name: "replay, its recording answered on time", answeredFirst: true},
+		// One claim asks the store twice, by the delete door and then the
+		// update door (the session pool's fallback), both refused in the
+		// view in force.
+		{name: "record's full round", opts: models.OutgoingOptions{Learn: true, LearnPool: true}, consumes: 2},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now()
 			own := r3Mock("t-jobs", now, "GET", "/jobs/1", "", `{"job":1}`)
@@ -420,23 +438,24 @@ func TestACallWhoseTestEndedUnderItIsNotItsOwnRecordingMadeElsewhere(t *testing.
 				mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
 			}
 			mm.ServeExactTest("T", []*models.Mock{own})
+			if tc.answeredFirst {
+				if r := sendForMiss(t, mm, tc.opts, learn.NewTracker(), jobsCall); r != nil {
+					t.Fatalf("precondition: T's own call on time missed: %+v", r)
+				}
+			}
 			db := &heldFirstRead{MockManager: mm, moved: func() { mm.ServeExactPool("k", nil) }}
 
-			// The call is read in T's view and offered own. Its one claim
-			// asks the store twice, by the delete door and then the update
-			// door (the session pool's fallback); both settle in the view
-			// in force (no test open) and are refused, and the call reads
-			// again, now in the view in force, which does not show own. A
-			// third consume of own is the call offered the refused
-			// recording again, which it would read and claim without end:
-			// the request's ctx ends at that consume, so the row fails by
-			// its own assertion rather than by the package's deadline.
+			// A consume of own past the late call's own asks is the call
+			// offered a refused recording again, which it would read and
+			// claim without end: the request's ctx ends at that consume, so
+			// the row fails by its own assertion rather than by the
+			// package's deadline.
 			ctx, offeredAgain := context.WithCancel(context.Background())
 			defer offeredAgain()
 			var consumes atomic.Int32
 			mm.OnConsume(func(name string) {
-				if name == own.Name && consumes.Add(1) == 3 {
-					t.Errorf("the call was offered %s again after the view in force refused its claim; want the view in force's read, without it: a matcher that reads again on a refused claim spins on it", name)
+				if name == own.Name && consumes.Add(1) == tc.consumes+1 {
+					t.Errorf("the call was offered %s again after its claim was refused; want a read without it: a matcher that reads again on a refused claim spins on it", name)
 					offeredAgain()
 				}
 			})
@@ -445,14 +464,23 @@ func TestACallWhoseTestEndedUnderItIsNotItsOwnRecordingMadeElsewhere(t *testing.
 			if !db.fired.Load() {
 				t.Fatal("precondition: the replay never ended the test under the call")
 			}
-			if n := consumes.Load(); n != 2 {
-				t.Fatalf("precondition: the call asked the store to consume %s %d times; want twice, its one claim's two doors, in T's view, refused in the view in force", own.Name, n)
+			if n := consumes.Load(); n != tc.consumes {
+				t.Fatalf("the call asked the store to consume %s %d times; want %d", own.Name, n, tc.consumes)
+			}
+			if r != nil && r.NotOwned {
+				t.Fatalf("a call of a test the replay ended was named as that test's own %s made elsewhere: %+v", own.Name, r)
+			}
+			if tc.consumes == 1 {
+				if r != nil {
+					t.Fatalf("T's late call missed (%+v); want it answered by T's own %s, unanswered, as at once", r, own.Name)
+				}
+				if test, consumed, unconsumed, ok := mm.ExactTestOutcome(); !ok || test != "T" || !slices.Equal(consumed, []string{own.Name}) || len(unconsumed) != 0 {
+					t.Fatalf("T's outcome is %q, answered %v, unanswered %v (%v); want T with %s answered", test, consumed, unconsumed, ok, own.Name)
+				}
+				return
 			}
 			if r == nil {
-				t.Fatalf("a call of a test the replay ended was answered from that test's recording as another test's")
-			}
-			if r.NotOwned {
-				t.Fatalf("a call of a test the replay ended was named as that test's own %s made elsewhere: %+v", own.Name, r)
+				t.Fatalf("T's late call was answered; want a miss: %s answered T's call on time, or the view in force refused its claim", own.Name)
 			}
 		})
 	}

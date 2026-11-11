@@ -811,6 +811,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// protocol-phase mocks of what is staged: no data-plane mock of the
 	// previous session answers an application kept alive across them.
 	m.lockRound()
+	m.exact.session.Add(1)
 	m.exact.fired.Store(false)
 	m.exact.last.Store(nil)
 	m.exact.ended.Store(nil)

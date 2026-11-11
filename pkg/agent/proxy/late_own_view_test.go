@@ -129,9 +129,11 @@ func TestALateCallTheTestNeverRecordedIsNotCountedByTheNextTestsRecordings(t *te
 // (integrations.SharedReads' owned reads) while the next test's view is in
 // force, as it reads the view's other recordings (heldScope.readView): the
 // view's number and list are the ones the store gave on time, and what is
-// left of them unanswered is that view's. It reads none once the staging
-// moved, none for a call marked between tests (a pool view owns none), and
-// the next test's own for a call marked in the next test's view.
+// left of them unanswered is that view's, a late answer of one of them
+// included. It reads none once the staging moved, none for a call marked
+// between tests (a pool view owns none), and the next test's own for a call
+// marked in the next test's view, or for a call of the pool view whose
+// consume the next test's view refused.
 func TestAHeldStoreReadsTheOwnRecordingsOfTheViewItsCallWasReadIn(t *testing.T) {
 	_, mm, own := lateOwnRun(t, nil)
 	onTime, _ := mm.HoldToRound(mm.MarkCallRound())
@@ -161,23 +163,39 @@ func TestAHeldStoreReadsTheOwnRecordingsOfTheViewItsCallWasReadIn(t *testing.T) 
 		t.Fatalf("a call marked in test-2's view reads own recordings %v of view %d (%v); want test-2's: none, another view", exactNames(l), v, ok)
 	}
 
-	// A call of test-1 whose consume test-2's view refused reads the view in
-	// force from then on (heldScope.settled), as a call made now does: its
-	// owned reads too, test-2's.
-	if v, _, ok := settled.(integrations.SharedReads).OwnedRecordings(); !ok || v != view {
-		t.Fatalf("precondition: before its consume, the held store reads own recordings of view %d (%v); want test-1's %d", v, ok, view)
+	// A call of test-1 whose consume of test-1's own recording lands after
+	// test-2 began is answered in test-1's view (roundGuard.ownView), and
+	// reads there still: its owned reads are test-1's, the recording now
+	// answered.
+	if !settled.DeleteUnFilteredMock(*own) {
+		t.Fatal("test-1's late call was refused test-1's own recording, unanswered; want it answered in test-1's view")
 	}
-	if settled.DeleteUnFilteredMock(*own) {
-		t.Fatal("precondition: test-2's view settled the consume of test-1's own recording; want it refused")
+	if v, l, ok := settled.(integrations.SharedReads).OwnedRecordings(); !ok || v != view || len(l) != 1 || l[0] != list[0] {
+		t.Fatalf("after its own answer the held store reads own recordings %v of view %d (%v); want test-1's view %d %v", exactNames(l), v, ok, view, exactNames(list))
 	}
-	if v, l, ok := settled.(integrations.SharedReads).OwnedRecordings(); !ok || v == view || len(l) != 0 {
-		t.Fatalf("after test-2's view refused its consume, the held store reads own recordings %v of view %d (%v); want test-2's: none, another view", exactNames(l), v, ok)
+	if left, ok := settled.(integrations.SharedReads).OwnedUnanswered(); !ok || len(left) != 0 {
+		t.Fatalf("test-1's own unanswered after its late call's answer are %v (%v); want none", exactNames(left), ok)
 	}
 
 	mm.ServeExactPool(models.PoolKeyNone, nil)
 	between, _ := mm.HoldToRound(mm.MarkCallRound())
 	if _, l, ok := between.(integrations.SharedReads).OwnedRecordings(); ok {
 		t.Fatalf("a call marked between tests reads own recordings %v; want none: a pool view owns none", exactNames(l))
+	}
+
+	// A call of the pool view whose consume test-2's view refused reads the
+	// view in force from then on (heldScope.settled), as a call made now
+	// does: its owned reads too, test-2's.
+	t2own := httpCall("own2-z", 3*time.Second, "/z")
+	_, pc, p := poolCallHeldAcrossNextTest(t, t2own)
+	if _, l, ok := pc.(integrations.SharedReads).OwnedRecordings(); ok {
+		t.Fatalf("precondition: before its consume, the pool view's call reads own recordings %v; want none", exactNames(l))
+	}
+	if pc.DeleteUnFilteredMock(*p) {
+		t.Fatal("precondition: T2's view settled the consume of the pool's p-0; want it refused")
+	}
+	if _, l, ok := pc.(integrations.SharedReads).OwnedRecordings(); !ok || len(l) != 1 || l[0].Name != t2own.Name {
+		t.Fatalf("after T2's view refused its consume, the held store reads own recordings %v (%v); want T2's %s", exactNames(l), ok, t2own.Name)
 	}
 
 	mm.SetMocksWithWindow([]*models.Mock{own}, nil, models.BaseTime, time.Now())

@@ -1306,13 +1306,7 @@ func TestALateCallReadsAndBindsInTheTableOfTheScopeItWasMadeIn(t *testing.T) {
 	if tb.In(one) != &tb {
 		t.Fatal("a call made in the running scope does not read the table in force")
 	}
-	if nx, began := tb.After(one); began || nx != nil {
-		t.Fatalf("After the running scope = %p, %v; want none: no scope began since", nx, began)
-	}
 	two := open("test-2")
-	if nx, began := tb.After(one); !began || nx != &tb {
-		t.Fatalf("After test-1's scope, with test-2's running = %p, %v; want the table in force", nx, began)
-	}
 	late := tb.In(one)
 	if late == &tb || late == nil {
 		t.Fatal("a call made in test-1's scope reads the table in force once test-2's began")
@@ -1338,9 +1332,6 @@ func TestALateCallReadsAndBindsInTheTableOfTheScopeItWasMadeIn(t *testing.T) {
 	reads("test-1's scope after a bind in its clone", vals(tb.EndedOf("test-1")), "id=x-5;key=x-1;")
 
 	three := open("test-3")
-	if nx, began := tb.After(one); !began || nx != tb.In(two) || nx == &tb {
-		t.Fatalf("After test-1's scope, with test-3's running = %p, %v; want test-2's ended table", nx, began)
-	}
 	if tb.In(one) != late {
 		t.Fatal("test-1's ended table changed once another scope began")
 	}

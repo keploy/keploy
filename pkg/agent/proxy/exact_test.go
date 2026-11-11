@@ -3752,13 +3752,16 @@ func TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn(t *testing.T) {
 	}
 
 	// T1 ends between the request's first read and the matcher's. The
-	// matcher reads in T1's view and is offered ex-mine; its consume,
-	// settled in T2's view, is refused, and the matcher reads again, now in
-	// T2's view, which does not show ex-mine. A second consume of ex-mine is
-	// the matcher offered the refused recording again, which it would read
-	// and consume without end: the request's ctx ends at that consume, so
-	// the row fails by its own assertion rather than by the package's
-	// deadline.
+	// matcher reads in T1's view and is offered ex-mine, and another call of
+	// T1's, read before T1 ended, takes it before the matcher consumes. The
+	// matcher's consume of its own test's exchange settles in T1's view
+	// (roundGuard.ownView), which refuses it, answered, and the matcher
+	// reads again there, where ex-mine is answered: it misses as T1's call.
+	// A third consume of ex-mine is the matcher offered the refused
+	// recording again, which it would read and consume without end: the
+	// request's ctx ends at that consume, so the row fails by its own
+	// assertion rather than by the package's deadline.
+	other := mm.MarkCallRound()
 	mm.exact.onMarked = func() {
 		mm.exact.onMarked = nil
 		mm.ServeExactTest("T2", nil)
@@ -3766,16 +3769,24 @@ func TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn(t *testing.T) {
 	ctx, offeredAgain := context.WithCancel(context.Background())
 	defer offeredAgain()
 	var consumes atomic.Int32
+	took := false
 	mm.OnConsume(func(name string) {
-		if name == mine.Name && consumes.Add(1) == 2 {
-			t.Errorf("the matcher was offered %s again after the view in force refused its consume; want the view in force's read, without it: a matcher that reads again on a refused consume spins on it", name)
+		if name != mine.Name {
+			return
+		}
+		switch consumes.Add(1) {
+		case 1:
+			h, _ := mm.HoldToRound(other)
+			took = h.DeleteUnFilteredMock(*mine)
+		case 3:
+			t.Errorf("the matcher was offered %s again after its own view refused its consume; want that view's read, without it: a matcher that reads again on a refused consume spins on it", name)
 			offeredAgain()
 		}
 	})
 	r := genericServeIn(t, ctx, mm, "AUTH step2")
 	mm.OnConsume(nil)
-	if n := consumes.Load(); n != 1 {
-		t.Fatalf("precondition: the matcher consumed %s %d times; want once, in T1's view, refused in T2's", mine.Name, n)
+	if n := consumes.Load(); n != 2 || !took {
+		t.Fatalf("precondition: %s was consumed %d times (the other call took it: %v); want twice, the other call's and the matcher's, refused", mine.Name, n, took)
 	}
 	if r == nil {
 		t.Fatal(`"AUTH step2": no miss with a report: the parser answered it`)
@@ -4433,24 +4444,35 @@ func TestAHeldCallReadsTheWorkerScopeInTheViewItWasReadIn(t *testing.T) {
 	}
 }
 
-// A held call whose consume the view in force refused is not offered that
-// recording again. The call is read in T1, T1 ends before its matcher reads,
-// and the matcher reads in T1's view (the view it was read in): it is offered
-// T1's own exchange, and the consume, settled in T2's view, is refused. A
-// parser takes a refused consume for a recording another call took and reads
-// again; offered the same recording again, the Generic parser's matcher spun
-// on it without end (TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn
-// timed out). Through each consume door, the read after the refusal is the
-// view in force's: T1's exchange is not in it.
-func TestAHeldCallIsNotOfferedARecordingTheViewInForceRefused(t *testing.T) {
-	has := func(ms []*models.Mock, name string) bool {
-		for _, mk := range ms {
-			if mk != nil && mk.Name == name {
-				return true
-			}
-		}
-		return false
+// poolCallHeldAcrossNextTest is a held store of a call read in the pool
+// view and offered the pool's p-0, held while the replay begins T2 (owning
+// next) under it: a pool view's call is no test's, and p-0 is not T2's, so a
+// consume of p-0 settles in T2's view (roundGuard.ownView), which refuses it.
+func poolCallHeldAcrossNextTest(t *testing.T, next ...*models.Mock) (*MockManager, integrations.MockMemDb, *models.Mock) {
+	t.Helper()
+	p := httpCall("p-0", time.Second, "/p")
+	mm := stagedManager(t, nil, append([]*models.Mock{p}, next...))
+	mm.ServeExactPool("k", []string{p.Name})
+	h, _ := mm.HoldToRound(mm.MarkCallRound())
+	if got, _ := h.GetSessionScopedMocks(); !slices.ContainsFunc(got, func(mk *models.Mock) bool { return mk.Name == p.Name }) {
+		t.Fatalf("precondition: the pool view's call is offered %v; want the pool's %s", exactNames(got), p.Name)
 	}
+	mm.ServeExactTest("T2", next)
+	return mm, h, p
+}
+
+// A held call whose consume the view in force refused is not offered that
+// recording again. The call is read in the pool view and offered the pool's
+// p-0, and the replay begins T2 before its matcher consumes: the consume,
+// settled in T2's view, is refused (poolCallHeldAcrossNextTest). A parser
+// takes a refused consume for a recording another call took and reads again;
+// offered the same recording again, the Generic parser's matcher spun on it
+// without end. Through each consume door, the read after the refusal is the
+// view in force's: p-0 is not in it. (A consume of the call's own test's
+// recording settles in the view it was read in, and one refused there keeps
+// the call reading there, where the recording is answered:
+// TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn.)
+func TestAHeldCallIsNotOfferedARecordingTheViewInForceRefused(t *testing.T) {
 	for _, door := range []struct {
 		name    string
 		consume func(h integrations.MockMemDb, mk *models.Mock) bool
@@ -4464,22 +4486,19 @@ func TestAHeldCallIsNotOfferedARecordingTheViewInForceRefused(t *testing.T) {
 		{"MarkMockAsUsed", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.MarkMockAsUsed(*mk) }},
 	} {
 		t.Run(door.name, func(t *testing.T) {
-			mine := genericExchange("ex-mine", 0, "AUTH step2")
-			mm := stagedManager(t, nil, []*models.Mock{mine})
-			mm.ServeExactTest("T1", []*models.Mock{mine})
-			call := mm.MarkCallRound()
-			mm.ServeExactTest("T2", nil)
-			h, _ := mm.HoldToRound(call)
-			if door.consume(h, mine) {
-				t.Fatal("T2's view settled the consume of T1's own exchange; want it refused: the row is about a refused consume")
+			_, h, p := poolCallHeldAcrossNextTest(t)
+			if door.consume(h, p) {
+				t.Fatal("T2's view settled the consume of the pool's p-0; want it refused: the row is about a refused consume")
+			}
+			has := func(ms []*models.Mock) bool {
+				return slices.ContainsFunc(ms, func(mk *models.Mock) bool { return mk != nil && mk.Name == p.Name })
 			}
 			//nolint:staticcheck // SA1019: the Generic parser reads through GetSessionMocks, and its spin is what this row is about.
-			got, _ := h.GetSessionMocks()
-			if has(got, "ex-mine") {
+			if got, _ := h.GetSessionMocks(); has(got) {
 				t.Fatalf("after its consume was refused the held call was offered %v again; want the view in force's read, without it: a parser that reads again on a refused consume spins on it", exactNames(got))
 			}
-			if again, _ := h.GetSessionScopedMocks(); has(again, "ex-mine") {
-				t.Fatalf("GetSessionScopedMocks offered %v after the refusal; want it without ex-mine", exactNames(again))
+			if again, _ := h.GetSessionScopedMocks(); has(again) {
+				t.Fatalf("GetSessionScopedMocks offered %v after the refusal; want it without p-0", exactNames(again))
 			}
 		})
 	}
@@ -4689,21 +4708,17 @@ func TestAHeldStoreThatReadsInAnotherViewSaysWhatItReads(t *testing.T) {
 
 	// Refused once, a held call reads the view in force, and says its
 	// generation again.
-	mine := genericExchange("ex-mine", 0, "AUTH step2")
-	mm2 := stagedManager(t, nil, []*models.Mock{mine})
-	mm2.ServeExactTest("T1", []*models.Mock{mine})
-	h2, _ := mm2.HoldToRound(mm2.MarkCallRound())
-	mm2.ServeExactTest("T2", nil)
+	mm2, h2, p := poolCallHeldAcrossNextTest(t)
 	if g := h2.(integrations.StagingGenerations).StagingGeneration(); g < integrations.ElsewhereGeneration {
-		t.Fatalf("before the refusal the held store's generation is %d; want its own: it reads in T1's view", g)
+		t.Fatalf("before the refusal the held store's generation is %d; want its own: it reads in the pool view", g)
 	}
-	if h2.DeleteUnFilteredMock(*mine) {
-		t.Fatal("T2's view settled the consume of T1's own exchange; want it refused")
+	if h2.DeleteUnFilteredMock(*p) {
+		t.Fatal("T2's view settled the consume of the pool's p-0; want it refused")
 	}
 	if got, want := h2.(integrations.StagingGenerations).StagingGeneration(), mm2.StagingGeneration(); got != want {
 		t.Errorf("after the refusal the held store's generation is %d; want the manager's %d: it reads in the view in force", got, want)
 	}
-	if _, ok := h2.(integrations.SharedReads).SharedGeneration(models.GENERIC); !ok {
+	if _, ok := h2.(integrations.SharedReads).SharedGeneration(models.HTTP); !ok {
 		t.Error("after the refusal the held store has no shared reads; want T2's: it reads in T2's view")
 	}
 }
@@ -5184,11 +5199,16 @@ func TestACallMarkedByARoundSnapshotSpendsTheWorkerScopeInTheViewInForce(t *test
 
 // A call read in TestA's window whose consume the view in force refuses
 // once TestA ended (heldScope.settled) reads, from then on, what a call made
-// between tests reads, and spends and walks there too: the worker: recording
-// it is then answered with is spent for the calls between tests (nothing),
-// so TestB's window is still answered by it. Before, the call read the pool
-// view but spent as TestA's window, and TestB's window missed a recording no
-// window had answered.
+// between tests reads, and spends and walks there too. The call is offered
+// w-0, and another of TestA's calls is answered w-0 before it consumes: a
+// worker: recording is no test's own, so the consume settles in the view in
+// force (roundGuard.ownView), spending for the windows (the call was read in
+// one), which spent w-0, and is refused. Read again between tests, the call
+// is answered w-0, which answers again there, spent for the calls between
+// tests (nothing), so TestB's window is answered w-1, the next the windows
+// did not spend. Spent as TestA's window, or read on in TestA's view, the
+// call is refused w-0 again, or answered w-1 for the windows and TestB's
+// window misses.
 func TestACallRefusedAfterItsTestEndedSpendsTheWorkerScopeAsTheCallsBetweenTests(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	names := []string{"w-0", "w-1"}
@@ -5201,16 +5221,19 @@ func TestACallRefusedAfterItsTestEndedSpendsTheWorkerScopeAsTheCallsBetweenTests
 		{"keeping door", func(db integrations.MockMemDb, mk *models.Mock) bool { return db.MarkMockAsUsed(*mk) }, markFirst},
 	} {
 		t.Run(door.name, func(t *testing.T) {
-			a := httpCall("a", 0, "/a")
-			mm := stagedManager(t, nil, []*models.Mock{a, httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")})
+			w0 := httpCall("w-0", time.Second, "/poll")
+			mm := stagedManager(t, nil, []*models.Mock{w0, httpCall("w-1", 2*time.Second, "/poll")})
 			mm.ServeExactWorker(names)
-			mm.ServeExactTest("TestA", []*models.Mock{a})
+			mm.ServeExactTest("TestA", nil)
 			call := mm.MarkCallRound()
 			held, _ := mm.HoldToRound(call)
+			if got := door.ask(t, mm, "w-"); got != "w-0" {
+				t.Fatalf("precondition: TestA's window was answered %s; want w-0", got)
+			}
 			mm.ServeExactWorker(names)
 			mm.ServeExactPool(models.PoolKeyNone, nil)
-			if door.consume(held, a) {
-				t.Fatal("precondition: the pool view took TestA's own recording after TestA ended")
+			if door.consume(held, w0) {
+				t.Fatal("precondition: the pool view took w-0 for TestA's window after TestA's window spent it")
 			}
 			if sv, ok := integrations.SequenceViewOf(held); !ok || sv.Test != "" || sv.Worker != nil {
 				t.Errorf("after the refusal the call walks %q's view (worker band %v); want the pool view's", sv.Test, sv.Worker != nil)
@@ -5226,12 +5249,12 @@ func TestACallRefusedAfterItsTestEndedSpendsTheWorkerScopeAsTheCallsBetweenTests
 				}
 			}
 			if first != "w-0" {
-				t.Fatalf("precondition: the call read again between tests was answered %s; want w-0", first)
+				t.Errorf("the call read again between tests was answered %s; want w-0: between tests a worker recording the windows spent answers again", first)
 			}
 			mm.ServeExactWorker(names)
 			mm.ServeExactTest("TestB", nil)
-			got := []string{door.ask(t, mm, "w-"), door.ask(t, mm, "w-"), door.ask(t, mm, "w-")}
-			if want := []string{"w-0", "w-1", "a miss"}; !reflect.DeepEqual(got, want) {
+			got := []string{door.ask(t, mm, "w-"), door.ask(t, mm, "w-")}
+			if want := []string{"w-1", "a miss"}; !reflect.DeepEqual(got, want) {
 				t.Errorf("TestB's window was answered %v; want %v (the call between tests spent nothing for the windows)", got, want)
 			}
 		})
