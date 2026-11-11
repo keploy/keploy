@@ -846,9 +846,32 @@ func spanOf(o models.ClockOffset, s Span) (Span, string) {
 // so that serve bounds no read of this call. s is checked first, so a read
 // plus an offset checkable in s alone is checked there as before; a value
 // outside both is refused with s's reason.
+//
+// CheckClockRead checks with the time default off (keploy.yml's
+// mock.times: strict, or a replay outside keploy mock), as
+// CheckClockReadForm does with timeForm false: it fails closed for a
+// caller that does not say the replay turned the default on.
 func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known bool) (bool, string) {
+	return CheckClockReadForm(path, o, live, s, known, false)
+}
+
+// CheckClockReadForm is CheckClockRead for a replay that says whether it
+// turned the time default on (timeForm: integrations.TimeFormOf of its
+// store). On, an o learned with a form (models.ClockOffset.Form) passes any
+// value of that form. Off (keploy.yml's mock.times: strict), the form is
+// set aside and o is checked by its range, cut, zone and provenance, as
+// before the default was; an o learned with a form alone, whose range the
+// learn step never learned (no cut: the default settled a refusal there),
+// is refused, saying to record it again under strict.
+func CheckClockReadForm(path string, o models.ClockOffset, live Leaf, s Span, known, timeForm bool) (bool, string) {
 	if o.Empty() {
 		return false, path + " was learned at more than one call as " + o.String() + ": no one read of the application's clock explains them all, so keploy refuses the value whatever it is. Record the test again; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	}
+	if o.Form != "" && !timeForm {
+		if o.Res <= 0 {
+			return false, path + " was learned as a time written as " + o.Form + ", checked by its form alone: learned under the time default; re-record with mock.times: strict to check its range"
+		}
+		o.Form = ""
 	}
 	learned := learnedAs(path, o)
 	if o.Form != "" {

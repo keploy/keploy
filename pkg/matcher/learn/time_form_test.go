@@ -118,10 +118,10 @@ func TestTheTimeDefaultKeepsATimeTheClockChecksRefuse(t *testing.T) {
 		if o.Word.IsZero() {
 			t.Errorf("a declared time inside a text: %+v; want the word's place kept", o)
 		}
-		if ok, why := CheckClockRead(cPath, o, Leaf{Type: String, Value: "at " + iMicro(cFAt.Add(time.Hour))}, Span{}, false); !ok {
+		if ok, why := CheckClockReadForm(cPath, o, Leaf{Type: String, Value: "at " + iMicro(cFAt.Add(time.Hour))}, Span{}, false, true); !ok {
 			t.Errorf("another instant in the same text: %s; want it passed", why)
 		}
-		if ok, _ := CheckClockRead(cPath, o, Leaf{Type: String, Value: "on " + cF}, Span{}, false); ok {
+		if ok, _ := CheckClockReadForm(cPath, o, Leaf{Type: String, Value: "on " + cF}, Span{}, false, true); ok {
 			t.Errorf("FALSE GREEN: the text around the time changed: passed; want refused")
 		}
 	}
@@ -317,7 +317,7 @@ func TestATimeFormPassesAnyInstantOfItsForm(t *testing.T) {
 		if o.Form == "" {
 			t.Fatalf("%s: %+v reads as no time", c.what, c.rec)
 		}
-		ok, why := CheckClockRead("body.at", o, c.live, Span{}, false)
+		ok, why := CheckClockReadForm("body.at", o, c.live, Span{}, false, true)
 		if ok != c.pass {
 			t.Errorf("%s: %+v against %q passed %v (%s); want %v", c.what, c.live, o.Form, ok, why, c.pass)
 		}
@@ -330,7 +330,7 @@ func TestATimeFormPassesAnyInstantOfItsForm(t *testing.T) {
 	}
 	// A typed time keeps its form whatever its instant.
 	ty := Leaf{Type: Instant, Value: "2026-11-11T08:00:00.000Z"}
-	if ok, why := CheckClockRead("body.at", models.ClockOffset{Form: TimeForm(ty)}, Leaf{Type: Instant, Value: "2001-02-03T04:05:06.789Z"}, Span{}, false); !ok {
+	if ok, why := CheckClockReadForm("body.at", models.ClockOffset{Form: TimeForm(ty)}, Leaf{Type: Instant, Value: "2001-02-03T04:05:06.789Z"}, Span{}, false, true); !ok {
 		t.Errorf("a typed time of another instant: %s; want it passed", why)
 	}
 }
@@ -349,5 +349,49 @@ func TestTimeFormsMeet(t *testing.T) {
 	}
 	if m := r.Meet(a); m.Form != "" {
 		t.Errorf("a range met with a form: %+v; want the range's checks", m)
+	}
+}
+
+// Under keploy.yml's mock.times: strict a replay sets a learned form aside
+// (CheckClockReadForm with the default off; CheckClockRead always): a read
+// learned with its range is checked by that range again, so a value of the
+// form outside it is refused, and a time learned under the default by its
+// form alone, with no range, is refused, saying to record it again under
+// strict. With the default on, both pass any value of their form.
+func TestStrictTimesSetALearnedFormAside(t *testing.T) {
+	in := cCall(cR, cF, nil, false)
+	in.TimeForm = true
+	ds := Decide(in)
+	if len(ds) != 1 || ds[0].Clock == nil || ds[0].Clock.Form == "" || ds[0].Clock.Res <= 0 || in.Window == nil {
+		t.Fatalf("a read in the span under the default: %s; want a read with its range and a form", oDescribe(ds))
+	}
+	read, span := *ds[0].Clock, in.Window.F
+	held, later := in.Live.Leaves[cPath], Leaf{Type: String, Value: iMicro(cFAt.Add(time.Hour))}
+	formOnly := models.ClockOffset{Form: read.Form}
+	const reRecord = "learned under the time default; re-record with mock.times: strict to check its range"
+	for _, c := range []struct {
+		what     string
+		o        models.ClockOffset
+		live     Leaf
+		timeForm bool
+		pass     bool
+		says     string
+	}{
+		{"a read in its range, strict", read, held, false, true, ""},
+		{"a read of the form an hour out of its range, strict", read, later, false, false, "a read of the application's clock"},
+		{"a read of the form an hour out of its range, the default", read, later, true, true, ""},
+		{"a time learned by its form alone, strict", formOnly, held, false, false, reRecord},
+		{"a time learned by its form alone, the default", formOnly, later, true, true, ""},
+	} {
+		ok, why := CheckClockReadForm(cPath, c.o, c.live, span, true, c.timeForm)
+		if ok != c.pass || !strings.Contains(why, c.says) {
+			t.Errorf("%s: passed %v (%q); want %v saying %q", c.what, ok, why, c.pass, c.says)
+		}
+		if c.timeForm {
+			continue
+		}
+		if ok2, why2 := CheckClockRead(cPath, c.o, c.live, span, true); ok2 != ok || why2 != why {
+			t.Errorf("%s: CheckClockRead %v (%q); want CheckClockReadForm's with the default off", c.what, ok2, why2)
+		}
 	}
 }
