@@ -1120,6 +1120,55 @@ func (s *SetBound) EndedOf(test string) []Binding {
 	return endedOf(s.ended, test)
 }
 
+// LookupOf is the binding of name test's own scope had made when the set
+// ended (Table.LookupOf then): the running scope's own while it was test's,
+// else the latest of test's ended scopes that bound it, none where two of
+// them bound it with two values. ended says the binding is not the running
+// scope's. None for test "", and none of a nil SetBound.
+func (s *SetBound) LookupOf(test, name string) (b Binding, ended, ok bool) {
+	if s == nil || test == "" {
+		return Binding{}, false, false
+	}
+	if s.test == test {
+		b, ok = bindingNamed(s.own, name)
+		return b, false, ok
+	}
+	b, ok = endedLookup(s.ended, test, name)
+	return b, true, ok
+}
+
+// bindingNamed is the binding of name in bs, sorted by name (sorted).
+func bindingNamed(bs []Binding, name string) (Binding, bool) {
+	j, found := slices.BinarySearchFunc(bs, name, func(x Binding, n string) int { return strings.Compare(x.Name, n) })
+	if !found {
+		return Binding{}, false
+	}
+	return bs[j], true
+}
+
+// endedLookup is the binding of name the latest of test's scopes in ended
+// made, none where two of them made it with two values (no one value is
+// test's), or none made it.
+func endedLookup(ended []endedScope, test, name string) (b Binding, ok bool) {
+	for i := len(ended) - 1; i >= 0; i-- {
+		e := ended[i]
+		if e.test != test {
+			continue
+		}
+		got, found := bindingNamed(e.bindings, name)
+		if !found {
+			continue
+		}
+		if ok && got.Value != b.Value {
+			return Binding{}, false
+		}
+		if !ok {
+			b, ok = got, true
+		}
+	}
+	return b, ok
+}
+
 // endedOf is the bindings of the scopes of ended begun for test, scope by
 // scope in the order they ended: none for test "" (a scope begun with no
 // test named is kept as no test's).
@@ -1276,22 +1325,7 @@ func (t *Table) LookupOf(test, name string) (b Binding, ended, ok bool) {
 		b, ok = t.vals[name]
 		return b, false, ok
 	}
-	for i := len(t.ended) - 1; i >= 0; i-- {
-		e := t.ended[i]
-		if e.test != test {
-			continue
-		}
-		j, found := slices.BinarySearchFunc(e.bindings, name, func(x Binding, n string) int { return strings.Compare(x.Name, n) })
-		if !found {
-			continue
-		}
-		if ok && e.bindings[j].Value != b.Value {
-			return Binding{}, true, false
-		}
-		if !ok {
-			b, ok = e.bindings[j], true
-		}
-	}
+	b, ok = endedLookup(t.ended, test, name)
 	return b, true, ok
 }
 

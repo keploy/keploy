@@ -3,12 +3,12 @@ package learn
 import (
 	"encoding/base64"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/variables"
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 )
 
@@ -27,9 +27,21 @@ const (
 	mRec, mLiv = "1111aaaa-2222-48d1-9444-444455556666", "9999cccc-7777-4a2e-8888-000011112222"
 )
 
-// mMinted declares path minted by mRule.
+// mForm is the form of mRule's values: a UUID's, as the set's recordings
+// give it (no prefix, 36 bytes).
+var mForm = models.MintedForm{MinLen: 36, MaxLen: 36}
+
+// mB64 is the form of a key of 12 bytes in standard base64.
+var mB64 = models.MintedForm{MinLen: 16, MaxLen: 16}
+
+// mMinted declares path minted by mRule, of the form mForm.
 func mMinted(path string) func(string) (Source, bool) {
-	return func(f string) (Source, bool) { return Source{Kind: SourceMinted, Rule: mRule}, f == path }
+	return mMintedAs(path, mForm)
+}
+
+// mMintedAs declares path minted by mRule, of the form f.
+func mMintedAs(path string, f models.MintedForm) func(string) (Source, bool) {
+	return func(p string) (Source, bool) { return Source{Kind: SourceMinted, Rule: mRule, Minted: f}, p == path }
 }
 
 // mChance is an earlier call of the test whose text holds the id's
@@ -61,15 +73,33 @@ func mAnsweredAfter(name string, before, after time.Duration, id string) Raw {
 }
 
 // mFresh checks ds is the field decided made anew whole by mRule, rec and
-// live its values, a in its check.
-func mFresh(t *testing.T, what string, ds []Decision, rec, live string, a variables.Alphabet) {
+// live its values, f the form its replay checks.
+func mFresh(t *testing.T, what string, ds []Decision, rec, live string, f models.MintedForm) {
 	t.Helper()
-	if len(ds) != 1 || ds[0].Outcome != OutcomeFresh || ds[0].At.Word != -1 || ds[0].Recorded != rec || ds[0].Full != live {
+	mFreshBeside(t, what, ds, rec, live, f)
+}
+
+// mFreshBeside checks ds is the field decided made anew whole by mRule (as
+// mFresh), then each of bound, a piece of its value (its recorded word)
+// learning bound to an earlier place, in order, still bound there.
+func mFreshBeside(t *testing.T, what string, ds []Decision, rec, live string, f models.MintedForm, bound ...string) {
+	t.Helper()
+	if len(ds) != 1+len(bound) {
+		t.Errorf("%s: %s; want the field made anew whole, and the pieces %q bound beside it", what, oDescribe(ds), bound)
+		return
+	}
+	for i, w := range bound {
+		if d := ds[1+i]; d.Outcome != OutcomeValue || d.Recorded != w || d.At.Word < 0 || d.Minted != nil || d.From.Mock == "" {
+			t.Errorf("%s: piece %d is %s; want %q bound to its earlier place", what, i, oDescribe([]Decision{d}), w)
+		}
+	}
+	ds = ds[:1]
+	if ds[0].Outcome != OutcomeFresh || ds[0].At.Word != -1 || ds[0].Recorded != rec || ds[0].Full != live {
 		t.Errorf("%s: %s; want the field made anew whole", what, oDescribe(ds))
 		return
 	}
-	if m := ds[0].Minted; m == nil || m.Rule != mRule || m.Alphabet != a {
-		t.Errorf("%s: minted %+v; want rule %s, alphabet %d", what, ds[0].Minted, mRule, a)
+	if m := ds[0].Minted; m == nil || m.Rule != mRule || !reflect.DeepEqual(m.Form, f) {
+		t.Errorf("%s: minted %+v; want rule %s, form %+v", what, ds[0].Minted, mRule, f)
 	}
 	if !strings.Contains(ds[0].Line, mRule) || !strings.Contains(ds[0].Line, "declares it minted") {
 		t.Errorf("%s: the line must name the rule: %q", what, ds[0].Line)
@@ -108,7 +138,7 @@ func TestAMintedRuleDecidesANewIdWholeWhereLearningRefusedAPieceOfIt(t *testing.
 		t.Fatalf("with no rule: %s; want the id's group refused", oDescribe(before))
 	}
 	in.Source = mMinted(mPath)
-	mFresh(t, "a piece of the id stands in another id", Decide(in), mRec, mLiv, variables.AlphabetHex)
+	mFresh(t, "a piece of the id stands in another id", Decide(in), mRec, mLiv, mForm)
 
 	// No rule of a kind keploy knows, or none for this field: as before.
 	for name, src := range map[string]func(string) (Source, bool){
@@ -129,24 +159,71 @@ func TestAMintedRuleDecidesANewIdWholeWhereLearningRefusedAPieceOfIt(t *testing.
 		t.Fatalf("with no rule and no earlier place: %s; want each word made anew", oDescribe(ds))
 	}
 	in.Source = mMinted(mPath)
-	mFresh(t, "every word made anew", Decide(in), mRec, mLiv, variables.AlphabetHex)
+	mFresh(t, "every word made anew", Decide(in), mRec, mLiv, mForm)
 
 	// A number the application mints.
 	num := oInput(mPath, "4821375", "9057713", nil, nil)
 	num.Rec.Leaves[mPath], num.Live.Leaves[mPath] = Leaf{Path: mPath, Noise: mPath, Type: Number, Value: "4821375"}, Leaf{Path: mPath, Noise: mPath, Type: Number, Value: "9057713"}
-	num.Source = mMinted(mPath)
-	mFresh(t, "a number", Decide(num), "4821375", "9057713", variables.AlphabetDigits)
+	digits := models.MintedForm{MinLen: 7, MaxLen: 7}
+	num.Source = mMintedAs(mPath, digits)
+	mFresh(t, "a number", Decide(num), "4821375", "9057713", digits)
+
+	// A prefix is cut to what both runs' values share: one recorded value
+	// alone was all prefix (up to its last '-'). A prefix both runs keep
+	// stays.
+	whole := models.MintedForm{Prefix: mRec[:24], MinLen: 36, MaxLen: 36}
+	in = oInput(mPath, mRec, mLiv, nil, nil)
+	in.Source = mMintedAs(mPath, whole)
+	mFresh(t, "one recorded value's form", Decide(in), mRec, mLiv, mForm)
+	const kRec, kLiv = "kepreq_uamfMJBud4Q7D2dpiTWWtg5vnhG5v-jDYXUBeo0jS6Y", "kepreq_siMFUFEA8nOk70O88nz4QCLT-Kb0ucbqCNzRe_kaPWQ"
+	kForm := models.MintedForm{Prefix: "kepreq_", MinLen: 50, MaxLen: 50}
+	in = oInput(mPath, kRec, kLiv, nil, nil)
+	in.Source = mMintedAs(mPath, kForm)
+	mFresh(t, "a prefixed id", Decide(in), kRec, kLiv, kForm)
+	// A recorded value that lacks the rule's prefix cuts it too: the
+	// prefix is no literal part of the values made there.
+	in = oInput(mPath, "kepcod"+kRec[6:], kLiv, nil, nil)
+	in.Source = mMintedAs(mPath, kForm)
+	mFresh(t, "a recorded value with no prefix", Decide(in), "kepcod"+kRec[6:], kLiv, models.MintedForm{MinLen: 50, MaxLen: 50})
+	// The lengths widen to both runs' values: a generator of more than one
+	// length (the form of the set's recordings, 7 to 9 digits, and round
+	// F's of 10).
+	num = oInput(mPath, "4821375", "9057713012", nil, nil)
+	num.Rec.Leaves[mPath], num.Live.Leaves[mPath] = Leaf{Path: mPath, Noise: mPath, Type: Number, Value: "4821375"}, Leaf{Path: mPath, Noise: mPath, Type: Number, Value: "9057713012"}
+	num.Source = mMintedAs(mPath, models.MintedForm{MinLen: 7, MaxLen: 9})
+	mFresh(t, "a longer number in round F", Decide(num), "4821375", "9057713012", models.MintedForm{MinLen: 7, MaxLen: 10})
 }
 
-// Learned facts come first: a word learning bound to an earlier place, or
-// read as the clock, keeps learning's decision, and so does a refusal of
-// what keploy could not read or check; each refusal names the rule.
+// Learning's decision of the whole value comes first: a value read as the
+// clock keeps learning's decision, and so does a refusal of what keploy
+// could not read (at the field or any word of it) or check whole; each
+// refusal names the rule. A piece of the value learning bound to an
+// earlier place stays bound there beside the value made anew whole: a
+// minted "<copied>-<random>" (a tenant an earlier call sent, then a new
+// part) still checks its copied part, so a replay that sends another
+// tenant there misses.
 func TestAMintedRuleLeavesWhatLearningPlacedOrCouldNotRead(t *testing.T) {
 	shown := oCarried("mock-48", "body.code", "48d1", "4a2e", 2*time.Second, time.Second, 1)
 	in := oInput(mPath, mRec, mLiv, []Earlier{shown}, nil)
+	if d := oWord(t, Decide(in), "48d1", "4a2e"); d.Outcome != OutcomeValue || d.From.Mock != "mock-48" {
+		t.Errorf("a place shows the id's group in both runs, no rule: %s; want learning's Value bound at mock-48", oDescribe([]Decision{d}))
+	}
 	in.Source = mMinted(mPath)
-	if d := oWord(t, Decide(in), "48d1", "4a2e"); d.Outcome != OutcomeValue || d.From.Mock != "mock-48" || d.Minted != nil {
-		t.Errorf("a place shows the id's group in both runs: %s; want learning's Value bound at mock-48", oDescribe([]Decision{d}))
+	mFreshBeside(t, "a place shows the id's group in both runs", Decide(in), mRec, mLiv, mForm, "48d1")
+	const tRec, tLiv = "t4821-7f3e9b2c41d6", "t9057-c0d18e5a77b2"
+	tenant := oCarried("mock-48", "body.tenant", "t4821", "t9057", 2*time.Second, time.Second, 1)
+	in = oInput(mPath, tRec, tLiv, []Earlier{tenant}, nil)
+	in.Source = mMintedAs(mPath, models.MintedForm{MinLen: 18, MaxLen: 18})
+	ds := Decide(in)
+	mFreshBeside(t, "a minted <copied>-<random>", ds, tRec, tLiv, models.MintedForm{MinLen: 18, MaxLen: 18}, "t4821")
+	if len(ds) == 2 && (ds[1].At.Word != 0 || ds[1].From.Path != "body.tenant") {
+		t.Errorf("a minted <copied>-<random>: the copied part is %s at %s; want word 0 bound to mock-48 body.tenant", oDescribe(ds[1:]), ds[1].From.Path)
+	}
+	// The whole value bound to an earlier place: learning's Value.
+	whole := oInput(mPath, "48d1", "4a2e", []Earlier{shown}, nil)
+	whole.Source = mMintedAs(mPath, models.MintedForm{MinLen: 4, MaxLen: 4})
+	if ds := Decide(whole); len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "mock-48" || ds[0].Minted != nil {
+		t.Errorf("a place shows the whole value in both runs: %s; want learning's Value bound at mock-48", oDescribe(ds))
 	}
 
 	const p = "body.updatedAt"
@@ -158,7 +235,7 @@ func TestAMintedRuleLeavesWhatLearningPlacedOrCouldNotRead(t *testing.T) {
 
 	unread := oInput(mPath, mRec, mLiv, []Earlier{{Mock: "mock-7", At: oAt.Add(-time.Second), Own: true, Unread: "its payload was lost"}}, nil)
 	unread.Source = mMinted(mPath)
-	ds := Decide(unread)
+	ds = Decide(unread)
 	oRefused(t, "an earlier place keploy could not read", ds[0], RefusalUnread, "mock-7")
 	mNamesRule(t, "an earlier place keploy could not read", ds)
 
@@ -202,13 +279,33 @@ func TestAMintedRuleRefusesAValueOfAnotherKindOrShape(t *testing.T) {
 	stepped.Source = mMinted(mPath)
 	mRefused(t, "a value a step opens", Decide(stepped), RefusalNotMinted)
 
+	// The form names no character after the prefix: round F's value of
+	// any printable characters keeps it, and a length the set's recordings
+	// did not show widens it.
 	for name, live := range map[string]string{
-		"a character more": mLiv + "0",
 		"a ':' for a '-'":  "9999cccc:7777-4a2e-8888-000011112222",
 		"a '+' for a '-'":  "9999cccc+7777-4a2e-8888-000011112222",
+		"a capital":        "9999cccC-7777-4a2e-8888-000011112222",
+		"a character more": mLiv + "0",
 	} {
 		in := oInput(mPath, mRec, live, nil, nil)
 		in.Source = mMinted(mPath)
+		mFresh(t, name, Decide(in), mRec, live, models.MintedForm{MinLen: 36, MaxLen: len(live)})
+	}
+	// Whitespace, a character that is not printable, or nothing after the
+	// prefix: refused, in either run.
+	for name, c := range map[string]struct {
+		r, f string
+		form models.MintedForm
+	}{
+		"a space for a '-' in round F":            {mRec, "9999cccc 7777-4a2e-8888-000011112222", mForm},
+		"a tab for a '-' in the recording":        {"1111aaaa\t2222-48d1-9444-444455556666", mLiv, mForm},
+		"a control byte in round F":               {mRec, "9999cccc\x017777-4a2e-8888-000011112222", mForm},
+		"a byte that is no UTF-8 in round F":      {mRec, "9999cccc\xff7777-4a2e-8888-000011112222", mForm},
+		"round F's value the rule's prefix alone": {"kepreq_uamfMJBud4Q7D2dpiTWWtg5vnhG5v-jDYXUBeo0jS6Y", "kepreq_", models.MintedForm{Prefix: "kepreq_", MinLen: 50, MaxLen: 50}},
+	} {
+		in := oInput(mPath, c.r, c.f, nil, nil)
+		in.Source = mMintedAs(mPath, c.form)
 		mRefused(t, name, Decide(in), RefusalChangedShape)
 	}
 }
@@ -228,7 +325,7 @@ func TestAMintedRuleRefusesAValueAnEarlierPlaceHoldsWhole(t *testing.T) {
 		t.Helper()
 		in := oInput(mPath, mRec, mLiv, nil, raw)
 		in.Source = mMinted(mPath)
-		mFresh(t, what, Decide(in), mRec, mLiv, variables.AlphabetHex)
+		mFresh(t, what, Decide(in), mRec, mLiv, mForm)
 	}
 	caps := Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}
 	sent := func(r, f string) []Earlier {
@@ -251,7 +348,7 @@ func TestAMintedRuleRefusesAValueAnEarlierPlaceHoldsWhole(t *testing.T) {
 		{"a value of the standard base64 alphabet at an earlier send", plus, plusLive},
 	} {
 		in := oInput(mPath, tc.r, tc.f, []Earlier{oCarried("mock-5", "body.ref", "key "+tc.r+" end", "other", 2*time.Second, time.Second, 1)}, nil)
-		in.Source = mMinted(mPath)
+		in.Source = mMintedAs(mPath, mB64)
 		mRefused(t, tc.what, Decide(in), RefusalNotMinted, "mock-5")
 	}
 }
@@ -271,17 +368,19 @@ func TestAMintedFieldBindsTheValueTheCallSendsAtAnotherField(t *testing.T) {
 	if len(ds) != 2 || ds[0].Outcome != OutcomeFresh || ds[1].Outcome != OutcomeValue || ds[1].From.Path != a {
 		t.Fatalf("with no rule, a key sent at two fields: %s; want the first bound, the second its use", oDescribe(ds))
 	}
-	in.Source = mMinted(b)
+	in.Source = mMintedAs(b, mB64)
 	ds = Decide(in)
 	if len(ds) != 2 || ds[0].Outcome != OutcomeValue || ds[0].From.Path != b || ds[1].Outcome != OutcomeFresh || ds[1].Minted == nil {
 		t.Errorf("a key sent at two fields, the second minted: %s; want the minted field bound, the other its use", oDescribe(ds))
 	}
-	in.Source = mMinted(a)
+	in.Source = mMintedAs(a, mB64)
 	ds = Decide(in)
 	if len(ds) != 2 || ds[0].Outcome != OutcomeFresh || ds[0].Minted == nil || ds[1].Outcome != OutcomeValue || ds[1].From.Path != a {
 		t.Errorf("a key sent at two fields, the first minted: %s; want the minted field bound, the other its use", oDescribe(ds))
 	}
-	in.Source = func(f string) (Source, bool) { return Source{Kind: SourceMinted, Rule: mRule}, f == a || f == b }
+	in.Source = func(f string) (Source, bool) {
+		return Source{Kind: SourceMinted, Rule: mRule, Minted: mB64}, f == a || f == b
+	}
 	ds = Decide(in)
 	if len(ds) != 2 || ds[0].Outcome != OutcomeFresh || ds[0].Minted == nil || ds[1].Outcome != OutcomeValue || ds[1].From.Path != a {
 		t.Errorf("a key sent at two fields, both minted: %s; want the first bound, the other its use", oDescribe(ds))
@@ -296,4 +395,51 @@ func TestAMintedFieldOfACallThatLandedElsewhereIsRefusedNamingTheRule(t *testing
 	ds := Decide(in)
 	oRefused(t, "a minted field of a call that landed between tests", ds[0], RefusalLandedElsewhere)
 	mNamesRule(t, "a minted field of a call that landed between tests", ds)
+}
+
+// TestCITrustIsNarrowedBoundedAndExpires's insert on app_config_audits
+// mints a v4 UUID _id; a 16-bit group of it stood, in both runs, in an
+// earlier answer's id list, so learning bound the group there, and the
+// Mongo learn step, which names no place of that answer to bind it at,
+// refused it as keploy's limit: the call was set aside though a rule
+// declared the id minted. Under the rule the id is decided made anew
+// whole, and the group stays bound beside it: an adapter that cannot
+// follow that place (the Mongo learn step names no place of a Postgres
+// answer) leaves the group to the rule, so the call is kept.
+func TestAMintedRuleDecidesAnIdWholeWhoseGroupAnEarlierAnswerShows(t *testing.T) {
+	const (
+		rec, live = "294e693b-0963-42b8-a8ba-8cdf7fb6d3f1", "22ee59fa-7c10-412d-b6e2-90ad3f5c7e18"
+		other     = "ab4e1a5f-ccca-48d0-8fb3-144c278387a7"
+	)
+	list := func(session string, ids ...string) *models.Mock {
+		rows := []models.PostgresV3Cells{{{Value: session}}}
+		for _, id := range ids {
+			rows = append(rows, models.PostgresV3Cells{{Value: id}})
+		}
+		return oPgMock("mock-47", 97*time.Second, "SELECT id FROM suites", rows, "SELECT 3")
+	}
+	// One listed id holds the recorded group in the recording and round
+	// F's in round F's view, at one spot.
+	raw := RawOf(list("s-1", "d4927bdf-978e-42b8-86de-eeb6c761151c", other), true).ServedAs(1).
+		ServedLive(RawOf(list("s-2", "d4927bdf-978e-412d-86de-eeb6c761151c", other), true))
+	in := oInput(mPath, rec, live, nil, []Raw{raw})
+	if d := oWord(t, Decide(in), "42b8", "412d"); d.Outcome != OutcomeValue || d.From.Mock != "mock-47" {
+		t.Fatalf("with no rule: %s; want the group bound to mock-47", oDescribe([]Decision{d}))
+	}
+	in.Source = mMinted(mPath)
+	mFreshBeside(t, "a group an earlier answer shows", Decide(in), rec, live, mForm, "42b8")
+}
+
+// Two ObjectIDs one process makes share its 5 random bytes (and their
+// counters run on): an earlier send of one, in each run, leaves the
+// other's whole value unheld, and the rule decides it made anew whole.
+func TestAMintedRuleDecidesAnObjectIdWholeBesideAnotherOfItsProcess(t *testing.T) {
+	const (
+		rec, live   = "6730a1c2e4b0d1f2a3c4d5e7", "6730a2f0b7c8e9d0f1a2b3c5"
+		recA, liveA = "6730a1c1e4b0d1f2a3c4d5e6", "6730a2efb7c8e9d0f1a2b3c4"
+	)
+	sent := oCarried("mock-5", "body.ref", recA, liveA, 2*time.Second, time.Second, 1)
+	in := oInput(mPath, rec, live, []Earlier{sent}, nil)
+	in.Source = mMintedAs(mPath, models.MintedForm{MinLen: 24, MaxLen: 24})
+	mFresh(t, "an ObjectID beside another of its process", Decide(in), rec, live, models.MintedForm{MinLen: 24, MaxLen: 24})
 }

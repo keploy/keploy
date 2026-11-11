@@ -1164,6 +1164,14 @@ type PoolSourcesSetter interface {
 	SetPoolSources(sources map[string][]models.DeclaredSource) error
 }
 
+// PoolTimeFormSetter is implemented by a proxy whose learn step can check a
+// changed time by its form alone (the time default, learn.Input.TimeForm):
+// SetPoolTimeForm installs, of keploy mock replay's scope table under the
+// proven switch, whether it does (models.ScopeTableReq.TimeForm).
+type PoolTimeFormSetter interface {
+	SetPoolTimeForm(on bool) error
+}
+
 // SeriesRepeatReader is implemented by a proxy that serves the series
 // SetPoolSeries installs: SeriesRepeats is, by series, how many calls in the
 // current staging's tests its last-placed recording answered past the

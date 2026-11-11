@@ -126,7 +126,8 @@ func TestAClockRuleDecidesAReadWhereAnAnswerOutsideTheScopeHoldsTheMoment(t *tes
 	}
 
 	// A minted rule on the field: minted's checks, never the clock's.
-	in.Source = func(f string) (Source, bool) { return Source{Kind: SourceMinted, Rule: cRule}, f == cPath }
+	tf, _ := models.MintedFormOf(cR, cF)
+	in.Source = func(f string) (Source, bool) { return Source{Kind: SourceMinted, Rule: cRule, Minted: tf}, f == cPath }
 	if ds := Decide(in); len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalNotMinted {
 		t.Errorf("a minted rule on the field: %s; want refused not-minted, naming the answer that holds it", oDescribe(ds))
 	}
@@ -256,12 +257,12 @@ func TestAClockRuleLeavesWhatLearningPlaced(t *testing.T) {
 	cNamesRule(t, "no instant", ds)
 }
 
-// A minted rule acts on the field's words only through minted: where one
-// word of the field is copied from an exchange of the call's own test,
-// minted leaves every word as learning decided it, and an instant word
-// learning refused as another-scope keeps that refusal, never decided by a
-// clock's checks.
-func TestAMintedRuleLeavesAnInstantWordToLearning(t *testing.T) {
+// A minted rule decides the field whole, by minted's checks alone: an
+// instant word of it learning refused as another-scope, and a word copied
+// from an exchange of the call's own test, are pieces of its value, never
+// decided by a clock's checks or bound one by one. This value holds a
+// space, so it is refused as of another shape, naming the rule.
+func TestAMintedRuleDecidesAFieldWithAnInstantWordWhole(t *testing.T) {
 	const wr, wf = "order-17", "order-18"
 	in := cCall(cR+" "+wr, cF+" "+wf, []Raw{cAns(cR, cF)}, false)
 	in.Earlier = oServed("mock-231", false, false, Response, oText("body.value.seq", "17"), "18", time.Millisecond)
@@ -275,11 +276,12 @@ func TestAMintedRuleLeavesAnInstantWordToLearning(t *testing.T) {
 	if len(before) != 2 || before[0].Refusal == nil || before[0].Refusal.Kind != RefusalAnotherScope || before[1].Outcome != OutcomeValue {
 		t.Fatalf("with no rule: %s; want the instant refused as another-scope and the word a Value", oDescribe(before))
 	}
-	in.Source = func(p string) (Source, bool) { return Source{Kind: SourceMinted, Rule: cRule}, p == cPath }
-	ds := Decide(in)
-	if oDescribe(ds) != oDescribe(before) {
-		t.Fatalf("a minted rule on the field: %s; want as learning decided it: %s", oDescribe(ds), oDescribe(before))
+	form := models.MintedForm{MinLen: len(cR + " " + wr), MaxLen: len(cR + " " + wr)}
+	in.Source = func(p string) (Source, bool) {
+		return Source{Kind: SourceMinted, Rule: cRule, Minted: form}, p == cPath
 	}
-	oRefused(t, "the instant word", ds[0], RefusalAnotherScope, "mock-7")
-	iValue(t, "the copied word", ds[1], "mock-231")
+	ds := Decide(in)
+	if len(ds) != 1 || ds[0].At.Word != -1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalChangedShape || ds[0].Refusal.Rule != cRule {
+		t.Fatalf("a minted rule on the field: %s; want the field refused whole as of another shape, naming the rule", oDescribe(ds))
+	}
 }

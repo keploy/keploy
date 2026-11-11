@@ -253,6 +253,14 @@ func TestTheTimeDefaultLeavesWhatIsNoTime(t *testing.T) {
 			t.Errorf("FALSE GREEN? a declared epoch number %s: %s; want refused", c.what, oDescribe(ds))
 		}
 	}
+	// A declared word the reader reads no moment in (a number it matches by
+	// its text alone: an epoch with a fraction ends inside it, so no instant
+	// stands at its bytes) keeps its refusal, though the word alone reads as
+	// an instant of one form in both runs.
+	glued := declare(cCall("1731300000."+near, "1731300000."+nearF, nil, false))
+	if ds := Decide(glued); len(ds) != 1 || ds[0].Outcome == OutcomeClock || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalNoClockRead {
+		t.Errorf("FALSE GREEN? a declared word with no moment read in it: %s; want refused %s", oDescribe(ds), RefusalNoClockRead)
+	}
 	// A declared text keeps its form however far from its call: a text in a
 	// clock layout names its moment, as no 13-digit id does.
 	far := iMicro(cFAt.Add(-2 * epochNear))

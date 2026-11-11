@@ -57,8 +57,8 @@ func TestScopeTableCarriesTheDeclaredSources(t *testing.T) {
 		}
 		return ack.Served
 	}
-	withSources := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-2"]},"sources":{"mock-3":[{"rule":"audit-id@0a1b2c3d","kind":"minted","field":"body.docs.msgs.0._id"}]}}`
-	want := map[string][]models.DeclaredSource{"mock-3": {{Rule: "audit-id@0a1b2c3d", Kind: models.DeclaredSourceMinted, Field: "body.docs.msgs.0._id"}}}
+	withSources := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-2"]},"sources":{"mock-3":[{"rule":"audit-id@0a1b2c3d","kind":"minted","field":"body.docs.msgs.0._id","minted":{"min_len":36,"max_len":36}}]}}`
+	want := map[string][]models.DeclaredSource{"mock-3": {{Rule: "audit-id@0a1b2c3d", Kind: models.DeclaredSourceMinted, Field: "body.docs.msgs.0._id", Minted: &models.MintedForm{MinLen: 36, MaxLen: 36}}}}
 	t.Setenv(provenswitch.Env, "1")
 	ps, got := &poolSvc{}, map[string][]models.DeclaredSource{}
 	rec := post(sourcesSvc{workerSvc{ps}, &got, nil}, withSources)

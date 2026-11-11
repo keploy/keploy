@@ -496,6 +496,14 @@ type ScopeTableReq struct {
 	// of a kind it does not know (DeclaredSource.Check); the CLI refuses an
 	// agent that does not name it.
 	Sources map[string][]DeclaredSource `json:"sources,omitempty"`
+	// TimeForm, under the proven switch, turns on the learn step's time
+	// default (learn.Input.TimeForm): a changed time passes with any value
+	// of the type and form it was recorded in. A caller that sets
+	// MockCmd.TimeForm (keploy's T2 commands, unless keploy.yml asks for
+	// strict times) sends it; every other caller sends none. An agent that
+	// cannot take it decides times by the clock checks alone, as with none:
+	// it refuses more, never passes more.
+	TimeForm bool `json:"timeForm,omitempty"`
 	// RepeatReads is, under the proven switch, each test's repeated reads
 	// by test ID, as whatever names them for the replay named them
 	// (mock.RegisterRepeatReadNamer): recordings of one read the test made

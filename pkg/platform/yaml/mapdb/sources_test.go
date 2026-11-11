@@ -24,7 +24,7 @@ import (
 // writing nothing. In both formats, whatever the switch.
 func TestSetSourcesMarksEntriesAndReplacesTheSetsSources(t *testing.T) {
 	clock := models.DeclaredSource{Rule: "at@0a1b2c3d", Kind: models.DeclaredSourceClock, Field: "body.docs.msgs.0.at", Clock: &models.ClockOffset{Min: -time.Second, Res: time.Second}}
-	minted := models.DeclaredSource{Rule: "id@44aa55bb", Kind: models.DeclaredSourceMinted, Field: "body.docs.msgs.0._id"}
+	minted := models.DeclaredSource{Rule: "id@44aa55bb", Kind: models.DeclaredSourceMinted, Field: "body.docs.msgs.0._id", Minted: &models.MintedForm{MinLen: 36, MaxLen: 36}}
 	for _, sw := range []string{"1", ""} {
 		for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
 			t.Run("switch="+sw+"/"+format.FileExtension(), func(t *testing.T) {
@@ -98,7 +98,7 @@ func TestSetSourcesMarksEntriesAndReplacesTheSetsSources(t *testing.T) {
 				for name, bad := range map[string]map[string][]models.DeclaredSource{
 					"a name no entry has": {"mock-3": {clock}, "mock-404": {minted}},
 					"an unknown kind":     {"mock-3": {{Rule: "x@00000000", Kind: "answer", Field: "body.x"}}},
-					"two on one field":    {"mock-3": {minted, {Rule: "y@00000000", Kind: models.DeclaredSourceMinted, Field: minted.Field}}},
+					"two on one field":    {"mock-3": {minted, {Rule: "y@00000000", Kind: models.DeclaredSourceMinted, Field: minted.Field, Minted: &models.MintedForm{MinLen: 36, MaxLen: 36}}}},
 				} {
 					if err := db.SetSources(ctx, "test-set-0", bad); err == nil {
 						t.Fatalf("%s: SetSources took %v", name, bad)

@@ -57,7 +57,7 @@ func TestTheScopeSourcesReachTheProxyWithThePool(t *testing.T) {
 	for _, bad := range [][]models.DeclaredSource{
 		{{Rule: "at@0a1b2c3d", Kind: "answer", Field: "body.at"}},
 		{{Rule: "at@0a1b2c3d", Kind: models.DeclaredSourceClock, Field: "body.at", Clock: &models.ClockOffset{Min: -time.Second}}},
-		{clock, {Rule: "id@0a1b2c3d", Kind: models.DeclaredSourceMinted, Field: "body.at"}},
+		{clock, {Rule: "id@0a1b2c3d", Kind: models.DeclaredSourceMinted, Field: "body.at", Minted: &models.MintedForm{MinLen: 36, MaxLen: 36}}},
 	} {
 		require.Error(t, a.SetScopeSources(ctx, map[string][]models.DeclaredSource{"mock-1": bad}), "sources %v", bad)
 		a.provenMu.Lock()

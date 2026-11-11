@@ -87,8 +87,8 @@ type MockVariable struct {
 	// made anew at its Bind (an id the application mints there), the rule
 	// and the shape the learn step read the value with: a replay binds it
 	// only to a value that is not its recorded one, that no minted
-	// variable bound earlier in the run, and that keeps the recorded
-	// value's shape (variables.Table.BindAll). Only the learn step sets
+	// variable bound earlier in the run, and that keeps the rule's form
+	// (variables.Table.BindAll). Only the learn step sets
 	// it, with a Bind; none for any other variable.
 	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty" bson:"minted,omitempty"`
 	// Why is, for a variable the learn step wrote, why it is one and how to
@@ -99,13 +99,11 @@ type MockVariable struct {
 }
 
 // MintedShape is what a minted rule decided of a variable's value
-// (MockVariable.Minted): the id of the rule (Rule), and the alphabet its
-// value is made of (Alphabet: a name variables.ParseAlphabet reads), which
-// a value bound there keeps at each position its recorded value holds a
-// letter of it, every other byte as recorded.
+// (MockVariable.Minted): the id of the rule (Rule), and the form a value
+// bound there keeps (MintedForm: the prefix and the range of lengths).
 type MintedShape struct {
-	Rule     string `json:"rule" yaml:"rule" bson:"rule"`
-	Alphabet string `json:"alphabet" yaml:"alphabet" bson:"alphabet"`
+	Rule       string `json:"rule" yaml:"rule" bson:"rule"`
+	MintedForm `yaml:",inline" bson:",inline"`
 }
 
 // clone is a copy of s that shares nothing with it; nil for nil.

@@ -1301,11 +1301,15 @@ func BackgroundRecordingsAt(db MockMemDb, call CallRound, kind models.Kind) []mo
 // same test's next run, first; a pool view's call between tests is the
 // ended test's, whose scope runs until the next begins; variables.Table.
 // OwnOf, by the mark's test, for a mark that keeps no scope), what each ended test of the set
-// bound itself (variables.Table.EndedOf), and the test each recording
-// trails by the set's scope table (TrailedTests).
+// bound itself (variables.Table.EndedOf), the binding of a name a test's own
+// scope made (variables.Table.LookupOf: the running scope's while it is that
+// test's, else the latest of its ended scopes'; Mongo's markTrails reads a
+// trailed test's values so), and the test each recording trails by the
+// set's scope table (TrailedTests).
 type BoundValues interface {
 	Own() []variables.Binding
 	EndedOf(test string) []variables.Binding
+	LookupOf(test, name string) (b variables.Binding, ended, ok bool)
 	TrailOf(mock string) learn.Trail
 }
 
@@ -1369,6 +1373,9 @@ func (b boundNow) Own() []variables.Binding {
 
 func (b boundNow) EndedOf(test string) []variables.Binding { return b.table.EndedOf(test) }
 func (b boundNow) TrailOf(mock string) learn.Trail         { return TrailOf(b.db, mock) }
+func (b boundNow) LookupOf(test, name string) (variables.Binding, bool, bool) {
+	return b.table.LookupOf(test, name)
+}
 
 // LearnEnder is an optional MockMemDb capability: whether the test set's
 // learn step has ended (models.MockFilterParams.LearnEnded). keploy replay's
@@ -1764,6 +1771,22 @@ func SourcesOf(db MockMemDb, mock string) []models.DeclaredSource {
 		return nil
 	}
 	return s.SourcesOf(mock)
+}
+
+// TimeFormReader is an optional MockMemDb capability under the proven
+// switch: whether keploy mock replay's scope table turned on the learn
+// step's time default (models.ScopeTableReq.TimeForm), which checks a
+// changed time by its type and form alone (learn.Input.TimeForm).
+type TimeFormReader interface {
+	TimeForm() bool
+}
+
+// TimeFormOf is whether db's replay turned the time default on
+// (TimeFormReader); off for a db that cannot tell, which decides times by
+// the clock checks alone: it refuses more, never passes more.
+func TimeFormOf(db MockMemDb) bool {
+	t, ok := db.(TimeFormReader)
+	return ok && t.TimeForm()
 }
 
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of

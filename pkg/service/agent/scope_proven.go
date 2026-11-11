@@ -131,6 +131,10 @@ type provenWire struct {
 	// table, models.ScopeTableReq.Sources), which SetScopePool hands the
 	// proxy. nil when the table had none.
 	sources map[string][]models.DeclaredSource
+	// timeForm is, in a replay, whether the learn step checks a changed
+	// time by its form alone (the CLI's scope table,
+	// models.ScopeTableReq.TimeForm), which SetScopePool hands the proxy.
+	timeForm bool
 	// notRequired is, in a replay, by test ID, the names of the test's own
 	// list keploy's judging marked served, not required (the CLI's scope table,
 	// models.ScopeTableReq.NotRequired): its end does not charge the test
@@ -657,6 +661,7 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	series := maps.Clone(a.proven.series)
 	once := slices.Clone(a.proven.once)
 	sources := maps.Clone(a.proven.sources)
+	timeForm := a.proven.timeForm
 	a.provenMu.Unlock()
 	if ts, ok := a.Proxy.(coreAgent.PoolTrailsSetter); ok {
 		if err := ts.SetPoolTrails(trails); err != nil {
@@ -679,6 +684,11 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	}
 	if ss, ok := a.Proxy.(coreAgent.PoolSourcesSetter); ok {
 		if err := ss.SetPoolSources(sources); err != nil {
+			return err
+		}
+	}
+	if ts, ok := a.Proxy.(coreAgent.PoolTimeFormSetter); ok {
+		if err := ts.SetPoolTimeForm(timeForm); err != nil {
 			return err
 		}
 	}
@@ -751,6 +761,23 @@ func (a *Agent) SetScopeSources(ctx context.Context, sources map[string][]models
 	}
 	a.provenMu.Lock()
 	a.proven.sources = cp
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeTimeForm installs whether a replay's learn step checks a changed
+// time by its form alone (models.ScopeTableReq.TimeForm), which the pool
+// slices sent next hand the proxy (SetScopePool). Every table says it, off
+// too: a set never keeps the previous set's. A proxy that cannot take it
+// is handed nothing and decides times by the clock checks alone, which
+// refuses more and never passes more.
+func (a *Agent) SetScopeTimeForm(ctx context.Context, on bool) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.timeForm = on
 	a.provenMu.Unlock()
 	return nil
 }

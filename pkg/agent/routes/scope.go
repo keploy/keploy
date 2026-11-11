@@ -407,6 +407,16 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot learn a field by the source a rule in keploy.yml declares", http.StatusNotImplemented)
 			return
 		}
+		// Whether the learn step checks a changed time by its form alone.
+		// Every table says it, off too: a set never keeps the previous
+		// set's. An agent that cannot take it decides times by the clock
+		// checks alone: it refuses more, never passes more.
+		if ts, ok := a.svc.(scopeTimeFormSetter); ok {
+			if err := ts.SetScopeTimeForm(r.Context(), req.TimeForm); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		// The recordings keploy's judging marked served, not required, by test, before
 		// the pool is served. Every table says it, an empty one too: a set
 		// never keeps the previous set's. An agent that cannot take them
@@ -501,6 +511,13 @@ type scopeOnceSetter interface {
 // (models.ScopeTableReq.Sources, proven wire).
 type scopeSourcesSetter interface {
 	SetScopeSources(ctx context.Context, sources map[string][]models.DeclaredSource) error
+}
+
+// scopeTimeFormSetter installs whether a replay's learn step checks a
+// changed time by its form alone (models.ScopeTableReq.TimeForm, proven
+// wire).
+type scopeTimeFormSetter interface {
+	SetScopeTimeForm(ctx context.Context, on bool) error
 }
 
 // scopeNotRequiredSetter installs, by test, the recordings keploy's judging
