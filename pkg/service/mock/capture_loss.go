@@ -71,13 +71,7 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 		unchargedErr = err
 		m.logger.Warn("keploy could not read which of the run's capture losses no test was charged with, so every one of them is the run's", zap.Error(err))
 	}
-	all := append(models.CaptureLosses(nil), lost...)
-	if refused.Target > 0 {
-		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refused.Target, What: refused.CaptureIncomplete()})
-	}
-	if refused.Excluded > 0 {
-		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refused.Excluded, What: refused.CaptureIncomplete()})
-	}
+	all := append(append(models.CaptureLosses(nil), lost...), pidMapLosses(refused)...)
 	switch {
 	case lostErr != nil && unchargedErr != nil:
 		return all, fmt.Errorf("%w; nor which of them no test was charged with: %v", lostErr, unchargedErr)
@@ -85,6 +79,22 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 		return all, lostErr
 	}
 	return all, nil
+}
+
+// pidMapLosses are refused as capture losses, one for each PID map that
+// refused an insert: the inserts it refused, the run's sentence for both
+// maps (PIDMapRefusals.CaptureIncomplete), and the kernel's errno for that
+// map's latest refusal, so a reader takes each map's cause from its own
+// loss. nil when neither refused one.
+func pidMapLosses(refused models.PIDMapRefusals) models.CaptureLosses {
+	var out models.CaptureLosses
+	if refused.Target > 0 {
+		out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refused.Target, What: refused.CaptureIncomplete(), Err: refused.LastTargetErr})
+	}
+	if refused.Excluded > 0 {
+		out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refused.Excluded, What: refused.CaptureIncomplete(), Err: refused.LastExcludedErr})
+	}
+	return out
 }
 
 // captureLossesDuring is what the agent could not capture while the test
