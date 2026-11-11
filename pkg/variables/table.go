@@ -464,8 +464,12 @@ const wordRunSep = "-"
 // string, whole, at a place other than Text (a field, a segment, a header, a
 // value of its answer): the evidence that cuts a run into held stretches
 // (WordRuns). Of names the learned value Live is a word of: a held stretch
-// is one value only when each of its words names the same one. A WordBind
-// with none of them has no span but its own word.
+// is one value only when each of its words names the same one, and a
+// stretch that is one UUID by its form (WordRuns) is one value only when
+// each of its words names that UUID. A WordBind with none of them has no
+// span but its own word. The call's text there is RecordedText with its
+// live words in place of the words it binds: the adapter matched every
+// other byte as recorded.
 type WordBind struct {
 	Text         string
 	Word         int
@@ -507,12 +511,22 @@ const maxSpanRun = 64
 // values), when each of its words names the same learned value (Of). A held
 // stretch is not proof of one value by itself: "<B>/3" sent whole elsewhere
 // may be one id or a cid beside a count, and the recording does not say
-// which. Every other word is its own value, alone, checked word by word as
-// main checks it: a word no held stretch covers (never the words around it:
-// "<cid>/<appId>/7" with only the cid held leaves "7" alone, not with the
-// appId), a word of a held stretch whose words name no one value, a word
-// whose recorded text does not hold the run's recorded words where the run
-// says, and one with no Elsewhere. A binding of a value whole has none.
+// which. A stretch is one value by its form, held elsewhere or not, when its
+// recorded text and its live text are each one canonical UUID (8-4-4-4-12
+// hex digits: a minted id), the call binds every word of it, and each of
+// those words names that recorded UUID (Of): its words are the groups of one
+// id, never a count or a second value beside it. Every other word is its own
+// value, alone, checked word by word as main checks it: a word no held or
+// UUID stretch covers (never the words around it: "<cid>/<appId>/7" with
+// only the cid held leaves "7" alone, not with the appId), a word of a
+// stretch whose words name no one value, a word whose recorded text does not
+// hold the run's recorded words where the run says, and one with neither
+// Elsewhere nor a UUID's form. A binding of a value whole has none.
+//
+// Binds of one call at one word of one text, with one live and one recorded
+// word (a variable and its run twin, bound at one place), take one position
+// in the run and share its span; binds at one word that differ there cut the
+// run, each its own word.
 func WordRuns(ws []WordBind) []Run {
 	runs := make([]Run, len(ws))
 	byText := map[string][]int{}
@@ -529,19 +543,23 @@ func WordRuns(ws []WordBind) []Run {
 	for _, k := range texts {
 		idx := byText[k]
 		sort.SliceStable(idx, func(x, y int) bool { return ws[idx[x]].Word < ws[idx[y]].Word })
-		for lo := 0; lo < len(idx); {
+		pos := positionsOf(ws, idx)
+		for lo := 0; lo < len(pos); {
 			hi := lo + 1
-			for hi < len(idx) && ws[idx[hi]].Word == ws[idx[hi-1]].Word+1 {
+			for hi < len(pos) && ws[pos[hi][0]].Word == ws[pos[hi-1][0]].Word+1 {
 				hi++
 			}
-			run := idx[lo:hi]
+			run := pos[lo:hi]
 			for at, span := range spansOf(ws, run) {
 				from, to := span[0], span[1]
 				live, recorded := make([]string, 0, to-from+1), make([]string, 0, to-from+1)
-				for _, j := range run[from : to+1] {
-					live, recorded = append(live, ws[j].Live), append(recorded, ws[j].Recorded)
+				for _, p := range run[from : to+1] {
+					live, recorded = append(live, ws[p[0]].Live), append(recorded, ws[p[0]].Recorded)
 				}
-				runs[run[at]] = Run{Live: strings.Join(live, wordRunSep), Recorded: strings.Join(recorded, wordRunSep), At: at - from}
+				r := Run{Live: strings.Join(live, wordRunSep), Recorded: strings.Join(recorded, wordRunSep), At: at - from}
+				for _, j := range run[at] {
+					runs[j] = r
+				}
 			}
 			lo = hi
 		}
@@ -549,36 +567,73 @@ func WordRuns(ws []WordBind) []Run {
 	return runs
 }
 
-// spansOf is the value span (WordRuns) of each word of run (indexes of ws, at
-// consecutive words of one text), as the first and last index into run:
-// read once for the run from its recorded text and its mock (Elsewhere), the
-// same for every word of one text in one call.
-func spansOf(ws []WordBind, run []int) [][2]int {
+// positionsOf is idx (indexes of ws at one text, in word order) as the run's
+// positions: the binds at one word with one live and one recorded word (a
+// variable and its run twin) are one position; a bind at the same word that
+// differs from the one before it there is a position of its own, which cuts
+// the run (WordRuns: no word follows itself).
+func positionsOf(ws []WordBind, idx []int) [][]int {
+	var pos [][]int
+	for _, j := range idx {
+		if n := len(pos); n > 0 {
+			if prev := ws[pos[n-1][0]]; prev.Word == ws[j].Word && prev.Live == ws[j].Live && prev.Recorded == ws[j].Recorded {
+				pos[n-1] = append(pos[n-1], j)
+				continue
+			}
+		}
+		pos = append(pos, []int{j})
+	}
+	return pos
+}
+
+// spansOf is the value span (WordRuns) of each position of run (the binds of
+// ws at each of consecutive words of one text, positionsOf), as the first
+// and last index into run: read once for the run from its recorded text, its
+// mock (Elsewhere) and its words' form, the same for every word of one text
+// in one call.
+func spansOf(ws []WordBind, run [][]int) [][2]int {
 	n := len(run)
 	spans := make([][2]int, n)
 	for at := range spans {
 		spans[at] = [2]int{at, at}
 	}
-	first := ws[run[0]]
+	first := ws[run[0][0]]
 	words := Words(first.RecordedText)
-	if first.Elsewhere == nil || n > maxSpanRun || ws[run[n-1]].Word >= len(words) {
+	if n > maxSpanRun || ws[run[n-1][0]].Word >= len(words) {
 		return spans
 	}
-	for _, j := range run {
-		if x := words[ws[j].Word]; ws[j].RecordedText != first.RecordedText || first.RecordedText[x[0]:x[1]] != ws[j].Recorded {
-			return spans
+	for _, p := range run {
+		for _, j := range p {
+			if x := words[ws[j].Word]; ws[j].RecordedText != first.RecordedText || first.RecordedText[x[0]:x[1]] != ws[j].Recorded {
+				return spans
+			}
 		}
 	}
-	// value[a*n+b]: the stretch a..b of run is held whole elsewhere and holds
-	// no shorter stretch held whole (inner). A held stretch that holds another
-	// ("<B>/3" beside "<B>") is two values, never one.
+	// text is the stretch a..b of run as recorded, and live its live text:
+	// the recorded text with the live words in place of its words.
+	text := func(a, b int) string {
+		return first.RecordedText[words[ws[run[a][0]].Word][0]:words[ws[run[b][0]].Word][1]]
+	}
+	live := func(a, b int) string {
+		var s strings.Builder
+		s.WriteString(ws[run[a][0]].Live)
+		for p := a + 1; p <= b; p++ {
+			s.WriteString(first.RecordedText[words[ws[run[p-1][0]].Word][1]:words[ws[run[p][0]].Word][0]])
+			s.WriteString(ws[run[p][0]].Live)
+		}
+		return s.String()
+	}
+	// value[a*n+b]: the stretch a..b of run is held whole elsewhere, or is one
+	// UUID by its form (uuidStretch), and holds no shorter such stretch
+	// (inner). A held stretch that holds another ("<B>/3" beside "<B>") is two
+	// values, never one.
 	value, inner := make([]bool, n*n), make([]bool, n*n)
 	for a := n - 1; a >= 0; a-- {
 		for b := a; b < n; b++ {
 			if b > a {
 				inner[a*n+b] = value[(a+1)*n+b] || inner[(a+1)*n+b] || value[a*n+b-1] || inner[a*n+b-1]
 			}
-			value[a*n+b] = !inner[a*n+b] && first.Elsewhere(first.RecordedText[words[ws[run[a]].Word][0]:words[ws[run[b]].Word][1]])
+			value[a*n+b] = !inner[a*n+b] && (first.Elsewhere != nil && first.Elsewhere(text(a, b)) || uuidStretch(ws, run[a:b+1], text(a, b), func() string { return live(a, b) }))
 		}
 	}
 	for at := range spans {
@@ -597,13 +652,73 @@ func spansOf(ws []WordBind, run []int) [][2]int {
 	return spans
 }
 
-// oneValue reports whether the word binds of stretch (indexes of ws) each
-// name the same learned value (WordBind.Of).
-func oneValue(ws []WordBind, stretch []int) bool {
-	of := ws[stretch[0]].Of
-	for _, j := range stretch {
-		if ws[j].Of == "" || ws[j].Of != of {
+// NameUUIDs names each word bind of ws (the binds of one call) a word of its
+// recorded text (Of) where ws bind every word of that text and the text is
+// one canonical UUID: a minted id bound word by word, whose words WordRuns
+// then reads as one value by its form. A text bound at only some of its
+// words, and a text that is no UUID, is named nothing: each of its words
+// stays its own value, checked word by word. A bind already named keeps its
+// name.
+func NameUUIDs(ws []WordBind) {
+	bound := map[string]map[int]bool{}
+	for _, w := range ws {
+		if bound[w.Text] == nil {
+			bound[w.Text] = map[int]bool{}
+		}
+		bound[w.Text][w.Word] = true
+	}
+	for i, w := range ws {
+		if w.Word < 0 || w.Of != "" || !canonicalUUID(w.RecordedText) {
+			continue
+		}
+		every := true
+		for k := range Words(w.RecordedText) {
+			every = every && bound[w.Text][k]
+		}
+		if every {
+			ws[i].Of = w.RecordedText
+		}
+	}
+}
+
+// uuidStretch reports whether a stretch of a run (its positions), recorded
+// as text and live as live gives it, is one UUID by its form: both texts are
+// each one canonical UUID and its first bind names the recorded one (Of; a
+// span is taken only where every bind of it names one value, oneValue). The
+// stretch covers every word of it: a UUID is five words.
+func uuidStretch(ws []WordBind, stretch [][]int, text string, live func() string) bool {
+	return canonicalUUID(text) && ws[stretch[0][0]].Of == text && canonicalUUID(live())
+}
+
+// canonicalUUID reports whether s is one UUID in its canonical text: 32 hex
+// digits in groups of 8, 4, 4, 4 and 12, joined by "-".
+func canonicalUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if s[i] != '-' {
+				return false
+			}
+			continue
+		}
+		if !isHex(s[i]) {
 			return false
+		}
+	}
+	return true
+}
+
+// oneValue reports whether the word binds of stretch (the binds of ws at
+// each of its positions) each name the same learned value (WordBind.Of).
+func oneValue(ws []WordBind, stretch [][]int) bool {
+	of := ws[stretch[0][0]].Of
+	for _, p := range stretch {
+		for _, j := range p {
+			if ws[j].Of == "" || ws[j].Of != of {
+				return false
+			}
 		}
 	}
 	return true
