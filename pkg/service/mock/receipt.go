@@ -137,6 +137,17 @@ type Receipt struct {
 	// means the run has no verdict, whatever its tests' lines say: a call
 	// after the last test's read is on no line. Empty with the switch off.
 	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
+	// CaptureIncomplete is what keploy could not capture during the run, as
+	// data, one entry per kind: each PID map's refusals
+	// (models.CaptureLossPIDMap, CaptureLossPIDMapExcluded: the inserts it
+	// refused over the run, the kernel's errno for the latest in Err) and,
+	// under the proven switch, each other kind of loss counted over the run
+	// that fails it. IsolationNote, when FailedBy is capture_incomplete, says
+	// the same in words; a reader takes each loss's kind, count and cause
+	// from here, never from those words. Empty when nothing was lost; a
+	// count that could not be read adds nothing here
+	// (ProcessTrackingUnread, CallCaptureUnread say it).
+	CaptureIncomplete models.CaptureLosses `yaml:"captureIncomplete,omitempty" json:"captureIncomplete,omitempty"`
 	// UnchargedMisses are, under the proven switch, the misses MissedData
 	// counts that no test was charged with (models.UnmatchedCall.ChargedTo
 	// empty): a call made before the test process claimed the run, or
