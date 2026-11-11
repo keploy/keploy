@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"os"
+	"sort"
+	"sync"
 
 	"go.uber.org/zap"
 
@@ -130,6 +132,11 @@ func (p *Proxy) serveOwnListenerCall(ctx context.Context, mode models.Mode, srcC
 	said := ownListenerReplayed
 	if mode == models.MODE_RECORD {
 		said = ownListenerRecorded
+	} else {
+		// The replay marks a mock recorded at this destination as the call
+		// it is (OwnListenerCalls), whether or not the dial below succeeds:
+		// no mock answers the call either way.
+		p.ownListenerDests.add(dstAddr)
 	}
 	caller, _ := callerOf(dest)
 	fields := []zap.Field{zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
@@ -148,4 +155,61 @@ func (p *Proxy) serveOwnListenerCall(ctx context.Context, mode models.Mode, srcC
 	defer func() { _ = dstConn.Close() }()
 	util.RelayRawPassthrough(srcConn, dstConn)
 	return true, nil
+}
+
+// ownListenerDests is a set's destinations of the calls passed through as
+// calls of the app to its own listener, in models.OwnListenerDestination's
+// spelling: at most models.MaxOwnListenerCalls of them, so an app that calls
+// many of its addresses holds no more; one past the bound is not reported,
+// and the replay judges its mocks as before.
+type ownListenerDests struct {
+	mu sync.Mutex
+	m  map[string]struct{}
+}
+
+// add notes addr, unless it names no IP and port, or the set holds the
+// bound (one noted already is kept).
+func (d *ownListenerDests) add(addr string) {
+	dest, ok := models.OwnListenerDestination(addr)
+	if !ok {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.m) >= models.MaxOwnListenerCalls {
+		return
+	}
+	if d.m == nil {
+		d.m = map[string]struct{}{}
+	}
+	d.m[dest] = struct{}{}
+}
+
+// reset empties the set, as a new set's mocks are loaded.
+func (d *ownListenerDests) reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.m = nil
+}
+
+// list is the set's destinations, sorted; nil when it holds none.
+func (d *ownListenerDests) list() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(d.m))
+	for dest := range d.m {
+		out = append(out, dest)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// OwnListenerCalls reports the destinations of the calls keploy test passed
+// through, since the set's mocks were loaded, as calls of the app to its own
+// listener (agent.OwnListenerReporter).
+func (p *Proxy) OwnListenerCalls() []string {
+	return p.ownListenerDests.list()
 }

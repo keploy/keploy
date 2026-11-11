@@ -118,6 +118,11 @@ type AgentClient struct {
 	// last staging call said it serves the set by
 	// (models.BackgroundRulesHeader): "" until one says the background rules.
 	stagedBackground atomic.Pointer[string]
+	// ownListenerCalls is what the agent's last answer to /consumedmocks
+	// named of the set's calls it passed through as the app's own
+	// (models.OwnListenerCallsHeader): a []string, none until an answer
+	// names one.
+	ownListenerCalls atomic.Value
 	// mockWindows is what the agent's answers to /updatemockparams since the
 	// last StoreMocks said of how it served their windows
 	// (models.MockWindowHeader; AgentMockWindow).
@@ -1892,8 +1897,39 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState,
 	if err := json.NewDecoder(res.Body).Decode(&consumedMocks); err != nil {
 		return nil, fmt.Errorf("failed to decode response body for getconsumedmocks: %s", err.Error())
 	}
+	a.ownListenerCalls.Store(ownListenerCallsOf(res.Header))
 
 	return consumedMocks, nil
+}
+
+// OwnListenerCalls is what the agent's last answer to a consumed-mocks read
+// named of the destinations it passed through, since the set's mocks were
+// loaded, as calls of the app to its own listener
+// (models.OwnListenerCallsHeader): none before such an answer, and none from
+// an agent that does not name them.
+func (a *AgentClient) OwnListenerCalls() []string {
+	// Before any read the value holds nothing, which is no []string.
+	calls, _ := a.ownListenerCalls.Load().([]string)
+	return calls
+}
+
+// ownListenerCallsOf is the destinations header names in
+// models.OwnListenerCallsHeader, each in models.OwnListenerDestination's
+// spelling, at most models.MaxOwnListenerCalls of them: one that is no
+// ip:port is not read, so its mocks are judged as before.
+func ownListenerCallsOf(header http.Header) []string {
+	var out []string
+	for _, v := range header.Values(models.OwnListenerCallsHeader) {
+		for _, d := range strings.Split(v, ",") {
+			if len(out) == models.MaxOwnListenerCalls {
+				return out
+			}
+			if dest, ok := models.OwnListenerDestination(d); ok {
+				out = append(out, dest)
+			}
+		}
+	}
+	return out
 }
 
 // GetLearnedElsewhere reads what record's full round's learn step taught

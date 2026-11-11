@@ -141,11 +141,18 @@ func TestReplayPassesTheAppsCallToItsOwnPortToTheApp(t *testing.T) {
 				_ = app.Close()
 				_ = awaitEvent(t, done, "handleConnection returning after the app left")
 				missed := len(logs.FilterMessageSnippet("no matching mock").All())
+				reported := p.OwnListenerCalls()
 				if !own {
 					if resp.StatusCode == http.StatusOK || string(body) == ownHealth || missed == 0 {
 						t.Fatalf("a call to another container's listener was answered %d %q with %d mock misses said, want it matched against the mocks and missed", resp.StatusCode, body, missed)
 					}
+					if reported != nil {
+						t.Fatalf("a call to another container's listener was reported as the app's own: %v", reported)
+					}
 					return
+				}
+				if len(reported) != 1 || reported[0] != dst {
+					t.Fatalf("the agent reports %v of the set's calls passed through as the app's own, want [%s]", reported, dst)
 				}
 				if resp.StatusCode != http.StatusOK || string(body) != ownHealth {
 					t.Fatalf("the app's call to its own port was answered %d %q, want the app's own 200 %q", resp.StatusCode, body, ownHealth)
@@ -198,6 +205,13 @@ func TestRecordPassesTheAppsCallToItsOwnPortThroughUnrecorded(t *testing.T) {
 				_ = awaitEvent(t, done, "handleConnection returning after the app left")
 				return body
 			}
+			t.Cleanup(func() {
+				// keploy record names no destination to a replay: nothing it
+				// passes through is judged against a recording.
+				if got := p.OwnListenerCalls(); got != nil {
+					t.Errorf("keploy record reported %v as the app's own calls, want none", got)
+				}
+			})
 			if body := call(fmt.Sprintf("127.0.0.1:%d", ownPort), os.Getpid(), "/parse/health"); body != ownHealth {
 				t.Fatalf("the app's call to its own port was answered %q, want the app's own %q", body, ownHealth)
 			}

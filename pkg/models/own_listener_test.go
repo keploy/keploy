@@ -43,3 +43,28 @@ func TestAPayloadLeftOnDiskKeepsTheHostItWasRecordedWith(t *testing.T) {
 		t.Fatal("a Host longer than maxKeptDisplay was kept")
 	}
 }
+
+func TestOwnListenerDestinationSpellsWhereAConnectionWentOneWay(t *testing.T) {
+	for _, c := range []struct {
+		in, want string
+		ok       bool
+	}{
+		{"172.18.0.3:6100", "172.18.0.3:6100", true},
+		{" 172.18.0.3:6100 ", "172.18.0.3:6100", true},
+		{"[::ffff:172.18.0.3]:6100", "172.18.0.3:6100", true},
+		{"[0:0:0:0:0:0:0:1]:8080", "[::1]:8080", true},
+		{"172.18.0.3:06100", "172.18.0.3:6100", true},
+		{"0.0.0.0:6100", "0.0.0.0:6100", true},
+		{"localhost:6100", "", false},
+		{"172.18.0.3", "", false},
+		{"172.18.0.3:0", "", false},
+		{"172.18.0.3:65536", "", false},
+		{"172.18.0.3:http", "", false},
+		{"", "", false},
+	} {
+		got, ok := OwnListenerDestination(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("OwnListenerDestination(%q) = %q, %v; want %q, %v", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}

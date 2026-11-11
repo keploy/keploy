@@ -94,6 +94,14 @@ type servedMockReader interface {
 type learnedElsewhereReader interface {
 	LearnedElsewhere(ctx context.Context) ([]models.MockState, error)
 }
+
+// ownListenerReporter is the agent service's optional read of the
+// destinations keploy test passed through as calls of the app to its own
+// listener (service/agent.Agent.OwnListenerCalls).
+type ownListenerReporter interface {
+	OwnListenerCalls() []string
+}
+
 type capturedMockDrainer interface {
 	DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error)
 }

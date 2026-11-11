@@ -1229,6 +1229,15 @@ type LearnedElsewhereReader interface {
 	LearnedElsewhere() []models.MockState
 }
 
+// OwnListenerReporter is an optional Proxy extension: the destinations
+// (models.OwnListenerDestination) of the calls keploy test passed through,
+// since the set's mocks were loaded, as calls of the app to a listener of its
+// own, at most models.MaxOwnListenerCalls of them, sorted. The agent names
+// them to the replay in models.OwnListenerCallsHeader.
+type OwnListenerReporter interface {
+	OwnListenerCalls() []string
+}
+
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }

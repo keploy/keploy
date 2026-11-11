@@ -2529,6 +2529,16 @@ func (a *Agent) LearnedElsewhere(_ context.Context) ([]models.MockState, error) 
 	return reader.LearnedElsewhere(), nil
 }
 
+// OwnListenerCalls reports the destinations of the calls keploy test passed
+// through, since the set's mocks were loaded, as calls of the app to its own
+// listener (coreAgent.OwnListenerReporter); none when the proxy cannot say.
+func (a *Agent) OwnListenerCalls() []string {
+	if reporter, ok := a.Proxy.(coreAgent.OwnListenerReporter); ok {
+		return reporter.OwnListenerCalls()
+	}
+	return nil
+}
+
 // ReadsConsumedForPerTestOnly reports whether svc, the service the route
 // serves, reads the consumed history the way this one does: only in
 // filterOutDeleted, over the per-test mocks it stages, which all come from the

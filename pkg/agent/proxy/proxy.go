@@ -461,6 +461,11 @@ type Proxy struct {
 	// tree listens on was called as an outside dependency by the recording
 	// (serveTreeListener): said once, at INFO.
 	recordedTreeSaid atomic.Bool
+	// ownListenerDests is the destinations of the calls keploy test passed
+	// through as calls of the app to its own listener (serveOwnListenerCall)
+	// since the set's mocks were loaded (Mock empties it): what the agent
+	// reports to the replay (OwnListenerCalls).
+	ownListenerDests ownListenerDests
 	// unnamedConns counts the connections to a listener of the run's own
 	// tree whose caller the agent could not name in its PID namespace
 	// (callerOf), so that it could not tell whether a test made the calls
@@ -4535,6 +4540,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// store (SeedRecordedDestinations), stay: keploy mock replay publishes
 	// the store after its Mock, keploy test may before.
 	recorded.reset()
+	p.ownListenerDests.reset()
 	p.startContainerKeys(ctx)
 	// Reconcile the two mock-noise spellings on receipt. This is the process
 	// boundary: opts arrives over the agent API from a client that may predate
@@ -5450,6 +5456,7 @@ var (
 	_ agent.ExactTestOpener        = (*Proxy)(nil)
 	_ agent.WindowedTestOpener     = (*Proxy)(nil)
 	_ agent.LearnedElsewhereReader = (*Proxy)(nil)
+	_ agent.OwnListenerReporter    = (*Proxy)(nil)
 )
 
 // GetConsumedMocks returns the consumed filtered mocks.

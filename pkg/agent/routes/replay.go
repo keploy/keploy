@@ -94,6 +94,14 @@ func (a *Agent) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
 	}
+	// The set's calls passed through as the app's own, which no mock
+	// answered: read after the consumed mocks, so a call passed through
+	// before this read is named in it.
+	if s, ok := a.svc.(ownListenerReporter); ok {
+		if dests := s.OwnListenerCalls(); len(dests) > 0 {
+			w.Header().Set(models.OwnListenerCallsHeader, strings.Join(dests, ","))
+		}
+	}
 
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, consumedMocks)
