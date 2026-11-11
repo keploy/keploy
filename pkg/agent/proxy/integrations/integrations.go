@@ -1830,21 +1830,37 @@ type WindowPacer interface {
 // deferred streaming tests) from one moving on, however many window changes
 // it did not wake for in between.
 //
-//   - WindowRewinds counts the test-window changes that start a pass over
-//     the set again, within one staging: a window whose start went back to
-//     before the start set before it, and the first window set after
-//     keploy test rewound the set's consumed history for a retry cycle
-//     (models.MockFilterParams.ConsumedRewinds), at any start, the same one
-//     included. Each window change counts one at most, and the count never
-//     goes down. A window set again at the same start with no rewind of the
-//     history (the window loaded again within the pass) is not counted.
+//   - WindowRewinds returns, in one read, rewinds, the count of the
+//     test-window changes that start a pass over the set again, and start,
+//     the start of the test window in force with that count, which is what
+//     CurrentTestWindow reads at the same moment (zero between tests and
+//     under exact serving). A rewind is, within one staging, a window whose
+//     start went back to before the start set before it, and the first
+//     window set after keploy test rewound the set's consumed history for a
+//     retry cycle (models.MockFilterParams.ConsumedRewinds), at any start,
+//     the same one included. Each window change counts one at most, and the
+//     count never goes down. A window set again at the same start with no
+//     rewind of the history (the window loaded again within the pass) is not
+//     counted.
 //
-// Read it with the state WindowChanged guards: take the channel, read the
-// count, the window and the trees, and read again if the channel closed
-// meanwhile. A store that wraps another without the facet reports zero, so a
-// consumer still treats a window start that went back as a rewind.
+//   - GetPerTestMocksWithRewinds is GetPerTestMocksInWindow read with
+//     WindowRewinds in one snapshot: the per-test mocks, the count and the
+//     start are one window change's.
+//
+// The count, the start and the per-test tier move together, under the
+// manager's locks, and are read together: a consumer that files the per-test
+// tier by the count or the start MUST take all three from one
+// GetPerTestMocksWithRewinds call, and one that reads the count with the start
+// alone from one WindowRewinds call. Read apart (the count, then
+// CurrentTestWindow, then the tier), a change between two of the reads pairs
+// one window change's count with another's start or tier. Take WindowChanged's
+// channel before the call, and read again if it closed meanwhile. A store that
+// wraps another without the facet reports a zero count and the wrapped store's
+// start and tier, read apart, so a consumer still treats a window start that
+// went back as a rewind.
 type WindowRewindCounter interface {
-	WindowRewinds() uint64
+	WindowRewinds() (rewinds uint64, start time.Time)
+	GetPerTestMocksWithRewinds() (mocks []*models.Mock, rewinds uint64, start time.Time, err error)
 }
 
 // SetEndFiler is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
