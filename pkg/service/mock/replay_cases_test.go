@@ -480,7 +480,8 @@ func TestATestsLineNamesEveryRecordingThatAnsweredIt(t *testing.T) {
 		{Name: "pkg.TestA", Seq: 4, Start: time.Unix(41, 0), End: time.Unix(50, 0), Outcome: models.ScopeOutcomeFailed},
 	}
 	expected := map[string][]models.MockEntry{"pkg.TestA": {{Name: "mock-10"}}}
-	m := &mockService{logger: zap.NewNop(), config: &config.Config{}, instrumentation: outcomeInstr{consumed: mm.GetConsumedMocks()}}
+	consumed := mm.GetConsumedMocks()
+	m := &mockService{logger: zap.NewNop(), config: &config.Config{}, instrumentation: outcomeInstr{consumed: consumed}}
 	counts := m.reportOutcome(context.Background(), 4, replayDetail{set: "s", windows: windows, expected: expected}, func() bool { return false })
 	byName := make(map[string]TestReceipt)
 	for _, tr := range counts.tests {
@@ -492,6 +493,122 @@ func TestATestsLineNamesEveryRecordingThatAnsweredIt(t *testing.T) {
 	require.Equal(t, []string{"mock-21"}, byName["pkg.TestB"].AnsweredBy)
 	require.Equal(t, []string{"mock-21"}, byName["pkg.TestC"].AnsweredBy, "a serve while TestA and TestC were open is both's")
 	require.Equal(t, 1, byName["pkg.TestC"].Consumed)
+	require.Equal(t, time.Unix(50, 0).UTC(), byName["pkg.TestA"].Ended, "its latest run's end")
+
+	// The set's answers say every place each recording answered, the ones
+	// no test's line names too (at boot, a window no test's), each place
+	// once at its first answer, in the order of those.
+	places := make(map[string][]string)
+	firsts := make(map[string][]time.Time)
+	for _, r := range counts.answered {
+		for _, p := range r.In {
+			places[r.Mock] = append(places[r.Mock], p.Test)
+			firsts[r.Mock] = append(firsts[r.Mock], p.First)
+		}
+	}
+	require.Equal(t, map[string][]string{
+		"mock-30": {""},
+		"mock-21": {"pkg.TestB", "pkg.TestA", "pkg.TestC"},
+		"mock-10": {"pkg.TestA"},
+		"mock-40": {""},
+	}, places)
+	require.Equal(t, firsts["mock-21"][1], firsts["mock-21"][2], "TestA's first answer from it is its first run's, the serve it shared with TestC, not its second run's")
+	require.True(t, firsts["mock-21"][0].Before(firsts["mock-21"][1]))
+	require.True(t, firsts["mock-10"][0].Before(firsts["mock-21"][1]), "mock-10 answered TestA before mock-21 did")
+	require.Equal(t, []string{"mock-30", "mock-21", "mock-10", "mock-40"}, []string{counts.answered[0].Mock, counts.answered[1].Mock, counts.answered[2].Mock, counts.answered[3].Mock}, "the order the agent first served them")
+	for range 20 {
+		require.Equal(t, counts.answered, answeredWhere(consumed, windows), "the same receipt every time: places first answered at once are in the order of their tests' names")
+	}
+}
+
+// A recording that answered while no test window was open (a background
+// call between two tests, or after the last) is named on no test's line,
+// yet the application may keep its answer and send it on in a later test's
+// request. The receipt says, at set level, where and when it answered
+// (TestsReceipt.Answered), and each test's line when the test ended
+// (TestReceipt.Ended), on the clock the agent stamps both with, so a judge
+// of a mapping edit that moved it can tell it answered before o::TestA,
+// which failed, ended. The receipt carries both through its file.
+func TestAnAnswerBetweenTestsIsInTheReceiptWithWhenItCame(t *testing.T) {
+	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	serve := func(name string, lt models.Lifetime) {
+		t.Helper()
+		require.True(t, mm.MarkMockAsUsed(models.Mock{Name: name, Kind: models.HTTP, TestModeInfo: models.TestModeInfo{Lifetime: lt}}), name)
+	}
+	// tick is a time strictly after everything before it and before
+	// everything after it.
+	tick := func() time.Time {
+		time.Sleep(2 * time.Millisecond)
+		now := time.Now()
+		time.Sleep(2 * time.Millisecond)
+		return now
+	}
+	bStart := tick()
+	mm.OpenTestWindow(1) // o::TestB
+	serve("mock-20", models.LifetimePerTest)
+	mm.CloseTestWindow(1)
+	bEnd := tick()
+	serve("mock-21", models.LifetimeSession) // between the tests
+	aStart := tick()
+	mm.OpenTestWindow(2) // o::TestA
+	serve("mock-10", models.LifetimePerTest)
+	mm.CloseTestWindow(2)
+	aEnd := tick()
+	serve("mock-22", models.LifetimeSession) // after the last test
+	windows := []models.ScopeWindow{
+		{Name: "o::TestB", Seq: 1, Start: bStart, End: bEnd, Outcome: models.ScopeOutcomePassed},
+		{Name: "o::TestA", Seq: 2, Start: aStart, End: aEnd, Outcome: models.ScopeOutcomeFailed},
+	}
+	m := &mockService{logger: zap.NewNop(), config: &config.Config{}, instrumentation: outcomeInstr{consumed: mm.GetConsumedMocks()}}
+	counts := m.reportOutcome(context.Background(), 4, replayDetail{set: "t2-go", windows: windows}, func() bool { return false })
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "t2-go"), 0o755))
+	writeTestsReceipt(zap.NewNop(), dir, TestsReceipt{Set: "t2-go", Tests: counts.tests, Answered: counts.answered})
+	got, err := ReadTestsReceipt(dir, "t2-go")
+	require.NoError(t, err)
+	require.Equal(t, counts.answered, got.Answered, "the set's answers round-trip")
+
+	var testA TestReceipt
+	for _, tr := range got.Tests {
+		if tr.Name == "o::TestA" {
+			testA = tr
+		}
+	}
+	require.Equal(t, []string{"mock-10"}, testA.AnsweredBy, "its line names only what answered in its window")
+	require.True(t, testA.Ended.Equal(aEnd), "%v vs %v", testA.Ended, aEnd)
+	where := make(map[string]AnswerPlace)
+	for _, r := range got.Answered {
+		require.Len(t, r.In, 1, r.Mock)
+		where[r.Mock] = r.In[0]
+	}
+	require.Equal(t, "o::TestB", where["mock-20"].Test)
+	require.Equal(t, "o::TestA", where["mock-10"].Test)
+	require.Equal(t, "", where["mock-21"].Test, "answered in no test's window")
+	require.True(t, where["mock-21"].First.After(bEnd) && where["mock-21"].First.Before(aStart), "between the tests: before o::TestA ended")
+	require.Equal(t, "", where["mock-22"].Test)
+	require.True(t, where["mock-22"].First.After(testA.Ended), "after o::TestA ended")
+	raw, err := os.ReadFile(filepath.Join(dir, "t2-go", TestsReceiptFile))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "\nanswered:\n    - mock: mock-20\n      in:\n        - test: o::TestB\n          first: ")
+	require.Contains(t, string(raw), "\n    - mock: mock-21\n      in:\n        - first: ")
+	require.Contains(t, string(raw), "      ended: ")
+}
+
+// A test's Ended is its latest run's end, and zero when a run of it did not
+// end: a judge then reads it as not ended, so every answer before the end of
+// the run came before it.
+func TestATestEndedIsItsLatestRunsEndOrNoneWhenOneWasCut(t *testing.T) {
+	windows := []models.ScopeWindow{
+		{Name: "pkg.TestA", Start: time.Unix(10, 0), End: time.Unix(50, 0)},
+		{Name: "pkg.TestA", Start: time.Unix(5, 0), End: time.Unix(8, 0)},
+		{Name: "pkg.TestB", Start: time.Unix(60, 0), End: time.Unix(70, 0)},
+		{Name: "pkg.TestB", Start: time.Unix(80, 0)}, // cut short
+	}
+	got := withEnded([]TestReceipt{{Name: "pkg.TestA"}, {Name: "pkg.TestB"}, {Name: "pkg.TestC"}}, windows)
+	require.Equal(t, time.Unix(50, 0).UTC(), got[0].Ended)
+	require.True(t, got[1].Ended.IsZero(), "a run of it was cut")
+	require.True(t, got[2].Ended.IsZero(), "it ran no run")
 }
 
 // A test's line counts and names the recordings that answered it only when
@@ -506,8 +623,9 @@ func TestATestsLineNamesEveryRecordingThatAnsweredIt(t *testing.T) {
 // one of its own.
 func TestATestsAnswersAreUnreadWhenTheAgentDoesNotSayWhereItServedThem(t *testing.T) {
 	windows := []models.ScopeWindow{{Name: "pkg.TestA", Seq: 1, Start: time.Unix(10, 0), End: time.Unix(20, 0), Outcome: models.ScopeOutcomeFailed}}
-	placed := models.MockState{Name: "mock-1", Timestamp: time.Unix(12, 0).UnixNano(), AnsweredIn: []uint64{1}}
+	placed := models.MockState{Name: "mock-1", Timestamp: time.Unix(12, 0).UnixNano(), AnsweredIn: []models.WindowAnswer{{Seq: 1, First: time.Unix(12, 0).UnixNano()}}}
 	firstServe := models.MockState{Name: "mock-2", Timestamp: time.Unix(13, 0).UnixNano()}
+	inTestA := []RecordingAnswers{{Mock: "mock-1", In: []AnswerPlace{{Test: "pkg.TestA", First: time.Unix(12, 0).UTC()}}}}
 	for _, row := range []struct {
 		what        string
 		consumed    []models.MockState
@@ -515,16 +633,24 @@ func TestATestsAnswersAreUnreadWhenTheAgentDoesNotSayWhereItServedThem(t *testin
 		instance    uint32
 		consumedN   int
 		answeredBy  []string
+		// answered is the receipt's set-level answers: nil when not every
+		// place an answer was served in was read.
+		answered []RecordingAnswers
 	}{
-		{what: "every answer placed", consumed: []models.MockState{placed}, consumedN: 1, answeredBy: []string{"mock-1"}},
+		{what: "every answer placed", consumed: []models.MockState{placed}, consumedN: 1, answeredBy: []string{"mock-1"}, answered: inTestA},
 		{what: "only a first serve's time", consumed: []models.MockState{firstServe}, consumedN: -1},
 		{what: "one answer only a first serve's time", consumed: []models.MockState{placed, firstServe}, consumedN: -1},
-		{what: "an answer whose windows were not all kept", consumed: []models.MockState{{Name: "mock-1", AnsweredIn: []uint64{1}, AnsweredInLost: 1}}, consumedN: -1},
+		{what: "an answer whose windows were not all kept", consumed: []models.MockState{{Name: "mock-1", AnsweredIn: placed.AnsweredIn, AnsweredInLost: 1}}, consumedN: -1},
 		{what: "an answer of no window kept", consumed: []models.MockState{placed, {Name: "mock-3", AnsweredInLost: 2}}, consumedN: -1},
-		{what: "answered only outside every test", consumed: []models.MockState{{Name: "mock-1", AnsweredOutside: true}}, consumedN: 0},
-		{what: "nothing served", consumedN: 0},
+		{what: "answered only outside every test", consumed: []models.MockState{{Name: "mock-1", AnsweredOutsideAt: time.Unix(25, 0).UnixNano()}}, consumedN: 0,
+			answered: []RecordingAnswers{{Mock: "mock-1", In: []AnswerPlace{{First: time.Unix(25, 0).UTC()}}}}},
+		{what: "nothing served", consumedN: 0, answered: []RecordingAnswers{}},
 		{what: "the read of what was served failed", consumed: []models.MockState{placed}, consumedErr: errors.New("agent gone"), consumedN: -1},
-		{what: "a test of one of several workers", consumed: []models.MockState{placed}, instance: 2, consumedN: -1},
+		// Worker ids start at 1 (0 is a run of one worker): the first
+		// worker's tests are unread as every other's are. The set-level
+		// answers lack every worker's own, as the lines say (-1).
+		{what: "a test of the first of several workers", consumed: []models.MockState{placed}, instance: 1, consumedN: -1, answered: inTestA},
+		{what: "a test of another of several workers", consumed: []models.MockState{placed}, instance: 2, consumedN: -1, answered: inTestA},
 	} {
 		t.Run(row.what, func(t *testing.T) {
 			ws := append([]models.ScopeWindow(nil), windows...)
@@ -535,6 +661,8 @@ func TestATestsAnswersAreUnreadWhenTheAgentDoesNotSayWhereItServedThem(t *testin
 			require.Equal(t, "pkg.TestA", counts.tests[0].Name)
 			require.Equal(t, row.consumedN, counts.tests[0].Consumed)
 			require.Equal(t, row.answeredBy, counts.tests[0].AnsweredBy)
+			require.Equal(t, row.answered, counts.answered)
+			require.Equal(t, time.Unix(20, 0).UTC(), counts.tests[0].Ended, "its window's end, whatever was read of its answers")
 		})
 	}
 }

@@ -174,7 +174,8 @@ type MockManager struct {
 	consumedList  []models.MockState
 	consumedIndex map[string]int
 	// answeredIn is, by mock name, every test window open at its serves
-	// since the last consumed read (noteAnsweredInLocked), drained with
+	// since the last consumed read, each with when it first answered there,
+	// and when it first answered outside every one (noteAnsweredInLocked), drained with
 	// consumedList; answeredInHeld counts the window ids it holds, at most
 	// answeredInMax. Guarded by consumedMu. windows is the test windows the
 	// agent holds open, the proxy's (shareWindows), else the manager's own.
@@ -5569,7 +5570,7 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 	if m.servedCount != nil {
 		m.servedCount[mock.Name]++
 	}
-	m.noteAnsweredInLocked(mock.Name)
+	m.noteAnsweredInLocked(mock.Name, time.Now().UnixNano())
 	m.consumedMu.Unlock()
 	return nil
 }

@@ -32,16 +32,16 @@ func TestGetPersistentConsumed_EqualsClientAccumulation(t *testing.T) {
 	// name (latest state wins) — exactly pkg/service/replay/replay.go's
 	// `totalConsumedMocks[m.Name] = m`.
 	// A drain also says where each mock answered since the drain before
-	// (AnsweredIn, AnsweredOutside, AnsweredInLost: here outside every test
+	// (AnsweredIn, AnsweredOutsideAt, AnsweredInLost: here outside every test
 	// window); that is the read's, never the history's, which keeps none of
 	// it.
 	client := map[string]models.MockState{}
 	accumulate := func() {
 		for _, ms := range mm.GetConsumedMocks() {
-			if !ms.AnsweredOutside || len(ms.AnsweredIn) > 0 || ms.AnsweredInLost != 0 {
-				t.Fatalf("drained %s: want answered outside every test window only, got %v %v %d", ms.Name, ms.AnsweredIn, ms.AnsweredOutside, ms.AnsweredInLost)
+			if ms.AnsweredOutsideAt == 0 || len(ms.AnsweredIn) > 0 || ms.AnsweredInLost != 0 {
+				t.Fatalf("drained %s: want answered outside every test window only, got %v %v %d", ms.Name, ms.AnsweredIn, ms.AnsweredOutsideAt, ms.AnsweredInLost)
 			}
-			ms.AnsweredIn, ms.AnsweredOutside, ms.AnsweredInLost = nil, false, 0
+			ms.AnsweredIn, ms.AnsweredOutsideAt, ms.AnsweredInLost = nil, 0, 0
 			client[ms.Name] = ms
 		}
 	}

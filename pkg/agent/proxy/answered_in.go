@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"cmp"
 	"slices"
 	"sync"
 
@@ -51,17 +52,19 @@ func (w *testWindows) each(fn func(seq uint64)) bool {
 const answeredInMax = 1 << 16
 
 // answeredWins is what a manager keeps of where a mock answered since the
-// last consumed read (models.MockState.AnsweredIn, AnsweredOutside,
-// AnsweredInLost).
+// last consumed read (models.MockState.AnsweredIn, AnsweredOutsideAt,
+// AnsweredInLost): each window id with when it first answered there, and
+// when it first answered outside every window (0: it did not).
 type answeredWins struct {
-	ids     map[uint64]struct{}
-	outside bool
-	lost    int
+	ids       map[uint64]int64
+	outsideAt int64
+	lost      int
 }
 
-// noteAnsweredInLocked records that the mock name answered now: under every
-// test window open, or outside every one. Caller holds consumedMu.
-func (m *MockManager) noteAnsweredInLocked(name string) {
+// noteAnsweredInLocked records that the mock name answered at at (Unix
+// nanoseconds): under every test window open, or outside every one, each
+// place keeping its first answer. Caller holds consumedMu.
+func (m *MockManager) noteAnsweredInLocked(name string, at int64) {
 	if m.answeredIn == nil {
 		m.answeredIn = make(map[string]*answeredWins)
 	}
@@ -79,12 +82,12 @@ func (m *MockManager) noteAnsweredInLocked(name string) {
 			return
 		}
 		if a.ids == nil {
-			a.ids = make(map[uint64]struct{})
+			a.ids = make(map[uint64]int64)
 		}
-		a.ids[seq] = struct{}{}
+		a.ids[seq] = at
 		m.answeredInHeld++
-	}) {
-		a.outside = true
+	}) && a.outsideAt == 0 {
+		a.outsideAt = at
 	}
 }
 
@@ -98,11 +101,11 @@ func (m *MockManager) withAnsweredInLocked(s models.MockState) models.MockState 
 		return s
 	}
 	s.AnsweredIn = nil
-	for seq := range a.ids {
-		s.AnsweredIn = append(s.AnsweredIn, seq)
+	for seq, first := range a.ids {
+		s.AnsweredIn = append(s.AnsweredIn, models.WindowAnswer{Seq: seq, First: first})
 	}
-	slices.Sort(s.AnsweredIn)
-	s.AnsweredOutside, s.AnsweredInLost = a.outside, a.lost
+	slices.SortFunc(s.AnsweredIn, func(x, y models.WindowAnswer) int { return cmp.Compare(x.Seq, y.Seq) })
+	s.AnsweredOutsideAt, s.AnsweredInLost = a.outsideAt, a.lost
 	return s
 }
 

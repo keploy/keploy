@@ -1213,18 +1213,30 @@ type MockState struct {
 	TaughtIn []TeachingWindow `json:"taughtIn,omitempty"`
 	// AnsweredIn is, in a replay, every test window (ScopeWindow.Seq) that
 	// was open at any of the mock's serves since the last consumed read,
-	// ascending, each once: a recording that answers call after call (a
-	// session or connection one, one a mapping edit moved to a shared
-	// scope) answered every test it served, not only the one its first
-	// serve fell in. Under windows open at once (parallel tests), a serve
-	// is every open window's. AnsweredOutside says it also answered while
-	// no test window was open. The agent keeps a bounded number of window
-	// ids between reads: AnsweredInLost counts those it could not keep for
-	// this mock, and a reader then cannot say every test it answered. An
-	// agent that predates them reports none of the three.
-	AnsweredIn      []uint64 `json:"answeredIn,omitempty"`
-	AnsweredOutside bool     `json:"answeredOutside,omitempty"`
-	AnsweredInLost  int      `json:"answeredInLost,omitempty"`
+	// ascending by Seq, each once with when the mock first answered in it:
+	// a recording that answers call after call (a session or connection
+	// one, one a mapping edit moved to a shared scope) answered every test
+	// it served, not only the one its first serve fell in. Under windows
+	// open at once (parallel tests), a serve is every open window's.
+	// AnsweredOutsideAt is when it first answered while no test window was
+	// open (the application's start, between tests, after the last), 0 when
+	// it did not. The agent keeps a bounded number of window ids between
+	// reads: AnsweredInLost counts those it could not keep for this mock,
+	// and a reader then cannot say every test it answered. An agent that
+	// predates them reports none of the three.
+	AnsweredIn        []WindowAnswer `json:"answeredIn,omitempty"`
+	AnsweredOutsideAt int64          `json:"answeredOutsideAt,omitempty"`
+	AnsweredInLost    int            `json:"answeredInLost,omitempty"`
+}
+
+// WindowAnswer is one test window a mock answered in (MockState.AnsweredIn):
+// the window's id (ScopeWindow.Seq) and when the mock first answered while
+// it was open, in Unix nanoseconds on the agent's clock. Its later answers
+// there are not kept: an answer can shape only what comes after it, so the
+// first is the one a reader compares with when a test ended.
+type WindowAnswer struct {
+	Seq   uint64 `json:"seq"`
+	First int64  `json:"first"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec

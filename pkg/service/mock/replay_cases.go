@@ -218,8 +218,8 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 			// Under every test whose window was open at one of its serves,
 			// once each.
 			var under map[string]bool
-			for _, seq := range c.AnsweredIn {
-				flow, ok := bySeq[seq]
+			for _, a := range c.AnsweredIn {
+				flow, ok := bySeq[a.Seq]
 				if !ok || under[flow] {
 					continue
 				}

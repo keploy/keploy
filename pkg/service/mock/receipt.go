@@ -280,6 +280,20 @@ type TestsReceipt struct {
 	// MocksDigest is the receipt's: which recording these results are about.
 	MocksDigest string        `yaml:"mocksDigest" json:"mocksDigest"`
 	Tests       []TestReceipt `yaml:"tests" json:"tests"`
+	// Answered is, in a replay's file, every recording the agent served,
+	// in the order it first served them, with each place it answered and
+	// when it first answered there (RecordingAnswers): in a test's window,
+	// or while no test's was open (the application's start, between tests,
+	// after the last). An answer shapes what the application does next,
+	// through what it keeps as well as through the call it answered, so a
+	// test that failed after it, in any window, may have failed on it: a
+	// judge of a mapping edit blames the edit when a recording it moved
+	// answered before a failed test ended (TestReceipt.Ended). nil when the
+	// replay could not read what was served or every place it was served
+	// in; every test's line then says consumed: -1. It lacks what a test
+	// worker's own mock manager served (the consumed read does not carry
+	// it), and each test of such a worker says consumed: -1.
+	Answered []RecordingAnswers `yaml:"answered,omitempty" json:"answered,omitempty"`
 	// Refusals are, in a record's file, what keploy refused during it
 	// (Receipt.Refusals): a record that reported no test says why.
 	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
@@ -367,6 +381,11 @@ type TestReceipt struct {
 	// when the replay saw it begin no run. The test with the latest Began is
 	// the last test begun: the one a run cut short was in, or left last.
 	Began time.Time `yaml:"began,omitempty" json:"began,omitzero"`
+	// Ended is when the test's latest run ended (its window's end), on the
+	// clock the agent stamps windows and answers with
+	// (TestsReceipt.Answered); zero when the replay saw no run of it end,
+	// or a run of it that did not end (cut short).
+	Ended time.Time `yaml:"ended,omitempty" json:"ended,omitzero"`
 	// Evidence is, under the proven wire, what failed the test at its end:
 	// its misses, the recorded calls of its mapping it never made, and the
 	// connections keploy could not capture; or what left it not judged
@@ -406,6 +425,23 @@ type TestReceipt struct {
 	// recording answered the test, and when the replay could not read what
 	// was served or in which windows (Consumed is -1).
 	AnsweredBy []string `yaml:"answeredBy,omitempty" json:"answeredBy,omitempty"`
+}
+
+// RecordingAnswers is one recording a replay's agent served and each place
+// it answered (TestsReceipt.Answered), in the order it first answered there.
+type RecordingAnswers struct {
+	Mock string        `yaml:"mock" json:"mock"`
+	In   []AnswerPlace `yaml:"in" json:"in"`
+}
+
+// AnswerPlace is where a recording answered and when it first answered
+// there (RecordingAnswers.In): in the window of Test, over every run of it,
+// or, Test "", while no test's window was open. Its later answers there are
+// not kept: an answer shapes only what comes after it, so the first is the
+// one to compare with when a test ended.
+type AnswerPlace struct {
+	Test  string    `yaml:"test,omitempty" json:"test,omitempty"`
+	First time.Time `yaml:"first" json:"first"`
 }
 
 // SkippedReadAnswer is one read of a skipped test that answered a test's
