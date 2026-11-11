@@ -274,8 +274,13 @@ func TestSetCallsPlaceACallBetweenTestsByTheReads(t *testing.T) {
 		// candidate came close all the same: the step holds only if the app
 		// changed the call on purpose.
 		{models.UnmatchedCall{ClosestMock: "mock-1", MatchPhase: models.MatchPhaseSchema}, "if the application changed this call on purpose, " + cannot},
-		{models.UnmatchedCall{MatchPhase: models.MatchPhaseSchema}, cannot},
-		{models.UnmatchedCall{MatchPhase: models.MatchPhaseNoMocks}, cannot},
+		{models.UnmatchedCall{MatchPhase: models.MatchPhaseSchema, SetRecorded: models.RecordedNone}, cannot},
+		{models.UnmatchedCall{MatchPhase: models.MatchPhaseNoMocks, SetRecorded: models.RecordedNone}, cannot},
+		// A phase that found no recording to compare speaks of its pool
+		// alone: with no read of the whole set, or one that found the
+		// shape, the step holds only if the app changed the call.
+		{models.UnmatchedCall{MatchPhase: models.MatchPhaseNoMocks}, "if the application changed this call on purpose, " + cannot},
+		{models.UnmatchedCall{MatchPhase: models.MatchPhaseNoMocks, SetRecorded: models.RecordedShape}, "if the application changed this call on purpose, " + cannot},
 		// Recordings of its shape, or a phase that says neither: only an app
 		// that changed the call on purpose records the set again.
 		{models.UnmatchedCall{MatchPhase: models.MatchPhaseBody}, "if the application changed this call on purpose, " + cannot},
@@ -291,23 +296,27 @@ func TestSetCallsPlaceACallBetweenTestsByTheReads(t *testing.T) {
 // What keploy knows of a call between tests is said from its closest
 // recording: a recording with no differing field named does not match, and
 // fields named with no recording are no closest recording. With none named,
-// its match phase says whether the set has recordings of its shape, or none,
-// and a phase that says neither claims neither.
+// what keploy knows of the set's recordings of its shape says: a phase that
+// compared some, or a read of the whole set (SetRecorded) that found some or
+// none; with neither, it claims neither.
 func TestBetweenFactsSayTheClosestRecording(t *testing.T) {
 	for _, c := range []struct {
 		call models.UnmatchedCall
 		want string
 	}{
 		{models.UnmatchedCall{ClosestMock: "mock-3"}, "the closest recording is mock-3, which it does not match"},
-		{models.UnmatchedCall{Differs: []string{"body.qty"}, MatchPhase: models.MatchPhaseSchema}, "no recording of this call in the set"},
-		{models.UnmatchedCall{MatchPhase: models.MatchPhaseNoMocks}, "no recording of this call in the set"},
+		{models.UnmatchedCall{Differs: []string{"body.qty"}, MatchPhase: models.MatchPhaseSchema, SetRecorded: models.RecordedNone}, "no recording of this call in the set"},
+		{models.UnmatchedCall{MatchPhase: models.MatchPhaseNoMocks, SetRecorded: models.RecordedNone}, "no recording of this call in the set"},
+		{models.UnmatchedCall{MatchPhase: models.MatchPhaseNoMocks, SetRecorded: models.RecordedShape}, "the set has recordings of this call's shape, and it matches none of them"},
+		{models.UnmatchedCall{MatchPhase: models.MatchPhaseNoMocks}, "no recording came close to this call, and keploy cannot tell whether the set has one of its shape"},
+		{models.UnmatchedCall{MatchPhase: models.MatchPhaseExhausted, SetRecorded: models.RecordedNone}, "no recording of this call in the set"},
 		{models.UnmatchedCall{MatchPhase: models.MatchPhaseBody}, "the set has recordings of this call's shape, and it matches none of them"},
 		{models.UnmatchedCall{MatchPhase: models.MatchPhaseStrict}, "the set has recordings of this call's shape, and it matches none of them"},
 		{models.UnmatchedCall{MatchPhase: models.MatchPhaseVariable}, "the set has recordings of this call's shape, and it matches none of them"},
 		{models.UnmatchedCall{ClosestMock: "mock-3", MatchPhase: models.MatchPhaseBody}, "the closest recording is mock-3, which it does not match"},
-		{models.UnmatchedCall{Differs: []string{"body.qty"}}, "no recording came close to this call, and keploy's matcher did not say whether the set has one of its shape"},
-		{models.UnmatchedCall{MatchPhase: models.MatchPhaseExhausted}, "no recording came close to this call, and keploy's matcher did not say whether the set has one of its shape"},
-		{models.UnmatchedCall{MatchPhase: models.MatchPhaseProtoError}, "no recording came close to this call, and keploy's matcher did not say whether the set has one of its shape"},
+		{models.UnmatchedCall{Differs: []string{"body.qty"}}, "no recording came close to this call, and keploy cannot tell whether the set has one of its shape"},
+		{models.UnmatchedCall{MatchPhase: models.MatchPhaseExhausted}, "no recording came close to this call, and keploy cannot tell whether the set has one of its shape"},
+		{models.UnmatchedCall{MatchPhase: models.MatchPhaseProtoError}, "no recording came close to this call, and keploy cannot tell whether the set has one of its shape"},
 		{models.UnmatchedCall{ClosestMock: "mock-3", Differs: []string{"body.qty"}}, "the closest recording is mock-3, which it differs from in body.qty"},
 	} {
 		if got := betweenFacts(c.call); got != c.want {
@@ -579,19 +588,21 @@ func TestOutsideFieldsSayWhatThePhaseTellsOfTheRecordings(t *testing.T) {
 	r := &Replayer{config: &config.Config{Path: "/w/keploy", Command: "go run ."}, setRunID: "test-run-2"}
 	again := "record the test set again in its place: " + r.recordAgainCommand("test-set-1").Text()
 	shape := "the set has recordings of this call's shape, and it matches none of them"
-	unsaid := "no recording came close to this call, and keploy's matcher did not say whether the set has one of its shape"
-	for _, c := range []struct{ phase, recorded, facts, next string }{
-		{models.MatchPhaseBody, models.RecordedShape, shape, "if the application changed this call on purpose, " + again},
-		{models.MatchPhaseStrict, models.RecordedShape, shape, "if the application changed this call on purpose, " + again},
-		{models.MatchPhaseVariable, models.RecordedShape, shape, "if the application changed this call on purpose, " + again},
-		{models.MatchPhaseSchema, models.RecordedNone, "no recording of this call in the set", again},
-		{models.MatchPhaseNoMocks, models.RecordedNone, "no recording of this call in the set", again},
-		{models.MatchPhaseExhausted, "", unsaid, "if the application changed this call on purpose, " + again},
-		{models.MatchPhaseProtoError, "", unsaid, "if the application changed this call on purpose, " + again},
-		{"", "", unsaid, "if the application changed this call on purpose, " + again},
+	unsaid := "no recording came close to this call, and keploy cannot tell whether the set has one of its shape"
+	for _, c := range []struct{ phase, set, recorded, facts, next string }{
+		{models.MatchPhaseBody, "", models.RecordedShape, shape, "if the application changed this call on purpose, " + again},
+		{models.MatchPhaseStrict, models.RecordedNone, models.RecordedShape, shape, "if the application changed this call on purpose, " + again},
+		{models.MatchPhaseVariable, "", models.RecordedShape, shape, "if the application changed this call on purpose, " + again},
+		{models.MatchPhaseSchema, models.RecordedNone, models.RecordedNone, "no recording of this call in the set", again},
+		{models.MatchPhaseNoMocks, models.RecordedNone, models.RecordedNone, "no recording of this call in the set", again},
+		{models.MatchPhaseNoMocks, models.RecordedShape, models.RecordedShape, shape, "if the application changed this call on purpose, " + again},
+		{models.MatchPhaseNoMocks, "", "", unsaid, "if the application changed this call on purpose, " + again},
+		{models.MatchPhaseExhausted, "", "", unsaid, "if the application changed this call on purpose, " + again},
+		{models.MatchPhaseProtoError, "", "", unsaid, "if the application changed this call on purpose, " + again},
+		{"", "", "", unsaid, "if the application changed this call on purpose, " + again},
 	} {
 		core, logs := observer.New(zapcore.ErrorLevel)
-		zap.New(core).Error("call outside every test", r.outsideFields("test-set-1", "", models.UnmatchedCall{Protocol: "MongoDB", Between: true, MatchPhase: c.phase})...)
+		zap.New(core).Error("call outside every test", r.outsideFields("test-set-1", "", models.UnmatchedCall{Protocol: "MongoDB", Between: true, MatchPhase: c.phase, SetRecorded: c.set})...)
 		f := logs.All()[0].ContextMap()
 		for k, want := range map[string]string{"recorded": c.recorded, "facts": c.facts, "next_step": c.next, "closest": ""} {
 			if got := f[k]; got != want {

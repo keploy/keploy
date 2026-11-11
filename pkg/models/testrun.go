@@ -698,6 +698,13 @@ type UnmatchedCall struct {
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+	// SetRecorded is what keploy's replay found of the call's shape among
+	// every recording of its test set, under the proven switch, for a call
+	// outside every test (SetShapeRecordings): models.RecordedShape,
+	// models.RecordedNone, or "" when it did not read the set or could not
+	// tell. ShapeRecordings reads it where the match phase compared no
+	// recording of the shape.
+	SetRecorded string `json:"set_recorded,omitempty" yaml:"set_recorded,omitempty"`
 	// FieldReasons mirrors MockMismatchReport.FieldReasons: of the fields
 	// in Differs, those a replay refused for a reason of its own, and why,
 	// without values.

@@ -6419,6 +6419,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 			if own := r.setCalls.failing(); len(own) > 0 {
+				own = r.withSetRecordings(runTestSetCtx, testSetID, own)
 				unclaimed = append(unclaimed, own...)
 				if unclaimedReason != "" {
 					unclaimedReason += "; "

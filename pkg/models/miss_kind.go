@@ -58,29 +58,35 @@ func (k MissMark) Before(epoch, bounds uint64) bool {
 // recording (Held), which the replay says as held.
 func (c UnmatchedCall) OutsideEveryTest() bool { return c.Between || c.Late && !c.Held }
 
-// What a miss's match phase says of its set's recordings of the call's shape
-// (UnmatchedCall.ShapeRecordings), as the line of a call outside every test
-// says it.
+// What a miss's match phase, or a read of its whole set, says of its set's
+// recordings of the call's shape (UnmatchedCall.ShapeRecordings), as the line
+// of a call outside every test says it.
 const (
 	// RecordedShape: the matcher compared recordings of the call's shape and
 	// refused each: by its body (MatchPhaseBody), by strict noise
-	// (MatchPhaseStrict), or by a test variable (MatchPhaseVariable).
+	// (MatchPhaseStrict), or by a test variable (MatchPhaseVariable); or the
+	// set has a recording of its shape (SetShapeRecordings).
 	RecordedShape = "shape"
-	// RecordedNone: the matcher found no recording of the call's shape to
-	// compare (MatchPhaseNoMocks, MatchPhaseSchema).
+	// RecordedNone: keploy read every recording of the call's set and none
+	// has its shape (SetShapeRecordings).
 	RecordedNone = "none"
 )
 
-// ShapeRecordings says what c's match phase tells of its set's recordings of
-// the call's shape: RecordedShape, RecordedNone, or "" when the phase says
-// neither (none, a protocol error, a full cascade that names no closest
-// recording): then keploy knows only that no recording came close.
+// ShapeRecordings says what keploy knows of c's set's recordings of c's
+// shape: RecordedShape when c's match phase compared some, else what a read
+// of the whole set found (SetRecorded): RecordedShape, RecordedNone, or ""
+// when no such read said (none was made, or it could not tell). A phase that
+// found no recording to compare (MatchPhaseNoMocks, MatchPhaseSchema) speaks
+// only of the pool its matcher read, one test's window and the session's less
+// what was spent: alone, it never says the set has none.
 func (c UnmatchedCall) ShapeRecordings() string {
 	switch c.MatchPhase {
 	case MatchPhaseBody, MatchPhaseStrict, MatchPhaseVariable:
 		return RecordedShape
-	case MatchPhaseNoMocks, MatchPhaseSchema:
-		return RecordedNone
+	}
+	switch c.SetRecorded {
+	case RecordedShape, RecordedNone:
+		return c.SetRecorded
 	}
 	return ""
 }

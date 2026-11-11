@@ -33,7 +33,7 @@ import (
 // (BackgroundBinding.Sanitized).
 func (m UnmatchedCall) Sanitized() UnmatchedCall {
 	out := UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Operation: SanitizedOperation(m.Operation), Command: CommandName(m.Command), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
+		ClosestMock: m.ClosestMock, SetRecorded: m.SetRecorded, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Operation: SanitizedOperation(m.Operation), Command: CommandName(m.Command), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
 		Kind: m.Kind, Recorded: m.Recorded, SkippedReads: slices.Clone(m.SkippedReads), NotOwned: m.NotOwned, Background: m.Background, BackgroundBound: sanitizedBindings(m.BackgroundBound), Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.

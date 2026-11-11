@@ -138,6 +138,10 @@ func (e *earlierSetCalls) take(read []models.UnmatchedCall) (rest []models.Unmat
 	return rest, taken
 }
 
+// earlierSetReadBound bounds the read of an earlier set's recordings that
+// says what it holds of the shape of a call it made (withSetRecordings).
+const earlierSetReadBound = 30 * time.Second
+
 // takeEarlierSetCalls is read without the calls an earlier set made
 // (earlierSetCalls.take), which the run keeps to fail with. It says each one
 // that fails the run, at ERROR, as it takes it, in the documented form of a
@@ -155,6 +159,15 @@ func (r *Replayer) takeEarlierSetCalls(read []models.UnmatchedCall) []models.Unm
 	for _, c := range taken {
 		if !c.call.CountsAgainstTest() {
 			continue
+		}
+		if c.set != "" {
+			// What the set that made it recorded of its shape, read from
+			// that set's every recording, as for a set's own call
+			// (withSetRecordings); bounded, so a store that does not
+			// answer leaves the line saying it cannot tell.
+			ctx, cancel := context.WithTimeout(context.Background(), earlierSetReadBound)
+			c.call = r.withSetRecordings(ctx, c.set, []models.UnmatchedCall{c.call})[0]
+			cancel()
 		}
 		said := false
 		if saying {

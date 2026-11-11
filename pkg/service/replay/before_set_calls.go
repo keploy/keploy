@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"slices"
@@ -223,12 +224,53 @@ func lateWhere(c models.UnmatchedCall) string {
 	return where
 }
 
+// withSetRecordings is calls with what their set's recordings hold of the
+// shape of each call outside every test that names no closest recording and
+// whose match phase compared no recording of its shape
+// (models.UnmatchedCall.SetRecorded). Such a call's matcher read one test's
+// window and the session's, less what was spent: a call whose shape the set
+// recorded only in another test's window found none there. So the set's
+// every recording is read (eachSetMock: each test's and the session's, as
+// recorded, one at a time), once, and only when such a call is there. A read
+// that fails sets nothing: no call then says the set has none.
+func (r *Replayer) withSetRecordings(ctx context.Context, testSetID string, calls []models.UnmatchedCall) []models.UnmatchedCall {
+	needs := func(c models.UnmatchedCall) bool {
+		return c.OutsideEveryTest() && c.ClosestMock == "" && c.ShapeRecordings() != models.RecordedShape
+	}
+	if !slices.ContainsFunc(calls, needs) {
+		return calls
+	}
+	seen := map[models.RecordedCall]bool{}
+	var recorded []models.RecordedCall
+	err := r.eachSetMock(ctx, testSetID, true, func(m *models.Mock, _ bool) {
+		if m == nil || (m.Kind != models.HTTP && m.Kind != models.Mongo) {
+			return
+		}
+		if rc := models.RecordedCallOf(m); !seen[rc] {
+			seen[rc] = true
+			recorded = append(recorded, rc)
+		}
+	})
+	if err != nil {
+		r.logger.Debug("keploy could not read the test set's recordings, so a call outside every test does not say whether the set has one of its shape",
+			zap.String("test-set", testSetID), zap.Error(err))
+		return calls
+	}
+	out := slices.Clone(calls)
+	for i := range out {
+		if needs(out[i]) {
+			out[i].SetRecorded = models.SetShapeRecordings(out[i], recorded)
+		}
+	}
+	return out
+}
+
 // betweenFacts is what keploy knows of the recording closest to c, a call
 // made Between two tests: its name and the fields c differs from it in, each
 // in its shape (models.FieldShapes, never a value); with none named, what
-// c's match phase says of the set's recordings of its shape
+// keploy knows of the set's recordings of its shape
 // (UnmatchedCall.ShapeRecordings): that it has some and c matches none, that
-// it has none, or, when the phase says neither, only that none came close.
+// it has none, or, when keploy cannot tell, only that none came close.
 func betweenFacts(c models.UnmatchedCall) string {
 	differs := models.FieldShapes(c.Differs)
 	switch {
@@ -243,7 +285,7 @@ func betweenFacts(c models.UnmatchedCall) string {
 	case models.RecordedNone:
 		return "no recording of this call in the set"
 	}
-	return "no recording came close to this call, and keploy's matcher did not say whether the set has one of its shape"
+	return "no recording came close to this call, and keploy cannot tell whether the set has one of its shape"
 }
 
 // betweenNextStep is the one next step for c, a call outside every test,
