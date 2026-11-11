@@ -134,10 +134,11 @@ func TestWordRuns_ConsecutiveWordsOfOneTextAreOneRun(t *testing.T) {
 // held whole at another place of its mock and named one learned value, whose
 // version groups (12 random bits) are equal. Drawn from a fixed seed, every
 // such pair binds, in one call or two, bare or after "APP:"; one UUID sent
-// where two were recorded never does. In mocks that hold no part of them
-// whole elsewhere, or where no learned value names their words, the pair
-// shows no value, so each word is checked alone, and the group equal by
-// chance is refused, as main refuses it.
+// where two were recorded never does. Named one learned value, each UUID is
+// one value by its form, held whole elsewhere or not, and the pair binds;
+// where no learned value names their words the pair shows no value, so each
+// word is checked alone, and the group equal by chance is refused, as main
+// refuses it.
 func TestTable_AGroupTwoFreshUUIDsShareByChanceBinds(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	rng := rand.New(rand.NewSource(20261103))
@@ -169,8 +170,18 @@ func TestTable_AGroupTwoFreshUUIDsShareByChanceBinds(t *testing.T) {
 			}
 			var bare Table
 			bare.BindAll(bare.Gen(), uuidBindsHeld(t, heldNowhere, recA, "ev", "id", liveA, recA, 0))
-			if _, with, _, ok := bare.BindAll(bare.Gen(), uuidBindsHeld(t, heldNowhere, recB, "su", "key", liveB, recB, first)); ok || with.Name == "" {
-				t.Fatalf("pair %d (first word %d): %s beside %s, neither held whole elsewhere, bound; main refuses the group %s", n, first, liveB, liveA, group)
+			if bad, with, _, ok := bare.BindAll(bare.Gen(), uuidBindsHeld(t, heldNowhere, recB, "su", "key", liveB, recB, first)); !ok {
+				t.Fatalf("pair %d (first word %d): %s beside %s, neither held whole elsewhere but each one UUID by its form, did not bind: %+v beside %+v", n, first, liveB, liveA, bad, with)
+			}
+			var bareCopy Table
+			bareCopy.BindAll(bareCopy.Gen(), uuidBindsHeld(t, heldNowhere, recA, "ev", "id", liveA, recA, 0))
+			if _, with, _, ok := bareCopy.BindAll(bareCopy.Gen(), uuidBindsHeld(t, heldNowhere, recB, "su", "key", liveA, recB, first)); ok || with.Name == "" {
+				t.Fatalf("pair %d (first word %d): %s sent where %s and %s were recorded, held nowhere, bound", n, first, liveA, recA, recB)
+			}
+			var bareUnnamed Table
+			bareUnnamed.BindAll(bareUnnamed.Gen(), uuidBindsHeld(t, heldNowhere, "", "ev", "id", liveA, recA, 0))
+			if _, with, _, ok := bareUnnamed.BindAll(bareUnnamed.Gen(), uuidBindsHeld(t, heldNowhere, "", "su", "key", liveB, recB, first)); ok || with.Name == "" {
+				t.Fatalf("pair %d (first word %d): %s beside %s, held nowhere and named no learned value, bound; main refuses the group %s", n, first, liveB, liveA, group)
 			}
 			var unnamed Table
 			unnamed.BindAll(unnamed.Gen(), uuidBindsHeld(t, heldAt(recA), "", "ev", "id", liveA, recA, 0))
@@ -277,10 +288,9 @@ func textBindsNamed(t *testing.T, elsewhere func(string) bool, of func(string, i
 // beside another place, in one call or two, and twice in one text, whether
 // the mocks hold each UUID whole elsewhere or nothing, and whether learning
 // names each UUID one value or not. Two fresh UUIDs side by side, whose
-// groups are equal by chance, bind only where the mocks hold each UUID whole
-// elsewhere and learning names each one value, and are refused, as main
-// refuses them, where they hold no part of either text or learning names no
-// value.
+// groups are equal by chance, bind only where learning names each one value
+// (each UUID then one value by its form, held whole elsewhere or not), and
+// are refused, as main refuses them, where learning names no value.
 func TestTable_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const (
@@ -348,9 +358,9 @@ func TestTable_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *
 			return bindText([4]string{"body.key", "k", liveX + "/" + liveY, recA + "/" + recB}, [4]string{"body.c", "c", liveZ, recC})
 		}
 		if !uuids {
-			// No part of either text is held whole elsewhere, or no learned
-			// value names it: each word is its own value, and the group equal
-			// by chance is refused, as main refuses it.
+			// No learned value names either text: each word is its own
+			// value, and the group equal by chance is refused, as main
+			// refuses it.
 			t.Run("two fresh UUIDs side by side, a group equal by chance, are refused", func(t *testing.T) {
 				var tb Table
 				if _, with, _, ok := tb.BindAll(tb.Gen(), chance()); ok || with.Name == "" {
@@ -381,7 +391,8 @@ func TestTable_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *
 	}{
 		{"each UUID held whole elsewhere and learned as one value", heldAt(recA, recB, recC, recD), learnedAs(recA, recB, recC, recD), true},
 		{"each UUID held whole elsewhere, no learned value named", heldAt(recA, recB, recC, recD), nil, false},
-		{"nothing held elsewhere, each UUID learned as one value", heldNowhere, learnedAs(recA, recB, recC, recD), false},
+		{"nothing held elsewhere, each UUID learned as one value", heldNowhere, learnedAs(recA, recB, recC, recD), true},
+		{"nothing held elsewhere, no learned value named", heldNowhere, nil, false},
 	} {
 		t.Run(m.name, func(t *testing.T) { check(t, m.held, m.of, m.uuids) })
 	}

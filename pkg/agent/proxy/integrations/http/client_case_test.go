@@ -17,6 +17,15 @@ func TestAClientTestCasesRequestIsReadAtItsVariablesPlace(t *testing.T) {
 		return &models.HTTPReq{Method: "POST", URL: url, Header: map[string]string{"x-name": header}, Body: body}
 	}
 	sent := live("http://api/apps?team=t-2", "app-2", `{"name":"app-2","n":2}`)
+	// api-server's TestSlowStepFailsOnlyItself: an agent's response for a
+	// job, its response_time a JSON number (test case
+	// post-atg-response-by-id-by-id-1), as recorded and as a run sends it.
+	slowURL := "http://localhost:8083/atg/response/b3c4cfaa-7655-400b-b5de-4e6e97abf480/a20b6921-24c6-4a03-bcf9-b409842a88d0"
+	slowBody := func(date, responseTime string) string {
+		return `{"req_id":"a20b6921-24c6-4a03-bcf9-b409842a88d0","status":200,"headers":{"Content-Length":"2","Content-Type":"application/json","Date":"` + date + `"},"body":"[]","response_time":` + responseTime + `}`
+	}
+	slowRec := &models.HTTPReq{Method: "POST", URL: slowURL, Header: map[string]string{"Content-Type": "application/json", "Content-Length": "205"}, Body: slowBody("Tue, 10 Nov 2026 18:22:03 GMT", "42597640")}
+	slowLive := &models.HTTPReq{Method: "POST", URL: slowURL, Header: map[string]string{"Content-Type": "application/json", "Content-Length": "205"}, Body: slowBody("Tue, 10 Nov 2026 18:29:52 GMT", "51234567")}
 	for _, tc := range []struct {
 		name            string
 		rec, live       *models.HTTPReq
@@ -36,6 +45,14 @@ func TestAClientTestCasesRequestIsReadAtItsVariablesPlace(t *testing.T) {
 		{name: "a recorded URL that does not parse", rec: &models.HTTPReq{Method: "POST", URL: "http://api/%zz", Body: `{"name":"app-1"}`}, live: sent, place: "body.name", recorded: "app-1", why: "its URL does not parse"},
 		{name: "not sent", rec: rec, live: live("http://api/apps", "", `{}`), place: "body.name", recorded: "app-1", why: "it holds no value at body.name this run"},
 		{name: "sent empty", rec: rec, live: live("http://api/apps", "", `{"name":""}`), place: "body.name", recorded: "app-1", why: "it holds no value at body.name this run"},
+		{name: "a word of a string", rec: rec, live: sent, place: "body.name#1", recorded: "1", value: "2"},
+		{name: "a word past the recorded text's words", rec: rec, live: sent, place: "body.name#2", recorded: "1", why: `its recording does not hold the variable's recorded value "1" at body.name#2`},
+		{name: "a word past the live text's words", rec: rec, live: live("http://api/apps", "", `{"name":"app"}`), place: "body.name#1", recorded: "1", why: "it holds no value at body.name#1 this run"},
+		// A number is read whole, as the learn step binds one (a word of
+		// it is no place: the replay reads a word of a string only).
+		{name: "a client test's number, whole", rec: slowRec, live: slowLive, place: "body.response_time", recorded: "42597640", value: "51234567"},
+		{name: "a word of a number", rec: slowRec, live: slowLive, place: "body.response_time#0", recorded: "42597640", why: `its recording does not hold the variable's recorded value "42597640" at body.response_time#0`},
+		{name: "a number the live request does not send", rec: slowRec, live: live(slowRec.URL, "", `{"req_id":"a20b6921-24c6-4a03-bcf9-b409842a88d0","status":200}`), place: "body.response_time", recorded: "42597640", why: "it holds no value at body.response_time this run"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			value, why := RequestPlace(tc.rec, tc.live, tc.place, tc.recorded)
