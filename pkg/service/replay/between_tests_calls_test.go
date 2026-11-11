@@ -270,6 +270,10 @@ func TestSetCallsPlaceACallBetweenTestsByTheReads(t *testing.T) {
 		want string
 	}{
 		{models.UnmatchedCall{ClosestMock: "mock-1"}, "if the application changed this call on purpose, " + cannot},
+		// A closest recording named by a phase that found no schema
+		// candidate came close all the same: the step holds only if the app
+		// changed the call on purpose.
+		{models.UnmatchedCall{ClosestMock: "mock-1", MatchPhase: models.MatchPhaseSchema}, "if the application changed this call on purpose, " + cannot},
 		{models.UnmatchedCall{MatchPhase: models.MatchPhaseSchema}, cannot},
 		{models.UnmatchedCall{MatchPhase: models.MatchPhaseNoMocks}, cannot},
 		// Recordings of its shape, or a phase that says neither: only an app
