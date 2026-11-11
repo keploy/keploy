@@ -52,7 +52,9 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 		{Rule: "workload-key-expires-at", Kind: models.DeclaredSourceClock, Field: "body.data.expiresAt", Clock: yearOn},
 		{Rule: "pat-updated-at", Kind: models.DeclaredSourceClock, Field: "body.data.updatedAt", Clock: plain},
 	}
-	run := func(sources []models.DeclaredSource, timeForm bool, expiry time.Duration) (*models.Mock, *learnMiss, *learnDb) {
+	// unread, where not "", is why keploy could not read the run's request
+	// (Tracker.Incoming), and the run PUTs the recorded id.
+	run := func(sources []models.DeclaredSource, timeForm bool, expiry time.Duration, unread string) (*models.Mock, *learnMiss, *learnDb) {
 		h, n, opts := learnOn(t)
 		n.sources = func(mock string) []models.DeclaredSource {
 			if mock == "mock-0" {
@@ -71,12 +73,19 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 		tr.SetCases([]learn.ClientCase{{Name: "post-query-83", Req: recReq}})
 		liveReq := *recReq
 		liveReq.Body, liveReq.Timestamp = name(began.Add(100*time.Millisecond)), began.Add(100*time.Millisecond)
-		if !tr.Incoming(&liveReq, "", began.Add(100*time.Millisecond)) {
+		if !tr.Incoming(&liveReq, unread, began.Add(100*time.Millisecond)) {
 			t.Fatal("the run's request paired with none of the test's recorded requests")
 		}
 		put := learnRecorded("mock-0", 1130*time.Millisecond, "PUT", path(recID), body(recID, recBegin.Add(120*time.Millisecond), expiry), nil, `{"data":{"version":1}}`)
 		db := &learnDb{perTest: []*models.Mock{put}}
-		in := live("PUT", path(liveID), body(liveID, began.Add(120*time.Millisecond), expiry), nil)
+		id := liveID
+		if unread != "" {
+			// The record's id as recorded, so that only the stamps changed:
+			// an id that changed is refused for the request alone, with no
+			// rule at it.
+			id = recID
+		}
+		in := live("PUT", path(id), body(id, began.Add(120*time.Millisecond), expiry), nil)
 		in.arrived = began.Add(130 * time.Millisecond)
 		var store integrations.MockMemDb = db
 		if timeForm {
@@ -91,16 +100,16 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 	// but expiresAt's, on expiresAt, as the run refused it.
 	stamps := []models.DeclaredSource{rules[0], rules[2]}
 	for _, timeForm := range []bool{true, false} {
-		if served, miss, _ := run(nil, timeForm, ttl); served != nil || miss == nil {
+		if served, miss, _ := run(nil, timeForm, ttl, ""); served != nil || miss == nil {
 			t.Fatalf("no rules, time default %v: served %v, miss %+v; want the PUT refused", timeForm, served != nil, miss)
 		}
-		served, miss, _ := run(stamps, timeForm, ttl)
+		served, miss, _ := run(stamps, timeForm, ttl, "")
 		if served != nil || miss == nil || !strings.Contains(miss.res.Why, "body.data.expiresAt changed, and its moment, to the second, stands 8760h0m0s after the moment test case post-query-83 at body.variables.input.name holds") {
 			t.Fatalf("no expiry rule, time default %v: served %v, miss %+v; want the PUT refused on expiresAt built by an offset on the name, as the run refused it", timeForm, served != nil, miss)
 		}
 	}
 	for _, timeForm := range []bool{true, false} {
-		served, miss, db := run(rules, timeForm, ttl)
+		served, miss, db := run(rules, timeForm, ttl, "")
 		if served == nil || miss != nil || len(db.consumed) != 1 {
 			t.Fatalf("both stamps declared clocks, time default %v: served %v, miss %+v; want the PUT answered", timeForm, served != nil, miss)
 		}
@@ -117,10 +126,22 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 	// the same, checked by its form; with times strict the range decides,
 	// and the PUT is refused.
 	day := 24 * time.Hour
-	if served, miss, _ := run(rules, true, day); served == nil || miss != nil {
+	if served, miss, _ := run(rules, true, day, ""); served == nil || miss != nil {
 		t.Fatalf("a one-day expiry, time default: served %v, miss %+v; want the PUT answered", served != nil, miss)
 	}
-	if served, miss, _ := run(rules, false, day); served != nil || miss == nil {
+	if served, miss, _ := run(rules, false, day, ""); served != nil || miss == nil {
 		t.Fatalf("a one-day expiry, times strict: served %v, miss %+v; want the PUT refused by the rule's range", served != nil, miss)
+	}
+	// A run whose request keploy could not read: each stamp may be a part
+	// of what the test gave the application, or a pick from it by the
+	// clock, which keploy cannot tell, and a clock rule says nothing of
+	// what keploy could not read. The rules leave the PUT refused, naming
+	// the request.
+	const unread = "its body was cut short"
+	for _, timeForm := range []bool{true, false} {
+		served, miss, _ := run(rules, timeForm, ttl, unread)
+		if served != nil || miss == nil || !strings.Contains(miss.res.Why, "could not read the test case's own request ("+unread+")") {
+			t.Fatalf("request unread, every stamp declared a clock, time default %v: served %v, miss %+v; want the PUT refused for the request keploy could not read", timeForm, served != nil, miss)
+		}
 	}
 }
