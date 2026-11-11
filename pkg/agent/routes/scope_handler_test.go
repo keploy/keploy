@@ -837,3 +837,62 @@ func TestScopeTableCarriesTheSeriesAndAcksThem(t *testing.T) {
 		t.Fatalf("an agent without series answered %d, %s to a table without any; want 200 naming none", rec.Code, rec.Body.String())
 	}
 }
+
+// onceSvc is seriesSvc that also serves the series that answer once in a
+// run (scopeOnceSetter).
+type onceSvc struct {
+	seriesSvc
+	once *[]string
+	err  error
+}
+
+func (s onceSvc) SetScopeOnce(_ context.Context, once []string) error {
+	if s.err != nil {
+		return s.err
+	}
+	*s.once = once
+	s.order = append(s.order, "once")
+	return nil
+}
+
+// Under the switch the scope table carries the series that answer once in
+// a run, installed after the series, before the pool slices, and the answer
+// names them served, an empty table's too. An agent that cannot serve them
+// refuses a table that has some (it would answer the request again), and
+// takes one without, naming them not served; one that fails to install
+// them fails before the pool.
+func TestScopeTableCarriesTheOnceSeriesAndAcksThem(t *testing.T) {
+	post := func(svc agent.Service, body string) (*httptest.ResponseRecorder, models.ScopeTableResp) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		var ack models.ScopeTableResp
+		_ = json.Unmarshal(rec.Body.Bytes(), &ack)
+		return rec, ack
+	}
+	withOnce := `{"mappings":{"o::TestA":[]},"pool":{"o":["mock-1"]},"worker":{"o":["mock-1"]},"series":{"pat/-/1":["mock-1"]},"once":["pat/-/1"]}`
+	t.Setenv(provenswitch.Env, "1")
+	ps, series, once := &poolSvc{}, map[string][]string{}, []string(nil)
+	rec, ack := post(onceSvc{seriesSvc{workerSvc{ps}, &series, nil}, &once, nil}, withOnce)
+	if rec.Code != http.StatusOK || !slices.Equal(ack.Served, []string{"series", "once"}) {
+		t.Fatalf("status %d, answer %s; want 200 naming series and once served", rec.Code, rec.Body.String())
+	}
+	if !slices.Equal(once, []string{"pat/-/1"}) || !slices.Equal(ps.order, []string{"windows", "worker", "series", "once", "pool"}) {
+		t.Fatalf("once %v, installed %v; want it installed after the series, before the pool", once, ps.order)
+	}
+	ps, once = &poolSvc{}, []string{"stale"}
+	if rec, ack := post(onceSvc{seriesSvc{workerSvc{ps}, &series, nil}, &once, nil}, `{"mappings":{},"pool":{}}`); rec.Code != http.StatusOK || len(once) != 0 || !slices.Contains(ack.Served, "once") {
+		t.Fatalf("a table without once series: status %d, once %v, answer %s; want none installed, once served", rec.Code, once, rec.Body.String())
+	}
+	ps = &poolSvc{}
+	if rec, _ := post(onceSvc{seriesSvc{workerSvc{ps}, &series, nil}, &once, errors.New("refused")}, withOnce); rec.Code != http.StatusInternalServerError || slices.Contains(ps.order, "pool") {
+		t.Fatalf("an agent that could not install the once series answered %d and installed %v; want 500 before the pool", rec.Code, ps.order)
+	}
+	ps = &poolSvc{}
+	if rec, _ := post(seriesSvc{workerSvc{ps}, &series, nil}, withOnce); rec.Code != http.StatusNotImplemented || slices.Contains(ps.order, "pool") {
+		t.Fatalf("an agent without once series answered %d to a table with some (installed %v); want 501 before the pool", rec.Code, ps.order)
+	}
+	if rec, ack := post(seriesSvc{workerSvc{&poolSvc{}}, &series, nil}, `{"mappings":{},"pool":{}}`); rec.Code != http.StatusOK || slices.Contains(ack.Served, "once") {
+		t.Fatalf("an agent without once series answered %d, %s to a table without any; want 200 not naming once", rec.Code, rec.Body.String())
+	}
+}

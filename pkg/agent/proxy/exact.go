@@ -67,7 +67,12 @@ import (
 //     the application repeats on a timer then never misses when the replay
 //     is slower than the record, and the count of repeats moves nothing.
 //     Each repeat must still be the request itself: the parser matches it
-//     as any other. A trail move's answer-once rule does not hold a series.
+//     as any other. A trail move's answer-once rule does not hold a series,
+//     but for a once series (SetPoolOnce: a call the application makes once
+//     per process, for whichever test needs it first): each of its
+//     recordings answers one call in the staging, in a window or between
+//     tests, and its last-placed recording answers no repeat, so a second
+//     call of the request misses.
 //
 // A data-plane recording a parser consumes through a delete door while no
 // test is open (a call before the first test or between tests) is consumed
@@ -392,6 +397,11 @@ type exactState struct {
 	// answers a series' repeats past its recorded count in the windows
 	// (seriesIndex.againIn). nil until a replay sent one.
 	poolSeries atomic.Pointer[seriesIndex]
+	// poolOnce is, of the same scope table, the series whose recordings
+	// each answer once in the run (SetPoolOnce): what SetPoolSeries marks
+	// once on the index it builds (seriesMember.once). nil until a replay
+	// sent one.
+	poolOnce atomic.Pointer[map[string]bool]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
 	// cached for one staging generation of the trees (StagingGeneration: an
 	// exact serve does not move it), one scope table, one recording's times
@@ -913,9 +923,10 @@ func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict 
 	}
 	// A trailing write answers once in the staging, wherever its call lands
 	// (outsideState.trailUsed). A declared rule's series answers by its own
-	// rule instead (seriesIndex.againIn).
+	// rule instead (seriesIndex.againIn), and a once series' recording once
+	// in the staging, as a trailing write does (seriesIndex.answersOnce).
 	series := m.exact.poolSeries.Load()
-	if isTrail(&m.exact.poolTrails, mk.Name) && !series.has(mk.Name) {
+	if answersOnce(&m.exact.poolTrails, series, mk.Name) {
 		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
 			return exactRefused
 		}
@@ -958,8 +969,9 @@ func (m *MockManager) consumeBetween(mk *models.Mock) (verdict exactVerdict, fir
 	// A trailing write answers once in the staging, between tests too
 	// (outsideState.trailUsed): it is no call the app repeats between tests.
 	// A declared rule's series answers again here, as the rest of the worker
-	// scope does.
-	if isTrail(&m.exact.poolTrails, mk.Name) && !m.exact.poolSeries.Load().has(mk.Name) {
+	// scope does, but for a once series' recording, which answers once in
+	// the staging wherever its call lands (seriesIndex.answersOnce).
+	if answersOnce(&m.exact.poolTrails, m.exact.poolSeries.Load(), mk.Name) {
 		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
 			return exactRefused, false
 		}
@@ -2014,6 +2026,10 @@ type seriesIndex struct {
 type seriesMember struct {
 	id   string
 	last bool
+	// once is that the member's series answers once in a run (SetPoolOnce):
+	// each recording once in the staging, wherever its call lands, and no
+	// last-placed recording answers a repeat (againIn).
+	once bool
 }
 
 // SetPoolSeries installs, of the replay's scope table, the series the
@@ -2029,6 +2045,10 @@ type seriesMember struct {
 // skipped. None leaves the set none, never the previous set's.
 func (m *MockManager) SetPoolSeries(series map[string][]string) {
 	idx := &seriesIndex{of: map[string]seriesMember{}, members: map[string][]string{}}
+	var once map[string]bool
+	if p := m.exact.poolOnce.Load(); p != nil {
+		once = *p
+	}
 	ids := make([]string, 0, len(series))
 	for id := range series {
 		ids = append(ids, id)
@@ -2040,16 +2060,49 @@ func (m *MockManager) SetPoolSeries(series map[string][]string) {
 			if _, dup := idx.of[n]; n == "" || dup {
 				continue
 			}
-			idx.of[n] = seriesMember{id: id}
+			idx.of[n] = seriesMember{id: id, once: once[id]}
 			names = append(names, n)
 		}
 		if len(names) == 0 {
 			continue
 		}
-		idx.of[names[len(names)-1]] = seriesMember{id: id, last: true}
+		idx.of[names[len(names)-1]] = seriesMember{id: id, last: true, once: once[id]}
 		idx.members[id] = names
 	}
 	m.exact.poolSeries.Store(idx)
+}
+
+// SetPoolOnce installs, of the replay's scope table, the series whose
+// recordings each answer once in the run (models.ScopeTableReq.Once): the
+// next SetPoolSeries marks their members once (seriesMember.once), so the
+// agent sends these first. Each such recording answers one call in the
+// staging, in a test's window or between tests, through any door, and never
+// again; no last-placed recording answers a repeat. None leaves the set
+// none, never the previous set's.
+func (m *MockManager) SetPoolOnce(once []string) {
+	set := make(map[string]bool, len(once))
+	for _, id := range once {
+		if id != "" {
+			set[id] = true
+		}
+	}
+	m.exact.poolOnce.Store(&set)
+}
+
+// answersOnce reports whether name answers one call in the staging,
+// wherever it lands (outsideState.trailUsed): a recording a trail move put
+// in the worker scope that no declared rule's series holds, or a recording
+// of a once series (seriesMember.once).
+func answersOnce(trails *atomic.Pointer[map[string]string], series *seriesIndex, name string) bool {
+	if series.once(name) {
+		return true
+	}
+	return isTrail(trails, name) && !series.has(name)
+}
+
+// once reports whether name is a recording of a once series of s.
+func (s *seriesIndex) once(name string) bool {
+	return s != nil && s.of[name].once
 }
 
 // has reports whether name is a recording of a series of s.
@@ -2073,7 +2126,7 @@ func (s *seriesIndex) againIn(st *outsideState, name string) bool {
 		return false
 	}
 	mem := s.of[name] // a name of no series is the zero member, never the last
-	if !mem.last {
+	if !mem.last || mem.once {
 		return false
 	}
 	for _, n := range s.members[mem.id] {
@@ -3034,9 +3087,10 @@ func (v *exactView) spentOutsideIn(name string, windowed bool) bool {
 	if v.series != nil {
 		series = v.series.Load()
 	}
-	if isTrail(v.trails, name) && !series.has(name) {
-		// A trailing write that answered once is spent for the staging,
-		// in every window and between tests (outsideState.trailUsed).
+	if answersOnce(v.trails, series, name) {
+		// A trailing write, or a once series' recording, that answered
+		// once is spent for the staging, in every window and between tests
+		// (outsideState.trailUsed).
 		return v.outside.trailUsed(name, e)
 	}
 	if windowed && v.isWorker(name) {

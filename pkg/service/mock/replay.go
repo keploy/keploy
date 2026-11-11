@@ -1454,7 +1454,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker), declaredSources(served, loaded)); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker), declaredSources(served, loaded), onceSeries(served, worker)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -1924,6 +1924,31 @@ func workerSeries(mp *models.Mapping, worker map[string][]string) map[string][]s
 		}
 		out[e.Series] = append(out[e.Series], e.Name)
 	}
+	return out
+}
+
+// onceSeries is, of workerSeries(mp, worker), the series one entry of
+// which says it answers once in a run (models.MockEntry.Once), sorted. One
+// entry is enough: answering once is the stricter serving, so an entry
+// that lost the mark serves no more than it would with it. nil when none.
+func onceSeries(mp *models.Mapping, worker map[string][]string) []string {
+	series := workerSeries(mp, worker)
+	if len(series) == 0 {
+		return nil
+	}
+	served := map[string]bool{}
+	for _, names := range series {
+		for _, n := range names {
+			served[n] = true
+		}
+	}
+	var out []string
+	for _, e := range mp.Worker {
+		if e.Once && served[e.Name] && !slices.Contains(out, e.Series) {
+			out = append(out, e.Series)
+		}
+	}
+	slices.Sort(out)
 	return out
 }
 

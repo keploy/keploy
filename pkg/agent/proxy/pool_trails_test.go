@@ -60,3 +60,17 @@ func TestAProxySetsItsSeriesOnItsMockManager(t *testing.T) {
 	require.True(t, s.has("mock-8") && s.has("mock-9"))
 	require.True(t, s.of["mock-9"].last)
 }
+
+// The proxy installs the once series on its mock manager, and refuses them
+// with none; the series it installs next are marked once.
+func TestAProxySetsItsOnceSeriesOnItsMockManager(t *testing.T) {
+	p := &Proxy{learnTracker: learn.NewTracker()}
+	require.ErrorIs(t, p.SetPoolOnce([]string{"pat/-/1"}), errNoMockManager)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	p.mockManager = mm
+	require.NoError(t, p.SetPoolOnce([]string{"pat/-/1"}))
+	require.NoError(t, p.SetPoolSeries(map[string][]string{"pat/-/1": {"mock-8", "mock-9"}, "sweep/o::TestA/1": {"mock-7"}}))
+	s := mm.exact.poolSeries.Load()
+	require.True(t, s.once("mock-8") && s.once("mock-9"))
+	require.False(t, s.once("mock-7"))
+}

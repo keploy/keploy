@@ -380,6 +380,19 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a series of recordings a declared rule placed", http.StatusNotImplemented)
 			return
 		}
+		// The series that answer once in a run. Every table says them, an
+		// empty one too. An agent that cannot serve them refuses a table
+		// that has one: it would answer such a series' request again.
+		if os, ok := a.svc.(scopeOnceSetter); ok {
+			if err := os.SetScopeOnce(r.Context(), req.Once); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedOnce)
+		} else if len(req.Once) > 0 {
+			http.Error(w, "this keploy agent cannot serve a series of recordings once in a run", http.StatusNotImplemented)
+			return
+		}
 		// The sources rules declared in keploy.yml give fields of the
 		// recordings' requests. Every table says them, an empty one too.
 		// An agent that cannot learn by them, or that does not know a
@@ -475,6 +488,12 @@ type scopeTrailsSetter interface {
 // (models.ScopeTableReq.Series, proven wire).
 type scopeSeriesSetter interface {
 	SetScopeSeries(ctx context.Context, series map[string][]string) error
+}
+
+// scopeOnceSetter installs the series of a replay whose recordings each
+// answer once in the run (models.ScopeTableReq.Once, proven wire).
+type scopeOnceSetter interface {
+	SetScopeOnce(ctx context.Context, once []string) error
 }
 
 // scopeSourcesSetter installs, by recording name, the sources rules

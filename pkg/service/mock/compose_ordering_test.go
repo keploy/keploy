@@ -97,6 +97,8 @@ type composeInstr struct {
 	series map[string][]string
 	// sources is the declared sources the last PushProvenTable carried.
 	sources map[string][]models.DeclaredSource
+	// once is the once series the last PushProvenTable carried.
+	once []string
 	// begins and seeds are what the last push of the tests' recorded begins
 	// sent, and beginsErr what it fails with.
 	begins    map[string]time.Time
@@ -272,9 +274,9 @@ func (f *composeInstr) PushScopeTable(_ context.Context, _ map[string][]string, 
 // recorded test windows, the recorded givens, the named repeated reads, the
 // not-required marks, the background recordings' names and the series
 // (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource) error {
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string) error {
 	f.table, f.pool, f.worker, f.skippedReads, f.trails, f.recordedWindows, f.given, f.repeats, f.notRequired, f.background = table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background
-	f.series, f.sources = series, sources
+	f.series, f.sources, f.once = series, sources, once
 	return nil
 }
 

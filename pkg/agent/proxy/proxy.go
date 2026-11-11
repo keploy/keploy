@@ -5081,6 +5081,18 @@ func (p *Proxy) SetPoolTrails(trails map[string]string) error {
 }
 
 var _ agent.PoolSeriesSetter = (*Proxy)(nil)
+var _ agent.PoolOnceSetter = (*Proxy)(nil)
+
+// SetPoolOnce implements agent.PoolOnceSetter: the series whose recordings
+// each answer once in a run, on the mock manager (MockManager.SetPoolOnce).
+func (p *Proxy) SetPoolOnce(once []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolOnce(once)
+	return nil
+}
 
 // SetPoolSeries implements agent.PoolSeriesSetter: the series of the
 // worker-scope recordings a declared rule placed, on the mock manager

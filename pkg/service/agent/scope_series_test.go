@@ -118,3 +118,64 @@ func TestTheMockStatsCarryTheSeriesRepeats(t *testing.T) {
 	require.False(t, stats.SeriesCounted)
 	require.Equal(t, loaded, stats.Loaded)
 }
+
+// onceProxy is seriesProxy that also serves once series
+// (coreAgent.PoolOnceSetter), noting the order the pool hands them.
+type onceProxy struct {
+	*seriesProxy
+	once  []string
+	order []string
+	err   error
+}
+
+var _ coreAgent.PoolOnceSetter = (*onceProxy)(nil)
+
+func (p *onceProxy) SetPoolOnce(once []string) error {
+	if p.err != nil {
+		return p.err
+	}
+	p.once, p.order = once, append(p.order, "once")
+	return nil
+}
+
+func (p *onceProxy) SetPoolSeries(series map[string][]string) error {
+	p.order = append(p.order, "series")
+	return p.seriesProxy.SetPoolSeries(series)
+}
+
+// The table's once series reach the proxy with the pool (SetScopePool),
+// before the series (the index the proxy builds reads them), as the CLI
+// sent them; a table with none clears the previous set's. A proxy that
+// cannot serve them refuses once series, at the table and at the pool, and
+// takes a table without any; one that fails to install them fails the pool.
+func TestTheScopeOnceSeriesReachTheProxyBeforeTheSeries(t *testing.T) {
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &onceProxy{seriesProxy: &seriesProxy{wireProxy: wp}}
+	a.Proxy = p
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"), httpMock("mock-2", "GET", "http://h/b"))
+	ctx := context.Background()
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+	sent := []string{"pat/-/1"}
+	require.NoError(t, a.SetScopeSeries(ctx, map[string][]string{"pat/-/1": {"mock-2"}}))
+	require.NoError(t, a.SetScopeOnce(ctx, sent))
+	sent[0] = "changed" // the caller's slice is its own
+	require.Empty(t, p.order, "the once series go to the proxy with the pool, not before")
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{models.PoolKeyNone: {"mock-2"}}))
+	require.Equal(t, []string{"pat/-/1"}, p.once)
+	require.Equal(t, []string{"once", "series"}, p.order)
+	require.NoError(t, a.SetScopeOnce(ctx, nil))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{models.PoolKeyNone: {"mock-2"}}))
+	require.Empty(t, p.once, "a table with no once series leaves the set none")
+	p.err = errors.New("no mock manager")
+	require.Error(t, a.SetScopePool(ctx, map[string][]string{models.PoolKeyNone: {"mock-2"}}), "a proxy that refuses the once series fails the pool")
+	p.err = nil
+
+	b, bp := wireAgent(t, models.MODE_TEST)
+	b.Proxy = &seriesProxy{wireProxy: bp}
+	require.Error(t, b.SetScopeOnce(ctx, []string{"pat/-/1"}), "a proxy that cannot serve once series refuses them")
+	require.NoError(t, b.SetScopeOnce(ctx, nil), "and takes a table with none")
+	b.proven.once = []string{"pat/-/1"} // as if the proxy changed under the table
+	storeMocks(b, httpMock("mock-2", "GET", "http://h/b"))
+	b.scopeTable = map[string][]string{"o::TestA": {}}
+	require.Error(t, b.SetScopePool(ctx, map[string][]string{models.PoolKeyNone: {"mock-2"}}), "and the pool refuses them too")
+}

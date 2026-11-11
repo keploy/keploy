@@ -121,6 +121,11 @@ type provenWire struct {
 	// models.ScopeTableReq.Series), which SetScopePool hands the proxy.
 	// nil when the table had none.
 	series map[string][]string
+	// once is, in a replay, the series of series whose recordings each
+	// answer once in the run (the CLI's scope table,
+	// models.ScopeTableReq.Once), which SetScopePool hands the proxy before
+	// the series. nil when the table had none.
+	once []string
 	// sources is, in a replay, by recording name, the sources rules
 	// declared in keploy.yml give fields of its request (the CLI's scope
 	// table, models.ScopeTableReq.Sources), which SetScopePool hands the
@@ -650,12 +655,22 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	a.provenMu.Lock()
 	trails := maps.Clone(a.proven.trails)
 	series := maps.Clone(a.proven.series)
+	once := slices.Clone(a.proven.once)
 	sources := maps.Clone(a.proven.sources)
 	a.provenMu.Unlock()
 	if ts, ok := a.Proxy.(coreAgent.PoolTrailsSetter); ok {
 		if err := ts.SetPoolTrails(trails); err != nil {
 			return err
 		}
+	}
+	// The once series go first: the series index the proxy builds next
+	// reads them (MockManager.SetPoolOnce).
+	if os, ok := a.Proxy.(coreAgent.PoolOnceSetter); ok {
+		if err := os.SetPoolOnce(once); err != nil {
+			return err
+		}
+	} else if len(once) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a series of recordings once in a run")
 	}
 	if ss, ok := a.Proxy.(coreAgent.PoolSeriesSetter); ok {
 		if err := ss.SetPoolSeries(series); err != nil {
@@ -761,6 +776,26 @@ func (a *Agent) SetScopeSeries(ctx context.Context, series map[string][]string) 
 	}
 	a.provenMu.Lock()
 	a.proven.series = cp
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeOnce installs the series of a replay whose recordings each answer
+// once in the run (models.ScopeTableReq.Once), which the pool slices sent
+// next hand the proxy (SetScopePool): in a test's window or between tests,
+// and never again. None leaves the set none, never the previous set's. A
+// proxy that cannot serve them refuses some: the CLI refuses an agent that
+// does not acknowledge them.
+func (a *Agent) SetScopeOnce(ctx context.Context, once []string) error {
+	if _, ok := a.Proxy.(coreAgent.PoolOnceSetter); !ok && len(once) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a series of recordings once in a run")
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.once = slices.Clone(once)
 	a.provenMu.Unlock()
 	return nil
 }

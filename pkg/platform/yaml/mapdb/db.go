@@ -470,10 +470,11 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 // is the last placement's. So are its Drift (MockEntry.Drift: the move rests
 // on its owner's quarantine) and its Trails (MockEntry.Trails: the earlier
 // test whose call it trails, which only the move that proved it names), and
-// its Rule, Series, Read and Unchanged (MockEntry.Rule, Series, Read,
-// Unchanged: the declared rule that placed it, its series, whether that
-// series only reads, and whether the write it recorded changed nothing,
-// which only that rule's move names). Under the switch a mock taken out of a test's list
+// its Rule, Series, Read, Unchanged and Once (MockEntry.Rule, Series, Read,
+// Unchanged, Once: the declared rule that placed it, its series, whether
+// that series only reads, whether the write it recorded changed nothing,
+// and whether the series answers once in a run, which only that rule's
+// move names). Under the switch a mock taken out of a test's list
 // names that test as its Owner (MockEntry.Owner), unless the move names one;
 // a worker entry placed again keeps its owner unless the move names one.
 // Without the switch no owner is written, so a move writes what it wrote
@@ -545,7 +546,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			mapping.Worker[i].Drift = mv.Drift
 			mapping.Worker[i].Trails = mv.Trails
 			mapping.Worker[i].Rule, mapping.Worker[i].Series, mapping.Worker[i].Read = mv.Rule, mv.Series, mv.Read
-			mapping.Worker[i].Unchanged = mv.Unchanged
+			mapping.Worker[i].Unchanged, mapping.Worker[i].Once = mv.Unchanged, mv.Once
 			if mv.Owner != "" {
 				mapping.Worker[i].Owner = mv.Owner
 			}
@@ -582,7 +583,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	entry.Drift = mv.Drift
 	entry.Trails = mv.Trails
 	entry.Rule, entry.Series, entry.Read = mv.Rule, mv.Series, mv.Read
-	entry.Unchanged = mv.Unchanged
+	entry.Unchanged, entry.Once = mv.Unchanged, mv.Once
 	// A replay serves a worker entry only while a test process of its key
 	// holds the run, and a moved entry with none would sit in the slice no
 	// test process holds: the move's key, else the test's. A test with no
