@@ -2385,7 +2385,7 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 			awaiting: snap.Learn.Awaiting,
 			open:     snap.Learn.Open,
 			windows:  snap,
-			claimDb:  integrations.WithinRound(mockDb, snap.At),
+			claimDb:  integrations.WithinRoundOf(mockDb, snap),
 			at:       learnPass{rev: rev, round: snap.At},
 		}
 		r.round = learnRound{read: true, open: r.open, test: r.test, snap: true,

@@ -383,6 +383,10 @@ func (s *scopedMockDb) WithinRound(at integrations.RoundAt) integrations.RoundSc
 	return integrations.WithinRound(s.MockMemDb, at)
 }
 
+func (s *scopedMockDb) WithinRoundOf(snap integrations.RoundSnapshot) integrations.RoundScope {
+	return integrations.WithinRoundOf(s.MockMemDb, snap)
+}
+
 func (s *scopedMockDb) ClaimPairingIn(m *models.Mock, at integrations.RoundAt) (bool, bool, string) {
 	return integrations.ClaimPairingIn(s.MockMemDb, m, at)
 }

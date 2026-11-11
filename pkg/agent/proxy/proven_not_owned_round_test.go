@@ -406,9 +406,9 @@ func TestACallHeldWhileTheNextSetIsStagedIsDiagnosedAgainstNoRecordingOfIt(t *te
 // not one judging moves to the worker scope. In the replay it is answered by
 // its own test's recording, unanswered, in its test's view
 // (roundGuard.ownView), as at once; with that recording answered it misses
-// there as its test's call. In record's full round its learn step reads the
-// view in force (HoldToRound): the claim is refused there and the call
-// misses, still its test's.
+// there as its test's call. In record's full round its learn step's claim
+// settles in the view its round snapshot read (MockManager.WithinRoundOf),
+// so it is answered by its own test's recording there too.
 func TestACallWhoseTestEndedUnderItIsNotItsOwnRecordingMadeElsewhere(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
@@ -422,10 +422,10 @@ func TestACallWhoseTestEndedUnderItIsNotItsOwnRecordingMadeElsewhere(t *testing.
 	}{
 		{name: "replay", consumes: 1},
 		{name: "replay, its recording answered on time", answeredFirst: true},
-		// One claim asks the store twice, by the delete door and then the
-		// update door (the session pool's fallback), both refused in the
-		// view in force.
-		{name: "record's full round", opts: models.OutgoingOptions{Learn: true, LearnPool: true}, consumes: 2},
+		// Before, one claim asked the store twice, by the delete door and
+		// then the update door (the session pool's fallback), both refused
+		// in the view in force, and the call missed.
+		{name: "record's full round", opts: models.OutgoingOptions{Learn: true, LearnPool: true}, consumes: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now()

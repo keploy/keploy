@@ -971,6 +971,30 @@ func WithinRound(db MockMemDb, at RoundAt) RoundScope {
 	return nil
 }
 
+// RoundViewReader is a RoundReader whose round scope can be held to the view
+// a round snapshot read as well as to its round (WithinRoundOf).
+type RoundViewReader interface {
+	WithinRoundOf(snap RoundSnapshot) RoundScope
+}
+
+// WithinRoundOf is db's scope at the round snap read (WithinRound), but for
+// a consume of one of the recordings of the test whose view snap read: that
+// settles in that view, whether or not the round moved since, as it would
+// have had keploy decided the call at once (a late call is still its test's,
+// answered by its test's recording that view left unanswered, and by no
+// other view's). A store that cannot hold a scope to a view gives
+// WithinRound's, which refuses every consume once the round moved.
+func WithinRoundOf(db MockMemDb, snap RoundSnapshot) RoundScope {
+	if r, ok := db.(RoundViewReader); ok {
+		return r.WithinRoundOf(snap)
+	}
+	return WithinRound(db, snap.At)
+}
+
+// StoreView is the store's handle of the view s read (RoundParts.View), nil
+// for none: the one a call's mark of it carries (CallRound.InStoreView).
+func (s RoundSnapshot) StoreView() any { return s.view }
+
 // ClaimPairingIn is db's ClaimPairingIn; nothing claimed, with why, when db
 // does not implement RoundReader.
 func ClaimPairingIn(db MockMemDb, m *models.Mock, at RoundAt) (claimed, moved bool, why string) {

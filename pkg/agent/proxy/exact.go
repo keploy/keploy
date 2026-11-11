@@ -3565,7 +3565,13 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 		// its closing view announces and is settled again in the view that
 		// follows (where the round moved): either way the served observer
 		// is told nothing, of a mock nothing served.
-		if ok, wait := m.guardLocked(g, v); !ok {
+		if own {
+			// Settled in the call's own view (ownView): only a restage
+			// refuses it, never the round's move since.
+			if !m.stagingGuardLocked(g) {
+				return exactRefused, nil
+			}
+		} else if ok, wait := m.guardLocked(g, v); !ok {
 			return exactRefused, wait
 		}
 		verdict, wait, after := func() (exactVerdict, <-chan struct{}, func()) {

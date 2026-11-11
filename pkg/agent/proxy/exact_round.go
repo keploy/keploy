@@ -434,7 +434,11 @@ func (m *MockManager) bumpStagingEpoch() {
 // staging guard's call was read in (its mark's), in which the call's reads,
 // walk, worker spend and own test's consumes are made (heldScope.readView,
 // heldScope.SequenceView, windowed, ownView); nil when they are made in the
-// view in force (heldScope.readView says when).
+// view in force (heldScope.readView says when). ownIn: the view a guard of
+// the round made from a round snapshot read (WithinRoundOf), in which its
+// call's consume of one of that view's test's recordings settles (ownView);
+// its other consumes settle in the view in force, refused once the round
+// moved.
 type roundGuard struct {
 	at       integrations.RoundAt
 	moved    string
@@ -443,6 +447,7 @@ type roundGuard struct {
 	staging  bool
 	restaged bool
 	readIn   *exactView
+	ownIn    *exactView
 }
 
 // windowed reports whether a consume settled in v is a test window's: made
@@ -471,8 +476,10 @@ func (g *roundGuard) windowed(v *exactView) bool {
 }
 
 // ownView is the view a consume of mk by g's call settles in when mk is one
-// of the recordings of the test whose view the call was read in (readIn):
-// that view, whether or not it is still in force. keploy can decide a call
+// of the recordings of the test whose view the call was read in (readIn, or
+// for a guard of the round, the view its round snapshot read: ownIn): that
+// view, whether or not it is still in force, or the round moved since: only
+// a restage refuses it (stagingGuardLocked). keploy can decide a call
 // after the replay ended its test, or began the next: at zero latency the
 // call would have been decided in its own view, so it is still answered by
 // its own test's recording, unanswered there, and never by the next test's
@@ -492,7 +499,11 @@ func (g *roundGuard) ownView(mk *models.Mock) *exactView {
 	if g == nil || mk == nil {
 		return nil
 	}
-	if v := g.readIn; v != nil && v.test != "" && v.owns(mk.Name) && !v.sessionEnded() {
+	v := g.readIn
+	if v == nil {
+		v = g.ownIn
+	}
+	if v != nil && v.test != "" && v.owns(mk.Name) && !v.sessionEnded() {
 		return v
 	}
 	return nil
@@ -550,13 +561,7 @@ func (m *MockManager) guardLocked(g *roundGuard, v *exactView) (ok bool, wait <-
 		return true, nil
 	}
 	if g.staging {
-		if m.stagingEpoch.Load() == g.at.Epoch {
-			return true, nil
-		}
-		m.exact.round.mu.Unlock()
-		g.restaged = true
-		g.refuse(restagedWhy)
-		return false, nil
+		return m.stagingGuardLocked(g), nil
 	}
 	why, wait := m.movedLocked(g.at, v)
 	if why == "" && wait == nil {
@@ -567,6 +572,23 @@ func (m *MockManager) guardLocked(g *roundGuard, v *exactView) (ok bool, wait <-
 		g.refuse(why)
 	}
 	return false, wait
+}
+
+// stagingGuardLocked checks a take against g's staging alone, holding the
+// round lock: refused, the lock let go and why kept in g, once the set was
+// staged again. A staging guard checks every take so (guardLocked); any
+// guard checks so a consume settled in its call's own view (ownView), which
+// a view's install or a learn boundary since never refuses: the view's
+// recordings stay its test's until the set is staged again. g checks a
+// round (roundGuard.checks).
+func (m *MockManager) stagingGuardLocked(g *roundGuard) bool {
+	if m.stagingEpoch.Load() == g.at.Epoch {
+		return true
+	}
+	m.exact.round.mu.Unlock()
+	g.restaged = true
+	g.refuse(restagedWhy)
+	return false
 }
 
 // LearnBoundary runs step (the learn tracker's Begin, End or NewSet) on t
@@ -928,9 +950,24 @@ func (m *MockManager) WithinRound(at integrations.RoundAt) integrations.RoundSco
 	return &roundScope{MockManager: m, g: roundGuard{at: at}}
 }
 
+// WithinRoundOf implements integrations.RoundViewReader: WithinRound of the
+// round snap read, whose consume of one of the recordings of the test whose
+// view snap read settles in that view (roundGuard.ownView). Record's full
+// round's learn step claims through it, so a call it decided in its test's
+// view is answered by its test's recording, unanswered there, after the
+// replay ended that test or began the next, as it would have been at once.
+func (m *MockManager) WithinRoundOf(snap integrations.RoundSnapshot) integrations.RoundScope {
+	s := &roundScope{MockManager: m, g: roundGuard{at: snap.At}}
+	if c, mine := snap.StoreView().(viewCursor); mine && c.m == m {
+		s.g.ownIn = c.v
+	}
+	return s
+}
+
 var (
-	_ integrations.RoundReader = (*MockManager)(nil)
-	_ integrations.RoundWaiter = (*MockManager)(nil)
+	_ integrations.RoundReader     = (*MockManager)(nil)
+	_ integrations.RoundViewReader = (*MockManager)(nil)
+	_ integrations.RoundWaiter     = (*MockManager)(nil)
 )
 
 // roundScope is the manager whose consume doors settle only while it is at
