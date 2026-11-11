@@ -2,7 +2,11 @@ package replay
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -295,5 +299,132 @@ func TestLiftOwnListenerChargesPassesOnlyAWhollyMarkedVerdict(t *testing.T) {
 	}
 	if _, l := liftOwnListenerCharges([]models.TestResult{failedRow("all-marked", "own-1")}, charges, nil); l != nil {
 		t.Fatalf("lifted %v with nothing marked", l)
+	}
+}
+
+// The set's end asks the agent again only for a test its judge charged a
+// recording of its mapping it did not make: not for a test whose consumption
+// could not be read (its judge compared nothing, so it charged nothing), and
+// not when the set's results cannot be read (there is no row to judge again).
+func TestTheSetsEndAsksTheAgentOnlyForARowItCanJudgeAgain(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		for _, when := range []string{"its consumption was not read", "the set's results are unreadable"} {
+			t.Run(switchName(on)+", "+when, func(t *testing.T) {
+				setSwitch(t, on)
+				fastWorkerWait(t)
+				h := newPartialRunHarness(t, 1, 0)
+				pinWindows(h)
+				own := "172.18.0.5:" + appPortOf(t, h)
+				h.replayer.config.Command = "./app"
+				refresh := 0
+				h.replayer.instrumentation = setEndReporter{Instrumentation: h.replayer.instrumentation, mu: &sync.Mutex{}, refresh: &refresh, dests: []string{own}}
+				h.mocks.filtered = []*models.Mock{calledAt("mock-in-test", 1020, own)}
+				mappingFile(t, h, map[string][]models.MockEntry{"test-1": {{Name: "mock-in-test", Kind: string(models.HTTP)}}})
+				hooks := prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{})}
+				if when == "its consumption was not read" {
+					h.replayer.hookImpl = consumedFailsFor{prHooks: hooks, h: h, test: "test-1"}
+				} else {
+					h.replayer.hookImpl = hooks
+					h.report.readErr = errors.New("the report store is unreadable")
+				}
+				_ = h.run(t)
+				if refresh != 0 {
+					t.Fatalf("the set's end asked the agent %d time(s); want none: no row can be judged again", refresh)
+				}
+			})
+		}
+	}
+}
+
+// A test passed at the set's end is a passing test for everything that reads
+// the set after it: the prune keeps what it consumed, its mapping is what it
+// consumed (the recording of its call to its own listener is no wrong serve,
+// so a call no mock answered in its window does not hold its mapping back),
+// and the summary of tests that left a dependency unexercised does not name
+// it. The control: the agent names nothing, and each of those reads the test
+// as before. (The prune does not run under the switch, so these rows run with
+// it off, with and without --assert-dependencies.)
+func TestATestPassedAtTheSetsEndIsAPassingTestToEveryLaterRead(t *testing.T) {
+	const unexercised = "some tests did not exercise a dependency their recording says they use"
+	for _, assert := range []bool{false, true} {
+		for _, named := range []bool{true, false} {
+			t.Run(fmt.Sprintf("--assert-dependencies %v, named %v", assert, named), func(t *testing.T) {
+				setSwitch(t, false)
+				fastWorkerWait(t)
+				h := newPartialRunHarness(t, 1, 0)
+				pinWindows(h)
+				own := "172.18.0.5:" + appPortOf(t, h)
+				h.replayer.config.Command = "./app"
+				h.replayer.config.Test.AssertDependencies = assert
+				h.replayer.config.Test.RemoveUnusedMocks = assert
+				h.replayer.config.Test.UpdateTestMapping = !assert
+				core, logs := observer.New(zap.InfoLevel)
+				h.replayer.logger = zap.New(core)
+				refresh := 0
+				r := setEndReporter{Instrumentation: h.replayer.instrumentation, mu: &sync.Mutex{}, refresh: &refresh}
+				if named {
+					r.dests = []string{own}
+				}
+				h.replayer.instrumentation = r
+				h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), calledAt("mock-in-test", 1020, own)}
+				db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": {
+					{Name: "mock-a", Kind: string(models.HTTP)},
+					{Name: "mock-in-test", Kind: string(models.HTTP)},
+				}})
+				made := models.MockState{Name: "mock-a", Kind: models.HTTP, Usage: models.Deleted, Lifetime: models.LifetimePerTest,
+					ReqTimestampMock: models.FormatMockTimestamp(attrAt(1010)), ResTimestampMock: models.FormatMockTimestamp(attrAt(1011))}
+				h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": {made}})}
+				if !assert {
+					// A call no mock answered fails no test with the switch off.
+					h.instr.mockErrorsFor = func() ([]models.UnmatchedCall, error) {
+						h.instr.mu.Lock()
+						after := h.instr.windowAfter
+						h.instr.mu.Unlock()
+						if after.Equal(h.cases[0].HTTPReq.Timestamp) {
+							return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /parse/health"}}, nil
+						}
+						return nil, nil
+					}
+				}
+				set := h.run(t)
+				if refresh != 1 {
+					t.Fatalf("precondition: the set's end asked the agent %d time(s); want 1", refresh)
+				}
+				if assert {
+					// The judge failed test-1 for the unmade recording; passed
+					// at the set's end, its set is PASSED and the prune keeps
+					// what it consumed.
+					if !named {
+						if set != models.TestSetStatusFailed {
+							t.Fatalf("control: set %s; want FAILED", set)
+						}
+						return
+					}
+					if set != models.TestSetStatusPassed || h.mocks.pruneCalls() != 1 {
+						t.Fatalf("set %s, %d prune(s); want PASSED, one", set, h.mocks.pruneCalls())
+					}
+					if _, ok := h.mocks.kept["mock-a"]; !ok {
+						t.Fatalf("the prune keeps %v; want mock-a, which test-1 consumed", slices.Collect(maps.Keys(h.mocks.kept)))
+					}
+					return
+				}
+				// test-1 passes at its judge either way, with its recording of
+				// the self-call left unconsumed and a call no mock answered in
+				// its window.
+				if got := resultOf(t, h, "test-1"); got.Status != models.TestStatusPassed || dataPlaneMisses(got.FailureInfo.UnmatchedCalls) == 0 {
+					t.Fatalf("precondition: test-1 %s with misses %+v; want PASSED with the call no mock answered", got.Status, got.FailureInfo.UnmatchedCalls)
+				}
+				want, warned := []string{"mock-a"}, 0
+				if !named {
+					want, warned = []string{"mock-a", "mock-in-test"}, 1
+				}
+				if got := mappedOnDisk(t, db)["test-1"]; !reflect.DeepEqual(got, want) {
+					t.Fatalf("test-1 is mapped to %v; want %v", got, want)
+				}
+				if n := logs.FilterMessageSnippet(unexercised).Len(); n != warned {
+					t.Fatalf("the unexercised-dependency summary was said %d time(s); want %d", n, warned)
+				}
+			})
+		}
 	}
 }
