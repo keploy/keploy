@@ -4,5 +4,9 @@ package testnet
 
 import "syscall"
 
-// errAddrInUse is what a bind to a port another socket holds ends in.
-var errAddrInUse error = syscall.EADDRINUSE
+// ErrAddrInUse is what a bind to an address and port another socket holds
+// ends in.
+var ErrAddrInUse error = syscall.EADDRINUSE
+
+// ErrAddrNotAvail is what a bind to an address no interface has ends in.
+var ErrAddrNotAvail error = syscall.EADDRNOTAVAIL
