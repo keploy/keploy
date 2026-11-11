@@ -876,15 +876,18 @@ type Place struct {
 	// arrival in record's full round (ClassifyGiven, ClassifyIn) reads no
 	// client test's request (arrivedBefore).
 	Client bool
-	// Claim, of a place that held the value inside a longer value (Whole
-	// false), is the word of the leaf's JWT claim that held the recorded
-	// value in the recording and the value F saw in record's full round, at
-	// one word (claimWord: a token the application minted with an id in a
-	// claim, sent back to it), addressed at the place Var names
-	// ("header.Authorization|jwt.cluster_id#0"): a replay decodes the claim
-	// there and binds a variable to its word, as at any place (BindAt). ""
-	// where the leaf is no JWT in either run, no claim holds the two values
-	// at one word, or the leaf has no variable place.
+	// Claim, of a client test's request (Client) that held the value inside
+	// a longer value (Whole false), is the word of the leaf's JWT claim that
+	// held the recorded value in the recording and the value F saw in
+	// record's full round, at one word (claimWord: a token the application
+	// minted with an id in a claim, sent back to it), addressed at the place
+	// Var names ("header.Authorization|jwt.cluster_id#0"): a replay decodes
+	// the claim in the request that pairs with the test case and binds a
+	// variable to its word (BindAt). "" where the leaf is no JWT in either
+	// run, no claim holds the two values at one word, the leaf has no
+	// variable place, or the place is a call's: a replay reads a call's
+	// request only to put its recorded values back, and cannot write a
+	// claim into a signed token (claimAt).
 	Claim string
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
@@ -3853,8 +3856,13 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// application sent it, whole): the test's own call that sent it first,
 	// else the run's, else another's; then the same inside a longer value;
 	// an answer that gave it only when no call sent it. Earliest within each.
+	// A client test's request whose JWT claim holds the value (Place.Claim)
+	// is a place to bind it, ranked after a call that sent it whole and
+	// before one that sent it inside a longer value, which binds nothing:
+	// such a call (an auth check, a forwarded token) never hides the claim.
+	// rank is twice placeRank's, so the claim's rank lies between the two.
 	var best Place
-	rank := 7
+	rank := 14
 	for _, e := range served {
 		for _, s := range e.Seen {
 			// A place F saw hold its recorded value did not drift: the
@@ -3878,11 +3886,14 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			if !ok || !e.Gave && fol.refuteSeen(e, s, whole, v) {
 				continue
 			}
-			if r := placeRank(e, s, whole); r < rank {
-				best, rank = seenPlace(e, s, whole), r
-				if !whole {
-					best.Claim = claimAt(best.Var, s.Leaf.Value, s.Live, recorded, v.live)
+			p, r := seenPlace(e, s, whole), 2*placeRank(e, s, whole)
+			if !whole {
+				if p.Claim = claimAt(p, s.Leaf.Value, s.Live, recorded, v.live); p.Claim != "" {
+					r = 2*placeRank(Earlier{Own: true}, Seen{Side: Request}, false) - 1
 				}
+			}
+			if r < rank {
+				best, rank = p, r
 				// A leaf its protocol types as one instant, its instant whole
 				// in the value's own layout (a findAndModify's createdAt
 				// copied as epoch seconds): a whole copy too.
@@ -3895,7 +3906,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 		}
 	}
-	if rank < 7 {
+	if rank < 14 {
 		return best, true
 	}
 	// No other rule reads a value the test gave (classifyRead).

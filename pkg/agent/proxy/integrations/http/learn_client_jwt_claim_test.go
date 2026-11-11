@@ -96,13 +96,22 @@ func TestLearnMatchBindsAnIdAClientTestsJWTClaimCarries(t *testing.T) {
 	}
 	recHeader = bearer(`{"cid":"e2e-free-company","cluster_id":"`+recID+`","iat":1794407071}`, "recorded-signature")
 
-	for what, liveHeader := range map[string]map[string]string{
-		"the same claim, this run's id at another word": bearer(`{"cid":"e2e-free-company","cluster_id":"c `+fullID+`","iat":1794407138}`, "this-run-signature"),
-		"a live token that is no JWT":                   {"Content-Type": "application/json", "Authorization": "Bearer " + fullID},
+	// Refused, naming the claim and why this run's token holds no place of
+	// it: exact for each.
+	const refused = "body.filter._id carries a value test case post-cluster-status-3 sent earlier in the test in the cluster_id claim of the JWT at header.Authorization, and "
+	for _, tc := range []struct {
+		what       string
+		liveHeader map[string]string
+		why        string
+	}{
+		{"the same claim, this run's id at another word", bearer(`{"cid":"e2e-free-company","cluster_id":"c `+fullID+`","iat":1794407138}`, "this-run-signature"),
+			"no claim of this run's token holds this run's value where the recording's claim held it, at that word or whole: no variable can bind it there"},
+		{"a live token that is no JWT", map[string]string{"Content-Type": "application/json", "Authorization": "Bearer " + fullID},
+			"this run's text there holds no JWT: no variable can bind it there"},
 	} {
-		served, miss, db := run(liveHeader)
-		if served != nil || miss == nil || len(db.consumed) != 0 || !strings.Contains(miss.res.Why, "test case post-cluster-status-3 sent earlier in the test at header.Authorization, inside a longer value or at a place keploy cannot bind it") {
-			t.Errorf("%s: served %v, miss %+v; want it refused, no claim bound", what, served != nil, miss)
+		served, miss, db := run(tc.liveHeader)
+		if served != nil || miss == nil || len(db.consumed) != 0 || !strings.Contains(miss.res.Why, refused+tc.why) {
+			t.Errorf("%s: served %v, miss %+v; want it refused, no claim bound: %s", tc.what, served != nil, miss, refused+tc.why)
 		}
 	}
 }

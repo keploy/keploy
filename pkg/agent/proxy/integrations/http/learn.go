@@ -2574,6 +2574,12 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, why
 			case !bindable:
 				why := r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+				// Inside a JWT claim, the refusal names the claim, and why
+				// it is no place: a call's request, or a client test's whose
+				// token in this run holds the value at no place of it.
+				if claim := learn.ClaimRefused(from.Mock, from.Path, sentText(earlier, from.Mock, from.Path), from.Live, r.Value, from.Client); claim != "" {
+					why = r.Path + " carries a value " + from.Mock + " sent earlier in the test " + strings.TrimPrefix(claim, from.Mock+" sent this value ")
+				}
 				if l.Why != "" {
 					why += "; " + l.Why
 				}
@@ -2715,6 +2721,22 @@ func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding,
 
 // respLeavesOf are the leaves of m's recorded answer.
 func respLeavesOf(m *models.Mock) []learn.Leaf { return respLeaves(m.Spec.HTTPResp) }
+
+// sentText is the text mock's request was sent with at path, as recorded:
+// "" where earlier holds no such leaf.
+func sentText(earlier []learn.Earlier, mock, path string) string {
+	for _, e := range earlier {
+		if e.Mock != mock {
+			continue
+		}
+		for _, s := range e.Seen {
+			if s.Side == learn.Request && s.Leaf.Path == path {
+				return s.Leaf.Value
+			}
+		}
+	}
+	return ""
+}
 
 // earlierAnswers are the answer places of the earlier mock that hold r's
 // recorded value whole: where a variable bound in its request is answered.

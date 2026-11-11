@@ -137,23 +137,29 @@ func TestAClaimIsTheBindPlaceOnlyWhereItHoldsTheValueInBothRuns(t *testing.T) {
 // says), the word or the claim that holds the value is read in the text
 // that step opens, and the claim's step follows it: the bind place reads
 // the value there in both runs. A leaf the step does not open is named
-// whole, with its step, as before.
+// whole, with its step, as before. A call's request (no client test's) is
+// never addressed at a claim: its leaf is named whole, as before, since its
+// replay puts the recorded values back and cannot write a claim.
 func TestFromAtReadsTheTextItsAddressOpens(t *testing.T) {
 	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	tok := func(id string) string { return claimToken(t, map[string]any{"cid": id}, "sig") }
-	dc := &decider{in: Input{PlaceOf: func(Leaf, bool) (string, bool) { return "header.X-Proxy|b64", true }}}
+	dc := &decider{in: Input{PlaceOf: func(Leaf, bool) (string, bool) { return "header.X-Proxy|b64", true },
+		Earlier: []Earlier{{Mock: "test case c"}, {Mock: "mock-0"}}}}
+	dc.in.Earlier[0].incoming = true
 	for _, tc := range []struct {
-		name      string
-		rec, live string
-		want      string
+		name, mock string
+		rec, live  string
+		want       string
 	}{
-		{"a claim of the opened text", b64("Bearer " + tok("a1")), b64("Bearer " + tok("b2")), "header.X-Proxy|b64|jwt.cid#0"},
-		{"a word of the opened text", b64("u-a1"), b64("u-b2"), "header.X-Proxy|b64#1"},
-		{"round F's text is not opened: no claim", b64("Bearer " + tok("a1")), "Bearer " + tok("b2"), "header.X-Proxy|b64"},
-		{"the step does not open the leaf: whole", "u-a1", "u-b2", "header.X-Proxy|b64"},
+		{"a claim of the opened text", "test case c", b64("Bearer " + tok("a1")), b64("Bearer " + tok("b2")), "header.X-Proxy|b64|jwt.cid#0"},
+		{"a claim of a call's request: whole", "mock-0", b64("Bearer " + tok("a1")), b64("Bearer " + tok("b2")), "header.X-Proxy|b64"},
+		{"a word of the opened text", "test case c", b64("u-a1"), b64("u-b2"), "header.X-Proxy|b64#1"},
+		{"a word of a call's request", "mock-0", b64("u-a1"), b64("u-b2"), "header.X-Proxy|b64#1"},
+		{"round F's text is not opened: no claim", "test case c", b64("Bearer " + tok("a1")), "Bearer " + tok("b2"), "header.X-Proxy|b64"},
+		{"the step does not open the leaf: whole", "test case c", "u-a1", "u-b2", "header.X-Proxy|b64"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			at := dc.fromAt(evPlace{leaf: Leaf{Path: "header.X-Proxy", Type: String, Value: tc.rec}, live: tc.live}, "a1", "b2")
+			at := dc.fromAt(evPlace{mock: tc.mock, leaf: Leaf{Path: "header.X-Proxy", Type: String, Value: tc.rec}, live: tc.live}, "a1", "b2")
 			if got := at.String(); got != tc.want {
 				t.Fatalf("fromAt = %q; want %q", got, tc.want)
 			}
@@ -185,8 +191,8 @@ func TestClaimNameIsTheClaimABindPlaceReads(t *testing.T) {
 		// A token inside a claim of a token: the inner claim, the last read.
 		{[]variables.Step{variables.JWTClaim("outer"), variables.JWTClaim("inner")}, "inner"},
 	} {
-		if got := claimName(variables.Address{Steps: tc.steps, Word: 0}); got != tc.want {
-			t.Fatalf("claimName(%v) = %q; want %q", tc.steps, got, tc.want)
+		if got := ClaimName(variables.Address{Steps: tc.steps, Word: 0}); got != tc.want {
+			t.Fatalf("ClaimName(%v) = %q; want %q", tc.steps, got, tc.want)
 		}
 	}
 }
@@ -246,23 +252,28 @@ func TestClaimAtAddressesTheClaimAtTheLeafsVariablePlace(t *testing.T) {
 		{"a place that names a step", "header.Authorization|b64", "6af47b1e0c22d4e8a91b03f6", ""},
 		{"round F's claim holds another value", "header.Authorization", "6af47b1e0c22d4e8a91b03f7", ""},
 	} {
-		if got := claimAt(tc.at, rec, live, "6af47add8a9351dfdb7c457a", tc.f); got != tc.want {
+		if got := claimAt(Place{Var: tc.at, Client: true}, rec, live, "6af47add8a9351dfdb7c457a", tc.f); got != tc.want {
 			t.Errorf("%s: claimAt(%q) = %q; want %q", tc.name, tc.at, got, tc.want)
 		}
+	}
+	// A call's request is no place to bind a claim at: its replay cannot
+	// write one into the token it sends.
+	if got := claimAt(Place{Var: "header.Authorization"}, rec, live, "6af47add8a9351dfdb7c457a", "6af47b1e0c22d4e8a91b03f6"); got != "" {
+		t.Errorf("claimAt of a call's request = %q; want none", got)
 	}
 	// An id of several words, the claim whole: no word.
 	rec = "Bearer " + claimToken(t, map[string]any{"sub": "a20b6921-24c6-4a03-bcf9-b409842a88d0"}, "recorded")
 	live = "Bearer " + claimToken(t, map[string]any{"sub": "0c9e1f7a-5b2d-4e8c-9a61-3d7f0b2c4e19"}, "this-run")
-	if got := claimAt("header.Authorization", rec, live, "a20b6921-24c6-4a03-bcf9-b409842a88d0", "0c9e1f7a-5b2d-4e8c-9a61-3d7f0b2c4e19"); got != "header.Authorization|jwt.sub" {
+	if got := claimAt(Place{Var: "header.Authorization", Client: true}, rec, live, "a20b6921-24c6-4a03-bcf9-b409842a88d0", "0c9e1f7a-5b2d-4e8c-9a61-3d7f0b2c4e19"); got != "header.Authorization|jwt.sub" {
 		t.Errorf("claimAt of a UUID claim = %q; want header.Authorization|jwt.sub", got)
 	}
 }
 
 // TestBindAtIsTheWholePlaceOrItsClaimsWord: a place that held the value
-// whole binds at its variable place, with the value F saw there; one that
-// held it inside a JWT claim (Place.Claim), at the claim's word, with that
-// word of what F saw; any other, or one whose claim F's text does not open,
-// is no place to bind at.
+// whole binds at its variable place, with the value F saw there; a client
+// test's request that held it inside a JWT claim (Place.Claim), at the
+// claim's word, with that word of what F saw; any other (a call's claim, a
+// claim F's text does not open) is no place to bind at.
 func TestBindAtIsTheWholePlaceOrItsClaimsWord(t *testing.T) {
 	tok := "Bearer " + claimToken(t, map[string]any{"cluster_id": "6af47b1e0c22d4e8a91b03f6"}, "this-run")
 	claim := "header.Authorization|jwt.cluster_id#0"
@@ -274,11 +285,12 @@ func TestBindAtIsTheWholePlaceOrItsClaimsWord(t *testing.T) {
 	}{
 		{"whole", Place{Var: "body.name", Live: "app-2", Whole: true}, "body.name", "app-2", true},
 		{"whole, no variable place", Place{Live: "app-2", Whole: true}, "", "", false},
-		{"inside a claim", Place{Var: "header.Authorization", Live: tok, Claim: claim}, claim, "6af47b1e0c22d4e8a91b03f6", true},
-		{"inside a claim, no variable place", Place{Live: tok, Claim: claim}, "", "", false},
-		{"inside a longer value, no claim", Place{Var: "header.Authorization", Live: tok}, "", "", false},
-		{"a claim that is no place", Place{Var: "header.Authorization", Live: tok, Claim: "nowhere"}, "", "", false},
-		{"a claim F's text does not open", Place{Var: "header.Authorization", Live: "Bearer opaque", Claim: claim}, "", "", false},
+		{"inside a claim", Place{Var: "header.Authorization", Live: tok, Claim: claim, Client: true}, claim, "6af47b1e0c22d4e8a91b03f6", true},
+		{"inside a claim of a call's request", Place{Var: "header.Authorization", Live: tok, Claim: claim}, "", "", false},
+		{"inside a claim, no variable place", Place{Live: tok, Claim: claim, Client: true}, "", "", false},
+		{"inside a longer value, no claim", Place{Var: "header.Authorization", Live: tok, Client: true}, "", "", false},
+		{"a claim that is no place", Place{Var: "header.Authorization", Live: tok, Claim: "nowhere", Client: true}, "", "", false},
+		{"a claim F's text does not open", Place{Var: "header.Authorization", Live: "Bearer opaque", Claim: claim, Client: true}, "", "", false},
 	} {
 		at, live, ok := tc.p.BindAt()
 		if at != tc.at || live != tc.live || ok != tc.ok {
@@ -310,6 +322,85 @@ func TestClaimHoldingNamesTheClaimThatHoldsAValue(t *testing.T) {
 	} {
 		if got := ClaimHolding(tc.text, tc.v); got != tc.want {
 			t.Errorf("%s: ClaimHolding(%q) = %q; want %q", tc.name, tc.v, got, tc.want)
+		}
+	}
+}
+
+// TestDecideBindsAClaimOnlyInAClientTestsRequest: an earlier call of the
+// test sent the token (an auth check, a forwarded token), then the call
+// that carries the claim's id. A replay puts a call's recorded values back
+// at its places and cannot write a claim into its signed token, so the
+// call's claim is never the bind place: with no client test, Decide names
+// the call's leaf whole (the adapter refuses it as held in another form);
+// with a client test that sent the token, the id binds at the test case's
+// claim, and the learned line annotates that place alone with the claim,
+// not the call's that held the token too.
+func TestDecideBindsAClaimOnlyInAClientTestsRequest(t *testing.T) {
+	const rID, fID = "6af47add8a9351dfdb7c457a", "6af47b1e0c22d4e8a91b03f6"
+	rReq := time.Date(2026, 11, 11, 14, 24, 31, 630_000_000, time.UTC)
+	fReq := rReq.Add(67 * time.Second)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	token := func(id string, iat int64, sig string) string {
+		return claimToken(t, map[string]any{"cid": "e2e-free-company", "cluster_id": id, "role": "ADMIN", "iat": iat, "exp": iat + 3600}, sig)
+	}
+	rTok, fTok := token(rID, rReq.Unix(), "recorded-signature-bytes-0001"), token(fID, fReq.Unix(), "round-f-signature-bytes-00002")
+	sent := iSent("mock-0", rReq.Add(time.Millisecond), "header.Authorization", String, "Bearer "+rTok, "Bearer "+fTok)
+	const p = "body.cmd.filter._id"
+	for _, client := range []bool{false, true} {
+		name := "no client test"
+		if client {
+			name = "a client test that sent the token"
+		}
+		t.Run(name, func(t *testing.T) {
+			earlier := []Earlier{sent}
+			if client {
+				earlier = append(clientPlaced(t, "post-cluster-status-3", heartbeatCase(rTok, rReq), heartbeatCase(fTok, fReq), fReq), sent)
+			}
+			in := iCall(p, String, rID, fID, rCall, fCall, nil, earlier, nil)
+			if client {
+				in.Drifts = oClientDrifts()
+			}
+			d := oWord(t, Decide(in), rID, fID)
+			if !client {
+				if ClaimName(d.FromAt) != "" || d.From.Client {
+					t.Fatalf("Decide binds at %s's %s (client %v); want no claim of a call's token", d.From.Mock, d.FromAt.String(), d.From.Client)
+				}
+				return
+			}
+			if d.Outcome != OutcomeValue || !d.From.Client || d.From.Mock != "test case post-cluster-status-3" || d.FromAt.String() != "header.Authorization|jwt.cluster_id#0" {
+				t.Fatalf("outcome %v from %s (client %v) at %q; want a Value bound at the test case's header.Authorization|jwt.cluster_id#0", d.Outcome, d.From.Mock, d.From.Client, d.FromAt.String())
+			}
+			// Two places held the value; only the bind place reads the claim.
+			_, places, ok := strings.Cut(d.Line, "Places: ")
+			if !ok || strings.Count(places, "(its JWT's cluster_id claim)") != 1 || !strings.Contains(places, "test case post-cluster-status-3 header.Authorization (its JWT's cluster_id claim)") || !strings.Contains(places, "mock-0") {
+				t.Fatalf("learned %q; want both places named, the test case's alone with its claim", d.Line)
+			}
+		})
+	}
+}
+
+// TestClaimRefusedSaysWhyAClaimIsNoPlace: a refusal of a value held inside
+// a JWT claim names the claim and the exact reason: a call's request, a
+// client test's whose token in this run is no JWT, or one whose claims hold
+// this run's value at no place where the recording's held it; none where
+// the recording holds the value in no claim.
+func TestClaimRefusedSaysWhyAClaimIsNoPlace(t *testing.T) {
+	rec := "Bearer " + claimToken(t, map[string]any{"cluster_id": "6af47add8a9351dfdb7c457a"}, "recorded")
+	live := "Bearer " + claimToken(t, map[string]any{"cluster_id": "c 6af47b1e0c22d4e8a91b03f6"}, "this-run")
+	const head = "mock-0 sent this value in the cluster_id claim of the JWT at header.Authorization, "
+	for _, tc := range []struct {
+		name, rec, live, v string
+		client             bool
+		want               string
+	}{
+		{"a call's request", rec, live, "6af47add8a9351dfdb7c457a", false, head + "a call's request: keploy binds a variable at a JWT claim only in a client test's request, which a replay reads, never in a token a call sends, which a replay cannot write a claim into"},
+		{"no JWT in this run", rec, "Bearer opaque", "6af47add8a9351dfdb7c457a", true, head + "and this run's text there holds no JWT: no variable can bind it there"},
+		{"no claim holds this run's value there", rec, live, "6af47add8a9351dfdb7c457a", true, head + "and no claim of this run's token holds this run's value where the recording's claim held it, at that word or whole: no variable can bind it there"},
+		{"the recording holds it in no claim", rec, live, "6af47add8a9351dfdb7c457b", true, ""},
+		{"the recording is no JWT", "Bearer opaque", live, "opaque", false, ""},
+	} {
+		if got := ClaimRefused("mock-0", "header.Authorization", tc.rec, tc.live, tc.v, tc.client); got != tc.want {
+			t.Errorf("%s: ClaimRefused = %q; want %q", tc.name, got, tc.want)
 		}
 	}
 }
