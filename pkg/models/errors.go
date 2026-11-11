@@ -317,19 +317,23 @@ type MockMismatchReport struct {
 	// which the miss's shape writes {} (MissShape); the summary then names
 	// the path escaped, as a place counts segments.
 	VariablePlaces []string
-	// BoundIn is, under the proven switch, of a variable miss
-	// (MatchPhaseVariable), where this run bound each test variable the
-	// variable pass read to refuse the call, once, in the order the pass
-	// read them: the variable the closest recording's place holds another
-	// value than, or the other variable whose value the call carries where
-	// it was recorded with another. Each is the name the binding carries
+	// BoundIn is, under the proven switch, of a miss whose closest
+	// recording the variable pass refused (a variable miss,
+	// MatchPhaseVariable, or a MongoDB call whose recorded answer gives a
+	// variable another value than this run bound), where this run bound
+	// each test variable the pass read to refuse the call, once, in the
+	// order the pass read them: the variable the closest recording's place
+	// (or answer) holds another value than, or the other variable whose
+	// value the call (or answer) carries where it was recorded with
+	// another. Each is the name the binding carries
 	// (VariableBinding.Mock): the recording whose answer or request bound
 	// it, or "test case <name>" where the test's own request did. A name,
 	// never a value. A refusal that read no bound variable (a given, a
 	// variable not bound yet) gives none, as does a parser that does not
 	// name its bindings: a reader of a variable miss without it cannot tell
 	// which recordings shaped the refusal beside the closest one. Set by
-	// each matcher's variable check that names them (the HTTP matcher's).
+	// each matcher's variable check that names them (the HTTP and MongoDB
+	// matchers').
 	BoundIn []string
 	// Given is, under the proven switch, the given (GivenVariable) a
 	// variable miss is about: the call carried another value than the one the
