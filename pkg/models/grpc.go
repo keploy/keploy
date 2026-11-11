@@ -93,6 +93,19 @@ type GrpcResp struct {
 	// before this field existed decodes with NoMessages=false and keeps exactly
 	// the old behaviour.
 	NoMessages bool `json:"no_messages,omitempty" yaml:"no_messages,omitempty"`
+	// EmptyMessageSent records that the answer's one message, an empty one,
+	// is a message its server sent, on an answer that ended with a status
+	// other than OK. A recorder that predates NoMessages, or one that does
+	// not write it, stored an answer that had no message as one empty
+	// message, and an answer that failed has none most often: replay serves
+	// one empty message under such a status, unmarked, with its status
+	// alone, as it always has. A recorder that writes NoMessages marks the
+	// empty message its server did send, so replay sends it.
+	//
+	// It is written only on that shape (exactly one message, empty, under a
+	// status other than OK) and omitempty keeps it off disk everywhere else:
+	// every other answer is byte-identical to one written before it existed.
+	EmptyMessageSent bool `json:"empty_message_sent,omitempty" yaml:"empty_message_sent,omitempty"`
 	// SentAfter says when the server wrote on a stream whose client sent a
 	// message or half-closed after it had one of the server's: a bidi stream
 	// that sends a message and waits for its reply before it sends the next
