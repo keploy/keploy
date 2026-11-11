@@ -203,6 +203,19 @@ type RoundQuery struct {
 	Tracker *learn.Tracker
 	// Pairing reads the pairing's candidates of Kind.
 	Pairing bool
+	// Of, when set, is a read of the round a call of a test was decided on
+	// whose take was then refused: the snapshot reads the view Of read as
+	// it stands now, in Of's round (RoundSnapshot.Retaken). A learn step
+	// whose take another call of the test beat to the call's choice looks
+	// again there when the replay ended the test, or began the next, since:
+	// at zero latency the call would have looked again in its test's view,
+	// and been answered by another of its test's recordings that view left
+	// unanswered, or missed there. The store reads no tracker for it (Of's
+	// reading stands) and says false where it cannot read that view: a
+	// restage since, a view of no test open (a pool view, a boundary), a
+	// replay session the agent reset, a read of another store. The call
+	// then misses as moved, as before.
+	Of *RoundSnapshot
 }
 
 // DiskCandidate is a pairing candidate the agent keeps on disk, by name, not
@@ -994,6 +1007,29 @@ func WithinRoundOf(db MockMemDb, snap RoundSnapshot) RoundScope {
 // StoreView is the store's handle of the view s read (RoundParts.View), nil
 // for none: the one a call's mark of it carries (CallRound.InStoreView).
 func (s RoundSnapshot) StoreView() any { return s.view }
+
+// Retaken is s, a read of the round a call was decided on, with what the
+// view s read shows now (now: a store's read of that view, RoundQuery.Of):
+// its recordings and whose each is, what it answered, the background's
+// spends, and the staging's take log. The rest is s's: the staging, the
+// round's generation and boundaries (a take held to the result settles one
+// of the view's own recordings there, WithinRoundOf, and refuses any other
+// once the round moved), the learn tracker's test and places, whether a
+// test is open, and the windows. A call's learn step reads it as the round
+// the call was made in, so nothing the replay did after the call is the
+// call's. The tracker's places stay s's: what the call carries came from
+// answers given before it was made, which a read made after it already
+// holds, and a place read after the test ended would be the next test's.
+func (s RoundSnapshot) Retaken(now RoundSnapshot) RoundSnapshot {
+	s.At.Taken, s.Taken = now.At.Taken, now.Taken
+	s.PerTest, s.Session, s.Startup, s.SessionScoped = now.PerTest, now.Session, now.Startup, now.SessionScoped
+	s.Consumed = now.Consumed
+	s.BackgroundUnused, s.BackgroundSpent = now.BackgroundUnused, now.BackgroundSpent
+	s.Candidates, s.OnDisk, s.OnDiskErr = now.Candidates, now.OnDisk, now.OnDiskErr
+	s.owners, s.claimants = now.owners, now.claimants
+	s.taken = &takenIndex{}
+	return s
+}
 
 // ClaimPairingIn is db's ClaimPairingIn; nothing claimed, with why, when db
 // does not implement RoundReader.

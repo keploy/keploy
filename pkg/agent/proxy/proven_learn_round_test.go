@@ -906,8 +906,11 @@ func TestALearnStepAnswersACallWhoseTestEndedAsItsTakeWasAskedByItsOwnRecording(
 // Two calls of test-1, each exactly its own mock-own1, read in test-1's
 // round, are both late: the replay ends test-1 (or ends it and begins
 // test-2) as the second asks the learn tracker to take mock-own1, the first
-// asking it then too. One is answered by mock-own1 and the other misses as
-// moved: a recording answers one call of its test, late or at once. Once
+// asking it then too. One is answered by mock-own1 and the other misses: a
+// recording answers one call of its test, late or at once. The other looks
+// again in test-1's view, as it would at once, where nothing else answers
+// it, and its miss, decided there, names no recording: the replay replaced
+// that view before keploy diagnosed it. Once
 // test-2 began the tracker keeps nothing of test-1's take
 // (learn.Tracker.Answer), and test-1's view, which both claims settle in,
 // refuses the second; before test-2 begins the tracker refuses it.
@@ -967,8 +970,8 @@ func TestTwoLateCallsOfATestNeverTakeOneOfItsRecordings(t *testing.T) {
 					}
 				}
 				misses, err := p.GetMockErrors(context.Background())
-				if err != nil || len(misses) != 1 || !strings.Contains(misses[0].NextSteps, "keploy record's full round read this request") {
-					t.Fatalf("the misses read %+v (%v); want one, the refused call's, missed as moved", misses, err)
+				if err != nil || len(misses) != 1 || !strings.Contains(misses[0].NextSteps, "keploy record's full round decided this request in test-1, and the replay ended test-1") {
+					t.Fatalf("the misses read %+v (%v); want one, the refused call's, decided in test-1's view, its miss diagnosed after the replay ended test-1", misses, err)
 				}
 			})
 		}
@@ -1012,11 +1015,13 @@ func sendPear(t *testing.T, p *Proxy, mm *MockManager, waits bool) (code int, go
 // refused in test-1's view, another call of test-1 answered by mock-own1
 // first, as the replay ends test-1 under it (and, in one case, begins
 // test-2, which owns mock-own2). mock-own2p, a recording of no test open
-// then, is the same request. The call misses plainly, saying the replay
-// ended its test, with no extra-call kind, no recording named as made
-// elsewhere, and no closest recording: the hold reads nothing once test-1's
-// view was replaced, so the miss names none of the view in force's, and its
-// path is redacted whole, as a miss whose pool is unread is. Before,
+// then, is the same request. The call looks again in test-1's view, as it
+// would at once, where nothing else answers it, and misses plainly, saying
+// the replay ended its test before keploy diagnosed the miss, with no
+// extra-call kind, no recording named as made elsewhere, and no closest
+// recording: the hold reads nothing once test-1's view was replaced, so the
+// miss names none of the view in force's, and its path is redacted whole,
+// as a miss whose pool is unread is. Before,
 // the miss was held after the move to the view then in force, which told it
 // no move, and its lookup named mock-own2p as recorded where the replay did
 // not make it (NotOwned), whose next step had record's judging move
@@ -1051,7 +1056,22 @@ func TestAMovedLearnMissIsDiagnosedOnTheCallsHold(t *testing.T) {
 			if !moved.Load() {
 				t.Fatal("precondition: no boundary landed under the call's take")
 			}
-			misses := heldMiss(t, p, mm, code, got, "in test-1", "ended that test")
+			if code == http.StatusOK {
+				t.Fatalf("a call of test-1 whose own recording another call took got %d %s; want a miss", code, got)
+			}
+			for name, st := range r3States(mm) {
+				if len(st.ReqBodyNoise) > 0 {
+					t.Errorf("%s learned %v as noise from a call it missed", name, st.ReqBodyNoise)
+				}
+			}
+			what := "ended test-1"
+			if next {
+				what = "ended test-1 and began test-2"
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil || len(misses) != 1 || !strings.Contains(misses[0].NextSteps, "keploy record's full round decided this request in test-1, and the replay "+what+" before keploy diagnosed its miss") {
+				t.Fatalf("the miss reads %+v (%v); want one, decided in test-1's view, saying the replay %s before keploy diagnosed it", misses, err, what)
+			}
 			for _, m := range misses {
 				if m.Kind == string(models.MissExtraCall) {
 					t.Errorf("the moved miss is told an extra call (recorded %d)", m.Recorded)

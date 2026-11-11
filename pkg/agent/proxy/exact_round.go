@@ -732,6 +732,9 @@ func (m *MockManager) phaseLocked(v *exactView, l integrations.LearnRead) (phase
 
 // RoundSnapshot implements integrations.RoundReader: every part read holding
 // swapMu (read) and the round lock, which every change of the round takes.
+// With q.Of, the view q.Of read, as it stands now, in q.Of's round
+// (integrations.RoundSnapshot.Retaken), read with no tracker; false where
+// it cannot be read (ownViewOf).
 func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.RoundSnapshot, bool) {
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
@@ -748,6 +751,13 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 		}
 	}
 	l := m.logLocked()
+	if q.Of != nil {
+		own := m.ownViewOf(*q.Of, l.epoch)
+		if own == nil {
+			return integrations.RoundSnapshot{}, false
+		}
+		v, q.Tracker = own, nil
+	}
 	n := len(l.takes)
 	s := integrations.RoundSnapshot{
 		At:         integrations.RoundAt{Epoch: l.epoch, Gen: r.gen, Bounds: r.bounds, Taken: n},
@@ -856,7 +866,27 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	m.windowMu.RLock()
 	parts.WindowStart, parts.WindowEnd = m.windowStart, m.windowEnd
 	m.windowMu.RUnlock()
+	if q.Of != nil {
+		return q.Of.Retaken(s.WithParts(parts)), true
+	}
 	return s.WithParts(parts), true
+}
+
+// ownViewOf is the view of, a round snapshot of m's, read, for a read of it
+// now in of's round (integrations.RoundQuery.Of), holding the round lock:
+// nil where of read no test open in its view (a pool view, a boundary), m
+// staged a set again since (epoch, the staging's now), or the agent reset
+// the replay session the view was of. A late call's look again reads its
+// test's view only where its take of one of that view's own recordings
+// would settle there (roundGuard.ownView).
+func (m *MockManager) ownViewOf(of integrations.RoundSnapshot, epoch uint64) *exactView {
+	// A read of no store's view, or of another store's, names no view of
+	// m's (a zero cursor's store is none).
+	c, _ := of.StoreView().(viewCursor)
+	if c.m != m || !of.Open || of.At.Epoch != epoch || c.v.sessionEnded() {
+		return nil
+	}
+	return c.v
 }
 
 // sessionUnion is GetSessionMocks under exact serving, of the reads it

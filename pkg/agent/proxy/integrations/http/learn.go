@@ -1666,6 +1666,10 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 	// recording it matches exactly, or not at all.
 	alone := ""
 	retake := false
+	// took is the snapshot of the last pass that decided a take, zero
+	// before one did (and from a store that reads no round in one): a
+	// refused take's look again reads that pass's view (readOwnLearnPass).
+	var took integrations.RoundSnapshot
 	for {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
@@ -1686,6 +1690,24 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			*call, marked = read.call, true
 		}
 		moved, caughtUp := made.movedFrom(read.round, retake)
+		if moved != "" {
+			// A take of the pass before was refused, another call of the
+			// test having taken the call's choice, and the replay moved the
+			// round since (it ended the test, or began the next): at zero
+			// latency the call would have looked again in its test's view,
+			// and been answered by another of its test's recordings that
+			// view left unanswered, or missed there. It looks again there,
+			// in the round it was made in, so it fails closed exactly where
+			// it would at once; the take settles in that view
+			// (integrations.WithinRoundOf), never the next test's. A
+			// restage, a pool view's call, or a store that cannot read the
+			// view keeps the moved miss below.
+			if own, ok := h.readOwnLearnPass(mockDb, took, live, liveShape, n, opts.LearnPool); ok {
+				if again, _ := made.movedFrom(own.round, retake); again == "" {
+					read, moved = own, ""
+				}
+			}
+		}
 		if caughtUp && call != nil {
 			// The call's round is the one caught up with from now on, and
 			// so is its mark: the recordings that round's view holds as its
@@ -1762,7 +1784,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			continue
 		}
-		retake = false
+		retake, took = false, read.snap
 		sc, windows, claimDb := read.sc, read.windows, read.claimDb
 		test, earlier, served, before, set := read.test, read.earlier, read.served, read.before, read.set
 		// F's serves the read saw made after the call reached keploy are
@@ -2354,6 +2376,9 @@ type learnRead struct {
 	// store that reads no round in one snapshot gives none (the zero
 	// CallRound), and its misses name no recording made elsewhere.
 	call integrations.CallRound
+	// snap is the snapshot the pass was read from, zero for a pass of a
+	// store that reads no round in one.
+	snap integrations.RoundSnapshot
 }
 
 // readLearnPass reads a pass of the learn step. From a store that reads its
@@ -2372,31 +2397,7 @@ type learnRead struct {
 func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (learnRead, error) {
 	rev := storeRevision(mockDb)
 	if snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{Tracker: tracker}); ok {
-		r := learnRead{
-			sc:       h.learnScopeIn(snap, live, liveShape, n, pool),
-			test:     snap.Learn.Number,
-			earlier:  snap.Learn.Earlier,
-			served:   snap.Learn.Served,
-			before:   snap.Learn.Before,
-			set:      snap.Learn.Set,
-			order:    snap.Learn.Order,
-			awaiting: snap.Learn.Awaiting,
-			open:     snap.Learn.Open,
-			windows:  snap,
-			claimDb:  integrations.WithinRoundOf(mockDb, snap),
-			at:       learnPass{rev: rev, round: snap.At},
-		}
-		r.round = learnRound{read: true, open: r.open, test: r.test, snap: true,
-			agrees:  snap.Phase == integrations.RoundInTest || snap.Phase == integrations.RoundBetween,
-			epoch:   snap.At.Epoch,
-			viewGen: snap.ViewGen(),
-			view:    snap.Test,
-			noOne:   snap.NoOneRound(),
-			ahead:   snap.TrackerAhead(),
-			alone:   snap.ViewAlone(),
-		}
-		r.call = snap.CallRound()
-		return r, nil
+		return h.learnReadOf(mockDb, snap, rev, live, liveShape, n, pool), nil
 	}
 	sc, err := h.learnScope(mockDb, tracker, live, liveShape, n, pool)
 	if err != nil {
@@ -2409,6 +2410,52 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 	r.round = learnRound{read: true, open: r.open, test: r.test}
 	r.windows, _ = mockDb.(integrations.TestWindows)
 	return r, nil
+}
+
+// readOwnLearnPass reads a pass of the learn step in the view of took, the
+// pass whose take another call of the test beat to the call's choice, as
+// that view stands now, in took's round (integrations.RoundQuery.Of): a late
+// call's look again, where at zero latency it would have looked again in its
+// test's view. false where the store cannot read it (no snapshot took, a
+// view of no test open, a restage, a store that reads no round).
+func (h *HTTP) readOwnLearnPass(mockDb integrations.MockMemDb, took integrations.RoundSnapshot, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (learnRead, bool) {
+	rev := storeRevision(mockDb)
+	snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{Of: &took})
+	if !ok {
+		return learnRead{}, false
+	}
+	return h.learnReadOf(mockDb, snap, rev, live, liveShape, n, pool), true
+}
+
+// learnReadOf is the pass read from snap, one snapshot of the round, at the
+// store's revision rev.
+func (h *HTTP) learnReadOf(mockDb integrations.MockMemDb, snap integrations.RoundSnapshot, rev uint64, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) learnRead {
+	r := learnRead{
+		sc:       h.learnScopeIn(snap, live, liveShape, n, pool),
+		test:     snap.Learn.Number,
+		earlier:  snap.Learn.Earlier,
+		served:   snap.Learn.Served,
+		before:   snap.Learn.Before,
+		set:      snap.Learn.Set,
+		order:    snap.Learn.Order,
+		awaiting: snap.Learn.Awaiting,
+		open:     snap.Learn.Open,
+		windows:  snap,
+		claimDb:  integrations.WithinRoundOf(mockDb, snap),
+		at:       learnPass{rev: rev, round: snap.At},
+	}
+	r.round = learnRound{read: true, open: r.open, test: r.test, snap: true,
+		agrees:  snap.Phase == integrations.RoundInTest || snap.Phase == integrations.RoundBetween,
+		epoch:   snap.At.Epoch,
+		viewGen: snap.ViewGen(),
+		view:    snap.Test,
+		noOne:   snap.NoOneRound(),
+		ahead:   snap.TrackerAhead(),
+		alone:   snap.ViewAlone(),
+	}
+	r.call = snap.CallRound()
+	r.snap = snap
+	return r
 }
 
 // storeRevision is the mock store's revision (MockManager.Revision: it moves
