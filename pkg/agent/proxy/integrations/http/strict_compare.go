@@ -127,10 +127,11 @@ type declaredRules struct {
 	// sources is the declared sources the table gives a recording, by name
 	// (sourcesIn). nil reads none.
 	sources func(mock string) []models.DeclaredSource
-	// background reports whether a recording, by name, is one the
-	// background serves (integrations.InBackground), onto which no test's
-	// drift is learned; nil: none is.
-	background func(mock string) bool
+	// background reports whether a recording is one the background serves
+	// with no learn step deciding it for the open test
+	// (integrations.DeclaredBackground), onto which no test's drift is
+	// learned; nil: none is.
+	background func(m *models.Mock) bool
 	// timeForm is whether the replay turned the time default on
 	// (integrations.TimeFormOf).
 	timeForm bool
@@ -142,7 +143,7 @@ type declaredRules struct {
 func declaredIn(db integrations.MockMemDb) declaredRules {
 	return declaredRules{
 		sources:    sourcesIn(db),
-		background: func(mock string) bool { return integrations.InBackground(db, mock) },
+		background: func(m *models.Mock) bool { return integrations.DeclaredBackground(db, m) },
 		timeForm:   integrations.TimeFormOf(db),
 	}
 }
@@ -279,7 +280,7 @@ func clocksWith(m *models.Mock, d declaredRules) map[string]models.ClockOffset {
 		l, ok := leaves[leaf]
 		return l, ok
 	}
-	return learn.ReplayClocks(d.sources(m.Name), clocks, d.background(m.Name), d.timeForm, recorded, learn.Span{From: m.Spec.ReqTimestampMock, To: m.Spec.ResTimestampMock})
+	return learn.ReplayClocks(d.sources(m.Name), clocks, d.background(m), d.timeForm, recorded, learn.Span{From: m.Spec.ReqTimestampMock, To: m.Spec.ResTimestampMock})
 }
 
 // declaredClockFields are the body fields, by leaf path, a clock rule d's

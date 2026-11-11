@@ -112,11 +112,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			// The recording a once chain this connection began names next
 			// (integrations.OnceChainOnConn): this call's to be answered
-			// with, ahead of any other, when it is that call (chainNext).
-			// Taken, the chain ends here unless this call's answer carries
-			// it on (chain.Answered, after the match): a call passed
-			// through, answered by no recording or by another ends it.
-			follow, followSeries := chain.Take()
+			// with, ahead of any other, when it is that call and is made
+			// in the view the chain was carried on in (chainNext). Taken,
+			// the chain ends here unless this call's answer carries it on
+			// (chain.Answered, after the match): a call passed through,
+			// answered by no recording or by another ends it.
+			follow := chain.Take()
 
 			// A bypassRule that names this call (its host, path and port)
 			// passes it to its server, and the server's answer back, unmocked.
@@ -350,6 +351,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// found it made (integrations.CallRound): a miss's lookup
 				// of a recording made elsewhere is asked of that round.
 				call integrations.CallRound
+				// followed is the recording the connection's once chain
+				// named for the call in its view (follow.For), "" for
+				// none: the chain goes on only when it answers the call.
+				followed string
 				// db is the store the request's matcher and its miss read:
 				// under the switch held to call's staging
 				// (integrations.HoldToRound), so a request is never answered
@@ -457,8 +462,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// chain's next recording answers the call first when the
 					// call is that recording, whatever the open test owns of
 					// it, and a line says the chain decided it (chainNext).
-					if follow != "" {
-						stub, err = h.chainNext(reqCtx, input, db, chainCall{next: follow, series: followSeries, call: request.Method + " " + utils.URLPathShape(input.url)},
+					// A chain carried on in another view (a test began or
+					// ended since its last call) ends here, said: the call
+					// is answered as any call is, the open test's own first.
+					followed = follow.For(call)
+					if follow.Next != "" && followed == "" {
+						h.Logger.Info("a once series' chain ended: the replay's view moved since this connection's last call of the series (a test began or ended, or a test set was staged), so the series' next recording does not answer this call ahead of the open test's own; the call is answered as any call is",
+							zap.String("series", follow.Series), zap.String("next", follow.Next), zap.String("call", request.Method+" "+utils.URLPathShape(input.url)))
+					}
+					if followed != "" {
+						stub, err = h.chainNext(reqCtx, input, db, chainCall{next: followed, series: follow.Series, call: request.Method + " " + utils.URLPathShape(input.url)},
 							h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), func() bool {
 								return h.ownCall(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
 							})
@@ -793,7 +806,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// connection, and the recording the chain named carries it on
 			// (integrations.OnceChainOnConn); any other answer, and a call
 			// that ended above, leave it ended.
-			chain.Answered(mockDb, stub.Name, follow)
+			chain.Answered(mockDb, stub.Name, followed, call)
 
 			// A mock whose call ended in a fault gets the fault, as the
 			// upstream gave it (serveFault), not its head as a whole answer.

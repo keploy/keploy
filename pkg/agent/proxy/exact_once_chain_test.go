@@ -26,9 +26,12 @@ import (
 // (mock-218, version 1), then writes it with options.cas the version it read
 // (mock-221), all on one connection, in TestAppCRUD's window; a declared
 // rule placed the three in the worker scope as one once series, mock-216
-// first. Every later read by name answers version 2, as the touch left it:
-// mock-308 is TestListApps' own. In the replay TestListApps authenticates
-// first, so its process makes the touch.
+// first. The write stamps the token's lastUsedAt (epoch seconds) and
+// updatedAt (RFC 3339) from the clock at the call, which keploy.yml's clock
+// rules pat-last-used-at and pat-updated-at name (touchClocks). Every later
+// read by name answers version 2, as the touch left it: mock-308 is
+// TestListApps' own. In the replay TestListApps authenticates first, so its
+// process makes the touch.
 const (
 	chainByID   = "/v1/secret/data/keploy/personal-access-tokens/_id/e2e-go-key"
 	chainRead   = "/v1/secret/data/keploy/personal-access-tokens/keploy.io/e2e-go-key"
@@ -40,7 +43,24 @@ const (
 	answerV2      = `{"version":2}`
 	answerTouched = `{"version":2,"touched":true}`
 	answerApps    = `[]`
+	answerOther   = `{"version":2,"other":true}`
+	answerRestage = `{"version":9}`
 )
+
+// touchClocks are the PAT touch's two clock rules as the scope table gives
+// them to the write (models.DeclaredSource).
+var touchClocks = []models.DeclaredSource{
+	{Rule: "pat-last-used-at", Kind: models.DeclaredSourceClock, Field: "body.data.lastUsedAt", Clock: &models.ClockOffset{Min: -time.Second, Res: time.Second}},
+	{Rule: "pat-updated-at", Kind: models.DeclaredSourceClock, Field: "body.data.updatedAt", Clock: &models.ClockOffset{Min: -time.Second, Res: time.Second}},
+}
+
+// touchBody is the touch's write as the PAT store sends it: the token with
+// lastUsedAt and updatedAt stamped at at, and options.cas the version the
+// read answered.
+func touchBody(cas int, at time.Time) string {
+	return `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":` + strconv.FormatInt(at.Unix(), 10) +
+		`,"name":"e2e-go","status":"active","updatedAt":"` + at.UTC().Format(time.RFC3339) + `"},"options":{"cas":` + strconv.Itoa(cas) + `}}`
+}
 
 // patChain is the touch's staged manager with TestListApps open, its own
 // recordings mock-308 (the read by name, version 2) and mock-310 (GET
@@ -48,10 +68,19 @@ const (
 // when not nil, changes the recordings before they are staged.
 func patChain(t *testing.T, lg *zap.Logger, once bool, edit func(byName map[string]*models.Mock)) *MockManager {
 	t.Helper()
+	mm := NewMockManager(nil, nil, lg)
+	t.Cleanup(mm.Close)
+	stagePatChain(mm, once, edit, nil)
+	return mm
+}
+
+// stagePatChain stages patChain's set in mm, with extra recordings and
+// their test windows beside it, and opens TestListApps.
+func stagePatChain(mm *MockManager, once bool, edit func(byName map[string]*models.Mock), extra []*models.Mock, windows ...models.TestWindow) {
 	write := workerProbe("mock-221", 3*time.Second, chainRead, answerTouched)
 	write.Spec.HTTPReq.Method = models.Method("PUT")
 	write.Spec.HTTPReq.Header["Content-Type"] = "application/json"
-	write.Spec.HTTPReq.Body = `{"options":{"cas":1}}`
+	write.Spec.HTTPReq.Body = touchBody(1, write.Spec.ReqTimestampMock)
 	mks := []*models.Mock{
 		workerProbe("mock-216", time.Second, chainByID, answerByID),
 		workerProbe("mock-218", 2*time.Second, chainRead, answerV1),
@@ -59,6 +88,7 @@ func patChain(t *testing.T, lg *zap.Logger, once bool, edit func(byName map[stri
 		workerProbe("mock-308", 10*time.Second, chainRead, answerV2),
 		workerProbe("mock-310", 11*time.Second, chainApps, answerApps),
 	}
+	mks = append(mks, extra...)
 	if edit != nil {
 		byName := map[string]*models.Mock{}
 		for _, mk := range mks {
@@ -66,8 +96,8 @@ func patChain(t *testing.T, lg *zap.Logger, once bool, edit func(byName map[stri
 		}
 		edit(byName)
 	}
-	mm := stagedManagerLogged(t, lg, nil, mks)
-	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "TestListApps", Start: exactT0.Add(9 * time.Second), End: exactT0.Add(12 * time.Second)}})
+	mm.SetMocksWithWindow(nil, mks, models.BaseTime, time.Now())
+	mm.SeedRecordedWindows(append([]models.TestWindow{{TestCase: "TestListApps", Start: exactT0.Add(9 * time.Second), End: exactT0.Add(12 * time.Second)}}, windows...))
 	members := []string{"mock-216", "mock-218", "mock-221"}
 	mm.ServeExactWorker(members)
 	if once {
@@ -76,9 +106,12 @@ func patChain(t *testing.T, lg *zap.Logger, once bool, edit func(byName map[stri
 		mm.SetPoolOnce(nil)
 	}
 	mm.SetPoolSeries(map[string][]string{chainSeries: members})
+	// The replay's T2 default: a declared clock field is checked by its
+	// type and form.
+	mm.SetPoolSources(map[string][]models.DeclaredSource{"mock-221": touchClocks})
+	mm.SetPoolTimeForm(true)
 	mm.ServeExactPool(models.PoolKeyNone, nil)
 	mm.ServeExactTest("TestListApps", []*models.Mock{roundMock(mm, "mock-308"), roundMock(mm, "mock-310")})
-	return mm
 }
 
 // appConn is one connection of the application's to the HTTP parser, which
@@ -96,12 +129,18 @@ type appConn struct {
 // parser to return.
 func dialParser(t *testing.T, mm *MockManager, lg *zap.Logger) *appConn {
 	t.Helper()
+	return dialParserWith(t, mm, lg, models.OutgoingOptions{})
+}
+
+// dialParserWith is dialParser with the parser's options opts.
+func dialParserWith(t *testing.T, mm *MockManager, lg *zap.Logger, opts models.OutgoingOptions) *appConn {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), callDeadline)
 	app, agentEnd := net.Pipe()
 	c := &appConn{t: t, app: app, br: bufio.NewReader(app), done: make(chan struct{})}
 	go func() {
 		defer close(c.done)
-		_ = httpint.New(lg).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
+		_ = httpint.New(lg).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, opts)
 		_ = agentEnd.Close()
 	}()
 	t.Cleanup(func() {
@@ -149,9 +188,11 @@ func (c *appConn) send(raw string) string {
 
 func chainGet(path string) string { return "GET " + path + " HTTP/1.1\r\nHost: deps\r\n\r\n" }
 
-// chainPut is the touch's write, options.cas the version the read answered.
+// chainPut is the touch's write, options.cas the version the read answered,
+// its lastUsedAt and updatedAt stamped now (touchBody), as the replay's
+// application stamps them: not as recorded.
 func chainPut(cas int) string {
-	b := `{"options":{"cas":` + strconv.Itoa(cas) + `}}`
+	b := touchBody(cas, time.Now())
 	return "PUT " + chainRead + " HTTP/1.1\r\nHost: deps\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(b)) + "\r\n\r\n" + b
 }
 
@@ -190,6 +231,9 @@ func TestAOnceChainsNextAnswersAheadOfTheOpenTestsOwnOnItsConnection(t *testing.
 		}
 		if got, want := chainLines(logs), []string{"mock-218 owned=true", "mock-221 owned=false"}; !slices.Equal(got, want) {
 			t.Fatalf("the chain's lines are %v, want %v", got, want)
+		}
+		if ended := endedLines(logs); len(ended) != 0 {
+			t.Fatalf("a line says the chain ended: %v", ended)
 		}
 	})
 	t.Run("the test's own read still to be answered", func(t *testing.T) {
@@ -282,6 +326,129 @@ func TestAOnceChainsNextWhoseAnswerCannotLoadEndsTheCall(t *testing.T) {
 	got := []string{c.send(chainGet(chainByID)), c.send(chainGet(chainRead))}
 	if want := []string{answerByID, "no answer"}; !slices.Equal(got, want) {
 		t.Fatalf("the connection was answered %v, want %v", got, want)
+	}
+}
+
+// A chain is followed only in the view it was carried on in. The touch
+// begins its chain in TestListApps' window; the replay ends that test and
+// opens TestOther before the connection's next call, TestOther's own read
+// by name (mock-408): it is answered that, not the chain's version 1, and
+// a line says the chain ended. Before, the chain answered it ahead of
+// TestOther's own, which then went unanswered.
+func TestAOnceChainEndsWhenTheReplayMovesToAnotherTestsWindow(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.InfoLevel)
+	lg := zap.New(core)
+	mm := NewMockManager(nil, nil, lg)
+	t.Cleanup(mm.Close)
+	stagePatChain(mm, true, nil, []*models.Mock{workerProbe("mock-408", 13*time.Second, chainRead, answerOther)},
+		models.TestWindow{TestCase: "TestOther", Start: exactT0.Add(12 * time.Second), End: exactT0.Add(15 * time.Second)})
+	c := dialParser(t, mm, lg)
+	got := []string{c.send(chainGet(chainByID))}
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.ServeExactTest("TestOther", []*models.Mock{roundMock(mm, "mock-408")})
+	got = append(got, c.send(chainGet(chainRead)))
+	if want := []string{answerByID, answerOther}; !slices.Equal(got, want) {
+		t.Fatalf("the connection was answered %v, want %v", got, want)
+	}
+	if lines := chainLines(logs); len(lines) != 0 {
+		t.Fatalf("the chain answered a call of TestOther's window: %v", lines)
+	}
+	if got, want := endedLines(logs), []string{"mock-218"}; !slices.Equal(got, want) {
+		t.Fatalf("the lines that say the chain ended name %v, want %v", got, want)
+	}
+}
+
+// A chain ends with its test's window too: past TestListApps' end the read
+// by name and the write are answered as any call is (the series' members,
+// served wherever they land), and the write is not the chain's to answer:
+// the read that ended it was answered so, not by the chain.
+func TestAOnceChainEndsWhenItsTestsWindowEnds(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.InfoLevel)
+	lg := zap.New(core)
+	mm := patChain(t, lg, true, nil)
+	c := dialParser(t, mm, lg)
+	got := []string{c.send(chainGet(chainByID))}
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	got = append(got, c.send(chainGet(chainRead)), c.send(chainPut(1)))
+	if want := []string{answerByID, answerV1, answerTouched}; !slices.Equal(got, want) {
+		t.Fatalf("the connection was answered %v, want %v", got, want)
+	}
+	if lines := chainLines(logs); len(lines) != 0 {
+		t.Fatalf("the chain answered a call after its test's window ended: %v", lines)
+	}
+	if got, want := endedLines(logs), []string{"mock-218"}; !slices.Equal(got, want) {
+		t.Fatalf("the lines that say the chain ended name %v, want %v", got, want)
+	}
+}
+
+// endedLines are, of the lines that say a once chain ended at a view
+// change, the recording each names next.
+func endedLines(logs *observer.ObservedLogs) []string {
+	var out []string
+	for _, e := range logs.FilterMessageSnippet("a once series' chain ended: the replay's view moved").All() {
+		f := e.ContextMap()
+		if f["series"] != chainSeries {
+			continue
+		}
+		out = append(out, f["next"].(string))
+	}
+	return out
+}
+
+// A call the parser answers with no recording (a bypassed telemetry call,
+// answered by the parser itself) ends the connection's chain as any other
+// answer does: the read by name after it is the open test's own, version 2.
+func TestACallAnsweredByNoRecordingEndsTheOnceChain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.InfoLevel)
+	lg := zap.New(core)
+	mm := patChain(t, lg, true, nil)
+	c := dialParserWith(t, mm, lg, models.OutgoingOptions{PassThroughHosts: []models.PassThroughRule{{Host: "deps", Path: "/telemetry", Mode: models.PassThroughSkip}}})
+	got := []string{
+		c.send(chainGet(chainByID)),
+		c.send("POST /telemetry HTTP/1.1\r\nHost: deps\r\nContent-Length: 2\r\n\r\n{}"),
+		c.send(chainGet(chainRead)),
+	}
+	if want := []string{answerByID, "", answerV2}; !slices.Equal(got, want) {
+		t.Fatalf("the connection was answered %q, want %q", got, want)
+	}
+	if lines := chainLines(logs); len(lines) != 0 {
+		t.Fatalf("a chain line was written: %v", lines)
+	}
+}
+
+// The chain's next recording is read from the call's held round, as every
+// matcher of the call reads it (integrations.HoldToRound): the replay
+// stages the set again right after the read by name is marked, its
+// mock-218 now answering version 9, and the read is not answered from the
+// set staged after its mark.
+func TestAOnceChainsNextIsReadInTheCallsHeldRound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.InfoLevel)
+	lg := zap.New(core)
+	mm := patChain(t, lg, true, nil)
+	c := dialParser(t, mm, lg)
+	got := []string{c.send(chainGet(chainByID))}
+	restaged := false
+	mm.exact.onMarked = func() {
+		mm.exact.onMarked = nil
+		stagePatChain(mm, true, func(byName map[string]*models.Mock) {
+			byName["mock-218"].Spec.HTTPResp.Body = answerRestage
+			byName["mock-218"].Spec.HTTPResp.Header["Content-Length"] = strconv.Itoa(len(answerRestage))
+		}, nil)
+		restaged = true
+	}
+	got = append(got, c.send(chainGet(chainRead)))
+	if !restaged {
+		t.Fatal("precondition: the set was not staged again at the read's mark")
+	}
+	if want := []string{answerByID, "a miss"}; !slices.Equal(got, want) {
+		t.Fatalf("the connection was answered %v, want %v", got, want)
+	}
+	if lines := chainLines(logs); len(lines) != 0 {
+		t.Fatalf("a chain line was written: %v", lines)
 	}
 }
 
