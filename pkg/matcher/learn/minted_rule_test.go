@@ -76,7 +76,25 @@ func mAnsweredAfter(name string, before, after time.Duration, id string) Raw {
 // live its values, f the form its replay checks.
 func mFresh(t *testing.T, what string, ds []Decision, rec, live string, f models.MintedForm) {
 	t.Helper()
-	if len(ds) != 1 || ds[0].Outcome != OutcomeFresh || ds[0].At.Word != -1 || ds[0].Recorded != rec || ds[0].Full != live {
+	mFreshBeside(t, what, ds, rec, live, f)
+}
+
+// mFreshBeside checks ds is the field decided made anew whole by mRule (as
+// mFresh), then each of bound, a piece of its value (its recorded word)
+// learning bound to an earlier place, in order, still bound there.
+func mFreshBeside(t *testing.T, what string, ds []Decision, rec, live string, f models.MintedForm, bound ...string) {
+	t.Helper()
+	if len(ds) != 1+len(bound) {
+		t.Errorf("%s: %s; want the field made anew whole, and the pieces %q bound beside it", what, oDescribe(ds), bound)
+		return
+	}
+	for i, w := range bound {
+		if d := ds[1+i]; d.Outcome != OutcomeValue || d.Recorded != w || d.At.Word < 0 || d.Minted != nil || d.From.Mock == "" {
+			t.Errorf("%s: piece %d is %s; want %q bound to its earlier place", what, i, oDescribe([]Decision{d}), w)
+		}
+	}
+	ds = ds[:1]
+	if ds[0].Outcome != OutcomeFresh || ds[0].At.Word != -1 || ds[0].Recorded != rec || ds[0].Full != live {
 		t.Errorf("%s: %s; want the field made anew whole", what, oDescribe(ds))
 		return
 	}
@@ -180,7 +198,10 @@ func TestAMintedRuleDecidesANewIdWholeWhereLearningRefusedAPieceOfIt(t *testing.
 // clock keeps learning's decision, and so does a refusal of what keploy
 // could not read (at the field or any word of it) or check whole; each
 // refusal names the rule. A piece of the value learning bound to an
-// earlier place does not count: the rule decides the value whole.
+// earlier place stays bound there beside the value made anew whole: a
+// minted "<copied>-<random>" (a tenant an earlier call sent, then a new
+// part) still checks its copied part, so a replay that sends another
+// tenant there misses.
 func TestAMintedRuleLeavesWhatLearningPlacedOrCouldNotRead(t *testing.T) {
 	shown := oCarried("mock-48", "body.code", "48d1", "4a2e", 2*time.Second, time.Second, 1)
 	in := oInput(mPath, mRec, mLiv, []Earlier{shown}, nil)
@@ -188,7 +209,16 @@ func TestAMintedRuleLeavesWhatLearningPlacedOrCouldNotRead(t *testing.T) {
 		t.Errorf("a place shows the id's group in both runs, no rule: %s; want learning's Value bound at mock-48", oDescribe([]Decision{d}))
 	}
 	in.Source = mMinted(mPath)
-	mFresh(t, "a place shows the id's group in both runs", Decide(in), mRec, mLiv, mForm)
+	mFreshBeside(t, "a place shows the id's group in both runs", Decide(in), mRec, mLiv, mForm, "48d1")
+	const tRec, tLiv = "t4821-7f3e9b2c41d6", "t9057-c0d18e5a77b2"
+	tenant := oCarried("mock-48", "body.tenant", "t4821", "t9057", 2*time.Second, time.Second, 1)
+	in = oInput(mPath, tRec, tLiv, []Earlier{tenant}, nil)
+	in.Source = mMintedAs(mPath, models.MintedForm{MinLen: 18, MaxLen: 18})
+	ds := Decide(in)
+	mFreshBeside(t, "a minted <copied>-<random>", ds, tRec, tLiv, models.MintedForm{MinLen: 18, MaxLen: 18}, "t4821")
+	if len(ds) == 2 && (ds[1].At.Word != 0 || ds[1].From.Path != "body.tenant") {
+		t.Errorf("a minted <copied>-<random>: the copied part is %s at %s; want word 0 bound to mock-48 body.tenant", oDescribe(ds[1:]), ds[1].From.Path)
+	}
 	// The whole value bound to an earlier place: learning's Value.
 	whole := oInput(mPath, "48d1", "4a2e", []Earlier{shown}, nil)
 	whole.Source = mMintedAs(mPath, models.MintedForm{MinLen: 4, MaxLen: 4})
@@ -205,7 +235,7 @@ func TestAMintedRuleLeavesWhatLearningPlacedOrCouldNotRead(t *testing.T) {
 
 	unread := oInput(mPath, mRec, mLiv, []Earlier{{Mock: "mock-7", At: oAt.Add(-time.Second), Own: true, Unread: "its payload was lost"}}, nil)
 	unread.Source = mMinted(mPath)
-	ds := Decide(unread)
+	ds = Decide(unread)
 	oRefused(t, "an earlier place keploy could not read", ds[0], RefusalUnread, "mock-7")
 	mNamesRule(t, "an earlier place keploy could not read", ds)
 
@@ -372,8 +402,10 @@ func TestAMintedFieldOfACallThatLandedElsewhereIsRefusedNamingTheRule(t *testing
 // earlier answer's id list, so learning bound the group there, and the
 // Mongo learn step, which names no place of that answer to bind it at,
 // refused it as keploy's limit: the call was set aside though a rule
-// declared the id minted. Under the rule the id's words are not decided
-// one by one: the rule decides the id made anew whole.
+// declared the id minted. Under the rule the id is decided made anew
+// whole, and the group stays bound beside it: an adapter that cannot
+// follow that place (the Mongo learn step names no place of a Postgres
+// answer) leaves the group to the rule, so the call is kept.
 func TestAMintedRuleDecidesAnIdWholeWhoseGroupAnEarlierAnswerShows(t *testing.T) {
 	const (
 		rec, live = "294e693b-0963-42b8-a8ba-8cdf7fb6d3f1", "22ee59fa-7c10-412d-b6e2-90ad3f5c7e18"
@@ -395,7 +427,7 @@ func TestAMintedRuleDecidesAnIdWholeWhoseGroupAnEarlierAnswerShows(t *testing.T)
 		t.Fatalf("with no rule: %s; want the group bound to mock-47", oDescribe([]Decision{d}))
 	}
 	in.Source = mMinted(mPath)
-	mFresh(t, "a group an earlier answer shows", Decide(in), rec, live, mForm)
+	mFreshBeside(t, "a group an earlier answer shows", Decide(in), rec, live, mForm, "42b8")
 }
 
 // Two ObjectIDs one process makes share its 5 random bytes (and their

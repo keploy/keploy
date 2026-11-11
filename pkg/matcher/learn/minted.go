@@ -9,15 +9,18 @@ import (
 // A source keploy.yml's mock.rules declares for a field of a call
 // (Input.Source) settles what learning could not: a rule of kind minted
 // says the application makes the field's whole value anew at the call (an
-// id it mints). The field is decided whole, by the rule's checks below:
-// learning's decisions of a piece of its value (a word of it, or a text a
-// step opens in it) do not count, so a piece of a new id that stands, by
-// chance, at an earlier place (bound there, or refused as one keploy names
-// no place of to bind it at) leaves the field to the rule. Learning's
-// decision of the whole value comes first: where it bound the value to an
-// earlier place, or read it as a clock, the rule does not act and the
-// field is decided as learning decided it. Else the field is decided made
-// anew whole, bound at the call, so long as:
+// id it mints). The field is decided whole, by the rule's checks below. A
+// piece of its value (a word of it, or a text a step opens in it) that
+// learning bound to an earlier place stays bound there beside it, so a
+// minted "<copied>-<random>" still checks its copied part at every replay
+// (an adapter that cannot follow that place leaves the piece to the rule);
+// every other decision of a piece (refused, read as the clock, or made
+// anew) leaves it to the rule, so a piece of a new id that stands, by
+// chance, in an earlier place's text does not set the call aside.
+// Learning's decision of the whole value comes first: where it bound the
+// value to an earlier place, or read it as a clock, the rule does not act
+// and the field is decided as learning decided it. Else the field is
+// decided made anew whole, bound at the call, so long as:
 //   - keploy read every earlier place (no refusal of the field, or of any
 //     word of it, is unread), and could check the whole value (no refusal
 //     of it is keploy's limit);
@@ -86,16 +89,22 @@ func (dc *decider) source(path string) (Source, bool) {
 }
 
 // minted decides the drifted leaf at path, which src declares minted, from
-// ds, its words as learning decided them (see above).
+// ds, its words as learning decided them (see above): the field whole,
+// then each piece learning bound to an earlier place.
 func (dc *decider) minted(path string, src Source, ds []Decision) []Decision {
 	rec, live := dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path]
+	var bound []Decision
 	for _, d := range ds {
 		switch {
 		case d.Refusal != nil && d.Refusal.Kind == RefusalUnread:
 			return ds
 		case d.Recorded != rec.Value:
 			// A piece of the value (a word of it, or a text a step opens
-			// in it): the rule decides the value whole.
+			// in it): one bound to an earlier place stays its check; the
+			// rule decides the rest with the value whole.
+			if d.Outcome == OutcomeValue {
+				bound = append(bound, d)
+			}
 		case d.Outcome == OutcomeValue || d.Outcome == OutcomeClock || d.Refusal != nil && d.Refusal.Kind == RefusalCannotCheck:
 			return ds
 		}
@@ -119,7 +128,7 @@ func (dc *decider) minted(path string, src Source, ds []Decision) []Decision {
 	d := dc.learned(path, at, -1, r, f, OutcomeFresh, why+": no earlier place holds its whole value in either run; bound at its first call, and a replay checks it is new and keeps its shape", nil)
 	d.Minted = &Minted{Rule: src.Rule, Form: form}
 	d.AnsweredAfter = dc.answeredAfter(r)
-	return []Decision{d}
+	return append([]Decision{d}, bound...)
 }
 
 // mintedHeld names the earlier places that hold a minted field's whole
