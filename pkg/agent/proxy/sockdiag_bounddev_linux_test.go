@@ -74,10 +74,17 @@ func TestASocketBoundToADeviceIsFound(t *testing.T) {
 				if local.Addr() == remote.Addr() {
 					t.Fatalf("the socket's ends %s -> %s share an address (this case's premise: they differ)", local, remote)
 				}
-				// A listener's backlog completes a decoy's connect.
-				for i, to := range []netip.AddrPort{remote, netip.AddrPortFrom(lo3, remote.Port())} {
-					if err := unix.Connect(fds[1+i], sockaddrOf(tc.family, to)); err != nil {
-						t.Fatalf("connect a decoy at %s to %s: %v", socks[1+i].addr, to, err)
+				// A listener's backlog completes a decoy's connect. Each
+				// has the socket's two ports, and one of its addresses.
+				for i, ends := range [][2]netip.AddrPort{
+					{netip.AddrPortFrom(lo3, local.Port()), remote},
+					{local, netip.AddrPortFrom(lo3, remote.Port())},
+				} {
+					if err := unix.Connect(fds[1+i], sockaddrOf(tc.family, ends[1])); err != nil {
+						t.Fatalf("connect a decoy at %s to %s: %v", socks[1+i].addr, ends[1], err)
+					}
+					if at, _ := socketEnds(t, fds[1+i]); at != ends[0] {
+						t.Fatalf("a decoy connected to %s is at %s; want %s, on the socket's port (this case's premise)", ends[1], at, ends[0])
 					}
 				}
 			}
@@ -125,14 +132,19 @@ func onOnePort(t *testing.T, socks ...boundSock) ([]int, uint16) {
 			t.Fatal(err)
 		}
 	}
-	t.Fatalf("no port free at every address of %v in %d tries: %v", socks, tries, err)
+	addrs := make([]netip.Addr, len(socks))
+	for i, s := range socks {
+		addrs[i] = s.addr
+	}
+	t.Fatalf("no port free at every one of %v in %d tries: %v", addrs, tries, err)
 	return nil, 0
 }
 
 // bindOnOnePort is one try of onOnePort. Its sockets are closed unless it
 // is all of them, bound (and listening): on an error, a skip or a failure.
-// A first socket that cannot be bound at all (its address is not here)
-// skips the test.
+// A first socket that listens at an address that is not here
+// (EADDRNOTAVAIL: ::1 where lo has no IPv6) skips the test, whose case has
+// no listener there; any other error is the caller's.
 func bindOnOnePort(t *testing.T, socks []boundSock) (fds []int, port uint16, err error) {
 	t.Helper()
 	held := false
@@ -152,10 +164,10 @@ func bindOnOnePort(t *testing.T, socks []boundSock) (fds []int, port uint16, err
 		}
 		at := netip.AddrPortFrom(s.addr, port)
 		if err := unix.Bind(fd, sockaddrOf(s.family, at)); err != nil {
-			if i == 0 && !errors.Is(err, unix.EADDRINUSE) {
-				t.Skipf("no socket at %s here: %v", at, err)
+			if i == 0 && s.listen && errors.Is(err, unix.EADDRNOTAVAIL) {
+				t.Skipf("no listener at %s here: %v", at, err)
 			}
-			return fds, 0, fmt.Errorf("bind to %s, beside %s on its port: %w", at, socks[0].addr, err)
+			return fds, 0, fmt.Errorf("bind socket %d of %d to %s: %w", i+1, len(socks), at, err)
 		}
 		if i == 0 {
 			sa, err := unix.Getsockname(fd)

@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -197,10 +199,15 @@ func callServerFirst(t *testing.T, p *Proxy, served <-chan string, quit bool) {
 // its port learned, relayed as the destination was marked); the run's
 // context ending; and a client-first destination on the same port is
 // dispatched as before.
+//
+// That destination listens at 127.0.0.3 on the server's port, held there
+// from the start (servingOnOnePort): the kernel picks the server's port among
+// those free at 127.0.0.1 alone, and another socket may hold it at 127.0.0.3.
+// Where 127.0.0.3 is not an address (macOS) its row is skipped.
 func TestAServerFirstRelayServesEveryWayAConnectionGoes(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	served := make(chan string, 8)
-	addr, conns, _ := acceptingServer(t, smtpServer(served))
+	addr, conns, clientFirst := servingOnOnePort(t, smtpServer(served), silentUntilAsked)
 	p := recordingProxy(t, addr, zap.NewNop())
 
 	t.Run("the destination closes", func(t *testing.T) {
@@ -272,7 +279,6 @@ func TestAServerFirstRelayServesEveryWayAConnectionGoes(t *testing.T) {
 		awaitEvent(t, done, "the second handling ending")
 	})
 
-	port := addr[strings.LastIndex(addr, ":")+1:]
 	t.Run("the run's context ends", func(t *testing.T) {
 		app, src := acceptedConn(t)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -291,7 +297,12 @@ func TestAServerFirstRelayServesEveryWayAConnectionGoes(t *testing.T) {
 	// dispatched as before (and a server-first one would hang as before
 	// P250, a known limit).
 	t.Run("a client-first destination on the same port", func(t *testing.T) {
-		clientFirst := listenAt(t, "127.0.0.3:"+port, silentUntilAsked)
+		if clientFirst == "" {
+			t.Skip("127.0.0.3 is not an address here")
+		}
+		if _, port, _ := net.SplitHostPort(clientFirst); !strings.HasSuffix(addr, ":"+port) {
+			t.Fatalf("the client-first destination %s is not on the server's port, %s (this row's premise)", clientFirst, addr)
+		}
 		p.to(t, clientFirst)
 		t.Cleanup(func() { p.to(t, addr) })
 		app, src := acceptedConn(t)
@@ -309,25 +320,41 @@ func TestAServerFirstRelayServesEveryWayAConnectionGoes(t *testing.T) {
 	})
 }
 
-// listenAt serves serve at addr, a loopback address of another port's
-// choosing; the test is skipped where the address cannot be bound.
-func listenAt(t *testing.T, addr string, serve func(net.Conn)) string {
+// servingOnOnePort serves serve at 127.0.0.1, as acceptingServer does, and
+// other at 127.0.0.3 on the same port, and is their addresses. The kernel
+// picks the port among those free at 127.0.0.1 alone, and another socket may
+// hold it at 127.0.0.3 (EADDRINUSE): then it closes the first and tries
+// again, at a port the kernel picks anew, so the test starts with the port
+// held at both. otherAddr is "" where 127.0.0.3 is not an address here
+// (EADDRNOTAVAIL: macOS's lo0 has 127.0.0.1 alone); any other error fails
+// the test. Both are closed when the test ends.
+func servingOnOnePort(t *testing.T, serve, other func(net.Conn)) (addr string, conns *atomic.Int32, otherAddr string) {
 	t.Helper()
-	ln, err := net.Listen("tcp4", addr)
-	if err != nil {
-		t.Skipf("cannot listen at %s: %v", addr, err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go serve(c)
+	const tries = 64
+	var err error
+	for range tries {
+		var ln, ln3 net.Listener
+		if ln, err = net.Listen("tcp4", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
 		}
-	}()
-	return ln.Addr().String()
+		at := net.JoinHostPort("127.0.0.3", strconv.Itoa(ln.Addr().(*net.TCPAddr).Port))
+		ln3, err = net.Listen("tcp4", at)
+		switch {
+		case err == nil:
+			addr, conns, _ = acceptingOn(t, ln, serve)
+			otherAddr, _, _ = acceptingOn(t, ln3, other)
+			return addr, conns, otherAddr
+		case errors.Is(err, syscall.EADDRNOTAVAIL):
+			addr, conns, _ = acceptingOn(t, ln, serve)
+			return addr, conns, ""
+		}
+		_ = ln.Close()
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatalf("listen at %s beside %s: %v", at, ln.Addr(), err)
+		}
+	}
+	t.Fatalf("no port free at both 127.0.0.1 and 127.0.0.3 in %d tries: %v", tries, err)
+	return "", nil, ""
 }
 
 // h2Settings is an HTTP/2 server's connection preface, a SETTINGS frame of
