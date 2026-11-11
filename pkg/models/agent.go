@@ -603,6 +603,15 @@ type MockStats struct {
 	Loaded   int `json:"loaded"`
 	Consumed int `json:"consumed"`
 	Missed   int `json:"missed"`
+	// SeriesCounted says the agent counts the calls in tests each series of
+	// a declared rule (ScopeTableReq.Series) answered past its recorded
+	// count, in SeriesRepeats. False from an agent that does not: its
+	// SeriesRepeats is no count, not a count of none.
+	SeriesCounted bool `json:"seriesCounted,omitempty"`
+	// SeriesRepeats is, by series, how many calls in the current staging's
+	// tests the series' last-placed recording answered past the series'
+	// recorded count. A series with none is left out.
+	SeriesRepeats map[string]int64 `json:"seriesRepeats,omitempty"`
 }
 
 type SetMocksReq struct {

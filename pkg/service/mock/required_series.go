@@ -59,6 +59,19 @@ type RequiredNotMade struct {
 // not one of table's, the set's, is never due and is left out. nil when no
 // entry has a required series.
 func requiredSeries(mp *models.Mapping, table map[string][]string) map[string]seriesDue {
+	out := placedSeries(mp, table)
+	maps.DeleteFunc(out, func(_ string, s seriesDue) bool { return !s.write })
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// placedSeries is, by series, every series of mp's worker scope
+// (models.MockEntry.Series) that requiredSeries reads, the ones it leaves
+// out as served, not required, among them (write false): what the run's
+// RULE USED lines count. nil when no entry has a series.
+func placedSeries(mp *models.Mapping, table map[string][]string) map[string]seriesDue {
 	if mp == nil {
 		return nil
 	}
@@ -81,10 +94,6 @@ func requiredSeries(mp *models.Mapping, table map[string][]string) map[string]se
 		s.write = s.write || (!e.Read && !e.Unchanged)
 		out[e.Series] = s
 	}
-	maps.DeleteFunc(out, func(_ string, s seriesDue) bool { return !s.write })
-	if len(out) == 0 {
-		return nil
-	}
 	return out
 }
 
@@ -100,13 +109,7 @@ func requiredNotMade(req map[string]seriesDue, tests []TestReceipt, consumed []m
 	if len(req) == 0 {
 		return nil, nil, nil
 	}
-	ran := make(map[string]bool, len(tests))
-	for _, t := range tests {
-		if ranOutcome(t.Outcome) {
-			ran[t.Name] = true
-		}
-	}
-	for _, id := range owedSeries(req, ran, usedNames(consumed)) {
+	for _, id := range owedSeries(req, ranTests(tests), usedNames(consumed)) {
 		s := req[id]
 		if !known {
 			if s.Trails == "" {
@@ -147,16 +150,28 @@ func owedSeries(req map[string]seriesDue, ran, used map[string]bool) []string {
 	var owed []string
 	for _, id := range slices.Sorted(maps.Keys(req)) {
 		s := req[id]
-		due := ran[s.Trails]
-		if s.Trails == "" {
-			due = s.Place == "" || ran[s.Place]
-		}
-		if !due || slices.ContainsFunc(s.Names, func(n string) bool { return used[n] }) {
+		if !s.dueIn(ran) || s.madeIn(used) {
 			continue
 		}
 		owed = append(owed, id)
 	}
 	return owed
+}
+
+// dueIn is whether s is due in a run whose tests that ran are ran: a
+// trailing series when the test it trails ran, a background one when the run
+// reached its place: the set's start, or the test of that ID ran.
+func (s seriesDue) dueIn(ran map[string]bool) bool {
+	if s.Trails == "" {
+		return s.Place == "" || ran[s.Place]
+	}
+	return ran[s.Trails]
+}
+
+// madeIn is whether used holds a recording of s: one answered call makes
+// the series.
+func (s seriesDue) madeIn(used map[string]bool) bool {
+	return slices.ContainsFunc(s.Names, func(n string) bool { return used[n] })
 }
 
 // notMadeByName is, by recording, the test each trailing series of notMade

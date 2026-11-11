@@ -5095,6 +5095,19 @@ func (p *Proxy) SetPoolSeries(series map[string][]string) error {
 	return nil
 }
 
+var _ agent.SeriesRepeatReader = (*Proxy)(nil)
+
+// SeriesRepeats implements agent.SeriesRepeatReader: the mock manager's
+// count of the calls each series answered past its recorded count
+// (MockManager.SeriesRepeats).
+func (p *Proxy) SeriesRepeats() (map[string]int64, error) {
+	m := p.getMockManager()
+	if m == nil {
+		return nil, errNoMockManager
+	}
+	return m.SeriesRepeats(), nil
+}
+
 // learnBoundary runs step (the learn tracker's Begin, End or NewSet) on the
 // proxy's learn tracker through the mock manager it holds
 // (MockManager.LearnBoundary): holding the manager's round lock, so a learn
