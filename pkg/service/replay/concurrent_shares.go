@@ -919,6 +919,12 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 		if sp.conc.entries[n].listedBy == "" {
 			continue
 		}
+		// The agent reported, after the shares were planned, that the app
+		// called its own listener where this was recorded: it passed the
+		// call through, so no test of the group made it from a mock.
+		if p.ownListener[n] {
+			continue
+		}
 		g, _ := sp.conc.group(n)
 		in := sp.info[n]
 		for _, t := range g.Tests {

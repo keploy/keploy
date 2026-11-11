@@ -62,6 +62,12 @@ type exactPlan struct {
 	// declares idle (models.IsIdleAnswer): the set's end does not require
 	// them answered (D4).
 	idle map[string]bool
+	// ownListener names the set's recordings marked as the app's calls to
+	// its own listener, at load or, mid-set, from the agent's reports
+	// (ownListenerReports.marked, the same map): keploy passes such a call
+	// through to the app, so the set's end requires none of them, and no
+	// share charges one, whenever its mark came.
+	ownListener map[string]bool
 	// begun names the test cases of the set's run that have begun: the
 	// worker-scope mocks placed after one of them are due by the set's end.
 	// One placed after a test case the run passed over without beginning it
@@ -309,6 +315,8 @@ func (p *exactPlan) unansweredWorkerOf(consumed map[string]models.MockState, sto
 		case p.idle[e.Name], e.AtStop && !stopped:
 			continue
 		case e.Place == "" && !p.bootSeen, e.Place != "" && !p.begun[e.Place]:
+			continue
+		case p.ownListener[e.Name]:
 			continue
 		}
 		if _, ok := consumed[e.Name]; !ok {

@@ -2588,6 +2588,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// (buildExpectedMockInfos, reportedExpectedNames), whatever mapping names
 	// one.
 	unservedMockNames := make(map[string]bool)
+	// ownReports is the set's recordings by where they were made, to mark
+	// those the agent reports it passed through as the app's own listener's
+	// calls (own_listener_reports.go). applyOwnListenerReport applies the
+	// agent's last answer: it runs after every read of what the app
+	// consumed, before what was read is judged.
+	var ownReports ownListenerReports
+	applyOwnListenerReport := func() {
+		r.applyOwnListenerReport(testSetID, ownReports, reusableMockNames, unservedMockNames)
+	}
 	// mockLookup maps a mock's name to its summary, protocol and target, for
 	// the report: the per-test and session mocks as recorded. Built as the
 	// mocks are loaded (loadTestSetMocks), or below, before the tests run,
@@ -2730,6 +2739,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		// Before anything reads what a test or the worker scope requires.
 		r.markOwnListenerMocks(testSetID, testCases, filtered, unfiltered)
+		ownReports = newOwnListenerReports(filtered, unfiltered)
 		if fromWindows {
 			expectedTestMockMappings, workerScope, conc = r.windowOwnershipOf(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
@@ -2753,6 +2763,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		perTestRegion = pkg.PerTestRegion(filtered)
 		if r.exactServing() {
 			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
+			r.exact.ownListener = ownReports.marked
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
 			r.exact.order, r.exact.mainPass = passOrder(testCases)
 			if r.exact.share, err = newSharePlan(ctx, conc, workerScope, filtered, unfiltered); err != nil {
@@ -4238,6 +4249,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				noteConsumers(consumers, testCase.Name, consumedMocks)
 				noteLearnedAfterEnd(learnedLate, testCase.Name, consumedMocks)
 				r.exact.noteShares(testCase.Name, consumedMocks, instrumentConsumedFetchErr)
+				applyOwnListenerReport()
 			}
 
 			r.logger.Debug("test case kind", zap.String("kind", string(testCase.Kind)), zap.String("testcase", testCase.Name), zap.String("testset", testSetID))
@@ -4809,6 +4821,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					perTestConsumedKnown := r.instrument && instrumentConsumedFetchErr == nil
 					if !r.instrument && !r.noAgent {
 						if fetched, fetchErr := r.hookImpl.GetConsumedMocks(runTestSetCtx); fetchErr == nil {
+							applyOwnListenerReport()
 							perTestConsumed = fetched
 							perTestConsumedKnown = true
 						} else {
@@ -5379,6 +5392,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					noteConsumers(consumers, tc.Name, consumedMocks)
 					noteLearnedAfterEnd(learnedLate, tc.Name, consumedMocks)
 					r.exact.noteShares(tc.Name, consumedMocks, nil)
+					applyOwnListenerReport()
 				}
 			}
 
@@ -5604,6 +5618,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				noteConsumers(consumers, tc.Name, additionalMocks)
 				noteLearnedAfterEnd(learnedLate, tc.Name, additionalMocks)
 				r.exact.noteShares(tc.Name, additionalMocks, drainErr)
+				applyOwnListenerReport()
 				consumedMocks = append(consumedMocks, additionalMocks...)
 			}
 
@@ -6206,6 +6221,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			(testSetStatus == models.TestSetStatusPassed || failedForNotFoundAlone(testSetStatus, failure, len(missing), realWhy, unclaimedReason))
 		if checkWorker {
 			workerMissing, workerUnread = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks.Map(), func(read []models.MockState) {
+				applyOwnListenerReport()
 				for _, m := range read {
 					totalConsumedMocks.Set(m)
 					allConsumedAcrossCycles[m.Name] = m
@@ -6254,6 +6270,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if err != nil {
 					consumedAtStopUnread = err
 				} else {
+					applyOwnListenerReport()
 					for _, m := range consumed {
 						totalConsumedMocks.Set(m)
 						allConsumedAcrossCycles[m.Name] = m
