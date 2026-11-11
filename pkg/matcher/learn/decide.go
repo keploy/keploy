@@ -115,9 +115,11 @@ const (
 )
 
 // Caps is what the call's adapter can do at replay: bind a Value at a word
-// address, answer an echo at one, and state what the full round's answers
-// held.
-type Caps struct{ BindAtWord, AnswerAtWord, FViewStated bool }
+// address, answer an echo at one, state what the full round's answers held,
+// and check a time in a claim of a JWT by its form (ClaimByForm:
+// learn.HoldsClaimByForm at a models.ClockOffset.Claim place). An adapter
+// that does not set ClaimByForm gets such a time refused, as before.
+type Caps struct{ BindAtWord, AnswerAtWord, FViewStated, ClaimByForm bool }
 
 // Scope is where mappings.yaml names a mock, as models.Mapping.MockPlaces
 // writes it: "test <name>" for a test's own list, "startup:", "worker:", or

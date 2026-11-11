@@ -79,6 +79,10 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 		return d
 	}
 	if d.Outcome == OutcomeClock && d.Clock != nil {
+		if d.Clock.Claim != "" {
+			// Its form is its claim's (claimForm).
+			return d
+		}
 		if form := dc.timeFormOf(path, c); form != "" {
 			off := *d.Clock
 			off.Form = form
@@ -219,6 +223,60 @@ func AnsweredWhole(earlier []Earlier, mock string, r Leaf) bool {
 		}
 	}
 	return false
+}
+
+// claimForm is the form of c, a read of the application's clock that is the
+// value whole of one claim of the JWT at path (changedInstant.claim), that a
+// replay checks it by (ClaimTimeForm) where the time default is on and the
+// call's adapter checks a claim at replay (Caps.ClaimByForm): its claim's
+// form in both runs, where c is a time of one form (timeFormOf). "" where
+// any of that does not hold: the read is refused as before.
+func (dc *decider) claimForm(path string, c changedInstant) string {
+	if !dc.in.TimeForm || !dc.in.Caps.ClaimByForm || c.claim == "" || dc.timeFormOf(path, c) == "" {
+		return ""
+	}
+	rec, live := c.leaf()
+	form := ClaimTimeForm(rec, c.claim)
+	if form == "" || ClaimTimeForm(live, c.claim) != form {
+		return ""
+	}
+	return form
+}
+
+// ClaimTimeForm is the form (TimeForm) of the value of claim in the JWT
+// text holds (a token, or "Bearer <token>"), of its JSON type: a number's a
+// Number's, a string's a String's. "" where text holds no JWT, the JWT no
+// such claim, or its value is no string or number keploy reads as an
+// instant.
+func ClaimTimeForm(text, claim string) string {
+	_, claims, ok := jwtClaims(text)
+	if !ok || claim == "" {
+		return ""
+	}
+	raw, ok := claims[claim]
+	if !ok {
+		return ""
+	}
+	v, ok := variables.Decode(variables.StepJSON, string(raw))
+	if !ok || v == "" {
+		return ""
+	}
+	t := String
+	if raw[0] != '"' {
+		t = Number
+	}
+	return timeFormAs(t, Leaf{Type: t, Value: v})
+}
+
+// HoldsClaimByForm reports whether live, the value a replay's call carries
+// at a place learned as a time in one claim of a JWT (o, with
+// models.ClockOffset.Claim), passes that check: under the time default
+// (timeForm) alone, the claim's value in live's JWT a time of o's form, of
+// its JSON type (ClaimTimeForm). HTTP and MongoDB replays both check such a
+// place with it, so the two agree; every other part of the token is
+// checked as its own learning says.
+func HoldsClaimByForm(o models.ClockOffset, live string, timeForm bool) bool {
+	return timeForm && o.Form != "" && o.Claim != "" && o.Word.IsZero() && ClaimTimeForm(live, o.Claim) == o.Form
 }
 
 // formIn is the form rec and live, a time field's leaf as recorded and in
