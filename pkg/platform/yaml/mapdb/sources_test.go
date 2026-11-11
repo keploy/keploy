@@ -16,7 +16,7 @@ import (
 )
 
 // SetSources writes the declared sources on every entry it names, in any
-// list (a test's, worker:), and they survive the rewrites a record and a
+// list (a test's, worker:, a boot's), and they survive the rewrites a record and a
 // judge make after it, a move to worker: among them. A second call names
 // the set's whole sources: an entry it does not name loses its own, and a
 // call that changes nothing writes nothing. Sources keploy cannot decide a
@@ -35,6 +35,10 @@ func TestSetSourcesMarksEntriesAndReplacesTheSetsSources(t *testing.T) {
 				if err := db.Insert(ctx, goldenMapping()); err != nil {
 					t.Fatal(err)
 				}
+				// A boot's recordings are the set's too: a source names one there.
+				if err := db.UpsertBoots(ctx, "test-set-0", []models.BootSpec{{Key: "app", Mocks: []models.MockEntry{{Name: "mock-9", Kind: "Mongo"}}}}); err != nil {
+					t.Fatal(err)
+				}
 				sourcesOf := func() map[string][]models.DeclaredSource {
 					t.Helper()
 					m, err := db.GetMapping(ctx, "test-set-0")
@@ -46,6 +50,9 @@ func TestSetSourcesMarksEntriesAndReplacesTheSetsSources(t *testing.T) {
 					for _, tc := range m.TestCases {
 						lists = append(lists, tc.Mocks)
 					}
+					for _, b := range m.Boots {
+						lists = append(lists, b.Mocks)
+					}
 					for _, list := range lists {
 						for _, e := range list {
 							if len(e.Sources) > 0 {
@@ -55,7 +62,7 @@ func TestSetSourcesMarksEntriesAndReplacesTheSetsSources(t *testing.T) {
 					}
 					return out
 				}
-				want := map[string][]models.DeclaredSource{"mock-3": {clock, minted}, "mock-6": {minted}, "mock-2": {clock}}
+				want := map[string][]models.DeclaredSource{"mock-3": {clock, minted}, "mock-6": {minted}, "mock-2": {clock}, "mock-9": {minted}}
 				if err := db.SetSources(ctx, "test-set-0", want); err != nil {
 					t.Fatal(err)
 				}

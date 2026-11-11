@@ -112,6 +112,14 @@ func TestADeclaredClockIsCheckedInARecordingNoLearningRead(t *testing.T) {
 	never := func(m *models.Mock) {
 		m.Spec.HTTPReq.Body = strings.Replace(m.Spec.HTTPReq.Body, recAt.Format(time.RFC3339), "never", 1)
 	}
+	// formOnly and rangedForm are what the learn step learns at lastUsedAt,
+	// an epoch second, under the time default: its form alone, where it
+	// learned no range, and its range with its form. The time default passes
+	// any value of the form; strict sets the form aside, so the range alone
+	// decides and a form with no range is refused.
+	epochSecond := learn.TimeForm(learn.Leaf{Type: learn.Number, Value: strconv.FormatInt(recAt.Unix(), 10)})
+	formOnly := map[string]models.ClockOffset{"body.data.lastUsedAt": {Form: epochSecond}}
+	rangedForm := map[string]models.ClockOffset{"body.data.lastUsedAt": {Res: time.Second, Form: epochSecond}}
 	for _, c := range []struct {
 		name      string
 		sources   []models.DeclaredSource
@@ -148,6 +156,11 @@ func TestADeclaredClockIsCheckedInARecordingNoLearningRead(t *testing.T) {
 		{name: "a recorded no-time compares as recorded, a time in the window", sources: both, lastUsed: now, recording: never, differs: []string{"body.data.updatedAt"}},
 		{name: "the time default: a recorded epoch far from its call keeps the range", sources: both, timeForm: true, lastUsed: recAt, recording: stale, differs: []string{"body.data.lastUsedAt"}},
 		{name: "the time default: a recorded epoch far from its call keeps the range, in the window", sources: both, timeForm: true, lastUsed: now, recording: stale},
+		{name: "the time default: a test's own place learned by its form alone, any moment of it", sources: both, own: true, learned: formOnly, timeForm: true, lastUsed: now.Add(-400 * 24 * time.Hour), updated: recAt},
+		{name: "strict: a test's own place learned by its form alone is refused", sources: both, own: true, learned: formOnly, lastUsed: now, updated: recAt, differs: []string{"body.data.lastUsedAt"}},
+		{name: "the time default: a test's own place learned with its range and form, an hour out", sources: both, own: true, learned: rangedForm, timeForm: true, lastUsed: now.Add(time.Hour), updated: recAt},
+		{name: "strict: a test's own place learned with its range and form keeps the range, an hour out", sources: both, own: true, learned: rangedForm, lastUsed: now.Add(time.Hour), updated: recAt, differs: []string{"body.data.lastUsedAt"}},
+		{name: "strict: a test's own place learned with its range and form, in the window", sources: both, own: true, learned: rangedForm, lastUsed: now, updated: recAt},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("KEPLOY_PROVEN", "1")

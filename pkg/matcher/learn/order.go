@@ -2814,10 +2814,21 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	if first.trailed {
 		rule += ", sent in " + dc.in.Trails.Test + ", which this call trails"
 	}
-	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+rule+answeredAt(c.valueEcho, c.rec), names(src))
+	fromAt, name, places := dc.fromAt(first, c.r, c.l), first.name, names(src)
+	if claim := ClaimName(fromAt); claim != "" {
+		// Bound inside a token, the line names the claim that holds it,
+		// and so does its place in the line's places.
+		name += ", its JWT's " + claim + " claim"
+		for i, p := range places {
+			if p == first.name {
+				places[i] += " (its JWT's " + claim + " claim)"
+			}
+		}
+	}
+	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), places)
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
 		Given: first.given, Client: dc.clientCase(first.mock)}
-	d.FromAt = dc.fromAt(first, c.r)
+	d.FromAt = fromAt
 	d.Echo = c.valueEcho
 	return d
 }
@@ -3352,22 +3363,185 @@ func addrList(as []variables.Address) string {
 	return strings.Join(s, ", ")
 }
 
-// fromAt is the address of the word v at p, a Value's bind place: the
-// earlier exchange's leaf as its adapter names it (an answer's as an
-// answer's), at v's word where v is one of its words, else the whole leaf;
-// no place (word -1) for a recording keploy read whole.
-func (dc *decider) fromAt(p evPlace, v string) variables.Address {
+// fromAt is the address of the word v (f in round F) at p, a Value's bind
+// place: the earlier exchange's leaf as its adapter names it (an answer's as
+// an answer's), at v's word where v is one of its words, else the whole
+// leaf; no place (word -1) for a recording keploy read whole. A client
+// test's request (clientCase) whose leaf's own words do not hold v but
+// whose JWT does, in a claim that holds v and f at one word in the two runs
+// (claimWord: a token the application minted with an id in it, sent back
+// to it), is addressed at that word of the claim (|jwt.<claim>#<n>): a
+// replay decodes the claim in the request that pairs with the test case,
+// binds the variable to it, and compares each later use with it. A call's
+// request is never addressed at a claim: its replay puts the recorded
+// values back at its places, and cannot write a claim into a signed token;
+// its leaf is named whole, as before. The signature is no place of it:
+// compared by its form, as before. Words
+// and claims are read in the text the address's own steps open (an
+// adapter's PlaceOf may name a decode step), so the claim's step follows
+// them; a leaf they do not open has no word or claim there: it is named
+// whole, as before.
+func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 	if p.leaf.Path == "" {
 		return variables.Address{Word: -1}
 	}
 	a := dc.in.AddressOf(p.leaf, p.side == Response)
-	for i, w := range variables.Words(p.leaf.Value) {
-		if p.leaf.Value[w[0]:w[1]] == v {
+	rec, _ := a.WordOf(p.leaf.Value)
+	live, _ := a.WordOf(p.live)
+	for i, w := range variables.Words(rec) {
+		if rec[w[0]:w[1]] == v {
 			a.Word = i
-			break
+			return a
 		}
 	}
+	if !dc.clientCase(p.mock) {
+		return a
+	}
+	if st, n, ok := claimWord(rec, live, v, f); ok {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), st), n
+	}
 	return a
+}
+
+// ClaimName is the JWT claim a bind place reads (its last such step), for a
+// learned line: "" where it reads none. An adapter reads it to refuse a
+// claim place that is no client test's request (Place.Claim).
+func ClaimName(at variables.Address) string {
+	claim := ""
+	for _, st := range at.Steps {
+		if c, ok := strings.CutPrefix(string(st), string(variables.JWTClaim(""))); ok {
+			claim = c
+		}
+	}
+	return claim
+}
+
+// claimWord is the claim of the JWTs rec and live, two runs of one leaf,
+// that holds v in rec and f in live at one word n, as a step: the first
+// such claim by name (jwtSpan reads the claims that differ, in that order).
+// Where no claim holds them at a word, the first claim that is v in rec and
+// f in live whole (an id of several words, a UUID in a sub claim), at word
+// -1. ok is false where either is no JWT (jwtSpan then opens no claim), or
+// no claim holds them so: the leaf is then named whole, as before.
+func claimWord(rec, live, v, f string) (variables.Step, int, bool) {
+	span, _ := jwtSpan(rec, live)
+	for _, part := range span.Parts {
+		for n, w := range variables.Words(part.Rec) {
+			if part.Rec[w[0]:w[1]] != v {
+				continue
+			}
+			if lw, ok := (variables.Address{Word: n}).WordOf(part.Live); ok && lw == f {
+				return part.Step, n, true
+			}
+		}
+	}
+	for _, part := range span.Parts {
+		if part.Rec == v && part.Live == f {
+			return part.Step, -1, true
+		}
+	}
+	return "", 0, false
+}
+
+// claimAt is Place.Claim of p, a leaf at the variable place p.Var, recorded
+// rec and seen live in record's full round, that holds the recorded value v
+// and the value f F saw inside a longer value: p.Var, at the word of the
+// claim that holds them (claimWord), "" where none does, p.Var is no place
+// (""), or p is no client test's request (Client): a replay reads a claim
+// only in the request that pairs with a client test case, and cannot write
+// one into a call's signed token. A place that already names a step or a
+// word is none: its claim would stand in text it decodes.
+func claimAt(p Place, rec, live, v, f string) string {
+	if !p.Client {
+		return ""
+	}
+	a, err := variables.ParseAddress(p.Var)
+	if err != nil || !a.Whole() {
+		return ""
+	}
+	st, n, ok := claimWord(rec, live, v, f)
+	if !ok {
+		return ""
+	}
+	a.Steps, a.Word = []variables.Step{st}, n
+	return a.String()
+}
+
+// ClaimHolding is the name of the claim of the JWT text holds (a token, or
+// "Bearer <token>") whose value holds v whole or at a word, the first such
+// claim by name: "" where text holds no JWT, v is "", or no claim holds v.
+// A refusal reads it to name the claim it found no place to bind at.
+func ClaimHolding(text, v string) string {
+	_, claims, ok := jwtClaims(text)
+	if !ok || v == "" {
+		return ""
+	}
+	for _, n := range slices.Sorted(maps.Keys(claims)) {
+		c, ok := variables.Decode(variables.StepJSON, string(claims[n]))
+		if !ok {
+			continue
+		}
+		if c == v {
+			return n
+		}
+		for _, w := range variables.Words(c) {
+			if c[w[0]:w[1]] == v {
+				return n
+			}
+		}
+	}
+	return ""
+}
+
+// ClaimRefused is why the value v, sent earlier by mock at path inside a
+// claim of the JWT there (rec as recorded, live in record's full round),
+// binds no variable there, the claim named (ClaimHolding): "" where rec
+// holds v in no claim. A call's request (client false) is no place to bind
+// a claim at: a replay reads a claim only in the request that pairs with a
+// client test case, and cannot write one into a token the call sends. A
+// client test's request is none where round F's text there holds no JWT,
+// or no claim of its token holds round F's value where the recording's
+// claim held v (at that word, or whole: claimWord).
+func ClaimRefused(mock, path, rec, live, v string, client bool) string {
+	claim := ClaimHolding(rec, v)
+	if claim == "" {
+		return ""
+	}
+	why := mock + " sent this value in the " + claim + " claim of the JWT at " + path
+	if !client {
+		return why + ", a call's request: keploy binds a variable at a JWT claim only in a client test's request, which a replay reads, never in a token a call sends, which a replay cannot write a claim into"
+	}
+	if _, _, ok := jwtClaims(live); !ok {
+		return why + ", and this run's text there holds no JWT: no variable can bind it there"
+	}
+	return why + ", and no claim of this run's token holds this run's value where the recording's claim held it, at that word or whole: no variable can bind it there"
+}
+
+// BindAt is where a variable binds at p, and the value F saw there: its
+// variable place (Var) and Live, where p held the value whole; the word of
+// its JWT claim (Claim) and that word of Live, where p is a client test's
+// request (Client) that held the value inside the claim. ok is false where
+// p has no variable place, held the value inside a longer value otherwise
+// (Claim "", which names no place), or names a claim of a call's request,
+// which a replay cannot write a claim into: no place a replay can bind at.
+func (p Place) BindAt() (at, live string, ok bool) {
+	switch {
+	case p.Var == "":
+		return "", "", false
+	case p.Whole:
+		return p.Var, p.Live, true
+	case !p.Client:
+		return "", "", false
+	}
+	a, err := variables.ParseAddress(p.Claim)
+	if err != nil {
+		return "", "", false
+	}
+	w, ok := a.WordOf(p.Live)
+	if !ok {
+		return "", "", false
+	}
+	return p.Claim, w, true
 }
 
 // learned is a decided word and its line.

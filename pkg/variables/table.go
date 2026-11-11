@@ -83,7 +83,11 @@ type Table struct {
 	// binding. Neither a new scope nor a new set forgets them (MintedWhy:
 	// an id made anew is never one the run had already). A table that
 	// reads another's run's (ReadRunOf) keeps its in that one's, so the
-	// two hold one list, under that one's lock (mintedOf).
+	// two hold one list, under that one's lock (mintedOf); one that turns
+	// to read a third's carries the list there. The list only grows, one
+	// entry per value bound at a minted place: a table lives for one keploy
+	// mock replay process, one run, so it holds at most one entry per call
+	// of the run that made an id.
 	minted map[string]Binding
 }
 
@@ -286,28 +290,31 @@ func (t *Table) keepMinted(from *Table, b Binding) {
 // to make of a minted variable (Binding.Minted), beside the run's minted
 // values and earlier (bound with b, before it): the package's MintedWhy of
 // b and the binding whose value it reuses; "" where BindAll would not, or
-// where b is none. A call checks it before it takes the recording that
-// binds b. A name already bound binds nothing new (BindAll holds it to its
-// value by its name), and is not checked here. A nil table checks b beside
+// where b is none. with is that binding, as BindAll's refusal names it, so
+// the call's miss names where the run bound the value (its Mock): none where
+// b's own value refuses it (its recorded one, or another shape), or where
+// nothing does. A call checks it before it takes the recording that binds
+// b. A name already bound binds nothing new (BindAll holds it to its value
+// by its name), and is not checked here. A nil table checks b beside
 // earlier alone.
-func (t *Table) MintedWhy(b Binding, earlier []Binding) string {
+func (t *Table) MintedWhy(b Binding, earlier []Binding) (why string, with Binding) {
 	if b.Minted == nil {
-		return ""
+		return "", Binding{}
 	}
 	var minted map[string]Binding
 	if t != nil {
 		from := t.lock()
 		defer t.unlock(from)
 		if _, ok := t.lookup(from, b.Name); ok {
-			return ""
+			return "", Binding{}
 		}
 		minted = t.mintedOf(from)
 	}
 	with, bad := mintedBeside(minted, b, earlier)
 	if !bad {
-		return ""
+		return "", Binding{}
 	}
-	return MintedWhy(b, with)
+	return MintedWhy(b, with), with
 }
 
 // KeepRun makes what is bound before the first scope begins the run's, which
@@ -357,8 +364,10 @@ func (t *Table) AllowRun() {
 // every scope: a table whose scope is a test's begun early (the next test's
 // calls in flight, answered in the gap before it) sees what the run's
 // start-up bound, as the test does once it begins. The run's minted values
-// (Table.minted) are one list for the two, kept in from's. t keeps no run's of its
-// own from it: what t binds is its scope's. from never reads t's, but checks
+// (Table.minted) are one list for the two, kept in from's; where t read
+// another table's run before, that one's list is carried into from's too,
+// so a value made anew before the turn is still the run's. t keeps no
+// run's of its own from it: what t binds is its scope's. from never reads t's, but checks
 // a bind of its run's beside t's scope's (Beside): whichever of the two binds
 // a value first, the other is refused it for another variable.
 func (t *Table) ReadRunOf(from *Table) {
@@ -391,7 +400,20 @@ func (t *Table) ReadRunOf(from *Table) {
 				break
 			}
 		}
+		// What t bound at a minted place while it read old's run is kept
+		// in old's list (keepMinted): carried into from's, so a reuse
+		// across the turn is still caught. Copied out first, so no two
+		// tables' locks are held here in another order than above.
+		carry := make([]Binding, 0, len(old.minted))
+		for _, b := range old.minted {
+			carry = append(carry, b)
+		}
 		old.mu.Unlock()
+		from.mu.Lock()
+		for _, b := range carry {
+			from.keepMinted(nil, b)
+		}
+		from.mu.Unlock()
 	}
 }
 

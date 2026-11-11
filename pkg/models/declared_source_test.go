@@ -24,6 +24,10 @@ func TestDeclaredSourceCheck(t *testing.T) {
 	}
 	withForm := clock(-sec, 0, sec)
 	withForm.Minted = form
+	// A source that is good in every other way, so the missing name alone
+	// refuses it.
+	noRule, noField := minted, clock(-sec, 0, sec)
+	noRule.Rule, noField.Field = "", ""
 	for name, c := range map[string]struct {
 		s  DeclaredSource
 		ok bool
@@ -33,8 +37,8 @@ func TestDeclaredSourceCheck(t *testing.T) {
 		"a range of two cuts and a sec":                 {clock(-2*sec, sec, sec), true},
 		"a range a nanosecond wider":                    {clock(-2*sec-1, sec, sec), false},
 		"a minted value":                                {minted, true},
-		"no rule":                                       {DeclaredSource{Kind: DeclaredSourceMinted, Field: "body._id"}, false},
-		"no field":                                      {DeclaredSource{Rule: "id@0a1b2c3d", Kind: DeclaredSourceMinted}, false},
+		"no rule":                                       {noRule, false},
+		"no field":                                      {noField, false},
 		"a kind keploy does not know":                   {DeclaredSource{Rule: "id@0a1b2c3d", Kind: "answer", Field: "body._id"}, false},
 		"no kind":                                       {DeclaredSource{Rule: "id@0a1b2c3d", Field: "body._id"}, false},
 		"a clock with no range":                         {DeclaredSource{Rule: "at@0a1b2c3d", Kind: DeclaredSourceClock, Field: "body.at"}, false},
@@ -57,6 +61,11 @@ func TestDeclaredSourceCheck(t *testing.T) {
 	} {
 		if err := c.s.Check(); (err == nil) != c.ok {
 			t.Errorf("%s: Check() = %v, want ok %v", name, err, c.ok)
+		}
+	}
+	for s, want := range map[*DeclaredSource]string{&noRule: "a declared source names no rule", &noField: "rule at@0a1b2c3d's declared source names no field"} {
+		if err := s.Check(); err == nil || err.Error() != want {
+			t.Errorf("Check() = %v, want %q", err, want)
 		}
 	}
 	if err := CheckSources([]DeclaredSource{clock(-sec, 0, sec), minted}); err != nil {

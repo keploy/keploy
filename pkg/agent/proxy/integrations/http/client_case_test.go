@@ -1,6 +1,7 @@
 package http
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -26,6 +27,19 @@ func TestAClientTestCasesRequestIsReadAtItsVariablesPlace(t *testing.T) {
 	}
 	slowRec := &models.HTTPReq{Method: "POST", URL: slowURL, Header: map[string]string{"Content-Type": "application/json", "Content-Length": "205"}, Body: slowBody("Tue, 10 Nov 2026 18:22:03 GMT", "42597640")}
 	slowLive := &models.HTTPReq{Method: "POST", URL: slowURL, Header: map[string]string{"Content-Type": "application/json", "Content-Length": "205"}, Body: slowBody("Tue, 10 Nov 2026 18:29:52 GMT", "51234567")}
+	// api-server's TestReplayVerdictReachesAnAppAdminWithoutClusterView: a
+	// cluster's proxy sends the token the application minted at its login,
+	// the cluster's id (made anew each run) in its cluster_id claim; the
+	// learn step binds the id at the claim (test case post-cluster-status-3).
+	enc := base64.RawURLEncoding
+	bearer := func(payload, sig string) map[string]string {
+		return map[string]string{"Authorization": "Bearer " + enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + enc.EncodeToString([]byte(payload)) + "." + enc.EncodeToString([]byte(sig))}
+	}
+	beat := func(header map[string]string) *models.HTTPReq {
+		return &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/cluster/status", Header: header, Body: `{"status":"active"}`}
+	}
+	beatRec := beat(bearer(`{"cid":"e2e-free-company","cluster_id":"6af47add8a9351dfdb7c457a","iat":1794407071}`, "recorded-signature"))
+	beatLive := beat(bearer(`{"cid":"e2e-free-company","cluster_id":"6af47b1e0c22d4e8a91b03f6","iat":1794407138}`, "this-run-signature"))
 	for _, tc := range []struct {
 		name            string
 		rec, live       *models.HTTPReq
@@ -52,6 +66,10 @@ func TestAClientTestCasesRequestIsReadAtItsVariablesPlace(t *testing.T) {
 		// it is no place: the replay reads a word of a string only).
 		{name: "a client test's number, whole", rec: slowRec, live: slowLive, place: "body.response_time", recorded: "42597640", value: "51234567"},
 		{name: "a word of a number", rec: slowRec, live: slowLive, place: "body.response_time#0", recorded: "42597640", why: `its recording does not hold the variable's recorded value "42597640" at body.response_time#0`},
+		{name: "a JWT claim's word", rec: beatRec, live: beatLive, place: "header.Authorization|jwt.cluster_id#0", recorded: "6af47add8a9351dfdb7c457a", value: "6af47b1e0c22d4e8a91b03f6"},
+		{name: "a JWT claim recorded with another value", rec: beatRec, live: beatLive, place: "header.Authorization|jwt.cluster_id#0", recorded: "6af47b1e0c22d4e8a91b03f6", why: `its recording does not hold the variable's recorded value "6af47b1e0c22d4e8a91b03f6" at header.Authorization|jwt.cluster_id#0`},
+		{name: "a JWT claim the live token does not hold", rec: beatRec, live: beat(bearer(`{"cid":"e2e-free-company","iat":1794407138}`, "this-run-signature")), place: "header.Authorization|jwt.cluster_id#0", recorded: "6af47add8a9351dfdb7c457a", why: "it holds no value at header.Authorization|jwt.cluster_id#0 this run"},
+		{name: "a live header that is no JWT", rec: beatRec, live: beat(map[string]string{"Authorization": "Bearer opaque-token"}), place: "header.Authorization|jwt.cluster_id#0", recorded: "6af47add8a9351dfdb7c457a", why: "it holds no value at header.Authorization|jwt.cluster_id#0 this run"},
 		{name: "a number the live request does not send", rec: slowRec, live: live(slowRec.URL, "", `{"req_id":"a20b6921-24c6-4a03-bcf9-b409842a88d0","status":200}`), place: "body.response_time", recorded: "42597640", why: "it holds no value at body.response_time this run"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

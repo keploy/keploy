@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -442,4 +443,21 @@ func TestAMintedRuleDecidesAnObjectIdWholeBesideAnotherOfItsProcess(t *testing.T
 	in := oInput(mPath, rec, live, []Earlier{sent}, nil)
 	in.Source = mMintedAs(mPath, models.MintedForm{MinLen: 24, MaxLen: 24})
 	mFresh(t, "an ObjectID beside another of its process", Decide(in), rec, live, models.MintedForm{MinLen: 24, MaxLen: 24})
+}
+
+// A recording asked before the call and answered after it, whose answer
+// holds the minted value, is downstream of the call: no place the
+// application copied the value from, so the value is still made anew, and
+// the decision lists that recording as set aside (Decision.AnsweredAfter),
+// as every word's decision does, for an adapter to refuse where no replay
+// would check it.
+func TestAMintedRuleListsARecordingAnsweredAfterTheCallThatHoldsItsValue(t *testing.T) {
+	m := receiveOf("mock-31", mRec, oAt.Add(-time.Second/2))
+	in := oInput(mPath, mRec, mLiv, nil, []Raw{RawOf(m, false)})
+	in.Source = mMinted(mPath)
+	ds := Decide(in)
+	mFresh(t, "a value a recording answered after the call holds", ds, mRec, mLiv, mForm)
+	if want := []Place{{Mock: "mock-31", Side: Response}}; len(ds) == 0 || !slices.Equal(ds[0].AnsweredAfter, want) {
+		t.Errorf("set aside as answered after the call: %s; want %+v", oDescribe(ds), want)
+	}
 }
