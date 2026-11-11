@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -670,7 +671,7 @@ func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.Teard
 // changing so that it cannot tell, once the application's command has exited:
 // keploy's stop of them (stopAdopted) has not begun. False where it adopts
 // nothing, or cannot read its children: it then does not wait on them.
-func appRunsOn(logger *zap.Logger) bool {
+func appRunsOn(logger *zap.Logger, _ *app.App) bool {
 	if !adopting.Load() {
 		return false
 	}
