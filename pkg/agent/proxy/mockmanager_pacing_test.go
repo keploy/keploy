@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -469,6 +470,68 @@ func TestWindowRewindsReadsTheCountWithItsStartAndTier(t *testing.T) {
 			}
 			t.Fatalf("read %d: GetPerTestMocksWithRewinds = %v, %d at %v, want [%s], %d: another window change's", reads, names, n, start, name, w)
 		}
+	}
+	checkRewinds(t, mm, "after the last cycle", cycles)
+}
+
+// SetCurrentTestWindow moves the window and the rewind count under windowMu
+// alone, with no swapMu to wait for a tier read to let go of: a read that took
+// the count after it let go of windowMu, apart from the window, paired a
+// window with a later change's count whenever a move landed between the two.
+// Readers race a writer that only moves the window, back and on; each read's
+// count must be the one its window was set with.
+func TestWindowRewindsTierReadHoldsTheCountAgainstAWindowOnlyMove(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	// Cycle i moves on to on(i), then back to back(i): the i-th rewind.
+	const cycles, readers = 100000, 4
+	on := func(i int) int { return 1000*i + 500 }
+	back := func(i int) int { return 1000 * i }
+	set := func(ms int) { mm.SetCurrentTestWindow(pms(ms), pms(ms+100)) }
+	want := func(start time.Time) uint64 {
+		ms := int(start.Sub(pms(0)) / time.Millisecond)
+		if ms%1000 != 0 {
+			return uint64(ms/1000 - 1)
+		}
+		return uint64(ms / 1000)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 1; i <= cycles; i++ {
+			set(on(i))
+			set(back(i))
+		}
+	}()
+	errs := make(chan string, readers)
+	var wg sync.WaitGroup
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for reads := 0; ; reads++ {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				_, n, start, err := mm.GetPerTestMocksWithRewinds()
+				if err != nil || start.IsZero() {
+					continue
+				}
+				if w := want(start); n != w {
+					errs <- fmt.Sprintf("read %d: GetPerTestMocksWithRewinds = %d at %v, want %d: another window change's count", reads, n, start, w)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatal(e)
 	}
 	checkRewinds(t, mm, "after the last cycle", cycles)
 }
