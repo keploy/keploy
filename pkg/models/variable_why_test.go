@@ -36,6 +36,13 @@ func TestSanitizedVariableMissKeepsThePassWhy(t *testing.T) {
 		require.NotContains(t, bad.NextSteps, name)
 		require.True(t, strings.HasPrefix(bad.NextSteps, "a test variable did not hold in mock-462"), bad.NextSteps)
 	}
+	// A learned name is a key's length at most: 128 is kept, a longer one is
+	// not a key keploy learns at, and the why stays out.
+	long := miss("the call does not hold variable " + strings.Repeat("a", 128) + "'s value in this run (bound at body.id of mock-9)")
+	require.Contains(t, long.VariableWhy, strings.Repeat("a", 128))
+	tooLong := miss("the call does not hold variable " + strings.Repeat("a", 129) + "'s value in this run (bound at body.id of mock-9)")
+	require.Empty(t, tooLong.VariableWhy)
+	require.True(t, strings.HasPrefix(tooLong.NextSteps, "a test variable did not hold in mock-462"), tooLong.NextSteps)
 	// No why: keploy's own sentence, as before.
 	none := miss("")
 	require.Empty(t, none.VariableWhy)
