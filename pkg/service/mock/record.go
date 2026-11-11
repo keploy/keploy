@@ -796,7 +796,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			if recordLosses, unread = m.runLosses(ctx, lossesBase, judgedLost, lostErr, refused); unread != nil {
 				recordLossesUnread = unread.Error()
 			}
-			if t := recordLosses.Text(); t != "" {
+			if t := recordLosses.RunText(); t != "" {
 				m.logger.Error("keploy could not capture every call the test command made after its last test: no recording holds what those calls carried, so judging fails the run ("+provenswitch.Env+"=1)",
 					zap.String("mock-set", name), zap.String("reason", t),
 					zap.String("next_step", "fix what the reason names, then record again"))

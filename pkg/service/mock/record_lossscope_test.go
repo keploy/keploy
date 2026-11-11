@@ -49,6 +49,13 @@ func stall(n uint64) models.CaptureLosses {
 // answers); pid, when set, is the agent's PID-map count.
 func recordWithLosses(t *testing.T, evA, evB *models.ScopeEvidence, after models.CaptureLosses, afterErr error, uncharged models.CaptureLosses, unchargedErr error, pid *pidMapCounter) (error, *TestsReceipt, string) {
 	t.Helper()
+	got, setDir, err := recordWithLossesTo(t, zap.NewNop(), evA, evB, after, afterErr, uncharged, unchargedErr, pid)
+	return err, got, setDir
+}
+
+// recordWithLossesTo is recordWithLosses with the record's log to logger.
+func recordWithLossesTo(t *testing.T, logger *zap.Logger, evA, evB *models.ScopeEvidence, after models.CaptureLosses, afterErr error, uncharged models.CaptureLosses, unchargedErr error, pid *pidMapCounter) (*TestsReceipt, string, error) {
+	t.Helper()
 	t.Setenv(provenswitch.Env, "1")
 	judgedBuild(t)
 	dir := t.TempDir()
@@ -76,11 +83,11 @@ func recordWithLosses(t *testing.T, evA, evB *models.ScopeEvidence, after models
 	require.NoError(t, os.WriteFile(filepath.Join(dir, set, RecordTestsReceiptFile), []byte("set: "+set+"\nat: 2020-01-01T00:00:00Z\nmocksDigest: \"\"\ntests:\n  - name: orders::TestStale\n    outcome: passed\n"), 0o644))
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	svc := New(zap.NewNop(), in, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	svc := New(logger, in, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
 	err := svc.Record(context.Background())
 	got, rerr := ReadRecordTestsReceipt(dir, set)
 	require.NoError(t, rerr)
-	return err, got, filepath.Join(dir, set)
+	return got, filepath.Join(dir, set), err
 }
 
 func receiptTest(r *TestsReceipt, name string) *TestReceipt {
@@ -143,6 +150,30 @@ func TestAJudgedRecordSaysALossChargedToNoTest(t *testing.T) {
 	require.NotNil(t, got)
 	require.Empty(t, got.CaptureLosses)
 	require.Contains(t, got.CaptureLossesUnread, "bad file descriptor")
+}
+
+// keploy mock record says what it could not capture after its last test in
+// the run's words (models.CaptureLosses.RunText): what, how many, why and
+// what to do, never "while this test or one before it ran", which its
+// ERROR's reason said before of a loss no test carried.
+func TestAJudgedRecordSaysALossAfterItsLastTestInTheRunsWords(t *testing.T) {
+	core, logs := observer.New(zapcore.ErrorLevel)
+	uncharged := models.CaptureLosses{
+		{Kind: models.CaptureLossPIDMap, Count: 3, Err: -7, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full"},
+		stall(1)[0],
+	}
+	got, _, err := recordWithLossesTo(t, zap.New(core), nil, nil, nil, nil, uncharged, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got, "no per-test file was written")
+	lines := logs.FilterMessageSnippet("after its last test").All()
+	require.Len(t, lines, 1, "the record did not say the loss after its last test")
+	reason, _ := lines[0].ContextMap()["reason"].(string)
+	for _, w := range []string{"this test", "before it"} {
+		require.NotContains(t, reason, w, "a loss no test carried is said as a test's")
+	}
+	require.Contains(t, reason, "target_namespace_pids refused 3 insert(s) (E2BIG")
+	require.Contains(t, reason, "(to db:3306)")
+	require.Contains(t, reason, "What to do: A map keeps one entry")
 }
 
 // pidLossRunner is lossRunner whose agent also counts PID-map refusals.

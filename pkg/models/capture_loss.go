@@ -3,6 +3,7 @@ package models
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -471,6 +472,10 @@ func (l CaptureLosses) NotJudgedText() string {
 // pycurl) sets CURLOPT_CAINFO itself, or its library's own option for it.
 const trustKeployCA = "Node.js: set NODE_EXTRA_CA_CERTS to keploy's CA certificate; the curl command line: --cacert, CURL_CA_BUNDLE or SSL_CERT_FILE; libcurl clients such as PHP's Guzzle and pycurl: CURLOPT_CAINFO (Guzzle's verify, pycurl's CAINFO), which libcurl does not take from those variables"
 
+// trustKeployCARemedy is what to do about a TLS client that rejects keploy's
+// certificate.
+const trustKeployCARemedy = "make the TLS client trust keploy's CA (" + trustKeployCA + ")"
+
 // UnixUnseenRemedy is what to do when keploy's report of the application's
 // calls over Unix sockets stopped while running (CaptureLossUnixUnseen). A
 // state of keploy's, not of the application's dependencies, so nothing done
@@ -540,7 +545,7 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 		do = append(do, UnixUnseenRemedy)
 	}
 	if tls {
-		do = append(do, "make the TLS client trust keploy's CA ("+trustKeployCA+")")
+		do = append(do, trustKeployCARemedy)
 	}
 	if serverFirst {
 		do = append(do, "list the server-first destination in keploy.yml mock.real, to reach it for real by design")
@@ -786,6 +791,97 @@ func (l CaptureLosses) Text() string {
 	return "capture incomplete: " + strings.Join(parts, "; ")
 }
 
+// RunText is keploy's sentence for losses no test carried (after a run's,
+// record's or test set's last test, or outside every test), for the run's own
+// line: each loss says what was lost and how many times in the run's words,
+// never a test's ("while this test or one before it ran"), with what it was
+// (its What, shaped as Text shapes it) and why where its record says (a PID
+// map's errno, Err); then what to do, each remedy once, where keploy names
+// one for the kind and its sentence does not already say it. A PID map's
+// loss is said from its kind, count and Err alone: its What only repeats
+// them (the agent's map and cause, or the session's sentence for both maps,
+// PIDMapRefusals.CaptureIncomplete). A kind this build does not know says
+// its kind and count. It carries no "capture incomplete: " or "not judged: "
+// head, as it says losses of both. "" for none.
+func (l CaptureLosses) RunText() string {
+	var lost, do []string
+	for _, c := range l {
+		s := runCaptureLossText(c)
+		if w := captureWhatShape(c.What); w != "" && !c.Kind.pidMap() {
+			s += " (" + w + ")"
+		}
+		lost = append(lost, s)
+		if r := runLossRemedy(c); r != "" && !slices.Contains(do, r) {
+			do = append(do, r)
+		}
+	}
+	s := strings.Join(lost, "; ")
+	if len(do) > 0 {
+		s += ". What to do: " + strings.Join(do, "; and ")
+	}
+	return s
+}
+
+// pidMap says a loss of kind k is a PID map's refusal (pid_map_refused,
+// pid_map_refused_excluded).
+func (k CaptureLossKind) pidMap() bool {
+	return k == CaptureLossPIDMap || k == CaptureLossPIDMapExcluded
+}
+
+// runCaptureLossText is c's sentence for RunText: captureLossText without
+// when, for each kind whose sentence places the loss in a test. Every other
+// kind's sentence says only what was lost, and is captureLossText's.
+func runCaptureLossText(c CaptureLoss) string {
+	switch c.Kind {
+	case CaptureLossPIDMap:
+		return pidMapTargetLost(0, c.Count, c.Err)
+	case CaptureLossPIDMapExcluded:
+		return pidMapExcludedLost(0, c.Count, c.Err)
+	case CaptureLossUnixSocket:
+		return fmt.Sprintf("the application called a Unix socket keploy cannot capture (%d time(s))", c.Count)
+	case CaptureLossUnixUnseen:
+		return "keploy's report of the application's calls over Unix sockets stopped, so whether the application made one cannot be told"
+	case CaptureLossListenerDropped:
+		return listenerDropText(c)
+	case CaptureLossKernelSkip:
+		return fmt.Sprintf("during its recording the kernel skipped %d capture run(s) of keploy's programs that see the application's connections (a run of a tracing program is skipped on a CPU where another run of it was preempted)", c.Count)
+	case CaptureLossKernelSkipCall:
+		return fmt.Sprintf("during its recording the kernel skipped %d capture run(s) of keploy's programs that capture the application's calls (a run of a tracing program is skipped on a CPU where another run of it was preempted)", c.Count)
+	case CaptureLossUnclassified:
+		return fmt.Sprintf("keploy could not tell %d time(s) whether a process was the application's (a read of its PID namespace failed where nothing had classified it), so its calls may have gone unseen", c.Count)
+	case CaptureLossAppSubtreeUntracked:
+		return fmt.Sprintf("keploy could not mark %d process(es) forked in the application's subtree as the application's (its map of the subtree was full, or it could not read the fork's start time), so their calls may have been neither recorded nor mocked; report it to keploy with the agent's log, which names the process", c.Count)
+	case CaptureLossProcessUnshimmed:
+		return fmt.Sprintf("a process of the run ran a program keploy's shim is not in (macOS drops DYLD_INSERT_LIBRARIES for a platform, hardened-runtime or restricted binary), so keploy saw none of its calls (found %d time(s): as it started, and at each test end it outlived)", c.Count)
+	case CaptureLossUnattributed:
+		return fmt.Sprintf("the application made %d call(s) from a process in no test worker's keploy instance, or in that of a worker keploy does not serve, in a run of test workers, so keploy cannot tell which test made them: a record keeps them in none of the tests' recordings, and a replay refuses them unanswered", c.Count)
+	case CaptureLossAgentStartedAgain:
+		return "keploy's agent was started again while the application ran on, and what the agent before counted went with it: a process of the application's that it could not place, or a call keploy cannot capture at all, may have gone unseen from then on, and the new agent cannot see it (keploy judges the tests again once it starts the application anew)"
+	}
+	return captureLossText(c)
+}
+
+// runLossRemedy is what to do about c for RunText: a PID map's for its
+// cause (PIDMapRefusalRemedy), the kernel's skipped runs' (KernelSkipRemedy),
+// a TLS client's that rejects keploy's certificate, and each kind's that
+// leaves a test without a verdict (NotJudgedRemedy). "" for a kind whose
+// sentence says what to do (an abandoned TLS handshake, UDP answered live,
+// an untracked fork of the application's), and for one keploy names no
+// remedy for.
+func runLossRemedy(c CaptureLoss) string {
+	switch {
+	case c.Kind.pidMap():
+		return PIDMapRefusalRemedy(c.Err)
+	case c.Kind.Evidence():
+		return KernelSkipRemedy
+	case c.Kind == CaptureLossTLSAbort:
+		return trustKeployCARemedy
+	case c.Kind == CaptureLossTLSAbandoned:
+		return ""
+	}
+	return CaptureLosses{c}.NotJudgedRemedy()
+}
+
 // captureWhatShape is what a capture loss was, as a report names it. Its
 // producers give keploy's own words and a destination (host and port), which
 // are kept as they are. A word that carries a path, a query or credentials
@@ -810,6 +906,17 @@ func captureWhatShape(what string) string {
 // miss the set's). Its text says it, as the count lands on a test's line, a
 // test case's, or the run's.
 const listenerDropWhere = "a drop is charged where a call keploy missed then would be: to the test it fell in (in keploy test, to the test case that ended before it, until that test case's misses were read), otherwise to the next test, but to the run when it fell before a test process claimed the run (keploy's SDK claims it as the process starts) or after the run's last test; one exception: in keploy test, a drop before a test set's first test case is that test case's, where a missed call would be the set's"
+
+// listenerDropText is what a listener_dropped loss c lost, without where it
+// is charged (listenerDropWhere).
+func listenerDropText(c CaptureLoss) string {
+	if c.What != "" {
+		// Its network namespace's count unread: every packet the
+		// listener dropped counted (What says why).
+		return fmt.Sprintf("the kernel dropped %d packet(s) at keploy's proxy listener (a full SYN or accept queue, or a client that gave up its connect: keploy could not tell which), so a call may not have reached keploy", c.Count)
+	}
+	return fmt.Sprintf("the kernel dropped %d connection attempt(s) at keploy's proxy listener (its SYN or accept queue full), so a call may not have reached keploy: a client that retried one, which keploy then accepted, lost nothing, but keploy cannot tell that from one that gave up", c.Count)
+}
 
 func captureLossText(c CaptureLoss) string {
 	switch c.Kind {
@@ -850,12 +957,7 @@ func captureLossText(c CaptureLoss) string {
 	case CaptureLossContainerUnread:
 		return fmt.Sprintf("the Docker daemon did not answer keploy's read of a container's configuration (%d time(s) a call to it was matched or recorded), so keploy cannot tell which container those calls reached, nor whether they were matched or recorded as that container's", c.Count)
 	case CaptureLossListenerDropped:
-		if c.What != "" {
-			// Its network namespace's count unread: every packet the
-			// listener dropped counted (What says why).
-			return fmt.Sprintf("the kernel dropped %d packet(s) at keploy's proxy listener (a full SYN or accept queue, or a client that gave up its connect: keploy could not tell which), so a call may not have reached keploy; "+listenerDropWhere, c.Count)
-		}
-		return fmt.Sprintf("the kernel dropped %d connection attempt(s) at keploy's proxy listener (its SYN or accept queue full), so a call may not have reached keploy: a client that retried one, which keploy then accepted, lost nothing, but keploy cannot tell that from one that gave up; "+listenerDropWhere, c.Count)
+		return listenerDropText(c) + "; " + listenerDropWhere
 	case CaptureLossKernelSkip:
 		return fmt.Sprintf("during its recording the kernel skipped %d capture run(s) of keploy's programs that see the application's connections (a run of a tracing program is skipped on a CPU where another run of it was preempted), while this test or one before it ran", c.Count)
 	case CaptureLossKernelSkipCall:

@@ -96,10 +96,10 @@ func (r PIDMapRefusals) Since(base PIDMapRefusals) PIDMapRefusals {
 func (r PIDMapRefusals) CaptureIncomplete() string {
 	var lost []string
 	if r.Target > 0 {
-		lost = append(lost, fmt.Sprintf("the agent's PID map target_namespace_pids%s refused %d insert(s)%s, so at least one process was not intercepted: its calls were neither recorded nor mocked and went to the real destination", pidMapHolds(r.TargetCapacity), r.Target, pidMapBecause(r.LastTargetErr)))
+		lost = append(lost, pidMapTargetLost(r.TargetCapacity, r.Target, r.LastTargetErr))
 	}
 	if r.Excluded > 0 {
-		lost = append(lost, fmt.Sprintf("the agent's PID map excluded_pids%s refused %d insert(s)%s, so at least one process that predates the run, or a child of one, was not excluded: calls of its children may have been captured as the app's", pidMapHolds(r.ExcludedCapacity), r.Excluded, pidMapBecause(r.LastExcludedErr)))
+		lost = append(lost, pidMapExcludedLost(r.ExcludedCapacity, r.Excluded, r.LastExcludedErr))
 	}
 	if len(lost) == 0 {
 		return ""
@@ -117,6 +117,18 @@ func (r PIDMapRefusals) CaptureIncomplete() string {
 	add(r.Target, r.LastTargetErr)
 	add(r.Excluded, r.LastExcludedErr)
 	return "capture incomplete: " + strings.Join(lost, "; and ") + ". " + strings.Join(remedies, ". ") + "."
+}
+
+// pidMapTargetLost is what n inserts target_namespace_pids refused cost a
+// session, the latest refused with err, in a map of capacity entries (0: not
+// said): its sentence in a reason (CaptureIncomplete, CaptureLosses.RunText).
+func pidMapTargetLost(capacity uint32, n uint64, err int32) string {
+	return fmt.Sprintf("the agent's PID map target_namespace_pids%s refused %d insert(s)%s, so at least one process was not intercepted: its calls were neither recorded nor mocked and went to the real destination", pidMapHolds(capacity), n, pidMapBecause(err))
+}
+
+// pidMapExcludedLost is pidMapTargetLost for excluded_pids.
+func pidMapExcludedLost(capacity uint32, n uint64, err int32) string {
+	return fmt.Sprintf("the agent's PID map excluded_pids%s refused %d insert(s)%s, so at least one process that predates the run, or a child of one, was not excluded: calls of its children may have been captured as the app's", pidMapHolds(capacity), n, pidMapBecause(err))
 }
 
 // PIDMapRefusalRemedy is what a user can do about an insert the kernel refused

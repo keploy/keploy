@@ -157,7 +157,8 @@ func TestARecordingSaysAnAbandonedHandshakeAndKeepsIt(t *testing.T) {
 	}
 	late := logs.FilterMessageSnippet("after the last test case was recorded").All()
 	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "hung up on 1 TLS handshake(s)") ||
-		!strings.Contains(late[0].Message, "Go's http.Transport keeps such a spare") || !strings.HasPrefix(fmt.Sprint(late[0].ContextMap()["next_step"]), "if the client does not trust keploy's CA: ") {
+		!strings.Contains(late[0].Message, "Go's http.Transport keeps such a spare") || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "if the client does not trust keploy's CA, make it trust it (Node.js: set NODE_EXTRA_CA_CERTS") ||
+		!strings.HasPrefix(fmt.Sprint(late[0].ContextMap()["next_step"]), "if the client does not trust keploy's CA, make it trust it as the reason says") {
 		t.Fatalf("%d lines for the late one, want one WARN naming 1 handshake: %+v", len(late), late)
 	}
 }
@@ -189,7 +190,8 @@ func TestARecordingSaysAServerFirstProtocolItPassedThrough(t *testing.T) {
 		t.Fatalf("%d late lines call it an abandoned TLS handshake", n)
 	}
 	late := logs.FilterMessageSnippet("keploy passes through (a server-first protocol, or a destination's refusal), after the last test case was recorded").All()
-	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "sent data on them 1 time(s)") || !strings.Contains(fmt.Sprint(late[0].ContextMap()["next_step"]), "mock.real") {
+	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "sent data on them 1 time(s)") ||
+		!strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "What to do: list the server-first destination in keploy.yml mock.real") || fmt.Sprint(late[0].ContextMap()["next_step"]) != "do what the reason says, then re-record" {
 		t.Fatalf("%d lines for the late one, want one WARN naming 1 send and mock.real: %+v", len(late), late)
 	}
 }
@@ -378,6 +380,11 @@ func TestARecordingChargesAContainerTheDaemonDidNotAnswerToItsMocksOwnTestCase(t
 	apart := logs.FilterMessageSnippet("mocks no test case holds").All()
 	if len(apart) != 1 || !strings.Contains(fmt.Sprint(apart[0].ContextMap()["reason"]), "pg (postgres:16)") {
 		t.Fatalf("%d WARNs for the mock no test case holds, want one naming pg: %+v", len(apart), apart)
+	}
+	// No test case holds it: the run's words, with what to do, never a
+	// test's ("so keploy cannot prove this test's calls were all captured").
+	if r := fmt.Sprint(apart[0].ContextMap()["reason"]); strings.Contains(r, "this test") || !strings.Contains(r, "What to do: make `docker inspect`") {
+		t.Fatalf("the mock no test case holds is not said in the run's words: %s", r)
 	}
 	if n := logs.FilterMessageSnippet("after the last test case").Len(); n != 0 {
 		t.Fatalf("%d lines charged the count after the last test case: the mocks charge it", n)

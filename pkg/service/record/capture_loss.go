@@ -439,8 +439,8 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		// background calls): no test case is charged, and nothing fails.
 		w.logger.Warn("keploy could not name the container of mocks no test case holds, because the Docker daemon did not answer keploy's read of it: they are kept without its key ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", unmapped.NotJudgedText()),
-			zap.String("next_step", unmapped.NotJudgedRemedy()+", then re-record"))
+			zap.String("reason", unmapped.RunText()),
+			zap.String("next_step", "do what the reason says, then re-record"))
 	}
 	// A handshake abandoned after the last test case was checked, or data
 	// sent over a server-first protocol keploy relays: charged to no test
@@ -457,14 +457,14 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 	if skippedLate := w.finalEvidence.Since(w.chargedEvidence); len(skippedLate) > 0 {
 		w.logger.Warn("the kernel skipped runs of keploy's capture programs after the last test case was recorded: evidence, not a verdict; no test case holds what they may have missed ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", skippedLate.EvidenceText()),
-			zap.String("next_step", models.KernelSkipRemedy))
+			zap.String("reason", skippedLate.RunText()),
+			zap.String("next_step", "do what the reason says"))
 	}
 	if len(relayedLate) > 0 {
 		w.logger.Warn("the application sent data on connections keploy passes through (a server-first protocol, or a destination's refusal), after the last test case was recorded: no test case holds those calls ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", relayedLate.NotJudgedText()),
-			zap.String("next_step", relayedLate.NotJudgedRemedy()+", then re-record"))
+			zap.String("reason", relayedLate.RunText()),
+			zap.String("next_step", "do what the reason says, then re-record"))
 	}
 	if len(abandonedLate) > 0 {
 		// Most often a connection the application dialled, never used and
@@ -473,14 +473,14 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		// against it.
 		w.logger.Warn("a TLS client abandoned its handshake with keploy's proxy after the last test case was recorded: a client that does not trust keploy's CA rejects its certificate so, and so does a connection the application dialled, never used and closed at its stop (Go's http.Transport keeps such a spare), which lost nothing; no test case holds it ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", abandonedLate.NotJudgedText()),
-			zap.String("next_step", "if the client does not trust keploy's CA: "+abandonedLate.NotJudgedRemedy()+", then re-record"))
+			zap.String("reason", abandonedLate.RunText()),
+			zap.String("next_step", "if the client does not trust keploy's CA, make it trust it as the reason says, then re-record"))
 	}
 	if afterLast := w.final.Since(w.charged); len(afterLast) > 0 && judge == nil {
 		failed = true
 		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call after the last test case was recorded, and no test case holds what those calls carried ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", afterLast.Text()),
+			zap.String("reason", afterLast.RunText()),
 			zap.String("next_step", "fix what the reason names, then re-record"))
 	}
 	if w.finalErr != nil && judge == nil {
