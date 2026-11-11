@@ -178,9 +178,12 @@ func (r *roundState) wakeLocked() {
 // generation), or a manager closed (Close wakes its waiters so). It holds no
 // lock while it waits, so a boundary, an install or a staging takes the
 // round lock as ever. No clock: a waiter wakes on the move alone. A waiter
-// scheduled only after the store ended the test it waited for reads the
-// round moved on, and its call gets the moved miss: accepted as
-// fail-closed, the same class as learn.Tracker.AwaitRequest's.
+// the install woke that the scheduler runs only later still reads the
+// test's round: keploy's agent ends a test (its settle) only once every call
+// in the proxy's hands is answered, a waiter's among them, as for
+// learn.Tracker.AwaitRequest's. A settle that gives up on it leaves the test
+// not judged, so the moved miss it would then read is charged to no
+// verdict.
 func (m *MockManager) AwaitRoundMove(ctx context.Context, at integrations.RoundAt) (moved bool, err error) {
 	r := &m.exact.round
 	r.mu.Lock()

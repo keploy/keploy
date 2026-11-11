@@ -437,13 +437,16 @@ func (t *Tracker) OnAnswer(f func(n uint64)) {
 // no lock of the tracker's while it waits; its caller must hold none that
 // Give, End or a Begin takes.
 //
-// A known nondeterminism, accepted as fail-closed: a call woken by Give but
-// not scheduled until its test's window closed (End, the next Begin) reads a
-// round that moved, and its caller decides nothing of it (a miss naming the
-// move), where a call scheduled at once is decided in its test. Whether such
-// a call is kept or dropped then depends on the scheduler under load. Either
-// way nothing is learned from another round, so it costs yield, never a
-// false pass.
+// A call Give woke that the scheduler runs only later (a loaded host) reads
+// the round it would read at once. keploy's agent gives the request before
+// it settles the calls made before the test opens (OpenTestCase), with its
+// window staged otherwise, and both that settle and the test's end wait for
+// every call in the proxy's hands until it is answered: a call waiting here,
+// or woken and not yet run, is one (its handler is not reading the
+// application). So the test neither opens nor ends under it. A settle whose
+// watchdog gives up on such a call fails the open, which installs nothing
+// and stops keploy test's set, or leaves the test not judged at its end: the
+// call is never decided in another round unseen.
 func (t *Tracker) AwaitRequest(ctx context.Context) error {
 	if t == nil {
 		return nil

@@ -1742,11 +1742,9 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// test's round, its mark read again there (its own recordings
 			// held); the window closing (End, the next Begin, NewSet) or a
 			// staging is the moved miss. The call and the install give
-			// one verdict whichever way the scheduler orders them, but for
-			// a waiter the install woke that runs only once the store has
-			// ended that test too: it reads the round moved on and gets
-			// the moved miss, accepted as fail-closed
-			// (MockManager.AwaitRoundMove's doc). A store that
+			// one verdict whichever way the scheduler orders them: the
+			// test's end waits for the call the install woke, however late
+			// it runs (MockManager.AwaitRoundMove's doc). A store that
 			// cannot tell the move fails closed: the call is decided in no
 			// round. The tracker ahead of the store's pool view is no
 			// wait: that call is the pool's

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	nethttp "net/http"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -159,6 +160,97 @@ func TestKeployTestOpensATestCaseWithAPoolCallReadInItsGap(t *testing.T) {
 			require.NoError(t, err, "keploy test could not open test-1 with a pool call read in its gap")
 			<-done
 			require.Equal(t, "200 OK pooled", *got, "the pool's call read in test-1's gap")
+			require.Equal(t, 1, p.opened, "test-1's view was not installed")
+		})
+	}
+}
+
+// keploy test opens a test case only once every call made before it is
+// answered, the pool's call that waits for the test case's request among
+// them: its filter gives the request, settles, then installs. A call the
+// request woke that the scheduler runs only later (a loaded host) still
+// holds the open: it reads the round between tests when it runs, never
+// test-1's view, and is answered from the pool, as at once. The settle
+// counts its connection as holding work (the proxy's in-flight read, which
+// TestACallWokenByItsTestsRequestHoldsTheSettleUntilAnswered pins on the
+// real proxy). Should the settle give up on it (its watchdog wakes to its
+// count with no progress), the open fails and installs nothing: keploy
+// test's set stops there, its tests not run counted unverified, and the
+// call, run late, is still the pool's.
+func TestKeployTestHoldsAnOpenForAPoolCallItsRequestWokeLate(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, gaveUp := range []bool{false, true} {
+		t.Run(map[bool]string{false: "the call is answered, then test-1 opens", true: "the settle gives up: nothing opens"}[gaveUp], func(t *testing.T) {
+			w := stallWake(t)
+			a, _ := wireAgent(t, models.MODE_TEST)
+			p := &learningProxy{openingProxy: openingProxy{keepingProxy: keepingProxy{servingProxy: newServingProxy()}}, tracker: learn.NewTracker()}
+			t.Cleanup(p.mm.Close)
+			a.Proxy = p
+			ctx := context.Background()
+			require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{pingMock("pool-1", "/pool", "pooled", t0), pingMock("own-1", "/own-1", "owned", t0)}))
+			p.mm.LearnBoundary(p.tracker, (*learn.Tracker).NewSet)
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{
+				AfterTime: models.BaseTime, BeforeTime: t0.Add(1 << 40),
+				Exact: &models.ExactServing{Stage: true, Pool: []string{"pool-1"}},
+			}))
+			p.BeginTestCaseCapture()
+			// The call reaches the wait for test-1's request, then runs again
+			// only once the row says: the request is given meanwhile.
+			parked, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			p.tracker.OnAwait(func() {
+				once.Do(func() {
+					close(parked)
+					<-release
+				})
+			})
+			t.Cleanup(func() { p.tracker.OnAwait(nil) })
+			released := false
+			let := func() {
+				if !released {
+					released = true
+					close(release)
+				}
+			}
+			defer let()
+			waitedRound := make(chan struct{})
+			p.mm.OnAwaitRoundMove(func() { close(waitedRound) })
+			t.Cleanup(func() { p.mm.OnAwaitRoundMove(nil) })
+			p.inWork = make(chan struct{})
+			done, got := p.learnCall(t, "/pool", true)
+			select {
+			case <-parked:
+			case <-waitedRound:
+				t.Fatal("the pool's call read before test-1's request waited for the store to open test-1, whose open waits for it")
+			}
+			openTest1 := func() error {
+				return a.OpenTestCase(ctx, models.MockFilterParams{
+					Exact:       &models.ExactServing{Test: "test-1", Owned: []string{"own-1"}},
+					TestRequest: &models.TestRequest{Test: "test-1"},
+				})
+			}
+			if gaveUp {
+				_, err := w.run(openTest1, nil)
+				require.ErrorIs(t, err, errNoProgress, "the settle gave up on the woken call")
+				require.Equal(t, 0, p.opened, "test-1's view was installed though its open failed")
+				let()
+				<-done
+				require.Equal(t, "200 OK pooled", *got, "the woken call, run after the open failed")
+				return
+			}
+			opened := make(chan error, 1)
+			go func() { opened <- openTest1() }()
+			select {
+			case <-p.inWork: // the request is given, and the settle waits on the call's connection
+			case err := <-opened:
+				let()
+				<-done
+				t.Fatalf("test-1 opened (%v) before the pool call its request woke ran; the call then got %s", err, *got)
+			}
+			let()
+			<-done
+			require.Equal(t, "200 OK pooled", *got, "the pool's call its request woke, run late")
+			require.NoError(t, <-opened)
 			require.Equal(t, 1, p.opened, "test-1's view was not installed")
 		})
 	}
