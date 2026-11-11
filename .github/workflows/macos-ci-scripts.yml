@@ -22,10 +22,10 @@ name: macOS CI scripts
 # where the script then sweeps a real Docker daemon.
 #
 # Also here: docker-build-retry.tests.sh, the cases of the helper every docker
-# lane builds its images through (test_workflow_scripts/docker-build-retry.sh),
-# which decides from a failed build's log whether to build again. The macOS
-# lanes source it under bash 3.2, the Linux lanes under GNU tools, so it runs
-# on both too.
+# lane builds and fetches its images through
+# (test_workflow_scripts/docker-build-retry.sh), which decides from a failed
+# build's or fetch's log whether to run it again. The macOS lanes source it
+# under bash 3.2, the Linux lanes under GNU tools, so it runs on both too.
 
 on:
   push:
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test which failed builds docker_build_retry builds again (bash 3.2, BSD tools)
+      - name: Test which failed builds and image fetches the helper runs again (bash 3.2, BSD tools)
         run: /bin/bash .github/workflows/test_workflow_scripts/docker-build-retry.tests.sh
 
   docker-build-retry-linux:
@@ -72,7 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test which failed builds docker_build_retry builds again (GNU tools)
+      - name: Test which failed builds and image fetches the helper runs again (GNU tools)
         run: bash .github/workflows/test_workflow_scripts/docker-build-retry.tests.sh
 
   reaper-linux:

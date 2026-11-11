@@ -1,0 +1,18 @@
+time="2026-11-10T18:00:09Z" level=warning msg="/home/runner/work/keploy/keploy/samples-python/django-postgres/django_postgres/docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+ postgres Pulling 
+ fcd0e9514062 Pulling fs layer 
+ 37fb86c2a767 Pulling fs layer 
+ bcc75ab4e010 Pulling fs layer 
+ eac25292b613 Pulling fs layer 
+ 6d141360b363 Pulling fs layer 
+ cbe0afc9eb7b Pulling fs layer 
+ da434b32d480 Pulling fs layer 
+ 369949eb0229 Pulling fs layer 
+ fc6c21aca07c Pulling fs layer 
+ 2a59118cca0e Pulling fs layer 
+ e9dd37612d7b Pulling fs layer 
+ a28de24f57c0 Pulling fs layer 
+ 7e0f86eb8508 Pulling fs layer 
+ a82d2da6710e Download complete 
+ 2f3707deb487 Download complete 
+unknown: failed to copy: httpReadSeeker: failed open: unexpected status from GET request to https://registry-1.docker.io/v2/library/postgres/blobs/sha256:eac25292b61391b522f697b80462618b0975d82274583089e3152f9eab8400e0: 502 Bad Gateway

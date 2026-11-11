@@ -1,0 +1,23 @@
+#1 [internal] load local bake definitions
+#1 reading from stdin 760B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 788B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/golang:1.20-bookworm
+#3 DONE 0.6s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/6] FROM docker.io/library/golang:1.20-bookworm@sha256:8bca9649e52d948114ccc8164b55b7ab26b64e729893e420114bb5c87bf7c7cc
+#5 resolve docker.io/library/golang:1.20-bookworm@sha256:8bca9649e52d948114ccc8164b55b7ab26b64e729893e420114bb5c87bf7c7cc 0.0s done
+#5 sha256:eac25292b61391b522f697b80462618b0975d82274583089e3152f9eab8400e0 0B / 64.11MB 0.2s
+#5 ERROR: failed to copy: httpReadSeeker: failed open: unexpected status from GET request to https://registry-1.docker.io/v2/library/golang/blobs/sha256:eac25292b61391b522f697b80462618b0975d82274583089e3152f9eab8400e0: 502 Bad Gateway
+------
+ > [build 1/6] FROM docker.io/library/golang:1.20-bookworm@sha256:8bca9649e52d948114ccc8164b55b7ab26b64e729893e420114bb5c87bf7c7cc:
+------
+failed to solve: failed to copy: httpReadSeeker: failed open: unexpected status from GET request to https://registry-1.docker.io/v2/library/golang/blobs/sha256:eac25292b61391b522f697b80462618b0975d82274583089e3152f9eab8400e0: 502 Bad Gateway

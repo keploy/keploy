@@ -34,6 +34,27 @@
 # very output, and matching them would silently reclassify real breakage
 # as a rate limit.
 #
+# A REGISTRY THAT CANNOT ANSWER NOW
+#
+# Docker Hub, or a proxy in front of it, also answers a fetch with 502 Bad
+# Gateway, 503 Service Unavailable or 504 Gateway Timeout while it is in
+# trouble. Observed on the django-postgres and async-config-poll lanes (jobs
+# 130020507054 and 130020507888, run 42869994761), where `docker compose
+# pull` died on a layer the same minute in both:
+#
+#   unknown: failed to copy: httpReadSeeker: failed open: unexpected status
+#     from GET request to https://registry-1.docker.io/v2/library/postgres/
+#     blobs/sha256:eac2...: 502 Bad Gateway
+#
+# Those three statuses are matched in the two wordings a registry client
+# gives them: containerd's (BuildKit, and the daemon with the containerd image
+# store), "unexpected status from GET request to <url>: 502 Bad Gateway", the
+# wording of the 429 above, and the daemon's own, "received unexpected HTTP
+# status: 503 Service Unavailable". The status is matched with the words
+# before it, never alone, for the reason above; and only those three: a 401
+# or a 404 in the same wording is a registry refusing the image, which no
+# retry clears.
+#
 # THE MODULE PROXY IS THE OTHER TRANSIENT DEPENDENCY FETCH
 #
 # A build inside these images downloads Go modules, and proxy.golang.org
@@ -144,7 +165,7 @@
 # failure in one cancels the others, so a service whose fetch failed in
 # transport retries the build of the others too — including a sibling's
 # genuine compile break, when it failed before it was cancelled.
-DOCKER_BUILD_RETRY_RE="toomanyrequests|too many requests|pull rate limit|rate limit exceeded|stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer|exceptions\\.ReadTimeoutError: HTTPS?ConnectionPool\\(|Caused by (Read|Connect)TimeoutError\\(|Retry\\(total=0, [^)]*\\)\\) after connection broken by '(Read|Connect)TimeoutError\\(|error: incomplete-download"
+DOCKER_BUILD_RETRY_RE="toomanyrequests|too many requests|pull rate limit|rate limit exceeded|unexpected status from [a-z]+ request to [^ ]+: 50[234]( |\$)|received unexpected http status: 50[234]( |\$)|stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer|exceptions\\.ReadTimeoutError: HTTPS?ConnectionPool\\(|Caused by (Read|Connect)TimeoutError\\(|Retry\\(total=0, [^)]*\\)\\) after connection broken by '(Read|Connect)TimeoutError\\(|error: incomplete-download"
 
 # _docker_build_failure_text <log>: what the transient-fault match reads in a
 # failed build's log: in BuildKit's output, the lines of the steps that failed

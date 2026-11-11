@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Tests for docker-build-retry.sh's docker_build_retry: which failed builds it
-# builds again, and which it fails on the first attempt. Plain bash with no
+# Tests for docker-build-retry.sh's docker_build_retry, docker_pull_retry and
+# docker_compose_pull_retry: which failed builds and image fetches they run
+# again, and which they fail on the first attempt. Plain bash with no
 # Docker, so it runs unchanged on the self-hosted macOS runners' bash 3.2 and
 # BSD tools and on Linux (macos-ci-scripts.yml runs it on both), and locally:
 #
 #   bash .github/workflows/test_workflow_scripts/docker-build-retry.tests.sh
 #
-# Each case is a "build" that prints a build log from docker-build-retry.tests.d
-# and fails, run through docker_build_retry with no backoff, under the shell
-# options the lanes use (set -euo pipefail) and under none.
+# Each case is a "build" (or a `docker pull` / `docker compose pull`) that
+# prints a log from docker-build-retry.tests.d and fails, run through the
+# helper with no backoff, under the shell options the lanes use (set -euo
+# pipefail) and under none.
 #
 # The logs in docker-build-retry.tests.d:
 #   buildkit-pip-read-timeout-macos.log  job 119763088290's `docker build`
@@ -37,6 +39,18 @@
 #   buildkit-failed-step-number-prefix.log  written by hand, cut to the two
 #       steps that matter: the failed step is #2, and #21 met an i/o
 #       timeout and went on.
+#   compose-pull-docker-hub-502.log  job 130020507054's `docker compose
+#       pull` (run 42869994761, the django-postgres lane), verbatim,
+#       timestamps cut: Docker Hub answered a layer's GET with 502 Bad
+#       Gateway, and the helper refused to fetch again ("for a reason
+#       retrying will not clear").
+#   pull-docker-hub-503.log, buildkit-docker-hub-502-base-image.log  written
+#       by hand: the same fault in the Docker daemon's own wording
+#       ("received unexpected HTTP status"), and in a build's FROM step, in
+#       the framing of buildkit-docker-hub-rate-limit.log.
+#   compose-pull-unauthorized-401.log, pull-manifest-unknown.log  written by
+#       hand: a registry that refuses an image (401, in the wording of the
+#       502 above) and a tag that does not exist.
 set -u
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -139,6 +153,88 @@ refused() {
   done
 }
 
+# fake_docker: the `docker` a fetch runs. `docker image inspect` finds no
+# image here, so docker_pull_retry fetches; anything else is one attempt of
+# fake_build.
+fake_docker() {
+  case "${1:-}" in
+    image) return 1 ;;
+  esac
+  fake_build
+}
+
+# run_fetch <mode> <pull|compose> <log:code>...: run_build's form for
+# docker_pull_retry (pull) or docker_compose_pull_retry (compose), with
+# fake_docker as docker.
+run_fetch() {
+  local mode="$1" how="$2" spec
+  shift 2
+  : >"$work/outputs"
+  : >"$work/codes"
+  echo 0 >"$work/attempts"
+  for spec in "$@"; do
+    case "${spec%%:*}" in
+      -) echo >>"$work/outputs" ;;
+      *) echo "$logs/${spec%%:*}" >>"$work/outputs" ;;
+    esac
+    echo "${spec##*:}" >>"$work/codes"
+  done
+  (
+    if [ "$mode" = strict ]; then set -euo pipefail; fi
+    # shellcheck source=docker-build-retry.sh
+    source "$helper"
+    docker() { fake_docker "$@"; }
+    export DOCKER_PULL_RETRY_ATTEMPTS=$# DOCKER_PULL_RETRY_BACKOFF=0
+    if [ "$how" = pull ]; then
+      docker_pull_retry postgres:16
+    else
+      docker_compose_pull_retry
+    fi
+  ) >"$work/out" 2>&1
+  rc=$?
+  out="$(LC_ALL=C tr -d '\000' <"$work/out")"
+  tries="$(cat "$work/attempts")"
+}
+
+# fetched_again <pull|compose> <log>: a fetch that fails so is run again, and
+# fails at the end once every attempt failed so; one that then succeeds is a
+# success.
+fetched_again() {
+  local mode
+  [ -f "$logs/$2" ] || { fail "$2: no such log"; return; }
+  for mode in strict plain; do
+    run_fetch "$mode" "$1" "$2:1" "$2:1"
+    if [ "$tries" -ne 2 ] || [ "$rc" -ne 1 ] ||
+      ! grep -q 'Transient registry failure' <<<"$out" ||
+      ! grep -q "did not succeed in 2 attempts" <<<"$out"; then
+      fail "$2 ($1, $mode): want two attempts and exit 1 after both; got $tries attempt(s), exit $rc"
+      grep -E '^fetching|::error::|Transient' <<<"$out" | sed 's/^/    | /' | cut -c1-200
+      continue
+    fi
+    run_fetch "$mode" "$1" "$2:1" "-:0"
+    if [ "$tries" -ne 2 ] || [ "$rc" -ne 0 ]; then
+      fail "$2 ($1, $mode): want the second attempt's success; got $tries attempt(s), exit $rc"
+      continue
+    fi
+    echo "ok   - $2 ($1, $mode): fetched again"
+  done
+}
+
+# fetch_refused <pull|compose> <log>: a fetch that fails so is not run again.
+fetch_refused() {
+  local mode
+  [ -f "$logs/$2" ] || { fail "$2: no such log"; return; }
+  for mode in strict plain; do
+    run_fetch "$mode" "$1" "$2:1" "-:0"
+    if [ "$tries" -ne 1 ] || [ "$rc" -ne 1 ] || ! grep -q 'retrying will not clear' <<<"$out"; then
+      fail "$2 ($1, $mode): want one attempt and exit 1 with 'retrying will not clear'; got $tries attempt(s), exit $rc"
+      grep -E '^fetching|::error::|Transient' <<<"$out" | sed 's/^/    | /' | cut -c1-200
+      continue
+    fi
+    echo "ok   - $2 ($1, $mode): not fetched again"
+  done
+}
+
 # whole_log_matches <log>: the control for a case refused because only the
 # failed step is read: the whole log does hold a word the match takes.
 whole_log_matches() {
@@ -165,6 +261,9 @@ retried pip-wheel-cut-short-incomplete-download.log
 retried pip-wheel-cut-short-resumed-incomplete-download.log
 retried buildkit-docker-hub-rate-limit.log
 retried buildkit-go-proxy-stream-error.log
+# A registry that answers 502, 503 or 504 (it, or a proxy in front of it,
+# could not answer now) in a build's FROM step.
+retried buildkit-docker-hub-502-base-image.log
 
 # Failures that are not transport. The Go one is the syntax error a match on
 # "unexpected EOF" once built again four times.
@@ -261,8 +360,17 @@ else
   done
 fi
 
+# Fetching an image: the registry's 502 that failed the django-postgres lane's
+# `docker compose pull`, and the daemon's 503 on a `docker pull`, are fetched
+# again; a registry that refuses the image (401, in the same wording) and a
+# tag that does not exist are not.
+fetched_again compose compose-pull-docker-hub-502.log
+fetched_again pull pull-docker-hub-503.log
+fetch_refused compose compose-pull-unauthorized-401.log
+fetch_refused pull pull-manifest-unknown.log
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures case(s) failed"
   exit 1
 fi
-echo "all docker_build_retry cases passed"
+echo "all docker-build-retry.sh cases passed"
