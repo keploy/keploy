@@ -22,6 +22,7 @@ func TestShellWordQuotesWhatAShellWouldChange(t *testing.T) {
 		"it's":                 `'it'\''s'`,
 		"a`b`":                 "'a`b`'",
 		`a\tb`:                 `'a\tb'`,
+		"$PORT":                "'$PORT'",
 	} {
 		if got := ShellWord(in); got != want {
 			t.Errorf("ShellWord(%q) = %q; want %q", in, got, want)
@@ -51,6 +52,9 @@ func TestRecordSetAgainRecordsTheSetInItsPlace(t *testing.T) {
 		{"no app command", "/w/app/keploy", "/w/app", "/w/app", "  ",
 			"mkdir -p -- /w/app/keploy-replaced && mkdir -- /w/app/keploy-replaced/test-set-0-test-run-3 && mv -- /w/app/keploy/test-set-0 /w/app/keploy-replaced/test-set-0-test-run-3/test-set-0 && keploy record --metadata name=test-set-0",
 			"/w/app/keploy-replaced/test-set-0-test-run-3"},
+		{"a cwd with a trailing slash", "/w/app/keploy", "/w/app", "/w/app/", "./app",
+			"mkdir -p -- /w/app/keploy-replaced && mkdir -- /w/app/keploy-replaced/test-set-0-test-run-3 && mv -- /w/app/keploy/test-set-0 /w/app/keploy-replaced/test-set-0-test-run-3/test-set-0 && keploy record -c ./app --metadata name=test-set-0",
+			"/w/app/keploy-replaced/test-set-0-test-run-3"},
 		{"a trailing slash", "/w/app/keploy/", "/w/app/", "/w/app", "./app",
 			"mkdir -p -- /w/app/keploy-replaced && mkdir -- /w/app/keploy-replaced/test-set-0-test-run-3 && mv -- /w/app/keploy/test-set-0 /w/app/keploy-replaced/test-set-0-test-run-3/test-set-0 && keploy record -c ./app --metadata name=test-set-0",
 			"/w/app/keploy-replaced/test-set-0-test-run-3"},
@@ -76,7 +80,9 @@ func TestRecordSetAgainRecordsTheSetInItsPlace(t *testing.T) {
 // its own for the run, by, nor one that would record the set under another
 // name: such a command would move another folder, or leave the set as it was.
 func TestRecordSetAgainFailsClosedOnASetItCannotName(t *testing.T) {
-	for _, set := range []string{"", ".", "..", "a/b", `a\b`, "../x", "a,b", "123", "0", "true", "null", "x, y"} {
+	// " lead": keploy record trims the space after name= (TrimSpaces) and
+	// records "lead"; `a\`: no folder name on Windows.
+	for _, set := range []string{"", ".", "..", "a/b", `a\b`, `a\`, `\`, "../x", "a,b", "123", "0", "true", "null", "x, y", " lead"} {
 		if got := RecordSetAgain("/w/app/keploy", "/w/app", "/w/app", set, "test-run-1", "./app"); got != (RecordAgain{}) {
 			t.Errorf("set %q: got %+v; want no command", set, got)
 		}
