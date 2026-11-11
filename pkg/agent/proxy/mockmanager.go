@@ -1312,25 +1312,47 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 // getFilteredMocksInWindowIn is GetFilteredMocksInWindow read in v: the view in force, or the view a call held to
 // its mark was read in (heldScope.readView); nil with exact serving off.
 func (m *MockManager) getFilteredMocksInWindowIn(v *exactView) ([]*models.Mock, error) {
+	mocks, _, _, err := m.getFilteredMocksInWindowAt(v)
+	return mocks, err
+}
+
+// GetPerTestMocksWithRewinds is GetPerTestMocksInWindow read with
+// WindowRewinds in one snapshot (integrations.WindowRewindCounter): the tree,
+// the window and the rewind count are taken under the one swapMu and windowMu
+// hold the per-test read takes them in, so the three are one window change's.
+func (m *MockManager) GetPerTestMocksWithRewinds() ([]*models.Mock, uint64, time.Time, error) {
+	v := m.exactView()
+	mocks, rewinds, start, err := m.getFilteredMocksInWindowAt(v)
+	if v != nil {
+		// What CurrentTestWindow reads under exact serving.
+		start = time.Time{}
+	}
+	return mocks, rewinds, start, err
+}
+
+// getFilteredMocksInWindowAt is getFilteredMocksInWindowIn, also returning
+// the rewind count and the window start it was read in.
+func (m *MockManager) getFilteredMocksInWindowAt(v *exactView) ([]*models.Mock, uint64, time.Time, error) {
 	// Atomicity contract: snapshot the per-test tree POINTER and the
 	// window together under swapMu.RLock so SetMocksWithWindow can't
 	// interleave a (tree, window) swap between our two reads. Once
 	// both snapshots are in hand, release swapMu and let tree
 	// iteration run unlocked — otherwise a long walk over a large
 	// pool would block SetMocksWithWindow writers for its duration.
+	// The rewind count moves with the window, under windowMu.
 	m.swapMu.RLock()
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
 	m.windowMu.RLock()
-	start, end := m.windowStart, m.windowEnd
+	start, end, rewinds := m.windowStart, m.windowEnd, m.rewinds
 	m.windowMu.RUnlock()
 	m.swapMu.RUnlock()
 
 	// Under exact serving the test's mapping decides, not a recorded time,
 	// over what the view shows of the tier (shownOf).
 	if v != nil {
-		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
+		return m.exactPerTest(v, "", v.shownOf(tree, "")), rewinds, start, nil
 	}
 	all := make([]*models.Mock, 0, 64)
 	tree.rangeValues(func(v interface{}) bool {
@@ -1340,7 +1362,7 @@ func (m *MockManager) getFilteredMocksInWindowIn(v *exactView) ([]*models.Mock, 
 		return true
 	})
 	if start.IsZero() || end.IsZero() {
-		return all, nil
+		return all, rewinds, start, nil
 	}
 	out := make([]*models.Mock, 0, len(all))
 	var droppedOutOfWindow, droppedInvalidOrder, missingTs uint64
@@ -1397,7 +1419,7 @@ func (m *MockManager) getFilteredMocksInWindowIn(v *exactView) ([]*models.Mock, 
 			zap.Time("windowStart", start),
 			zap.Time("windowEnd", end))
 	}
-	return out, nil
+	return out, rewinds, start, nil
 }
 
 // DroppedOutOfWindow returns the number of mocks that
@@ -4621,11 +4643,18 @@ func (m *MockManager) StagingEpoch() uint64 {
 // the history (a test's window loaded again within the pass) is not counted.
 // The count never goes down, and it moves under windowMu with the window it
 // compares, in the same staging step as the trees, before WindowChanged's
-// channel closes.
-func (m *MockManager) WindowRewinds() uint64 {
+// channel closes. It is returned with start, the window start set with it,
+// read under the same windowMu hold, so the pair never mixes two window
+// changes; start is what CurrentTestWindow reads: zero under exact serving.
+// GetPerTestMocksWithRewinds reads the pair with the per-test tier.
+func (m *MockManager) WindowRewinds() (uint64, time.Time) {
+	exact := m.exactView() != nil
 	m.windowMu.RLock()
 	defer m.windowMu.RUnlock()
-	return m.rewinds
+	if exact {
+		return m.rewinds, time.Time{}
+	}
+	return m.rewinds, m.windowStart
 }
 
 // SeedConsumedRewinds hands the manager the count of retry cycles the consumed

@@ -1190,12 +1190,27 @@ func (s *scopedMockDb) StagingEpoch() uint64 {
 }
 
 // WindowRewinds carries no mock data either. A wrapped store without the facet
-// counts none.
-func (s *scopedMockDb) WindowRewinds() uint64 {
+// counts none, with its window start.
+func (s *scopedMockDb) WindowRewinds() (uint64, time.Time) {
 	if r, ok := s.MockMemDb.(integrations.WindowRewindCounter); ok {
 		return r.WindowRewinds()
 	}
-	return 0
+	start, _ := s.MockMemDb.CurrentTestWindow()
+	return 0, start
+}
+
+// GetPerTestMocksWithRewinds is the wrapped store's, through the same name
+// filter as GetPerTestMocksInWindow. A wrapped store without the facet counts
+// none, and its start and tier are read apart.
+func (s *scopedMockDb) GetPerTestMocksWithRewinds() ([]*models.Mock, uint64, time.Time, error) {
+	if r, ok := s.MockMemDb.(integrations.WindowRewindCounter); ok {
+		mocks, rewinds, start, err := r.GetPerTestMocksWithRewinds()
+		mocks, err = s.keep(mocks, err)
+		return mocks, rewinds, start, err
+	}
+	_, start := s.WindowRewinds()
+	mocks, err := s.GetPerTestMocksInWindow()
+	return mocks, 0, start, err
 }
 
 func (s *scopedMockDb) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
