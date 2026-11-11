@@ -1760,6 +1760,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			Differs:          call.Differs,
 			FieldReasons:     call.FieldReasons,
 			VariablePlaces:   call.VariablePlaces,
+			BoundIn:          slices.Clone(call.BoundIn),
 			Given:            call.Given,
 			NotOwned:         call.NotOwned,
 			HeldPastWindow:   call.Held, // the proxy's copy of the parser's HeldPastWindow

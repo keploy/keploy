@@ -523,6 +523,21 @@ type varProblem struct {
 	// this run's test did not give it before the call. The miss names it
 	// (MockMismatchReport.Given).
 	given string
+	// boundIn is where this run bound each variable the problem read (the
+	// variable the place holds another value than, or the other variable
+	// whose value the call carries), once, by the name its binding carries:
+	// the miss names them (MockMismatchReport.BoundIn). None for a given or
+	// a variable not bound yet.
+	boundIn []string
+}
+
+// boundAt is p with mock, the name the binding of a variable it read
+// carries (VariableBinding.Mock), in its boundIn; "" adds none.
+func (p *varProblem) boundAt(mock string) *varProblem {
+	if mock != "" && !slices.Contains(p.boundIn, mock) {
+		p.boundIn = append(p.boundIn, mock)
+	}
+	return p
 }
 
 func (p *varProblem) diff() string {
@@ -1028,7 +1043,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				return nil, (&varProblem{
 					mock: m.Name, name: d.name, place: d.bind.raw, expected: "a value other than variable " + b.Name + "'s", actual: v.value,
 					next: fmt.Sprintf("the application sent %s's value where it sent %s's when the test was recorded: fix the application, or re-record the test if that is intended", b.Name, d.name),
-				}).say("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, said{v.value, d.bind.place}, b.Name, b.Mock, b.Place)
+				}).say("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, said{v.value, d.bind.place}, b.Name, b.Mock, b.Place).boundAt(b.Mock)
 			}
 		}
 		taken[d.name] = runOf[d.name].On(variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw, Clock: d.clock})
@@ -1159,7 +1174,7 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 		return (&varProblem{
 			mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value,
 			next: fmt.Sprintf("the application sent another value at %s than the one it made in this test: if that is intended, re-record the test; otherwise fix the application", vp.raw),
-		}).say("variable %s is %q in this test (taken at %s %s), and this call %s %q at %s", d.name, said{want, vp.place}, boundMock, boundPlace, verb, said{l.value, vp.place}, vp.raw)
+		}).say("variable %s is %q in this test (taken at %s %s), and this call %s %q at %s", d.name, said{want, vp.place}, boundMock, boundPlace, verb, said{l.value, vp.place}, vp.raw).boundAt(boundMock)
 	}
 	return nil
 }
@@ -1452,7 +1467,7 @@ func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, cons
 			return nil, (&varProblem{
 				mock: hit.mock.Name, name: bad.Name, place: bad.Place, expected: "a value variable " + with.Name + " does not hold", actual: bad.Value,
 				next: "the check of the call and its bind disagree, which is a keploy bug: report it with this test set",
-			}).say("this call binds variable %s at %s to %q, which the test's variables refuse beside variable %s (bound at %s %s to %q), though the check of the call let it", bad.Name, bad.Place, said{bad.Value, at.Place}, with.Name, with.Mock, with.Place, said{with.Value, at.Place}), false, nil
+			}).say("this call binds variable %s at %s to %q, which the test's variables refuse beside variable %s (bound at %s %s to %q), though the check of the call let it", bad.Name, bad.Place, said{bad.Value, at.Place}, with.Name, with.Mock, with.Place, said{with.Value, at.Place}).boundAt(with.Mock), false, nil
 		}
 		return nil, nil, true, nil
 	}
@@ -1811,6 +1826,9 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest string,
 	}
 	r := b.Build()
 	r.Given = p.given
+	// The recordings the variables the refusal read were bound at: with
+	// the closest, every recording that shaped the refusal.
+	r.BoundIn = slices.Clone(p.boundIn)
 	// The problem's own place, the path places the closest mock and the
 	// mocks on this call's route declare, and the segments that hold a value
 	// the test bound (routePathPlaces) hold the application's values: the
