@@ -2976,6 +2976,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		r.earlierSetCalls.begin(testSetID)
 
 		// The compose agent is up and the app is still parked behind its
 		// healthcheck: this test set's refused PID map inserts are counted from
@@ -3147,6 +3148,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		r.earlierSetCalls.begin(testSetID)
 
 		if r.instrument {
 			if !serveTest {
@@ -3425,9 +3427,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// What the previous set's application missed before its first test is
 	// not this set's, nor are the tests whose request its agent did not read.
 	r.setCalls.reset()
-	// An earlier set's call this set's reads return was made in a set the
-	// run began before it, the one the agent counts back to.
-	r.earlierSetCalls.begin(testSetID)
 	r.requestsUnread.reset()
 	// var to store the error in the loop
 	var loopErr error
