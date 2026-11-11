@@ -52,6 +52,10 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 		{Rule: "workload-key-expires-at", Kind: models.DeclaredSourceClock, Field: "body.data.expiresAt", Clock: yearOn},
 		{Rule: "pat-updated-at", Kind: models.DeclaredSourceClock, Field: "body.data.updatedAt", Clock: plain},
 	}
+	// shift moves round F's name and stamps off the run's clock: a test
+	// that sends an instant it did not read now, and an app that builds
+	// both stamps on it (0: the run's shape).
+	var shift time.Duration
 	run := func(sources []models.DeclaredSource, timeForm bool, expiry time.Duration) (*models.Mock, *learnMiss, *learnDb) {
 		h, n, opts := learnOn(t)
 		n.sources = func(mock string) []models.DeclaredSource {
@@ -70,13 +74,13 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 			Header: jsonType, Body: name(recBegin.Add(100 * time.Millisecond))}
 		tr.SetCases([]learn.ClientCase{{Name: "post-query-83", Req: recReq}})
 		liveReq := *recReq
-		liveReq.Body, liveReq.Timestamp = name(began.Add(100*time.Millisecond)), began.Add(100*time.Millisecond)
+		liveReq.Body, liveReq.Timestamp = name(began.Add(100*time.Millisecond+shift)), began.Add(100*time.Millisecond)
 		if !tr.Incoming(&liveReq, "", began.Add(100*time.Millisecond)) {
 			t.Fatal("the run's request paired with none of the test's recorded requests")
 		}
 		put := learnRecorded("mock-0", 1130*time.Millisecond, "PUT", path(recID), body(recID, recBegin.Add(120*time.Millisecond), expiry), nil, `{"data":{"version":1}}`)
 		db := &learnDb{perTest: []*models.Mock{put}}
-		in := live("PUT", path(liveID), body(liveID, began.Add(120*time.Millisecond), expiry), nil)
+		in := live("PUT", path(liveID), body(liveID, began.Add(120*time.Millisecond+shift), expiry), nil)
 		in.arrived = began.Add(130 * time.Millisecond)
 		var store integrations.MockMemDb = db
 		if timeForm {
@@ -87,16 +91,42 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 	}
 
 	// Without the rules the PUT is refused (createdAt, a pick from the
-	// name by the clock as far as keploy can tell); with the stamps' rules
-	// but expiresAt's, on expiresAt, as the run refused it.
+	// name by the clock as far as keploy can tell). With the stamps' rules
+	// but expiresAt's, the run refused it on expiresAt, built by the offset
+	// on the name; its call's window holds it as a read of the clock plus
+	// 365 days in both runs, so it is a time all the same, learned as that
+	// read since its test began, which a replay holds to its test's span.
+	// Built on a name an hour off the run's clock, it is no such read in
+	// round F, and stays refused on the offset.
 	stamps := []models.DeclaredSource{rules[0], rules[2]}
+	const offsetLine = "body.data.expiresAt changed, and its moment, to the second, stands 8760h0m0s after the moment test case post-query-83 at body.variables.input.name holds"
 	for _, timeForm := range []bool{true, false} {
 		if served, miss, _ := run(nil, timeForm, ttl); served != nil || miss == nil {
 			t.Fatalf("no rules, time default %v: served %v, miss %+v; want the PUT refused", timeForm, served != nil, miss)
 		}
+		shift = -time.Hour
 		served, miss, _ := run(stamps, timeForm, ttl)
-		if served != nil || miss == nil || !strings.Contains(miss.res.Why, "body.data.expiresAt changed, and its moment, to the second, stands 8760h0m0s after the moment test case post-query-83 at body.variables.input.name holds") {
-			t.Fatalf("no expiry rule, time default %v: served %v, miss %+v; want the PUT refused on expiresAt built by an offset on the name, as the run refused it", timeForm, served != nil, miss)
+		shift = 0
+		if served != nil || miss == nil || timeForm && !strings.Contains(miss.res.Why, offsetLine) {
+			t.Fatalf("no expiry rule, stamps an hour off round F's clock, time default %v: served %v, miss %+v; want the PUT refused (on the offset under the time default)", timeForm, served != nil, miss)
+		}
+		served, miss, db := run(stamps, timeForm, ttl)
+		if !timeForm {
+			// mock.times: strict checks a time by its range and
+			// provenance: the read since the test began keeps the range
+			// alone, so the offset rule's refusal stands, as before the
+			// time default was (learn.OffsetReadUnder).
+			if served != nil || miss == nil || !strings.Contains(miss.res.Why, offsetLine) {
+				t.Fatalf("no expiry rule, mock.times: strict: served %v, miss %+v; want the PUT refused on expiresAt built by an offset on the name, as before the time default", served != nil, miss)
+			}
+			continue
+		}
+		if served == nil || miss != nil || len(db.consumed) != 1 {
+			t.Fatalf("no expiry rule, time default %v: served %v, miss %+v; want the PUT answered, expiresAt a read of the clock plus 365 days", timeForm, served != nil, miss)
+		}
+		o, ok := db.consumed[0].Spec.Clocks["body.data.expiresAt"]
+		if !ok || o.Since != models.SinceTestBegin || o.Min > ttl || o.Max < ttl || o.Min <= ttl-time.Second || o.Layout != "epoch-s" || o.Form != "" {
+			t.Errorf("no expiry rule, time default %v: expiresAt learned as %+v; want the clock plus 365 days in epoch seconds, checked from its test's begin", timeForm, o)
 		}
 	}
 	for _, timeForm := range []bool{true, false} {

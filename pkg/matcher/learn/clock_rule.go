@@ -122,8 +122,15 @@ func (dc *decider) clockOnly(path string, src Source, ds []Decision) []Decision 
 // earlier place that holds it whole, a read of the clock or an offset from
 // it learning found, an echo the answer carries, and every other refusal
 // (two layouts or zone forms, a value its call's answer holds, what keploy
-// could not read).
+// could not read). A read the re-read since the test began learned in
+// place of the offset rule's refusal (Learned.offsetRefused) is decided as
+// that refusal: the rule, not learning, says how the field is checked.
 func DeclaredClockLearned(ln Learned, src Source, w *Window, timeForm bool) Learned {
+	if src.Kind == SourceClock && ln.offsetRefused != nil {
+		// The rule decides the offset rule's refusal, which the re-read
+		// since the test began learned as a read (Learned.offsetRefused).
+		ln = *ln.offsetRefused
+	}
 	settles := ln.Kind == KindVariable && ln.From.Echo || ln.Kind == KindNoise ||
 		ln.Kind == KindUnaccounted && ln.sourceWhy != "" && ln.sourceWhy == ln.Why
 	if src.Kind != SourceClock || !settles {
