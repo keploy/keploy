@@ -18,7 +18,7 @@ import (
 // ("Recv.Name" for a method).
 var missMarkWaivers = map[string]string{
 	"pkg/agent/proxy/integrations/mysql/replayer/report.go:newConnectionMiss": "a connection-phase miss: the replayer stamps the connection's round on it with markConnectionMiss (replay.go) before it reaches the proxy",
-	"pkg/models/mock_mismatch_reporter.go:ReportAnswer":                       "an answered call's report (ErrAnswered), no miss: it counts against no test",
+	"pkg/models/mock_mismatch_reporter.go:ReportAnswer":                       "the sink every answer goes through: it sends a copy of the report its caller passed, and each caller is checked here for stamping that report",
 }
 
 // Every miss a parser reports carries the round its call was made in
@@ -26,8 +26,11 @@ var missMarkWaivers = map[string]string{
 // marked, never by when keploy decided it, so a call keploy answers late is
 // never charged to the next test. A function is listed here, unless it is
 // waived with the reason (missMarkWaivers), when it:
-//   - builds a miss with its report (models.NewMockMismatchError) and stamps
-//     no round on it (a report named at the build is stamped by that name);
+//   - builds a miss with its report (models.NewMockMismatchError), or reports
+//     an answered call (models.ReportAnswer), and stamps no round on its
+//     report (a report named at the build is stamped by that name): an
+//     answer is listed under the test whose read takes it as a miss is, so
+//     it is placed by its mark too;
 //   - builds a miss with no report (a nil one): the proxy files it with no
 //     round, at the time it reached the proxy;
 //   - makes an error of models.ErrNoMockMatched and builds no report for it:
@@ -100,7 +103,7 @@ func TestEveryMissReportIsStampedWithItsCallsRound(t *testing.T) {
 	sort.Strings(missing)
 	sort.Strings(stale)
 	if len(missing) > 0 {
-		t.Errorf("these report a miss with no round stamped on it (StampMark with the call's MarkCallRound, taken when the call is made), so a miss keploy decides after the call's test ended is charged to the next test: %s", strings.Join(missing, ", "))
+		t.Errorf("these report a miss or an answer with no round stamped on it (StampMark with the call's MarkCallRound, taken when the call is made), so one keploy decides after the call's test ended is charged to the next test: %s", strings.Join(missing, ", "))
 	}
 	if len(stale) > 0 {
 		t.Errorf("these waivers name no function that reports an unstamped miss any more: drop them: %s", strings.Join(stale, ", "))
@@ -125,7 +128,7 @@ func missUnstamped(body *ast.BlockStmt, models, integ string) string {
 			return true
 		}
 		switch {
-		case calls(call, models, "NewMockMismatchError") && len(call.Args) == 2:
+		case (calls(call, models, "NewMockMismatchError") || calls(call, models, "ReportAnswer")) && len(call.Args) == 2:
 			switch r := call.Args[1].(type) {
 			case *ast.Ident:
 				if r.Name == "nil" {

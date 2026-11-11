@@ -650,7 +650,7 @@ func TestHTTPSaysWhoseRequestItServes(t *testing.T) {
 			}
 		},
 		"a pairing": func(ctx context.Context, _ *learn.Tracker) {
-			reportPairing(ctx, &req{method: "GET", header: http.Header{"Host": {"api.test"}}}, m, integrations.AnsweredCall{}, false)
+			reportPairing(ctx, &req{method: "GET", header: http.Header{"Host": {"api.test"}}}, m, integrations.AnsweredCall{}, false, integrations.CallRound{})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

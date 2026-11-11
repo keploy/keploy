@@ -223,10 +223,10 @@ func TestEveryHTTPServeStatesTheViewItGave(t *testing.T) {
 				}
 			case "pairing":
 				other := learnRecorded("mock-2", time.Second, "GET", "/v1/users/u-61", "", nil, `{"name":"ann"}`)
-				reportPairing(ctx, live("GET", "/v1/users/u-61", "", nil), other, integrations.AnsweredCall{}, false)
+				reportPairing(ctx, live("GET", "/v1/users/u-61", "", nil), other, integrations.AnsweredCall{}, false, integrations.CallRound{})
 			case "pairing-noise":
 				other := learnRecorded("mock-2", time.Second, "GET", "/v1/users/u-61", "", map[string]string{"X-Trace": "t-1"}, `{"name":"ann"}`)
-				reportPairing(ctx, live("GET", "/v1/users/u-61", "", map[string]string{"X-Trace": "nz77"}), other, integrations.AnsweredCall{}, false)
+				reportPairing(ctx, live("GET", "/v1/users/u-61", "", map[string]string{"X-Trace": "nz77"}), other, integrations.AnsweredCall{}, false, integrations.CallRound{})
 			}
 			tr.End()
 			tr.Begin()
