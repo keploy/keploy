@@ -155,6 +155,12 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if mv.Recorded == "" {
 			return nil, fmt.Sprintf("variable %s has no recorded value", name)
 		}
+		if mv.Minted != nil {
+			// A minted value is checked new and of its shape where it is
+			// bound (variables.MintedWhy), which keploy does on MongoDB
+			// calls alone: unchecked here, it would pass as any value.
+			return nil, fmt.Sprintf("variable %s is declared minted by keploy.yml's rule %s, and keploy checks a minted value on MongoDB calls only: it cannot check this HTTP call's", name, mv.Minted.Rule)
+		}
 		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock}
 		if mv.Bind != "" {
 			p, why := parse(name, "bind", mv.Bind, false)

@@ -83,11 +83,38 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// Minted is, for a variable keploy.yml's rule of kind minted declares
+	// made anew at its Bind (an id the application mints there), the rule
+	// and the shape the learn step read the value with: a replay binds it
+	// only to a value that is not its recorded one, that no minted
+	// variable bound earlier in the run, and that keeps the recorded
+	// value's shape (variables.Table.BindAll). Only the learn step sets
+	// it, with a Bind; none for any other variable.
+	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty" bson:"minted,omitempty"`
 	// Why is, for a variable the learn step wrote, why it is one and how to
 	// undo it, for a person or a tool reading the mock (the legibility
 	// rule). Only given variables (GivenPrefix) carry one for now
 	// (learn.GivenWhy). Nothing replays it.
 	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
+}
+
+// MintedShape is what a minted rule decided of a variable's value
+// (MockVariable.Minted): the id of the rule (Rule), and the alphabet its
+// value is made of (Alphabet: a name variables.ParseAlphabet reads), which
+// a value bound there keeps at each position its recorded value holds a
+// letter of it, every other byte as recorded.
+type MintedShape struct {
+	Rule     string `json:"rule" yaml:"rule" bson:"rule"`
+	Alphabet string `json:"alphabet" yaml:"alphabet" bson:"alphabet"`
+}
+
+// clone is a copy of s that shares nothing with it; nil for nil.
+func (s *MintedShape) clone() *MintedShape {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	return &c
 }
 
 // ClockRead is one clock read a recorded value holds, as the learn step read
@@ -1963,6 +1990,7 @@ func (v MockVariables) Clone() MockVariables {
 		mv.Use = append([]string(nil), mv.Use...)
 		mv.Answer = append([]string(nil), mv.Answer...)
 		mv.Clock = append([]ClockRead(nil), mv.Clock...)
+		mv.Minted = mv.Minted.clone()
 		out[name] = mv
 	}
 	return out
@@ -1972,7 +2000,8 @@ func (v MockVariables) Clone() MockVariables {
 // both keeps a's bind and both's uses and answers, and is an echo only when
 // both say so. Clock goes with the bind it was read at: a's bind keeps a's,
 // one taken from b keeps b's, and a variable both bind is a clock read only
-// when both say so.
+// when both say so. Minted goes with the bind as well: a's bind keeps a's
+// (a variable both bind is checked as a says), one taken from b keeps b's.
 func MergeVariables(a, b MockVariables) MockVariables {
 	out := a.Clone()
 	for name, v := range b {
@@ -1986,6 +2015,7 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		}
 		if cur.Bind == "" {
 			cur.Bind, cur.Clock = v.Bind, append([]ClockRead(nil), v.Clock...)
+			cur.Minted = v.Minted.clone()
 		} else if v.Bind != "" && len(v.Clock) == 0 {
 			cur.Clock = nil
 		}
@@ -2070,6 +2100,10 @@ type VariableBinding struct {
 	// variable's binding whose reads were made in the same second
 	// (ReadInOneSecond), and with no other.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty"`
+	// Minted is, for a binding of a minted variable, its shape
+	// (MockVariable.Minted): the table binds it only to a value that is
+	// new and keeps that shape (variables.MintedWhy).
+	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty"`
 	// WordRun is, for a binding at a word of a value (a word address), the
 	// value span its word is in: the words its call binds at consecutive
 	// words of that text, its own among them, that hold one value (a

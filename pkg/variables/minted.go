@@ -1,6 +1,7 @@
 package variables
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -88,4 +89,67 @@ func (a Alphabet) holds(c byte) bool {
 		return a == AlphabetBase64URL
 	}
 	return false
+}
+
+// String is a's name in a mock (models.MintedShape.Alphabet), "" for no
+// alphabet keploy knows.
+func (a Alphabet) String() string {
+	switch a {
+	case AlphabetDigits:
+		return "digits"
+	case AlphabetHex:
+		return "hex"
+	case AlphabetAlnum:
+		return "alnum"
+	case AlphabetBase64:
+		return "base64"
+	case AlphabetBase64URL:
+		return "base64url"
+	}
+	return ""
+}
+
+// ParseAlphabet is the alphabet named s (Alphabet.String); ok is false for
+// a name keploy does not know.
+func ParseAlphabet(s string) (Alphabet, bool) {
+	for a := AlphabetDigits; a <= AlphabetBase64URL; a++ {
+		if a.String() == s {
+			return a, true
+		}
+	}
+	return 0, false
+}
+
+// MintedWhy is why b, the binding a call makes of a minted variable
+// (Binding.Minted: an id keploy.yml's rule declares the application makes
+// anew at that call), may not be bound: "" where it may, or where b is no
+// minted variable's. The value must not be its recorded one (an id the
+// application did not make anew), must keep the recorded one's shape in
+// its rule's alphabet (Alphabet.Keeps; an alphabet keploy cannot read
+// fails closed), and must not be the value of any of earlier that is a
+// minted variable's binding (one the run bound before at a minted place,
+// or one the call binds before b): an id made anew is never one the run
+// had already. Each text leads with what the replay's miss says: "minted
+// value reused" or "minted value of another shape".
+func MintedWhy(b Binding, earlier ...Binding) string {
+	if b.Minted == nil {
+		return ""
+	}
+	rule := "keploy.yml's rule " + b.Minted.Rule + " declares variable " + b.Name + " made anew at " + b.Place + " of " + b.Mock
+	if b.Value == b.Recorded {
+		return fmt.Sprintf("minted value reused: %s, and this call sends the value it was recorded with there, %q", rule, b.Value)
+	}
+	for _, e := range earlier {
+		if e.Minted != nil && e.Value == b.Value {
+			return fmt.Sprintf("minted value reused: %s, and this call sends %q there, the value variable %s was bound to earlier in this run, at %s of %s", rule, b.Value, e.Name, e.Place, e.Mock)
+		}
+	}
+	a, ok := ParseAlphabet(b.Minted.Alphabet)
+	if !ok {
+		return fmt.Sprintf("minted value of another shape: %s, in an alphabet keploy does not know (%q), so it cannot check the value this call sends there", rule, b.Minted.Alphabet)
+	}
+	if !a.Keeps(b.Recorded, b.Value) {
+		return fmt.Sprintf("minted value of another shape: %s, and this call sends %q there, which does not keep the shape of the recorded %q (its length, and at each position a letter of the alphabet %s where the recorded value holds one, else the recorded byte)", rule, b.Value, b.Recorded, a)
+	}
+	return ""
 }
