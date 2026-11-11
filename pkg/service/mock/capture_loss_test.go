@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -128,6 +129,15 @@ func TestAReplayThatLostACallFailsUnderTheSwitchOnly(t *testing.T) {
 	r := mustReceipt(t, dir)
 	require.True(t, r.Isolated)
 	require.Empty(t, r.FailedBy)
+	require.Empty(t, r.CaptureIncomplete)
+	// A run that lost nothing names no such field, in the receipt's file or
+	// its JSON (keploy mock status --json): older readers see what they did.
+	raw, err := os.ReadFile(filepath.Join(dir, "set", ReceiptFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "captureIncomplete")
+	j, err := json.Marshal(r)
+	require.NoError(t, err)
+	require.NotContains(t, string(j), "captureIncomplete")
 
 	provenOn(t)
 	on := &lossCounter{after: tls}
@@ -138,6 +148,31 @@ func TestAReplayThatLostACallFailsUnderTheSwitchOnly(t *testing.T) {
 	require.Equal(t, FailedByCaptureIncomplete, r.FailedBy)
 	require.False(t, r.Isolated)
 	require.Contains(t, logged(logs), "keploy could not capture every call the test command made")
+	require.Equal(t, tls, r.CaptureIncomplete, "the receipt keeps the run's loss as data")
+
+	// A PID map's refusal and another loss in one run: the receipt keeps
+	// both as data, the refusal with its own errno, as its note says both.
+	refused := models.PIDMapRefusals{Target: 2, LastTargetErr: -7}
+	dir, code, _ = replayIn(t, replayCase{losses: &lossCounter{after: tls}, pidMaps: &pidMapCounter{after: refused}, mapped: true, keployFails: true})
+	require.Equal(t, 1, code)
+	r = mustReceipt(t, dir)
+	require.Equal(t, FailedByCaptureIncomplete, r.FailedBy)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, What: refused.CaptureIncomplete(), Err: -7}, tls[0]}, r.CaptureIncomplete)
+	require.Contains(t, r.IsolationNote, refused.CaptureIncomplete())
+	require.Contains(t, r.IsolationNote, "to db:5432")
+
+	// A loss keploy judges, one it cannot capture at all and the kernel's
+	// evidence, in one run: only the judged loss fails the run, so only it is
+	// the receipt's CaptureIncomplete; the one keploy cannot capture is its
+	// CannotCapture alone, and the evidence is neither.
+	unix := models.CaptureLoss{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}
+	skip := models.CaptureLoss{Kind: models.CaptureLossKernelSkip, Count: 3}
+	dir, code, _ = replayIn(t, replayCase{losses: &lossCounter{after: models.CaptureLosses{tls[0], unix, skip}}, mapped: true, keployFails: true})
+	require.Equal(t, 1, code)
+	r = mustReceipt(t, dir)
+	require.Equal(t, FailedByCaptureIncomplete, r.FailedBy)
+	require.Equal(t, tls, r.CaptureIncomplete, "only what fails the run")
+	require.Equal(t, models.CaptureLosses{unix}, r.CannotCapture)
 
 	// Lost before the test command ran: not this run's.
 	before := &lossCounter{before: tls, after: tls}
@@ -471,4 +506,17 @@ func TestARecordChargesEachTestOpenAtACallFromNoWorker(t *testing.T) {
 	t.Run("not judged, the test command failed", func(t *testing.T) {
 		notJudged(t, models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}, 3)
 	})
+}
+
+// The run's PID map losses each carry their own map's errno as data, beside
+// the run's verdict as words, so a reader of both never takes one map's
+// cause for the other's.
+func TestTheRunsPIDMapLossesCarryEachMapsOwnErrno(t *testing.T) {
+	refused := models.PIDMapRefusals{Target: 4, LastTargetErr: -7, Excluded: 2, LastExcludedErr: -110}
+	got, err := (&mockService{}).runLosses(context.Background(), lossBase{checked: true}, nil, nil, refused)
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{
+		{Kind: models.CaptureLossPIDMap, Count: 4, What: refused.CaptureIncomplete(), Err: -7},
+		{Kind: models.CaptureLossPIDMapExcluded, Count: 2, What: refused.CaptureIncomplete(), Err: -110},
+	}, got)
 }

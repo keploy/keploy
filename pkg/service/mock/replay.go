@@ -721,9 +721,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// suite's: returned, like an unverifiable --strict run.
 	var keployFailure error
 	captureIncomplete, captureUnverified := "", ""
+	// incompleteLosses are captureIncomplete's losses as data, for the
+	// receipt (Receipt.CaptureIncomplete).
+	var incompleteLosses models.CaptureLosses
 	pidCheck := m.pidMapRefusedDuring(ctx, pidBase, "replay")
 	if refused := pidCheck.refused; pidCheck.known && refused.Any() {
 		captureIncomplete = refused.CaptureIncomplete()
+		incompleteLosses = pidMapLosses(refused)
 		if utils.ErrCode == 0 {
 			utils.ErrCode = 1
 		}
@@ -760,6 +764,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		} else {
 			captureIncomplete += "; " + t
 		}
+		incompleteLosses = append(incompleteLosses, lost...)
 		if utils.ErrCode == 0 {
 			utils.ErrCode = 1
 		}
@@ -972,6 +977,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Refusals:        m.refusals,
 		CannotCapture:   lostNotJudged,
 		UnchargedMisses: counts.uncharged,
+
+		CaptureIncomplete: incompleteLosses,
 
 		ProcessTrackingUnread: trackingUnread,
 		CallCaptureUnread:     captureUnread,
