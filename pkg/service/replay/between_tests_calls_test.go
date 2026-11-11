@@ -378,8 +378,8 @@ func TestLateWhereSaysWhatKeployKnows(t *testing.T) {
 // a call of its own: those calls fail the run and no test, so a reader that
 // charges a set's own failure to all its tests charges them nothing. A set
 // that fails for something else as well (a call before its first test, one a
-// parser held for a later test's recording), or that holds no call outside
-// every test, does not say it.
+// parser held for a later test's recording, one after its last test), or
+// that holds no call outside every test, does not say it.
 func TestRunTestSet_ASetFailedOnlyOutsideEveryTestSaysSo(t *testing.T) {
 	read := func(c models.UnmatchedCall) func() ([]models.UnmatchedCall, error) {
 		return func() ([]models.UnmatchedCall, error) { return []models.UnmatchedCall{c}, nil }
@@ -399,6 +399,7 @@ func TestRunTestSet_ASetFailedOnlyOutsideEveryTestSaysSo(t *testing.T) {
 		{name: "a call between two tests and a test's own miss", reads: []func() ([]models.UnmatchedCall, error){nil, betweenWrite, read(own)}, failed: "test-3", want: true},
 		{name: "a call between two tests and one before the first", reads: []func() ([]models.UnmatchedCall, error){read(before), betweenWrite}},
 		{name: "a call between two tests and a held one", reads: []func() ([]models.UnmatchedCall, error){nil, betweenWrite, read(held)}},
+		{name: "a call between two tests and one after the last", reads: []func() ([]models.UnmatchedCall, error){nil, betweenWrite, nil, afterLast}},
 		{name: "a test's own miss alone", reads: []func() ([]models.UnmatchedCall, error){nil, read(own)}, failed: "test-2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -444,5 +445,41 @@ func TestFailedOutsideOnlyNeedsEachOfItsFacts(t *testing.T) {
 		if got {
 			t.Errorf("%s: OutsideOnly; want not", name)
 		}
+	}
+}
+
+// A set whose worker scope the application never made fails for that too:
+// it is not OutsideOnly, though a call between two tests is in it; with the
+// worker scope made, the same set is.
+func TestUnderTheSwitchASetWhoseWorkerScopeIsNotMadeIsNotOutsideOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		made map[string][]models.MockState
+		want bool
+	}{
+		{"the boot call made in a test", map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010), mongoAt("mock-boot", 500)}}, true},
+		{"the boot call never made", map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			fastWorkerWait(t)
+			h := newPartialRunHarness(t, 2, 0)
+			pinWindows(h)
+			h.replayer.config.Command = "./app"
+			h.mocks.filtered = []*models.Mock{httpAt("mock-boot", 500), httpAt("mock-a", 1010)}
+			mappingFile(t, h, nil)
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, tc.made)}
+			h.instr.mockErrorsFor = misses(nil, betweenWrite)
+			if got := h.run(t); got != models.TestSetStatusFailed {
+				t.Fatalf("set %s, want FAILED for the call between the tests", got)
+			}
+			rep := h.report.report
+			if rep.OutsideOnly != tc.want {
+				t.Fatalf("OutsideOnly %v, want %v (reason %q)", rep.OutsideOnly, tc.want, rep.FailureReason)
+			}
+			if worker := strings.Contains(rep.FailureReason, "worker scope"); worker == tc.want {
+				t.Fatalf("reason %q: the worker scope said %v, want %v", rep.FailureReason, worker, !tc.want)
+			}
+		})
 	}
 }
