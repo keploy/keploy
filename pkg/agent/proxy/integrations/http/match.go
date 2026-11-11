@@ -893,10 +893,10 @@ func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
 }
 
 // recordedPaths memoises the path of each recorded request URL. SchemaMatch
-// checks every mock of the pool on every proxied call, and url.Parse of the
-// mock's URL was the largest share of that (49% of agent CPU at a pool of 10k
+// checks every mock of the pool on every proxied call, and parsing the mock's
+// URL was the largest share of that (49% of agent CPU at a pool of 10k
 // mocks: about 0.75 us and 7 allocations per mock, every call). The URL of a
-// recording does not change and url.Parse is a pure function of it, so each
+// recording does not change and parseRecordedURL is a pure function of it, so each
 // URL is parsed once and its path (or that it does not parse) is read back.
 // Keyed by the URL string, not the mock, so it holds no mock alive; bounded
 // by recordedPathsCap entries, emptied when full (the URLs of the pool in use
@@ -906,7 +906,7 @@ var recordedPaths struct {
 	n atomic.Int64 // entries stored since the last empty
 }
 
-// recordedPath is url.Parse(URL).Path of a recorded URL; ok is false when the
+// recordedPath is parseRecordedURL(URL).Path of a recorded URL; ok is false when the
 // URL does not parse, which matches no request path.
 type recordedPath struct {
 	path string
@@ -915,10 +915,10 @@ type recordedPath struct {
 
 const recordedPathsCap = 1 << 16
 
-// recordedPathParses counts url.Parse calls of recorded URLs; the rows read it.
+// recordedPathParses counts parseRecordedURL calls of recorded URLs; the rows read it.
 var recordedPathParses atomic.Int64
 
-// recordedURLPath returns url.Parse(mockURL).Path, and false when it does not
+// recordedURLPath returns parseRecordedURL(mockURL).Path, and false when it does not
 // parse, parsing each URL once.
 func recordedURLPath(mockURL string) (string, bool) {
 	if v, ok := recordedPaths.m.Load(mockURL); ok {
@@ -929,7 +929,7 @@ func recordedURLPath(mockURL string) (string, bool) {
 	// A copy, so the memo keeps no larger buffer the URL may sit in alive.
 	key := strings.Clone(mockURL)
 	p := &recordedPath{}
-	if parsed, err := url.Parse(key); err == nil {
+	if parsed, err := parseRecordedURL(key); err == nil {
 		p.path, p.ok = parsed.Path, true
 	}
 	if recordedPaths.n.Add(1) > recordedPathsCap {
@@ -2819,7 +2819,7 @@ func pickClosestCandidate(request *http.Request, liveOp string, schemaSurvivors,
 			}
 			// Parse mock URL to extract just the path (mocks store full URL strings)
 			mockPath := mock.Spec.HTTPReq.URL
-			if parsed, err := url.Parse(mock.Spec.HTTPReq.URL); err == nil {
+			if parsed, err := parseRecordedURL(mock.Spec.HTTPReq.URL); err == nil {
 				mockPath = parsed.Path
 			}
 			mockKey := models.WithHTTPOperation(string(mock.Spec.HTTPReq.Method)+" "+mockPath, recordedOperations.of(mock.Spec.HTTPReq))

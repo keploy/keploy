@@ -150,7 +150,7 @@ func ptRecordKey(scope, method, host string, port uint32, reqPath string, queryK
 // resolved port, doesn't over-filter). Host compare is case-insensitive and
 // port-stripped on both sides.
 func mockHostPortMatches(mockReq *models.HTTPReq, host string, port uint32) bool {
-	u, err := url.Parse(mockReq.URL)
+	u, err := parseRecordedURL(mockReq.URL)
 	if err != nil {
 		return true // unparseable recorded URL → don't over-filter
 	}
@@ -193,7 +193,7 @@ func mockQueryGet(mockReq *models.HTTPReq, name string) string {
 	if v, ok := mockReq.URLParams[name]; ok {
 		return v
 	}
-	if u, err := url.Parse(mockReq.URL); err == nil {
+	if u, err := parseRecordedURL(mockReq.URL); err == nil {
 		return u.Query().Get(name)
 	}
 	return ""

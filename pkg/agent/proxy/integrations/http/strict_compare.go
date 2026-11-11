@@ -606,15 +606,11 @@ func readCovered(o models.ClockOffset, text string, marks []bool) bool {
 // the request matcher's writes [].
 var arrayIndex = regexp.MustCompile(`\[[0-9]+\]`)
 
-// parseRecordedURL parses a recorded request's URL. A path-only recording is
-// read as a request line is (url.ParseRequestURI, as http.ReadRequest reads
-// the call's): "//v1/charge" is a path, not a host, so its segments are
-// counted as the call's are.
+// parseRecordedURL parses a recorded request's URL (models.ParseRequestURL):
+// "//v1/charge" is a path, not a host, so its segments are counted as the
+// call's are.
 func parseRecordedURL(raw string) (*url.URL, error) {
-	if strings.HasPrefix(raw, "/") {
-		return url.ParseRequestURI(raw)
-	}
-	return url.Parse(raw)
+	return models.ParseRequestURL(raw)
 }
 
 // riskOf is a body path in the learn step's dialect (items[0].at) in the

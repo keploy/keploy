@@ -302,7 +302,10 @@ func TestMockURLShape(t *testing.T) {
 		{"a declared word of a segment", mock("http://store/apps/app-kqzxwv/items", MockVariables{"appId": {Recorded: "kqzxwv", Use: []string{"url.path[1]#1"}}}), "store/apps/{}/items"},
 		{"a path alone", mock("/orders/12345", nil), "/orders/{}"},
 		{"a URL that does not parse", mock("http://h/a%zz/alice", nil), "{}"},
-		{"a path that starts //, read as a place reads it", mock("//orders/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[0]"}}}), "orders/{}"},
+		// A path-only URL is read as a request line (ParseRequestURL), as a
+		// place reads it: "//orders/kqzxwv" is a path whose first segment is
+		// empty, not the host "orders".
+		{"a path that starts //, read as a place reads it", mock("//orders/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[2]"}}}), "//orders/{}"},
 		{"an encoded slash before a place", mock("http://store/files/a%2Fb/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[2]"}}}), "store/files/{}/{}"},
 		{"a relative URL, counted as a place counts it", mock("orders/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[1]"}}}), "orders/{}"},
 		{"no HTTP request", &Mock{Kind: HTTP}, ""},

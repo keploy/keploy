@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -445,6 +446,73 @@ func TestRecordedPathsStayBounded(t *testing.T) {
 	}
 	if _, ok := recordedURLPath("http://[::1/x"); ok {
 		t.Fatal("a URL url.Parse refuses has a path")
+	}
+}
+
+// TestARecordedPathStartingWithTwoSlashesIsAPath: a call whose request line
+// is GET //fees/state (a base URL ending in "/" joined with a path starting
+// with one) is recorded with that path, and read back as it, not as a host
+// "fees" and a path "/state": the recording is a candidate for the same
+// call at replay, and the URL's other readers see its path and query.
+func TestARecordedPathStartingWithTwoSlashesIsAPath(t *testing.T) {
+	resetRecordedPaths()
+	t.Cleanup(resetRecordedPaths)
+	for _, c := range []struct{ url, path string }{
+		{"//fees/state", "//fees/state"},
+		{"//fees/state?region=ak", "//fees/state"},
+		{"http://pricing//fees/state", "//fees/state"},
+		{"/fees/state", "/fees/state"},
+	} {
+		if p, ok := recordedURLPath(c.url); !ok || p != c.path {
+			t.Fatalf("recordedURLPath(%q) = %q, %v; want %q", c.url, p, ok, c.path)
+		}
+	}
+	h := &HTTP{Logger: zap.NewNop()}
+	if !h.MatchURLPath("//fees/state", "//fees/state", nil, false) {
+		t.Fatal("a recording of GET //fees/state does not match the same call")
+	}
+	if h.MatchURLPath("//fees/state", "/state", nil, false) {
+		t.Fatal("a recording of GET //fees/state matches GET /state")
+	}
+	if got := mockURLPath("//fees/state"); got != "//fees/state" {
+		t.Fatalf("mockURLPath = %q", got)
+	}
+	if !mockHostPortMatches(&models.HTTPReq{URL: "//fees/state"}, "pricing", 80) {
+		t.Fatal("a recording of GET //fees/state was taken for one to the host fees")
+	}
+	if got := parseRecordedParts(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "//fees/state"}}}).path; got != "//fees/state" {
+		t.Fatalf("parseRecordedParts path = %q", got)
+	}
+	if r, err := mockToReq(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "//fees/state"}, HTTPResp: &models.HTTPResp{StatusCode: 200}}}); err != nil || r.url.Path != "//fees/state" {
+		t.Fatalf("mockToReq path = %v, %v; want //fees/state", r, err)
+	}
+	doubled := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "//fees/state"}}}
+	single := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "/state"}}}
+	live := &http.Request{Method: "GET", URL: &url.URL{Path: "//fees/state"}}
+	if got := pickClosestCandidate(live, "", nil, []*models.Mock{single, doubled}); got != doubled {
+		t.Fatalf("the closest recording to GET //fees/state is %+v; want the //fees/state one", got)
+	}
+	// A path-only URL url.Parse refuses (a "port" that is no number): a
+	// base URL ending in "/" joined with "/projects:list".
+	odd := "//projects:list?k=v&ts=1"
+	if got := mockQueryGet(&models.HTTPReq{URL: odd}, "k"); got != "v" {
+		t.Fatalf("mockQueryGet = %q; want v", got)
+	}
+	if got := queryOf(&models.HTTPReq{URL: odd}).Get("k"); got != "v" {
+		t.Fatalf("queryOf k = %q; want v", got)
+	}
+	if got := mockQueryString(&models.HTTPReq{URL: odd}); got != "k=v&ts=1" {
+		t.Fatalf("mockQueryString = %q; want k=v&ts=1", got)
+	}
+	stripped := stripVolatile(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: odd}}}, map[string]bool{"ts": true})
+	if got := stripped.Spec.HTTPReq.URL; got != "//projects:list?k=v" {
+		t.Fatalf("stripVolatile URL = %q; want //projects:list?k=v", got)
+	}
+	if v, ok := recordedView(&models.HTTPReq{Method: "GET", URL: "//fees/state"}); !ok || !reflect.DeepEqual(v.segments, []string{"", "fees", "state"}) {
+		t.Fatalf("recordedView segments = %q, %v; want [\"\" fees state]", v.segments, ok)
+	}
+	if host, path := hostAndPath(&models.HTTPReq{URL: "//fees/state", Header: map[string]string{"Host": "pricing"}}); host != "pricing" || path != "//fees/state" {
+		t.Fatalf("hostAndPath = %q, %q; want pricing, //fees/state", host, path)
 	}
 }
 

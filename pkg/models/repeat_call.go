@@ -477,7 +477,7 @@ func requestFingerprint(m *Mock) string {
 // requests that differ only in the order of their parameters are one; raw
 // itself when it does not parse.
 func sortedQueryURL(raw string) string {
-	u, err := url.Parse(raw)
+	u, err := ParseRequestURL(raw)
 	if err != nil || u.RawQuery == "" {
 		return raw
 	}
