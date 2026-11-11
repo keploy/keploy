@@ -2266,7 +2266,7 @@ func boundedAgentRead[T any](ctx context.Context, what string, read func(context
 // (replay.AppProcessRunner).
 func (a *AgentClient) RunsAppProcess() bool { return true }
 
-func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
+func (a *AgentClient) Run(ctx context.Context, opts models.RunOptions) (ret models.AppError) {
 	// The agent's container this run is to create, under docker compose: a
 	// release that waits for it ends once the run is over without it
 	// (containerExited). Its end is noted last, once Run returns, whichever
@@ -2317,6 +2317,10 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		defer utils.Recover(a.logger)
 		appErr := app.Run(runAppCtx)
 		stopKilled = appErr.StopKilled
+		// The application's command exited on its own, and what it left runs
+		// on: the run's caller waits on it (models.RunOptions.BeforeStop)
+		// before keploy stops it. Not once keploy or the user stopped the run.
+		beforeStop(runAppCtx, opts.BeforeStop, func() bool { return appRunsOn(a.logger) })
 		// The daemons the app left are part of its run, and end with it
 		// (adopt_linux.go): none is judged in the next test set, and the app
 		// started again can bind their ports. An app whose shell died on
@@ -2354,6 +2358,15 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		}
 		return appErr
 	}
+}
+
+// beforeStop calls hook (models.RunOptions.BeforeStop) when it is set, the
+// run was not stopped (ctx), and something of the application runs on.
+func beforeStop(ctx context.Context, hook func(context.Context, func() bool), running func() bool) {
+	if hook == nil || ctx.Err() != nil || !running() {
+		return
+	}
+	hook(ctx, running)
 }
 
 func (a *AgentClient) GetRecentAppLogs(ctx context.Context) string {

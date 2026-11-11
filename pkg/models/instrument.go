@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"time"
@@ -583,6 +584,13 @@ type SetupOptions struct {
 type RunOptions struct {
 	//IgnoreErrors bool
 	AppCommand string // command to run the application
+	// BeforeStop, when set, is called once the application's command has
+	// exited on its own, before keploy stops what the application left
+	// running (its daemons), and only when some of it still runs: running
+	// says, each time it is called, whether any of it does. ctx ends when
+	// the run is stopped (the user's interrupt). The run's stop waits for it
+	// to return; it holds no call the application makes.
+	BeforeStop func(ctx context.Context, running func() bool)
 }
 
 //For test bench

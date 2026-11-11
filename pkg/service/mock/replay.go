@@ -434,7 +434,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if composeAppExit != nil {
 		appErr = <-composeAppExit
 	} else {
-		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		opts := models.RunOptions{AppCommand: m.config.Command}
+		if provenswitch.On() && len(m.series) > 0 {
+			// The series a declared rule requires, which what the test
+			// command leaves running may still make once it exited.
+			opts.BeforeStop = m.awaitRequiredSeries
+		}
+		appErr = m.instrumentation.Run(ctx, opts)
 	}
 
 	if parent.Err() != nil { // user Ctrl+C / a signal interrupted the replay
@@ -2701,7 +2707,9 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				// so no test is judged on it.
 				settleErr = m.settleRun(outcomeCtx)
 				if consumedErr = settleErr; consumedErr == nil {
-					consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
+					if consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx); consumedErr == nil {
+						consumed = m.withSeriesRead(consumed)
+					}
 				}
 				if consumedErr == nil && m.learning() {
 					elsewhere = learn.ReadLearnedElsewhere(outcomeCtx, m.instrumentation, m.logger)
