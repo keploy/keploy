@@ -1189,6 +1189,15 @@ func (s *scopedMockDb) StagingEpoch() uint64 {
 	return 0
 }
 
+// WindowRewinds carries no mock data either. A wrapped store without the facet
+// counts none.
+func (s *scopedMockDb) WindowRewinds() uint64 {
+	if r, ok := s.MockMemDb.(integrations.WindowRewindCounter); ok {
+		return r.WindowRewinds()
+	}
+	return 0
+}
+
 func (s *scopedMockDb) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
 	if bk, ok := s.MockMemDb.(interface {
 		GetFilteredMocksByKind(models.Kind) ([]*models.Mock, error)

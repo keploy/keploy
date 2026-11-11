@@ -310,6 +310,12 @@ type MockManager struct {
 	// it under swapMu, so WindowSnapshot reads it with testFiredThisSet
 	// tear-free.
 	scopeOpen bool
+	// rewinds counts the window changes whose start went back to before the
+	// start set before them in the same staging (WindowRewinds); rewindFrom
+	// is that start, zero again at every staging call. Guarded by windowMu,
+	// written with windowStart.
+	rewinds    uint64
+	rewindFrom time.Time
 
 	// firstWindowStart caches the earliest windowStart observed across
 	// all SetMocksWithWindow calls for this manager's lifetime. It's
@@ -1168,6 +1174,7 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 	m.windowStart = start
 	m.windowEnd = end
 	m.scopeOpen = false
+	m.noteWindowStartLocked(start)
 	m.windowMu.Unlock()
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
 	m.signalWindowChange()
@@ -2193,6 +2200,11 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	if !isInitialStaging {
 		m.windowStart = start
 		m.windowEnd = end
+		m.noteWindowStartLocked(start)
+	} else {
+		// A staging starts what WindowRewinds compares over: the set's first
+		// window does not go back from the last set's last one.
+		m.rewindFrom = time.Time{}
 	}
 	m.scopeOpen = scope
 	m.windowMu.Unlock()
@@ -4590,6 +4602,33 @@ func (m *MockManager) WindowChanged() <-chan struct{} {
 // changes. Zero until the first staging call.
 func (m *MockManager) StagingEpoch() uint64 {
 	return m.stagingEpoch.Load()
+}
+
+// WindowRewinds counts the test-window changes, over the manager's life, whose
+// start went back to before the start set before them in the same staging: a
+// retry cycle, or the deferred streaming tests, going back to an earlier
+// recorded window (integrations.WindowRewindCounter). Every SetMocksWithWindow,
+// SetMocksWithWindowThreeTier and SetCurrentTestWindow that sets a non-zero
+// start is compared; a staging call (models.BaseTime) starts the comparison
+// over, and a window set again at the same start is not counted. The count
+// never goes down, and it moves under windowMu with the window it compares, in
+// the same staging step as the trees, before WindowChanged's channel closes.
+func (m *MockManager) WindowRewinds() uint64 {
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	return m.rewinds
+}
+
+// noteWindowStartLocked counts start, the window start being set, when it
+// went back (WindowRewinds). Caller holds windowMu for write.
+func (m *MockManager) noteWindowStartLocked(start time.Time) {
+	if start.IsZero() {
+		return
+	}
+	if start.Before(m.rewindFrom) { // never, while rewindFrom is zero
+		m.rewinds++
+	}
+	m.rewindFrom = start
 }
 
 // signalWindowChange wakes every WindowChanged waiter and arms a fresh channel.
