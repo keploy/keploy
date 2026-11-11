@@ -295,7 +295,8 @@ func (t *Table) keepMinted(from *Table, b Binding) {
 // b's own value refuses it (its recorded one, or another shape), or where
 // nothing does. A call checks it before it takes the recording that binds
 // b. A name already bound binds nothing new (BindAll holds it to its value
-// by its name), and is not checked here. A nil table checks b beside
+// by its name), and is not checked here, unless b is a binding of the call
+// alone (Binding.Call), which reads no name. A nil table checks b beside
 // earlier alone.
 func (t *Table) MintedWhy(b Binding, earlier []Binding) (why string, with Binding) {
 	if b.Minted == nil {
@@ -305,7 +306,7 @@ func (t *Table) MintedWhy(b Binding, earlier []Binding) (why string, with Bindin
 	if t != nil {
 		from := t.lock()
 		defer t.unlock(from)
-		if _, ok := t.lookup(from, b.Name); ok {
+		if _, ok := t.lookup(from, b.Name); ok && !b.Call {
 			return "", Binding{}
 		}
 		minted = t.mintedOf(from)

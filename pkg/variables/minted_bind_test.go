@@ -301,3 +301,35 @@ func TestTable_ACallsMintedBindingIsKeptInTheRunAndBindsNoName(t *testing.T) {
 		t.Fatalf("one call's value at two places refused %s beside %s, want poolId beside clusterId", bad.Name, with.Name)
 	}
 }
+
+// A call's minted binding reads no name either: a test's variable of its
+// name, bound to another value, neither refuses it nor spares it the
+// minted check, before the bind (Table.MintedWhy) as in BindAll. A test's
+// variable beside it at its own place of its recording is one value in
+// either order; at that place of another recording it is a reuse.
+func TestTable_ACallsMintedBindingReadsNoNameAndIsOneValueOnlyAtItsOwnPlace(t *testing.T) {
+	var tb Table
+	call := func(value string) Binding {
+		b := mintedB("poolId", value)
+		b.Call = true
+		return b
+	}
+	plain := Binding{Name: "poolId", Value: "tenant-7", Recorded: "tenant-1", Mock: "mock-0", Place: "body.tenant"}
+	if bad, with, stale, ok := tb.BindAll(tb.Gen(), []Binding{plain}); !ok || stale {
+		t.Fatalf("binding the test's poolId refused %s beside %s", bad.Name, with.Name)
+	}
+	bindMinted(t, &tb, true, call(mintLive))
+	if b, ok := tb.Lookup("poolId"); !ok || b.Value != "tenant-7" {
+		t.Fatalf("a call's binding changed the test's poolId: %+v", b)
+	}
+	if bad, with := bindMinted(t, &tb, false, call(mintLive)); bad.Name != "poolId" || with.Value != mintLive || !with.Call {
+		t.Fatalf("a call's reuse beside a bound name refused %s beside %+v, want poolId beside the call's first", bad.Name, with)
+	}
+	const one, two = "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d", "6f5e4d3c-2b1a-4a5b-8c9d-0e1f2a3b4c5d"
+	bindMinted(t, &tb, true, call(one), mintedB("auditId", one))
+	other := call(two)
+	other.Mock = "mock-2"
+	if bad, with := bindMinted(t, &tb, false, mintedB("clusterId", two), other); bad.Name != "poolId" || with.Name != "clusterId" {
+		t.Fatalf("one value at one place of two recordings refused %s beside %s, want poolId beside clusterId", bad.Name, with.Name)
+	}
+}
