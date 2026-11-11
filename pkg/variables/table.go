@@ -501,9 +501,13 @@ func mintedBeside(minted map[string]Binding, b Binding, earlier []Binding) (with
 		return had, true
 	}
 	for _, e := range earlier {
-		if e.Minted != nil && e.Value == b.Value && e.Name != b.Name && !((e.Call || b.Call) && e.Mock == b.Mock && e.Place == b.Place) {
-			return e, true
+		if e.Minted == nil || e.Value != b.Value || e.Name == b.Name {
+			continue
 		}
+		if (e.Call || b.Call) && e.Mock == b.Mock && e.Place == b.Place {
+			continue
+		}
+		return e, true
 	}
 	return Binding{}, MintedWhy(b) != ""
 }
