@@ -534,6 +534,38 @@ func TestWindowRewindsSurvivesTheWorkerScopeWrap(t *testing.T) {
 	}
 }
 
+// A worker's scoped view reads the tier with the count through the name
+// filter its GetPerTestMocksInWindow reads through, over a store with the
+// facet and over one without it: the worker sees its own mocks either way.
+func TestWindowRewindsTierReadThroughAWorkersScope(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.SetMocksWithWindow([]*models.Mock{scopeMock("a", pms(1010)), scopeMock("b", pms(1020))}, nil, pms(1000), pms(1100))
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a", "b"})
+	const worker = 4102
+	p.SetWorkerScope(worker, []string{"a"})
+	for _, c := range []struct {
+		name  string
+		store integrations.MockMemDb
+	}{{"the manager", mm}, {"a store without the facet", noPlaceDb{mm}}} {
+		view := p.scopedFor(worker, c.store)
+		if view == c.store {
+			t.Fatalf("%s: precondition: the worker's connection got the bare store", c.name)
+		}
+		plain, err := view.GetPerTestMocksInWindow()
+		if err != nil {
+			t.Fatalf("%s: GetPerTestMocksInWindow: %v", c.name, err)
+		}
+		equalNames(t, c.name+": the worker's per-test read", plain, "a")
+		tier, _, _, err := view.(integrations.WindowRewindCounter).GetPerTestMocksWithRewinds()
+		if err != nil {
+			t.Fatalf("%s: GetPerTestMocksWithRewinds: %v", c.name, err)
+		}
+		equalNames(t, c.name+": the worker's per-test read with the count", tier, "a")
+	}
+}
+
 // -race: waiters looping on the documented take-channel-then-read pattern while
 // windows switch concurrently. Every waiter must observe the final window.
 func TestWindowChangedConcurrentWaiters(t *testing.T) {
