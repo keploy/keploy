@@ -255,3 +255,31 @@ func TestAClockRuleLeavesWhatLearningPlaced(t *testing.T) {
 	}
 	cNamesRule(t, "no instant", ds)
 }
+
+// A minted rule acts on the field's words only through minted: where one
+// word of the field is copied from an exchange of the call's own test,
+// minted leaves every word as learning decided it, and an instant word
+// learning refused as another-scope keeps that refusal, never decided by a
+// clock's checks.
+func TestAMintedRuleLeavesAnInstantWordToLearning(t *testing.T) {
+	const wr, wf = "order-17", "order-18"
+	in := cCall(cR+" "+wr, cF+" "+wf, []Raw{cAns(cR, cF)}, false)
+	in.Earlier = oServed("mock-231", false, false, Response, oText("body.value.seq", "17"), "18", time.Millisecond)
+	in.Scope = func(m string) Scope {
+		if m == "mock-7" {
+			return ScopeTest("test-1")
+		}
+		return ScopeTest(in.Test)
+	}
+	before := Decide(in)
+	if len(before) != 2 || before[0].Refusal == nil || before[0].Refusal.Kind != RefusalAnotherScope || before[1].Outcome != OutcomeValue {
+		t.Fatalf("with no rule: %s; want the instant refused as another-scope and the word a Value", oDescribe(before))
+	}
+	in.Source = func(p string) (Source, bool) { return Source{Kind: SourceMinted, Rule: cRule}, p == cPath }
+	ds := Decide(in)
+	if oDescribe(ds) != oDescribe(before) {
+		t.Fatalf("a minted rule on the field: %s; want as learning decided it: %s", oDescribe(ds), oDescribe(before))
+	}
+	oRefused(t, "the instant word", ds[0], RefusalAnotherScope, "mock-7")
+	iValue(t, "the copied word", ds[1], "mock-231")
+}
