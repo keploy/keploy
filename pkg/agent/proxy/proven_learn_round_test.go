@@ -849,6 +849,163 @@ func TestALearnStepAnswersACallInARoundTheStoreMovedOnFromByItsOwnRecording(t *t
 	}
 }
 
+// A call exactly test-1's own mock-own1, still unanswered, whose test the
+// replay ends (or ends and begins test-2 in) as the learn step asks the
+// learn tracker to take mock-own1 for it (learn.Tracker.Answer): after the
+// call's round was read, before its claim. It is answered by mock-own1, as
+// the same call decided at once is, and nothing is learned onto the pool's
+// or test-2's recordings. Before, the tracker refused the take once test-1
+// ended, and the call missed as moved: a false red under load. Both orders
+// of the end (the store's pool view first, the tracker's End first), under
+// today's rules and proven routing, for a call made after its test case's
+// request and for one that waited for it.
+func TestALearnStepAnswersACallWhoseTestEndedAsItsTakeWasAskedByItsOwnRecording(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		for _, move := range []string{"at once", "the store ends it first", "the tracker ends it first", "the store ends it first, then test-2 begins", "the tracker ends it first, then test-2 begins"} {
+			for _, waits := range []bool{false, true} {
+				name := map[bool]string{false: "today's rules", true: "proven routing"}[routed] + "/" + move + "/" +
+					map[bool]string{false: "a call made after its request", true: "a call that waited for it"}[waits]
+				t.Run(name, func(t *testing.T) {
+					p, mm := heldOrders(t, routed)
+					mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+					if waits {
+						p.ContinueTestCaseCapture()
+					} else {
+						p.ContinueTestErrorCapture()
+					}
+					var asked, moved atomic.Bool
+					p.learnTracker.OnAnswer(func(uint64) {
+						if !asked.CompareAndSwap(false, true) || move == "at once" {
+							return
+						}
+						if strings.HasPrefix(move, "the store ends it first") {
+							mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+							p.EndTestErrorCapture()
+						} else {
+							p.EndTestErrorCapture()
+							mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+						}
+						if strings.HasSuffix(move, "test-2 begins") {
+							mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+							p.ContinueTestErrorCapture()
+						}
+						moved.Store(true)
+					})
+					t.Cleanup(func() { p.learnTracker.OnAnswer(nil) })
+					code, got := sendPear(t, p, mm, waits)
+					if !asked.Load() || move != "at once" && !moved.Load() {
+						t.Fatalf("precondition: the call's take was never asked of the tracker, or no boundary landed under it (got %d %s)", code, got)
+					}
+					ownAnswered(t, p, mm, code, got, `{"order":1}`)
+				})
+			}
+		}
+	}
+}
+
+// Two calls of test-1, each exactly its own mock-own1, read in test-1's
+// round, are both late: the replay ends test-1 (or ends it and begins
+// test-2) as the second asks the learn tracker to take mock-own1, the first
+// asking it then too. One is answered by mock-own1 and the other misses as
+// moved: a recording answers one call of its test, late or at once. Once
+// test-2 began the tracker keeps nothing of test-1's take
+// (learn.Tracker.Answer), and test-1's view, which both claims settle in,
+// refuses the second; before test-2 begins the tracker refuses it.
+func TestTwoLateCallsOfATestNeverTakeOneOfItsRecordings(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		for _, next := range []bool{false, true} {
+			name := map[bool]string{false: "today's rules", true: "proven routing"}[routed] + "/" +
+				map[bool]string{false: "the test ends", true: "the next test begins"}[next]
+			t.Run(name, func(t *testing.T) {
+				p, mm := heldOrders(t, routed)
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				var arrived atomic.Int32
+				both := make(chan struct{})
+				p.learnTracker.OnAnswer(func(uint64) {
+					switch arrived.Add(1) {
+					case 1:
+						select {
+						case <-both:
+						case <-time.After(10 * time.Second):
+						}
+					case 2:
+						p.EndTestErrorCapture()
+						mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+						if next {
+							mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+							p.ContinueTestErrorCapture()
+						}
+						close(both)
+					}
+				})
+				t.Cleanup(func() { p.learnTracker.OnAnswer(nil) })
+				type sent struct {
+					code int
+					got  string
+				}
+				out := make(chan sent, 2)
+				for range 2 {
+					go func() {
+						code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(`{"item":"pear"}`))
+						out <- sent{code, got}
+					}()
+				}
+				a, b := <-out, <-out
+				if arrived.Load() < 2 {
+					t.Fatalf("precondition: the two calls' takes were not both asked of the tracker (%+v, %+v)", a, b)
+				}
+				if a.code != http.StatusOK {
+					a, b = b, a
+				}
+				if a.code != http.StatusOK || a.got != `{"order":1}` || b.code == http.StatusOK {
+					t.Fatalf("two late calls of test-1 got %+v and %+v; want one answered by mock-own1 and the other missing", a, b)
+				}
+				for name, st := range r3States(mm) {
+					if len(st.ReqBodyNoise) > 0 {
+						t.Errorf("%s learned %v as noise from a call it answered exactly or refused", name, st.ReqBodyNoise)
+					}
+				}
+				misses, err := p.GetMockErrors(context.Background())
+				if err != nil || len(misses) != 1 || !strings.Contains(misses[0].NextSteps, "keploy record's full round read this request") {
+					t.Fatalf("the misses read %+v (%v); want one, the refused call's, missed as moved", misses, err)
+				}
+			})
+		}
+	}
+}
+
+// sendPear sends test-1's POST /orders {"item":"pear"} through the learn
+// step: at once, or (waits) as a call that waits for its test case's
+// request, which it then takes.
+func sendPear(t *testing.T, p *Proxy, mm *MockManager, waits bool) (code int, got string) {
+	t.Helper()
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	if !waits {
+		return r3Send(t, p, mm, opts, roundPost(`{"item":"pear"}`))
+	}
+	waiting := make(chan struct{}, 1)
+	p.learnTracker.OnAwait(func() {
+		select {
+		case waiting <- struct{}{}:
+		default:
+		}
+	})
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		code, got = r3Send(t, p, mm, opts, roundPost(`{"item":"pear"}`))
+	}()
+	select {
+	case <-waiting:
+	case <-sent:
+		t.Fatalf("precondition: the call did not wait for its test case's request (got %d %s)", code, got)
+	}
+	p.TakeTestRequest(&models.TestRequest{Test: "test-1"})
+	<-sent
+	return code, got
+}
+
 // A learn step's moved miss is diagnosed on the call's one hold, as every
 // full-round miss is: held to the call's round and to the view its learn
 // step read. A call that is exactly test-1's own mock-own1 has its take

@@ -1168,42 +1168,54 @@ func (d *endingDb) InRecordedTestWindow(t time.Time) (bool, bool) {
 	return d.learnDb.InRecordedTestWindow(t)
 }
 
-// A call of a test that ended before it took the test's own mock is a call of
-// the gap: no test is open, so, as main's rule for the gap says, it answers
-// on an exact match only, and never as the ended test's own. One that drifted
-// from the recording is refused, and nothing is learned onto it.
-func TestLearnMatchALateCallOfAnEndedTestAnswersOnAnExactMatchOnly(t *testing.T) {
+// A call that read its test's scope while the test was open, whose test then
+// ended before it took the test's own mock (learn.Tracker.Answer), is decided
+// as the same call decided at once is: the replay can end a test after
+// keploy read a call of it, and at zero latency the call is the test's.
+// Exactly the test's own recording, it is answered by it as the test's own;
+// drifted from it, it is paired with it and learned from as at once. Before,
+// it was read again as a call of the gap after its test: answered on an
+// exact match only and never as the test's own, and a drifted one missed (a
+// false red under load).
+func TestLearnMatchALateCallOfAnEndedTestIsDecidedAsAtOnce(t *testing.T) {
+	type outcome struct {
+		served, missed, own bool
+		consumed            string
+	}
 	for _, drifted := range []bool{false, true} {
-		h, n, opts := learnOn(t)
-		tr := learn.NewTracker()
-		tr.Begin()
-		ctx := learn.WithTracker(context.Background(), tr)
-		db := &endingDb{learnDb: &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/a", `{"kind":"order","id":"x"}`, nil, `{}`)}}, end: tr.End}
-		body := `{"kind":"order","id":"x"}`
-		if drifted {
-			body = `{"kind":"order","id":"y"}`
-		}
-		served, miss, err := h.learnMatch(ctx, live("POST", "/a", body, nil), db, n, opts)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if tr.Open() {
-			t.Fatal("precondition: the test did not end while the call read its scope")
-		}
-		if tr.Answered("mock-0") {
-			t.Fatalf("drifted %v: a call made after its test ended was answered as that test's own", drifted)
-		}
-		if drifted {
-			if served != nil || miss == nil {
-				t.Fatalf("a drifted call of an ended test was paired: served %v", served != nil)
+		decide := func(late bool) outcome {
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.Begin()
+			ctx := learn.WithTracker(context.Background(), tr)
+			inner := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/a", `{"kind":"order","id":"x"}`, nil, `{}`)}}
+			var db integrations.MockMemDb = inner
+			if late {
+				db = &endingDb{learnDb: inner, end: tr.End}
 			}
-			if len(db.consumed) != 0 {
-				t.Fatalf("a refused call of an ended test consumed its recording, noise %v", db.consumed[0].Spec.ReqBodyNoise)
+			body := `{"kind":"order","id":"x"}`
+			if drifted {
+				body = `{"kind":"order","id":"y"}`
 			}
-			continue
+			served, miss, err := h.learnMatch(ctx, live("POST", "/a", body, nil), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tr.Open() == late {
+				t.Fatalf("precondition: late %v, but the test is open %v after the call", late, tr.Open())
+			}
+			o := outcome{served: served != nil, missed: miss != nil, own: tr.Answered("mock-0")}
+			for _, c := range inner.consumed {
+				o.consumed += fmt.Sprintf("%s noise %v; ", c.Name, c.Spec.ReqBodyNoise)
+			}
+			return o
 		}
-		if served == nil || miss != nil {
-			t.Fatalf("a call of an ended test that matches its recording exactly was not answered: %+v", miss)
+		at, late := decide(false), decide(true)
+		if !at.served || at.missed || !at.own || at.consumed == "" {
+			t.Fatalf("drifted %v: precondition: at once the call of the open test is decided %+v; want it answered by its own recording, as the test's own", drifted, at)
+		}
+		if late != at {
+			t.Fatalf("drifted %v: a call whose test ended under its take is decided %+v; want %+v, as at once", drifted, late, at)
 		}
 	}
 }

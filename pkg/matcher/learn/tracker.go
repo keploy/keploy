@@ -210,6 +210,8 @@ type Tracker struct {
 	// closes while it still awaited its request, with how many calls waited
 	// for it then (waiting), the tracker's lock not held.
 	onUnread func(waiting int)
+	// onAnswer is OnAnswer's f, nil while none is set.
+	onAnswer atomic.Pointer[func(n uint64)]
 	// waiting counts the calls waiting for the running test's request
 	// (AwaitRequest).
 	waiting int
@@ -401,6 +403,22 @@ func (t *Tracker) OnAwait(f func()) {
 	t.mu.Lock()
 	t.onAwait = f
 	t.mu.Unlock()
+}
+
+// OnAnswer makes the tracker call f with the test number of each Answer as
+// it is asked, before it reads the tracker, without the tracker's lock: a
+// test lands a test's end or the next test's begin under a call's take of
+// its test's own recording through no clock. nil calls nothing. The agent
+// sets none.
+func (t *Tracker) OnAnswer(f func(n uint64)) {
+	if t == nil {
+		return
+	}
+	if f == nil {
+		t.onAnswer.Store(nil)
+		return
+	}
+	t.onAnswer.Store(&f)
 }
 
 // AwaitRequest waits while the running test awaits its test case's request
@@ -1647,17 +1665,37 @@ func (t *Tracker) Answered(name string) bool {
 	return t.answered[name] != nil
 }
 
-// Answer takes the test's own mock m to answer a request of test number n:
-// false when it answered one already, or that test has ended, or no test is
-// open, and the request looks again. Two requests never take one mock. A nil
-// tracker takes every mock.
+// Answer takes test number n's own mock m to answer a request of that test:
+// false when m answered one of its requests already, or n is no test of the
+// running set (its start-up's number, a previous set's test, a test not
+// begun), and the request looks again. Two requests never take one mock.
+//
+// A request of a test that has ended is taken as one of the open test is:
+// the replay can end the request's test, or end it and begin the next, after
+// keploy read the request in its test and before it takes m, and decided at
+// once keploy would have answered it from m. Refused, it missed: a false red
+// under load. Taken before the next test begins, m is the ended test's
+// answer (Answered) until that Begin, as an open test's is. Taken once a
+// later test began, the tracker keeps nothing: the request's take settles in
+// the store's view of its own test, which it was read in
+// (integrations.WithinRoundOf), and that view holds m to one answer, so a
+// second request of that test is refused there; the running test's answers
+// hold none of it. A nil tracker takes every mock.
 func (t *Tracker) Answer(n uint64, m *models.Mock) bool {
 	if t == nil {
 		return true
 	}
+	if f := t.onAnswer.Load(); f != nil {
+		(*f)(n)
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if !t.open || t.epoch != n || t.answered[m.Name] != nil {
+	switch {
+	case n <= t.setEpoch || n > t.epoch:
+		return false
+	case n < t.epoch:
+		return true
+	case t.answered[m.Name] != nil:
 		return false
 	}
 	if t.answered == nil {
@@ -1683,7 +1721,8 @@ func (t *Tracker) AnsweredMocks() []*models.Mock {
 }
 
 // Unanswer gives back a mock Answer took for a request that was not answered
-// from it after all.
+// from it after all. A take of a test a later test began after kept
+// nothing, and gives back nothing.
 func (t *Tracker) Unanswer(n uint64, name string) {
 	if t == nil {
 		return

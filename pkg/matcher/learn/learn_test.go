@@ -838,10 +838,14 @@ func TestClockReads(t *testing.T) {
 }
 
 // Each of the running test's own mocks answers one request: a second take
-// fails, a give-back frees it, an ended test takes nothing, and the next
-// test starts afresh.
+// fails, a give-back frees it, and the next test starts afresh. A request of
+// a test that ended takes its own mock as at once: once before the next test
+// begins, kept as the ended test's; after it began, kept by no test (the
+// store's view of the request's test holds it to one answer). No test of the
+// running set (a test not begun, the set's start-up, a previous set's test)
+// takes any.
 func TestTrackerAnswer(t *testing.T) {
-	m, x := &models.Mock{Name: "m"}, &models.Mock{Name: "x"}
+	m, x, y, z := &models.Mock{Name: "m"}, &models.Mock{Name: "x"}, &models.Mock{Name: "y"}, &models.Mock{Name: "z"}
 	tr := NewTracker()
 	tr.Begin()
 	n, _, _, _ := tr.Test()
@@ -855,17 +859,66 @@ func TestTrackerAnswer(t *testing.T) {
 	if tr.Answered("m") || !tr.Answer(n, m) {
 		t.Fatal("a mock given back answers again")
 	}
-	tr.Begin()
-	if tr.Answer(n, x) {
-		t.Fatal("an ended test takes nothing")
+	if tr.Answer(n+1, x) || tr.Answered("x") {
+		t.Fatal("a test not begun takes nothing")
 	}
-	if tr.Answered("m") || len(tr.AnsweredMocks()) != 0 {
+	tr.End()
+	if !tr.Answer(n, x) || tr.Answer(n, x) || !tr.Answered("x") {
+		t.Fatal("a late request of the ended test takes its own mock once, kept as the test's until the next begins")
+	}
+	tr.Unanswer(n, "x")
+	if tr.Answered("x") || !tr.Answer(n, x) {
+		t.Fatal("a mock the ended test's late request gave back answers again")
+	}
+	tr.Begin()
+	if tr.Answered("m") || tr.Answered("x") || len(tr.AnsweredMocks()) != 0 {
 		t.Fatal("the next test starts afresh")
+	}
+	if !tr.Answer(n, y) || tr.Answered("y") || len(tr.AnsweredMocks()) != 0 {
+		t.Fatal("a late request of an earlier test of the set takes its own mock, which the running test's answers never hold")
+	}
+	if !tr.Answer(n+1, y) || !tr.Answered("y") {
+		t.Fatal("the running test's request takes its own mock")
+	}
+	tr.NewSet()
+	if tr.Answer(n+2, z) || tr.Answer(n, z) || tr.Answer(n+1, z) {
+		t.Fatal("before the set's first test, the start-up's number or a previous set's test takes a mock")
+	}
+	tr.Begin()
+	if tr.Answer(n+1, z) || tr.Answer(n+2, z) || tr.Answered("z") || !tr.Answer(n+3, z) {
+		t.Fatal("a previous set's test or the set's start-up took a mock, or the set's first test took none")
+	}
+	var asked []uint64
+	tr.OnAnswer(func(k uint64) { asked = append(asked, k) })
+	tr.Answer(n+3, m)
+	tr.OnAnswer(nil)
+	if !answersWithoutPanic(tr, n+3, x) || len(asked) != 1 || asked[0] != n+3 {
+		t.Fatalf("OnAnswer was told %v; want the one take asked while it was set, and none after it was cleared", asked)
 	}
 	var nilTracker *Tracker
 	if !nilTracker.Answer(1, m) || nilTracker.Answered("m") || nilTracker.AnsweredMocks() != nil {
 		t.Fatal("a nil tracker takes every mock")
 	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("OnAnswer of a nil tracker panicked: %v", r)
+			}
+		}()
+		nilTracker.OnAnswer(func(uint64) {})
+	}()
+}
+
+// answersWithoutPanic asks tr to take m for test n, and reports whether the
+// take returned rather than panicked.
+func answersWithoutPanic(tr *Tracker, n uint64, m *models.Mock) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	tr.Answer(n, m)
+	return true
 }
 
 // A spent candidate (one of the test's own mocks that answered already)
