@@ -1057,9 +1057,11 @@ func wordRunsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) map[str
 // it (one place, one decode), live and as recorded, with the evidence that
 // cuts a run into held stretches, the places other than that text where m's
 // request holds a value whole (heldWhole). An echo is the call's own, never
-// bound in the table, so it has none. No learned value names a word here
-// (WordBind.Of), so each word's span is its own word (main's word by word
-// check).
+// bound in the table, so it has none. A text that is one UUID the call binds
+// at every word names its words that UUID (variables.NameUUIDs): its words
+// are one value by its form. No other learned value names a word here
+// (WordBind.Of), so every other word's span is its own word (main's word by
+// word check).
 func wordBindsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) ([]string, []variables.WordBind) {
 	rec, _ := recordedView(m.Spec.HTTPReq) // fitVariables refused a recording whose URL does not read
 	whole := heldWhole(rec)
@@ -1093,6 +1095,7 @@ func wordBindsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) ([]str
 		names = append(names, d.name)
 		ws = append(ws, w)
 	}
+	variables.NameUUIDs(ws)
 	return names, ws
 }
 
