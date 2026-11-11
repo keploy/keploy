@@ -2110,6 +2110,14 @@ func TestTheManagersMarkInATestSetTheStoreHasNotStagedIsAStagings(t *testing.T) 
 					t.Errorf("%s reads staging %v, in a test %v, holding mock-own2 %v; want a staging's, outside every test, holding every recording", name, call.Staging(), call.InTest(), call.Held("mock-own2"))
 				}
 			}
+			// The manager's mark keeps the variable scope its view was
+			// served in, so keploy, deciding the call late, reads the
+			// bindings of the scope the call was made in.
+			var inForce uint64
+			mm.Variables().InScope(func(scope uint64) { inForce = scope })
+			if scope, known := mm.MarkCallRound().VariableScope(); !known || scope != inForce {
+				t.Errorf("the manager's mark keeps variable scope %d (known %v); want the view's, %d", scope, known, inForce)
+			}
 		})
 	}
 }

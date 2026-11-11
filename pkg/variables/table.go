@@ -70,12 +70,20 @@ type Table struct {
 	// test is the test whose scope is running (StartOpeningTest), "" for a
 	// scope begun with no test named, or before the first.
 	test string
+	// scope is the number of the scope in force (InScope): NewSet and each
+	// scope begun for a named test take the next, so a test run twice in a
+	// set has two. A scope begun with no test named (Start, Reset) keeps the
+	// number in force: none of its calls is read as a named test's, and a
+	// call made in it reads the running scope (OwnIn), as when keploy
+	// decides it at once.
+	scope uint64
 }
 
 // endedScope is an ended scope's own bindings (Own as it ended), by name,
-// and the test it was the scope of.
+// the test it was the scope of, and its number (InScope).
 type endedScope struct {
 	test     string
+	scope    uint64
 	bindings []Binding
 }
 
@@ -768,17 +776,50 @@ func (t *Table) StartOpening(open func(), given, carried []Binding) {
 // notes, by variable name, are noted in the scope as it begins (Note), in
 // the same step: a call checked in the scope reads them from its first.
 func (t *Table) StartOpeningTest(test string, open func(), given, carried []Binding, notes map[string]string) {
+	t.StartOpeningScope(test, func(uint64) { open() }, given, carried, notes)
+}
+
+// StartOpeningScope is StartOpeningTest, open told the number the scope it
+// begins has (InScope): what makes the scope's mocks live (a test's view)
+// carries it, so a call made there reads that scope's bindings as its own
+// test's (OwnIn), however late keploy decides it.
+//
+// open must call none of t's methods: it holds t's lock.
+func (t *Table) StartOpeningScope(test string, open func(scope uint64), given, carried []Binding, notes map[string]string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	open()
+	open(t.scopeOf(test))
 	t.start(test, given, carried)
 	t.notes = maps.Clone(notes)
+}
+
+// InScope runs f holding the table's lock, told the number of the scope in
+// force (StartOpeningScope): what makes mocks live while that scope runs (a
+// pool view between tests, whose calls are the ended test's at zero
+// latency: its scope runs until the next test's begins) carries it, and no
+// scope begins between the read and f's end.
+//
+// f must call none of t's methods: it holds t's lock.
+func (t *Table) InScope(f func(scope uint64)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	f(t.scope)
+}
+
+// scopeOf is the number a scope begun now for test has: the next for a
+// named test, the one in force for none named. t.mu is held.
+func (t *Table) scopeOf(test string) uint64 {
+	if test == "" {
+		return t.scope
+	}
+	return t.scope + 1
 }
 
 // start begins a scope (StartCarrying), of test ("" for none named). t.mu
 // is held.
 func (t *Table) start(test string, given, carried []Binding) {
 	t.end()
+	t.scope = t.scopeOf(test)
 	t.test = test
 	t.gen++
 	t.vals, t.notes = nil, nil
@@ -880,6 +921,7 @@ func (t *Table) newSet() {
 	t.vals, t.run, t.ended, t.notes = nil, nil, nil, nil
 	t.began, t.test = false, ""
 	t.gen++
+	t.scope++
 }
 
 // SetBound is what a table had bound as its set ended (NewSetKeeping), as
@@ -890,22 +932,45 @@ type SetBound struct {
 	own   []Binding
 	ended []endedScope
 	// test is the test the running scope was begun for then ("" for none
-	// named, or before the first scope began).
-	test string
+	// named, or before the first scope began), scope its number (InScope).
+	test  string
+	scope uint64
 }
 
 // NewSetKeeping is NewSet, returning what the ending set had bound
 // (SetBound), read in the same step: no binding is made after it is read
 // and before NewSet forgets it. A call of the ending set that keploy
 // decides once the next set began reads its set's bindings from it.
-func (t *Table) NewSetKeeping() *SetBound {
+// publish, unless nil, is given it in that step too, before NewSet forgets
+// it, under the table's lock: a reader that reads the table in force
+// (Bound) and then finds nothing new published read the set before NewSet
+// forgot it, never the next set's with the ending set's not yet published.
+func (t *Table) NewSetKeeping(publish func(*SetBound)) *SetBound {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	kept := &SetBound{ended: t.ended}
+	kept := t.bound()
+	if publish != nil {
+		publish(kept)
+	}
+	t.newSet()
+	return kept
+}
+
+// Bound is what the table has bound now, as NewSetKeeping would keep it
+// (SetBound), without forgetting it: a call keploy decides reads the
+// bindings of its set in force from it, all in one step.
+func (t *Table) Bound() *SetBound {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.bound()
+}
+
+// bound is Bound's step. t.mu is held.
+func (t *Table) bound() *SetBound {
+	kept := &SetBound{ended: t.ended[:len(t.ended):len(t.ended)], scope: t.scope}
 	if t.began {
 		kept.own, kept.test = sorted(t.vals), t.test
 	}
-	t.newSet()
 	return kept
 }
 
@@ -926,6 +991,18 @@ func (s *SetBound) OwnOf(test string) []Binding {
 	}
 	if !ownScope(s.test, test) {
 		return endedOf(s.ended, test)
+	}
+	return append([]Binding(nil), s.own...)
+}
+
+// OwnIn is what a call made while scope was in force read as its own
+// test's bindings when the set ended (Table.OwnIn then).
+func (s *SetBound) OwnIn(scope uint64) []Binding {
+	if s == nil {
+		return nil
+	}
+	if scope != s.scope {
+		return endedIn(s.ended, scope)
 	}
 	return append([]Binding(nil), s.own...)
 }
@@ -953,6 +1030,17 @@ func endedOf(ended []endedScope, test string) []Binding {
 		}
 	}
 	return out
+}
+
+// endedIn is the bindings of the scope of ended numbered scope (InScope),
+// none where ended keeps none of that number.
+func endedIn(ended []endedScope, scope uint64) []Binding {
+	for _, e := range ended {
+		if e.scope == scope {
+			return append([]Binding(nil), e.bindings...)
+		}
+	}
+	return nil
 }
 
 // Clone is a table holding t's bindings in t's scope, the run's it reads
@@ -1036,6 +1124,27 @@ func (t *Table) OwnOf(test string) []Binding {
 	return sorted(t.vals)
 }
 
+// OwnIn is what a call made while scope was in force (InScope,
+// StartOpeningScope) reads as its own test's bindings (Own), read in one
+// step: the running scope's while it is scope, as when keploy decides the
+// call at once; once a later scope began (keploy decided the call after the
+// replay began the set's next test, or the same test's next run), what
+// scope bound itself as it ended (kept for a named test's scope, on a table
+// that keeps them: KeepEnded), never another scope's, nor the union of a
+// test's runs. None for a scope ended unkept, and for NewSet's before any
+// scope began (no test is running).
+func (t *Table) OwnIn(scope uint64) []Binding {
+	from := t.lock()
+	defer t.unlock(from)
+	if scope != t.scope {
+		return endedIn(t.ended, scope)
+	}
+	if !t.began {
+		return nil
+	}
+	return sorted(t.vals)
+}
+
 // ownScope reports whether a call marked in test's view reads the running
 // scope, begun for running ("" for none named), as its own test's (OwnOf).
 func ownScope(running, test string) bool {
@@ -1049,7 +1158,7 @@ func ownScope(running, test string) bool {
 // no test bound. t.mu is held.
 func (t *Table) end() {
 	if t.keepEnded && t.test != "" {
-		t.ended = append(t.ended, endedScope{test: t.test, bindings: sorted(t.vals)})
+		t.ended = append(t.ended, endedScope{test: t.test, scope: t.scope, bindings: sorted(t.vals)})
 	}
 }
 

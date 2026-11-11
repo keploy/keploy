@@ -59,4 +59,19 @@ func TestBoundValuesAtReadsTheBindingsOfTheTestTheCallWasMarkedIn(t *testing.T) 
 	if got := BoundValuesAt(varsOnly{}, mark); got != nil {
 		t.Fatalf("a store with no table reads %+v; want none", got)
 	}
+
+	// A call marked with the variable scope in force reads that scope's,
+	// not the scope's of its test's next run (a retry cycle), which a mark
+	// by the test's name alone reads while it runs.
+	var first uint64
+	tb.StartOpeningScope("test-1", func(scope uint64) { first = scope }, nil, nil, nil)
+	tb.Bind(variables.Binding{Name: "key", Value: "first", Recorded: "rec-1", Mock: "own-1", Place: "body.key"})
+	tb.StartOpeningTest("test-1", func() {}, nil, nil, nil)
+	tb.Bind(variables.Binding{Name: "key", Value: "again", Recorded: "rec-1", Mock: "own-1", Place: "body.key"})
+	if got := BoundValuesAt(db, NewCallRound(1, nil).OfTest("test-1").InVariableScope(first)).Own(); len(got) != 1 || got[0].Value != "first" {
+		t.Fatalf("test-1's call made in its first run, decided in its next, reads %+v as its own test's; want the first run's key=first", got)
+	}
+	if got := BoundValuesAt(db, mark).Own(); len(got) != 1 || got[0].Value != "again" {
+		t.Fatalf("a mark of test-1 that keeps no scope reads %+v while test-1 runs again; want the running scope's key=again", got)
+	}
 }

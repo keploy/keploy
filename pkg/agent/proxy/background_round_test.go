@@ -167,6 +167,125 @@ func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
 	reads("a call of set C", mark(), "test-a1", "mock-9", &read{trailMocks: "[]"})
 }
 
+// A call of the ending set that keploy decides while the replay switches to
+// the next set reads its set's bound values, as at once: between the
+// session's reset, which clears the set's scope table, and the new set (the
+// trails the reset kept, for a call marked up to it); once the table forgot
+// the set, before the rest of the switch (the set is kept as it is
+// forgotten); and where a new set or a session reset lands while it is read
+// (it reads again). What it read is what it reads after. A worker's manager,
+// which begins no new set, reads the trails its reset kept for a call
+// marked up to it, and a later staging's call the scope table in force.
+func TestACallOfTheEndingSetDecidedAsTheSetSwitchesReadsItsOwnSet(t *testing.T) {
+	bind := func(name, value, mock string) models.VariableBinding {
+		return models.VariableBinding{Name: name, Value: value, Recorded: "rec-" + name, Mock: mock, Place: "body.id"}
+	}
+	type read struct{ own, ended, trail, trailMocks string }
+	text := func(bv integrations.BoundValues) *read {
+		if bv == nil {
+			return nil
+		}
+		names := func(bs []models.VariableBinding) string {
+			out := ""
+			for _, b := range bs {
+				out += b.Name + "=" + b.Value + ";"
+			}
+			return out
+		}
+		tr := bv.TrailOf("mock-9")
+		return &read{own: names(bv.Own()), ended: names(bv.EndedOf("test-a1")), trail: tr.Test, trailMocks: fmt.Sprint(tr.Mocks)}
+	}
+	reads := func(what string, bv integrations.BoundValues, want *read) {
+		t.Helper()
+		if got := text(bv); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: the call reads %+v; want %+v", what, got, want)
+		}
+	}
+	// Set A, as on the run's manager (a set begun: NewVariableSet), or on a
+	// worker's (no set begun): test-a1 bound app=a1 at mock-1 and ended;
+	// test-a2 bound own=a2. mock-9, a worker's recording, trails test-a1.
+	setA := func(begun bool) (*MockManager, integrations.CallRound) {
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		if begun {
+			mm.ResetForReplaySession()
+			mm.NewVariableSet()
+		}
+		mm.SetPoolTests(map[string][]string{"test-a1": {"mock-1"}, "test-a2": {"mock-2"}})
+		mm.SetPoolTrails(map[string]string{"mock-9": "test-a1"})
+		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		mm.Variables().StartOpeningTest("test-a1", func() {}, nil, nil, nil)
+		mm.Variables().Bind(bind("app", "a1", "mock-1"))
+		mm.Variables().StartOpeningTest("test-a2", func() {}, nil, nil, nil)
+		mm.Variables().Bind(bind("own", "a2", "mock-2"))
+		return mm, integrations.NewCallRound(mm.StagingEpoch(), nil)
+	}
+	ownSet := &read{own: "own=a2;", ended: "app=a1;", trail: "test-a1", trailMocks: "[mock-1]"}
+	// Set B's scope table: mock-9 trails test-b1.
+	stageB := func(mm *MockManager) {
+		mm.SetPoolTests(map[string][]string{"test-b1": {"mock-1"}})
+		mm.SetPoolTrails(map[string]string{"mock-9": "test-b1"})
+		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	}
+
+	mm, a := setA(true)
+	mm.ResetForReplaySession()
+	reads("decided between the session's reset and the new set", mm.BoundValuesIn(a), ownSet)
+	before := mm.BoundValuesIn(a)
+	mm.NewVariableSet()
+	reads("read before the new set, read after it", before, ownSet)
+	reads("decided once the new set began", mm.BoundValuesIn(a), ownSet)
+	stageB(mm)
+	reads("read before the new set, read once set B is staged", before, ownSet)
+	reads("decided once set B is staged", mm.BoundValuesIn(a), ownSet)
+
+	mm, a = setA(true)
+	mm.ResetForReplaySession()
+	var inSwitch integrations.BoundValues
+	mm.testHookSetSwitch = func() { inSwitch = mm.BoundValuesIn(a) }
+	mm.NewVariableSet()
+	reads("decided once the table forgot the set, before the rest of the switch", inSwitch, ownSet)
+
+	// A new set lands while the call is read, with no session reset before
+	// it (as for a fresh agent's manager): no scope table was cleared, so
+	// the kept set keeps no trails.
+	mm, a = setA(true)
+	landing := func(land func()) func() {
+		return func() {
+			if land != nil {
+				l := land
+				land = nil
+				l()
+			}
+		}
+	}
+	mm.testHookBoundRead = landing(mm.NewVariableSet)
+	reads("a new set lands while it is read", mm.BoundValuesIn(a), &read{own: "own=a2;", ended: "app=a1;", trailMocks: "[]"})
+
+	mm, a = setA(true)
+	mm.ResetForReplaySession()
+	mm.testHookBoundRead = landing(mm.NewVariableSet)
+	reads("a new set lands while it is read, after the session's reset", mm.BoundValuesIn(a), ownSet)
+
+	mm, a = setA(true)
+	mm.testHookBoundRead = landing(mm.ResetForReplaySession)
+	reads("the session's reset lands while it is read", mm.BoundValuesIn(a), ownSet)
+
+	// A worker's manager: its session reset keeps its scope table's trails
+	// for the calls marked up to it, and no new set takes them.
+	w, aw := setA(false)
+	w.ResetForReplaySession()
+	reads("a worker's call, decided after the session's reset", w.BoundValuesIn(aw), ownSet)
+	stageB(w)
+	if w.StagingEpoch() == aw.Epoch() {
+		t.Fatal("set B's staging started no staging epoch (this case's premise)")
+	}
+	reads("a worker's call, decided once set B is staged", w.BoundValuesIn(aw), ownSet)
+	if got := w.BoundValuesIn(integrations.NewCallRound(w.StagingEpoch(), nil)).TrailOf("mock-9"); got.Test != "test-b1" {
+		t.Fatalf("a worker's call of set B reads the trail %+v; want set B's test-b1", got)
+	}
+}
+
 // A test's call keploy decides after the replay began the set's next test
 // reads, as its own test's bindings, the scope of the test its mark names
 // (variables.Table.OwnOf), not the next test's, which is running when keploy
@@ -251,4 +370,144 @@ func TestACallReadsTheBindingsOfTheTestItWasMarkedIn(t *testing.T) {
 	mm.ResetVariables()
 	bind("unnamed", "u", "own-1")
 	own("test-3's call while a scope that names no test runs", in3, "unnamed=u;")
+}
+
+// boundOwnNames is bv's Own as name=value pairs, "<no set>" for none.
+func boundOwnNames(bv integrations.BoundValues) string {
+	if bv == nil {
+		return "<no set>"
+	}
+	out := ""
+	for _, b := range bv.Own() {
+		out += b.Name + "=" + b.Value + ";"
+	}
+	return out
+}
+
+// A call marked in the pool view after test-1 ended names no test, and is
+// test-1's at zero latency: test-1's variable scope runs until test-2's
+// begins. Decided after test-2 began, or once the next set began, it reads
+// test-1's bindings as its own, never test-2's; a pool-view call after
+// test-2 reads test-2's, and one before the set's first test reads none.
+func TestAPoolViewCallDecidedAfterTheNextTestBeganReadsTheEndedTestsScope(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	own1 := varMockOf("own-1", "/apps", "app-1", true, models.LifetimePerTest)
+	own2 := varMockOf("own-2", "/apps", "app-2", true, models.LifetimePerTest)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	var view integrations.MockMemDb = &scopedMockDb{MockMemDb: mm}
+	mm.NewVariableSet()
+	mm.SetMocksWithWindow([]*models.Mock{own1, own2}, nil, models.BaseTime, time.Now())
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	own := func(what string, call integrations.CallRound, want string) {
+		t.Helper()
+		if got := boundOwnNames(mm.BoundValuesIn(call)); got != want {
+			t.Fatalf("%s: the manager reads %q as the call's own test's; want %q", what, got, want)
+		}
+		if got := boundOwnNames(integrations.BoundValuesAt(view, call)); got != want {
+			t.Fatalf("%s: a test's view reads %q as the call's own test's; want %q", what, got, want)
+		}
+	}
+	bind := func(name, value, mock string) {
+		t.Helper()
+		if _, ok := mm.Variables().Bind(variables.Binding{Name: name, Value: value, Recorded: "rec-" + name, Mock: mock, Place: "body.key"}); !ok {
+			t.Fatalf("premise: no bind of %s", name)
+		}
+	}
+	pre := integrations.MarkCallRound(mm)
+	if _, known := pre.VariableScope(); !known {
+		t.Fatal("premise: a pool view's mark keeps no variable scope")
+	}
+	own("a pool-view call before the set's first test, decided then", pre, "")
+	mm.OpenExactTest("test-1", []*models.Mock{own1}, nil)
+	bind("key", "one", "own-1")
+	own("a pool-view call before the set's first test, decided once it began", pre, "")
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	gap := integrations.MarkCallRound(mm)
+	if gap.Test() != "" {
+		t.Fatalf("premise: pool view mark names %q", gap.Test())
+	}
+	own("the pool-view call after test-1, decided at once", gap, "key=one;")
+	mm.OpenExactTest("test-2", []*models.Mock{own2}, nil)
+	bind("other", "two", "own-2")
+	in2 := integrations.MarkCallRound(mm)
+	own("the pool-view call after test-1, decided after test-2 began", gap, "key=one;")
+	own("test-2's call", in2, "other=two;")
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	gap2 := integrations.MarkCallRound(mm)
+	own("the pool-view call after test-2, decided at once", gap2, "other=two;")
+	mm.OpenExactTest("test-1", []*models.Mock{own1}, nil)
+	bind("key", "again", "own-1")
+	own("the pool-view call after test-2, decided after test-1 ran again", gap2, "other=two;")
+	own("the pool-view call after test-1's first run, decided in its second", gap, "key=one;")
+
+	// The next set begins: the set's calls read the kept set's. A call of
+	// the view the session's reset serves between the sets reads the scope
+	// running then, the set's last test's, decided then or in the next set.
+	mm.ResetForReplaySession()
+	between := integrations.MarkCallRound(mm)
+	own("a call between the sets, decided then", between, "key=again;")
+	mm.NewVariableSet()
+	mm.SetMocksWithWindow([]*models.Mock{own1, own2}, nil, models.BaseTime, time.Now())
+	if mm.StagingEpoch() == gap.Epoch() {
+		t.Fatal("premise: the next set's staging started no staging epoch")
+	}
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.OpenExactTest("test-1", []*models.Mock{own1}, nil)
+	bind("key", "next-set", "own-1")
+	own("the pool-view call after test-1, decided in the next set", gap, "key=one;")
+	own("the pool-view call after test-2, decided in the next set", gap2, "other=two;")
+	own("test-2's call, decided in the next set", in2, "other=two;")
+	own("the pool-view call before the first test, decided in the next set", pre, "")
+	own("a call between the sets, decided in the next set", between, "key=again;")
+}
+
+// A test run twice in one set (keploy replay's mock-consistency retry
+// cycles) has two variable scopes: a call marked in one run, decided once
+// another test began, reads that run's bindings as its own, never the
+// other run's nor both (two live values of one name read as no binding).
+func TestARetriedTestsCallReadsTheRunItWasMarkedIn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	own1 := varMockOf("own-1", "/apps", "app-1", true, models.LifetimePerTest)
+	own2 := varMockOf("own-2", "/apps", "app-2", true, models.LifetimePerTest)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.NewVariableSet()
+	mm.SetMocksWithWindow([]*models.Mock{own1, own2}, nil, models.BaseTime, time.Now())
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	own := func(what string, call integrations.CallRound, want string) {
+		t.Helper()
+		if got := boundOwnNames(mm.BoundValuesIn(call)); got != want {
+			t.Fatalf("%s: reads %q as the call's own test's; want %q", what, got, want)
+		}
+	}
+	bind := func(value string) {
+		t.Helper()
+		if _, ok := mm.Variables().Bind(variables.Binding{Name: "key", Value: value, Recorded: "rec-key", Mock: "own-1", Place: "body.key"}); !ok {
+			t.Fatalf("premise: no bind of %s", value)
+		}
+	}
+	mm.OpenExactTest("test-1", []*models.Mock{own1}, nil)
+	bind("first")
+	run1 := integrations.MarkCallRound(mm)
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.OpenExactTest("test-2", []*models.Mock{own2}, nil)
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.OpenExactTest("test-1", []*models.Mock{own1}, nil)
+	bind("second")
+	run2 := integrations.MarkCallRound(mm)
+	if run1.Test() != "test-1" || run2.Test() != "test-1" {
+		t.Fatalf("premise: the runs' marks name %q and %q", run1.Test(), run2.Test())
+	}
+	own("the first run's call, decided in the second", run1, "key=first;")
+	own("the second run's call, decided at once", run2, "key=second;")
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.OpenExactTest("test-2", []*models.Mock{own2}, nil)
+	own("the first run's call, decided once another test began", run1, "key=first;")
+	own("the second run's call, decided once another test began", run2, "key=second;")
+	mm.ResetForReplaySession()
+	mm.NewVariableSet()
+	mm.SetMocksWithWindow([]*models.Mock{own1, own2}, nil, models.BaseTime, time.Now())
+	own("the first run's call, decided in the next set", run1, "key=first;")
+	own("the second run's call, decided in the next set", run2, "key=second;")
 }
