@@ -2027,8 +2027,10 @@ type seriesMember struct {
 	id   string
 	last bool
 	// once is that the member's series answers once in a run (SetPoolOnce):
-	// each recording once in the staging, wherever its call lands, and no
-	// last-placed recording answers a repeat (againIn).
+	// each recording once in the staging, wherever its call lands
+	// (answersOnce), so its last-placed recording answers no repeat: the
+	// answer-once check refuses a second consume, and hides the recording
+	// from the reads, before againIn is asked.
 	once bool
 }
 
@@ -2126,7 +2128,7 @@ func (s *seriesIndex) againIn(st *outsideState, name string) bool {
 		return false
 	}
 	mem := s.of[name] // a name of no series is the zero member, never the last
-	if !mem.last || mem.once {
+	if !mem.last {
 		return false
 	}
 	for _, n := range s.members[mem.id] {

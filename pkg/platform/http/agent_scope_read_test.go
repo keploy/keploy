@@ -284,7 +284,8 @@ func TestScopeTableWithoutSourcesAckIsRefused(t *testing.T) {
 // among them, is refused with ErrAgentIgnoresRules: it would answer a once
 // series' request again and again. An agent that names once is taken, and
 // the table posted carries them; a table with none takes an answer that
-// does not name once.
+// does not name once. A table with once series and no other rule field is
+// checked all the same.
 func TestScopeTableWithoutOnceAckIsRefused(t *testing.T) {
 	var answer string
 	var posted models.ScopeTableReq
@@ -312,6 +313,10 @@ func TestScopeTableWithoutOnceAckIsRefused(t *testing.T) {
 	answer = `{"status":"ok","served":["series"]}`
 	if err := push(nil); err != nil {
 		t.Fatalf("a table with no once series was refused by an agent that names series: %v", err)
+	}
+	answer = `{"status":"ok"}`
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, []string{"pat/-/1"}); !errors.Is(err, ErrAgentIgnoresRules) {
+		t.Fatalf("a table with once series and no series was taken by an agent that names none: got %v, want ErrAgentIgnoresRules", err)
 	}
 	answer = `{"status":"ok","served":["series","once"]}`
 	if err := push([]string{"pat/-/1"}); err != nil {
