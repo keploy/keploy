@@ -86,14 +86,14 @@ func TestReachableWorkerGatesSiblingsAndOrdersByPlace(t *testing.T) {
 	}
 	begun := map[string]bool{"T1": true, "T2": true}
 	begunAt := map[string]int{"T2": 1, "T1": 2} // T2 began first
-	if got := strings.Join(reachableWorker(worker, begun, begunAt, nil), ","); got != "boot-idle,boot-poll,t2-poll,t1-idle,t1-poll" {
+	if got := strings.Join(reachableWorker(worker, begun, begunAt, nil, nil), ","); got != "boot-idle,boot-poll,t2-poll,t1-idle,t1-poll" {
 		t.Fatalf("today's rules reach %s; want the begun places' in recorded order", got)
 	}
 	bg := &testBackground{
 		noSibling: map[string]bool{"t3-delete": true},
 		idle:      map[string]bool{"boot-idle": true, "t1-idle": true},
 	}
-	got := strings.Join(reachableWorker(worker, begun, begunAt, bg), ",")
+	got := strings.Join(reachableWorker(worker, begun, begunAt, bg, nil), ",")
 	if want := "boot-poll,t3-delete,boot-idle,t2-poll,t1-poll,t1-idle"; got != want {
 		t.Fatalf("the background rules reach %s; want %s", got, want)
 	}
