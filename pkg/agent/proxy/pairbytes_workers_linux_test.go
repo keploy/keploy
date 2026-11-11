@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -99,6 +100,7 @@ func (holdParser) MatchType(context.Context, []byte) bool { return true }
 func (holdParser) RecordOutgoing(context.Context, *integrations.RecordSession) error {
 	return nil
 }
+func (holdParser) MockNoise() mocknoise.Adapter { return nil }
 func (h holdParser) MockOutgoing(context.Context, net.Conn, *models.ConditionalDstCfg, integrations.MockMemDb, models.OutgoingOptions) error {
 	h.saw <- struct{}{}
 	<-h.release
