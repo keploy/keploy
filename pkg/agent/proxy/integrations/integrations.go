@@ -763,7 +763,28 @@ type CallRound struct {
 	// reads is how many reads of its misses window had begun when the read
 	// was made (AfterReads).
 	reads uint64
+	// scope is the number of the variable scope in force in the view the
+	// read was made in (InVariableScope), scoped whether the store keeps one.
+	scope  uint64
+	scoped bool
 }
+
+// InVariableScope is c, of a read made in a view served while the variable
+// scope numbered scope was in force (variables.Table.InScope): a test's
+// view, its test's scope; a pool view between tests, the scope of the test
+// that ended, which runs until the next test's begins. A store that keeps
+// one sets it as it marks the call, from the view it read, so a late
+// decision reads the bindings of that scope as the call's own test's
+// (BoundValues.Own, variables.Table.OwnIn), not those of a scope begun after
+// the mark: at zero latency the call read that scope's.
+func (c CallRound) InVariableScope(scope uint64) CallRound {
+	c.scope, c.scoped = scope, true
+	return c
+}
+
+// VariableScope is the number InVariableScope kept; known is false for a
+// store that keeps none.
+func (c CallRound) VariableScope() (scope uint64, known bool) { return c.scope, c.scoped }
 
 // AfterReads is c, of a read made when n reads of the misses window its
 // store files its misses in had begun (the proxy's GetMockErrors of the run,
@@ -1243,10 +1264,13 @@ func BackgroundRecordingsAt(db MockMemDb, call CallRound, kind models.Kind) []mo
 }
 
 // BoundValues is what a set's test variables had bound, as a background
-// miss reads them (Mongo's markBackground): the bindings the scope of the
-// test the call was marked in made itself (variables.Table.OwnOf: the
-// running scope's while it is that test's, its ended scopes' once the
-// replay began the set's next test first), what each ended test of the set
+// miss reads them (Mongo's markBackground): the bindings the variable scope
+// the call was marked in made itself (variables.Table.OwnIn, of the mark's
+// CallRound.VariableScope: the running scope's while it is that scope, what
+// it bound as it ended once the replay began the set's next test, or the
+// same test's next run, first; a pool view's call between tests is the
+// ended test's, whose scope runs until the next begins; variables.Table.
+// OwnOf, by the mark's test, for a mark that keeps no scope), what each ended test of the set
 // bound itself (variables.Table.EndedOf), and the test each recording
 // trails by the set's scope table (TrailedTests).
 type BoundValues interface {
@@ -1262,8 +1286,9 @@ type BoundValues interface {
 // every binding of the set before (as RoundBackgroundReader is to the
 // background recordings). nil when the call was marked in a set older than
 // the store keeps (no value is bound for it, so a background miss counts);
-// the set's in force for the zero CallRound. Own is the scope's of the test
-// call names (CallRound.Test).
+// the set's in force for the zero CallRound. Own is the scope's the call was
+// made in (CallRound.VariableScope), or of the test it names (CallRound.Test)
+// for a mark that keeps no scope.
 type RoundBoundReader interface {
 	BoundValuesIn(call CallRound) BoundValues
 }
@@ -1288,19 +1313,30 @@ func BoundValuesAt(db MockMemDb, call CallRound) BoundValues {
 }
 
 // BoundNow is the bound values in force in table, with the trails db tells
-// (TrailOf), as call reads them (Own: the scope's of the test call names):
-// a store's current set's.
+// (TrailOf), as call reads them (Own: the scope's the call was made in,
+// variables.Table.OwnIn, for a mark that keeps its variable scope
+// (CallRound.VariableScope); the scope's of the test call names,
+// variables.Table.OwnOf, for one that keeps none): a store's current set's.
 func BoundNow(table *variables.Table, db MockMemDb, call CallRound) BoundValues {
-	return boundNow{table: table, db: db, test: call.Test()}
+	scope, scoped := call.VariableScope()
+	return boundNow{table: table, db: db, test: call.Test(), scope: scope, scoped: scoped}
 }
 
 type boundNow struct {
-	table *variables.Table
-	db    MockMemDb
-	test  string
+	table  *variables.Table
+	db     MockMemDb
+	test   string
+	scope  uint64
+	scoped bool
 }
 
-func (b boundNow) Own() []variables.Binding                { return b.table.OwnOf(b.test) }
+func (b boundNow) Own() []variables.Binding {
+	if b.scoped {
+		return b.table.OwnIn(b.scope)
+	}
+	return b.table.OwnOf(b.test)
+}
+
 func (b boundNow) EndedOf(test string) []variables.Binding { return b.table.EndedOf(test) }
 func (b boundNow) TrailOf(mock string) learn.Trail         { return TrailOf(b.db, mock) }
 

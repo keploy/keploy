@@ -2968,14 +2968,24 @@ type boundKept struct {
 	older       bool
 }
 
-// keptFor is k as a call marked in test's view reads it (Own: that test's
-// scope's, variables.SetBound.OwnOf).
+// keptFor is k as a call marked in test's view, with the variable scope
+// numbered scope in force (scoped: the mark keeps one), reads it (Own: that
+// scope's, variables.SetBound.OwnIn; test's, variables.SetBound.OwnOf, for
+// a mark that keeps none).
 type keptFor struct {
-	k    *boundKept
-	test string
+	k      *boundKept
+	test   string
+	scope  uint64
+	scoped bool
 }
 
-func (r keptFor) Own() []variables.Binding                { return r.k.vars.OwnOf(r.test) }
+func (r keptFor) Own() []variables.Binding {
+	if r.scoped {
+		return r.k.vars.OwnIn(r.scope)
+	}
+	return r.k.vars.OwnOf(r.test)
+}
+
 func (r keptFor) EndedOf(test string) []variables.Binding { return r.k.vars.EndedOf(test) }
 func (r keptFor) TrailOf(mock string) learn.Trail         { return trailIn(r.k.scope, mock) }
 
@@ -2985,9 +2995,11 @@ func (r keptFor) TrailOf(mock string) learn.Trail         { return trailIn(r.k.s
 // before it (boundKept) for a call marked up to then, which keploy decides
 // once the replay began the next set; nil for a call marked before both
 // (no value is bound for it: its background miss counts). Each reads, as
-// the call's own test's, the scope of the test the call was marked in
-// (variables.Table.OwnOf): the replay can begin the set's next test before
-// keploy decides a test's call too.
+// the call's own test's, the variable scope in force in the view the call
+// was marked in (integrations.CallRound.VariableScope, variables.Table.
+// OwnIn): the replay can begin the set's next test before keploy decides a
+// test's call, or a pool view's call between tests (the ended test's: its
+// scope runs until the next begins), and a test can run again in its set.
 func (m *MockManager) BoundValuesIn(call integrations.CallRound) integrations.BoundValues {
 	k := m.boundKept.Load()
 	if !call.Read() || k == nil || call.Epoch() > k.upTo {
@@ -2996,7 +3008,8 @@ func (m *MockManager) BoundValuesIn(call integrations.CallRound) integrations.Bo
 	if k.older && call.Epoch() <= k.after {
 		return nil
 	}
-	return keptFor{k: k, test: call.Test()}
+	scope, scoped := call.VariableScope()
+	return keptFor{k: k, test: call.Test(), scope: scope, scoped: scoped}
 }
 
 var _ integrations.RoundBoundReader = (*MockManager)(nil)
