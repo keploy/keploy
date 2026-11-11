@@ -180,7 +180,14 @@ func (p *Proxy) ServeInstance(inst uint32) (agent.ExactServer, error) {
 	if s.misses == nil {
 		s.misses = make(map[uint32]*missWindow)
 	}
-	s.misses[inst] = &missWindow{}
+	w := &missWindow{}
+	if set := p.setStarts.Load(); set > 0 {
+		// Served in a running test set, under the proven switch: the
+		// worker's calls are that set's from its manager's staging here,
+		// before any read of its window (missWindow.keptAsEarlierSet).
+		w.noteSetStart(setStart{epoch: wm.StagingEpoch(), set: set})
+	}
+	s.misses[inst] = w
 	s.on = true
 	s.mu.Unlock()
 	return instanceExact{p: p, inst: inst}, nil
@@ -288,6 +295,14 @@ func (s instanceExact) RestartExactKey(key string, names []string) error {
 	return nil
 }
 
+func (s instanceExact) ExactTestInstalled(test string) (epoch, bounds uint64, ok bool) {
+	m, err := s.mgr()
+	if err != nil {
+		return 0, 0, false
+	}
+	return m.ExactTestInstalled(test)
+}
+
 func (s instanceExact) ExactTestOutcome() (string, []string, []string, bool) {
 	m, err := s.mgr()
 	if err != nil {
@@ -314,6 +329,8 @@ var (
 	_ agent.ExactAheadServer      = instanceExact{}
 	_ agent.ExactWorkerServer     = instanceExact{}
 	_ agent.ExactKeyRestarter     = instanceExact{}
+
+	_ agent.ExactTestInstallReader = instanceExact{}
 )
 
 // refuseUnserved is the error that ends a connection no test worker's

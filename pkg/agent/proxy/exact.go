@@ -108,6 +108,15 @@ func (p *poolSlice) has(name string) bool {
 type exactView struct {
 	// test is the open test's ID; "" while no test is open.
 	test string
+	// scope is the number of the variable scope in force while the view
+	// serves (variables.Table.InScope), scoped whether it was stamped (a
+	// view installed by serveExactTest or ServeExactPool): a test's view,
+	// its test's scope; a pool view after a test, that test's, which runs
+	// until the next test's begins. A call marked in the view reads that
+	// scope's bindings as its own test's however late keploy decides it
+	// (integrations.CallRound.VariableScope).
+	scope  uint64
+	scoped bool
 	// gen is the test view's own number: each copy it serves carries it
 	// (TestModeInfo.ServedIn), so a copy read in an earlier view, a previous
 	// attempt of the same test, cannot answer for this one.
@@ -232,6 +241,10 @@ type exactView struct {
 	round       uint64
 	learnNumber uint64
 	learnBound  bool
+	// installed is the staging and the round's boundary count this view was
+	// installed at (ExactTestInstalled), set with round: a call marked in a
+	// view before this one carries a lower one (integrations.CallRound.Round).
+	installed integrations.RoundAt
 	// shared is the view's SharedGen's View, which a test's view reports:
 	// what it shows of the trees beyond the protocol-phase recordings, the
 	// last view's number when that view's was the same (sharedViews.of).
@@ -1002,6 +1015,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	r.mu.Lock()
 	v := m.exact.view.Load()
 	at := integrations.RoundAt{Epoch: m.stagingEpoch.Load(), Gen: r.gen, Bounds: r.bounds}
+	reads := m.windowReads.Load()
 	var ended *exactView
 	ahead, unstaged := false, false
 	if v != nil && r.learn.routed {
@@ -1023,21 +1037,34 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// (integrations.RoundSnapshot.SetUnstaged): the call the staging
 		// note describes, outside every test, its miss naming none made
 		// elsewhere.
-		return integrations.NewCallRound(at.Epoch, nil).HoldingEvery().ReadAt(at).InStaging(true).InView(false, v.bg != nil).WithSequence(m.sequenceViewOf(v))
+		return v.inVariableScope(integrations.NewCallRound(at.Epoch, nil).HoldingEvery().ReadAt(at).InStaging(true).InView(false, v.bg != nil).WithSequence(m.sequenceViewOf(v)).AfterReads(reads))
 	}
 	held := v.holds
 	if ended != nil {
 		held = func(name string) bool { return v.holds(name) || ended.holds(name) }
 	}
-	c := integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).WithSequence(m.sequenceViewOf(v))
+	c := v.inVariableScope(integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).WithSequence(m.sequenceViewOf(v)).AfterReads(reads))
 	if ahead {
 		// The tracker began a test whose view the store has not
 		// installed (integrations.RoundSnapshot.TrackerAhead): nothing
 		// tells which recordings are that test's own, so every one is
-		// held, and the call's miss names none made elsewhere.
-		c = c.HoldingEvery()
+		// held, and the call's miss names none made elsewhere. Nor does
+		// it name the test whose view is in force: the call is the pool's
+		// or the tracker's test's, never that one's, so a test's end
+		// charges its miss by the view it was read in (fails closed).
+		return c.HoldingEvery().WithTrackerAhead(true)
 	}
-	return c.WithTrackerAhead(ahead)
+	return c.OfTest(v.test).WithTrackerAhead(false)
+}
+
+// inVariableScope is c, a mark made in v, in the variable scope v was
+// stamped with (exactView.scope); c unchanged for a view not stamped, whose
+// mark reads the scope of the test it names (integrations.BoundNow).
+func (v *exactView) inVariableScope(c integrations.CallRound) integrations.CallRound {
+	if !v.scoped {
+		return c
+	}
+	return c.InVariableScope(v.scope)
 }
 
 // endedName is the test of v, the view the store ended while the learn
@@ -1619,11 +1646,14 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		}
 		v.carried[a.owned.Name] = true
 	}
-	install := func() {
-		// The install lock is taken here, on every door, so on the open
-		// doors (OpenExactTest, OpenExactTestConcurrent) it is held under
-		// the variables' lock; the round lock the install takes is taken
-		// under it.
+	install := func(scope uint64) {
+		// The install lock is taken here, on every door, under the
+		// variables' lock (the open doors, OpenExactTest and
+		// OpenExactTestConcurrent, begin the test's scope in the step; the
+		// others read the scope in force, variables.Table.InScope); the
+		// round lock the install takes is taken under it. The view is
+		// stamped with that scope before it serves (exactView.scope).
+		v.scope, v.scoped = scope, true
 		m.exact.installMu.Lock()
 		defer m.exact.installMu.Unlock()
 		// One step with the swap, holding the round lock: no snapshot sees
@@ -1653,10 +1683,10 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		// The scope is test's: what it binds itself is test's once the next
 		// begins (variables.Table.EndedOf). It begins with the notes left
 		// for it (NoteExactTestAtOpen).
-		m.vars.StartOpeningTest(test, install, given, m.carriedInto(v), m.takeCaseNotes(test))
+		m.vars.StartOpeningScope(test, install, given, m.carriedInto(v), m.takeCaseNotes(test))
 		m.aheadVars.Reset()
 	} else {
-		install()
+		m.vars.InScope(install)
 	}
 	// Their consumes are flagged now, as this test's: the test before it was
 	// drained since (the replay drains it after the pool call), and this
@@ -1860,7 +1890,13 @@ var _ integrations.TrailedTests = (*MockManager)(nil)
 // trails no test, for a test the table does not list, and until a replay
 // sent both: such a call reads only its own test's places.
 func (m *MockManager) TrailOf(mock string) learn.Trail {
-	trails, tests := m.exact.poolTrails.Load(), m.exact.poolTests.Load()
+	return trailIn(scopeTrails{trails: m.exact.poolTrails.Load(), tests: m.exact.poolTests.Load()}, mock)
+}
+
+// trailIn is the test the recording named mock trails by s, with the mocks
+// that test lists there (TrailOf); the zero Trail where s tells none.
+func trailIn(s scopeTrails, mock string) learn.Trail {
+	trails, tests := s.trails, s.tests
 	if trails == nil || tests == nil {
 		return learn.Trail{}
 	}
@@ -1947,8 +1983,18 @@ func (m *MockManager) ServeExactPool(key string, names []string, ahead ...*model
 		}
 	}
 	m.aheadVars.StartCarrying(nil, bound)
-	m.installExactWith(v, func(r *roundState) {
-		m.settleAheadLocked(r, answered, v, func(name string) (bool, bool) { return false, kept[name] })
+	// Installed in the variable scope in force, which the view is stamped
+	// with (exactView.scope): the ended test's, which runs until the next
+	// test's begins, so a call made in the pool view reads that test's
+	// bindings as its own however late keploy decides it, as at zero
+	// latency. No scope begins between the read and the install
+	// (variables.Table.InScope holds the variables' lock, which an open
+	// door's install takes first too).
+	m.vars.InScope(func(scope uint64) {
+		v.scope, v.scoped = scope, true
+		m.installExactWith(v, func(r *roundState) {
+			m.settleAheadLocked(r, answered, v, func(name string) (bool, bool) { return false, kept[name] })
+		})
 	})
 	for _, a := range answered {
 		if !kept[a.owned.Name] && m.logger != nil {
@@ -2055,6 +2101,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	r := &m.exact.round
 	r.boundary("a view was installed")
 	v.round = r.gen
+	v.installed = integrations.RoundAt{Epoch: m.stagingEpoch.Load(), Gen: r.gen, Bounds: r.bounds}
 	m.exact.shared.of(v, w)
 	if v.test != "" {
 		r.bindLocked(v)
@@ -2199,6 +2246,21 @@ func (m *MockManager) ExactTestServed() string {
 		return v.test
 	}
 	return ""
+}
+
+// ExactTestInstalled is, under exact serving, the staging and the round's
+// boundary count the view in force was installed at, when it is test's view
+// (agent.ExactTestInstallReader): ok is false when no view of test's is in
+// force. They are read under the round lock with the install, as a call's
+// mark reads them (MarkCallRound), so a call marked in any view before this
+// one carries an earlier round (models.MissMark.Before), and one marked in
+// this view or after it never does.
+func (m *MockManager) ExactTestInstalled(test string) (epoch, bounds uint64, ok bool) {
+	v := m.exactView()
+	if v == nil || test == "" || v.test != test {
+		return 0, 0, false
+	}
+	return v.installed.Epoch, v.installed.Bounds, true
 }
 
 // testOutcome is a test view's outcome, by name (ExactTestOutcome).
