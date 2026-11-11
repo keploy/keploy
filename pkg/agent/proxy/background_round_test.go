@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
 
@@ -74,4 +77,178 @@ func TestACallIsJudgedByTheBackgroundRecordingsOfTheSetItWasMarkedIn(t *testing.
 	reads("a call of set C before its second seed", c, "c-poll")
 	reads("a call of set C after its second seed", mark(), "c2-poll")
 	reads("a call of set B after C's second seed", b)
+}
+
+// A call's background miss reads the bound values of the set it was marked
+// in, as its background recordings: what that set's tests bound and the
+// test each recording trails by that set's scope table, not the next set's,
+// which the replay can begin first and which forgets every binding of the
+// set before. The set before the current one is kept; a call marked before
+// both reads none (its background miss counts); the zero CallRound and a
+// call of the current set read the current set's; a test's view forwards
+// it; and a new set begun again before its staging keeps the set before.
+func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mark := func() integrations.CallRound { return integrations.NewCallRound(mm.StagingEpoch(), nil) }
+	var view integrations.MockMemDb = &scopedMockDb{MockMemDb: mm}
+	bind := func(name, value, mock string) models.VariableBinding {
+		return models.VariableBinding{Name: name, Value: value, Recorded: "rec-" + name, Mock: mock, Place: "body.id"}
+	}
+	type read struct{ own, ended, trail, trailMocks string }
+	text := func(bv integrations.BoundValues, endedTest, mock string) *read {
+		if bv == nil {
+			return nil
+		}
+		names := func(bs []models.VariableBinding) string {
+			out := ""
+			for _, b := range bs {
+				out += b.Name + "=" + b.Value + ";"
+			}
+			return out
+		}
+		tr := bv.TrailOf(mock)
+		return &read{own: names(bv.Own()), ended: names(bv.EndedOf(endedTest)), trail: tr.Test, trailMocks: fmt.Sprint(tr.Mocks)}
+	}
+	reads := func(what string, call integrations.CallRound, endedTest, mock string, want *read) {
+		t.Helper()
+		if got := text(mm.BoundValuesIn(call), endedTest, mock); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: the manager reads %+v; want %+v", what, got, want)
+		}
+		if got := text(integrations.BoundValuesAt(view, call), endedTest, mock); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: a test's view reads %+v; want %+v", what, got, want)
+		}
+	}
+
+	// Set A: test-a1 bound app=a1 at mock-1 and ended; test-a2 bound
+	// own=a2. mock-9, a worker: recording, trails test-a1.
+	mm.ResetForReplaySession()
+	mm.NewVariableSet()
+	mm.SetPoolTests(map[string][]string{"test-a1": {"mock-1"}, "test-a2": {"mock-2"}})
+	mm.SetPoolTrails(map[string]string{"mock-9": "test-a1"})
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.Variables().StartOpeningTest("test-a1", func() {}, nil, nil, nil)
+	mm.Variables().Bind(bind("app", "a1", "mock-1"))
+	mm.Variables().StartOpeningTest("test-a2", func() {}, nil, nil, nil)
+	mm.Variables().Bind(bind("own", "a2", "mock-2"))
+	a := mark()
+	setA := &read{own: "own=a2;", ended: "app=a1;", trail: "test-a1", trailMocks: "[mock-1]"}
+	reads("a call of set A", a, "test-a1", "mock-9", setA)
+
+	// Set B begins (twice: the replay's re-registration before staging),
+	// with its own scope table, which trails nothing; staged, its test-b1
+	// binds own=b1.
+	mm.ResetForReplaySession()
+	mm.NewVariableSet()
+	reads("a call of set A, B begun and not staged", a, "test-a1", "mock-9", setA)
+	mm.ResetForReplaySession()
+	mm.NewVariableSet()
+	reads("a call of set A, B begun again and not staged", a, "test-a1", "mock-9", setA)
+	mm.SetPoolTests(map[string][]string{"test-b1": {"mock-1"}})
+	mm.SetPoolTrails(map[string]string{})
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if mm.StagingEpoch() == a.Epoch() {
+		t.Fatal("set B's staging started no staging epoch (this case's premise)")
+	}
+	mm.Variables().StartOpeningTest("test-b1", func() {}, nil, nil, nil)
+	mm.Variables().Bind(bind("own", "b1", "mock-1"))
+	b := mark()
+	setB := &read{own: "own=b1;", trailMocks: "[]"}
+	reads("a call of set A decided in set B", a, "test-a1", "mock-9", setA)
+	reads("a call of set B", b, "test-a1", "mock-9", setB)
+	reads("a call of no mark", integrations.CallRound{}, "test-a1", "mock-9", setB)
+
+	// Set C: B's call reads B's as B ended; A's, two sets back, none.
+	mm.ResetForReplaySession()
+	mm.NewVariableSet()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	reads("a call of set B decided in set C", b, "test-a1", "mock-9", setB)
+	reads("a call of set A, two sets back", a, "test-a1", "mock-9", nil)
+	reads("a call of set C", mark(), "test-a1", "mock-9", &read{trailMocks: "[]"})
+}
+
+// A test's call keploy decides after the replay began the set's next test
+// reads, as its own test's bindings, the scope of the test its mark names
+// (variables.Table.OwnOf), not the next test's, which is running when keploy
+// decides it: at once, it read its own test's scope. So too once the next
+// set began (the kept set's). A pool view's call decided at once reads the
+// running scope, the ended test's; a mark of a test whose scope bound
+// nothing reads none (its background miss counts); and while the running
+// scope names no test, nothing tells it is not the call's, so it is read.
+func TestACallReadsTheBindingsOfTheTestItWasMarkedIn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	own1 := varMockOf("own-1", "/apps", "app-1", true, models.LifetimePerTest)
+	own2 := varMockOf("own-2", "/apps", "app-2", true, models.LifetimePerTest)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	var view integrations.MockMemDb = &scopedMockDb{MockMemDb: mm}
+	mm.NewVariableSet()
+	mm.SetMocksWithWindow([]*models.Mock{own1, own2}, nil, models.BaseTime, time.Now())
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	own := func(what string, call integrations.CallRound, want string) {
+		t.Helper()
+		names := func(bv integrations.BoundValues) string {
+			if bv == nil {
+				return "<no set>"
+			}
+			out := ""
+			for _, b := range bv.Own() {
+				out += b.Name + "=" + b.Value + ";"
+			}
+			return out
+		}
+		if got := names(mm.BoundValuesIn(call)); got != want {
+			t.Fatalf("%s: the manager reads %q as the call's own test's; want %q", what, got, want)
+		}
+		if got := names(integrations.BoundValuesAt(view, call)); got != want {
+			t.Fatalf("%s: a test's view reads %q as the call's own test's; want %q", what, got, want)
+		}
+	}
+	bind := func(name, value, mock string) {
+		t.Helper()
+		if _, ok := mm.Variables().Bind(variables.Binding{Name: name, Value: value, Recorded: "rec-" + name, Mock: mock, Place: "body.key"}); !ok {
+			t.Fatalf("the running scope did not bind %s (this case's premise)", name)
+		}
+	}
+
+	mm.OpenExactTest("test-1", []*models.Mock{own1}, nil)
+	bind("key", "one", "own-1")
+	in1 := integrations.MarkCallRound(mm)
+	if in1.Test() != "test-1" {
+		t.Fatalf("a call read in test-1's view is marked of test %q; want test-1 (this case's premise)", in1.Test())
+	}
+	own("test-1's call decided in test-1", in1, "key=one;")
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	gap := integrations.MarkCallRound(mm)
+	if gap.Test() != "" {
+		t.Fatalf("a call read in the pool view is marked of test %q; want none (this case's premise)", gap.Test())
+	}
+	own("a call of the pool view after test-1, decided then", gap, "key=one;")
+	mm.OpenExactTest("test-2", []*models.Mock{own2}, nil)
+	bind("other", "two", "own-2")
+	in2 := integrations.MarkCallRound(mm)
+	own("test-1's call decided after test-2 began", in1, "key=one;")
+	own("test-2's call", in2, "other=two;")
+	ghost := integrations.NewCallRound(in1.Epoch(), nil).OfTest("test-9")
+	own("a call of a test whose scope bound nothing", ghost, "")
+	own("a call of no mark", integrations.CallRound{}, "other=two;")
+
+	// The next set begins: the set's calls read the kept set's.
+	mm.ResetForReplaySession()
+	mm.NewVariableSet()
+	mm.SetMocksWithWindow([]*models.Mock{own1, own2}, nil, models.BaseTime, time.Now())
+	if mm.StagingEpoch() == in1.Epoch() {
+		t.Fatal("the next set's staging started no staging epoch (this case's premise)")
+	}
+	own("test-1's call decided in the next set", in1, "key=one;")
+	own("test-2's call decided in the next set", in2, "other=two;")
+	own("a call of a test whose scope bound nothing, in the next set", ghost, "")
+
+	// A scope begun with no test named: nothing tells it is not test-3's.
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.OpenExactTest("test-3", []*models.Mock{own1}, nil)
+	in3 := integrations.MarkCallRound(mm)
+	mm.ResetVariables()
+	bind("unnamed", "u", "own-1")
+	own("test-3's call while a scope that names no test runs", in3, "unnamed=u;")
 }

@@ -1868,7 +1868,13 @@ var _ integrations.TrailedTests = (*MockManager)(nil)
 // trails no test, for a test the table does not list, and until a replay
 // sent both: such a call reads only its own test's places.
 func (m *MockManager) TrailOf(mock string) learn.Trail {
-	trails, tests := m.exact.poolTrails.Load(), m.exact.poolTests.Load()
+	return trailIn(scopeTrails{trails: m.exact.poolTrails.Load(), tests: m.exact.poolTests.Load()}, mock)
+}
+
+// trailIn is the test the recording named mock trails by s, with the mocks
+// that test lists there (TrailOf); the zero Trail where s tells none.
+func trailIn(s scopeTrails, mock string) learn.Trail {
+	trails, tests := s.trails, s.tests
 	if trails == nil || tests == nil {
 		return learn.Trail{}
 	}

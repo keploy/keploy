@@ -570,7 +570,7 @@ func TestAnsweredAndPairedReportsRedactTheLiveValueAtARedactedSegment(t *testing
 						r = e.MismatchReport()
 					}
 				})
-				reportPairing(ctx, in, m, integrations.AnsweredCall{}, false)
+				reportPairing(ctx, in, m, integrations.AnsweredCall{}, false, integrations.CallRound{})
 				noSecret(t, r, true)
 				if got := c.carried(t, r); len(got) > 0 {
 					t.Errorf("the report carries %q: summary %s", got, r.ActualSummary)
@@ -883,7 +883,7 @@ func TestAPairedCallWithAnEmptyPathIsNamedSlash(t *testing.T) {
 	m := recorded("m", "/REDACTED_abc", nil, "")
 	m.Noise = []string{`^REDACTED_abc$`}
 	in := &req{method: "GET", url: &url.URL{}, header: http.Header{"Host": {"api.example"}}}
-	reportPairing(ctx, in, m, integrations.AnsweredCall{}, false)
+	reportPairing(ctx, in, m, integrations.AnsweredCall{}, false, integrations.CallRound{})
 	if len(got) != 1 || got[0].ActualSummary != "GET /" {
 		t.Fatalf("reports %+v", got)
 	}
