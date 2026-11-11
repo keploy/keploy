@@ -246,3 +246,20 @@ func TestTable_AReadersMintedValueTheOtherHadStaysTheOthers(t *testing.T) {
 		t.Fatalf("refused beside %+v, want the table's own binding", with)
 	}
 }
+
+// A reader that turns from one table's run to another's carries the run's
+// minted values with it: a value it bound at a minted place while it read
+// the first is refused at the second, naming that binding.
+func TestTable_AReaderCarriesTheRunsMintedValuesWhenItTurnsToAnotherTable(t *testing.T) {
+	var first, second, ahead Table
+	ahead.ReadRunOf(&first)
+	bindMinted(t, &ahead, true, mintedB("auditId", mintNext))
+	ahead.ReadRunOf(&second)
+	if _, with := bindMinted(t, &second, false, mintedB("clusterId", mintNext)); with.Name != "auditId" {
+		t.Fatalf("refused beside %+v, want the binding made while the reader read the first table", with)
+	}
+	ahead.Reset()
+	if _, with := bindMinted(t, &ahead, false, mintedB("otherId", mintNext)); with.Name != "auditId" {
+		t.Fatalf("the reader itself: refused beside %+v, want its own earlier binding", with)
+	}
+}
