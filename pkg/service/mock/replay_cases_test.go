@@ -17,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
@@ -434,9 +435,108 @@ func TestTestReceiptsMarkAnUnreportedCount(t *testing.T) {
 		Consumed: []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}},
 		Missed:   []models.UnmatchedCall{{Protocol: "HTTP"}},
 	}}
-	require.Equal(t, []TestReceipt{{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: 2, Missed: 1}}, testReceipts(flows, true, true))
-	require.Equal(t, []TestReceipt{{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: -1, Missed: 1}}, testReceipts(flows, false, true))
+	require.Equal(t, []TestReceipt{{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: 2, Missed: 1, AnsweredBy: []string{"mock-0", "mock-1"}}}, testReceipts(flows, true, true))
+	require.Equal(t, []TestReceipt{{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: -1, Missed: 1}}, testReceipts(flows, false, true),
+		"a replay that could not read what was served names no recording that answered")
 	require.Nil(t, testReceipts(nil, true, true))
+}
+
+// A test's line names every recording that answered one of its calls
+// (TestReceipt.AnsweredBy), as the agent's own mock manager reads where each
+// answered: a recording that answers call after call (a session one, as one
+// a mapping edit moved to a shared scope is) is named under every test it
+// answered, not only the one it first answered, and a serve while two tests
+// are open is named under both. One that answered only while no test was
+// open (at boot, from the background) is named under none. An answer shapes
+// the application's later calls, so a judge of a mapping edit reads which
+// recordings answered a test that failed.
+func TestATestsLineNamesEveryRecordingThatAnsweredIt(t *testing.T) {
+	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	serve := func(name string, lt models.Lifetime) {
+		t.Helper()
+		require.True(t, mm.MarkMockAsUsed(models.Mock{Name: name, Kind: models.HTTP, TestModeInfo: models.TestModeInfo{Lifetime: lt}}), name)
+	}
+	serve("mock-30", models.LifetimeSession) // at boot
+	mm.OpenTestWindow(1)                     // pkg.TestB
+	serve("mock-21", models.LifetimeSession)
+	mm.CloseTestWindow(1)
+	mm.OpenTestWindow(2) // pkg.TestA
+	serve("mock-10", models.LifetimePerTest)
+	mm.OpenTestWindow(3) // pkg.TestC, beside pkg.TestA
+	serve("mock-21", models.LifetimeSession)
+	mm.CloseTestWindow(3)
+	mm.CloseTestWindow(2)
+	mm.OpenTestWindow(4) // pkg.TestA's second run
+	serve("mock-21", models.LifetimeSession)
+	mm.CloseTestWindow(4)
+	mm.OpenTestWindow(5) // a window keploy withdrew: no test's
+	serve("mock-40", models.LifetimeSession)
+	mm.CloseTestWindow(5)
+	windows := []models.ScopeWindow{
+		{Name: "pkg.TestB", Seq: 1, Start: time.Unix(10, 0), End: time.Unix(20, 0), Outcome: models.ScopeOutcomePassed},
+		{Name: "pkg.TestC", Seq: 3, Start: time.Unix(25, 0), End: time.Unix(30, 0), Outcome: models.ScopeOutcomePassed},
+		{Name: "pkg.TestA", Seq: 2, Start: time.Unix(21, 0), End: time.Unix(40, 0), Outcome: models.ScopeOutcomeFailed},
+		{Name: "pkg.TestA", Seq: 4, Start: time.Unix(41, 0), End: time.Unix(50, 0), Outcome: models.ScopeOutcomeFailed},
+	}
+	expected := map[string][]models.MockEntry{"pkg.TestA": {{Name: "mock-10"}}}
+	m := &mockService{logger: zap.NewNop(), config: &config.Config{}, instrumentation: outcomeInstr{consumed: mm.GetConsumedMocks()}}
+	counts := m.reportOutcome(context.Background(), 4, replayDetail{set: "s", windows: windows, expected: expected}, func() bool { return false })
+	byName := make(map[string]TestReceipt)
+	for _, tr := range counts.tests {
+		byName[tr.Name] = tr
+	}
+	require.Len(t, byName, 3, "%+v", counts.tests)
+	require.Equal(t, []string{"mock-21", "mock-10"}, byName["pkg.TestA"].AnsweredBy, "TestA: its own recording, and the session one TestB answered from first")
+	require.Equal(t, 2, byName["pkg.TestA"].Consumed, "each recording once, over both runs")
+	require.Equal(t, []string{"mock-21"}, byName["pkg.TestB"].AnsweredBy)
+	require.Equal(t, []string{"mock-21"}, byName["pkg.TestC"].AnsweredBy, "a serve while TestA and TestC were open is both's")
+	require.Equal(t, 1, byName["pkg.TestC"].Consumed)
+}
+
+// A test's line counts and names the recordings that answered it only when
+// the agent said every test window each answer was served in: an older agent
+// stamps each recording with its first serve alone, which names a recording
+// that answered several tests under one of them, and an agent that could not
+// keep every window names it under some. Then the line says the count is
+// unread (-1) and names no recording, not that nothing answered the test, and
+// so it does when the agent's read of what it served failed, and for a test
+// that ran in one of several test workers, whose answers that read does not
+// carry. A judge of a mapping edit then cannot take the test's failure for
+// one of its own.
+func TestATestsAnswersAreUnreadWhenTheAgentDoesNotSayWhereItServedThem(t *testing.T) {
+	windows := []models.ScopeWindow{{Name: "pkg.TestA", Seq: 1, Start: time.Unix(10, 0), End: time.Unix(20, 0), Outcome: models.ScopeOutcomeFailed}}
+	placed := models.MockState{Name: "mock-1", Timestamp: time.Unix(12, 0).UnixNano(), AnsweredIn: []uint64{1}}
+	firstServe := models.MockState{Name: "mock-2", Timestamp: time.Unix(13, 0).UnixNano()}
+	for _, row := range []struct {
+		what        string
+		consumed    []models.MockState
+		consumedErr error
+		instance    uint32
+		consumedN   int
+		answeredBy  []string
+	}{
+		{what: "every answer placed", consumed: []models.MockState{placed}, consumedN: 1, answeredBy: []string{"mock-1"}},
+		{what: "only a first serve's time", consumed: []models.MockState{firstServe}, consumedN: -1},
+		{what: "one answer only a first serve's time", consumed: []models.MockState{placed, firstServe}, consumedN: -1},
+		{what: "an answer whose windows were not all kept", consumed: []models.MockState{{Name: "mock-1", AnsweredIn: []uint64{1}, AnsweredInLost: 1}}, consumedN: -1},
+		{what: "an answer of no window kept", consumed: []models.MockState{placed, {Name: "mock-3", AnsweredInLost: 2}}, consumedN: -1},
+		{what: "answered only outside every test", consumed: []models.MockState{{Name: "mock-1", AnsweredOutside: true}}, consumedN: 0},
+		{what: "nothing served", consumedN: 0},
+		{what: "the read of what was served failed", consumed: []models.MockState{placed}, consumedErr: errors.New("agent gone"), consumedN: -1},
+		{what: "a test of one of several workers", consumed: []models.MockState{placed}, instance: 2, consumedN: -1},
+	} {
+		t.Run(row.what, func(t *testing.T) {
+			ws := append([]models.ScopeWindow(nil), windows...)
+			ws[0].Instance = row.instance
+			m := &mockService{logger: zap.NewNop(), config: &config.Config{}, instrumentation: outcomeInstr{consumed: row.consumed, consumedErr: row.consumedErr}}
+			counts := m.reportOutcome(context.Background(), 2, replayDetail{set: "s", windows: ws}, func() bool { return false })
+			require.Len(t, counts.tests, 1)
+			require.Equal(t, "pkg.TestA", counts.tests[0].Name)
+			require.Equal(t, row.consumedN, counts.tests[0].Consumed)
+			require.Equal(t, row.answeredBy, counts.tests[0].AnsweredBy)
+		})
+	}
 }
 
 // A test's receipt says how its browser drew its random numbers in its

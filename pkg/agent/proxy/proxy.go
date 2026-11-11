@@ -271,6 +271,10 @@ type Proxy struct {
 	sessionMu   sync.RWMutex
 	session     *agent.Session
 	mockManager *MockManager
+	// windows is the test windows the agent holds open, which every mock
+	// manager of the proxy serves under (testWindowsShared).
+	windowsOnce sync.Once
+	windows     *testWindows
 	// instances serves each test worker of a replay from a manager of its
 	// own (instance_serving.go).
 	instances instanceServing
@@ -4477,7 +4481,7 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	// mocks to (the first session's had none: a connection under it was
 	// dropped). The manager is put in place just before the session, so
 	// a replay session before it serves from its own until then.
-	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger)
+	mm := p.shareWindows(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 	if opts.CapturePackets {
 		// Agent picks its own scratch dir on its OWN filesystem; the
 		// recorder cannot pass a path here because the two processes
@@ -4612,7 +4616,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
 	}
 	if mm := p.getMockManager(); mm == nil {
-		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+		p.setMockManager(p.shareWindows(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger)))
 	} else {
 		// Every test worker's manager starts the session as the run's does.
 		p.stage(mm, "session", func(m *MockManager) {

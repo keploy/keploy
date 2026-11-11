@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -312,4 +314,62 @@ func TestEndOfAGatedTestWarnsOnce(t *testing.T) {
 	require.NoError(t, a.BeginScope(ctx, "t3", 3))
 	require.NoError(t, a.EndScope(ctx, "t3", 3))
 	require.Equal(t, 1, logs.FilterMessageSnippet("told to skip").Len(), "an ordinary test's end is not a gated one")
+}
+
+// windowNoter is a proxy that is told of the test windows the agent holds
+// open (coreAgent.TestWindowNoter).
+type windowNoter struct {
+	coreAgent.Proxy
+	open   map[uint64]bool
+	events []string
+}
+
+func (n *windowNoter) OpenTestWindow(seq uint64) {
+	n.open[seq] = true
+	n.events = append(n.events, fmt.Sprintf("open %d", seq))
+}
+
+func (n *windowNoter) CloseTestWindow(seq uint64) {
+	delete(n.open, seq)
+	n.events = append(n.events, fmt.Sprintf("close %d", seq))
+}
+
+// The agent gives each test window it opens an id of its own (Seq), tells a
+// proxy that can say what answered in it that it is open until it closes,
+// and puts the id on the window it records: a mock the proxy served while it
+// was open names it (models.MockState.AnsweredIn). A begin that replaces a
+// window still open closes it first; a window withdrawn closes too. A proxy
+// that cannot say gets no window's id, and its windows carry none.
+func TestATestWindowsIdIsTheOneTheProxyServedUnder(t *testing.T) {
+	ctx := context.Background()
+	n := &windowNoter{open: map[uint64]bool{}}
+	a := &Agent{logger: zap.NewNop(), Proxy: n}
+	require.NoError(t, a.BeginScope(ctx, "suite", 0))
+	require.NoError(t, a.BeginScope(ctx, "test1", 0))
+	require.NoError(t, a.BeginScope(ctx, "test1", 0)) // its begin again
+	require.NoError(t, a.EndScope(ctx, "test1", 0))
+	require.NoError(t, a.BeginScope(ctx, "test2", 7))
+	a.withdrawWindow("test2", 7)
+	require.NoError(t, a.BeginScope(ctx, "test3", 0))
+	a.abandonWindow("test3")
+	require.NoError(t, a.EndScope(ctx, "suite", 0))
+	require.Equal(t, []string{"open 1", "open 2", "close 2", "open 3", "close 3", "open 4", "close 4", "open 5", "close 5", "close 1"}, n.events)
+	require.Empty(t, n.open)
+	ws, err := a.GetScopeWindows(ctx)
+	require.NoError(t, err)
+	seqs := map[string]uint64{}
+	for _, w := range ws {
+		seqs[w.Name] = w.Seq
+	}
+	require.Equal(t, map[string]uint64{"test1": 3, "suite": 1}, seqs)
+
+	plain := newRecordAgent()
+	require.NotPanics(t, func() {
+		require.NoError(t, plain.BeginScope(ctx, "t", 0))
+		require.NoError(t, plain.EndScope(ctx, "t", 0))
+	})
+	pw, err := plain.GetScopeWindows(ctx)
+	require.NoError(t, err)
+	require.Len(t, pw, 1)
+	require.Zero(t, pw[0].Seq)
 }

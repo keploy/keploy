@@ -1185,6 +1185,16 @@ type InstanceServer interface {
 	StopServingInstance(inst uint32) error
 }
 
+// TestWindowNoter is an optional Proxy capability: the agent tells it each
+// test window it opens and closes (models.ScopeWindow.Seq), so its consumed
+// read says, of each mock, every test window it answered in
+// (models.MockState.AnsweredIn). A proxy without it reports none, and the
+// agent gives its windows no Seq.
+type TestWindowNoter interface {
+	OpenTestWindow(seq uint64)
+	CloseTestWindow(seq uint64)
+}
+
 // ScopeStager is an optional Proxy capability: it stages the pool of a test
 // of keploy mock replay that its harness began (open) or ended (!open) without
 // a worker pid, with the proven switch off. Such a test is served the mocks

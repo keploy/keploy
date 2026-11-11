@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -283,6 +284,7 @@ func (a *Agent) openWindow(name string, pid int, at time.Time) {
 		a.workerOpen = make(map[scopeKey]time.Time)
 	}
 	a.workerOpen[k] = start
+	a.openSeqLocked(k)
 	a.recordScopeLocked(k, start)
 	if proc != "" {
 		if a.openProc == nil {
@@ -341,8 +343,42 @@ func (a *Agent) withdrawWindow(name string, pid int) {
 	delete(a.workerOpen, k)
 	delete(a.openProc, k)
 	delete(a.scopeMeta, k)
+	a.closeSeqLocked(k)
 	a.abandonScopeLocked(k)
 	a.scopeMu.Unlock()
+}
+
+// openSeqLocked gives the window k opens now an id and tells the proxy it is
+// open, when the proxy can say what answered in it
+// (coreAgent.TestWindowNoter): every mock it serves until the window closes
+// answered in it. A window k still held is closed first: its begin was
+// replaced. Caller holds scopeMu.
+func (a *Agent) openSeqLocked(k scopeKey) {
+	a.closeSeqLocked(k)
+	n, ok := a.Proxy.(coreAgent.TestWindowNoter)
+	if !ok {
+		return
+	}
+	a.lastSeq++
+	if a.openSeq == nil {
+		a.openSeq = make(map[scopeKey]uint64)
+	}
+	a.openSeq[k] = a.lastSeq
+	n.OpenTestWindow(a.lastSeq)
+}
+
+// closeSeqLocked tells the proxy k's window is closed and returns its id, 0
+// when it had none. Caller holds scopeMu.
+func (a *Agent) closeSeqLocked(k scopeKey) uint64 {
+	seq, ok := a.openSeq[k]
+	if !ok {
+		return 0
+	}
+	delete(a.openSeq, k)
+	if n, ok := a.Proxy.(coreAgent.TestWindowNoter); ok {
+		n.CloseTestWindow(seq)
+	}
+	return seq
 }
 
 // recordScopeLocked opens, in a recording under the proven switch, the test
@@ -392,6 +428,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		end := boundaryTime(at)
 		delete(a.workerOpen, k)
 		delete(a.openProc, k)
+		seq := a.closeSeqLocked(k)
 		// Its span is the window's.
 		a.openScopes[k].End(end)
 		delete(a.openScopes, k)
@@ -405,7 +442,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if a.replaying() {
 			meta.given = nil
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given, SkippedReads: meta.skippedReads, Instance: meta.instance})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Seq: seq, Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given, SkippedReads: meta.skippedReads, Instance: meta.instance})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()

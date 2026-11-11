@@ -323,7 +323,14 @@ type ScopeWindow struct {
 	// whatever worker's; and two windows open at once in one worker (parallel
 	// tests of one go test binary) share its PID, so the later-begun one takes
 	// both tests' calls.
-	PID     uint32    `json:"pid,omitempty"`
+	PID uint32 `json:"pid,omitempty"`
+	// Seq is the agent's id of a test window it held open, unique in its
+	// run, which the mock states a replay's consumed read returns name
+	// (MockState.AnsweredIn); 0 on a window keploy held open for no
+	// serving: a test not run or refused at its begin, an application's
+	// start, a claim, and every window of a proxy that cannot say what it
+	// answered in.
+	Seq     uint64    `json:"seq,omitempty"`
 	Dir     string    `json:"dir,omitempty"`
 	Suite   bool      `json:"suite,omitempty"`
 	App     bool      `json:"app,omitempty"`

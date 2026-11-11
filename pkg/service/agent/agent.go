@@ -220,6 +220,11 @@ type Agent struct {
 	// noteEndOfGated said so this session.
 	gatedScopes    map[scopeKey]struct{}
 	gatedEndWarned bool
+	// openSeq is each open window's id (models.ScopeWindow.Seq) as the proxy
+	// was told it (coreAgent.TestWindowNoter); lastSeq the latest given.
+	// Guarded by scopeMu.
+	openSeq map[scopeKey]uint64
+	lastSeq uint64
 
 	// provenMu guards proven, the single-worker integration wire's state
 	// (scope_proven.go), served under the proven switch. Never held while

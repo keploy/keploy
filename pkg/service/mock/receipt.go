@@ -353,7 +353,10 @@ func (r TestsReceipt) empty() bool {
 // reported none. Random is how the test's browser drew its random numbers
 // in that run, as its harness said at its end, else at its begin
 // (models.ScopeWindow.Random): seeded, own, or "" when it said nothing. A
-// count the agent did not report in full is -1.
+// count the agent did not report in full is -1, and so is Consumed when the
+// agent did not say every test window each answer was served in
+// (answersPlaced), or the test ran in one of several test workers
+// (withWorkerAnswersUnread).
 type TestReceipt struct {
 	Name     string `yaml:"name" json:"name"`
 	Outcome  string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
@@ -390,6 +393,19 @@ type TestReceipt struct {
 	// loads no skipped test's recordings has no answer for those calls, so
 	// a test that passed on one did not pass on its own recordings.
 	SkippedReads []SkippedReadAnswer `yaml:"skippedReads,omitempty" json:"skippedReads,omitempty"`
+	// AnsweredBy is each recording that answered a call while one of the
+	// test's windows was open this replay, over every run of it, by name,
+	// once, in the order the agent first served them this replay; Consumed
+	// counts them. A recording that answered several tests (a session or
+	// connection one, one a mapping edit moved to a shared scope, a
+	// background series) is named under each of them, and a serve while
+	// tests ran at once under every test open then. An answer shapes what
+	// the application does next, so a failure on a later call may be that
+	// answer's: a judge of a mapping edit reads it to blame the edit for a
+	// failure after an answer from a recording the edit moved. Empty when no
+	// recording answered the test, and when the replay could not read what
+	// was served or in which windows (Consumed is -1).
+	AnsweredBy []string `yaml:"answeredBy,omitempty" json:"answeredBy,omitempty"`
 }
 
 // SkippedReadAnswer is one read of a skipped test that answered a test's

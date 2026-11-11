@@ -185,11 +185,12 @@ func TestKeployMockKeepsWhatItsAgentLearnedOnlyFromAClientTestsReader(t *testing
 // as client tests.
 type outcomeInstr struct {
 	clientTestsInstr
-	consumed []models.MockState
+	consumed    []models.MockState
+	consumedErr error
 }
 
 func (o outcomeInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) {
-	return o.consumed, nil
+	return o.consumed, o.consumedErr
 }
 
 func (o outcomeInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
@@ -211,7 +212,7 @@ func TestARoundsEndKeepsWhatWasLearnedOnlyFromAClientTestsReader(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Test.Learn = true
 			core, logs := observer.New(zap.WarnLevel)
-			m := &mockService{config: cfg, mockDB: store, logger: zap.New(core), instrumentation: outcomeInstr{clientTestsInstr{reads: reads}, consumed}}
+			m := &mockService{config: cfg, mockDB: store, logger: zap.New(core), instrumentation: outcomeInstr{clientTestsInstr: clientTestsInstr{reads: reads}, consumed: consumed}}
 			counts := m.reportOutcome(context.Background(), 1, replayDetail{set: "s"}, func() bool { return false })
 			if reads != (counts.learnErr == nil) {
 				t.Fatalf("reads %v: learnErr %v", reads, counts.learnErr)

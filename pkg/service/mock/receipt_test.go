@@ -962,13 +962,19 @@ func TestTestsReceiptRoundTripsAndIsLocal(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(keployDir, "set"), 0o755))
 	at := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 	want := TestsReceipt{Set: "set", At: at, MocksDigest: "abc", Tests: []TestReceipt{
-		{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: 2},
+		{Name: "pkg.TestA", Outcome: models.ScopeOutcomeFailed, Consumed: 2, AnsweredBy: []string{"mock-21", "mock-10"}},
 		{Name: "pkg.TestB", Outcome: models.ScopeOutcomeGated},
 	}}
 	writeTestsReceipt(zap.NewNop(), keployDir, want)
 	got, err := ReadTestsReceipt(keployDir, "set")
 	require.NoError(t, err)
 	require.Equal(t, &want, got)
+	// The recordings that answered a test are written under the key a
+	// judge reads (answeredBy), and a test none answered writes none.
+	raw, err := os.ReadFile(filepath.Join(keployDir, "set", TestsReceiptFile))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "      answeredBy:\n        - mock-21\n        - mock-10\n")
+	require.Equal(t, 1, strings.Count(string(raw), "answeredBy:"), string(raw))
 
 	writeReceipt(zap.NewNop(), keployDir, Receipt{Set: "set"})
 	gi, err := os.ReadFile(filepath.Join(keployDir, ".gitignore"))

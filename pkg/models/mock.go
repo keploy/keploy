@@ -1211,6 +1211,20 @@ type MockState struct {
 	// learned past a point it could not read) reads such learning as that
 	// window's, not the recording owner's. Empty on every other state.
 	TaughtIn []TeachingWindow `json:"taughtIn,omitempty"`
+	// AnsweredIn is, in a replay, every test window (ScopeWindow.Seq) that
+	// was open at any of the mock's serves since the last consumed read,
+	// ascending, each once: a recording that answers call after call (a
+	// session or connection one, one a mapping edit moved to a shared
+	// scope) answered every test it served, not only the one its first
+	// serve fell in. Under windows open at once (parallel tests), a serve
+	// is every open window's. AnsweredOutside says it also answered while
+	// no test window was open. The agent keeps a bounded number of window
+	// ids between reads: AnsweredInLost counts those it could not keep for
+	// this mock, and a reader then cannot say every test it answered. An
+	// agent that predates them reports none of the three.
+	AnsweredIn      []uint64 `json:"answeredIn,omitempty"`
+	AnsweredOutside bool     `json:"answeredOutside,omitempty"`
+	AnsweredInLost  int      `json:"answeredInLost,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
