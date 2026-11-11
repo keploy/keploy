@@ -871,10 +871,63 @@ func (t *Table) Reset() {
 // next test set's replay starts (as learn.Tracker.NewSet).
 func (t *Table) NewSet() {
 	t.mu.Lock()
+	t.newSet()
+	t.mu.Unlock()
+}
+
+// newSet is NewSet's step. t.mu is held.
+func (t *Table) newSet() {
 	t.vals, t.run, t.ended, t.notes = nil, nil, nil, nil
 	t.began, t.test = false, ""
 	t.gen++
-	t.mu.Unlock()
+}
+
+// SetBound is what a table had bound as its set ended (NewSetKeeping), as
+// a background miss reads it: the running scope's own bindings, as Own gave
+// them then, and what the set's ended scopes of each named test bound, as
+// EndedOf gave them then. It changes no more. A nil SetBound holds none.
+type SetBound struct {
+	own   []Binding
+	ended []endedScope
+}
+
+// NewSetKeeping is NewSet, returning what the ending set had bound
+// (SetBound), read in the same step: no binding is made after it is read
+// and before NewSet forgets it. A call of the ending set that keploy
+// decides once the next set began reads its set's bindings from it.
+func (t *Table) NewSetKeeping() *SetBound {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	kept := &SetBound{ended: t.ended}
+	if t.began {
+		kept.own = sorted(t.vals)
+	}
+	t.newSet()
+	return kept
+}
+
+// Own is the bindings the set's running scope had made itself when it
+// ended (Table.Own then), by name.
+func (s *SetBound) Own() []Binding {
+	if s == nil {
+		return nil
+	}
+	return append([]Binding(nil), s.own...)
+}
+
+// EndedOf is what the set's ended scopes of test had bound themselves when
+// it ended (Table.EndedOf then): none for test "".
+func (s *SetBound) EndedOf(test string) []Binding {
+	if s == nil || test == "" {
+		return nil
+	}
+	var out []Binding
+	for _, e := range s.ended {
+		if e.test == test {
+			out = append(out, e.bindings...)
+		}
+	}
+	return out
 }
 
 // Clone is a table holding t's bindings in t's scope, the run's it reads

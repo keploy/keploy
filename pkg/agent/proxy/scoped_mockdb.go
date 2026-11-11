@@ -1103,6 +1103,14 @@ func (s *scopedMockDb) BackgroundRecordingsIn(call integrations.CallRound, kind 
 
 var _ integrations.RoundBackgroundReader = (*scopedMockDb)(nil)
 
+// BoundValuesIn is the bound values of the set call was marked in
+// (integrations.RoundBoundReader): the store's, as Variables and TrailOf.
+func (s *scopedMockDb) BoundValuesIn(call integrations.CallRound) integrations.BoundValues {
+	return integrations.BoundValuesAt(s.MockMemDb, call)
+}
+
+var _ integrations.RoundBoundReader = (*scopedMockDb)(nil)
+
 // RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
 // pass straight through.
 func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
