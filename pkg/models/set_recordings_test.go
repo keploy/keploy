@@ -35,6 +35,22 @@ func TestRecordedCallOfReadsHTTPAndMongoCommands(t *testing.T) {
 		{"mongo no request", &Mock{Kind: Mongo}, RecordedCall{Kind: Mongo}},
 		{"http no request", &Mock{Kind: HTTP}, RecordedCall{Kind: HTTP}},
 		{"http with no method or URL", httpMock("", "", nil), RecordedCall{Kind: HTTP}},
+		// A value Keploy Enterprise sealed (read as on disk) where the
+		// shape is read from leaves the recording unread; a sealed query
+		// value does not, as the shape holds no query value.
+		{"http sealed segment", httpMock("GET", "http://clock:80/api/ENC:t:k:dGljaw", nil), RecordedCall{Kind: HTTP}},
+		{"http sealed segment of standard base64", httpMock("GET", "http://clock:80/api/ENC:t:k:dG/ljaw==", nil), RecordedCall{Kind: HTTP}},
+		{"http sealed query name", httpMock("GET", "http://clock/api/tick?ENC:t:k:em9uZQ=utc", nil), RecordedCall{Kind: HTTP}},
+		{"http sealed query value", httpMock("GET", "http://clock/api/tick?zone=ENC%3At%3Ak%3AdXRj&flag", nil),
+			RecordedCall{Kind: HTTP, Shape: CallShape("HTTP", "GET /api/tick?zone=utc&flag"), Read: true}},
+		{"http sealed bare query component", httpMock("GET", "http://clock/api/tick?ENC:t:k:MTY5", nil),
+			RecordedCall{Kind: HTTP, Shape: CallShape("HTTP", "GET /api/tick?1697040000"), Read: true}},
+		{"mongo sealed collection", mongoMock(`{ SectionSingle msg: {"find":"ENC:t:k:dXNlcnM","$db":"api"} }`), RecordedCall{Kind: Mongo}},
+		{"mongo collection holding a sealed part", mongoMock(`{ SectionSingle msg: {"find":"users_ENC:t:k:NDI","$db":"api"} }`), RecordedCall{Kind: Mongo}},
+		{"mongo sealed command", mongoMock(`{ SectionSingle msg: {"ENC:t:k:ZmluZA":"users"} }`), RecordedCall{Kind: Mongo}},
+		{"mongo sealed command with no collection", mongoMock(`{ SectionSingle msg: {"ENC:t:k:cGluZw":1} }`), RecordedCall{Kind: Mongo}},
+		{"mongo command whose value does not read", mongoMock(`{ SectionSingle msg: {"find":ENC:t:k:dXNlcnM} }`), RecordedCall{Kind: Mongo}},
+		{"mongo command whose value is a document", mongoMock(`{ SectionSingle msg: {"explain":{"find":"users"}} }`), RecordedCall{Kind: Mongo, Shape: "explain", Read: true}},
 		{"mongo with an HTTP request", &Mock{Kind: Mongo, Spec: MockSpec{HTTPReq: &HTTPReq{Method: "GET", URL: "http://clock/api/tick"},
 			MongoRequests: []MongoRequest{{Message: &MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"find":"ticks"} }`}}}}}}, RecordedCall{Kind: Mongo, Shape: "find on ticks", Read: true}},
 		{"redis", &Mock{Kind: REDIS}, RecordedCall{Kind: REDIS}},
@@ -76,10 +92,17 @@ func TestSetShapeRecordingsReadsTheWholeSet(t *testing.T) {
 		{"a protocol keploy reads no shape of", UnmatchedCall{Protocol: "Redis", Command: "GET"}, nil, ""},
 		{"http2", UnmatchedCall{Protocol: "HTTP2", ActualSummary: "GET /api/tick"}, []RecordedCall{tick}, ""},
 		{"no summary", UnmatchedCall{Protocol: "HTTP"}, nil, ""},
-		// A path segment a recording holds as ciphertext (a secret Keploy
-		// Enterprise encrypted, read as on disk) reads as any segment, so
-		// the set is never said to have none for it.
-		{"a segment recorded as ciphertext", get, []RecordedCall{RecordedCallOf(httpMock("GET", "http://clock:80/api/ENC:dGljaw", nil))}, RecordedShape},
+		// A recording that holds a value Keploy Enterprise sealed where
+		// its shape is read from (read as on disk, never opened) makes the
+		// set's answer for the call's kind "cannot tell", never "none";
+		// one recording of the call's shape still says "shape".
+		{"a segment recorded sealed", get, []RecordedCall{RecordedCallOf(httpMock("GET", "http://clock:80/api/ENC:t:k:dGljaw", nil))}, ""},
+		{"mongo collection recorded sealed", UnmatchedCall{Protocol: "Mongo", ActualSummary: "delete on sessions", MatchPhase: MatchPhaseNoMocks},
+			[]RecordedCall{RecordedCallOf(mongoMock(`{ SectionSingle msg: {"delete":"ENC:t:k:c2Vzc2lvbnM","$db":"api"} }`)), tick}, ""},
+		{"mongo collection recorded sealed and the call's own", UnmatchedCall{Protocol: "Mongo", ActualSummary: "delete on sessions"},
+			[]RecordedCall{RecordedCallOf(mongoMock(`{ SectionSingle msg: {"delete":"ENC:t:k:c2Vzc2lvbnM"} }`)), del}, RecordedShape},
+		{"http recorded sealed, a mongo call", UnmatchedCall{Protocol: "Mongo", ActualSummary: "delete on carts"},
+			[]RecordedCall{RecordedCallOf(httpMock("GET", "http://clock:80/api/ENC:t:k:dGljaw", nil)), del}, RecordedNone},
 		{"another kind with its shape", get, []RecordedCall{{Kind: Mongo, Shape: CallShape("HTTP", "GET /api/tick"), Read: true}}, RecordedNone},
 		{"a shorter path", UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /api"}, []RecordedCall{tick}, RecordedNone},
 		{"a place the call holes", UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /u/bob", VariablePlaces: []string{"url.path[1]"}},

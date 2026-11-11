@@ -30,8 +30,9 @@ type RecordedCall struct {
 // MongoDB mock's OP_MSG command (the command and the collection it runs on, as
 // a miss's summary names them, in their shape); of a mock whose payload is on
 // disk, from its payload read back. A mock of any other kind, one whose
-// payload cannot be read back, and a MongoDB mock with no OP_MSG command it
-// can read are not read.
+// payload cannot be read back, a MongoDB mock with no OP_MSG command it can
+// read, and a mock that holds a sealed value where its shape is read from
+// (sealedMark) are not read.
 func RecordedCallOf(m *Mock) RecordedCall {
 	if m == nil {
 		return RecordedCall{}
@@ -56,12 +57,39 @@ func RecordedCallOf(m *Mock) RecordedCall {
 		}
 		return r
 	}
-	if req := m.Spec.HTTPReq; req != nil {
+	if req := m.Spec.HTTPReq; req != nil && !sealedTarget(req.URL) {
 		if shape := CallShape(string(HTTP), string(req.Method)+" "+strings.TrimSpace(req.URL)); shape != "" {
 			r.Shape, r.Read = holePathPlaces(shape, DeclaredPathPlaces(m)), true
 		}
 	}
 	return r
+}
+
+// sealedMark opens a value Keploy Enterprise sealed in a recording
+// ("ENC:<type>:<key>:<ciphertext>"), which a reader that does not open it
+// cannot tell from any other: a sealed collection's name reads as a name the
+// call does not have, and a sealed path segment's ciphertext in the older
+// standard base64 may hold '/', so its path reads as one of more segments.
+// A recording that holds one
+// where its shape is read from is not read, so the set is never said to have
+// no recording of a call's shape because a value of it was sealed.
+const sealedMark = "ENC:"
+
+// sealedTarget reports whether rawURL, an HTTP mock's URL, holds a sealed
+// value where its shape is read from: anywhere before its query, or in a
+// query parameter's name. A sealed query value is read: the shape holds no
+// query value (PathShape), nor a component with no '='.
+func sealedTarget(rawURL string) bool {
+	target, query, _ := strings.Cut(rawURL, "?")
+	if strings.Contains(target, sealedMark) {
+		return true
+	}
+	for _, kv := range strings.Split(query, "&") {
+		if name, _, hasValue := strings.Cut(kv, "="); hasValue && strings.Contains(name, sealedMark) {
+			return true
+		}
+	}
+	return false
 }
 
 // mongoMsgSection opens a recorded OP_MSG body section: "{ SectionSingle
@@ -72,7 +100,9 @@ const mongoMsgSection = "{ SectionSingle msg: "
 // parser's miss summary names one: the command (the first key of its OP_MSG
 // body section) and, when that key's value is a collection's name other than
 // the $cmd pseudo-collection, " on <collection>". False for a request that is
-// no OP_MSG, or whose body section does not read as a command.
+// no OP_MSG, whose body section does not read as a command, whose command's
+// value does not read, or whose command or collection holds a sealed value
+// (sealedMark).
 func mongoRecordedSummary(reqs []MongoRequest) (string, bool) {
 	if len(reqs) == 0 {
 		return "", false
@@ -98,8 +128,17 @@ func mongoRecordedSummary(reqs []MongoRequest) (string, bool) {
 		if cmd == "" {
 			return "", false
 		}
-		value, _ := dec.Token()
-		if coll, _ := value.(string); coll != "" && coll != "$cmd" {
+		// A value that does not read (a sealed value written bare) may
+		// be the collection's name.
+		value, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		coll, _ := value.(string)
+		if strings.Contains(cmd, sealedMark) || strings.Contains(coll, sealedMark) {
+			return "", false
+		}
+		if coll != "" && coll != "$cmd" {
 			return cmd + " on " + coll, true
 		}
 		return cmd, true
