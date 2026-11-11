@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent"
@@ -28,33 +29,78 @@ func recordedPlainDep(port uint32) *models.Mock {
 	}
 }
 
-// A port the recording called as an outside dependency stays on the mock path
-// even when a process in the run's own tree now listens on it — otherwise the
-// test set's recorded mock for that dependency would be skipped for whatever is
-// live there. (The hardening guard in serveTreeListener.)
-func TestServeTreeListenerKeepsRecordedDepOnMockPath(t *testing.T) {
-	recorded.forget()
-	t.Cleanup(recorded.forget)
+// A port the recording called as an outside dependency that a process of the
+// run's own tree now listens on is the app's own: the call is passed through
+// to the live listener, with the proven switch on and off, never matched
+// against the recording's mocks of it. The run says once, at INFO, that
+// those mocks go unused; a self-call to a port no recording called says
+// nothing of the kind.
+func TestServeTreeListenerPassesARecordedPortItsTreeListensOn(t *testing.T) {
+	for _, sw := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+sw, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, sw)
+			recorded.forget()
+			t.Cleanup(recorded.forget)
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	port := uint32(l.Addr().(*net.TCPAddr).Port)
+			core, logs := observer.New(zap.DebugLevel)
+			p := selfCallProxy()
+			p.logger = zap.New(core)
+			call := func(record bool) {
+				l, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = l.Close() }()
+				go func() {
+					if c, err := l.Accept(); err == nil {
+						_, _ = c.Write([]byte("live"))
+						_ = c.Close()
+					}
+				}()
+				port := uint32(l.Addr().(*net.TCPAddr).Port)
+				if record {
+					recorded.add([]*models.Mock{recordedPlainDep(port)})
+					if !RecordedPort(port) {
+						t.Fatalf("precondition: port %d should be a recorded outside dependency", port)
+					}
+				}
+				dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
+				cli, srv := net.Pipe()
+				defer func() { _ = srv.Close() }()
+				done := make(chan error, 1)
+				go func() {
+					served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+					if err == nil && !served {
+						err = fmt.Errorf("left to the mock path")
+					}
+					done <- err
+				}()
+				// Bounded: a call left to the mock path is answered by no one.
+				_ = cli.SetReadDeadline(time.Now().Add(10 * time.Second))
+				got := make([]byte, len("live"))
+				if _, err := io.ReadFull(cli, got); err != nil || string(got) != "live" {
+					t.Fatalf("the caller read %q (%v); want the live listener's answer", got, err)
+				}
+				_ = cli.Close() // the relay's other direction ends, so serveTreeListener returns
+				if err := awaitEvent(t, done, "serveTreeListener returning"); err != nil {
+					t.Fatalf("a call to a listener of the run's tree must be passed through: %v", err)
+				}
+			}
+			said := func() int { return len(logs.FilterMessageSnippet("the recording's mocks of it go unused").All()) }
 
-	recorded.add([]*models.Mock{recordedPlainDep(port)})
-	if !RecordedPort(port) {
-		t.Fatalf("precondition: port %d should be a recorded outside dependency", port)
-	}
-
-	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
-	_, srv := net.Pipe()
-	defer srv.Close()
-	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
-	if served || err != nil {
-		t.Fatalf("a recorded outside dependency must stay on the mock path (served=false), got served=%v err=%v", served, err)
+			call(false)
+			if n := said(); n != 0 {
+				t.Fatalf("a self-call to a port no recording called said %d times that a recording's mocks go unused", n)
+			}
+			call(true)
+			call(true)
+			if n := said(); n != 1 {
+				t.Fatalf("two calls to recorded ports the tree listens on said %d times that the recording's mocks go unused, want once", n)
+			}
+			if e := logs.FilterMessageSnippet("the recording's mocks of it go unused").All()[0]; e.Level != zapcore.InfoLevel {
+				t.Fatalf("said at %v, want INFO", e.Level)
+			}
+		})
 	}
 }
 

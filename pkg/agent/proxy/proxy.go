@@ -457,6 +457,10 @@ type Proxy struct {
 	selfCalls       atomic.Int64
 	selfCallOwners  sync.Map // owner pid -> struct{}
 	selfCallsLogged atomic.Int64
+	// recordedTreeSaid is set once the run has said that a port its own
+	// tree listens on was called as an outside dependency by the recording
+	// (serveTreeListener): said once, at INFO.
+	recordedTreeSaid atomic.Bool
 	// unnamedConns counts the connections to a listener of the run's own
 	// tree whose caller the agent could not name in its PID namespace
 	// (callerOf), so that it could not tell whether a test made the calls
@@ -6854,17 +6858,16 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		starts.Default.Child(conn)
 		return false, nil, nil
 	}
-	// A port the recording called as a (non-child) outside dependency stays on
-	// the mock path even when something in the run's tree now listens there:
-	// those recorded responses are the dependency's, and serving the live
-	// listener would skip the mock the test set is built on. A genuine
-	// self-call is unaffected — an app's own ingress port is never a recorded
-	// dependency destination. Not under the proven switch: there a listener
-	// of the run's tree is live whatever a recording says (design v14 §3.1),
-	// and a recording that mocked it leaves its mocks unconsumed (U11).
-	if !proven && ip.IsLoopback() && RecordedPort(dest.Port) {
-		p.logger.Debug("the destination is a port the recording called as an outside dependency; serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
-		return false, nil, nil
+	// A listener of the run's own tree is the app's, live whatever a
+	// recording says, with the proven switch on and off: an app's call to
+	// its own listening port is passed through, never matched against mocks.
+	// A recording that called the port as an outside dependency (made while
+	// something outside the tree listened there) leaves its mocks of it
+	// unused; the run says so once.
+	if RecordedPort(dest.Port) && p.recordedTreeSaid.CompareAndSwap(false, true) {
+		p.logger.Info("the app called a port its own process tree listens on, which the recording called as an outside dependency; passed through to the app, and the recording's mocks of it go unused",
+			zap.String("destination", dstAddr), zap.Int("owner", owner),
+			zap.String("note", "said once per run"))
 	}
 	caller, unnamed := callerOf(dest)
 	// A mock.real destination (proven switch only) that the tree's listener

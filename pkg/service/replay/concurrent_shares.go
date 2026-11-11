@@ -258,7 +258,10 @@ func newSharePlan(ctx context.Context, conc *setConcurrency, worker []models.Moc
 				continue
 			}
 			sp.held[mk.Name] = mk.Kind
-			if sp.info[mk.Name] != nil || mk.IsProtocolPhase() {
+			// A recording of a call the app made to its own port is passed
+			// through, never served (markOwnListenerMocks): shared by no test,
+			// it is no group's to make, and its going unused charges none.
+			if sp.info[mk.Name] != nil || mk.IsProtocolPhase() || mk.OwnListenerCall() {
 				continue
 			}
 			keys, ok := models.ConcurrentKeysOf(mk.Kind)

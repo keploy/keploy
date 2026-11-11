@@ -199,6 +199,49 @@ func TestShareConcurrentSplitsDefiniteFromCandidates(t *testing.T) {
 	}
 }
 
+// A grouped recording of a call the app made to its own port (an old
+// recording's: keploy passes such a call through to the app) is no
+// candidate of its group: no test makes it from a mock, so its going unused
+// charges no test of the group, and the shares neither pin nor move it.
+// Beside it, a candidate no test made still charges its group. (Shares
+// settle under the proven switch only.)
+func TestSettleSharesNeverChargesAnOldSelfCallRecording(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	registerShareKeys(t)
+	ca := shMock("ca", 100, "INSERT", "bind.$1=a", "ok")
+	self := shMock("self", 200, "INSERT", "bind.$1=health", "ok")
+	self.MarkOwnListenerCall()
+	s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
+		map[string][]models.MockEntry{"a": {shEntry(ca, "g1"), shEntry(self, "g1")}, "b": {}}, nil, nil, ca, self)
+	if cands := s.p.concurrentServing("b"); !reflect.DeepEqual(cands, []string{"ca"}) {
+		t.Fatalf("b's candidates %v; want [ca], never the self-call's recording", cands)
+	}
+	s.run("a", used("ca"))
+	s.run("b")
+	if charged := s.settle(t); len(charged) != 0 {
+		t.Fatalf("charged %v for a self-call recording no test made", charged)
+	}
+	for _, test := range []string{"a", "b"} {
+		if r := s.resultOf(test); r.Status != models.TestStatusPassed || len(reasonsOf(r)) != 0 {
+			t.Fatalf("%s: %s %v", test, r.Status, reasonsOf(r))
+		}
+	}
+	got, _ := s.p.setShares(models.TestSetStatusPassed)
+	if _, moved := got.Moves["self"]; moved || got.Pins["self"] != "" || got.Pins["ca"] != "a" {
+		t.Fatalf("shares %+v; want ca pinned to a and the self-call's recording neither pinned nor moved", got)
+	}
+
+	// The same set without the mark: the leftover charges its group.
+	left := shMock("self", 200, "INSERT", "bind.$1=health", "ok")
+	s = newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}},
+		map[string][]models.MockEntry{"a": {shEntry(ca, "g1"), shEntry(left, "g1")}, "b": {}}, nil, nil, ca, left)
+	s.run("a", used("ca"))
+	s.run("b")
+	if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"a", "b"}) {
+		t.Fatalf("an unmarked leftover charged %v; want a and b", charged)
+	}
+}
+
 // Each candidate a test consumed is pinned to it; nobody is charged.
 func TestSettleSharesPinsEachCallToTheTestThatMadeIt(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
