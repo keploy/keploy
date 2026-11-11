@@ -546,7 +546,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			mapping.Worker[i].Drift = mv.Drift
 			mapping.Worker[i].Trails = mv.Trails
 			mapping.Worker[i].Rule, mapping.Worker[i].Series, mapping.Worker[i].Read = mv.Rule, mv.Series, mv.Read
-			mapping.Worker[i].Unchanged, mapping.Worker[i].Once = mv.Unchanged, mv.Once
+			mapping.Worker[i].Unchanged, mapping.Worker[i].Once, mapping.Worker[i].Optional = mv.Unchanged, mv.Once, mv.Optional
 			if mv.Owner != "" {
 				mapping.Worker[i].Owner = mv.Owner
 			}
@@ -583,7 +583,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	entry.Drift = mv.Drift
 	entry.Trails = mv.Trails
 	entry.Rule, entry.Series, entry.Read = mv.Rule, mv.Series, mv.Read
-	entry.Unchanged, entry.Once = mv.Unchanged, mv.Once
+	entry.Unchanged, entry.Once, entry.Optional = mv.Unchanged, mv.Once, mv.Optional
 	// A replay serves a worker entry only while a test process of its key
 	// holds the run, and a moved entry with none would sit in the slice no
 	// test process holds: the move's key, else the test's. A test with no

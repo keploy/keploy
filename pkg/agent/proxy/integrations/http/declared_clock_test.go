@@ -81,8 +81,9 @@ func patTouchCall(body string) *req {
 // changed value is a change the learn step decides. Under the time default
 // (timeForm) the background's declared field is checked by its form alone:
 // a lastUsedAt of any moment in epoch seconds passes, one in milliseconds
-// or sent as a text does not, and a recorded updatedAt keploy reads as no
-// time keeps the rule's range.
+// or sent as a text does not. A recorded updatedAt keploy reads as no
+// time compares as recorded, under the time default or not: the rule does
+// not describe that recording.
 func TestADeclaredClockIsCheckedInARecordingNoLearningRead(t *testing.T) {
 	base := time.Date(2026, 11, 11, 14, 16, 33, 0, time.UTC)
 	recAt := time.Date(2026, 11, 11, 14, 6, 39, 0, time.UTC)
@@ -96,6 +97,12 @@ func TestADeclaredClockIsCheckedInARecordingNoLearningRead(t *testing.T) {
 	withLastUsed := func(v string) string {
 		return `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":` + v +
 			`,"name":"e2e-go","status":"active","updatedAt":"` + now.Format(time.RFC3339) + `"},"options":{"cas":1}}`
+	}
+	// withUpdated is the touch's body with lastUsedAt stamped from now and
+	// updatedAt written as v.
+	withUpdated := func(v string) string {
+		return `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":` + strconv.FormatInt(now.Unix(), 10) +
+			`,"name":"e2e-go","status":"active","updatedAt":"` + v + `"},"options":{"cas":1}}`
 	}
 	// stale is the recording holding a lastUsedAt two years before its
 	// call: a stored moment, no read of the clock near it.
@@ -135,8 +142,10 @@ func TestADeclaredClockIsCheckedInARecordingNoLearningRead(t *testing.T) {
 		{name: "the time default: lastUsedAt in milliseconds", sources: both, timeForm: true, body: withLastUsed(strconv.FormatInt(now.UnixMilli(), 10)), differs: []string{"body.data.lastUsedAt"}},
 		{name: "the time default: lastUsedAt sent as a text", sources: both, timeForm: true, body: withLastUsed(`"` + strconv.FormatInt(now.Unix(), 10) + `"`), differs: []string{"body.data.lastUsedAt"}},
 		{name: "the time default: a field no rule names", sources: []models.DeclaredSource{updated}, timeForm: true, lastUsed: now, differs: []string{"body.data.lastUsedAt"}},
-		{name: "the time default: a recorded no-time keeps the range, in the window", sources: both, timeForm: true, lastUsed: now, recording: never},
-		{name: "the time default: a recorded no-time keeps the range, outside it", sources: both, timeForm: true, lastUsed: now, updated: recAt, recording: never, differs: []string{"body.data.updatedAt"}},
+		{name: "the time default: a recorded no-time compares as recorded, a time in the window", sources: both, timeForm: true, lastUsed: now, recording: never, differs: []string{"body.data.updatedAt"}},
+		{name: "the time default: a recorded no-time compares as recorded, the recorded value", sources: both, timeForm: true, body: withUpdated("never"), recording: never},
+		{name: "a recorded no-time compares as recorded, the recorded value", sources: both, body: withUpdated("never"), recording: never},
+		{name: "a recorded no-time compares as recorded, a time in the window", sources: both, lastUsed: now, recording: never, differs: []string{"body.data.updatedAt"}},
 		{name: "the time default: a recorded epoch far from its call keeps the range", sources: both, timeForm: true, lastUsed: recAt, recording: stale, differs: []string{"body.data.lastUsedAt"}},
 		{name: "the time default: a recorded epoch far from its call keeps the range, in the window", sources: both, timeForm: true, lastUsed: now, recording: stale},
 	} {

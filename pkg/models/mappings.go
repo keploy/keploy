@@ -141,7 +141,7 @@ type MockEntry struct {
 	// never, as it serves every read and requires none. False, the default
 	// an entry without the key reads as, requires the series once per run
 	// when it is due, so a series is required unless every entry of it says
-	// read, or read or unchanged (Unchanged). Kept as Series is.
+	// read, unchanged (Unchanged) or optional (Optional). Kept as Series is.
 	Read bool `json:"read,omitempty" yaml:"read,omitempty" bson:"read,omitempty"`
 	// Unchanged is, on an entry of a Series keploy mock record judged a
 	// write, that the entry's recorded answer says the write changed nothing
@@ -153,6 +153,17 @@ type MockEntry struct {
 	// required. False, the default an entry without the key reads as, keeps
 	// a write's series required. Kept as Series is.
 	Unchanged bool `json:"unchanged,omitempty" yaml:"unchanged,omitempty" bson:"unchanged,omitempty"`
+	// Optional is, on an entry of a Series, that the rule which placed it
+	// serves the entry and never requires it, whatever it writes: keploy
+	// mock record saw the series' call once in the recording, which proves
+	// no period, so a run may end before the application makes the call
+	// (a timer whose first tick can fall after a shorter run's end).
+	// keploy mock replay serves the entry as any series' (an entry of a
+	// once series once in the run) and requires a series once per run only
+	// while one entry of it is neither Read, Unchanged nor Optional. False,
+	// the default an entry without the key reads as, keeps a write's series
+	// required. Kept as Series is.
+	Optional bool `json:"optional,omitempty" yaml:"optional,omitempty" bson:"optional,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy's
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's

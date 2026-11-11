@@ -763,11 +763,13 @@ type outsideState struct {
 	between  sync.Map
 	betweenN atomic.Int64
 	// trailUsed holds the names of the worker scope's recordings a trail
-	// move put there (poolTrails: models.MockEntry.Trails) that answered a
-	// call in the staging, in a test's window or between tests, through any
-	// door: a trailing write answers once per run of the test it trails, so
-	// a second call of it, wherever it lands, is not answered from it, and
-	// neither inTests nor between gives it again.
+	// move put there (poolTrails: models.MockEntry.Trails) with no series
+	// (poolSeries: a set an older enterprise judged) that answered a call in
+	// the staging, in a test's window or between tests, through any door:
+	// such a trailing write answers once per staging, so a second call of
+	// it, wherever it lands, is not answered from it, and neither inTests
+	// nor between gives it again. A trailing write in a series answers by
+	// its series instead (seriesIndex.againIn).
 	trailUsed sync.Map
 	// seriesRepeats counts, by series (poolSeries), the calls in the
 	// windows its last-placed recording answered again once every recording
@@ -925,10 +927,13 @@ func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict 
 		!staged.Spec.ResTimestampMock.Equal(mk.Spec.ResTimestampMock) {
 		return exactRefused
 	}
-	// A trailing write answers once in the staging, wherever its call lands
-	// (outsideState.trailUsed). A declared rule's series answers by its own
-	// rule instead (seriesIndex.againIn), and a once series' recording once
-	// in the staging, as a trailing write does (seriesIndex.answersOnce).
+	// A trailing write with no series (a set an older enterprise judged)
+	// answers once in the staging, wherever its call lands
+	// (outsideState.trailUsed). A trailing write in a series, a declared
+	// rule's or a trail move's, answers by its series instead
+	// (seriesIndex.againIn), and a once series' recording once in the
+	// staging, as a trailing write with no series does
+	// (seriesIndex.answersOnce).
 	series := m.exact.poolSeries.Load()
 	if answersOnce(&m.exact.poolTrails, series, mk.Name) {
 		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
@@ -970,11 +975,13 @@ func (m *MockManager) consumeBetween(mk *models.Mock) (verdict exactVerdict, fir
 		!staged.Spec.ResTimestampMock.Equal(mk.Spec.ResTimestampMock) {
 		return exactRefused, false
 	}
-	// A trailing write answers once in the staging, between tests too
+	// A trailing write with no series (a set an older enterprise judged)
+	// answers once in the staging, between tests too
 	// (outsideState.trailUsed): it is no call the app repeats between tests.
-	// A declared rule's series answers again here, as the rest of the worker
-	// scope does, but for a once series' recording, which answers once in
-	// the staging wherever its call lands (seriesIndex.answersOnce).
+	// A trailing write in a series, a declared rule's or a trail move's,
+	// answers again here, as the rest of the worker scope does, but for a
+	// once series' recording, which answers once in the staging wherever
+	// its call lands (seriesIndex.answersOnce).
 	if answersOnce(&m.exact.poolTrails, m.exact.poolSeries.Load(), mk.Name) {
 		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
 			return exactRefused, false
@@ -3112,8 +3119,9 @@ func (v *exactView) spentOutsideIn(name string, windowed bool) bool {
 		series = v.series.Load()
 	}
 	if answersOnce(v.trails, series, name) {
-		// A trailing write, or a once series' recording, that answered
-		// once is spent for the staging, in every window and between tests
+		// A trailing write with no series, or a once series' recording,
+		// that answered once is spent for the staging, in every window and
+		// between tests
 		// (outsideState.trailUsed).
 		return v.outside.trailUsed(name, e)
 	}

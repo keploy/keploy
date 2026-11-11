@@ -24,15 +24,16 @@ type seriesDue struct {
 	// start.
 	Place string
 	// write is whether an entry of the series says neither that it reads
-	// (models.MockEntry.Read) nor that its write changed nothing when
-	// recorded (models.MockEntry.Unchanged): such a series is required.
+	// (models.MockEntry.Read), that its write changed nothing when recorded
+	// (models.MockEntry.Unchanged), nor that its rule never requires it
+	// (models.MockEntry.Optional): such a series is required.
 	write bool
-	// served are, of Names, the entries that say they read or that their
-	// write changed nothing: served, never what makes a required series
-	// (madeIn). Only a once series holds such entries beside a write: the
-	// reads its write follows on its connection (keploy.yml mock.rules
-	// chain), whose answers do not make a write the application stopped
-	// making.
+	// served are, of Names, the entries that say they read, that their
+	// write changed nothing, or that their rule never requires them: served,
+	// never what makes a required series (madeIn). Only a once series holds
+	// such entries beside a write: the reads its write follows on its
+	// connection (keploy.yml mock.rules chain), whose answers do not make a
+	// write the application stopped making.
 	served []string
 }
 
@@ -64,7 +65,9 @@ type RequiredNotMade struct {
 // (models.MockEntry.Read) is served, not required, as every read is, and
 // so is one every entry of which says it reads or that its write changed
 // nothing when recorded (models.MockEntry.Unchanged: a MongoDB reply of n
-// 0); both are left out. One entry with neither makes its series required. A series trailing a test that is
+// 0), or that its rule never requires it (models.MockEntry.Optional: a call
+// keploy mock record saw once, which a shorter run may end before); all are
+// left out. One entry with none of them makes its series required. A series trailing a test that is
 // not one of table's, the set's, is never due and is left out. nil when no
 // entry has a required series.
 func requiredSeries(mp *models.Mapping, table map[string][]string) map[string]seriesDue {
@@ -100,7 +103,7 @@ func placedSeries(mp *models.Mapping, table map[string][]string) map[string]seri
 			s = seriesDue{Rule: e.Rule, Trails: e.Trails, Place: e.Place}
 		}
 		s.Names = append(s.Names, e.Name)
-		if e.Read || e.Unchanged {
+		if e.Read || e.Unchanged || e.Optional {
 			s.served = append(s.served, e.Name)
 		} else {
 			s.write = true

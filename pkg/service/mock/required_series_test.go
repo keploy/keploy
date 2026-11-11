@@ -335,6 +335,41 @@ func TestASeriesOfWritesThatChangedNothingIsServedNotRequired(t *testing.T) {
 	require.Len(t, ruleNotMadeLines(logs), 1)
 }
 
+// A series whose rule saw its call once (a lease a timer claims once in a
+// recording) proves no period, so a shorter run may end before the
+// application makes it: an entry that says optional is served, never
+// required, whatever it writes, and a run that never made its series passes
+// with no RULE NOT MADE. The same entry without the key is required, and the
+// run that never made it fails, naming it; an optional entry beside a write
+// that says nothing leaves that write's series required.
+func TestAnOptionalSeriesIsServedNeverRequired(t *testing.T) {
+	none := []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
+	lease := "    - name: mock-8\n      place: o::TestB\n      rule: lease@5e6f7a8b\n      series: lease/-/1\n      once: true\n"
+	code, r, tr, logs := seriesRunOf(t, unchangedSeriesMappings+lease+"      optional: true\n", seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), none, nil)
+	require.Equal(t, 0, code)
+	require.Empty(t, r.FailedBy)
+	require.Nil(t, r.RequiredNotMade)
+	require.Equal(t, models.ScopeOutcomePassed, testLine(t, tr, "o::TestB").Outcome)
+	require.Empty(t, ruleNotMadeLines(logs))
+
+	code, r, _, logs = seriesRunOf(t, unchangedSeriesMappings+lease, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed), none, nil)
+	require.Equal(t, 1, code)
+	require.Equal(t, FailedByRuleNotMade, r.FailedBy)
+	require.Equal(t, []RequiredNotMade{{Series: "lease/-/1", Rule: "lease@5e6f7a8b", Names: []string{"mock-8"}}}, r.RequiredNotMade)
+	require.Len(t, ruleNotMadeLines(logs), 1)
+
+	mp := &models.Mapping{Worker: []models.MockEntry{
+		{Name: "m1", Place: "o::TestA", Rule: "b@2", Series: "b/-/1", Optional: true},
+		{Name: "m2", Place: "o::TestA", Rule: "b@2", Series: "b/-/1"},
+		{Name: "m3", Place: "o::TestA", Rule: "b@2", Series: "b/-/2", Once: true, Optional: true},
+	}}
+	req := requiredSeries(mp, map[string][]string{"o::TestA": nil})
+	require.Equal(t, []string{"b/-/1"}, slices.Sorted(maps.Keys(req)))
+	require.Equal(t, []string{"m2"}, req["b/-/1"].makers())
+	placed := placedSeries(mp, map[string][]string{"o::TestA": nil})
+	require.Equal(t, []string{"m3"}, placed["b/-/2"].served, "the optional series is still counted as placed, served")
+}
+
 // requiredSeries leaves out a series every entry of which says read or
 // unchanged, in any mix, and keeps one an entry of which says neither:
 // a read entry beside it does not make it served.
