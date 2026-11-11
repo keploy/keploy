@@ -74,7 +74,7 @@ func (f MintedForm) With(values ...string) MintedForm {
 // isMintedSeparator reports whether r ends a minted form's prefix: an
 // ASCII character that is no letter or digit.
 func isMintedSeparator(r rune) bool {
-	return r < utf8.RuneSelf && !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	return r < utf8.RuneSelf && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
 }
 
 // mintable reports whether s holds only what a minted value may: UTF-8
