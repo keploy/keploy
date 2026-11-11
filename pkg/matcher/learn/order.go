@@ -2817,7 +2817,7 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+rule+answeredAt(c.valueEcho, c.rec), names(src))
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
 		Given: first.given, Client: dc.clientCase(first.mock)}
-	d.FromAt = dc.fromAt(first, c.r)
+	d.FromAt = dc.fromAt(first, c.r, c.l)
 	d.Echo = c.valueEcho
 	return d
 }
@@ -3352,11 +3352,17 @@ func addrList(as []variables.Address) string {
 	return strings.Join(s, ", ")
 }
 
-// fromAt is the address of the word v at p, a Value's bind place: the
-// earlier exchange's leaf as its adapter names it (an answer's as an
-// answer's), at v's word where v is one of its words, else the whole leaf;
-// no place (word -1) for a recording keploy read whole.
-func (dc *decider) fromAt(p evPlace, v string) variables.Address {
+// fromAt is the address of the word v (f in round F) at p, a Value's bind
+// place: the earlier exchange's leaf as its adapter names it (an answer's as
+// an answer's), at v's word where v is one of its words, else the whole
+// leaf; no place (word -1) for a recording keploy read whole. A leaf whose
+// own words do not hold v but whose JWT does, in a claim that holds v and
+// f at one word in the two runs (claimWord: a token the application minted
+// with an id in it, sent back to it), is addressed at that word of the
+// claim (|jwt.<claim>#<n>): a replay decodes the claim there, binds the
+// variable to it, and compares each later use with it, as at any place.
+// The signature is no place of it: compared by its form, as before.
+func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 	if p.leaf.Path == "" {
 		return variables.Address{Word: -1}
 	}
@@ -3364,10 +3370,34 @@ func (dc *decider) fromAt(p evPlace, v string) variables.Address {
 	for i, w := range variables.Words(p.leaf.Value) {
 		if p.leaf.Value[w[0]:w[1]] == v {
 			a.Word = i
-			break
+			return a
 		}
 	}
+	if st, n, ok := claimWord(p.leaf.Value, p.live, v, f); ok {
+		// The claim is read in the leaf's own text, as claimWord read it.
+		a.Steps, a.Word = []variables.Step{st}, n
+	}
 	return a
+}
+
+// claimWord is the claim of the JWTs rec and live, two runs of one leaf,
+// that holds v in rec and f in live at one word n, as a step: the first
+// such claim by name (jwtSpan reads the claims that differ, in that order).
+// ok is false where either is no JWT (jwtSpan then opens no claim), or no
+// claim holds them so: the leaf is then named whole, as before.
+func claimWord(rec, live, v, f string) (variables.Step, int, bool) {
+	span, _ := jwtSpan(rec, live)
+	for _, part := range span.Parts {
+		for n, w := range variables.Words(part.Rec) {
+			if part.Rec[w[0]:w[1]] != v {
+				continue
+			}
+			if lw, ok := (variables.Address{Word: n}).WordOf(part.Live); ok && lw == f {
+				return part.Step, n, true
+			}
+		}
+	}
+	return "", 0, false
 }
 
 // learned is a decided word and its line.
