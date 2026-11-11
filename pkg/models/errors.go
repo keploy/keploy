@@ -499,6 +499,16 @@ var ErrNoMockMatched = errors.New("no matching mock found")
 // An agent reports it with the switch on or off.
 var ErrUnmatchedCallsUnread = errors.New("the unmatched calls of this test could not all be read")
 
+// ErrSettleGaveUp says keploy's agent did not apply a mock filter because it
+// gave up settling the calls made before it: its settle watchdog saw no
+// progress on work its proxy held. It is keploy's own failure, never the
+// application's. The agent's failed answer says so as data
+// (SettleGaveUpHeader), and keploy's agent client returns an error that Is
+// it, so a replay tells it from every other refusal without reading the
+// message's words: a test case its agent did not open for it is not judged,
+// and its report says nothing in the application is to be changed for it.
+var ErrSettleGaveUp = errors.New("keploy's agent made no progress settling the test's calls")
+
 // UnreadCause is why a read of the unmatched calls was incomplete: the text
 // err carries after ErrUnmatchedCallsUnread's own ("…: <cause>"), or all of it
 // when it carries none.

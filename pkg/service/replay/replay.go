@@ -4021,15 +4021,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Exact serving: a test case begins only over the pool, never
 			// over the last test case's own view (poolBeforeBegin). Its
 			// capture window opens next, where the agent's learn tracker
-			// begins it (openTestErrorCapture). When the agent takes no
-			// pool call, or opens no window, the set stops here, before the
-			// test case's view is asked for, never a pass, and keploy says
-			// so at once (logStoppedBeforeTest). The set's end gives the
-			// set its verdict (notBegun): not judged when the status is
-			// keploy's own failure, else the status of what failed the call.
+			// begins it (openTestErrorCapture), and then its own view
+			// (serveExactTest), which the agent installs once the calls
+			// made before it are settled. When the agent takes no pool
+			// call, opens no window, or does not open the test case because
+			// its settle gave up on work its proxy held (said as data:
+			// models.ErrSettleGaveUp), the set stops here, before the test
+			// case's request is sent, never a pass, and keploy says so at
+			// once (logStoppedBeforeTest). The set's end gives the set its
+			// verdict (notBegun): not judged, as keploy's own failure, when
+			// no stop of the application's explains it, else the status of
+			// what failed the call. Any other refusal of the test case's
+			// view (openErr) stops the set as it always has.
 			beginErr := r.poolBeforeBegin(runTestSetCtx, r.exact, testCase.Name)
 			if beginErr == nil {
 				beginErr = r.openTestErrorCapture(runTestSetCtx, r.exact, &captureOpened, testCase.Name)
+			}
+			var openErr error
+			if beginErr == nil && r.exact != nil {
+				beginErr, openErr = r.serveExactTest(runTestSetCtx, r.exact, testCase.Name, opening)
 			}
 			if beginErr != nil {
 				exitLoop = true
@@ -4049,7 +4059,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 			if r.exact != nil {
-				err = r.serveExactTest(runTestSetCtx, r.exact, testCase.Name, opening)
+				err = openErr
 			} else {
 				err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, perTestRegion, useMappingBased, recordedSetShape{}, &opening)
 			}
@@ -5226,15 +5236,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Exact serving: a test case begins only over the pool, never
 			// over the last test case's own view (poolBeforeBegin). Its
 			// capture window opens next, where the agent's learn tracker
-			// begins it (openTestErrorCapture). When the agent takes no
-			// pool call, or opens no window, the set stops here, before the
-			// test case's view is asked for, never a pass, and keploy says
-			// so at once (logStoppedBeforeTest). The set's end gives the
-			// set its verdict (notBegun): not judged when the status is
-			// keploy's own failure, else the status of what failed the call.
+			// begins it (openTestErrorCapture), and then its own view
+			// (serveExactTest), which the agent installs once the calls
+			// made before it are settled. When the agent takes no pool
+			// call, opens no window, or does not open the test case because
+			// its settle gave up on work its proxy held (said as data:
+			// models.ErrSettleGaveUp), the set stops here, before the test
+			// case's request is sent, never a pass, and keploy says so at
+			// once (logStoppedBeforeTest). The set's end gives the set its
+			// verdict (notBegun): not judged, as keploy's own failure, when
+			// no stop of the application's explains it, else the status of
+			// what failed the call. Any other refusal of the test case's
+			// view (openErr) stops the set as it always has.
 			beginErr := r.poolBeforeBegin(runTestSetCtx, r.exact, tc.Name)
 			if beginErr == nil {
 				beginErr = r.openTestErrorCapture(runTestSetCtx, r.exact, &captureOpened, tc.Name)
+			}
+			var openErr error
+			if beginErr == nil && r.exact != nil {
+				beginErr, openErr = r.serveExactTest(runTestSetCtx, r.exact, tc.Name, opening)
 			}
 			if beginErr != nil {
 				exitLoop = true
@@ -5254,7 +5274,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 			if r.exact != nil {
-				err = r.serveExactTest(runTestSetCtx, r.exact, tc.Name, opening)
+				err = openErr
 			} else {
 				err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, totalConsumedMocks, perTestRegion, useMappingBased, recordedSetShape{}, &opening)
 			}
@@ -6684,10 +6704,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// it. When that left the set keploy's own failure (INTERNAL_ERR), the
 	// set is not judged, saying why, and the run goes on to the next set
 	// (abortAfterTestSet). A set the app's halt failed keeps the app's
-	// status.
+	// status. The reason says the failure is keploy's (notBegunOwnFailure):
+	// a stop with no test failed and nothing of the application's in it
+	// otherwise reads as the application's.
 	if notBegun != nil && testSetStatus == models.TestSetStatusInternalErr {
 		r.logNotBegun(testSetID, notBegun)
-		notJudged = alsoNotJudged(notJudged, "not judged: "+notBegun.Error())
+		notJudged = alsoNotJudged(notJudged, "not judged: "+notBegun.Error()+" ("+notBegunOwnFailure+")")
 		r.markNotJudged(testSetID)
 	}
 

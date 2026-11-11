@@ -79,6 +79,11 @@ import (
 // progress (design v14's lead decision: 600).
 var settleStallLimit = 600
 
+// settleCountsKey is the watchdog's progress key, while a settle waits for
+// the proxy to accept and settle the application's connections, for their
+// counts; every later key is a connection's id.
+const settleCountsKey = "counts"
+
 // settleWake is how the watchdog wakes; a test replaces it.
 var settleWake = func(ctx context.Context) (<-chan struct{}, func()) {
 	t := time.NewTicker(time.Second)
@@ -110,14 +115,31 @@ var settleWake = func(ctx context.Context) (<-chan struct{}, func()) {
 // test waits on it.
 var settleWoken func()
 
-// errNoProgress is the watchdog's: the wait made no progress at all.
-var errNoProgress = errors.New("keploy's agent made no progress settling the test's calls")
+// errNoProgress is the watchdog's: the wait made no progress at all. It is
+// models.ErrSettleGaveUp, which the agent's routes say as data on the failed
+// answer of the filter whose settle gave up (models.SettleGaveUpHeader).
+var errNoProgress = models.ErrSettleGaveUp
 
 // noProgress is errNoProgress naming what the wait found stuck: the keys of
-// the watchdog's progress that did not move.
+// the watchdog's progress that did not move. Its message names them, so the
+// replay's report of a test case the agent did not open says what keploy's
+// agent waited on.
 type noProgress struct{ stalled []string }
 
-func (n noProgress) Error() string { return errNoProgress.Error() }
+func (n noProgress) Error() string {
+	if len(n.stalled) == 0 {
+		return errNoProgress.Error()
+	}
+	what := make([]string, 0, len(n.stalled))
+	for _, k := range n.stalled {
+		if k == settleCountsKey {
+			what = append(what, "the application's connections keploy's proxy had not yet accepted and settled")
+			continue
+		}
+		what = append(what, "connection "+k)
+	}
+	return errNoProgress.Error() + "; nothing moved on " + strings.Join(what, "; ")
+}
 
 func (n noProgress) Is(target error) bool { return target == errNoProgress }
 
@@ -250,7 +272,7 @@ func (a *Agent) settleKeeping(ctx context.Context, answers bool, worker uint32, 
 			if pb, ok := a.Proxy.(coreAgent.PairedBytesWaiter); ok {
 				v += pb.PairedBytesProgress()
 			}
-			return map[string]uint64{"counts": v}
+			return map[string]uint64{settleCountsKey: v}
 		}
 		pp := ir.InFlightPendingProgress
 		if sc := scoped.Load(); sc != nil {

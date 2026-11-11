@@ -1064,6 +1064,16 @@ const (
 // one that did not say its version.
 const AgentVersionHeader = "X-Keploy-Agent-Version"
 
+// SettleGaveUpHeader is the /updatemockparams response header in which an
+// agent says, on a failed answer, that the failure is its settle giving up
+// on the calls made before the filter (ErrSettleGaveUp): keploy's own
+// failure. An agent that does not send it, every agent released before it
+// among them, has its failed answer read as any other refusal.
+const (
+	SettleGaveUpHeader = "X-Keploy-Settle-Gave-Up"
+	SettleGaveUp       = "gave-up"
+)
+
 // UnmatchedCallsUnreadHeader is the /mockerrors response header in which an
 // agent says the list in the body is incomplete (ErrUnmatchedCallsUnread), with
 // why. The body is still the list that was read, so a client that does not know

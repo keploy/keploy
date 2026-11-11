@@ -306,6 +306,7 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		// call they answer binds before it.
 		if err := opener.OpenTestCase(r.Context(), updateParamsReq.FilterParams); err != nil {
 			utils.LogError(a.logger, err, "failed to open the test case")
+			saySettleGaveUp(w, err)
 			respondAgent(w, r, http.StatusInternalServerError, err)
 			return
 		}
@@ -317,6 +318,7 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if err := a.svc.UpdateMockParams(r.Context(), updateParamsReq.FilterParams); err != nil {
 		utils.LogError(a.logger, err, "failed to update mock params")
+		saySettleGaveUp(w, err)
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
 	}
@@ -350,6 +352,16 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(models.MockWindowHeader, s.MockWindowOf(updateParamsReq.FilterParams).String())
 	}
 	respondAgent(w, r, http.StatusOK, nil)
+}
+
+// saySettleGaveUp marks the failed answer of a filter the agent did not
+// apply because its settle gave up on the calls made before it
+// (models.SettleGaveUpHeader): keploy's own failure, which the replay reads
+// as data, never from the message's words.
+func saySettleGaveUp(w http.ResponseWriter, err error) {
+	if errors.Is(err, models.ErrSettleGaveUp) {
+		w.Header().Set(models.SettleGaveUpHeader, models.SettleGaveUp)
+	}
 }
 
 // mockWindowSayer says how the agent serves a call's window

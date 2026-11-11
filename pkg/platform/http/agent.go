@@ -1777,6 +1777,16 @@ func (a *AgentClient) updateMockParams(ctx context.Context, params models.MockFi
 	return hdr, err
 }
 
+// settleGaveUp is the agent's failed answer to a filter it did not apply
+// because its settle gave up on the calls made before it, which the answer
+// said as data (models.SettleGaveUpHeader): it reads as the answer, and Is
+// models.ErrSettleGaveUp.
+type settleGaveUp struct{ error }
+
+func (e settleGaveUp) Is(target error) bool { return target == models.ErrSettleGaveUp }
+
+func (e settleGaveUp) Unwrap() error { return e.error }
+
 // sendMockParams makes one /updatemockparams call for params. resend reports
 // a call the agent did not apply as asked because it does not hold the
 // consumed history the send built on: the caller sends it again, which then
@@ -1832,6 +1842,9 @@ func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilt
 		return nil, true, nil
 	}
 	if err := agentRespErr("update mock params", res, rawBody); err != nil {
+		if res.Header.Get(models.SettleGaveUpHeader) == models.SettleGaveUp {
+			err = settleGaveUp{err}
+		}
 		return nil, false, err
 	}
 	if !a.consumed.answered(send, res.Header.Get(models.ConsumedSyncHeader)) {

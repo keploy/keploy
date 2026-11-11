@@ -232,6 +232,10 @@ func TestKeployTestHoldsAnOpenForAPoolCallItsRequestWokeLate(t *testing.T) {
 			if gaveUp {
 				_, err := w.run(openTest1, nil)
 				require.ErrorIs(t, err, errNoProgress, "the settle gave up on the woken call")
+				require.ErrorIs(t, err, models.ErrSettleGaveUp, "the agent's give-up is not said as keploy's own")
+				// What the replay reports of a test case keploy's agent did
+				// not open: the work its settle waited on.
+				require.Contains(t, err.Error(), "nothing moved on connection 1", "the give-up does not name the connection it waited on")
 				require.Equal(t, 0, p.opened, "test-1's view was installed though its open failed")
 				let()
 				<-done
