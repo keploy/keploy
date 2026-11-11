@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/base64"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,69 @@ func TestLearnMatchBindsNoClaimOfACallsToken(t *testing.T) {
 				t.Fatalf("%d binds at a claim; want the find's id at the test case's claim alone", claimed)
 			}
 		})
+	}
+}
+
+// TestLearnMatchBindsAtACallThatSentTheIdWholeBeforeTheClaim: the client
+// test sends the token, an earlier call of the test sends the claim's id
+// whole (a lookup by id), then the find carries it. A call of the test that
+// sent the value whole is named before the test case's claim, as before
+// (placeRank): the lookup's id binds at the test case's claim, and the
+// find's at the lookup's own place, where a replay reads what the
+// application sends; the claim binds the lookup's alone.
+func TestLearnMatchBindsAtACallThatSentTheIdWholeBeforeTheClaim(t *testing.T) {
+	const recID, fullID = "6af47add8a9351dfdb7c457a", "6af47b1e0c22d4e8a91b03f6"
+	recTok := callBearer(`{"cid":"e2e-free-company","cluster_id":"`+recID+`","iat":1794407071}`, "recorded-signature")
+	liveTok := callBearer(`{"cid":"e2e-free-company","cluster_id":"`+fullID+`","iat":1794407138}`, "this-run-signature")
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	sent := time.Now()
+	tr.SetClientTests(true)
+	tr.Begin()
+	recReq := &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/cluster/status", Timestamp: learnAt.Add(-time.Second),
+		Header: map[string]string{"Content-Type": "application/json", "Authorization": recTok}, Body: `{"status":"active"}`}
+	liveReq := *recReq
+	liveReq.Header = map[string]string{"Content-Type": "application/json", "Authorization": liveTok}
+	liveReq.Timestamp = sent
+	tr.SetCases([]learn.ClientCase{{Name: "post-cluster-status-3", Req: recReq}})
+	if !tr.Incoming(&liveReq, "", sent) {
+		t.Fatal("the run's request paired with none of the test's recorded requests")
+	}
+	db := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/clusters/get", `{"id":"`+recID+`"}`, nil, `{"ok":true}`),
+		learnRecorded("mock-1", time.Millisecond, "POST", "/v1/clusters/find", `{"filter":{"_id":"`+recID+`"}}`, nil, `{"found":1}`),
+	}}
+	ctx := learn.WithTracker(context.Background(), tr)
+	in0 := live("POST", "/v1/clusters/get", `{"id":"`+fullID+`"}`, nil)
+	in0.arrived = sent.Add(time.Millisecond)
+	if s0, m0, _ := h.learnMatch(ctx, in0, db, n, opts); s0 == nil || m0 != nil {
+		t.Fatalf("the lookup: served %v, miss %+v; want it served, bound at the test case's claim", s0 != nil, m0)
+	}
+	in1 := live("POST", "/v1/clusters/find", `{"filter":{"_id":"`+fullID+`"}}`, nil)
+	in1.arrived = sent.Add(2 * time.Millisecond)
+	if s1, m1, _ := h.learnMatch(ctx, in1, db, n, opts); s1 == nil || m1 != nil {
+		t.Fatalf("the find: served %v, miss %+v; want it served, bound at the lookup's id", s1 != nil, m1)
+	}
+	want := map[string][2]string{
+		"mock-0": {"test case post-cluster-status-3", "header.Authorization|jwt.cluster_id#0"},
+		"mock-1": {"mock-0", "body.id"},
+	}
+	got := map[string][2]string{}
+	for _, c := range db.consumed {
+		for target, vs := range c.Spec.LearnedBinds() {
+			for _, b := range vs {
+				if b.Recorded != recID {
+					continue
+				}
+				if _, dup := got[c.Name]; dup {
+					t.Fatalf("%s binds the id twice: %+v", c.Name, c.Spec.LearnedBinds())
+				}
+				got[c.Name] = [2]string{target, b.Bind}
+			}
+		}
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("the id binds at %v; want %v: the lookup at the test case's claim, the find at the lookup's id, which it sent whole", got, want)
 	}
 }
 
