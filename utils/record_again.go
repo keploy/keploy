@@ -28,17 +28,23 @@ const ReplacedDir = "keploy-replaced"
 // (RecordSetAgain): the shell command, and the folder it first moves the
 // set's recordings into, which stays until the user deletes it (Replaced is
 // "" for a command that records the set in place without moving it). Command
-// is "" when keploy cannot print one.
+// is "" when keploy cannot print one. Say is, with no Command, the step in
+// words where no command the user runs records the set again (a set that
+// lives in a cluster is recorded again there): "" when keploy cannot say one.
 type RecordAgain struct {
 	Command  string
 	Replaced string
+	Say      string
 }
 
 // Text is a as a next step says it: the command, then where it moves the
 // set's recordings and that they are deleted once the set recorded again
-// passes. "" for no command.
+// passes; with no command, Say. "" for neither.
 func (a RecordAgain) Text() string {
-	if a.Command == "" || a.Replaced == "" {
+	if a.Command == "" {
+		return a.Say
+	}
+	if a.Replaced == "" {
 		return a.Command
 	}
 	return a.Command + " (it first moves the set's recordings out of the keploy folder, into " + a.Replaced + "; delete that folder once the set recorded again passes)"

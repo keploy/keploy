@@ -5,6 +5,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 )
 
 // SetEndHook is an optional TestHooks extension: it is told how keploy test
@@ -65,6 +66,38 @@ type SetAnswersHook interface {
 // A notification only.
 type EarlierSetCallHook interface {
 	EarlierSetCall(set, readIn string, call models.UnmatchedCall)
+}
+
+// SetRecordAgainer is an optional TestHooks extension, for a replay whose
+// sets the user does not record again with a keploy record run where the
+// replay ran (a replay in a cluster, of sets recorded and kept there): it is
+// how the test set testSetID is recorded again in its place, which the next
+// step for a call outside every test names in place of the command the
+// replay would print (utils.RecordSetAgain): a command, or with none the step
+// in words (utils.RecordAgain.Say). says is false when the hooks do not say
+// how that set is recorded again (a composed hook value has the method
+// whether or not a hook it holds says one): the replay's command stands.
+// When says is true their answer stands: with neither a command nor words,
+// the step says keploy cannot print one, never a command for another place.
+// It is asked only of a set the run names.
+type SetRecordAgainer interface {
+	RecordSetAgain(testSetID string) (record utils.RecordAgain, says bool)
+}
+
+// OutsideCallsLogger is an optional TestHooks extension, under the proven
+// switch: it says the calls outside every test the replay fails a set or the
+// run with (models.UnmatchedCall.OutsideEveryTest), each in place of the
+// replay's own ERROR line for it, so a hook that says such a call in its own
+// documented form says it in one form on every path. set is the test set
+// whose calls they are: the running set's own, said with its end, or a call
+// an earlier set made, said as a read returns it (EarlierSetCallHook), set ""
+// when the run began no such set. record is how set is recorded again, as
+// the replay's line would name it (utils.RecordSetAgain, SetRecordAgainer),
+// for the run's id. said is whether the hooks said them: when false (a
+// composed hook value has the method whether or not a hook it holds says
+// such calls) the replay says each itself.
+type OutsideCallsLogger interface {
+	LogOutsideCalls(set string, calls []models.UnmatchedCall, record utils.RecordAgain) (said bool)
 }
 
 // noteSetEnd keeps how a final report of the set RunTestSet is running ends

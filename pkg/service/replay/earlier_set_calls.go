@@ -144,18 +144,27 @@ func (e *earlierSetCalls) take(read []models.UnmatchedCall) (rest []models.Unmat
 // call outside every test (outsideFields): named under the set it was made in
 // and its test (none for a call made while no test's view named one), with
 // the set whose read returned it, and tells the hooks each
-// (EarlierSetCallHook).
+// (EarlierSetCallHook). Hooks that say calls outside every test themselves
+// (OutsideCallsLogger) are handed each, under the set it was made in, and
+// the replay does not say it when the hooks said it.
 func (r *Replayer) takeEarlierSetCalls(read []models.UnmatchedCall) []models.UnmatchedCall {
 	rest, taken := r.earlierSetCalls.take(read)
 	readIn := r.earlierSetCalls.reading()
 	h, telling := r.hookImpl.(EarlierSetCallHook)
+	sayer, saying := r.hookImpl.(OutsideCallsLogger)
 	for _, c := range taken {
 		if !c.call.CountsAgainstTest() {
 			continue
 		}
-		r.logger.Error("test run failed: an earlier test set made a call that no mock answered, which keploy decided only after that set had ended; it is charged to no test and no set, so it fails the run ("+provenswitch.Env+"=1)",
-			append(r.outsideFields(c.set, c.call.EarlierSetTest, c.call),
-				zap.String("read-in-test-set", readIn))...)
+		said := false
+		if saying {
+			said = sayer.LogOutsideCalls(c.set, []models.UnmatchedCall{c.call}, r.recordAgainCommand(c.set))
+		}
+		if !said {
+			r.logger.Error("test run failed: an earlier test set made a call that no mock answered, which keploy decided only after that set had ended; it is charged to no test and no set, so it fails the run ("+provenswitch.Env+"=1)",
+				append(r.outsideFields(c.set, c.call.EarlierSetTest, c.call),
+					zap.String("read-in-test-set", readIn))...)
+		}
 		if telling {
 			h.EarlierSetCall(c.set, readIn, c.call)
 		}

@@ -246,14 +246,19 @@ func betweenFacts(c models.UnmatchedCall) string {
 // where it moves the set's recordings. record has no command when keploy
 // cannot print one: for set "", the set that made the call
 // is recorded again with the command that recorded it, which keploy cannot
-// name; for a set whose name keploy record would not record under, set is
-// recorded again under its own name with the command that recorded it.
+// name; for a set the hooks say is recorded again with no command the user
+// runs (SetRecordAgainer), it is their step in words (record.Say); for a set
+// whose name keploy record would not record under, set is recorded again
+// under its own name with the command that recorded it.
 func betweenNextStep(c models.UnmatchedCall, set string, record utils.RecordAgain) string {
 	if record.Command == "" && set == "" {
 		return "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call"
 	}
 	again := "record the test set again in its place: " + record.Text()
-	if record.Command == "" {
+	switch {
+	case record.Command == "" && record.Say != "":
+		again = record.Say
+	case record.Command == "":
 		again = "record the test set " + set + " again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"
 	}
 	if c.ClosestMock != "" {
@@ -269,8 +274,16 @@ func betweenNextStep(c models.UnmatchedCall, set string, record utils.RecordAgai
 // record records under the set's name with the application's command and the
 // keploy folder and keploy.yml the run read, each word quoted for a POSIX
 // shell. No command when keploy cannot name the set's folder, or when no set
-// is running (no run id to name the folder by).
+// is running (no run id to name the folder by). For a set the run names, the
+// hooks' answer stands in place of that command when they give one
+// (SetRecordAgainer): a set kept where the replay runs is recorded again
+// there, never by a command for the folder the replay read.
 func (r *Replayer) recordAgainCommand(testSetID string) utils.RecordAgain {
+	if a, ok := r.hookImpl.(SetRecordAgainer); ok && testSetID != "" {
+		if record, says := a.RecordSetAgain(testSetID); says {
+			return record
+		}
+	}
 	if r.config == nil {
 		return utils.RecordAgain{}
 	}
@@ -287,9 +300,21 @@ func (r *Replayer) recordAgainCommand(testSetID string) utils.RecordAgain {
 // between which tests, what keploy knows of its closest recording and the
 // one next step, each a field of the line. So is a call made in a test and
 // decided after its end (Late), with the test it was made in (made_in); a
-// held one is said as held.
+// held one is said as held. Hooks that say calls outside every test
+// themselves (OutsideCallsLogger) are handed those first, all at once, and
+// the replay says none of them when the hooks said them.
 func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
+	said := false
+	if sayer, ok := r.hookImpl.(OutsideCallsLogger); ok {
+		outside := slices.DeleteFunc(slices.Clone(calls), func(c models.UnmatchedCall) bool { return !c.OutsideEveryTest() })
+		if len(outside) > 0 {
+			said = sayer.LogOutsideCalls(testSetID, outside, r.recordAgainCommand(testSetID))
+		}
+	}
 	for _, c := range calls {
+		if c.OutsideEveryTest() && said {
+			continue
+		}
 		if c.OutsideEveryTest() {
 			msg := "test-set failed: the application made a call between two tests that no mock answered; it is outside every test, so it fails the set and no test (" + provenswitch.Env + "=1)"
 			if !c.Between {
