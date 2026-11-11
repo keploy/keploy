@@ -63,10 +63,7 @@ func DeclaredClocks(sources []models.DeclaredSource, learned map[string]models.C
 		if err != nil || p.Part != variables.PartBody {
 			continue
 		}
-		leaf, ok := placeLeafPath(p)
-		if !ok {
-			continue
-		}
+		leaf, _ := placeLeafPath(p) // every body place has one
 		if _, has := learned[leaf]; has {
 			continue
 		}
