@@ -248,7 +248,11 @@ func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T)
 // compare a worker's marks with its own manager's count, never the run's: a
 // call the worker makes after the next set's staging, filed after it, is
 // that set's and its next read returns it, and its pool-view call made
-// before the staging, filed after it, is cut and said.
+// before the staging and after its set's last read of its window, filed
+// after the staging, is cut and said. Its pool-view call made before that
+// read is kept as the earlier set's call of no test, one set back: the set
+// the worker was served in, counted by the worker's own set starts, never
+// by the run's window's (which would name a set before the worker began).
 func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50102"))
@@ -264,6 +268,7 @@ func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
 		}
 	}
 	for i := 0; i < 3; i++ {
+		p.missCutPending.Store(true)
 		stageSet()
 	}
 	p.StartErrorDrain(ctx)
@@ -272,6 +277,14 @@ func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
 	run := p.getMockManager()
 	if run.StagingEpoch() <= m1.StagingEpoch() {
 		t.Fatalf("precondition: the run's manager counted %d stagings, worker 1's %d; want the run's ahead", run.StagingEpoch(), m1.StagingEpoch())
+	}
+	m1.ServeExactPool(models.PoolKeyNone, nil)
+	kept := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /worker-kept"}
+	integrations.StampMark(kept, m1.MarkCallRound())
+	// The worker's set's last read of its window.
+	w.ContinueTestErrorCapture()
+	if got := readCalls(t, "worker 1's last test's end", w); len(got) != 0 {
+		t.Fatalf("precondition: worker 1's last test's end read %v", got)
 	}
 	m1.ServeExactPool(models.PoolKeyNone, nil)
 	before := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /worker-before"}
@@ -287,7 +300,7 @@ func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
 	if after.Mark == models.RoundUnmarked || after.MarkEpoch != m1.StagingEpoch() {
 		t.Fatalf("precondition: worker 1's call after the staging is marked %v at staging %d, want marked at %d", after.Mark, after.MarkEpoch, m1.StagingEpoch())
 	}
-	for _, r := range []*models.MockMismatchReport{before, after} {
+	for _, r := range []*models.MockMismatchReport{kept, before, after} {
 		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
 		flushDrain(p)
 	}
@@ -296,8 +309,18 @@ func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
 		t.Fatalf("the run's next-set read %v; worker 1's calls are no calls of the run's", got)
 	}
 	w.ContinueTestErrorCapture()
-	if got := readCalls(t, "worker 1", w); len(got) != 1 || got[0] != "GET /worker-after@1" {
-		t.Fatalf("worker 1's next-set read %v; want only its call made after the staging", got)
+	got, err := w.GetMockErrors(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("worker 1's next-set read %+v; want its pool-view call made before its last read, then its call made after the staging", got)
+	}
+	if c := got[0]; c.ActualSummary != "GET /worker-kept" || c.Instance != 1 || c.EarlierSetTest != "" || c.EarlierSet != 1 || c.BeforeSet || c.Kind != models.MissOutsideTest {
+		t.Fatalf("worker 1's next-set read %+v; want first its pool-view call made before its last read, as the call of no test of the set it was served in, one set back, outside every test", got)
+	}
+	if c := got[1]; c.ActualSummary != "GET /worker-after" || c.Instance != 1 || c.EarlierSet != 0 || c.EarlierSetTest != "" {
+		t.Fatalf("worker 1's next-set read %+v; want next its call made after the staging, as this set's", got)
 	}
 	if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"GET /worker-before"})).Len(); n != 1 {
 		t.Fatalf("the cut of worker 1's call made before the staging was said %d times; want once: %+v", n, logs.All())

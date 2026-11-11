@@ -345,3 +345,95 @@ func TestAnEarlierSetsCallOfNoTestFailsTheRunNamingTheSetItWasMadeIn(t *testing.
 		t.Fatalf("the call made in test-set-a was said %d times as failing the run outside every test, of no test, read in test-set-c; want once: %+v", n, logs.All())
 	}
 }
+
+// failingSetReportDB is the harness's report store, refusing the report of
+// the set fail names: that set's RunTestSet ends after its mocks are staged,
+// before any of its tests runs.
+type failingSetReportDB struct {
+	*prReportDB
+	fail string
+}
+
+func (f *failingSetReportDB) InsertReport(ctx context.Context, run, set string, rep *models.TestReport) error {
+	if set == f.fail {
+		return fmt.Errorf("the report store refused %s's report", set)
+	}
+	return f.prReportDB.InsertReport(ctx, run, set, rep)
+}
+
+// The agent counts a test set at its mocks' staging, and names an earlier
+// set's call by how many sets back from the reading one it was made in
+// (models.UnmatchedCall.EarlierSet). The replay counts each set where the
+// agent does, at its staging, so a set that ends after its staging and before
+// any of its tests runs is counted on both sides: with sets [P, X, H, Y], H
+// ended so, X's call of no test that Y's first read returns two sets back is
+// named as X's, never as P's. The native and the docker compose path stage a
+// set each in their own place, and each counts it there.
+func TestASetEndedAfterItsStagingIsCountedAsTheAgentCountsIt(t *testing.T) {
+	provenOn(t, true)
+	for _, path := range []struct {
+		name    string
+		harness func(*testing.T) *prRun
+	}{
+		{"native", func(t *testing.T) *prRun { return newPartialRunHarness(t, 2, 0) }},
+		{"compose", func(t *testing.T) *prRun { return composeHarness(t, &composeInstr{}) }},
+	} {
+		t.Run(path.name, func(t *testing.T) { aSetEndedAfterItsStagingIsCountedAsTheAgentCountsIt(t, path.harness(t)) })
+	}
+}
+
+func aSetEndedAfterItsStagingIsCountedAsTheAgentCountsIt(t *testing.T, h *prRun) {
+	core, logs := observer.New(zap.ErrorLevel)
+	h.replayer.logger = zap.New(core)
+	h.replayer.reportDB = &failingSetReportDB{prReportDB: h.report, fail: "test-set-h"}
+	for _, set := range []string{"test-set-p", "test-set-x"} {
+		h.set = set
+		if status := h.runServing(t); status != models.TestSetStatusPassed {
+			t.Fatalf("%s is %s (reason %q), want PASSED", set, status, h.report.report.FailureReason)
+		}
+	}
+	stagings := func() int {
+		h.instr.mu.Lock()
+		defer h.instr.mu.Unlock()
+		n := 0
+		for _, p := range h.instr.allParams {
+			if p.AfterTime.Equal(models.BaseTime) {
+				n++
+			}
+		}
+		return n
+	}
+	staged := stagings()
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	if status, err := h.replayer.RunTestSet(ctx, "test-set-h", "test-run-0", true); err == nil || status != models.TestSetStatusFailed {
+		t.Fatalf("precondition: test-set-h ended %s, %v; want FAILED by its refused report", status, err)
+	}
+	if stagings() == staged {
+		t.Fatal("precondition: test-set-h's mocks were not staged before its report was refused")
+	}
+	var handed atomic.Bool
+	h.instr.mockErrorsFor = func() ([]models.UnmatchedCall, error) {
+		if h.replayer.earlierSetCalls.reading() != "test-set-y" || handed.Swap(true) {
+			return nil, nil
+		}
+		return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /orders", Destination: "orders:80",
+			Kind: models.MissOutsideTest, EarlierSet: 2}}, nil
+	}
+	h.set = "test-set-y"
+	if status := h.runServing(t); status != models.TestSetStatusPassed {
+		t.Fatalf("test-set-y is %s (reason %q); test-set-x's call is no call of test-set-y", status, h.report.report.FailureReason)
+	}
+	if !handed.Load() {
+		t.Fatal("test-set-y read nothing: the case needs its first read to return the call")
+	}
+	if late := h.replayer.earlierSetCalls.failing(); len(late) != 1 || late[0].set != "test-set-x" {
+		t.Fatalf("the run holds %+v; want test-set-x's call, two sets back from test-set-y", late)
+	}
+	said := logs.FilterMessageSnippet("an earlier test set made a call that no mock answered").
+		FilterField(zap.String("made-in-test-set", "test-set-x")).
+		FilterField(zap.String("read-in-test-set", "test-set-y"))
+	if said.Len() != 1 {
+		t.Fatalf("the call was said %d times naming test-set-x and test-set-y; want once: %+v", said.Len(), logs.All())
+	}
+}

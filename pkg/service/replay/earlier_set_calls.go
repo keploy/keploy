@@ -45,9 +45,14 @@ type earlierSetCall struct {
 	call models.UnmatchedCall
 }
 
-// begin notes that the run now reads set's calls: an earlier set's call read
-// from here was made in a set the run began before it (an earlier attempt of
-// the same set, for a set run again).
+// begin notes that the run now reads set's calls, at the set's staging
+// (RunTestSet, once the agent took the staging of its mocks), where the agent
+// counts the set too (its set start): an earlier set's call read from here
+// was made in a set the run began before it (an earlier attempt of the same
+// set, for a set run again), counted back as the agent counts, so a set that
+// ends after its staging and before its first test is counted on both sides.
+// A staging the agent did not take ends the run (Start), so no later set's
+// read follows a count the two sides could disagree on.
 func (e *earlierSetCalls) begin(set string) {
 	e.mu.Lock()
 	e.sets = append(e.sets, set)
@@ -122,8 +127,9 @@ func (e *earlierSetCalls) reading() string {
 	return e.running
 }
 
-// failing is the calls of earlier sets' tests that fail the run
-// (models.UnmatchedCall.CountsAgainstTest), in the order they were read.
+// failing is the calls of earlier sets that fail the run
+// (models.UnmatchedCall.CountsAgainstTest), each made in one of that set's
+// tests or while no test's view named one, in the order they were read.
 func (e *earlierSetCalls) failing() []earlierSetCall {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -144,7 +150,8 @@ func (e *earlierSetCalls) reset() {
 }
 
 // earlierSetCallsWhy says why the calls fail the run, naming each call, the
-// test it was made in and that test's set.
+// set it was made in and the test, where it names one, or that it was made in
+// no test (between two of the set's tests, or after its last).
 func earlierSetCallsWhy(calls []earlierSetCall) string {
 	var named []string
 	for _, c := range calls {
@@ -171,6 +178,6 @@ func (r *Replayer) passesEarlierSetCalls(pass bool) bool {
 		return pass
 	}
 	r.logger.Error("test run failed: "+earlierSetCallsWhy(late)+" ("+provenswitch.Env+"=1)",
-		zap.String("next_step", "each call is the test's it was made in: fix the application, or re-record that test if the change is intended"))
+		zap.String("next_step", "each call is the set's it was made in, and the test's, where one is named: fix the application, or re-record that test (that set, for a call of no test) if the change is intended"))
 	return false
 }
