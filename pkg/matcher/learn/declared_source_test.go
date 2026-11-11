@@ -15,7 +15,7 @@ import (
 // by, none at all, or no namer leave the learn step no source (nil).
 func TestDeclaredSourcesAnswerAPathByItsPlace(t *testing.T) {
 	off := models.ClockOffset{Min: -time.Second, Res: time.Second}
-	form := models.MintedForm{Prefix: "kepreq_", Classes: []string{"-", "_", "digit", "lower", "upper"}}
+	form := models.MintedForm{Prefix: "kepreq_", MinLen: 50, MaxLen: 50}
 	sources := []models.DeclaredSource{
 		{Rule: "at@0a1b2c3d", Kind: models.DeclaredSourceClock, Field: "body.docs.msgs.0.at", Clock: &off},
 		{Rule: "id@44aa55bb", Kind: models.DeclaredSourceMinted, Field: "body.docs.msgs.0._id", Minted: &form},

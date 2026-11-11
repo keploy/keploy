@@ -71,7 +71,7 @@ func (s DeclaredSource) Check() error {
 		if s.Clock != nil {
 			return fmt.Errorf("rule %s declares %s minted with a clock range", s.Rule, s.Field)
 		}
-		// No form is the empty one, which names no class.
+		// No form is the empty one, which leaves no byte after its prefix.
 		if err := cmp.Or(s.Minted, &MintedForm{}).Check(); err != nil {
 			return fmt.Errorf("rule %s declares %s minted: %w", s.Rule, s.Field, err)
 		}

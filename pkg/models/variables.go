@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,8 +87,8 @@ type MockVariable struct {
 	// made anew at its Bind (an id the application mints there), the rule
 	// and the shape the learn step read the value with: a replay binds it
 	// only to a value that is not its recorded one, that no minted
-	// variable bound earlier in the run, and that keeps the recorded
-	// value's shape (variables.Table.BindAll). Only the learn step sets
+	// variable bound earlier in the run, and that keeps the rule's form
+	// (variables.Table.BindAll). Only the learn step sets
 	// it, with a Bind; none for any other variable.
 	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty" bson:"minted,omitempty"`
 	// Why is, for a variable the learn step wrote, why it is one and how to
@@ -101,8 +100,7 @@ type MockVariable struct {
 
 // MintedShape is what a minted rule decided of a variable's value
 // (MockVariable.Minted): the id of the rule (Rule), and the form a value
-// bound there keeps (MintedForm: the recorded value's length, the prefix,
-// and the classes of the bytes after it).
+// bound there keeps (MintedForm: the prefix and the range of lengths).
 type MintedShape struct {
 	Rule       string `json:"rule" yaml:"rule" bson:"rule"`
 	MintedForm `yaml:",inline" bson:",inline"`
@@ -114,7 +112,6 @@ func (s *MintedShape) clone() *MintedShape {
 		return nil
 	}
 	c := *s
-	c.Classes = slices.Clone(s.Classes)
 	return &c
 }
 

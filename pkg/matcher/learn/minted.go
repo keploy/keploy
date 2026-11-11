@@ -9,20 +9,25 @@ import (
 // A source keploy.yml's mock.rules declares for a field of a call
 // (Input.Source) settles what learning could not: a rule of kind minted
 // says the application makes the field's whole value anew at the call (an
-// id it mints). Learning's own facts come first: where it bound a word of
-// the field to an earlier place, or read it as a clock, the rule does not
-// act and the field is decided as learning decided it. Where learning
-// refused the field's words (a piece of a new id that stands, by chance,
-// in another place), or learned them made anew word by word, the field is
-// decided made anew whole, bound at the call, so long as:
-//   - keploy read every earlier place (no refusal of the field is unread
-//     or keploy's limit);
+// id it mints). The field is decided whole, by the rule's checks below:
+// learning's decisions of a piece of its value (a word of it, or a text a
+// step opens in it) do not count, so a piece of a new id that stands, by
+// chance, at an earlier place (bound there, or refused as one keploy names
+// no place of to bind it at) leaves the field to the rule. Learning's
+// decision of the whole value comes first: where it bound the value to an
+// earlier place, or read it as a clock, the rule does not act and the
+// field is decided as learning decided it. Else the field is decided made
+// anew whole, bound at the call, so long as:
+//   - keploy read every earlier place (no refusal of the field, or of any
+//     word of it, is unread), and could check the whole value (no refusal
+//     of it is keploy's limit);
 //   - the value is a string or a number read as written in both runs (no
 //     step opens it);
 //   - both runs' values keep the rule's form (models.MintedForm.Keeps:
 //     Source.Minted, of every value the set's recordings hold at the
-//     rule's places, its prefix cut to what both runs' values share):
-//     else it is refused as of another shape;
+//     rule's places, with both runs' values: its prefix cut to what they
+//     share, its lengths widened to theirs): else it is refused as of
+//     another shape;
 //   - no earlier place holds the whole value: neither one the recording
 //     gave the application before the call holding the recorded value,
 //     nor one round F gave it holding round F's value, in the call's scope
@@ -83,15 +88,18 @@ func (dc *decider) source(path string) (Source, bool) {
 // minted decides the drifted leaf at path, which src declares minted, from
 // ds, its words as learning decided them (see above).
 func (dc *decider) minted(path string, src Source, ds []Decision) []Decision {
+	rec, live := dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path]
 	for _, d := range ds {
 		switch {
-		case d.Outcome == OutcomeValue || d.Outcome == OutcomeClock:
+		case d.Refusal != nil && d.Refusal.Kind == RefusalUnread:
 			return ds
-		case d.Refusal != nil && (d.Refusal.Kind == RefusalUnread || d.Refusal.Kind == RefusalCannotCheck):
+		case d.Recorded != rec.Value:
+			// A piece of the value (a word of it, or a text a step opens
+			// in it): the rule decides the value whole.
+		case d.Outcome == OutcomeValue || d.Outcome == OutcomeClock || d.Refusal != nil && d.Refusal.Kind == RefusalCannotCheck:
 			return ds
 		}
 	}
-	rec, live := dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path]
 	at := dc.in.AddressOf(rec, false)
 	r, f := rec.Value, live.Value
 	why := "keploy.yml's rule " + src.Rule + " declares it minted"
@@ -99,10 +107,10 @@ func (dc *decider) minted(path string, src Source, ds []Decision) []Decision {
 		return []Decision{dc.refuse(path, at, -1, r, f, RefusalNotMinted,
 			why+", and keploy reads a minted value as one string or number in each run, as written: this one is not", nil, dc.fieldNoise(path))}
 	}
-	form := src.Minted.Cut(r, f)
-	if !form.Keeps(r, r) || !form.Keeps(r, f) {
+	form := src.Minted.With(r, f)
+	if form.Check() != nil || !form.Keeps(r) || !form.Keeps(f) {
 		return []Decision{dc.refuse(path, at, -1, r, f, RefusalChangedShape,
-			why+", and a run's value does not keep the rule's form ("+form.Where()+", at the recorded value's length): minted value of another shape", nil, dc.fieldNoise(path))}
+			why+", and a run's value does not keep the rule's form ("+form.Where()+"): minted value of another shape", nil, dc.fieldNoise(path))}
 	}
 	if held := dc.mintedHeld(r, f); len(held) > 0 {
 		return []Decision{dc.refuse(path, at, -1, r, f, RefusalNotMinted,

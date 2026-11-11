@@ -9,9 +9,10 @@ import (
 // anew at that call), may not be bound: "" where it may, or where b is no
 // minted variable's. The value must not be its recorded one (an id the
 // application did not make anew), must keep its rule's form there
-// (models.MintedForm.Keeps: the recorded value's length, the prefix, and
-// after it only bytes of the form's classes; a form keploy cannot check
-// fails closed), and must not be the value of any of earlier that is a
+// (models.MintedForm.Keeps: the prefix, a length in the range of the
+// values learning saw there, and after the prefix only printable
+// characters and no whitespace; a form keploy cannot check fails closed),
+// and must not be the value of any of earlier that is a
 // minted variable's binding (one the run bound before at a minted place,
 // or one the call binds before b): an id made anew is never one the run
 // had already. Each text leads with what the replay's miss says: "minted
@@ -33,8 +34,8 @@ func MintedWhy(b Binding, earlier ...Binding) string {
 	if err := f.Check(); err != nil {
 		return fmt.Sprintf("minted value of another shape: %s, in %v, so keploy cannot check the value this call sends there", rule, err)
 	}
-	if !f.Keeps(b.Recorded, b.Value) {
-		return fmt.Sprintf("minted value of another shape: %s, and this call sends %q there, which does not keep the rule's form: the recorded value's length (%d), then %s", rule, b.Value, len(b.Recorded), f.Where())
+	if !f.Keeps(b.Value) {
+		return fmt.Sprintf("minted value of another shape: %s, and this call sends %q there, which does not keep the rule's form: %s", rule, b.Value, f.Where())
 	}
 	return ""
 }

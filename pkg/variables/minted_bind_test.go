@@ -14,24 +14,26 @@ const (
 )
 
 // mintedB is a binding of the minted variable name at mock-1's body._id,
-// recorded mintRec, bound to value, of a UUID's form: '-', digits and
-// lower-case letters.
+// recorded mintRec, bound to value, of a UUID's form: no prefix, 36 bytes.
 func mintedB(name, value string) Binding {
-	return Binding{Name: name, Value: value, Recorded: mintRec, Mock: "mock-1", Place: "body._id", Minted: &models.MintedShape{Rule: "audit-id", MintedForm: models.MintedForm{Classes: []string{"-", "digit", "lower"}}}}
+	return Binding{Name: name, Value: value, Recorded: mintRec, Mock: "mock-1", Place: "body._id", Minted: &models.MintedShape{Rule: "audit-id", MintedForm: models.MintedForm{MinLen: 36, MaxLen: 36}}}
 }
 
-// A minted value is new and keeps its recorded shape: its recorded value,
-// the value of a minted variable bound earlier, and a value of another
-// shape (or of a form keploy cannot check) are refused, each saying
-// which. A binding of no minted variable, and an earlier binding that is
-// no minted variable's or holds another value, refuse nothing.
+// A minted value is new and keeps its rule's form: its recorded value, the
+// value of a minted variable bound earlier, and a value of another length
+// or prefix, or that holds whitespace (or of a form keploy cannot check),
+// are refused, each saying which. Any printable character after the prefix
+// keeps the form. A binding of no minted variable, and an earlier binding
+// that is no minted variable's or holds another value, refuse nothing.
 func TestMintedWhy(t *testing.T) {
 	plain := mintedB("auditId", mintLive)
 	plain.Minted = nil
 	odd := mintedB("auditId", mintLive)
-	odd.Minted.Classes = []string{"hex"}
+	odd.Minted.MaxLen = 30
 	prefixed := mintedB("auditId", "kepreq_"+mintLive[7:])
 	prefixed.Minted.Prefix, prefixed.Recorded = "kepreq_", "kepreq_"+mintRec[7:]
+	ranged := mintedB("auditId", "n-123456")
+	ranged.Minted.Prefix, ranged.Minted.MinLen, ranged.Minted.MaxLen, ranged.Recorded = "n-", 7, 9, "n-12345"
 	unprefixed := prefixed
 	unprefixed.Value = "kepreg_" + mintLive[7:]
 	for _, c := range []struct {
@@ -48,11 +50,14 @@ func TestMintedWhy(t *testing.T) {
 		{"another length", mintedB("auditId", mintLive[:35]), nil, "minted value of another shape: keploy.yml's rule audit-id declares variable auditId made anew at body._id of mock-1, and this call sends"},
 		{"a dash moved: the form names no byte's place", mintedB("auditId", "5c1e7a9b3-d2f-4e8a-b6c4-9f0a1b2c3d4e"), nil, ""},
 		{"any lower-case letter", mintedB("auditId", "5c1e7a9b-3d2f-4e8a-b6c4-9f0a1b2c3d4z"), nil, ""},
-		{"a capital, a class none of its values held", mintedB("auditId", "5c1e7a9b-3d2f-4e8a-b6c4-9f0a1b2c3d4E"), nil, "which does not keep the rule's form: the recorded value's length (36), then only bytes of the classes - digit lower"},
-		{"a ':', a class none of its values held", mintedB("auditId", "5c1e7a9b:3d2f-4e8a-b6c4-9f0a1b2c3d4e"), nil, "does not keep the rule's form"},
+		{"a capital none of its values held", mintedB("auditId", "5c1e7a9b-3d2f-4e8a-b6c4-9f0a1b2c3d4E"), nil, ""},
+		{"a ':' none of its values held", mintedB("auditId", "5c1e7a9b:3d2f-4e8a-b6c4-9f0a1b2c3d4e"), nil, ""},
+		{"a space", mintedB("auditId", "5c1e7a9b 3d2f-4e8a-b6c4-9f0a1b2c3d4e"), nil, "which does not keep the rule's form: a length of 36, and only printable characters and no whitespace"},
 		{"its prefix", prefixed, nil, ""},
-		{"no prefix", unprefixed, nil, `then the prefix "kepreq_", then only bytes`},
-		{"a form keploy cannot check", odd, nil, `minted value of another shape: keploy.yml's rule audit-id declares variable auditId made anew at body._id of mock-1, in a minted form names a class keploy does not know ("hex")`},
+		{"no prefix", unprefixed, nil, `which does not keep the rule's form: the prefix "kepreq_", a length of 36`},
+		{"a length in its range", ranged, nil, ""},
+		{"a length past its range", mintedB("auditId", "n-12345678"), nil, "a length of 36"},
+		{"a form keploy cannot check", odd, nil, `minted value of another shape: keploy.yml's rule audit-id declares variable auditId made anew at body._id of mock-1, in a minted form's longest length is shorter than its shortest`},
 	} {
 		got := MintedWhy(c.b, c.earlier...)
 		if c.want == "" && got != "" || c.want != "" && !strings.Contains(got, c.want) {

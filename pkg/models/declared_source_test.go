@@ -15,7 +15,7 @@ func TestDeclaredSourceCheck(t *testing.T) {
 	clock := func(min, max, res time.Duration) DeclaredSource {
 		return DeclaredSource{Rule: "at@0a1b2c3d", Kind: DeclaredSourceClock, Field: "body.at", Clock: &ClockOffset{Min: min, Max: max, Res: res}}
 	}
-	form := &MintedForm{Classes: []string{"-", "digit", "lower"}}
+	form := &MintedForm{MinLen: 36, MaxLen: 36}
 	minted := DeclaredSource{Rule: "id@0a1b2c3d", Kind: DeclaredSourceMinted, Field: "body._id", Minted: form}
 	mintedAs := func(f MintedForm) DeclaredSource {
 		s := minted
@@ -43,15 +43,16 @@ func TestDeclaredSourceCheck(t *testing.T) {
 		"a clock whose max is its min's before":         {clock(0, -time.Millisecond, sec), false},
 		"a minted value with a range":                   {DeclaredSource{Rule: "id@0a1b2c3d", Kind: DeclaredSourceMinted, Field: "body._id", Clock: &ClockOffset{Res: sec}, Minted: form}, false},
 		"a minted value with no form":                   {DeclaredSource{Rule: "id@0a1b2c3d", Kind: DeclaredSourceMinted, Field: "body._id"}, false},
-		"a minted form with no class":                   {mintedAs(MintedForm{}), false},
-		"a minted form of a class keploy does not know": {mintedAs(MintedForm{Classes: []string{"hex"}}), false},
-		"a minted form of a letter as a class":          {mintedAs(MintedForm{Classes: []string{"a"}}), false},
-		"a minted form of a space as a class":           {mintedAs(MintedForm{Classes: []string{" "}}), false},
-		"a minted form of no name":                      {mintedAs(MintedForm{Classes: []string{""}}), false},
-		"a minted form of a symbol":                     {mintedAs(MintedForm{Classes: []string{"!", "~", "upper", "digit", "lower"}}), true},
-		"a minted form of a prefix":                     {mintedAs(MintedForm{Prefix: "kepreq_", Classes: []string{"lower"}}), true},
-		"a minted prefix that ends at a letter":         {mintedAs(MintedForm{Prefix: "kepreq", Classes: []string{"lower"}}), false},
-		"a minted prefix of a space":                    {mintedAs(MintedForm{Prefix: "a _", Classes: []string{"lower"}}), false},
+		"a minted form with no length":                  {mintedAs(MintedForm{}), false},
+		"a minted form of one byte":                     {mintedAs(MintedForm{MinLen: 1, MaxLen: 1}), true},
+		"a minted form of a range of lengths":           {mintedAs(MintedForm{MinLen: 7, MaxLen: 9}), true},
+		"a minted form whose longest is its shortest's": {mintedAs(MintedForm{MinLen: 9, MaxLen: 7}), false},
+		"a minted form of a prefix":                     {mintedAs(MintedForm{Prefix: "kepreq_", MinLen: 50, MaxLen: 50}), true},
+		"a minted form of a prefix alone":               {mintedAs(MintedForm{Prefix: "kepreq_", MinLen: 7, MaxLen: 50}), false},
+		"a minted prefix that ends at a letter":         {mintedAs(MintedForm{Prefix: "kepreq", MinLen: 50, MaxLen: 50}), false},
+		"a minted prefix that ends outside ASCII":       {mintedAs(MintedForm{Prefix: "keé", MinLen: 50, MaxLen: 50}), false},
+		"a minted prefix of a space":                    {mintedAs(MintedForm{Prefix: "a _", MinLen: 50, MaxLen: 50}), false},
+		"a minted prefix of a tab":                      {mintedAs(MintedForm{Prefix: "a\t_", MinLen: 50, MaxLen: 50}), false},
 		"a clock read with a minted form":               {withForm, false},
 	} {
 		if err := c.s.Check(); (err == nil) != c.ok {
