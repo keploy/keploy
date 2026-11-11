@@ -869,13 +869,13 @@ func CheckClockReadForm(path string, o models.ClockOffset, live Leaf, s Span, kn
 	}
 	if o.Form != "" && !timeForm {
 		if o.Res <= 0 {
-			return false, path + " was learned as a time written as " + o.Form + ", checked by its form alone: learned under the time default; re-record with mock.times: strict to check its range"
+			return false, path + " was learned as a time written as " + o.Forms() + ", checked by its form alone: learned under the time default; re-record with mock.times: strict to check its range"
 		}
-		o.Form = ""
+		o.Form, o.FormF = "", ""
 	}
 	learned := learnedAs(path, o)
 	if o.Form != "" {
-		learned = path + " was learned as a time written as " + o.Form
+		learned = path + " was learned as a time written as " + o.Forms()
 	}
 	if !o.Word.IsZero() {
 		word, why := wordIn(o.Word, live)
@@ -885,9 +885,10 @@ func CheckClockReadForm(path string, o models.ClockOffset, live Leaf, s Span, kn
 		o.Word, live = models.ClockWord{}, word
 	}
 	if o.Form != "" {
-		// The time default: any instant of the form passes (TimeForm); a
-		// word keeps its leaf's type (wordIn).
-		if f := TimeForm(live); f != o.Form {
+		// The time default: any instant of the form passes (TimeForm), of
+		// either form where the two record runs wrote two (FormF); a word
+		// keeps its leaf's type (wordIn).
+		if f := TimeForm(live); !o.WrittenAs(f) {
 			return false, learned + ", and the value this call carries is " + formWhy(f) + ": it changed"
 		}
 		return true, ""
@@ -951,7 +952,7 @@ func ReadsAsClockRead(o models.ClockOffset, live Leaf) bool {
 		live = word
 	}
 	if o.Form != "" {
-		return TimeForm(live) == o.Form
+		return o.WrittenAs(TimeForm(live))
 	}
 	if models.LayoutTimeOfDay(o.Layout) {
 		_, _, lay, ok := timeOfDayOf(live)
