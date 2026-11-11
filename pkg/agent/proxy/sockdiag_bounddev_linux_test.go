@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -23,6 +24,11 @@ import (
 // addresses differ (127.0.0.2 to 127.0.0.1), so a dump that compared its local
 // address with the remote one would miss it. ::1 is the only IPv6 address lo
 // has: the tcp6 case has one address at both ends and no decoys.
+//
+// Each port a case uses is held at every address it uses it at before the
+// case connects (onOnePort): the kernel picks the socket's port, and the
+// listener's, among those free at their own address alone, and another
+// test's socket may hold either at 127.0.0.3.
 func TestASocketBoundToADeviceIsFound(t *testing.T) {
 	lo1, lo2, lo3 := netip.AddrFrom4([4]byte{127, 0, 0, 1}), netip.AddrFrom4([4]byte{127, 0, 0, 2}), netip.AddrFrom4([4]byte{127, 0, 0, 3})
 	for _, tc := range []struct {
@@ -37,41 +43,43 @@ func TestASocketBoundToADeviceIsFound(t *testing.T) {
 		{"tcp6 over v4-mapped addresses", unix.AF_INET6, lo2, lo1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ln, err := net.Listen("tcp", netip.AddrPortFrom(tc.peer, 0).String())
-			if err != nil {
-				t.Skipf("no listener on %s here: %v", tc.peer, err)
+			// The listener, and with the decoys a second one at 127.0.0.3
+			// on its port, which the second decoy connects to.
+			peerFamily := unix.AF_INET6
+			if tc.peer.Is4() {
+				peerFamily = unix.AF_INET
 			}
-			defer func() { _ = ln.Close() }()
-			port := ln.Addr().(*net.TCPAddr).Port
-			fd := boundSocket(t, tc.family, "lo")
-			// Its local end may be shared by a socket of another remote end
-			// (the second decoy).
-			if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
-				t.Fatal(err)
+			listeners := []boundSock{{family: peerFamily, addr: tc.peer, listen: true}}
+			// The socket bound to lo, and with the decoys one at 127.0.0.3
+			// and one at its own address (it shares the socket's local end:
+			// it has another remote end), on its port.
+			socks := []boundSock{{family: tc.family, dev: "lo", addr: tc.addr}}
+			if tc.decoys {
+				listeners = append(listeners, boundSock{family: unix.AF_INET, addr: lo3, listen: true})
+				socks = append(socks, boundSock{family: tc.family, addr: lo3}, boundSock{family: tc.family, addr: tc.addr})
 			}
-			if err := unix.Bind(fd, sockaddrOf(tc.family, netip.AddrPortFrom(tc.addr, 0))); err != nil {
-				t.Fatalf("bind a socket bound to lo to %s: %v", tc.addr, err)
-			}
-			if err := unix.Connect(fd, sockaddrOf(tc.family, netip.AddrPortFrom(tc.peer, uint16(port)))); err != nil {
+			lns, port := onOnePort(t, listeners...)
+			fds, _ := onOnePort(t, socks...)
+			fd := fds[0]
+			if err := unix.Connect(fd, sockaddrOf(tc.family, netip.AddrPortFrom(tc.peer, port))); err != nil {
 				t.Fatalf("connect a socket bound to lo: %v", err)
 			}
-			s, err := ln.Accept()
+			s, _, err := unix.Accept4(lns[0], unix.SOCK_CLOEXEC)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer func() { _ = s.Close() }()
+			t.Cleanup(func() { _ = unix.Close(s) })
 			local, remote := socketEnds(t, fd)
 			if tc.decoys {
 				if local.Addr() == remote.Addr() {
 					t.Fatalf("the socket's ends %s -> %s share an address (this case's premise: they differ)", local, remote)
 				}
-				ln3, err := net.Listen("tcp4", netip.AddrPortFrom(lo3, remote.Port()).String())
-				if err != nil {
-					t.Fatalf("listen on %s at the first listener's port %d: %v", lo3, remote.Port(), err)
+				// A listener's backlog completes a decoy's connect.
+				for i, to := range []netip.AddrPort{remote, netip.AddrPortFrom(lo3, remote.Port())} {
+					if err := unix.Connect(fds[1+i], sockaddrOf(tc.family, to)); err != nil {
+						t.Fatalf("connect a decoy at %s to %s: %v", socks[1+i].addr, to, err)
+					}
 				}
-				defer func() { _ = ln3.Close() }()
-				decoy(t, tc.family, netip.AddrPortFrom(lo3, local.Port()), remote)
-				decoy(t, tc.family, local, netip.AddrPortFrom(lo3, remote.Port()))
 			}
 			premiseExactMisses(t, local, remote)
 			got, err := lookupTCP(local, remote)
@@ -82,30 +90,88 @@ func TestASocketBoundToADeviceIsFound(t *testing.T) {
 	}
 }
 
-// decoy is a socket of family (an IPv6 one over v4-mapped addresses) bound to
-// no device, connected from local to remote (a listener's backlog completes
-// its connect), closed when the test ends.
-func decoy(t *testing.T, family int, local, remote netip.AddrPort) {
+// boundSock is a TCP socket onOnePort binds: of family (an IPv6 one takes
+// v4-mapped addresses too), bound to the device dev unless dev is "", at
+// addr, listening if listen.
+type boundSock struct {
+	family int
+	dev    string
+	addr   netip.Addr
+	listen bool
+}
+
+// onOnePort binds each of socks to one port, the first to one the kernel
+// picks and each other to that one, and is their fds, closed when the test
+// ends, and that port. The kernel picks the first's port among those free at
+// the first's address alone, and another socket may hold it at another's
+// (EADDRINUSE): then it closes them and tries again, at a port the kernel
+// picks anew, so a case starts with the port held at every address it uses
+// it at. Each is SO_REUSEADDR, so two that do not listen may share an
+// address and port (the socket and its second decoy).
+func onOnePort(t *testing.T, socks ...boundSock) ([]int, uint16) {
 	t.Helper()
-	fd, err := unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, unix.IPPROTO_TCP)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = unix.Close(fd) })
-	if family == unix.AF_INET6 {
-		if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 0); err != nil {
+	const tries = 64
+	var err error
+	for range tries {
+		var fds []int
+		var port uint16
+		if fds, port, err = bindOnOnePort(t, socks); err == nil {
+			for _, fd := range fds {
+				t.Cleanup(func() { _ = unix.Close(fd) })
+			}
+			return fds, port
+		}
+		if !errors.Is(err, unix.EADDRINUSE) {
 			t.Fatal(err)
 		}
 	}
-	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
-		t.Fatal(err)
+	t.Fatalf("no port free at every address of %v in %d tries: %v", socks, tries, err)
+	return nil, 0
+}
+
+// bindOnOnePort is one try of onOnePort. Its sockets are closed unless it
+// is all of them, bound (and listening): on an error, a skip or a failure.
+// A first socket that cannot be bound at all (its address is not here)
+// skips the test.
+func bindOnOnePort(t *testing.T, socks []boundSock) (fds []int, port uint16, err error) {
+	t.Helper()
+	held := false
+	defer func() {
+		if !held {
+			for _, fd := range fds {
+				_ = unix.Close(fd)
+			}
+			fds = nil
+		}
+	}()
+	for i, s := range socks {
+		fd := newSocket(t, s.family, s.dev)
+		fds = append(fds, fd)
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+			return fds, 0, err
+		}
+		at := netip.AddrPortFrom(s.addr, port)
+		if err := unix.Bind(fd, sockaddrOf(s.family, at)); err != nil {
+			if i == 0 && !errors.Is(err, unix.EADDRINUSE) {
+				t.Skipf("no socket at %s here: %v", at, err)
+			}
+			return fds, 0, fmt.Errorf("bind to %s, beside %s on its port: %w", at, socks[0].addr, err)
+		}
+		if i == 0 {
+			sa, err := unix.Getsockname(fd)
+			if err != nil {
+				return fds, 0, err
+			}
+			port = uint16(sockaddrPort(sa))
+		}
+		if s.listen {
+			if err := unix.Listen(fd, unix.SOMAXCONN); err != nil {
+				return fds, 0, fmt.Errorf("listen at %s: %w", netip.AddrPortFrom(s.addr, port), err)
+			}
+		}
 	}
-	if err := unix.Bind(fd, sockaddrOf(family, local)); err != nil {
-		t.Fatalf("bind a decoy to %s: %v", local, err)
-	}
-	if err := unix.Connect(fd, sockaddrOf(family, remote)); err != nil {
-		t.Fatalf("connect a decoy %s -> %s: %v", local, remote, err)
-	}
+	held = true
+	return fds, port, nil
 }
 
 // sockaddrOf is ap as a socket of family takes it: an IPv4 address
@@ -206,18 +272,31 @@ func premiseExactMisses(t *testing.T, local, remote netip.AddrPort) {
 // the test ends. An IPv6 one takes v4-mapped addresses too.
 func boundSocket(t *testing.T, family int, dev string) int {
 	t.Helper()
+	fd := newSocket(t, family, dev)
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	return fd
+}
+
+// newSocket is a TCP socket of family (an IPv6 one takes v4-mapped addresses
+// too), bound to the device dev unless dev is "", for the caller to close. It
+// skips the test where there is no such socket, closing it first.
+func newSocket(t *testing.T, family int, dev string) int {
+	t.Helper()
 	fd, err := unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, unix.IPPROTO_TCP)
 	if err != nil {
 		t.Skipf("no TCP socket of family %d here: %v", family, err)
 	}
-	t.Cleanup(func() { _ = unix.Close(fd) })
 	if family == unix.AF_INET6 {
 		if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 0); err != nil {
+			_ = unix.Close(fd)
 			t.Fatal(err)
 		}
 	}
-	if err := unix.BindToDevice(fd, dev); err != nil {
-		t.Skipf("no socket bound to %s here: %v", dev, err)
+	if dev != "" {
+		if err := unix.BindToDevice(fd, dev); err != nil {
+			_ = unix.Close(fd)
+			t.Skipf("no socket bound to %s here: %v", dev, err)
+		}
 	}
 	return fd
 }
