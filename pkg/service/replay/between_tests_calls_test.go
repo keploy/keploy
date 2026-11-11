@@ -38,14 +38,20 @@ func observeSetLogs(h *prRun) *observer.ObservedLogs {
 }
 
 // recordAgainOf is the command h's lines name to record set again in its
-// place: remove its folder in h's keploy folder, then keploy record under
-// its name with the app's command (single-quoted), the keploy folder's
-// parent (the tests' keploy folder is a temporary one, not under the cwd)
-// and the keploy.yml folder observeSetLogs gave.
+// place, run in the run test-run-0 (as the rows run their sets), with where it
+// moves the set's recordings: into set-test-run-0 of keploy-replaced beside
+// h's keploy folder, then keploy record under its name with the app's
+// command (single-quoted), the keploy folder's parent (the tests' keploy
+// folder is a temporary one, not under the cwd) and the keploy.yml folder
+// observeSetLogs gave.
 func recordAgainOf(h *prRun, set string) string {
-	return "rm -rf -- " + utils.ShellWord(filepath.Join(h.replayer.config.Path, set)) +
-		" && keploy record -c 'go run ./cmd/api' --path " + utils.ShellWord(filepath.Dir(h.replayer.config.Path)) +
-		" --config-path /w/conf --metadata name=" + set
+	parent := filepath.Dir(h.replayer.config.Path)
+	moved := filepath.Join(parent, "keploy-replaced", set+"-test-run-0")
+	return "mkdir -p -- " + utils.ShellWord(filepath.Join(parent, "keploy-replaced")) + " && mkdir -- " + utils.ShellWord(moved) +
+		" && mv -- " + utils.ShellWord(filepath.Join(h.replayer.config.Path, set)) + " " + utils.ShellWord(filepath.Join(moved, set)) +
+		" && keploy record -c 'go run ./cmd/api' --path " + utils.ShellWord(parent) +
+		" --config-path /w/conf --metadata name=" + set +
+		" (it first moves the set's recordings out of the keploy folder, into " + moved + "; delete that folder once the set recorded again passes)"
 }
 
 // outsideLines are the ERROR lines of logs said in the documented form of a
@@ -248,10 +254,10 @@ func TestSetCallsPlaceACallBetweenTestsByTheReads(t *testing.T) {
 	if w := betweenWhere(s.failing()[0]); w != "made before test test-1 began" {
 		t.Fatalf("where %q", w)
 	}
-	if got := (&Replayer{}).recordAgainCommand("test-set-0"); got != "" {
+	if got := (&Replayer{}).recordAgainCommand("test-set-0"); got != (utils.RecordAgain{}) {
 		t.Fatalf("record command with no config %q; want none", got)
 	}
-	if got := betweenNextStep(models.UnmatchedCall{ClosestMock: "mock-1"}, "", ""); got != "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call" {
+	if got := betweenNextStep(models.UnmatchedCall{ClosestMock: "mock-1"}, "", utils.RecordAgain{}); got != "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call" {
 		t.Fatalf("next step with no command %q; want the earlier set's", got)
 	}
 	// A set keploy names, whose name keploy record would not record under
@@ -266,7 +272,7 @@ func TestSetCallsPlaceACallBetweenTestsByTheReads(t *testing.T) {
 		{models.UnmatchedCall{ClosestMock: "mock-1"}, "if the application changed this call on purpose, " + cannot},
 		{models.UnmatchedCall{}, cannot},
 	} {
-		if got := betweenNextStep(c.call, "123", ""); got != c.want {
+		if got := betweenNextStep(c.call, "123", utils.RecordAgain{}); got != c.want {
 			t.Fatalf("next step for set 123 %q; want %q", got, c.want)
 		}
 	}
@@ -524,11 +530,16 @@ func TestUnderTheSwitchASetWhoseWorkerScopeIsNotMadeIsNotOutsideOnly(t *testing.
 // set's; a call of an earlier set the run cannot name (set "") says that
 // set. Mutation: hand betweenNextStep no set.
 func TestOutsideFieldsRecordTheSetTheyNameAgain(t *testing.T) {
-	r := &Replayer{config: &config.Config{Path: "/w/keploy", Command: "go run ."}}
-	for _, c := range []struct{ set, want string }{
-		{"123", "record the test set 123 again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"},
-		{"", "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call"},
+	for _, c := range []struct{ run, set, want string }{
+		{"test-run-2", "123", "record the test set 123 again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"},
+		{"test-run-2", "", "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call"},
+		// The set's recordings move into the folder of the run that read
+		// the call, beside the keploy folder.
+		{"test-run-2", "test-set-1", "record the test set again in its place: mkdir -p -- /w/keploy-replaced && mkdir -- /w/keploy-replaced/test-set-1-test-run-2 && mv -- /w/keploy/test-set-1 /w/keploy-replaced/test-set-1-test-run-2/test-set-1 && keploy record -c 'go run .' --path /w --metadata name=test-set-1 (it first moves the set's recordings out of the keploy folder, into /w/keploy-replaced/test-set-1-test-run-2; delete that folder once the set recorded again passes)"},
+		// No set running, no run to name the folder by: no command.
+		{"", "test-set-1", "record the test set test-set-1 again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"},
 	} {
+		r := &Replayer{config: &config.Config{Path: "/w/keploy", Command: "go run ."}, setRunID: c.run}
 		core, logs := observer.New(zapcore.ErrorLevel)
 		zap.New(core).Error("call outside every test", r.outsideFields(c.set, "", models.UnmatchedCall{Between: true})...)
 		if got := logs.All()[0].ContextMap()["next_step"]; got != c.want {

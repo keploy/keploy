@@ -242,17 +242,18 @@ func betweenFacts(c models.UnmatchedCall) string {
 // set is recorded again if the application changed the call on purpose;
 // with none, it is recorded again. set is the test set whose call it is, ""
 // for an earlier set's call in a run that ran no such set, and record the
-// command that records set again in its place (recordAgainCommand). record
-// is "" when keploy cannot print one: for set "", the set that made the call
+// command that records set again in its place (recordAgainCommand), with
+// where it moves the set's recordings. record has no command when keploy
+// cannot print one: for set "", the set that made the call
 // is recorded again with the command that recorded it, which keploy cannot
 // name; for a set whose name keploy record would not record under, set is
 // recorded again under its own name with the command that recorded it.
-func betweenNextStep(c models.UnmatchedCall, set, record string) string {
-	if record == "" && set == "" {
+func betweenNextStep(c models.UnmatchedCall, set string, record utils.RecordAgain) string {
+	if record.Command == "" && set == "" {
 		return "record the earlier test set that made this call again, with the command that recorded it; keploy cannot name that set, and recording this set again does not hold the call"
 	}
-	again := "record the test set again in its place: " + record
-	if record == "" {
+	again := "record the test set again in its place: " + record.Text()
+	if record.Command == "" {
 		again = "record the test set " + set + " again under its own name, with the command that recorded it; keploy cannot print a command that records it in its place"
 	}
 	if c.ClosestMock != "" {
@@ -261,21 +262,23 @@ func betweenNextStep(c models.UnmatchedCall, set, record string) string {
 	return again
 }
 
-// recordAgainCommand is the command that records testSetID again in its
-// place (utils.RecordSetAgainCommand): it removes the set's folder in the
-// run's keploy folder, then keploy record records under the set's name with
-// the application's command and the keploy folder and keploy.yml the run
-// read, each word quoted for a POSIX shell. "" when keploy cannot name the
-// set's folder.
-func (r *Replayer) recordAgainCommand(testSetID string) string {
+// recordAgainCommand is how testSetID is recorded again in its place
+// (utils.RecordSetAgain): the command moves the set's folder out of the
+// run's keploy folder, into the run's own folder of keploy-replaced beside it
+// (named by the run's id, so nothing is removed or overwritten), then keploy
+// record records under the set's name with the application's command and the
+// keploy folder and keploy.yml the run read, each word quoted for a POSIX
+// shell. No command when keploy cannot name the set's folder, or when no set
+// is running (no run id to name the folder by).
+func (r *Replayer) recordAgainCommand(testSetID string) utils.RecordAgain {
 	if r.config == nil {
-		return ""
+		return utils.RecordAgain{}
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = ""
 	}
-	return utils.RecordSetAgainCommand(r.config.Path, r.config.ConfigPath, cwd, testSetID, r.config.Command)
+	return utils.RecordSetAgain(r.config.Path, r.config.ConfigPath, cwd, testSetID, r.setRunID, r.config.Command)
 }
 
 // logSetCalls says, at ERROR, each of the set's calls that fails it. A call

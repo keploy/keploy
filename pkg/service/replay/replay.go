@@ -819,6 +819,11 @@ type Replayer struct {
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
 	setCalls setCalls
+	// setRunID is the id of the run (RunTestSet's testRunID) whose set
+	// RunTestSet is running: the next step of a call outside every test
+	// names the folder it moves the set's recordings into by it
+	// (recordAgainCommand).
+	setRunID string
 	// earlierSetCalls are the calls of earlier sets' tests that keploy
 	// decided only after their set had ended, which a later set's read
 	// returned (proven switch): they fail the run, and no set
@@ -3427,6 +3432,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// What the previous set's application missed before its first test is
 	// not this set's, nor are the tests whose request its agent did not read.
 	r.setCalls.reset()
+	r.setRunID = testRunID
 	r.requestsUnread.reset()
 	// var to store the error in the loop
 	var loopErr error

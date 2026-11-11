@@ -74,12 +74,18 @@ func TestRunTestSet_AnEarlierSetsTestsLateCallFailsTheRunNotTheSetThatReadIt(t *
 		t.Fatalf("the call was said %d times; want once: %+v", len(said), logs.All())
 	}
 	f := said[0].ContextMap()
+	// The step moves set A's recordings, not set B's, into the run's folder
+	// for set A.
+	parent := filepath.Dir(h.replayer.config.Path)
+	moved := filepath.Join(parent, "keploy-replaced", "test-set-a-test-run-0")
 	for k, want := range map[string]string{
 		"kind": models.KindOutsideEveryTest, "made_in": "test-2", "test-set": "test-set-a", "read-in-test-set": "test-set-b",
 		"protocol": "HTTP", "call": "POST /orders", "destination": "orders:80", "after": "", "before": "", "closest": "",
 		"facts": "no recording of this call in the set",
-		"next_step": "record the test set again in its place: rm -rf -- " + utils.ShellWord(filepath.Join(h.replayer.config.Path, "test-set-a")) +
-			" && keploy record --path " + utils.ShellWord(filepath.Dir(h.replayer.config.Path)) + " --metadata name=test-set-a",
+		"next_step": "record the test set again in its place: mkdir -p -- " + utils.ShellWord(filepath.Join(parent, "keploy-replaced")) +
+			" && mkdir -- " + utils.ShellWord(moved) + " && mv -- " + utils.ShellWord(filepath.Join(h.replayer.config.Path, "test-set-a")) + " " + utils.ShellWord(filepath.Join(moved, "test-set-a")) +
+			" && keploy record --path " + utils.ShellWord(parent) + " --metadata name=test-set-a" +
+			" (it first moves the set's recordings out of the keploy folder, into " + moved + "; delete that folder once the set recorded again passes)",
 	} {
 		if got := f[k]; got != want {
 			t.Errorf("line field %s = %v; want %q", k, got, want)

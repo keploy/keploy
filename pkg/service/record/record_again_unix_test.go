@@ -17,11 +17,12 @@ import (
 )
 
 // The command a call outside every test names to record its set again
-// (utils.RecordSetAgainCommand), run by a POSIX shell, removes that set's
-// folder and no other, hands keploy record the app's command as it was
-// given ($ and quotes kept), and keploy record then records under the set's
-// own name: the set is recorded again in its place, not into a new set
-// beside it that would leave the run red the same way.
+// (utils.RecordSetAgain), run by a POSIX shell, moves that set's folder and
+// no other out of the keploy folder, recordings and all, into the run's
+// folder of keploy-replaced beside it, hands keploy record the app's command
+// as it was given ($ and quotes kept), and keploy record then records under
+// the set's own name: the set is recorded again in its place, not into a new
+// set beside it that would leave the run red the same way.
 func TestTheRecordAgainCommandRecordsTheFailingSetInItsPlace(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -33,6 +34,9 @@ func TestTheRecordAgainCommandRecordsTheFailingSetInItsPlace(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(root, set, "tests"), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(root, set, "tests", "test-1.yaml"), []byte(set), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// keploy here writes the words it was given, one per line.
 	bin := t.TempDir()
@@ -42,7 +46,8 @@ func TestTheRecordAgainCommandRecordsTheFailingSetInItsPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := `bash -c "echo $PORT; it's"`
-	cmdLine := utils.RecordSetAgainCommand(root, filepath.Join(work, "conf"), work, "test-set-1", app)
+	again := utils.RecordSetAgain(root, filepath.Join(work, "conf"), work, "test-set-1", "test-run-4", app)
+	cmdLine := again.Command
 	if cmdLine == "" {
 		t.Fatal("no command for test-set-1")
 	}
@@ -53,11 +58,17 @@ func TestTheRecordAgainCommandRecordsTheFailingSetInItsPlace(t *testing.T) {
 		t.Fatalf("%s: %v\n%s", cmdLine, err, out)
 	}
 	if _, err := os.Stat(filepath.Join(root, "test-set-1")); !os.IsNotExist(err) {
-		t.Fatalf("test-set-1 is still there (%v); the command must remove the failing set", err)
+		t.Fatalf("test-set-1 is still there (%v); the command must move the failing set out", err)
+	}
+	if want := filepath.Join(work, "my tests", "keploy-replaced", "test-set-1-test-run-4"); again.Replaced != want {
+		t.Fatalf("the recordings go to %s; want %s", again.Replaced, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(again.Replaced, "test-set-1", "tests", "test-1.yaml")); err != nil || string(b) != "test-set-1" {
+		t.Fatalf("test-set-1's recordings in %s: %q (%v); the command keeps them", again.Replaced, b, err)
 	}
 	for _, set := range []string{"test-set-0", "test-set-10"} {
-		if _, err := os.Stat(filepath.Join(root, set)); err != nil {
-			t.Fatalf("%s is gone (%v); the command removes the failing set alone", set, err)
+		if b, err := os.ReadFile(filepath.Join(root, set, "tests", "test-1.yaml")); err != nil || string(b) != set {
+			t.Fatalf("%s's recordings are %q (%v); the command moves the failing set alone", set, b, err)
 		}
 	}
 	raw, err := os.ReadFile(argsFile)
@@ -77,7 +88,7 @@ func TestTheRecordAgainCommandRecordsTheFailingSetInItsPlace(t *testing.T) {
 		t.Fatalf("keploy record records into %q (%v); want test-set-1, the set the run failed", id, err)
 	}
 	// With the folder left in place, the same record goes to a new set:
-	// why the command removes it first.
+	// why the command moves it first.
 	if err := os.MkdirAll(filepath.Join(root, "test-set-1", "tests"), 0o755); err != nil {
 		t.Fatal(err)
 	}
