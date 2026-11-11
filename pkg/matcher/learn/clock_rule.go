@@ -1,9 +1,6 @@
 package learn
 
 import (
-	"cmp"
-	"strings"
-
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 )
@@ -161,12 +158,10 @@ func DeclaredClockLearned(ln Learned, src Source, w *Window, timeForm bool) Lear
 	if timeForm {
 		// The time default checks a time by its form alone, a read the
 		// rule's range holds too (timeDefault).
-		form := TimeForm(rec)
+		form, noForm := formIn(rec, live, w)
 		switch {
-		case TimeForm(live) != form || !isInstant(rec) || !isInstant(live):
-			no += "; and its two runs write no one form of an instant (" + cmp.Or(form, "none") + " recorded, " + cmp.Or(TimeForm(live), "none") + " in round F)"
-		case strings.HasPrefix(leafLayout(rec), "epoch-") && (w == nil || !nearSpan(rec, w.Rec) || !nearSpan(live, w.F)):
-			no += "; and, an epoch number, it names no moment near its call in both runs"
+		case noForm != "":
+			no += noForm
 		case read != nil:
 			read.Form = form
 			read.Why += "; a time, checked by its form alone (" + form + ", keploy.yml's times setting at its default)"

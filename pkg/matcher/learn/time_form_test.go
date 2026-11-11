@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -392,6 +393,179 @@ func TestStrictTimesSetALearnedFormAside(t *testing.T) {
 		}
 		if ok2, why2 := CheckClockRead(cPath, c.o, c.live, span, true); ok2 != ok || why2 != why {
 			t.Errorf("%s: CheckClockRead %v (%q); want CheckClockReadForm's with the default off", c.what, ok2, why2)
+		}
+	}
+}
+
+// A Value (a time learning bound to an earlier place that holds it) keeps
+// its bind; beside it Decide gives the time default's check by its form
+// (Decision.ByForm), which an adapter takes where it cannot hold the bind.
+// Only a time gets one: a field a clock rule declares, a decoder-typed time,
+// or a value bound to a place learning read as a plain read of the clock.
+// A value of the same shape that is none of them, and any value under
+// strict times, gets none.
+func TestAValueThatIsATimeCarriesItsCheckByForm(t *testing.T) {
+	const p = "body.since"
+	rAt := oAt.Add(900 * time.Microsecond)
+	fAt := oAt.Add(time.Hour + 950*time.Microsecond)
+	rec, live := iMicro(rAt.Add(-600*time.Microsecond)), iMicro(fAt.Add(-610*time.Microsecond))
+	sent := func(clock bool) []Earlier {
+		e := iSent("mock-1", rAt.Add(-500*time.Microsecond), "body.createdAt", String, rec, live)
+		e.Seen[0].Clock = clock
+		return []Earlier{e}
+	}
+	call := func(clock, declared, typed, timeForm bool) Input {
+		in := iCall(p, String, rec, live, rAt, fAt, iWin(rAt, fAt, 800*time.Microsecond), sent(clock), nil)
+		if declared {
+			in.Source = cClock(p, cMicro)
+		}
+		if typed {
+			for _, sh := range []*Shape{&in.Rec, &in.Live} {
+				l := sh.Leaves[p]
+				l.Type = Instant
+				sh.Leaves = map[string]Leaf{p: l}
+			}
+		}
+		in.TimeForm = timeForm
+		return in
+	}
+	for _, c := range []struct {
+		what                                    string
+		clock, declared, typed, tform, twoForms bool
+		form                                    string
+	}{
+		{what: "bound to a read of the clock", clock: true, tform: true, form: "text 9999-99-99a99:99:99.fa"},
+		{what: "a field a clock rule declares", declared: true, tform: true, form: "text 9999-99-99a99:99:99.fa"},
+		{what: "a decoder-typed time", typed: true, tform: true},
+		{what: "a value that is no time", tform: true},
+		{what: "bound to a read of the clock, two forms", clock: true, tform: true, twoForms: true},
+		{what: "bound to a read of the clock, strict times", clock: true},
+		{what: "a field a clock rule declares, strict times", declared: true},
+	} {
+		in := call(c.clock, c.declared, c.typed, c.tform)
+		if c.twoForms {
+			// Round F wrote the moment at the millisecond, the earlier send
+			// with it: a copy, of no one form in both runs.
+			liveMs := iMs(fAt.Add(-610 * time.Microsecond))
+			in.Live.Leaves[p] = Leaf{Path: p, Noise: p, Type: String, Value: liveMs}
+			in.Earlier[0].Seen[0].Live = liveMs
+		}
+		var d Decision
+		if c.typed {
+			ds := Decide(in)
+			if len(ds) != 1 {
+				t.Fatalf("%s: %s; want one decision", c.what, oDescribe(ds))
+			}
+			d = ds[0]
+		} else {
+			ds := Decide(in)
+			if c.twoForms {
+				if len(ds) != 1 || ds[0].ByForm != nil {
+					t.Errorf("FALSE GREEN? %s: %s; want no check by form", c.what, oDescribe(ds))
+				}
+				continue
+			}
+			d = oWord(t, ds, rec, live)
+		}
+		if c.typed {
+			// A typed instant Decide reads by its decoder: its form is the
+			// typed one, whatever the reader made of its text.
+			if d.Outcome == OutcomeValue && (d.ByForm == nil || !strings.HasPrefix(d.ByForm.Form, "typed ")) {
+				t.Errorf("%s: %s, by form %+v; want a typed form beside the Value", c.what, oDescribe([]Decision{d}), d.ByForm)
+			}
+			continue
+		}
+		iValue(t, c.what, d, "mock-1")
+		switch {
+		case c.form == "" && d.ByForm != nil:
+			t.Errorf("FALSE GREEN? %s: checked by form %+v; want none", c.what, *d.ByForm)
+		case c.form != "" && (d.ByForm == nil || d.ByForm.Form != c.form || !d.ByForm.Plain() || !strings.Contains(d.ByForm.Why, "checked by its form alone")):
+			t.Errorf("%s: by form %+v; want %q checked by its form alone", c.what, d.ByForm, c.form)
+		}
+	}
+}
+
+// A Value that is one word of a longer text ("since <time> ok") carries the
+// word in its check by form, as a Clock in a text does (Word: its bytes and
+// the hashes of the text on each side), so a replay checks that word alone
+// by its form and the rest of the text as it is. Where the text around it
+// changed too, the sides a replay compares are not the same in both runs:
+// the Value keeps its bind and gets no check by form.
+func TestAValueThatIsAWordOfATextCarriesItsWordInItsCheckByForm(t *testing.T) {
+	const p = "body.note"
+	rAt := oAt.Add(900 * time.Microsecond)
+	fAt := oAt.Add(time.Hour + 950*time.Microsecond)
+	rec, live := iMicro(rAt.Add(-600*time.Microsecond)), iMicro(fAt.Add(-610*time.Microsecond))
+	for _, c := range []struct {
+		what              string
+		recText, liveText string
+		word              bool
+	}{
+		{"a word of a text whose rest is the same", "since " + rec + " ok", "since " + live + " ok", true},
+		{"a word of a text that changed around it", "since " + rec + " n=1", "since " + live + " n=2", false},
+	} {
+		e := iSent("mock-1", rAt.Add(-500*time.Microsecond), "body.createdAt", String, rec, live)
+		e.Seen[0].Clock = true
+		in := iCall(p, String, c.recText, c.liveText, rAt, fAt, iWin(rAt, fAt, 800*time.Microsecond), []Earlier{e}, nil)
+		in.TimeForm = true
+		d := oWord(t, Decide(in), rec, live)
+		iValue(t, c.what, d, "mock-1")
+		switch {
+		case !c.word && d.ByForm != nil:
+			t.Errorf("FALSE GREEN? %s: checked by form %+v; want none", c.what, *d.ByForm)
+		case c.word && d.ByForm == nil:
+			t.Errorf("%s: no check by form; want one at its word", c.what)
+		case c.word:
+			start := len("since ")
+			if want := models.ClockWordOf(c.recText, start, start+len(rec)); d.ByForm.Word != want {
+				t.Errorf("%s: word %+v; want %+v", c.what, d.ByForm.Word, want)
+			}
+		}
+	}
+}
+
+// BoundTimeLearned gives a variable bound whole the time default's check by
+// its form where its field is a time and both runs write it in one form, an
+// epoch number near its call in both. An echo, a variable bound to a part
+// of a value, a value that is no time, two forms, an epoch far from its
+// call, no window, and strict times get none.
+func TestABoundTimeLearnedIsCheckedByFormOnlyWhereItIsATime(t *testing.T) {
+	rAt := time.Date(2026, 11, 11, 18, 35, 46, 0, time.UTC)
+	fAt := rAt.Add(time.Minute)
+	w := iWin(rAt, fAt, time.Second)
+	sec := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	leaf := func(v string, typ Type) Leaf { return Leaf{Path: "body.data.createdAt", Value: v, Type: typ} }
+	for _, c := range []struct {
+		what          string
+		ln            Learned
+		declared, off bool
+		w             *Window
+		form          string
+	}{
+		{what: "bound to a read of the clock", ln: Learned{Kind: KindVariable, Recorded: leaf(sec(rAt), Number), Live: leaf(sec(fAt), Number), From: Place{Whole: true, Clock: true}}, w: w, form: "number 9999999999"},
+		{what: "declared", ln: Learned{Kind: KindVariable, Recorded: leaf(sec(rAt), Number), Live: leaf(sec(fAt), Number), From: Place{Whole: true}}, declared: true, w: w, form: "number 9999999999"},
+		{what: "no time", ln: Learned{Kind: KindVariable, Recorded: leaf(sec(rAt), Number), Live: leaf(sec(fAt), Number), From: Place{Whole: true}}, w: w},
+		{what: "strict times", ln: Learned{Kind: KindVariable, Recorded: leaf(sec(rAt), Number), Live: leaf(sec(fAt), Number), From: Place{Whole: true, Clock: true}}, off: true, w: w},
+		{what: "an echo", ln: Learned{Kind: KindVariable, Recorded: leaf(sec(rAt), Number), Live: leaf(sec(fAt), Number), From: Place{Whole: true, Echo: true, Clock: true}}, w: w},
+		{what: "a part of a value", ln: Learned{Kind: KindVariable, Recorded: leaf(sec(rAt), Number), Live: leaf(sec(fAt), Number), From: Place{Clock: true}}, w: w},
+		{what: "noise", ln: Learned{Kind: KindNoise, Recorded: leaf(sec(rAt), Number), Live: leaf(sec(fAt), Number), From: Place{Whole: true, Clock: true}}, w: w},
+		{what: "two forms", ln: Learned{Kind: KindVariable, Recorded: leaf(sec(rAt), Number), Live: leaf(iEpochMs(fAt), Number), From: Place{Whole: true, Clock: true}}, w: w},
+		{what: "far as recorded", ln: Learned{Kind: KindVariable, Recorded: leaf(sec(rAt.Add(-2*epochNear)), Number), Live: leaf(sec(fAt), Number), From: Place{Whole: true, Clock: true}}, w: w},
+		{what: "a typed time, untyped in round F", ln: Learned{Kind: KindVariable, Recorded: leaf(iMs(rAt), Instant), Live: leaf(iMs(fAt), String), From: Place{Whole: true}}, w: w},
+		{what: "far from its call", ln: Learned{Kind: KindVariable, Recorded: leaf(sec(rAt), Number), Live: leaf(sec(fAt.Add(2*epochNear)), Number), From: Place{Whole: true, Clock: true}}, w: w},
+		{what: "no window", ln: Learned{Kind: KindVariable, Recorded: leaf(sec(rAt), Number), Live: leaf(sec(fAt), Number), From: Place{Whole: true, Clock: true}}},
+		{what: "a counter", ln: Learned{Kind: KindVariable, Recorded: leaf("42", Number), Live: leaf("43", Number), From: Place{Whole: true, Clock: true}}, w: w},
+		{what: "a typed time", ln: Learned{Kind: KindVariable, Recorded: leaf(iMs(rAt), Instant), Live: leaf(iMs(fAt), Instant), From: Place{Whole: true}}, w: w, form: "typed 9999-99-99a99:99:99.fa"},
+	} {
+		got := BoundTimeLearned(c.ln, c.declared, c.w, !c.off)
+		switch {
+		case c.form == "" && got.ByForm != nil:
+			t.Errorf("FALSE GREEN? %s: checked by form %+v; want none", c.what, *got.ByForm)
+		case c.form != "" && (got.ByForm == nil || got.ByForm.Form != c.form || !strings.Contains(got.ByForm.Why, "checked by its form alone")):
+			t.Errorf("%s: by form %+v; want %q", c.what, got.ByForm, c.form)
+		}
+		if got.Kind != c.ln.Kind {
+			t.Errorf("%s: kind %v; want %v kept", c.what, got.Kind, c.ln.Kind)
 		}
 	}
 }

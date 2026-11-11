@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"cmp"
 	"strings"
 	"time"
 
@@ -42,6 +43,17 @@ import (
 // two runs write it in two forms, or in no form keploy reads, keeps its
 // refusal: a time of another type or form is refused, as is anything that
 // is no time.
+//
+// A time learning bound to an earlier place that holds its value (a Value,
+// a variable bound whole) keeps that bind wherever the bind holds. Where it
+// does not (round F's call carries another value than the place it was bound
+// to; the place holds the moment in another form, which a variable cannot
+// hold), two reads of the clock that fell in one second when recorded are
+// no copy, and the field falls back to the time default: checked by its form
+// alone (ByForm), as above. A time here is a decoder-typed time in both runs,
+// a field a clock rule declares, or a value bound to a place learning read
+// as a plain read of the application's clock (Place.Clock): never a value's
+// name or shape. Every other refusal of the bind stands.
 
 // timeSettles are the refusals the time default settles on a time field.
 var timeSettles = map[RefusalKind]bool{
@@ -74,6 +86,9 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 		}
 		return d
 	}
+	if d.Outcome == OutcomeValue {
+		return dc.valueByForm(path, at, n, c, d, declared)
+	}
 	if d.Refusal == nil || c.text && c.noWord != "" {
 		// A replay reads a time inside a text only as one word of it.
 		return d
@@ -100,6 +115,96 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	off.Why = nd.Line
 	nd.Clock = &off
 	return nd
+}
+
+// valueByForm is d, a Value (the changed instant c at path, bound to an
+// earlier place), with its time default's check by form (Decision.ByForm)
+// where its field is a time (boundTime; declared: a clock rule names it),
+// read as a replay reads it (a word of a text where it stands in one), and
+// both runs write it in one form (timeFormOf). d's outcome stands: the
+// adapter takes ByForm only where it cannot hold the bind.
+func (dc *decider) valueByForm(path string, at variables.Address, n int, c changedInstant, d Decision, declared bool) Decision {
+	why := boundTime(dc.in.Rec.Leaves[path], d.From, declared)
+	if why == "" || c.text && c.noWord != "" {
+		return d
+	}
+	form := dc.timeFormOf(path, c)
+	if form == "" {
+		return d
+	}
+	off := models.ClockOffset{Form: form}
+	if c.text {
+		off.Word = c.word
+	}
+	off.Why = dc.learned(path, at, n, c.r, c.l, OutcomeClock, byFormRule(form, why), nil).Line
+	d.ByForm = &off
+	return d
+}
+
+// boundTime is why a value learning bound to the earlier place from is a
+// time the time default checks by its form where the bind does not hold
+// (see above): a decoder-typed time (rec, its field's recorded leaf; the
+// form check holds round F's value to the same typed form), a field a clock
+// rule declares (declared), or a value bound to a place learning read as a
+// plain read of the application's clock (Place.Clock). "" for any other
+// value: never by its name or its shape.
+func boundTime(rec Leaf, from Place, declared bool) string {
+	switch {
+	case rec.Type == Instant:
+		return "a decoder-typed time"
+	case declared:
+		return "a field a clock rule in keploy.yml declares"
+	case from.Clock:
+		return "bound to " + placeAt(from) + ", where keploy learned a read of the application's clock"
+	}
+	return ""
+}
+
+// byFormRule is the rule a time field (why: boundTime) checked by its form
+// alone (form) is learned by where the bind keploy found does not hold.
+func byFormRule(form, why string) string {
+	return "a time (" + why + "), checked by its form alone (" + form + ", keploy.yml's times setting at its default) where the value it was bound to does not hold"
+}
+
+// BoundTimeLearned is ln, a drifted leaf the classify path learned (the HTTP
+// adapter's learn step), with its time default's check by form
+// (Learned.ByForm) where it is a variable bound whole whose field is a time
+// (boundTime; declared: a clock rule keploy.yml declares names it), under
+// the time default (timeForm), and both runs write it as an instant of one
+// form, an epoch number near its call in both runs (w), as
+// DeclaredClockLearned checks a declared time by its form. ln as it is
+// otherwise: the caller takes ByForm only where round F's call does not carry
+// the bound place's value.
+func BoundTimeLearned(ln Learned, declared bool, w *Window, timeForm bool) Learned {
+	if !timeForm || ln.Kind != KindVariable || !ln.From.Whole || ln.From.Echo {
+		return ln
+	}
+	why := boundTime(ln.Recorded, ln.From, declared)
+	if why == "" {
+		return ln
+	}
+	form, no := formIn(ln.Recorded, ln.Live, w)
+	if no != "" {
+		return ln
+	}
+	ln.ByForm = &models.ClockOffset{Form: form, Why: byFormRule(form, why)}
+	return ln
+}
+
+// formIn is the form rec and live, a time field's leaf as recorded and in
+// round F, are both written in (TimeForm), as the time default checks it;
+// else "" and why not, after "; and": its runs write no one form of an
+// instant, or, an epoch number, it names no moment near its call in both
+// runs (nearSpan, in w's spans).
+func formIn(rec, live Leaf, w *Window) (form, no string) {
+	form = TimeForm(rec)
+	switch {
+	case TimeForm(live) != form || !isInstant(rec) || !isInstant(live):
+		return "", "; and its two runs write no one form of an instant (" + cmp.Or(form, "none") + " recorded, " + cmp.Or(TimeForm(live), "none") + " in round F)"
+	case strings.HasPrefix(leafLayout(rec), "epoch-") && (w == nil || !nearSpan(rec, w.Rec) || !nearSpan(live, w.F)):
+		return "", "; and, an epoch number, it names no moment near its call in both runs"
+	}
+	return form, ""
 }
 
 // timeFormOf is the form of the changed instant c, a time field at path, in
