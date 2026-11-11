@@ -27,6 +27,7 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 	}
 	m.SetResponseHydrator(func() (*HTTPResp, []MongoResponse, error) { return nil, nil, nil })
 	m.onDisk = &payloadOnDisk{at: PayloadAt{Offset: 5, Length: 9, Name: "m"}}
+	m.MarkOwnListenerCall()
 	m.MarkPooled()
 
 	m.SetStoredSize(4096)
@@ -49,10 +50,13 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 	if c.StoredSize() != 4096 {
 		t.Error("the store's count of the mock's bytes was not carried over")
 	}
+	if !c.OwnListenerCall() {
+		t.Error("the mark of a call the app made to its own port was not carried over")
+	}
 	cv, mv := reflect.ValueOf(*c), reflect.ValueOf(*m)
 	for i := 0; i < cv.NumField(); i++ {
 		switch name := cv.Type().Field(i).Name; name {
-		case "pooled", "responseHydrator", "onDisk", "storedSize": // checked above
+		case "pooled", "responseHydrator", "onDisk", "storedSize", "ownListener": // checked above
 		default:
 			if !reflect.DeepEqual(cv.Field(i).Interface(), mv.Field(i).Interface()) {
 				t.Errorf("field %s was not copied", name)

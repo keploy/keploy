@@ -2581,11 +2581,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// (excludedFromTestMockAssertion): a test owns every data-plane mock its
 	// mapping lists, whatever tier DeriveLifetime gives it.
 	reusableMockNames := make(map[string]bool)
-	// undeliveredMockNames marks the answers the client never read
-	// (models.Mock.IsUndelivered), which no replay serves: the report's
-	// expected side leaves them out (buildExpectedMockInfos,
-	// reportedExpectedNames), whatever mapping names one.
-	undeliveredMockNames := make(map[string]bool)
+	// unservedMockNames marks the recordings no replay serves: the answers
+	// the client never read (models.Mock.IsUndelivered), and the calls the
+	// app made to its own port (models.Mock.OwnListenerCall), which keploy
+	// passes through to the app. The report's expected side leaves them out
+	// (buildExpectedMockInfos, reportedExpectedNames), whatever mapping names
+	// one.
+	unservedMockNames := make(map[string]bool)
 	// mockLookup maps a mock's name to its summary, protocol and target, for
 	// the report: the per-test and session mocks as recorded. Built as the
 	// mocks are loaded (loadTestSetMocks), or below, before the tests run,
@@ -2597,8 +2599,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if excludedFromTestMockAssertion(m) {
 				reusableMockNames[m.Name] = true
 			}
-			if m.IsUndelivered() {
-				undeliveredMockNames[m.Name] = true
+			if m.IsUndelivered() || m.OwnListenerCall() {
+				unservedMockNames[m.Name] = true
 			}
 		}
 	}
@@ -2726,6 +2728,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return nil, nil, err
 		}
+		// Before anything reads what a test or the worker scope requires.
+		r.markOwnListenerMocks(testSetID, testCases, filtered, unfiltered)
 		if fromWindows {
 			expectedTestMockMappings, workerScope, conc = r.windowOwnershipOf(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
@@ -4880,7 +4884,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// missing expectation for any name that appears in both
 					// sections. Report-only — MockMismatches does not drive the
 					// pass/fail or obsolescence verdict.
-					expectedMockInfos := dropStartupMockInfos(buildExpectedMockInfos(expectedMocks, mockKindByName, undeliveredMockNames), startupMockNames)
+					expectedMockInfos := dropStartupMockInfos(buildExpectedMockInfos(expectedMocks, mockKindByName, unservedMockNames), startupMockNames)
 					actualMockInfos := dropStartupMockInfos(buildActualMockInfos(perTestConsumed, perTestConsumedKnown), startupMockNames)
 
 					// FIRST WRITER of models.Result.DepResult
@@ -5752,7 +5756,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.Strings("mockNames", mockNames))
 
 			if mockSetMismatch {
-				reportedExpected := reportedExpectedNames(expectedMocks, undeliveredMockNames)
+				reportedExpected := reportedExpectedNames(expectedMocks, unservedMockNames)
 				if testPass {
 					r.logger.Debug("mock mapping mismatch ignored because streaming testcase passed",
 						zap.String("testcase", tc.Name),
@@ -10249,9 +10253,11 @@ func isMockSubset(actual []string, expected []string) bool {
 // resolution order is non-deterministic, and connection failures, which
 // nothing consumes at replay yet) are filtered out both at the entry level and
 // via the mockKindByName lookup; listed here they would only ever show as
-// spurious "expected, not consumed" entries. So are the answers the client
-// never read (undelivered: models.Mock.IsUndelivered), which no replay serves,
-// when a mapping names one (a hand edit, or another writer). Resolves an empty
+// spurious "expected, not consumed" entries. So are the recordings no replay
+// serves (undelivered: an answer the client never read,
+// models.Mock.IsUndelivered, or a call the app made to its own port,
+// models.Mock.OwnListenerCall), when a mapping names one (a hand edit,
+// another writer, or a keploy before it passed self-calls through). Resolves an empty
 // Kind by looking up mockKindByName so the consumer always gets a kind label
 // when one is available.
 //
@@ -10394,9 +10400,11 @@ func newStreamingTest(testCase *models.TestCase, mappings map[string][]models.Mo
 }
 
 // reportedExpectedNames is expected, a streaming test's expected mock names,
-// as the mismatch report lists them: without the answers the client never
-// read (undelivered: models.Mock.IsUndelivered), which no replay serves, so
-// the report would name one as expected and not consumed. Only the report
+// as the mismatch report lists them: without the recordings no replay
+// serves (undelivered: an answer the client never read,
+// models.Mock.IsUndelivered, or a call the app made to its own port,
+// models.Mock.OwnListenerCall), so the report would name one as expected
+// and not consumed. Only the report
 // reads it; the mock-set check reads expected as it is.
 func reportedExpectedNames(expected []string, undelivered map[string]bool) []string {
 	out := make([]string, 0, len(expected))

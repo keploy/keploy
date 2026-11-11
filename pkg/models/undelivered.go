@@ -41,11 +41,12 @@ func (m *Mock) IsUndelivered() bool {
 }
 
 // OutsideTestScopes reports whether no test and no set's worker scope can
-// require m: a protocol-phase mock (IsProtocolPhase), or an answer the client
-// never read (IsUndelivered), which no replay serves. Only the sites that
-// decide what a test or the worker scope requires ask it; a site that serves
-// or matches asks IsProtocolPhase, which reads a tagged answer as the
-// data-plane answer it is.
+// require m: a protocol-phase mock (IsProtocolPhase), an answer the client
+// never read (IsUndelivered), which no replay serves, or a recording of a
+// call the app made to its own port (OwnListenerCall), which keploy passes
+// through to the app. Only the sites that decide what a test or the worker
+// scope requires ask it; a site that serves or matches asks IsProtocolPhase,
+// which reads a tagged answer as the data-plane answer it is.
 func (m *Mock) OutsideTestScopes() bool {
-	return m.IsProtocolPhase() || m.IsUndelivered()
+	return m.IsProtocolPhase() || m.IsUndelivered() || m.OwnListenerCall()
 }

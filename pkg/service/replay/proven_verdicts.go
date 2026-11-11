@@ -27,13 +27,14 @@ func (r *Replayer) assertTestMocks() bool {
 // excludedFromTestMockAssertion reports whether a loaded mock is left out of
 // the per-test consumed-vs-expected assertion by name: a reusable-tier mock
 // today, and only a protocol-phase mock under the proven switch. An answer
-// the client never read (models.Mock.IsUndelivered) is left out under both:
-// no replay serves it, so no test makes the call it recorded.
+// the client never read (models.Mock.IsUndelivered) and a recording of a call
+// the app made to its own port (models.Mock.OwnListenerCall) are left out
+// under both: no replay serves either, so no test makes the call it recorded.
 func excludedFromTestMockAssertion(m *models.Mock) bool {
 	if provenswitch.On() {
 		return m.OutsideTestScopes()
 	}
-	return m.IsUndelivered() || isReusableTierMock(m)
+	return m.IsUndelivered() || m.OwnListenerCall() || isReusableTierMock(m)
 }
 
 // unconsumedTestMocks is, under the proven switch, how many test mocks a test

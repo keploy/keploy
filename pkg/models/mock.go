@@ -187,6 +187,11 @@ type Mock struct {
 	// unpooled. It sits after SourcePID, in that field's padding, so a Mock is
 	// no bigger for it.
 	pooled bool
+	// ownListener marks a recording of a call the app made to its own port,
+	// set only on the CLI side (MarkOwnListenerCall). Unexported so no
+	// encoder carries it: the agent never reads it. It shares pooled's
+	// padding.
+	ownListener bool
 
 	// Noise holds exact-match regex patterns for obfuscated values.
 	// During mock matching, any stored value matching a pattern in this
@@ -408,6 +413,10 @@ func (m *Mock) GetKind() string {
 // Host header, but a mock captured through a forward proxy carries an
 // absolute URL instead.
 func (m *Mock) RecordedDestination() (string, bool) {
+	if m != nil && m.onDisk != nil {
+		// LeavePayloadOnDisk kept it, an HTTP mock's only.
+		return m.onDisk.dest, m.onDisk.dest != ""
+	}
 	if m == nil || m.Kind != Kind(HTTP) || m.Spec.HTTPReq == nil {
 		return "", false
 	}
@@ -1264,6 +1273,7 @@ func (m *Mock) DeepCopy() *Mock {
 	c.responseHydrator = m.responseHydrator
 	c.onDisk = m.onDisk
 	c.storedSize = m.storedSize
+	c.ownListener = m.ownListener
 
 	// Where the call came from (proven switch): the copy's own, so a copy
 	// written later (the async gob writer's) holds what the mock held.

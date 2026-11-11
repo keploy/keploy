@@ -106,6 +106,10 @@ type payloadOnDisk struct {
 	// fault is a copy of the mock's Spec.Fault (FaultOf), nil for none: what
 	// a replay's summary names when the mock was served (FaultServed).
 	fault *Fault
+	// dest is RecordedDestination's, when no longer than maxKeptDisplay:
+	// where a recording made before keploy stamped every mock's destAddr
+	// says an HTTP call went.
+	dest string
 }
 
 // onDiskPredicates is every registry whose predicates read a mock's payload;
@@ -137,6 +141,9 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d.fingerprint = requestFingerprint(m)
 	d.summary, d.longSummary = keptDisplay(MockSummaryFromSpec(m))
 	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
+	// "" where it names none, and where it is too long to keep.
+	dest, _ := m.RecordedDestination()
+	d.dest, _ = keptDisplay(dest)
 	if f := m.Spec.Fault; f != nil {
 		kept := *f
 		kept.Observed = strings.Clone(f.Observed)
