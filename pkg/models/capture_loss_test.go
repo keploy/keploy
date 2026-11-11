@@ -31,6 +31,48 @@ func TestCaptureLossesSinceIsWhatGrew(t *testing.T) {
 	}
 }
 
+// A PID map's loss carries its map's errno (Err) as data: what grew keeps
+// it, a sum takes the later's when that says one, and the receipt's YAML and
+// the agent's JSON keep it, and leave it out when it is 0.
+func TestAPIDMapLossKeepsItsErrnoAsData(t *testing.T) {
+	base := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 4, Err: -7}}
+	got := (CaptureLosses{{Kind: CaptureLossPIDMap, Count: 7, What: "x", Err: -110}}).Since(base)
+	if want := (CaptureLosses{{Kind: CaptureLossPIDMap, Count: 3, What: "x", Err: -110}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("what grew keeps its errno: %+v, want %+v", got, want)
+	}
+	sum := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1, Err: -7}}.Plus(CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2, Err: -110}})
+	if want := (CaptureLosses{{Kind: CaptureLossPIDMap, Count: 3, Err: -110}}); !reflect.DeepEqual(sum, want) {
+		t.Fatalf("a sum takes the later's errno: %+v, want %+v", sum, want)
+	}
+	sum = CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1, Err: -7}}.Plus(CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}})
+	if want := (CaptureLosses{{Kind: CaptureLossPIDMap, Count: 3, Err: -7}}); !reflect.DeepEqual(sum, want) {
+		t.Fatalf("a later that says none leaves the earlier's: %+v, want %+v", sum, want)
+	}
+	said := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1, What: "x", Err: -7}}
+	y, err := yaml.Marshal(said)
+	if err != nil || !strings.Contains(string(y), "err: -7") {
+		t.Fatalf("YAML names the errno: %q, %v", y, err)
+	}
+	var back CaptureLosses
+	if err := yaml.Unmarshal(y, &back); err != nil || !reflect.DeepEqual(back, said) {
+		t.Fatalf("YAML reads it back: %+v, %v", back, err)
+	}
+	j, err := json.Marshal(said)
+	if err != nil || !strings.Contains(string(j), `"err":-7`) {
+		t.Fatalf("JSON names the errno: %s, %v", j, err)
+	}
+	back = nil
+	if err := json.Unmarshal(j, &back); err != nil || !reflect.DeepEqual(back, said) {
+		t.Fatalf("JSON reads it back: %+v, %v", back, err)
+	}
+	none := CaptureLosses{{Kind: CaptureLossTLSAbort, Count: 1}}
+	y, _ = yaml.Marshal(none)
+	j, _ = json.Marshal(none)
+	if strings.Contains(string(y), "err") || strings.Contains(string(j), "err") {
+		t.Fatalf("no errno, no field: %q, %s", y, j)
+	}
+}
+
 // A test is charged the agent-life kinds' growth since the run began (they
 // taint every later test) and a test's own kinds' growth since the previous
 // test ended (only the test they happened in).

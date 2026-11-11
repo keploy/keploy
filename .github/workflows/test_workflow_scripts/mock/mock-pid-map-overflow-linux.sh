@@ -5,7 +5,8 @@
 # The agent tracks the processes it may intercept in a BPF map,
 # target_namespace_pids (10240 entries), which sys_enter_socket fills with
 # every process that calls socket() in the agent's PID namespace (for a native
-# agent, the whole host). Exited processes leave it, so it fills only with more
+# agent, of the keploy command's own tree: the test command's processes, as
+# here). Exited processes leave it, so it fills only with more
 # LIVE such processes than it holds. Then the kernel refuses the next process
 # a place, and that process's calls are not intercepted: in record they are
 # not recorded, in replay they are not mocked and reach the real dependency.
@@ -20,6 +21,18 @@
 # 10500 of them cost little memory; the test command waits for the program to
 # say they all called socket(), not for a time. Runs without OVERFLOW check that
 # a run the map does not overflow still records and replays cleanly.
+#
+# The same processes held by another program, started beside the keploy
+# command instead of by it (OUTSIDER=1), must take no place: a native agent
+# intercepts the keploy command's tree only, so the map holds that tree only.
+# The agent used to give every process of its PID namespace that called
+# socket() a place, so another program's live processes on the machine (a
+# second test suite, a build) filled it, and the application's next process
+# was refused: its calls were neither recorded nor mocked. Here the test
+# command asks for the outsider once its first call is made, waits for it to
+# say all its processes called socket(), and calls the dependency again from a
+# new process: record must keep both calls and replay must mock both, neither
+# saying anything about the PID map.
 # Uses the PR `build` binary for record and replay (mock_linux.yml).
 set -uo pipefail
 
@@ -130,13 +143,25 @@ if [ "\${OVERFLOW:-0}" = 1 ]; then
   IFS= read -r held < held.fifo
   echo "\$held"
 fi
+if [ "\${OUTSIDER:-0}" = 1 ]; then
+  # The script starts the outsider on outsider.go, outside this command's
+  # tree, its "held N" into outsider.fifo (or nothing, if it exits first).
+  : > outsider.go
+  IFS= read -r held < outsider.fifo
+  echo "outsider \$held"
+fi
 curl -fsS -o /dev/null -w "after-overflow %{http_code}\n" http://127.0.0.1:$PORT/after-overflow
 SH
 
 : > dep.log
 python3 dep.py "$PORT" "$WORK/dep.log" > dep.out 2>&1 &
 DP=$!
-trap 'kill "$DP" 2>/dev/null' EXIT
+# end_outsider: kills the outsider, if one runs (keploy_mock_outsider).
+end_outsider() {
+  sudo test -s outsider.pid && sudo kill "$(sudo cat outsider.pid)" 2>/dev/null
+  sudo rm -f outsider.pid
+}
+trap 'kill "$DP" 2>/dev/null; end_outsider' EXIT
 # Wait until the dependency answers, for as long as its process is alive; the
 # bound is only a hang guard (and says what it waited for), not a readiness
 # deadline.
@@ -162,13 +187,43 @@ if command -v systemd-run >/dev/null 2>&1 && sudo systemd-run --scope --quiet -p
 fi
 
 # keploy_mock <log> <record|replay> [VAR=value...]: one keploy mock run of
-# overflow.sh with the given environment; prints keploy's exit code.
+# overflow.sh with the given environment, recorded as NAME (default overflow);
+# prints keploy's exit code.
 keploy_mock() {
   local log=$1 verb=$2 bin=$RECORD_BIN
   shift 2
   [ "$verb" = replay ] && bin=$REPLAY_BIN
-  bounded -k 30 300 sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$@" "$bin" mock "$verb" -c "bash overflow.sh" --name overflow --disable-tele > "$log" 2>&1
+  bounded -k 30 300 sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$@" "$bin" mock "$verb" -c "bash overflow.sh" --name "${NAME:-overflow}" --disable-tele > "$log" 2>&1
   echo $?
+}
+
+# keploy_mock_outsider <log> <record|replay>: keploy_mock with OUTSIDER=1 and
+# the outsider beside it. A background job waits for the test command's
+# outsider.go, then runs hold $HOLD as root in a scope of its own, a child of
+# this script and so of no process of keploy's command, its "held N" into
+# outsider.fifo. After keploy exits the outsider is killed (its children die
+# with it) and waited for, so the next run starts with none. Prints keploy's
+# exit code.
+keploy_mock_outsider() {
+  local log=$1 verb=$2 rc op
+  sudo rm -f outsider.go outsider.pid outsider.fifo
+  if ! mkfifo outsider.fifo; then
+    echo 1
+    return
+  fi
+  (
+    for _ in $(seq 3000); do [ -e outsider.go ] && break; sleep 0.1; done
+    [ -e outsider.go ] || exit 0
+    exec sudo "${SCOPE[@]}" bash -c 'echo $$ > outsider.pid; exec ./hold "$1"' _ "$HOLD" > outsider.fifo
+  ) &
+  op=$!
+  rc=$(NAME=outsider keploy_mock "$log" "$verb" OUTSIDER=1)
+  # Unblock a waiter that never saw outsider.go, then end the outsider.
+  end_outsider
+  { exec 3<>outsider.fifo; } 2>/dev/null && exec 3>&-
+  kill "$op" 2>/dev/null
+  wait "$op" 2>/dev/null
+  echo "$rc"
 }
 
 # overflowed <log> <phase>: the test command held the processes, and both of
@@ -230,8 +285,38 @@ if grep -q "PID map" rep.log; then
   fail "replay: keploy reported a PID map refusal on a run that held no extra processes: $(grep -m1 'PID map' rep.log)"
 fi
 
+# outsider_held <log> <phase>: both calls were answered and the outsider held
+# its processes between them; keploy said nothing about the PID map.
+outsider_held() {
+  grep -qx "before-overflow 200" "$1" || fail "$2: the call before the outsider did not get a 200"
+  grep -qx "outsider held $HOLD" "$1" || fail "$2: the outsider did not hold $HOLD live processes: $(grep -m1 -i 'outsider\|clone\|mmap' "$1")"
+  grep -qx "after-overflow 200" "$1" || fail "$2: the call after the outsider did not get a 200"
+  if grep -qE "PID map|could not track" "$1"; then
+    fail "$2: the outsider's processes took places in the agent's PID map: $(grep -m2 -E 'PID map|could not track' "$1" | cut -c1-400)"
+  fi
+}
+
+echo "== record, an outsider holding $HOLD processes: must record both calls =="
+rc=$(keploy_mock_outsider rec-outsider.log record)
+echo "record (outsider): keploy exited $rc"
+outsider_held rec-outsider.log "record (outsider)"
+[ "$rc" = 0 ] || fail "record (outsider): keploy exited $rc, want 0"
+for p in before-overflow after-overflow; do
+  sudo grep -q "url: /$p\$" keploy/outsider/mocks.yaml 2>/dev/null || fail "record (outsider): the call to /$p was not recorded"
+done
+
+: > dep.log
+echo "== replay, an outsider holding $HOLD processes: must pass from mocks =="
+rc=$(keploy_mock_outsider rep-outsider.log replay)
+echo "replay (outsider): keploy exited $rc; the dependency saw: $(tr '\n' ' ' < dep.log)"
+outsider_held rep-outsider.log "replay (outsider)"
+[ "$rc" = 0 ] || fail "replay (outsider): keploy exited $rc, want 0"
+if [ -s dep.log ]; then
+  fail "replay (outsider): these calls went to the real dependency instead of a mock: $(tr '\n' ' ' < dep.log)"
+fi
+
 if [ "$FAIL" -ne 0 ]; then
-  for l in rec-overflow rec rep-overflow rep; do
+  for l in rec-overflow rec rep-overflow rep rec-outsider rep-outsider; do
     echo "--- the last 40 lines of $l.log ---"
     tail -n 40 "$l.log"
   done

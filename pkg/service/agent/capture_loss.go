@@ -84,10 +84,10 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 	default:
 		// One kind per map, so what grew since a mark names its own map.
 		if refusals.Target > 0 {
-			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refusals.Target, What: pidMapCause("target_namespace_pids", refusals.LastTargetErr)})
+			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refusals.Target, What: pidMapCause("target_namespace_pids", refusals.LastTargetErr), Err: refusals.LastTargetErr})
 		}
 		if refusals.Excluded > 0 {
-			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refusals.Excluded, What: pidMapCause("excluded_pids", refusals.LastExcludedErr)})
+			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refusals.Excluded, What: pidMapCause("excluded_pids", refusals.LastExcludedErr), Err: refusals.LastExcludedErr})
 		}
 	}
 	return mergeKinds(out), nil
@@ -111,7 +111,8 @@ func (a *Agent) countsCaptureLosses(ctx context.Context) bool {
 // two sources may count one kind (the hooks' kernel_skipped and a downstream
 // build's, the proxy's capture_dropped and its ring's), and a mark is read
 // by kind (models.CaptureLosses.Since keeps one count per kind), so the
-// counts are added, which only grow as each does, and the Whats joined.
+// counts are added, which only grow as each does, the Whats joined, and the
+// first Err any of them said kept.
 func mergeKinds(l models.CaptureLosses) models.CaptureLosses {
 	at := make(map[models.CaptureLossKind]int, len(l))
 	var out models.CaptureLosses
@@ -123,6 +124,9 @@ func mergeKinds(l models.CaptureLosses) models.CaptureLosses {
 			continue
 		}
 		out[i].Count += c.Count
+		if out[i].Err == 0 {
+			out[i].Err = c.Err
+		}
 		switch {
 		case out[i].What == "":
 			out[i].What = c.What

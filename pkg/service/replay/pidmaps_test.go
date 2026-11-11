@@ -1337,6 +1337,27 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 	}
 }
 
+// What a set's tests are charged
+// from before it began (appLossesCarriedIn) is each loss as the agent's
+// record gives it, a PID map refusal's errno (models.CaptureLoss.Err) kept,
+// with only its count moved to what was lost before the set's mark. Here the
+// application lost 4 of target_namespace_pids's inserts before this set
+// (2 of them before its start, which are not its) and 1 more in the set.
+func TestACarriedInPIDMapRefusalKeepsItsErrno(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	stall := models.CaptureLoss{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"}
+	r := &Replayer{
+		lossAppBase:  models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, Err: -7}},
+		lossMark:     captureLossMark{at: models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 6, Err: -7}}, known: true},
+		lossLastRead: true,
+		lossLast:     models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 7, What: "target_namespace_pids, E2BIG", Err: -7}, stall},
+	}
+	want := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 4, What: "target_namespace_pids, E2BIG", Err: -7}}
+	if got := r.appLossesCarriedIn(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the losses carried into the set: %+v; want %+v (its errno kept)", got, want)
+	}
+}
+
 // errorWhy is the "why" field of the first of logs' entries at ERROR that
 // says what; "" where none does, or it has no such field.
 func errorWhy(logs *observer.ObservedLogs, what string) string {
