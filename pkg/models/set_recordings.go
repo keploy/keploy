@@ -50,15 +50,15 @@ func RecordedCallOf(m *Mock) RecordedCall {
 		c.Spec = read.Spec
 		m = &c
 	}
-	switch {
-	case m.Kind == HTTP && m.Spec.HTTPReq != nil:
-		shape := CallShape(string(HTTP), string(m.Spec.HTTPReq.Method)+" "+strings.TrimSpace(m.Spec.HTTPReq.URL))
-		if shape != "" {
-			r.Shape, r.Read = holePathPlaces(shape, DeclaredPathPlaces(m)), true
-		}
-	case m.Kind == Mongo:
+	if m.Kind == Mongo {
 		if s, ok := mongoRecordedSummary(m.Spec.MongoRequests); ok {
 			r.Shape, r.Read = mongoShape(s), true
+		}
+		return r
+	}
+	if req := m.Spec.HTTPReq; req != nil {
+		if shape := CallShape(string(HTTP), string(req.Method)+" "+strings.TrimSpace(req.URL)); shape != "" {
+			r.Shape, r.Read = holePathPlaces(shape, DeclaredPathPlaces(m)), true
 		}
 	}
 	return r

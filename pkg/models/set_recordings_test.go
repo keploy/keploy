@@ -34,6 +34,9 @@ func TestRecordedCallOfReadsHTTPAndMongoCommands(t *testing.T) {
 		{"mongo no OP_MSG", &Mock{Kind: Mongo, Spec: MockSpec{MongoRequests: []MongoRequest{{Message: &MongoOpQuery{FullCollectionName: "api.sessions"}}}}}, RecordedCall{Kind: Mongo}},
 		{"mongo no request", &Mock{Kind: Mongo}, RecordedCall{Kind: Mongo}},
 		{"http no request", &Mock{Kind: HTTP}, RecordedCall{Kind: HTTP}},
+		{"http with no method or URL", httpMock("", "", nil), RecordedCall{Kind: HTTP}},
+		{"mongo with an HTTP request", &Mock{Kind: Mongo, Spec: MockSpec{HTTPReq: &HTTPReq{Method: "GET", URL: "http://clock/api/tick"},
+			MongoRequests: []MongoRequest{{Message: &MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"find":"ticks"} }`}}}}}}, RecordedCall{Kind: Mongo, Shape: "find on ticks", Read: true}},
 		{"redis", &Mock{Kind: REDIS}, RecordedCall{Kind: REDIS}},
 		{"nil", nil, RecordedCall{}},
 	} {
