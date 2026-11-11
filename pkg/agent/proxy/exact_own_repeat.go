@@ -145,8 +145,14 @@ func (v *exactView) owns(name string) bool {
 
 // background reports whether the recording named name is one of the
 // background's recordings the open test does not own, while a test is open
-// in the view in force: under the background rules the pool's or the worker
-// scope's, under any rules the reached worker scope's (isWorker). A
+// in the view h's call reads in (readView: the view its mark kept, or the
+// one in force): under the background rules the pool's or the worker
+// scope's, under any rules the reached worker scope's (isWorker). It is the
+// view h's reads hand recordings out of: a call keploy decides after its
+// test ended still reads the background its test's view showed, and is
+// hidden from it as on time. Read in the view in force, which between tests
+// shows a test none, a call one more than its test recorded was answered by
+// the background's copy. A
 // background recording a test owns (one judging moved into it) is that
 // test's own, and answers its call. It reads the name alone, so every read
 // and door of h, and a parser's index that asks MockSpent by name, hide the
@@ -157,7 +163,7 @@ func (v *exactView) owns(name string) bool {
 // own recording of the read now makes the skipped test's too, after its own,
 // and the read answers it once (ServeExactWorkerSkipped).
 func (h *heldScope) background(name string) bool {
-	v := h.exactView()
+	v := h.readView()
 	if v == nil || v.test == "" || !v.bg.has(name) && !v.isWorker(name) || v.isSkippedRead(name) {
 		return false
 	}
