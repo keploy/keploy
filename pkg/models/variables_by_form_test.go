@@ -23,6 +23,8 @@ func TestAUsesCheckByFormHoldsOnlyWhereNoLearningChecksItExactly(t *testing.T) {
 		{what: "a alone names it", aUse: []string{at}, aBy: map[string]ClockOffset{at: text}, bUse: []string{other}, want: map[string]ClockOffset{at: text}},
 		{what: "b alone names it", aUse: []string{other}, bUse: []string{at}, bBy: map[string]ClockOffset{at: number}, want: map[string]ClockOffset{at: number}},
 		{what: "neither checks one", aUse: []string{at}, bUse: []string{at}},
+		{what: "each alone names one", aUse: []string{at}, aBy: map[string]ClockOffset{at: text}, bUse: []string{other}, bBy: map[string]ClockOffset{other: number}, want: map[string]ClockOffset{at: text, other: number}},
+		{what: "both check two in one form", aUse: []string{at, other}, aBy: map[string]ClockOffset{at: text, other: number}, bUse: []string{at, other}, bBy: map[string]ClockOffset{at: text, other: number}, want: map[string]ClockOffset{at: text, other: number}},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			got := MergeByForm(tc.aUse, tc.aBy, tc.bUse, tc.bBy)
