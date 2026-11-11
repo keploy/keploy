@@ -228,16 +228,14 @@ func lateWhere(c models.UnmatchedCall) string {
 // test (a set's own, or one an earlier set made), with what their set's
 // recordings hold of the shape of each that names no closest recording and
 // whose match phase compared no recording of its shape
-// (models.UnmatchedCall.SetRecorded). Such a call's matcher read one test's
+// (models.UnmatchedCall.NeedsSetRecorded, into SetRecorded). Such a call's matcher read one test's
 // window and the session's, less what was spent: a call whose shape the set
 // recorded only in another test's window found none there. So the set's
 // every recording is read (eachSetMock: each test's and the session's, as
 // recorded, one at a time), once, and only when such a call is there. A read
 // that fails sets nothing: no call then says the set has none.
 func (r *Replayer) withSetRecordings(ctx context.Context, testSetID string, calls []models.UnmatchedCall) []models.UnmatchedCall {
-	needs := func(c models.UnmatchedCall) bool {
-		return c.ClosestMock == "" && c.ShapeRecordings() != models.RecordedShape
-	}
+	needs := models.UnmatchedCall.NeedsSetRecorded
 	if !slices.ContainsFunc(calls, needs) {
 		return calls
 	}

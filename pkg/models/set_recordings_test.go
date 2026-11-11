@@ -144,6 +144,35 @@ func TestShapeRecordingsNeedsTheWholeSetToSayNone(t *testing.T) {
 	}
 }
 
+// Only a call that names no closest recording and does not already know the
+// set has one of its shape needs its whole set read: one with a closest
+// recording says its diffs, one whose phase or read found the shape says so.
+// A read that said "none" or could not tell is read again (another path's
+// read may say more), never trusted as "shape".
+func TestNeedsSetRecordedOnlyWhenNothingSaysTheShape(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		call UnmatchedCall
+		want bool
+	}{
+		{"no closest, phase found none", UnmatchedCall{MatchPhase: MatchPhaseNoMocks}, true},
+		{"no closest, schema phase", UnmatchedCall{MatchPhase: MatchPhaseSchema}, true},
+		{"no closest, no phase", UnmatchedCall{}, true},
+		{"no closest, read said none", UnmatchedCall{MatchPhase: MatchPhaseNoMocks, SetRecorded: RecordedNone}, true},
+		{"no closest, read could not tell", UnmatchedCall{SetRecorded: "bogus"}, true},
+		{"no closest, read found the shape", UnmatchedCall{MatchPhase: MatchPhaseNoMocks, SetRecorded: RecordedShape}, false},
+		{"no closest, body phase compared the shape", UnmatchedCall{MatchPhase: MatchPhaseBody}, false},
+		{"no closest, strict phase", UnmatchedCall{MatchPhase: MatchPhaseStrict}, false},
+		{"no closest, variable phase", UnmatchedCall{MatchPhase: MatchPhaseVariable}, false},
+		{"a closest recording, phase found none", UnmatchedCall{ClosestMock: "mock-3", MatchPhase: MatchPhaseNoMocks}, false},
+		{"a closest recording, read said none", UnmatchedCall{ClosestMock: "mock-3", SetRecorded: RecordedNone}, false},
+	} {
+		if got := c.call.NeedsSetRecorded(); got != c.want {
+			t.Errorf("%s: NeedsSetRecorded = %v; want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // onDiskSource is a mock file holding one recording, which it reads back, or
 // fails to with err.
 type onDiskSource struct {

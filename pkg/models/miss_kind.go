@@ -90,3 +90,12 @@ func (c UnmatchedCall) ShapeRecordings() string {
 	}
 	return ""
 }
+
+// NeedsSetRecorded reports whether only a read of c's whole set
+// (SetShapeRecordings, into SetRecorded) can say what the set recorded of c's
+// shape: c names no closest recording and does not already know the set has
+// one of its shape (ShapeRecordings). Every path that reports a call outside
+// every test reads the set for such a call, and only for one.
+func (c UnmatchedCall) NeedsSetRecorded() bool {
+	return c.ClosestMock == "" && c.ShapeRecordings() != RecordedShape
+}
