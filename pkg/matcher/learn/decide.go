@@ -209,6 +209,12 @@ type Input struct {
 	PlaceOf   func(l Leaf, answer bool) (string, bool)
 	Trails    Trail
 	Source    func(field string) (Source, bool)
+	// TimeForm turns on the time default (time_form.go): a changed time
+	// passes at replay with any value of its form. false decides times by
+	// the clock checks alone (range, cut, zone, provenance, the time-of-day
+	// echo): keploy.yml's strict times setting, and every caller that sets
+	// nothing.
+	TimeForm bool
 }
 
 // Trail is the test a call trails: keploy record marked the call's

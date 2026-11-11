@@ -133,6 +133,10 @@ type decider struct {
 	// places' words (places), built at its first ask.
 	oh *outsideHeld
 	pi *placeIndex
+	// readClock: the refusal instantLearned last gave is one where learning
+	// read the value as the application's clock (heldRead), which the time
+	// default settles on any field (timeDefault).
+	readClock bool
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
@@ -2071,11 +2075,14 @@ func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool)
 // (7), a client test's own value (8); else refused. A field keploy.yml
 // declares a read of the clock is then decided by its rule (declaredClock).
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
+	dc.readClock = false
 	d := dc.instantLearned(path, at, n, c)
-	if src, ok := dc.source(path); ok && src.Kind == SourceClock {
-		return dc.declaredClock(path, at, n, c, src, d)
+	src, declared := dc.source(path)
+	declared = declared && src.Kind == SourceClock
+	if declared {
+		d = dc.declaredClock(path, at, n, c, src, d)
 	}
-	return d
+	return dc.timeDefault(path, at, n, c, d, declared)
 }
 
 // instantLearned is instant as learning alone decides it.
@@ -2474,7 +2481,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 				if gaveRefusal != nil {
 					return *gaveRefusal
 				}
-				return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
+				return dc.heldRead(dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path)))
 			case g != "":
 				off, cutWhy, guardWhy, inWindow = models.ClockOffset{}, "", g, false
 			}
@@ -2551,7 +2558,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			if ln, sok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &off}); sok && ln.Offset != nil {
 				switch g, uncompared := dc.offsetGuard(path, *ln.Offset, enc, wb); {
 				case uncompared:
-					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
+					return dc.heldRead(dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path)))
 				case g == "":
 					return dc.clock(path, at, n, c, *ln.Offset, "a read of the application's clock made since its test began in both runs, before its call's window", false)
 				}
@@ -2764,7 +2771,7 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 		return dc.noPayloadRefusal(path, at, n, r, l)
 	}
 	if echo := dc.instantEchoed(c); echo != "" {
-		return dc.cannotCheck(path, at, n, r, l, "keploy cannot check a clock read its own call's recorded answer holds ("+echo+"): it would serve that answer's recorded moment")
+		return dc.heldRead(dc.cannotCheck(path, at, n, r, l, "keploy cannot check a clock read its own call's recorded answer holds ("+echo+"): it would serve that answer's recorded moment"))
 	}
 	if c.text {
 		lay := models.ClockOffset{Layout: clockTextLayout(r)}.MeetLayout(clockTextLayout(l))
@@ -2846,8 +2853,13 @@ func twoClockReads(src []evPlace) bool {
 func (dc *decider) copied(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
 	if i := slices.IndexFunc(src, func(p evPlace) bool { return p.clock && p.name != first.name }); i >= 0 {
-		return dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
+		d := dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
 			"the same moment was sent at "+first.name+" and "+src[i].name+", two separate reads", []string{first.name, src[i].name}, dc.fieldNoise(path))
+		if first.clock {
+			// Each source its own call's read of the clock: a copy of a read.
+			d = dc.heldRead(d)
+		}
+		return d
 	}
 	return dc.bound(path, at, n, c, src, rule)
 }
