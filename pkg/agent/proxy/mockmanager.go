@@ -425,9 +425,12 @@ type MockManager struct {
 	// seed at a set boundary is parked (backgroundSeeded) until that set's
 	// staging call installs it with the trees it describes, and a set that
 	// seeds none has none, not the previous one's: names are unique only
-	// within a set. Stored under swapMu, read lock-free.
-	background       atomic.Pointer[map[models.Kind][]models.BackgroundRecording]
-	backgroundSeeded *map[models.Kind][]models.BackgroundRecording
+	// within a set. Each install is kept with the staging epoch it took
+	// effect at, and the one before it too (backgroundInstall), for a call
+	// marked in the set before to be judged by that set's
+	// (BackgroundRecordingsIn). Stored under swapMu, read lock-free.
+	background       atomic.Pointer[backgroundInstall]
+	backgroundSeeded map[models.Kind][]models.BackgroundRecording
 	// repeatNoise is the header noise the session's matcher compares the
 	// set's calls with, which proves a test's repeated reads
 	// (SetRepeatReadNoise); nil, none, until the session sets it.
@@ -1762,6 +1765,15 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		}
 	}
 	if isInitialStaging {
+		// A set boundary installs the set's background recordings as of the
+		// epoch this staging starts, before it starts it: no call can be
+		// marked in that epoch while the previous set's are still in force
+		// there, and a call marked before it is judged by the previous
+		// set's (BackgroundRecordingsIn).
+		if m.boundaryPending {
+			m.installBackgroundLocked(m.backgroundSeeded, m.stagingEpoch.Load()+1)
+			m.backgroundSeeded = nil
+		}
 		// Every staging call starts a new epoch, boundary or not: whatever a
 		// consumer built from the previous staging snapshot is stale now.
 		m.bumpStagingEpoch()
@@ -1796,8 +1808,6 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// The run's place's too (SeedRunPlaceWindows).
 			m.placeWindows.Store(m.placeWindowsSeeded)
 			m.placeWindowsSeeded = nil
-			m.background.Store(m.backgroundSeeded)
-			m.backgroundSeeded = nil
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -4523,20 +4533,19 @@ func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 // staging call installs its trees (see testWindows). Read-only: never served,
 // never consumed. nil or empty installs none.
 func (m *MockManager) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
-	var byKind *map[models.Kind][]models.BackgroundRecording
+	var byKind map[models.Kind][]models.BackgroundRecording
 	if len(recs) > 0 {
-		kinds := map[models.Kind][]models.BackgroundRecording{}
+		byKind = map[models.Kind][]models.BackgroundRecording{}
 		for _, r := range recs {
 			if r.Mock != nil {
-				kinds[r.Mock.Kind] = append(kinds[r.Mock.Kind], r)
+				byKind[r.Mock.Kind] = append(byKind[r.Mock.Kind], r)
 			}
 		}
-		for _, list := range kinds {
+		for _, list := range byKind {
 			slices.SortStableFunc(list, func(a, b models.BackgroundRecording) int {
 				return a.Mock.Spec.ReqTimestampMock.Compare(b.Mock.Spec.ReqTimestampMock)
 			})
 		}
-		byKind = &kinds
 	}
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
@@ -4544,7 +4553,33 @@ func (m *MockManager) SeedBackgroundRecordings(recs []models.BackgroundRecording
 		m.backgroundSeeded = byKind
 		return
 	}
-	m.background.Store(byKind)
+	m.installBackgroundLocked(byKind, m.stagingEpoch.Load())
+}
+
+// backgroundInstall is one install of a set's background recordings by kind
+// (byKind, nil: none), in force from the staging epoch from on, and the
+// install it replaced (prev, which keeps none before it).
+type backgroundInstall struct {
+	from   uint64
+	byKind map[models.Kind][]models.BackgroundRecording
+	prev   *backgroundInstall
+}
+
+// installBackgroundLocked installs byKind as the background recordings in
+// force from the staging epoch from on, keeping the install it replaces
+// for the calls marked before from; one made within the epoch the install
+// in force took effect at replaces it there (a call marked in that epoch
+// reads the latest, as it did before). Holding swapMu.
+func (m *MockManager) installBackgroundLocked(byKind map[models.Kind][]models.BackgroundRecording, from uint64) {
+	in := &backgroundInstall{from: from, byKind: byKind}
+	if cur := m.background.Load(); cur != nil {
+		if cur.from < from {
+			in.prev = &backgroundInstall{from: cur.from, byKind: cur.byKind}
+		} else if cur.prev != nil {
+			in.prev = cur.prev
+		}
+	}
+	m.background.Store(in)
 }
 
 // BackgroundRecordings returns the current set's background recordings of
@@ -4552,14 +4587,40 @@ func (m *MockManager) SeedBackgroundRecordings(recs []models.BackgroundRecording
 // the open view shows; nil when the set has none. The slice and its mocks
 // are shared: a caller reads them and changes nothing.
 func (m *MockManager) BackgroundRecordings(kind models.Kind) []models.BackgroundRecording {
-	byKind := m.background.Load()
-	if byKind == nil {
-		return nil
-	}
-	return (*byKind)[kind]
+	return m.background.Load().of(kind)
 }
 
-var _ integrations.BackgroundRecordingReader = (*MockManager)(nil)
+// BackgroundRecordingsIn returns the background recordings of kind of the
+// set in force in the staging epoch call was marked in
+// (integrations.RoundBackgroundReader): the current set's, or the set's
+// before it for a call marked before the current set's install, which the
+// replay can stage before keploy decides the call. nil for a call marked
+// before both (it is read as no background call, and counts), and the
+// current set's for the zero CallRound.
+func (m *MockManager) BackgroundRecordingsIn(call integrations.CallRound, kind models.Kind) []models.BackgroundRecording {
+	in := m.background.Load()
+	if !call.Read() {
+		return in.of(kind)
+	}
+	for ; in != nil; in = in.prev {
+		if in.from <= call.Epoch() {
+			return in.of(kind)
+		}
+	}
+	return nil
+}
+
+func (in *backgroundInstall) of(kind models.Kind) []models.BackgroundRecording {
+	if in == nil {
+		return nil
+	}
+	return in.byKind[kind]
+}
+
+var (
+	_ integrations.BackgroundRecordingReader = (*MockManager)(nil)
+	_ integrations.RoundBackgroundReader     = (*MockManager)(nil)
+)
 
 // RecordedWindows returns the current set's recorded test windows, or nil when
 // the replayer sent none (mock replay, an older CLI, SetFilteredMocks-only

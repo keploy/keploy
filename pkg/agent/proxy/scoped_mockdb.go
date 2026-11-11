@@ -1094,6 +1094,15 @@ func (s *scopedMockDb) BackgroundRecordings(kind models.Kind) []models.Backgroun
 	return integrations.BackgroundRecordingsOf(s.MockMemDb, kind)
 }
 
+// BackgroundRecordingsIn is the background recordings of the set call was
+// marked in (integrations.RoundBackgroundReader), whatever this view's
+// allowlist.
+func (s *scopedMockDb) BackgroundRecordingsIn(call integrations.CallRound, kind models.Kind) []models.BackgroundRecording {
+	return integrations.BackgroundRecordingsAt(s.MockMemDb, call, kind)
+}
+
+var _ integrations.RoundBackgroundReader = (*scopedMockDb)(nil)
+
 // RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
 // pass straight through.
 func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
