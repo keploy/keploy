@@ -43,6 +43,8 @@ func TestRecordedCallOfReadsHTTPAndMongoCommands(t *testing.T) {
 		{"http sealed query name", httpMock("GET", "http://clock/api/tick?ENC:t:k:em9uZQ=utc", nil), RecordedCall{Kind: HTTP}},
 		{"http sealed query value", httpMock("GET", "http://clock/api/tick?zone=ENC%3At%3Ak%3AdXRj&flag", nil),
 			RecordedCall{Kind: HTTP, Shape: CallShape("HTTP", "GET /api/tick?zone=utc&flag"), Read: true}},
+		{"http sealed query value not escaped", httpMock("GET", "http://clock/api/tick?zone=ENC:t:k:dXRj", nil),
+			RecordedCall{Kind: HTTP, Shape: CallShape("HTTP", "GET /api/tick?zone=utc"), Read: true}},
 		{"http sealed bare query component", httpMock("GET", "http://clock/api/tick?ENC:t:k:MTY5", nil),
 			RecordedCall{Kind: HTTP, Shape: CallShape("HTTP", "GET /api/tick?1697040000"), Read: true}},
 		{"mongo sealed collection", mongoMock(`{ SectionSingle msg: {"find":"ENC:t:k:dXNlcnM","$db":"api"} }`), RecordedCall{Kind: Mongo}},
