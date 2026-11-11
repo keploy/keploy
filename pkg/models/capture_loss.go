@@ -583,6 +583,13 @@ type CaptureLoss struct {
 	Kind  CaptureLossKind `json:"kind"`
 	Count uint64          `json:"count"`
 	What  string          `json:"what,omitempty"`
+	// Err is, on a PID map's loss (CaptureLossPIDMap,
+	// CaptureLossPIDMapExcluded), the kernel's (negative, Linux) errno for
+	// that map's latest refusal (PIDMapRefusals.LastTargetErr,
+	// LastExcludedErr), so a reader takes each map's cause from its own
+	// loss, never out of What; 0 when the agent did not say (an older
+	// agent), and on every other kind.
+	Err int32 `json:"err,omitempty" yaml:"err,omitempty"`
 }
 
 // OwnedCaptureLoss is a capture loss of bytes a test wrote to a connection,
@@ -706,7 +713,9 @@ func (l CaptureLosses) Since(base CaptureLosses) CaptureLosses {
 		b := was[c.Kind]
 		switch {
 		case c.Count > b:
-			out = append(out, CaptureLoss{Kind: c.Kind, Count: c.Count - b, What: c.What})
+			d := c
+			d.Count = c.Count - b
+			out = append(out, d)
 		case c.Count < b && c.Count > 0:
 			out = append(out, c)
 		}
@@ -737,7 +746,7 @@ func (l CaptureLosses) Max(o CaptureLosses) CaptureLosses {
 }
 
 // Plus is l and o added kind by kind (each with the What of the later of
-// the two, o's, when it has one). Sorted by kind.
+// the two, o's, when it has one, and its Err likewise). Sorted by kind.
 func (l CaptureLosses) Plus(o CaptureLosses) CaptureLosses {
 	at := make(map[CaptureLossKind]int, len(l)+len(o))
 	var out CaptureLosses
@@ -746,6 +755,9 @@ func (l CaptureLosses) Plus(o CaptureLosses) CaptureLosses {
 			out[i].Count += c.Count
 			if c.What != "" {
 				out[i].What = c.What
+			}
+			if c.Err != 0 {
+				out[i].Err = c.Err
 			}
 			continue
 		}

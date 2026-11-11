@@ -73,10 +73,10 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 	}
 	all := append(models.CaptureLosses(nil), lost...)
 	if refused.Target > 0 {
-		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refused.Target, What: refused.CaptureIncomplete()})
+		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refused.Target, What: refused.CaptureIncomplete(), Err: refused.LastTargetErr})
 	}
 	if refused.Excluded > 0 {
-		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refused.Excluded, What: refused.CaptureIncomplete()})
+		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refused.Excluded, What: refused.CaptureIncomplete(), Err: refused.LastExcludedErr})
 	}
 	switch {
 	case lostErr != nil && unchargedErr != nil:

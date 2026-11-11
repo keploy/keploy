@@ -657,7 +657,8 @@ func (r *Replayer) appLossesCarriedIn() models.CaptureLosses {
 	var out models.CaptureLosses
 	for _, c := range r.lossLast.Since(r.lossAppBase) {
 		if c.Kind.AppLife() && c.Count > sinceSet[c.Kind] {
-			out = append(out, models.CaptureLoss{Kind: c.Kind, Count: c.Count - sinceSet[c.Kind], What: c.What})
+			c.Count -= sinceSet[c.Kind]
+			out = append(out, c)
 		}
 	}
 	return out
