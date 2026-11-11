@@ -6,20 +6,35 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
 )
 
+// The guard's rules, in the words it reports a function breaking each in.
+const (
+	ruleNilReport = "a miss with a nil report"
+	ruleNoReport  = "a ParserError miss with no report built at it"
+	ruleInline    = "a report built inline at the miss, which no stamp can reach"
+	ruleCondition = "a report stamped only under a condition that does not build it"
+	ruleNoRound   = "a report with no round"
+	ruleNoMatched = "an ErrNoMockMatched error with no report"
+)
+
+// missMarkWaiver excuses one function from one of the guard's rules (rule)
+// and says where its round is stamped instead, or why it carries none (why).
+// It excuses no other rule.
+type missMarkWaiver struct{ rule, why string }
+
 // missMarkWaivers are the functions outside tests that report a miss and
-// stamp no round on it themselves (StampMark), each with where its round is
-// stamped instead, or why it carries none. Keyed by the file, from the module's root, and the function
-// ("Recv.Name" for a method).
-var missMarkWaivers = map[string]string{
-	"pkg/agent/proxy/integrations/mysql/replayer/report.go:newConnectionMiss": "a connection-phase miss: the replayer stamps the connection's round on it with markConnectionMiss (replay.go) before it reaches the proxy",
-	"pkg/agent/proxy/proxy.go:Proxy.sendMockNotFoundErrorFrom":                "the sink every parser's reported miss goes through: the report it files is the one the parser built into the error (models.NewMockMismatchError), and each such site is checked here; an error that carries none is a miss built with no report, which the ErrNoMockMatched rule checks",
-	"pkg/models/mock_mismatch_reporter.go:ReportAnswer":                       "the sink every answer goes through: it sends a copy of the report its caller passed, and each caller is checked here for stamping that report",
+// stamp no round on it themselves (StampMark). Keyed by the file, from the
+// module's root, and the function ("Recv.Name" for a method).
+var missMarkWaivers = map[string]missMarkWaiver{
+	"pkg/agent/proxy/integrations/mysql/replayer/report.go:newConnectionMiss": {ruleNoRound, "a connection-phase miss: the replayer stamps the connection's round on it with markConnectionMiss (replay.go) before it reaches the proxy"},
+	"pkg/agent/proxy/proxy.go:Proxy.sendMockNotFoundErrorFrom":                {ruleNoReport, "the sink every parser's reported miss goes through: its ParserError takes the report the parser built into the error (models.NewMockMismatchError), and each such site is checked here; an error that carries none is a miss built with no report, which the ErrNoMockMatched rule checks"},
+	"pkg/models/mock_mismatch_reporter.go:ReportAnswer":                       {ruleNoRound, "the sink every answer goes through: it sends a copy of the report its caller passed, and each caller is checked here for stamping that report"},
 }
 
 // Every miss a parser reports carries the round its call was made in
@@ -49,15 +64,16 @@ var missMarkWaivers = map[string]string{
 //     a select) that does not build that report itself: where the
 //     condition fails, the report goes unstamped.
 //
-// A waiver of a function that does none of these fails too, so the list
-// stays true.
+// A waiver excuses its function from the one rule it names: the function
+// breaking another fails as any function does, and a waiver whose function
+// no longer breaks its rule fails too, so the list stays true.
 func TestEveryMissReportIsStampedWithItsCallsRound(t *testing.T) {
 	root := moduleRoot(t)
 	const (
 		modelsPath       = "go.keploy.io/server/v3/pkg/models"
 		integrationsPath = "go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	)
-	unstamped := map[string]string{}
+	unstamped := map[string][]string{}
 	fset := token.NewFileSet()
 	err := filepath.WalkDir(filepath.Join(root, "pkg"), func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -93,8 +109,8 @@ func TestEveryMissReportIsStampedWithItsCallsRound(t *testing.T) {
 			if !ok || fd.Body == nil {
 				continue
 			}
-			if why := missUnstamped(fd.Body, models, integ); why != "" {
-				unstamped[rel+":"+funcName(fd)] = why
+			if rules := missUnstamped(fd.Body, models, integ); len(rules) > 0 {
+				unstamped[rel+":"+funcName(fd)] = rules
 			}
 		}
 		return nil
@@ -102,31 +118,40 @@ func TestEveryMissReportIsStampedWithItsCallsRound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var missing, stale []string
-	for fn, why := range unstamped {
-		if _, ok := missMarkWaivers[fn]; !ok {
-			missing = append(missing, fn+" ("+why+")")
-		}
-	}
-	for fn := range missMarkWaivers {
-		if _, ok := unstamped[fn]; !ok {
-			stale = append(stale, fn)
-		}
-	}
-	sort.Strings(missing)
-	sort.Strings(stale)
+	missing, stale := unwaived(unstamped, missMarkWaivers)
 	if len(missing) > 0 {
 		t.Errorf("these report a miss or an answer with no round stamped on it (StampMark with the call's MarkCallRound, taken when the call is made), so one keploy decides after the call's test ended is charged to the next test: %s", strings.Join(missing, ", "))
 	}
 	if len(stale) > 0 {
-		t.Errorf("these waivers name no function that reports an unstamped miss any more: drop them: %s", strings.Join(stale, ", "))
+		t.Errorf("these waivers name a rule their function no longer breaks: drop them: %s", strings.Join(stale, ", "))
 	}
 }
 
-// missUnstamped is how body reports a miss with no round stamped on it, ""
-// when it reports none so. models and integ are the names its file calls the
+// unwaived reads the rules each function breaks (unstamped) against the
+// waivers: missing, each rule a function breaks that no waiver of it names;
+// stale, each waiver whose function no longer breaks the rule it names.
+func unwaived(unstamped map[string][]string, waivers map[string]missMarkWaiver) (missing, stale []string) {
+	for fn, rules := range unstamped {
+		for _, rule := range rules {
+			if w, ok := waivers[fn]; !ok || w.rule != rule {
+				missing = append(missing, fn+" ("+rule+")")
+			}
+		}
+	}
+	for fn, w := range waivers {
+		if !slices.Contains(unstamped[fn], w.rule) {
+			stale = append(stale, fn+" ("+w.rule+")")
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(stale)
+	return missing, stale
+}
+
+// missUnstamped is every rule body breaks in reporting a miss with no round
+// stamped on it, none when it reports none so. models and integ are the names its file calls the
 // models and integrations packages by ("" for the package itself).
-func missUnstamped(body *ast.BlockStmt, models, integ string) string {
+func missUnstamped(body *ast.BlockStmt, models, integ string) []string {
 	builds, stamps, nilReport, wraps := false, false, false, false
 	// The reports built into a miss by name, and those stamped by name: a
 	// report built by name is stamped by name, so one site's stamp does not
@@ -202,21 +227,23 @@ func missUnstamped(body *ast.BlockStmt, models, integ string) string {
 		}
 		return true
 	})
-	switch {
-	case nilReport:
-		return "a miss with a nil report"
-	case noReport:
-		return "a ParserError miss with no report built at it"
-	case inline:
-		return "a report built inline at the miss, which no stamp can reach"
-	case stampedUnderCondition(body, integ):
-		return "a report stamped only under a condition that does not build it"
-	case builds && !stamps:
-		return "a report with no round"
-	case wraps && !builds:
-		return "an ErrNoMockMatched error with no report"
+	var rules []string
+	for _, r := range []struct {
+		broken bool
+		rule   string
+	}{
+		{nilReport, ruleNilReport},
+		{noReport, ruleNoReport},
+		{inline, ruleInline},
+		{stampedUnderCondition(body, integ), ruleCondition},
+		{builds && !stamps, ruleNoRound},
+		{wraps && !builds, ruleNoMatched},
+	} {
+		if r.broken {
+			rules = append(rules, r.rule)
+		}
 	}
-	return ""
+	return rules
 }
 
 // inlineReport reports whether e builds its report right where it is used:
@@ -386,31 +413,28 @@ func funcName(fd *ast.FuncDecl) string {
 // in, read as the guard reads a file that calls the models and integrations
 // packages by those names, and what it says of it.
 func TestTheMissMarkGuardReadsEveryShape(t *testing.T) {
-	const (
-		inline  = "a report built inline at the miss, which no stamp can reach"
-		noRound = "a report with no round"
-		cond    = "a report stamped only under a condition that does not build it"
-	)
 	for _, c := range []struct{ name, body, want string }{
 		{"a report built by name and stamped by that name", "report := build()\nintegrations.StampMark(report, mark)\nreturn models.NewMockMismatchError(err, report)", ""},
-		{"a report built by name while another is stamped", "integrations.StampMark(other, mark)\nreturn models.NewMockMismatchError(err, report)", noRound},
-		{"a ParserError's inline report while another is stamped", "integrations.StampMark(report, mark)\nreturn models.ParserError{Err: err, MismatchReport: &models.MockMismatchReport{At: at}}", inline},
-		{"a miss's inline report while another is stamped", "integrations.StampMark(report, mark)\nreturn models.NewMockMismatchError(err, &models.MockMismatchReport{At: at})", inline},
-		{"an answer's inline report while another is stamped", "integrations.StampMark(report, mark)\nmodels.ReportAnswer(ctx, &models.MockMismatchReport{})", inline},
-		{"a ParserError's report made by new", "integrations.StampMark(report, mark)\nreturn &models.ParserError{Err: err, MismatchReport: new(models.MockMismatchReport)}", inline},
-		{"an inline report in parentheses", "integrations.StampMark(report, mark)\nreturn models.NewMockMismatchError(err, (&(models.MockMismatchReport{})))", inline},
+		{"a report built by name while another is stamped", "integrations.StampMark(other, mark)\nreturn models.NewMockMismatchError(err, report)", ruleNoRound},
+		{"a ParserError's inline report while another is stamped", "integrations.StampMark(report, mark)\nreturn models.ParserError{Err: err, MismatchReport: &models.MockMismatchReport{At: at}}", ruleInline},
+		{"a miss's inline report while another is stamped", "integrations.StampMark(report, mark)\nreturn models.NewMockMismatchError(err, &models.MockMismatchReport{At: at})", ruleInline},
+		{"an answer's inline report while another is stamped", "integrations.StampMark(report, mark)\nmodels.ReportAnswer(ctx, &models.MockMismatchReport{})", ruleInline},
+		{"a ParserError's report made by new", "integrations.StampMark(report, mark)\nreturn &models.ParserError{Err: err, MismatchReport: new(models.MockMismatchReport)}", ruleInline},
+		{"an inline report in parentheses", "integrations.StampMark(report, mark)\nreturn models.NewMockMismatchError(err, (&(models.MockMismatchReport{})))", ruleInline},
 		{"a report a call makes, with a stamp in the function", "integrations.StampMark(report, mark)\nreturn models.NewMockMismatchError(err, buildReport(req))", ""},
-		{"a report a call makes, with no stamp", "return models.NewMockMismatchError(err, b.Report())", noRound},
+		{"a report a call makes, with no stamp", "return models.NewMockMismatchError(err, b.Report())", ruleNoRound},
+		{"an inline report beside a report a call makes, with a stamp", "report := build()\nintegrations.StampMark(report, mark)\nsend(models.NewMockMismatchError(err, b.Report()))\nreturn models.NewMockMismatchError(err, &models.MockMismatchReport{At: at})", ruleInline},
+		{"a nil report and an inline one", "send(models.NewMockMismatchError(err, nil))\nreturn models.NewMockMismatchError(err, &models.MockMismatchReport{})", ruleNilReport + "; " + ruleInline},
 		{"the address of a report stamped by its address", "var report models.MockMismatchReport\nintegrations.StampMark(&report, mark)\nreturn models.NewMockMismatchError(err, &report)", ""},
 		{"a report received from a channel made there", "integrations.StampMark(report, mark)\nmodels.ReportAnswer(ctx, <-new(chan *models.MockMismatchReport))", ""},
-		{"a nil report", "return models.NewMockMismatchError(err, nil)", "a miss with a nil report"},
-		{"a ParserError with a nil report", "return &models.ParserError{Err: err, MismatchReport: nil}", "a miss with a nil report"},
-		{"a ParserError with no report", "return models.ParserError{Err: err}", "a ParserError miss with no report built at it"},
-		{"a stamp in an else", "report := build()\nif ok {\n\tlog()\n} else {\n\tintegrations.StampMark(report, mark)\n}\nreturn models.NewMockMismatchError(err, report)", cond},
-		{"a stamp in a switch case", "report := build()\nswitch {\ncase ok:\n\tintegrations.StampMark(report, mark)\n}\nreturn models.NewMockMismatchError(err, report)", cond},
+		{"a nil report", "return models.NewMockMismatchError(err, nil)", ruleNilReport},
+		{"a ParserError with a nil report", "return &models.ParserError{Err: err, MismatchReport: nil}", ruleNilReport},
+		{"a ParserError with no report", "return models.ParserError{Err: err}", ruleNoReport},
+		{"a stamp in an else", "report := build()\nif ok {\n\tlog()\n} else {\n\tintegrations.StampMark(report, mark)\n}\nreturn models.NewMockMismatchError(err, report)", ruleCondition},
+		{"a stamp in a switch case", "report := build()\nswitch {\ncase ok:\n\tintegrations.StampMark(report, mark)\n}\nreturn models.NewMockMismatchError(err, report)", ruleCondition},
 		{"a stamp under the if that builds the report", "if report := build(); report != nil {\n\tintegrations.StampMark(report, mark)\n\treturn models.NewMockMismatchError(err, report)\n}", ""},
 		{"a stamp in a function literal under an if", "if ok {\n\tgo func() {\n\t\treport := build()\n\t\tintegrations.StampMark(report, mark)\n\t\tsend(models.NewMockMismatchError(err, report))\n\t}()\n}", ""},
-		{"an ErrNoMockMatched error with no report", "return fmt.Errorf(\"%w: x\", models.ErrNoMockMatched)", "an ErrNoMockMatched error with no report"},
+		{"an ErrNoMockMatched error with no report", "return fmt.Errorf(\"%w: x\", models.ErrNoMockMatched)", ruleNoMatched},
 		{"an error only tested for ErrNoMockMatched", "if errors.Is(err, models.ErrNoMockMatched) {\n\treturn nil\n}", ""},
 		{"no miss", "return nil", ""},
 	} {
@@ -418,8 +442,30 @@ func TestTheMissMarkGuardReadsEveryShape(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
-		if got := missUnstamped(f.Decls[0].(*ast.FuncDecl).Body, "models", "integrations"); got != c.want {
+		if got := strings.Join(missUnstamped(f.Decls[0].(*ast.FuncDecl).Body, "models", "integrations"), "; "); got != c.want {
 			t.Errorf("%s: the guard says %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// A waiver excuses its function from the rule it names and from no other,
+// and one whose function no longer breaks that rule is reported.
+func TestAMissMarkWaiverExcusesOnlyTheRuleItNames(t *testing.T) {
+	missing, stale := unwaived(map[string][]string{
+		"a.go:waived":     {ruleNoRound},
+		"a.go:alsoInline": {ruleNoRound, ruleInline},
+		"a.go:other":      {ruleInline},
+		"a.go:unwaived":   {ruleNilReport},
+	}, map[string]missMarkWaiver{
+		"a.go:waived":     {ruleNoRound, "why"},
+		"a.go:alsoInline": {ruleNoRound, "why"},
+		"a.go:other":      {ruleNoRound, "why"},
+		"a.go:gone":       {ruleNoRound, "why"},
+	})
+	if want := []string{"a.go:alsoInline (" + ruleInline + ")", "a.go:other (" + ruleInline + ")", "a.go:unwaived (" + ruleNilReport + ")"}; !slices.Equal(missing, want) {
+		t.Errorf("missing = %q, want %q", missing, want)
+	}
+	if want := []string{"a.go:gone (" + ruleNoRound + ")", "a.go:other (" + ruleNoRound + ")"}; !slices.Equal(stale, want) {
+		t.Errorf("stale = %q, want %q", stale, want)
 	}
 }
