@@ -4,8 +4,9 @@
 #
 # The agent tracks the processes it may intercept in a BPF map,
 # target_namespace_pids (10240 entries), one entry for each live process that
-# called socket() in the agent's PID namespace (for a native agent, the whole
-# host). With the map full the kernel refuses the next process a place, and
+# called socket() in the agent's PID namespace (for a native agent, of the
+# keploy command's own tree: the app's processes, as here). With the map full
+# the kernel refuses the next process a place, and
 # that process's calls are not intercepted: they reach the real dependency.
 # While the dependency is up its tests pass all the same, and the mocks
 # recorded for those calls are consumed by nobody. So `keploy test` used to
