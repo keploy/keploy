@@ -7,6 +7,7 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -14,11 +15,16 @@ import (
 // (StampMark), taken as it reaches keploy: forwarding it to the replay's
 // own resolver takes until that resolver's timeout, and the replay can
 // stage the next set before the miss is filed, which is listed where its
-// question was asked, not where keploy decided it.
+// question was asked, not where keploy decided it. A proven run serves the
+// set's pool view before its first test (ServeExactPool), as here: a store
+// with no view marks no round (MarkCallRound), and its miss is placed by the
+// view serving when it is filed, as every parser's.
 func TestADNSMissIsMarkedInTheRoundItsQuestionWasAskedIn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.ServeExactPool(models.PoolKeyNone, nil)
 	asked := mm.StagingEpoch()
 	// The resolver the miss is forwarded to: when the question reaches it,
 	// the replay stages the next set, and it never answers.
@@ -34,6 +40,7 @@ func TestADNSMissIsMarkedInTheRoundItsQuestionWasAskedIn(t *testing.T) {
 			return
 		}
 		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		mm.ServeExactPool(models.PoolKeyNone, nil)
 		close(got)
 	}()
 	_, port, _ := net.SplitHostPort(conn.LocalAddr().String())
