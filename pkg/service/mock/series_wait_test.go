@@ -195,3 +195,34 @@ func TestTheSeriesWaitEndsOnAReadThatFails(t *testing.T) {
 	require.Equal(t, 1, instr.consumedReadCount)
 	require.Empty(t, m.seriesRead)
 }
+
+// A run stopped while the wait sleeps ends the wait at once: it does not
+// sleep on to its next wake-up (here one that never comes), and reads nothing
+// more of what was consumed.
+func TestAStoppedRunEndsTheSeriesWaitAtOnce(t *testing.T) {
+	wake := seriesWake
+	t.Cleanup(func() { seriesWake = wake })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	seriesWake = func(context.Context) (func() <-chan time.Time, func()) {
+		return func() <-chan time.Time {
+			cancel()
+			return nil
+		}, func() {}
+	}
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{})
+	m := &mockService{logger: zap.NewNop(), instrumentation: instr, series: map[string]seriesDue{
+		"start/-/1": {Names: []string{"mock-8"}, Rule: "start@01234567"},
+	}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.awaitRequiredSeries(ctx, runsOnForGood)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait slept on after the run was stopped")
+	}
+	require.Equal(t, 1, instr.consumedReadCount, "the wait's first read only")
+}
