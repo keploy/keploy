@@ -10,16 +10,19 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 )
 
-// replayOwnListener reports whether a keploy test connection the app made
-// reaches a listener of the app itself, and which process holds it: a call
-// the app makes to its own port (parse-server checking its own health, an
-// app calling its own API), which reached the app at record and is passed
-// through to it at replay (serveReplayOwnListener), never matched against
-// mocks. keploy mock decides its own loopback calls (serveTreeListener).
+// ownListenerCall reports whether a connection the app made, under keploy
+// record or keploy test, reaches a listener of the app itself, and which
+// process holds it: a call the app makes to its own port (parse-server
+// checking its own health, an app calling its own API). Such a call is the
+// app's own business, not a dependency's: keploy record passes it through
+// without recording it as a mock, and keploy test passes it through to the
+// app (serveOwnListenerCall), never matched against mocks, whether or not a
+// recording made before holds a mock of it, with the proven switch on and
+// off alike. keploy mock of a native command decides its own loopback calls
+// (serveTreeListener); keploy mock in Docker takes this rule.
 //
 // The listener is the app's when the destination is an address of the
 // agent's network namespace, something listens there that is not keploy's
@@ -28,22 +31,23 @@ import (
 //
 //   - the process that made the call holds that listening socket itself: a
 //     process calling its own listener, never a dependency; or
-//   - a process of the app holds it, and the recording did not reach its
-//     port as a dependency (RecordedPort, as keploy mock's rule; not under
-//     the proven switch, where a listener of the app's is always live). A
-//     native app's processes are the keploy CLI's descendants other than
-//     the CLI and the agent. In Docker the app shares the agent's network
-//     and PID namespaces (network_mode and pid: service:keploy-agent), and
-//     so may other containers (a Kubernetes pod's sidecars, with
-//     shareProcessNamespace): there the app's processes are those of the
-//     caller's own container (its mount namespace), never the agent's.
+//   - a process of the app holds it. A native app's processes are the keploy
+//     CLI's descendants other than the CLI and the agent. In Docker the app
+//     shares the agent's network and PID namespaces (network_mode and pid:
+//     service:keploy-agent), and so may other containers (a Kubernetes
+//     pod's sidecars, with shareProcessNamespace): there the app's processes
+//     are those of the caller's own container (its mount namespace), never
+//     the agent's.
 //
 // Whatever keploy cannot tell (no destination address, no listener, no
 // holder or caller it can name, no CLI pid in this agent's PID namespace, a
-// mount namespace it cannot read) is not the app's: the call takes the mock
-// path, as it did before.
-func (p *Proxy) replayOwnListener(mode models.Mode, dest *agent.NetworkAddress, dstAddr string) (owner int, own bool) {
-	if mode != models.MODE_TEST || p.mockMode {
+// mount namespace it cannot read) is not the app's: the call is recorded or
+// mocked, as it was before.
+func (p *Proxy) ownListenerCall(mode models.Mode, dest *agent.NetworkAddress, dstAddr string) (owner int, own bool) {
+	if mode != models.MODE_TEST && mode != models.MODE_RECORD {
+		return 0, false
+	}
+	if p.mockMode && !p.IsDocker {
 		return 0, false
 	}
 	// An address that does not parse names no IP, which ownIP refuses.
@@ -85,11 +89,15 @@ func (p *Proxy) replayOwnListener(mode models.Mode, dest *agent.NetworkAddress, 
 			return 0, false
 		}
 	}
-	if !provenswitch.On() && RecordedPort(dest.Port) {
-		return 0, false
-	}
 	return owner, true
 }
+
+// What the agent says of a call the app makes to its own port, under keploy
+// test and under keploy record.
+const (
+	ownListenerReplayed = "the app called a port it listens on; passed through to the app, as at record, not matched against mocks"
+	ownListenerRecorded = "the app called a port it listens on; passed through to the app, not recorded as a mock"
+)
 
 // agentPID is the agent's own process; a test swaps it to stand apart from
 // the test process, which plays the app.
@@ -109,24 +117,28 @@ func (p *Proxy) keployListens(port uint32) bool {
 	return port == p.Port || port == p.DNSPort || port == uint32(p.IncomingProxyPort)
 }
 
-// serveReplayOwnListener passes a keploy test (mode) connection to a listener of the
-// app's own (replayOwnListener) through to it, as keploy record did: the
-// app's own handler answers, and no mock is matched or missed. It returns
-// false, having read nothing of the connection, for any other connection.
-func (p *Proxy) serveReplayOwnListener(ctx context.Context, mode models.Mode, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, predialed *util.Predialed) (served bool, err error) {
-	owner, own := p.replayOwnListener(mode, dest, dstAddr)
+// serveOwnListenerCall passes a connection of the app's to a listener of its
+// own (ownListenerCall) through to it: the app's own handler answers, and
+// under keploy record no mock is recorded, under keploy test none is matched
+// or missed. It returns false, having read nothing of the connection, for
+// any other connection.
+func (p *Proxy) serveOwnListenerCall(ctx context.Context, mode models.Mode, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, predialed *util.Predialed) (served bool, err error) {
+	owner, own := p.ownListenerCall(mode, dest, dstAddr)
 	if !own {
 		return false, nil
+	}
+	said := ownListenerReplayed
+	if mode == models.MODE_RECORD {
+		said = ownListenerRecorded
 	}
 	caller, _ := callerOf(dest)
 	fields := []zap.Field{zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
 		zap.Uint32("caller_kernel_pid", dest.KernelPid), zap.String("reason", models.ReasonLoopbackOutsideRun)}
 	p.selfCallOwners.LoadOrStore(owner, struct{}{})
 	if p.selfCalls.Add(1) == 1 {
-		p.logger.Info("the app called a port it listens on; passed through to the app, as at record, not matched against mocks",
-			append(fields, zap.String("note", "further such calls are logged at debug, and counted at the end of a run that finishes"))...)
+		p.logger.Info(said, append(fields, zap.String("note", "further such calls are logged at debug, and counted at the end of a run that finishes"))...)
 	} else {
-		p.logger.Debug("the app called a port it listens on; passed through to the app, as at record, not matched against mocks", fields...)
+		p.logger.Debug(said, fields...)
 	}
 	dstConn, err := dialOwnListener(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
 	if err != nil {

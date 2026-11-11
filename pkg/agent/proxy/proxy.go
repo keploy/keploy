@@ -3077,10 +3077,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if served {
 		return err
 	}
-	// keploy test of a call the app makes to a port it listens on itself:
-	// passed through to the app, as keploy record did, before anything reads
-	// the connection (serveReplayOwnListener). Every other call goes on.
-	if served, err := p.serveReplayOwnListener(parserCtx, rule.Mode, srcConn, destInfo, dstAddr, predialed); served {
+	// A call the app makes to a port it listens on itself: passed through to
+	// the app, neither recorded as a mock nor matched against one, before
+	// anything reads the connection (serveOwnListenerCall). Every other call
+	// goes on.
+	if served, err := p.serveOwnListenerCall(parserCtx, rule.Mode, srcConn, destInfo, dstAddr, predialed); served {
 		return err
 	}
 

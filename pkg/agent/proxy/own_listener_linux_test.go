@@ -20,10 +20,12 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -91,53 +93,150 @@ func anotherProcess(t *testing.T) int {
 // The parse-server lane's case, through handleConnection: keploy test of the
 // app's GET /parse/health to its own port, which no mock holds. It was
 // matched against the mocks and answered 502 "no matching mock"; it reaches
-// the app, as at record, and no mismatch is said.
+// the app, as at record, and no mismatch is said. A call to another local
+// service (a listener of another container's) is still matched against the
+// mocks, and missed.
 func TestReplayPassesTheAppsCallToItsOwnPortToTheApp(t *testing.T) {
+	other := anotherProcess(t)
 	// The package's TestMain clears KEPLOY_PROVEN, so each switch is set here.
+	for _, on := range []string{"", "1"} {
+		for _, own := range []bool{true, false} {
+			t.Run(fmt.Sprintf("KEPLOY_PROVEN=%s/own=%v", on, own), func(t *testing.T) {
+				t.Setenv(provenswitch.Env, on)
+				standApartFromTheAgent(t)
+				recorded.forget()
+				t.Cleanup(recorded.forget)
+				port := appListener(t)
+				dst := fmt.Sprintf("127.0.0.1:%d", port)
+				caller := os.Getpid()
+				if !own {
+					// The listener is another container's: the caller is
+					// another process, in a mount namespace of its own.
+					caller = other
+					inAnotherContainer(t, os.Getpid())
+				}
+				app, src := acceptedConn(t)
+				p := replayProxyTo(t, dst, models.OutgoingOptions{})
+				d := ipv4Dest(t, dst)
+				d.AgentNsPid, d.KernelPid = uint32(caller), uint32(caller)
+				p.DestInfo = fakeDestInfo{dest: d}
+				p.IsDocker = true // keploy test of docker compose: no CLI pid here
+				core, logs := observer.New(zap.DebugLevel)
+				p.logger = zap.New(core)
+				p.errChannel = make(chan error, 4)
+				p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.HTTP: httpint.New(zap.NewNop())}
+				p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}
+				done := make(chan error, 1)
+				go func() { done <- p.handleConnection(context.Background(), src) }()
+
+				if _, err := fmt.Fprintf(app, "GET /parse/health HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", port); err != nil {
+					t.Fatal(err)
+				}
+				resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+				if err != nil {
+					t.Fatalf("the app's call got no answer: %v (logs: %v)", err, logs.All())
+				}
+				body, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				_ = app.Close()
+				_ = awaitEvent(t, done, "handleConnection returning after the app left")
+				missed := len(logs.FilterMessageSnippet("no matching mock").All())
+				if !own {
+					if resp.StatusCode == http.StatusOK || string(body) == ownHealth || missed == 0 {
+						t.Fatalf("a call to another container's listener was answered %d %q with %d mock misses said, want it matched against the mocks and missed", resp.StatusCode, body, missed)
+					}
+					return
+				}
+				if resp.StatusCode != http.StatusOK || string(body) != ownHealth {
+					t.Fatalf("the app's call to its own port was answered %d %q, want the app's own 200 %q", resp.StatusCode, body, ownHealth)
+				}
+				if missed != 0 {
+					t.Fatalf("a call passed through to the app must say no mock miss, said %d", missed)
+				}
+				if len(p.errChannel) != 0 {
+					t.Fatalf("a call passed through to the app must keep no miss for a test, kept %d", len(p.errChannel))
+				}
+			})
+		}
+	}
+}
+
+// keploy record of the app's call to its own port passes it through to the
+// app and records no mock of it; a call to another local service (another
+// container's listener) is recorded as a mock, as before.
+func TestRecordPassesTheAppsCallToItsOwnPortThroughUnrecorded(t *testing.T) {
+	other := anotherProcess(t)
 	for _, on := range []string{"", "1"} {
 		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, on)
 			standApartFromTheAgent(t)
-			recorded.forget()
-			t.Cleanup(recorded.forget)
-			port := appListener(t)
-			dst := fmt.Sprintf("127.0.0.1:%d", port)
-			app, src := acceptedConn(t)
-			p := replayProxyTo(t, dst, models.OutgoingOptions{})
-			d := ipv4Dest(t, dst)
-			d.AgentNsPid, d.KernelPid = uint32(os.Getpid()), uint32(os.Getpid())
-			p.DestInfo = fakeDestInfo{dest: d}
-			p.IsDocker = true // keploy test of docker compose: no CLI pid here
+			t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			ownPort := appListener(t)
+			service := keepAliveHTTPUpstream(t)
+			cfg := config.New()
+			cfg.Agent.Mode = models.MODE_RECORD
 			core, logs := observer.New(zap.DebugLevel)
-			p.logger = zap.New(core)
-			p.errChannel = make(chan error, 4)
-			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.HTTP: httpint.New(zap.NewNop())}
-			p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}
-			done := make(chan error, 1)
-			go func() { done <- p.handleConnection(context.Background(), src) }()
-
-			if _, err := fmt.Fprintf(app, "GET /parse/health HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", port); err != nil {
+			p := New(zap.New(core), nil, cfg)
+			p.IsDocker = true
+			if err := p.InitIntegrations(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			resp, err := http.ReadResponse(bufio.NewReader(app), nil)
-			if err != nil {
-				t.Fatalf("the app's call to its own port got no answer: %v (logs: %v)", err, logs.All())
+			mocks := make(chan *models.Mock, 16)
+			if err := p.Record(context.Background(), mocks, models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+				t.Fatal(err)
 			}
-			body, _ := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			_ = app.Close()
-			_ = awaitEvent(t, done, "handleConnection returning after the app left")
-			if resp.StatusCode != http.StatusOK || string(body) != ownHealth {
-				t.Fatalf("the app's call to its own port was answered %d %q, want the app's own 200 %q", resp.StatusCode, body, ownHealth)
+			call := func(dst string, caller int, path string) string {
+				t.Helper()
+				d := ipv4Dest(t, dst)
+				d.AgentNsPid, d.KernelPid = uint32(caller), uint32(caller)
+				p.DestInfo = fakeDestInfo{dest: d}
+				app, src := acceptedConn(t)
+				done := make(chan error, 1)
+				go func() { done <- p.handleConnection(context.Background(), src) }()
+				body := awaitEvent(t, get(app, bufio.NewReader(app), path, true), "the answer to "+path)
+				_ = app.Close()
+				_ = awaitEvent(t, done, "handleConnection returning after the app left")
+				return body
 			}
-			if n := len(logs.FilterMessageSnippet("no matching mock").All()); n != 0 {
-				t.Fatalf("a call passed through to the app must say no mock miss, said %d", n)
+			if body := call(fmt.Sprintf("127.0.0.1:%d", ownPort), os.Getpid(), "/parse/health"); body != ownHealth {
+				t.Fatalf("the app's call to its own port was answered %q, want the app's own %q", body, ownHealth)
 			}
-			if len(p.errChannel) != 0 {
-				t.Fatalf("a call passed through to the app must keep no miss for a test, kept %d", len(p.errChannel))
+			if n := logs.FilterMessage(ownListenerRecorded).Len(); n != 1 {
+				t.Fatalf("keploy record said %d times that it passed the app's call to its own port through unrecorded, want once", n)
+			}
+			inAnotherContainer(t, os.Getpid())
+			if body := call(service, other, "/service"); body != "/service" {
+				t.Fatalf("the call to another local service was answered %q, want the service's", body)
+			}
+			for {
+				m := awaitEvent(t, (<-chan *models.Mock)(mocks), "the other service's mock")
+				if m.Spec.HTTPReq == nil {
+					continue
+				}
+				if strings.HasSuffix(m.Spec.HTTPReq.URL, "/parse/health") {
+					t.Fatalf("the app's call to its own port was recorded as a mock: %s", m.Spec.HTTPReq.URL)
+				}
+				if strings.HasSuffix(m.Spec.HTTPReq.URL, "/service") {
+					return
+				}
 			}
 		})
 	}
+}
+
+// inAnotherContainer makes process pid's mount namespace another's than
+// every other process's, as a pod's sidecar's is, until the test ends.
+func inAnotherContainer(t *testing.T, pid int) {
+	t.Helper()
+	old := mountNSOf
+	mountNSOf = func(p int) (string, error) {
+		ns, err := old(p)
+		if p == pid {
+			return "mnt:[another]", err
+		}
+		return ns, err
+	}
+	t.Cleanup(func() { mountNSOf = old })
 }
 
 func TestReplayOwnListenerTellsTheAppsOwnPortsApart(t *testing.T) {
@@ -155,12 +254,12 @@ func TestReplayOwnListenerTellsTheAppsOwnPortsApart(t *testing.T) {
 	for _, proven := range []bool{false, true} {
 		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
-			ownListenerRows(t, proven, self, port, recPort, anyPort, refused, other)
+			ownListenerRows(t, self, port, recPort, anyPort, refused, other)
 		})
 	}
 }
 
-func ownListenerRows(t *testing.T, proven bool, self int, port, recPort, anyPort, refused uint32, other int) {
+func ownListenerRows(t *testing.T, self int, port, recPort, anyPort, refused uint32, other int) {
 
 	type row struct {
 		name   string
@@ -191,8 +290,12 @@ func ownListenerRows(t *testing.T, proven bool, self int, port, recPort, anyPort
 		{name: "docker: the agent's own listener", p: docker(), mode: models.MODE_TEST, caller: other, port: port, agent: self, want: false},
 		{name: "the agent itself calls a listener it holds", p: docker(), mode: models.MODE_TEST, caller: self, port: port, agent: self, want: false},
 		{name: "docker: keploy cannot read who holds it", p: docker(), mode: models.MODE_TEST, caller: other, port: port, holder: true, want: false},
-		{name: "keploy record", p: docker(), mode: models.MODE_RECORD, caller: self, port: port, want: false},
-		{name: "keploy mock decides its own", p: &Proxy{logger: zap.NewNop(), mockMode: true, IsDocker: true}, mode: models.MODE_TEST, caller: self, port: port, want: false},
+		{name: "keploy record: the caller holds it", p: docker(), mode: models.MODE_RECORD, caller: self, port: port, want: true},
+		{name: "keploy record: a process the CLI started holds it", p: native(os.Getppid()), mode: models.MODE_RECORD, port: port, want: true},
+		{name: "keploy record: another local service holds it", p: native(other), mode: models.MODE_RECORD, port: port, want: false},
+		{name: "keploy off", p: docker(), mode: models.MODE_OFF, caller: self, port: port, want: false},
+		{name: "keploy mock of a native command decides its own", p: &Proxy{logger: zap.NewNop(), mockMode: true, appPID: uint32(os.Getppid())}, mode: models.MODE_TEST, caller: self, port: port, want: false},
+		{name: "keploy mock in docker", p: &Proxy{logger: zap.NewNop(), mockMode: true, IsDocker: true}, mode: models.MODE_TEST, caller: self, port: port, want: true},
 		{name: "keploy's proxy port", p: &Proxy{logger: zap.NewNop(), IsDocker: true, Port: port}, mode: models.MODE_TEST, caller: self, port: port, want: false},
 		{name: "keploy's DNS port", p: &Proxy{logger: zap.NewNop(), IsDocker: true, DNSPort: port}, mode: models.MODE_TEST, caller: self, port: port, want: false},
 		{name: "keploy's ingress proxy port", p: &Proxy{logger: zap.NewNop(), IsDocker: true, IncomingProxyPort: uint16(port)}, mode: models.MODE_TEST, caller: self, port: port, want: false},
@@ -201,7 +304,7 @@ func ownListenerRows(t *testing.T, proven bool, self int, port, recPort, anyPort
 		{name: "another host, at a port the app listens on at every address", p: docker(), mode: models.MODE_TEST, caller: self, port: anyPort, addr: fmt.Sprintf("192.0.2.1:%d", anyPort), want: false},
 		{name: "this host, at a port the app listens on at every address", p: docker(), mode: models.MODE_TEST, caller: self, port: anyPort, want: true},
 		{name: "an address that does not parse", p: docker(), mode: models.MODE_TEST, caller: self, port: port, addr: "no-port", want: false},
-		{name: "a port the recording reached as a dependency", p: docker(), mode: models.MODE_TEST, caller: other, port: recPort, want: proven},
+		{name: "a port a recording made before reached as a dependency", p: docker(), mode: models.MODE_TEST, caller: other, port: recPort, want: true},
 		{name: "a recorded port the caller holds itself", p: docker(), mode: models.MODE_TEST, caller: self, port: recPort, want: true},
 	}
 	for _, r := range rows {
@@ -237,9 +340,9 @@ func ownListenerRows(t *testing.T, proven bool, self int, port, recPort, anyPort
 				addr = fmt.Sprintf("127.0.0.1:%d", r.port)
 			}
 			d := &agent.NetworkAddress{Version: 4, Port: r.port, AgentNsPid: uint32(r.caller), KernelPid: uint32(r.caller)}
-			owner, own := r.p.replayOwnListener(r.mode, d, addr)
+			owner, own := r.p.ownListenerCall(r.mode, d, addr)
 			if own != r.want {
-				t.Fatalf("replayOwnListener(%s) = %v (owner %d), want %v", addr, own, owner, r.want)
+				t.Fatalf("ownListenerCall(%s) = %v (owner %d), want %v", addr, own, owner, r.want)
 			}
 			if own && owner != self {
 				t.Fatalf("the listener's holder is %d, want the test process %d", owner, self)
@@ -288,7 +391,7 @@ func TestReplayOwnListenerSaysTheFirstAndEndsAFailedDial(t *testing.T) {
 				_ = resp.Body.Close()
 			}
 		}()
-		return p.serveReplayOwnListener(context.Background(), models.MODE_TEST, srv, d, dst, nil)
+		return p.serveOwnListenerCall(context.Background(), models.MODE_TEST, srv, d, dst, nil)
 	}
 	for i := 0; i < 2; i++ {
 		if served, err := call(); !served || err != nil {
@@ -296,7 +399,7 @@ func TestReplayOwnListenerSaysTheFirstAndEndsAFailedDial(t *testing.T) {
 		}
 	}
 	said := logs.FilterMessageSnippet("passed through to the app").All()
-	if len(said) != 2 || said[0].Level != zapcore.InfoLevel || said[1].Level != zapcore.DebugLevel {
+	if len(said) != 2 || said[0].Level != zapcore.InfoLevel || said[1].Level != zapcore.DebugLevel || said[0].Message != ownListenerReplayed {
 		t.Fatalf("want the first call said at INFO and the second at debug, got %v", said)
 	}
 	if n := p.selfCalls.Load(); n != 2 {
@@ -315,7 +418,7 @@ func TestReplayOwnListenerSaysTheFirstAndEndsAFailedDial(t *testing.T) {
 	other := &agent.NetworkAddress{Version: 4, Port: port}
 	_, srv := net.Pipe()
 	defer func() { _ = srv.Close() }()
-	if served, err := (&Proxy{logger: zap.NewNop()}).serveReplayOwnListener(context.Background(), models.MODE_TEST, srv, other, dst, nil); served || err != nil {
+	if served, err := (&Proxy{logger: zap.NewNop()}).serveOwnListenerCall(context.Background(), models.MODE_TEST, srv, other, dst, nil); served || err != nil {
 		t.Fatalf("a call keploy cannot tell is the app's: served=%v err=%v, want it left to the mock path", served, err)
 	}
 }
