@@ -1109,7 +1109,7 @@ func TestAViewInstallExactClosesReleasesItsWaitersAfterTheRevisionsMove(t *testi
 				rev = mm.Revision()
 				_, waits["spend"] = mm.spendByKindIn(prev, ms["pool"], nil)
 				mk := *ms["pool"]
-				_, waits["consume"], _ = mm.exactConsumeIn(prev, &mk, true, nil)
+				_, waits["consume"], _ = mm.exactConsumeIn(prev, &mk, true, nil, true)
 				for name, w := range waits {
 					if w == nil {
 						t.Errorf("a %s in the replaced view settled: it is closed", name)

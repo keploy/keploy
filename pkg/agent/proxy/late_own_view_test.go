@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -183,19 +184,20 @@ func TestAHeldStoreReadsTheOwnRecordingsOfTheViewItsCallWasReadIn(t *testing.T) 
 		t.Fatalf("a call marked between tests reads own recordings %v; want none: a pool view owns none", exactNames(l))
 	}
 
-	// A call of the pool view whose consume test-2's view refused reads the
-	// view in force from then on (heldScope.settled), as a call made now
-	// does: its owned reads too, test-2's.
+	// A call of the pool view whose consume of the pool view's copy of the
+	// next test's recording test-2's view refused reads the view in force
+	// from then on (heldScope.settled), as a call made now does: its owned
+	// reads too, test-2's.
 	t2own := httpCall("own2-z", 3*time.Second, "/z")
-	_, pc, p := poolCallHeldAcrossNextTest(t, t2own)
+	_, pc, p := aheadCallHeldAcrossNextTest(t, t2own)
 	if _, l, ok := pc.(integrations.SharedReads).OwnedRecordings(); ok {
 		t.Fatalf("precondition: before its consume, the pool view's call reads own recordings %v; want none", exactNames(l))
 	}
 	if pc.DeleteUnFilteredMock(*p) {
-		t.Fatal("precondition: T2's view settled the consume of the pool's p-0; want it refused")
+		t.Fatal("precondition: T2's view settled the consume of the copy of a-0 the pool view served; want it refused")
 	}
-	if _, l, ok := pc.(integrations.SharedReads).OwnedRecordings(); !ok || len(l) != 1 || l[0].Name != t2own.Name {
-		t.Fatalf("after T2's view refused its consume, the held store reads own recordings %v (%v); want T2's %s", exactNames(l), ok, t2own.Name)
+	if _, l, ok := pc.(integrations.SharedReads).OwnedRecordings(); !ok || !reflect.DeepEqual(exactNames(l), []string{"a-0", t2own.Name}) {
+		t.Fatalf("after T2's view refused its consume, the held store reads own recordings %v (%v); want T2's a-0 and %s", exactNames(l), ok, t2own.Name)
 	}
 
 	mm.SetMocksWithWindow([]*models.Mock{own}, nil, models.BaseTime, time.Now())

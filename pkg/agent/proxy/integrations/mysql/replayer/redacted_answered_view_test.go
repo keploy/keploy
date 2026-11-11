@@ -165,16 +165,17 @@ func debugText(logs *observer.ObservedLogs) string {
 	return lines.String()
 }
 
-// Under exact serving a command marked in the pool view matches the pool's
-// recording, which redacted the key, while the replay begins T1: right after
-// the mark, before the command is held, or right after the hold. A pool
-// view's command is no test's, and the recording is not T1's, so its
-// consume settles in T1's view, which refuses it: the command reads the view
-// in force from then on and misses there. Its reads were made in two views,
-// and its miss and every debug line show it redacted whole, wherever between
-// the mark and the hold T1 began. Before, a command held after T1 began was
-// taken as held in the view in force, its view never moved: the miss and a
-// debug line showed the key as sent.
+// Under exact serving a command marked in the pool view matches the
+// recording the pool view serves as the next test's in flight (its ahead),
+// which redacted the key, while the replay begins T1, owning none of it:
+// right after the mark, before the command is held, or right after the
+// hold. T1's view refuses the copy the pool view served, and a pool view's
+// ahead are the next test's, settled in its view, never in the pool view:
+// the command reads the view in force from then on and misses there. Its
+// reads were made in two views, and its miss and every debug line show it
+// redacted whole, wherever between the mark and the hold T1 began. Before, a
+// command held after T1 began was taken as held in the view in force, its
+// view never moved: the miss and a debug line showed the key as sent.
 func TestMySQLAMissMovedOntoTheViewInForceByARefusedConsumeIsRedactedWhole(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
@@ -193,7 +194,16 @@ func TestMySQLAMissMovedOntoTheViewInForceByARefusedConsumeIsRedactedWhole(t *te
 			t.Cleanup(mm.Close)
 			mm.SetMocksWithWindow(nil, []*models.Mock{first}, models.BaseTime, time.Now().Add(time.Hour))
 			seedWindows(mm, 2)
-			mm.ServeExactPool("pool", []string{first.Name})
+			var ahead *models.Mock
+			for _, mk := range mm.StagedMocks() {
+				if mk.Name == first.Name {
+					ahead = mk
+				}
+			}
+			if ahead == nil {
+				t.Fatal("precondition: the recording is not staged")
+			}
+			mm.ServeExactPool("pool", nil, ahead)
 			if !mm.ExactServing() {
 				t.Fatal("precondition: the pool view is not served exactly")
 			}
@@ -221,19 +231,19 @@ func TestMySQLAMissMovedOntoTheViewInForceByARefusedConsumeIsRedactedWhole(t *te
 				t.Fatal("precondition: T1 did not begin inside the match")
 			}
 			if consumes.Load() == 0 {
-				t.Fatal("precondition: the command never went to consume the pool's recording; the row is about a refused consume")
+				t.Fatal("precondition: the command never went to consume the recording the pool view serves; the row is about a refused consume")
 			}
 			if err != nil || ok || miss == "" {
 				t.Fatalf("precondition: the command was not a miss: ok %v, err %v, miss %q", ok, err, miss)
 			}
 			if strings.Contains(shown+miss, closeSecret) {
-				t.Errorf("the miss shows the key the pool's recording redacted: shown %q\nmiss: %s", shown, miss)
+				t.Errorf("the miss shows the key the recording redacted: shown %q\nmiss: %s", shown, miss)
 			}
 			if shown != "(redacted)" {
 				t.Errorf("the miss, read in two views, is shown %q; want it redacted whole", shown)
 			}
 			if text := debugText(logs); strings.Contains(text, closeSecret) {
-				t.Errorf("a debug line shows the key the pool's recording redacted:\n%s", text)
+				t.Errorf("a debug line shows the key the recording redacted:\n%s", text)
 			}
 		})
 	}

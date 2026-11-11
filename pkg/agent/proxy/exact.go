@@ -3547,10 +3547,15 @@ func (m *MockManager) consumeAt(mk *models.Mock, evicts bool, g *roundGuard, tie
 //
 // A late call's consume of one of its own test's recordings settles in its
 // own view (roundGuard.ownView), never in the view in force: see ownView.
+// One of a recording its own view shows, which the view in force refused,
+// settles in its own view then (roundGuard.shownIn): see shownIn.
 func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard, tier func() bool, observe func()) exactVerdict {
 	if f := m.exact.round.onConsume.Load(); f != nil && mk != nil {
 		(*f)(mk.Name)
 	}
+	// tiered is whether mk's tier ran: a view that passed mk refused it only
+	// by its tier's word, which runs once.
+	var tiered bool
 	settle := func(v *exactView, own bool) (exactVerdict, <-chan struct{}) {
 		if v != nil && mk != nil && (evicts || v.spendsInTests(mk, g.windowed(v)) || v.spendsBetween(mk, g.windowed(v)) || v.spendsAsPool(mk)) {
 			if _, own := v.index[mk.Name]; !own {
@@ -3580,18 +3585,17 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 			// lock past it would leave every consume, snapshot and boundary
 			// after it waiting for good, with no error.
 			defer m.exact.round.mu.Unlock()
-			var verdict exactVerdict
-			var wait <-chan struct{}
-			var after func()
-			if own {
-				verdict, wait, after = m.consumeOwnedLocked(v, mk, v.index[mk.Name], false)
-			} else {
-				verdict, wait, after = m.exactConsumeIn(v, mk, evicts, g)
-			}
+			// Settled in the call's own view (own), the consume never waits
+			// for a closed view's replacement: the view the call was read in
+			// decides it, in force or not.
+			verdict, wait, after := m.exactConsumeIn(v, mk, evicts, g, !own)
 			// One the view passes is its tier's to take, in this step: a
 			// tier that refuses it refuses the consume.
-			if wait == nil && verdict == exactPass && tier != nil && !tier() {
-				verdict = exactRefused
+			if wait == nil && verdict == exactPass && tier != nil {
+				tiered = true
+				if !tier() {
+					verdict = exactRefused
+				}
 			}
 			// Told once the consume went through, in this step, still
 			// holding the round lock: never of one refused. One that found
@@ -3618,9 +3622,16 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 		verdict, _ := settle(v, true)
 		return verdict
 	}
-	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
+	verdict := settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
 		return settle(v, false)
 	})
+	if v := g.shownIn(mk); verdict == exactRefused && !tiered && v != nil {
+		// The view in force refused a recording the call's own view shows:
+		// settled there, as at zero latency (shownIn). When that view is
+		// the one in force, and open, it refuses again, as it just did.
+		verdict, _ = settle(v, true)
+	}
+	return verdict
 }
 
 // settleInForce settles a consume or a spend (settle) against the view in
@@ -3650,10 +3661,12 @@ func settleInForce[T any](m *MockManager, refused T, settle func(v *exactView) (
 // when not nil, is the consume's guard: a worker-scope recording is read and
 // spent for the view g's call was read in (roundGuard.windowed).
 // wait, when not nil, says v is closed: nothing was settled, and the consume
-// is to be settled again once wait is closed. after, when not nil, is what
-// the consume tells the replay and the parsers' indexes, to run once the
-// round lock is let go.
-func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool, g *roundGuard) (exactVerdict, <-chan struct{}, func()) {
+// is to be settled again once wait is closed. Only with waits: without it
+// the consume settles in v, closed or not (a late call's own view,
+// roundGuard.ownView and shownIn). after, when not nil, is what the consume
+// tells the replay and the parsers' indexes, to run once the round lock is
+// let go.
+func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool, g *roundGuard, waits bool) (exactVerdict, <-chan struct{}, func()) {
 	if v == nil || mk == nil {
 		return exactPass, nil, nil
 	}
@@ -3661,8 +3674,16 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 	// in flight when it began): each answers once.
 	if len(v.owned) > 0 {
 		if i, ok := v.index[mk.Name]; ok {
-			return m.consumeOwnedLocked(v, mk, i, true)
+			return m.consumeOwnedLocked(v, mk, i, waits)
 		}
+	}
+	// closed is, with v.mu held, v's closedWait while the consume waits for a
+	// closed view's replacement (waits); nil otherwise.
+	closed := func() <-chan struct{} {
+		if !waits {
+			return nil
+		}
+		return v.closedWait()
 	}
 	windowed := g.windowed(v)
 	if !v.showsTo(mk, windowed) {
@@ -3691,7 +3712,7 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 	// read (Postgres's pool index) reads it again for the next call.
 	if v.spendsBetween(mk, windowed) {
 		v.mu.Lock()
-		if wait := v.closedWait(); wait != nil {
+		if wait := closed(); wait != nil {
 			v.mu.Unlock()
 			return exactRefused, wait, nil
 		}
@@ -3729,7 +3750,7 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 		// The view's closed check and the spend are one step: no begin or
 		// end lands between them.
 		v.mu.Lock()
-		if wait := v.closedWait(); wait != nil {
+		if wait := closed(); wait != nil {
 			v.mu.Unlock()
 			return exactRefused, wait, nil
 		}
@@ -3771,7 +3792,7 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 		}
 	}
 	v.mu.Lock()
-	if wait := v.closedWait(); wait != nil {
+	if wait := closed(); wait != nil {
 		v.mu.Unlock()
 		return exactRefused, wait, nil
 	}

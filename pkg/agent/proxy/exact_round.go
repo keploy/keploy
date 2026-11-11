@@ -494,7 +494,8 @@ func (g *roundGuard) windowed(v *exactView) bool {
 // the view in force, one read in a pool view (its ahead recordings are the
 // next test's, carried into that test's view as it opens), and a recording
 // the call's view does not own (the pool's, the worker scope's, the
-// start-up's).
+// start-up's: one the view in force refused settles in the call's view
+// then, shownIn).
 func (g *roundGuard) ownView(mk *models.Mock) *exactView {
 	if g == nil || mk == nil {
 		return nil
@@ -507,6 +508,25 @@ func (g *roundGuard) ownView(mk *models.Mock) *exactView {
 		return v
 	}
 	return nil
+}
+
+// shownIn is the view a consume of mk by g's call settles in once the view in
+// force refused it, when mk is one the view the call was read in (readIn)
+// shows and does not own: the pool's, the worker scope's, a declared session
+// call's. That view, in force or not, decides it, as at zero latency: a call
+// read in a pool view and offered the pool's recording, whose consume lands
+// after the next test began, is answered by it, where that test's view, which
+// shows no pool recording under today's rules, would refuse it and the call
+// would miss. One that view spent already is refused there, as at once. Only
+// a restage refuses it otherwise (stagingGuardLocked). nil when the call
+// reads the view in force, for a recording readIn owns (a test's own settles
+// in ownView; a pool view's ahead are the next test's, settled in its view,
+// which carries them), and once the agent reset readIn's session.
+func (g *roundGuard) shownIn(mk *models.Mock) *exactView {
+	if g == nil || mk == nil || g.readIn == nil || g.readIn.owns(mk.Name) || g.readIn.sessionEnded() {
+		return nil
+	}
+	return g.readIn
 }
 
 // checks says g checks its take against a round: a guard, not ServingFor's.

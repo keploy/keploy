@@ -245,21 +245,25 @@ func (h *heldScope) MarkMockAsUsed(mock models.Mock) bool {
 // latency. Read in the view in force instead, a call whose test ended under
 // it read the worker scope as a call between tests does, where a recording the windows
 // spent answers again, so a call one more than the windows recorded passed,
-// and a later window missed a recording the late call took. When the
-// call's view still offers mk, h reads, walks and spends in the view in
-// force from then on (heldScope.readView): read in its own view, the
-// recording the view in force refused would be offered again, and refused
-// again, without end (the Generic parser's matcher spun on a test's own
-// exchange once the test ended under the call). Read in the view in force,
-// the call reads what any call made now reads: that recording is not
-// offered, and the call is answered by another or misses, as a call read
-// after the begin or end is. A consume of one of the call's own test's
-// recordings settles in the view it was read in (roundGuard.ownView), so one
-// refused there keeps h reading there: that view no longer offers the
-// recording, and the call is answered by another of its own or misses
-// there, as at once, never by the next test's.
+// and a later window missed a recording the late call took. A consume of a
+// recording the call's view shows and does not own settles in that view once
+// the view in force refused it (roundGuard.shownIn), and one of the call's
+// own test's recordings in the view it was read in (roundGuard.ownView): one
+// refused there keeps h reading there, as at once, never in the next test's
+// view or the pool's. So does one of those a tier refused (a copy the store
+// no longer holds): read again there, the call is offered what it would be
+// at zero latency. Only a consume its
+// view could not decide moves h: one of a pool view's ahead (the next test's
+// recordings in flight, carried into its view as it opens: the copy the pool
+// view served answers for nothing there), or of a view whose session the
+// agent reset. While the call's view still offers mk, h reads, walks and
+// spends in the view in force from then on (heldScope.readView): read in its
+// own view, the recording the view in force refused would be offered again,
+// and refused again, without end. Read in the view in force, the call reads
+// what any call made now reads: the next test's own copy of that recording,
+// or another, or it misses, as a call read after the begin is.
 func (h *heldScope) settled(mk *models.Mock, ok bool) bool {
-	if !ok && h.elsewhere() && h.g.ownView(mk) == nil && h.g.readIn.offers(mk) {
+	if !ok && h.elsewhere() && h.g.ownView(mk) == nil && h.g.shownIn(mk) == nil && h.g.readIn.offers(mk) {
 		h.g.readIn = nil
 	}
 	return ok

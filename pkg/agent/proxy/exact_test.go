@@ -1437,7 +1437,7 @@ func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 	mm.ServeExactPool("-", nil)
 	// The race: a consume that loaded v before the swap.
 	mk := *held[0]
-	verdict, wait, _ := mm.exactConsumeIn(v, &mk, true, nil)
+	verdict, wait, _ := mm.exactConsumeIn(v, &mk, true, nil, true)
 	if verdict != exactRefused || wait == nil {
 		t.Fatalf("a consume in a replaced view: %v, wait %v; want refused, to be settled in the view in force", verdict, wait)
 	}
@@ -4444,11 +4444,11 @@ func TestAHeldCallReadsTheWorkerScopeInTheViewItWasReadIn(t *testing.T) {
 	}
 }
 
-// poolCallHeldAcrossNextTest is a held store of a call read in the pool
-// view and offered the pool's p-0, held while the replay begins T2 (owning
-// next) under it: a pool view's call is no test's, and p-0 is not T2's, so a
-// consume of p-0 settles in T2's view (roundGuard.ownView), which refuses it.
-func poolCallHeldAcrossNextTest(t *testing.T, next ...*models.Mock) (*MockManager, integrations.MockMemDb, *models.Mock) {
+// poolCallHeld is a held store of a call read in the pool view and offered
+// the pool's p-0, held, when late, while the replay begins T2 (owning next)
+// under it: a pool view's call is no test's, and p-0 is not T2's, which
+// shows no pool recording under today's rules.
+func poolCallHeld(t *testing.T, late bool, next ...*models.Mock) (*MockManager, integrations.MockMemDb, *models.Mock) {
 	t.Helper()
 	p := httpCall("p-0", time.Second, "/p")
 	mm := stagedManager(t, nil, append([]*models.Mock{p}, next...))
@@ -4457,48 +4457,164 @@ func poolCallHeldAcrossNextTest(t *testing.T, next ...*models.Mock) (*MockManage
 	if got, _ := h.GetSessionScopedMocks(); !slices.ContainsFunc(got, func(mk *models.Mock) bool { return mk.Name == p.Name }) {
 		t.Fatalf("precondition: the pool view's call is offered %v; want the pool's %s", exactNames(got), p.Name)
 	}
-	mm.ServeExactTest("T2", next)
+	if late {
+		mm.ServeExactTest("T2", next)
+	}
 	return mm, h, p
 }
 
-// A held call whose consume the view in force refused is not offered that
-// recording again. The call is read in the pool view and offered the pool's
-// p-0, and the replay begins T2 before its matcher consumes: the consume,
-// settled in T2's view, is refused (poolCallHeldAcrossNextTest). A parser
-// takes a refused consume for a recording another call took and reads again;
-// offered the same recording again, the Generic parser's matcher spun on it
-// without end. Through each consume door, the read after the refusal is the
-// view in force's: p-0 is not in it. (A consume of the call's own test's
-// recording settles in the view it was read in, and one refused there keeps
-// the call reading there, where the recording is answered:
-// TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn.)
-func TestAHeldCallIsNotOfferedARecordingTheViewInForceRefused(t *testing.T) {
-	for _, door := range []struct {
-		name    string
-		consume func(h integrations.MockMemDb, mk *models.Mock) bool
-	}{
-		{"UpdateUnFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool {
-			served := *mk
-			return h.UpdateUnFilteredMock(mk, &served)
-		}},
-		{"DeleteUnFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.DeleteUnFilteredMock(*mk) }},
-		{"DeleteFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.DeleteFilteredMock(*mk) }},
-		{"MarkMockAsUsed", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.MarkMockAsUsed(*mk) }},
-	} {
+// aheadCallHeldAcrossNextTest is a held store of a call read in the pool
+// view after T1 and offered the copy that view serves of a-0, the next
+// test's recording in flight (its ahead), held while the replay begins T2
+// (owning a-0, then next) under it: T2's view refuses the copy the pool view
+// served (a copy another view served answers for nothing there), while the
+// pool view still offers a-0, unanswered.
+func aheadCallHeldAcrossNextTest(t *testing.T, next ...*models.Mock) (*MockManager, integrations.MockMemDb, *models.Mock) {
+	t.Helper()
+	a := exactMock("a-0", time.Second, models.LifetimePerTest)
+	a.Spec.HTTPReq = &models.HTTPReq{Method: "GET", URL: "/a"}
+	mm := stagedManager(t, []*models.Mock{a}, next)
+	mm.ServeExactTest("T1", nil)
+	mm.ServeExactPool(models.PoolKeyNone, nil, roundMock(mm, a.Name))
+	h, _ := mm.HoldToRound(mm.MarkCallRound())
+	offered := aheadOffered(h)
+	if offered == nil {
+		t.Fatal("precondition: the pool view's call was not offered the next test's a-0 in flight")
+	}
+	mm.ServeExactTest("T2", append([]*models.Mock{roundMock(mm, a.Name)}, next...))
+	return mm, h, offered
+}
+
+// aheadOffered is the first a-0 copy db's per-test reads offer; nil for none.
+func aheadOffered(db integrations.MockMemDb) *models.Mock {
+	for _, read := range []func() ([]*models.Mock, error){db.GetFilteredMocks, db.GetPerTestMocksInWindow} {
+		got, _ := read()
+		for _, mk := range got {
+			if mk != nil && mk.Name == "a-0" {
+				return mk
+			}
+		}
+	}
+	return nil
+}
+
+// heldConsumeDoors are the consume doors a parser settles a held call's
+// answer through.
+var heldConsumeDoors = []struct {
+	name    string
+	consume func(h integrations.MockMemDb, mk *models.Mock) bool
+}{
+	{"UpdateUnFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool {
+		served := *mk
+		return h.UpdateUnFilteredMock(mk, &served)
+	}},
+	{"DeleteUnFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.DeleteUnFilteredMock(*mk) }},
+	{"DeleteFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.DeleteFilteredMock(*mk) }},
+	{"MarkMockAsUsed", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.MarkMockAsUsed(*mk) }},
+}
+
+// A call read in the pool view and offered the pool's p-0 is decided as at
+// zero latency whether its consume lands before the replay begins T2 or
+// after (roundGuard.shownIn): the same answer through each consume door, and
+// the same read after it. After, T2's view shows no pool recording (today's
+// rules) and refuses p-0, while the pool view the call was read in still
+// shows it: the consume settles there. Settled in T2's view, the call was
+// refused and read on in T2's view, where p-0 is not offered: it missed.
+func TestAPoolCallHeldAcrossTheNextTestIsAnsweredByThePoolsRecordingAsAtOnce(t *testing.T) {
+	has := func(ms []*models.Mock, name string) bool {
+		return slices.ContainsFunc(ms, func(mk *models.Mock) bool { return mk != nil && mk.Name == name })
+	}
+	for _, door := range heldConsumeDoors {
 		t.Run(door.name, func(t *testing.T) {
-			_, h, p := poolCallHeldAcrossNextTest(t)
-			if door.consume(h, p) {
-				t.Fatal("T2's view settled the consume of the pool's p-0; want it refused: the row is about a refused consume")
+			type outcome struct{ answered, offeredAfter bool }
+			var got [2]outcome
+			for i, late := range []bool{false, true} {
+				_, h, p := poolCallHeld(t, late)
+				got[i].answered = door.consume(h, p)
+				after, _ := h.GetSessionScopedMocks()
+				got[i].offeredAfter = has(after, p.Name)
 			}
-			has := func(ms []*models.Mock) bool {
-				return slices.ContainsFunc(ms, func(mk *models.Mock) bool { return mk != nil && mk.Name == p.Name })
+			if !got[0].answered {
+				t.Fatalf("precondition: at once the pool view's call was refused p-0 through %s; want it answered", door.name)
 			}
-			//nolint:staticcheck // SA1019: the Generic parser reads through GetSessionMocks, and its spin is what this row is about.
-			if got, _ := h.GetSessionMocks(); has(got) {
-				t.Fatalf("after its consume was refused the held call was offered %v again; want the view in force's read, without it: a parser that reads again on a refused consume spins on it", exactNames(got))
+			if got[1] != got[0] {
+				t.Errorf("late the pool view's call was answered %v, then offered p-0 again %v; want %v and %v, as at once: the pool view it was read in shows p-0", got[1].answered, got[1].offeredAfter, got[0].answered, got[0].offeredAfter)
 			}
-			if again, _ := h.GetSessionScopedMocks(); has(again) {
-				t.Fatalf("GetSessionScopedMocks offered %v after the refusal; want it without p-0", exactNames(again))
+		})
+	}
+}
+
+// A call read in the pool view whose pool recording another of the pool
+// view's calls spent is refused whether its consume lands before T2 begins
+// or after, and is not offered it again: the pool view it was read in no
+// longer shows p-0 (roundGuard.shownIn settles nothing it does not show).
+func TestAPoolCallBeatenToThePoolsRecordingIsRefusedAsAtOnce(t *testing.T) {
+	for _, late := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late=%v", late), func(t *testing.T) {
+			p := httpCall("p-0", time.Second, "/p")
+			mm := stagedManager(t, nil, []*models.Mock{p})
+			mm.ServeExactPool("k", []string{p.Name})
+			other, _ := mm.HoldToRound(mm.MarkCallRound())
+			h, _ := mm.HoldToRound(mm.MarkCallRound())
+			if !other.DeleteUnFilteredMock(*p) {
+				t.Fatal("precondition: the pool view's other call was not answered p-0")
+			}
+			if late {
+				mm.ServeExactTest("T2", nil)
+			}
+			if h.DeleteUnFilteredMock(*p) {
+				t.Fatal("the pool view's call was answered p-0 after its other call spent it; want it refused, as at once")
+			}
+			if got, _ := h.GetSessionScopedMocks(); slices.ContainsFunc(got, func(mk *models.Mock) bool { return mk.Name == p.Name }) {
+				t.Errorf("after its refused consume the call was offered %v; want no p-0: the pool view it reads spent it", exactNames(got))
+			}
+		})
+	}
+}
+
+// A call read in the pool view before the agent reset its replay session,
+// whose consume lands after the next test began, is refused the pool's p-0:
+// no recording of a session the agent reset answers, however late keploy
+// decides a call made in it (roundGuard.shownIn settles nothing in a view of
+// an ended session), and the call reads the view in force from then on.
+func TestAPoolCallOfAResetSessionIsRefusedThePoolsRecordingLate(t *testing.T) {
+	mm, h, p := poolCallHeld(t, false)
+	mm.ResetForReplaySession()
+	mm.ServeExactTest("T2", nil)
+	if h.DeleteUnFilteredMock(*p) {
+		t.Fatal("the pool view's call of the reset session was answered p-0; want it refused: its session ended")
+	}
+	if got, _ := h.GetSessionScopedMocks(); slices.ContainsFunc(got, func(mk *models.Mock) bool { return mk.Name == p.Name }) {
+		t.Errorf("after its refused consume the call was offered %v; want the view in force's read, without p-0", exactNames(got))
+	}
+}
+
+// A held call whose consume neither the view in force nor its own view can
+// settle is not offered that recording again. The call is read in the pool
+// view after T1 and offered that view's copy of a-0, the next test's
+// recording in flight, and the replay begins T2 before its matcher consumes:
+// T2's view refuses the copy the pool view served, and a pool view's ahead
+// are the next test's, settled in its view (aheadCallHeldAcrossNextTest). A
+// parser takes a refused consume for a recording another call took and reads
+// again; offered the same copy again, the Generic parser's matcher spun on
+// it without end. Through each consume door, the read after the refusal is
+// the view in force's: T2's own copy of a-0, never the pool view's again.
+func TestAHeldCallIsNotOfferedARecordingTheViewInForceRefused(t *testing.T) {
+	for _, door := range heldConsumeDoors {
+		t.Run(door.name, func(t *testing.T) {
+			_, h, a := aheadCallHeldAcrossNextTest(t)
+			if door.consume(h, a) {
+				t.Fatal("T2's view settled the consume of the copy the pool view served; want it refused: the row is about a refused consume")
+			}
+			again := aheadOffered(h)
+			if again == nil {
+				t.Fatal("after its consume was refused the held call was offered no a-0; want T2's own copy")
+			}
+			if again.TestModeInfo.ServedIn == a.TestModeInfo.ServedIn {
+				t.Fatalf("after its consume was refused the held call was offered the pool view's copy of a-0 again (served in %d); want the view in force's: a parser that reads again on a refused consume spins on it", again.TestModeInfo.ServedIn)
+			}
+			if !door.consume(h, again) {
+				t.Errorf("the held call was refused T2's own copy of a-0 through %s; want it answered", door.name)
 			}
 		})
 	}
@@ -4708,12 +4824,12 @@ func TestAHeldStoreThatReadsInAnotherViewSaysWhatItReads(t *testing.T) {
 
 	// Refused once, a held call reads the view in force, and says its
 	// generation again.
-	mm2, h2, p := poolCallHeldAcrossNextTest(t)
+	mm2, h2, p := aheadCallHeldAcrossNextTest(t)
 	if g := h2.(integrations.StagingGenerations).StagingGeneration(); g < integrations.ElsewhereGeneration {
 		t.Fatalf("before the refusal the held store's generation is %d; want its own: it reads in the pool view", g)
 	}
 	if h2.DeleteUnFilteredMock(*p) {
-		t.Fatal("T2's view settled the consume of the pool's p-0; want it refused")
+		t.Fatal("T2's view settled the consume of the copy of a-0 the pool view served; want it refused")
 	}
 	if got, want := h2.(integrations.StagingGenerations).StagingGeneration(), mm2.StagingGeneration(); got != want {
 		t.Errorf("after the refusal the held store's generation is %d; want the manager's %d: it reads in the view in force", got, want)
