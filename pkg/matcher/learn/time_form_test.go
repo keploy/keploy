@@ -485,6 +485,31 @@ func TestAValueThatIsATimeCarriesItsCheckByForm(t *testing.T) {
 	}
 }
 
+// An id whose bytes begin with a moment (a Mongo ObjectId: its first four
+// bytes are the second it was made, a hex text; a filter's _id, a role
+// binding's key) is no time the time default checks by its form, even
+// bound to an earlier place learning read as a read of the clock: Decide
+// keeps it a Value with no check by form, so an adapter that cannot hold
+// its bind refuses it.
+func TestAnIdThatBeginsWithAMomentGetsNoCheckByForm(t *testing.T) {
+	const p = "body.filter._id"
+	rAt := oAt.Add(900 * time.Microsecond)
+	fAt := oAt.Add(time.Hour + 950*time.Microsecond)
+	oid := func(at time.Time, rest string) string { return strconv.FormatInt(at.Unix(), 16) + rest }
+	rec, live := oid(rAt.Add(-time.Second), "32e505659b477299"), oid(fAt.Add(-time.Second), "32e505659b4772a3")
+	for _, clock := range []bool{true, false} {
+		e := iSent("mock-1", rAt.Add(-500*time.Microsecond), "body.documents.0._id", String, rec, live)
+		e.Seen[0].Clock = clock
+		in := iCall(p, String, rec, live, rAt, fAt, iWin(rAt, fAt, 800*time.Microsecond), []Earlier{e}, nil)
+		in.TimeForm = true
+		d := oWord(t, Decide(in), rec, live)
+		iValue(t, "an ObjectId", d, "mock-1")
+		if d.ByForm != nil {
+			t.Errorf("FALSE GREEN? an ObjectId bound to a place learned as a read of the clock (%v): checked by form %+v; want none", clock, *d.ByForm)
+		}
+	}
+}
+
 // A Value that is one word of a longer text ("since <time> ok") carries the
 // word in its check by form, as a Clock in a text does (Word: its bytes and
 // the hashes of the text on each side), so a replay checks that word alone
