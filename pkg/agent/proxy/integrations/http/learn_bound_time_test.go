@@ -141,3 +141,43 @@ func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 		})
 	}
 }
+
+// One variable the call uses at two fields, each a time stamped by the
+// application and bound whole to the same earlier read of the clock: each
+// use keeps its own check by form, so a replay where the bind does not hold
+// at either field checks that field by its form.
+func TestTwoUsesOfOneBoundTimeEachKeepTheirCheckByForm(t *testing.T) {
+	const created, issued = "body.data.createdAt", "body.data.issuedAt"
+	recAt := time.Date(2026, 11, 11, 18, 35, 46, 351_000_000, time.UTC)
+	liveAt := time.Date(2026, 11, 11, 18, 37, 5, 527_000_000, time.UTC)
+	window := &learn.Window{
+		Rec: learn.Span{From: recAt.Add(-200 * time.Millisecond), To: recAt},
+		F:   learn.Span{From: liveAt.Add(-200 * time.Millisecond), To: liveAt},
+	}
+	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	tr := learn.NewTracker()
+	tr.Begin()
+	test := tr.Epoch()
+	from := learn.Place{Mock: "mock-3232", Side: learn.Request, Path: "body.docs.msgs.0.app.createdAt.$numberLong", Var: "body.docs.msgs.{}.app.createdAt.{}", Live: secs(liveAt), Whole: true, Own: true, Clock: true}
+	var learned []learn.Learned
+	for _, field := range []string{created, issued} {
+		rec := learn.Leaf{Path: field, Value: secs(recAt), Type: learn.Number}
+		live := learn.Leaf{Path: field, Value: secs(liveAt), Type: learn.Number}
+		learned = append(learned, learn.Learned{Kind: learn.KindVariable, Recorded: rec, Live: live, From: from})
+	}
+	m := &models.Mock{Name: "mock-3240"}
+	p, why := learnPlan(tr, test, m, learn.Shape{Fixed: map[string]string{"body": "json"}}, true, boundTimesOf(learned, nil, m, window, true), nil, nil)
+	if why != "" || len(p.vars) != 1 {
+		t.Fatalf("why %q, variables %v; want one variable bound", why, p.vars)
+	}
+	for name, v := range p.vars {
+		if len(v.Use) != 2 || len(v.ByForm) != 2 {
+			t.Fatalf("variable %s uses %v, checked by form at %v; want both fields used and checked by form", name, v.Use, v.ByForm)
+		}
+		for _, field := range []string{created, issued} {
+			if o, ok := v.ByForm[field]; !ok || o.Form != "number 9999999999" {
+				t.Errorf("variable %s's use at %s is checked by form %+v (%v); want its form kept", name, field, o, ok)
+			}
+		}
+	}
+}

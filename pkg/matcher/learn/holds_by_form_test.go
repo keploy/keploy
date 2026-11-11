@@ -25,6 +25,7 @@ func TestAUseCheckedByFormPassesOnlyATimeOfItsFormUnderTheTimeDefault(t *testing
 		{what: "the next second", o: o, live: next, timeForm: true, want: true},
 		{what: "the next second under strict times", o: o, live: next},
 		{what: "no form", o: models.ClockOffset{}, live: next, timeForm: true},
+		{what: "no form, of a value that is no time", o: models.ClockOffset{}, live: Leaf{Type: String, Value: "6732f0f0c3d4e5f60123aaaa"}, timeForm: true},
 		{what: "a word's check", o: models.ClockOffset{Form: o.Form, Word: models.ClockWord{Start: 1, End: 2}}, live: next, timeForm: true},
 		{what: "another form", o: o, live: Leaf{Type: String, Value: "2026-11-12 01:00:01Z"}, timeForm: true},
 		{what: "an epoch number", o: o, live: Leaf{Type: Number, Value: "1794429703"}, timeForm: true},
