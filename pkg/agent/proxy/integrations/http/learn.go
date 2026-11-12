@@ -2690,7 +2690,13 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				}
 			}
 			if !variables.SameValue(bindLive, uLive, u.Type == learn.Number) {
+				// The run's place (from.Run) is an earlier test's call or
+				// the set's start-up's, never this test's: the refusal
+				// names whose it is.
 				held := r.Path + " does not hold the value the test sent at " + bindAt + " of " + from.Mock + ", which it held when recorded"
+				if from.Run {
+					held = r.Path + " does not hold the value " + from.Mock + ", " + learn.RunCallWhose(from) + ", sent at " + bindAt + ", which it held when recorded"
+				}
 				if l.ByForm != nil {
 					// A time whose bind does not hold in round F: two reads
 					// of the clock that fell in one second when recorded,

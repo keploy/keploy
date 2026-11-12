@@ -2407,11 +2407,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 // hold it as its own read of the clock. It names the earlier call and the
 // place, never the value.
 func clockSourceWhy(from Place) string {
-	whose := "an earlier test's call"
+	return "its recorded value was sent in " + placeAt(from) + ", " + RunCallWhose(from) + ", where keploy learned it as a read of the application's clock, and this call does not hold it as its own read of the clock. keploy cannot tell a copy of that read from a read of the clock made in the same second where keploy does not see it (a token the test's client holds, minted at that second, or a value this call made that second, which its answer echoes), so it follows neither. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+}
+
+// RunCallWhose says whose call the run's place from (Place.Run) is: the
+// test set's start-up's, or an earlier test's, never the running test's.
+func RunCallWhose(from Place) string {
 	if from.InStartUp {
-		whose = "the test set's start-up's call"
+		return "the test set's start-up's call"
 	}
-	return "its recorded value was sent in " + placeAt(from) + ", " + whose + ", where keploy learned it as a read of the application's clock, and this call does not hold it as its own read of the clock. keploy cannot tell a copy of that read from a read of the clock made in the same second where keploy does not see it (a token the test's client holds, minted at that second, or a value this call made that second, which its answer echoes), so it follows neither. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+	return "an earlier test's call"
 }
 
 // sinceRereadWindow is the window the offset rule's refusal is read again
