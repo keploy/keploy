@@ -248,7 +248,7 @@ func TestADeclaredClockIsReadUnderTheProvenSwitchOnly(t *testing.T) {
 	if got := sourcesIn(nil)("mock-220"); got != nil {
 		t.Fatalf("a nil store: %v; want none", got)
 	}
-	if got := declaredIn(nil); got.background("mock-220") || got.timeForm {
+	if got := declaredIn(nil); got.background(m) || got.timeForm {
 		t.Fatalf("a nil store: %+v; want no background and no time default", got)
 	}
 }

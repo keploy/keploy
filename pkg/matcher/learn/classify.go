@@ -1042,8 +1042,10 @@ type Learned struct {
 	// moment the start-up, an older test or an earlier read of the clock
 	// gave, an instant built by an offset on a place that moved, as a read
 	// of the clock plus that offset is: offsetWhy): what a clock rule
-	// keploy.yml declares at its field settles (DeclaredClockLearned). "" for every other refusal, and stale (not
-	// Why) once a later step refuses it for another reason.
+	// keploy.yml declares at its field settles (DeclaredClockLearned). ""
+	// for every other refusal (a test case's request keploy could not read,
+	// one that holds a moment the value lost), and stale (not Why) once a
+	// later step refuses it for another reason.
 	sourceWhy string
 	// byOffset: the offset rule refused it (offsetWhy: built by an offset on
 	// what the application was given, before any lead or window excused
