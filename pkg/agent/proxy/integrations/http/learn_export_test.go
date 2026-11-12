@@ -478,8 +478,8 @@ func TestLearnMatchReadsAHeldNullLeafAsNullUnderAKeployYmlPattern(t *testing.T) 
 			}
 			if c.change == "" {
 				if miss != nil || served == nil || served.Name != "mock-1" || len(db.consumed) != 1 ||
-					!reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.MessageBody": {}}) {
-					t.Fatalf("served %v miss %+v, took %+v; want mock-1 served with only its message body learned", served, miss, db.consumed)
+					!reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, exportSendLearned) {
+					t.Fatalf("served %v miss %+v, took %+v; want mock-1 served with only its message's id and stamp learned, by their words", served, miss, db.consumed)
 				}
 				return
 			}
