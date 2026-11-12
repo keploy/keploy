@@ -359,6 +359,45 @@ func TestAOnceChainEndsWhenTheReplayMovesToAnotherTestsWindow(t *testing.T) {
 	}
 }
 
+// The chain is carried in the view of the call's mark, not of its answer:
+// the replay ends TestListApps and opens TestOther while the read by id,
+// the chain's first call, is in flight (marked, not yet answered). The
+// connection's next call, TestOther's own read by name (mock-408), is
+// answered that, not the chain's version 1, and a line says the chain
+// ended. Carried in the answer's view, the chain would follow into
+// TestOther's window and starve its own read.
+func TestAOnceChainEndsWhenTheViewMovesWhileItsFirstCallIsInFlight(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.InfoLevel)
+	lg := zap.New(core)
+	mm := NewMockManager(nil, nil, lg)
+	t.Cleanup(mm.Close)
+	stagePatChain(mm, true, nil, []*models.Mock{workerProbe("mock-408", 13*time.Second, chainRead, answerOther)},
+		models.TestWindow{TestCase: "TestOther", Start: exactT0.Add(12 * time.Second), End: exactT0.Add(15 * time.Second)})
+	c := dialParser(t, mm, lg)
+	moved := false
+	mm.exact.onMarked = func() {
+		mm.exact.onMarked = nil
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactTest("TestOther", []*models.Mock{roundMock(mm, "mock-408")})
+		moved = true
+	}
+	got := []string{c.send(chainGet(chainByID))}
+	if !moved {
+		t.Fatal("precondition: the view did not move at the read by id's mark")
+	}
+	got = append(got, c.send(chainGet(chainRead)))
+	if want := []string{answerByID, answerOther}; !slices.Equal(got, want) {
+		t.Fatalf("the connection was answered %v, want %v", got, want)
+	}
+	if lines := chainLines(logs); len(lines) != 0 {
+		t.Fatalf("the chain answered a call of TestOther's window: %v", lines)
+	}
+	if got, want := endedLines(logs), []string{"mock-218"}; !slices.Equal(got, want) {
+		t.Fatalf("the lines that say the chain ended name %v, want %v", got, want)
+	}
+}
+
 // A chain ends with its test's window too: past TestListApps' end the read
 // by name and the write are answered as any call is (the series' members,
 // served wherever they land), and the write is not the chain's to answer:
