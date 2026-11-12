@@ -642,7 +642,12 @@ func TestAClientTestKeepsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsRef
 // without the offset rule in those windows, the value is refused today by
 // the search for its source too (F served mock-3 and mock-11 with no view an
 // adapter stated, and the windows show no plain read), so the rescue's own
-// restriction to a plain read is not what keeps it refused here.
+// restriction to a plain read is not what keeps it refused here. Where an
+// adapter said F served mock-3 and mock-11 as recorded, no search refuses
+// it there, and the read plus thirty days those windows hold would be
+// learned past the offset rule's refusal if the rescue took a read plus an
+// offset under the rule a copy follows its source: that restriction alone
+// keeps it refused.
 func TestAClientTestKeepsAnOffsetRefusedExpiryOnlyOneRunsOwnWindowHoldsRefused(t *testing.T) {
 	const p = "body.docs.msgs.0.token.expiresAt.$numberLong"
 	const month = 30 * 24 * time.Hour
@@ -661,11 +666,16 @@ func TestAClientTestKeepsAnOffsetRefusedExpiryOnlyOneRunsOwnWindowHoldsRefused(t
 	leaf := func(x copyOrReadRun) Leaf {
 		return Leaf{Path: p, Noise: p, Type: Number, Value: secs(x.at(x.audited).Add(month))}
 	}
-	learn := func(r, f copyOrReadRun) Learned {
+	learn := func(r, f copyOrReadRun, asRecorded bool) Learned {
 		dc := clientTestCache()
 		raw := []Raw{
 			dc.RawOf(stamp("mock-3", r.at(r.audited).Add(month-gap), r.began.Add(-6*time.Minute)), true),
 			dc.RawOf(stamp("mock-11", f.at(f.audited).Add(month-gap), r.began.Add(-5*time.Minute)), true),
+		}
+		if asRecorded {
+			for i := range raw {
+				raw[i] = raw[i].ServedAsRecorded()
+			}
 		}
 		w := (&Window{Rec: r.window(true), F: f.window(true)}).ComparesOffsets()
 		shape := func(x copyOrReadRun) Shape { return Shape{Leaves: map[string]Leaf{p: leaf(x)}} }
@@ -674,15 +684,17 @@ func TestAClientTestKeepsAnOffsetRefusedExpiryOnlyOneRunsOwnWindowHoldsRefused(t
 	if secs(slow.at(slow.audited)) == secs(slow.at(slow.insert)) || secs(rec.at(rec.audited)) != secs(rec.at(rec.insert)) {
 		t.Fatal("fixture: the read must lie in the recording's own window and outside the slow round's")
 	}
-	for _, c := range []struct {
-		name string
-		r, f copyOrReadRun
-	}{
-		{"the recording's own window", rec, slow},
-		{"record's full round's own window", slow, rec},
-	} {
-		if ln := learn(c.r, c.f); ln.Kind != KindUnaccounted || !ln.byOffset || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
-			t.Fatalf("%s alone: %s Read=%+v Offset=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", c.name, ln.Kind, ln.Read, ln.Offset, ln.Why)
+	for _, asRecorded := range []bool{false, true} {
+		for _, c := range []struct {
+			name string
+			r, f copyOrReadRun
+		}{
+			{"the recording's own window", rec, slow},
+			{"record's full round's own window", slow, rec},
+		} {
+			if ln := learn(c.r, c.f, asRecorded); ln.Kind != KindUnaccounted || !ln.byOffset || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
+				t.Fatalf("%s alone, served as recorded %v: %s Read=%+v Offset=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", c.name, asRecorded, ln.Kind, ln.Read, ln.Offset, ln.Why)
+			}
 		}
 	}
 }
