@@ -1,6 +1,7 @@
 package http
 
 import (
+	"cmp"
 	"context"
 	"strconv"
 	"strings"
@@ -104,14 +105,71 @@ func TestLearnMatchRefusesAClientTestsWordItCannotBind(t *testing.T) {
 	}
 }
 
+// An earlier call of the test, the application's audit write, sent the
+// repository inside a longer value before the PUT ("trusted
+// octo-org/repo-<word>"): such a call binds nothing, and it never hides the
+// client test's request field that holds the word the name changed by,
+// ranked before it, whether the word is a UnixNano (an instant, which the
+// echo finds) or a random one. The PUT is answered, the word bound at the
+// request's field. Where the request's field changed by two words (no word
+// of it to bind), the call is where the name's value came from, and the PUT
+// is refused naming the call. Under both time settings.
+func TestLearnMatchBindsAClientTestsWordBeforeACallThatSentItInsideALongerValue(t *testing.T) {
+	twoWords := func(live bool) string {
+		if live {
+			return "-9f3a"
+		}
+		return "-1e8b"
+	}
+	const atCall = "body.data.name carries a value mock-1 sent earlier in the test at body.event, inside a longer value or at a place keploy cannot bind it"
+	for _, hex := range []bool{false, true} {
+		for _, timeForm := range []bool{true, false} {
+			served, miss, db := ciKeyPut(t, ciKeyCase{audit: true, hex: hex}, timeForm)
+			if served == nil || miss != nil || len(db.consumed) != 1 {
+				t.Fatalf("an earlier call sent the repository inside a longer value (random word %v, time default %v): served %v, miss %+v; want the PUT answered", hex, timeForm, served != nil, miss)
+			}
+			if !bindsAt(db.consumed[0], "body.variables.input.conditions[0].value#3") {
+				t.Fatalf("random word %v: binds %+v; want the name's word bound at the test case's body.variables.input.conditions[0].value#3", hex, db.consumed[0].Spec.LearnedBinds())
+			}
+			served, miss, db = ciKeyPut(t, ciKeyCase{audit: true, hex: hex, repoTail: twoWords}, timeForm)
+			if served != nil || miss == nil || len(db.consumed) != 0 || !strings.Contains(miss.res.Why, atCall) {
+				t.Fatalf("the request's field changed by two words, an earlier call sent the repository inside a longer value (random word %v, time default %v): served %v, miss %+v; want it refused: %s", hex, timeForm, served != nil, miss, atCall)
+			}
+		}
+	}
+	// A field whose key ends in #<digits> binds at its escaped name.
+	served, miss, db := ciKeyPut(t, ciKeyCase{key: "value#1"}, true)
+	if served == nil || miss != nil || len(db.consumed) != 1 || !bindsAt(db.consumed[0], `body.variables.input.conditions[0]["value#1"]#3`) {
+		t.Fatalf("the request's field named value#1: served %v, miss %+v; want the PUT answered, the word bound at the field's escaped name", served != nil, miss)
+	}
+}
+
+// bindsAt reports whether m binds a variable at the test case
+// post-query-83's place at.
+func bindsAt(m models.Mock, at string) bool {
+	for _, b := range m.Spec.LearnedBinds()["test case post-query-83"] {
+		if b.Bind == at {
+			return true
+		}
+	}
+	return false
+}
+
 // ciKeyCase varies the key record ciKeyPut learns on: a tail after the
 // name's repository (nameTail), a tail after the request's repository
 // (repoTail), and a number in the record (seq) holding the run's id that
 // the request sent as a word of its ref condition, after a fraction's
-// point (not seqWhole) or whole.
+// point (not seqWhole) or whole. audit is an earlier call of the test, the
+// application's audit write (mock-1), that sent the repository inside a
+// longer value before the PUT, as recorded and as F sent it. key names the
+// request's repository field ("value" where ""). hex makes the repository's
+// word a random one in place of the UnixNano, a word that is no instant, and
+// leaves the record's stamps as recorded.
 type ciKeyCase struct {
 	nameTail, repoTail func(live bool) string
 	seq, seqWhole      bool
+	audit, hex         bool
+	key                string
 }
 
 const (
@@ -137,6 +195,15 @@ func ciKeyPut(t *testing.T, c ciKeyCase, timeForm bool) (*models.Mock, *learnMis
 		}
 		return f(live)
 	}
+	word := func(read time.Time, live bool) string {
+		switch {
+		case !c.hex:
+			return strconv.FormatInt(read.UnixNano(), 10)
+		case live:
+			return "e5f6a7b8c9"
+		}
+		return "a1b2c3d4e5"
+	}
 	path := func(id string) string { return "/v1/secret/data/keploy/personal-access-tokens/keploy.io/" + id }
 	body := func(id, by, seq string, at, nameRead time.Time, live bool) string {
 		extra := ""
@@ -150,12 +217,13 @@ func ciKeyPut(t *testing.T, c ciKeyCase, timeForm bool) (*models.Mock, *learnMis
 		return `{"data":{"_id":"` + id + `","cid":"keploy.io","createdAt":` + strconv.FormatInt(at.Unix(), 10) +
 			`,"createdBy":"` + by + `","email":"sa-` + by + `@keploy.io.svc","expiresAt":` + strconv.FormatInt(at.Add(ttl).Unix(), 10) +
 			`,"isServiceAccountKey":true,"isServiceToken":false,"isWebSession":false,"isWorkloadIdentity":true,"keyType":"pat","lastUsedAt":0,"mintedForJti":"","name":"CI identity: github octo-org/repo-` +
-			strconv.FormatInt(nameRead.UnixNano(), 10) + tail(c.nameTail, live) + `","resourceId":"","resourceType":"","scopes":["read","write","admin"]` + extra +
+			word(nameRead, live) + tail(c.nameTail, live) + `","resourceId":"","resourceType":"","scopes":["read","write","admin"]` + extra +
 			`,"sessionPerms":"","status":"active","token":"","updatedAt":"` + at.UTC().Format(time.RFC3339) + `"}}`
 	}
+	key := cmp.Or(c.key, "value")
 	req := func(read time.Time, sa, seq string, live bool) string {
-		return `{"query":"mutation($sa: String!, $input: CreateWorkloadIdentityInput!) {\n  createServiceAccountWorkloadIdentity(serviceAccountId: $sa, input: $input) { id audience exchangeAudience issuer pinned { claim value } expiresAt }\n}","variables":{"input":{"conditions":[{"claim":"repository","value":"octo-org/repo-` +
-			strconv.FormatInt(read.UnixNano(), 10) + tail(c.repoTail, live) + `"},{"claim":"ref","value":"refs/heads/run-` + seq + `"}],"issuer":"http://127.0.0.1:42833","provider":"github"},"sa":"` + sa + `"}}`
+		return `{"query":"mutation($sa: String!, $input: CreateWorkloadIdentityInput!) {\n  createServiceAccountWorkloadIdentity(serviceAccountId: $sa, input: $input) { id audience exchangeAudience issuer pinned { claim value } expiresAt }\n}","variables":{"input":{"conditions":[{"claim":"repository","` + key + `":"octo-org/repo-` +
+			word(read, live) + tail(c.repoTail, live) + `"},{"claim":"ref","value":"refs/heads/run-` + seq + `"}],"issuer":"http://127.0.0.1:42833","provider":"github"},"sa":"` + sa + `"}}`
 	}
 	recBegin := ciRecBegin()
 	began := learnAt.Add(10 * time.Minute)
@@ -187,7 +255,22 @@ func ciKeyPut(t *testing.T, c ciKeyCase, timeForm bool) (*models.Mock, *learnMis
 	put := learnRecorded("mock-0", 1130*time.Millisecond, "PUT", path(ciRecID),
 		body(ciRecID, ciRecBy, ciRecSeq, recBegin.Add(120*time.Millisecond), recBegin.Add(100*time.Millisecond), false), nil, `{"data":{"version":1}}`)
 	db := &learnDb{perTest: []*models.Mock{put}}
-	in := live("PUT", path(ciLiveID), body(ciLiveID, ciLiveBy, ciLiveSeq, began.Add(120*time.Millisecond), sent, true), nil)
+	if c.audit {
+		event := func(read time.Time, live bool) string {
+			return `{"event":"trusted octo-org/repo-` + word(read, live) + `"}`
+		}
+		// Its learn step bound its word, and told the test's tracker what
+		// it sent, as recorded and as F sent it.
+		audit := learnRecorded("mock-1", 1110*time.Millisecond, "POST", "/v1/audit", event(recBegin.Add(100*time.Millisecond), false), nil, `{}`)
+		test, _, _, _ := tr.Test()
+		tr.Served(test, learn.Earlier{Mock: audit.Name, At: audit.Spec.ReqTimestampMock, Own: true, Payload: learn.RawOf(audit, true),
+			Seen: []learn.Seen{{Side: learn.Request, Leaf: learn.Leaf{Path: "body.event", Value: event(recBegin.Add(100*time.Millisecond), false), Type: learn.String}, Live: event(sent, true)}}})
+	}
+	stamped := began.Add(120 * time.Millisecond)
+	if c.hex {
+		stamped = recBegin.Add(120 * time.Millisecond)
+	}
+	in := live("PUT", path(ciLiveID), body(ciLiveID, ciLiveBy, ciLiveSeq, stamped, sent, true), nil)
 	in.arrived = began.Add(130 * time.Millisecond)
 	var store integrations.MockMemDb = db
 	if timeForm {

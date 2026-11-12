@@ -83,6 +83,10 @@ func TestAOnceChainIsFollowedOnlyInTheViewItWasCarriedOnIn(t *testing.T) {
 		{"a set staged since", at(1, 4), at(2, 4), ""},
 		{"a mark with no boundary count", NewCallRound(1, nil), NewCallRound(1, nil), ""},
 		{"the call's mark keeps no boundary count", at(1, 4), NewCallRound(1, nil), ""},
+		// Each mark's own known flag decides it: here the epochs and counts
+		// agree, and only the mark that keeps no count tells them apart.
+		{"the call's mark keeps no boundary count, at the carried one's epoch and count", at(1, 0), NewCallRound(1, nil), ""},
+		{"the carried mark keeps no boundary count, at the call's epoch and count", NewCallRound(1, nil), at(1, 0), ""},
 		{"a mark of no read after one of a read", at(1, 4), CallRound{}, ""},
 		{"a mark of a read after one of no read", CallRound{}, at(1, 4), ""},
 		{"two marks of no read", CallRound{}, CallRound{}, "n1"},

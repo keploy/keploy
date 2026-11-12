@@ -2,8 +2,11 @@ package learn
 
 import (
 	"slices"
+	"strconv"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // A source keploy.yml's mock.rules declares for a field of a call
@@ -129,6 +132,186 @@ func (dc *decider) minted(path string, src Source, ds []Decision) []Decision {
 	d.Minted = &Minted{Rule: src.Rule, Form: form}
 	d.AnsweredAfter = dc.answeredAfter(r)
 	return append([]Decision{d}, bound...)
+}
+
+// mintedUses makes every other place of the call that holds a value a
+// minted rule decided made anew (Decision.Minted), whole or a word of it, a
+// use of the minted field, so a replay holds the place to the value the
+// rule binds there: never a value of its own that no replay compares, and
+// never noise. The field's words are not decided apart (minted), so each
+// copy names the minted field as its source:
+//   - a field whose recorded value is the minted value whole is one use of
+//     it whole, however many words learning split it into;
+//   - a word that is the minted value whole is a use of it there;
+//   - a word that is one word of a minted value of several words (a
+//     UUID's) is a use of that word of the minted field, read there in the
+//     value the rule binds.
+//
+// Where round F sent another value there than the minted field's, the call
+// sent two values apart: refused, as oneValue refuses one. A word made
+// anew whose text holds the minted value, or a word of it, that no use can
+// name (inside a longer word, or a text learning decided whole) is
+// refused: keploy cannot hold it to the minted value. Only a word made
+// anew is re-decided here: one learning bound to an earlier place, read
+// as the clock, or refused keeps its decision.
+func (dc *decider) mintedUses(out []Decision, fields []string) ([]Decision, []string) {
+	var ms []mintedValue
+	minted := map[string]bool{}
+	for i, d := range out {
+		if d.Minted != nil {
+			ms = append(ms, mintedValue{field: fields[i], at: d.At, rule: d.Minted.Rule, rec: d.Recorded, live: d.Full, rw: wordTexts(d.Recorded), lw: wordTexts(d.Full)})
+			minted[fields[i]] = true
+		}
+	}
+	if len(ms) == 0 {
+		return out, fields
+	}
+	name := func(m mintedValue, word int) string {
+		if word >= 0 {
+			return dc.in.Mock + " " + m.field + " word " + strconv.Itoa(word)
+		}
+		return dc.in.Mock + " " + m.field
+	}
+	use := func(path string, at variables.Address, n int, r, f string, m mintedValue, word int) Decision {
+		from := m.at
+		from.Word = word
+		what := "the value bound at " + name(m, -1)
+		if word >= 0 {
+			what = "word " + strconv.Itoa(word) + " of the value bound at " + name(m, -1)
+		}
+		d := dc.learned(path, at, n, r, f, OutcomeValue,
+			"used "+what+", which keploy.yml's rule "+m.rule+" declares minted, sent at both places in both runs: a replay holds this place to the value the rule binds there", []string{name(m, word)})
+		d.From = Place{Mock: dc.in.Mock, Side: Request, Path: m.field, Live: f, Whole: word < 0}
+		d.FromAt = from
+		d.AnsweredAfter = dc.answeredAfter(r)
+		return d
+	}
+	twoValues := func(path string, at variables.Address, n int, r, f string, m mintedValue, word int) Decision {
+		there := m.live
+		if word >= 0 {
+			there = m.lw[word]
+		}
+		return ruledBy(dc.refuse(path, at, n, r, f, RefusalTwoSources,
+			"the recorded value stands at "+name(m, word)+", which keploy.yml's rule "+m.rule+" declares minted, and here, and round F sent "+strconv.Quote(f)+" here and "+strconv.Quote(there)+" there: two values, and keploy cannot tell which one the recording's is",
+			[]string{name(m, word)}, dc.fieldNoise(path)), m.rule)
+	}
+	var res []Decision
+	var resFields []string
+	for i := 0; i < len(out); {
+		j := i
+		for j < len(out) && fields[j] == fields[i] {
+			j++
+		}
+		path, group := fields[i], out[i:j]
+		i = j
+		if minted[path] {
+			res = append(res, group...)
+			for range group {
+				resFields = append(resFields, path)
+			}
+			continue
+		}
+		rec, live := dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path]
+		at := dc.in.AddressOf(rec, false)
+		whole := slices.IndexFunc(ms, func(m mintedValue) bool { return rec.Value == m.rec })
+		if whole >= 0 && !slices.ContainsFunc(group, func(d Decision) bool {
+			return d.Outcome != OutcomeFresh && d.Outcome != OutcomeValue
+		}) {
+			// The field is the minted value whole, as written: one use of
+			// it there (no step opens it), or two values where round F
+			// sent another one here. A word of it learning refused keeps
+			// the field as learning decided it (above).
+			m := ms[whole]
+			at.Steps = nil
+			if live.Value == m.live {
+				res = append(res, use(path, at, -1, m.rec, m.live, m, -1))
+			} else {
+				res = append(res, twoValues(path, at, -1, m.rec, live.Value, m, -1))
+			}
+			resFields = append(resFields, path)
+			continue
+		}
+		for _, d := range group {
+			if d.Outcome == OutcomeFresh {
+				d = dc.mintedCopy(path, d, ms, func(m mintedValue, word int) Decision {
+					if word < 0 && m.live == d.Full || word >= 0 && m.lw[word] == d.Full {
+						return use(path, d.At, d.At.Word, d.Recorded, d.Full, m, word)
+					}
+					return twoValues(path, d.At, d.At.Word, d.Recorded, d.Full, m, word)
+				})
+			}
+			res = append(res, d)
+			resFields = append(resFields, path)
+		}
+	}
+	return res, resFields
+}
+
+// mintedValue is a value a minted rule decided made anew at field
+// (Decision.Minted), as mintedUses reads it: its address and rule, its
+// recorded value (rec) and round F's (live), and the words of each.
+type mintedValue struct {
+	field     string
+	at        variables.Address
+	rule      string
+	rec, live string
+	rw, lw    []string
+}
+
+// mintedCopy is d, a word made anew at path, as mintedUses decides it
+// against the minted values ms: d itself where it holds none of them;
+// decided(m, -1) where it is m whole; decided(m, w) where it is word w of
+// m, a value whose words pair in round F (the first such
+// word round F's value pairs with, else the first); refused where its
+// text holds one, or a word of one, that no use names (inside a longer
+// word, or a text learning decided whole).
+func (dc *decider) mintedCopy(path string, d Decision, ms []mintedValue, decided func(m mintedValue, word int) Decision) Decision {
+	for _, m := range ms {
+		if d.Recorded == m.rec {
+			return decided(m, -1)
+		}
+		if len(m.rw) == len(m.lw) {
+			first := -1
+			for w, t := range m.rw {
+				if t != d.Recorded {
+					continue
+				}
+				if m.lw[w] == d.Full {
+					return decided(m, w)
+				}
+				if first < 0 {
+					first = w
+				}
+			}
+			if first >= 0 {
+				return decided(m, first)
+			}
+		}
+		if slices.ContainsFunc(m.rw, func(w string) bool { return strings.Contains(d.Recorded, w) }) {
+			return ruledBy(dc.cannotCheck(path, d.At, d.At.Word, d.Recorded, d.Full,
+				"its text holds "+dc.in.Mock+" "+m.field+"'s value, which keploy.yml's rule "+m.rule+" declares minted, or a word of it, in a way no use of that value names here (inside a longer word or text, or the minted value's words did not pair in round F), so keploy cannot hold it to the value the rule binds"), m.rule)
+		}
+	}
+	return d
+}
+
+// ruledBy is d, a refusal, naming rule in its line's tail
+// (Refusal.Rule): the rule whose minted field the refused place copies.
+func ruledBy(d Decision, rule string) Decision {
+	rf := *d.Refusal
+	rf.Rule = rule
+	d.Refusal, d.Line = &rf, RefusalLine(rf)
+	return d
+}
+
+// wordTexts is s's words (variables.Words), as texts.
+func wordTexts(s string) []string {
+	ws := variables.Words(s)
+	out := make([]string, len(ws))
+	for i, w := range ws {
+		out[i] = s[w[0]:w[1]]
+	}
+	return out
 }
 
 // mintedHeld names the earlier places that hold a minted field's whole

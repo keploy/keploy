@@ -4233,29 +4233,35 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 // (echoedIn, holdsRecorded): the first by placeRank. ok is false when none
 // does. A client test's request that held it inside a longer value names
 // the word the value changed by where it held that word (Place.Word: the
-// value as recorded, and live, as F saw it, wordBindAt).
+// value as recorded, and live, as F saw it, wordBindAt), and ranks as
+// appearedIn ranks it: after the test's request that sent the value whole
+// and before a call that sent it inside a longer value, which binds
+// nothing and never hides that word.
 func (dc *DriftCache) echoServed(echoed []echoMatch, recorded, live string, served []Earlier) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
 	}
 	var best Place
-	rank := noPlaceRank
+	rank := 2 * noPlaceRank
 	for _, e := range served {
 		for _, s := range e.Seen {
 			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
 				continue
 			}
 			whole := s.Leaf.Value == recorded
-			if r := placeRank(e, s, whole); r < rank {
-				best, rank = seenPlace(e, s, whole), r
-				best.Echo, best.givenWhole = true, s.Side == Response
-				if !whole {
-					best.Word = wordBindAt(best, s.Leaf.Value, s.Live, recorded, live)
+			p, r := seenPlace(e, s, whole), 2*placeRank(e, s, whole)
+			if !whole {
+				if p.Word = wordBindAt(p, s.Leaf.Value, s.Live, recorded, live); p.Word != "" {
+					r = 2*clientWholeRank + 1
 				}
+			}
+			if r < rank {
+				best, rank = p, r
+				best.Echo, best.givenWhole = true, s.Side == Response
 			}
 		}
 	}
-	return best, rank < noPlaceRank
+	return best, rank < 2*noPlaceRank
 }
 
 // echoRaw is the place of payload x that holds the recorded moment of one of
