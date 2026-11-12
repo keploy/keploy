@@ -33,7 +33,9 @@ import (
 // calls served before it in the order served, that the reader follows for
 // the read), and p does not answer already, the place learn.ReadBack finds
 // in earlier with the reader's marks of what each call stored, when the
-// test's own call made it. A leaf whose write holds a variable of the test
+// test's own call made it and no call the reader does not follow may have
+// written the leaf's value otherwise (HTTP's own store's
+// putWrittenElsewhere). A leaf whose write holds a variable of the test
 // already (bound or used there) answers that variable; any other is a new
 // variable bound at the write (p.binds), but where the write's leaf is a read
 // of the application's clock its call learned (clockWritten), which is
@@ -50,6 +52,11 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		return models.HTTPStoreFollows(read.Spec.HTTPReq, call.Spec.HTTPReq)
 	}
 	accessOf := models.HTTPStoreAccessOf
+	// elsewhere names a call the reader does not follow that may have
+	// written a value the read answers (recorded, as the write that stored
+	// it sent live) otherwise: none for a registered reader, which follows
+	// every call of its API that writes a record.
+	elsewhere := func(string, string, string) (string, bool) { return "", false }
 	if !models.HTTPStoreReads(answered.Spec.HTTPReq) {
 		// No registered reader reads it: HTTP's own store does where it is
 		// a GET (putstore.go).
@@ -59,6 +66,9 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		follows = putFollows
 		accessOf = func(read *models.Mock, calls []*models.Mock) (models.HTTPStoreAccess, bool) {
 			return putAccess(read, calls, earlier, live)
+		}
+		elsewhere = func(write, recorded, live string) (string, bool) {
+			return putWrittenElsewhere(answered, served, earlier, write, recorded, live)
 		}
 	}
 	calls := make([]*models.Mock, 0, len(served))
@@ -91,7 +101,8 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		h.Logger.Info("keploy answers fields of a read with their recorded values, not with what this run wrote, because of a write it cannot follow",
 			zap.String("mock", answered.Name), zap.Int("fields", len(paths)), zap.String("first", paths[0]), zap.String("why", access.Unread[paths[0]]))
 	}
-	if len(access.Read) == 0 {
+	if len(access.Read) == 0 || !storedAny(access.Written) {
+		// No call stored a leaf: learn.ReadBack reads back none.
 		return p
 	}
 	// The tracker holds each mock it served once (Tracker.Placed), so a
@@ -111,6 +122,20 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 	for _, g := range given {
 		reserved[g.Name] = true
 	}
+	// held is each answer field elsewhere left as recorded, with the call.
+	held := map[string]string{}
+	defer func() {
+		if len(held) == 0 {
+			return
+		}
+		paths := make([]string, 0, len(held))
+		for path := range held {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		h.Logger.Info("keploy answers fields of a read with their recorded values, not with what this run's PUT stored, because a later call to another URL of the store may have written them",
+			zap.String("mock", answered.Name), zap.Int("fields", len(paths)), zap.String("first", paths[0]), zap.String("call", held[paths[0]]))
+	}()
 	for _, a := range respLeaves(answered.Spec.HTTPResp) {
 		record, ok := access.Read[a.Path]
 		if !ok {
@@ -136,6 +161,10 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 				// word: the field is answered as recorded.
 				continue
 			}
+			if c, ok := elsewhere(from.Mock, learned[from.Mock][name].Recorded, from.Live[w[k][0]:w[k][1]]); ok {
+				held[a.Path] = c
+				continue
+			}
 			v := p.vars[name]
 			v.Recorded, v.Answer = learned[from.Mock][name].Recorded, appendNew(v.Answer, place+"#"+strconv.Itoa(k))
 			p.vars[name] = v
@@ -143,6 +172,10 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 			if _, ok := p.values[name]; !ok {
 				p.values[name] = variables.Binding{Name: name, Value: from.Live[w[k][0]:w[k][1]], Recorded: v.Recorded, Mock: from.Mock, Place: from.Var + "#" + strconv.Itoa(k)}
 			}
+			continue
+		}
+		if c, ok := elsewhere(from.Mock, a.Value, from.Live); ok {
+			held[a.Path] = c
 			continue
 		}
 		if from.Name != "" {

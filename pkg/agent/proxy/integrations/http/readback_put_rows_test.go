@@ -98,8 +98,9 @@ func TestReadBackOfAPutHoldsOverCallsThatKeepTheRecord(t *testing.T) {
 // The read-back stops where the GET may not read what the PUT stored: a PUT
 // answered 500 after it (whether it stored is unknown), the PUT and the GET in this
 // run to two URLs keploy.yml masks to one, requests with no Host (no one
-// resource is named), and a later PUT that replaced the record (a field only
-// the earlier PUT stored is not read back).
+// resource is named), a POST or a PATCH of the record after it, and a later
+// PUT that replaced the record (a field only the earlier PUT stored is not
+// read back).
 func TestReadBackOfAPutStopsWhereTheRecordMayDiffer(t *testing.T) {
 	const keyA, keyB = "9e3f6a1b-2c4d-4e5f-8a9b-0c1d2e3f4a5b", "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
 	recordedAnswer := kpGetAnswer(kpRecKey, kpRecBy, kpRecNano)
@@ -136,6 +137,21 @@ func TestReadBackOfAPutStopsWhereTheRecordMayDiffer(t *testing.T) {
 				t.Fatalf("a GET with no Host answered\n%s\nwant its recording", got)
 			}
 		})
+		for _, method := range []string{"POST", "PATCH"} {
+			// A POST or a PATCH to the record's URL after the PUT changes it
+			// in a way keploy does not follow, though its JSON body holds a
+			// value the GET's recorded answer holds, drifted with the PUT's.
+			t.Run("proven="+proven+"/a-"+method+"-between", func(t *testing.T) {
+				owner := func(by string) string { return `{"data":{"createdBy":"` + by + `"}}` }
+				m := kpMocks(recordedAnswer)
+				w := learnRecorded("mock-2", 1200*time.Millisecond, method, kpPath(kpRecKey), owner(kpRecBy), kpVault, `{"data":{"version":2}}`)
+				m = []*models.Mock{m[0], w, m[1]}
+				_, served := kpRun(t, proven, m, []*req{put(), live(method, kpPath(kpRecKey), owner(kpLiveBy), kpVault), get()})
+				if got := served[2].Spec.HTTPResp.Body; got != recordedAnswer {
+					t.Fatalf("a GET after a %s of the record answered\n%s\nwant its recording", method, got)
+				}
+			})
+		}
 		t.Run("proven="+proven+"/replaced", func(t *testing.T) {
 			const revoked = `{"data":{"_id":"` + kpRecKey + `","status":"revoked"}}`
 			answer := `{"data":{"data":{"_id":"` + kpRecKey + `","status":"revoked"},"metadata":{"owner":"` + kpRecBy + `","version":2}}}`

@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -33,18 +34,24 @@ import (
 //   - no call of the test to that URL other than a GET, a HEAD or an OPTIONS
 //     came after the last PUT (a POST, a PATCH, a DELETE, or a PUT keploy
 //     cannot read changes the resource in a way keploy does not follow), and
-//     a later PUT replaces what an earlier one stored.
+//     a later PUT replaces what an earlier one stored;
+//   - no call of the test after that PUT to another URL of the Host, other
+//     than a read, may have written the field's value otherwise
+//     (putWrittenElsewhere): a store's delete, reset or transfer endpoint
+//     whose request held the value, as recorded, and sent another in this
+//     run, or held it where keploy does not read it, leaves the field
+//     answered as recorded. One that sent this run's value there (an index
+//     of the record the application keeps at another URL) wrote what the PUT
+//     wrote.
 //
 // A stored field the PUT's learn step learned as a read of the application's
 // clock (a createdAt or an expiresAt the application stamps) is answered as
 // recorded (readBackPlan's clockWritten): the HTTP replay cannot hold one
 // place of a call to both a variable and a read of the clock, so a variable
-// bound there would refuse the PUT in every later replay.
-//
-// A stated limit: a call to another URL that changes the resource (a key
-// store's delete or destroy endpoint) is not seen; the GET's recorded answer
-// then holds what that call left there, which is linked only where it is
-// what the PUT stored when recorded.
+// bound there would refuse the PUT in every later replay. That recorded
+// stamp is what the PUT wrote: the run clock begins each test at its
+// recorded instant, so the application stamps the PUT with the recorded
+// moment.
 
 // putTarget names the resource m's recorded request names: its Host, its
 // path and its query, each as recorded (parsedOf), the query's parameters in
@@ -112,10 +119,10 @@ func putAccess(read *models.Mock, calls []*models.Mock, earlier []learn.Earlier,
 		}
 	}
 	for i, c := range calls {
-		switch c.Spec.HTTPReq.Method {
-		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		if putReadOnly(c) {
 			continue
-		case http.MethodPut:
+		}
+		if c.Spec.HTTPReq.Method == http.MethodPut {
 			code := 0
 			if c.Spec.HTTPResp != nil {
 				code = c.Spec.HTTPResp.StatusCode
@@ -135,12 +142,110 @@ func putAccess(read *models.Mock, calls []*models.Mock, earlier []learn.Earlier,
 		}
 		stop(i)
 	}
+	if !storedAny(a.Written) {
+		// Nothing stored: no leaf of the answer is read back, so it is not
+		// decoded.
+		return a, true
+	}
 	for _, l := range respLeaves(read.Spec.HTTPResp) {
 		if strings.HasPrefix(l.Path, "body.") {
 			a.Read[l.Path] = target
 		}
 	}
 	return a, true
+}
+
+// putReadOnly reports whether c's recorded request is a read, which changes
+// no resource: a GET, a HEAD or an OPTIONS.
+func putReadOnly(c *models.Mock) bool {
+	switch c.Spec.HTTPReq.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	return false
+}
+
+// storedAny reports whether a call of written stored a leaf.
+func storedAny(written []map[string]string) bool {
+	for _, w := range written {
+		if len(w) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// putWrittenElsewhere names a call of served (the test's calls before the
+// read, in the order served) that may have written recorded, a value of
+// read's answer that learn.ReadBack links to write (the PUT that stored
+// it), into read's record otherwise than write did: a call after write, to
+// read's Host and to another URL (putAccess judges each call to read's URL),
+// other than a read (putReadOnly), whose recorded request holds recorded
+// and that did not send live, the value write stored there, in its place
+// (sentAsWritten). Such a call (a key store's delete, reset or transfer
+// endpoint) may have left the recorded value in the record, or another, so
+// the read answers it as recorded. A call that sent live in its place
+// wrote what write wrote, in whichever order the two came. earlier holds
+// the exchanges the test served (each call's live request); ok is false
+// where no call does.
+func putWrittenElsewhere(read *models.Mock, served []*models.Mock, earlier []learn.Earlier, write, recorded, live string) (string, bool) {
+	host := parsedOf(read).parts.host
+	after := false
+	for _, c := range served {
+		if c.Name == write {
+			after = true
+			continue
+		}
+		if !after || c.Spec.HTTPReq == nil || putReadOnly(c) || putFollows(read, c) || parsedOf(c).parts.host != host {
+			continue
+		}
+		if !sentAsWritten(earlierOfMock(earlier, c.Name), c, recorded, live) {
+			return c.Name, true
+		}
+	}
+	return "", false
+}
+
+// sentAsWritten reports whether c, a call served from e (its exchange),
+// sent live wherever its recorded request held recorded: each leaf of e's
+// request that holds recorded held, in this run, that leaf with live in its
+// place, and no part of c's recorded request holds recorded where no leaf
+// of e does (a part keploy reads whole, such as a body that is no JSON or
+// form and a repeated query parameter, a header keploy does not read, a
+// path segment url noise masks, or a JSON body's key).
+func sentAsWritten(e learn.Earlier, c *models.Mock, recorded, live string) bool {
+	at := map[string]bool{}
+	for _, s := range e.Seen {
+		if s.Side != learn.Request || !strings.Contains(s.Leaf.Value, recorded) {
+			continue
+		}
+		if s.Live != strings.ReplaceAll(s.Leaf.Value, recorded, live) {
+			return false
+		}
+		part := s.Leaf.Path
+		if strings.HasPrefix(part, "body") {
+			// A body's leaves are its one part.
+			part = "body"
+		}
+		at[part] = true
+	}
+	p := parseRecordedParts(c)
+	parts := map[string]string{"body": string(p.body)}
+	for i, seg := range strings.Split(strings.TrimPrefix(p.path, "/"), "/") {
+		parts["url.path."+strconv.Itoa(i)] = seg
+	}
+	for k, vs := range p.query {
+		parts["url.query."+k] = strings.Join(vs, "\x00")
+	}
+	for k, v := range p.header {
+		parts["header."+k] = v
+	}
+	for part, text := range parts {
+		if strings.Contains(text, recorded) && !at[part] {
+			return false
+		}
+	}
+	return true
 }
 
 // putStored are the leaves of c's request that the PUT stores: its JSON
