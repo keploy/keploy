@@ -20,7 +20,8 @@ import (
 // nothing, whether the series answers once in a run, and whether its rule
 // never requires it) are written on the
 // entry it moves or places as given, with or without the proven switch, as
-// its Trails is: a move that names none leaves a placed entry none. Every
+// its Trails is: a move that names none leaves a placed entry none, and one
+// that names them all gives an entry already in worker: each. Every
 // later rewrite of mappings.yaml keeps them, and the set's rules digest
 // (SetRules) with them.
 func TestMoveToWorkerWritesRuleAndSeries(t *testing.T) {
@@ -31,6 +32,9 @@ func TestMoveToWorkerWritesRuleAndSeries(t *testing.T) {
 				ctx := context.Background()
 				db := NewWithFormat(zap.NewNop(), t.TempDir(), "mappings", format)
 				m := goldenMapping()
+				again := m.Worker[1] // mock-9: in worker: with no marks, placed again by a move that names them all
+				again.Name = "mock-9"
+				m.Worker = append(m.Worker, again)
 				m.Worker[0].Rule, m.Worker[0].Series, m.Worker[0].Read = "r-old@00000000", "r-old/-/0", true // mock-2: placed again by a move that names none
 				m.Worker[0].Unchanged, m.Worker[0].Once, m.Worker[0].Optional = true, true, true
 				m.Worker[1].Rule, m.Worker[1].Series, m.Worker[1].Read = "r-bg@0badcafe", "r-bg/-/0", true // mock-5: no move names it
@@ -42,6 +46,7 @@ func TestMoveToWorkerWritesRuleAndSeries(t *testing.T) {
 					{Name: "mock-7", Place: "post-url-0", Trails: "post-url-0", Rule: "cleanup@3f2a91c0", Series: "cleanup/post-url-0/0", Unchanged: true, Reason: "trailing from post-url-0"},
 					{Name: "mock-2"},
 					{Name: "mock-6", Place: "post-url-0", Rule: "seen@44aa55bb", Series: "seen/-/0", Once: true, Optional: true},
+					{Name: "mock-9", Place: "post-url-1", Rule: "lease@5e6f7a8b", Series: "lease/-/0", Read: true, Unchanged: true, Once: true, Optional: true},
 				}); err != nil {
 					t.Fatal(err)
 				}
@@ -77,6 +82,7 @@ func TestMoveToWorkerWritesRuleAndSeries(t *testing.T) {
 					"mock-5": {"r-bg@0badcafe", "r-bg/-/0", true, true, true, true},
 					"mock-3": {},
 					"mock-6": {"seen@44aa55bb", "seen/-/0", false, false, true, true},
+					"mock-9": {"lease@5e6f7a8b", "lease/-/0", true, true, true, true},
 				}
 				seen := map[string]bool{}
 				for _, e := range got.Worker {
