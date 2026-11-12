@@ -438,6 +438,38 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	return nil
 }
 
+// setHaltKey marks the context AfterTestSetRun is called with for a set that
+// halted (WithSetHalt).
+type setHaltKey struct{}
+
+// WithSetHalt is ctx for AfterTestSetRun of a set that halted, for reason:
+// the run's stop names the set with it. The replayer calls it; a TestHooks
+// implementation's tests call it to build the context that end is told with.
+func WithSetHalt(ctx context.Context, reason string) context.Context {
+	return context.WithValue(ctx, setHaltKey{}, reason)
+}
+
+// SetHalt reports whether ctx, the context a TestHooks' AfterTestSetRun is
+// called with, says that set halted: its application exited (APP_HALTED,
+// APP_FAULT, or a docker compose stack that went down under it), or an
+// internal error of keploy's stopped the run in it (INTERNAL_ERR). reason is
+// what the run's stop names the set with, such as "the application exited
+// during test-set test-set-0 with exit code 4: ...", and the run fails for
+// it. Its tests that got no verdict got none because of this end, not for a
+// difference in the app's answers.
+//
+// Most such sets end the run: their status is false and no set runs after
+// them. Under docker compose, a stack per set, the run goes on past a set
+// whose application exited, to the next set on a stack of its own; and a set
+// whose application halted on one attempt and ran to a verdict on another (a
+// flaky check's) has the status of its last attempt, true where that one
+// passed. ctx may have ended already, with the application's exit as its
+// cause: a hook that still writes detaches from it.
+func SetHalt(ctx context.Context) (reason string, halted bool) {
+	reason, halted = ctx.Value(setHaltKey{}).(string)
+	return reason, halted
+}
+
 // agentGoneKey marks a context whose run has no agent left to call
 // (withoutAgent).
 type agentGoneKey struct{}

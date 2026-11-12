@@ -1620,11 +1620,26 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			attempt = 0
 		}
 
+		// A set the run's stop names (setStops: its application exited, or
+		// its internal error stopped the run) has its hooks told it halted,
+		// and why (SetHalt), whether the run ends with it or goes on past it
+		// (docker compose, a stack per set): a hook that reports each set
+		// reports this one as halted for that reason, not as nothing, nor as
+		// a difference in the app's answers.
+		setEndCtx := ctx
+		if at, ok := setStopAt[testSet]; ok {
+			setEndCtx = WithSetHalt(ctx, setStops[at])
+		}
 		if abortTestRun {
+			// The set ended the run, and no set runs after it. Its hooks are
+			// still told it ended.
+			if err := r.hookImpl.AfterTestSetRun(setEndCtx, testSet, false); err != nil {
+				utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
+			}
 			break
 		}
 
-		err = r.hookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
+		err = r.hookImpl.AfterTestSetRun(setEndCtx, testSet, testSetResult)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
 		}
