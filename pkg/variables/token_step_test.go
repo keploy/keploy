@@ -125,3 +125,87 @@ func TestEachTokenIsNextTokenInTurn(t *testing.T) {
 		t.Errorf("EachToken told to stop at the second token: read %d and reported it ran to the end", n)
 	}
 }
+
+// A URL-safe token step names one token of a text cut by the URL-safe
+// alphabet alone (NextURLToken), so a URL's '/' ends it: the id of
+// "/v1/oauth/requests/<id>", which a token step reads joined to the path
+// before it. It parses and prints as written, reads the id whole, writes
+// the next run's id in its place with every other byte kept, and refuses a
+// value that would be no URL-safe token there ('/', '+' or '.' in it, or a
+// byte that joins the one beside it).
+func TestURLTokenStepReadsAndWritesAnIdInAPath(t *testing.T) {
+	for _, s := range []string{"header.Location|urltoken.3", "body.user|pct|urltoken.0", "header.Location|urltoken.3#1"} {
+		a, err := ParseAddress(s)
+		if err != nil || a.String() != s {
+			t.Errorf("ParseAddress(%q) = %q, %v; want it back as written", s, a.String(), err)
+		}
+	}
+	for _, s := range []string{"urltoken.", "urltoken.x", "urltoken.01", "urltoken.-1", "urltokens.1"} {
+		if _, err := parseAddress("body.user|" + s); err == nil {
+			t.Errorf("parseAddress(body.user|%s) parsed; want no such step", s)
+		}
+		if _, ok := Decode(Step(s), "a b"); ok {
+			t.Errorf("Decode(%q) opened a text; want no such step", s)
+		}
+	}
+	const loc = "/v1/oauth/requests/"
+	a, _ := ParseAddress("header.Location|urltoken.3")
+	if a.Steps[0] != URLToken(3) {
+		t.Fatalf("header.Location|urltoken.3: steps %v; want urltoken.3", a.Steps)
+	}
+	text := loc + tokRec + "?state=on"
+	if got, ok := a.WordOf(text); !ok || got != tokRec {
+		t.Errorf("WordOf = %q, %v; want the id whole", got, ok)
+	}
+	if got, ok := (Address{Steps: []Step{Token(0)}, Word: -1}).WordOf(text); !ok || got == tokRec {
+		t.Errorf("a token step reads %q, %v; want the path joined to the id, the shape a URL-safe step reads apart", got, ok)
+	}
+	if got, ok := a.ReplaceWord(text, tokNext); !ok || got != loc+tokNext+"?state=on" {
+		t.Errorf("ReplaceWord = %q, %v; want the next id in place, every other byte kept", got, ok)
+	}
+	for _, v := range []string{"kepreq/x", "kepreq+x", "kepreq.x", ""} {
+		if got, ok := a.ReplaceWord(text, v); ok {
+			t.Errorf("ReplaceWord(%q) = %q; want it refused, no URL-safe token there", v, got)
+		}
+	}
+	if got, ok := (Address{Steps: []Step{URLToken(9)}, Word: -1}).WordOf(text); ok {
+		t.Errorf("WordOf at a token the text lacks = %q; want none", got)
+	}
+	// Through pct: an id after an escaped '/' ("%2F") reads whole and is
+	// written back escaped as it was.
+	esc := "next=%2Fr%2F" + tokRec
+	p := Address{Steps: []Step{StepPct, URLToken(2)}, Word: -1}
+	if got, ok := p.WordOf(esc); !ok || got != tokRec {
+		t.Errorf("WordOf through pct = %q, %v; want the id whole", got, ok)
+	}
+	if got, ok := p.ReplaceWord(esc, tokNext); !ok || got != "next=%2Fr%2F"+tokNext {
+		t.Errorf("ReplaceWord through pct = %q, %v; want the next id, the escapes kept", got, ok)
+	}
+	// Its span is the id's own bytes: the path's words are other places.
+	tok := Address{Steps: []Step{URLToken(3)}, Word: -1}
+	if tok.Overlaps(Address{Word: 2}, text) {
+		t.Error("the id overlaps the path's word before it; want two places")
+	}
+	if !tok.Overlaps(Address{Word: 4}, text) {
+		t.Error("the id whole does not overlap its own random word; want one place")
+	}
+}
+
+// NextURLToken cuts runs of the URL-safe alphabet: '/', '+' and '.' end
+// one, the padding after a run is its own, and a run such a byte follows
+// past its padding is none ("request" of "request=<id>").
+func TestNextURLTokenCutsAtAPathsSlash(t *testing.T) {
+	s := "/v1/a+b.c/request=" + tokRec + "==/x_y-z"
+	var got []string
+	if !EachURLToken(s, 0, len(s), func(a, b int) bool { got = append(got, s[a:b]); return true }) {
+		t.Fatal("EachURLToken stopped; want it to run to the end")
+	}
+	want := []string{"v1", "a", "b", "c", tokRec + "==", "x_y-z"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("EachURLToken = %q; want %q", got, want)
+	}
+	n := 0
+	if EachURLToken(s, 0, len(s), func(int, int) bool { n++; return n < 2 }) || n != 2 {
+		t.Errorf("EachURLToken ran on after yield said stop (%d calls); want 2 and false", n)
+	}
+}

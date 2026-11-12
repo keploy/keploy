@@ -505,8 +505,14 @@ const tokenBits = 64
 // never be written back (a replay puts the recorded word back and keeps
 // the rest of the new token). Bound whole, the replay holds the whole
 // token to the value bound at that place: a leaf that holds it whole, or a
-// longer text that holds it as one of its tokens (fromAt's |token.<n>: a
-// consent URL, a Location header). Any other paired text, one no earlier
+// longer text that holds it as one of its tokens (fromAt's |token.<n>, or
+// |urltoken.<n> in a URL's path, through |pct behind escapes: a consent
+// URL, a Location header). A place that shows it only so, whose base64 runs
+// hold no run of it (shownInText: "/requests/<id>", "code=<key>" escaped),
+// shows it too, and the token stands there only where it binds whole: where
+// the reader's words see no earlier place of it (an escaped key), it is
+// bound at the earliest such place of the call's scope, never fresh. Any
+// other paired text, one no earlier
 // place shows whole or one read whole that binds nowhere so (a refusal, a
 // text no address reads it whole in), with a word that stayed ("user-"
 // before an id) or of the URL-safe alphabet, whose '-' and '_' separate an
@@ -524,6 +530,14 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 	}
 	whole := readWord{At: bare, Rec: rec, Live: live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rec, Live: live}}}
 	shown := slices.ContainsFunc(dc.ps, func(p evPlace) bool { return tokenShown(placedFor(p, rec), whole) })
+	// Shown only inside a longer text whose base64 runs hold it in no run of
+	// its own (a URL's path, an escaped query): it stands only where it
+	// binds whole there.
+	var inText []evPlace
+	if !shown {
+		inText = dc.shownInText(rec, live)
+		shown = len(inText) > 0
+	}
 	held := func(least float64) bool {
 		return slices.ContainsFunc(rd.Words, func(w readWord) bool {
 			return slices.ContainsFunc(dc.ps, func(p evPlace) bool {
@@ -543,7 +557,17 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 		return Decision{}, false
 	}
 	d := dc.word(path, bare, rec, live, rec, whole, false, nil)
-	if (copied || d.Outcome == OutcomeValue) && !dc.boundWhole(d, rec, live) {
+	if d.Outcome == OutcomeFresh {
+		// The reader's words and runs see no earlier place of it (a standard
+		// key behind escapes, "%2B" and "%2F" for its '+' and '/'), but a
+		// place shows it whole: it is bound at the earliest such place of
+		// the call's scope, as a whole copy is (wholeCopy). With none, it
+		// is never fresh: the rules after this decide it.
+		if own := slices.DeleteFunc(inText, func(p evPlace) bool { return !dc.allScope && p.otherTest }); len(own) > 0 {
+			d = dc.bound(path, bare, -1, changedInstant{r: rec, l: live, rec: rec}, own, ", the earliest place before the call that shows it whole in both runs")
+		}
+	}
+	if (copied || len(inText) > 0 || d.Outcome == OutcomeValue) && !dc.boundWhole(d, rec, live) {
 		// Read whole, the token binds at no address that reads it whole
 		// in both runs: a paired one is left to its words, an unpaired
 		// one to the rules after this.
@@ -568,14 +592,60 @@ func (dc *decider) boundWhole(d Decision, rec, live string) bool {
 		if p.mock != d.From.Mock || p.path != d.From.Path || p.side != d.From.Side {
 			return false
 		}
-		if p.raw > 0 {
-			return true
-		}
-		// A text the address does not open reads "", which no token is.
-		r, _ := d.FromAt.WordOf(p.leaf.Value)
-		l, _ := d.FromAt.WordOf(p.live)
-		return r == rec && l == live
+		return p.raw > 0 || readsWhole(d.FromAt, p, rec, live)
 	})
+}
+
+// readsWhole reports whether a, an address of p, an exchange's place,
+// reads rec in its recorded text and live in round F's: a text the address
+// does not open reads "", which no token is.
+func readsWhole(a variables.Address, p evPlace, rec, live string) bool {
+	r, _ := a.WordOf(p.leaf.Value)
+	l, _ := a.WordOf(p.live)
+	return r == rec && l == live
+}
+
+// shownInText is the earlier exchanges' places, each one that changed
+// between the runs, placed for rec (placedFor), that show the token rec
+// (live in round F) whole inside a longer text in both runs, at the address
+// fromAt names for it there (a URL-safe token of a URL's path, a key read
+// through |pct): the shapes tokenShown's whole runs miss, a run of the
+// base64 alphabets taking in a path's '/' and an escape's '%' ending one. A
+// place's texts (as its address opens them) are read only where they hold
+// the longest word of each run's token, or an escape, which may hide a
+// letter of it: a call reads the places that may hold it, each once.
+func (dc *decider) shownInText(rec, live string) []evPlace {
+	rw, lw := longestWord(rec), longestWord(live)
+	mayHold := func(text, w string) bool { return strings.Contains(text, w) || strings.Contains(text, "%") }
+	var out []evPlace
+	for _, p := range dc.ps {
+		if p.raw > 0 || p.leaf.Path == "" {
+			continue
+		}
+		a := dc.in.AddressOf(p.leaf, p.side == Response)
+		if r, _ := a.WordOf(p.leaf.Value); !mayHold(r, rw) {
+			continue
+		}
+		if l, _ := a.WordOf(p.live); !mayHold(l, lw) {
+			continue
+		}
+		if q := placedFor(p, rec); q.state == stateBefore && !q.same() && readsWhole(dc.fromAt(q, rec, live), q, rec, live) {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// longestWord is s's longest word (variables.Words), the first of that
+// length: "" where s holds none.
+func longestWord(s string) string {
+	w := ""
+	for _, at := range variables.Words(s) {
+		if at[1]-at[0] > len(w) {
+			w = s[at[0]:at[1]]
+		}
+	}
+	return w
 }
 
 // signature decides rd, the signatures of two JWTs (the jwtsig step,
@@ -3534,7 +3604,12 @@ func addrList(as []variables.Address) string {
 // at one index (tokenStepAt: an id in a consent URL, a key after "Bearer "), is
 // addressed at that token (|token.<n>): a replay reads it there whole,
 // wherever the next run's '-' and '_' fall, where the text whole would hold
-// the id equal to the whole URL. A Cookie or
+// the id equal to the whole URL; a random token (randomToken) so even where
+// it is one word of the text in both runs (an id of letters and digits,
+// whose next run may hold a '-'). A token step of the URL-safe cut
+// (|urltoken.<n>) reads an id in a URL's path, and one through |pct a value
+// behind escapes; a word the escapes hide from the text's own words is read
+// through |pct at its word (pctWord), never the text whole. A Cookie or
 // Set-Cookie header holds a token as one pair's value, beside other pairs
 // (refresh_token=<JWT>; refresh_token_staging=<JWT>), which no JWT step reads
 // whole: its signature and its claims are read in the first pair that holds
@@ -3559,14 +3634,26 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 		a.Steps, a.Word = append(slices.Clip(a.Steps), st...), -1
 		return a
 	}
+	steps, byToken := tokenStepAt(rec, live, v, f)
+	if byToken && randomToken(v, f) {
+		// A random token that is one word in both runs (an id of letters
+		// and digits alone) is still read at its token: the next run's id
+		// may hold a '-' or '_', which a word would cut.
+		a.Steps, a.Word = append(slices.Clip(a.Steps), steps...), -1
+		return a
+	}
 	for i, w := range variables.Words(rec) {
 		if rec[w[0]:w[1]] == v {
 			a.Word = i
 			return a
 		}
 	}
-	if n, ok := tokenStepAt(rec, live, v, f); ok {
-		a.Steps, a.Word = append(slices.Clip(a.Steps), variables.Token(n)), -1
+	if n, ok := pctWord(rec, v); ok {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), variables.StepPct), n
+		return a
+	}
+	if byToken {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), steps...), -1
 		return a
 	}
 	if !dc.clientCase(p.mock) {
@@ -3580,36 +3667,98 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 	return a
 }
 
-// tokenStepAt is n where v and f, a value as recorded and as round F saw it,
-// are the n-th token (variables.EachToken) of rec and live, two runs of a
-// longer text: the first such token of rec that is v, where live's token
-// of that index is f. ok is false where rec and live are v and f whole (the
-// place is named whole), or no such token is: past the last token of
-// either text, no token of that index is in both. It reads rec and live
-// once each, their n-th tokens side by side, each from the end of the one
-// before (nextToken), so a leaf of any length costs one pass, never a pass
-// for each token.
-func tokenStepAt(rec, live, v, f string) (int, bool) {
+// tokenStepAt is the steps to the token that v and f, a value as recorded
+// and as round F saw it, are in rec and live, two runs of a longer text: a
+// token of one index n in both, cut by the first of tokenCuts that holds
+// it so (|token.<n>, the base64 alphabets together; else |urltoken.<n>,
+// the URL-safe one alone, whose '/' ends a token of a URL's path:
+// "/v1/requests/<id>"), the first such token of rec that is v, where
+// live's token of that index is f. A text that holds escapes ("%2B" of a
+// standard key passed through url.QueryEscape) is read so too through
+// |pct, after its own text: |pct alone where the decoded texts are v and f
+// whole. ok is false where rec and live are v and f whole (the place is
+// named whole), or no cut holds such a token: past the last token of
+// either text, no token of that index is in both. Each cut reads rec and
+// live once each, their n-th tokens side by side, each from the end of the
+// one before, so a leaf of any length costs a pass for each cut (and one
+// to decode it), never a pass for each token.
+func tokenStepAt(rec, live, v, f string) ([]variables.Step, bool) {
 	if rec == v && live == f {
-		return 0, false
+		return nil, false
 	}
-	r, l := 0, 0
-	for n := 0; ; n++ {
-		rs, re, rok := nextToken(rec, r, len(rec))
-		ls, le, lok := nextToken(live, l, len(live))
-		if !rok || !lok {
-			return 0, false
-		}
-		if rec[rs:re] == v && live[ls:le] == f {
-			return n, true
-		}
-		r, l = re, le
+	if st, ok := cutTokenAt(rec, live, v, f); ok {
+		return []variables.Step{st}, true
 	}
+	if !strings.Contains(rec, "%") && !strings.Contains(live, "%") {
+		return nil, false
+	}
+	r, rok := variables.Decode(variables.StepPct, rec)
+	l, lok := variables.Decode(variables.StepPct, live)
+	switch {
+	case !rok || !lok:
+		return nil, false
+	case r == v && l == f:
+		return []variables.Step{variables.StepPct}, true
+	}
+	if st, ok := cutTokenAt(r, l, v, f); ok {
+		return []variables.Step{variables.StepPct, st}, true
+	}
+	return nil, false
 }
 
-// nextToken is the cut tokenStepAt reads a text's tokens by in turn
-// (variables.NextToken), the one a replay's token step reads.
-var nextToken = variables.NextToken
+// pctWord is n where v is the n-th word of rec percent-decoded, rec a text
+// that holds escapes and whose own words do not hold v ("9Lk" of
+// "code=q3Zx%2B9Lk", whose own word there is "2B9Lk"): a replay reads that
+// word through |pct, where the text whole holds no word equal to v. ok is
+// false where rec holds no escape, does not decode, or its decoded words do
+// not hold v.
+func pctWord(rec, v string) (int, bool) {
+	if !strings.Contains(rec, "%") {
+		return 0, false
+	}
+	r, ok := variables.Decode(variables.StepPct, rec)
+	if !ok {
+		return 0, false
+	}
+	for i, w := range variables.Words(r) {
+		if r[w[0]:w[1]] == v {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// cutTokenAt is the token step of the first of tokenCuts at which v and f
+// are rec's and live's token of one index (tokenStepAt).
+func cutTokenAt(rec, live, v, f string) (variables.Step, bool) {
+	for _, c := range tokenCuts {
+		r, l := 0, 0
+		for n := 0; ; n++ {
+			rs, re, rok := c.next(rec, r, len(rec))
+			ls, le, lok := c.next(live, l, len(live))
+			if !rok || !lok {
+				break
+			}
+			if rec[rs:re] == v && live[ls:le] == f {
+				return c.step(n), true
+			}
+			r, l = re, le
+		}
+	}
+	return "", false
+}
+
+// tokenCuts are the cuts tokenStepAt reads a text's tokens by, in turn,
+// each the one a replay's step of it reads: the base64 alphabets together
+// (variables.NextToken, |token.<n>), then the URL-safe one alone
+// (variables.NextURLToken, |urltoken.<n>).
+var tokenCuts = []struct {
+	step func(int) variables.Step
+	next func(s string, from, to int) (int, int, bool)
+}{
+	{variables.Token, variables.NextToken},
+	{variables.URLToken, variables.NextURLToken},
+}
 
 // cookieToken is the steps from a, a Cookie or Set-Cookie header's own text
 // (rec and live, two runs of it), to the part of a JWT that holds v in rec
