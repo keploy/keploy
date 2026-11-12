@@ -390,6 +390,9 @@ func betweenWords(rd textReading) string {
 // text decides the changed words of rd, one text the leaf at bare opens;
 // whole reports a refusal of the field whole, which ends the leaf.
 func (dc *decider) text(path string, bare variables.Address, rec, live string, rd textReading) ([]Decision, bool) {
+	if n := len(rd.At.Steps); n > 0 && rd.At.Steps[n-1] == variables.StepJWTSig {
+		return dc.signature(path, bare, rec, live, rd)
+	}
 	if d, ok := dc.oneToken(path, bare, rec, live, rd); ok {
 		return []Decision{d}, true
 	}
@@ -515,6 +518,24 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 		return Decision{}, false
 	}
 	return dc.word(path, bare, rec, live, rec, whole, false, nil), true
+}
+
+// signature decides rd, the signatures of two JWTs (the jwtsig step,
+// jwtSigSpan). A signature is checked by its form only (the founder's
+// 2026-10-31 ruling; variables.SignatureForm: base64url of one length), so
+// it is one value, read whole as oneToken reads a token: bound where an
+// earlier place shows it, else made anew at the call and bound there,
+// never word by word, whose count changes with its '-' and '_'. Nothing
+// is carried inside a signature, so no word of it is asked apart. Two of
+// another form (another length: the header's algorithm, compared exactly,
+// changed with it) are refused as a changed shape, the field whole.
+func (dc *decider) signature(path string, bare variables.Address, rec, live string, rd textReading) ([]Decision, bool) {
+	if !variables.SignatureForm(rd.Rec, rd.Live) {
+		return []Decision{dc.refuse(path, bare, -1, rec, live, RefusalChangedShape,
+			"its JWT's signature changed form (keploy checks a signature by its form: base64url of one length)", nil, dc.fieldNoise(path))}, true
+	}
+	whole := readWord{At: rd.At, Rec: rd.Rec, Live: rd.Live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rd.Rec, Live: rd.Live}}}
+	return []Decision{dc.word(path, bare, rec, live, rd.Rec, whole, false, nil)}, false
 }
 
 // randomToken reports whether rec and live are one value of one generator:
@@ -3413,8 +3434,9 @@ func addrList(as []variables.Address) string {
 // binds the variable to it, and compares each later use with it. A call's
 // request is never addressed at a claim: its replay puts the recorded
 // values back at its places, and cannot write a claim into a signed token;
-// its leaf is named whole, as before. The signature is no place of it:
-// compared by its form, as before. Words
+// its leaf is named whole, as before. A value that is the JWT's signature
+// in both runs (sigAt) is addressed at the signature (|jwtsig), first: a
+// replay reads it there whole, whatever its count of words. Words
 // and claims are read in the text the address's own steps open (an
 // adapter's PlaceOf may name a decode step), so the claim's step follows
 // them; a leaf they do not open has no word or claim there: it is named
@@ -3426,6 +3448,10 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 	a := dc.in.AddressOf(p.leaf, p.side == Response)
 	rec, _ := a.WordOf(p.leaf.Value)
 	live, _ := a.WordOf(p.live)
+	if sigAt(rec, live, v, f) {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), variables.StepJWTSig), -1
+		return a
+	}
 	for i, w := range variables.Words(rec) {
 		if rec[w[0]:w[1]] == v {
 			a.Word = i
@@ -3439,6 +3465,17 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 		a.Steps, a.Word = append(slices.Clip(a.Steps), st), n
 	}
 	return a
+}
+
+// sigAt reports whether v and f, a value as recorded and as round F saw
+// it, are the signatures of rec and live, two runs of one JWT
+// (variables.StepJWTSig): the place is then addressed at its signature,
+// whose words a replay could not count on (decider.signature), whatever
+// its words are.
+func sigAt(rec, live, v, f string) bool {
+	r, rok := variables.Decode(variables.StepJWTSig, rec)
+	l, lok := variables.Decode(variables.StepJWTSig, live)
+	return rok && lok && r == v && l == f
 }
 
 // ClaimName is the JWT claim a bind place reads (its last such step), for a
