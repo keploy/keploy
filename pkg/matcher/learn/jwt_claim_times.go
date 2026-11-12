@@ -64,10 +64,11 @@ func ClaimClockField(k string, o models.ClockOffset) (string, bool) {
 // learned noise, or refused only as an instant its call's window shows no
 // read of the clock in (unreadHeld: the classify path reads a token as its
 // words, and a claim's time is no word of it), a text at a header or a body
-// field, a JWT in both runs, of one set of claims, whose every claim that
-// changed is a time in both runs (claimTime), and that, with each such
-// claim's recorded value written back, is the recorded token but for its
-// signature, which is of the recorded one's form. Never for a variable, an
+// field whose path holds no '|', a JWT in both runs, of one set of claims,
+// whose every claim that changed is a time in both runs (claimTime), and
+// that, with each such claim's recorded value written back, is the
+// recorded token but for its signature, which is of the recorded one's
+// form. Never for a variable, an
 // echo, a clock read, any other refusal, a token any other claim of which
 // changed (it stays as learned), or with the time default off.
 func ClaimTimesLearned(ln Learned, w *Window, timeForm bool) ([]Learned, bool) {
@@ -81,6 +82,12 @@ func ClaimTimesLearned(ln Learned, w *Window, timeForm bool) ([]Learned, bool) {
 	}
 	r, l := ln.Recorded, ln.Live
 	if r.Type != String || l.Type != String || !strings.HasPrefix(r.Path, "body.") && !strings.HasPrefix(r.Path, "header.") {
+		return nil, false
+	}
+	if strings.Contains(r.Path, "|") {
+		// A field whose name holds a '|': a claim's key of it would read as
+		// another kind of key (ClaimClockField), so replay could not find
+		// the times learned in it.
 		return nil, false
 	}
 	_, rc, okR := jwtClaims(r.Value)

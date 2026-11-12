@@ -3,6 +3,7 @@ package learn
 import (
 	"encoding/base64"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,28 +71,37 @@ func TestATokensTimeClaimsHoldByFormAndTheRestAsRecorded(t *testing.T) {
 	form := TimeForm(Leaf{Type: Number, Value: strconv.FormatInt(at.Unix(), 10)})
 	offs := []models.ClockOffset{{Form: form, Claim: "iat"}}
 	moved := "Bearer " + claimsToken(base64.RawURLEncoding, claims("a", at.Add(time.Hour)), claimSigB)
+	later := strconv.FormatInt(at.Add(time.Hour).Unix(), 10)
 	for _, c := range []struct {
 		what     string
 		offs     []models.ClockOffset
+		rec      string // the recorded token, where not rec
 		live     string
 		timeForm bool
 		held     bool
+		why      string // a refusal's reason holds it
 	}{
 		{what: "times moved", offs: offs, live: moved, timeForm: true, held: true},
-		{what: "times moved, strict", offs: offs, live: moved},
-		{what: "no time learned", live: moved, timeForm: true},
-		{what: "another subject", offs: offs, live: "Bearer " + claimsToken(base64.RawURLEncoding, claims("b", at.Add(time.Hour)), claimSigB), timeForm: true},
-		{what: "another scheme", offs: offs, live: "Basic " + claimsToken(base64.RawURLEncoding, claims("a", at.Add(time.Hour)), claimSigB), timeForm: true},
-		{what: "another signature length", offs: offs, live: moved[:len(moved)-1], timeForm: true},
-		{what: "a time of another form", offs: offs, live: "Bearer " + claimsToken(base64.RawURLEncoding, `{"sub":"a","iat":"1762909200"}`, claimSigB), timeForm: true},
-		{what: "a time in milliseconds", offs: offs, live: "Bearer " + claimsToken(base64.RawURLEncoding, `{"sub":"a","iat":1762909200000}`, claimSigB), timeForm: true},
-		{what: "the claim gone", offs: offs, live: "Bearer " + claimsToken(base64.RawURLEncoding, `{"sub":"a"}`, claimSigB), timeForm: true},
-		{what: "a padded payload", offs: offs, live: "Bearer " + claimsToken(base64.URLEncoding, claims("a", at.Add(time.Hour)), claimSigB), timeForm: true},
-		{what: "no time learned, the signature alone moved", live: "Bearer " + claimsToken(base64.RawURLEncoding, claims("a", at), claimSigB), timeForm: true},
+		{what: "times moved, strict", offs: offs, live: moved, why: "mock.times: strict"},
+		{what: "no time learned", live: moved, timeForm: true, why: "no time was learned"},
+		{what: "another subject", offs: offs, live: "Bearer " + claimsToken(base64.RawURLEncoding, claims("b", at.Add(time.Hour)), claimSigB), timeForm: true, why: "its header or another claim changed"},
+		{what: "another scheme", offs: offs, live: "Basic " + claimsToken(base64.RawURLEncoding, claims("a", at.Add(time.Hour)), claimSigB), timeForm: true, why: "its header or another claim changed"},
+		{what: "another signature length", offs: offs, live: moved[:len(moved)-1], timeForm: true, why: "signature is not of the recorded one's form"},
+		{what: "a time of another form", offs: offs, live: "Bearer " + claimsToken(base64.RawURLEncoding, `{"sub":"a","iat":"1762909200"}`, claimSigB), timeForm: true, why: "iat claim was learned as a time"},
+		{what: "a time in milliseconds", offs: offs, live: "Bearer " + claimsToken(base64.RawURLEncoding, `{"sub":"a","iat":1762909200000}`, claimSigB), timeForm: true, why: "iat claim was learned as a time"},
+		{what: "the claim gone", offs: offs, live: "Bearer " + claimsToken(base64.RawURLEncoding, `{"sub":"a"}`, claimSigB), timeForm: true, why: "iat claim was learned as a time"},
+		{what: "a padded payload", offs: offs, live: "Bearer " + claimsToken(base64.URLEncoding, claims("a", at.Add(time.Hour)), claimSigB), timeForm: true, why: "its header or another claim changed"},
+		{what: "no time learned, the signature alone moved", live: "Bearer " + claimsToken(base64.RawURLEncoding, claims("a", at), claimSigB), timeForm: true, why: "no time was learned"},
+		{what: "a recorded token of no such claim", offs: offs, rec: "Bearer " + claimsToken(base64.RawURLEncoding, `{"sub":"a"}`, claimSigA), live: moved, timeForm: true, why: "the recorded JWT holds no one iat claim"},
+		{what: "the claim twice in this call's token", offs: offs, live: "Bearer " + claimsToken(base64.RawURLEncoding, `{"sub":"a","iat":`+later+`,"iat":`+later+`}`, claimSigB), timeForm: true, why: "this call's JWT holds no one iat claim"},
 	} {
-		held, why := HoldsClaimsByForm(c.offs, rec, c.live, c.timeForm)
-		if held != c.held || held == (why != "") {
-			t.Errorf("%s: held %v (%q), want %v", c.what, held, why, c.held)
+		r := rec
+		if c.rec != "" {
+			r = c.rec
+		}
+		held, why := HoldsClaimsByForm(c.offs, r, c.live, c.timeForm)
+		if held != c.held || held == (why != "") || !strings.Contains(why, c.why) {
+			t.Errorf("%s: held %v (%q), want %v (%q)", c.what, held, why, c.held, c.why)
 		}
 	}
 }
@@ -154,6 +164,7 @@ func TestOnlyNoiseOrAnUnreadInstantIsLearnedAsAToken(t *testing.T) {
 		{what: "noise at a body field", ln: Learned{Kind: KindNoise, Recorded: leaf("body.token", recAt, claimSigA), Live: leaf("body.token", liveAt, claimSigB)}, timeForm: true, learned: true},
 		{what: "noise at a header", ln: Learned{Kind: KindNoise, Recorded: leaf("header.x-token", recAt, claimSigA), Live: leaf("header.x-token", liveAt, claimSigB)}, timeForm: true, learned: true},
 		{what: "noise, strict", ln: Learned{Kind: KindNoise, Recorded: leaf("body.token", recAt, claimSigA), Live: leaf("body.token", liveAt, claimSigB)}},
+		{what: "noise at a body field whose name holds a '|'", ln: Learned{Kind: KindNoise, Recorded: leaf("body.a|b", recAt, claimSigA), Live: leaf("body.a|b", liveAt, claimSigB)}, timeForm: true},
 		{what: "noise at a query value", ln: Learned{Kind: KindNoise, Recorded: leaf("url.query.t", recAt, claimSigA), Live: leaf("url.query.t", liveAt, claimSigB)}, timeForm: true},
 		{what: "an unread instant", ln: Learned{Kind: KindUnaccounted, Why: unread, unreadWhy: unread, Recorded: leaf("body.token", recAt, claimSigA), Live: leaf("body.token", liveAt, claimSigB)}, timeForm: true, learned: true},
 		{what: "an unread instant refused again for another reason", ln: Learned{Kind: KindUnaccounted, Why: "another", unreadWhy: unread, Recorded: leaf("body.token", recAt, claimSigA), Live: leaf("body.token", liveAt, claimSigB)}, timeForm: true},

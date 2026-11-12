@@ -56,8 +56,15 @@ func notifyHeader(token string) map[string]string { return map[string]string{"X-
 // call) and its refusal.
 func learnNotify(t *testing.T, rec string, liveClaims func(call time.Time) string, timeForm bool) (*models.Mock, string) {
 	t.Helper()
+	return learnNotifyIn(t, notifyBody, rec, liveClaims, timeForm)
+}
+
+// learnNotifyIn is learnNotify of a call whose body body writes of its
+// token.
+func learnNotifyIn(t *testing.T, body func(token string) string, rec string, liveClaims func(call time.Time) string, timeForm bool) (*models.Mock, string) {
+	t.Helper()
 	recToken := claimJWT(hs256Head, rec, recSig)
-	m := learnRecorded("mock-0", 1300*time.Millisecond, "POST", "/v1/notify", notifyBody(recToken), notifyHeader(recToken), `{"ok":true}`)
+	m := learnRecorded("mock-0", 1300*time.Millisecond, "POST", "/v1/notify", body(recToken), notifyHeader(recToken), `{"ok":true}`)
 	h, n, opts := learnOn(t)
 	began := learnAt.Add(10 * time.Minute)
 	tr := learn.NewTracker()
@@ -68,7 +75,7 @@ func learnNotify(t *testing.T, rec string, liveClaims func(call time.Time) strin
 	ctx := learn.WithTracker(context.Background(), tr)
 	call := began.Add(300 * time.Millisecond)
 	token := claimJWT(hs256Head, liveClaims(call), liveSig)
-	in := live("POST", "/v1/notify", notifyBody(token), notifyHeader(token))
+	in := live("POST", "/v1/notify", body(token), notifyHeader(token))
 	in.arrived = call.Add(2 * time.Millisecond)
 	ldb := &learnDb{perTest: []*models.Mock{m}}
 	var db integrations.MockMemDb = ldb
@@ -127,6 +134,18 @@ func TestAJWTsTimeClaimsAreLearnedAsTimesCheckedByForm(t *testing.T) {
 		for p := range m.Spec.ReqBodyNoise {
 			if p == "body.token" || p == "header.x-api-token" {
 				t.Fatalf("noise %v; want no noise at the token", m.Spec.ReqBodyNoise)
+			}
+		}
+	})
+	t.Run("time default: no claim key of a field whose name holds a '|'", func(t *testing.T) {
+		barred := func(token string) string { return `{"to":"u-1","a|b":"` + token + `"}` }
+		m, _ := learnNotifyIn(t, barred, rec, sameSub, true)
+		if m == nil {
+			return
+		}
+		for k := range m.Spec.Clocks {
+			if strings.HasPrefix(k, "body.a|b|") {
+				t.Fatalf("clocks %+v; want no key a replay cannot read as a claim's (%s)", m.Spec.Clocks, k)
 			}
 		}
 	})
@@ -203,6 +222,8 @@ func TestAJWTsTimeClaimsLearnedByFormAreCheckedAtReplay(t *testing.T) {
 		sources    []models.DeclaredSource
 	}{
 		{name: "times moved, the time default", token: claimJWT(hs256Head, moved, liveSig), timeForm: true},
+		{name: "the recorded token, the time default", token: claimJWT(hs256Head, notifyClaims("svc-1", recCall, ""), recSig), timeForm: true},
+		{name: "the recorded token, strict times", token: claimJWT(hs256Head, notifyClaims("svc-1", recCall, ""), recSig)},
 		{name: "times moved, another signature of the form", token: claimJWT(hs256Head, moved, strings.Repeat("A", len(recSig))), timeForm: true},
 		{name: "times moved, strict times", token: claimJWT(hs256Head, moved, liveSig), differs: both, why: "learned under the time default"},
 		{name: "another subject", token: claimJWT(hs256Head, notifyClaims("svc-2", now, ""), liveSig), timeForm: true, differs: both, why: "outside the times learned in its claims"},
@@ -255,5 +276,24 @@ func TestAJWTsTimeClaimsLearnedByFormAreCheckedAtReplay(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The times learned in a token's claims are the ones at that field's own
+// claim keys (learn.ClaimClockField): a claim's offset at a key of no claim,
+// of another claim, or of a field whose name holds a '|', is none of them.
+func TestATokensTimesAreTheOnesAtItsOwnClaimKeys(t *testing.T) {
+	o := models.ClockOffset{Form: "number 9999999999", Claim: "exp"}
+	k := strictKnown{clocks: map[string]models.ClockOffset{
+		learn.ClaimClockKey("body.token", "exp"): o,
+		"body.token":                             o,
+		learn.ClaimClockKey("body.token", "iat"): o,
+		learn.ClaimClockKey("body.a|b", "exp"):   o,
+	}}
+	if got := k.claimsAt("body.token"); len(got) != 1 || got[0] != o {
+		t.Fatalf("times at body.token %+v; want the one at its exp claim's key", got)
+	}
+	if got := k.claimsAt("body.a|b"); len(got) != 0 {
+		t.Fatalf("times at body.a|b %+v; want none", got)
 	}
 }
