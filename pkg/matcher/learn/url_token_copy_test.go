@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -153,6 +154,22 @@ func TestOutcomeATokenShownWholeAtARecordingBindsThere(t *testing.T) {
 			t.Errorf("%s a recording shows whole: bound at %s %s; want mock-5's recording", tc.name, d.From.Mock, d.FromAt.String())
 		}
 	}
+
+	// An exchange's place that names no leaf is no recording: it binds the
+	// token only where what it holds is the token, never as a recording's
+	// place does. Its text here is "Bearer <token>", so the unpaired token
+	// binds nowhere whole and is refused.
+	e := oSent("Bearer "+ur, "Bearer "+uf)
+	e[0].Seen[0].Leaf.Path = ""
+	ds := Decide(oInput("body.cmd.query._id", ur, uf, e, nil))
+	if len(ds) == 0 {
+		t.Fatal("an unpaired token at a place that names no leaf: no decision")
+	}
+	for _, d := range ds {
+		if d.Outcome == OutcomeValue {
+			t.Errorf("an unpaired token at a place that names no leaf: %s bound at %s %s; want it refused", oDescribe(ds), d.From.Mock, d.FromAt.String())
+		}
+	}
 }
 
 // tokenStepAt names a token of a longer text only where that token is the
@@ -173,10 +190,92 @@ func TestTokenStepAtNamesATokenOnlyWhereBothRunsHoldTheValue(t *testing.T) {
 		{"round F's token there is another", url + v, url + "x." + f, 0, false},
 		{"the recording's token there is another", url + "x." + v, url + f, 0, false},
 		{"round F's text lacks the token", url + v, url, 0, false},
+		{"the first token of a longer text", v + "&x=1", f + "&x=1", 0, true},
+		{"the first pair of a cookie", v + "; Path=/", f + "; Path=/", 0, true},
+		{"the recording's text whole, round F's longer", v, f + "&x=1", 0, true},
+		{"round F's text whole, the recording's longer", v + "&x=1", f, 0, true},
+		{"the recording's text whole, round F's token 0 another", v, "x." + f, 0, false},
 	} {
 		if n, ok := tokenStepAt(tc.rec, tc.live, v, f); ok != tc.ok || ok && n != tc.n {
 			t.Errorf("%s: tokenStepAt = %d, %v; want %d, %v", tc.name, n, ok, tc.n, tc.ok)
 		}
+	}
+
+	// Past the last token of either text no token of that index is in both:
+	// a value round F gave as no token, or one the recording held as none,
+	// names none.
+	for _, tc := range []struct{ name, rec, live, v, f string }{
+		{"round F's text has no token of that index", "a " + v, "a", v, ""},
+		{"the recording's text has no token of that index", "a", "a " + f, "", f},
+	} {
+		if n, ok := tokenStepAt(tc.rec, tc.live, tc.v, tc.f); ok {
+			t.Errorf("%s: tokenStepAt = %d, true; want none", tc.name, n)
+		}
+	}
+}
+
+// tokenStepAt reads each text once, however many tokens it holds: a leaf of
+// 256 KB or 1 MB (an HTML mail that carries a reset link, a SOAP body) costs
+// one pass over rec and live, where reading token n afresh from the text's
+// start for each n took seconds a decision at 256 KB and minutes at 1 MB.
+// The row counts the bytes the cut scans (nextToken), so it holds on a slow
+// box as on a fast one; past twice the texts' length the cut reads nothing
+// more, so a form that scans more stops at once and fails here.
+func TestTokenStepAtReadsALongTextOnce(t *testing.T) {
+	const v, f = "kepreq_9fsSK78UnjdjTSFj51vJvm_CkQdnzdp6aRCUCH0PP5g", "kepreq_WWEEXXKJO_kzw3aZ8Wxfl5wsJUE3V7QGpBKzyTlYA_0"
+	cut := nextToken
+	t.Cleanup(func() { nextToken = cut })
+	var scanned, budget int
+	nextToken = func(s string, from, to int) (int, int, bool) {
+		if scanned > budget {
+			return 0, 0, false
+		}
+		start, end, ok := cut(s, from, to)
+		if !ok {
+			end = to
+		}
+		scanned += end - from
+		return start, end, ok
+	}
+	for _, size := range []int{256 << 10, 1 << 20} {
+		var b strings.Builder
+		for b.Len() < size {
+			b.WriteString("lorem ipsum dolor sit amet, ")
+		}
+		body := b.String()
+		for _, tc := range []struct {
+			name, rec, live, v, f string
+			ok                    bool
+		}{
+			{"the last token", body + v, body + f, v, f, true},
+			{"a value that is no token", body + v, body + f, "no such token", "nor here", false},
+			{"a text with no token", strings.Repeat(" ", size), strings.Repeat(" ", size), v, f, false},
+		} {
+			scanned, budget = 0, 2*(len(tc.rec)+len(tc.live))
+			n, ok := tokenStepAt(tc.rec, tc.live, tc.v, tc.f)
+			if ok != tc.ok || ok && n != strings.Count(body, " ") {
+				t.Errorf("%d KB, %s: tokenStepAt = %d, %v; want %v", size>>10, tc.name, n, ok, tc.ok)
+			}
+			if scanned == 0 || scanned > len(tc.rec)+len(tc.live) {
+				t.Errorf("%d KB, %s: tokenStepAt scanned %d bytes of texts of %d; want each text read once", size>>10, tc.name, scanned, len(tc.rec)+len(tc.live))
+			}
+		}
+	}
+
+	// Through Decide: one Value bound at an earlier leaf of 1 MB, the token
+	// at its end, reads the leaf's two runs once each for the bind.
+	var b strings.Builder
+	for b.Len() < 1<<20 {
+		b.WriteString("lorem ipsum dolor sit amet, ")
+	}
+	rec, live := b.String()+v, b.String()+f
+	scanned, budget = 0, 2*(len(rec)+len(live))
+	ds := Decide(oInput("body.cmd.query._id", v, f, oSent(rec, live), nil))
+	if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "mock-0" || addrSuffix(ds[0].FromAt) != "|token."+strconv.Itoa(strings.Count(b.String(), " ")) {
+		t.Errorf("a token at the end of a 1 MB leaf: %s; want one Value bound at mock-0 body.user at its last token", oDescribe(ds))
+	}
+	if scanned == 0 || scanned > len(rec)+len(live) {
+		t.Errorf("a token at the end of a 1 MB leaf: Decide scanned %d bytes of texts of %d; want each read once", scanned, len(rec)+len(live))
 	}
 }
 

@@ -556,17 +556,19 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 // at a place whose text at d's bind address is the token in both runs: a
 // leaf that holds it whole, or a longer text whose token, jwtsig or cookie
 // step there reads it, never the longer text whole, which the next run's
-// token could never equal. A recording's place (no leaf: Decide names no
+// token could never equal. A recording's place (p.raw: Decide names no
 // address of it) binds so too: its adapter names the place of the
-// recording that holds the value whole or as one word, or refuses it. A
-// token is read whole (oneToken) only so: any other Value of it whole is
-// no bind, and a paired token's other verdicts leave it to its words.
+// recording that holds the value whole or as one word, or refuses it. Any
+// other place is held to what its address reads: one with no leaf reads an
+// empty text, which no token is. A token is read whole (oneToken) only
+// so: any other Value of it whole is no bind, and a paired token's other
+// verdicts leave it to its words.
 func (dc *decider) boundWhole(d Decision, rec, live string) bool {
 	return d.Outcome == OutcomeValue && slices.ContainsFunc(dc.ps, func(p evPlace) bool {
 		if p.mock != d.From.Mock || p.path != d.From.Path || p.side != d.From.Side {
 			return false
 		}
-		if p.leaf.Path == "" {
+		if p.raw > 0 {
 			return true
 		}
 		// A text the address does not open reads "", which no token is.
@@ -3582,21 +3584,32 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 // are the n-th token (variables.EachToken) of rec and live, two runs of a
 // longer text: the first such token of rec that is v, where live's token
 // of that index is f. ok is false where rec and live are v and f whole (the
-// place is named whole), or no such token is.
+// place is named whole), or no such token is: past the last token of
+// either text, no token of that index is in both. It reads rec and live
+// once each, their n-th tokens side by side, each from the end of the one
+// before (nextToken), so a leaf of any length costs one pass, never a pass
+// for each token.
 func tokenStepAt(rec, live, v, f string) (int, bool) {
 	if rec == v && live == f {
 		return 0, false
 	}
+	r, l := 0, 0
 	for n := 0; ; n++ {
-		r, ok := variables.Decode(variables.Token(n), rec)
-		if !ok {
+		rs, re, rok := nextToken(rec, r, len(rec))
+		ls, le, lok := nextToken(live, l, len(live))
+		if !rok || !lok {
 			return 0, false
 		}
-		if l, _ := variables.Decode(variables.Token(n), live); r == v && l == f {
+		if rec[rs:re] == v && live[ls:le] == f {
 			return n, true
 		}
+		r, l = re, le
 	}
 }
+
+// nextToken is the cut tokenStepAt reads a text's tokens by in turn
+// (variables.NextToken), the one a replay's token step reads.
+var nextToken = variables.NextToken
 
 // cookieToken is the steps from a, a Cookie or Set-Cookie header's own text
 // (rec and live, two runs of it), to the part of a JWT that holds v in rec

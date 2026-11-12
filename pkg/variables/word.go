@@ -718,6 +718,23 @@ func IsTokenByte(c byte) bool {
 // is the one rule a token step reads a text by, and the one learning cuts
 // a whole token by.
 func EachToken(s string, from, to int, yield func(start, end int) bool) bool {
+	for {
+		start, end, ok := NextToken(s, from, to)
+		if !ok {
+			return true
+		}
+		if !yield(start, end) {
+			return false
+		}
+		from = end
+	}
+}
+
+// NextToken is [start, end) of the first token of s[from:to] (EachToken),
+// from standing as the text's start; ok is false where it holds none. The
+// next token starts at or after end, so a caller that reads a text's tokens
+// in turn, each from the end of the one before, reads the text once.
+func NextToken(s string, from, to int) (start, end int, ok bool) {
 	for i := from; i < to; {
 		if !IsTokenByte(s[i]) {
 			i++
@@ -731,12 +748,12 @@ func EachToken(s string, from, to int, yield func(start, end int) bool) bool {
 		for k < to && s[k] == '=' {
 			k++
 		}
-		if (k == to || !IsTokenByte(s[k])) && !yield(i, k) {
-			return false
+		if k == to || !IsTokenByte(s[k]) {
+			return i, k, true
 		}
 		i = k
 	}
-	return true
+	return 0, 0, false
 }
 
 // tokenSpan is [lo, hi) of the n-th token of text (EachToken); ok is false

@@ -1,6 +1,9 @@
 package variables
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // A token step names one token of a longer text (EachToken), read whole
 // wherever its own '-' and '_' fall: an id in a consent URL, a key after
@@ -90,5 +93,35 @@ func TestEachTokenCutsAfterAPaddedRun(t *testing.T) {
 	EachToken(s, 0, len(s), func(a, b int) bool { got = append(got, s[a:b]); return true })
 	if len(got) != 2 || got[0] != "ab+cd/ef==" || got[1] != "x" {
 		t.Errorf("EachToken = %q; want [ab+cd/ef== x]", got)
+	}
+}
+
+// EachToken stops where yield says so and reports it, and cuts a run that
+// starts with '/' or '+', or holds '-' or '_', whole, as NextToken does one
+// at a time: each token starts at or after the end of the one before.
+func TestEachTokenIsNextTokenInTurn(t *testing.T) {
+	s := "Bearer /x+yz== a-b_c; +q"
+	want := []string{"Bearer", "/x+yz==", "a-b_c", "+q"}
+	var got []string
+	if !EachToken(s, 0, len(s), func(a, b int) bool { got = append(got, s[a:b]); return true }) {
+		t.Error("EachToken ran to the end but reported false")
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("EachToken = %q; want %q", got, want)
+	}
+	got = got[:0]
+	for from := 0; ; {
+		a, b, ok := NextToken(s, from, len(s))
+		if !ok {
+			break
+		}
+		got, from = append(got, s[a:b]), b
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("NextToken in turn = %q; want %q", got, want)
+	}
+	n := 0
+	if EachToken(s, 0, len(s), func(int, int) bool { n++; return n < 2 }) || n != 2 {
+		t.Errorf("EachToken told to stop at the second token: read %d and reported it ran to the end", n)
 	}
 }
