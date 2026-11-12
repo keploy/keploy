@@ -636,6 +636,17 @@ func TestOutcomeATokenInAClientTestsJWTClaimBindsAtTheClaimWhole(t *testing.T) {
 			{Side: Request, Leaf: oText("body.status", "active"), Live: "active", Place: "body.status"},
 		}}), rText, fText
 	}
+	// A claim before it by name that holds the token in the recording alone
+	// (round F's another) is passed over: the claim that holds it in both
+	// runs is the bind place.
+	twoClaims := func(r, f string) ([]Earlier, string, string) {
+		tok := func(prev, id string, at time.Time, sig string) string {
+			return claimToken(t, map[string]any{"a_prev": prev, "request_id": id, "iat": at.Unix()}, sig)
+		}
+		rTok := tok(r, r, rReq, "recorded-signature-bytes-0001")
+		fTok := tok("kepreq_ZZ9yXw8VuT7sRq6PoN5mLk4JiH3gFe2DcB1aZy0XwVu", f, fReq, "round-f-signature-bytes-00002")
+		return clientPlaced(t, "post-cluster-status-3", heartbeatCase(rTok, rReq), heartbeatCase(fTok, fReq), fReq), "Bearer " + rTok, "Bearer " + fTok
+	}
 	call := func(r, f string, earlier []Earlier) []Decision {
 		in := iCall("body.cmd.filter._id", String, r, f, rCall, fCall, nil, earlier, nil)
 		in.Drifts = oClientDrifts()
@@ -651,6 +662,7 @@ func TestOutcomeATokenInAClientTestsJWTClaimBindsAtTheClaimWhole(t *testing.T) {
 		{"an id of letters and digits in a Bearer token's claim", ar, af, bearer, "header.Authorization|jwt.request_id"},
 		{"a standard key in a Bearer token's claim", kr, kf, bearer, "header.Authorization|jwt.request_id"},
 		{"an unpaired token in a Bearer token's claim, a later exchange of the test case's name", ur, uf, named, "header.Authorization|jwt.request_id"},
+		{"an id of letters and digits in a claim, a claim before it holding it in the recording alone", ar, af, twoClaims, "header.Authorization|jwt.request_id"},
 		{"an unpaired token in a cookie pair's token's claim, the token under two names", ur, uf, cookie, "header.Cookie|cookie.refresh_token|jwt.request_id"},
 	} {
 		earlier, rText, fText := tc.place(tc.rec, tc.live)
