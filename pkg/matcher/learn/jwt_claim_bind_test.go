@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
@@ -582,13 +583,24 @@ func TestPlaceRankNamesAClientTestsWholeRequestBeforeALongerValue(t *testing.T) 
 	calls := []struct {
 		name string
 		e    Earlier
-	}{{"the test's own", Earlier{Own: true}}, {"the run's", Earlier{Run: true}}, {"another test's", Earlier{}}}
-	for _, c := range calls {
-		if r := placeRank(c.e, call, true); r >= cw {
-			t.Errorf("%s call that sent the value whole ranks %d; want it before the client test's request that sent it whole (%d)", c.name, r, cw)
-		}
-		if r := placeRank(c.e, call, false); r <= cw {
-			t.Errorf("%s call that sent the value inside a longer value ranks %d; want it after the client test's request that sent it whole (%d)", c.name, r, cw)
+	}{{"the test's own", Earlier{Own: true}}, {"the run's", Earlier{Run: true}}, {"the pool's", Earlier{}}}
+	for _, sw := range []string{"1", ""} {
+		t.Setenv(provenswitch.Env, sw)
+		for _, c := range calls {
+			// A call that sent the value whole where a plan binds it (the
+			// test's own; the run's under the switch) ranks before the client
+			// test's whole request; one where none binds it, after the
+			// client test's claim (2*cw-1 of the doubled ranks), its whole
+			// request and its word (2*cw+1), never hiding them.
+			r := placeRank(c.e, call, true)
+			if binds := c.e.Own || c.e.Run && sw == "1"; binds && r >= cw || !binds && 2*r <= 2*cw+1 {
+				t.Errorf("switch %q: %s call that sent the value whole (a plan binds it: %v) ranks %d; the client test's whole request ranks %d", sw, c.name, binds, r, cw)
+			}
+			// A call that sent it inside a longer value ranks after every call
+			// that sent it whole, a plan binding it there or not.
+			if l, w := placeRank(c.e, call, false), placeRank(Earlier{}, call, true); l <= r || l <= cw || l <= w {
+				t.Errorf("switch %q: %s call that sent the value inside a longer value ranks %d; want it after the call that sent it whole (%d), the pool's whole call (%d) and the client test's request that sent it whole (%d)", sw, c.name, l, r, w, cw)
+			}
 		}
 	}
 	last := placeRank(Earlier{}, call, false)
@@ -664,5 +676,64 @@ func TestAClientTestsClaimComesBeforeItsWholeBody(t *testing.T) {
 				t.Fatalf("ClassifyArrived: %s (%s) from %s %s, bound at %q (%v); want a variable of test case post-cluster-status-3 bound at header.Authorization|jwt.cluster_id#0", ln.Kind, ln.Why, ln.From.Mock, ln.From.Path, at, ok)
 			}
 		})
+	}
+}
+
+// TestAWholeCallNoPlanBindsNeverHidesAClientPlace: before the find, a call
+// sent the id whole where no plan binds it: a mock of the pool F served in
+// the test, or the run's call (the set's start-up's, or an earlier test's)
+// without the proven switch. The client test sent the id whole in its body,
+// or in a claim of its token. That call ranks after the client test's place
+// (placeRank), which binds the id, through ClassifyArrived (the HTTP
+// adapter's classify), though it comes first; under the switch the run's
+// call binds the id, and is named first, as before.
+func TestAWholeCallNoPlanBindsNeverHidesAClientPlace(t *testing.T) {
+	const rID, fID = "6af47add8a9351dfdb7c457a", "6af47b1e0c22d4e8a91b03f6"
+	rReq := time.Date(2026, 11, 11, 14, 24, 31, 630_000_000, time.UTC)
+	fReq := rReq.Add(67 * time.Second)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	const p = "body.cmd.filter._id"
+	sh := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	clientCase := func(id, sig string, at time.Time) *models.HTTPReq {
+		h := map[string]string{"Content-Type": "application/json", "Host": "localhost:8083"}
+		body := `{"cluster_id":"` + id + `","status":"active"}`
+		if sig != "" {
+			h["Authorization"] = "Bearer " + claimToken(t, map[string]any{"cid": "e2e-free-company", "cluster_id": id}, sig)
+			body = `{"status":"active"}`
+		}
+		return &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/cluster/status", Timestamp: at, Header: h, Body: body}
+	}
+	for _, c := range []struct {
+		name         string
+		run, startUp bool
+	}{{"the pool's call", false, false}, {"the set's start-up call", true, true}, {"an earlier test's call", true, false}} {
+		for _, claim := range []bool{false, true} {
+			for _, sw := range []string{"1", ""} {
+				name, recSig, liveSig, wantAt := c.name+" before the body", "", "", "body.cluster_id"
+				if claim {
+					name, recSig, liveSig, wantAt = c.name+" before the claim", "recorded-signature", "this-run-signature", "header.Authorization|jwt.cluster_id#0"
+				}
+				t.Run(name+" switch "+sw, func(t *testing.T) {
+					t.Setenv(provenswitch.Env, sw)
+					sent := iSent("mock-0", rReq.Add(time.Millisecond), "body.id", String, rID, fID)
+					sent.Seen[0].Place = "body.id"
+					sent.Own, sent.Run, sent.StartUp = false, c.run, c.startUp
+					earlier := append([]Earlier{sent}, clientPlaced(t, "post-cluster-status-3", clientCase(rID, recSig, rReq), clientCase(fID, liveSig, fReq), fReq)...)
+					ln := ClassifyArrived(oClientDrifts(), []string{p}, sh(fID), sh(rID), rCall, fCall, earlier, nil, nil, nil, nil)[0]
+					at, live, ok := ln.From.BindAt()
+					if c.run && sw == "1" {
+						if ln.Kind != KindVariable || ln.From.Mock != "mock-0" || !ln.From.Run || !ok || at != "body.id" || live != fID {
+							t.Fatalf("%s (%s) from %s %s (run %v), bound at %q to %q (%v); want the run's call, which binds the id under the switch, bound at body.id to %s", ln.Kind, ln.Why, ln.From.Mock, ln.From.Path, ln.From.Run, at, live, ok, fID)
+						}
+						return
+					}
+					if ln.Kind != KindVariable || ln.From.Mock != "test case post-cluster-status-3" || !ln.From.Client || !ok || at != wantAt || live != fID {
+						t.Fatalf("%s (%s) from %s %s (client %v), bound at %q to %q (%v); want a variable of the test case bound at %s to %s, not mock-0, which no plan binds at", ln.Kind, ln.Why, ln.From.Mock, ln.From.Path, ln.From.Client, at, live, ok, wantAt, fID)
+					}
+				})
+			}
+		}
 	}
 }
