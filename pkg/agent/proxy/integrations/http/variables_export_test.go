@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -419,5 +420,84 @@ func TestVariableMatch_TheWhyShowsNoValueAtARedactedPathSegment(t *testing.T) {
 				t.Errorf("with no recording that redacted the segment, the why hides the value the call sent: %s", res.Problem)
 			}
 		})
+	}
+}
+
+// Another parser's miss carries the strict comparison's own reasons as the
+// HTTP parser's does (StrictMissOf): a message body an older keploy learned
+// as noise whole, a text of more than one word, that changed is refused with
+// a reason that names the field and says to record again, against the
+// recording it names. A body that only differs, or a recording of another
+// route, gives no such reason, and a nil miss explains nothing.
+func TestStrictMissOf_CarriesTheStrictComparisonsOwnReason(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	withMessage := func(c VariableCall, msg string) VariableCall {
+		c.Body = []byte(strings.Replace(string(c.Body), `"MessageBody":"order 1"`, `"MessageBody":"`+msg+`"`, 1))
+		return c
+	}
+	stale := sqsSend("stale", "d", nil)
+	stale.Spec.ReqBodyNoise = map[string][]string{"body.MessageBody": {}}
+	plain := sqsSend("plain", "d", nil)
+	miss := func(c VariableCall, pool ...*models.Mock) *StrictMiss {
+		t.Helper()
+		if fits, err := h.StrictFits(context.Background(), c, sdkNoise(), pool); err != nil || len(fits) != 0 {
+			t.Fatalf("fits %d, err %v; want no recording to fit", len(fits), err)
+		}
+		return h.StrictMissOf(context.Background(), c, sdkNoise(), pool)
+	}
+	// noPanic runs f, a nil miss's or a nil report's, failing the row where
+	// it panics.
+	noPanic := func(name string, f func()) {
+		t.Helper()
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("%s panicked: %v", name, p)
+			}
+		}()
+		f()
+	}
+
+	// far differs in its deduplication id too: stale is the closest, and
+	// of two as close the first (strictCompare's closerThan).
+	far := sqsSend("far", "x", nil)
+	m := miss(withMessage(sqsCall("d"), "evil 2"), far, stale, plain)
+	want := []models.FieldReason{{Field: "body.MessageBody", Why: staleWholeWhy("body.MessageBody")}}
+	r := &models.MockMismatchReport{FieldReasons: []models.FieldReason{{Field: "body.other", Why: "an earlier report's"}}}
+	m.Explain(r)
+	if m.Closest() != stale || !reflect.DeepEqual(r.FieldReasons, want) {
+		t.Fatalf("closest %v, reasons %+v; want stale, %+v", m.Closest(), r.FieldReasons, want)
+	}
+	if !strings.Contains(r.FieldReasons[0].Why, "Record the test again") {
+		t.Fatalf("the reason %q does not say to record again", r.FieldReasons[0].Why)
+	}
+
+	if m := miss(withMessage(sqsCall("d"), "evil 2"), plain); m != nil {
+		t.Fatalf("a body that only differs gave %+v; want no reason of the comparison's own", m)
+	}
+	other := withMessage(sqsCall("d"), "evil 2")
+	other.URL = &url.URL{Scheme: "http", Host: "sqs.us-east-1.amazonaws.com", Path: "/000000000000/orders.fifo"}
+	if m := miss(other, stale); m != nil {
+		t.Fatalf("a recording of another path gave %+v; want no reason", m)
+	}
+
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if m := h.StrictMissOf(ended, withMessage(sqsCall("d"), "evil 2"), sdkNoise(), []*models.Mock{stale}); m != nil {
+		t.Fatalf("a call whose context ended gave %+v; want no reason", m)
+	}
+
+	var none *StrictMiss
+	r = &models.MockMismatchReport{FieldReasons: want}
+	noPanic("a nil miss's Explain", func() { none.Explain(r) })
+	noPanic("a nil miss's Explain of no report", func() { none.Explain(nil) })
+	noPanic("an Explain of no report", func() { m.Explain(nil) })
+	noPanic("a nil miss's Closest", func() {
+		if none.Closest() != nil {
+			t.Fatal("a nil miss named a recording")
+		}
+	})
+	if !reflect.DeepEqual(r.FieldReasons, want) {
+		t.Fatal("a nil miss changed the report")
 	}
 }

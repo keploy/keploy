@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"slices"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -179,4 +180,53 @@ func (h *HTTP) StrictFits(ctx context.Context, call VariableCall, noise RequestN
 	input := call.req()
 	fits, _, err := strictCompare(ctx, input, liveDestination(ctx, input), pool, h.newStrictNoise(noise.Header, noise.Body, noise.URL))
 	return fits, err
+}
+
+// StrictMiss is why the closest recording of a call's route is not that very
+// call, where the strict comparison (StrictFits) refused a field of it for a
+// reason of its own: a place learned as a read of the application's clock
+// that the call does not hold, a text an older keploy learned as noise whole
+// that changed (staleWholeWhy), or a field keploy.yml's noise lets vary only
+// within patterns, a side's value outside them. The HTTP parser's own miss
+// carries the same reasons (reasonsOf). Neither names a value.
+type StrictMiss struct {
+	closest *models.Mock
+	reasons []models.FieldReason
+}
+
+// Closest is the recording the call was refused against; nil for a nil miss.
+func (m *StrictMiss) Closest() *models.Mock {
+	if m == nil {
+		return nil
+	}
+	return m.closest
+}
+
+// Explain writes the reasons onto the miss's report, as the HTTP parser's
+// miss carries them (models.MockMismatchReport.FieldReasons): the run's
+// summary and record's judging read them there.
+func (m *StrictMiss) Explain(r *models.MockMismatchReport) {
+	if m == nil || r == nil {
+		return
+	}
+	r.FieldReasons = slices.Clone(m.reasons)
+}
+
+// StrictMissOf is the strict comparison's miss of a call of another parser
+// that no recording of pool is (StrictFits gave none), as the HTTP parser's
+// miss reads it (strictServe): the closest recording, and the reasons of its
+// fields refused for a reason of their own. nil where none was: a field that
+// only differs is the call's change, which the parser's miss already says,
+// and a recording of another route (method, destination or path) has no
+// field refused so (walkOnly). So is a call whose context ended: the
+// comparison stopped, and strictCompare names no closest recording then.
+// ctx has the call's destination pinned (PinLiveDestination).
+func (h *HTTP) StrictMissOf(ctx context.Context, call VariableCall, noise RequestNoise, pool []*models.Mock) *StrictMiss {
+	input := call.req()
+	_, near, _ := strictCompare(ctx, input, liveDestination(ctx, input), pool, h.newStrictNoise(noise.Header, noise.Body, noise.URL))
+	reasons := reasonsOf(near.diffs)
+	if len(reasons) == 0 {
+		return nil
+	}
+	return &StrictMiss{closest: near.mock, reasons: reasons}
 }
