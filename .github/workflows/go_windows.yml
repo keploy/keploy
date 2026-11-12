@@ -126,3 +126,16 @@ jobs:
       - name: Test the run's log (amd64)
         run: go test -count=1 -run "TestTheRunsLog|TestCloseLogFileOfAClosedLogIsANoOp|TestCloseLogFileLeavesAFileThatIsNotALog" ./utils/log/
         shell: cmd
+
+      # The claim's reads of the calling process on Windows, all without
+      # elevation: the owner of a connection's client end, from the system's
+      # TCP tables (GetExtendedTcpTable); a process's creation time, and that
+      # one that has exited is gone while a handle still keeps it
+      # (procStart); and its parent chain (procDescends). The table layout and
+      # the chain rule are also tested on every system (caller_tcptable_test,
+      # claimer_chain_test); only here do the system's own tables and
+      # processes feed them. The claim row has a child claim over HTTP and
+      # checks that the agent names the child.
+      - name: Test the claim's process reads (amd64)
+        run: go test -count=1 -run "TestTheClaimReadsTheCallerFromTheConnection|TestCallerPID|TestSameEndpoint|TestTCPOwnerOnWindows|TestTheWindowsTCP|TestWindowsProc|TestDescendsByCreation" ./pkg/agent/routes/ ./pkg/service/agent/
+        shell: cmd

@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package routes
 
@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -141,7 +140,7 @@ func TestCallerPIDNamesACallerThatClosedItsWriteSide(t *testing.T) {
 	defer srv.Close()
 	c := exec.Command(os.Args[0], "-test.run=^$")
 	c.Env = append(os.Environ(), envHalfCloseTo+"="+srv.Listener.Addr().String())
-	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	ownProcessGroup(c)
 	in, err := c.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -155,7 +154,7 @@ func TestCallerPIDNamesACallerThatClosedItsWriteSide(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if c.ProcessState == nil {
-			_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+			killProcessGroup(c)
 			_ = c.Wait()
 		}
 	})
