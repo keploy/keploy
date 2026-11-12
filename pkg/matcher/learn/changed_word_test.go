@@ -33,8 +33,9 @@ func TestChangedWord(t *testing.T) {
 // wordBindAt binds a client test's request field at the one word it changed
 // by where the value changed by that same word, as recorded and as F saw it,
 // and at the field whole where the field is the word whole. It binds no
-// call's request, no field or value that changed by more than one word, and
-// no word that is not the value's in either run.
+// field that holds the value whole (that place binds whole), no call's
+// request, no field or value that changed by more than one word, and no
+// word that is not the value's in either run.
 func TestWordBindAt(t *testing.T) {
 	const (
 		v = "CI identity: github octo-org/repo-1"
@@ -49,6 +50,7 @@ func TestWordBindAt(t *testing.T) {
 	}{
 		{"the word inside the field", client, "octo-org/repo-1", "octo-org/repo-2", v, f, "body.variables.input.conditions[0].value#3"},
 		{"the field is the word whole", client, "1", "2", v, f, "body.variables.input.conditions[0].value"},
+		{"the field holds the value whole", client, v, f, v, f, ""},
 		{"a call's request", Place{Var: "body.event"}, "trusted octo-org/repo-1", "trusted octo-org/repo-2", v, f, ""},
 		{"F's word is not the value's", client, "octo-org/repo-1", "octo-org/repo-3", v, f, ""},
 		{"the recorded word is not the value's", client, "octo-org/repo-3", "octo-org/repo-2", v, f, ""},

@@ -3510,14 +3510,15 @@ func claimAt(p Place, rec, live, v, f string) string {
 // (v as recorded, f as F saw it) inside a longer value: p.Var at the one
 // word rec changed by (ChangedWord), where v changed by one word alone too,
 // and the leaf's word is v's, rec's recorded and live's F's (p.Var itself
-// where rec and live are that word whole). "" where either changed by more
-// than one word or by a byte between words, the words differ, p.Var is no
-// place or names a word or a step already, or p is no client test's request
-// (Client): a replay binds a variable at a word only of the request that
-// pairs with a client test case, and reads a call's request only to put its
-// recorded values back.
+// where rec and live are that word whole). "" where rec is v whole (no
+// longer value: the place binds whole), either changed by more than one word
+// or by a byte between words, the words differ, p.Var is no place or names a
+// word or a step already, or p is no client test's request (Client): a
+// replay binds a variable at a word only of the request that pairs with a
+// client test case, and reads a call's request only to put its recorded
+// values back.
 func wordBindAt(p Place, rec, live, v, f string) string {
-	if !p.Client {
+	if !p.Client || rec == v {
 		return ""
 	}
 	a, err := variables.ParseAddress(p.Var)
