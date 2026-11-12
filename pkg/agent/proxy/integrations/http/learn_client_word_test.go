@@ -61,9 +61,11 @@ func TestLearnMatchBindsTheWordAClientTestSentInsideALongerValue(t *testing.T) {
 
 // What keploy cannot read as one word of a client test's request carried
 // into a longer value is refused, as before: a name that changed by two
-// words, a request field that changed by two, and a word of a JSON number,
-// which a replay reads no word of. A name that holds the word whole as a
-// number is used whole.
+// words, a request field that changed by two or by a byte between words as
+// well, a name whose word as F wrote it is not the request's, and a word of
+// a JSON number, which a replay reads no word of. A name that holds the word
+// whole as a number is used whole, and a name whose stamp as F wrote it is
+// not the request's binds nothing at the request.
 func TestLearnMatchRefusesAClientTestsWordItCannotBind(t *testing.T) {
 	const inside = "body.data.name carries a value test case post-query-83 sent earlier in the test at body.variables.input.conditions[0].value, inside a longer value or at a place keploy cannot bind it"
 	for _, tc := range []struct {
@@ -83,6 +85,8 @@ func TestLearnMatchRefusesAClientTestsWordItCannotBind(t *testing.T) {
 			}
 			return "-1e8b"
 		}}, inside},
+		{"the request's field changed by a byte between words too", ciKeyCase{liveSep: "_"}, inside},
+		{"the name's word as F wrote it is not the request's", ciKeyCase{hex: true, nameLive: "f0e1d2c3b4"}, "body.data.name changed, and a word of its recorded value (its characters 35 to 44) appears in what the test case gave the application, in test case post-query-83 at body.variables.input.conditions[0].value, which did not drift with it"},
 		{"a word of a number", ciKeyCase{seq: true}, "body.data.seq carries a word test case post-query-83 sent earlier in the test at body.variables.input.conditions[1].value#3, inside a value that is no string, which a replay reads no word of"},
 	} {
 		for _, timeForm := range []bool{true, false} {
@@ -102,6 +106,22 @@ func TestLearnMatchRefusesAClientTestsWordItCannotBind(t *testing.T) {
 	}
 	if !containsString(uses, "body.data.seq") {
 		t.Fatalf("uses %v; want the number used whole at body.data.seq", uses)
+	}
+	// The name's stamp as F wrote it, a moment in F's call, is not the one
+	// the request sent: the request's field binds nothing there, and the
+	// stamp is learned as a read of the clock in each run.
+	for _, timeForm := range []bool{true, false} {
+		other := strconv.FormatInt(learnAt.Add(10*time.Minute+107*time.Millisecond).UnixNano(), 10)
+		served, miss, db := ciKeyPut(t, ciKeyCase{nameLive: other}, timeForm)
+		if served == nil || miss != nil || len(db.consumed) != 1 {
+			t.Fatalf("the name's stamp as F wrote it is not the request's (time default %v): served %v, miss %+v; want it answered by the clock", timeForm, served != nil, miss)
+		}
+		if bindsAt(db.consumed[0], "body.variables.input.conditions[0].value#3") {
+			t.Errorf("time default %v: binds %+v; want none at the request's word, which F's name does not hold", timeForm, db.consumed[0].Spec.LearnedBinds())
+		}
+		if _, ok := db.consumed[0].Spec.Clocks["body.data.name"]; !ok {
+			t.Errorf("time default %v: clocks %+v; want the name's stamp learned as a read of the clock", timeForm, db.consumed[0].Spec.Clocks)
+		}
 	}
 }
 
@@ -164,12 +184,15 @@ func bindsAt(m models.Mock, at string) bool {
 // longer value before the PUT, as recorded and as F sent it. key names the
 // request's repository field ("value" where ""). hex makes the repository's
 // word a random one in place of the UnixNano, a word that is no instant, and
-// leaves the record's stamps as recorded.
+// leaves the record's stamps as recorded. liveSep is the byte before the
+// request's word as F sent it ("-" where ""), and nameLive the name's word
+// as F wrote it (the request's word where "").
 type ciKeyCase struct {
 	nameTail, repoTail func(live bool) string
 	seq, seqWhole      bool
 	audit, hex         bool
 	key                string
+	liveSep, nameLive  string
 }
 
 const (
@@ -204,6 +227,18 @@ func ciKeyPut(t *testing.T, c ciKeyCase, timeForm bool) (*models.Mock, *learnMis
 		}
 		return "a1b2c3d4e5"
 	}
+	nameWord := func(read time.Time, live bool) string {
+		if live && c.nameLive != "" {
+			return c.nameLive
+		}
+		return word(read, live)
+	}
+	repoSep := func(live bool) string {
+		if live && c.liveSep != "" {
+			return c.liveSep
+		}
+		return "-"
+	}
 	path := func(id string) string { return "/v1/secret/data/keploy/personal-access-tokens/keploy.io/" + id }
 	body := func(id, by, seq string, at, nameRead time.Time, live bool) string {
 		extra := ""
@@ -217,13 +252,13 @@ func ciKeyPut(t *testing.T, c ciKeyCase, timeForm bool) (*models.Mock, *learnMis
 		return `{"data":{"_id":"` + id + `","cid":"keploy.io","createdAt":` + strconv.FormatInt(at.Unix(), 10) +
 			`,"createdBy":"` + by + `","email":"sa-` + by + `@keploy.io.svc","expiresAt":` + strconv.FormatInt(at.Add(ttl).Unix(), 10) +
 			`,"isServiceAccountKey":true,"isServiceToken":false,"isWebSession":false,"isWorkloadIdentity":true,"keyType":"pat","lastUsedAt":0,"mintedForJti":"","name":"CI identity: github octo-org/repo-` +
-			word(nameRead, live) + tail(c.nameTail, live) + `","resourceId":"","resourceType":"","scopes":["read","write","admin"]` + extra +
+			nameWord(nameRead, live) + tail(c.nameTail, live) + `","resourceId":"","resourceType":"","scopes":["read","write","admin"]` + extra +
 			`,"sessionPerms":"","status":"active","token":"","updatedAt":"` + at.UTC().Format(time.RFC3339) + `"}}`
 	}
 	key := cmp.Or(c.key, "value")
 	req := func(read time.Time, sa, seq string, live bool) string {
-		return `{"query":"mutation($sa: String!, $input: CreateWorkloadIdentityInput!) {\n  createServiceAccountWorkloadIdentity(serviceAccountId: $sa, input: $input) { id audience exchangeAudience issuer pinned { claim value } expiresAt }\n}","variables":{"input":{"conditions":[{"claim":"repository","` + key + `":"octo-org/repo-` +
-			word(read, live) + tail(c.repoTail, live) + `"},{"claim":"ref","value":"refs/heads/run-` + seq + `"}],"issuer":"http://127.0.0.1:42833","provider":"github"},"sa":"` + sa + `"}}`
+		return `{"query":"mutation($sa: String!, $input: CreateWorkloadIdentityInput!) {\n  createServiceAccountWorkloadIdentity(serviceAccountId: $sa, input: $input) { id audience exchangeAudience issuer pinned { claim value } expiresAt }\n}","variables":{"input":{"conditions":[{"claim":"repository","` + key + `":"octo-org/repo` +
+			repoSep(live) + word(read, live) + tail(c.repoTail, live) + `"},{"claim":"ref","value":"refs/heads/run-` + seq + `"}],"issuer":"http://127.0.0.1:42833","provider":"github"},"sa":"` + sa + `"}}`
 	}
 	recBegin := ciRecBegin()
 	began := learnAt.Add(10 * time.Minute)
@@ -257,14 +292,15 @@ func ciKeyPut(t *testing.T, c ciKeyCase, timeForm bool) (*models.Mock, *learnMis
 	db := &learnDb{perTest: []*models.Mock{put}}
 	if c.audit {
 		event := func(read time.Time, live bool) string {
-			return `{"event":"trusted octo-org/repo-` + word(read, live) + `"}`
+			return "trusted octo-org/repo-" + word(read, live)
 		}
 		// Its learn step bound its word, and told the test's tracker what
-		// it sent, as recorded and as F sent it.
-		audit := learnRecorded("mock-1", 1110*time.Millisecond, "POST", "/v1/audit", event(recBegin.Add(100*time.Millisecond), false), nil, `{}`)
+		// it sent, as recorded and as F sent it, at the variable place of
+		// its body's field (earlierOf).
+		audit := learnRecorded("mock-1", 1110*time.Millisecond, "POST", "/v1/audit", `{"event":"`+event(recBegin.Add(100*time.Millisecond), false)+`"}`, nil, `{}`)
 		test, _, _, _ := tr.Test()
 		tr.Served(test, learn.Earlier{Mock: audit.Name, At: audit.Spec.ReqTimestampMock, Own: true, Payload: learn.RawOf(audit, true),
-			Seen: []learn.Seen{{Side: learn.Request, Leaf: learn.Leaf{Path: "body.event", Value: event(recBegin.Add(100*time.Millisecond), false), Type: learn.String}, Live: event(sent, true)}}})
+			Seen: []learn.Seen{{Side: learn.Request, Leaf: learn.Leaf{Path: "body.event", Value: event(recBegin.Add(100*time.Millisecond), false), Type: learn.String}, Live: event(sent, true), Place: "body.event"}}})
 	}
 	stamped := began.Add(120 * time.Millisecond)
 	if c.hex {

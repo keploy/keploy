@@ -3536,7 +3536,9 @@ func wordBindAt(p Place, rec, live, v, f string) string {
 	if wordOf(rec, n) != vw || wordOf(live, n) != fw {
 		return ""
 	}
-	if rec != vw || live != fw {
+	// rec is the word whole only where live is F's word whole too:
+	// ChangedWord keeps every byte but the word's alike.
+	if rec != vw {
 		a.Word = n
 	}
 	return a.String()
