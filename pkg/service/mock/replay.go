@@ -1430,7 +1430,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	if !ok {
 		return refuse("this keploy cannot read the calls the set recorded outside its tests")
 	}
-	mp, err := reader.GetMapping(ctx, name)
+	mp, err := mockSetMapping(ctx, reader, name)
 	if err != nil {
 		return unreadable(err)
 	}
@@ -2514,7 +2514,7 @@ func (m *mockService) pushSetTable(ctx context.Context, name string) bool {
 	if !ok {
 		return false
 	}
-	mapping, err := reader.GetMapping(ctx, name)
+	mapping, err := mockSetMapping(ctx, reader, name)
 	if err != nil || mapping == nil || (len(mapping.Boots) == 0 && len(mapping.Suites) == 0) {
 		return false
 	}
@@ -3351,4 +3351,17 @@ func (m *mockService) announceServed(served map[string]models.MockState) {
 			// would otherwise read it as "when this happened".
 			zap.String("recordedReqTimestamp", state.ReqTimestampMock))
 	}
+}
+
+// mockSetMapping is mock set name's mapping as keploy mock replay reads it:
+// its worker scope without the entries worker-mock rules marked
+// (models.WithoutWorkerRuleEntries), which keploy test alone serves to every
+// test. nil for a set with none.
+func mockSetMapping(ctx context.Context, reader MappingReader, name string) (*models.Mapping, error) {
+	mp, err := reader.GetMapping(ctx, name)
+	if err != nil || mp == nil {
+		return mp, err
+	}
+	mp.Worker = models.WithoutWorkerRuleEntries(mp.Worker)
+	return mp, nil
 }

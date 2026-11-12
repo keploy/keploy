@@ -471,6 +471,6 @@ func TestConsumeMappingsTellsEachTestsResolvedMocks(t *testing.T) {
 			for _, e := range entries {
 				told = append(told, test+"/"+e.Name)
 			}
-		}))
+		}, nil))
 	assert.Equal(t, []string{"test-1/mock-1", "test-1/mock-2"}, told)
 }
