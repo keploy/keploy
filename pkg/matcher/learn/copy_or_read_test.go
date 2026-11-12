@@ -323,6 +323,15 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantItsOwnWindowHoldsAsAReadSinceIt
 				if d := OffsetReadUnder(g, true); d.Kind != KindClockRead {
 					t.Fatalf("the rule's absence under the time default: %s (%s); want the read", d.Kind, d.Why)
 				}
+				// A rule of another kind at the field (a minted rule)
+				// decides nothing of a read of the clock: the read the
+				// re-read learned stands, never the refusal it keeps.
+				for _, timeForm := range []bool{true, false} {
+					m := DeclaredClockLearned(g, Source{Kind: SourceMinted, Rule: "minted-at-the-field"}, &Window{Rec: rec.window(true), F: f.window(true)}, timeForm)
+					if mo, mok := m.Clock(); m.Kind != KindClockRead || !mok || !reflect.DeepEqual(mo, o) {
+						t.Fatalf("a minted rule at the field (time default %v): %s Read=%+v (%s); want the read the re-read learned", timeForm, m.Kind, m.Read, m.Why)
+					}
+				}
 			}
 			for _, r := range []struct {
 				name string
