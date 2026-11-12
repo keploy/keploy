@@ -107,7 +107,8 @@ func TestATokensTimeClaimsHoldByFormAndTheRestAsRecorded(t *testing.T) {
 }
 
 // A clock key names a claim only where its offset names that claim, of a
-// leaf's path.
+// leaf's path: a key of the claim of no name, with an offset of no claim,
+// is a word's read, not a claim's.
 func TestAClaimClockKeyNamesItsClaim(t *testing.T) {
 	k := ClaimClockKey("body.token", "iat")
 	for _, c := range []struct {
@@ -117,6 +118,7 @@ func TestAClaimClockKeyNamesItsClaim(t *testing.T) {
 	}{
 		{key: k, o: models.ClockOffset{Claim: "iat"}, field: "body.token"},
 		{key: k, o: models.ClockOffset{}},
+		{key: ClaimClockKey("body.token", ""), o: models.ClockOffset{}},
 		{key: k, o: models.ClockOffset{Claim: "exp"}},
 		{key: "body.token", o: models.ClockOffset{Claim: "iat"}},
 		{key: "|jwt.iat", o: models.ClockOffset{Claim: "iat"}},
@@ -129,9 +131,9 @@ func TestAClaimClockKeyNamesItsClaim(t *testing.T) {
 	}
 }
 
-// Only a leaf learned as noise, or refused as an instant its call's window
-// shows no read of the clock in, at a header or a body field, under the
-// time default, is learned as the times in its token's claims.
+// Only a text leaf learned as noise, or refused as an instant its call's
+// window shows no read of the clock in, at a header or a body field, under
+// the time default, is learned as the times in its token's claims.
 func TestOnlyNoiseOrAnUnreadInstantIsLearnedAsAToken(t *testing.T) {
 	recAt := time.Date(2026, 11, 12, 1, 0, 0, 0, time.UTC)
 	liveAt := recAt.Add(10 * time.Minute)
@@ -165,6 +167,8 @@ func TestOnlyNoiseOrAnUnreadInstantIsLearnedAsAToken(t *testing.T) {
 		{what: "noise at a header", ln: Learned{Kind: KindNoise, Recorded: leaf("header.x-token", recAt, claimSigA), Live: leaf("header.x-token", liveAt, claimSigB)}, timeForm: true, learned: true},
 		{what: "noise, strict", ln: Learned{Kind: KindNoise, Recorded: leaf("body.token", recAt, claimSigA), Live: leaf("body.token", liveAt, claimSigB)}},
 		{what: "noise at a body field whose name holds a '|'", ln: Learned{Kind: KindNoise, Recorded: leaf("body.a|b", recAt, claimSigA), Live: leaf("body.a|b", liveAt, claimSigB)}, timeForm: true},
+		{what: "a token in a leaf typed a number as recorded", ln: Learned{Kind: KindNoise, Recorded: Leaf{Path: "body.token", Type: Number, Value: tok(recAt, claimSigA)}, Live: leaf("body.token", liveAt, claimSigB)}, timeForm: true},
+		{what: "a token in a leaf typed a number in round F", ln: Learned{Kind: KindNoise, Recorded: leaf("body.token", recAt, claimSigA), Live: Leaf{Path: "body.token", Type: Number, Value: tok(liveAt, claimSigB)}}, timeForm: true},
 		{what: "noise at a query value", ln: Learned{Kind: KindNoise, Recorded: leaf("url.query.t", recAt, claimSigA), Live: leaf("url.query.t", liveAt, claimSigB)}, timeForm: true},
 		{what: "an unread instant", ln: Learned{Kind: KindUnaccounted, Why: unread, unreadWhy: unread, Recorded: leaf("body.token", recAt, claimSigA), Live: leaf("body.token", liveAt, claimSigB)}, timeForm: true, learned: true},
 		{what: "an unread instant refused again for another reason", ln: Learned{Kind: KindUnaccounted, Why: "another", unreadWhy: unread, Recorded: leaf("body.token", recAt, claimSigA), Live: leaf("body.token", liveAt, claimSigB)}, timeForm: true},
