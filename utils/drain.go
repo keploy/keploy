@@ -91,23 +91,25 @@ func DrainErrGroupStatus(logger *zap.Logger, name string, g *errgroup.Group, tim
 // as DrainErrGroupStatus otherwise: timedOut means a goroutine may still be
 // running.
 func DrainErrGroupProgress(logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {
-	return drainErrGroupProgress(nil, logger, name, g, bound, progress)
+	return drainErrGroupProgress(nil, logger, name, g, bound, progress, nil)
 }
 
 // DrainErrGroupProgressOn is DrainErrGroupProgress on clk (nil: the
 // process's own runnable clock), for a test that drives the time a drain's
 // stall is measured in.
 func DrainErrGroupProgressOn(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {
-	return drainErrGroupProgress(clk, logger, name, g, bound, progress)
+	return drainErrGroupProgress(clk, logger, name, g, bound, progress, nil)
 }
 
 // drainErrGroupProgress is DrainErrGroupProgress on clk (nil: the process's
-// own runnable clock).
-func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {
+// own runnable clock). watch, if set, is handed each wait's meter before the
+// wait's first look (waitWhileProgressing): a test reads the stall the drain
+// itself measures, from the start the drain measures it from.
+func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64, watch func(*stall.Meter)) (err error, timedOut bool) {
 	done := make(chan struct{})
 	var werr error
 	go func() { werr = g.Wait(); close(done) }()
-	for !waitWhileProgressing(clk, done, bound, progress) {
+	for !waitWhileProgressing(clk, done, bound, progress, watch) {
 		// An agent stop still in progress is waited for; once it ends, the
 		// rest of the group gets the bound again.
 		idle, inProgress := agentStopsIdle()
@@ -126,20 +128,21 @@ func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *
 	return werr, false
 }
 
-// WaitWhileProgressing waits for done for as long as progress() keeps changing,
-// and reports false once it has not changed for bound, in the time this
-// process could run (utils/stall) (true: done closed).
-func WaitWhileProgressing(done <-chan struct{}, bound time.Duration, progress func() uint64) bool {
-	return waitWhileProgressing(nil, done, bound, progress)
-}
-
-// waitWhileProgressing is WaitWhileProgressing on clk (nil: the process's own
-// runnable clock). It looks at progress every tenth of the bound, at most a
-// second (stall.CheckEvery) of wall time, before it looks at the stall: a change
-// starts the stall again.
-func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Duration, progress func() uint64) bool {
+// waitWhileProgressing waits for done for as long as progress() keeps
+// changing, and reports false once it has not changed for bound, in the time
+// this process could run on clk (nil: the process's own runnable clock)
+// (true: done closed). It looks at progress every tenth of the bound, at most
+// a second (stall.CheckEvery) of wall time, before it looks at the stall: a
+// change starts the stall again. Only the teardown drain uses it: a consumer
+// that writes what a run captured is waited for until it ends
+// (pkg/service/mock waitConsumers), never cut off by a stall. watch, if set,
+// is handed the meter before the first look at progress.
+func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Duration, progress func() uint64, watch func(*stall.Meter)) bool {
 	m := stall.NewMeter(clk, bound)
 	defer m.Stop()
+	if watch != nil {
+		watch(m)
+	}
 	last := progress()
 	for {
 		select {

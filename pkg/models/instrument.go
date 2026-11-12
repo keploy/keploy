@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"time"
@@ -103,11 +104,20 @@ type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
 	TLSPrivateKey string
-	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay time.Duration // This is the same as Application delay.
-	Mocking  bool          // used to enable/disable mocking
-	SwapIDs  bool
+	// Synchronous sits with Mocking and SwapIDs, in one word: the word it
+	// took alone before SQLDelay holds LearnTests.
+	Synchronous bool
+	Mocking     bool // used to enable/disable mocking
+	SwapIDs     bool
+	// SrcInstance is the test worker instance the kernel stamped THIS
+	// connection with (0: none). Runtime, per-connection: json:"-" like
+	// SrcPid. It sits in the word the three bools above leave four bytes
+	// of: supervisor.Session holds these options by value, once per
+	// connection, and stays in the 640 B size class only so
+	// (TestASessionStaysInThe640ByteSizeClass).
+	SrcInstance uint32 `json:"-"`
 	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
 	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
 	// default), "passthrough" (dial the real upstream, don't persist), or
@@ -229,6 +239,17 @@ type OutgoingOptions struct {
 	// (MockManager.ArmSetFence). Like Learn it sits in the padding after the
 	// TLS switches.
 	StartsTestSet bool `json:"StartsTestSet,omitempty"`
+	// LearnTests, when not nil, are the tests whose recordings the round
+	// learns onto (config.Test.LearnTests: the tests a record has just
+	// recorded anew). A test outside it keeps an earlier record's recording
+	// (a partial record, or a test that failed against real infra), so it
+	// holds that record's times: run after a test recorded later, it is no
+	// test begun out of its recorded order, and its own recording learns
+	// nothing (pkg/service/agent keepRecordedOrder, holdLearn). nil: every
+	// test's recording learns (a CLI from before it). Never omitted, so an
+	// empty list (no test learns) is not read as nil. A map, one word: a
+	// Session holds these options by value (supervisor.Session).
+	LearnTests map[string]bool `json:"LearnTests"`
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial
@@ -287,6 +308,19 @@ type OutgoingOptions struct {
 	// older CLI that never sets it never receives one — the version-skew
 	// guard for the deferred-orphan revoke protocol. Record path only.
 	SupportsDroppedRevoke bool
+	// ReadsSetEnds is a capability flag set by the CLI on the replay
+	// session's /mock request: when true, the CLI reads each of its test
+	// sets' end with a set's end read (WithSetEndRead), as keploy test does
+	// under the proven switch. The run's mock manager takes a parser's
+	// set's end registration (integrations.SetEndFiler), which the parser
+	// makes at each call it would hold for a later test, ONLY in a session
+	// that sets it, so under a client that never makes the read (keploy
+	// mock, a keploy test without the switch or from before the read) a
+	// parser holds no call for a later test: it misses it at once instead.
+	// The agent passes it on only to a Proxy that files those calls at the
+	// read (agent.SetEndFilingProxy), and false to any other. Replay path
+	// only.
+	ReadsSetEnds bool
 	// UpstreamTLSVerify mirrors config.Record.UpstreamTLS.Verify: when true,
 	// keploy's own dial to the REAL destination validates the server's
 	// certificate chain and hostname instead of skipping verification.
@@ -320,6 +354,13 @@ type OutgoingOptions struct {
 	// options and uses it to pick the worker's scoped mock view (per-PID
 	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
 	SrcPid uint32 `json:"-"`
+	// SrcNsPid is that process's PID in keploy's agent's own PID namespace
+	// (the eBPF redirect's agentNsPid), by which the agent reads it in its own
+	// /proc: the kernel's PID for an agent in the initial namespace, another
+	// number for one in a container's. 0 when the process is outside the
+	// agent's namespace or unknown. Runtime, per-connection: json:"-" like
+	// SrcPid.
+	SrcNsPid uint32 `json:"-"`
 	// NetNS names the network namespace THIS connection was made from, as an
 	// opaque token. It exists because some destination addresses name a
 	// different server in every network namespace: 127.0.0.0/8, ::1, link-local
@@ -543,6 +584,13 @@ type SetupOptions struct {
 type RunOptions struct {
 	//IgnoreErrors bool
 	AppCommand string // command to run the application
+	// BeforeStop, when set, is called once the application's command has
+	// exited on its own, before keploy stops what the application left
+	// running (its daemons), and only when some of it still runs: running
+	// says, each time it is called, whether any of it does. ctx ends when
+	// the run is stopped (the user's interrupt). The run's stop waits for it
+	// to return; it holds no call the application makes.
+	BeforeStop func(ctx context.Context, running func() bool)
 }
 
 //For test bench

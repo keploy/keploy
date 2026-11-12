@@ -41,6 +41,22 @@ const (
 	// on agent startup to prevent stale state from passing the healthcheck.
 	AgentReadyFile = "/tmp/agent.ready"
 
+	// InternalNetworkName, InternalSubnet and AgentInternalIP address the agent
+	// on a compose network that denies the replayed app any egress.
+	//
+	// A STATIC address, because the agent's URI is settled before the container
+	// exists (AgentClient.Setup), so there is nothing to inspect yet. Both ends
+	// read these constants: the generator pins the agent here, and the caller
+	// that shares the daemon's network namespace dials it here.
+	//
+	// The subnet is deliberately obscure. It only has to avoid colliding with
+	// the Pod's own networks, and a replay Pod is short-lived and otherwise
+	// empty, so a fixed range costs nothing and removes an inspect-then-wire
+	// ordering problem entirely.
+	InternalNetworkName = "default"
+	InternalSubnet      = "172.31.253.0/24"
+	AgentInternalIP     = "172.31.253.10"
+
 	// AgentOutcomeFile is where a containerised agent serving a mock replay
 	// leaves what it served and what it could not match (models.MockOutcome)
 	// as it is stopped. Under docker compose that is the only account of the
@@ -862,24 +878,15 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		// port in the first place.
 		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.AgentPort, opts.AgentPort))
 	}
-	if opts.ProxyPort != 0 {
-		// Host loopback only, for the same reason as the agent port above.
-		//
-		// The proxy is the interception point for the application's outgoing
-		// dependency calls: reaching it means being able to drive mock
-		// matching and to see what a recorded dependency answers. The app does
-		// not need this publish to get there — it runs in the agent's own
-		// network namespace (`network_mode: service:keploy-agent`, set in
-		// modifyAppService) and reaches the proxy over that namespace's
-		// loopback. The DNS port, used exactly the same way, is not published
-		// at all, which is the clearest evidence the publish was never what
-		// made interception work.
-		//
-		// It dates from the agent/client split, where it was introduced as a
-		// copy of the agent port's `%d:%d` line; the agent port has since been
-		// narrowed and this one had not been.
-		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.ProxyPort, opts.ProxyPort))
-	}
+	// The proxy's port is not published, as the DNS server's is not. The
+	// proxy is the interception point for the application's outgoing
+	// dependency calls, and the app reaches it over the loopback of the
+	// agent's network namespace, which it runs in (`network_mode:
+	// service:keploy-agent`, set in modifyAppService), where the agent binds
+	// it and moves off it when another socket holds it
+	// (agent.letProxyPortsMove). A publish claimed the port on the host too:
+	// two runs started together on the configured ports collided there, and
+	// after a move it named a port the proxy did not listen on.
 
 	ports = append(ports, opts.AppPorts...)
 
@@ -1101,8 +1108,28 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		)
 	}
 
-	// Add networks if specified
-	if len(opts.NetworkAliases) > 0 {
+	// Add networks if specified.
+	//
+	// The pinned-address branch comes FIRST and is exclusive: a caller that
+	// presets Agent.AgentURI shares the docker daemon's network namespace and
+	// dials the agent directly, on a compose network that denies the replayed
+	// app egress. That stack has one generated network and no aliases, and a
+	// second `networks` key here would be a duplicate mapping key -- invalid
+	// YAML that compose rejects.
+	if ip := PresetAgentIP(idc.conf); ip != "" {
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "networks"},
+			&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: InternalNetworkName},
+				{Kind: yaml.MappingNode, Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Value: "ipv4_address"},
+					{Kind: yaml.ScalarNode, Value: ip, Tag: "!!str"},
+				}},
+			}},
+		)
+		idc.logger.Info("pinned the keploy-agent to a static compose address",
+			zap.String("ip", ip), zap.String("network", InternalNetworkName))
+	} else if len(opts.NetworkAliases) > 0 {
 		networksMapNode := &yaml.Node{Kind: yaml.MappingNode}
 
 		for netName, aliases := range opts.NetworkAliases {

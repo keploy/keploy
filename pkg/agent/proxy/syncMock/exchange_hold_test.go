@@ -76,3 +76,40 @@ func TestANewRecordingsHoldsWaitForItsOwnStop(t *testing.T) {
 	}
 	nextHandedOn()
 }
+
+// HoldsSession is the stop signal a hold made now takes: none before the
+// first hold, the same until a re-record follows a stop, and a new one then.
+func TestHoldsSessionIsTheSignalAHoldTakes(t *testing.T) {
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("a nil manager's HoldsSession panicked: %v", r)
+			}
+		}()
+		if (*SyncMockManager)(nil).HoldsSession() != nil {
+			t.Fatal("a nil manager has a hold signal")
+		}
+	}()
+	m := New(zap.NewNop())
+	m.SetWatermark(&backlogWatermark{})
+	m.SetOutputChannel(make(chan *models.Mock, 1))
+	if m.HoldsSession() != nil {
+		t.Fatal("a hold signal before any hold")
+	}
+	t0 := time.Unix(5000, 0)
+	first, handedOn := m.HoldExchanges(t0)
+	if m.HoldsSession() != first {
+		t.Fatal("the signal is not the one the hold took")
+	}
+	m.BacklogBefore(t0.Add(time.Second)) // the stop
+	handedOn()
+	if m.HoldsSession() != first {
+		t.Fatal("the signal changed at the stop, before any re-record")
+	}
+	m.SetOutputChannel(make(chan *models.Mock, 1)) // the re-record
+	next, nextHandedOn := m.HoldExchanges(t0.Add(time.Minute))
+	defer nextHandedOn()
+	if s := m.HoldsSession(); s == first || s != next {
+		t.Fatal("the re-record's signal is not the one its holds take")
+	}
+}

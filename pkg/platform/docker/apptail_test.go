@@ -3,13 +3,11 @@ package docker
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"math"
 	"runtime"
 	"strings"
 	"testing"
 
-	composetypes "github.com/compose-spec/compose-go/v2/types"
 	keployLog "go.keploy.io/server/v3/utils/log"
 )
 
@@ -29,68 +27,6 @@ func heldBytes(name string) []byte {
 		return append([]byte(nil), t.buf...)
 	}
 	return nil
-}
-
-// A line a container prints reaches its tail only cut: the tail holds what
-// keploy printed, never the line as it came, so a read with no redactor at
-// all (one gone since) still finds no value. AppOutputTails, which a debug
-// bundle reads, and ServiceOutputTail, which recentAppLogs reads, give the
-// same cut text.
-func TestTheTailHoldsOnlyTheCutLine(t *testing.T) {
-	freshTails(t)
-	keployLog.SetRedactor(composeCutter{})
-	t.Cleanup(func() { keployLog.SetRedactor(nil) })
-
-	var out, errOut bytes.Buffer
-	c := runnerOf("p", "app").upConsumer(&out, &errOut)
-	c.Log("app-1", "DB_PASSWORD="+plantedComposeValue)
-	c.Err("app-1", "dial with "+plantedComposeValue+" failed")
-
-	if held := heldIn("p", "app-1"); bytes.Contains(held, []byte(plantedComposeValue)) || string(held) != "DB_PASSWORD=***\ndial with *** failed\n" {
-		t.Fatalf("tail holds %q; want the two cut lines alone", held)
-	}
-	if out.String() != "app-1  | DB_PASSWORD=***\n" || errOut.String() != "app-1  | dial with *** failed\n" {
-		t.Fatalf("printed %q and %q; want the lines the tail holds", out.String(), errOut.String())
-	}
-
-	keployLog.SetRedactor(nil)
-	if got := string(AppOutputTail("p", "app-1")); got != "DB_PASSWORD=***\ndial with *** failed\n" {
-		t.Fatalf("AppOutputTail = %q", got)
-	}
-	if got := string(ServiceOutputTail("p", "app")); got != "DB_PASSWORD=***\ndial with *** failed\n" {
-		t.Fatalf("ServiceOutputTail = %q", got)
-	}
-	tails, gone := AppOutputTails()
-	if len(tails) != 1 || gone != 0 || tails[0].Project != "p" || tails[0].Name != "app-1" || tails[0].Service != "app" ||
-		string(tails[0].Text) != "DB_PASSWORD=***\ndial with *** failed\n" {
-		t.Fatalf("AppOutputTails = %+v, %d", tails, gone)
-	}
-}
-
-// A value registered after its line reached the tail is cut when the tail is
-// read, by every reader: ServiceOutputTail (what recentAppLogs reads),
-// AppOutputTail and AppOutputTails (what a debug bundle reads).
-func TestATailReadCutsAValueRegisteredSince(t *testing.T) {
-	freshTails(t)
-	keployLog.SetRedactor(nil)
-	c := runnerOf("p", "app").upConsumer(&bytes.Buffer{}, &bytes.Buffer{})
-	c.Log("app-1", "token "+plantedComposeValue)
-	if held := heldIn("p", "app-1"); string(held) != "token "+plantedComposeValue+"\n" {
-		t.Fatalf("with no redactor the tail holds %q; want the line as it came", held)
-	}
-
-	keployLog.SetRedactor(composeCutter{})
-	t.Cleanup(func() { keployLog.SetRedactor(nil) })
-	if got := string(ServiceOutputTail("p", "app")); got != "token ***\n" {
-		t.Fatalf("ServiceOutputTail = %q, want the value cut on read", got)
-	}
-	if got := string(AppOutputTail("p", "app-1")); got != "token ***\n" {
-		t.Fatalf("AppOutputTail = %q, want the value cut on read", got)
-	}
-	tails, _ := AppOutputTails()
-	if len(tails) != 1 || string(tails[0].Text) != "token ***\n" {
-		t.Fatalf("AppOutputTails = %+v, want the value cut on read", tails)
-	}
 }
 
 // One container that prints far more than its share holds at most its share,
@@ -158,16 +94,6 @@ func heldCap() int {
 		total += cap(t.buf)
 	}
 	return total
-}
-
-// runnerOf is a runner of project with the services named, enough for what
-// its Up's consumer does with a line.
-func runnerOf(project string, services ...string) *ComposeRunner {
-	svcs := composetypes.Services{}
-	for _, name := range services {
-		svcs[name] = composetypes.ServiceConfig{Name: name}
-	}
-	return &ComposeRunner{project: &composetypes.Project{Name: project, Services: svcs}}
 }
 
 // heldAndDropped is what the tail of name holds as stored, and the bytes it
@@ -335,80 +261,6 @@ func TestServiceOutputTailIsTheContainerThatPrintedLast(t *testing.T) {
 	}
 }
 
-// serviceOf reads compose's container naming backwards from the project.
-func TestServiceOfReadsComposeNamesBackwards(t *testing.T) {
-	r := &ComposeRunner{project: &composetypes.Project{Services: composetypes.Services{
-		"app":   {Name: "app"},
-		"app-1": {Name: "app-1"},
-		"db":    {Name: "db", ContainerName: "orders-db"},
-	}}}
-	for name, want := range map[string]string{
-		"app-1":     "app",
-		"app-12":    "app",
-		"app-1-1":   "app-1",
-		"orders-db": "db",
-		"db-1":      "",
-		"app-":      "",
-		"app-x":     "",
-		"other-1":   "",
-	} {
-		if got := r.serviceOf(name); got != want {
-			t.Errorf("serviceOf(%q) = %q, want %q", name, got, want)
-		}
-	}
-}
-
-// Each Up of a project starts a new run of its tails, as keploy's one Up per
-// test set on one runner does: what the tails hold is that Up's output alone,
-// as `docker logs` of that Up's container was. A set whose app printed
-// nothing reads nothing, not the set before; a set whose app printed one
-// panic line reads that line alone; a line an earlier Up's attach stream
-// still delivers is printed but not kept. Another project's tails are its
-// own: an Up of one project leaves them, and no read of one project answers
-// with them.
-func TestEachUpStartsANewRunOfTheProjectsTails(t *testing.T) {
-	freshTails(t)
-	r := runnerOf("p", "app", "db")
-	other := runnerOf("q", "app")
-
-	otherUp := other.upConsumer(io.Discard, io.Discard)
-	otherUp.Log("app-1", "q's app line")
-	set1 := r.upConsumer(io.Discard, io.Discard)
-	for i := 0; i < 30; i++ {
-		set1.Log("app-1", fmt.Sprintf("set-1 line %d", i))
-	}
-	set1.Log("db-1", "set-1 db ready")
-	if got := string(ServiceOutputTail("p", "app")); strings.Count(got, "set-1 line") != 30 {
-		t.Fatalf("set 1's app tail = %q; want its 30 lines", got)
-	}
-
-	var late bytes.Buffer
-	set1.out = &late
-	set2 := r.upConsumer(io.Discard, io.Discard)
-	set1.Log("app-1", "set-1 late line")
-	if late.String() != "app-1  | set-1 late line\n" {
-		t.Fatalf("an earlier Up's late line printed %q; want it printed as it came", late.String())
-	}
-	if got := ServiceOutputTail("p", "app"); got != nil {
-		t.Fatalf("set 2's app printed nothing, but its tail = %q", got)
-	}
-	if got := AppOutputTail("p", "db-1"); got != nil {
-		t.Fatalf("set 2's db printed nothing, but its tail = %q", got)
-	}
-
-	set2.Err("app-1", "set-2: panic: cannot reach the db")
-	if got := string(ServiceOutputTail("p", "app")); got != "set-2: panic: cannot reach the db\n" {
-		t.Fatalf("set 2 printed one line; its app tail = %q", got)
-	}
-	if got := string(ServiceOutputTail("q", "app")); got != "q's app line\n" {
-		t.Fatalf("project q's tail = %q after p's Ups; want its own line kept", got)
-	}
-	tails, _ := AppOutputTails()
-	if len(tails) != 2 || tails[0].Project != "q" || tails[1].Project != "p" || string(tails[1].Text) != "set-2: panic: cannot reach the db\n" {
-		t.Fatalf("AppOutputTails = %+v; want q's tail and set 2's app tail", tails)
-	}
-}
-
 // RecordAppOutput cuts the line itself: whoever records a line, the tail
 // holds it cut, so the guarantee does not rest on its caller cutting first.
 func TestRecordAppOutputHoldsOnlyTheCutLine(t *testing.T) {
@@ -501,13 +353,17 @@ func tailPattern(from, n int) []byte {
 // the limit, or just what the text needs when that is more. Each case is at
 // an edge of one of those choices, from a state addLocked reaches (the line
 // under the limit, the buffer within it), with sizes past 256 so append's own
-// growth would show; the last is outside that and only keeps the text.
+// growth would show. The cases left to append are outside that: a line of the
+// limit or a buffer past it is not grown by hand, and gets just the buffer
+// append alone would give it, so no size there is a sum add made.
 func TestAppTailAddSizesEachBufferFromTheRoomLeft(t *testing.T) {
-	const limit = 4096
+	const limit, asAppendGrows = 4096, -1
 	for _, c := range []struct {
 		name                 string
 		held, capacity, line int
-		wantCap              int // 0: any buffer that holds the text
+		// wantCap 0: any buffer that holds the text; asAppendGrows: the
+		// buffer append alone grows the held one to.
+		wantCap int
 	}{
 		{"an empty line to an empty tail", 0, 0, 0, 1},
 		{"a line that fills the free room", 1000, 1024, 23, 1024},
@@ -521,19 +377,30 @@ func TestAppTailAddSizesEachBufferFromTheRoomLeft(t *testing.T) {
 		{"a buffer twice which is one past the limit", 2049, 2049, 0, limit},
 		{"a buffer of the limit grows past it to just what the text needs", limit, limit, 0, limit + 1},
 		{"the longest line to a full buffer", limit, limit, limit - 1, 2 * limit},
-		{"a line of the limit, which addLocked never passes", 0, 0, limit, 0},
+		{"a buffer of the limit with room for the line keeps its buffer", limit, limit + 10, 9, limit + 10},
+		{"a line one under the limit to an empty tail", 0, 0, limit - 1, limit},
+		{"a line of the limit, which addLocked never passes, is left to append", 0, 0, limit, asAppendGrows},
+		{"a line of the limit to a held text is left to append", 100, 200, limit, asAppendGrows},
+		{"a buffer one past the limit, which trim never leaves, is left to append", limit + 1, limit + 1, 0, asAppendGrows},
+		{"a buffer one past the limit with room for the line keeps its buffer", limit + 1, limit + 3, 1, limit + 3},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			buf := make([]byte, c.held, c.capacity)
 			copy(buf, tailPattern(0, c.held))
 			tl := &appTail{buf: buf}
+			wantCap := c.wantCap
+			if wantCap == asAppendGrows {
+				held := make([]byte, c.held, c.capacity)
+				copy(held, buf)
+				wantCap = cap(append(append(held, tailPattern(c.held, c.line)...), '\n'))
+			}
 			tl.add(string(tailPattern(c.held, c.line)), limit)
 			want := append(tailPattern(0, c.held+c.line), '\n')
 			if !bytes.Equal(tl.buf, want) {
 				t.Fatalf("holds %d bytes that are not the %d of the text and the line", len(tl.buf), len(want))
 			}
-			if c.wantCap != 0 && cap(tl.buf) != c.wantCap {
-				t.Fatalf("a %d-byte buffer holds the %d bytes; want %d", cap(tl.buf), len(tl.buf), c.wantCap)
+			if wantCap != 0 && cap(tl.buf) != wantCap {
+				t.Fatalf("a %d-byte buffer holds the %d bytes; want %d", cap(tl.buf), len(tl.buf), wantCap)
 			}
 		})
 	}

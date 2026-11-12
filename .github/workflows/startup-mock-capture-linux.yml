@@ -11,6 +11,16 @@ name: Startup Mock Capture Regression (Linux)
 # deterministic trigger is the enterprise --static-dedup path). The
 # precise regression lives in the Go unit tests under
 # pkg/agent/proxy/syncMock.
+#
+# Also here, on the same runner and binary: two records started together on
+# the default ports (python/concurrent-records). Each CLI hands its agent
+# the configured ports unchecked, and an agent that finds its port taken
+# moves off it, naming the holder, and tells its hooks. Each run's mocks must
+# hold its own app's DNS names and upstream calls, and none of the other
+# run's, and a proxy or DNS server off its configured port must be on one its
+# agent said it moved to. With one run started once the other's agent
+# listens, its agent must move both; with UDP 26789 held, both agents must
+# move their DNS servers, naming its holder.
 on:
   workflow_call:
     inputs:
@@ -55,6 +65,13 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/startup-mock-capture/python-linux.sh"
 
+      - name: Two records started together
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/concurrent-records/python-linux.sh"
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -65,5 +82,8 @@ jobs:
             .github/workflows/test_workflow_scripts/python/startup-mock-capture/record_logs_1.txt
             .github/workflows/test_workflow_scripts/python/startup-mock-capture/upstream_logs.txt
             .github/workflows/test_workflow_scripts/python/startup-mock-capture/keploy/
+            .github/workflows/test_workflow_scripts/python/concurrent-records/record_logs_*.txt
+            .github/workflows/test_workflow_scripts/python/concurrent-records/A/keploy/
+            .github/workflows/test_workflow_scripts/python/concurrent-records/B/keploy/
           if-no-files-found: warn
           retention-days: 7

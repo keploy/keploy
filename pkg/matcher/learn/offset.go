@@ -31,7 +31,7 @@ import (
 //   - a moved place is an instant of one layout in one field of an answer
 //     (models.MockSpec's answer fields; every field of a kind whose spec
 //     holds its request and its answer in one), named by the word written
-//     before it (instantLabel: its key, "created_at" of a JSON object), as
+//     before it (instantLabels: its key, "created_at" of a JSON object), as
 //     two recordings of one call (callOf) hold it, at two moments, at any
 //     position in the field (a list F gave the application with another
 //     number of elements puts the instant a value is built on at another
@@ -132,7 +132,7 @@ func inRecordedOrder(a, b offsetPlace) bool {
 // offsetKey is a place of an answer, as two recordings of a kind each hold
 // it: the field (rawField.path), which of its forms (0: as it stands, 1: its
 // other declared forms, rawExtra), the instant's layout, and the word written
-// before it (instantLabel). Every instant of that layout and label in the
+// before it (instantLabels). Every instant of that layout and label in the
 // field stands at it, at any position.
 type offsetKey struct {
 	path         string
@@ -140,35 +140,43 @@ type offsetKey struct {
 	label        string
 }
 
-// instantLabel is the word written before the i-th of spans, the instants of
-// t: the last word before it that is no part of another instant ("at" of
+// instantLabels are the words written before each of spans, the instants
+// of t in order and none overlapping, as instantSpans gives them: of each,
+// the last word before it that is no part of another instant ("at" of
 // "created_at": "2026-…", "jobs" of each instant of "jobs": ["2026-…",
 // "2026-…"]), "" where none is. It names where in a field an instant stands
-// whatever its position: no value is read.
-func instantLabel(t string, spans []instant, i int) string {
-	j := spans[i].start - 1
-	for j >= 0 {
-		in := false
-		for _, sp := range spans {
-			if sp.start <= j && j < sp.end {
-				j, in = sp.start-1, true
-				break
-			}
+// whatever its position: no value is read. One pass over t: the walk back
+// from an instant that meets no word before the instant ahead of it goes on
+// from that one's start, as that one's own walk did, so it takes that
+// one's word. Before, each instant's walk tested each byte it passed
+// against every instant of t and went on past every instant before its
+// own, so a field holding a list of n instants took about n³ steps: a
+// recording's 31 KiB list of 2 884 times of day took 26 s of the staging's
+// CPU (its keyed places, setPlaces).
+func instantLabels(t string, spans []instant) []string {
+	out := make([]string, len(spans))
+	for i, sp := range spans {
+		lo := 0
+		if i > 0 {
+			lo = spans[i-1].end
 		}
-		if in {
-			continue
-		}
-		if !isWord(t[j]) {
+		j := sp.start - 1
+		for j >= lo && !isWord(t[j]) {
 			j--
+		}
+		if j < lo {
+			if i > 0 {
+				out[i] = out[i-1]
+			}
 			continue
 		}
 		end := j + 1
 		for j >= 0 && isWord(t[j]) {
 			j--
 		}
-		return t[j+1 : end]
+		out[i] = t[j+1 : end]
 	}
-	return ""
+	return out
 }
 
 // offsetPlaces are the places a call's offset rule reads (offsetPlacesOf):
@@ -275,10 +283,11 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			if mv := e.servedMoves(); len(mv) > 0 {
 				moves = append(moves, moved{mock: e.Mock, call: x.call, at: e.At, first: x.first, last: x.last, moves: mv})
 			}
-		} else if op.unread == "" {
+		} else if op.unread == "" && !e.ofEarlierTest() {
 			// What RawOf could not read, and an exchange that came with no
 			// payload at all, is no place the rule can search: a value
-			// built on its answer would pass as the lead's move.
+			// built on its answer would pass as the lead's move. An earlier
+			// test's place keeps no payload, by design (ranCalls).
 			op.unread = payloadUnread(*e)
 		}
 	}
@@ -408,15 +417,49 @@ func (dc *DriftCache) readPlaces(x Raw) []keyedPlace {
 		where := x.mock + " at " + f.describe()
 		for form, t := range []string{own, dc.rawExtra(own)} {
 			spans := dc.spansOf(t)
+			var labels []string
 			for si, sp := range spans {
 				if !sp.keyed {
 					continue
 				}
-				out = append(out, keyedPlace{k: offsetKey{path: f.path, form: form, layout: sp.layout, label: instantLabel(t, spans, si)}, m: sp.moment(), where: where})
+				if labels == nil {
+					labels = instantLabels(t, spans)
+				}
+				out = append(out, keyedPlace{k: offsetKey{path: f.path, form: form, layout: sp.layout, label: labels[si]}, m: sp.moment(), where: where})
 			}
 		}
 	}
 	return out
+}
+
+// copyPlaces makes each name of places (its field, label and where) a copy
+// that holds no part of the text it was read from, each name once: a name
+// that is the place before it's takes that one's copy. Each instant of a
+// list that meets no word before the instant ahead of it takes that one's
+// label, one string (instantLabels), so a list of n instants after one
+// long word (a base64 text's encoded run, ahead of its decoded form in
+// rawExtra) has n places of one label: a copy for each held n copies of
+// it, memory quadratic in the payload (the staging's read of a 128 KiB
+// base64 text of a JSON list of dates held about 1 GB). Go compares two
+// strings that share their bytes without reading them, so a name the
+// place before it shares costs no pass over it.
+func copyPlaces(places []keyedPlace) {
+	var path, label, where lastCopy
+	for i := range places {
+		k := &places[i]
+		k.k.path, k.k.label, k.where = path.of(k.k.path), label.of(k.k.label), where.of(k.where)
+	}
+}
+
+// lastCopy is the name it copied last and its copy (of).
+type lastCopy struct{ name, copy string }
+
+// of is a copy of name: the one it made last where name is that one's.
+func (c *lastCopy) of(name string) string {
+	if name != c.name {
+		c.name, c.copy = name, strings.Clone(name)
+	}
+	return c.copy
 }
 
 // servedMove is a leaf of an exchange's answer F served with another value
@@ -450,11 +493,15 @@ func (dc *DriftCache) movePlaces(mock string, moves []servedMove) []keyedPlace {
 		where := mock + " at " + rawField{path: mv.path}.describe()
 		for form, ft := range []string{t, dc.rawExtra(t)} {
 			spans := dc.spansOf(ft)
+			var labels []string
 			for si, sp := range spans {
 				if !sp.keyed {
 					continue
 				}
-				out = append(out, keyedPlace{k: offsetKey{path: mv.in, form: form, layout: sp.layout, label: instantLabel(ft, spans, si)}, m: sp.moment(), where: where})
+				if labels == nil {
+					labels = instantLabels(ft, spans)
+				}
+				out = append(out, keyedPlace{k: offsetKey{path: mv.in, form: form, layout: sp.layout, label: labels[si]}, m: sp.moment(), where: where})
 			}
 		}
 	}
@@ -479,6 +526,10 @@ type GivenPlaces struct {
 	// answers: its recording holds an answer the word rule reads
 	// (holdsAnswer), where F may have given the application a word.
 	answers bool
+	// fView are the instants of the views of it that F's serves the read
+	// saw gave the application, read as answer is (Order.viewMoments):
+	// under the proven switch only, nil with it off.
+	fView []givenMoment
 }
 
 // PlacesOf is x as the offset rule and the word rule read it among the
@@ -488,10 +539,7 @@ type GivenPlaces struct {
 func PlacesOf(x Raw) GivenPlaces {
 	dc := NewDriftCache()
 	places := dc.keyedPlaces(x)
-	for i := range places {
-		k := &places[i]
-		k.k.path, k.k.label, k.where = strings.Clone(k.k.path), strings.Clone(k.k.label), strings.Clone(k.where)
-	}
+	copyPlaces(places)
 	answer := dc.answerMoments(x)
 	for i := range answer {
 		a := &answer[i]
@@ -741,9 +789,16 @@ type givenWords struct {
 	// candidate sources (follows.followed). set: a recording F gave the
 	// application earlier in the set (GivenEarlier), which no Raw handed to
 	// the call stands for.
-	answered    time.Time
-	conn        string
-	pos         uint64
+	answered time.Time
+	conn     string
+	pos      uint64
+	// test is the number in the set of the older test F gave the
+	// application the recording in, every serve of it, as the read
+	// numbered them (Order.testOf); 0 where keploy cannot name one. A call
+	// that carries what F gave there is late (lateServes). prev: that test
+	// is the one F ran just before the call's (Order.previous).
+	test        int
+	prev        bool
 	first, last int
 	set         bool
 	// unstated: F served it and no adapter said what it gave the
@@ -755,11 +810,28 @@ type givenWords struct {
 	// test (unseenWhy).
 	unstated, unread bool
 	views            []answerLists
+	// fRead: keploy reads what F gave the application there before the
+	// call: F served it before the call reached keploy (not fAfter), as
+	// recorded, or changed with the one view it stated (Raw.Live). Not
+	// where F's serves gave different views, a view was unstated or
+	// unread, or F did not serve it. An outside recording is one F gave
+	// the application before the call (Raw.elsewhere, GivenEarlier). A
+	// set recording (GivenPlaces) reads it from the statements of F's
+	// serves the read saw (statedWords), as Order.ServedView marks a Raw:
+	// each told as recorded, or with one view read and none as recorded.
+	fRead bool
+	// fAfter: every serve of it the read saw was made after the call
+	// reached keploy, or in a request of the application's still aloft
+	// then (Order.ArrivedAt, Raw.servedAfter): F gave the application
+	// nothing there before the call, whatever its serves stated, so no
+	// word F gave there is a source of the call's (setEvidence).
+	fAfter bool
 }
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
-	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, first: x.first, last: x.last}
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, test: x.test, prev: x.prev, first: x.first, last: x.last}
+	g.fRead, g.fAfter = x.readBefore()
 	lists, plain := dc.answerListsOf(x)
 	g.answerLists = lists
 	// Served unchanged, every word is one both gave: the same lists.
@@ -1058,6 +1130,9 @@ type setPlaces struct {
 type viewLists struct {
 	answerLists
 	gave [][]string
+	// moments are its answer's instants (viewAnswerMoments), read with its
+	// words so that the set reads the view once (Order.viewMoments).
+	moments []givenMoment
 }
 
 // viewListsOf is the viewLists of lv, a view F gave of a recording, every
@@ -1096,6 +1171,16 @@ func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
 		return GivenPlaces{}, err
 	}
 	g.words = o.statedWords(m, g.words, g.answers)
+	g.fView, g.words.unread = o.viewMoments(m, g.words, g.answers)
+	// A view read for its words that cannot be read again for its
+	// instants is one keploy does not read (fail closed).
+	g.words.fRead = g.words.fRead && !g.words.unread
+	if o.t != nil {
+		o.t.mu.Lock()
+		g.words.test = o.testOf(g.first, g.last)
+		g.words.prev = o.previous(g.words.test)
+		o.t.mu.Unlock()
+	}
 	return g, nil
 }
 
@@ -1110,7 +1195,11 @@ func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
 // where m's recording holds an answer (answers): one of a kind that holds
 // its answer apart from its request and holds none gave the application
 // nothing. What both gave (same) stays as read with no view stated, none:
-// it lets no word go, the fail-closed side.
+// it lets no word go, the fail-closed side. fRead says keploy reads what F
+// gave there before the call: every serve told as recorded, or with one
+// view, read, and none as recorded, where F did not serve it only after
+// the call reached keploy (givenWords.fRead, fAfter: servedAfterLocked, as
+// Order.ServedView marks a Raw).
 func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWords {
 	if o.t == nil || !answers {
 		return w
@@ -1118,8 +1207,16 @@ func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWord
 	id := MockID(m)
 	o.t.mu.Lock()
 	recorded, keys, loads, unread, ok := o.viewsLocked(id)
+	// Served only after the call reached keploy, or in a request still
+	// aloft then (Order.ArrivedAt): F gave the application nothing there
+	// before the call, however its serves were told (Raw.servedAfter).
+	after := o.servedAfterLocked(id)
 	o.t.mu.Unlock()
-	w.unstated, w.unread, w.gave, w.view, w.views = !ok, ok && unread, nil, answerLists{}, nil
+	w.unstated, w.unread, w.gave, w.view, w.views, w.fAfter = !ok, ok && unread, nil, answerLists{}, nil, after
+	// Every serve told as recorded gave the recording itself
+	// (Raw.ServedAsRecorded): keploy reads it, where F gave it before the
+	// call.
+	w.fRead = ok && !unread && len(loads) == 0 && !after
 	if !ok || unread || len(loads) == 0 {
 		return w
 	}
@@ -1131,7 +1228,9 @@ func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWord
 			return w
 		}
 		if !recorded && len(loads) == 1 {
-			w.gave, w.view = words.gave, words.answerLists
+			// The one view, read (Raw.ServedLive): keploy reads it, where
+			// F gave it before the call.
+			w.gave, w.view, w.fRead = words.gave, words.answerLists, !after
 			return w
 		}
 		views = append(views, words.answerLists)
@@ -1166,6 +1265,7 @@ func (c *setPlaces) viewWords(m *models.Mock, id string, k int, load func() (*mo
 		return viewLists{}, false
 	}
 	words := NewDriftCache().viewListsOf(*lv)
+	words.moments = viewAnswerMoments(*lv)
 	if c != nil {
 		c.mu.Lock()
 		c.views[key] = words

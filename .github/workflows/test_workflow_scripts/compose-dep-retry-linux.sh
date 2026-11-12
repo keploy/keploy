@@ -34,12 +34,24 @@
 #      container is only created, so the agent keploy sets up again is the
 #      one the app runs against from its start. The set must be judged, and
 #      pass, with no test charged agent_started_again (that kind is for an
-#      agent started again while the application ran on).
+#      agent started again while the application ran on);
+#   7. record, a file that needs a variable only the up's own command gives
+#      (--env-file): `docker compose ps` cannot load it, so every ps fails, and
+#      the retry's decision must come from the daemon.
 #
 # Env: RECORD_BIN and REPLAY_BIN (the keploy binaries under test). The agent
 # image must be loaded as ghcr.io/keploy/keploy:v3-dev
 # (.github/actions/download-image).
 set -uo pipefail
+
+# http_mock_count: the app's calls to its dependency are its Http mocks, by
+# their kind whole (an Http2 or HttpFault mock is not one).
+# shellcheck source=mock-kinds.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mock-kinds.sh" || exit 1
+# shellcheck source=sudo_env.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sudo_env.sh" || exit 1
+# shellcheck source=hang_guard.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hang_guard.sh" || exit 1
 
 RECORD_BIN="$(command -v "${RECORD_BIN:-keploy}" || echo "${RECORD_BIN:-keploy}")"
 REPLAY_BIN="$(command -v "${REPLAY_BIN:-$RECORD_BIN}" || echo "${REPLAY_BIN:-$RECORD_BIN}")"
@@ -147,20 +159,26 @@ record() {
   cleanup
   sudo rm -rf keploy
   # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN="${KEPLOY_PROVEN:-}" timeout -k 10 180 "$RECORD_BIN" record -c "$cmd" --container-name retryapp \
-    --record-timer 60s --disable-tele > "$name.log" 2>&1 &
-  local pid=$!
+  hang_start -k 10 180 sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="${KEPLOY_PROVEN:-}" "$RECORD_BIN" record -c "$cmd" --container-name retryapp \
+    --record-timer 60s --disable-tele > "$name.log" 2>&1
+  local pid=$HANG_PID
   requests "$pid"
-  wait "$pid"
+  hang_wait "$pid"
   rc=$?
   [ "$rc" -eq 0 ] || fail "$name: keploy record exited $rc"
+  # keploy record exits 0 on the guard's TERM too, so a record still
+  # running at 180 s is told by the guard, not by its code.
+  [ "$HANG_FIRED" = 0 ] || fail "$name: keploy record still ran after 180 s; the hang guard ended it"
+  # The commands that attach to the app alone print none of the agent's
+  # lines: its debug log holds them.
+  verify_ran "${KEPLOY_PROVEN:-}" "$name.log" keploy/agent-debug.log || FAIL=$((FAIL + 1))
   if ! how=$(retried "$name"); then
     fail "$name: the dependency crash was not retried"
     tail -60 "$name.log"
     return
   fi
   tests=$( (sudo find keploy -path '*/tests/*.yaml' 2>/dev/null || true) | wc -l)
-  mocks=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -c '^kind: Http')
+  mocks=$(http_mock_count <(sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null))
   [ "$tests" -ge 3 ] || fail "$name: $tests test case(s) recorded after the retry, want at least 3"
   [ "$mocks" -ge 3 ] || fail "$name: $mocks HTTP mock(s) of the app's calls to its dependency, want at least 3"
   if [ "$FAIL" -ne "$before" ]; then
@@ -180,7 +198,7 @@ setup_again recreated || fail "recreated: the agent compose recreated was not se
 cleanup
 before=$FAIL
 # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-sudo -E env PATH="$PATH" timeout -k 10 300 "$REPLAY_BIN" test -c "docker compose up --always-recreate-deps app" \
+bounded -k 10 300 sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "docker compose up --always-recreate-deps app" \
   --container-name retryapp --delay 10 --disable-tele > replay.log 2>&1
 rc=$?
 [ "$rc" -eq 0 ] || fail "replay: keploy test exited $rc"
@@ -200,13 +218,13 @@ fi
 before=$FAIL
 KEPLOY_PROVEN=1 record recreated-proven "docker compose up --always-recreate-deps app"
 setup_again recreated-proven || fail "recreated-proven: the agent compose recreated was not set up again"
-mocks=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -c '^kind: Http')
+mocks=$(http_mock_count <(sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null))
 # The dependency's key: its repository (no tag), its port and its
 # configuration's fingerprint; one key on every mock.
 keys=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -oE 'containerKey: container:python:8000@s[0-9a-f]{12}$')
 keyed=$(grep -c . <<<"$keys")
 if [ "$mocks" -lt 3 ] || [ "$keyed" -ne "$mocks" ] || [ "$(sort -u <<<"$keys" | wc -l)" -ne 1 ]; then
-  fail "recreated-proven: $keyed of $mocks HTTP mocks carry the dependency's container key, want all"
+  fail "recreated-proven: $keyed mock(s) carry the dependency's container key, and $mocks Http mock(s) were recorded; want 3 or more Http mocks, each with the one key, and no other mock keyed"
 fi
 [ "$FAIL" -eq "$before" ] && echo "ok: recreated-proven: all $mocks mocks carry the dependency's container key"
 
@@ -216,10 +234,11 @@ fi
 cleanup
 before=$FAIL
 # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 timeout -k 10 300 "$REPLAY_BIN" test -c "docker compose up --always-recreate-deps app" \
+bounded -k 10 300 sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "docker compose up --always-recreate-deps app" \
   --container-name retryapp --delay 10 --disable-tele > replay-proven.log 2>&1
 rc=$?
 [ "$rc" -eq 0 ] || fail "replay-proven: keploy test exited $rc"
+verify_ran 1 replay-proven.log keploy/agent-debug.log || FAIL=$((FAIL + 1))
 how=$(retried replay-proven) || fail "replay-proven: the dependency crash was not retried"
 setup_again replay-proven || fail "replay-proven: the agent compose recreated was not set up again"
 summary=$(sed -E 's/\x1b\[[0-9;]*m//g' replay-proven.log | { grep -E 'Total test (passed|failed):' || true; } | tr -s ' \t' ' ' | tr '\n' ' ')
@@ -237,6 +256,17 @@ if [ "$FAIL" -ne "$before" ]; then
 else
   echo "ok: replay-proven: $how; $summary; test-set-0 $status, none charged agent_started_again"
 fi
+
+# 7. The dependency crashes on a project `docker compose ps` cannot load: the
+# file needs a variable only this up's --env-file gives. The ps of a compose
+# that loads it after all would prove nothing here.
+# shellcheck disable=SC2016 # the variable is compose's, in the file
+sed 's/image: python:3.11-slim/image: python:${PY_TAG:?}/' docker-compose.yml > needs-var.yml
+echo 'PY_TAG=3.11-slim' > needs-var.env
+if docker compose -f needs-var.yml ps >/dev/null 2>&1; then
+  fail "needs-var: docker compose ps loaded a file whose variable it was not given"
+fi
+record needs-var "docker compose -f needs-var.yml --env-file needs-var.env up"
 
 if [ "$FAIL" -ne 0 ]; then
   echo "compose-dep-retry e2e: FAILED"

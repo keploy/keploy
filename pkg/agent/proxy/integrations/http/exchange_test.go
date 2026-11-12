@@ -262,7 +262,7 @@ func TestARequestAfterEmptyLinesIsParsed(t *testing.T) {
 		send([]byte("\r\n"), now, now)
 		send([]byte("\r\n"+req), now, now)
 		var finalReq []byte
-		if err := h.readRequestV2(context.Background(), stream, &finalReq); err != nil || string(finalReq) != req {
+		if err := h.readRequestV2(stream, &finalReq); err != nil || string(finalReq) != req {
 			t.Fatalf("readRequestV2 = (%q, %v), want the request from its request line: %q", finalReq, err, req)
 		}
 		m, err := h.buildHTTPMock(&FinalHTTP{Req: finalReq, Resp: []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"),
@@ -288,6 +288,9 @@ func TestARequestAfterEmptyLinesIsParsed(t *testing.T) {
 func TestHandleChunkedResponsesHandsOverAfterAProtocolSwitch(t *testing.T) {
 	for _, c := range []struct{ method, head string }{
 		{"GET", "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"},
+		// net/http frames a 101 as its head whatever its fields say.
+		{"GET", "HTTP/1.1 101 Switching Protocols\r\nContent-Length: 5\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n"},
+		{"GET", "HTTP/1.1 101 Switching Protocols\r\nTransfer-Encoding: chunked\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n"},
 		{"CONNECT", "HTTP/1.1 200 Connection Established\r\n\r\n"},
 	} {
 		dest := newScriptedConn() // the upgraded stream: nothing more yet
@@ -338,7 +341,7 @@ func TestReadResponseV2ReadsPastAHundredContinueInItsOwnRead(t *testing.T) {
 	send([]byte("hello"), now, now)
 	finalResp := []byte("HTTP/1.1 100 Continue\r\n\r\n") // the first read, already taken by recordV2
 	done := make(chan error, 1)
-	go func() { _, err := h.readResponseV2(context.Background(), stream, &finalResp, "POST"); done <- err }()
+	go func() { _, err := h.readResponseV2(stream, &finalResp, "POST"); done <- err }()
 	select {
 	case err := <-done:
 		if err != nil || string(finalResp) != "HTTP/1.1 100 Continue\r\n\r\n"+final {

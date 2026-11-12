@@ -10,11 +10,14 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
@@ -67,6 +70,24 @@ type HTTP struct {
 	// strictIx is the strict pass's index of the last staging generation, or
 	// shared part of an open test's reads, a strict call read (strictIndex).
 	strictIx strictIndexes
+	// verify is the exact view's verify mode of this handler's own reads
+	// (verifying): nil follows the process's (integrations.ExactViewVerify),
+	// what every handler the proxy makes does; a row gives a handler its
+	// own, so handlers in different modes run at once.
+	verify *atomic.Bool
+	// answerFaultHook is the fault hook replay asks before it serves a
+	// mock's answer (SetAnswerFault, answerFault); nil when none is set.
+	answerFaultHook atomic.Pointer[AnswerFault]
+}
+
+// verifying is whether h's reads run in the exact view's verify mode: each
+// kept read (an index, a sieve's pass) is computed again the way it was
+// before it was kept, and a difference panics.
+func (h *HTTP) verifying() bool {
+	if h.verify != nil {
+		return h.verify.Load()
+	}
+	return integrations.ExactViewVerify.Load()
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
@@ -76,11 +97,22 @@ func New(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
+// MockNoise returns HTTP's field-level request-body mock-noise adapter, wiring
+// the parser into the shared mocknoise engine (auto-replay learns
+// req_body_noise). Satisfies integrations.Integrations.
+func (h *HTTP) MockNoise() mocknoise.Adapter { return httpNoiseAdapter{} }
+
 type FinalHTTP struct {
 	Req              []byte
 	Resp             []byte
 	ReqTimestampMock time.Time
 	ResTimestampMock time.Time
+	// ReqClock is the clock ReqTimestampMock is on: the request's first
+	// chunk's (fakeconn.Chunk.ReadClock), as the producer that took the
+	// stamp named it; fakeconn.ClockUnset for a stamp it did not take, which
+	// names none. Under the proven switch buildHTTPMock writes its id on the
+	// mock (models.Origin.Clock).
+	ReqClock fakeconn.Clock
 	// RespReadInPart: Resp may be only the part of the response its client
 	// read. An observe-only capture (a DaemonSet's, OutgoingOptions.SkipTLSMITM)
 	// carries the bytes the client read and nothing else, so a client that
@@ -95,6 +127,18 @@ type FinalHTTP struct {
 	// apart is a server that closed the connection partway through its
 	// response: the client read all there was, and it is recorded as that.
 	RespReadInPart bool
+	// RespWrites is where in Resp each write the relay made of the response
+	// to the client ended, and when, in order (readResponseWrites): what the
+	// answer's marks are worked out from (answerMarks). Nil where nothing
+	// noted them.
+	RespWrites []respWrite
+	// Fault is how the call ended, when the upstream did not give its whole
+	// answer (recordV2's noAnswerFault and partAnswerFault): with no answer,
+	// the mock is built with no response and this fault. With part of one
+	// (Fault.SendsHead), the mock carries the fault only when the response
+	// is in fact unfinished: its body cut short of its framing, or a
+	// close-delimited body the upstream reset or the client gave up on.
+	Fault *models.Fault
 }
 
 // MatchType determines if the outgoing network call is HTTP by checking for

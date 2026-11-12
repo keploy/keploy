@@ -2,6 +2,7 @@ package relay
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -71,6 +72,17 @@ type teeProgress struct {
 	// forwarder read on this direction (0: none yet): what the connection
 	// carried, whether the tee queued it or not.
 	first, last atomic.Int64
+	// heldSeq is the number (fakeconn.Chunk.ConnSeq) of the chunk held: set
+	// with held, numbering while the forwarder has read one and not numbered
+	// it yet, and 0 when it holds none (Relay.StreamedBefore).
+	heldSeq atomic.Uint64
+	// changed is told whenever what Relay.StreamedBefore says of this
+	// direction may change though no chunk comes on its stream.
+	changed waker
+	// afterLook, when set, runs in Relay.StreamedBefore after it looks at
+	// each place a chunk of this direction is in before its stream. Tests
+	// set it to move a chunk on between two looks.
+	afterLook func(place)
 
 	// delivered is the chunks the drain took off the queue that the parser
 	// has not consumed whole, oldest first, by where each ends in the stream.
@@ -103,12 +115,135 @@ func (t *tee) noteCarried(at time.Time) {
 }
 
 // noteReading says the forwarder's Read returned bytes, which it is about to
-// stamp (heldUnstamped).
-func (t *tee) noteReading() { t.progress.held.Store(heldUnstamped) }
+// stamp (heldUnstamped) and number (numbering).
+func (t *tee) noteReading() {
+	t.progress.heldSeq.Store(numbering)
+	t.progress.held.Store(heldUnstamped)
+}
+
+// noteNumbered says the chunk the forwarder holds is numbered seq. A reader
+// that waits on it while it was not numbered is told (changed): numbered after
+// the number it asked of, it holds nothing back.
+func (t *tee) noteNumbered(seq uint32) {
+	t.progress.heldSeq.Store(uint64(seq))
+	t.progress.changed.wake()
+}
 
 // noteReleased says the forwarder holds no chunk: it queued, refused,
-// stashed or set aside (tee.await) the one it read.
-func (t *tee) noteReleased() { t.progress.held.Store(0) }
+// stashed or set aside (tee.await) the one it read. One it refused or stashed
+// never comes on the stream, so a reader waiting on it is told (changed).
+func (t *tee) noteReleased() {
+	t.progress.held.Store(0)
+	t.progress.heldSeq.Store(0)
+	t.progress.changed.wake()
+}
+
+// numbering is heldSeq while the forwarder holds a chunk it has not numbered:
+// above every ConnSeq.
+const numbering = uint64(1) << 32
+
+// waker tells whoever asked (wait) that something they wait on may have
+// changed.
+type waker struct {
+	mu sync.Mutex
+	ch chan struct{}
+	// woken, when set, runs at each wake before a reader is told, so it sees
+	// what that reader, told, looks at. Set it only on a bare tee (newTee,
+	// in no Relay), where only the test's own goroutine wakes w: wake reads
+	// it without w.mu, so setting it where another goroutine may wake (any
+	// tee in a Relay) is a data race. It runs with w.mu not held, but with
+	// whatever lock the waking caller holds, so a woken func that takes that
+	// lock deadlocks.
+	woken func()
+}
+
+// wait returns a channel closed at the next wake. Asked before the state it
+// waits on is looked at, a change after the look closes it.
+func (w *waker) wait() <-chan struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.ch == nil {
+		w.ch = make(chan struct{})
+	}
+	return w.ch
+}
+
+// wake closes the channel wait gave, if any.
+func (w *waker) wake() {
+	if w.woken != nil {
+		w.woken()
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.ch != nil {
+		close(w.ch)
+		w.ch = nil
+	}
+}
+
+// heldBefore reports whether the forwarder holds a chunk numbered before seq,
+// or one it has not numbered yet.
+func (t *tee) heldBefore(seq uint32) bool {
+	h := t.progress.heldSeq.Load()
+	return h == numbering || h != 0 && (fakeconn.Chunk{ConnSeq: uint32(h)}).CapturedBefore(seq)
+}
+
+// awaitingBefore reports whether a chunk set aside for the client's answer
+// (tee.await) is numbered before seq.
+func (t *tee) awaitingBefore(seq uint32) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, c := range t.awaiting {
+		if c.CapturedBefore(seq) {
+			return true
+		}
+	}
+	return false
+}
+
+// StreamedBefore reports whether every chunk of dir captured before the chunk
+// numbered seq, a number given on this connection, has gone on dir's stream,
+// or never will (refused, stashed): end is then how far into the stream they
+// all are (fakeconn.FakeConn.Consumed counts in the same bytes), and ok true.
+// While one may still go on it, ok is false and changed is closed once that
+// may have changed with nothing more on the stream. Each place a chunk is in
+// before its stream is looked at in the order chunks move through them: not
+// numbered yet (connseq.Upstream.PendingBefore), in the forwarder's hand, set
+// aside, and then queued (acceptedBytes), so none is missed as it moves. A
+// chunk the relay stashes across a pause and hands on later is not followed:
+// a pause is a directive's (a TLS upgrade), which a parser that asks this does
+// not send. It is supervisor.Session.Order.
+func (r *Relay) StreamedBefore(dir fakeconn.Direction, seq uint32) (end int64, ok bool, changed <-chan struct{}) {
+	t := r.teeC2D
+	if dir == fakeconn.FromDest {
+		t = r.teeD2C
+	}
+	changed = t.progress.changed.wait()
+	if t.looked(placeNotNumbered, r.order.PendingBefore(dir, seq)) ||
+		t.looked(placeInHand, t.heldBefore(seq)) ||
+		t.looked(placeSetAside, t.awaitingBefore(seq)) {
+		return 0, false, changed
+	}
+	return t.acceptedBytes(), true, nil
+}
+
+// place is where a chunk is before its stream, in the order chunks move
+// through them (Relay.StreamedBefore).
+type place int
+
+const (
+	placeNotNumbered place = iota // connseq.Upstream.PendingBefore
+	placeInHand                   // the forwarder's (heldBefore)
+	placeSetAside                 // for the client's answer (awaitingBefore)
+)
+
+// looked returns found, what StreamedBefore saw at p, once afterLook has run.
+func (t *tee) looked(p place, found bool) bool {
+	if t.progress.afterLook != nil {
+		t.progress.afterLook(p)
+	}
+	return found
+}
 
 // noteLayerGone says nothing the layer the forwarder read through holds will
 // reach the parser: the forwarder stopped, or the layer's handshake failed and

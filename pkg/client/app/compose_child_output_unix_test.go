@@ -21,9 +21,6 @@ import (
 // row fresh tails.
 func shellOutPath(t *testing.T) {
 	t.Helper()
-	was := composeLibrarySupported
-	composeLibrarySupported = false
-	t.Cleanup(func() { composeLibrarySupported = was })
 	docker.ForgetAppOutput()
 	t.Cleanup(docker.ForgetAppOutput)
 	unsetEnvVars(t, "COMPOSE_ENV_FILES", "COMPOSE_DISABLE_ENV_FILE")
@@ -195,5 +192,16 @@ func TestComposeChildTeeIsOnlyForKeploysOwnDocument(t *testing.T) {
 	a.composeContent = []byte("services: [not, a, mapping]")
 	if opts := a.composeChildTee(ctx); opts != nil || a.composeOutputProject() != "" || logs.Len() != 1 {
 		t.Fatalf("a document the loader refuses got a tee (project %q), or not one warning: %v", a.composeOutputProject(), logs.All())
+	}
+}
+
+// The library's Up keeps its containers' output in the tails itself: a run on
+// that path gets no tee and loads no child output, and so leaves nothing for
+// composeOutputProject to read in place of the runner's project.
+func TestComposeChildTeeIsNotSetWhenTheLibraryRunsTheStack(t *testing.T) {
+	forceComposeLibrary(t)
+	a := childComposeApp()
+	if opts := a.composeChildTee(context.Background()); opts != nil || a.composeChildOut.Load() != nil {
+		t.Fatalf("the in-process path got a child tee (%d options, child output %v)", len(opts), a.composeChildOut.Load())
 	}
 }

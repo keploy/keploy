@@ -105,6 +105,11 @@ type trackedConn struct {
 	// while it was kept, so each of its holds is of a request opened since.
 	// Under mu.
 	floor *holdBound
+	// worker is the test worker's keploy instance the kernel stamped the
+	// connection with, plus one, once its handler has read its pairing
+	// (setWorker); 0 while it has not. Only its own worker's window begins
+	// and scopes move or wait for it (inflight.of).
+	worker atomic.Uint64
 	// delivered counts the bytes its reads have returned, and eof says one
 	// returned the end of the stream: changed with reading as a read
 	// returns, under mu (returned), so a view never sees a read done whose
@@ -115,6 +120,11 @@ type trackedConn struct {
 	// raw reads how many bytes the socket has received (untaken); nil for
 	// a conn with no socket under it.
 	raw syscall.RawConn
+	// base is what the platform reads, as c is kept and before its handler
+	// runs, that its later counts of what the socket received are taken
+	// from (sockBase.read; on macOS, the application's first sequence
+	// number).
+	base sockBase
 	// forgotten: its handler is done with it (forget).
 	forgotten atomic.Bool
 	// beforeClose, when set (by the accept, before the handler runs), runs
@@ -187,9 +197,13 @@ type trackedConn struct {
 	fmu      sync.Mutex
 	flight   *learn.Flight
 	grounded bool
-	// hangUps counts the holds on a client's hang-up on a TLS handshake
-	// keploy makes over it, not yet told (HoldHangUp).
+	// hangUps counts the holds on a client's hang-up not yet told
+	// (HoldHangUp): on a TLS handshake keploy makes over it, or while a
+	// watch tells its going on to the app its call is live to.
 	hangUps atomic.Int32
+	// hangUpTold: its handler has told its client's hang-up on to the app
+	// its call was live to (HangUpTold); under mu.
+	hangUpTold bool
 }
 
 // track keeps conn, and returns it wrapped so its reads are seen.
@@ -202,6 +216,7 @@ func (t *inflight) trackTold(conn net.Conn, flights *learn.Tracker) *trackedConn
 	if sc, ok := conn.(syscall.Conn); ok {
 		if raw, err := sc.SyscallConn(); err == nil {
 			tc.raw = raw
+			tc.base.read(raw)
 		}
 	}
 	t.mu.Lock()
@@ -212,6 +227,37 @@ func (t *inflight) trackTold(conn net.Conn, flights *learn.Tracker) *trackedConn
 	t.mu.Unlock()
 	t.changed()
 	return tc
+}
+
+// setWorker notes the test worker's keploy instance the kernel stamped tc
+// with (0: none), read from its pairing.
+func (tc *trackedConn) setWorker(instance uint32) {
+	if tc != nil {
+		tc.worker.Store(uint64(instance) + 1)
+	}
+}
+
+// of is the connections kept now that are worker's: every one for worker 0
+// (a run of one test process, whose windows are the run's). For a test
+// worker, those its kernel stamp names, and, with unread, those whose
+// pairing its handler has not read yet: a scope waits for one of those,
+// which may be the worker's, where a window's begin leaves its cut alone,
+// since moving it could take another worker's requests out of that
+// worker's window.
+func (t *inflight) of(worker uint32, unread bool) []*trackedConn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	conns := make([]*trackedConn, 0, len(t.conns))
+	for tc := range t.conns {
+		if worker != 0 {
+			w := tc.worker.Load()
+			if w != uint64(worker)+1 && (w != 0 || !unread) {
+				continue
+			}
+		}
+		conns = append(conns, tc)
+	}
+	return conns
 }
 
 // forget drops tc: its handler is done with it, and has filed whatever miss
@@ -285,8 +331,12 @@ func (c *trackedConn) pending(answers bool) bool {
 }
 
 // busyAt is busy for c's counts at one instant (v), read before its socket
-// (untaken, hungUp).
+// (untaken, hungUp). One whose client's hang-up was told on (HangUpTold)
+// holds none.
 func (c *trackedConn) busyAt(v connView, answers bool) bool {
+	if v.hangUpTold {
+		return false
+	}
 	return busy(c.untaken(v), answers, v.reading, v.held, v.idle, c.closing.Load()) || c.hungUp(v)
 }
 
@@ -594,8 +644,10 @@ type connView struct {
 	// returned the end of the stream.
 	delivered uint64
 	eof       bool
-	// hangUps are its holds on a client's hang-up not yet told (HoldHangUp).
-	hangUps int32
+	// hangUps are its holds on a client's hang-up not yet told (HoldHangUp),
+	// and hangUpTold whether one was told on to the app (HangUpTold).
+	hangUps    int32
+	hangUpTold bool
 	// settled, settledMarks and hasSettled are its last note of holding
 	// no request (trackedConn.settled).
 	settled      uint64
@@ -615,15 +667,15 @@ func (c *trackedConn) view() connView {
 func (c *trackedConn) viewLocked() connView {
 	return connView{
 		reading: c.reading.Load(), held: c.held.Load(), marks: c.unknownFor.Load(), idle: c.idle.Load(),
-		delivered: c.delivered.Load(), eof: c.eof.Load(), hangUps: c.hangUps.Load(),
+		delivered: c.delivered.Load(), eof: c.eof.Load(), hangUps: c.hangUps.Load(), hangUpTold: c.hangUpTold,
 		settled: c.settled, settledMarks: c.settledMarks, hasSettled: c.hasSettled,
 	}
 }
 
-// HoldHangUp implements pTls.HangUpHolder: until release, c holds work
-// whenever its client is gone and the hang-up is not yet told (hungUp), in a
-// record as in a replay. A test's end waits for it by events: release, as
-// every change of c's, wakes whoever waits on Changed.
+// HoldHangUp implements pTls.HangUpHolder and util.HangUpTeller: until
+// release, c holds work whenever its client is gone and the hang-up is not
+// yet told (hungUp), in a record as in a replay. A test's end waits for it by
+// events: release, as every change of c's, wakes whoever waits on Changed.
 func (c *trackedConn) HoldHangUp() (release func()) {
 	c.count(&c.hangUps, 1)
 	c.t.changed()
@@ -634,6 +686,25 @@ func (c *trackedConn) HoldHangUp() (release func()) {
 			c.moved()
 		})
 	}
+}
+
+// HangUpTold implements util.HangUpTeller: c's handler has told its
+// client's hang-up on to the app its call was live to (the HTTP/1 ingress's
+// watch of a live call's client), once c's socket held nothing but the
+// client's end: every byte the client sent before it was read. What c holds
+// from then on, the client's end and the app's answer no one is there to
+// take, is no test's work: the exchange is not recorded and nothing asserts
+// its answer, so a test's end that waited on it would prove nothing, and an
+// app that ignores its client's going (a long poll quiet until its own
+// timeout, a handler deaf to its request's context) would hold that end for
+// good. c holds no work from then on (busyAt, scope.holds), in a record as in
+// a replay, as a record's settle, which reads only untaken bytes, already
+// held none for a client whose FIN its socket shows.
+func (c *trackedConn) HangUpTold() {
+	c.mu.Lock()
+	c.hangUpTold = true
+	c.mu.Unlock()
+	c.moved()
 }
 
 // hungUp reports whether c, holding a client's hang-up not yet told (v's
@@ -653,7 +724,7 @@ func (c *trackedConn) hungUp(v connView) bool {
 	if c.raw == nil {
 		return false
 	}
-	_, state, ok := socketReceived(c.raw)
+	_, state, ok := c.socketCounts(v)
 	return ok && clientGone(state)
 }
 
@@ -734,14 +805,8 @@ func (c *trackedConn) boundLocked(cut uint64, floor bool) *holdBound {
 // begins (trackedConn.floor): a scope cut from now on leaves out the holds
 // its parser had taken by the time its reads passed what its socket has
 // received now, until the next window begins.
-func (t *inflight) beginWindow() {
-	t.mu.Lock()
-	conns := make([]*trackedConn, 0, len(t.conns))
-	for tc := range t.conns {
-		conns = append(conns, tc)
-	}
-	t.mu.Unlock()
-	for _, c := range conns {
+func (t *inflight) beginWindow(worker uint32) {
+	for _, c := range t.of(worker, false) {
 		c.mu.Lock()
 		c.floor = c.boundLocked(c.received(c.viewLocked()), true)
 		c.mu.Unlock()
@@ -887,12 +952,13 @@ func (c *trackedConn) NetConn() net.Conn { return c.Conn }
 // loaded host is as long as the scheduler makes it). The socket alone does not
 // show those, and the counts show their read as one waiting for the
 // application. They are what the socket has received in all (the kernel's
-// count, tcpi_bytes_received, read after v, so a read that returns between
-// the two counts as untaken, never as neither) less what v says the reads
-// returned. That count takes the application's FIN as one: it is taken off
-// once the socket is in a state only a FIN it received leads to, or in
-// TCP_CLOSE (reset, or closed as its FIN_WAIT2, CLOSING or LAST_ACK ended)
-// after a read returned the stream's end (finReceived). In
+// count, read after v, so a read that returns between the two counts as
+// untaken, never as neither: tcpi_bytes_received on Linux, the distance its
+// next expected sequence number has come on macOS, socketCounts) less what v
+// says the reads returned. Either count takes the application's FIN as one:
+// it is taken off once the socket is in a state only a FIN it received leads
+// to, or closed (reset, or closed as its FIN_WAIT2, CLOSING or LAST_ACK
+// ended) after a read returned the stream's end (finCounted). In
 // TCP_CLOSE with no end returned the kernel's counts do not tell the FIN from
 // a byte (a TLS layer stops reading at the close_notify before it), so it
 // counts as one until a read returns it or the handler closes the
@@ -911,11 +977,11 @@ func (c *trackedConn) received(v connView) uint64 {
 	if c.raw == nil {
 		return v.delivered
 	}
-	received, state, ok := socketReceived(c.raw)
+	received, state, ok := c.socketCounts(v)
 	if !ok {
 		return v.delivered
 	}
-	if finReceived(state, v.eof) && received > 0 {
+	if finCounted(state, v.eof) && received > 0 {
 		received--
 	}
 	return max(received, v.delivered)
@@ -955,15 +1021,11 @@ type scope struct {
 	bounds map[*trackedConn]*holdBound
 }
 
-// scope begins a scope with every connection kept now, each cut at what its
-// socket has received.
-func (t *inflight) scope() *scope {
-	t.mu.Lock()
-	conns := make([]*trackedConn, 0, len(t.conns))
-	for tc := range t.conns {
-		conns = append(conns, tc)
-	}
-	t.mu.Unlock()
+// scope begins a scope with every connection of worker's kept now
+// (inflight.of, unread ones included), each cut at what its socket has
+// received.
+func (t *inflight) scope(worker uint32) *scope {
+	conns := t.of(worker, true)
 	left := make(map[*trackedConn]uint64, len(conns))
 	bounds := make(map[*trackedConn]*holdBound, len(conns))
 	for _, tc := range conns {
@@ -1131,6 +1193,11 @@ func heldWords(tc *trackedConn, v connView, cut uint64, answers bool) string {
 // unknown mark stood when it was found holding none. v is the view read.
 func (s *scope) holds(tc *trackedConn, cut uint64, answers bool, b *holdBound) (held, marked bool, v connView) {
 	v = tc.scopedView(b)
+	if v.hangUpTold {
+		// Its client's hang-up was told on: what it holds is no test's
+		// (HangUpTold).
+		return false, false, v
+	}
 	if v.delivered < cut || tc.hungUp(v) {
 		return true, false, v
 	}
@@ -1217,10 +1284,18 @@ func (s *scope) PendingProgress(answers bool) map[uint64]uint64 {
 }
 
 // InFlightScope implements agent.InFlightScoper.
-func (p *Proxy) InFlightScope() agent.InFlightScope { return p.inflight.scope() }
+func (p *Proxy) InFlightScope() agent.InFlightScope { return p.inflight.scope(0) }
+
+// InFlightScopeOf implements agent.InFlightWorkerScoper.
+func (p *Proxy) InFlightScopeOf(instance uint32) agent.InFlightScope {
+	return p.inflight.scope(instance)
+}
+
+// InFlightBeginWindowOf implements agent.InFlightWorkerScoper.
+func (p *Proxy) InFlightBeginWindowOf(instance uint32) { p.inflight.beginWindow(instance) }
 
 // InFlightBeginWindow implements agent.InFlightWindower.
-func (p *Proxy) InFlightBeginWindow() { p.inflight.beginWindow() }
+func (p *Proxy) InFlightBeginWindow() { p.inflight.beginWindow(0) }
 
 // InFlightChanged implements agent.InFlightReader.
 func (p *Proxy) InFlightChanged() <-chan struct{} { return p.inflight.Changed() }
@@ -1243,6 +1318,7 @@ var (
 	_ integrations.UnknownMarker = (*trackedConn)(nil)
 	_ integrations.IdleMarker    = (*trackedConn)(nil)
 	_ syscall.Conn               = (*trackedConn)(nil)
+	_ util.HangUpTeller          = (*trackedConn)(nil)
 )
 
 // keepsConnections reports whether the accept keeps each connection it hands

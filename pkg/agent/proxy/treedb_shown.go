@@ -17,6 +17,11 @@ import (
 // view, tree generation and key, never on a call.
 var keyedExamined, shownBuilds atomic.Uint64
 
+// verifyExamined counts the entries the verify mode's walk of a key examined
+// (exactView.walkedLocked), read by the row that pins it: once per view,
+// tree, key and generation, never on every read.
+var verifyExamined atomic.Uint64
+
 // viewNarrowed counts the staged mocks an exact view's reads were handed to
 // narrow to what it shows (keep, reusable, teardown): what an unkeyed read
 // costs beside the tree's split, read by the rows that pin it. A tier read
@@ -166,7 +171,8 @@ func (v *exactView) showsStaticRest(mk *models.Mock) bool {
 
 // sharesRest is what the view shows of a mock that is not protocol-phase, its
 // own apart: one of the reached worker scope; in a test, one of the pool
-// under the background rules; between tests, one of the pool slice served.
+// under the background rules, or one a declared session call names
+// (declaredInPool); between tests, one of the pool slice served.
 func (v *exactView) sharesRest(mk *models.Mock) bool {
 	if v.isWorker(mk.Name) {
 		return true
@@ -175,10 +181,22 @@ func (v *exactView) sharesRest(mk *models.Mock) bool {
 		// Under the background rules the pool answers in a test too,
 		// after the test's own and the worker scope (keep); an async
 		// lane's recording keeps today's rules.
-		return v.bg.inPool(mk.Name) && !mk.IsAsync()
+		return v.declaredInPool(mk) || v.bg.inPool(mk.Name) && !mk.IsAsync()
 	}
 	_, ok := v.pool[mk.Name]
 	return ok
+}
+
+// declaredInPool reports whether mk, in a test's view, is a recording made
+// outside every test (the pool slice served before the test opened) that
+// a keploy.yaml sessionCalls entry names exactly, by its method and whole
+// path, served to every test
+// (models.Mock.DeclaredSessionCall). Every test of the run is served it,
+// whatever test opened: a call the app makes once at start-up and caches
+// (a token, a configuration read) that a test makes again. Another test's
+// recording of it is that test's alone.
+func (v *exactView) declaredInPool(mk *models.Mock) bool {
+	return v.declared.has(mk.Name) && mk.DeclaredSessionCall()
 }
 
 // unspentNow reports whether mk is neither spent in the view nor consumed
@@ -210,22 +228,28 @@ func (v *exactView) extraLocked(db *TreeDb, ix *integrations.MockIndex, key stri
 		return s.extra
 	}
 	shownBuilds.Add(1)
-	var pool map[string]struct{}
+	var pool, declared map[string]struct{}
 	if v.test != "" {
 		if v.bg != nil {
 			pool = v.bg.pool
+		}
+		if v.declared != nil {
+			declared = v.declared.names
 		}
 	} else {
 		pool = v.pool
 	}
 	var extra []keyedEntry
-	if looks := len(v.worker) + len(pool); looks < len(p.rest) {
+	if looks := len(v.worker) + len(pool) + len(declared); looks < len(p.rest) {
 		keyedExamined.Add(uint64(looks))
 		var pos []int
 		for name := range v.worker {
 			pos = append(pos, p.byName[name]...)
 		}
 		for name := range pool {
+			pos = append(pos, p.byName[name]...)
+		}
+		for name := range declared {
 			pos = append(pos, p.byName[name]...)
 		}
 		slices.Sort(pos)
@@ -317,18 +341,38 @@ func (v *exactView) rangeShownKeyed(db *TreeDb, ix *integrations.MockIndex, key 
 	}
 }
 
+// verifyWalk is the verify mode's walk of every entry a key index files under
+// one key, narrowed to those the view shows (showsStatic), at one version of
+// that index (keyIndex.ver), in the index's order. A read narrows it to the
+// live ones.
+type verifyWalk struct {
+	ki   *keyIndex
+	ver  uint64
+	want []keyedEntry
+}
+
 // recomputeShownLocked gives, for the verify mode, what rangeShownKeyed reads
 // from p and extra (got), and the same read the way the walk made it before
 // the tree split it (want): every live entry the key index files under key
 // that the view shows, spends aside (both read those the same way, as fn is
 // called). db.mu must be held, so no change falls between the two; the
 // caller compares them once it is released (verifyExactRead panics).
+//
+// The walk examines every entry filed under key, so it is made once per view,
+// tree, MockIndex, key and version of the tree's key index (walkedLocked);
+// each read narrows it to the entries live at that read. That is the walk the
+// read would make: the index's lists change only by a rebuild, which is a new
+// index, or by follow and swapInPlace, which move its version; and what the
+// view shows of a mock (showsStatic) does not change while the view is in
+// force. The walk does not read the tree's generation, which the split it
+// checks (keyParts) trusts: a store that changes the index without moving
+// the generation leaves the split stale, and the next read panics. Every read
+// is still compared whole, and a call's read costs what the view shows, not
+// every recording of the key.
 func (v *exactView) recomputeShownLocked(db *TreeDb, ix *integrations.MockIndex, key string, p *keyPart, extra []keyedEntry) (want, got []*models.Mock) {
-	if ki := db.keyed[ix]; ki != nil {
-		for _, e := range ki.lists[key] {
-			if db.liveLocked(e) && v.showsStatic(e.mk) {
-				want = append(want, e.mk)
-			}
+	for _, e := range v.walkedLocked(db, ix, key) {
+		if db.liveLocked(e) {
+			want = append(want, e.mk)
 		}
 	}
 	cmp := db.rbt.Comparator
@@ -347,6 +391,35 @@ func (v *exactView) recomputeShownLocked(db *TreeDb, ix *integrations.MockIndex,
 		}
 	}
 	return want, got
+}
+
+// walkedLocked returns the verify mode's walk of what ix files under key in db
+// that v shows, at the current version of db's key index for ix, making it on
+// its first use there; nothing when db has no index for ix. db.mu must be
+// held, for reading at least.
+func (v *exactView) walkedLocked(db *TreeDb, ix *integrations.MockIndex, key string) []keyedEntry {
+	ki := db.keyed[ix]
+	if ki == nil {
+		return nil
+	}
+	at := shownAt{db, ix, key}
+	v.shownMu.Lock()
+	defer v.shownMu.Unlock()
+	if w := v.walked[at]; w != nil && w.ki == ki && w.ver == ki.ver {
+		return w.want
+	}
+	w := &verifyWalk{ki: ki, ver: ki.ver}
+	verifyExamined.Add(uint64(len(ki.lists[key])))
+	for _, e := range ki.lists[key] {
+		if v.showsStatic(e.mk) {
+			w.want = append(w.want, e)
+		}
+	}
+	if v.walked == nil {
+		v.walked = map[shownAt]*verifyWalk{}
+	}
+	v.walked[at] = w
+	return w.want
 }
 
 // kindIndex files every mock under "" and under its kind, so an exact view's
@@ -369,8 +442,12 @@ var kindIndex = &integrations.MockIndex{Keys: func(mk *models.Mock) []string {
 // It examines the protocol-phase entries the tree split out at its generation
 // and the view's extras, built once per view and generation (extraLocked);
 // the tree's split is built once per generation, on the first read, by one
-// walk of the tree. In the verify mode the read is recomputed by that walk,
-// under the same lock, and a difference panics.
+// walk of the tree. In the verify mode the read is recomputed, under the same
+// lock, from the walk of every entry the tree's kind index files under kind
+// that v shows, and a difference panics. That walk is made once per view,
+// tree, kind and version of the kind index (walkedLocked), as a keyed read's
+// is (recomputeShownLocked): it does not read the generation the split
+// trusts, so a change that misses the generation still panics the next read.
 func (v *exactView) shownOf(db *TreeDb, kind models.Kind) []*models.Mock {
 	if db == nil {
 		return nil
@@ -407,10 +484,9 @@ func (v *exactView) shownOf(db *TreeDb, kind models.Kind) []*models.Mock {
 	var want []*models.Mock
 	verify := exactViewVerify.Load()
 	if verify {
-		it := db.rbt.Iterator()
-		for it.Next() {
-			if mk, ok := it.Value().(*models.Mock); ok && mk != nil && (kind == "" || mk.Kind == kind) && v.showsStatic(mk) {
-				want = append(want, mk)
+		for _, e := range v.walkedLocked(db, kindIndex, key) {
+			if db.liveLocked(e) {
+				want = append(want, e.mk)
 			}
 		}
 	}

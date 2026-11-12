@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,8 +178,10 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	//    remains active for any startup-init traffic the app emits
 	//    before this step's narrower window kicks in. Matches replay's
 	//    ordering where the initial broad UpdateMockParams precedes
-	//    the first per-test one (replay.go:1047 / 1156 → 1433).
-	if err := waitForApp(ctx, opts.ServiceURL, 2*time.Minute, r.logger); err != nil {
+	//    the first per-test one (replay.go:1047 / 1156 → 1433). A caller
+	//    that started the app gives its end (opts.AppEnded): the wait then
+	//    has no budget and ends on the app's answer or its end.
+	if err := waitForApp(ctx, opts.ServiceURL, appWaitBudget, opts.AppEnded, r.logger); err != nil {
 		return &TestResult{Passed: false, Error: fmt.Sprintf("app not reachable: %v", err), Noise: tc.Noise}
 	}
 
@@ -253,8 +256,10 @@ func (r *Runner) executeAndCompare(ctx context.Context, tc *models.TestCase, ser
 	tcCopy.HTTPReq = httpReq
 
 	// Sent as written: one test case run alone has no test set's template
-	// values, which belong to a replay of the whole set (pkg/templates).
-	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{})
+	// values, which belong to a replay of the whole set (pkg/templates). The
+	// files kept beside the test case are read from its testdb's directory,
+	// not the process's working directory.
+	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{KeployPath: r.testCaseDB.Root()})
 	if err != nil {
 		return false, models.RespCompare{}, err
 	}
@@ -382,7 +387,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		// waited out the whole of it for one that had stopped.
 		agentCtx, cancel := context.WithCancel(gCtx)
 		agentReadyCh := make(chan bool, 1)
-		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh)
 		agentStart := r.instrumentation.WatchAgentStart(agentCtx)
 		select {
 		case <-gCtx.Done():
@@ -393,7 +398,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			if gCtx.Err() != nil {
 				return nil, gCtx.Err()
 			}
-			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", r.config.Agent.AgentURI, err)
+			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", keployPkg.ShownAgentURI(r.config.Agent.AgentURI), err)
 		case ready, ok := <-agentReadyCh:
 			if !ok || !ready {
 				cancel()
@@ -435,22 +440,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			}
 		}
 	}
-	noiseCfg := map[string]map[string][]string{}
-	if headerNoise, ok := r.globalNoise["header"]; ok {
-		noiseCfg["header"] = headerNoise
-	}
-	if bodyNoise, ok := r.globalNoise["body"]; ok {
-		// "body" feeds outgoing-payload matchers (e.g. the Pulsar SEND matcher)
-		// and stays the response-assertion bucket — it intentionally does NOT
-		// drive HTTP request-body matching anymore.
-		noiseCfg["body"] = bodyNoise
-	}
-	if reqBodyNoise, ok := r.globalNoise["requestbody"]; ok {
-		// Dedicated HTTP request-body matching noise (drift-detection
-		// exclusion + strict-noise allowance). Separate from "body" so
-		// response-assertion noise can't silently soften request matching.
-		noiseCfg["requestbody"] = reqBodyNoise
-	}
+	// keploy.yml's matching noise, cut to the buckets the agent's mock
+	// matchers read, as keploy test cuts it (models.MockMatchingNoise).
+	noiseCfg := models.MockMatchingNoise(r.globalNoise)
 	if len(noiseCfg) > 0 {
 		outOpts.NoiseConfig = noiseCfg
 	}
@@ -814,8 +806,42 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 	}
 }
 
+// appWaitBudget bounds the wait for an app whose caller gave no end of its run
+// (RunTestOpts.AppEnded nil). A variable for tests.
+var appWaitBudget = 2 * time.Minute
+
+// appProbeTick is how long the wait leaves between two probes the app did not
+// answer, and appSayEvery how many unanswered probes pass between the lines an
+// unbudgeted wait says it still waits with. appProbeTimeout ends one probe the
+// app has not answered in that long (0: none), and the wait probes again.
+// Pacing only: none of them is a verdict. Variables for tests.
+var (
+	appProbeTick    = 2 * time.Second
+	appSayEvery     = 30
+	appProbeTimeout = 3 * time.Second
+)
+
+// answerNeverAccepted reports whether a probe's error says the app answered in
+// a way that no later probe, nor the test's own request (it verifies the app's
+// certificate as the probe does), can accept: a certificate that fails
+// verification (an unknown authority, another host's, an expired one), or
+// plain HTTP from an app the ServiceURL names as https. Refused connections
+// and other TLS handshake errors (a TLS sidecar can send those while it
+// starts) are not ready yet, not this.
+func answerNeverAccepted(err error) bool {
+	var verifyErr *tls.CertificateVerificationError
+	return errors.As(err, &verifyErr) || errors.Is(err, http.ErrSchemeMismatch)
+}
+
 // waitForApp blocks until the app at serviceURL responds to an HTTP
-// request, or the timeout elapses. TCP reachability is no longer
+// request. Given ended, the end of the app's run (RunTestOpts.AppEnded), it
+// has no budget: it also ends when ended closes, with an error that says the
+// app stopped before it answered, when ctx ends, or at once on an answer
+// the test can never accept (answerNeverAccepted). An app compose holds
+// from starting until a slow dependency is healthy is waited for however
+// long that takes (enterprise atg-with-mocks pipelines 13105 and 13112: the
+// two-minute budget ran out 8 s before compose started the app). With ended
+// nil it ends, too, once timeout has elapsed. TCP reachability is no longer
 // checked separately — the HTTP probe's underlying dial subsumes it
 // and catches the strictly larger set of not-ready conditions (see
 // below).
@@ -841,7 +867,7 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 // and each of those conditions legitimately represents an app that
 // isn't yet ready to serve traffic end-to-end, which is the signal
 // we want during startup.
-func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, logger *zap.Logger) error {
+func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, ended <-chan struct{}, logger *zap.Logger) error {
 	parsed, err := url.Parse(serviceURL)
 	if err != nil || parsed.Host == "" {
 		return fmt.Errorf("invalid service URL %q: check the ServiceURL and ensure it includes a valid host", serviceURL)
@@ -868,12 +894,21 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	// attempt — including the very first — is cancelled when the
 	// budget runs out. Using the parent ctx for the probe while the
 	// outer select watches waitCtx would let a single slow probe run
-	// past the budget.
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	// past the budget. A wait given the app's end has no budget: its
+	// probes end with ctx alone.
+	var (
+		waitCtx context.Context
+		cancel  context.CancelFunc
+	)
+	if ended == nil {
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		waitCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	probeClient := &http.Client{
-		Timeout: 3 * time.Second,
+		Timeout: appProbeTimeout,
 		// New connection each probe so we're exercising real readiness
 		// rather than a cached keep-alive from an earlier attempt.
 		Transport: &http.Transport{DisableKeepAlives: true},
@@ -902,7 +937,9 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	//   nil          — response received (any status code; we care
 	//                  about liveness, not correctness).
 	//   fatal=true   — deterministic request-construction error; no
-	//                  point retrying.
+	//                  point retrying. Also, for a wait with no budget,
+	//                  an answer no later probe can accept (see
+	//                  answerNeverAccepted).
 	//   fatal=false  — transport error (connect refused, reset, TLS
 	//                  handshake fail, etc.); retry on the next tick.
 	//
@@ -925,6 +962,14 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 		}
 		resp, httpErr := probeClient.Do(req)
 		if httpErr != nil {
+			// A wait with no budget would hold the run for as long as the
+			// app runs on an answer no later probe can accept: it ends at
+			// once instead. A budgeted wait retries it until its budget, as
+			// before: a k8s ingress serves a placeholder certificate until
+			// its own is loaded.
+			if ended != nil && answerNeverAccepted(httpErr) {
+				return true, fmt.Errorf("the app answered, but in a way the test's request can never accept: check the ServiceURL (--app-url)'s scheme and the app's certificate: %w", httpErr)
+			}
 			return false, httpErr
 		}
 		_ = resp.Body.Close()
@@ -946,17 +991,47 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 		lastErr = err
 	}
 
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(appProbeTick)
 	defer ticker.Stop()
 
+	// unanswered counts the probes the app has not answered: an unbudgeted
+	// wait says every appSayEvery of them that it still waits, and on what,
+	// so a run held by an app that does not come up says why it is held.
+	unanswered := 1
+	// stopped is the error of a wait whose waitCtx ended, and appEnded that of
+	// one whose app's run ended before the app answered.
+	stopped := func() error {
+		if ctx.Err() != nil {
+			// The caller's ctx ended (a signal, the caller's own bound):
+			// no budget ran out.
+			return fmt.Errorf("stopped waiting for app at %s: %w", addr, ctx.Err())
+		}
+		if lastErr != nil {
+			return fmt.Errorf("timed out waiting for app at %s (last probe error: %v); check that the service is running and the ServiceURL is correct", addr, lastErr)
+		}
+		return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
+	}
+	appEnded := func() error {
+		return fmt.Errorf("the app's run ended before the app at %s answered (last probe error: %v); see the app's output for why it stopped", addr, lastErr)
+	}
 	for {
 		select {
 		case <-waitCtx.Done():
-			if lastErr != nil {
-				return fmt.Errorf("timed out waiting for app at %s (last probe error: %v); check that the service is running and the ServiceURL is correct", addr, lastErr)
-			}
-			return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
+			return stopped()
+		case <-ended:
+			// Never ready when ended is nil (a nil channel never receives).
+			return appEnded()
 		case <-ticker.C:
+			// A tick can be ready with waitCtx or the end (a probe that
+			// outlasted the tick leaves one ready), and select picks at
+			// random: they win over it, so no probe follows them.
+			select {
+			case <-waitCtx.Done():
+				return stopped()
+			case <-ended:
+				return appEnded()
+			default:
+			}
 			if fatal, err := probe(); err == nil {
 				logger.Debug("app is reachable", zap.String("addr", addr))
 				return nil
@@ -964,6 +1039,11 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 				return fmt.Errorf("failed to probe %s: %w", addr, err)
 			} else {
 				lastErr = err
+			}
+			unanswered++
+			if ended != nil && unanswered%appSayEvery == 0 {
+				logger.Info("still waiting for the app to answer before running the test; its run has not ended: a compose stack may still be starting the app's dependencies, or the app listens elsewhere than the ServiceURL (--app-url) names",
+					zap.String("addr", addr), zap.Int("unansweredProbes", unanswered), zap.NamedError("lastProbeError", lastErr))
 			}
 		}
 	}

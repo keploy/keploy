@@ -133,11 +133,11 @@ func (a *AgentClient) answerNameAskStream(ctx context.Context, uri, agentContain
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	q := url.Values{"after": {strconv.FormatUint(after, 10)}}
-	req, err := http.NewRequestWithContext(sctx, http.MethodGet, uri+models.NetworkNamesAskPath+"?"+q.Encode(), nil)
+	req, err := newAgentRequest(sctx, http.MethodGet, uri+models.NetworkNamesAskPath+"?"+q.Encode(), nil)
 	if err != nil {
 		return after, err
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return after, err
 	}
@@ -176,12 +176,15 @@ func (a *AgentClient) postNetworkNames(ctx context.Context, uri, agentContainer 
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uri+models.NetworkNamesPath, bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, uri+models.NetworkNamesPath, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.client.Do(req)
+	// Made beside the run's requests, and cancelled as the run ends
+	// (ownConnection).
+	client := a.ownConnection()
+	res, err := doAgent(&client, req)
 	if err != nil {
 		return err
 	}

@@ -120,6 +120,24 @@ func SkipGRPCUnderPressure(ctx context.Context, pausedAtRequest bool) bool {
 	return paused
 }
 
+// HandOn hands testCase, which a capture built, to t, the recording's queue,
+// and reports whether it did. A capture runs on its ingress's context (ctx),
+// which ends as that ingress stops: its forwarder for the app's port, or the
+// agent, is stopping. A test case that ctx's end beats to the queue never
+// reaches the recording, though the app served its request: it is counted on
+// the manager ctx carries (syncMock NoteNotHandedOn), so the recording says
+// how many it lost so. A CaptureFunc that builds its own test cases hands them
+// on with it.
+func HandOn(ctx context.Context, t chan<- *models.TestCase, testCase *models.TestCase) bool {
+	select {
+	case t <- testCase:
+		return true
+	case <-ctx.Done():
+		syncMock.FromContextOrGlobal(ctx).NoteNotHandedOn()
+		return false
+	}
+}
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
 	if SkipUnderPressure(ctx, req, resp) {
 		return
@@ -329,11 +347,26 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// The window is on the manager its ingress opened it on, the one the
 		// ctx carries (or the global one): the test-id counter's, and the one
 		// resolved here.
+		//
+		// The window is claimed only once the test case is in the
+		// recording's queue (HandOn), not before: a claimed window is never
+		// given up, so it pins every mock held from its start on, and the
+		// queue stays full for as long as the recording's stream is slow.
+		// Claimed while the test case waited, the hold grew with all the
+		// traffic captured meanwhile, past its bound. So the window stays
+		// open and unclaimed until the test case is queued, and the mocks
+		// are resolved to it (ResolveKept) after that:
+		//   - given up already: left out, as before, and never handed on;
+		//   - not handed on (the ingress stopped first, and HandOn counted
+		//     it): nothing is resolved to a test case the recording never
+		//     gets; the ingress ends the window, as for a left-out request;
+		//   - given up while the test case waited for the queue: it went out
+		//     without mocks it may own, and RevokeTestCase leaves it out.
 		mgr := syncMock.FromContextOrGlobal(ctx)
 		win := syncMock.WindowFromContext(ctx)
-		if !win.Keep() {
-			// The manager warned of it as Keep found the window given up; the
-			// ingress ends the window.
+		if win.LeftOut() {
+			// The manager warned of it as LeftOut found the window given up;
+			// the ingress ends the window.
 			logger.Debug("Test case left out: its request's window was given up while it was in flight",
 				zap.String("method", req.Method),
 				zap.Time("in_flight_since", reqTimeTest))
@@ -353,11 +386,27 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// the taint flow and stops the go/clear-text-logging false
 		// positives that fire downstream (syncMock.go diag/Info
 		// logs include test_name for ResolveRange traceability).
+		if !HandOn(ctx, t, testCase) {
+			return
+		}
+		sent = true
+		if !win.Keep() {
+			// Given up while the test case waited for the queue: the manager
+			// warned of it as Keep found it so, and the test case is left out
+			// after all; the ingress ends the window.
+			mgr.RevokeTestCase(testName)
+			logger.Debug("Test case left out: its request's window was given up while its test case waited for the recording's queue",
+				zap.String("method", req.Method),
+				zap.Time("in_flight_since", reqTimeTest))
+			return
+		}
 		// Dumping the test case from the mock manager in synchronous mode:
 		// takes what was held for the request and ends its window before
-		// handing the mocks on.
+		// handing the mocks on. ResolveKept noted the test case's span.
 		mgr.ResolveKept(win, reqTimeTest, resTimeTest, testName, mapping)
-	} else if syncMock.WindowFromContext(ctx).LeftAtStop() {
+		return
+	}
+	if syncMock.WindowFromContext(ctx).LeftAtStop() {
 		// Without --sync nothing is resolved here, but a request that was in
 		// flight across its recording's stop is left out as Keep leaves it
 		// out with --sync: the recording it began in has ended without it,
@@ -367,16 +416,13 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.Time("in_flight_since", reqTimeTest))
 		return
 	}
-	select {
-	case <-ctx.Done():
+	if !HandOn(ctx, t, testCase) {
 		return
-	case t <- testCase:
-		sent = true
-		// Without --sync no resolve ends the window: it is noted a test
-		// case's here, before the ingress ends it (syncMock.TestSpanAt).
-		// With --sync ResolveKept noted it, and its window has ended.
-		syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 	}
+	sent = true
+	// Without --sync no resolve ends the window: it is noted a test case's
+	// here, before the ingress ends it (syncMock.TestSpanAt).
+	syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 }
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
 	dstPort := 0
@@ -662,12 +708,16 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// keep=false releases them from the buffer so they don't accumulate as
 	// orphans. Must run before the isDuplicate early-return below.
 	if synchronous {
-		// Always increment the counter so every stream — duplicate or not —
-		// gets a unique window name. Concurrent duplicates would otherwise all
-		// share "test-0" and collide in the mock manager's window map.
-		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
-		testName = fmt.Sprintf("test-%d", currentID)
-		if mgr := syncMock.Get(); mgr != nil {
+		// Every stream, duplicate or not, takes a name of its own: concurrent
+		// duplicates would otherwise share one and collide in the manager's
+		// window map. It is the name its mocks are mapped to and its test
+		// case's (below), as an HTTP request's is (Capture): the recording
+		// joins a mapping to its test case by it. It comes off the manager
+		// the call's context carries, as Capture's does, so an HTTP
+		// request's and a gRPC call's names never share one, and the call's
+		// mocks resolve on that manager.
+		if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
+			testName = fmt.Sprintf("test-%d", mgr.NextTestID())
 			mgr.ResolveRange(
 				http2Stream.GRPCReq.Timestamp,
 				http2Stream.GRPCResp.Timestamp,
@@ -695,7 +745,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 
 	testCase := &models.TestCase{
 		Version:   models.GetVersion(),
-		Name:      http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
+		Name:      testName,
 		Kind:      models.GRPC_EXPORT,
 		Created:   time.Now().Unix(),
 		SourcePod: SourcePodFromContext(ctx),
@@ -708,10 +758,13 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// The clock its window start is on (proven switch).
 	StampOrigin(ctx, testCase)
 
-	select {
-	case <-ctx.Done():
-		return
-	case t <- testCase:
+	// With --sync the call's mocks were resolved to it above, before it is
+	// handed on, unlike an HTTP request's (Capture): a gRPC call opens no
+	// window to hold its mocks while its test case waits for the queue, so
+	// resolved after the wait they could be gone at the stale cutoff. One
+	// HandOn cannot hand on (counted) leaves those mocks, and their mapping,
+	// to a test case the recording never gets: replay serves none of them.
+	if HandOn(ctx, t, testCase) {
 		logger.Debug("Captured gRPC test case",
 			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
 	}

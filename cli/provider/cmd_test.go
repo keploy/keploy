@@ -598,9 +598,6 @@ func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 	if err := os.Remove(gone); err != nil {
 		t.Skipf("this system keeps a working directory from being removed: %v", err)
 	}
-	if _, err := os.Getwd(); err == nil {
-		t.Skip("this system still reads a working directory that was removed")
-	}
 
 	core, logs := observer.New(zapcore.InfoLevel)
 	c := NewCmdConfigurator(zap.New(core), config.New())
@@ -615,8 +612,8 @@ func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 
 	const refusal = "failed to get the last directory for appName"
 	err := c.Validate(context.Background(), cmd)
-	if err == nil || !strings.HasPrefix(err.Error(), refusal) {
-		t.Fatalf("Validate = %v, want %q", err, refusal)
+	if err == nil || !strings.HasPrefix(err.Error(), refusal) || !strings.Contains(err.Error(), "the working directory is gone: ") {
+		t.Fatalf("Validate = %v, want %q, saying the working directory is gone", err, refusal)
 	}
 	var said []string
 	n := 0

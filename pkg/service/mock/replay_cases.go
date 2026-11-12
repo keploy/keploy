@@ -3,7 +3,6 @@ package mock
 import (
 	"context"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -34,8 +34,10 @@ type FlowMocks struct {
 	Missed   []models.UnmatchedCall
 	// Outcome is the verdict of the test's latest run this replay
 	// (models.ScopeOutcome*, ScopeOutcomeGated when the replay told it not to
-	// run); "" when its harness reported none.
+	// run); "" when its harness reported none. Random is how its browser
+	// drew its random numbers in that run (models.ScopeWindow.Random).
 	Outcome string
+	Random  string
 }
 
 // CaseReader is an optional MappingDB extension: which cases each flow recorded.
@@ -45,9 +47,17 @@ type CaseReader interface {
 
 // replayDetail is everything the outcome needs to say what each test did this run.
 type replayDetail struct {
-	set      string // the set replayed
-	windows  []models.ScopeWindow
-	starts   []models.ScopeWindow
+	set     string // the set replayed
+	windows []models.ScopeWindow
+	starts  []models.ScopeWindow
+	// run is when keploy started the test command and when what it started
+	// was down: no application it started lived past its end, and none
+	// began before the first call keploy saw of it (lifeOf). A series whose
+	// rule's timer bound that life did not reach is not due (markEarly).
+	// Zero when not measured (a compose run, whose application keploy
+	// started apart from the command): every series is due as with no
+	// bound.
+	run      commandRun
 	expected map[string][]models.MockEntry
 	recorded map[string][]*models.TestCase
 	actual   []*models.TestCase
@@ -55,6 +65,9 @@ type replayDetail struct {
 	// captured ("": it is not): a request it lost would read as one the app
 	// did not make.
 	actualShort string
+	// faults is the mocks the agent holds whose answer ends in a fault, by
+	// name: the summary names each one served (logFaultsServed).
+	faults map[string]*models.Mock
 }
 
 // actualCapture keeps the app's incoming requests during a replay, in memory only.
@@ -89,17 +102,6 @@ func (m *mockService) watchIncoming(ctx context.Context, on bool) *actualCapture
 	return c
 }
 
-// wait blocks until the incoming stream has been drained, or it has taken
-// nothing for grace of the time this process could run (utils/stall), as the
-// record side's caseCapture.wait does: a reader still taking requests is
-// waited for however long that takes.
-func (c *actualCapture) wait(grace time.Duration) {
-	if c == nil {
-		return
-	}
-	utils.WaitWhileProgressing(c.done, grace, func() uint64 { return uint64(c.seen.Load()) })
-}
-
 func (c *actualCapture) list() []*models.TestCase {
 	if c == nil {
 		return nil
@@ -109,26 +111,11 @@ func (c *actualCapture) list() []*models.TestCase {
 	return append([]*models.TestCase(nil), c.cases...)
 }
 
-var idSegment = regexp.MustCompile(`^([0-9]+|[0-9a-fA-F]{12,}|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27})$`)
-
-// normalisePath keeps the path of a URL with ids blanked, so the same call made twice looks the same.
-func normalisePath(rawURL string) string {
-	path := rawURL
-	if u, err := url.Parse(rawURL); err == nil && u.Path != "" {
-		path = u.Path
-	}
-	parts := strings.Split(path, "/")
-	for i, p := range parts {
-		if idSegment.MatchString(p) {
-			parts[i] = "{id}"
-		}
-	}
-	return strings.Join(parts, "/")
-}
-
-// requestKey is what makes two requests the same call: the method and the path with ids blanked.
+// requestKey is what makes two requests the same call: the method and the
+// path with each segment that names a record blanked (learn.CaseKey, the
+// rule the learn step pairs a client test's requests by).
 func requestKey(method, rawURL string) string {
-	return strings.ToUpper(method) + " " + normalisePath(rawURL)
+	return learn.CaseKey(models.Method(method), rawURL)
 }
 
 func exactKey(method, rawURL string) string {
@@ -258,9 +245,10 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 	}
 	for name, w := range latest {
 		if f, known := byFlow[name]; known {
-			f.Outcome = w.Outcome
+			f.Outcome, f.Random = w.Outcome, w.Random
 		} else if w.Outcome != "" {
-			get(name).Outcome = w.Outcome
+			f := get(name)
+			f.Outcome, f.Random = w.Outcome, w.Random
 		}
 	}
 	if len(byFlow) == 0 {

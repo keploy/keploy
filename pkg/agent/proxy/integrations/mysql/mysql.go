@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/recorder"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
@@ -37,6 +39,11 @@ func New(logger *zap.Logger) integrations.Integrations {
 		logger: logger,
 	}
 }
+
+// MockNoise returns MySQL's field-level request-body mock-noise adapter
+// (mysqlNoiseAdapter, exposed via replayer.NoiseAdapter), wiring the parser into
+// the shared mocknoise engine. Satisfies integrations.Integrations.
+func (m *MySQL) MockNoise() mocknoise.Adapter { return replayer.NoiseAdapter() }
 
 func (m *MySQL) MatchType(_ context.Context, buf []byte) bool {
 	// The default proxy path routes MySQL by destination port (3306), so
@@ -212,32 +219,29 @@ func (m *MySQL) IsV2() bool { return true }
 // proxy_v2.go.
 func (m *MySQL) WantsClientWriteHold() bool { return true }
 
+// errNoV2RecordSession is RecordOutgoing's answer to a caller that attached no
+// V2 session. MySQL records only from keploy's V2 chunk streams (recordV2), so
+// it declines the connection (integrations.ErrParserDeclined): it has read
+// nothing from either socket and started no reader, so the caller can relay
+// the connection raw, keep the app's traffic alive and say that nothing on it
+// was recorded, instead of tearing the connection down.
+var errNoV2RecordSession = fmt.Errorf("mysql: no V2 record session (RecordSession.V2) was attached and the parser records only from keploy's V2 chunk streams: %w", integrations.ErrParserDeclined)
+
+// RecordOutgoing records one connection through the V2 FakeConn path
+// (recordV2), from keploy's chunk streams in session.V2. A session without V2
+// is declined with errNoV2RecordSession: no keploy record path builds one for
+// a parser whose IsV2 is true, and the parser cannot record from the raw
+// sockets.
 func (m *MySQL) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
-	if session != nil && session.V2 != nil {
-		return m.recordV2(ctx, session)
+	if session == nil || session.V2 == nil {
+		return errNoV2RecordSession
 	}
-	return m.recordLegacy(ctx, session)
-}
-
-// recordLegacy is the byte-for-byte preserved pre-V2 record path. It
-// is invoked when the session is not running under the supervisor +
-// relay architecture (RecordSession.V2 == nil). Do not edit this body
-// without a matching change in recordV2.
-func (m *MySQL) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
-	logger := session.Logger
-
-	err := recorder.Record(ctx, logger, session.Ingress, session.Egress, session.Mocks, session.Opts, session.TLSUpgrader)
-
-	if err != nil {
-		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
-		return err
-	}
-	return nil
+	return m.recordV2(ctx, session)
 }
 
 // recordV2 delegates to the V2 recorder which consumes the supervisor
 // Session's FakeConns and uses directives for the CLIENT_SSL TLS
-// upgrade. The legacy record path is not entered on this code path.
+// upgrade.
 func (m *MySQL) recordV2(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 	err := recorder.RecordV2(ctx, logger, session.V2)

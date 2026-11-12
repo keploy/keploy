@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -25,6 +26,12 @@ type DecodeContext struct {
 	ClientCaps         uint32 // live client's caps (from HandshakeResponse41)
 	RecordedClientCaps uint32 // caps from the recorded config mock
 	PreferRecordedCaps bool   // if true, prefer RecordedClientCaps over ClientCaps
+	// ServerMariaDBCaps and ClientMariaDBCaps are the MariaDB extended
+	// capabilities each side sent: the greeting's
+	// (HandshakeV10Packet.MariaDBCapabilities) and the client's
+	// HandshakeResponse41 or SSLRequest's. MetadataFraming reads them.
+	ServerMariaDBCaps uint32
+	ClientMariaDBCaps uint32
 	// FramingAssumed is set while ClientCaps is assumed rather than read off
 	// the client's HandshakeResponse41 or SSLRequest (a connection joined
 	// mid-stream, with no SSLRequest of its own captured): the recorder
@@ -61,6 +68,23 @@ type DecodeContext struct {
 	StmtIDToQuery map[uint32]string
 	// Statement ID counter for generating unique statement IDs during replay
 	NextStmtID uint32
+
+	// InTx, Bound, BoundWindow, AutocommitOff and AutocommitOffAtConnect
+	// are replay's binding of the live connection's open transaction to the
+	// connection it was recorded on, which the replayer keeps from the
+	// status of the answers it replayed (its connection rule). InTx is
+	// whether the live connection is in a transaction: the latest answer
+	// said one is open, or that its autocommit is off. Bound is the
+	// recording that answered the transaction's latest command after its
+	// start, and BoundWindow the start of the test window it answered in
+	// (zero under exact serving). AutocommitOff is whether the live
+	// session's autocommit is off, and AutocommitOffAtConnect whether it was
+	// at connect (the greeting's status), which a reset brings back.
+	InTx                   bool
+	Bound                  *models.Mock
+	BoundWindow            time.Time
+	AutocommitOff          bool
+	AutocommitOffAtConnect bool
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000
@@ -94,6 +118,25 @@ func (d *DecodeContext) effectiveClientCaps() uint32 {
 func (d *DecodeContext) DeprecateEOF() bool {
 	return (d.ServerCaps&CLIENT_DEPRECATE_EOF) != 0 &&
 		(d.effectiveClientCaps()&CLIENT_DEPRECATE_EOF) != 0
+}
+
+// MetadataFraming returns which of MariaDB's optional result-set metadata
+// fields the connection's responses carry: those of the extended
+// capabilities both sides sent, when both speak MariaDB's extensions
+// (CLIENT_MYSQL clear on both). A MySQL server or client gets none.
+func (d *DecodeContext) MetadataFraming() mysql.MetadataFraming {
+	if d.ServerCaps&mysql.CLIENT_MYSQL != 0 || d.effectiveClientCaps()&mysql.CLIENT_MYSQL != 0 {
+		return 0
+	}
+	caps := d.ServerMariaDBCaps & d.ClientMariaDBCaps
+	var f mysql.MetadataFraming
+	if caps&mysql.MARIADB_CLIENT_EXTENDED_METADATA != 0 {
+		f |= mysql.FramingExtendedMetadata
+	}
+	if caps&mysql.MARIADB_CLIENT_CACHE_METADATA != 0 {
+		f |= mysql.FramingMetadataFollows
+	}
+	return f
 }
 
 // This map is used to store the last operation that was performed on a connection.

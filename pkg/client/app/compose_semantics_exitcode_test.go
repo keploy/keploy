@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	"github.com/docker/compose/v5/pkg/api"
+	"go.keploy.io/server/v3/pkg/platform/docker"
 )
 
 // The CLI treats --exit-code-from as implying --abort-on-container-exit, and
@@ -15,7 +15,7 @@ func TestComposeUpSemanticsExitCodeFromImpliesAbort(t *testing.T) {
 	if got.ExitCodeFrom != "app" {
 		t.Fatalf("ExitCodeFrom = %q, want app", got.ExitCodeFrom)
 	}
-	if got.OnExit != api.CascadeStop {
+	if got.OnExit != docker.ComposeOnExitStop {
 		t.Fatalf("OnExit = %v, want CascadeStop: --exit-code-from implies --abort-on-container-exit", got.OnExit)
 	}
 }
@@ -24,7 +24,7 @@ func TestComposeUpSemanticsExitCodeFromImpliesAbort(t *testing.T) {
 // downgraded to CascadeStop by the implication above.
 func TestComposeUpSemanticsAbortOnFailureKeepsPrecedence(t *testing.T) {
 	got := composeUpSemantics("docker compose -f - up --abort-on-container-failure --exit-code-from app")
-	if got.OnExit != api.CascadeFail {
+	if got.OnExit != docker.ComposeOnExitFail {
 		t.Fatalf("OnExit = %v, want CascadeFail", got.OnExit)
 	}
 }
@@ -32,7 +32,7 @@ func TestComposeUpSemanticsAbortOnFailureKeepsPrecedence(t *testing.T) {
 // No --exit-code-from, no implication: a plain `up` still returns immediately.
 func TestComposeUpSemanticsPlainUpIsUnchanged(t *testing.T) {
 	got := composeUpSemantics("docker compose -f - up")
-	if got.OnExit != api.CascadeIgnore {
+	if got.OnExit != docker.ComposeOnExitIgnore {
 		t.Fatalf("OnExit = %v, want CascadeIgnore for a plain up", got.OnExit)
 	}
 }

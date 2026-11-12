@@ -149,18 +149,20 @@ var goldenDebug = []string{
 	"🐰 Keploy: 2026-09-24T10:00:00.123456789Z \t\x1b[34mINFO\x1b[0m\trequest\t{\"body\": \"{\\\"name\\\":\\\"a\\\\\\\"b\\\",\\\"path\\\":\\\"C:\\\\\\\\temp\\\\\\\\new\\\"}\", \"ids\": [\"a\", \"b\"]}\n",
 }
 
+// An agent's lines carry the time to the nanosecond, as the CLI's do: main
+// wrote them to the second, which hid a stall of a second or two.
 var goldenAgent = []string{
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[34mINFO\x1b[0m\tstarting test for\t{\"test case\": \"\x1b[38;5;208mget-user-1\x1b[0;25;0m\", \"test set\": \"\x1b[38;5;208mtest-set-0\x1b[0;25;0m\"}\n",
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[34mINFO\x1b[0m\tstarting test for\t{\"test case\": \"\x1b[38;5;208mget-user-1\x1b[0;25;0m\", \"test set\": \"\x1b[38;5;208mtest-set-0\x1b[0;25;0m\"}\n",
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[34mINFO\x1b[0m\trunning\t{\"test-set\": \"\x1b[38;5;208mtest-set-0\x1b[0;25;0m\", \"attempt\": 1}\n",
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[34mINFO\x1b[0m\tresult\t{\"testcase id\": \"\x1b[31mget-user-1\x1b[0m\", \"testset id\": \"\x1b[31mtest-set-0\x1b[0m\", \"passed\": \"\x1b[31mfalse\x1b[0m\"}\n",
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[34mINFO\x1b[0m\tresult\t{\"testcase id\": \"\x1b[32mget-user-1\x1b[0m\", \"testset id\": \"\x1b[32mtest-set-0\x1b[0m\", \"passed\": \"\x1b[32mtrue\x1b[0m\"}\n",
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[34mINFO\x1b[0m\t\x1b[32mTotal Coverage Percentage: 85.5%\x1b[0m\n",
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[34mINFO\x1b[0m\tNo test-sets found. Please record testcases using \x1b[90mkeploy record\x1b[0m command\n",
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[31mERROR\x1b[0m\tNo test sets found in the keploy folder. Please record testcases using \x1b[90mkeploy record\x1b[0m command\n",
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[33mWARN\x1b[0m\twarn level\n",
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[34mINFO\x1b[0m\twith context\t{\"test-set\": \"\x1b[38;5;208mtest-set-0\x1b[0;25;0m\", \"k\": \"v\"}\n",
-	"🐰 Keploy(agent): 2026-09-24T10:00:00Z\t\x1b[34mINFO\x1b[0m\trequest\t{\"body\": \"{\\\"name\\\":\\\"a\\\\\\\"b\\\",\\\"path\\\":\\\"C:\\\\\\\\temp\\\\\\\\new\\\"}\", \"ids\": [\"a\", \"b\"]}\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\tstarting test for\t{\"test case\": \"\x1b[38;5;208mget-user-1\x1b[0;25;0m\", \"test set\": \"\x1b[38;5;208mtest-set-0\x1b[0;25;0m\"}\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\tstarting test for\t{\"test case\": \"\x1b[38;5;208mget-user-1\x1b[0;25;0m\", \"test set\": \"\x1b[38;5;208mtest-set-0\x1b[0;25;0m\"}\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\trunning\t{\"test-set\": \"\x1b[38;5;208mtest-set-0\x1b[0;25;0m\", \"attempt\": 1}\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\tresult\t{\"testcase id\": \"\x1b[31mget-user-1\x1b[0m\", \"testset id\": \"\x1b[31mtest-set-0\x1b[0m\", \"passed\": \"\x1b[31mfalse\x1b[0m\"}\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\tresult\t{\"testcase id\": \"\x1b[32mget-user-1\x1b[0m\", \"testset id\": \"\x1b[32mtest-set-0\x1b[0m\", \"passed\": \"\x1b[32mtrue\x1b[0m\"}\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\t\x1b[32mTotal Coverage Percentage: 85.5%\x1b[0m\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\tNo test-sets found. Please record testcases using \x1b[90mkeploy record\x1b[0m command\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[31mERROR\x1b[0m\tNo test sets found in the keploy folder. Please record testcases using \x1b[90mkeploy record\x1b[0m command\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[33mWARN\x1b[0m\twarn level\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\twith context\t{\"test-set\": \"\x1b[38;5;208mtest-set-0\x1b[0;25;0m\", \"k\": \"v\"}\n",
+	"🐰 Keploy(agent): 2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\trequest\t{\"body\": \"{\\\"name\\\":\\\"a\\\\\\\"b\\\",\\\"path\\\":\\\"C:\\\\\\\\temp\\\\\\\\new\\\"}\", \"ids\": [\"a\", \"b\"]}\n",
 }
 
 var goldenDisableANSI = []string{

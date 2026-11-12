@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/routes"
 	"go.keploy.io/server/v3/pkg/models"
@@ -90,12 +90,7 @@ func (*stalledStartInstr) WatchAgentStart(context.Context) <-chan error {
 // agent's start: a start that stopped fails the set, saying so, where its
 // health check never answers; no budget of wall time does.
 func TestRunTestSet_ComposeEndsOnTheAgentsStalledStart(t *testing.T) {
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	uri := "http://" + closed.Addr().String() + "/agent"
-	_ = closed.Close()
+	uri := "http://" + testnet.RefusedAddr(t, "tcp") + "/agent"
 	h := newPartialRunHarness(t, 2, 0)
 	h.replayer.config.CommandType = string(utils.DockerCompose)
 	h.replayer.config.Agent.AgentURI = uri

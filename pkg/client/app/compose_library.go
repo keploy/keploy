@@ -4,13 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strings"
-	"time"
 
-	"github.com/docker/compose/v5/pkg/api"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -22,13 +19,7 @@ import (
 // It exists so the in-memory path is testable without a docker daemon: the
 // shell-out it replaces could be intercepted with a stub `docker` on PATH, and
 // losing that would leave the whole path covered only by live runs.
-type composeStack interface {
-	ProjectName() string
-	Up(ctx context.Context, opts docker.ComposeUpOptions, out, errW io.Writer) error
-	Down(ctx context.Context, timeout time.Duration) error
-	Ps(ctx context.Context) ([]docker.ServiceState, error)
-	ContainerIDsForService(ctx context.Context, service string) ([]string, error)
-}
+type composeStack = docker.ComposeStack
 
 // composeRunner returns the library-backed runner for the in-memory compose
 // document, building it on first use.
@@ -60,20 +51,12 @@ func (a *App) composeRunner(ctx context.Context) (composeStack, error) {
 	return runner, nil
 }
 
-// newLibraryComposeStack is the production builder: the real compose library,
-// scoped to the same project the equivalent `docker compose` invocation would
-// have resolved. composeRunner calls it holding composeRunnerMu, which guards
-// composeAPI.
+// newLibraryComposeStack is the production builder: the registered in-process
+// runner (docker.RegisterComposeStack), scoped to the same project the
+// equivalent `docker compose` invocation would have resolved.
 func (a *App) newLibraryComposeStack(ctx context.Context) (composeStack, error) {
 	projectName, projectDir := composeProjectScope(a.cmd)
-	if a.composeAPI == nil {
-		apiClient, err := docker.NewComposeAPIClient()
-		if err != nil {
-			return nil, fmt.Errorf("configure the compose Engine API client: %w", err)
-		}
-		a.composeAPI = apiClient
-	}
-	return docker.NewComposeRunner(ctx, a.composeAPI, docker.ComposeRunnerOptions{
+	return docker.NewComposeStack(ctx, docker.ComposeStackSpec{
 		Content:     a.composeContent,
 		ProjectName: projectName,
 		WorkingDir:  projectDir,
@@ -102,7 +85,7 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		zap.String("executing_cmd", a.cmd),
 		zap.String("composeProject", runner.ProjectName()),
 		zap.String("exitCodeFrom", opts.ExitCodeFrom),
-		zap.String("onExit", cascadeName(opts.OnExit)))
+		zap.String("onExit", opts.OnExit.String()))
 
 	// Up runs on a context this function owns, NOT the caller's.
 	//
@@ -180,40 +163,10 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 	return utils.CmdError{}
 }
 
-// cascadeName renders api.Cascade for logs. It is an int enum, so a plain
-// string() conversion yields a one-rune string, not the name.
-func cascadeName(c api.Cascade) string {
-	switch c {
-	case api.CascadeStop:
-		return "stop"
-	case api.CascadeFail:
-		return "fail"
-	case api.CascadeIgnore:
-		return "ignore"
-	}
-	return "unknown"
-}
-
-// composeGraceThenDown is the in-process port of cmdCancel's compose branch.
-//
-// The grace is wall-clock-bounded, not iteration-counted: a saturated daemon
-// must not let the per-tick inspect sum past the teardown budget. It ends early
-// as soon as the app container has exited, because at that point the coverage
-// flush is done (Go has written GOCOVERDIR, Java its jacoco .exec) and there is
-// no reason to keep waiting on the slower sibling services.
+// composeGraceThenDown is the in-process port of cmdCancel's compose branch:
+// the app's grace (composeAppGrace), then the down.
 func (a *App) composeGraceThenDown(composeDown func()) {
-	graceDeadline := time.Now().Add(graceBudget)
-	for time.Now().Before(graceDeadline) {
-		time.Sleep(500 * time.Millisecond)
-
-		ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
-		info, ierr := a.docker.ContainerInspect(ictx, a.container)
-		icancel()
-		if ierr == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
-			a.logger.Debug("app container stopped gracefully; tearing down the rest of the compose stack")
-			break
-		}
-	}
+	a.composeAppGrace(nil)
 	composeDown()
 }
 

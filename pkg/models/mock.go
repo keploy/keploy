@@ -3,7 +3,7 @@ package models
 import (
 	"encoding/gob"
 	"maps"
-	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -141,8 +141,16 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
-	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
-	StartRef  string `json:"-" yaml:"-" bson:"-"`
+	// EndedInstance is, under the proven switch, the keploy instance the
+	// call's connection was stamped with when that test worker had ended by
+	// the time the call was captured (Instance is then 0): a value is given
+	// to one claim only, so the call is from a process in no live worker,
+	// and record charges it as it charges one from a process in no worker,
+	// naming the ended worker. 0 for none. Like SourcePID it only travels,
+	// and it sits in that field's padding, so a Mock is no bigger for it.
+	EndedInstance uint32 `json:"-" yaml:"-" bson:"-"`
+	Start         string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	StartRef      string `json:"-" yaml:"-" bson:"-"`
 	// Origin is, under the proven switch, where the call came from: the clock
 	// its ReqTimestampMock is on, and the process that made it. Only a record
 	// under the switch sets it; a file's is read and
@@ -151,6 +159,20 @@ type Mock struct {
 	// yaml "-" here. Set it whole, never edit one in place: ShallowCopy shares
 	// it, as it shares Spec's pointers.
 	Origin *Origin `json:"origin,omitempty" yaml:"-" bson:"origin,omitempty"`
+	// Instance is, under the proven switch, the keploy instance (a test
+	// worker's) the process that made the call was in when it connected,
+	// as the kernel stamped its connection: record charges the call to
+	// that worker's test only (ScopeWindow.Instance). 0 for none. Like
+	// SourcePID it only travels, to keploy record, and is never stored.
+	Instance uint32 `json:"-" yaml:"-" bson:"-"`
+	// OutsideRequests says the agent knows no incoming request was open while
+	// this call ran, so no request made it: it is the app's own background
+	// work, such as a poll on a timer. Only an agent that can tell sets it;
+	// false means "not known", never "a request's", so a mock from an agent
+	// that does not set it is taken for a request's. Like SourcePID it only
+	// travels, to the recorder, and is never stored; it sits in that field's
+	// padding, so a Mock is no bigger for it.
+	OutsideRequests bool `json:"-" yaml:"-" bson:"-"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -176,6 +198,12 @@ type Mock struct {
 	// Unexported so gob ignores it — never crosses the wire or a recording.
 	responseHydrator func() (*HTTPResp, []MongoResponse, error)
 
+	// storedSize is the bytes the agent's disk store keeps the mock in, its
+	// record and its parked response together, set by the store as it reads
+	// the mock (SetStoredSize); 0 where no store read it. Unexported so no
+	// encoder carries it.
+	storedSize int64
+
 	// onDisk is where a replay's read left the mock's payload, set only on
 	// the CLI side (LeavePayloadOnDisk); WithPayload reads it back to send
 	// the mock. Unexported so no encoder carries it.
@@ -199,6 +227,17 @@ func (m *Mock) MarkPooled() {
 func (m *Mock) SetResponseHydrator(fn func() (*HTTPResp, []MongoResponse, error)) {
 	m.responseHydrator = fn
 }
+
+// SetStoredSize records the bytes the agent's disk store keeps m in: its
+// record and its parked response together (StoredSize).
+func (m *Mock) SetStoredSize(n int64) { m.storedSize = n }
+
+// StoredSize is the bytes the agent's disk store keeps m in, its record and
+// its parked response together, as the store read it: what reading m's
+// whole payload back takes, known before its response is read back. 0
+// where no store read m (one made in memory): its size is not known before
+// its payload is read.
+func (m *Mock) StoredSize() int64 { return m.storedSize }
 
 // HasSpilledResponse reports whether the response is elided (needs hydration).
 func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
@@ -243,9 +282,24 @@ func (m *Mock) HydrateResponse() error {
 // whole while other connections count matches against them, so the replay
 // mock manager keeps the counts itself.
 type TestModeInfo struct {
-	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
-	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
-	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	ID         int  `json:"Id,omitempty" bson:"Id,omitempty"`
+	IsFiltered bool `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
+
+	// LoadSeq is the mock's place, counted from 1, in the set the agent's
+	// mock stream handed it (Agent.StoreMocksStream): the order the client
+	// sent the set in, the order its mocks were recorded in. The agent keeps
+	// each per-test mock in memory or on disk, and a read lists those kept in
+	// memory ahead of those loaded from disk, so where one time ties mocks
+	// (the frames of one pipelined write) the order a read holds them in is
+	// not the order recorded; this is, whichever tier holds the mock. Zero on
+	// a mock no stream handed. A uint32 in IsFiltered's word's padding, so a
+	// Mock stays in its size class; the stream refuses a set with more mocks
+	// than it counts. Runtime-only, like Lifetime and the fields below it:
+	// gob carries it into the agent's on-disk store and back, and no file
+	// keeps it.
+	LoadSeq uint32 `json:"-" bson:"-"`
+
+	SortOrder int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
 
 	// Lifetime classifies the mock (per-test / session / connection)
 	// once at ingest via (*Mock).DeriveLifetime. Matchers read this
@@ -291,11 +345,20 @@ type TestModeInfo struct {
 	// captured mocks before they are persisted. (Replay's own startup-mock
 	// preservation is timestamp-based — see replay.startupMockCutoff — not
 	// keyed off this flag.) Like the sibling runtime-only fields, the
-	// json/bson tags keep it out of the text formats; gob (which ignores
-	// struct tags) does encode it, but a value carried on a reloaded mock is
-	// inert — the reapers run only on the live record buffer, never on
-	// disk-loaded mocks.
+	// json/bson tags keep it out of the text formats, and the gob store
+	// (encoding/gob ignores struct tags) clears it on write and on read
+	// (mockdb's clearRuntimeOnly), so a disk-loaded mock never carries it.
 	IsStartup bool `json:"-" bson:"-"`
+
+	// Concurrent is, on a copy exact serving serves an open test
+	// (KEPLOY_PROVEN), set for a recording the test shares with the tests whose
+	// requests were open beside its own at record time
+	// (ExactServing.Concurrent): a candidate, answered at most once in the
+	// staging by whichever of them makes its call, never required of the
+	// test. Its matcher prefers the test's own recordings to it. Runtime-only,
+	// like the fields above. It sits in IsStartup's padding, which leaves room
+	// for RepeatRead: a Mock stays in its size class.
+	Concurrent bool `json:"-" bson:"-"`
 
 	// ServedIn is, on a copy exact serving serves an open test
 	// (KEPLOY_PROVEN), the number of that test's view; zero on every other mock. A
@@ -310,14 +373,17 @@ type TestModeInfo struct {
 	// mock names. Runtime-only, like the fields above.
 	StagedSet uint64 `json:"-" bson:"-"`
 
-	// Concurrent is, on a copy exact serving serves an open test
-	// (KEPLOY_PROVEN), set for a recording the test shares with the tests whose
-	// requests were open beside its own at record time
-	// (ExactServing.Concurrent): a candidate, answered at most once in the
-	// staging by whichever of them makes its call, never required of the
-	// test. Its matcher prefers the test's own recordings to it. Runtime-only,
-	// like the fields above.
-	Concurrent bool `json:"-" bson:"-"`
+	// RepeatRead is, on a test's own recording under exact serving
+	// (KEPLOY_PROVEN), the repeated read the replay named it in
+	// (ScopeTableReq.RepeatReads, MarkRepeatReads): the test recorded that
+	// read at least twice, every time with one answer. Exact serving
+	// answers such a read once more than recorded, and does not charge one
+	// of its recordings left unmade (one fewer). Two reads the replay names
+	// alike are two reads (RepeatReadMark.At). nil, no read, on every other
+	// recording (ReadMark). The recordings of one read share one mark: set
+	// it whole, never edit one in place, as ShallowCopy shares it.
+	// Runtime-only, like the fields above.
+	RepeatRead *RepeatReadMark `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -366,7 +432,7 @@ func (m *Mock) RecordedDestination() (string, bool) {
 			return v, true
 		}
 	}
-	if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
+	if u, err := ParseRequestURL(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
 		return u.Host, true
 	}
 	return "", false
@@ -404,6 +470,10 @@ type MockSpec struct {
 	// nil for every other kind. An older keploy's gob decoder drops it, as
 	// encoding/gob drops any field the receiving struct lacks.
 	ConnFailure *ConnFailureSpec `yaml:"connFailure,omitempty" json:"connFailure,omitempty" bson:"conn_failure,omitempty"`
+
+	// Fault is how the call ended without its whole answer (see fault.go);
+	// nil for a call that got one. Carried on an HTTP mock's spec.
+	Fault *Fault `yaml:"fault,omitempty" json:"fault,omitempty" bson:"fault,omitempty"`
 
 	// Aerospike (enterprise-only) stores its captured frames in the
 	// generic GenericRequests / GenericResponses payload slices above,
@@ -471,11 +541,17 @@ type MockSpec struct {
 // echoed in that mock's RESPONSE, so replay can reproduce an app-minted value
 // (UUID / nonce / idempotency key) the dependency reflects back. On replay the
 // matcher matches the request field by presence + ValueClass (not value),
-// binds the live value, and renders it into each ResponsePath of the served
-// response. Paths use the kind-agnostic dotted vocabulary of ReqBodyNoise
-// (body.<path>, header.<name>, url.query.<name>). RecordedValue is the value as
-// recorded (never a live/secret value) and ValueClass names its shape
-// (e.g. "uuid", "hex", "nonce") for the presence/type match.
+// binds the live value, and replaces RecordedValue with it in the served
+// response. RecordedValue is the value as recorded (never a live/secret value)
+// and ValueClass names its shape (e.g. "uuid", "hex", "nonce") for the
+// presence/type match.
+//
+// An HTTP mock's paths use the dotted vocabulary of ReqBodyNoise (body.<path>,
+// header.<name>, url.query.<name>). A Mongo mock's are section.<i>.<path>,
+// where i is the OP_MSG section's index. ResponsePaths says where the recording
+// answered the value, for a reader: the render goes by RecordedValue, and no
+// replay reads it. A Mongo list holds at most a few places of a value, on the
+// value's first correlation, and is empty on the value's others.
 type FieldCorrelation struct {
 	RequestPath   string   `json:"requestPath" yaml:"request_path" bson:"request_path"`
 	ResponsePaths []string `json:"responsePaths" yaml:"response_paths" bson:"response_paths"`
@@ -1126,6 +1202,14 @@ type MockState struct {
 	// reason. An agent that predates it reports none; the agent and the CLI
 	// are one keploy.
 	LearnedAfterEnd bool `json:"learnedAfterEnd,omitempty"`
+	// TaughtIn is, on a state record's full round's learn step kept from
+	// calls made in other windows than its recording's, for learning only
+	// (the agent's LearnedElsewhere), each window such a call taught it in:
+	// whose window it was and when (TeachingWindow). Learning is scoped to
+	// a window, so whatever reads a window's learning (undoing what a round
+	// learned past a point it could not read) reads such learning as that
+	// window's, not the recording owner's. Empty on every other state.
+	TaughtIn []TeachingWindow `json:"taughtIn,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
@@ -1141,6 +1225,17 @@ func (m *Mock) ShallowCopy() *Mock {
 	return &c
 }
 
+// DeepCopy returns a new, unpooled Mock with every field of m, sharing no
+// map, slice or pointer with it that a caller can edit: a copy's headers,
+// form values, stream chunks, gRPC headers and messages, DNS records,
+// generic packets, noise, variables and learning are its own. The one
+// exception is the decoded wire messages of the database protocols (each
+// Mongo, MySQL and Postgres request's and response's header, message and
+// meta, and a Postgres v3 spec's contents below its parts): the copy has its
+// own lists of them but shares each message. A parser writes those once, as
+// it decodes them, and nothing edits one after; they are a query's rows, and
+// replay copies every mock of a test's pool, so copying them would cost each
+// test their whole size.
 func (m *Mock) DeepCopy() *Mock {
 	if m == nil {
 		return nil
@@ -1158,15 +1253,29 @@ func (m *Mock) DeepCopy() *Mock {
 		Spec:         m.Spec,
 		TestModeInfo: m.TestModeInfo,
 		ConnectionID: m.ConnectionID,
+		SourcePID:    m.SourcePID,
+		Start:        m.Start,
+		StartRef:     m.StartRef,
 	}
+	c.Spec.learned, c.Spec.learnedBinds = m.Spec.learned.Clone(), cloneBinds(m.Spec.learnedBinds)
 
 	// Carry the loader so tree copies can still hydrate their elided response.
 	c.responseHydrator = m.responseHydrator
 	c.onDisk = m.onDisk
+	c.storedSize = m.storedSize
 
 	// Where the call came from (proven switch): the copy's own, so a copy
 	// written later (the async gob writer's) holds what the mock held.
 	c.Origin = m.Origin.clone()
+	// And the repeated read it is one of (TestModeInfo.RepeatRead), its
+	// own copy: ShallowCopy shares the mark, a deep copy shares nothing.
+	if r := m.TestModeInfo.RepeatRead; r != nil {
+		mark := *r
+		c.TestModeInfo.RepeatRead = &mark
+	}
+	// And the test worker it came from, which record charges it by.
+	c.Instance, c.EndedInstance = m.Instance, m.EndedInstance
+	c.OutsideRequests = m.OutsideRequests
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {
@@ -1214,11 +1323,8 @@ func (m *Mock) DeepCopy() *Mock {
 
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.
-	c.Spec.GenericRequests = make([]Payload, len(m.Spec.GenericRequests))
-	copy(c.Spec.GenericRequests, m.Spec.GenericRequests)
-
-	c.Spec.GenericResponses = make([]Payload, len(m.Spec.GenericResponses))
-	copy(c.Spec.GenericResponses, m.Spec.GenericResponses)
+	c.Spec.GenericRequests = clonePayloads(m.Spec.GenericRequests)
+	c.Spec.GenericResponses = clonePayloads(m.Spec.GenericResponses)
 
 	c.Spec.MongoRequests = make([]MongoRequest, len(m.Spec.MongoRequests))
 	copy(c.Spec.MongoRequests, m.Spec.MongoRequests)
@@ -1239,29 +1345,21 @@ func (m *Mock) DeepCopy() *Mock {
 	copy(c.Spec.PostgresResponsesV2, m.Spec.PostgresResponsesV2)
 
 	// 4. Deep copy all pointers by creating a new object and copying the value.
-	if m.Spec.HTTPReq != nil {
-		httpReqCopy := *m.Spec.HTTPReq
-		c.Spec.HTTPReq = &httpReqCopy
-	}
-	if m.Spec.HTTPResp != nil {
-		httpRespCopy := *m.Spec.HTTPResp
-		c.Spec.HTTPResp = &httpRespCopy
-	}
+	c.Spec.HTTPReq = m.Spec.HTTPReq.clone()
+	c.Spec.HTTPResp = m.Spec.HTTPResp.clone()
 	if m.Spec.Async != nil {
 		asyncCopy := *m.Spec.Async
 		c.Spec.Async = &asyncCopy
 	}
-	if m.Spec.GRPCReq != nil {
-		grpcReqCopy := *m.Spec.GRPCReq
-		c.Spec.GRPCReq = &grpcReqCopy
-	}
-	if m.Spec.GRPCResp != nil {
-		grpcRespCopy := *m.Spec.GRPCResp
-		c.Spec.GRPCResp = &grpcRespCopy
-	}
+	c.Spec.GRPCReq = m.Spec.GRPCReq.clone()
+	c.Spec.GRPCResp = m.Spec.GRPCResp.clone()
 	if m.Spec.ConnFailure != nil {
 		connFailureCopy := *m.Spec.ConnFailure
 		c.Spec.ConnFailure = &connFailureCopy
+	}
+	if m.Spec.Fault != nil {
+		faultCopy := *m.Spec.Fault
+		c.Spec.Fault = &faultCopy
 	}
 	if m.Spec.DNSReq != nil {
 		dnsReqCopy := *m.Spec.DNSReq
@@ -1273,6 +1371,8 @@ func (m *Mock) DeepCopy() *Mock {
 			dnsRespCopy.Answers = make([]string, len(m.Spec.DNSResp.Answers))
 			copy(dnsRespCopy.Answers, m.Spec.DNSResp.Answers)
 		}
+		dnsRespCopy.Ns = slices.Clone(m.Spec.DNSResp.Ns)
+		dnsRespCopy.Extra = slices.Clone(m.Spec.DNSResp.Extra)
 		c.Spec.DNSResp = &dnsRespCopy
 	}
 

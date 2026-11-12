@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,13 +24,29 @@ import (
 func parkedBig(i int, at time.Duration, size int, sample func()) *models.Mock {
 	m := learnRecorded(fmt.Sprintf("big-%04d", i), at, "GET", "/v1/blobs/"+strconv.Itoa(i), "", nil, "")
 	m.Spec.HTTPResp = nil
+	// The agent's store counts the bytes it parked (models.Mock.StoredSize).
+	m.SetStoredSize(int64(size))
 	m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
 		sample()
 		var b strings.Builder
 		b.Grow(size + 64)
 		b.WriteString(`{"blob":"`)
-		for j := 0; b.Len() < size; j++ {
-			fmt.Fprintf(&b, "w%dx%d ", i, j)
+		// The words "w<i>x<j> ", j from 0: j's digits are counted up in
+		// place, not formatted anew for each word.
+		prefix, j := "w"+strconv.Itoa(i)+"x", []byte{'0'}
+		for b.Len() < size {
+			b.WriteString(prefix)
+			b.Write(j)
+			b.WriteByte(' ')
+			k := len(j) - 1
+			for ; k >= 0 && j[k] == '9'; k-- {
+				j[k] = '0'
+			}
+			if k < 0 {
+				j = append([]byte{'1'}, j...)
+			} else {
+				j[k]++
+			}
 		}
 		b.WriteString(`"}`)
 		return &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: b.String()}, nil, nil
@@ -61,14 +78,20 @@ func (d *streamedHTTPDisk) RangeRecordedBefore(t time.Time, visit func(*models.M
 }
 
 // heapPeak samples the heap above where it stood at start, every 16th call
-// (each after a collection), into the peak it returns.
+// (each after a collection), into the peak it returns. The learn step reads
+// the recordings before a call with more than one reader (learn's
+// warmReaders), each loading answers (their hydrators sample), so a sample
+// holds mu.
 type heapPeak struct {
+	mu          sync.Mutex
 	start, peak uint64
 	calls       int
 }
 
 // reset starts h over from the heap as it stands now.
 func (h *heapPeak) reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	runtime.GC()
 	var st runtime.MemStats
 	runtime.ReadMemStats(&st)
@@ -76,14 +99,24 @@ func (h *heapPeak) reset() {
 }
 
 func (h *heapPeak) sample() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.calls++
 	if h.calls%16 != 0 {
 		return
 	}
-	h.now()
+	h.read()
 }
 
+// now samples the heap as it stands now.
 func (h *heapPeak) now() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.read()
+}
+
+// read is a sample, h.mu held.
+func (h *heapPeak) read() {
 	runtime.GC()
 	var st runtime.MemStats
 	runtime.ReadMemStats(&st)
@@ -92,15 +125,19 @@ func (h *heapPeak) now() {
 	}
 }
 
-// largeStreamMiB is how many recordings of 1 MiB a bound row reads: 256 by
+// largeStreamMiB is how many recordings of 1 MiB a bound row reads: 128 by
 // default, KEPLOY_LARGE_STREAM_MIB where it is set (CI's step for the bound
 // row's higher limits, or the 1 GB+ run on a test box). set says whether it
-// is.
+// is. 128 is twice the least limit's budget: a store that kept every
+// recording would hold 128 MiB of answers alone, past the 80 MiB bound, and
+// one within its budget lets at least half of them go. The peak heap does
+// not follow the stream past that: it is the budget's, 64 to 65 MiB above
+// the start at 64, 128 and 256 recordings alike.
 func largeStreamMiB(t *testing.T) (mib int, set bool) {
 	t.Helper()
 	v := os.Getenv("KEPLOY_LARGE_STREAM_MIB")
 	if v == "" {
-		return 256, false
+		return 128, false
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
@@ -115,8 +152,8 @@ func largeStreamMiB(t *testing.T) (mib int, set bool) {
 // recording read in flight (1 MiB of text, its decoded forms and words) and
 // the tiers' bookkeeping, measured at 3, 4 and 6 MiB at these limits. A
 // large limit's legs (large) run only with KEPLOY_LARGE_STREAM_MIB set:
-// each takes 40-50 s on 4 CPUs, and the least limit's already streams four
-// times its budget. CI runs them in a step of their own
+// each takes about 10 s on 4 CPUs, and the least limit's already streams
+// twice its budget. CI runs them in a step of their own
 // (.github/workflows/go-test.yaml).
 var boundLimits = []struct {
 	limit, budget int64
@@ -141,7 +178,7 @@ const boundOverhead = 16 << 20
 // ways a pool call reaches the recordings: the store's on disk, handed
 // over one at a time (integrations.RecordedBeforeReader), and those it
 // stages in memory with their answers parked (integrations.StagedReader).
-// Either set (256 MiB of answers by default, four times the least budget;
+// Either set (128 MiB of answers by default, twice the least budget;
 // KEPLOY_LARGE_STREAM_MIB=1100 for the 1 GB+ run on a test box) is learned
 // within the bound with the verdict a small set gives: refused, the token
 // answered earlier, by mock-0. The 512 MiB and 1 GiB limits run only with
@@ -160,6 +197,12 @@ func TestLearnMatchReadsTheRecordingsBeforeACallWithinTheSetsBudget(t *testing.T
 				}
 				prev := debug.SetMemoryLimit(l.limit)
 				defer debug.SetMemoryLimit(prev)
+				// Eight CPUs to Go: the call reads the recordings before it
+				// with four readers (learn's readersFor), each reserving its
+				// read's cost of what the set's readers have in flight, so
+				// these large ones are read one at a time.
+				procs := runtime.GOMAXPROCS(8)
+				defer runtime.GOMAXPROCS(procs)
 				bound := l.budget + boundOverhead
 				h, n, opts := learnOn(t)
 				opts.LearnPool = true

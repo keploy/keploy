@@ -254,7 +254,7 @@ type bootWorkItem struct {
 // BeginTeardownWork, the calling goroutine stays on its thread until it ends
 // the stage, and must be the one that ends it: work it waits for on another
 // goroutine is no progress of the stage, so that work begins a stage of its
-// own, on its own goroutine (the proxy's listener, its DNS servers' binds).
+// own, on its own goroutine (the proxy's listener).
 // Stages may overlap: the start makes progress while any of them does.
 //
 // Where a stage's progress cannot be seen (not on Linux: TeardownProgressSeen)

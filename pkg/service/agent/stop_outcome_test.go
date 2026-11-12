@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -66,8 +68,25 @@ func TestStopOutcomePathOnlyForAContainerisedMockReplay(t *testing.T) {
 }
 
 // What the agent leaves is exactly what /consumedmocks and /mockerrors would
-// have answered, in the one document the CLI decodes.
+// have answered, in the one document the CLI decodes. Under the proven switch
+// the agent also finishes its end of the run first, and the account says it
+// did (Settled); with the switch off it does not say so.
+// TestWriteStopOutcomeSettlesTheRunUnderTheSwitch checks the settle itself.
 func TestWriteStopOutcomeLeavesWhatTheReplayServedAndMissed(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch %v", on), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, strconv.FormatBool(on))
+			// The default hooks, whose end of the run succeeds, whatever
+			// an earlier test left in place.
+			prev := ActiveHooks
+			ActiveHooks = &AgentHook{}
+			t.Cleanup(func() { ActiveHooks = prev })
+			writeStopOutcomeLeavesWhatTheReplayServedAndMissed(t, on)
+		})
+	}
+}
+
+func writeStopOutcomeLeavesWhatTheReplayServedAndMissed(t *testing.T, on bool) {
 	proxy := &outcomeProxy{
 		consumed: []models.MockState{{Name: "mock-0", Kind: models.HTTP}, {Name: "mock-3"}},
 		missed:   []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /price/tsla", Destination: "dep:9411"}},
@@ -87,7 +106,7 @@ func TestWriteStopOutcomeLeavesWhatTheReplayServedAndMissed(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("the outcome is not a models.MockOutcome: %v\n%s", err, raw)
 	}
-	want := models.MockOutcome{Consumed: proxy.consumed, Missed: proxy.missed}
+	want := models.MockOutcome{Consumed: proxy.consumed, Missed: proxy.missed, Settled: on}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("left %+v, want %+v", got, want)
 	}
@@ -230,6 +249,10 @@ func TestWriteStopOutcomeCarriesTheTestsWindows(t *testing.T) {
 	if err := a.EndScope(ctx, "TestOrders", 4); err != nil {
 		t.Fatal(err)
 	}
+	// A test keploy refused at its begin: the replay fails on the reason,
+	// which the account must carry.
+	const why = "TestRefunds began with the pid 5: keploy narrows a test by its pid only with the marks"
+	a.noteScopeFailed("TestRefunds", 5, time.Now(), errors.New(why))
 	path := filepath.Join(t.TempDir(), "outcome.json")
 	if err := a.writeStopOutcome(ctx, path); err != nil {
 		t.Fatalf("writeStopOutcome: %v", err)
@@ -239,8 +262,11 @@ func TestWriteStopOutcomeCarriesTheTestsWindows(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Windows) != 1 || got.Windows[0].Name != "TestOrders" || got.Windows[0].Outcome != models.ScopeOutcomePassed {
-		t.Fatalf("the outcome carries windows %+v, want TestOrders passed", got.Windows)
+	if len(got.Windows) != 2 || got.Windows[0].Name != "TestOrders" || got.Windows[0].Outcome != models.ScopeOutcomePassed || got.Windows[0].BeginRefused != "" {
+		t.Fatalf("the outcome carries windows %+v, want TestOrders passed, then TestRefunds", got.Windows)
+	}
+	if w := got.Windows[1]; w.Name != "TestRefunds" || w.PID != 5 || w.Outcome != models.ScopeOutcomeFailed || w.BeginRefused != why {
+		t.Fatalf("the outcome carries %+v, want TestRefunds (pid 5) failed, refused at its begin saying why", w)
 	}
 }
 
@@ -352,5 +378,135 @@ func TestWriteStopOutcomeCarriesWhatTheHooksCouldNotTrack(t *testing.T) {
 		if len(warned) != tc.warns {
 			t.Fatalf("%s: the agent logged %d line(s) at WARN or above, want %d: %+v", tc.name, len(warned), tc.warns, warned)
 		}
+	}
+}
+
+// settleHooks records the agent's end-of-run hook among the proxy's reads.
+type settleHooks struct {
+	AgentHook
+	calls *[]string
+	err   error
+	// final reports whether the agent's test windows were final (its
+	// FinalScopeWindows had closed the run) when the hook was called; it is
+	// recorded as that read having come first.
+	final func() bool
+}
+
+func (h *settleHooks) AfterTestRun(context.Context, string, []string, models.TestCoverage) error {
+	if h.final != nil && h.final() {
+		*h.calls = append(*h.calls, "FinalScopeWindows")
+	}
+	*h.calls = append(*h.calls, "AfterTestRun")
+	return h.err
+}
+
+// settleOrderProxy is an outcomeProxy that records its reads among the hooks'.
+type settleOrderProxy struct {
+	outcomeProxy
+	calls *[]string
+}
+
+func (p *settleOrderProxy) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	*p.calls = append(*p.calls, "GetConsumedMocks")
+	return p.outcomeProxy.GetConsumedMocks(ctx)
+}
+
+// Under the proven switch an agent stopped under compose finishes its end of
+// the run (its hooks' AfterTestRun) before it reads what the replay served,
+// as the CLI has it do where it can reach it, and says in its account that it
+// did, or why it could not: the account is left either way, and the CLI does
+// not judge a run whose account lacks the word. Without the switch the hook is
+// not called and the account is encoded as before.
+func TestWriteStopOutcomeSettlesTheRunUnderTheSwitch(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		proven    bool
+		hookErr   error
+		wantCalls []string
+		want      models.MockOutcome
+	}{
+		{"off", false, nil, []string{"GetConsumedMocks"}, models.MockOutcome{}},
+		{"settled", true, nil, []string{"FinalScopeWindows", "AfterTestRun", "GetConsumedMocks"}, models.MockOutcome{Settled: true}},
+		{"hook failed", true, errors.New("keploy could not write the row of a program off the run's clock"), []string{"FinalScopeWindows", "AfterTestRun", "GetConsumedMocks"},
+			models.MockOutcome{SettleError: "keploy could not write the row of a program off the run's clock"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sw := ""
+			if c.proven {
+				sw = "1"
+			}
+			t.Setenv(provenswitch.Env, sw)
+			var calls []string
+			prev := ActiveHooks
+			a := &Agent{Proxy: &settleOrderProxy{calls: &calls}, logger: zap.NewNop()}
+			ActiveHooks = &settleHooks{calls: &calls, err: c.hookErr, final: a.wireClosed}
+			t.Cleanup(func() { ActiveHooks = prev })
+			path := filepath.Join(t.TempDir(), "outcome.json")
+			if err := a.writeStopOutcome(context.Background(), path); err != nil {
+				t.Fatalf("writeStopOutcome: %v", err)
+			}
+			if !reflect.DeepEqual(calls, c.wantCalls) {
+				t.Fatalf("calls %v, want %v", calls, c.wantCalls)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("no outcome left: %v", err)
+			}
+			var got models.MockOutcome
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("left %+v, want %+v", got, c.want)
+			}
+			if !c.proven && string(raw) != `{"consumed":null,"missed":null}` {
+				t.Fatalf("the account without the switch is %s, want it encoded as before", raw)
+			}
+		})
+	}
+}
+
+// learnedOutcomeProxy is an outcomeProxy whose learn step taught recordings
+// from calls made in other windows than theirs.
+type learnedOutcomeProxy struct {
+	outcomeProxy
+	learned []models.MockState
+}
+
+func (p *learnedOutcomeProxy) LearnedElsewhere() []models.MockState { return p.learned }
+
+// Under docker compose the CLI cannot ask the stopped agent anything: what
+// record's full round learned onto recordings from calls made in other
+// windows reaches it only in the outcome the agent leaves as it stops, beside
+// what it served. An outcome without it would write the timer's recording
+// with nothing learned, though the agent learned it.
+func TestWriteStopOutcomeCarriesWhatCallsInOtherWindowsTaught(t *testing.T) {
+	prev := ActiveHooks
+	ActiveHooks = &AgentHook{}
+	t.Cleanup(func() { ActiveHooks = prev })
+	learned := []models.MockState{{
+		Name:     "mock-9",
+		Clocks:   map[string]models.ClockOffset{"claimed_at": {Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}},
+		TaughtIn: []models.TeachingWindow{{Test: "test-2", At: time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)}},
+	}}
+	proxy := &learnedOutcomeProxy{outcomeProxy: outcomeProxy{consumed: []models.MockState{{Name: "mock-0"}}}, learned: learned}
+	a := &Agent{Proxy: proxy, logger: zap.NewNop()}
+	path := filepath.Join(t.TempDir(), "outcome.json")
+	if err := a.writeStopOutcome(context.Background(), path); err != nil {
+		t.Fatalf("writeStopOutcome: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("no outcome left: %v", err)
+	}
+	var got models.MockOutcome
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("the outcome is not a models.MockOutcome: %v\n%s", err, raw)
+	}
+	if !reflect.DeepEqual(got.LearnedElsewhere, learned) {
+		t.Fatalf("the outcome carries %+v as learned across windows; want %+v", got.LearnedElsewhere, learned)
+	}
+	if len(got.Consumed) != 1 {
+		t.Fatalf("the outcome carries %+v as served; want mock-0 alone", got.Consumed)
 	}
 }

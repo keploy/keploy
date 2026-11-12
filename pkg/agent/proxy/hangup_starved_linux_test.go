@@ -116,7 +116,7 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 						defer close(handled)
 						defer p.inflight.forget(tracked)
 						defer func() { _ = tracked.Close() }()
-						c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443", 0), zap.NewNop(), hand.conn(tracked), time.Time{})
+						c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443", Process{}), zap.NewNop(), hand.conn(tracked), time.Time{})
 						if err == nil {
 							_, _ = c.Read(make([]byte, 1)) // the client's first request
 						}
@@ -140,7 +140,7 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 					// in a later row's test, whose abandon it then drops.
 					pending := func() int { return p.inflight.Pending(answers) }
 					if mode.scoped {
-						sc := p.inflight.scope()
+						sc := p.inflight.scope(0)
 						pending = func() int { n, _ := sc.State(answers); return n }
 					}
 					waiting := make(chan struct{})
@@ -199,7 +199,7 @@ func TestAHangUpHoldHoldsNoWorkWhileItsClientIsThere(t *testing.T) {
 		defer close(read)
 		defer p.inflight.forget(tracked)
 		defer func() { _ = tracked.Close() }()
-		c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443", 0), zap.NewNop(), tracked, time.Time{})
+		c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443", Process{}), zap.NewNop(), tracked, time.Time{})
 		close(handshook)
 		if err == nil {
 			_, _ = c.Read(make([]byte, 1))

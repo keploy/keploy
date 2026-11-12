@@ -56,12 +56,6 @@ const (
 	// — is what signals the tail is through. Sized well above the agent's
 	// per-mapping flush latency so a slow flush is not mistaken for completion.
 	mappingIdleGrace = 3 * time.Second
-
-	// afterRecordingHookTimeout bounds the end-of-recording hook (issue #1867) so a
-	// wedged consumer cannot hang teardown. Matches the 30s stall bound of the
-	// drains (DrainErrGroupProgress) in the same teardown defer. It is the hook context's only deadline (WithoutCancel
-	// drops the upstream one), and consumers are expected to honor it.
-	afterRecordingHookTimeout = 30 * time.Second
 )
 
 // stopTimer disarms t, draining its channel if it had already fired, so a later
@@ -828,6 +822,21 @@ type mockStoreWriter interface {
 // stops it now (the rest is then not written, a capture loss), as the stop's
 // other drains do (reportDrainProgress).
 func (r *Recorder) closeMockStore(store any, every time.Duration) error {
+	return CloseMockStore(r.logger, store, every,
+		"Still writing the recording's mocks to the mock file",
+		"press Ctrl+C again to stop now: the rest is then not written, and this recording fails as incomplete",
+		func() { r.mockWriteStopped.Store(true) })
+}
+
+// CloseMockStore closes store, which writes what it still holds (a store that
+// writes in the background, mockStoreWriter, writes the rest). Such a store
+// is waited for for as long as it writes: every `every` the wait logs still
+// with how many mocks are left, and, once the run has been interrupted,
+// stopNow, the offer that another interrupt stops the writing now. That
+// interrupt calls stopped (when not nil) and stops it: the rest is then not
+// written, and the error says how many (models.ErrMocksNotWritten).
+// keploy record's stop and keploy mock replay --on-miss record use it.
+func CloseMockStore(logger *zap.Logger, store any, every time.Duration, still, stopNow string, stopped func()) error {
 	w, ok := store.(mockStoreWriter)
 	if !ok {
 		if closer, ok := store.(io.Closer); ok {
@@ -849,7 +858,9 @@ func (r *Recorder) closeMockStore(store any, every time.Duration) error {
 		case err := <-done:
 			return err
 		case <-notice.Interrupt():
-			r.mockWriteStopped.Store(true)
+			if stopped != nil {
+				stopped()
+			}
 			close(stop)
 			return <-done
 		case <-t.C:
@@ -858,11 +869,11 @@ func (r *Recorder) closeMockStore(store any, every time.Duration) error {
 		wasOffering := offering
 		offering = notice.Next()
 		if left != last || !said || offering != wasOffering {
-			msg := "Still writing the recording's mocks to the mock file"
+			msg := still
 			if offering {
-				msg += "; press Ctrl+C again to stop now: the rest is then not written, and this recording fails as incomplete"
+				msg += "; " + stopNow
 			}
-			r.logger.Info(msg, zap.Uint64("mocksLeft", left))
+			logger.Info(msg, zap.Uint64("mocksLeft", left))
 			said, last = true, left
 		}
 	}
@@ -1117,20 +1128,14 @@ func (r *Recorder) afterRecordingComplete(ctx context.Context, testSetID string)
 		}
 	}()
 	// The recorder ctx is already cancelled on the normal SIGINT stop of an
-	// interactive recording (the teardown defer above runs under a cancelled ctx).
-	// Decouple the hook from that cancellation (context.WithoutCancel) so a
-	// legitimate post-record pass is not skipped — but re-impose a fresh bound so a
-	// wedged hook cannot hang teardown, matching the 10s NotifyGracefulShutdown and
-	// 30s drain bounds in this same defer. WithoutCancel keeps request-scoped values
-	// while dropping the upstream cancellation AND deadline, so this WithTimeout is
-	// the hook's only deadline; consumers are expected to honor it (the enterprise
-	// re-key does — keploy/enterprise#2536).
-	hookCtx, cancelHook := context.WithTimeout(context.WithoutCancel(ctx), afterRecordingHookTimeout)
-	defer cancelHook()
-	if hookErr := r.hooks.AfterRecordingComplete(hookCtx, &RecordingCompleteContext{
+	// interactive recording (the teardown defer above runs under a cancelled
+	// ctx); RunAfterRecordingHook gives the hook a context without that
+	// cancellation, and without a deadline: the pass runs in full however
+	// loaded the machine is, and a second interrupt, once offered, stops it.
+	if hookErr := RunAfterRecordingHook(ctx, r.logger, r.hooks, &RecordingCompleteContext{
 		TestSetID: testSetID,
 		Path:      r.config.Path,
-	}); hookErr != nil {
+	}, r.noticeEvery()); hookErr != nil {
 		r.logger.Error("AfterRecordingComplete hook failed; recording is saved but a post-record pass may be incomplete. Check your RecordHooks implementation.",
 			zap.Error(hookErr), zap.String("testSetID", testSetID))
 	}
@@ -1612,6 +1617,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	var newTestSetID string
 	var err error
 	var testCount = 0
+	// refusedTestCount counts the test cases the store refused for their own
+	// payload (models.ErrTestCaseEncode), said when the recording ends. Under
+	// insertedMu, as testCount is.
+	var refusedTestCount = 0
 	var mockCountMap = make(map[string]int)
 	// droppedMockCount / droppedMockKinds are the missing half of mockCountMap,
 	// which only ever counts successes. A mock whose own payload cannot be
@@ -2085,6 +2094,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		 */
 		insertedMu.Lock()
 		testCountSnapshot := testCount
+		refusedSnapshot := refusedTestCount
 		insertedMu.Unlock()
 
 		totalMocks := 0
@@ -2132,6 +2142,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					zap.Any("byKind", droppedKindSnapshot),
 					zap.String("testSetID", newTestSetID),
 					zap.String("next_step", "check byKind: an unencodable payload is a parser/encoder bug worth reporting; drops during shutdown are usually I/O and re-recording recovers them"))
+			}
+			if refusedSnapshot > 0 {
+				r.logger.Warn("recording finished without the test cases the store refused: their bodies cannot be stored in this format, and each is said above",
+					zap.Int("testCasesRefused", refusedSnapshot),
+					zap.String("testSetID", newTestSetID),
+					zap.String("next_step", "set storageFormat to yaml and record them again; the yaml encoder stores binary bodies as !!binary without loss"))
 			}
 			suiteMeta := map[string]interface{}{
 				"host-domains": domainSet.ToSlice(),
@@ -2380,7 +2396,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	if r.config.CommandType == string(utils.DockerCompose) {
 
-		r.logger.Info("Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", r.config.Agent.AgentURI))
+		r.logger.Info("Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", pkg.ShownAgentURI(r.config.Agent.AgentURI)))
 
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
@@ -2402,7 +2418,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh)
 		agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
 		select {
@@ -2671,6 +2687,15 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			unreachablePorts.check(ctx, testCase)
 			if err != nil {
 				windowMaps.addLostTest(testCase)
+				if errors.Is(err, models.ErrTestCaseEncode) {
+					// THIS test case's body, not the storage: the store said so
+					// at ERROR, and the next test case may be fine. As for an
+					// unencodable mock, one such body must not end the recording.
+					insertedMu.Lock()
+					refusedTestCount++
+					insertedMu.Unlock()
+					continue
+				}
 				if ctx.Err() != nil {
 					// Once shutdown has begun nothing reads insertTestErrChan:
 					// Start's select has already returned, and this loop keeps

@@ -55,11 +55,19 @@ type answeredStore struct {
 
 func (s answeredStore) ConsumedTestMocks() []*models.Mock { return s.answered }
 
-// missReport is the report of the miss decodeGeneric returns for req.
+// missReport is the report of the miss decodeGeneric returns for req. A
+// request answered instead writes its answer to the app, which reads it
+// and hangs up: the decoder ends with no miss, and the row fails at once
+// rather than leaving the answer blocked on a pipe nobody reads.
 func missReport(t *testing.T, store integrations.MockMemDb, req string) *models.MockMismatchReport {
 	t.Helper()
 	app, proxySide := net.Pipe()
 	defer app.Close()
+	go func() {
+		if _, err := app.Read(make([]byte, 1)); err == nil {
+			_ = app.Close()
+		}
+	}()
 	err := decodeGeneric(context.Background(), zap.NewNop(), []byte(req), proxySide, nil, store, models.OutgoingOptions{})
 	var r interface {
 		MismatchReport() *models.MockMismatchReport
@@ -167,9 +175,12 @@ func TestARequestLongerThanAReadMatchesItsRecordingExactly(t *testing.T) {
 			}},
 		}
 		for _, c := range cases {
-			for _, reads := range c.reads {
-				if got := findExactMatch([]*models.Mock{c.mock}, reads); got != 0 {
-					t.Errorf("binary=%v, %s, read in %d pieces: findExactMatch = %d, want 0", binary, c.name, len(reads), got)
+			// The same with exact serving on and off: neither has noise.
+			for _, exact := range []bool{false, true} {
+				for _, reads := range c.reads {
+					if got := findExactMatch([]*models.Mock{c.mock}, reads, exact); got != 0 {
+						t.Errorf("binary=%v, exact=%v, %s, read in %d pieces: findExactMatch = %d, want 0", binary, exact, c.name, len(reads), got)
+					}
 				}
 			}
 			// Other bytes are no match: one changed byte in the last piece,
@@ -181,8 +192,10 @@ func TestARequestLongerThanAReadMatchesItsRecordingExactly(t *testing.T) {
 				"a byte more":    append(append([]byte(nil), req...), 'z'),
 				"a byte less":    req[:len(req)-1],
 			} {
-				if got := findExactMatch([]*models.Mock{c.mock}, splitAt(other, chunk)); got != -1 {
-					t.Errorf("binary=%v, %s, %s: findExactMatch = %d, want -1", binary, c.name, what, got)
+				for _, exact := range []bool{false, true} {
+					if got := findExactMatch([]*models.Mock{c.mock}, splitAt(other, chunk), exact); got != -1 {
+						t.Errorf("binary=%v, exact=%v, %s, %s: findExactMatch = %d, want -1", binary, exact, c.name, what, got)
+					}
 				}
 			}
 		}

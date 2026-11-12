@@ -276,8 +276,21 @@ func (p *Proxy) recordViaSupervisor(
 		// (it closed its socket, and refused what came after): a parser
 		// that reaches that end mid-message knows the client's close cut
 		// the message there, not the destination (the HTTP recorder leaves
-		// that exchange out, and says why).
+		// that exchange out, and says why, unless what the client refused,
+		// of what reached the proxy before the client's FIN, only finished
+		// the message's framing).
 		ClientStopped: svSess.MarkEndedWhereClientStopped,
+		// How each side ended its side of the connection, and which ended
+		// first: a call the destination never answered is recorded with
+		// the fault it gave (its reset or its close), or as the client's
+		// giving up when the client closed first. An end that is the
+		// application's stop, or a client's end the hooks cannot tell from
+		// its process's exit, records no fault (peerEndMarker).
+		PeerEnded: p.peerEndMarker(svSess, appEndOf(srcConn)),
+		// The error the client's socket gave after the relay's last write
+		// to it: a client that sent its FIN and then reset what reached it
+		// after, which no read of its end says (relay/client_end.go).
+		ClientEndError: svSess.MarkClientEndError,
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
@@ -315,6 +328,7 @@ func (p *Proxy) recordViaSupervisor(
 
 	svSess.ClientStream = r.ClientStream()
 	svSess.DestStream = r.DestStream()
+	svSess.Order = r.StreamedBefore
 	reads.follow(svSess.ClientStream, r.Teed)
 	svSess.Directives = r.Directives()
 	svSess.Acks = r.Acks()
@@ -336,7 +350,7 @@ func (p *Proxy) recordViaSupervisor(
 	relayDone := make(chan error, 1)
 	// A client-side TLS upgrade the relay makes is charged as every
 	// client-side handshake is (clientTLS), to this connection's destination.
-	relayCtx, relayCancel := context.WithCancel(p.withClientTLS(ctx, remoteOf(dstConn), opts.SrcPid))
+	relayCtx, relayCancel := context.WithCancel(p.withClientTLS(ctx, remoteOf(dstConn), srcProcess(opts)))
 	defer relayCancel()
 	go func() { relayDone <- r.Run(relayCtx) }()
 
@@ -417,8 +431,9 @@ func (p *Proxy) recordViaSupervisor(
 	switch {
 	case result.FallthroughToPassthrough:
 		// A parser retired as the recording stops (RecordingStopping), however
-		// it ends: aborted in a read once the supervisor's grace is over
-		// (canceled), or dead of a panic as the recording stops (panicked).
+		// it ends: aborted once it has read its streams to their end, or once
+		// the stop's deadline passed (canceled), or dead of a panic as the
+		// recording stops (panicked).
 		// There is no "rest of the connection" left to lose, so the warning
 		// does not apply, any more than the span does (openSpan): emitting it
 		// would tell the user their recording is broken at the exact moment

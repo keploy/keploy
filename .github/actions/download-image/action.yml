@@ -15,7 +15,7 @@ runs:
   using: composite
   steps:
     - name: Download image artifact
-      uses: actions/download-artifact@v8
+      uses: ./.github/actions/download-artifact-retry
       with:
         name: ${{ inputs.artifact_name }}
         path: ${{ runner.temp }}/keploy-image
@@ -32,10 +32,11 @@ runs:
     # On v8 a download step that passes has the bytes that were uploaded: it
     # retries a stream that stops part-way, fails when one never completes,
     # and fails on a digest that does not match the upload's. A second
-    # download would fetch the same bytes, so there is none. The check stays,
-    # as the job's own proof that the tarball is whole: one that is not was
-    # uploaded so, and the job fails here, naming the artifact, not at
-    # `docker load`.
+    # download after one that passed would fetch the same bytes, so there is
+    # none (download-artifact-retry tries again only a download that
+    # failed). The check stays, as the job's own proof that the tarball is
+    # whole: one that is not was uploaded so, and the job fails here, naming
+    # the artifact, not at `docker load`.
     - name: Check the image tarball is complete (Unix)
       if: runner.os != 'Windows'
       shell: bash

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/listeners"
 	"golang.org/x/sys/unix"
 )
@@ -59,4 +60,11 @@ func refused(ip net.IP, port uint32) bool {
 	}
 	_ = conn.Close()
 	return false
+}
+
+// callerOf is the process that made a redirected connection, by the number
+// the agent's process table names it by: macOS has no PID namespaces, so the
+// kernel's number (KernelPid) is that number. unnamed is never true.
+func callerOf(dest *agent.NetworkAddress) (caller int, unnamed bool) {
+	return int(dest.KernelPid), false
 }

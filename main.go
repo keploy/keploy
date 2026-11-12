@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -27,6 +29,13 @@ import (
 
 	_ "net/http/pprof"
 	"runtime/pprof"
+
+	// Mozilla's root list, which pkg/agent/proxy/tls already links, as Go's
+	// system roots when the host has none (a distroless image, or a k8s
+	// sidecar whose /etc/ssl/certs is an empty volume). keploy loads its own
+	// roots before it points SSL_CERT_FILE at files meant for the app, so
+	// without this such a host would leave keploy's own TLS with no roots.
+	_ "golang.org/x/crypto/x509roots/fallback"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -38,6 +47,11 @@ var apiServerURI = "http://localhost:8083"
 var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
+	// Load this process's TLS roots before anything can change what
+	// crypto/x509 would read: keploy points SSL_CERT_FILE at files meant for
+	// the app, and in native mode adds its CA to the system store
+	// (pkg/agent/proxy/tls, loadOwnRoots).
+	_, _ = x509.SystemCertPool()
 	setVersion()
 	ctx := utils.NewCtx()
 	// An agent's teardown records its steps, and its long stages as work in
@@ -46,7 +60,9 @@ func main() {
 	utils.DeclareTeardownSteps()
 	start(ctx)
 	// An agent has detached everything by now: what is left is the exit
-	// (utils.MarkDetachDone).
+	// (utils.MarkDetachDone). Its report is the agent's last, and nothing
+	// after it is watched, so nothing may come between the two, and
+	// os.Exit's argument calls nothing (TestMainReportsItsTeardownSteps).
 	utils.MarkDetachDone()
 	os.Exit(utils.ErrCode)
 }
@@ -277,6 +293,7 @@ func start(ctx context.Context) {
 	// does not have points at `keploy record --help`, where record's flags
 	// are, not at the root's, which lists only commands.
 	if cmd, err := rootCmd.ExecuteC(); err != nil {
+		err = cli.HintUnknownCommand(rootCmd, err)
 		utils.ErrCode = finalExitCode(err, utils.ErrCode, cmd.CommandPath(), os.Stderr)
 	}
 
@@ -442,7 +459,7 @@ func printEnterpriseUpgradeBanner() {
 	fmt.Fprintln(os.Stderr, "    • Recording and testing apps that run in Podman")
 	fmt.Fprintln(os.Stderr, "    • AI-powered test generation, sandbox replay, MCP for AI agents")
 	fmt.Fprintln(os.Stderr, "      (Claude Code, Cursor, Copilot, Gemini, …)")
-	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+"curl --silent -O -L https://keploy.io/install.sh && source install.sh"+reset)
+	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+models.InstallCommand+reset)
 	fmt.Fprintln(os.Stderr, orange+bar+reset)
 	fmt.Fprintln(os.Stderr)
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -67,6 +69,12 @@ done
 for a in "$@"; do
   if [ "$a" = "ps" ]; then
     if [ "` + hang + `" = "1" ]; then while : ; do sleep 1; done; fi
+    # KEPLOY_STUB_PS_CODE: ps fails with this code, as it does on a file that
+    # needs a variable only the up's own command gave.
+    if [ -n "${KEPLOY_STUB_PS_CODE:-}" ]; then
+      echo 'required variable TAG is missing a value' >&2
+      exit "$KEPLOY_STUB_PS_CODE"
+    fi
     cat "` + errFile + `" >&2
     cat "` + psFile + `"
     exit 0
@@ -76,8 +84,43 @@ for a in "$@"; do
   if [ "$a" = "up" ] && [ -n "${KEPLOY_STUB_UP_WAIT_FILE:-}" ]; then
     # KEPLOY_STUB_UP_WAIT_FILE: the up runs until the file exists, as an
     # up attached to the app alone runs until the app has stopped.
-    while [ ! -e "$KEPLOY_STUB_UP_WAIT_FILE" ]; do sleep 0.05 </dev/null >/dev/null 2>&1; done
+    # KEPLOY_STUB_UP_CODE: the first up exits with this code, and every up
+    # after it exits 0 at once, as a retried up whose dependency is healthy
+    # now (the first up may also be killed: it is the first all the same).
+    if [ -n "${KEPLOY_STUB_UP_CODE:-}" ]; then
+      if [ -e "$KEPLOY_STUB_UP_WAIT_FILE.first" ]; then
+        printf 'UP-RETRIED\n' >> "` + argvLog + `"
+        exit 0
+      fi
+      : > "$KEPLOY_STUB_UP_WAIT_FILE.first"
+      # The first up ignores TERM and INT, as an up whose own handling of a
+      # signal does not end it: only a kill does. It notes each it gets.
+      trap 'printf "UP-SIGNALLED\n" >> "` + argvLog + `"' TERM INT
+      # It starts a child in its process group, as the docker CLI starts
+      # its compose plugin. The child ignores TERM and INT too, ends with
+      # the up when the up ends on its own, and notes it if it outlives
+      # the group's leader: a kill of the leader alone, not of the group.
+      # The leader is this up, or the sh -c keploy runs it through, when
+      # that sh forks the up rather than exec it (Debian's and Ubuntu's
+      # dash), and then a kill of the leader alone leaves this up too.
+      ( trap '' TERM INT
+        pg=$(ps -o pgid= -p $$ | tr -d ' ')
+        if [ -z "$pg" ]; then printf 'UP-CHILD-NO-PGID\n' >> "` + argvLog + `"; exit 0; fi
+        printf 'UP-CHILD-STARTED\n' >> "` + argvLog + `"
+        while kill -0 "$pg" 2>/dev/null && [ -d "` + dir + `" ] && kill -0 ` + strconv.Itoa(os.Getpid()) + ` 2>/dev/null; do sleep 0.05; done
+        if [ -d "` + dir + `" ] && ! kill -0 "$pg" 2>/dev/null; then printf 'UP-CHILD-OUTLIVED\n' >> "` + argvLog + `"; fi
+      ) </dev/null >/dev/null 2>&1 &
+      child=$!
+    fi
+    # The wait also ends once this stand-in's dir is gone (its test ended)
+    # or the test process is (it died before its cleanups ran): no
+    # stand-in up outlives its test.
+    while [ ! -e "$KEPLOY_STUB_UP_WAIT_FILE" ] && [ -d "` + dir + `" ] && kill -0 ` + strconv.Itoa(os.Getpid()) + ` 2>/dev/null; do sleep 0.05 </dev/null >/dev/null 2>&1; done
     printf 'UP-DONE\n' >> "` + argvLog + `"
+    if [ -n "${KEPLOY_STUB_UP_CODE:-}" ]; then
+      kill -KILL "$child" 2>/dev/null
+      exit "$KEPLOY_STUB_UP_CODE"
+    fi
     exit 0
   fi
 done
@@ -267,7 +310,7 @@ func (r *inspectRecorder) ContainerInspect(_ context.Context, name string) (cont
 	if info, ok := r.inspects[name]; ok {
 		return info, nil
 	}
-	return container.InspectResponse{}, errors.New("no such container")
+	return container.InspectResponse{}, errdefs.NotFound(errors.New("no such container"))
 }
 
 func (r *inspectRecorder) askedAbout(name string) bool {
@@ -381,6 +424,34 @@ func TestComposeDownSweepsAfterAFailedDown(t *testing.T) {
 	// containers this sweep just removed.
 	if !rec.askedAbout("id-db") {
 		t.Fatalf("the reap barrier did not wait on the swept container; it waited on %v", rec.asked)
+	}
+}
+
+// TestSweepSendsTheComposeYAMLOnStdinForInMemoryProjects covers the in-memory
+// path (the enterprise cloud flow), where the compose document is piped rather
+// than written to disk. `docker compose -f -` with nothing on stdin fails with
+// "empty compose file", the sweep logs at Debug and returns nothing, and the
+// whole fix is silently a no-op on that path.
+func TestSweepSendsTheComposeYAMLOnStdinForInMemoryProjects(t *testing.T) {
+	ps := `{"ID":"id-app","Service":"app","State":"exited"}` + "\n"
+	argvLog := stubDockerCLI(t, ps, 1)
+	a := &App{
+		logger:          zap.NewNop(),
+		docker:          &inspectRecorder{},
+		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+		cmd:             "docker compose -f - up",
+		composeServices: []string{"app"},
+	}
+
+	a.sweepStragglingProjectContainers()
+
+	log := recordedLog(t, argvLog)
+	if !strings.Contains(log, "ARG -\n") {
+		t.Fatalf("the in-memory sweep did not pass `-f -`.\n%s", log)
+	}
+	if !strings.Contains(log, "STDIN services:") {
+		t.Fatalf("the compose YAML never reached the child's stdin, so `docker compose -f -` sees an "+
+			"empty compose file and the sweep silently does nothing.\n%s", log)
 	}
 }
 
@@ -665,48 +736,4 @@ func TestSetComposeSourceKeepsTheServiceListWithTheSource(t *testing.T) {
 		t.Fatal("the injected keploy-agent service is not in the set; the service list was captured " +
 			"before ModifyComposeForAgent")
 	}
-}
-
-// fakeComposeStack is a composeStack that answers from canned data, so the
-// in-memory compose path keeps unit coverage without a docker daemon.
-type fakeComposeStack struct {
-	ps       []docker.ServiceState
-	psCalls  int
-	downCall int
-	upErr    error
-	// upBlocksUntil, when non-nil, makes Up block until it is closed or the
-	// context ends — the shape a foreground `up` has.
-	upBlocksUntil chan struct{}
-}
-
-func (f *fakeComposeStack) ProjectName() string { return "fake" }
-
-func (f *fakeComposeStack) Up(ctx context.Context, _ docker.ComposeUpOptions, _, _ io.Writer) error {
-	if f.upBlocksUntil != nil {
-		select {
-		case <-f.upBlocksUntil:
-		case <-ctx.Done():
-		}
-	}
-	return f.upErr
-}
-
-func (f *fakeComposeStack) Down(context.Context, time.Duration) error {
-	f.downCall++
-	return nil
-}
-
-func (f *fakeComposeStack) Ps(context.Context) ([]docker.ServiceState, error) {
-	f.psCalls++
-	return f.ps, nil
-}
-
-func (f *fakeComposeStack) ContainerIDsForService(_ context.Context, service string) ([]string, error) {
-	var ids []string
-	for _, s := range f.ps {
-		if s.Service == service {
-			ids = append(ids, s.ID)
-		}
-	}
-	return ids, nil
 }

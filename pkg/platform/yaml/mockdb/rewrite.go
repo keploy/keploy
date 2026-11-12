@@ -248,6 +248,12 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 	if mock.Kind == models.ConnectionFailure {
 		return true
 	}
+	// An answer the client never read is never served (models.Mock.
+	// IsUndelivered), so never consumed: the recording keeps it, as it says
+	// what the dependency answered.
+	if mock.IsUndelivered() {
+		return true
+	}
 	if st, ok := mockNames[mock.Name]; ok {
 		// Persist any request-body noise detected during schema-based
 		// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
@@ -569,24 +575,15 @@ func forEachGobMockCut(path string, fn func(*models.Mock) error) (cut bool, err 
 			}
 			return false, fmt.Errorf("decode gob mock: %w", err)
 		}
-		// Lifetime and LifetimeDerived are RUNTIME-ONLY (models.Mock tags them
-		// json:"-" bson:"-" and says persisting them would create a second
-		// source of truth). encoding/gob ignores struct tags, so a gob file
-		// carries whatever the recorder stamped — and DeriveLifetime then
-		// short-circuits on the reloaded flag instead of re-deriving.
-		//
-		// The effect is that the SAME recording replays into a different tier
-		// depending on the storage format: gob keeps the recorder's per-test
-		// tag, while yaml drops it and the lax kind-fallback promotes the mock
-		// to session. A call two tests depend on is then consumed by the first
-		// and missing for the second — a CPU-optimisation knob silently
-		// changing replay semantics.
-		//
 		// Clearing on READ (not just on write) also repairs the recordings
-		// already on disk.
-		var zeroLifetime models.Lifetime
-		m.TestModeInfo.Lifetime = zeroLifetime
-		m.TestModeInfo.LifetimeDerived = false
+		// already on disk (clearRuntimeOnly).
+		clearRuntimeOnly(&m)
+		// A fault mock is held as models.HTTPFault (gobKinded); it is an
+		// HTTP mock. One with no fault stays of that kind, which no parser
+		// takes: never served as a whole answer.
+		if m.Kind == models.HTTPFault && m.Spec.Fault != nil {
+			m.Kind = models.HTTP
+		}
 		if err := fn(&m); err != nil {
 			return false, err
 		}
@@ -640,7 +637,7 @@ func newGobFileRewriter(gobPath string) (*gobFileRewriter, error) {
 }
 
 func (rw *gobFileRewriter) write(mock *models.Mock) error {
-	if err := rw.enc.Encode(mock); err != nil {
+	if err := rw.enc.Encode(gobKinded(mock)); err != nil {
 		return fmt.Errorf("encode mock during gob rewrite: %w", err)
 	}
 	return nil

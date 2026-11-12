@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -30,6 +33,9 @@ import (
 //	                          is a leaf lock — never re-acquire
 //	                          swapMu/treesMu from under it)
 //	swapMu  →  consumedMu    (independent; never hold consumedMu then swapMu)
+//	swapMu  →  exact.ofKind.mu  (the staging installs the set-as-recorded
+//	                          source, RangeRecordedSet reads it with the
+//	                          trees; a LEAF, also taken bare)
 //	hitMu   →  treesMu  →  connMu  →  TreeDb.mu
 //	                         (bumpHitCount's slow path; rebuildHitIndex takes
 //	                          hitMu as a LEAF — never acquire treesMu from
@@ -39,9 +45,14 @@ import (
 //	                          with hitMu as that leaf)
 //	sigMu                    (window-change signal; a LEAF — nothing is
 //	                          taken under it, and it may be taken under any)
+//	setEndMu                 (set-end registrations; a LEAF, released
+//	                          before any registration runs)
 //	swapMu  →  exact.outside.mu  →  treesMu  →  TreeDb.mu
 //	                         (prepareOutside reads the staged trees under the
 //	                          staging lock; nothing takes swapMu under it)
+//	swapMu  →  cursorMu      (a staging drops the per-test cursors and the
+//	                          recordings kept for repeats; keepOwned decides
+//	                          a recording's owner and keeps it under swapMu)
 //	swapMu  →  treesMu, carry.mu
 //	                         (fileCarryOver, under SetMocksWithWindow;
 //	                          carry.mu is a LEAF, also taken bare by
@@ -76,6 +87,10 @@ type MockManager struct {
 	// serves in a request its parser said (integrations.ServingIn,
 	// learn.Tracker.ServedMockIn).
 	servedInObserver atomic.Pointer[func(*models.Mock, *learn.Flight)]
+	// serveClock, when set (the proven switch off), is told the instant of
+	// every serve but a protocol phase's, as the learn tracker is under the
+	// switch: a call's span for the background check (learn.CallSpanOf).
+	serveClock atomic.Pointer[learn.ServeClock]
 	// openTestEpoch, when set, says the learn tracker's open test
 	// (learn.Tracker.OpenEpoch) as a test's view is installed: the view's
 	// stamp (exactView.stamp, ServedInOpenTest).
@@ -108,6 +123,14 @@ type MockManager struct {
 	// by treesMu. An entry whose mock DeleteStartupMock removed stays until the
 	// next staging; every swap and remove is pointer-checked, so it is inert.
 	startupKeys map[*models.Mock]models.TestModeInfo
+	// startupNames is the names of the set's start-up recordings the startup
+	// tree holds: a staging's startup-init mocks (recorded before the first
+	// test window) and its explicit startup slice, never the initial
+	// staging's copy of the whole pool. Rebuilt with the tree and read with
+	// no lock (ServedAsOwnOrStartup, which runs while a serve holds the round
+	// lock). A name DeleteStartupMock removed stays until the next staging:
+	// that recording is never served again.
+	startupNames atomic.Pointer[map[string]struct{}]
 	// startupShared is set while the startup tier may hold the session tier's
 	// own mocks — after a staging that filed them in both (see mirrorStartup)
 	// — and clear otherwise, so session updates pay for mirroring only then.
@@ -156,6 +179,18 @@ type MockManager struct {
 	// its OWN consumption history instead of a copy the client re-sends every
 	// testcase. Read only when MockFilterParams.AgentOwnsConsumed is set.
 	consumedPersistent map[string]models.MockState
+	// learnedElsewhere is what record's full round learned onto recordings
+	// from calls made in other windows than theirs (LearnElsewhere), by
+	// name: never consumption, so never in consumedList or
+	// consumedPersistent. Reset as a new test set is staged.
+	learnedElsewhere map[string]models.MockState
+	// elsewhereCounts is the current test set's count of learning-only
+	// pairings, by operation, then outcome (LearnElsewhereCounted);
+	// elsewhereCounted is how many calls it counts, elsewhereSaid how many
+	// of them the log said (unsaidElsewhereCounts). Reset with
+	// learnedElsewhere.
+	elsewhereCounts                 map[elsewhereOp]map[string]int
+	elsewhereCounted, elsewhereSaid int
 	// servedCount counts, per mock name, every time the mock answered a
 	// request this session, reset with consumedPersistent. A mock that may
 	// answer more than once keeps its first-use timestamp and its usage in
@@ -196,6 +231,32 @@ type MockManager struct {
 	// view prefixes its scope). Guarded by cursorMu, and dropped with the
 	// per-test cursors at every staging.
 	kept map[string]struct{}
+	// keptGen counts the stagings that dropped kept (resetPerTestCursors). A
+	// claim the store refuses to mark used takes back its keep only while
+	// keptGen is the one it kept in: once a staging dropped that keep, the
+	// name kept now, if any, is a later claim's. Guarded by cursorMu.
+	keptGen uint64
+	// testHookSetRead, testHookOwnerRead and testHookKeep, set only by a
+	// test before the manager is shared, run in a claim (keepOwned): the
+	// first in its set check, once that read the set generation, as it
+	// returns; the second in its owner check, once that read the open test,
+	// its window and its pool, as it returns; the third under cursorMu just
+	// before the keep. No staging may land from the first through the third.
+	// testHookMark runs in ClaimForRepeats once keepOwned kept the
+	// recording, holding no lock, before the store marks it used: a staging
+	// may land there.
+	testHookSetRead   func()
+	testHookOwnerRead func()
+	testHookKeep      func()
+	testHookMark      func()
+	// testHookBoundRead, set only by a test before the manager is shared,
+	// runs in BoundValuesIn once it read which set's bound values are kept
+	// and which scope table the session reset kept, before it reads the set
+	// in force; testHookSetSwitch in NewVariableSet once the table forgot the
+	// ending set, before the rest of the switch. Neither holds a lock: a
+	// session reset or a new set may land there.
+	testHookBoundRead func()
+	testHookSetSwitch func()
 	// usedUp are the recordings a worker's test consumed, held for the test
 	// instead of deleted, so a run of the same test again is served them
 	// (scopedMockDb.DeleteFilteredMock); by its scope and the name. Guarded by
@@ -222,6 +283,14 @@ type MockManager struct {
 	// every other call of the gap reads and binds in. It is carried into the
 	// next test's scope as it begins (StartVariables).
 	aheadVars variables.Table
+	// caseNotes are the notes the next scope of a test's variables begins
+	// with (NoteExactTestAtOpen), under caseNotesMu.
+	caseNotesMu sync.Mutex
+	caseNotes   pendingNotes
+	// asRecorded are the run's variables the next scope of a test's
+	// variables answers as recorded (AnswerAsRecordedAtOpen), under
+	// caseNotesMu.
+	asRecorded pendingAnswers
 
 	// exact is exact serving, under the proven switch (exact.go): when on,
 	// it decides what every read shows and which consume succeeds.
@@ -362,9 +431,40 @@ type MockManager struct {
 	// session) that seeds none has none there, not the previous one's: a
 	// keploy test session's windows would otherwise decide whose a later
 	// keploy mock replay's recordings are, over its scope table.
-	testWindows       atomic.Pointer[models.WindowSchedule]
+	testWindows atomic.Pointer[models.WindowSchedule]
+	// background is the current set's background recordings by kind
+	// (SeedBackgroundRecordings, BackgroundRecordings). Like testWindows, a
+	// seed at a set boundary is parked (backgroundSeeded) until that set's
+	// staging call installs it with the trees it describes, and a set that
+	// seeds none has none, not the previous one's: names are unique only
+	// within a set. Each install is kept with the staging epoch it took
+	// effect at, and the one before it too (backgroundInstall), for a call
+	// marked in the set before to be judged by that set's
+	// (BackgroundRecordingsIn). Stored under swapMu, read lock-free.
+	background       atomic.Pointer[backgroundInstall]
+	backgroundSeeded map[models.Kind][]models.BackgroundRecording
+	// boundKept is the bound values of the set whose variables the last new
+	// set forgot (NewVariableSet), for that set's calls keploy decides after
+	// (BoundValuesIn), and scopeEnded the scope table's trails and tests the
+	// session reset cleared as that set ended (ResetForReplaySession), with
+	// the staging epoch it was cleared in, until the new set keeps them
+	// with its bound values. boundKept is stored under the variable table's
+	// lock and swapMu, scopeEnded before the reset clears the table; both
+	// are read lock-free.
+	boundKept  atomic.Pointer[boundKept]
+	scopeEnded atomic.Pointer[trailsCleared]
+	// repeatNoise is the header noise the session's matcher compares the
+	// set's calls with, which proves a test's repeated reads
+	// (SetRepeatReadNoise); nil, none, until the session sets it.
+	repeatNoise       atomic.Pointer[repeatReadNoise]
 	testWindowsSeeded *models.WindowSchedule
 	windowsSeeded     *models.WindowSchedule
+	// placeWindows are the recorded test windows a replay seeded for the
+	// run's place alone (SeedRunPlaceWindows), read where it seeded no
+	// testWindows. Parked (placeWindowsSeeded) and installed as testWindows
+	// are, under swapMu.
+	placeWindows       atomic.Pointer[models.WindowSchedule]
+	placeWindowsSeeded *models.WindowSchedule
 
 	// statedKinds are the kinds of which a mock staged since the current
 	// set's boundary states its lifetime (models.Mock.StatesLifetime): the
@@ -381,11 +481,38 @@ type MockManager struct {
 	sigMu     sync.Mutex
 	windowSig chan struct{}
 
+	// setEndFilers are the parsers' registrations to file, at a read of a
+	// test set's end, the misses of the calls they hold for a test of the set
+	// (AtSetEnd, FileAtSetEnd), in the order they were made. setEndMu guards
+	// them and is a LEAF lock: the registrations run with it released.
+	setEndMu     sync.Mutex
+	setEndFilers []setEndFiler
+	setEndNext   uint64
+	// notAtSetEnd is set on a test worker's manager (instanceServing): no
+	// set's end read asks it, so AtSetEnd registers nothing there.
+	notAtSetEnd atomic.Bool
+	// readsSetEnds is the replay session's client's word that it reads each
+	// set's end (models.OutgoingOptions.ReadsSetEnds, SetReadsSetEnds):
+	// without it AtSetEnd registers nothing.
+	readsSetEnds atomic.Bool
+
+	// place is where the replay's run is among the set's recorded windows
+	// (RunPlace, run_place.go).
+	place runPlace
+
 	// stagingEpoch changes at every staging call (a SetMocksWithWindow with the
 	// models.BaseTime sentinel): a new set, or the same set staged again after
 	// an agent replacement. State a consumer builds from one staging snapshot
 	// is valid for one epoch. Written under swapMu, read lock-free.
 	stagingEpoch atomic.Uint64
+
+	// windowReads is how many reads have begun of the misses window this
+	// manager's calls file their misses in (the run's, or the test worker's
+	// it serves): the proxy's getMockErrorsOn moves it as each read begins,
+	// and a call's mark carries it (integrations.CallRound.AfterReads), so
+	// the set-start cut tells a call marked before its set's last read of
+	// that window from one marked after it (missWindow.keptAsEarlierSet).
+	windowReads atomic.Uint64
 
 	// carry is the carry-over tier: carry-over mocks (models.IsCarryOver: a
 	// RegisterCarryOver kind's, a StagingRelease need's) that stay reachable
@@ -459,6 +586,10 @@ type MockManager struct {
 	// stored generation (bumpRevisionAll) and at Close.
 	restagedMu sync.Mutex
 	restaged   map[any]func()
+
+	// parserKept is what the parsers keep with the manager, by slot
+	// (integrations.ParserKeep): it goes with the manager.
+	parserKept sync.Map
 
 	// noConnMocks is a negative cache for GetConnectionMocks's
 	// fallback scan. A connID that returned zero connection-scoped
@@ -561,6 +692,11 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 	}
 	mm.setGen.Store(1)
 	mm.answered.fence(1)
+	// The test variables keep what each ended test's scope bound, for the
+	// background calls the application makes for that test after it ended
+	// (variables.Table.EndedOf). The scope the next test's calls in flight
+	// bind in (aheadVars) is read by none of them, and keeps none.
+	mm.vars.KeepEnded()
 	// Start the per-connection idle sweeper. Reclaims
 	// connection-scoped pools whose last activity exceeded
 	// connectionIdleRetention so long-running agents don't accumulate
@@ -598,6 +734,9 @@ func (m *MockManager) Close() {
 		// stop. The replacement channel stays open, so a waiter that does not
 		// check IsClosed blocks again instead of spinning.
 		m.signalWindowChange()
+		// An answer held for the run's place is written: a closed manager
+		// is at the set's end (RunPlace).
+		m.signalRunPlace()
 		// A parser's data built from this manager's reads goes with it.
 		m.letDerivedGo()
 	})
@@ -693,11 +832,19 @@ func (m *MockManager) ResetForReplaySession() {
 	m.SetRecordingSource(nil)
 	m.SetRecordedBefore(nil)
 	m.SetRecordedOfKind(nil)
-	// Nor its scope table's pool names (SetPoolNames) and owners
-	// (SetPoolOwners): until the next session sends its own, whose mock is
-	// the pool's, and whose tests list each, is not known.
+	// Nor its scope table's pool names (SetPoolNames), owners
+	// (SetPoolOwners) and tests (SetPoolTests): until the next session sends
+	// its own, whose mock is the pool's, and whose tests list each, is not
+	// known. The trails and tests the ended set's table gave are kept with
+	// its bound values (NewVariableSet): a call of that set keploy decides
+	// after reads its recordings' trails by them (BoundValuesIn).
+	m.scopeEnded.Store(&trailsCleared{
+		scopeTrails: scopeTrails{trails: m.exact.poolTrails.Load(), tests: m.exact.poolTests.Load()},
+		upTo:        m.stagingEpoch.Load(),
+	})
 	m.exact.poolNames.Store(nil)
 	m.exact.poolOwners.Store(nil)
+	m.exact.poolTests.Store(nil)
 	if m.exact.view.Load() != nil {
 		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
 	}
@@ -776,6 +923,8 @@ func (m *MockManager) ResetForReplaySession() {
 	// Same for a parked window seed: it belongs to the set that sent it.
 	m.windowsSeeded = nil
 	m.testWindowsSeeded = nil
+	m.placeWindowsSeeded = nil
+	m.backgroundSeeded = nil
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -928,6 +1077,18 @@ func (m *MockManager) kindRevisions(kind models.Kind) (rev, staged, stored *uint
 	return rev, staged, stored
 }
 
+// bumpGapOrder moves the revisions and the staging generations, every
+// kind's and kind's, for a call between tests that first consumed one of the
+// worker scope's recordings of kind in the staging (consumeBetween): it
+// spends nothing, but the reads between tests hand it out after the rest
+// from now on (gapOrder), so an index built once per generation is built
+// again. It moves at most once per worker recording in a staging.
+func (m *MockManager) bumpGapOrder(kind models.Kind) {
+	atomic.AddUint64(&m.staged, 1)
+	atomic.AddUint64(&m.rev, 1)
+	m.bumpViewKind(kind)
+}
+
 // bumpConsumed moves the revisions for a consume or a spend under exact
 // serving of a mock of kind: Revision and RevisionByKind move, so a parser
 // that keys what it read on them reads again, as before; the staging
@@ -943,8 +1104,11 @@ func (m *MockManager) bumpConsumed(kind models.Kind) {
 // makes. It moves when the staged set changes (a staging, a store into a
 // tree, a delete; outside exact serving a consume deletes the mock from its
 // tree, so it moves then too) and when exact serving installs a view (a test
-// opens or ends, a key restarts), never when a parser consumes or spends a
-// mock the view in force shows. So what a read gives (GetPerTestMocksInWindow,
+// opens or ends, a key restarts), and when a call between tests first
+// consumes one of the worker scope's recordings in the staging, which moves
+// it after the rest in the reads between tests (gapOrder, bumpGapOrder);
+// never otherwise when a parser consumes or spends a mock the view in force
+// shows. So what a read gives (GetPerTestMocksInWindow,
 // GetSessionMocks, GetUnFilteredMocks, GetStartupMocks, ...) while one
 // generation holds is what it gave when the generation began, less the mocks
 // MockSpent reports: a parser can build its index once per generation and
@@ -1012,10 +1176,16 @@ func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
 // ---------- getters ----------
 
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
+	return m.getFilteredMocksIn(m.exactView())
+}
+
+// getFilteredMocksIn is GetFilteredMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getFilteredMocksIn(v *exactView) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
 	}
 	results := make([]*models.Mock, 0, 64)
@@ -1173,6 +1343,12 @@ func (m *MockManager) windowActiveLocked() bool {
 //
 // Drop count is exposed via DroppedOutOfWindow() for observability.
 func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
+	return m.getFilteredMocksInWindowIn(m.exactView())
+}
+
+// getFilteredMocksInWindowIn is GetFilteredMocksInWindow read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getFilteredMocksInWindowIn(v *exactView) ([]*models.Mock, error) {
 	// Atomicity contract: snapshot the per-test tree POINTER and the
 	// window together under swapMu.RLock so SetMocksWithWindow can't
 	// interleave a (tree, window) swap between our two reads. Once
@@ -1190,7 +1366,7 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 
 	// Under exact serving the test's mapping decides, not a recorded time,
 	// over what the view shows of the tier (shownOf).
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
 	}
 	all := make([]*models.Mock, 0, 64)
@@ -1300,6 +1476,7 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
 	m.keepRunOnlyForAnExactStartUp(start)
 	m.setMocksWithWindow(filtered, unfiltered, start, end)
+	m.placeWindowAt(start)
 }
 
 // keepRunOnlyForAnExactStartUp, under the proven switch, decides at a
@@ -1490,6 +1667,39 @@ func (o mockOwner) own(in []*models.Mock) []*models.Mock {
 	return out
 }
 
+// firstRecordedStartLocked is the start of the current set's first recorded
+// test as far as the manager knows it: the earlier of the start-up cutoff
+// (SeedStartupCutoff, or the earliest window staged) and the first recorded
+// test window seeded (SeedRecordedWindows). Zero when it knows neither: an
+// off-switch mock replay seeds none. The caller holds swapMu, after a set
+// boundary's staging installed what was parked for the set.
+func (m *MockManager) firstRecordedStartLocked() time.Time {
+	first := m.firstWindowStart
+	if tw := m.testWindows.Load(); tw.Len() > 0 {
+		if s := tw.Window(0).Start; first.IsZero() || s.Before(first) {
+			first = s
+		}
+	}
+	return first
+}
+
+// bootPlaced reports whether the start-up tier a models.BaseTime staging
+// builds, which serves before any test and between tests, serves mk without
+// exact serving. Every mock but one placed at its answer
+// (models.IsAnswerPlaced) is served; that one only when its answer came
+// before the set's first recorded test began (cutoff): answered in a test, it
+// carries what that test produced, and a window that holds its answer serves
+// it (pkg.StageInWindow). With no cutoff known (zero, before every place)
+// nothing tells a start-up answer from a test's, and it is held (fail
+// closed): its parser holds the call until a window holds a recording that
+// answers it.
+func bootPlaced(mk *models.Mock, cutoff time.Time) bool {
+	if !models.IsAnswerPlaced(mk) {
+		return true
+	}
+	return models.PlaceOf(mk).Before(cutoff)
+}
+
 // setMocksWithWindowLocked is SetMocksWithWindow without the window-change
 // signal. The caller holds swapMu and owns the mocks (mockOwner).
 //
@@ -1503,6 +1713,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// Every staging starts the per-test stateful cursors over: a test's own
 	// recordings of a request advance their cursor within that test alone.
 	m.resetPerTestCursors()
+	// The set's recordings as recorded are the trees this staging builds and
+	// the source the agent handed before it.
+	m.installRecordedOfKindLocked()
 	// Track the earliest window-start we've ever seen on this manager.
 	// Used below to distinguish startup-init mocks (recorded before
 	// any test fired) from stale previous-test mocks. Once set, only
@@ -1529,6 +1742,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// GetSessionMocks returns startup+session so pre-wave-2 parsers
 	// don't notice the split.
 	var startupInit []*models.Mock
+	// startupHeld is what the startup tier this staging builds stores but
+	// does not serve without exact serving (TreeDb.held).
+	startupHeld := map[*models.Mock]struct{}{}
 
 	// Runner/Replayer's initial SetMocksWithWindow call fires with
 	// start=models.BaseTime before any test runs — to stage mocks for
@@ -1577,6 +1793,15 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		}
 	}
 	if isInitialStaging {
+		// A set boundary installs the set's background recordings as of the
+		// epoch this staging starts, before it starts it: no call can be
+		// marked in that epoch while the previous set's are still in force
+		// there, and a call marked before it is judged by the previous
+		// set's (BackgroundRecordingsIn).
+		if m.boundaryPending {
+			m.installBackgroundLocked(m.backgroundSeeded, m.stagingEpoch.Load()+1)
+			m.backgroundSeeded = nil
+		}
 		// Every staging call starts a new epoch, boundary or not: whatever a
 		// consumer built from the previous staging snapshot is stale now.
 		m.bumpStagingEpoch()
@@ -1608,6 +1833,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// session, that seeded none places no recording by the last one's.
 			m.testWindows.Store(m.testWindowsSeeded)
 			m.testWindowsSeeded = nil
+			// The run's place's too (SeedRunPlaceWindows).
+			m.placeWindows.Store(m.placeWindowsSeeded)
+			m.placeWindowsSeeded = nil
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -1634,17 +1862,26 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// re-partitions, session mocks revert to being session-tier-only
 		// in the startup tree (which rebuilds from the real-window
 		// firstStart cutoff, not from the unfiltered input).
-		for _, mk := range filtered {
-			if mk == nil {
-				continue
+		//
+		// A mock placed at its answer (models.IsAnswerPlaced) that is not
+		// placed before the set's first recorded test (bootPlaced) is stored
+		// there as every other, and held (TreeDb.held): what the tier serves
+		// without exact serving leaves it out, since it would answer the call
+		// now with what a later test produced, and its parser holds the call
+		// until a window holds the answer. Exact serving shows it where its
+		// view places it, and every reader of the staged set (the teardown
+		// bound, the views, HasUnservedRecording) still finds it.
+		cutoff := m.firstRecordedStartLocked()
+		for _, list := range [][]*models.Mock{filtered, unfiltered} {
+			for _, mk := range list {
+				if mk == nil {
+					continue
+				}
+				startupInit = append(startupInit, mk)
+				if !bootPlaced(mk, cutoff) {
+					startupHeld[mk] = struct{}{}
+				}
 			}
-			startupInit = append(startupInit, mk)
-		}
-		for _, mk := range unfiltered {
-			if mk == nil {
-				continue
-			}
-			startupInit = append(startupInit, mk)
 		}
 	}
 	m.noteStatedLifetimes(filtered, unfiltered, explicitStartup)
@@ -1759,6 +1996,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	}
 	newStartup := NewTreeDb(customComparator)
 	newStartup.bootBuilt = !m.testFiredThisSet && !m.scopeFiredThisSet
+	newStartup.hold(startupHeld)
 	newStartupKeys := make(map[*models.Mock]models.TestModeInfo, len(startupInit)+len(explicitStartup))
 	// H4 round-2: use a TIER-LOCAL TestModeInfo copy as the startup tree
 	// key rather than mutating mk.TestModeInfo.ID in place. The same
@@ -1830,6 +2068,10 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		})
 	}
 
+	// What the test is staged with (OpenTestRecordings), kept before its
+	// tier is published.
+	m.stageRunTest(filteredForTree)
+
 	// Build both remaining tiers before publishing anything: building stamps
 	// tree IDs and sort orders, and one staged mock can sit in more than one
 	// tier (startup and session during BaseTime staging), so stamping after
@@ -1859,9 +2101,25 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// parser that is refused reads the new pool on its next try.
 		m.dropPreviousSetConsumes()
 	}
+	// The initial staging files every recording in the startup tier, so its
+	// startup-init slice names none as the start-up's (startupNames).
+	startupNames := make(map[string]struct{}, len(newStartupKeys))
+	if !isInitialStaging {
+		for _, mk := range startupInit {
+			if mk != nil && mk.Name != "" {
+				startupNames[mk.Name] = struct{}{}
+			}
+		}
+	}
+	for _, mk := range explicitStartup {
+		if mk != nil && mk.Name != "" {
+			startupNames[mk.Name] = struct{}{}
+		}
+	}
 	m.treesMu.Lock()
 	m.startup = newStartup
 	m.startupKeys = newStartupKeys
+	m.startupNames.Store(&startupNames)
 	// Initial staging files the session pool in the startup tier too; an
 	// explicit startup slice may share mocks with it as well.
 	m.startupShared.Store(isInitialStaging || len(explicitStartup) > 0)
@@ -2010,12 +2268,18 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 }
 
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
+	return m.getUnFilteredMocksIn(m.exactView())
+}
+
+// getUnFilteredMocksIn is GetUnFilteredMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getUnFilteredMocksIn(v *exactView) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.unfiltered
 	m.treesMu.RUnlock()
 	// Under exact serving only what the view shows of each tier is read
 	// (shownOf): reusable narrows it as it narrowed the tier's values.
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return v.reusable("", v.shownOf(tree, ""), v.shownOf(m.startupTree(), "")), nil
 	}
 	results := make([]*models.Mock, 0, 128)
@@ -2053,6 +2317,8 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 // identical to SetMocksWithWindow.
 func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup []*models.Mock, start, end time.Time) {
 	m.keepRunOnlyForAnExactStartUp(start)
+	// The run's place moves once the window is visible.
+	defer m.placeWindowAt(start)
 	// Signal once everything below has landed, startup additions included.
 	defer m.signalWindowChange()
 	m.swapMu.Lock()
@@ -2094,17 +2360,23 @@ func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup 
 // trees are disjoint and the dedup is a free no-op (zero duplicate
 // insertions into the seen-set).
 func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
-	startup, err := m.GetStartupMocks()
+	return m.getSessionMocksIn(m.exactView())
+}
+
+// getSessionMocksIn is GetSessionMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getSessionMocksIn(v *exactView) ([]*models.Mock, error) {
+	startup, err := m.getStartupMocksIn(v)
 	if err != nil {
 		return nil, err
 	}
-	session, err := m.GetSessionScopedMocks()
+	session, err := m.getSessionScopedMocksIn(v)
 	if err != nil {
 		return nil, err
 	}
 	// Under exact serving the open test's unanswered mocks lead the union:
 	// it is every mock a parser that reads nothing else may serve.
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		if owned := v.unanswered(""); len(owned) > 0 {
 			startup = append(owned, startup...)
 		}
@@ -2266,6 +2538,7 @@ func (m *MockManager) resetPerTestCursors() {
 		}
 	}
 	m.kept = nil
+	m.keptGen++
 	m.usedUp = nil
 }
 
@@ -2340,6 +2613,75 @@ func (m *MockManager) KeptForRepeats() func(key string) bool {
 	return snapshotKeys(m.kept)
 }
 
+// ClaimForRepeats keeps mk, the open test's own per-test recording, for its
+// test's byte-identical repeats and marks it used, when no consume kept it
+// yet (integrations.RepeatClaimer). It is false, keeping nothing, for a mock
+// of an earlier set, one that is not the open test's own (OwnedByOpenTest),
+// one already kept, and one the store cannot mark used (an unnamed mock).
+//
+// The mark runs after the keep, outside the staging's lock (the mark door
+// can take that lock for read itself, and a second read lock waits behind a
+// staging queued for the write lock), so a staging may land between them:
+// the store then refuses to mark the earlier staging's copy used, and the
+// claim takes back only its own keep (unkeep), never a later claim's of the
+// same name.
+func (m *MockManager) ClaimForRepeats(mk models.Mock) bool {
+	gen, ok := m.keepOwned(&mk)
+	if !ok {
+		return false
+	}
+	if m.testHookMark != nil {
+		m.testHookMark()
+	}
+	if m.MarkMockAsUsed(mk) {
+		return true
+	}
+	m.unkeep(mk.Name, gen)
+	return false
+}
+
+// keepOwned keeps mk for its test's repeats when it is of this set, the open
+// test's own, and not kept yet, and returns the kept generation (keptGen) it
+// kept in. It decides holding swapMu, which every staging holds while it
+// drops what was kept and swaps the trees and the window: no staging lands
+// from the set check's read through the keep, so a consume of one test's
+// recording that straddles the next test's staging keeps nothing for that
+// test, and a copy of the previous set's pool read before the next set's
+// fenced staging (ArmSetFence) keeps nothing for the new set.
+func (m *MockManager) keepOwned(mk *models.Mock) (uint64, bool) {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	if m.stalePooledRead(mk, m.testHookSetRead) || !m.ownedByOpenTest(mk, m.testHookOwnerRead) {
+		return 0, false
+	}
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if _, kept := m.kept[mk.Name]; kept {
+		return 0, false
+	}
+	if m.kept == nil {
+		m.kept = make(map[string]struct{})
+	}
+	if m.testHookKeep != nil {
+		m.testHookKeep()
+	}
+	m.kept[mk.Name] = struct{}{}
+	return m.keptGen, true
+}
+
+// unkeep takes back the keep of name a claim made in the kept generation
+// gen, once the store refused to mark the recording used. It decides under
+// cursorMu, which every staging holds while it drops what was kept and moves
+// keptGen: in gen the name's keep is this claim's (keepOwned keeps a name
+// once), and after a staging it is not this claim's to take back.
+func (m *MockManager) unkeep(name string, gen uint64) {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if m.keptGen == gen {
+		delete(m.kept, name)
+	}
+}
+
 // OwnedByOpenTest reports whether mk is the open test's own recording
 // (integrations.TestOwner): a test is open (IsTestWindowActive) and mk is in
 // the per-test pool served for it: under exact serving, the test's mapping
@@ -2349,8 +2691,18 @@ func (m *MockManager) KeptForRepeats() func(key string) bool {
 // staging before the first test, between tests, or a replay that opens none)
 // no mock is.
 func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
+	return m.ownedByOpenTest(mk, nil)
+}
+
+// ownedByOpenTest is OwnedByOpenTest. read, when not nil, runs once the check
+// read the open test, its window and its pool, as it returns: keepOwned's
+// test hook at the point the claim's owner is decided.
+func (m *MockManager) ownedByOpenTest(mk *models.Mock, read func()) bool {
 	if mk == nil {
 		return false
+	}
+	if read != nil {
+		defer read()
 	}
 	if v := m.exactView(); v != nil {
 		// The open test's test mocks (ServeExactTest), by name: its index
@@ -2585,12 +2937,144 @@ func (m *MockManager) ResetVariables() {
 // as does the scope the next test's calls in flight bind in before it
 // begins (AheadVariables). A test's own bindings stay its own: each test
 // begins with none of the test before it (StartVariables, ResetVariables).
+//
+// What the ending set had bound is kept, with the trails and tests its
+// scope table gave (scopeEnded), for its calls keploy decides after
+// (BoundValuesIn): every call marked in a staging up to now is that set's.
+// It is kept in the step the table forgets it (variables.Table.
+// NewSetKeeping), so a call of the ending set decided while the set
+// switches reads its set's, as at once. A new set begun again with no
+// staging since the last (the replay's re-registration of a set's mocks
+// before it stages them) keeps the set kept then: each set's first staging
+// starts an epoch, so no test of the set begun since has opened, and the
+// calls marked up to now are still the set's before.
 func (m *MockManager) NewVariableSet() {
-	m.vars.NewSet()
+	m.vars.NewSetKeeping(m.keepBound)
+	if m.testHookSetSwitch != nil {
+		m.testHookSetSwitch()
+	}
 	m.vars.KeepRun()
 	m.aheadVars.NewSet()
 	m.aheadVars.ReadRunOf(&m.vars)
 }
+
+// keepBound keeps vars, what the ending set had bound, with the trails and
+// tests its scope table gave (scopeEnded), as the set the calls marked up to
+// now read (boundKept). It runs under the variable table's lock, before the
+// table forgets vars (NewVariableSet).
+func (m *MockManager) keepBound(vars *variables.SetBound) {
+	scope := m.scopeEnded.Swap(nil)
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	k := &boundKept{vars: vars, upTo: m.stagingEpoch.Load()}
+	if scope != nil {
+		k.scope = scope.scopeTrails
+	}
+	if prev := m.boundKept.Load(); prev != nil {
+		if prev.upTo == k.upTo {
+			return
+		}
+		k.after, k.older = prev.upTo, true
+	}
+	m.boundKept.Store(k)
+}
+
+// trailsCleared is a scope table's trails and tests as the session reset
+// cleared them (scopeEnded), and the staging epoch they were cleared in
+// (upTo): the trails a call marked up to then reads (BoundValuesIn).
+type trailsCleared struct {
+	scopeTrails
+	upTo uint64
+}
+
+// scopeTrails is a scope table's trails (SetPoolTrails) and tests
+// (SetPoolTests), as TrailOf reads them; nil: none sent.
+type scopeTrails struct {
+	trails *map[string]string
+	tests  *poolTests
+}
+
+// boundKept is the bound values of a set whose variables a new set forgot
+// (NewVariableSet), as a background miss reads them (integrations.
+// BoundValues, through keptFor): what its table had bound (vars) and its scope
+// table's trails (scope), for the calls marked in a staging epoch after
+// after (any, where older is false) and up to upTo.
+type boundKept struct {
+	vars        *variables.SetBound
+	scope       scopeTrails
+	upTo, after uint64
+	older       bool
+}
+
+// keptFor is k as a call marked in test's view, with the variable scope
+// numbered scope in force (scoped: the mark keeps one), reads it (Own: that
+// scope's, variables.SetBound.OwnIn; test's, variables.SetBound.OwnOf, for
+// a mark that keeps none).
+type keptFor struct {
+	k      *boundKept
+	test   string
+	scope  uint64
+	scoped bool
+}
+
+func (r keptFor) Own() []variables.Binding {
+	if r.scoped {
+		return r.k.vars.OwnIn(r.scope)
+	}
+	return r.k.vars.OwnOf(r.test)
+}
+
+func (r keptFor) EndedOf(test string) []variables.Binding { return r.k.vars.EndedOf(test) }
+func (r keptFor) TrailOf(mock string) learn.Trail         { return trailIn(r.k.scope, mock) }
+func (r keptFor) LookupOf(test, name string) (variables.Binding, bool, bool) {
+	return r.k.vars.LookupOf(test, name)
+}
+
+// BoundValuesIn returns the bound values of the set the call was marked in
+// (integrations.RoundBoundReader): the set's in force (Variables, TrailOf)
+// for a call marked after the last new set began, or of no mark; the set's
+// before it (boundKept) for a call marked up to then, which keploy decides
+// once the replay began the next set; nil for a call marked before both
+// (no value is bound for it: its background miss counts). Each reads, as
+// the call's own test's, the variable scope in force in the view the call
+// was marked in (integrations.CallRound.VariableScope, variables.Table.
+// OwnIn): the replay can begin the set's next test before keploy decides a
+// test's call, or a pool view's call between tests (the ended test's: its
+// scope runs until the next begins), and a test can run again in its set.
+//
+// Each is read in one step, as keploy decides the call: what the set in
+// force has bound then (variables.Table.Bound), read again where a new set
+// or a session reset landed while it was read, and the trails the session
+// reset cleared for a call marked up to it (scopeEnded): a call of the
+// ending set decided while the set switches reads its set's, as at once.
+func (m *MockManager) BoundValuesIn(call integrations.CallRound) integrations.BoundValues {
+	if !call.Read() {
+		return integrations.BoundNow(&m.vars, m, call)
+	}
+	scope, scoped := call.VariableScope()
+	for {
+		k, cleared := m.boundKept.Load(), m.scopeEnded.Load()
+		if k != nil && call.Epoch() <= k.upTo {
+			if k.older && call.Epoch() <= k.after {
+				return nil
+			}
+			return keptFor{k: k, test: call.Test(), scope: scope, scoped: scoped}
+		}
+		if m.testHookBoundRead != nil {
+			m.testHookBoundRead()
+		}
+		now := &boundKept{scope: scopeTrails{trails: m.exact.poolTrails.Load(), tests: m.exact.poolTests.Load()}}
+		if cleared != nil && call.Epoch() <= cleared.upTo {
+			now.scope = cleared.scopeTrails
+		}
+		now.vars = m.vars.Bound()
+		if m.boundKept.Load() == k && m.scopeEnded.Load() == cleared {
+			return keptFor{k: now, test: call.Test(), scope: scope, scoped: scoped}
+		}
+	}
+}
+
+var _ integrations.RoundBoundReader = (*MockManager)(nil)
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set
 // whose ReqTimestampMock predates the earliest test window this manager
@@ -2602,20 +3086,28 @@ func (m *MockManager) NewVariableSet() {
 // currently only in-tree caller) consult this pool to serve
 // app-bootstrap traffic — Flyway migrations, ORM metadata boot,
 // HikariCP/JDBC pool warm-up queries. Pool is rebuilt by every
-// SetMocksWithWindow call using the latest firstWindowStart.
+// SetMocksWithWindow call using the latest firstWindowStart. Without exact
+// serving it leaves out what the tree holds and does not serve
+// (TreeDb.serves).
 func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
+	return m.getStartupMocksIn(m.exactView())
+}
+
+// getStartupMocksIn is GetStartupMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getStartupMocksIn(v *exactView) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.startup
 	m.treesMu.RUnlock()
 	if tree == nil {
 		return nil, nil
 	}
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return v.reusable("", v.shownOf(tree, ""), v.shownOf(m.unfilteredTree(), "")), nil
 	}
 	results := make([]*models.Mock, 0, 32)
 	tree.rangeValues(func(v interface{}) bool {
-		if mock, ok := v.(*models.Mock); ok && mock != nil {
+		if mock, ok := v.(*models.Mock); ok && mock != nil && tree.serves(mock) {
 			results = append(results, mock)
 		}
 		return true
@@ -2637,18 +3129,24 @@ func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 // Returns nil, nil when the startup tree has never been populated (fresh
 // manager pre-first SetMocksWithWindow).
 func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return m.getStartupMocksByKindIn(m.exactView(), kind)
+}
+
+// getStartupMocksByKindIn is GetStartupMocksByKind read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getStartupMocksByKindIn(v *exactView, kind models.Kind) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.startup
 	m.treesMu.RUnlock()
 	if tree == nil {
 		return nil, nil
 	}
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return v.reusable(kind, v.shownOf(tree, kind), v.shownOf(m.unfilteredTree(), kind)), nil
 	}
 	results := make([]*models.Mock, 0, 16)
 	tree.rangeValues(func(v interface{}) bool {
-		if mock, ok := v.(*models.Mock); ok && mock != nil && mock.Kind == kind {
+		if mock, ok := v.(*models.Mock); ok && mock != nil && mock.Kind == kind && tree.serves(mock) {
 			results = append(results, mock)
 		}
 		return true
@@ -2666,7 +3164,13 @@ func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, e
 // per-connID trees for O(1) lookup). Startup entries are in `m.startup`
 // and deliberately excluded here.
 func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
-	return m.GetUnFilteredMocks()
+	return m.getSessionScopedMocksIn(m.exactView())
+}
+
+// getSessionScopedMocksIn is GetSessionScopedMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getSessionScopedMocksIn(v *exactView) ([]*models.Mock, error) {
+	return m.getUnFilteredMocksIn(v)
 }
 
 // HasFirstTestFired reports whether at least one real test window has
@@ -2794,6 +3298,10 @@ func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
 // repeated identical prepared-statement reads (e.g. login's username lookup,
 // register's read-back of a freshly-generated id) so each consumes the row
 // recorded at that position rather than a stale earlier-test row.
+//
+// It takes windowMu alone, for read, and never swapMu: the MySQL replayer
+// reads it under a lock of its own, also from a release a staging runs
+// while it holds swapMu (WhenRestaged), so swapMu here would deadlock.
 func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
 	// Under exact serving no recorded time narrows what a test is served:
 	// its mapping does.
@@ -2815,7 +3323,13 @@ func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
 // collapse this accessor into a plain tree Snapshot with no iteration
 // overhead at all.
 func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
-	return m.GetFilteredMocksInWindow()
+	return m.getPerTestMocksInWindowIn(m.exactView())
+}
+
+// getPerTestMocksInWindowIn is GetPerTestMocksInWindow read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getPerTestMocksInWindowIn(v *exactView) ([]*models.Mock, error) {
+	return m.getFilteredMocksInWindowIn(v)
 }
 
 // RangePerTestMocksInWindow is GetPerTestMocksInWindow handed to fn one mock
@@ -2823,16 +3337,22 @@ func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 // unanswered mocks are read a few at a time and the tier only once fn has
 // not stopped at them (rangeExactPerTest); otherwise the read is walked.
 func (m *MockManager) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error {
+	return m.rangePerTestMocksInWindowIn(m.exactView(), fn)
+}
+
+// rangePerTestMocksInWindowIn is RangePerTestMocksInWindow read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) rangePerTestMocksInWindowIn(v *exactView, fn func(*models.Mock) bool) error {
 	m.swapMu.RLock()
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
 	m.swapMu.RUnlock()
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		m.rangeExactPerTest(v, "", tree, fn)
 		return nil
 	}
-	mocks, err := m.GetPerTestMocksInWindow()
+	mocks, err := m.getPerTestMocksInWindowIn(v)
 	if err != nil {
 		return err
 	}
@@ -2904,10 +3424,16 @@ func (m *MockManager) noteStatedLifetimes(slices ...[]*models.Mock) {
 //   - Every successful read touches connectionLastTs so the
 //     idle-sweeper doesn't reclaim an active connection.
 func (m *MockManager) GetConnectionMocks(connID string) ([]*models.Mock, error) {
+	return m.getConnectionMocksIn(m.exactView(), connID)
+}
+
+// getConnectionMocksIn is GetConnectionMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getConnectionMocksIn(v *exactView, connID string) ([]*models.Mock, error) {
 	mocks, err := m.connectionMocks(connID)
 	// Under exact serving a connection mock a parser evicted is gone, as from
 	// every other read (unspent).
-	if v := m.exactView(); v != nil && err == nil {
+	if v != nil && err == nil {
 		mocks = v.withLearned(v.unspent(mocks))
 	}
 	return mocks, err
@@ -3156,7 +3682,8 @@ func (m *MockManager) SessionMockHitCounts() map[string]uint64 {
 // match, across all tiers (unfiltered, filtered, startup, carry-over). It
 // reads the live trees on every call — no caching — so it stays correct as
 // the mock set is replaced between test-sets. Without exact serving it
-// returns on the first match and allocates nothing. A nil per-kind tree means
+// returns on the first match a tree serves (TreeDb.serves) and allocates
+// nothing. A nil per-kind tree means
 // no such mocks were set.
 //
 // Under exact serving (KEPLOY_PROVEN) it answers from what the open view
@@ -3202,6 +3729,9 @@ func (m *MockManager) HasMocksByKind(kind models.Kind, match func(*models.Mock) 
 					matched = append(matched, mock)
 					return true
 				}
+				if !tree.serves(mock) {
+					return true
+				}
 				found = true
 				return false // stop ranging
 			}
@@ -3229,6 +3759,12 @@ func (m *MockManager) HasMocksByKind(kind models.Kind, match func(*models.Mock) 
 }
 
 func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return m.getFilteredMocksByKindIn(m.exactView(), kind)
+}
+
+// getFilteredMocksByKindIn is GetFilteredMocksByKind read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getFilteredMocksByKindIn(v *exactView, kind models.Kind) ([]*models.Mock, error) {
 	// Fetch pointer safely; the tree itself is responsible for its own safety.
 	m.treesMu.RLock()
 	flt := m.filteredByKind[kind]
@@ -3237,7 +3773,7 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 		flt, _ = m.ensureKindTrees(kind)
 	}
 
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return m.exactPerTest(v, kind, v.shownOf(flt, "")), nil
 	}
 	results := make([]*models.Mock, 0, 64)
@@ -3251,6 +3787,12 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 }
 
 func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return m.getUnFilteredMocksByKindIn(m.exactView(), kind)
+}
+
+// getUnFilteredMocksByKindIn is GetUnFilteredMocksByKind read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getUnFilteredMocksByKindIn(v *exactView, kind models.Kind) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	unf := m.unfilteredByKind[kind]
 	m.treesMu.RUnlock()
@@ -3258,7 +3800,7 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 		_, unf = m.ensureKindTrees(kind)
 	}
 
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return v.reusable(kind, v.shownOf(unf, ""), v.shownOf(m.startupTree(), kind)), nil
 	}
 	results := make([]*models.Mock, 0, 128)
@@ -3277,6 +3819,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&mocks)
+	m.installRecordedOfKindLocked()
 	m.stampSet(mocks)
 	m.publishFiltered(m.buildTier(mocks, true), true)
 }
@@ -3401,6 +3944,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&mocks)
+	m.installRecordedOfKindLocked()
 	m.stampSet(mocks)
 	m.publishUnfiltered(m.buildTier(mocks, false), true)
 }
@@ -3482,22 +4026,14 @@ func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g
 	if served == nil {
 		served = old
 	}
-	if m.exactView() == nil {
-		if g.checks() {
-			g.refuse("exact serving is off")
-			return false
-		}
-		m.observeServed(new, g.flight())
-	} else {
-		// Under exact serving the served observer is told in the step that
-		// settles the consume, holding the round lock (exactConsumeAt).
-		switch m.exactConsumeAt(served, false, g, func() { m.observeServed(new, g.flight()) }) {
-		case exactServed:
-			return true
-		case exactRefused:
-			return false
-		}
-	}
+	return m.consumeAt(served, false, g,
+		func() bool { return m.updateUnFilteredTier(old, new) },
+		func() { m.observeServed(new, g.flight()) })
+}
+
+// updateUnFilteredTier files new over old in the session tier, and reports
+// whether it was consumed. It may run holding the round lock (consumeAt).
+func (m *MockManager) updateUnFilteredTier(old *models.Mock, new *models.Mock) bool {
 	if old != nil && m.stalePooled(old) {
 		return false
 	}
@@ -3612,6 +4148,12 @@ func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g
 		}
 	}
 
+	// One of the pool's, of any lifetime, answered a call, which a test's
+	// view may hide (noteKeptAnswer).
+	if updatedGlobal {
+		m.noteKeptAnswer(new)
+	}
+
 	// Bump revisions accurately:
 	// - global only if the global tree changed
 	// - per-kind only for kinds whose per-kind tree changed
@@ -3638,12 +4180,12 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 // deleteFilteredMock is DeleteFilteredMock, settled under exact serving only
 // while the store is at g's round when g is set (WithinRound).
 func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
-	switch m.exactConsumeValueAt(mock, true, g, true) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
-	}
+	return m.consumeValueAt(mock, true, g, true, m.deleteFilteredTier)
+}
+
+// deleteFilteredTier takes mock out of its tier, the per-test one first, and
+// reports whether it was consumed.
+func (m *MockManager) deleteFilteredTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
@@ -3788,12 +4330,12 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 // deleteUnFilteredMock is DeleteUnFilteredMock, settled under exact serving
 // only while the store is at g's round when g is set (WithinRound).
 func (m *MockManager) deleteUnFilteredMock(mock models.Mock, g *roundGuard) bool {
-	switch m.exactConsumeValueAt(mock, true, g, true) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
-	}
+	return m.consumeValueAt(mock, true, g, true, m.deleteUnFilteredTier)
+}
+
+// deleteUnFilteredTier takes mock out of the session tier, and reports
+// whether it was consumed.
+func (m *MockManager) deleteUnFilteredTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
@@ -3902,12 +4444,12 @@ func (m *MockManager) deleteStartupMock(mock models.Mock, g *roundGuard, observe
 		// The observer is told of no unnamed mock.
 		return false
 	}
-	switch m.exactConsumeValueAt(mock, true, g, observe) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
-	}
+	return m.consumeValueAt(mock, true, g, observe, m.deleteStartupTier)
+}
+
+// deleteStartupTier takes mock out of the startup tier, and reports whether
+// it was consumed.
+func (m *MockManager) deleteStartupTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
@@ -3924,6 +4466,16 @@ func (m *MockManager) deleteStartupMock(mock models.Mock, g *roundGuard, observe
 func (m *MockManager) stalePooled(mk *models.Mock) bool {
 	g := mk.TestModeInfo.StagedSet
 	return g != 0 && g != m.setGen.Load()
+}
+
+// stalePooledRead is stalePooled. read, when not nil, runs once the check
+// read the set generation, as it returns: keepOwned's test hook at the point
+// the claim's set is decided.
+func (m *MockManager) stalePooledRead(mk *models.Mock, read func()) bool {
+	if read != nil {
+		defer read()
+	}
+	return m.stalePooled(mk)
 }
 
 // deleteStartupMockFrom is deleteStartupMock on tree, the startup tier the
@@ -4135,6 +4687,101 @@ func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 	m.recordedWindows.Store(s)
 }
 
+// SeedBackgroundRecordings installs the set's background recordings
+// (models.MockFilterParams.BackgroundMocks, as the agent resolves them), by
+// kind, in recorded order: at once, or at a set boundary when that set's
+// staging call installs its trees (see testWindows). Read-only: never served,
+// never consumed. nil or empty installs none.
+func (m *MockManager) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
+	var byKind map[models.Kind][]models.BackgroundRecording
+	if len(recs) > 0 {
+		byKind = map[models.Kind][]models.BackgroundRecording{}
+		for _, r := range recs {
+			if r.Mock != nil {
+				byKind[r.Mock.Kind] = append(byKind[r.Mock.Kind], r)
+			}
+		}
+		for _, list := range byKind {
+			slices.SortStableFunc(list, func(a, b models.BackgroundRecording) int {
+				return a.Mock.Spec.ReqTimestampMock.Compare(b.Mock.Spec.ReqTimestampMock)
+			})
+		}
+	}
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	if m.boundaryPending {
+		m.backgroundSeeded = byKind
+		return
+	}
+	m.installBackgroundLocked(byKind, m.stagingEpoch.Load())
+}
+
+// backgroundInstall is one install of a set's background recordings by kind
+// (byKind, nil: none), in force from the staging epoch from on, and the
+// install it replaced (prev, which keeps none before it).
+type backgroundInstall struct {
+	from   uint64
+	byKind map[models.Kind][]models.BackgroundRecording
+	prev   *backgroundInstall
+}
+
+// installBackgroundLocked installs byKind as the background recordings in
+// force from the staging epoch from on, keeping the install it replaces
+// for the calls marked before from; one made within the epoch the install
+// in force took effect at replaces it there (a call marked in that epoch
+// reads the latest, as it did before). Holding swapMu.
+func (m *MockManager) installBackgroundLocked(byKind map[models.Kind][]models.BackgroundRecording, from uint64) {
+	in := &backgroundInstall{from: from, byKind: byKind}
+	if cur := m.background.Load(); cur != nil {
+		if cur.from < from {
+			in.prev = &backgroundInstall{from: cur.from, byKind: cur.byKind}
+		} else if cur.prev != nil {
+			in.prev = cur.prev
+		}
+	}
+	m.background.Store(in)
+}
+
+// BackgroundRecordings returns the current set's background recordings of
+// kind (integrations.BackgroundRecordingReader), in recorded order, whatever
+// the open view shows; nil when the set has none. The slice and its mocks
+// are shared: a caller reads them and changes nothing.
+func (m *MockManager) BackgroundRecordings(kind models.Kind) []models.BackgroundRecording {
+	return m.background.Load().of(kind)
+}
+
+// BackgroundRecordingsIn returns the background recordings of kind of the
+// set in force in the staging epoch call was marked in
+// (integrations.RoundBackgroundReader): the current set's, or the set's
+// before it for a call marked before the current set's install, which the
+// replay can stage before keploy decides the call. nil for a call marked
+// before both (it is read as no background call, and counts), and the
+// current set's for the zero CallRound.
+func (m *MockManager) BackgroundRecordingsIn(call integrations.CallRound, kind models.Kind) []models.BackgroundRecording {
+	in := m.background.Load()
+	if !call.Read() {
+		return in.of(kind)
+	}
+	for ; in != nil; in = in.prev {
+		if in.from <= call.Epoch() {
+			return in.of(kind)
+		}
+	}
+	return nil
+}
+
+func (in *backgroundInstall) of(kind models.Kind) []models.BackgroundRecording {
+	if in == nil {
+		return nil
+	}
+	return in.byKind[kind]
+}
+
+var (
+	_ integrations.BackgroundRecordingReader = (*MockManager)(nil)
+	_ integrations.RoundBackgroundReader     = (*MockManager)(nil)
+)
+
 // RecordedWindows returns the current set's recorded test windows, or nil when
 // the replayer sent none (mock replay, an older CLI, SetFilteredMocks-only
 // callers) or no kind registered a carry-over predicate: consumers then treat
@@ -4192,6 +4839,150 @@ func (m *MockManager) signalWindowChange() {
 	close(old)
 }
 
+// setEndFiler is one AtSetEnd registration.
+type setEndFiler struct {
+	id   uint64
+	kind models.Kind
+	file func(context.Context)
+}
+
+// setEndFilingBeat is how often a read of a set's end says, of a
+// registration it runs (FileAtSetEnd), that it has not returned yet
+// (watchSetEndFiling). A run files misses in-band and returns at once, or
+// once the read's context is done: a run still going after a beat holds the
+// read, and nothing else would say which parser does.
+var setEndFilingBeat = 5 * time.Second
+
+// newSetEndFilingTicker makes a watch's ticker (watchSetEndFiling), at the
+// beat: a test ticks it by hand.
+var newSetEndFilingTicker = time.NewTicker
+
+var _ integrations.SetEndFiler = (*MockManager)(nil)
+
+// SetReadsSetEnds says whether the replay session's client reads each of
+// its test sets' end with a set's end read (models.OutgoingOptions
+// .ReadsSetEnds). Proxy.Mock sets it on the run's manager alone, at each
+// session; a registration AtSetEnd took in an earlier session stays.
+func (m *MockManager) SetReadsSetEnds(reads bool) {
+	m.readsSetEnds.Store(reads)
+}
+
+// AtSetEnd implements integrations.SetEndFiler: file runs at each read of a
+// test set's end (FileAtSetEnd) until cancel. It registers nothing and says
+// !ok where no read of a set's end will run it: on a test worker's manager,
+// which no such read asks; in a session whose client makes no such read
+// (SetReadsSetEnds); on a closed manager; and for a nil file. It takes none
+// with an empty kind either: the log names the parser by it.
+func (m *MockManager) AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool) {
+	if file == nil || kind == "" || m.notAtSetEnd.Load() || !m.readsSetEnds.Load() || m.IsClosed() {
+		return func() {}, false
+	}
+	m.setEndMu.Lock()
+	defer m.setEndMu.Unlock()
+	m.setEndNext++
+	id := m.setEndNext
+	m.setEndFilers = append(m.setEndFilers, setEndFiler{id: id, kind: kind, file: file})
+	return func() {
+		m.setEndMu.Lock()
+		defer m.setEndMu.Unlock()
+		m.setEndFilers = slices.DeleteFunc(m.setEndFilers, func(f setEndFiler) bool { return f.id == id })
+	}, true
+}
+
+// FileAtSetEnd runs, once each and in the order they were made, the
+// registrations AtSetEnd held when it began, and returns once all have
+// returned: each has filed the misses of the calls its connection holds for
+// a test of the set, so a read of the misses made after it takes them. It
+// runs them with setEndMu released, so a registration may file in-band and
+// cancel itself or another. One cancelled before this read reaches it is
+// not run by it; one made while they run is not run by this read. Each is
+// handed ctx, the read's, and stops waiting once it is done. Nothing here
+// makes one return: while one runs, a warning at each beat it has not
+// returned through names its parser (watchSetEndFiling).
+//
+// The error says the read cannot take every such miss: a registration
+// panicked (recovered here, so the others still run and the read says why,
+// naming its parser, not a dropped connection), or ctx was done by the time
+// those it ran returned, and one may have returned before it filed. With
+// none run, nothing is left unfiled: nil.
+func (m *MockManager) FileAtSetEnd(ctx context.Context) error {
+	m.setEndMu.Lock()
+	filers := slices.Clone(m.setEndFilers)
+	m.setEndMu.Unlock()
+	var panicked []string
+	ran := false
+	for _, f := range filers {
+		if !m.setEndRegistered(f.id) {
+			continue
+		}
+		ran = true
+		if p := m.runSetEndFiler(ctx, f); p != nil {
+			panicked = append(panicked, fmt.Sprintf("%s: %v", f.kind, p))
+		}
+	}
+	if len(panicked) > 0 {
+		return fmt.Errorf("a parser panicked filing the calls it holds for a test of the set: %s", strings.Join(panicked, "; "))
+	}
+	if !ran {
+		return nil
+	}
+	return ctx.Err()
+}
+
+// runSetEndFiler runs one registration, recovering its panic: what it
+// panicked with, or nil.
+func (m *MockManager) runSetEndFiler(ctx context.Context, f setEndFiler) (panicked any) {
+	defer m.watchSetEndFiling(ctx, f.kind)()
+	defer func() {
+		if p := recover(); p != nil {
+			m.logger.Error("a parser panicked filing, at the test set's end read, the calls it holds for a test of the set; the read is not judged",
+				zap.String("kind", string(f.kind)), zap.Any("panic", p), zap.Stack("stack"))
+			panicked = p
+		}
+	}()
+	f.file(ctx)
+	return nil
+}
+
+// watchSetEndFiling warns, at each beat (setEndFilingBeat) until the
+// returned stop is called, that kind's registration has not returned: how
+// many beats it has run through, and whether the read's context is done by
+// then (a parser that ignores it holds the read on). It is a count of beats,
+// not a verdict: it changes nothing of the read, which waits as it would
+// without it. stop returns once the watch has ended, so no warning follows
+// it.
+func (m *MockManager) watchSetEndFiling(ctx context.Context, kind models.Kind) (stop func()) {
+	done := make(chan struct{})
+	ended := make(chan struct{})
+	beat := setEndFilingBeat
+	ticker := newSetEndFilingTicker(beat)
+	go func() {
+		defer close(ended)
+		defer ticker.Stop()
+		for beats := 1; ; beats++ {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+			m.logger.Warn(fmt.Sprintf("set-end filing for %s has not returned after %s", kind, time.Duration(beats)*beat),
+				zap.String("kind", string(kind)), zap.Int("beats", beats), zap.Duration("beat", beat),
+				zap.Bool("readContextDone", ctx.Err() != nil))
+		}
+	}()
+	return func() {
+		close(done)
+		<-ended
+	}
+}
+
+// setEndRegistered reports whether registration id is not cancelled yet.
+func (m *MockManager) setEndRegistered(id uint64) bool {
+	m.setEndMu.Lock()
+	defer m.setEndMu.Unlock()
+	return slices.ContainsFunc(m.setEndFilers, func(f setEndFiler) bool { return f.id == id })
+}
+
 // MarkMockAsUsed marks the given mock as used (consumed) without modifying
 // its sort order or removing it from any tree. This is intended for parsers
 // (e.g. mongo v2) that need to record mock usage without changing mock ordering.
@@ -4212,13 +5003,25 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		// The observer is told of no unnamed mock.
 		return false
 	}
-	switch m.exactConsumeValueAt(mock, false, g, true) {
-	case exactServed:
-		return true
-	case exactRefused:
+	// What the tier reads of the staging (learnedAfterEndPrepared), prepared
+	// before the door: that takes swapMu, which nothing holding the round
+	// lock takes, and the tier may run holding it.
+	if provenswitch.On() && m.exact.learnEnded.Load() {
+		m.prepareOutside()
+	}
+	return m.consumeValueAt(mock, false, g, true, m.markUsedTier)
+}
+
+// markUsedTier records mock's use, and reports whether it was consumed. It
+// may run holding the round lock (consumeAt). A consume a view settles itself
+// never gets here, so a test's own mock, which the staging does not hold, is
+// never read against the staging.
+func (m *MockManager) markUsedTier(mock models.Mock) bool {
+	if m.stalePooled(&mock) {
 		return false
 	}
-	if m.stalePooled(&mock) {
+	learned, ok := m.learnedAfterEndPrepared(&mock)
+	if !ok {
 		return false
 	}
 	m.bumpHitCount(mock.Name, mock.Kind)
@@ -4246,7 +5049,7 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		Binds:     bindsOf(mock.Spec),
 		// Learning the consume carries beyond what exact serving handed
 		// the parser out, once the set's learn step ended.
-		LearnedAfterEnd: m.learnedAfterEndNamed(&mock),
+		LearnedAfterEnd: learned,
 		// A registered kind's per-test mock consumed outside the current
 		// window (a server push delivered late) belongs to its own window.
 		CarryOver: m.consumedOutOfWindow(mock),
@@ -4257,9 +5060,13 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		return false
 	}
 	// A per-test recording this door keeps (HTTP's stateful one, kept for
-	// its test's repeats) answered a call too (FindAnsweredEarlier).
+	// its test's repeats) answered a call too (FindAnsweredEarlier), and so
+	// did one of the pool's of any other lifetime, which a test's view may
+	// hide (noteKeptAnswer).
 	if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
 		m.noteAnswered(mock)
+	} else {
+		m.noteKeptAnswer(&mock)
 	}
 	return true
 }
@@ -4435,6 +5242,48 @@ func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 	m.servedObserver.Store(&f)
 }
 
+// ServedAsOwnOrStartup reports whether mk is the open test's own recording in
+// the view in force (one its view holds as its own: its mapping's, in flight
+// into it, shared with it; never its worker: scope's or the background
+// pool's; and none while a pool view, which is no test's, is in force, even
+// one holding the next test's recordings ahead) or one of the set's start-up
+// recordings (startupNames), whatever the view. It is ServeOwnerOf's
+// learn.OwnerTest, which the learn tracker files each serve by
+// (learn.Tracker.SetServeOwnerOf); judging and a replay check a call against
+// such a recording in a span those serves start (learn.Tracker.LiveSpanOf).
+// It runs while a serve holds the round lock and reads the view and the
+// names atomically: it takes no lock and never calls back into the manager.
+func (m *MockManager) ServedAsOwnOrStartup(mk *models.Mock) bool {
+	return m.ServeOwnerOf(mk) == learn.OwnerTest
+}
+
+// ServeOwnerOf is ServedAsOwnOrStartup with what the store cannot say told
+// apart from what it says no to (learn.Tracker.SetServeOwnerOf):
+// learn.OwnerTest where that says yes (a start-up recording whatever the
+// view); learn.OwnerOther where a test's view is in force and does not hold
+// mk as its own (a worker: scope's, the background's, another test's);
+// learn.OwnerUnknown where no test's view is in force (none yet, or a pool
+// view) and mk is no start-up recording, or mk has no name. It reads the
+// view once, under the same rules.
+func (m *MockManager) ServeOwnerOf(mk *models.Mock) learn.ServeOwner {
+	if m == nil || mk == nil || mk.Name == "" {
+		return learn.OwnerUnknown
+	}
+	if names := m.startupNames.Load(); names != nil {
+		if _, ok := (*names)[mk.Name]; ok {
+			return learn.OwnerTest
+		}
+	}
+	v := m.exactView()
+	switch {
+	case v == nil || v.test == "":
+		return learn.OwnerUnknown
+	case v.holds(mk.Name) && !v.isWorker(mk.Name) && !v.bg.has(mk.Name):
+		return learn.OwnerTest
+	}
+	return learn.OwnerOther
+}
+
 // SetServedInObserver sets the observer told, instead of the served
 // observer, of a mock served in a request its parser said (ServingFor);
 // nil clears it. The same rules as SetServedObserver's hold.
@@ -4485,18 +5334,16 @@ func (m *MockManager) SetTrackerSetAt(f func() uint64) {
 	m.trackerSetAt.Store(&f)
 }
 
-// observeServed tells the served observer of mock before a parser's claim
-// takes it out of the pool, so a request reading the pool and then the
-// observer's record never finds it in neither (the learn step's earlier
-// places). A claim that then fails was another connection's serve of the
-// same mock: the observer is told of a mock that was served either way.
-// Under exact serving it is told once the view settled the consume as a
-// serve, in the step that takes it and holding the round lock
-// (exactConsumeAt), and never of a consume the view refused: nothing served
-// that one. There the take comes first, so only a reader that reads both
-// under that lock (RoundSnapshot) never finds the mock in neither; no reader
-// reads them without it, and none may. in is the request it is served in, as
-// its parser said (nil: not said).
+// observeServed tells the served observer of mock, a consume that went
+// through: its consume door calls it only once the consume succeeded
+// (consumeAt), never for one the view or the tier refused, since nothing
+// served that one. A parser asks again after a refusal, and the learn tracker
+// numbers every serve it hears in F's order of the set, so one told early
+// reads as a serve the application never got. Under exact serving it is told
+// in the step that settles the consume, holding the round lock, with the take
+// before it, so only a reader that reads both under that lock (RoundSnapshot)
+// never finds the mock in neither; no reader reads them without it, and none
+// may. in is the request it is served in, as its parser said (nil: not said).
 //
 // With an observer (the served-in observer for a said request, else the
 // served observer), the serve is then filed in the open test's view
@@ -4512,6 +5359,7 @@ func (m *MockManager) observeServed(mock *models.Mock, in *learn.Flight) {
 	if mock == nil || mock.Name == "" {
 		return
 	}
+	m.noteServe(mock)
 	if in != nil {
 		if f := m.servedInObserver.Load(); f != nil {
 			v := m.exactView()
@@ -4527,12 +5375,38 @@ func (m *MockManager) observeServed(mock *models.Mock, in *learn.Flight) {
 	}
 }
 
+// SetServeClock makes m note every serve to c from now on (nil: none),
+// with the proven switch off: a call's span for the background check
+// (learn.CallSpanOf, learn.ServeClock). The proxy sets it on every manager
+// it serves with, the switch off.
+func (m *MockManager) SetServeClock(c *learn.ServeClock) {
+	m.serveClock.Store(c)
+}
+
+// noteServe notes a serve of mock to the serve clock, where one is set
+// (SetServeClock), but not a protocol phase's (a connection's handshake):
+// the call that opened the connection read its clock before the handshake
+// was served, so the handshake starts no call's span, as the learn tracker
+// files no protocol phase's serve.
+func (m *MockManager) noteServe(mock *models.Mock) {
+	if c := m.serveClock.Load(); c != nil && !mock.IsProtocolPhase() {
+		c.Served()
+	}
+}
+
 // observeServedCopy is observeServed of a mock a door took by value: the
 // observer keeps a copy of its own, made only when there is an observer (the
 // proven switch), so the door's mock does not move to the heap without one.
 func (m *MockManager) observeServedCopy(mock models.Mock, in *learn.Flight) {
 	if mock.Name == "" {
 		return
+	}
+	// The serve clock (the switch off) reads a copy of its own, made only
+	// when it is set: reading the door's mock would move it to the heap.
+	if c := m.serveClock.Load(); c != nil {
+		if cp := mock; !cp.IsProtocolPhase() {
+			c.Served()
+		}
 	}
 	if in != nil {
 		if f := m.servedInObserver.Load(); f != nil {
@@ -4641,28 +5515,33 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 		m.consumedMu.Unlock()
 		return errPreviousSet
 	}
-	// Under the proven switch what record's full round learned onto a mock
-	// is cumulative across its states: a reusable recording the learn step
-	// pairs twice keeps both pairings' variables, binds and noise, whichever
-	// door each left through (a door that keeps the pool's copy, as
-	// MarkMockAsUsed does, hands the second pairing a copy without the
-	// first's).
-	if provenswitch.On() {
-		var prev models.MockState
-		var ok bool
-		if m.consumedPersistent != nil {
-			prev, ok = m.consumedPersistent[mock.Name]
-		} else if idx, exists := m.consumedIndex[mock.Name]; exists {
-			prev, ok = m.consumedList[idx], true
-		}
-		if ok {
-			mock.Variables = models.MergeVariables(prev.Variables, mock.Variables)
-			mock.Clocks = models.MergeClocks(prev.Clocks, mock.Clocks)
-			mock.Binds = models.MergeBinds(prev.Binds, mock.Binds)
-			if len(prev.ReqBodyNoise) > 0 {
-				mock.ReqBodyNoise = mocknoise.MergeLearned(mock.ReqBodyNoise, prev.ReqBodyNoise)
-			}
-		}
+	// What a reusable mock learns is cumulative across its states, because the
+	// match path can pair it more than once and some doors hand the later
+	// pairing the pool's copy (as MarkMockAsUsed does) rather than one carrying
+	// the earlier pairing's learning — so a later, emptier state would otherwise
+	// overwrite and drop it.
+	var prev models.MockState
+	var havePrev bool
+	if m.consumedPersistent != nil {
+		prev, havePrev = m.consumedPersistent[mock.Name]
+	} else if idx, exists := m.consumedIndex[mock.Name]; exists {
+		prev, havePrev = m.consumedList[idx], true
+	}
+	// Request-body noise merges regardless of the proven switch: HTTP/2 and gRPC
+	// both reach here through the pool-copy door, so without this a second clean
+	// hit on a reusable stream loses the noise an earlier drifting hit learned
+	// (Mongo is unaffected — it writes noise through UpdateUnFilteredMock first).
+	// The new state's own learning wins on conflicting paths; prior-only paths
+	// are carried forward.
+	if havePrev && len(prev.ReqBodyNoise) > 0 {
+		mock.ReqBodyNoise = mocknoise.MergeLearned(mock.ReqBodyNoise, prev.ReqBodyNoise)
+	}
+	// Variables/clocks/binds stay proven-switch-gated: that is where record's
+	// full-round learning accumulates them across a reusable recording's pairings.
+	if provenswitch.On() && havePrev {
+		mock.Variables = models.MergeVariables(prev.Variables, mock.Variables)
+		mock.Clocks = models.MergeClocks(prev.Clocks, mock.Clocks)
+		mock.Binds = models.MergeBinds(prev.Binds, mock.Binds)
 	}
 	if inScope && m.scopeConsumed != nil {
 		m.scopeConsumed[mock.Name] = struct{}{}
@@ -4930,7 +5809,14 @@ func (m *MockManager) dropPreviousSetConsumes() {
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
 	}
+	// What the previous set's calls taught its recordings is not this
+	// set's: recordings' names restart in each set. Its count is said
+	// first, if no read of the round's learning said it.
+	m.learnedElsewhere = nil
+	unsaid := m.unsaidElsewhereCounts()
+	m.elsewhereCounts, m.elsewhereCounted, m.elsewhereSaid = nil, 0, 0
 	m.consumedMu.Unlock()
+	m.sayElsewhereCounts(unsaid)
 	m.bootTakenMu.Lock()
 	m.bootTaken = nil
 	m.bootTakenMu.Unlock()
@@ -5100,7 +5986,13 @@ func (m *MockManager) CarryOverLoadRange(start time.Time) (from, to time.Time, o
 // and consumes them through DeleteFilteredMock. Empty while nothing is
 // registered.
 func (m *MockManager) GetCarryOverMocks() ([]*models.Mock, error) {
-	if v := m.exactView(); v != nil {
+	return m.getCarryOverMocksIn(m.exactView())
+}
+
+// getCarryOverMocksIn is GetCarryOverMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getCarryOverMocksIn(v *exactView) ([]*models.Mock, error) {
+	if v != nil {
 		return v.keep(m.carry.snapshot("")), nil
 	}
 	return m.carry.snapshot(""), nil
@@ -5108,7 +6000,13 @@ func (m *MockManager) GetCarryOverMocks() ([]*models.Mock, error) {
 
 // GetCarryOverMocksByKind is GetCarryOverMocks for one kind.
 func (m *MockManager) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	if v := m.exactView(); v != nil {
+	return m.getCarryOverMocksByKindIn(m.exactView(), kind)
+}
+
+// getCarryOverMocksByKindIn is GetCarryOverMocksByKind read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getCarryOverMocksByKindIn(v *exactView, kind models.Kind) ([]*models.Mock, error) {
+	if v != nil {
 		return v.keep(m.carry.snapshot(kind)), nil
 	}
 	return m.carry.snapshot(kind), nil

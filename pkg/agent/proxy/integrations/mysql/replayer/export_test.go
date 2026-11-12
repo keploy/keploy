@@ -2,12 +2,17 @@ package replayer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
+	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -53,6 +58,16 @@ func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.R
 	return resp, ok, missText, err
 }
 
+// MatchShownForTest is MatchForTest that also returns the live command as
+// the miss's report shows it (mockMiss.liveCommand), "" with no miss.
+func MatchShownForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext) (bool, string, string, error) {
+	_, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, nil, nil)
+	if miss == nil {
+		return ok, "", "", err
+	}
+	return ok, fmt.Sprintf("%+v", *miss), miss.liveCommand(req.Message, dctx), err
+}
+
 // MatchWithNoiseConfigForTest is MatchForTest with the user's noise
 // configuration (test.globalNoise), its requestBody bucket read as the
 // command phase reads it (requestBodyNoise).
@@ -79,6 +94,16 @@ func MatchCommandExaminedForTest(ctx context.Context, req mysql.Request, db inte
 	return resp, ok, examined, err
 }
 
+// MatchCommandWalkForTest is MatchCommandExaminedForTest with whole walking a
+// COM_STMT_EXECUTE's candidates on past a definitive match no later candidate
+// can outrank (matchOptions.wholeWalk), as the matcher did before it ended
+// the walk there: the reference a row counts the ended walk against.
+func MatchCommandWalkForTest(ctx context.Context, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, whole bool) (*mysql.Response, bool, int, error) {
+	examined := 0
+	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, nil, nil, matchOptions{wholeWalk: whole, examined: &examined})
+	return resp, ok, examined, err
+}
+
 // MatchCommandBodiesForTest is MatchCommandForTest that also returns how many
 // live request bodies the command built (matchOptions.bodiesBuilt). With eager
 // it builds the body before the scan, as the matcher did before it built the
@@ -91,6 +116,36 @@ func MatchCommandBodiesForTest(ctx context.Context, logger *zap.Logger, req mysq
 		missText = fmt.Sprintf("%+v", *miss)
 	}
 	return resp, ok, missText, built, err
+}
+
+// MatchCommandGateForTest is MatchCommandForTest that also returns how many
+// candidates the strict gate compared with the live request
+// (matchOptions.compared). With eager the gate decides on each fallback of a
+// COM_STMT_EXECUTE as the walk meets it and walks on past a definitive match
+// no later candidate can outrank, as the matcher did before it deferred the
+// gate past the walk and ended the walk there (matchOptions.eagerGate,
+// matchOptions.wholeWalk).
+func MatchCommandGateForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, eager bool) (*mysql.Response, bool, string, int, error) {
+	compared := 0
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{compared: &compared, eagerGate: eager, wholeWalk: eager})
+	missText := ""
+	if miss != nil {
+		missText = fmt.Sprintf("%+v", *miss)
+	}
+	return resp, ok, missText, compared, err
+}
+
+// MatchCommandDocsForTest is MatchCommandGateForTest that also returns how
+// many live bodies the strict gate gave the engine to compare
+// (matchOptions.docsMade), and how many times the engine validated or
+// decoded them, summed (mocknoise.JSONBody.Reads).
+func MatchCommandDocsForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, eager bool) (compared, docs, reads int, err error) {
+	var made []*mocknoise.JSONBody
+	_, _, _, err = matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{compared: &compared, docsMade: &made, eagerGate: eager, wholeWalk: eager})
+	for _, d := range made {
+		reads += d.Reads()
+	}
+	return compared, len(made), reads, err
 }
 
 // NoiseEngineForTest is the schema-noise engine matchCommand runs with, with
@@ -160,4 +215,212 @@ func CountUnnamedExecKeysForTest(f func()) int {
 	defer func() { unnamedExecIndex.Keys = keys }()
 	f()
 	return int(n.Load())
+}
+
+// HandshakeDstForTest is the server the recorded handshakes of this
+// package's tests were recorded for (their destAddr).
+const HandshakeDstForTest = testDBAddr
+
+// HandshakeMockForTest is a recorded native-password login that the server
+// let in (nativeHandshake), named mock-0: the greeting, the client's
+// HandshakeResponse41 and the OK.
+func HandshakeMockForTest() *models.Mock { return nativeHandshake() }
+
+// ClientHandshakeForTest is the client's HandshakeResponse41 the recorded
+// handshakes of this package's tests hold (clientHandshake), by user app.
+func ClientHandshakeForTest() *mysql.HandshakeResponse41Packet {
+	return clientHandshake("app", mysql.Native)
+}
+
+// SwitchedHandshakeForTest is a recorded native-password login that the
+// server let in after asking the client to switch (switchedHandshake), named
+// mock-0: the client's AuthSwitchResponse is recorded by its length, n bytes,
+// only (mysqlUtils.ClientAuthData), as the recorder holds it.
+func SwitchedHandshakeForTest(n int) *models.Mock {
+	m := switchedHandshake(okAnswer(4))
+	m.Spec.MySQLRequests[1] = authData(3, n, mysql.AuthSwithResponse)
+	return m
+}
+
+// FullAuthHandshakeForTest is a recorded caching_sha2_password login in full
+// without TLS that the server let in (fullAuthHandshake), named mock-0: the
+// client's encrypted password is recorded by its length, n bytes, only.
+func FullAuthHandshakeForTest(n int) *models.Mock {
+	m := fullAuthHandshake(okAnswer(6))
+	m.Spec.MySQLRequests[2] = authData(5, n, mysql.EncryptedPassword)
+	return m
+}
+
+// authData is a packet of n bytes of authentication data of type typ,
+// numbered seq, as a recording holds it (mysqlUtils.ClientAuthData).
+func authData(seq uint8, n int, typ string) mysql.Request {
+	return mysqlUtils.ClientAuthData(mysql.Packet{Header: mysql.Header{PayloadLength: uint32(n), SequenceID: seq}, Payload: make([]byte, n)}, typ)
+}
+
+// NativeHandshakeForTest is the recorded handshake of a native-password
+// login (nativeHandshake), for this package's external tests.
+func NativeHandshakeForTest() *models.Mock { return nativeHandshake() }
+
+// ReplayCommandsForTest serves one client connection from db as the proxy
+// does (replay): the client logs in as NativeHandshakeForTest recorded, then
+// sends each command payload and reads the first packet of its reply, but
+// for the last command's, which it leaves unread. It returns those packets,
+// and what Replay returns once it ends the connection.
+func ReplayCommandsForTest(t *testing.T, db integrations.MockMemDb, commands ...[]byte) ([][]byte, <-chan error) {
+	t.Helper()
+	client, done := replay(t, db)
+	client.greetAndAnswer("app", mysql.Native)
+	if ok := client.read(); len(ok) == 0 || ok[0] != mysql.OK {
+		t.Fatalf("the client read % x after its handshake; want the recorded OK", ok)
+	}
+	var replies [][]byte
+	for i, cmd := range commands {
+		client.send(0, cmd)
+		if i < len(commands)-1 {
+			replies = append(replies, client.read())
+		}
+	}
+	return replies, done
+}
+
+// CheckDecodedBodies turns on, for the rest of the package's run, the check
+// of every recorded request body the strict gate makes decoded
+// (mysqlRequestJSONBody): it must be what json.Unmarshal makes of
+// mysqlRequestBody's bytes, or the check panics. A message is checked once
+// per reading (its statement parameter count and statement), as its body is
+// the same for each.
+func CheckDecodedBodies() {
+	decodedBodyCheck = checkDecodedBody
+}
+
+// DecodedBodiesChecked is how many decoded bodies the check compared.
+func DecodedBodiesChecked() int64 {
+	return decodedBodiesChecked.Load()
+}
+
+type decodedBodyReading struct {
+	message         any
+	statementParams int
+	query           string
+}
+
+var (
+	decodedBodiesSeen    sync.Map
+	decodedBodiesChecked atomic.Int64
+)
+
+func checkDecodedBody(message any, statementParams int, query string, doc map[string]any, decoded any) {
+	if message != nil && reflect.TypeOf(message).Comparable() {
+		if _, seen := decodedBodiesSeen.LoadOrStore(decodedBodyReading{message, statementParams, query}, struct{}{}); seen {
+			return
+		}
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		panic(fmt.Sprintf("a body made decoded does not encode: %v (decoded %#v)", err, decoded))
+	}
+	var want any
+	if err := json.Unmarshal(raw, &want); err != nil {
+		panic(fmt.Sprintf("a body made decoded encodes to %s, which does not decode: %v", raw, err))
+	}
+	if !reflect.DeepEqual(want, decoded) {
+		panic(fmt.Sprintf("a body made decoded is not what its bytes decode to:\nbytes   %s\ndecoded %#v\nwant    %#v", raw, decoded, want))
+	}
+	decodedBodiesChecked.Add(1)
+}
+
+// ForgetAnsweredForTest drops the places the recordings answered in a test
+// window of a store that keeps nothing left (unkeptAnswered), so a row
+// starts with none; a store that keeps its note (integrations.Keep) starts
+// with none of its own.
+func ForgetAnsweredForTest() {
+	unkeptAnswered.mu.Lock()
+	defer unkeptAnswered.mu.Unlock()
+	unkeptAnswered.held, unkeptAnswered.places = false, redactedPlaces{}
+}
+
+// AnswerForTest notes the places m redacted as answered in db's open test
+// window, as an answer does before it takes m out of db's pool
+// (updateMock).
+func AnswerForTest(db integrations.MockMemDb, m *models.Mock) {
+	answeredNote(db).add(db, placesOf(m))
+}
+
+// AnsweredShownForTest is the live statement sql as a command matched in
+// the window of start is shown by the places of the recordings that
+// answered there (answeredPlaces): redacted whole when db tells another
+// window.
+func AnsweredShownForTest(db integrations.MockMemDb, start time.Time, sql string) string {
+	return answeredPlaces(db, start).liveStatement(sql)
+}
+
+// AnsweredSlotForTest is the slot a store keeps its answered note in.
+func AnsweredSlotForTest() any { return answeredKey{} }
+
+// AnsweredNoteFreeForTest reports whether db's answered note is free: no
+// add, read or release holds it.
+func AnsweredNoteFreeForTest(db integrations.MockMemDb) bool {
+	w := answeredNote(db)
+	if !w.mu.TryLock() {
+		return false
+	}
+	w.mu.Unlock()
+	return true
+}
+
+// ForgetPlacesForTest drops every recording's places kept (placesKept), so
+// a row reads each recording of its pool again.
+func ForgetPlacesForTest() {
+	placesKept.mu.Lock()
+	defer placesKept.mu.Unlock()
+	placesKept.byKey, placesKept.bytes = map[placesDigest]keptEntry{}, 0
+}
+
+// PlacesReadsForTest is how many recordings were read for their places
+// (placesReads) since the process started.
+func PlacesReadsForTest() int64 { return placesReads.Load() }
+
+// TxControlForTest is txControlOf's verdict on req: "begin", "end", "reset"
+// or "none".
+func TxControlForTest(req mysql.Request) string {
+	switch txControlOf(req) {
+	case txBegin:
+		return "begin"
+	case txEnd:
+		return "end"
+	case txReset:
+		return "reset"
+	}
+	return "none"
+}
+
+// StartSessionForTest begins d's session as one the server greeted with the
+// status flags status (startSession).
+func StartSessionForTest(d *wire.DecodeContext, status uint16) {
+	startSession(d, &mysql.HandshakeV10Packet{StatusFlags: status})
+}
+
+// MatchBoundExaminedForTest is MatchBoundForTest's match with no full scan
+// asked for, that also returns how many candidates the scan visited
+// (matchOptions.examined).
+func MatchBoundExaminedForTest(ctx context.Context, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext) (*mysql.Response, bool, int, error) {
+	var served servedRecording
+	examined := 0
+	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, nil, nil, matchOptions{served: &served, examined: &examined})
+	bindAfter(dctx, req, served)
+	return resp, ok, examined, err
+}
+
+// MatchBoundForTest is MatchCommandForTest that keeps the live connection's
+// transaction and its binding as matchCommand does (bindAfter), so a test can
+// check that the full scan answers a bound transaction as the first pass does.
+func MatchBoundForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, fullScan bool) (*mysql.Response, bool, string, error) {
+	var served servedRecording
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, nil, nil, matchOptions{fullScan: fullScan, served: &served})
+	bindAfter(dctx, req, served)
+	missText := ""
+	if miss != nil {
+		missText = fmt.Sprintf("%+v", *miss)
+	}
+	return resp, ok, missText, err
 }

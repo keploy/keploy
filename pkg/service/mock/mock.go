@@ -50,7 +50,7 @@ type mockService struct {
 	// claims are, under the proven switch, the run's claims (windows with
 	// Claim set), which readWindows takes out of the windows it returns: a
 	// record tags each pool mock with the key of the claim it was made
-	// under (claimKeyAt).
+	// under (claimKeyOf).
 	claims []models.ScopeWindow
 	// refusals are, under the proven switch, what the run's wire refused
 	// (windows with Refused set), which readWindows takes out of the
@@ -72,6 +72,28 @@ type mockService struct {
 	// pushProvenTable: the receipt names, on a test's miss that is another
 	// test's recording, that test (withRecordedIn).
 	mockOwners map[string][]string
+	// skippedReadOf is, under the proven switch, each read of a test the
+	// replay's gate skips that pushProvenTable moved to the worker scope,
+	// with that test (skippedReads' moved): the receipt names, on a miss one
+	// past such a read (models.RepeatNote.SkippedRead), its test
+	// (withSkippedTest).
+	skippedReadOf map[string]string
+	// series is, under the proven switch, each series a declared rule
+	// placed in the worker scope (models.MockEntry.Series), as
+	// pushProvenTable read the set's mappings: each is required once per run
+	// when it is due (requiredNotMade).
+	series map[string]seriesDue
+	// placed is, as series is, every series a declared rule (or keploy
+	// record's own trail move) placed in the worker scope, the ones served,
+	// not required, among them (placedSeries): what the run's RULE USED
+	// lines count.
+	placed map[string]seriesDue
+	// repeats is what the run's end read of how many calls in tests each
+	// series answered past its recorded count (readSeriesRepeats).
+	repeats seriesRepeats
+	// seriesRead is what the agent consumed that the wait for the series the
+	// run owes read (awaitRequiredSeries), before the run's end's read.
+	seriesRead []models.MockState
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil
@@ -144,8 +166,10 @@ func (m *mockService) setName() string {
 
 // agentEpilogueTimeout bounds, with the proven switch off, every agent read
 // made AFTER the wrapped runner has exited: the consumed/missed outcome, the
-// PID-map count and the captured-on-miss drain (epilogueRead), and the
-// per-test scope windows (readWindows). Under the switch those reads are what
+// PID-map count and the captured-on-miss drain (epilogueRead), and a
+// record's per-test scope windows (agentWindows). A replay's windows are
+// never bounded: whatever the switch, they carry the begins keploy refused,
+// which fail the run (readWindows). Under the switch those reads are what
 // keploy's verdict rests on, and none has a deadline (design rule 15): the
 // agent's answer, the connection's close or the run's context ends each, and
 // the user ends the epilogueRead ones at a second interrupt.
@@ -205,7 +229,12 @@ func (m *mockService) isDockerCompose() bool {
 // healthcheck, and that healthcheck only passes once keploy posts /agent/ready.
 // This function therefore waits only for the agent to become REACHABLE; the
 // app stays parked at its healthcheck until the caller has armed the proxy.
-func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group, phase string) (chan models.AppError, error) {
+//
+// stopNoticeFrom, for a recording, is the user's context (Record's parent):
+// the project then runs on runUntilStopNoted's context, so the user's stop is
+// told to the agent before the project is torn down, as the native command's
+// is. A replay passes nil: it records nothing, and the project runs on ctx.
+func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group, phase string, stopNoticeFrom context.Context) (chan models.AppError, error) {
 	if !m.isDockerCompose() {
 		return nil, nil
 	}
@@ -228,12 +257,16 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 		exit := models.AppError{AppErrorType: models.ErrInternal, Err: errors.New("the app runner panicked")}
 		defer utils.Recover(m.logger)
 		defer func() { appExit <- exit }()
-		exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		if stopNoticeFrom != nil {
+			exit = m.runStopNoted(stopNoticeFrom, ctx)
+		} else {
+			exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		}
 		return nil
 	})
 
 	m.logger.Info("waiting for the keploy-agent compose service to come up",
-		zap.String("agent-uri", m.config.Agent.AgentURI))
+		zap.String("agent-uri", pkg.ShownAgentURI(m.config.Agent.AgentURI)))
 
 	// The wait follows the agent container's BOOT, which is exactly what this
 	// waits on, as keploy record's same wait does: it lasts while the start
@@ -245,7 +278,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 	agentCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	agentReadyCh := make(chan bool, 1)
-	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh, time.Second)
+	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh)
 	agentStart := pkg.WatchAgentStart(agentCtx, m.instrumentation)
 
 	select {
@@ -304,6 +337,16 @@ func (m *mockService) composeAgentFailure() error {
 	return reader.ComposeAgentFailure()
 }
 
+// composeEnd is what ended a compose recording when the test command's own
+// end, appExit, does not stand, or nil. See ComposeEndReader.
+func (m *mockService) composeEnd(appExit int) error {
+	reader, ok := m.instrumentation.(ComposeEndReader)
+	if !ok || !m.isDockerCompose() {
+		return nil
+	}
+	return reader.ComposeEndAfterReady(appExit)
+}
+
 // releaseComposeApp releases the app service, which has been parked at its
 // healthcheck ever since startComposeApp brought the project up.
 //
@@ -328,6 +371,68 @@ func (m *mockService) releaseComposeApp(ctx context.Context) error {
 	// (MakeAgentReadyForDockerCompose), so an agent that dies between the
 	// health check and this call does not stall the run.
 	return m.instrumentation.MakeAgentReadyForDockerCompose(ctx)
+}
+
+// stopBeganNotifier is an Instrumentation that can tell the agent a
+// recording's stop has begun (the agent client's NotifyStopBegun).
+type stopBeganNotifier interface {
+	NotifyStopBegun(ctx context.Context) error
+}
+
+// runUntilStopNoted returns the context the recorded test command runs on,
+// with ctx's values, and ran, which releases it once the command's run has
+// returned. ctx is parent's child (the recording's errgroup context). A stop
+// of the user's (parent ends: Ctrl+C, or the record timer's stop) ends the
+// command only once the agent has been told the recording's stop has begun,
+// so the calls the command still has in flight are cut by a stop the agent
+// knows of, and record no fault; ended with the stop, the command was killed
+// first, and a call it had open was recorded as the application's giving up.
+// keploy's own failure (ctx ends, parent does not) ends the command at once,
+// with no notice: no stop of the user's began.
+//
+// One callback on ctx's end decides both, in that order: parent's end ends
+// ctx too, and a context's Err is set before its children end, so the
+// callback reads whose end it is; the notice, when there is one, returns
+// before the command's context ends, with no second callback to race it.
+func (m *mockService) runUntilStopNoted(parent, ctx context.Context) (runCtx context.Context, ran func()) {
+	runCtx, stopRun := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, func() {
+		if parent.Err() != nil {
+			m.notifyStopBegun()
+		}
+		stopRun()
+	})
+	return runCtx, func() {
+		stop()
+		stopRun()
+	}
+}
+
+// runStopNoted runs the recorded test command until it exits, on
+// runUntilStopNoted's context (parent: the user's; ctx: the recording's), and
+// releases that context once the run has returned, so a stop of the user's
+// after it tells the agent nothing: no call of the command's is left to cut.
+func (m *mockService) runStopNoted(parent, ctx context.Context) models.AppError {
+	runCtx, ran := m.runUntilStopNoted(parent, ctx)
+	defer ran()
+	return m.instrumentation.Run(runCtx, models.RunOptions{AppCommand: m.config.Command})
+}
+
+// notifyStopBegun tells the agent the recording's stop has begun, bounded so
+// an agent that does not answer cannot hold the stop. One that did not take
+// it is said at WARN: a call the stop cuts may then be recorded as a timeout
+// fault the application never met.
+func (m *mockService) notifyStopBegun() {
+	n, ok := m.instrumentation.(stopBeganNotifier)
+	if !ok {
+		return
+	}
+	notifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := n.NotifyStopBegun(notifyCtx); err != nil {
+		m.logger.Warn("keploy could not tell the agent the recording is stopping: a call the stop cuts may be recorded as a timeout fault",
+			zap.Error(err), zap.String("next_step", "check the mock's fault in the recording, or record again"))
+	}
 }
 
 // notifyShutdown tells the agent the session is ending so connection errors are

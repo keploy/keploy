@@ -1365,6 +1365,8 @@ is still being written).
 type gatedFailTestDB struct {
 	recTestDB
 	failName string
+	// failErr is the gated insert's error; nil is a full disk.
+	failErr error
 	// Closed by the test when the gated insert should be allowed to fail.
 	release chan struct{}
 	// Closed by the DB when the gated insert has been entered, so the test
@@ -1380,6 +1382,9 @@ func (d *gatedFailTestDB) InsertTestCase(ctx context.Context, tc *models.TestCas
 	}
 	d.once.Do(func() { close(d.entered) })
 	<-d.release
+	if d.failErr != nil {
+		return d.failErr
+	}
 	return errors.New("no space left on device")
 }
 

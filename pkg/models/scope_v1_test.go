@@ -87,3 +87,88 @@ func TestTestIDsAreDistinctAndSplitAtThePath(t *testing.T) {
 		}
 	}
 }
+
+// A test charged a call from no worker by the agent (a worker's REAL use)
+// and again by the record (a mock) says it in one sentence with the summed
+// count and both chargers' What, never in a second "Also" sentence; the
+// sentence for losses charged before (a Unix socket call) is written again
+// in its place with them, and a reason with no such sentence gets it after
+// what it says.
+func TestChargeNotJudgedWritesOneSentenceWithTheSummedCount(t *testing.T) {
+	unattributed := func(n uint64, what string) CaptureLosses {
+		return CaptureLosses{{Kind: CaptureLossUnattributed, Count: n, What: what}}
+	}
+	real, mock := "the latest: a connection to mock.real destination db:5432, from process 7", "the latest: mock m3, from process 9"
+
+	ev := ScopeEvidence{}
+	ev.ChargeNotJudged(unattributed(2, real))
+	ev.ChargeNotJudged(unattributed(3, mock))
+	want := unattributed(5, real+"; "+mock)
+	if len(ev.CannotCapture) != 1 || ev.CannotCapture[0] != want[0] {
+		t.Fatalf("CannotCapture = %+v, want %+v", ev.CannotCapture, want)
+	}
+	if wantReason := "keploy: " + want.NotJudgedText() + "."; ev.Reason != wantReason {
+		t.Fatalf("Reason = %q, want %q", ev.Reason, wantReason)
+	}
+
+	unix := CaptureLosses{{Kind: CaptureLossUnixSocket, Count: 1}}
+	ev = ScopeEvidence{CannotCapture: unix, Reason: "keploy: a value it gave is not recorded. Also " + unix.NotJudgedText() + "."}
+	ev.ChargeNotJudged(unattributed(1, mock))
+	both := unix.Plus(unattributed(1, mock))
+	if wantReason := "keploy: a value it gave is not recorded. Also " + both.NotJudgedText() + "."; ev.Reason != wantReason {
+		t.Fatalf("Reason = %q, want %q", ev.Reason, wantReason)
+	}
+	if strings.Count(ev.Reason, "not judged:") != 1 {
+		t.Fatalf("Reason %q says not judged more than once", ev.Reason)
+	}
+
+	ev = ScopeEvidence{Reason: "keploy: a miss."}
+	ev.ChargeNotJudged(unattributed(1, mock))
+	if wantReason := "keploy: a miss. Also " + unattributed(1, mock).NotJudgedText() + "."; ev.Reason != wantReason {
+		t.Fatalf("Reason = %q, want %q", ev.Reason, wantReason)
+	}
+
+	for _, c := range []struct{ before, charged, want string }{
+		{mock, mock, mock}, // the same call named once
+		{"", mock, mock},   // no What before: the charged one alone
+		{real, "", real},   // none charged: the one before stands
+		{real + "; " + mock, real, real + "; " + mock}, // each named once
+	} {
+		ev = ScopeEvidence{}
+		ev.ChargeNotJudged(append(unattributed(1, c.before), CaptureLosses{{Kind: CaptureLossUnixSocket, Count: 1, What: "s"}}...))
+		ev.ChargeNotJudged(unattributed(1, c.charged))
+		if got := ev.CannotCapture[0].What; got != c.want {
+			t.Fatalf("What after %q then %q = %q, want %q", c.before, c.charged, got, c.want)
+		}
+		if got := ev.CannotCapture[1].What; got != "s" {
+			t.Fatalf("another kind's What = %q, want it untouched", got)
+		}
+	}
+}
+
+// A test's evidence is Unanswered when it holds a call keploy did not answer
+// from a recording, or could not tell it answered: anything but the
+// recordings the test did not make. Those alone leave every call answered.
+func TestScopeEvidenceUnansweredIsAnythingButTheUnmadeRecordings(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		ev   *ScopeEvidence
+		want bool
+	}{
+		{"no evidence", nil, false},
+		{"only unmade recordings", &ScopeEvidence{Unconsumed: []string{"mock-1"}}, false},
+		{"a miss beside them", &ScopeEvidence{Unconsumed: []string{"mock-1"}, Misses: []UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}}, true},
+		{"a call keploy could not capture", &ScopeEvidence{Unconsumed: []string{"mock-1"}, Incomplete: []CaptureIncomplete{{Class: "e", Why: "x"}}}, true},
+		{"a counted loss", &ScopeEvidence{CaptureIncomplete: CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1}}}, true},
+		{"what the test did unread", &ScopeEvidence{Unconsumed: []string{"mock-1"}, Unread: true}, true},
+	} {
+		if got := c.ev.Unanswered(); got != c.want {
+			t.Errorf("%s: Unanswered() = %v, want %v", c.name, got, c.want)
+		}
+	}
+	ev := &ScopeEvidence{Unconsumed: []string{"mock-1"}, Misses: []UnmatchedCall{{Protocol: "HTTP"}}}
+	_ = ev.Unanswered()
+	if len(ev.Unconsumed) != 1 {
+		t.Fatalf("Unanswered changed the evidence it read: %+v", ev)
+	}
+}

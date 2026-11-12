@@ -151,6 +151,9 @@ type prReportDB struct {
 	failInserts bool
 	// failInsertOf fails only the named test's result insert, with that error.
 	failInsertOf map[string]error
+	// onFailInsert, when set, is called with the insert's context as a
+	// failInsertOf insert fails, before it returns its error.
+	onFailInsert func(context.Context)
 	// Read-back faults: onRead runs first (a test cancels the run from it),
 	// dropOnRead leaves the named test's result out, as a store that lost or
 	// paged away a result does, and readErr fails the read alongside whatever it
@@ -194,16 +197,22 @@ func (f *prReportDB) ClearTestCaseResults(context.Context, string, string) {
 	defer f.mu.Unlock()
 	f.results = nil
 }
-func (f *prReportDB) InsertTestCaseResult(_ context.Context, _ string, _ string, r *models.TestResult) error {
+func (f *prReportDB) InsertTestCaseResult(ctx context.Context, _ string, _ string, r *models.TestResult) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.failInserts {
+		f.mu.Unlock()
 		return fmt.Errorf("report store is unwritable")
 	}
 	if err := f.failInsertOf[r.TestCaseID]; err != nil {
+		onFail := f.onFailInsert
+		f.mu.Unlock()
+		if onFail != nil {
+			onFail(ctx)
+		}
 		return err
 	}
 	f.results = append(f.results, *r)
+	f.mu.Unlock()
 	return nil
 }
 func (f *prReportDB) InsertReport(_ context.Context, _ string, _ string, rep *models.TestReport) error {
@@ -235,9 +244,14 @@ func (prTelemetry) MockTestRun(int)                                            {
 // prInstr fails UpdateMockParams from the Nth call onwards, which is exactly
 // how a replaced agent behaves: it refuses the per-test filter params for the
 // rest of the set (#4614 → #4618).
+// RunsAppProcess: the harness's application is one keploy runs, whose exit
+// (appStopped) ends Run.
+func (f *prInstr) RunsAppProcess() bool { return true }
+
 type prInstr struct {
 	mu                sync.Mutex
 	updateCalls       int
+	runs              int // how many times the application was started
 	failUpdateFromNth int // 0 = never fail
 	recentAppLogs     string
 	// stopAppAfterNUpdates makes the stand-in application exit part-way through
@@ -246,6 +260,10 @@ type prInstr struct {
 	appStopped           chan struct{}
 	// stopErr is how the app exits; ErrAppStopped when empty.
 	stopErr models.AppErrorType
+	// stopErrs, when set, is how each of the app's exits is in turn (its
+	// first exit stopErrs[0]), stopErr past its end; exits counts them.
+	stopErrs []models.AppErrorType
+	exits    int
 	// lastParams is the filter-params payload of the most recent send, so a
 	// test can assert what the agent was actually told.
 	lastParams models.MockFilterParams
@@ -307,6 +325,9 @@ func (f *prInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) 
 // report the app as having exited, and the set lands on APP_HALTED no matter
 // what the tests did — which would mask the very status this file asserts on.
 func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	f.mu.Lock()
+	f.runs++
+	f.mu.Unlock()
 	if f.stopped != nil {
 		defer close(f.stopped)
 	}
@@ -317,16 +338,29 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 		}
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1, LeftRunning: f.leftRunning}
 	case <-f.appStopped:
+		f.mu.Lock()
 		errType := models.ErrAppStopped
 		if f.stopErr != "" {
 			errType = f.stopErr
 		}
+		if f.exits < len(f.stopErrs) {
+			errType = f.stopErrs[f.exits]
+		}
+		f.exits++
+		f.mu.Unlock()
 		return models.AppError{
 			AppErrorType: errType,
 			ExitCode:     1,
 			AppLogs:      "panic: runtime error: out of memory\n",
 		}
 	}
+}
+
+// runCalls is how many times the application was started.
+func (f *prInstr) runCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.runs
 }
 func (f *prInstr) GetErrorChannel() <-chan error                                 { return make(chan error) }
 func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) { return f.errs() }
@@ -437,7 +471,33 @@ func (f *prInstr) ComposeDownOnSetupFailure(context.Context) error      { return
 // response, so a test that runs, passes. simErr makes the named tests fail the
 // way SimulateHTTP does when no response comes back; streamErr fails the named
 // streaming tests while their body is read.
+// AfterTestCaseRun records what the engine reported, in order.
+//
+// Declared on prHooks so the optional TestCaseReporter is satisfied by the SAME
+// hooks the harness already wires in: a separate implementation would prove the
+// interface compiles and nothing about whether RunTestSet calls it.
+//
+// Value receiver and a pointer field, like the rest of this type -- the harness
+// stores hooks by value (hookImpl: prHooks{}), and a pointer-receiver method is
+// not in a value's method set, so the engine's type assertion would simply miss
+// it and the test would pass by never being called.
+func (h prHooks) AfterTestCaseRun(_ context.Context, testSetID string, tc *models.TestCase, result *models.TestResult) error {
+	if h.reported == nil {
+		return nil
+	}
+	name, status := "", ""
+	if tc != nil {
+		name = tc.Name
+	}
+	if result != nil {
+		status = string(result.Status)
+	}
+	*h.reported = append(*h.reported, testSetID+"/"+name+"="+status)
+	return nil
+}
+
 type prHooks struct {
+	reported  *[]string
 	wrongType bool
 	simErr    map[string]error
 	streamErr map[string]error
@@ -1532,5 +1592,41 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	}
 	if len(h.instr.lastParams.TotalConsumedMocks) == 0 {
 		t.Fatal("the fallback did not carry the CLI's consumed map")
+	}
+}
+
+// The per-case reporter must actually be CALLED by RunTestSet, once per test,
+// with the settled verdict. Asserted through the real loop rather than against
+// the interface, because the defect this guards is the hook being declared and
+// never wired -- which an interface-only test cannot see.
+func TestRunTestSetReportsEveryCaseToTheReporter(t *testing.T) {
+	var reported []string
+	h := newPartialRunHarness(t, 4, 0) // never fail
+	h.replayer.hookImpl = prHooks{reported: &reported}
+
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("the control run reported %q; want PASSED", status)
+	}
+	if len(reported) != 4 {
+		t.Fatalf("the reporter was handed %d cases (%v); want 4 -- RunTestSet ran every test, so every test has a settled verdict to report", len(reported), reported)
+	}
+	for _, got := range reported {
+		if !strings.HasPrefix(got, "test-set-0/") || !strings.HasSuffix(got, "=PASSED") {
+			t.Errorf("reported %q; want test-set-0/<case>=PASSED -- the hook must carry the set, the case and its verdict", got)
+		}
+	}
+}
+
+// A hooks implementation that does NOT report is the existing world, and it has
+// to keep working untouched: the run still passes and still scores every test.
+func TestARunWithoutAReporterIsUnchanged(t *testing.T) {
+	h := newPartialRunHarness(t, 4, 0)
+	h.replayer.hookImpl = prHooks{} // reported is nil: the hook no-ops
+
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("a run with no reporter reported %q; want PASSED", status)
+	}
+	if got := len(h.report.results); got != 4 {
+		t.Fatalf("recorded %d results; want 4", got)
 	}
 }

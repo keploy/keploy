@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
@@ -679,6 +680,7 @@ func heldOrdersWith(t *testing.T, routed bool, logger *zap.Logger, more func(now
 	own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
 	own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
 	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
 	mm.SeedRecordedWindows([]models.TestWindow{
 		{Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
 		{Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
@@ -707,8 +709,9 @@ func heldMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, where, mov
 
 // roundMiss fails t unless the call was answered by nothing, learned nothing
 // onto any recording, and missed once, with no reason, its next steps
-// saying why. It returns the misses it read: the read takes them, so a
-// later read finds none.
+// saying why, and that alone of a move: not again as a move after the call
+// was decided (integrations.CallViewGoneWhy). It returns the misses it
+// read: the read takes them, so a later read finds none.
 func roundMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, why string) []models.UnmatchedCall {
 	t.Helper()
 	for name, st := range r3States(mm) {
@@ -725,6 +728,9 @@ func roundMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, why strin
 	}
 	if len(misses) != 1 || misses[0].Reason != "" || !strings.Contains(misses[0].NextSteps, why) {
 		t.Fatalf("the miss reads %+v; want one, with no reason, saying %q", misses, why)
+	}
+	if strings.Contains(misses[0].NextSteps, "before keploy diagnosed its miss") {
+		t.Fatalf("the miss's next steps %q tell its move twice; want only %q", misses[0].NextSteps, why)
 	}
 	return misses
 }
@@ -820,6 +826,87 @@ func TestALearnStepDecidesNothingOfACallInARoundTheStoreMovedOnFrom(t *testing.T
 				}
 			}
 		}
+	}
+}
+
+// A learn step's moved miss is diagnosed on the call's one hold, as every
+// full-round miss is: held to the call's round and to the view its learn
+// step read. A call that is exactly test-1's own mock-own1 has its take
+// refused as the replay ends test-1 under it (and, in one case, begins
+// test-2, which owns mock-own2). mock-own2p, a recording of no test open
+// then, is the same request. The call misses plainly, saying the replay
+// ended its test, with no extra-call kind, no recording named as made
+// elsewhere, and no closest recording: the hold reads nothing once test-1's
+// view was replaced, so the miss names none of the view in force's, and its
+// path is redacted whole, as a miss whose pool is unread is. Before,
+// the miss was held after the move to the view then in force, which told it
+// no move, and its lookup named mock-own2p as recorded where the replay did
+// not make it (NotOwned), whose next step had record's judging move
+// mock-own2p to the worker scope; and, held to test-1's view, its closest
+// was still read in the view in force: test-2's mock-own2, diffed against a
+// call of test-1's.
+func TestAMovedLearnMissIsDiagnosedOnTheCallsHold(t *testing.T) {
+	for _, next := range []bool{false, true} {
+		t.Run(map[bool]string{false: "the test ends", true: "the next test begins"}[next], func(t *testing.T) {
+			p, mm := heldOrdersWith(t, false, zap.NewNop(), func(now time.Time) []*models.Mock {
+				return []*models.Mock{r3Mock("mock-own2p", now.Add(1600*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":3}`)}
+			})
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			var moved atomic.Bool
+			mm.exact.round.onWait = func() {
+				if !moved.CompareAndSwap(false, true) {
+					return
+				}
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				p.EndTestErrorCapture()
+				if next {
+					mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+					p.ContinueTestErrorCapture()
+				}
+			}
+			t.Cleanup(func() { mm.exact.round.onWait = nil })
+			code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(`{"item":"pear"}`))
+			if !moved.Load() {
+				t.Fatal("precondition: no boundary landed under the call's take")
+			}
+			misses := heldMiss(t, p, mm, code, got, "in test-1", "ended that test")
+			for _, m := range misses {
+				if m.Kind == string(models.MissExtraCall) {
+					t.Errorf("the moved miss is told an extra call (recorded %d)", m.Recorded)
+				}
+				if m.NotOwned {
+					t.Errorf("the moved miss names %s as recorded where the replay did not make it", m.ClosestMock)
+				}
+				if m.ClosestMock != "" || m.Diff != "" || len(m.FieldDiffs) > 0 {
+					t.Errorf("the moved miss of a test-1 call names %q as its closest (diff %q, fields %+v); want none: no recording of test-1's view is read once it ended", m.ClosestMock, m.Diff, m.FieldDiffs)
+				}
+				if strings.Contains(m.ActualSummary, "orders") {
+					t.Errorf("the moved miss names the call %q; want its path redacted whole, its view's pool unread", m.ActualSummary)
+				}
+			}
+		})
+	}
+}
+
+// A full-round miss whose view did not move is diagnosed on its hold, which
+// reads the view its learn step read, as before: a GET of /orders in
+// test-1, which recorded only a POST of it, misses naming test-1's own
+// mock-own1 as its closest.
+func TestAFullRoundMissNamesTheClosestRecordingOfItsHold(t *testing.T) {
+	p, mm := heldOrders(t, false)
+	mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+	p.ContinueTestErrorCapture()
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, "GET /orders HTTP/1.1\r\nHost: deps.example\r\n\r\n")
+	if code == http.StatusOK {
+		t.Fatalf("a GET test-1 never recorded was answered %d %s", code, got)
+	}
+	misses, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(misses) != 1 || misses[0].ClosestMock != "mock-own1" {
+		t.Fatalf("the miss reads %+v; want one naming test-1's mock-own1 as its closest", misses)
 	}
 }
 
@@ -1163,6 +1250,50 @@ func TestALearnStepWaitsForTheStoreToOpenTheTestTheTrackerBegan(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A call read with the learn tracker ahead of the store (TrackerAhead) is the
+// pool's or the tracker's test's, never that of the test whose view is in
+// force: the store's mark of it (MarkCallRound) and the round snapshot's
+// alike name no test (integrations.CallRound.Test), so a test's end charges
+// its miss by the view it was read in, never sets it aside as that test's
+// late call. Here the store still shows test-1's view as the tracker began
+// test-2 (an end whose pool view keploy could not install). In test-1's own
+// round the mark names test-1.
+func TestACallReadWithTheTrackerAheadNamesNoTestItWasMadeIn(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed], func(t *testing.T) {
+			p, mm := heldOrders(t, routed)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			if c := mm.MarkCallRound(); c.TrackerAhead() || c.Test() != "test-1" {
+				t.Fatalf("precondition: a call read in test-1's own round is marked ahead %v, in %q; want test-1's", c.TrackerAhead(), c.Test())
+			}
+			p.EndTestErrorCapture()
+			p.ContinueTestErrorCapture()
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+			if !ok || !snap.TrackerAhead() || snap.PoolsCall() || snap.Test != "test-1" {
+				t.Fatalf("precondition: the round's snapshot does not read the tracker ahead of test-1's view: %+v", snap.Boundary)
+			}
+			c := mm.MarkCallRound()
+			if !c.TrackerAhead() || !c.InTest() {
+				t.Fatalf("precondition: the store's mark does not read the tracker ahead of test-1's view (ahead %v, in a test %v)", c.TrackerAhead(), c.InTest())
+			}
+			for name, c := range map[string]integrations.CallRound{"the store's mark": c, "the round snapshot's": snap.CallRound()} {
+				r := &models.MockMismatchReport{}
+				integrations.StampMark(r, c)
+				if c.Test() != "" || r.MarkedTest != "" {
+					t.Errorf("WRONG TEST: %s of a call read with the tracker ahead names %q (report %q) as the test it was made in; want none", name, c.Test(), r.MarkedTest)
+				}
+				// Named no test, the call stays in a test (the ending
+				// test's view is in force): filed outside every test, its
+				// miss would be charged to no test at all.
+				if !c.InTest() || !r.MarkedInTest {
+					t.Errorf("FALSE GREEN: %s of a call read with the tracker ahead of test-1's view is in a test %v (report %v); want in a test", name, c.InTest(), r.MarkedInTest)
+				}
+			}
+		})
 	}
 }
 
@@ -1979,6 +2110,14 @@ func TestTheManagersMarkInATestSetTheStoreHasNotStagedIsAStagings(t *testing.T) 
 					t.Errorf("%s reads staging %v, in a test %v, holding mock-own2 %v; want a staging's, outside every test, holding every recording", name, call.Staging(), call.InTest(), call.Held("mock-own2"))
 				}
 			}
+			// The manager's mark keeps the variable scope its view was
+			// served in, so keploy, deciding the call late, reads the
+			// bindings of the scope the call was made in.
+			var inForce uint64
+			mm.Variables().InScope(func(scope uint64) { inForce = scope })
+			if scope, known := mm.MarkCallRound().VariableScope(); !known || scope != inForce {
+				t.Errorf("the manager's mark keeps variable scope %d (known %v); want the view's, %d", scope, known, inForce)
+			}
 		})
 	}
 }
@@ -2028,6 +2167,245 @@ func TestAMissMarkedBeforeASetsStagingIsCountedTheSameEitherWay(t *testing.T) {
 				t.Fatalf("the cut of the miss marked before the staging was said %d times; want once: %+v", n, logs.All())
 			}
 		})
+	}
+}
+
+// A set's last test's own call (marked in test-1's view) that keploy decides
+// only after test-1's end was read is kept at the next set's start, not cut:
+// its report reaching the drain before the set's staging (the set start's cut
+// keeps it), after it, or after the set's first test began (the drain keeps
+// it), the next read returns it, and only it, as the earlier set's test-1's
+// call (EarlierSetTest, outside every test), never as made before the set
+// (BeforeSet, which keploy test fails the running set with), whichever way
+// that test's window opens (keploy test's begin, or the carry keploy's scope
+// begins use), and it names test-1 on the wire. A call marked in the pool
+// view before the staging is still cut, and said. Before, test-1's call was
+// cut and said only in a log: test-1 passed with an unanswered call of its
+// own, and no receipt listed it.
+func TestASetsLastTestsLateCallIsKeptAtTheNextSetsStart(t *testing.T) {
+	for _, when := range []string{"before the staging", "after the staging", "after the first test began"} {
+		for _, carry := range []bool{false, true} {
+			t.Run("the report "+when+", the window opened carrying "+strconv.FormatBool(carry), func(t *testing.T) {
+				core, logs := observer.New(zap.DebugLevel)
+				p, mm := heldOrdersLogging(t, true, zap.New(core))
+				p.dnsCache = newDNSCache()
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				call := mm.MarkCallRound()
+				if !call.InTest() || call.Test() != "test-1" {
+					t.Fatalf("precondition: the call is not marked in test-1's view: in test %v, test %q", call.InTest(), call.Test())
+				}
+				late := mockMiss("POST /orders test-1's own late call")
+				integrations.StampMark(late.MismatchReport, call)
+				if got, err := p.GetMockErrors(context.Background()); err != nil || len(got) != 0 {
+					t.Fatalf("precondition: test-1's end read %v %+v", err, got)
+				}
+				p.EndTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				pool := mockMiss("POST /between-sets")
+				integrations.StampMark(pool.MismatchReport, mm.MarkCallRound())
+				p.SendError(pool)
+				// The next set's Mock, then its staging.
+				p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+				p.missCutPending.Store(true)
+				if when == "before the staging" {
+					p.SendError(late)
+				}
+				flushDrain(p)
+				if err := p.SetMocksWithWindow(context.Background(), nil, nil, models.BaseTime, time.Now().Add(time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+				if when == "after the staging" {
+					p.SendError(late)
+					flushDrain(p)
+				}
+				if carry {
+					p.ContinueTestErrorCapture()
+				} else {
+					p.BeginTestErrorCapture()
+				}
+				if when == "after the first test began" {
+					p.SendError(late)
+					flushDrain(p)
+				}
+				got, err := p.GetMockErrors(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got) != 1 || got[0].ActualSummary != "POST /orders test-1's own late call" || got[0].BeforeSet || got[0].EarlierSetTest != "test-1" || got[0].Kind != models.MissOutsideTest || got[0].Marked.Test != "test-1" || !got[0].Marked.Known {
+					t.Fatalf("the next set's first test read %+v; want only test-1's own late call, as the earlier set's test-1's, outside every test, not made before the set", got)
+				}
+				// On the wire, as keploy test reads it: Marked is not.
+				b, err := json.Marshal(got)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var wire []models.UnmatchedCall
+				if err := json.Unmarshal(b, &wire); err != nil {
+					t.Fatal(err)
+				}
+				if len(wire) != 1 || wire[0].BeforeSet || wire[0].EarlierSetTest != "test-1" {
+					t.Fatalf("on the wire the next set's first test read %s; want test-1's call naming test-1, not made before the set", b)
+				}
+				if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /between-sets"})).Len(); n != 1 {
+					t.Fatalf("the cut of the pool view's miss was said %d times; want once: %+v", n, logs.All())
+				}
+				if n := logs.FilterMessage(missesCutAtSetStart).Len(); n != 1 {
+					t.Fatalf("the set start's cut was said %d times; want once, of the pool view's miss alone: %+v", n, logs.All())
+				}
+			})
+		}
+	}
+}
+
+// keploy test serves each test case exactly by name, so a call its set A's
+// last test case (test-3) makes is marked naming it. Decided only after
+// test-3's end read and set A's end read, its report reaching the drain
+// before set B's staging or after it, set B's first read (keploy test's
+// begin, with either kind of test-case capture) returns it on the wire naming
+// test-3 as an earlier set's test (EarlierSetTest), never as made before set
+// B's first test (BeforeSet), which keploy test fails set B with.
+func TestKeployTestsSetsLastTestsLateCallReachesTheNextSetNamingItsTest(t *testing.T) {
+	for _, when := range []string{"before the staging", "after the staging"} {
+		for _, awaits := range []bool{false, true} {
+			name := when
+			if awaits {
+				name += ", keploy test's test-case capture"
+			}
+			t.Run(name, func(t *testing.T) {
+				p, mm := heldOrdersLogging(t, true, zap.NewNop())
+				p.dnsCache = newDNSCache()
+				ctx := context.Background()
+				mm.ServeExactTest("test-3", []*models.Mock{roundMock(mm, "mock-own1")})
+				if awaits {
+					p.ContinueTestCaseCapture()
+				} else {
+					p.ContinueTestErrorCapture()
+				}
+				call := mm.MarkCallRound()
+				if !call.InTest() || call.Test() != "test-3" {
+					t.Fatalf("precondition: not marked in test-3's view: in test %v, test %q", call.InTest(), call.Test())
+				}
+				late := mockMiss("POST /orders set A test-3's own late call")
+				integrations.StampMark(late.MismatchReport, call)
+				if got, err := p.GetMockErrors(ctx); err != nil || len(got) != 0 {
+					t.Fatalf("precondition: test-3's end read %v %+v", err, got)
+				}
+				p.EndTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				if got, err := p.GetMockErrors(models.WithSetEndRead(ctx)); err != nil || len(got) != 0 {
+					t.Fatalf("precondition: set A's end read %v %+v", err, got)
+				}
+				// Set B's Mock, then its staging.
+				p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+				p.missCutPending.Store(true)
+				if when == "before the staging" {
+					p.SendError(late)
+				}
+				flushDrain(p)
+				if err := p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now().Add(time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+				if when == "after the staging" {
+					p.SendError(late)
+					flushDrain(p)
+				}
+				// Set B's first test case: keploy test's begin.
+				if awaits {
+					p.BeginTestCaseCapture()
+				} else {
+					p.BeginTestErrorCapture()
+				}
+				got, err := p.GetMockErrors(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err := json.Marshal(got)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var wire []models.UnmatchedCall
+				if err := json.Unmarshal(b, &wire); err != nil {
+					t.Fatal(err)
+				}
+				if len(wire) != 1 || wire[0].BeforeSet || wire[0].EarlierSetTest != "test-3" || wire[0].Kind != models.MissOutsideTest {
+					t.Fatalf("set B's first read on the wire %s; want only set A's test-3's call, naming test-3 as an earlier set's test, not made before set B", b)
+				}
+			})
+		}
+	}
+}
+
+// A test's own call that a window carried as made before its set
+// (beforeSetMiss: filed before the set's first test began, in a window never
+// read) is kept at the next set's start as an earlier set's test's call
+// alone, a wrap the read unwraps: the read returns it, naming its test, not
+// as made before the next set.
+func TestABeforeSetCallOfATestIsKeptAtTheNextSetsStartAsAnEarlierSetsAlone(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := heldOrdersLogging(t, true, zap.NewNop())
+	p.dnsCache = newDNSCache()
+	m := mockMiss("POST /orders test-1's call")
+	m.MismatchReport.MarkedTest = "test-1"
+	m.MismatchReport.MarkedInTest = true
+	acc := &testErrorAccumulator{}
+	acc.addBounded(beforeSetMiss{m}, maxPendingMockErrors)
+	p.captureMu.Lock()
+	p.activeTestErrors.Store(acc)
+	p.captureMu.Unlock()
+	p.cutMissesAtSetStart(context.Background())
+	p.BeginTestErrorCapture()
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ActualSummary != "POST /orders test-1's call" || got[0].BeforeSet || got[0].EarlierSetTest != "test-1" || got[0].Kind != models.MissOutsideTest {
+		t.Fatalf("the next set's first read %+v; want test-1's call alone, as an earlier set's test's, not made before the set", got)
+	}
+}
+
+// A call made before a set's first test, carried as the set's by that test's
+// window, which is then taken back and opened again as the set's first, is
+// read once, as the set's: the second opening does not wrap it again.
+func TestABeforeSetCallIsReadOnceAfterTheFirstWindowIsTakenBack(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := heldOrdersLogging(t, true, zap.NewNop())
+	p.dnsCache = newDNSCache()
+	p.SendError(mockMiss("POST /startup"))
+	flushDrain(p)
+	p.BeginTestErrorCapture()
+	p.WithdrawTestErrorCapture()
+	p.BeginTestErrorCapture()
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ActualSummary != "POST /startup" || !got[0].BeforeSet || got[0].EarlierSetTest != "" {
+		t.Fatalf("the set's first test read %+v; want the startup call once, as the set's", got)
+	}
+}
+
+// An earlier set's test's call that two set starts keep (a set staged with no
+// read between) is read once, naming its test: the second start does not wrap
+// it again.
+func TestAnEarlierSetsTestsCallKeptByTwoSetStartsIsReadOnce(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := heldOrdersLogging(t, true, zap.NewNop())
+	p.dnsCache = newDNSCache()
+	m := mockMiss("POST /orders test-1's call")
+	m.MismatchReport.MarkedTest = "test-1"
+	m.MismatchReport.MarkedInTest = true
+	p.SendError(m)
+	flushDrain(p)
+	p.cutMissesAtSetStart(context.Background())
+	p.cutMissesAtSetStart(context.Background())
+	p.BeginTestErrorCapture()
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ActualSummary != "POST /orders test-1's call" || got[0].BeforeSet || got[0].EarlierSetTest != "test-1" {
+		t.Fatalf("the read after two set starts %+v; want test-1's call once, as an earlier set's test's", got)
 	}
 }
 
@@ -2137,6 +2515,7 @@ func elsewhereOrders(t *testing.T, routed bool, trees func(pool, own1, own2 *mod
 	own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
 	own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
 	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
 	mm.SeedRecordedWindows([]models.TestWindow{
 		{TestCase: "test-1", Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
 		{TestCase: "test-2", Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
@@ -2558,6 +2937,96 @@ func TestARetryCyclesLateCallKeepsNoPairingWithTheTestsOwnRecordingAndLearnsNoth
 			}
 			if learn.TrackerFrom(learn.WithTracker(ctx, p.learnTracker)) == nil {
 				t.Fatal("a new session's parsers find no learn tracker")
+			}
+		})
+	}
+}
+
+// A call set A makes in the pool view after its last test's end, before set
+// A's end read, which keploy decides only after the next set's mocks were
+// staged, is kept as set A's call, of no test: its report reaching the drain
+// before that staging (the set start's cut keeps it), after it, or after a
+// second set's staging, the next read returns it, and only it, outside every
+// test, naming no test and how many sets back it was made (EarlierSet), on the
+// wire too, never as made before the running set (BeforeSet). At zero latency
+// set A's end read would have failed set A with it. One marked after set A's
+// end read is cut and said, as at zero latency. Before, both were cut to a log
+// line: set A passed with an unanswered call it made.
+func TestASetsCallOfNoTestBeforeItsEndReadIsKeptAtTheNextSetsStart(t *testing.T) {
+	for _, when := range []string{"before the staging", "after the staging", "after a second set's staging"} {
+		t.Run("the report "+when, func(t *testing.T) {
+			ctx := context.Background()
+			core, logs := observer.New(zap.DebugLevel)
+			p, mm := heldOrdersLogging(t, true, zap.New(core))
+			p.dnsCache = newDNSCache()
+			// Set A's start, as its staging cuts.
+			p.cutMissesAtSetStart(ctx)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			if got, err := p.GetMockErrors(ctx); err != nil || len(got) != 0 {
+				t.Fatalf("precondition: test-1's end read %v %+v", err, got)
+			}
+			p.EndTestErrorCapture()
+			mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			gap := mockMiss("POST /after-test-1")
+			call := mm.MarkCallRound()
+			if call.Test() != "" || call.Staging() {
+				t.Fatalf("precondition: the call is not marked in set A's pool view: test %q, staging %v", call.Test(), call.Staging())
+			}
+			integrations.StampMark(gap.MismatchReport, call)
+			if got, err := p.GetMockErrors(ctx); err != nil || len(got) != 0 {
+				t.Fatalf("precondition: set A's end read %v %+v", err, got)
+			}
+			after := mockMiss("POST /after-the-end-read")
+			integrations.StampMark(after.MismatchReport, mm.MarkCallRound())
+			send := func() {
+				p.SendError(gap)
+				p.SendError(after)
+				flushDrain(p)
+			}
+			stageNext := func() {
+				p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+				p.missCutPending.Store(true)
+				if err := p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now().Add(time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if when == "before the staging" {
+				send()
+			}
+			stageNext()
+			back := 1
+			if when == "after a second set's staging" {
+				stageNext()
+				back = 2
+			}
+			if when != "before the staging" {
+				send()
+			}
+			p.BeginTestErrorCapture()
+			got, err := p.GetMockErrors(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ActualSummary != "POST /after-test-1" || got[0].BeforeSet || got[0].EarlierSetTest != "" || got[0].EarlierSet != back || got[0].Kind != models.MissOutsideTest {
+				t.Fatalf("the next set's first read %+v; want only set A's call of no test, %d set(s) back, outside every test, not made before the set", got, back)
+			}
+			b, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire []models.UnmatchedCall
+			if err := json.Unmarshal(b, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if len(wire) != 1 || wire[0].BeforeSet || wire[0].EarlierSet != back {
+				t.Fatalf("on the wire the next set's first read %s; want set A's call, %d set(s) back", b, back)
+			}
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /after-the-end-read"})).Len(); n != 1 {
+				t.Fatalf("the cut of the call marked after set A's end read was said %d times; want once: %+v", n, logs.All())
+			}
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /after-test-1"})).Len(); n != 0 {
+				t.Fatalf("the call marked before set A's end read was said cut %d times: %+v", n, logs.All())
 			}
 		})
 	}

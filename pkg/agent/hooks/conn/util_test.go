@@ -630,3 +630,84 @@ func TestSkipGRPCUnderPressureDecidesByThePauseAsTheRequestWasRead(t *testing.T)
 		t.Fatalf("not recorded under pressure: %+v, want the three calls left out, on their connection", got)
 	}
 }
+
+// A test case a capture built reaches the recording's queue, or, when its
+// ingress's context ends first, is counted on the manager the context carries
+// as one not handed on (syncMock NoteNotHandedOn): never a silent loss. The
+// gRPC capture hands its test cases on the same way.
+func TestATestCaseTheCaptureCannotHandOnIsCounted(t *testing.T) {
+	mgr := syncMock.New(zap.NewNop())
+	live := syncMock.NewContext(context.Background(), mgr)
+	stopped, stop := context.WithCancel(live)
+	stop()
+
+	queue := make(chan *models.TestCase, 1)
+	if !HandOn(live, queue, &models.TestCase{Name: "kept"}) || len(queue) != 1 || mgr.NotHandedOn() != 0 {
+		t.Fatalf("a running ingress with room in the queue: queued %d, counted %d; want it queued, none counted", len(queue), mgr.NotHandedOn())
+	}
+	if HandOn(stopped, make(chan *models.TestCase), &models.TestCase{Name: "lost"}) || mgr.NotHandedOn() != 1 {
+		t.Fatalf("a stopped ingress with no reader: counted %d, want the test case counted as not handed on", mgr.NotHandedOn())
+	}
+
+	stream := &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{}, GRPCResp: &models.GrpcResp{}}
+	origHook := GRPCCaptureHook
+	GRPCCaptureHook = nil
+	defer func() { GRPCCaptureHook = origHook }()
+	CaptureGRPC(stopped, zap.NewNop(), make(chan *models.TestCase), stream, 9090, false, false)
+	if mgr.NotHandedOn() != 2 {
+		t.Fatalf("a gRPC call's test case its stopped ingress could not hand on: counted %d in all, want 2", mgr.NotHandedOn())
+	}
+}
+
+// With --sync a gRPC call's test case is named as its mocks' mapping is
+// (TestMockMapping.TestName), as an HTTP request's is (Capture): the recording
+// joins a mapping to its test case by that name, so a test case named
+// otherwise (by its Keploy-Test-Name header, which a call seldom has, so the
+// recorder names it) is saved without the mocks its call made. The name comes
+// off the manager the call's context carries, the one an HTTP request's name
+// comes off, so the two never share a name in its window map, and the call's
+// mocks resolve on that manager.
+func TestASyncGRPCTestCaseIsNamedAsItsMocksMapping(t *testing.T) {
+	mgr := syncMock.New(zap.NewNop())
+	out := make(chan *models.Mock, 4)
+	mgr.SetOutputChannel(out)
+	maps := make(chan models.TestMockMapping, 4)
+	mctx, mcancel := context.WithCancel(context.Background())
+	defer mcancel()
+	mgr.SetMappingChannel(mctx, maps)
+	mgr.SetFirstRequestSignaled()
+	old := time.Now().Add(-time.Minute)
+	for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+		mgr.ResolveRange(old, old, "", true, false)
+	}
+	origHook := GRPCCaptureHook
+	GRPCCaptureHook = nil
+	defer func() { GRPCCaptureHook = origHook }()
+
+	// An HTTP request's capture on this manager took the name before.
+	httpID := mgr.NextTestID()
+	start := time.Now().Add(-time.Second)
+	mgr.AddMock(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: start.Add(time.Millisecond)},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}})
+	stream := &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{Timestamp: start}, GRPCResp: &models.GrpcResp{Timestamp: time.Now()}}
+	queue := make(chan *models.TestCase, 1)
+	CaptureGRPC(syncMock.NewContext(context.Background(), mgr), zap.NewNop(), queue, stream, 9090, true, true)
+
+	var tc *models.TestCase
+	select {
+	case tc = <-queue:
+	default:
+		t.Fatal("the gRPC call's test case was not handed on")
+	}
+	if want := fmt.Sprintf("test-%d", httpID+1); tc.Name != want {
+		t.Fatalf("the gRPC call's test case is named %q, want %q: the next name on its context's manager, after the HTTP request's", tc.Name, want)
+	}
+	select {
+	case m := <-maps:
+		if m.TestName != tc.Name || len(m.MockIDs) != 1 {
+			t.Fatalf("the call's mocks were mapped to %q (%d mocks), want its test case %q with its one mock", m.TestName, len(m.MockIDs), tc.Name)
+		}
+	case <-time.After(10 * time.Second): // only turns a hang into a failure
+		t.Fatal("the call's mocks were not mapped on its context's manager")
+	}
+}

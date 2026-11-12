@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -248,8 +249,9 @@ func TestRecordMySQLOutgoing_UnregisteredParser(t *testing.T) {
 	}
 }
 
-// upgradingParser drives the legacy TLSUpgrader the way the MySQL
-// recorder's STARTTLS path does (recorder/conn.go UpgradeDestTLS).
+// upgradingParser drives the legacy TLSUpgrader the way a parser's
+// STARTTLS on the raw sockets would, as MySQL's removed legacy recorder
+// did (UpgradeDestTLS).
 type upgradingParser struct {
 	recordingMySQLParser
 	upgradeErr error
@@ -573,6 +575,13 @@ func (c *closeHook) Close() error {
 // the scheduler does.
 func mysqlReplayMisses(t *testing.T, session []*models.Mock, app func(net.Conn)) []models.UnmatchedCall {
 	t.Helper()
+	return mysqlReplayMissesOver(t, session, func(c net.Conn) net.Conn { return c }, app)
+}
+
+// mysqlReplayMissesOver is mysqlReplayMisses with the agent's end of the
+// connection wrapped by wrap.
+func mysqlReplayMissesOver(t *testing.T, session []*models.Mock, wrap func(net.Conn) net.Conn, app func(net.Conn)) []models.UnmatchedCall {
+	t.Helper()
 	// Under the switch the proxy's error drain runs, and GetMockErrors waits
 	// for it on events. Without the switch it would wait for the drain on a
 	// two-second clock, so the proxy runs without one there: GetMockErrors
@@ -594,7 +603,7 @@ func mysqlReplayMisses(t *testing.T, session []*models.Mock, app func(net.Conn))
 	t.Cleanup(func() { _ = appEnd.Close() })
 	var misses []models.UnmatchedCall
 	var readErr error
-	agentEnd := &closeHook{Conn: pipeEnd, onClose: func() {
+	agentEnd := &closeHook{Conn: wrap(pipeEnd), onClose: func() {
 		misses, readErr = p.GetMockErrors(ctx) // the test ends: its database call failed
 	}}
 	connCtx := context.WithValue(context.WithValue(ctx, models.ClientConnectionIDKey, "1"), models.DestConnectionIDKey, "2")
@@ -698,6 +707,113 @@ func TestAMySQLHandshakeNoMockMatchesIsAMissOfItsTest(t *testing.T) {
 			}
 		})
 		requireOneMySQLMiss(t, misses, "connection phase: HandshakeResponse41")
+	})
+}
+
+// A statement no mock matches, on a connection whose login was recorded, is
+// answered with a MySQL error on a connection that stays open, and it is one
+// miss of the test it was made in, queued before the application reads the
+// error. Before, the proxy gave the replayer no reporter on MySQL
+// connections, so the replayer closed the connection on the miss: inside a
+// transaction the application could not reconnect and the rest of its
+// request failed (keploy/api-server#2514).
+func TestAMySQLStatementNoMockMatchesIsAnsweredAndAMissOfItsTest(t *testing.T) {
+	eachSwitchState(t, func(t *testing.T) {
+		misses := mysqlReplayMisses(t, []*models.Mock{mysqlTestNative("mock-0", time.Now(), false)}, func(app net.Conn) {
+			_ = app.SetDeadline(time.Now().Add(20 * time.Second))
+			if _, err := readOneMySQLPacket(app); err != nil {
+				t.Errorf("reading the greeting: %v", err)
+				return
+			}
+			payload, err := connphase.EncodeHandshakeResponse41(context.Background(), zap.NewNop(), mysqlTestHR41("app", mysqlmodels.Native))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := writeMySQLPacket(app, 1, payload); err != nil {
+				t.Errorf("sending the HandshakeResponse41: %v", err)
+				return
+			}
+			if ok, err := readOneMySQLPacket(app); err != nil || ok[4] != mysqlmodels.OK {
+				t.Errorf("the application read % x, %v after its login; want the recorded OK", ok, err)
+				return
+			}
+			if err := writeMySQLPacket(app, 0, append([]byte{mysqlmodels.COM_QUERY}, "SELECT 1 AS drifted"...)); err != nil {
+				t.Errorf("sending the query: %v", err)
+				return
+			}
+			if got, err := readOneMySQLPacket(app); err != nil || got[4] != mysqlmodels.ERR {
+				t.Errorf("the application read % x, %v after its query; want an error packet on an open connection", got, err)
+				return
+			}
+			// One more statement on the same connection: it is read, so
+			// the connection serves on after the miss.
+			if err := writeMySQLPacket(app, 0, append([]byte{mysqlmodels.COM_QUERY}, "SELECT 2 AS drifted"...)); err != nil {
+				t.Errorf("sending a second query after the miss: %v", err)
+				return
+			}
+			if got, err := readOneMySQLPacket(app); err != nil || got[4] != mysqlmodels.ERR {
+				t.Errorf("the application read % x, %v after its second query; want its error", got, err)
+				return
+			}
+			_ = app.Close()
+		})
+		if len(misses) != 2 {
+			t.Fatalf("the test read %d misses; want one for each unmatched statement, each once: %+v", len(misses), misses)
+		}
+		for i, want := range []string{"COM_QUERY SELECT 1 AS drifted", "COM_QUERY SELECT 2 AS drifted"} {
+			if m := misses[i]; m.Protocol != "MySQL" || m.ActualSummary != want || m.Destination != "10.0.0.5:3306" {
+				t.Fatalf("miss %d is %+v; want a MySQL miss of %q at 10.0.0.5:3306", i, m, want)
+			}
+		}
+	})
+}
+
+// errWriteFails is a connection on which writing an ERR packet fails, as a
+// write to an application that has gone does.
+type errWriteFails struct{ net.Conn }
+
+func (c errWriteFails) Write(p []byte) (int, error) {
+	if len(p) > 4 && p[4] == mysqlmodels.ERR {
+		return 0, errors.New("the application has gone")
+	}
+	return c.Conn.Write(p)
+}
+
+// A statement no mock matches whose error cannot be written (the application
+// has gone) ends the connection, and is one miss of its test, not two: the
+// replayer queued it before writing, and the proxy does not queue the miss it
+// returns again.
+func TestAMySQLMissWhoseAnswerCannotBeWrittenIsOneMiss(t *testing.T) {
+	eachSwitchState(t, func(t *testing.T) {
+		misses := mysqlReplayMissesOver(t, []*models.Mock{mysqlTestNative("mock-0", time.Now(), false)}, func(c net.Conn) net.Conn { return errWriteFails{c} }, func(app net.Conn) {
+			_ = app.SetDeadline(time.Now().Add(20 * time.Second))
+			if _, err := readOneMySQLPacket(app); err != nil {
+				t.Errorf("reading the greeting: %v", err)
+				return
+			}
+			payload, err := connphase.EncodeHandshakeResponse41(context.Background(), zap.NewNop(), mysqlTestHR41("app", mysqlmodels.Native))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := writeMySQLPacket(app, 1, payload); err != nil {
+				t.Errorf("sending the HandshakeResponse41: %v", err)
+				return
+			}
+			if ok, err := readOneMySQLPacket(app); err != nil || ok[4] != mysqlmodels.OK {
+				t.Errorf("the application read % x, %v after its login; want the recorded OK", ok, err)
+				return
+			}
+			if err := writeMySQLPacket(app, 0, append([]byte{mysqlmodels.COM_QUERY}, "SELECT 1 AS drifted"...)); err != nil {
+				t.Errorf("sending the query: %v", err)
+				return
+			}
+			if got, err := io.ReadAll(app); len(got) != 0 || err != nil {
+				t.Errorf("the application read %q, %v after its query; want its connection closed unanswered", got, err)
+			}
+		})
+		requireOneMySQLMiss(t, misses, "COM_QUERY SELECT 1 AS drifted")
 	})
 }
 

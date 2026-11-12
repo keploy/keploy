@@ -65,6 +65,14 @@ type Instrumentation interface {
 	NotifyGracefulShutdown(ctx context.Context) error
 }
 
+// RunSettler is an optional Instrumentation extension, which
+// pkg/platform/http.AgentClient has: the agent's end-of-run hook. Under the
+// proven switch Replay calls it once the test command has exited, before it
+// reads what the agent served (settleRun).
+type RunSettler interface {
+	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error
+}
+
 // ScopeReader is an optional Instrumentation extension: the per-test scope
 // windows the wrapped runner reported through the agent's /agent/scope/* API
 // during a record session. Record uses it to write mappings.yaml so replay can
@@ -103,11 +111,23 @@ type ComposeAgentFailureReader interface {
 	ComposeAgentFailure() error
 }
 
+// ComposeEndReader is an optional Instrumentation extension for a docker
+// compose recording: what ended the project when the test command's own end
+// does not stand. Compose can report 0 for a test command it never started
+// (another of the project's services ended the project first), and that 0 is
+// no verdict: nothing ran to be recorded. appExit is the test command's exit
+// as keploy got it. nil when its own end stands. AgentClient implements it.
+type ComposeEndReader interface {
+	ComposeEndAfterReady(appExit int) error
+}
+
 // ScopePusher is an optional Instrumentation extension: Replay uses it to hand
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
-// runner's /agent/scope/begin calls can restrict the served pool per test.
+// runner's /agent/scope/begin calls can restrict the served pool per test,
+// with every test's recorded window (recordedTestWindows), the run's place
+// an answer recorded in a later window than its call is written at.
 type ScopePusher interface {
-	PushScopeTable(ctx context.Context, table map[string][]string) error
+	PushScopeTable(ctx context.Context, table map[string][]string, windows []models.TestWindow) error
 }
 
 // ScopeGatePusher is an optional Instrumentation extension: Replay uses it to
@@ -119,9 +139,11 @@ type ScopeGatePusher interface {
 
 // TestBeginsPusher is an optional Instrumentation extension: under the proven
 // switch Replay hands the agent when each test of the recording began, so the
-// agent moves the run's clock per test (design v14 §3.4).
+// agent moves the run's clock per test (design v14 §3.4), the seed each
+// test's recording kept for its browser's random numbers, and the requests
+// each client test sent the application in its recording.
 type TestBeginsPusher interface {
-	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) error
+	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string, cases map[string][]models.ClientCase) error
 }
 
 type SetPusher interface {
@@ -131,9 +153,20 @@ type SetPusher interface {
 // ProvenTablePusher is the Instrumentation extension a replay under the
 // proven switch needs: it hands the agent the per-test table and each key's
 // pool slice (models.ScopeTableReq.Pool) in one request, with the recorded
-// window of every test of the set (models.ScopeTableReq.Windows).
+// window of every test of the set (models.ScopeTableReq.Windows), each
+// key's worker scope (models.ScopeTableReq.Worker), the names of it that
+// are the reads of tests the replay's gate skips, each with the skipped test
+// that lists it (models.ScopeTableReq.SkippedReads), the test each worker
+// recording trails (models.ScopeTableReq.Trails), the values each test
+// gave when it was recorded (models.ScopeTableReq.Given), each test's
+// repeated reads (models.ScopeTableReq.RepeatReads), the names of each
+// test's list keploy's judging marked served, not required
+// (models.ScopeTableReq.NotRequired), and the names of the set's background
+// recordings, its worker: and startup: mocks (models.ScopeTableReq.Background),
+// and whether the learn step checks a changed time by its form alone
+// (models.ScopeTableReq.TimeForm, config.MockCmd.TimeForm).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow) error
+	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm bool) error
 }
 
 type MappingReader interface {
@@ -182,6 +215,12 @@ type MappingDB interface {
 // CaseMapper is an optional MappingDB extension: Record writes which test cases each flow produced through it.
 type CaseMapper interface {
 	UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error
+}
+
+// WorkerMapper writes a set's worker scope (models.Mapping.Worker) whole,
+// keeping every other section of its mappings.
+type WorkerMapper interface {
+	UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error
 }
 
 type BootMapper interface {

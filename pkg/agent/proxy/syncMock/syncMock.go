@@ -274,6 +274,14 @@ type SyncMockManager struct {
 	// open[0]. A per-test mock requested at or after its start may be one of
 	// theirs, so no reaper drops it (see held). Guarded by mu.
 	open windowHeap
+	// lastWindowEnd is when the latest window ended, givenUpInFlight how
+	// many windows were given up while their requests are still in flight
+	// (noteGivenUpInFlightLocked), and windowlessIngress that this agent's
+	// ingress also takes requests that open no window
+	// (stampOutsideRequestsLocked). Guarded by mu.
+	lastWindowEnd     time.Time
+	givenUpInFlight   int
+	windowlessIngress bool
 	// stopFound is the windows of the requests in flight that began by the
 	// instant a recording stops at (NoteStop), less those that ended since:
 	// the requests its stop found in flight. They stay the stopping
@@ -309,6 +317,9 @@ type SyncMockManager struct {
 	testSpans     []testSpan
 	testSpansNext int
 	spanWatch     map[*Window]chan struct{}
+	// scopes is, under the proven switch, the test scopes open now
+	// (BeginTestScope): tests whose recording opens no window. Guarded by mu.
+	scopes []*TestScope
 	// exchangeHolds is the exchanges parsers hold while they cannot yet tell
 	// what they are (HoldExchanges), each by its earliest request time in
 	// Unix nanoseconds; exchangeHoldsNext numbers them. holdsStopping is
@@ -503,6 +514,26 @@ type SyncMockManager struct {
 	// their warnings are rate-limited, so this is the one place each is
 	// counted.
 	leftOut atomic.Int64
+	// notHandedOn counts the requests an ingress served and was recording
+	// whose test case never reached the recording's queue: the ingress
+	// stopped first (NoteNotHandedOn).
+	notHandedOn atomic.Uint64
+	// unnamedCallerConns counts the connections to a listener of the run's
+	// own process tree whose caller the agent could not name in its PID
+	// namespace, so that none of the calls they carried was recorded as a
+	// test case (NoteUnnamedCallerConn).
+	unnamedCallerConns atomic.Uint64
+	// tlsRelayedConns counts the connections to the app that opened with a
+	// TLS handshake, which the ingress relayed to the app's TLS unread, so
+	// that none of the calls they carried was recorded as a test case
+	// (NoteTLSRelayedConn).
+	tlsRelayedConns atomic.Uint64
+	// tlsRelayedSaid holds the app ports a TLS connection was relayed to
+	// since the recording session started (StartTLSRelayedSession): the
+	// session's first to each is said at WARN as it comes. tlsRelayedMu
+	// guards it, and orders each count against a session's start.
+	tlsRelayedMu   sync.Mutex
+	tlsRelayedSaid map[uint16]struct{}
 
 	// outChanClosedDrops counts mocks that were already counted in
 	// totalAdded (they passed the pressure gate) but were then dropped
@@ -592,7 +623,8 @@ type SyncMockManager struct {
 	// heldOldest is the earliest end (UnixNano) of a test case the recorder's
 	// stream holds for its verdict (NoteHeld); 0 when none.
 	heldOldest atomic.Int64
-	// onDrop is told of each mock the outChan capacity path drops (OnDrop).
+	// onDrop is told of each mock dropped on the way to outChan, but an
+	// answer the client never read (OnDrop, toldDropped).
 	onDrop atomic.Pointer[func(*models.Mock)]
 	// sending holds the request time of each mock taken out of the buffer
 	// (or handed straight on) whose send to outChan has not finished. A mock
@@ -1135,6 +1167,14 @@ func (m *SyncMockManager) send(mock *models.Mock, owner string, done func(bool))
 // recordDroppedTCFor; 0 for a delivery): what a done records for the drop is
 // revoked only if that is still the current channel's.
 func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(delivered bool, epoch uint64)) {
+	if mock.IsUndelivered() {
+		// An answer the client never read is no test's to lose: no replay
+		// serves it and no mapping lists it (mapsTo). So its drop, on any
+		// path below or from the queue, records no owner, and OnDrop is not
+		// told of it (toldDropped): it suppresses no test case, by name or
+		// by the span it was requested in.
+		owner = ""
+	}
 	tell := func(delivered bool, epoch uint64) {
 		m.handedOn.Add(1)
 		if done != nil {
@@ -1386,9 +1426,14 @@ func (m *SyncMockManager) outCloseStallBound() time.Duration {
 	return min(outCloseStall, m.outStallBound())
 }
 
-// toldDropped tells OnDrop's fn of a dropped mock. Called with no lock held:
-// the hook may take locks of its own.
+// toldDropped tells OnDrop's fn of a dropped mock, but not of an answer the
+// client never read (models.Mock.IsUndelivered): no replay serves it and no
+// test requires it, so its loss leaves out no test case. Called with no lock
+// held: the hook may take locks of its own.
 func (m *SyncMockManager) toldDropped(mock *models.Mock) {
+	if mock.IsUndelivered() {
+		return
+	}
 	if fn := m.onDrop.Load(); fn != nil {
 		(*fn)(mock)
 	}
@@ -1425,12 +1470,16 @@ func (m *SyncMockManager) dropOut(mock *models.Mock, owner string, epoch uint64,
 	}
 }
 
-// OnDrop has fn told of every mock dropped on the outChan capacity path (the
-// channel closed or never set, the queue's byte bound reached, or its
-// consumer stalled: send). The test cases that used such a
+// OnDrop has fn told of every mock dropped on its way to outChan: on the
+// capacity path (the channel closed or never set, the queue's byte bound
+// reached, or its consumer stalled: send), and by AddMock once the channel is
+// closed (CloseOutChan). The test cases that used such a
 // mock lack it: a capture whose test cases are not named (proxyless, a
 // DaemonSet) cannot find them by owner, as WasMockDroppedForTC does, and
-// leaves out those that ran while the mock was requested instead. fn must not
+// leaves out those that ran while the mock was requested instead. A dropped
+// answer the client never read (models.Mock.IsUndelivered) is not told, on
+// any of these paths (toldDropped): no test case used it, so none is left
+// out for it. fn must not
 // block. A drop of a given-up queue is told on its drainer, whose lane reads
 // queued until it has told every drop: fn must not wait for OutQueued or
 // OutQueuedTo to read false, nor call CloseOutChan, which waits for that
@@ -1694,6 +1743,19 @@ func (m *SyncMockManager) recordDroppedTCFor(name string, epoch uint64) {
 	}
 }
 
+// RevokeTestCase leaves the test case named name out of the recording after
+// it was handed on: the synchronous capture hands a test case on before it
+// claims its request's window (Window.LeftOut), and when the window was given
+// up meanwhile, mocks the test case may own were let go. The deferred-orphan
+// path a capacity drop takes leaves it out: the recording's stream suppresses
+// it if it has not sent it yet (WasMockDroppedForTC), and a CLI that
+// negotiated the revoke deletes it at the end if it has (RevokedTests). A CLI
+// that did not (OutgoingOptions.SupportsDroppedRevoke false) keeps a test
+// case the stream had sent already, without those mocks. Nil-safe.
+func (m *SyncMockManager) RevokeTestCase(name string) {
+	m.recordDroppedTC(name)
+}
+
 // SetRevokeCapable enables (or disables) emission of RevokedTests control
 // frames for the deferred-orphan revoke protocol. The agent service calls it
 // from GetOutgoing with OutgoingOptions.SupportsDroppedRevoke, so emission is
@@ -1744,8 +1806,9 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// over, while its connection is still open.
 		if provenswitch.On() {
 			containerkey.Default.Stamp(mock)
-			// And the process its call came from.
+			// And the process its call came from, and its test worker.
 			starts.Default.StampOrigin(mock)
+			starts.Default.StampInstance(mock)
 		}
 		// The address its connection reached, in every mode, stamped while
 		// its connection is open (starts.Registry.StampDest).
@@ -1776,6 +1839,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	if mock != nil && (!m.firstReqSeen || m.resolvedTestCount < models.StartupMockTestCaseWindow) {
 		mock.TestModeInfo.IsStartup = true
 	}
+	m.stampOutsideRequestsLocked(mock)
 
 	// Decide forward vs buffer vs drop under a single snapshot of
 	// (outChan, outChanClosed). The trio has three legal outcomes:
@@ -1830,9 +1894,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 				zap.Int64("outchan_closed_drops_total", closedDrops),
 			)
 		}
-		if fn := m.onDrop.Load(); fn != nil {
-			(*fn)(mock)
-		}
+		m.toldDropped(mock)
 		return
 	case bound && !m.firstReqSeen:
 		m.noteSending(mock) // under mu: it leaves no gap for PendingIn
@@ -1999,6 +2061,40 @@ func attributedReusable(mock *models.Mock) bool {
 	return !(provenswitch.On() && !mock.IsProtocolPhase() && !mock.IsAsync())
 }
 
+// mapsTo reports whether a test's mapping lists mock once the test's window
+// owns it: every mock but an answer the client never read
+// (models.Mock.IsUndelivered), which no replay serves, so no test makes the
+// call it recorded, under either switch. That one is owned, named, sent and
+// pruned as its window's other mocks are; only the mappings leave it out
+// (withMapped, withLate, noteSentClaimedLocked), and its drop, by its send or
+// by AddMock after the close, records no owner and is not told to OnDrop, so
+// it suppresses no test case (sendFor, toldDropped).
+func mapsTo(mock *models.Mock) bool {
+	return !mock.IsUndelivered()
+}
+
+// withMapped is ids, a test's mapping, with mock's name added when the
+// mapping lists mock (mapsTo).
+func withMapped(ids []string, mock *models.Mock) []string {
+	if !mapsTo(mock) {
+		return ids
+	}
+	return append(ids, mock.Name)
+}
+
+// withLate is late, the late mappings by test, with mock's name added to
+// test's when the mapping lists mock (mapsTo); late is made when nil.
+func withLate(late map[string][]string, test string, mock *models.Mock) map[string][]string {
+	if !mapsTo(mock) {
+		return late
+	}
+	if late == nil {
+		late = make(map[string][]string)
+	}
+	late[test] = append(late[test], mock.Name)
+	return late
+}
+
 // flushTakeLocked is what the next FlushOwnedWindows does with mock, and the
 // windows it does it by (ownerOrSharedLocked). BacklogBefore asks it too: what
 // a flush will take is still to be handed on. Caller holds m.mu.
@@ -2141,10 +2237,7 @@ func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mock
 		case flushOwned:
 			mock.Name = "mock-" + generateRandomString(8)
 			if w.mapping {
-				if lateMappings == nil {
-					lateMappings = make(map[string][]string)
-				}
-				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
+				lateMappings = withLate(lateMappings, w.testName, mock)
 			}
 			// Owned by the matched window's test → tag it so a capacity
 			// drop suppresses that TC.
@@ -2198,9 +2291,11 @@ type Window struct {
 	// lostOnce, which drops it once it has told it.
 	lost     func(LossCause) (takeBack func())
 	lostOnce sync.Once
-	// kept, givenUp, cause, told, toldEpoch and takeBack are guarded by m.mu.
-	// kept: Claim (or Keep) claimed it, so it is never given up. givenUp: it
-	// was given up, for cause (fitHoldLocked, giveUpForPressureLocked). told:
+	// kept, givenUp, inFlight, cause, told, toldEpoch and takeBack are
+	// guarded by m.mu. kept: Claim (or Keep) claimed it, so it is never given
+	// up. givenUp: it was given up, for cause (fitHoldLocked,
+	// giveUpForPressureLocked). inFlight: given up, its request has not ended
+	// yet (noteGivenUpInFlightLocked). told:
 	// Keep told its loss, and Replaced has not taken it back; toldEpoch is
 	// the manager's lossEpoch then (the loss is on the tallies open then,
 	// which are those still open whose epoch is no later), and takeBack is
@@ -2208,6 +2303,7 @@ type Window struct {
 	// one 112 B allocation.
 	kept      bool
 	givenUp   bool
+	inFlight  bool
 	told      bool
 	cause     LossCause
 	toldEpoch uint64
@@ -2261,7 +2357,11 @@ func (c LossCause) String() string {
 //     given up: some mocks it may own were let go, so leave the test case
 //     out, and resolve nothing for it (it is no duplicate: a prune over its
 //     span would drop the mocks of the calls that ran beside it); the loss is
-//     counted and told.
+//     counted and told. A caller that hands its test case on to a queue that
+//     can be full (the synchronous capture, conn.Capture) asks LeftOut
+//     first, hands the test case on with the window still unclaimed, and
+//     only then Keeps it: a Keep false then means the test case went out
+//     without mocks it may own, and RevokeTestCase leaves it out.
 //   - a duplicate: Close BEFORE the prune, so its own window does not hold its
 //     own debris.
 //   - given up on (an early exit, a failed read): Close.
@@ -2288,8 +2388,8 @@ func (c LossCause) String() string {
 // recording's while that drains, and is given up once it has ended
 // (EndStoppedRecording): it is no request of the next one (LostToStop).
 //
-// Only HTTP/1 ingress opens windows (the incoming proxy here, and the
-// enterprise eBPF parser). gRPC capture (CaptureGRPC) opens none and resolves
+// Only the incoming proxy's HTTP/1 ingress opens windows. gRPC capture
+// (CaptureGRPC) opens none and resolves
 // its window only in sync mode, so a gRPC call is not covered: one that outlives
 // the stale horizon while other requests are decided can still lose the mocks
 // it made early on.
@@ -2448,6 +2548,25 @@ func (w *Window) LeftAtStop() bool {
 	return w.givenUp && w.cause == LostToStop
 }
 
+// LeftOut reports whether the window was given up already, telling its loss
+// as Keep does when it was. Unlike Keep it claims nothing: a window it finds
+// open stays open and unclaimed, so the bound and memory pressure can still
+// give it up. The synchronous capture asks it before it hands its test case
+// on, and claims the window (Keep) only once the test case is in the
+// recording's queue: a claimed window pins the hold, and the queue can be
+// full for as long as the recording's stream is slow. False for a nil window.
+func (w *Window) LeftOut() bool {
+	if w == nil {
+		return false
+	}
+	w.m.mu.Lock()
+	givenUp := w.givenUp
+	w.m.mu.Unlock()
+	// Given up, the window is never claimed again: Keep reports false and
+	// tells the loss, once.
+	return givenUp && !w.Keep()
+}
+
 // Yield says that from at on, the window's request is no longer the only one in
 // flight. The synchronous ingress calls it at the response's headers when it
 // has given its lock back early (for a response, or a request body, of unknown
@@ -2601,10 +2720,17 @@ func (w *Window) Close() {
 // to a resolved kept window and no window still open claims any more goes to
 // it (oweUnclaimedLocked). Caller holds mu.
 func (m *SyncMockManager) endWindowLocked(w *Window, t *dropTally, givenUp bool) {
-	if w.idx >= 0 {
+	switch {
+	case w.idx >= 0:
 		heap.Remove(&m.open, w.idx)
 		m.noteOldestLocked()
 		m.windowLeftLocked(w)
+		m.lastWindowEnd = time.Now()
+		if givenUp {
+			m.noteGivenUpInFlightLocked(w)
+		}
+	case w.inFlight:
+		m.givenUpEndedLocked(w)
 	}
 	if _, found := m.stopFound[w]; found && !givenUp {
 		// Ended: no request a stop found in flight any more. One given up
@@ -2909,10 +3035,7 @@ func (m *SyncMockManager) handOwedLocked(outChanBound bool, send *[]ownedMock, l
 		n++
 		o.mock.Name = "mock-" + generateRandomString(8)
 		if o.to.mapping {
-			if *late == nil {
-				*late = make(map[string][]string)
-			}
-			(*late)[o.to.testName] = append((*late)[o.to.testName], o.mock.Name)
+			*late = withLate(*late, o.to.testName, o.mock)
 		}
 		*send = append(*send, ownedMock{mock: o.mock, owner: o.to.testName})
 	}
@@ -3143,6 +3266,7 @@ func (m *SyncMockManager) giveUpForPressureLocked() (dropped int, gaveUp []*Wind
 		w.givenUp, w.cause = true, LostToMemoryPressure
 		heap.Remove(&m.open, w.idx)
 		m.windowLeftLocked(w)
+		m.noteGivenUpInFlightLocked(w)
 	}
 	m.noteOldestLocked()
 	return m.dropHeldLocked(n, nil, true), gaveUp
@@ -3883,9 +4007,10 @@ func (m *SyncMockManager) startupClaimedLocked(mk *models.Mock, self *Window) bo
 // outgoing call and the test's resolve). owner, if not nil, is the resolved
 // kept window whose part after its yield covers it (sentClaim.owner). Reports
 // whether it was noted: its send's end must then be told (sentClaimDone).
-// Caller holds m.mu.
+// An answer the client never read is never noted (mapsTo): no mapping lists
+// it, and its drop costs no test a call. Caller holds m.mu.
 func (m *SyncMockManager) noteSentClaimedLocked(mk *models.Mock, self *Window, owner *resolvedWindow) bool {
-	if !m.startupClaimedLocked(mk, self) {
+	if !mapsTo(mk) || !m.startupClaimedLocked(mk, self) {
 		return false
 	}
 	if len(m.sentClaimed) >= maxSentClaimed {
@@ -4261,7 +4386,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 					continue
 				}
 				mock.Name = "mock-" + generateRandomString(8)
-				associatedMockIDs = append(associatedMockIDs, mock.Name)
+				associatedMockIDs = withMapped(associatedMockIDs, mock)
 				// Owned by THIS window's test → tag it so a capacity
 				// drop suppresses testName rather than orphaning it.
 				mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: testName})
@@ -4281,10 +4406,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 				}
 				mock.Name = "mock-" + generateRandomString(8)
 				if ownerW.mapping {
-					if lateMappings == nil {
-						lateMappings = make(map[string][]string)
-					}
-					lateMappings[ownerW.testName] = append(lateMappings[ownerW.testName], mock.Name)
+					lateMappings = withLate(lateMappings, ownerW.testName, mock)
 				}
 				mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: ownerW.testName})
 				lateBinned++
@@ -4385,10 +4507,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			}
 			mock.Name = "mock-" + generateRandomString(8)
 			if ownerW.mapping {
-				if lateMappings == nil {
-					lateMappings = make(map[string][]string)
-				}
-				lateMappings[ownerW.testName] = append(lateMappings[ownerW.testName], mock.Name)
+				lateMappings = withLate(lateMappings, ownerW.testName, mock)
 			}
 			// Owned by the retro-matched window's test → tag it so a
 			// capacity drop suppresses that TC.
@@ -4502,7 +4621,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			fromHold := make([]ownedMock, 0, len(taken))
 			for _, mock := range taken {
 				mock.Name = "mock-" + generateRandomString(8)
-				associatedMockIDs = append(associatedMockIDs, mock.Name)
+				associatedMockIDs = withMapped(associatedMockIDs, mock)
 				fromHold = append(fromHold, ownedMock{mock: mock, owner: testName})
 			}
 			heldTaken = len(fromHold)
@@ -4726,10 +4845,7 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 			}
 			mock.Name = "mock-" + generateRandomString(8)
 			if w.mapping {
-				if lateMappings == nil {
-					lateMappings = make(map[string][]string)
-				}
-				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
+				lateMappings = withLate(lateMappings, w.testName, mock)
 			}
 			// Owned by the rescued window's test → tag it so a capacity
 			// drop suppresses that TC.

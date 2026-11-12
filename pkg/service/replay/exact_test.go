@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -363,6 +364,100 @@ func TestTheSetsEndRequiresTheWorkerScopeItsRunReached(t *testing.T) {
 	}
 }
 
+// A set with no mappings.yaml marks as the stop's the worker-scope calls
+// recorded after its last test ended (stopsDerived): nothing says whether the
+// application made them on its own or as keploy record stopped it. Such a
+// mark is judged exactly as one keploy record wrote: the wait before the stop
+// leaves it out, the end of an application keploy stopped requires it, and
+// the end of one keploy did not stop does not, saying which went unjudged
+// (unjudgedAtStop) where a recorded mark's says nothing. A call consumed, or
+// placed where the run did not reach, is never unjudged.
+func TestTheSetsEndRequiresTheCallsMarkedAfterTheLastTestWithoutWaiting(t *testing.T) {
+	for _, derived := range []bool{false, true} {
+		p := newExactPlan(nil, []models.MockEntry{
+			{Name: "w-boot"}, {Name: "w-late", Place: "test-1", AtStop: true},
+			{Name: "w-made", Place: "test-1", AtStop: true}, {Name: "w-unreached", Place: "test-2", AtStop: true},
+		}, []*models.Mock{{Name: "w-boot"}, {Name: "w-late"}, {Name: "w-made"}, {Name: "w-unreached"}})
+		p.bootSeen, p.stopsDerived = true, derived
+		p.begin("test-1")
+		consumed := map[string]models.MockState{"w-made": {Name: "w-made"}}
+		// What the wait before the stop waits for (awaitWorkerScope), and
+		// what the end of an application keploy did not stop requires.
+		if got := p.unansweredWorker(consumed, false); !reflect.DeepEqual(got, []string{"w-boot"}) {
+			t.Fatalf("derived %v: before the stop the end requires %v; want [w-boot]", derived, got)
+		}
+		if got := p.unansweredWorker(consumed, true); !reflect.DeepEqual(got, []string{"w-boot", "w-late"}) {
+			t.Fatalf("derived %v: once the application was stopped the end requires %v; want [w-boot w-late]", derived, got)
+		}
+		var want []string
+		if derived {
+			want = []string{"w-late"}
+		}
+		if got := p.unjudgedAtStop(consumed, false); !reflect.DeepEqual(got, want) {
+			t.Fatalf("derived %v: the end of an application keploy did not stop says %v went unjudged; want %v", derived, got, want)
+		}
+		if got := p.unjudgedAtStop(consumed, true); got != nil {
+			t.Fatalf("derived %v: the end of an application keploy stopped says %v went unjudged; want none", derived, got)
+		}
+		why := p.stopsDerivedWhy([]string{"w-boot", "w-late"})
+		if derived != strings.Contains(why, "1 of them were recorded after the set's last test ended") || p.stopsDerivedWhy([]string{"w-boot"}) != "" {
+			t.Fatalf("derived %v: the failure says %q", derived, why)
+		}
+	}
+	var none *exactPlan
+	if none.stopsDerivedWhy([]string{"w"}) != "" || none.unjudgedAtStop(nil, false) != nil {
+		t.Fatal("no plan waits for nothing and says nothing")
+	}
+	bg := &exactPlan{background: true, stopsDerived: true, worker: []models.MockEntry{{Name: "w"}, {Name: "w-late", AtStop: true}}, bootSeen: true}
+	if bg.unansweredWorker(nil, false) != nil || bg.unjudgedAtStop(nil, false) != nil {
+		t.Fatal("under the background rules the wait waits for nothing and nothing goes unjudged")
+	}
+}
+
+// A set with no mappings.yaml derives its worker scope from its windows, and
+// marks as the stop's each call of it recorded after its last test ended: by
+// its request, or its answer for one placed at its answer (a poll answered as
+// the application was stopped). One recorded before the last test, though
+// after another test, is not marked; nor is any, with no window to end.
+func TestTheWindowsMarkTheWorkerCallsAfterTheLastTest(t *testing.T) {
+	unregister := models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Name == "w-held" })
+	t.Cleanup(unregister)
+	at := func(name string, req, res int) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "mocks", models.MetadataLifetimeKey: models.MetadataLifetimePerTest},
+			ReqTimestampMock: attrAt(req), ResTimestampMock: attrAt(res),
+		}}
+	}
+	cases := []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(1000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(1100)}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(2000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(2100)}},
+	}
+	stored := []*models.Mock{at("w-between", 1500, 1510), at("w-held", 2050, 2600), at("w-late", 2500, 2510)}
+	// A document the decoders skipped, built with no place: read by its
+	// request time.
+	skipped := []models.WindowedMock{{Name: "w-unread", Kind: models.HTTP, At: attrAt(2700), TestMock: true}}
+	core, logs := observer.New(zap.InfoLevel)
+	r := &Replayer{logger: zap.New(core)}
+	_, worker := r.windowOwnership("test-set-0", cases, "no mappings.yaml", skipped, stored)
+	got := map[string]bool{}
+	for _, e := range worker {
+		got[e.Name] = e.AtStop
+	}
+	if want := map[string]bool{"w-between": false, "w-held": true, "w-late": true, "w-unread": true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("marked %v; want %v", got, want)
+	}
+	said := logs.FilterMessageSnippet("owns the calls recorded inside its own window").All()
+	if len(said) != 1 || said[0].ContextMap()["workerMocksAfterTheLastTest"] != int64(3) {
+		t.Fatalf("said %v; want one line counting 3 worker calls after the last test", said)
+	}
+	_, worker = r.windowOwnership("test-set-0", []*models.TestCase{{Name: "grpc-less", Kind: models.GENERIC}}, "no mappings.yaml", nil, stored)
+	for _, e := range worker {
+		if e.AtStop {
+			t.Fatalf("with no window %s is marked as the stop's", e.Name)
+		}
+	}
+}
+
 // A worker-scope entry naming a mock the agent does not hold is required all
 // the same, as a test case's own entry is: a recorded call never made fails
 // the set. One of a kind no assertion covers (DNS) is not, nor is a
@@ -407,7 +502,9 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 	t.Cleanup(func() { workerStallLimit, workerWake = prevLimit, prevWake })
 	workerStallLimit = 3
 	wakes := make(chan time.Time)
-	workerWake = func(context.Context) (<-chan time.Time, func()) { return wakes, func() {} }
+	workerWake = func(context.Context) (func() <-chan time.Time, func()) {
+		return func() <-chan time.Time { return wakes }, func() {}
+	}
 	plan := func() *exactPlan {
 		p := newExactPlan(nil, []models.MockEntry{{Name: "w-1"}, {Name: "w-2"}, {Name: "w-shutdown", AtStop: true}},
 			[]*models.Mock{{Name: "w-1"}, {Name: "w-2"}, {Name: "w-shutdown"}})
@@ -428,14 +525,24 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 		}()
 		return out
 	}
+	// wake drives one wake-up of the wait: a wait that ended before it fails
+	// the row, as it no longer takes its wake-ups.
+	wake := func(t *testing.T, done <-chan []string, before string) {
+		t.Helper()
+		select {
+		case wakes <- time.Time{}:
+		case missing := <-done:
+			t.Fatalf("the wait ended before %s, reporting %v (%v)", before, missing, readErr)
+		}
+	}
 
 	t.Run("every call made", func(t *testing.T) {
 		reads := make(chan []models.MockState, 4)
 		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
 		done := run(r, context.Background(), plan(), map[string]models.MockState{})
 		reads <- []models.MockState{{Name: "w-1"}}
-		wakes <- time.Time{} // w-1 answers
-		wakes <- time.Time{} // a slow worker: nothing this time, under the limit
+		wake(t, done, "w-1 answered")
+		wake(t, done, "a slow worker's wake-up with nothing answered, under the limit")
 		reads <- []models.MockState{{Name: "w-2"}}
 		for {
 			select {
@@ -448,14 +555,32 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 			}
 		}
 	})
+	t.Run("every call made, a stop call marked for a set with no mappings.yaml", func(t *testing.T) {
+		reads := make(chan []models.MockState, 4)
+		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
+		p := plan()
+		p.stopsDerived = true
+		done := run(r, context.Background(), p, map[string]models.MockState{})
+		reads <- []models.MockState{{Name: "w-1"}, {Name: "w-2"}}
+		for {
+			select {
+			case wakes <- time.Time{}:
+			case missing := <-done:
+				if len(missing) != 0 || readErr != nil {
+					t.Fatalf("every call but the stop's was made, yet %v were reported (%v): the wait waited for the stop's", missing, readErr)
+				}
+				return
+			}
+		}
+	})
 	t.Run("a call never made", func(t *testing.T) {
 		reads := make(chan []models.MockState, 4)
 		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
 		done := run(r, context.Background(), plan(), map[string]models.MockState{})
 		reads <- []models.MockState{{Name: "w-1"}}
-		wakes <- time.Time{} // w-1 answers: progress
+		wake(t, done, "w-1 answered")
 		for i := 0; i < 3; i++ {
-			wakes <- time.Time{}
+			wake(t, done, fmt.Sprintf("its stall's wake-up %d", i+1))
 		}
 		if missing := <-done; !reflect.DeepEqual(missing, []string{"w-2"}) {
 			t.Fatalf("reported %v; want [w-2]", missing)
@@ -474,20 +599,178 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: make(chan []models.MockState)}}
 		consumed := map[string]models.MockState{"w-1": {}, "w-2": {}}
 		// The shutdown's call is not waited for: the application makes it
-		// only once it is stopped.
-		if missing := <-run(r, context.Background(), plan(), consumed); missing != nil {
-			t.Fatalf("reported %v with every call made", missing)
+		// only once it is stopped. A wait that takes a wake-up waits for it,
+		// and is ended before the row fails: left running, it would take the
+		// next case's wake-ups.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := run(r, ctx, plan(), consumed)
+		select {
+		case wakes <- time.Time{}:
+			cancel()
+			<-done
+			t.Fatal("the wait took a wake-up with every call but the shutdown's made: it waits for a call the application makes only once it is stopped")
+		case missing := <-done:
+			if missing != nil {
+				t.Fatalf("reported %v with every call made", missing)
+			}
 		}
 	})
 	t.Run("a read fails", func(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: make(chan []models.MockState), err: errors.New("the agent did not answer")}}
 		done := run(r, context.Background(), plan(), map[string]models.MockState{})
-		wakes <- time.Time{}
+		wake(t, done, "its read")
 		<-done
 		if readErr == nil {
 			t.Fatal("a failed read was not returned: the calls would be reported as never made")
 		}
 	})
+}
+
+// A worker call answered as the set's last test ends (a consumer's poll sent
+// in the last test and answered just after it) ends the set's end's wait for
+// the worker scope soon after, not at the next whole second: the wait reads
+// what the agent consumed first after workerWakeFirst. The row uses the real
+// wake-ups; a wait that still took a second's tick before its first read
+// takes 1 s here.
+func TestTheSetsEndReadsAWorkerCallAnsweredAsItsWaitBeginsSoon(t *testing.T) {
+	p := newExactPlan(nil, []models.MockEntry{{Name: "w-poll"}}, []*models.Mock{{Name: "w-poll"}})
+	p.bootSeen = true
+	reads := make(chan []models.MockState, 1)
+	reads <- []models.MockState{{Name: "w-poll"}}
+	r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
+	consumed := map[string]models.MockState{}
+	done := make(chan []string, 1)
+	// A wait the row gives up on ends with the row, not at its stall limit.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	began := time.Now()
+	go func() {
+		missing, _ := r.awaitWorkerScope(ctx, p, consumed, func(read []models.MockState) {
+			for _, m := range read {
+				consumed[m.Name] = m
+			}
+		})
+		done <- missing
+	}()
+	select {
+	case missing := <-done:
+		if len(missing) != 0 {
+			t.Fatalf("the call was answered, yet %v were reported", missing)
+		}
+		if took := time.Since(began); took >= 900*time.Millisecond {
+			t.Fatalf("the wait took %v for a call answered before its first read: it read first at a second's tick", took)
+		}
+	case <-time.After(900 * time.Millisecond):
+		t.Fatal("the wait had not ended 900 ms after it began, for a call answered before its first read: it reads first at a second's tick")
+	}
+}
+
+// nthRead hands the worker call w-poll back at the at-th read of what the
+// agent consumed, and nothing at the reads before or after it.
+type nthRead struct {
+	prHooks
+	n  *atomic.Int32
+	at int32
+}
+
+func (c nthRead) GetConsumedMocks(context.Context) ([]models.MockState, error) {
+	if c.n.Add(1) == c.at {
+		return []models.MockState{{Name: "w-poll"}}, nil
+	}
+	return nil, nil
+}
+
+// A worker call the agent hands back only at the wait's third read ends the
+// set's end's wait at that read, with the real wake-ups: the wait asks for a
+// new wake-up after each read (workerWake's next), so it reads again until
+// the call is answered, not once and then until its context ends, which is
+// when the application exits or the user stops keploy.
+func TestTheSetsEndReadsAgainUntilAWorkerCallAnsweredLaterInItsWait(t *testing.T) {
+	p := newExactPlan(nil, []models.MockEntry{{Name: "w-poll"}}, []*models.Mock{{Name: "w-poll"}})
+	p.bootSeen = true
+	reads := &atomic.Int32{}
+	r := &Replayer{logger: zap.NewNop(), hookImpl: nthRead{n: reads, at: 3}}
+	consumed := map[string]models.MockState{}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	began := time.Now()
+	missing, err := r.awaitWorkerScope(ctx, p, consumed, func(read []models.MockState) {
+		for _, m := range read {
+			consumed[m.Name] = m
+		}
+	})
+	if ctx.Err() != nil {
+		t.Fatalf("the wait ended only with its context, after %v and %d reads; want it to read again at each wake-up until the call is answered, at its third read", time.Since(began), reads.Load())
+	}
+	if err != nil || len(missing) != 0 {
+		t.Fatalf("the wait returned %v, %v after %d reads; want the call answered at the third read", missing, err, reads.Load())
+	}
+	if n := reads.Load(); n != 3 {
+		t.Fatalf("the wait read %d times; want 3: it ends at the read that hands the call back", n)
+	}
+}
+
+// The wait for the worker scope wakes first after workerWakeFirst, then twice
+// as long each time, at most workerWakeMost, a tenth of a second: a call
+// answered as the wait begins is read soon, and one answered later in the
+// wait at most a tenth of a second after its answer, not at the next whole
+// second. Its stall limit's wake-ups span about ten minutes, as long as the
+// end count's watchdog's 600 a second apart.
+func TestTheWorkerScopesWakeUpsDoubleToATenthOfASecond(t *testing.T) {
+	if got := workerWakeAfter(0); got != workerWakeFirst || got > 50*time.Millisecond {
+		t.Fatalf("the first wake-up comes after %v; want workerWakeFirst (%v), well under a tenth of a second", got, workerWakeFirst)
+	}
+	if workerWakeMost > 100*time.Millisecond {
+		t.Fatalf("the wait sleeps up to %v between two reads; want at most 100 ms, so a call answered in the wait is read within a tenth of a second", workerWakeMost)
+	}
+	prev := workerWakeAfter(0)
+	for n := 1; n <= 2000; n++ {
+		d := workerWakeAfter(n)
+		if want := min(2*prev, workerWakeMost); d != want {
+			t.Fatalf("wake-up %d comes after %v, after %v before it; want %v", n, d, prev, want)
+		}
+		prev = d
+	}
+	if prev != workerWakeMost {
+		t.Fatalf("a long wait wakes every %v; want every workerWakeMost (%v)", prev, workerWakeMost)
+	}
+	var span time.Duration
+	for n := 0; n < workerStallLimit; n++ {
+		span += workerWakeAfter(n)
+	}
+	if span < 590*time.Second || span > 610*time.Second {
+		t.Fatalf("the stall limit's %d wake-ups span %v; want about ten minutes, as long as the end count's watchdog's", workerStallLimit, span)
+	}
+}
+
+// The real wake-ups of one wait double as the wait takes them: once the wait
+// has taken those under workerWakeMost, the next is workerWakeMost away, not
+// workerWakeFirst. A wait that did not count them would read every
+// workerWakeFirst, and its stall limit would span a minute, not ten. A timer
+// never fires early, so the row cannot fail on a slow machine.
+func TestTheWorkerScopesRealWakeUpsDoubleAsTheWaitTakesThem(t *testing.T) {
+	next, stop := workerWake(context.Background())
+	defer stop()
+	for n := 0; workerWakeAfter(n) < workerWakeMost; n++ {
+		if n == 16 {
+			t.Fatalf("wake-up %d still comes %v after the one before: the wake-ups do not double to workerWakeMost (%v)", n, workerWakeAfter(n), workerWakeMost)
+		}
+		select {
+		case <-next():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("wake-up %d had not come 5 s after the wait asked for it", n)
+		}
+	}
+	asked := time.Now()
+	select {
+	case <-next():
+		if took := time.Since(asked); took < workerWakeMost {
+			t.Fatalf("the wake-up after those under workerWakeMost came %v after the wait asked for it; want workerWakeMost (%v): the wake-ups are not counted", took, workerWakeMost)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wake-up after those under workerWakeMost had not come 5 s after the wait asked for it")
+	}
 }
 
 // The set's retry cycles, and a streaming pass run out of recorded order,
@@ -511,5 +794,33 @@ func TestTheLearningServedAfterTheLearnStepEndedIsEveryStateThatCarriesSome(t *t
 	}
 	if want := []string{"a-noise", "b-vars", "c-binds", "e-clock"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("the states sent with the learn step ended are %v; want %v (a binds-only and a clock-only state among them)", got, want)
+	}
+}
+
+// Under the background rules the set's end requires no worker-scope
+// recording but a trailing write (models.MockEntry.Trails): a recording a
+// trail move put there, once the run reached its place, is required as
+// without them, and answered it is not. An ordinary background recording
+// stays not required, and one whose place the run did not reach is not due.
+func TestUnderTheBackgroundRulesATrailingWriteIsStillRequired(t *testing.T) {
+	p := &exactPlan{background: true, bootSeen: true, begun: map[string]bool{"TestA": true}, worker: []models.MockEntry{
+		{Name: "w"}, {Name: "w-trail", Place: "TestA", Trails: "TestA"}, {Name: "w-unreached", Place: "TestB", Trails: "TestB"},
+	}}
+	if got := p.unansweredWorker(nil, false); !reflect.DeepEqual(got, []string{"w-trail"}) {
+		t.Fatalf("never made, the set's end requires %v; want [w-trail]", got)
+	}
+	if got := p.unansweredWorker(map[string]models.MockState{"w-trail": {Name: "w-trail"}}, false); got != nil {
+		t.Fatalf("made once, the set's end requires %v; want none", got)
+	}
+	if got := p.trailingWrites(); !reflect.DeepEqual(got, map[string]bool{"w-trail": true, "w-unreached": true}) {
+		t.Fatalf("trailingWrites = %v", got)
+	}
+	var none *exactPlan
+	if none.unansweredWorker(nil, false) != nil || none.trailingWrites() != nil {
+		t.Fatal("no plan requires nothing")
+	}
+	without := &exactPlan{bootSeen: true, begun: map[string]bool{"TestA": true}, worker: p.worker}
+	if got := without.unansweredWorker(nil, false); !reflect.DeepEqual(got, []string{"w", "w-trail"}) {
+		t.Fatalf("without the background rules the set's end requires %v; want [w w-trail]", got)
 	}
 }

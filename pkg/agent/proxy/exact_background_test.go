@@ -527,7 +527,7 @@ func TestALostAnswerReportIsSaidToBeNoMiss(t *testing.T) {
 		t.Fatalf("the loss of a pairing's report is %v; want it said as no miss, with the list's cause", cause)
 	}
 	p = &Proxy{}
-	p.pendingDroppedForRoom(answer)
+	p.pendingDroppedForRoom(&p.missWindow, answer)
 	if !p.pendingLost {
 		t.Fatal("a pairing's report dropped while no window was open left the next read complete")
 	}
@@ -537,7 +537,7 @@ func TestALostAnswerReportIsSaidToBeNoMiss(t *testing.T) {
 	core, logs := observer.New(zapcore.WarnLevel)
 	p = &Proxy{logger: zap.New(core)}
 	p.noteMissLost(byKind, missLostListFull)
-	p.pendingDroppedForRoom(byKind)
+	p.pendingDroppedForRoom(&p.missWindow, byKind)
 	if cause := p.missLoss.Load(); cause != nil || p.pendingLost {
 		t.Fatalf("a by-kind answer's lost report made a read incomplete: %v, pending %v", cause, p.pendingLost)
 	}
@@ -718,8 +718,11 @@ func TestAnswersAndMissesHaveRoomOfTheirOwn(t *testing.T) {
 // answered by kind only when every background reply of it is equal):
 // KindBackground lists a worker recording placed after a test not begun,
 // which Background, what exact serving reads, hides; and SpendByKind spends it
-// for the staging, once, so it answers nothing more once its place is
-// reached. A test's own or another test's recording is no background; today's
+// once for the calls outside every test, where it was made: once its place
+// is reached a test's window still reads it, since the windows and the calls
+// between tests read the worker scope apart (a window's answers never depend
+// on what the calls between tests spent), and it answers one window's call,
+// then nothing more. A test's own or another test's recording is no background; today's
 // rules have none; a scoped view forwards it.
 func TestKindBackgroundIgnoresPlace(t *testing.T) {
 	mm, ms := s12Set(t)
@@ -747,12 +750,19 @@ func TestKindBackgroundIgnoresPlace(t *testing.T) {
 	equalNames(t, "the kind's spent background after the spend", spent, "w-later")
 	equalNames(t, "the spent background", mm.SpentBackground(models.HTTP), "w-later")
 
-	// Its place reached, it is spent for the staging: not shown.
+	// Its place reached, a window reads it: the by-kind answer between
+	// tests listed it spent for the by-kind answers outside every window
+	// only (the other doors still read it there). Main's row hid
+	// it here, so whether a window was answered depended on how many calls
+	// landed between tests. It answers one window's call, then nothing.
 	mm.ServeExactWorker([]string{"w-boot", "w-later"})
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
-	equalNames(t, "the background once w-later's place is reached", mm.Background(models.HTTP), "w-boot", "pool")
+	equalNames(t, "the background once w-later's place is reached", mm.Background(models.HTTP), "w-boot", "w-later", "pool")
+	if got := pollFirst(t, mm, "w-later"); got != "w-later" {
+		t.Fatalf("a recording a by-kind answer spent between tests did not answer a window: %s", got)
+	}
 	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
-		t.Fatalf("a recording a by-kind answer spent answered again: %s", got)
+		t.Fatalf("a worker recording answered twice in the windows: %s", got)
 	}
 
 	// Through a scoped view.
@@ -773,6 +783,54 @@ func TestKindBackgroundIgnoresPlace(t *testing.T) {
 	if mm.SpendByKind(ms["w-boot"]) {
 		t.Fatal("today's rules spent by kind")
 	}
+}
+
+// A by-kind spend of a worker recording is the view's its call was read in,
+// as a consume door's is (TestAWorkerSpendFollowsTheViewTheCallWasReadIn): a
+// call read between tests whose spend lands after the next test opened
+// spends nothing a window reads, and a test's call whose spend
+// lands after its end spends it for the windows. Settled in the view in
+// force, the first hid the recording from the test's window and the second
+// let a later window be answered it again, as the commit landed before or
+// after the boundary.
+func TestAByKindSpendFollowsTheViewTheCallWasReadIn(t *testing.T) {
+	worker := []string{"w-boot", "w-later"}
+	serve := func(mm *MockManager) {
+		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, worker)
+		mm.ServeExactWorker(worker)
+	}
+	spend := func(t *testing.T, db integrations.MockMemDb, mk *models.Mock) {
+		t.Helper()
+		if !integrations.SpendByKind(db, mk) {
+			t.Fatalf("a held call's by-kind answer could not spend %s", mk.Name)
+		}
+	}
+	t.Run("read between tests, spent after the test opened", func(t *testing.T) {
+		mm, ms := s12Set(t)
+		serve(mm)
+		mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+		held, _ := mm.HoldToRound(mm.MarkCallRound())
+		mm.ServeExactWorker(worker)
+		mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+		spend(t, held, ms["w-later"])
+		if got := pollFirst(t, mm, "w-later"); got != "w-later" {
+			t.Fatalf("T1's window was answered %s after a call read between tests spent w-later by kind in it; want w-later, as when the spend lands before the begin", got)
+		}
+	})
+	t.Run("read in a test, spent after its end", func(t *testing.T) {
+		mm, ms := s12Set(t)
+		serve(mm)
+		mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+		held, _ := mm.HoldToRound(mm.MarkCallRound())
+		mm.ServeExactWorker(worker)
+		mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+		spend(t, held, ms["w-later"])
+		mm.ServeExactWorker(worker)
+		mm.ServeExactTest("T2", []*models.Mock{ms["other"]})
+		if got := pollFirst(t, mm, "w-later"); got != "a miss" {
+			t.Fatalf("T2's window was answered %s after T1's call spent w-later by kind past T1's end; want a miss: w-later answered T1's window", got)
+		}
+	})
 }
 
 // An async lane's worker-scope recording keeps today's reuse under the background
@@ -927,7 +985,7 @@ func TestASpendInAClosedViewBackInForceIsRefused(t *testing.T) {
 	mm.ServeExactPool("k", []string{"pool"})
 	v := mm.exactView()
 	mm.ServeExactPool("k2", []string{"pool"})
-	if spent, wait := mm.spendByKindIn(v, ms["pool"]); spent || wait == nil {
+	if spent, wait := mm.spendByKindIn(v, ms["pool"], nil); spent || wait == nil {
 		t.Fatalf("a spend in a replaced view: spent %v, wait %v; want it to wait for the view in force", spent, wait)
 	}
 	mm.exact.view.Store(v)
@@ -1049,9 +1107,9 @@ func TestAViewInstallExactClosesReleasesItsWaitersAfterTheRevisionsMove(t *testi
 					t.Errorf("the view replaced is %p; want %p", prev, replaced)
 				}
 				rev = mm.Revision()
-				_, waits["spend"] = mm.spendByKindIn(prev, ms["pool"])
+				_, waits["spend"] = mm.spendByKindIn(prev, ms["pool"], nil)
 				mk := *ms["pool"]
-				_, waits["consume"], _ = mm.exactConsumeIn(prev, &mk, true)
+				_, waits["consume"], _ = mm.exactConsumeIn(prev, &mk, true, nil)
 				for name, w := range waits {
 					if w == nil {
 						t.Errorf("a %s in the replaced view settled: it is closed", name)
@@ -1097,5 +1155,40 @@ func TestASpendInAnOpenViewDoesNotWait(t *testing.T) {
 	defer func() { mm.exact.onClosedWait = nil }()
 	if !mm.SpendByKind(ms["pool"]) {
 		t.Fatal("a spend in an open view was refused")
+	}
+}
+
+// A background recording judging moved into the open test (one the test's
+// mapping names, though it was recorded in the pool or by a worker) is the
+// test's own: InBackground reads it as no background recording, so the
+// checks that hide the background from a call one more than the test
+// recorded (the HTTP learn step, Postgres' Hidden, Mongo's learn claim) never
+// hide the test's own recording from it, nor read it as the background's.
+// The rest of the background stays the background.
+func TestARecordingJudgingMovedIntoTheTestIsNotTheBackgrounds(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	mk := func(name string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"type": "mocks"}}}
+	}
+	moved, bg := mk("moved-1"), mk("bg-1")
+	for _, scope := range []string{"the pool", "the worker scope"} {
+		t.Run(scope, func(t *testing.T) {
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SetMocksWithWindow(nil, []*models.Mock{moved, bg}, models.BaseTime, time.Now().Add(time.Hour))
+			names := []string{moved.Name, bg.Name}
+			if scope == "the pool" {
+				mm.ServeExactBackground(models.RecordedWithS12Routing, names, nil)
+			} else {
+				mm.ServeExactWorker(names)
+			}
+			mm.ServeExactTest("T1", []*models.Mock{moved})
+			if !mm.ExactServing() {
+				t.Fatal("precondition: T1 is not served exactly")
+			}
+			if mm.InBackground(moved.Name) || !mm.InBackground(bg.Name) {
+				t.Fatalf("InBackground: the recording moved into T1 %v, the background's %v; want false, true", mm.InBackground(moved.Name), mm.InBackground(bg.Name))
+			}
+		})
 	}
 }

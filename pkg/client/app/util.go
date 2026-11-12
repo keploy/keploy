@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/compose/v5/pkg/api"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -343,14 +342,14 @@ func composeUpOffset(cmd string, intoQuoted bool) (int, bool) {
 // user-supplied --exit-code-from / --abort-* untouched, and only the final
 // string records which of the two decided them.
 func composeUpSemantics(cmd string) docker.ComposeUpOptions {
-	opts := docker.ComposeUpOptions{OnExit: api.CascadeIgnore}
+	opts := docker.ComposeUpOptions{OnExit: docker.ComposeOnExitIgnore}
 	parts := strings.Fields(cmd)
 	for i := 0; i < len(parts); i++ {
 		switch {
 		case parts[i] == "--abort-on-container-exit":
-			opts.OnExit = api.CascadeStop
+			opts.OnExit = docker.ComposeOnExitStop
 		case parts[i] == "--abort-on-container-failure":
-			opts.OnExit = api.CascadeFail
+			opts.OnExit = docker.ComposeOnExitFail
 		case parts[i] == "--exit-code-from" && i+1 < len(parts):
 			opts.ExitCodeFrom = parts[i+1]
 			i++
@@ -369,8 +368,8 @@ func composeUpSemantics(cmd string) docker.ComposeUpOptions {
 	// exactly why it is worth stating: the claim above is that the two paths
 	// cannot disagree, and that has to hold for inputs keploy does not
 	// currently produce, not only for the ones it does.
-	if opts.ExitCodeFrom != "" && opts.OnExit == api.CascadeIgnore {
-		opts.OnExit = api.CascadeStop
+	if opts.ExitCodeFrom != "" && opts.OnExit == docker.ComposeOnExitIgnore {
+		opts.OnExit = docker.ComposeOnExitStop
 	}
 	return opts
 }

@@ -87,6 +87,13 @@ type mockStatsReader interface {
 type servedMockReader interface {
 	ServedMocks(ctx context.Context) (map[string]models.MockState, error)
 }
+
+// learnedElsewhereReader is the agent service's optional read of what
+// record's full round learned onto recordings from calls made in other
+// windows than theirs (service/agent.Agent.LearnedElsewhere).
+type learnedElsewhereReader interface {
+	LearnedElsewhere(ctx context.Context) ([]models.MockState, error)
+}
 type capturedMockDrainer interface {
 	DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error)
 }
@@ -138,10 +145,13 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	starts.Default.Begin(uint32(req.Pid), req.Name, req.Dir, req.Suite, markTime(req.At))
 	if err := beginScope(r.Context(), a.svc, req); err != nil {
-		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
+		// A refused begin fails its test, and the replay with it, whatever
+		// the harness does with the answer: said where the agent's log is read.
+		a.logger.Warn("keploy refused a test at its begin, so the test fails", zap.String("test", req.Name), zap.Int("pid", req.Pid), zap.Error(err))
 		code := http.StatusInternalServerError
-		if errors.Is(err, agent.ErrOneTestAtATime) {
-			// release1-cut §2.1: 422 one_test_at_a_time.
+		if errors.Is(err, agent.ErrOneTestAtATime) || errors.Is(err, agent.ErrPidBeginWithoutMarks) {
+			// release1-cut §2.1: 422 one_test_at_a_time. A pid begin keploy
+			// cannot narrow is the harness's to change, as that one is.
 			code = http.StatusUnprocessableEntity
 		}
 		http.Error(w, err.Error(), code)
@@ -222,8 +232,13 @@ func (a *Agent) HandleScopeWindows(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleScopeTable installs the replay-time per-test name→mock-names table.
+//
+// Its answer names the table's fields the agent applied that an older agent
+// ignores (models.ScopeTableResp.Served), so the CLI can refuse an agent
+// that would serve them otherwise.
 func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 	var req models.ScopeTableReq
+	var served []string
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid scope-table request: %v", err), http.StatusBadRequest)
 		return
@@ -249,10 +264,49 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if provenswitch.On() && req.Sets == nil {
+		// The values each test gave when it was recorded: a replay's given
+		// is bound with its recorded value. An agent that cannot take them
+		// says so when the recording has any: its givens would check
+		// nothing.
+		if s, ok := a.svc.(scopeGivenSetter); ok {
+			if err := s.SetScopeGiven(r.Context(), req.Given); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Given) > 0 {
+			http.Error(w, "this keploy agent cannot take the values the tests gave when they were recorded", http.StatusNotImplemented)
+			return
+		}
+		// Each test's repeated reads: none clears a previous set's. An
+		// agent that cannot take them says so when the replay names any:
+		// it would serve each such read its exact count.
+		if s, ok := a.svc.(scopeRepeatReadsSetter); ok {
+			if err := s.SetScopeRepeatReads(r.Context(), req.RepeatReads); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.RepeatReads) > 0 {
+			http.Error(w, "this keploy agent cannot answer a test's repeated read once more", http.StatusNotImplemented)
+			return
+		}
+	}
 	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
 		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+	}
+	if req.Sets == nil {
+		// The run's place, under either switch: an answer recorded in a later
+		// test than its call is written once the replay reaches that test.
+		// A table without windows (an older CLI, a set with no test) leaves
+		// the set none: written at once.
+		if s, ok := a.svc.(runPlaceWindowsSetter); ok {
+			if err := s.SetRunPlaceWindows(r.Context(), req.Windows); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 	}
 	if provenswitch.On() && req.Sets == nil {
@@ -278,18 +332,206 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// Each key's worker scope, before the pool is served, which shows
+		// it. Every table says it, an empty one too: a set never keeps the
+		// previous set's. An agent that cannot serve one refuses a table
+		// that has one: the CLI judges each test on it.
+		if ws, ok := a.svc.(scopeWorkerSetter); ok {
+			if err := ws.SetScopeWorker(r.Context(), req.Worker); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Worker) > 0 {
+			http.Error(w, "this keploy agent cannot serve a set's worker: calls in a test's window", http.StatusNotImplemented)
+			return
+		}
+		// Which of the worker scope are the reads of tests the replay's gate
+		// skips, said by every table too. An agent that cannot tell them
+		// serves them as the rest of the worker scope, failing closed: they
+		// answer no call one more than the open test recorded.
+		if rs, ok := a.svc.(scopeSkippedReadsSetter); ok {
+			if err := rs.SetScopeSkippedReads(r.Context(), req.SkippedReads); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		// The test each worker recording trails, with the worker scope.
+		// Every table says it, an empty one too. An agent that cannot learn
+		// by it refuses a table that has one: the CLI judges the calls on it.
+		if ts, ok := a.svc.(scopeTrailsSetter); ok {
+			if err := ts.SetScopeTrails(r.Context(), req.Trails); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Trails) > 0 {
+			http.Error(w, "this keploy agent cannot learn a worker: call that trails an earlier test", http.StatusNotImplemented)
+			return
+		}
+		// The series of the recordings a declared rule placed, with the
+		// worker scope. Every table says it, an empty one too. An agent
+		// that cannot serve one refuses a table that has one.
+		if ss, ok := a.svc.(scopeSeriesSetter); ok {
+			if err := ss.SetScopeSeries(r.Context(), req.Series); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedSeries)
+		} else if len(req.Series) > 0 {
+			http.Error(w, "this keploy agent cannot serve a series of recordings a declared rule placed", http.StatusNotImplemented)
+			return
+		}
+		// The series that answer once in a run. Every table says them, an
+		// empty one too. An agent that cannot serve them refuses a table
+		// that has one: it would answer such a series' request again.
+		if os, ok := a.svc.(scopeOnceSetter); ok {
+			if err := os.SetScopeOnce(r.Context(), req.Once); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedOnce)
+		} else if len(req.Once) > 0 {
+			http.Error(w, "this keploy agent cannot serve a series of recordings once in a run", http.StatusNotImplemented)
+			return
+		}
+		// The sources rules declared in keploy.yml give fields of the
+		// recordings' requests. Every table says them, an empty one too.
+		// An agent that cannot learn by them, or that does not know a
+		// source's kind, refuses a table that has one.
+		if ss, ok := a.svc.(scopeSourcesSetter); ok {
+			if err := ss.SetScopeSources(r.Context(), req.Sources); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedSources)
+		} else if len(req.Sources) > 0 {
+			http.Error(w, "this keploy agent cannot learn a field by the source a rule in keploy.yml declares", http.StatusNotImplemented)
+			return
+		}
+		// Whether the learn step checks a changed time by its form alone.
+		// Every table says it, off too: a set never keeps the previous
+		// set's. An agent that cannot take it decides times by the clock
+		// checks alone: it refuses more, never passes more.
+		if ts, ok := a.svc.(scopeTimeFormSetter); ok {
+			if err := ts.SetScopeTimeForm(r.Context(), req.TimeForm); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		// The recordings keploy's judging marked served, not required, by test, before
+		// the pool is served. Every table says it, an empty one too: a set
+		// never keeps the previous set's. An agent that cannot take them
+		// refuses a table that has some: it would charge each test for them.
+		if ns, ok := a.svc.(scopeNotRequiredSetter); ok {
+			if err := ns.SetScopeNotRequired(r.Context(), req.NotRequired); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.NotRequired) > 0 {
+			http.Error(w, "this keploy agent cannot serve a recording served, not required", http.StatusNotImplemented)
+			return
+		}
+		// The set's background recordings (its worker: and startup:
+		// mocks), before the pool is served, whose serving stages the set
+		// and hands them to the proxy with it. Every table says it, an
+		// empty one too: a set never keeps the previous set's. An agent
+		// that cannot take them marks no miss background: every miss stays
+		// its test's, failing closed.
+		if bs, ok := a.svc.(scopeBackgroundSetter); ok {
+			if err := bs.SetScopeBackground(r.Context(), req.Background); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		if err := s.SetScopePool(r.Context(), req.Pool); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
 	render.Status(r, http.StatusOK)
-	render.JSON(w, r, map[string]string{"status": "ok"})
+	render.JSON(w, r, models.ScopeTableResp{Status: "ok", Served: served})
+}
+
+// scopeRepeatReadsSetter installs each test's repeated reads
+// (models.ScopeTableReq.RepeatReads).
+type scopeRepeatReadsSetter interface {
+	SetScopeRepeatReads(ctx context.Context, reads map[string][]models.RepeatRead) error
+}
+
+// scopeGivenSetter installs the values each test gave when it was recorded
+// (proven wire, models.ScopeTableReq.Given).
+type scopeGivenSetter interface {
+	SetScopeGiven(ctx context.Context, given map[string][]models.GivenValue) error
 }
 
 // scopePoolSetter installs each key's pool slice (proven wire).
 type scopePoolSetter interface {
 	SetScopePool(ctx context.Context, pool map[string][]string) error
+}
+
+// scopeWorkerSetter installs each key's worker scope for a replay
+// (models.ScopeTableReq.Worker, proven wire).
+type scopeWorkerSetter interface {
+	SetScopeWorker(ctx context.Context, worker map[string][]string) error
+}
+
+// scopeBackgroundSetter installs a replay's background recordings by name
+// (models.ScopeTableReq.Background, proven wire).
+type scopeBackgroundSetter interface {
+	SetScopeBackground(ctx context.Context, names []string) error
+}
+
+// scopeSkippedReadsSetter installs which of a replay's worker scope are the
+// reads of tests its gate skips, each with the skipped test that lists it
+// (models.ScopeTableReq.SkippedReads, proven wire).
+type scopeSkippedReadsSetter interface {
+	SetScopeSkippedReads(ctx context.Context, reads map[string]string) error
+}
+
+// scopeTrailsSetter installs the test each worker-scope recording trails
+// for a replay (models.ScopeTableReq.Trails, proven wire).
+type scopeTrailsSetter interface {
+	SetScopeTrails(ctx context.Context, trails map[string]string) error
+}
+
+// scopeSeriesSetter installs, by series, the worker-scope recordings a
+// declared rule placed for a replay, in placement order
+// (models.ScopeTableReq.Series, proven wire).
+type scopeSeriesSetter interface {
+	SetScopeSeries(ctx context.Context, series map[string][]string) error
+}
+
+// scopeOnceSetter installs the series of a replay whose recordings each
+// answer once in the run (models.ScopeTableReq.Once, proven wire).
+type scopeOnceSetter interface {
+	SetScopeOnce(ctx context.Context, once []string) error
+}
+
+// scopeSourcesSetter installs, by recording name, the sources rules
+// declared in keploy.yml give fields of its request for a replay
+// (models.ScopeTableReq.Sources, proven wire).
+type scopeSourcesSetter interface {
+	SetScopeSources(ctx context.Context, sources map[string][]models.DeclaredSource) error
+}
+
+// scopeTimeFormSetter installs whether a replay's learn step checks a
+// changed time by its form alone (models.ScopeTableReq.TimeForm, proven
+// wire).
+type scopeTimeFormSetter interface {
+	SetScopeTimeForm(ctx context.Context, on bool) error
+}
+
+// scopeNotRequiredSetter installs, by test, the recordings keploy's judging
+// marked served, not required (models.ScopeTableReq.NotRequired, proven
+// wire).
+type scopeNotRequiredSetter interface {
+	SetScopeNotRequired(ctx context.Context, notRequired map[string][]string) error
+}
+
+// runPlaceWindowsSetter installs the recorded window of every test of the set
+// keploy mock replay serves, for the run's place alone
+// (models.ScopeTableReq.Windows, models.RunWindows).
+type runPlaceWindowsSetter interface {
+	SetRunPlaceWindows(ctx context.Context, ws []models.TestWindow) error
 }
 
 // recordedWindowsSetter installs the recorded window of every test of the
@@ -318,8 +560,8 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-gate request: %v", err), http.StatusBadRequest)
 		return
 	}
-	// Under the proven switch the skip map is the gate, and every push
-	// replaces it: one without a map skips nothing. The answer acknowledges
+	// Under the proven switch the skip map and its needs are the gate, and
+	// every push replaces them: one without a map skips nothing. The answer acknowledges
 	// it with the wire's version, so a CLI never takes an agent that ignored
 	// the list for one that applies it. A run list is not part of it.
 	switch {
@@ -332,7 +574,7 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	case proven:
-		if err := p.SetScopeSkips(r.Context(), req.Skip); err != nil {
+		if err := p.SetScopeSkips(r.Context(), req.Skip, req.Needs); err != nil {
 			writeScopeError(w, r, &models.ScopeError{Status: http.StatusInternalServerError, Code: models.ScopeErrInternal, Message: err.Error()})
 			return
 		}
@@ -343,9 +585,9 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		render.Status(r, http.StatusOK)
-		render.JSON(w, r, models.ScopeGateResp{V: models.ScopeProtocolVersion, Status: "ok", Skips: len(req.Skip)})
+		render.JSON(w, r, models.ScopeGateResp{V: models.ScopeProtocolVersion, Status: "ok", Skips: len(req.Skip), Needs: len(req.Needs)})
 		return
-	case len(req.Skip) > 0:
+	case len(req.Skip) > 0 || len(req.Needs) > 0:
 		writeScopeError(w, r, &models.ScopeError{
 			Status:  http.StatusUnprocessableEntity,
 			Code:    models.ScopeErrUpgradeIntegration,
@@ -434,6 +676,34 @@ func (a *Agent) HandleServedMocks(w http.ResponseWriter, r *http.Request) {
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, served)
+}
+
+// HandleLearnedElsewhere answers what record's full round's learn step
+// taught recordings from calls made in other windows than theirs, for
+// learning only: one state per recording, none of it consumption (unlike
+// /consumedmocks). 501 from an agent that cannot say, so a caller tells
+// "this agent learns none" from "it learned none". keploy mock record and
+// keploy record's own full round (service/replay) both read it and write
+// it onto the recordings.
+func (a *Agent) HandleLearnedElsewhere(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s, ok := a.svc.(learnedElsewhereReader)
+	if !ok {
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": "this agent cannot report what it learned from calls made in other windows"})
+		return
+	}
+	learned, err := s.LearnedElsewhere(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
+	}
+	if learned == nil {
+		learned = []models.MockState{}
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, learned)
 }
 
 func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {

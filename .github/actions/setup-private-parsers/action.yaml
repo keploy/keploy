@@ -120,6 +120,9 @@ runs:
         # all, so a shed session failed the lane outright.
         # shellcheck source=/dev/null
         source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/go-retry.sh"
+        # integration_ref_of_body, shared with integrations-tests.sh.
+        # shellcheck source=/dev/null
+        source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/integration-ref.sh"
 
         # Cross-repo integrations-ref resolution order (first hit wins):
         #
@@ -182,17 +185,10 @@ runs:
           return 1
         }
 
-        # Step 1: PR body override.
-        # Tolerant matcher: accept the tag anywhere on a line — optional
-        # leading whitespace or a list marker ("- ", "* ", "> ") — and
-        # case-insensitive on both the "Integration" and "Ref" halves so
-        # common markdown rendering variants and hand-edited PR bodies
-        # still pair correctly. The trailing awk extracts only the
-        # FIRST whitespace-separated token after the colon — earlier
-        # iterations used `tr -d '[:space:]'` to strip trailing CR/LF,
-        # but that also concatenated "main other-tag" into
-        # "mainother-tag" if the author put two words on one line.
-        BODY_REF="$(printf '%s' "$PR_BODY" | grep -iE '^[[:space:]]*([-*>][[:space:]]+)?integration-ref:' | head -1 | sed -E 's/^[^:]+:[[:space:]]*//' | awk '{print $1; exit}' || true)"
+        # Step 1: PR body override. integration-ref.sh reads it: the
+        # first word after the first Integration-Ref line, any case, after
+        # an optional list or quote marker, with a CRLF body's CRs dropped.
+        BODY_REF="$(integration_ref_of_body "$PR_BODY")"
         if [ -n "$BODY_REF" ] && [ "$FETCHED" != "1" ]; then
           try_fetch "$BODY_REF" "PR body Integration-Ref" || true
         fi
@@ -280,6 +276,8 @@ runs:
         # Bounded retry for every go command below. See go-retry.ps1, and
         # go-retry.sh for why only certain failures are treated as transient.
         . "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.ps1"
+        # Get-IntegrationRefOfBody, integration-ref.sh's Windows twin.
+        . "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/integration-ref.ps1"
 
         function Try-Fetch([string]$Ref, [string]$Source) {
           if ([string]::IsNullOrWhiteSpace($Ref)) { return $false }
@@ -306,25 +304,8 @@ runs:
 
         # Resolution order: PR body Integration-Ref → head_ref → input.
         # See the non-Windows step for the full rationale.
-        $BodyRef = $null
-        if ($env:PR_BODY) {
-          # Tolerant matcher: accept the tag with optional leading
-          # whitespace or a list marker ("- ", "* ", "> "), mirroring
-          # the non-Windows branch. Keeps the cross-repo pairing
-          # working when reviewers edit PR bodies by hand. Take only
-          # the FIRST whitespace-separated token after the colon —
-          # an earlier iteration stripped all whitespace, which would
-          # silently concatenate "main other-tag" into "mainother-tag"
-          # for two-word lines.
-          $line = ($env:PR_BODY -split "`n") | Where-Object { $_ -imatch '^\s*([-*>]\s+)?integration-ref\s*:' } | Select-Object -First 1
-          if ($line) {
-            $tail = $line -replace '^[^:]+:\s*', ''
-            $tokens = $tail -split '\s+', 2
-            if ($tokens.Length -gt 0 -and $tokens[0]) {
-              $BodyRef = $tokens[0]
-            }
-          }
-        }
+        # Read as the non-Windows step reads it (integration-ref.ps1).
+        $BodyRef = Get-IntegrationRefOfBody $env:PR_BODY
 
         if ($BodyRef) { $Fetched = Try-Fetch $BodyRef "PR body Integration-Ref" }
         if (-not $Fetched) { $Fetched = Try-Fetch $env:GITHUB_HEAD_REF_VAL "github.head_ref" }

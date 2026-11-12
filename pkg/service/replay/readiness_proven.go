@@ -50,7 +50,8 @@ import (
 //   - a set whose first test says nowhere it dials: the same.
 //
 // No ceiling: what ends a wait that never sees its event is the watchdog. It
-// wakes once a second and counts the wake-ups in a row at which the
+// wakes soon after the wait begins, then once every readyWakeEvery
+// (readyWake), and counts the wake-ups in a row at which the
 // application made no progress: no listen, connect, process fork or exec by
 // its processes (in a container, its main process and what that starts; a
 // docker exec or a healthcheck is not the application), and, until it
@@ -63,20 +64,59 @@ import (
 // (JDWP's 5005) and then only computes for longer than the count; one its
 // launcher daemonizes before it listens (no longer seen as the
 // application). It counts its own wake-ups, not seconds: a starved keploy
-// wakes as seldom as it runs, so load alone cannot trip it. --delay is added
-// after the event.
+// wakes as seldom as it runs, so load alone cannot trip it. The count is
+// readyStallFor's worth of wake-ups at readyWakeEvery, each at least that long
+// after the last: the limit falls at about its time on an idle host (the
+// first wake-up comes readyWakeFirst in), later on a starved one. --delay is
+// added after the event.
+
+// readyWakeFirst is how soon after the wait begins the watchdog first wakes,
+// and readyWakeEvery how long it sleeps between two wake-ups after that. Each
+// wake-up reads the agent and probes again: an application that listens a few
+// milliseconds after keploy started it is found then, and one slow to start
+// within about readyWakeEvery of its listen. No busy loop: each read has the
+// agent look through /proc for the application's CPU time, and each probe
+// asks the application, ten of each a second at most.
+const (
+	readyWakeFirst = 10 * time.Millisecond
+	readyWakeEvery = 100 * time.Millisecond
+)
+
+// readyStallFor is how long the watchdog waits on an application that makes no
+// progress (design v14's lead decision: 600 wake-ups once a second, ten
+// minutes), and readyStatusFor how often a wait that goes on says what it
+// waits on: each a time, counted in the watchdog's wake-ups (readyStallLimit,
+// readyStatusEvery).
+const (
+	readyStallFor  = 10 * time.Minute
+	readyStatusFor = time.Minute
+)
+
+// wakeUpsIn is how many of the watchdog's wake-ups, readyWakeEvery apart, d
+// spans.
+func wakeUpsIn(d time.Duration) int { return int(d / readyWakeEvery) }
 
 // readyStallLimit is the watchdog's count of wake-ups in a row with no
-// progress (design v14's lead decision: 600).
-var readyStallLimit = 600
+// progress: readyStallFor's worth. A test sets its own.
+var readyStallLimit = wakeUpsIn(readyStallFor)
 
-// readyWake is how the watchdog wakes; a test replaces it.
+// watchdogSpan says n of the watchdog's wake-ups, and about the time they
+// span: n of readyWakeEvery, less when the first of them is the one
+// readyWakeFirst after the wait began, more when keploy is starved.
+func watchdogSpan(n int) string {
+	return fmt.Sprintf("%d wake-ups of keploy's watchdog (about %v, one each %v)", n, time.Duration(n)*readyWakeEvery, readyWakeEvery)
+}
+
+// readyWake is how the watchdog wakes: readyWakeFirst after the wait begins,
+// then readyWakeEvery after the wait took the last wake-up. A test replaces
+// it.
 var readyWake = func(ctx context.Context) (<-chan struct{}, func()) {
-	t := time.NewTicker(time.Second)
 	ch := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(ch)
+		t := time.NewTimer(readyWakeFirst)
+		defer t.Stop()
 		for {
 			select {
 			case <-t.C:
@@ -87,6 +127,7 @@ var readyWake = func(ctx context.Context) (<-chan struct{}, func()) {
 				case <-done:
 					return
 				}
+				t.Reset(readyWakeEvery)
 			case <-ctx.Done():
 				return
 			case <-done:
@@ -94,7 +135,7 @@ var readyWake = func(ctx context.Context) (<-chan struct{}, func()) {
 			}
 		}
 	}()
-	return ch, func() { t.Stop(); close(done) }
+	return ch, func() { close(done) }
 }
 
 // readinessReader is what the wait asks keploy's agent
@@ -199,7 +240,8 @@ func (m progressMark) moved(was progressMark) bool {
 // readyStatusEvery is how many wake-ups of a wait that goes on apart keploy
 // says what it waits on, and what moved: an endless wait (a start that
 // loops, re-exec'ing before it ever listens) is said, not silent.
-var readyStatusEvery = 60
+// readyStatusFor's worth; a test sets its own.
+var readyStatusEvery = wakeUpsIn(readyStatusFor)
 
 // wait blocks until the application is ready (true), ctx ends (false, ""),
 // or the application stalls (false and why, for the set's not-judged
@@ -239,11 +281,16 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 	probes := make(chan probeResult, 1)
 	probing := false
 	lastProbe := ""
+	// wakes counts the watchdog's wake-ups, and probeFrom and readFrom
+	// their count when the probe and the read in flight began: 0 for the
+	// first look, begun at the wait's start, however many wake-ups came
+	// while it was in flight.
+	wakes, probeFrom, readFrom := 0, 0, 0
 	startProbe := func() {
 		if probing || (health == "" && !p.dial) {
 			return
 		}
-		probing = true
+		probing, probeFrom = true, wakes
 		go func() {
 			if health != "" {
 				ok, what := answers(pctx, health, healthAny)
@@ -264,7 +311,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		if p.agent == nil || reading {
 			return
 		}
-		reading, readWakes = true, 0
+		reading, readWakes, readFrom = true, 0, wakes
 		if p.tally != nil {
 			p.tally.started.Add(1)
 		}
@@ -280,10 +327,23 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 
 	var last, mark, said progressMark
 	var st models.AppReadiness
+	// firstSt is the first look's answer, the read begun at the wait's
+	// start, once in. atFirstLook says it found the application listening
+	// where the first test dials: a kept-alive one is ready at the first
+	// look (afterEvent's atOnce), whatever wake-ups and reads came before
+	// docker said which port that is (resolve).
+	var firstSt *models.AppReadiness
+	atFirstLook := func() bool {
+		if firstSt == nil {
+			return false
+		}
+		_, ok := p.listened(*firstSt)
+		return ok
+	}
 	read, first := false, true
 	restarts0 := p.since.restarts
 	lastErr := ""
-	stalls, wakes := 0, 0
+	stalls := 0
 	// pending: the last wake-up waits on its read's answer to be weighed.
 	pending := false
 	// weigh counts a wake-up as progress or not, by the latest read's
@@ -309,7 +369,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		}
 		why := lastErr
 		if reading {
-			why = fmt.Sprintf("keploy's agent has not answered its last read, in flight across %d wake-ups", readWakes)
+			why = fmt.Sprintf("keploy's agent has not answered its last read, in flight across %s", watchdogSpan(readWakes))
 		}
 		if !resolved {
 			why = strings.TrimPrefix(why+"; docker has not answered keploy's look at the ports the agent container publishes", "; ")
@@ -347,9 +407,12 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 			lastErr = r.err.Error()
 		default:
 			st, lastErr, read = r.st, "", true
+			if readFrom == 0 {
+				firstSt = &r.st
+			}
 			if health == "" && resolved {
 				if port, ok := p.listened(st); ok {
-					ready, why := p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), first && wakes == 0)
+					ready, why := p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), atFirstLook())
 					return ready, why, true
 				}
 			}
@@ -389,7 +452,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		}
 		if health == "" && !p.dial && read {
 			if port, ok := p.listened(st); ok {
-				ready, why = p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), wakes == 0)
+				ready, why = p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), atFirstLook())
 				return ready, why, true
 			}
 		}
@@ -420,7 +483,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		case r := <-probes:
 			probing = false
 			if r.ok {
-				return p.afterEvent(ctx, r.what, wakes == 0)
+				return p.afterEvent(ctx, r.what, probeFrom == 0)
 			}
 			lastProbe = r.what // the next probe at the next wake-up
 		case r := <-reads:
@@ -524,7 +587,8 @@ func (p provenReadiness) sayStillWaiting(health, lastProbe, lastErr string, st m
 	case p.dial:
 		waits = net.JoinHostPort(p.host, p.port) + " taking a connect (keploy's agent cannot tell when the application listens)"
 	}
-	fields := []zap.Field{zap.String("waitingFor", waits), zap.Int("wakeUpsWithNoProgress", stalls), zap.Int("notJudgedAt", readyStallLimit)}
+	fields := []zap.Field{zap.String("waitingFor", waits), zap.Int("wakeUpsWithNoProgress", stalls), zap.Int("notJudgedAt", readyStallLimit),
+		zap.Duration("noProgressFor", time.Duration(stalls)*readyWakeEvery), zap.Duration("notJudgedAfter", time.Duration(readyStallLimit)*readyWakeEvery)}
 	if p.agent != nil {
 		fields = append(fields, zap.String("listening", p.listeningOn(st)),
 			zap.Uint64("newListens", now.p.Listens-min(now.p.Listens, was.p.Listens)),
@@ -668,12 +732,12 @@ func (p provenReadiness) healthTarget() (string, bool) {
 // stalled is the not-judged reason of a wait that saw no progress across the
 // watchdog's count.
 func (p provenReadiness) stalled(health, lastProbe, lastErr string, st models.AppReadiness, restarts uint64) string {
-	idle := fmt.Sprintf("it made no progress (no new listen, and before it listened no new connect, process fork or exec, or CPU time used) across %d wake-ups of keploy's watchdog", readyStallLimit)
+	idle := fmt.Sprintf("it made no progress (no new listen, and before it listened no new connect, process fork or exec, or CPU time used) across %s", watchdogSpan(readyStallLimit))
 	if !p.listenedAnywhere(st) && !st.CPUKnown {
-		idle = fmt.Sprintf("it made no progress (no new listen, connect, process fork or exec; its CPU time keploy could not read) across %d wake-ups of keploy's watchdog", readyStallLimit)
+		idle = fmt.Sprintf("it made no progress (no new listen, connect, process fork or exec; its CPU time keploy could not read) across %s", watchdogSpan(readyStallLimit))
 	}
 	if p.agent == nil {
-		idle = fmt.Sprintf("across %d wake-ups of keploy's watchdog (keploy's agent cannot tell when the application listens)", readyStallLimit)
+		idle = fmt.Sprintf("across %s; keploy's agent cannot tell when the application listens", watchdogSpan(readyStallLimit))
 	}
 	var what string
 	switch {

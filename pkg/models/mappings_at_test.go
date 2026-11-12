@@ -121,39 +121,48 @@ func TestMappedTestCaseRefusesABeginThatIsNotATime(t *testing.T) {
 	}
 }
 
-// With the proven switch off, a test entry reads and writes as it did before
-// keploy kept the begin: at: is not read, whatever it holds, so an entry keeps
-// its mocks and its shape; and an entry without a begin is written byte for
-// byte as the persisted format alone.
-func TestMappedTestCaseWithoutTheSwitchIgnoresAt(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
-	for _, doc := range []string{
-		"id: t1\nat: yesterday\nmock_entries:\n  - name: mock-0\n",
-		"id: t1\nat: 2026-10-06T09:30:15Z\nmock_entries:\n  - name: mock-0\n",
-		"id: t1\nat: [not, a, time]\nmocks: mock-0\n",
-	} {
-		var tc MappedTestCase
-		if err := yaml.Unmarshal([]byte(doc), &tc); err != nil {
-			t.Fatalf("%q: %v", doc, err)
+// A test's at: is read whatever the switch, as its key: (mapdb keeps every
+// field keploy writes on a test entry whatever the switch; a replay runs
+// the test on its recorded clock under the switch only). One that is not a
+// time fails the decode either way: read in another shape, the entry would
+// lose its mocks.
+func TestMappedTestCaseAtIsReadWhateverTheSwitch(t *testing.T) {
+	want := time.Date(2026, 10, 6, 9, 30, 15, 0, time.UTC)
+	for _, sw := range []string{"1", ""} {
+		t.Setenv(provenswitch.Env, sw)
+		for _, doc := range []string{
+			"id: t1\nat: yesterday\nmock_entries:\n  - name: mock-0\n",
+			"id: t1\nat: [not, a, time]\nmocks: mock-0\n",
+		} {
+			var tc MappedTestCase
+			if err := yaml.Unmarshal([]byte(doc), &tc); err == nil || !strings.Contains(err.Error(), "not a time") {
+				t.Fatalf("switch=%q %q: want a not-a-time error, got %v (%+v)", sw, doc, err, tc)
+			}
 		}
-		if tc.ID != "t1" || len(tc.Mocks) != 1 || tc.Mocks[0].Name != "mock-0" || !tc.At.IsZero() {
-			t.Fatalf("%q decoded as %+v", doc, tc)
+		for _, doc := range []string{
+			`{"id":"t1","at":"yesterday","mock_entries":[{"name":"mock-0"}]}`,
+			`{"id":"t1","at":42,"mocks":"mock-0"}`,
+		} {
+			var tc MappedTestCase
+			if err := json.Unmarshal([]byte(doc), &tc); err == nil || !strings.Contains(err.Error(), "not a time") {
+				t.Fatalf("switch=%q %s: want a not-a-time error, got %v (%+v)", sw, doc, err, tc)
+			}
+		}
+		var y MappedTestCase
+		if err := yaml.Unmarshal([]byte("id: t1\nat: 2026-10-06T09:30:15Z\nmock_entries:\n  - name: mock-0\n"), &y); err != nil || !y.At.Equal(want) || len(y.Mocks) != 1 || y.Mocks[0].Name != "mock-0" {
+			t.Fatalf("switch=%q: YAML decoded as %+v (%v)", sw, y, err)
+		}
+		var j MappedTestCase
+		if err := json.Unmarshal([]byte(`{"id":"t1","at":"2026-10-06T09:30:15Z","mock_entries":[{"name":"mock-0"}]}`), &j); err != nil || !j.At.Equal(want) || len(j.Mocks) != 1 || j.Mocks[0].Name != "mock-0" {
+			t.Fatalf("switch=%q: JSON decoded as %+v (%v)", sw, j, err)
 		}
 	}
-	for _, doc := range []string{
-		`{"id":"t1","at":"yesterday","mock_entries":[{"name":"mock-0"}]}`,
-		`{"id":"t1","at":"2026-10-06T09:30:15Z","mock_entries":[{"name":"mock-0"}]}`,
-		`{"id":"t1","at":42,"mocks":"mock-0"}`,
-	} {
-		var tc MappedTestCase
-		if err := json.Unmarshal([]byte(doc), &tc); err != nil {
-			t.Fatalf("%s: %v", doc, err)
-		}
-		if tc.ID != "t1" || len(tc.Mocks) != 1 || tc.Mocks[0].Name != "mock-0" || !tc.At.IsZero() {
-			t.Fatalf("%s decoded as %+v", doc, tc)
-		}
-	}
+}
 
+// An entry without a begin is written byte for byte as the persisted format
+// alone, as before keploy kept the begin.
+func TestMappedTestCaseWithoutABeginWritesAsBefore(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
 	tc := MappedTestCase{ID: "t1", Mocks: []MockEntry{{Name: "mock-0", Kind: "Http"}}, Cases: []string{"c1"}, Dir: "pkg", Starts: 2}
 	y, err := yaml.Marshal(tc)
 	if err != nil {

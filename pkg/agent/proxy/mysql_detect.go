@@ -1092,7 +1092,7 @@ func (p *Proxy) probeMysqlReplay(
 	if len(recorded) == 0 || opts.DisableMysqlEndpointDrift {
 		return &mysqlProbe{SrcConn: srcConn, Reason: "no-mysql-mock-for-port"}, nil
 	}
-	return p.replayUnrecordedPort(ctx, srcConn, dstAddr, port, recorded, logger)
+	return p.replayUnrecordedPort(ctx, srcConn, dstAddr, port, recorded, opts, logger)
 }
 
 // replayUnrecordedPort judges a replay connection to a port the recording
@@ -1117,13 +1117,18 @@ func (p *Proxy) probeMysqlReplay(
 // nothing, it waited to be greeted, and its miss names the port to list
 // (unlistedEndpointMiss); a warning says it once per endpoint, also when the
 // run ends with the client silent (hintUnlistedEndpoint). No verdict here is
-// cached for the port: each connection is judged by what it reaches.
+// cached for the port: each connection is judged by what it reaches. The miss
+// is the connection's process's, of its test worker (opts.SrcPid,
+// opts.SrcInstance), so only that worker's test reads it, and it carries the
+// round the connection arrived in (arrivalRound): a client that gives up
+// after its test ended is charged to that test, never to the next one.
 func (p *Proxy) replayUnrecordedPort(
 	ctx context.Context,
 	srcConn net.Conn,
 	dstAddr string,
 	port uint32,
 	recorded []uint32,
+	opts models.OutgoingOptions,
 	logger *zap.Logger,
 ) (*mysqlProbe, error) {
 	var host netip.Addr
@@ -1164,6 +1169,10 @@ func (p *Proxy) replayUnrecordedPort(
 	if !wakeable(srcConn) {
 		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
 	}
+	// The call is made as the connection arrives, waiting to be greeted:
+	// its miss, decided only when its client gives up, is the round's it
+	// arrived in, however long the client waits (arrivalRound).
+	arrived := p.arrivalRound(opts.SrcInstance)
 	client := startFirstRead(srcConn, logger)
 	cancelled := false
 	select {
@@ -1181,7 +1190,7 @@ func (p *Proxy) replayUnrecordedPort(
 		return &mysqlProbe{SrcConn: replayConn(srcConn, read, logger), Reason: "client-spoke-first"}, nil
 	case err != nil && !isTimeout(err):
 		// It waited to be greeted and gave up: a call no mock answered.
-		p.sendMockNotFoundError(unlistedEndpointMiss(dstAddr, recorded, p.unlistedNextStep(dstAddr, host, port)))
+		p.sendMockNotFoundErrorFrom(unlistedEndpointMiss(dstAddr, recorded, p.unlistedNextStep(dstAddr, host, port), arrived), opts.SrcPid, opts.SrcInstance, nil)
 		p.hintUnlistedEndpoint(logger, dstAddr, host, port, recorded, "its client closed it without sending anything")
 		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
 	case cancelled:
@@ -1217,12 +1226,27 @@ func (p *Proxy) unlistedNextStep(dstAddr string, host netip.Addr, port uint32) s
 	return fmt.Sprintf("if %s is MySQL, add %d to mysqlPorts in keploy.yml, keeping the ports already listed there (a mysqlPorts list replaces the built-in 3306 and 4000): keploy then serves the recorded MySQL mocks on it.%s", dstAddr, port, where)
 }
 
+// arrivalRound is the round a connection of test worker inst arrives in
+// (integrations.MarkCallRound on the manager its miss is filed with,
+// missManager): the zero CallRound, which marks nothing, when no manager
+// serves it.
+func (p *Proxy) arrivalRound(inst uint32) integrations.CallRound {
+	m := p.missManager(inst)
+	if m == nil {
+		return integrations.CallRound{}
+	}
+	return integrations.MarkCallRound(m)
+}
+
 // unlistedEndpointMiss is the miss of a connection to a port the recording
 // never saw whose client closed it without sending anything, in a replay whose
 // recording holds MySQL: it waited for its server to speak first, as a MySQL
 // client does, and nothing answered it. next is its next step
-// (unlistedNextStep), which names the port to list.
-func unlistedEndpointMiss(dstAddr string, recorded []uint32, next string) error {
+// (unlistedNextStep), which names the port to list. arrived is the round the
+// connection arrived in (arrivalRound), stamped on the report
+// (integrations.StampMark): the call was made then, not when keploy decided
+// it.
+func unlistedEndpointMiss(dstAddr string, recorded []uint32, next string, arrived integrations.CallRound) error {
 	why := fmt.Sprintf("the client closed its connection to a port the recording never saw without sending anything: it waited for its server to speak first, as a MySQL client does, and keploy answered nothing (the recording holds MySQL on ports %v)", recorded)
 	report := mismatch.NewReport(mismatch.ProtocolMySQL, "connection phase: server greeting").
 		WithDestination(dstAddr).
@@ -1230,6 +1254,7 @@ func unlistedEndpointMiss(dstAddr string, recorded []uint32, next string) error 
 		WithDiff(why).
 		WithNextSteps(next).
 		Build()
+	integrations.StampMark(report, arrived)
 	return models.NewMockMismatchError(fmt.Errorf("mysql connection phase, server greeting: %s: %w", why, models.ErrNoMockMatched), report)
 }
 

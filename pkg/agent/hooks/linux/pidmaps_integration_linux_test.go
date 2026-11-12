@@ -50,6 +50,15 @@ func TestMain(m *testing.M) {
 	if mode := os.Getenv(readyHelperEnv); mode != "" {
 		os.Exit(runReadyHelper(mode))
 	}
+	if port := os.Getenv(heldConnHelperEnv); port != "" {
+		os.Exit(runHeldConnHelper(port))
+	}
+	if os.Getenv(ingressSockHelperEnv) == "1" {
+		os.Exit(runIngressSockHelper())
+	}
+	if arg := os.Getenv(bindMoveHelperEnv); arg != "" {
+		os.Exit(runBindMoveHelper(arg))
+	}
 	if os.Getenv(socketHelperEnv) == "1" {
 		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 		if err != nil {

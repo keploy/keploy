@@ -1,5 +1,6 @@
 #!/bin/bash
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../../hang_guard.sh" || exit 1
 
 # E2E test for CONNECT tunnel support.
 # Verifies that Keploy can record and replay HTTP requests that the app
@@ -516,17 +517,29 @@ wait "$UPSTREAM_PID" 2>/dev/null || true
 sleep 2
 
 # ── Replay phase ──
-# Allow non-zero exit from replay (some tests may fail with latest binary).
-# We validate results from the report files below.
-set +e
-timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 TARGET_URL="$TARGET_URL" \
-    "$REPLAY_BIN" test -c "./connect-tunnel" --delay 7 --generateGithubActions=false 2>&1 | tee test_logs.txt
-replay_rc=${PIPESTATUS[0]}
-set -e
-if [ "$replay_rc" -eq 124 ] || [ "$replay_rc" -eq 137 ]; then
-    echo "::error::connect-tunnel replay timed out"
-    exit 1
-fi
+# replay_bounded LOG ARGS...: keploy test ARGS through the proxy, its output
+# streamed to LOG, bounded at 8 minutes (KILL 30 s after the TERM); exits the
+# lane when the bound ended it. Its exit code is not checked (some tests may
+# fail with the latest binary): the report files are, below. That the bound
+# ended it is told by the hang guard (hang_guard.sh), not by an exit code:
+# timeout(1)'s differs between GNU and uutils coreutils (Ubuntu 26.04). The
+# guard runs in the pipeline's subshell, so it hands HANG_FIRED back in a
+# file; no file fails the lane too.
+replay_bounded() {
+    local log=$1
+    shift
+    rm -f "$log.hung"
+    {
+        bounded -k 30 480 env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 TARGET_URL="$TARGET_URL" \
+            "$REPLAY_BIN" test "$@" 2>&1 || :
+        echo "$HANG_FIRED" >"$log.hung"
+    } | tee "$log"
+    if [ "$(cat "$log.hung" 2>/dev/null)" != 0 ]; then
+        echo "::error::connect-tunnel replay ($log) timed out: the hang guard ended it (or did not say)"
+        exit 1
+    fi
+}
+replay_bounded test_logs.txt -c "./connect-tunnel" --delay 7 --generateGithubActions=false
 
 if grep "ERROR" "test_logs.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
     echo "::error::Error found in replay"
@@ -566,7 +579,7 @@ if [ "$both_build" = true ]; then
         [ -e "$report_file" ] || { echo "No report files found!"; all_passed=false; break; }
 
         test_set_name=$(basename "$report_file" -report.yaml)
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        test_status=$(grep 'status:' "$report_file" | sed -n 1p | awk '{print $2}')
 
         echo "Status for ${test_set_name}: $test_status"
         if [ "$test_status" != "PASSED" ]; then
@@ -582,15 +595,7 @@ if [ "$both_build" = true ]; then
     fi
 
     if json_pass_supported; then
-        set +e
-        timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 TARGET_URL="$TARGET_URL" \
-            "$REPLAY_BIN" test --storage-format json -c "./connect-tunnel" --delay 7 --generateGithubActions=false 2>&1 | tee test_logs_json.txt
-        replay_rc_json=${PIPESTATUS[0]}
-        set -e
-        if [ "$replay_rc_json" -eq 124 ] || [ "$replay_rc_json" -eq 137 ]; then
-            echo "::error::connect-tunnel json replay timed out"
-            exit 1
-        fi
+        replay_bounded test_logs_json.txt --storage-format json -c "./connect-tunnel" --delay 7 --generateGithubActions=false
         if grep "ERROR" "test_logs_json.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
             echo "::error::Error found in json replay"
             cat "test_logs_json.txt"

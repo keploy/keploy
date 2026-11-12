@@ -417,12 +417,12 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 	t.Run("a report with no closest mock", func(t *testing.T) {
 		read := at(varMock("mock-2", "GET", "http://store/orders/recval", "", 200, `{}`,
 			models.MockVariables{"orderId": useV("recval", []string{"url.path[1]"})}), 2)
-		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwvbn"}, makeReq("GET", "/orders/kqzxwvbn"), nil, []*models.Mock{read}, nil)
+		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwvbn"}, makeReq("GET", "/orders/kqzxwvbn"), nil, []*models.Mock{read}, nil, placesOf(nil))
 		if !slices.Equal(r.VariablePlaces, []string{"url.path[1]"}) {
 			t.Fatalf("places %v; want the route's url.path[1]", r.VariablePlaces)
 		}
 		for _, off := range []*http.Request{makeReq("GET", "/items/kqzxwvbn"), makeReq("DELETE", "/orders/kqzxwvbn"), makeReq("GET", "/orders/kqzxwvbn/lines")} {
-			r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: off.Method + " " + off.URL.Path}, off, nil, []*models.Mock{read}, nil)
+			r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: off.Method + " " + off.URL.Path}, off, nil, []*models.Mock{read}, nil, placesOf(nil))
 			if r.VariablePlaces != nil {
 				t.Fatalf("%s %s is off mock-2's route, yet carries places %v", off.Method, off.URL.Path, r.VariablePlaces)
 			}
@@ -483,6 +483,22 @@ func TestVariables_AUseBeforeItsBindingCallIsAMiss(t *testing.T) {
 	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
 	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/ord-live-9", ""))
 	wantProblem(t, ok, diag, "before the call that binds it")
+}
+
+// A variable the test binds at a client test case's request, which bound
+// nothing this run, misses saying why (variables.Table.Note), never naming a
+// call that binds it.
+func TestVariables_AUseOfAVariableItsTestCaseBoundNothingSaysWhy(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
+	db.table.Start(nil)
+	db.table.Note("orderId", "the test binds it at test case post-orders-1's request, at body.id, which bound nothing this run")
+	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/ord-live-9", ""))
+	p := wantProblem(t, ok, diag, "variable orderId is used at url.path[1], and the test binds it at test case post-orders-1's request")
+	if strings.Contains(p.why, "before the call that binds it") || !strings.Contains(p.next, "did not bind it") {
+		t.Fatalf("the miss says %q, next %q", p.why, p.next)
+	}
 }
 
 func TestVariables_ABindingPlaceHoldsTheBoundValue(t *testing.T) {
@@ -625,7 +641,7 @@ func TestVariables_ABindRefusedOverWhatTheCheckReadIsAMiss(t *testing.T) {
 		hit := &varHit{mock: m, binds: []variables.Binding{{Name: "polled", Value: "V", Recorded: "r-2", Mock: "mock-2", Place: "body.at"}},
 			local: map[string]variables.Binding{}, table: &tb, gen: tb.Gen(), saw: c.saw}
 		consumed := false
-		served, problem, retry, err := newHTTP().serveVariablesBy(hit, func(*models.Mock) bool { consumed = true; return true })
+		served, problem, retry, err := newHTTP().serveVariablesBy(hit, nil, func(*models.Mock) bool { consumed = true; return true }, nil, unreadPlaces)
 		if err != nil || served != nil || consumed {
 			t.Fatalf("%s: served %v, consumed %v, err %v", c.name, served, consumed, err)
 		}
@@ -1234,10 +1250,10 @@ func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
 	if hx.mock != first || hy.mock != first {
 		t.Fatalf("both checked before either bound should pick the first recording: %s, %s", hx.mock.Name, hy.mock.Name)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hx, db); err != nil || p != nil || retry {
+	if _, p, retry, err := h.serveVariables(ctx, hx, db, unreadPlaces); err != nil || p != nil || retry {
 		t.Fatalf("x: problem %+v retry %v err %v", p, retry, err)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hy, db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hy, db, unreadPlaces); err != nil || p != nil || !retry {
 		t.Fatalf("y's collision should be checked again, not failed: problem %+v retry %v err %v", p, retry, err)
 	}
 	ok, stub, diag := matchVar(t, h, db, y)
@@ -1262,7 +1278,7 @@ func TestVariables_AStragglerBindsNothingInTheNextTest(t *testing.T) {
 		t.Fatal("the straggler should fit")
 	}
 	db.table.Reset() // the next test begins
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, unreadPlaces); err != nil || p != nil || !retry {
 		t.Fatalf("a straggler should be checked again: problem %+v retry %v err %v", p, retry, err)
 	}
 	if got := db.table.Snapshot(); len(got) != 0 {
@@ -1289,7 +1305,7 @@ func TestVariables_AMockAnotherCallTookIsCheckedAgain(t *testing.T) {
 	if ok, _, _ := matchVar(t, h, db, read); !ok {
 		t.Fatal("the read-back should match")
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, unreadPlaces); err != nil || p != nil || !retry {
 		t.Fatalf("a mock another call took: problem %+v retry %v err %v", p, retry, err)
 	}
 	if ok, _, _ := matchVar(t, h, db, read); ok {
@@ -2170,4 +2186,45 @@ func TestVariables_AClockReadBesideAVariableIsCheckedInItsCallsWindow(t *testing
 		ok, _, diag := matchVarIn(t, clockConn(true, base), newHTTP(), &varDb{perTest: []*models.Mock{at(m, 1)}}, r)
 		wantProblem(t, ok, diag, "learned both as variable first")
 	})
+}
+
+// A vault PUT whose body.data.lastUsedAt the learn step learned as a read of
+// the clock alone (two calls that read one clock in one second: no run's
+// variable) is served in its test's window, and its read checked there: an
+// hour off is no match. Learned as the run's variable alone (a later test
+// copied it where its own clock did not explain it), it is served too. A
+// place learned as both (a createdAt that is the app's clock and that a
+// later call carries) is refused: the HTTP replay cannot hold one value to
+// both yet, so it fails closed. That is a stated limit; the Mongo replay
+// checks both.
+func TestAPlaceLearnedAsOneThingIsServed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	base := time.Date(2026, 10, 30, 5, 8, 52, 0, time.UTC)
+	rec := strconv.FormatInt(base.Unix(), 10)
+	body := func(v string) string {
+		return `{"data":{"_id":"e2e-go-key","lastUsedAt":` + v + `},"options":{"cas":1}}`
+	}
+	clock := map[string]models.ClockOffset{"body.data.lastUsedAt": {Res: time.Second, Layout: "epoch-s"}}
+	variable := models.MockVariables{"run-lastUsedAt": bindV(rec, "body.data.lastUsedAt")}
+	for _, row := range []struct {
+		name   string
+		clocks map[string]models.ClockOffset
+		vars   models.MockVariables
+		live   time.Time
+		want   bool
+	}{
+		{"the clock read alone", clock, nil, base, true},
+		{"the clock read alone, an hour off", clock, nil, base.Add(time.Hour), false},
+		{"the variable alone", nil, variable, base, true},
+		{"both: refused, a stated limit", clock, variable, base, false},
+	} {
+		m := varMock("mock-195", "PUT", "http://store/v1/secret/data/pat", body(rec), 200, `{"data":{"version":2}}`, row.vars)
+		m.Spec.Clocks = row.clocks
+		r := liveReq("PUT", "/v1/secret/data/pat", body(strconv.FormatInt(row.live.Unix(), 10)))
+		r.arrived = base.Add(100 * time.Millisecond)
+		ok, _, diag := matchVarIn(t, clockConn(true, base), newHTTP(), &varDb{perTest: []*models.Mock{at(m, 1)}}, r)
+		if ok != row.want {
+			t.Errorf("%s: served %v (%+v); want %v", row.name, ok, diag, row.want)
+		}
+	}
 }

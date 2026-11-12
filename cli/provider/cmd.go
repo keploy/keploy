@@ -583,11 +583,11 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("sse-port", c.cfg.Test.SSEPort, "Custom SSE port to replace the actual port in the SSE testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
-		cmd.Flags().String("health-url", c.cfg.Test.HealthURL, "HTTP(S) URL polled before the first test is fired; first 2xx response proceeds immediately. Empty (default) preserves the fixed --delay behavior.")
+		cmd.Flags().String("health-url", c.cfg.Test.HealthURL, "HTTP(S) URL polled before the first test is fired; the first 2xx response proceeds immediately. If it gives no 2xx within --health-poll-timeout, the first test waits instead for the app to accept a connection on its port. Empty (default): the first test waits --delay, then for the app to accept a connection on its port.")
 		cmd.Flags().String("health-path", c.cfg.Test.HealthPath, "Request path polled on the address the recorded tests actually dial, before the first test is fired — e.g. /health. Needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready. Ignored when --health-url is set (that takes precedence). Empty (default) uses a keploy-reserved probe path.")
 		cmd.Flags().String("health-scheme", c.cfg.Test.HealthScheme, "Override the scheme for --health-path probing (http or https). Empty (default) uses the scheme the recorded tests dial. Ignored when --health-url is set.")
-		cmd.Flags().Bool("disable-app-ready-probe", c.cfg.Test.DisableAppReadyProbe, "Turn off every address-based readiness probe before the first test (the docker/compose published-port gates, --app-ready-probe-addr, and the recorded-target fallback), plus the reset-resend readiness re-gate. Use when a connect-then-close probe is destructive in your environment — notably an app reached through `kubectl port-forward`, where probing can tear the forward down. --health-url is unaffected. Replay falls back to the fixed --delay.")
-		cmd.Flags().Duration("health-poll-timeout", c.cfg.Test.HealthPollTimeout, "Ceiling for every pre-test readiness gate — --health-url, --health-path and the automatic docker/compose port gates (e.g. 60s, 3m). Only ever paid by an app that is not yet serving; a ready app satisfies the gate on the first probe. On timeout replay warns and fires anyway.")
+		cmd.Flags().Bool("disable-app-ready-probe", c.cfg.Test.DisableAppReadyProbe, "Turn off every address-based readiness probe before the first test (the docker/compose published-port gates, --app-ready-probe-addr, and the recorded-target fallback), plus the reset-resend readiness re-gate. Use when a connect-then-close probe is destructive in your environment — notably an app reached through `kubectl port-forward`, where probing can tear the forward down. With no --health-url, replay waits the fixed --delay and then fires the first test. A --health-url is still polled; when it has not answered 2xx within --health-poll-timeout and keploy runs the app itself, replay keeps polling it until it does, the app exits, or keploy is stopped, saying every 30 s that it still waits (for an app keploy does not run, it falls back to the fixed --delay). A test request the app refuses is sent again every 250 ms while keploy runs the app, with no probe of its address in between.")
+		cmd.Flags().Duration("health-poll-timeout", c.cfg.Test.HealthPollTimeout, "How long keploy waits for an HTTP answer before the first test (--health-url's 2xx, or any answer on the app's port, a docker or compose published port included, counted from its TCP accept) before it settles for that accept, warns and fires (e.g. 60s, 3m). The wait for that accept has no time limit: it ends when the app accepts, when the app exits (the test set then fails), or when keploy is stopped. A ready app pays nothing.")
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
@@ -3027,12 +3027,14 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return err
 	}
 
-	local, err := cmd.Flags().GetBool("local")
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to get the local flag")
-		return errors.New("failed to get the local flag")
-	}
-	c.cfg.Mock.Local = local
+	// --local, --strict and --on-miss are not read from their flags here:
+	// PreProcessFlags' viper.Unmarshal has already put the flag, when given
+	// (--local=false and --strict=false too), over the environment, over
+	// keploy.yml's mock.local, mock.strict and mock.onMiss, and over the
+	// flag's default. Reading a flag here again replaced keploy.yml's value
+	// with that default, captured from a zero config before keploy.yml was
+	// read: a committed `mock.local: true` still went to the registry, and a
+	// committed `mock.strict: true` never made a replay strict.
 
 	// The flag, when given, wins over keploy.yml's record.disableHandshakeHold.
 	if cmd.Flags().Changed("disable-handshake-hold") {
@@ -3058,26 +3060,15 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			return err
 		}
 	case "replay":
-		onMiss, err := cmd.Flags().GetString("on-miss")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get the on-miss flag")
-			return errors.New("failed to get the on-miss flag")
-		}
-		onMiss = strings.ToLower(strings.TrimSpace(onMiss))
+		// The miss policy as resolved above, from --on-miss or mock.onMiss.
+		onMiss := strings.ToLower(strings.TrimSpace(c.cfg.Mock.OnMiss))
 		if onMiss == "" {
 			onMiss = string(models.MissFail)
 		}
 		if !models.MissPolicy(onMiss).Valid() {
-			return fmt.Errorf("invalid --on-miss value %q: allowed values are fail, passthrough, record", onMiss)
+			return fmt.Errorf("invalid on-miss value %q (--on-miss, or mock.onMiss in keploy.yml): allowed values are fail, passthrough, record", onMiss)
 		}
 		c.cfg.Mock.OnMiss = onMiss
-
-		strict, err := cmd.Flags().GetBool("strict")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get the strict flag")
-			return errors.New("failed to get the strict flag")
-		}
-		c.cfg.Mock.Strict = strict
 
 		// Guarded on Changed||!IsSet for the reason spelled out for
 		// schema-noise-detection above: AddFlags captured this flag's default

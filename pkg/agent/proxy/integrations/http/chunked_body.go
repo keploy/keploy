@@ -5,11 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"strconv"
-	"strings"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"golang.org/x/net/http/httpguts"
 )
 
 // errMalformedChunkedBody is returned when a chunked message body does not
@@ -60,6 +61,10 @@ type chunkedBody struct {
 	inTrailer bool // the last-chunk has been framed; off is in the trailer section
 	done      bool
 	end       int // the body's length, once done
+	// contentEnd is the offset in the body just past the last chunk data or
+	// trailer field framed so far: only framing (chunk-size lines, their
+	// CRLFs, the empty line) follows it (chunkedEndRefused).
+	contentEnd int
 
 	// legacy is set once framing failed on a relay: from then on the end is
 	// judged by the legacy terminator suffix (completeOrLegacy).
@@ -117,10 +122,12 @@ func (c *chunkedBody) feed(body []byte) (bool, error) {
 		if c.inTrailer {
 			// Trailer section: field lines until the empty line that ends the
 			// message.
-			c.off = next
 			if len(line) == 0 {
 				c.done, c.end = true, next
+			} else {
+				c.contentEnd = c.off + len(line)
 			}
+			c.off = next
 			continue
 		}
 		size, err := parseChunkSize(line)
@@ -144,9 +151,49 @@ func (c *chunkedBody) feed(body []byte) (bool, error) {
 		if body[dataEnd] != '\r' || body[dataEnd+1] != '\n' {
 			return false, fmt.Errorf("%w: chunk data is not followed by CRLF", errMalformedChunkedBody)
 		}
-		c.off = dataEnd + 2
+		c.off, c.contentEnd = dataEnd+2, dataEnd
 	}
 	return true, nil
+}
+
+// chunkedEndRefused is the response resp with the end of its chunked body
+// appended, and true, when refused ends that body with framing alone: resp is
+// a chunked response its stream ended in the middle of, where the client
+// closed the connection, and refused is the start of what the destination sent
+// after it that the client refused, up to what reached the proxy after the
+// client's FIN (supervisor.Session.NotTakenWhereClientStopped). The client then
+// had every byte of content the response carries: the head and all the chunk
+// data (the trailer section, too, up to its empty line); it closed before the
+// rest of the framing came, the last chunk and the empty line, which a server
+// that flushes its body writes only as its handler returns. The destination
+// ended the response before it could know the client had closed, so the end is
+// not its answer to the close. The response is whole, and what the client had
+// of it is all of it.
+//
+// It is false when anything the client did not have is content: a data chunk,
+// the rest of one, or a trailer field. The client gave up on the rest of the
+// response, or never read it, and the exchange is left out, as are a body that
+// refused does not end (refused may stop short of the end: the relay keeps the
+// start of what was refused, and none of what reached the proxy after the
+// client's FIN, such as the end a streaming server writes once its client has
+// gone) and one that is not framed by the RFC. It is called only for a
+// response whose body readResponseV2 was still reading when the stream ended,
+// so one with a body.
+func chunkedEndRefused(resp, refused []byte) ([]byte, bool) {
+	// A head the client did not have whole is nil here, and names no
+	// framing. Chunked framing is readResponseV2's test: parseHeaders drops a
+	// Content-Length beside it.
+	head, bodyStart, _, _ := messageHead(resp, true)
+	if _, chunked, _ := parseHeaders(head, true); !chunked { // nor is a refused framing
+		return nil, false
+	}
+	msg := append(resp[:len(resp):len(resp)], refused...)
+	body := chunkedBody{response: true}
+	// A body framing fails on is not done.
+	if done, _ := body.complete(msg); !done || bodyStart+body.contentEnd > len(resp) {
+		return nil, false
+	}
+	return msg[:bodyStart+body.end], true
 }
 
 // chunkedLine returns the CRLF-terminated line starting at off without its
@@ -196,21 +243,27 @@ func parseChunkSize(line []byte) (int, error) {
 }
 
 // errBadContentLength is returned for a Content-Length field value that does
-// not parse as a length: not a decimal number, or one too large for an int.
+// not parse as a length: not decimal digits alone (a sign, a list, nothing),
+// or one too large for an int.
 var errBadContentLength = errors.New("the Content-Length field value does not parse as a decimal length")
 
-// contentLengthValue parses a Content-Length field value. Its error names the
+// contentLengthValue parses a Content-Length field value as net/http does
+// (RFC 9110 §8.6: 1*DIGIT): "+5" and "-5", which strconv.Atoi takes, are no
+// length, and net/http refuses a message that carries one. Its error names the
 // value by its length only, as parseChunkSize's do: strconv's error quotes the
 // value, which is the app's bytes (a client can send anything there), and it
 // reached the agent's log at Error (HandleChunkedRequests,
 // handleChunkedResponses) and the stopped-on reason of a recording
-// (readRequestV2, readResponseV2).
+// (readRequestV2, readResponseV2). A value past math.MaxInt is no length
+// either: the compare before the conversion is the bound, one CodeQL's
+// integer-conversion check reads as such (a bitSize below 64 given to strconv
+// is not).
 func contentLengthValue(v string) (int, error) {
-	n, err := strconv.Atoi(v)
-	if err != nil {
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil || n > math.MaxInt {
 		return 0, fmt.Errorf("%w (a %d-byte value)", errBadContentLength, len(v))
 	}
-	return n, nil
+	return int(n), nil
 }
 
 // messageHead finds the header section that governs msg's body: the request's
@@ -218,20 +271,22 @@ func contentLengthValue(v string) (int, error) {
 // 103 Early Hints or an unsolicited 100 Continue can precede the final response
 // in the same read, and has no body). It returns that section (start line and
 // header fields), the offset of the body after it, the response status (0 for
-// a request), and ok=false while that section has not fully arrived. The
-// empty lines before a request line (emptyLinesBefore) are skipped: two of
-// them in front of the next request are no empty header section.
+// a request), and ok=false while that section has not fully arrived. A
+// section ends where net/http's reader ends it (headerSectionEnd), at a bare
+// LF line end too. The empty lines before a request line (emptyLinesBefore)
+// are skipped: two of them in front of the next request are no empty header
+// section.
 func messageHead(msg []byte, response bool) (head []byte, bodyStart int, status int, ok bool) {
 	pos := 0
 	if !response {
 		pos = emptyLinesBefore(msg)
 	}
 	for {
-		i := bytes.Index(msg[pos:], []byte("\r\n\r\n"))
-		if i < 0 {
+		end := headerSectionEnd(msg[pos:])
+		if end < 0 {
 			return nil, 0, 0, false
 		}
-		head, bodyStart = msg[pos:pos+i+4], pos+i+4
+		head, bodyStart = msg[pos:pos+end], pos+end
 		if !response {
 			return head, bodyStart, 0, true
 		}
@@ -242,6 +297,33 @@ func messageHead(msg []byte, response bool) (head []byte, bodyStart int, status 
 		}
 		return head, bodyStart, status, true
 	}
+}
+
+// headerSectionEnd is the offset just past the empty line that ends the header
+// section msg starts with, or -1 while that line has not arrived. Lines end at
+// an LF, the one CR before it dropped, as net/textproto's reader ends them, so
+// the section is its first line (the start line) and the lines after it up to
+// the first empty one: "\r\n" or a bare "\n". A server that ends its lines
+// with a bare LF sends a section net/http's client reads: looking for
+// "\r\n\r\n", keploy read on past it, into the body and the responses after
+// it, to the connection's close.
+func headerSectionEnd(msg []byte) int {
+	i := bytes.IndexByte(msg, '\n') // the start line's end
+	for i >= 0 {
+		rest := msg[i+1:]
+		if len(rest) > 0 && rest[0] == '\n' {
+			return i + 2
+		}
+		if len(rest) > 1 && rest[0] == '\r' && rest[1] == '\n' {
+			return i + 3
+		}
+		j := bytes.IndexByte(rest, '\n')
+		if j < 0 {
+			return -1
+		}
+		i += 1 + j
+	}
+	return -1
 }
 
 // finalResponse is resp from its final response on, framed by blank lines: the
@@ -267,21 +349,21 @@ func finalResponse(resp []byte) []byte {
 // caller reads it as far as it goes.
 func responseAsRead(resp []byte) []byte {
 	for {
-		i := bytes.Index(resp, []byte("\r\n\r\n"))
-		if i < 0 {
+		end := headerSectionEnd(resp)
+		if end < 0 {
 			break
 		}
-		if pUtil.IsInterimStatus(responseStatus(resp[:i+4])) {
-			resp = resp[i+4:] // an interim response: the final one follows
+		if pUtil.IsInterimStatus(responseStatus(resp[:end])) {
+			resp = resp[end:] // an interim response: the final one follows
 			continue
 		}
 		return resp // its whole header section
 	}
-	end := bytes.LastIndex(resp, []byte("\r\n"))
+	end := bytes.LastIndexByte(resp, '\n')
 	if end < 0 {
 		return resp
 	}
-	return append(resp[:end+2:end+2], '\r', '\n')
+	return append(resp[:end+1:end+1], '\r', '\n')
 }
 
 // responseStatus is the status code of an HTTP/1.x response head, or 0 when
@@ -307,6 +389,18 @@ func responseStatus(head []byte) int {
 // interim 1xx, 204 or 304.
 func responseHasNoBody(reqMethod string, status int) bool {
 	return models.HTTPResponseHasNoBody(reqMethod, status)
+}
+
+// framedHeadOnly reports whether net/http's reader frames a final response as
+// its head alone, whatever its fields say: one with no body by rule
+// (responseHasNoBody), and a 101 (Switching Protocols), after whose head the
+// connection carries the protocol it switched to, both ways, which net/http's
+// client hands the connection over to. Their framing fields are read all the
+// same (parseHeaders), and refused as net/http refuses them. keploy read a
+// 101's Content-Length or chunked body off the switched-to protocol's bytes,
+// and with neither field read them as its body to the connection's close.
+func framedHeadOnly(reqMethod string, status int) bool {
+	return responseHasNoBody(reqMethod, status) || status == http.StatusSwitchingProtocols
 }
 
 // startsWithInterimResponse reports whether resp begins with an interim 1xx
@@ -349,37 +443,68 @@ func dropEmptyLinesBeforeRequest(req *[]byte) int {
 
 // awaitsContinue reports whether the client that sent req is waiting for a 100
 // (Continue) before it sends the request's body (RFC 9110 §10.1.1): req holds
-// the request's whole header section, which carries "Expect: 100-continue"
-// (expectsContinue) and frames a body, and none of that body has arrived. A
-// client that sends its body without waiting for the 100 — many do, and the
-// RFC lets them — is not waiting for one, and a proxy that answers it anyway
-// and then blocks for more bytes waits for bytes that are already in req.
+// the request's whole header section, which a server answers with a 100
+// (expectsContinue) and which frames a body, and none of that body has
+// arrived. A client that sends its body without waiting for the 100 — many do,
+// and the RFC lets them — is not waiting for one, and a proxy that answers it
+// anyway and then blocks for more bytes waits for bytes that are already in
+// req.
 func awaitsContinue(req []byte) bool {
 	head, bodyStart, _, ok := messageHead(req, false)
 	if !ok || bodyStart < len(req) || !expectsContinue(head) {
 		return false
 	}
-	contentLength, transferEncoding := parseHeaders(head)
-	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
-		return true
-	}
-	n, err := strconv.Atoi(contentLength)
-	return err == nil && n > 0
+	contentLength, chunked, _ := parseHeaders(head, false) // expectsContinue refused a refused framing
+	return chunked || contentLength > 0
 }
 
-// expectsContinue reports whether the request's header section carries
-// "Expect: 100-continue" — the field name and the expectation compared without
-// regard to case (RFC 9110 §5.1, §10.1.1), and only in the header section, not
-// in a body line that happens to read like one.
-func expectsContinue(req []byte) bool {
-	head, _, _, ok := messageHead(req, false)
-	if !ok {
-		head = req // the header section so far
+// expectsContinue reports whether head, a request's header section, is one
+// net/http's server answers with a 100 (Continue) once its body is read, as
+// its server decides (server.go): a request it reads (parseHeaders frames it,
+// and it has a Host field, but for CONNECT, a valid one, and no field name
+// with a space), of HTTP/1.1 or a later HTTP/1.x (it sends no 1xx to an
+// HTTP/1.0 client, RFC 9110 §15.2), whose first Expect field holds the token
+// 100-continue (hasToken: one element of a list, in any case). A later Expect
+// field is not read. Its fields are read as headerFields reads them: an
+// "Expect: 100-continue" on a folded line is part of the field before it.
+func expectsContinue(head []byte) bool {
+	major, minor, method, ok := startLine(head, false)
+	if !ok || major != 1 || minor < 1 {
+		return false
 	}
-	for _, line := range bytes.Split(head, []byte("\n")) {
-		name, value, found := bytes.Cut(bytes.TrimRight(line, "\r"), []byte(":"))
-		if found && bytes.EqualFold(bytes.TrimSpace(name), []byte("Expect")) &&
-			bytes.EqualFold(bytes.TrimSpace(value), []byte("100-continue")) {
+	if _, _, err := parseHeaders(head, false); err != nil {
+		return false
+	}
+	var expect, host []byte
+	expects, hosts, spaced := 0, 0, false
+	_ = headerFields(head, func(name, value []byte) { // parseHeaders read it whole
+		switch {
+		case bytes.IndexByte(name, ' ') >= 0:
+			spaced = true // net/http's server refuses the request
+		case asciiEqualFold(name, "expect"):
+			if expects == 0 {
+				expect = value
+			}
+			expects++
+		case asciiEqualFold(name, "host"):
+			host = value
+			hosts++
+		}
+	})
+	if spaced || hosts == 0 && method != http.MethodConnect || hosts == 1 && !httpguts.ValidHostHeader(string(host)) {
+		return false
+	}
+	return hasToken(expect, "100-continue")
+}
+
+// hasToken reports whether token, in lower case, is an element of v, a list
+// whose elements a space, a tab or a comma bound, compared without regard to
+// ASCII case: net/http's test of an Expect value (header.go's hasToken).
+func hasToken(v []byte, token string) bool {
+	boundary := func(c byte) bool { return c == ' ' || c == ',' || c == '\t' }
+	for sp := 0; sp+len(token) <= len(v); sp++ {
+		end := sp + len(token)
+		if (sp == 0 || boundary(v[sp-1])) && (end == len(v) || boundary(v[end])) && asciiEqualFold(v[sp:end], token) {
 			return true
 		}
 	}

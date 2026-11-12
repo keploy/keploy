@@ -66,6 +66,22 @@ var ErrPayloadFileReplaced = errors.New("the mock file was rewritten after its m
 // before it is sent any mock.
 var ErrPayloadMutatorChangedMock = errors.New("a mock payload hook changed what decides the mock's pool")
 
+// MockPayloadRefusal is the error of a PayloadMutator that failed on a mock:
+// the replay's hooks refused to hand the mock to the agent (Keploy Enterprise
+// refuses a sealed value its key service did not open). Err is the hook's
+// reason. The replay fails the mock's test set, unrun, with it, and goes on
+// to the next set.
+type MockPayloadRefusal struct {
+	Mock string
+	Err  error
+}
+
+func (e *MockPayloadRefusal) Error() string {
+	return fmt.Sprintf("the mock payload hook failed on mock %q: %v", e.Mock, e.Err)
+}
+
+func (e *MockPayloadRefusal) Unwrap() error { return e.Err }
+
 // payloadOnDisk is where a mock's payload was left, and what the replay asks
 // of the payload, answered before it was.
 type payloadOnDisk struct {
@@ -87,6 +103,9 @@ type payloadOnDisk struct {
 	// IsMySQLStatementLifecycle's and mysqlIsSessionReusableCommand's.
 	mysqlStatementLifecycle bool
 	mysqlSessionReusable    bool
+	// fault is a copy of the mock's Spec.Fault (FaultOf), nil for none: what
+	// a replay's summary names when the mock was served (FaultServed).
+	fault *Fault
 }
 
 // onDiskPredicates is every registry whose predicates read a mock's payload;
@@ -118,6 +137,11 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d.fingerprint = requestFingerprint(m)
 	d.summary, d.longSummary = keptDisplay(MockSummaryFromSpec(m))
 	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
+	if f := m.Spec.Fault; f != nil {
+		kept := *f
+		kept.Observed = strings.Clone(f.Observed)
+		d.fault = &kept
+	}
 	for i, r := range onDiskPredicates {
 		if r.match(m) {
 			d.matched |= 1 << i
@@ -230,6 +254,9 @@ func (m *Mock) IndexEntryBytes() int64 {
 	d := m.onDisk
 	// d.at.Name is m.Name's string, not a copy.
 	n += str(d.summary) + str(d.target) + str(d.fingerprint)
+	if f := d.fault; f != nil {
+		n += int(unsafe.Sizeof(*f)) + str(f.Observed)
+	}
 	return int64(n)
 }
 
@@ -261,16 +288,16 @@ func (m *Mock) WithPayload(ctx context.Context) (*Mock, error) {
 	return c, nil
 }
 
-// MutatePayload has mutate change m's payload, and fails when it changed
-// anything else that decides m's pool or its place in it
-// (ErrPayloadMutatorChangedMock). A nil mutate changes nothing.
+// MutatePayload has mutate change m's payload, and fails when mutate fails
+// (MockPayloadRefusal) or changed anything else that decides m's pool or its
+// place in it (ErrPayloadMutatorChangedMock). A nil mutate changes nothing.
 func MutatePayload(ctx context.Context, m *Mock, mutate PayloadMutator) error {
 	if mutate == nil {
 		return nil
 	}
 	before := poolKeyOf(m)
 	if err := mutate(ctx, m); err != nil {
-		return fmt.Errorf("the mock payload hook failed on mock %q: %w", before.name, err)
+		return &MockPayloadRefusal{Mock: before.name, Err: err}
 	}
 	if after := poolKeyOf(m); after != before {
 		return fmt.Errorf("%w: mock %q, before %+v, after %+v", ErrPayloadMutatorChangedMock, before.name, before, after)

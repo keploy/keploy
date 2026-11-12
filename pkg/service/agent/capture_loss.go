@@ -84,10 +84,10 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 	default:
 		// One kind per map, so what grew since a mark names its own map.
 		if refusals.Target > 0 {
-			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refusals.Target, What: pidMapCause("target_namespace_pids", refusals.LastTargetErr)})
+			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refusals.Target, What: pidMapCause("target_namespace_pids", refusals.LastTargetErr), Err: refusals.LastTargetErr})
 		}
 		if refusals.Excluded > 0 {
-			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refusals.Excluded, What: pidMapCause("excluded_pids", refusals.LastExcludedErr)})
+			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refusals.Excluded, What: pidMapCause("excluded_pids", refusals.LastExcludedErr), Err: refusals.LastExcludedErr})
 		}
 	}
 	return mergeKinds(out), nil
@@ -111,7 +111,8 @@ func (a *Agent) countsCaptureLosses(ctx context.Context) bool {
 // two sources may count one kind (the hooks' kernel_skipped and a downstream
 // build's, the proxy's capture_dropped and its ring's), and a mark is read
 // by kind (models.CaptureLosses.Since keeps one count per kind), so the
-// counts are added, which only grow as each does, and the Whats joined.
+// counts are added, which only grow as each does, the Whats joined, and the
+// first Err any of them said kept.
 func mergeKinds(l models.CaptureLosses) models.CaptureLosses {
 	at := make(map[models.CaptureLossKind]int, len(l))
 	var out models.CaptureLosses
@@ -123,6 +124,9 @@ func mergeKinds(l models.CaptureLosses) models.CaptureLosses {
 			continue
 		}
 		out[i].Count += c.Count
+		if out[i].Err == 0 {
+			out[i].Err = c.Err
+		}
 		switch {
 		case out[i].What == "":
 			out[i].What = c.What
@@ -173,14 +177,22 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 	// What the listener dropped after the last test is counted first
 	// (closeDropsGap), as every loss after it is.
 	a.closeDropsGap(ctx)
+	// Read first: a loss the proxy counted before the counts are read
+	// is in this answer whichever way it was counted.
+	taken := a.takeOwnedLosses()
 	a.provenMu.Lock()
-	mark, charged, outside := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside
+	for _, o := range taken {
+		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
+	}
+	mark, charged, outside, owned := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside, a.proven.ownedRun
 	a.provenMu.Unlock()
 	_, now, err := a.captureLossesSince(ctx, mark, nil)
 	if err != nil {
 		return nil, err
 	}
-	uncharged := sinceRun(now, mark).Since(charged)
+	// What cut-short ends owned that was counted after their charge: in
+	// no count, so in no test's charge, and the run's.
+	uncharged := sinceRun(now, mark).Since(charged).Plus(owned)
 	if !a.replaying() {
 		// A record charges a container read the daemon did not answer by
 		// the mocks its stamps marked (unreadMock): the run's are those of
@@ -188,6 +200,59 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 		uncharged = uncharged.Without(models.CaptureLossContainerUnread).Plus(outside)
 	}
 	return uncharged, nil
+}
+
+// takeOwnedLosses takes, once each, the losses the proxy counted that a test
+// whose end was cut short owned (coreAgent.OwnedLossTaker), after those the
+// session before left unread (resetSession): none from a proxy that does not
+// tell them apart, whose counts hold every loss.
+func (a *Agent) takeOwnedLosses() []coreAgent.OwnedLoss {
+	a.provenMu.Lock()
+	out := a.proven.ownedLeft
+	a.proven.ownedLeft = nil
+	a.provenMu.Unlock()
+	if t, ok := a.Proxy.(coreAgent.OwnedLossTaker); ok && a.Proxy != nil {
+		out = append(out, t.TakeOwnedLosses()...)
+	}
+	return out
+}
+
+// boundOwnedLeft bounds the losses a session leaves unread to the next run
+// (resetSession) as the proxy bounds those it keeps untaken: with no reader
+// (an older keploy on a long-lived agent) they would grow by a session's at
+// every reset. It keeps the first coreAgent.MaxOwnedLosses, the oldest, and
+// counts every one past them in one entry of its kind, the run's; none is
+// dropped, and no kind is counted as another.
+func boundOwnedLeft(left []coreAgent.OwnedLoss) []coreAgent.OwnedLoss {
+	if len(left) <= coreAgent.MaxOwnedLosses {
+		return left
+	}
+	out := left[:coreAgent.MaxOwnedLosses:coreAgent.MaxOwnedLosses]
+	at := make(map[models.CaptureLossKind]int)
+	for _, o := range left[coreAgent.MaxOwnedLosses:] {
+		i, ok := at[o.Loss.Kind]
+		if !ok {
+			i = len(out)
+			at[o.Loss.Kind] = i
+			out = append(out, coreAgent.OwnedLoss{Loss: models.CaptureLoss{Kind: o.Loss.Kind, What: coreAgent.OwnedLossesPastTheBound}})
+		}
+		out[i].Loss.Count += o.Loss.Count
+	}
+	return out
+}
+
+// TakeOwnedCaptureLosses takes, once each, the losses a test whose end was
+// cut short owned, by test: keploy test's read, at each test case's end and
+// at the set's end. keploy test reaches no end that charges them
+// (chargeCaptureLosses), and they are in none of the counts it reads, so
+// this is its only report of them. A test's own is "between test cases" for
+// a pool call's (endingTestCase), "" for the run's.
+func (a *Agent) TakeOwnedCaptureLosses(context.Context) ([]models.OwnedCaptureLoss, error) {
+	var out []models.OwnedCaptureLoss
+	for _, o := range a.takeOwnedLosses() {
+		out = append(out, models.OwnedCaptureLoss{Test: o.Test, Loss: o.Loss})
+	}
+	return out, nil
 }
 
 // sinceRun is what was lost since the run began, read as now: what keploy

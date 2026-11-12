@@ -217,15 +217,16 @@ func r3SendIn(t *testing.T, parent context.Context, p *Proxy, mm *MockManager, o
 }
 
 // r3SendVia is r3SendIn through the HTTP integration h: one the row keeps
-// across calls, as the agent's proxy keeps its parser.
-func r3SendVia(t *testing.T, parent context.Context, h integrations.Integrations, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
+// across calls, as the agent's proxy keeps its parser. The parser reads db:
+// the manager, or a row's view over it.
+func r3SendVia(t *testing.T, parent context.Context, h integrations.Integrations, p *Proxy, db integrations.MockMemDb, opts models.OutgoingOptions, request string) (int, string) {
 	t.Helper()
 	app, agentEnd := net.Pipe()
 	ctx := models.WithMockMismatchReporter(parent, p.sendMockNotFoundError)
 	ctx = learn.WithTracker(ctx, p.learnTracker)
 	defer app.Close()
 	go func() {
-		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, opts)
+		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, db, opts)
 		_ = agentEnd.Close()
 	}()
 	if _, err := app.Write([]byte(request)); err != nil {
@@ -1185,6 +1186,46 @@ func TestALearnStepRefusesAPickFromTheTestCasesRequest(t *testing.T) {
 	}
 }
 
+// The test case's request carries where the test began in its recording
+// (models.TestRequest.RecordedAt), which the agent hands the learn step with
+// it (learn.Tracker.GiveRequest): a server test's call whose previous
+// recorded call came after that begin has its window in the recording carry
+// it. A request of none, none handed, or the switch off: none.
+func TestTheTestCasesRecordedBeginReachesTheLearnStepsWindow(t *testing.T) {
+	recBegin := time.Date(2026, 10, 31, 8, 53, 33, 933_485_077, time.UTC)
+	paired := &models.Mock{Name: "mock-5", Kind: models.Mongo}
+	paired.Spec.ReqTimestampMock = recBegin.Add(2 * time.Millisecond)
+	for _, c := range []struct {
+		name string
+		on   string
+		req  *models.TestRequest
+		want time.Time
+	}{
+		{"handed its recorded begin", "1", &models.TestRequest{Test: "test-1", RecordedAt: recBegin}, recBegin},
+		{"a request of none", "1", &models.TestRequest{Test: "test-1"}, time.Time{}},
+		{"handed none", "1", nil, time.Time{}},
+		{"the switch off", "0", &models.TestRequest{Test: "test-1", RecordedAt: recBegin}, time.Time{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, c.on)
+			start := time.Now()
+			p := &Proxy{learnTracker: learn.NewTracker()}
+			p.learnTracker.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+			p.learnTracker.SetAppClockRun(func(time.Time) (time.Time, bool) { return start, true })
+			p.learnTracker.NewSetAt(start)
+			p.learnTracker.BeginAwaiting()
+			p.TakeTestRequest(c.req)
+			w := p.learnTracker.CallWindowFrom(recBegin.Add(time.Millisecond), paired, time.Now())
+			if w == nil {
+				t.Fatal("no window")
+			}
+			if !w.Rec.TestFrom.Equal(c.want) {
+				t.Fatalf("the recording's span carries the test's begin %v; want %v", w.Rec.TestFrom, c.want)
+			}
+		})
+	}
+}
+
 // An agent that serves keploy mock (its --mock-mode) learns its tests as a
 // test harness's client tests (learn.Tracker.SetClientTests); one that serves
 // keploy test does not.
@@ -1303,10 +1344,11 @@ func TestATestCasesCaptureWindowAwaitsItsRequest(t *testing.T) {
 // test-2's mock-t, test-3's mock-u, test-5's mock-v, and test-4 recorded
 // none. In record's full round test-1 makes it (mock-s answers) and test-2
 // makes it twice: its own mock-t answers the first, and the second, one call
-// more than test-2 recorded, is paired with mock-u and carries no note, as
-// its miss would carry none (it repeats test-2's own recorded call, so a note
-// saying the test recorded no such call would be false). test-4's call,
-// which it recorded nothing like, is paired with mock-v and carries the note
+// more than test-2 recorded, its own recording spent, is never paired: it
+// misses as one call more than the test recorded (models.MissExtraCall,
+// recorded 1), with no note, and claims none of the other tests'
+// recordings. test-4's call, which it recorded nothing like, is paired with
+// one of the unclaimed others' (mock-u or mock-v) and carries the note
 // naming a recording an earlier test's call consumed.
 func TestAPairedCallsRepeatNoteFollowsTheMissesRule(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
@@ -1350,13 +1392,14 @@ func TestAPairedCallsRepeatNoteFollowsTheMissesRule(t *testing.T) {
 	}
 	p.ContinueTestErrorCapture()
 	mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-t")})
-	for i := 1; i <= 2; i++ {
-		if code, got := r3Send(t, p, mm, opts, get); code != http.StatusOK {
-			t.Fatalf("test-2's call %d: %d %s", i, code, got)
-		}
+	if code, got := r3Send(t, p, mm, opts, get); code != http.StatusOK {
+		t.Fatalf("test-2's call 1: %d %s", code, got)
 	}
-	if a := answers(t); len(a) != 1 || a[0].ClosestMock != "mock-u" || a[0].Repeat != nil {
-		t.Fatalf("test-2's answers are %+v; want one pairing with mock-u, with no repeat note", a)
+	if code, got, err := callWithinOpts(httpint.New(zap.NewNop()), p, mm, opts, get, true); err == nil && code == http.StatusOK {
+		t.Fatalf("test-2's call 2, one more than it recorded, was answered %s; want a miss, never another test's recording paired", got)
+	}
+	if calls, err := p.GetMockErrors(context.Background()); err != nil || len(calls) != 1 || calls[0].Answer != "" || calls[0].Kind != models.MissExtraCall || calls[0].Recorded != 1 || calls[0].Repeat != nil {
+		t.Fatalf("test-2's reports are %+v (%v); want one extra_call miss, recorded 1, with no repeat note", calls, err)
 	}
 	p.ContinueTestErrorCapture()
 	mm.ServeExactTest("test-4", nil)
@@ -1364,7 +1407,7 @@ func TestAPairedCallsRepeatNoteFollowsTheMissesRule(t *testing.T) {
 		t.Fatalf("test-4's call: %d %s", code, got)
 	}
 	a := answers(t)
-	if len(a) != 1 || a[0].ClosestMock != "mock-v" || a[0].Repeat == nil || (a[0].Repeat.Mock != "mock-s" && a[0].Repeat.Mock != "mock-t") {
-		t.Fatalf("test-4's answers are %+v; want one pairing with mock-v, noting mock-s or mock-t", a)
+	if len(a) != 1 || (a[0].ClosestMock != "mock-u" && a[0].ClosestMock != "mock-v") || a[0].Repeat == nil || (a[0].Repeat.Mock != "mock-s" && a[0].Repeat.Mock != "mock-t") {
+		t.Fatalf("test-4's answers are %+v; want one pairing with mock-u or mock-v, noting mock-s or mock-t", a)
 	}
 }

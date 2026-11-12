@@ -258,22 +258,33 @@ func sqsPoll(input *req) bool {
 // the pairing, its answer and x stay as they are, and the replay names the
 // earlier test and measures the gaps at the set's end (markRepeatOf), as it
 // does a miss's.
-func reportPairing(ctx context.Context, input *req, x *models.Mock, a integrations.AnsweredCall, repeat bool) {
+//
+// The report carries the round its call was made in (call, where the
+// request's first read of the round found it: integrations.StampMark), as a
+// miss's does: the proxy lists an answer under the test whose read takes it,
+// and places it by that mark, so a pairing keploy decides after the next
+// test's install is listed under the test that made the call, never the
+// next one.
+func reportPairing(ctx context.Context, input *req, x *models.Mock, a integrations.AnsweredCall, repeat bool, call integrations.CallRound) {
 	path, dest := "/", input.header.Get("Host")
 	if input.url != nil {
-		if input.url.Path != "" {
-			path = input.url.Path
+		if escaped := input.url.EscapedPath(); escaped != "" {
+			path = escaped
 		}
 		if dest == "" {
 			dest = input.url.Host
 		}
 	}
-	r := mismatch.NewReport(mismatch.ProtocolHTTP, input.method+" "+path).WithDestination(dest).Build()
+	// The path shows the segments x redacted redacted: the call sent its
+	// secret there.
+	r := mismatch.NewReport(mismatch.ProtocolHTTP, placesOf(x).summary(input.method, path)).WithDestination(dest).Build()
+	r.Operation = models.HTTPOperationLabel(liveRequest(nil, input))
 	r.Answer, r.ClosestMock, r.NotOwned = models.AnswerProvisional, x.Name, true
 	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)
 	if repeat {
 		r.Repeat = models.NewRepeatNote(a.Mock.Name, a.AnsweredAt, a.Mock.Spec.ReqTimestampMock, r.At)
 	}
+	integrations.StampMark(r, call)
 	models.ReportAnswer(ctx, r)
 	if t := learn.TrackerFrom(ctx); t != nil {
 		// In this connection's request (integrations.InFlightOf), as a
@@ -284,5 +295,13 @@ func reportPairing(ctx context.Context, input *req, x *models.Mock, a integratio
 		} else {
 			t.ServedMockAtIn(x, input.arrived, in)
 		}
+		// F answered with x's recorded answer whole (pairExactlyIn): its
+		// view is x as the application sent its request and F answered it,
+		// stated after the serve, as the learn step states its own
+		// (servedExchange). Without it a later call of the set reads x as
+		// a serve no adapter stated, and refuses every changed value that
+		// may stand there.
+		view, key := servedLiveView(x, input)
+		t.ServedMockLive(x, key, view)
 	}
 }

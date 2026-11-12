@@ -266,7 +266,19 @@ func TestDeclaredPathPlaces(t *testing.T) {
 	require.Equal(t, []string{"url.path[1]", "url.path[3]"}, DeclaredPathPlaces(m))
 	require.Nil(t, DeclaredPathPlaces(nil))
 	require.True(t, IsPathPlace("url.path[0]"))
-	for _, p := range []string{"", "url.path[]", "url.path[x]", "url.query.id", "body.id", "url.path[1]x"} {
+	// A word of a segment (a word address another protocol's learn step
+	// writes) names that segment.
+	require.True(t, IsPathPlace("url.path[2]#1"))
+	require.True(t, IsPathPlace("url.path[2]|pct#0"))
+	for _, p := range []string{"url.path[2]|json#10", "url.path[2]|b64|b64url", "url.path[2]|cookie.sid", "url.path[2]|jwt.sub#3", `url.path[2]|jwt.a\|b#0`, `url.path[2]|jwt.a\`} {
+		require.True(t, IsPathPlace(p), p)
+	}
+	for _, p := range []string{"", "url.path[]", "url.path[x]", "url.query.id", "body.id", "url.path[1]x", "url.path[1]x#0", "url.path[x]#0"} {
+		require.False(t, IsPathPlace(p), p)
+	}
+	// What variables.ParseAddress refuses after a segment is no word of it.
+	for _, p := range []string{"url.path[1]#x", "url.path[1]#", "url.path[1]|", "url.path[1]#01", "url.path[1]#-1", "url.path[1]#+1", "url.path[1]0",
+		"url.path[1]#0#1", "url.path[1]#0|pct", "url.path[1]|foo", "url.path[1]|jwt.", "url.path[1]|cookie.", "url.path[1]|pct|foo#0"} {
 		require.False(t, IsPathPlace(p), p)
 	}
 }
@@ -287,9 +299,13 @@ func TestMockURLShape(t *testing.T) {
 		{"a bare host", mock("http://pay.internal", nil), "pay.internal"},
 		{"a declared bind place", mock("http://store/orders/kqzxwv", MockVariables{"orderId": {Recorded: "kqzxwv", Bind: "url.path[1]"}}), "store/orders/{}"},
 		{"a declared use place", mock("http://store/orders/kqzxwv/items", MockVariables{"orderId": {Recorded: "kqzxwv", Use: []string{"body.id", "url.path[1]"}}}), "store/orders/{}/items"},
+		{"a declared word of a segment", mock("http://store/apps/app-kqzxwv/items", MockVariables{"appId": {Recorded: "kqzxwv", Use: []string{"url.path[1]#1"}}}), "store/apps/{}/items"},
 		{"a path alone", mock("/orders/12345", nil), "/orders/{}"},
 		{"a URL that does not parse", mock("http://h/a%zz/alice", nil), "{}"},
-		{"a path that starts //, read as a place reads it", mock("//orders/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[0]"}}}), "orders/{}"},
+		// A path-only URL is read as a request line (ParseRequestURL), as a
+		// place reads it: "//orders/kqzxwv" is a path whose first segment is
+		// empty, not the host "orders".
+		{"a path that starts //, read as a place reads it", mock("//orders/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[2]"}}}), "//orders/{}"},
 		{"an encoded slash before a place", mock("http://store/files/a%2Fb/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[2]"}}}), "store/files/{}/{}"},
 		{"a relative URL, counted as a place counts it", mock("orders/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[1]"}}}), "orders/{}"},
 		{"no HTTP request", &Mock{Kind: HTTP}, ""},
@@ -432,4 +448,52 @@ func TestSQLShapeKeepsNoLiteral(t *testing.T) {
 func TestSQLShapeMasksDigitsInNames(t *testing.T) {
 	require.Equal(t, "SELECT a `~ ? AND b ~` c", SQLShape("SELECT a `~ 999 AND b ~` c"))
 	require.Equal(t, "SELECT `t?` FROM x", SQLShape("SELECT `t1` FROM x"))
+}
+
+// A miss of a protocol keploy has no shape of is named by the command its
+// parser read, and by no word of its summary, which can hold the values the
+// call sent: a Redis command, a Kafka API, an SQS operation, a DNS query's
+// type. A miss whose parser names no command, or whose command does not read
+// as one, is named by nothing, as before. A protocol with a shape is named
+// by its shape alone, whatever command it carries. A sanitized miss keeps the
+// command, so its shape is the same when it is read again.
+func TestMissShapeOfAProtocolWithNoShapeIsItsCommand(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		miss UnmatchedCall
+		want string
+	}{
+		{"redis", UnmatchedCall{Protocol: "Redis", ActualSummary: "GET", Command: "GET"}, "GET"},
+		{"redis module", UnmatchedCall{Protocol: "Redis", ActualSummary: "JSON.GET", Command: "JSON.GET"}, "JSON.GET"},
+		{"kafka", UnmatchedCall{Protocol: "Kafka", ActualSummary: "Produce v9", Command: "Produce"}, "Produce"},
+		{"sqs", UnmatchedCall{Protocol: "SQS", ActualSummary: "SendMessage", Command: "SendMessage"}, "SendMessage"},
+		{"dns", UnmatchedCall{Protocol: "DNS", ActualSummary: "A orders.internal.", Command: "A"}, "A"},
+		{"dns digit", UnmatchedCall{Protocol: "DNS", ActualSummary: "NSEC3 orders.internal.", Command: "NSEC3"}, "NSEC3"},
+		// No command: the summary's words are never taken for one.
+		{"redis no command", UnmatchedCall{Protocol: "Redis", ActualSummary: "GET"}, ""},
+		{"generic", UnmatchedCall{Protocol: "Generic", ActualSummary: "opaque TCP exchange (1 request buffer(s), first 12 bytes)"}, ""},
+		// A command that could be a value names none.
+		{"spaced", UnmatchedCall{Protocol: "Redis", Command: "GET user:42"}, ""},
+		{"key after it", UnmatchedCall{Protocol: "Redis", Command: "GET orders"}, ""},
+		{"address", UnmatchedCall{Protocol: "Redis", Command: "alice@example.com"}, ""},
+		{"key with a colon", UnmatchedCall{Protocol: "Redis", Command: "user:42"}, ""},
+		{"dashed uuid", UnmatchedCall{Protocol: "Redis", Command: "e3b0c442-98fc-1c14-9afb-f4c8996fb924"}, ""},
+		{"path", UnmatchedCall{Protocol: "SQS", Command: "queue/orders"}, ""},
+		{"digit first", UnmatchedCall{Protocol: "Kafka", Command: "42"}, ""},
+		{"unparsed", UnmatchedCall{Protocol: "Redis", Command: "(unparsed command)"}, ""},
+		{"too long", UnmatchedCall{Protocol: "SQS", Command: strings.Repeat("A", maxCommandName+1)}, ""},
+		// A protocol with a shape is named by it.
+		{"http", UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /orders/42", Command: "GET"}, "GET /orders/{}"},
+		{"sql", UnmatchedCall{Protocol: "PostgreSQL", ActualSummary: "SELECT 1", Command: "SELECT"}, "SELECT ?"},
+		{"mongo", UnmatchedCall{Protocol: "MongoDB", ActualSummary: "delete on apps", Command: "drop"}, "delete on apps"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, c.want, MissShape(c.miss))
+			s := c.miss.Sanitized()
+			require.Equal(t, c.want, s.ActualSummary, "a sanitized miss's summary is its shape")
+			require.Equal(t, c.want, MissShape(s), "a sanitized miss is shaped the same again")
+			require.Equal(t, CommandName(c.miss.Command), s.Command, "a sanitized miss keeps a command only when it names one")
+		})
+	}
+	require.Equal(t, maxCommandName, len(CommandName(strings.Repeat("A", maxCommandName))), "a command of the longest length is kept")
 }

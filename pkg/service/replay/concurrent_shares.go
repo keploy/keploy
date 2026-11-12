@@ -558,7 +558,7 @@ func (s *settlement) chargeUnconsumed(test string, u models.UnconsumedMock) {
 // call is the charge of a shared recording mock's call, with reason and note.
 func (s *settlement) call(mock, reason string, note *models.ConcurrentNote, why string) models.UnmatchedCall {
 	info := s.lookup[mock]
-	protocol, summary := info.protocol, info.summaryOf()
+	protocol, summary, operation := info.protocol, info.summaryOf(), models.MockOperation(info.onDisk)
 	if in := s.sp.info[mock]; in != nil && in.keys.Describe != nil {
 		if p, sum := in.keys.Describe(in.mock); p != "" {
 			protocol, summary = p, sum
@@ -571,10 +571,12 @@ func (s *settlement) call(mock, reason string, note *models.ConcurrentNote, why 
 		if summary == "" {
 			summary = models.MockSummaryFromSpec(in.mock)
 		}
+		operation = models.MockOperation(in.mock)
 	}
 	return models.UnmatchedCall{
 		Protocol:      protocol,
 		ActualSummary: summary,
+		Operation:     operation,
 		ClosestMock:   mock,
 		Kind:          models.MissInTest,
 		Reason:        reason,
@@ -831,8 +833,9 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 		}
 	}
 
-	// A conflict (the learn step paired a call with a candidate another
-	// test answered with) charges that test too.
+	// A conflict (a call the learn step found closest to a candidate
+	// another test answered with: paired with it, or apart from it in more
+	// than values) charges that test too.
 	conflictTo := map[string]string{}
 	for _, r := range results {
 		for _, c := range r.FailureInfo.UnmatchedCalls {
@@ -840,7 +843,7 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 				continue
 			}
 			x := c.Concurrent.Claimant
-			why := "its call and " + r.TestCaseID + "'s both pair with " + c.ClosestMock + ", recorded once while both were open: one of them made a call it did not record"
+			why := "its call and " + r.TestCaseID + "'s are both closest to " + c.ClosestMock + ", recorded once while both were open: one of them made a call it did not record"
 			note := s.note(x, c.ClosestMock)
 			note.Claimant, note.Case = r.TestCaseID, models.ConcurrentCaseConflict
 			s.charge(x, s.call(c.ClosestMock, models.MissConcurrentConflict, note, why))

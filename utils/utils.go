@@ -38,6 +38,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
 	keployLog "go.keploy.io/server/v3/utils/log"
+	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/strvals"
 )
@@ -165,9 +166,10 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta is what a log says about req: its method, its host, its path
-// and the names of its query parameters. Never a query value, a header or
-// the body: those are the application's content (tokens, credentials), and
+// GetReqMeta is what a log says about req: its method, its host, its path's
+// shape (URLPathShape) and the names of its query parameters. Never a path
+// segment, a query value, a header or the body: those are the application's
+// content (a segment may be a token the recording redacted), and
 // logs get pasted into issues. A query part with no "=" is not named either,
 // since it may be a bare token; a bare token that holds "=" (padded base64,
 // ?dG9rZW4=) is named by what comes before its first "=" (dG9rZW4).
@@ -179,12 +181,35 @@ func GetReqMeta(req *http.Request) map[string]string {
 	reqMeta["method"] = req.Method
 	reqMeta["host"] = req.Host
 	if req.URL != nil {
-		reqMeta["path"] = req.URL.Path
+		reqMeta["path"] = URLPathShape(req.URL)
 		if keys := queryKeys(req.URL.RawQuery); len(keys) > 0 {
 			reqMeta["query keys"] = strings.Join(keys, ",")
 		}
 	}
 	return reqMeta
+}
+
+// URLPathShape is u's path in its shape: each segment of the escaped path
+// written {}, an empty one (a trailing "/", "//") kept empty, so it names
+// how many segments the path has and never a value of one. A log made where
+// no recording is at hand names a path this way: keploy does not know there
+// which segment holds a secret the recording redacted. "" for a nil u.
+func URLPathShape(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	escaped := u.EscapedPath()
+	segs := strings.Split(strings.TrimPrefix(escaped, "/"), "/")
+	for i, seg := range segs {
+		if seg != "" {
+			segs[i] = "{}"
+		}
+	}
+	out := strings.Join(segs, "/")
+	if strings.HasPrefix(escaped, "/") {
+		out = "/" + out
+	}
+	return out
 }
 
 // queryKeys are the names of rawQuery's name=value parameters, unescaped,
@@ -1384,9 +1409,47 @@ func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
 // window rather than closing it — nothing short of passing the listener itself
 // closes it — but the port no longer competes with every other bind(0) on the
 // host.
+//
+// Its probe listeners are plain TCP, never Go's default MPTCP: for as long as
+// one is open it listens on every interface.
 func GetAvailablePort() (uint32, error) {
-	if _, ephemeralHi, known := ephemeralPortRange(); known && ephemeralHi < 65535 {
-		lo := ephemeralHi + 1
+	return availablePortAbove(hostEphemeralRange, 0)
+}
+
+// hostEphemeralRange reads the host's ephemeral port range for
+// GetAvailablePort and GetAvailableContainerPort (ephemeralPortRange).
+var hostEphemeralRange = ephemeralPortRange
+
+// containerEphemeralHi is the top of a container's ephemeral port range: the
+// kernel gives each new network namespace Linux's default range, 32768-60999,
+// whatever the host's is.
+const containerEphemeralHi = defaultEphemeralHi
+
+// GetAvailableContainerPort is GetAvailablePort for a port a container
+// listens on that the host publishes as itself (127.0.0.1:P:P), as a Docker
+// agent's: free on the host, and above the container's own ephemeral range
+// too. On a user-defined network, as every compose stack's is, Docker's
+// embedded DNS resolver listens in the container's namespace, on 127.0.0.11,
+// on a TCP and a UDP port the kernel drew from that range before the
+// container's process ran. A port the CLI found free on the host could be one
+// of them, and the process in the container then cannot bind it, nor move off
+// it: the CLI reaches it through the publish. A host whose range ends below
+// 60999, or reaches 65535, or is unknown (macOS, Windows), would otherwise
+// hand out ports inside it.
+func GetAvailableContainerPort() (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, containerEphemeralHi)
+}
+
+// availablePortAbove is GetAvailablePort with the host's ephemeral range read
+// by ephemeral (ephemeralPortRange's signature), whose candidates are above
+// floor too.
+func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32) (uint32, error) {
+	top := floor
+	if _, ephemeralHi, known := ephemeral(); known && ephemeralHi < 65535 && ephemeralHi > top {
+		top = ephemeralHi
+	}
+	if top > 0 {
+		lo := top + 1
 		span := 65536 - lo // inclusive of 65535
 		// A random start, not a scan from the bottom. Scanning upward returns
 		// the LOWEST free port every time, so two keploy processes started
@@ -1398,7 +1461,7 @@ func GetAvailablePort() (uint32, error) {
 		}
 		for i := uint32(0); i < span; i++ {
 			port := lo + ((start - lo + i) % span)
-			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+			ln, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 			if err != nil {
 				continue
 			}
@@ -1413,10 +1476,12 @@ func GetAvailablePort() (uint32, error) {
 	}
 
 	// Either the platform's ephemeral range is unknown, or every port above it
-	// is taken, or the range reaches 65535 leaving no space. Fall back to the
-	// OS assignment rather than failing: a port that may race is strictly
-	// better than no port at all, and this is the historical behaviour.
-	listener, err := net.Listen("tcp", ":0")
+	// is taken, or the range reaches 65535 leaving no space (with no floor).
+	// Fall back to the OS assignment rather than failing: a port that may race
+	// is strictly better than no port at all, and this is the historical
+	// behaviour. A container's port that then meets one of the resolver's
+	// fails the agent's start at its bind, as no port at all would.
+	listener, err := plaintcp.Listen(context.Background(), "tcp", ":0")
 	if err != nil {
 		return 0, fmt.Errorf("failed to find available port: %w", err)
 	}
@@ -1426,9 +1491,10 @@ func GetAvailablePort() (uint32, error) {
 	return uint32(addr.Port), nil
 }
 
-// isPortAvailable checks if a specific port is available on the system
+// isPortAvailable checks if a specific port is available on the system, with
+// a plain TCP probe listener (as GetAvailablePort's).
 func isPortAvailable(port uint32) bool {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	listener, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return false
 	}
@@ -1699,9 +1765,26 @@ func Hash(data []byte) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
+// cdIntoOneThatExists is what a user does about a working directory that is
+// gone.
+const cdIntoOneThatExists = "cd into a directory that exists and run keploy again"
+
+// GetLastDirectory is the name of the directory keploy runs in. It fails once
+// that directory is gone, on every platform, in the same words.
 func GetLastDirectory() (string, error) {
+	return lastDirectory(os.Getwd)
+}
+
+func lastDirectory(getwd func() (string, error)) (string, error) {
 	// Get the current working directory
-	dir, err := os.Getwd()
+	dir, err := getwd()
+	if err == nil {
+		err = confirmWorkingDirectory(dir)
+	}
+	// Linux's Getwd fails here, and on macOS the stat of its answer does.
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("the working directory is gone: %w; %s", err, cdIntoOneThatExists)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -1709,6 +1792,27 @@ func GetLastDirectory() (string, error) {
 	// Extract the base (last directory)
 	lastDir := filepath.Base(dir)
 	return lastDir, nil
+}
+
+// confirmWorkingDirectory fails unless dir, os.Getwd's answer, still leads to
+// the directory the process is in. Getwd does not say so itself: on Linux it
+// fails once the directory is removed, but macOS's getcwd goes on answering the
+// path the directory last had, which by then leads nowhere or to a newer
+// directory of that name. A path this user may not walk, as under `sudo -u`
+// below a private directory, says nothing of the kind, and is let through.
+func confirmWorkingDirectory(dir string) error {
+	here, err := os.Stat(".")
+	if err == nil {
+		var there os.FileInfo
+		there, err = os.Stat(dir)
+		if err == nil && !os.SameFile(here, there) {
+			return fmt.Errorf("the working directory is gone: %s is another directory now; %s", dir, cdIntoOneThatExists)
+		}
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return nil
+	}
+	return err
 }
 
 func IsFileEmpty(filePath string) (bool, error) {

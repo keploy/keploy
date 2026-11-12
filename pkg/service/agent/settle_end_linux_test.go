@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -111,6 +112,57 @@ func TestAnEndWithAConnectionWhoseHeldRequestsAreUnknownIsNotVerified(t *testing
 	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}, nil), "a test case opens")
 	err = a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}, nil)
 	require.ErrorIs(t, err, errHoldsUnknown, "a test case's end is told it is not verified")
+}
+
+// keploy test's end of a test case makes its bytes wait under the test case's
+// name (endingTestCase): one cut short marks what it could not see reached
+// with it, so the owned losses counted later say which test case wrote the
+// bytes. An end with no test case opened says "the test case"; an opening
+// waits under no test's name.
+func TestAKeployTestEndNamesItsTestCaseToTheBytesWait(t *testing.T) {
+	a, p := exactAgent(t, nil, map[string][]string{}, map[string][]string{})
+	ctx := context.Background()
+	var ends []string
+	p.bytesWait = func(ctx context.Context, _ uint64) error {
+		ends = append(ends, coreAgent.EndOf(ctx))
+		return nil
+	}
+	// A pool call before the set's first test case, a test case's open
+	// (which settles the gap's calls, marking nothing), its end, then two
+	// pool calls after it ended (a passed run's, a plain one), then the next
+	// test case and its end. Only an end whose view is in force names a
+	// test case: a pool call after test-1 ended is the gap's, never test-1's,
+	// which was verified.
+	for i, ex := range []models.ExactServing{{}, {Test: "test-1"}, {}, {Passed: 1}, {}, {Test: "test-2"}, {}} {
+		require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &ex}, nil), "call %d", i)
+	}
+	require.Equal(t, []string{coreAgent.BetweenTestCases, "", "test-1", coreAgent.BetweenTestCases, coreAgent.BetweenTestCases, "", "test-2"}, ends)
+}
+
+// A proxy that cannot say which view is in force names no test case: its
+// marks say "the test case", never a test case that may have ended.
+func TestAKeployTestEndWithNoServedReaderNamesNoTestCase(t *testing.T) {
+	require.Equal(t, "the test case", endingTestCase(outcomeOnly{"test-1"}))
+	a, _ := exactAgent(t, nil, map[string][]string{}, map[string][]string{})
+	es, err := a.exactServer()
+	require.NoError(t, err)
+	require.Equal(t, coreAgent.BetweenTestCases, endingTestCase(es), "no test case open")
+}
+
+// A drop counted in the gap says it was between test cases, never "while
+// between test cases ran" nor a test case's name.
+func TestADropBetweenTestCasesSaysSo(t *testing.T) {
+	require.Contains(t, dropped{what: coreAgent.BetweenTestCases, n: 2}.Error(), "listener between test cases (its SYN")
+	require.Contains(t, dropped{what: "test-1", n: 2}.Error(), "listener while test-1 ran (its SYN")
+}
+
+// outcomeOnly is an ExactServer that answers ExactTestOutcome alone.
+type outcomeOnly struct{ test string }
+
+func (outcomeOnly) ServeExactTest(string, []*models.Mock) error { return nil }
+func (outcomeOnly) ServeExactPool(string, []string) error       { return nil }
+func (o outcomeOnly) ExactTestOutcome() (string, []string, []string, bool) {
+	return o.test, nil, nil, true
 }
 
 // A test during which the kernel dropped, at the proxy's listener, what can
@@ -836,6 +888,6 @@ func TestATestsWindowBeginsAtItsBeginOnly(t *testing.T) {
 	require.EqualValues(t, 1, k.windows.Load(), "the test case's end begins none")
 
 	t.Setenv(provenswitch.Env, "0")
-	b.beginWindow()
+	b.beginWindow(0)
 	require.EqualValues(t, 1, k.windows.Load(), "with the switch off no window begins")
 }

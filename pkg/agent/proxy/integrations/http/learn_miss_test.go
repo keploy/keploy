@@ -19,7 +19,7 @@ func TestALearnMissReportNamesTheRefusedRecordingAndWhatDiffers(t *testing.T) {
 	lmiss := &learnMiss{res: learn.Result{Outcome: learn.Miss, Reason: models.MissRequestChanged, Why: "a value at url.query.amount flowed"}, closest: refused, pool: []*models.Mock{refused}}
 	request := &http.Request{Method: "GET", URL: &url.URL{Path: "/charge/book", RawQuery: "amount=6"}, Host: answeredHost, Header: http.Header{"Accept": {"application/json"}}}
 	r := newHTTP().buildHTTPMismatchReport(request, nil, db, nil, nil, nil, lmiss.diag())
-	lmiss.explain(r)
+	lmiss.explain(r, false)
 	if r.ClosestMock != "charge-rec" || r.Diff == "" || r.Reason != models.MissRequestChanged {
 		t.Fatalf("closest %q, diff %q, reason %q", r.ClosestMock, r.Diff, r.Reason)
 	}

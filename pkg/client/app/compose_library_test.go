@@ -3,17 +3,20 @@ package app
 import (
 	"context"
 	"errors"
-	"os"
+	"fmt"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/docker/cli/cli"
-	"github.com/docker/compose/v5/pkg/api"
 	"github.com/docker/docker/api/types/container"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestComposeUpSemanticsAgreeWithTheInjectedFlags is the parity guard between
@@ -30,26 +33,26 @@ func TestComposeUpSemanticsAgreeWithTheInjectedFlags(t *testing.T) {
 		service            string
 		preferFailureAbort bool
 		wantExitCodeFrom   string
-		wantOnExit         api.Cascade
+		wantOnExit         docker.ComposeOnExit
 	}{
 		{
 			name:             "abort on container exit carries the app service",
 			service:          "app",
 			wantExitCodeFrom: "app",
-			wantOnExit:       api.CascadeStop,
+			wantOnExit:       docker.ComposeOnExitStop,
 		},
 		{
 			name:               "a completion dependency switches to abort-on-failure",
 			service:            "app",
 			preferFailureAbort: true,
 			wantExitCodeFrom:   "",
-			wantOnExit:         api.CascadeFail,
+			wantOnExit:         docker.ComposeOnExitFail,
 		},
 		{
 			name:             "no service means no --exit-code-from",
 			service:          "",
 			wantExitCodeFrom: "",
-			wantOnExit:       api.CascadeStop,
+			wantOnExit:       docker.ComposeOnExitStop,
 		},
 	}
 	for _, tt := range tests {
@@ -74,7 +77,7 @@ func TestComposeUpSemanticsAgreeWithTheInjectedFlags(t *testing.T) {
 func TestComposeUpSemanticsDefaultsToCascadeIgnore(t *testing.T) {
 	got := composeUpSemantics("docker compose -f - up")
 
-	if got.OnExit != api.CascadeIgnore {
+	if got.OnExit != docker.ComposeOnExitIgnore {
 		t.Fatalf("OnExit = %v with no abort flag, want CascadeIgnore; a stack with a one-shot "+
 			"init container would be torn down as soon as it finished", got.OnExit)
 	}
@@ -92,7 +95,7 @@ func TestComposeUpSemanticsReadsTheEqualsForm(t *testing.T) {
 	if got.ExitCodeFrom != "web" {
 		t.Errorf("ExitCodeFrom = %q, want %q", got.ExitCodeFrom, "web")
 	}
-	if got.OnExit != api.CascadeFail {
+	if got.OnExit != docker.ComposeOnExitFail {
 		t.Errorf("OnExit = %v, want CascadeFail", got.OnExit)
 	}
 }
@@ -215,14 +218,22 @@ func TestRunComposeInProcessClassifiesFailures(t *testing.T) {
 //
 // compose reacts to a cancelled context with a graceful stop of every service,
 // on a context it deliberately makes uncancellable. That is the slow teardown
-// the drain budget cannot absorb, so keploy's fast down must run FIRST. If this
-// stops happening, runs fail with "teardown drain timed out" rather than
-// anything that points here.
+// the drain budget cannot absorb, so keploy's fast down must run FIRST: Up's
+// context must still be live when the down starts. If this stops happening,
+// runs fail with "teardown drain timed out" rather than anything that points
+// here.
+//
+// And the run returns only once its down has finished: the replay loop starts
+// the next test-set's `up` as soon as it returns, which would race the daemon
+// still reaping these containers ("container name already in use").
 func TestRunComposeInProcessTearsDownOnCancel(t *testing.T) {
 	blockUntilCancel := make(chan struct{})
-	stack := &fakeComposeStack{upBlocksUntil: blockUntilCancel}
+	upStarted := make(chan struct{})
+	stack := &fakeComposeStack{upBlocksUntil: blockUntilCancel, upStarted: upStarted}
 
 	downCalled := make(chan struct{})
+	releaseDown := make(chan struct{})
+	var upEndedBeforeDown atomic.Bool
 	a := &App{
 		logger:          zap.NewNop(),
 		docker:          exitedInspector{},
@@ -233,22 +244,45 @@ func TestRunComposeInProcessTearsDownOnCancel(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan utils.CmdError, 1)
 	go func() {
 		done <- a.runComposeInProcess(ctx, func() {
+			upEndedBeforeDown.Store(stack.upContext().Err() != nil)
 			close(downCalled)
 			close(blockUntilCancel)
+			<-releaseDown
 		})
 	}()
 
+	select {
+	case <-upStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run never called the runner's Up")
+	}
 	cancel()
 
 	select {
 	case <-downCalled:
 	case <-time.After(graceBudget + 5*time.Second):
+		close(releaseDown)
 		t.Fatal("the compose stack was never brought down after the run was cancelled; compose's own " +
 			"graceful stop then runs unbounded and overruns the teardown drain budget")
 	}
+	if upEndedBeforeDown.Load() {
+		close(releaseDown)
+		t.Fatal("the run's cancel reached the runner's Up before keploy's down started: compose's own " +
+			"unbounded graceful stop runs first")
+	}
+
+	// The down is still running: the run must not have returned.
+	select {
+	case <-done:
+		close(releaseDown)
+		t.Fatal("runComposeInProcess returned while its own down was still running")
+	case <-time.After(time.Second):
+	}
+	close(releaseDown)
 
 	select {
 	case <-done:
@@ -257,14 +291,83 @@ func TestRunComposeInProcessTearsDownOnCancel(t *testing.T) {
 	}
 }
 
+// TestACancelledInProcessRunStopsTheAppAsTheSwitchSays pins which teardown a
+// cancelled in-process run takes. Under the proven switch keploy stops the app
+// itself (StopComposeApp): it looks for the app's container through the
+// compose project on its agent's container, and says so when it cannot find
+// it. With the switch off the app gets its grace (composeAppGrace): keploy
+// reads the app's container until it has exited and asks for no stop. Both
+// end in the same down, so a run that took the wrong one is seen only here.
+func TestACancelledInProcessRunStopsTheAppAsTheSwitchSays(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		proven string
+		stops  bool
+	}{
+		{name: "under the switch keploy stops the app itself", proven: "1", stops: true},
+		{name: "with the switch off the app gets its grace", proven: "", stops: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, tc.proven)
+			blockUntilCancel := make(chan struct{})
+			stack := &fakeComposeStack{upBlocksUntil: blockUntilCancel}
+			exited := container.InspectResponse{
+				ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited"}},
+			}
+			// Every container has exited, and none carries a label.
+			d := &inspectRecorder{inspects: map[string]container.InspectResponse{"user-app": exited, "keploy-v3": exited}}
+			core, logs := observer.New(zap.WarnLevel)
+			a := &App{
+				logger:          zap.New(core),
+				docker:          d,
+				composeContent:  []byte("services: {}"),
+				cmd:             "docker compose -f - up",
+				container:       "user-app",
+				composeService:  "app",
+				keployContainer: "keploy-v3",
+				newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			downs := 0
+			done := make(chan utils.CmdError, 1)
+			go func() {
+				done <- a.runComposeInProcess(ctx, func() {
+					downs++
+					close(blockUntilCancel)
+				})
+			}()
+			cancel()
+
+			select {
+			case <-done:
+			case <-time.After(graceBudget + 10*time.Second):
+				t.Fatal("runComposeInProcess did not return after the run was cancelled")
+			}
+			if downs != 1 {
+				t.Fatalf("the stack was brought down %d times, want once", downs)
+			}
+			const cannotStop = "keploy could not stop the application's container before taking its compose stack down"
+			warned := logs.FilterMessage(cannotStop).Len() == 1
+			if asked := d.askedAbout(a.keployContainer); asked != tc.stops || warned != tc.stops {
+				t.Fatalf("keploy looked for the app's container through its agent's project: %v, and warned %q: %v; "+
+					"want both %v (the switch %q)", asked, cannotStop, warned, tc.stops, tc.proven)
+			}
+			if !tc.stops && !d.askedAbout(a.container) {
+				t.Fatalf("with the switch off keploy never read the app's container %q for its grace (inspected %v)", a.container, d.asked)
+			}
+		})
+	}
+}
+
 // TestExitCodeFromErrReadsComposeStatusError pins exit-code propagation across
 // the mechanism change. The in-process path runs no child process, so it can
-// never produce an *exec.ExitError; compose reports the --exit-code-from status
-// as cli.StatusError. Without this, every compose exit code collapses to -1 and
+// never produce an *exec.ExitError; its runner reports the --exit-code-from
+// status as a *docker.ComposeExitError. Without this, every compose exit code collapses to -1 and
 // a wrapped runner's status silently stops propagating.
 func TestExitCodeFromErrReadsComposeStatusError(t *testing.T) {
-	if got := exitCodeFromErr(cli.StatusError{StatusCode: 7, Status: "app exited"}); got != 7 {
-		t.Fatalf("exitCodeFromErr(cli.StatusError{7}) = %d, want 7", got)
+	if got := exitCodeFromErr(fmt.Errorf("compose up: %w", &docker.ComposeExitError{Code: 7, Err: errors.New("app exited")})); got != 7 {
+		t.Fatalf("exitCodeFromErr(*docker.ComposeExitError{7}) = %d, want 7", got)
 	}
 	if got := exitCodeFromErr(nil); got != -1 {
 		t.Fatalf("exitCodeFromErr(nil) = %d, want -1", got)
@@ -305,14 +408,252 @@ func TestComposeRunnerIsRebuiltWhenTheDocumentChanges(t *testing.T) {
 	}
 }
 
-// unsetEnvVars unsets each of keys for one test, restored after it: to
-// compose an empty value is set, so an env file could not set it.
-func unsetEnvVars(t *testing.T, keys ...string) {
-	t.Helper()
-	for _, k := range keys {
-		t.Setenv(k, "")
-		if err := os.Unsetenv(k); err != nil {
-			t.Fatal(err)
+// A build that registers an in-process runner gets keploy's own compose
+// document run through it, scoped as the command scopes it; with none
+// registered, the same App keeps the `docker compose -f -` shell-out.
+func TestARegisteredComposeStackRunsTheInMemoryDocument(t *testing.T) {
+	newApp := func() *App {
+		return &App{
+			logger:         zap.NewNop(),
+			kind:           utils.DockerCompose,
+			cmd:            "docker compose -p proj --project-directory /work --env-file a.env up",
+			composeContent: []byte("services: {app: {image: app}}"),
 		}
+	}
+	if a := newApp(); a.useComposeLibrary() {
+		t.Fatal("the in-memory document takes the in-process path with no runner registered")
+	}
+
+	var got []docker.ComposeStackSpec
+	stack := &fakeComposeStack{ps: []docker.ServiceState{{ID: "agent-id", Service: keployAgentComposeService}}}
+	docker.RegisterComposeStack(func(_ context.Context, spec docker.ComposeStackSpec) (docker.ComposeStack, error) {
+		got = append(got, spec)
+		return stack, nil
+	})
+	t.Cleanup(func() { docker.RegisterComposeStack(nil) })
+
+	a := newApp()
+	if !a.useComposeLibrary() {
+		t.Fatal("the in-memory document keeps the shell-out with a runner registered")
+	}
+	if ids := a.composeAgentContainerIDs(context.Background()); !reflect.DeepEqual(ids, []string{"agent-id"}) {
+		t.Fatalf("agent container ids %v; want the registered runner's [agent-id]", ids)
+	}
+	if len(got) != 1 {
+		t.Fatalf("the registered builder ran %d times; want once", len(got))
+	}
+	want := docker.ComposeStackSpec{Content: a.composeContent, ProjectName: "proj", WorkingDir: "/work", EnvFiles: []string{"a.env"}}
+	if !reflect.DeepEqual(got[0], want) {
+		t.Fatalf("the builder got %+v; want %+v", got[0], want)
+	}
+
+	noDoc := newApp()
+	noDoc.composeContent = nil
+	if noDoc.useComposeLibrary() {
+		t.Fatal("a compose file on disk takes the in-process path; only keploy's own in-memory document may")
+	}
+}
+
+// A run of keploy's own compose document, in a build with a runner, starts
+// the stack through that runner and tears it down through it: no `docker`
+// binary runs, which is what lets the agent image, which has no compose
+// plugin, run a compose replay.
+func TestARunDrivesTheInMemoryDocumentThroughTheRunner(t *testing.T) {
+	forceComposeLibrary(t)
+	argvLog := stubDockerCLI(t, "", 0)
+	stack := &fakeComposeStack{}
+	a := &App{
+		logger:          zap.NewNop(),
+		docker:          &inspectRecorder{},
+		kind:            utils.DockerCompose,
+		cmd:             "docker compose -f - up",
+		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+		keployContainer: "keploy-v3",
+		container:       "app",
+		composeServices: []string{"app", "keploy-agent"},
+		newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
+	}
+
+	if appErr := a.run(context.Background()); appErr.AppErrorType != models.ErrAppStopped {
+		t.Fatalf("the stack's up returned clean; run() reported %+v", appErr)
+	}
+
+	if n := stack.upCalls.Load(); n != 1 {
+		t.Fatalf("the runner's Up ran %d times; want once", n)
+	}
+	if stack.downCall != 1 {
+		t.Fatalf("the runner's Down ran %d times; want once", stack.downCall)
+	}
+	if log := recordedLog(t, argvLog); strings.Contains(log, "ARG") {
+		t.Fatalf("the run shelled out to a `docker` binary:\n%s", log)
+	}
+}
+
+// A state read on the in-process path asks the runner, which knows its own
+// project: it asks the daemon nothing to resolve one, whose answer it would
+// wait out however slow (composeProjectLabelAnswered) only to drop it.
+func TestALibraryStateReadAsksTheDaemonNothing(t *testing.T) {
+	forceComposeLibrary(t)
+	rec := &inspectRecorder{}
+	stack := &fakeComposeStack{ps: []docker.ServiceState{{ID: "id-db", Service: "db", State: "exited", ExitCode: 1}}}
+	a := &App{
+		logger:          zap.NewNop(),
+		docker:          rec,
+		composeContent:  []byte("services:\n  db:\n    image: postgres\n"),
+		cmd:             "docker compose -f - up",
+		keployContainer: "keploy-v3",
+		container:       "user-app",
+		newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
+	}
+
+	states := a.composeServiceStates(context.Background())
+
+	if len(states) != 1 || states[0].ID != "id-db" || states[0].ExitCode != 1 {
+		t.Fatalf("states %+v; want the runner's id-db, exited 1", states)
+	}
+	if len(rec.asked) != 0 {
+		t.Fatalf("a state read on the in-process path inspected %v on the daemon", rec.asked)
+	}
+}
+
+// The dependency-abort retry reads the in-process runner's service states as
+// it reads `docker compose ps`'s: an app compose created but never started,
+// beside a dependency that crashed, is retried; an app that ran is not.
+func TestALibraryStateReadFeedsTheDependencyAbortRetry(t *testing.T) {
+	forceComposeLibrary(t)
+	for _, tc := range []struct {
+		name     string
+		appState string
+		retry    bool
+	}{
+		{name: "compose created the app and a dependency crashed", appState: "created", retry: true},
+		{name: "the app ran and exited", appState: "exited", retry: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stack := &fakeComposeStack{ps: []docker.ServiceState{
+				{ID: "id-app", Service: "app", State: tc.appState, ExitCode: 1},
+				{ID: "id-db", Service: "db", State: "exited", ExitCode: 1},
+				{ID: "id-agent", Service: keployAgentComposeService, State: "running"},
+			}}
+			a := &App{
+				logger:          zap.NewNop(),
+				docker:          &inspectRecorder{},
+				kind:            utils.DockerCompose,
+				composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+				cmd:             "docker compose -f - up",
+				composeService:  "app",
+				keployContainer: "keploy-v3",
+				container:       "user-app",
+				newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
+			}
+
+			got := shouldRetryComposeUp(a.kind, 1, composeDepFailureRetries, nil, errors.New("dependency failed to start"),
+				utils.Runtime, a.composeService, func() []composeServiceState {
+					return a.composeServiceStatesWithin(composePsStateBudget)
+				})
+
+			if got != tc.retry {
+				t.Fatalf("with the app %s and db exited 1 in the runner's states, keploy retried the up: %v; want %v",
+					tc.appState, got, tc.retry)
+			}
+			if stack.psCalls != 1 {
+				t.Fatalf("the retry decision read the runner's states %d times; want once", stack.psCalls)
+			}
+		})
+	}
+}
+
+// On the in-process path the app's recent output is read under the runner's
+// project, where the runner's Up keeps it (StartAppOutputRun), and there is
+// none before a runner is built.
+func TestALibraryRunsRecentOutputIsReadUnderTheRunnersProject(t *testing.T) {
+	forceComposeLibrary(t)
+	docker.ForgetAppOutput()
+	t.Cleanup(docker.ForgetAppOutput)
+	a := &App{
+		logger:          zap.NewNop(),
+		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+		cmd:             "docker compose -p orderflow -f - up",
+		container:       "app",
+		composeService:  "app",
+		newComposeStack: func(context.Context) (composeStack, error) { return &fakeComposeStack{}, nil },
+	}
+	if got := a.recentAppOutput(); got != "" {
+		t.Fatalf("no runner built yet: recent output %q; want none", got)
+	}
+	if _, err := a.composeRunner(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	run := docker.StartAppOutputRun("fake")
+	docker.RecordAppOutputOfRun("fake", run, "fake-app-1", "app", "panic: the app crashed")
+
+	if got := a.recentAppOutput(); !strings.Contains(got, "panic: the app crashed") {
+		t.Fatalf("recent output %q; want the app's line the runner kept under its project", got)
+	}
+}
+
+// The library never runs the command in a shell, so an assignment in it does
+// not name the project the down takes; keploy's own environment does.
+func TestALibraryDownProjectIgnoresTheCommandsAssignment(t *testing.T) {
+	forceComposeLibrary(t)
+	t.Setenv("COMPOSE_PROJECT_NAME", "")
+	a := &App{
+		logger:         zap.NewNop(),
+		docker:         &inspectRecorder{},
+		composeContent: []byte("services:\n  app:\n    image: alpine\n"),
+		cmd:            "COMPOSE_PROJECT_NAME=assigned docker compose -f - up",
+	}
+	if got := a.composeDownProject(context.Background()); got != "" {
+		t.Fatalf("project %q; the library run never sees the command's assignment", got)
+	}
+	t.Setenv("COMPOSE_PROJECT_NAME", "Exported")
+	if got := a.composeDownProject(context.Background()); got != "exported" {
+		t.Fatalf("project %q; want keploy's own COMPOSE_PROJECT_NAME, normalized", got)
+	}
+}
+
+// The down of an in-process run takes the project the runner ran, over what
+// else names one; a runner that names none leaves it to those (here keploy's
+// own COMPOSE_PROJECT_NAME).
+func TestALibraryDownProjectIsTheRunnersElseTheEnvironments(t *testing.T) {
+	forceComposeLibrary(t)
+	t.Setenv("COMPOSE_PROJECT_NAME", "Exported")
+	for _, tc := range []struct {
+		name  string
+		stack *fakeComposeStack
+		want  string
+	}{
+		{"a runner that names its project", &fakeComposeStack{}, "fake"},
+		{"a runner that names none", &fakeComposeStack{noProject: true}, "exported"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &App{
+				logger:          zap.NewNop(),
+				docker:          &inspectRecorder{},
+				composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+				cmd:             "docker compose -f - up",
+				newComposeStack: func(context.Context) (composeStack, error) { return tc.stack, nil },
+			}
+			if _, err := a.composeRunner(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := a.composeDownProject(context.Background()); got != tc.want {
+				t.Fatalf("project %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// With no in-memory document there is nothing for a runner to run: none is
+// built, and the caller hears why.
+func TestNoRunnerIsBuiltWithoutAnInMemoryDocument(t *testing.T) {
+	built := 0
+	a := &App{
+		logger:          zap.NewNop(),
+		composeFile:     "/tmp/keploy-compose.yaml",
+		newComposeStack: func(context.Context) (composeStack, error) { built++; return &fakeComposeStack{}, nil },
+	}
+	if r, err := a.composeRunner(context.Background()); err == nil || r != nil || built != 0 {
+		t.Fatalf("composeRunner with no document = (%v, %v), builder ran %d times; want an error and no build", r, err, built)
 	}
 }

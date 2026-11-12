@@ -272,6 +272,11 @@ func TestTheSweepLoopSweepsAgainAfterZombiesOrAFailure(t *testing.T) {
 	core, logs := observer.New(zapcore.WarnLevel)
 	h := &Hooks{logger: zap.New(core), skips: newSkipWatch(zap.NewNop(), nil)}
 	h.skips.watch(map[string]*ebpf.Program{"k_process_exit": exit})
+	// Each map the sweep deletes from is the hooks' own: the PID maps and
+	// the keploy instances' (instance_of_tgid).
+	h.objects.TargetNamespacePids, h.objects.ExcludedPids = new(ebpf.Map), new(ebpf.Map)
+	h.objects.PidStartTimes, h.objects.InstanceOfTgid = new(ebpf.Map), new(ebpf.Map)
+	wantMaps := []*ebpf.Map{h.objects.TargetNamespacePids, h.objects.ExcludedPids, h.objects.PidStartTimes, h.objects.InstanceOfTgid}
 	type sweep struct {
 		only    []uint32
 		zombies []uint32
@@ -280,7 +285,12 @@ func TestTheSweepLoopSweepsAgainAfterZombiesOrAFailure(t *testing.T) {
 	var calls []sweep
 	var next []sweep
 	was := sweepPIDs
-	sweepPIDs = func(_, _, _ *ebpf.Map, only []uint32) (int, []uint32, error) {
+	sweepPIDs = func(targets, excluded, starts, instances *ebpf.Map, only []uint32) (int, []uint32, error) {
+		for i, m := range []*ebpf.Map{targets, excluded, starts, instances} {
+			if m != wantMaps[i] {
+				t.Errorf("swept map %d (target_namespace_pids, excluded_pids, pid_start_times, instance_of_tgid) at %p, want the hooks' at %p", i, m, wantMaps[i])
+			}
+		}
 		r := next[0]
 		next = next[1:]
 		r.only = only

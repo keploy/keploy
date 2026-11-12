@@ -3,6 +3,8 @@
 package routes
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
@@ -83,37 +86,101 @@ func TestTCPOwnerMatchesBothEnds(t *testing.T) {
 	}
 }
 
-// envClaimFrom makes this test binary, run again as a child, claim against
-// the server at its value and exit.
-const envClaimFrom = "KEPLOY_TEST_CLAIM_FROM"
-
-func TestMain(m *testing.M) {
-	if url := os.Getenv(envClaimFrom); url != "" {
-		resp, err := http.Post(url, "application/json", strings.NewReader(`{"key":"orders","pid":1}`))
-		if err != nil {
-			os.Exit(3)
-		}
-		resp.Body.Close()
-		os.Exit(0)
-	}
-	os.Exit(m.Run())
-}
-
-// The claim reads the caller from the connection: a claim made by another
-// process (this test binary run again) hands the service that process's ID,
-// not the server's, and a pid in the body is ignored.
-func TestTheClaimReadsTheCallerFromTheConnection(t *testing.T) {
+// A begin's caller, read while it is served (in a run of more than one test
+// worker), is the process that sent it: this test binary run again.
+func TestABeginsCallerIsReadFromItsConnection(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	svc := &wireSvc{}
+	svc := &wireSvc{readBegin: true, beginResp: models.ScopeBeginResp{V: 1, Status: "ok"}}
 	a := &Agent{logger: zap.NewNop(), svc: svc}
-	srv := httptest.NewServer(http.HandlerFunc(a.HandleInstance))
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleScopeBegin))
 	defer srv.Close()
 	c := exec.Command(os.Args[0], "-test.run=^$")
-	c.Env = append(os.Environ(), envClaimFrom+"="+srv.URL)
+	c.Env = append(os.Environ(), envClaimFrom+"="+srv.URL, envBegin+"=1")
 	if out, err := c.CombinedOutput(); err != nil {
-		t.Fatalf("the claiming child failed: %v: %s", err, out)
+		t.Fatalf("the beginning child failed: %v: %s", err, out)
 	}
-	if svc.claimKey != "orders" || svc.claimCaller != c.Process.Pid {
-		t.Fatalf("claimed key %q for process %d, want orders for the child %d", svc.claimKey, svc.claimCaller, c.Process.Pid)
+	if len(svc.begun) != 1 || svc.beginPID != c.Process.Pid {
+		t.Fatalf("begins %+v read as process %d, want one from the child %d", svc.begun, svc.beginPID, c.Process.Pid)
+	}
+}
+
+// A socket's holder is read as the pid_t the kernel numbers its processes
+// with. A /proc name past that is no process, so the claim that came on the
+// socket is refused: it is never handed to the process the name's low 32
+// bits give (4294967301 is 5 as the u32 TGID the instance stamp keys on),
+// nor to another holder of the socket, and no worker is stamped.
+func TestASocketHolderPastAProcessIDIsNoCaller(t *testing.T) {
+	t.Run("names", func(t *testing.T) {
+		for name, want := range map[string]int{"1": 1, "4194304": 4194304, "2147483647": 2147483647} {
+			if got, err := pidOf(name); err != nil || got != want {
+				t.Errorf("pidOf(%q) = %d, %v; want %d", name, got, err, want)
+			}
+		}
+		for _, name := range []string{"0", "-5", "05", "+5", "2147483648", "4294967295", "4294967296", "4294967301", "18446744073709551621", "12a"} {
+			if got, err := pidOf(name); err == nil {
+				t.Errorf("pidOf(%q) = %d: read as a process", name, got)
+			}
+		}
+	})
+	for _, tc := range []struct{ name, holder, child string }{
+		{"just past a pid_t", "2147483648", ""},
+		{"past a u32", "4294967296", ""},
+		{"past a u32, its u32 5", "4294967301", ""},
+		{"past a u32, its child holding the socket too", "4294967301", "77"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			write := func(rel, body string) {
+				p := filepath.Join(root, rel)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("net/tcp", "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"+
+				"   0: 0100007F:C350 0100007F:41ED 01 00000000:00000000 00:00000000 00000000  1000        0 222 1\n")
+			holders := []string{tc.holder}
+			if tc.child != "" {
+				holders = append(holders, tc.child)
+				write(tc.child+"/stat", tc.child+" (go) S "+tc.holder+" 1 1 0 -1")
+			}
+			for _, pid := range holders {
+				dir := filepath.Join(root, pid, "fd")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("socket:[222]", filepath.Join(dir, "3")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			old := procRoot
+			procRoot = root
+			t.Cleanup(func() { procRoot = old })
+
+			self, peer := netip.MustParseAddrPort("127.0.0.1:50000"), netip.MustParseAddrPort("127.0.0.1:16877")
+			if got, err := tcpOwner(self, peer); err == nil || got != 0 || !strings.Contains(err.Error(), filepath.Join(root, tc.holder)+", which is not a process ID") {
+				t.Fatalf("owner %d, %v; want no owner, the holder %s named", got, err, tc.holder)
+			}
+
+			t.Setenv(provenswitch.Env, "1")
+			svc := &refusingSvc{}
+			a := &Agent{logger: zap.NewNop(), svc: svc}
+			req := httptest.NewRequest(http.MethodPost, "/agent/instance", strings.NewReader(`{"key":"o","workers":2}`))
+			req.RemoteAddr = self.String()
+			req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey, net.TCPAddrFromAddrPort(peer)))
+			rec := httptest.NewRecorder()
+			a.HandleInstance(rec, req)
+			if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), tc.holder) {
+				t.Fatalf("the claim was answered %d %s; want the agent's refusal naming %s", rec.Code, rec.Body.String(), tc.holder)
+			}
+			if svc.claimKey != "" || svc.claimCaller != 0 {
+				t.Fatalf("the run was claimed for process %d", svc.claimCaller)
+			}
+			if len(svc.refusals) != 1 || svc.refusals[0].Code != models.ScopeErrNoCaller {
+				t.Fatalf("refusals %+v; want the one no-caller refusal", svc.refusals)
+			}
+		})
 	}
 }

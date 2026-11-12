@@ -2,9 +2,19 @@ package learn
 
 import (
 	"container/list"
+	"context"
+	"reflect"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
+	"unsafe"
+
+	"golang.org/x/sync/semaphore"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // setDerived keeps, for the running test set, what the learn step derives
@@ -59,6 +69,12 @@ import (
 //     on api-server's round, and its instants' reads (instantSpans) 75%
 //     before the test that timed out.
 //
+//   - drifts: what each value an earlier place holds drifted, bounded by no
+//     call (driftOf), kept as held is. Every later test reads each place of
+//     the run's (an earlier test's call) as a source of each changed value
+//     of its calls, so without them each test built every earlier place's
+//     drift again at its first call: 410 MB and 310 ms at 20 000 places.
+//
 // The budget is the set's, not a tier's: a tier of a fixed size below the
 // set's working set kept a part of each recording and read the rest anew on
 // every call. On api-server's round (15 589 recordings) the held and forms
@@ -88,6 +104,7 @@ type setDerived struct {
 	held   tier[heldParts]
 	words  tier[wordParts]
 	forms  tier[formParts]
+	drifts tier[driftPart]
 	// reading are the parts being read (derive), by recording and part:
 	// closed when read.
 	reading map[readingKey]chan struct{}
@@ -108,10 +125,45 @@ type setDerived struct {
 	// bodies are the payloads of the set's recordings its readers loaded
 	// (bodyStore), one more tier on budget.
 	bodies *bodyStore
+	// views are the views F's serves gave of the set's recordings
+	// (Tracker.ServedMockLive) that its calls read (Order.ServedView), by
+	// the recording's identity and the view's place among those the set
+	// keeps of it (viewsLocked's keys): one more tier on budget, let go
+	// after the payloads, so a view is read once for the set, not once for
+	// each call that reads the recording, and again only past the budget.
+	// Its own store, not bodies: a view bears its recording's identity,
+	// and read as the recording a word only the view holds would pass.
+	views *bodyStore
+	// recs are the set's recordings the agent's on-disk store decoded for
+	// its readers (Tracker.KeepRecording), by the store's key: kept only in
+	// the room the budget has spare, and the first let go when any other
+	// part needs room (keepSpare).
+	recs tier[*models.Mock]
+	// refused are the keys of the recordings keepSpare refused once their
+	// least size had room (recRoom) but their measured heap did not: one
+	// more tier on budget, a slot each, let go of by none, so a recording
+	// is measured once for the set, not at each read (keepRecording).
+	refused tier[struct{}]
+	// recDecodes counts the recordings decoded for KeepRecording, for the
+	// rows.
+	recDecodes int
 	// offsets are the set's places the offset rule reads, by place and
 	// moment (offsetIndex), within offsetBudget: its handlers share them.
 	offsets *offsetIndex
+	// run is the bytes the tracker's run keeps of the set's tests' places
+	// (Tracker.keepRun), on budget (keepRun).
+	run int64
+	// inFlight is the bytes the set's readers (a call's warm, its staging's:
+	// warmSet) have in flight, within readInFlight: each reserves its read's
+	// (readWeight) before it reads (reserve).
+	inFlight *semaphore.Weighted
+	// inFlightWaiting is how many readers wait for room in inFlight now,
+	// for the rows.
+	inFlightWaiting int
 }
+
+// driftPart is what setDerived keeps of one drift (drifts).
+type driftPart struct{ d *valueDrift }
 
 // heldParts are what setDerived keeps of a recording for the set (held).
 type heldParts struct {
@@ -168,6 +220,8 @@ const (
 	_
 	partKeys
 	partDecoded // by whether the stamps are blanked: partDecoded<<1
+	_
+	partDrift
 )
 
 // byKeep is p, a part kept by keep, for keep.
@@ -210,7 +264,8 @@ func newTier[P any](cap int64, set *budget, lru bool) tier[P] {
 // kept while the set is within it, whichever tier the part is of. letGo
 // frees need bytes for a part: the words tier lets go of its recordings
 // read least recently, then, where that is not enough, the payloads tier
-// (bodyStore) of its own (newSetDerived).
+// (bodyStore) of its own, and last the views' (setDerived.views;
+// newSetDerived).
 type budget struct {
 	limit, used int64
 	letGo       func(need int64)
@@ -448,7 +503,7 @@ const (
 // derivedBudget, formsBudget and heldBudget, where a row sets them (0 or
 // more), cap the words, forms and held tiers within the set's budget;
 // noCap, no cap of a tier's own, in keploy itself.
-var derivedBudget, formsBudget, heldBudget int64 = noCap, noCap, noCap
+var derivedBudget, formsBudget, heldBudget, driftBudget int64 = noCap, noCap, noCap, noCap
 
 const noCap = -1
 
@@ -474,15 +529,25 @@ func wordsBytes(words map[string]bool) int64 {
 
 func newSetDerived() *setDerived {
 	b := &budget{limit: setBudget()}
-	s := &setDerived{budget: b, held: newTier[heldParts](heldBudget, b, false), words: newTier[wordParts](derivedBudget, b, true), forms: newTier[formParts](formsBudget, b, false), reading: map[readingKey]chan struct{}{}, reads: map[readTally]int{}, warming: map[string]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
+	s := &setDerived{budget: b, held: newTier[heldParts](heldBudget, b, false), words: newTier[wordParts](derivedBudget, b, true), forms: newTier[formParts](formsBudget, b, false), drifts: newTier[driftPart](driftBudget, b, false), reading: map[readingKey]chan struct{}{}, reads: map[readTally]int{}, warming: map[string]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
 	s.bodies = newSetBodyStore(&s.mu, b, bodyBudget)
-	// The words go first: a recording's words are read again from its
-	// payload, where one let go is decoded again (a JSON encode and decode
-	// of the whole recording) before any of its parts can be read.
+	s.views = newSetBodyStore(&s.mu, b, viewBudget)
+	s.views.forgetUnread = true
+	s.recs = newTier[*models.Mock](recordingBudget, b, true)
+	s.refused = newTier[struct{}](noCap, b, false)
+	s.inFlight = semaphore.NewWeighted(readInFlight)
+	// The decoded recordings go first: they keep only what the budget has
+	// spare, and one let go is decoded again from the store, as it was at
+	// every read before the set kept them. The words go next: a
+	// recording's words are read again from its payload, where one let go
+	// is decoded again (a JSON encode and decode of the whole recording)
+	// before any of its parts can be read. The views go last: every call
+	// that reads a recording F served with a view reads the view.
 	b.letGo = func(need int64) {
-		if freed := s.words.letGo(need); freed < need {
-			s.bodies.kept.letGo(need - freed)
-		}
+		freed := s.recs.letGo(need)
+		freed += s.words.letGo(need - freed)
+		freed += s.bodies.kept.letGo(need - freed)
+		s.views.kept.letGo(need - freed)
 	}
 	return s
 }
@@ -501,8 +566,12 @@ func (s *setDerived) drop() {
 	s.held.drop()
 	s.words.drop()
 	s.forms.drop()
+	s.drifts.drop()
 	s.bodies.kept.drop()
 	s.bodies.over = true
+	s.views.kept.drop()
+	s.recs.drop()
+	s.refused.drop()
 }
 
 // keepsPayloads reports whether the set's store keeps the payloads a test
@@ -523,7 +592,105 @@ func (s *setDerived) keepsPayloads() bool {
 func (s *setDerived) usedBytes() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.held.used + s.words.used + s.forms.used + s.bodies.kept.used
+	return s.held.used + s.words.used + s.forms.used + s.drifts.used + s.bodies.kept.used + s.views.kept.used + s.recs.used + s.refused.used
+}
+
+// keepRun counts size bytes more of the run's places (Tracker.keepRun) on
+// the set's budget, and reports whether they are within the run's share of
+// it (runCap); past it, it counts none. The run has the first claim on its
+// share: the tiers that let go (words, payloads) make room for it
+// (budget.letGo), and those that do not keep no more once the set is past
+// its budget. So a set whose never-let-go tiers filled its budget at its
+// staging (WarmSet) still keeps its tests' values, and holds an eighth more
+// than its budget at most; a run with no room at all would refuse every
+// value a later test sent.
+func (s *setDerived) keepRun(size int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.run+size > s.budget.limit/runShare {
+		return false
+	}
+	s.run += size
+	s.budget.used += size
+	if need := s.budget.used - s.budget.limit; need > 0 && s.budget.letGo != nil {
+		s.budget.letGo(need)
+	}
+	return true
+}
+
+// runCap is the run's share of the set's budget (keepRun), for its reason.
+func (s *setDerived) runCap() int64 { return s.budget.limit / runShare }
+
+// runShare: the run keeps its places within an eighth of the set's budget
+// (keepRun): 8 MiB at the least budget, 512 MiB at the most.
+const runShare = 8
+
+// driftOf is what the drifted value (rec, live) changed, read with the lead
+// where lead holds, bounded by no call (newDrift), kept for the set (drifts)
+// where s is a tracker's. It reads no zone: of a call not known, a clock read
+// is bounded by none (readNoLaterThan), the only rule that reads the zone, so
+// such a drift is the same in every zone (TestADriftBoundedByNoCallIsTheSameInEveryZone).
+func (s *setDerived) driftOf(rec, live string, lead bool) *valueDrift {
+	read := func(bool) *valueDrift { return newDrift(rec, live, nil, lead, time.Time{}, nil) }
+	if s == nil {
+		return read(false)
+	}
+	// The lead and the value's two sides, the recorded one by its length:
+	// no two drifts share an id.
+	id := make([]byte, 0, len(rec)+len(live)+32)
+	id = strconv.AppendBool(id, lead)
+	id = strconv.AppendInt(append(id, ' '), int64(len(rec)), 10)
+	id = append(append(append(id, ' '), rec...), live...)
+	// Two handlers that build one drift at once each build it, as a test's
+	// own cache does (DriftCache.ofIn): it is no recording's part to wait
+	// for (derive), and either is the drift.
+	var d *valueDrift
+	s.mu.Lock()
+	if sl := s.drifts.find(string(id), partDrift); sl != nil {
+		d = sl.p.d
+	}
+	s.mu.Unlock()
+	if d != nil {
+		return d
+	}
+	d = read(true)
+	s.mu.Lock()
+	if s.drifts.room() {
+		s.drifts.keep(string(id), partDrift, driftBytes(d), func(e *driftPart) { e.d = d })
+	}
+	s.mu.Unlock()
+	return d
+}
+
+// driftBytes is about what drift d holds (newDrift): its texts in each
+// form, its words, its pieces and their words, its ids' words and its
+// instants.
+func driftBytes(d *valueDrift) int64 {
+	n := int64(unsafe.Sizeof(*d)) + int64(len(d.rec)+len(d.live)+len(d.decRec)+len(d.decLive)+len(d.encodedRec)+len(d.unparsed))
+	for _, f := range d.forms {
+		n += headerBytes + int64(len(f[0])+len(f[1]))
+	}
+	for _, ws := range [][]map[string]bool{d.lost, d.gained, d.movedRec, d.movedLive, d.recTok, d.liveTok, {d.clock.rec, d.clock.live, d.wholes, d.plainRuns}} {
+		for _, w := range ws {
+			n += wordsBytes(w)
+		}
+	}
+	for i, p := range d.pieces {
+		n += headerBytes + int64(len(p.rec)+len(p.live))
+		for _, side := range d.pieceWords[i] {
+			for _, w := range side {
+				n += wordBytes + int64(len(w))
+			}
+		}
+	}
+	for _, side := range d.idParts {
+		for w, others := range side {
+			n += wordBytes + int64(len(w)) + wordsBytes(others)
+		}
+	}
+	n += int64(len(d.clock.reads))*int64(unsafe.Sizeof(models.ClockRead{})) + int64(len(d.instants))*int64(unsafe.Sizeof(driftedInstant{}))
+	n += int64(len(d.recKeys)+len(d.liveKeys))*(wordBytes+int64(unsafe.Sizeof(instantKey{}))) + momentBytes*int64(len(d.recMoments)+len(d.liveMoments))
+	return n
 }
 
 // keptBytes is the bytes setDerived counts as kept of the set's words and
@@ -609,7 +776,7 @@ func (dc *DriftCache) payloadMoments(x Raw) []moment {
 }
 
 // setPlaces is keyedPlaces(x), read once for the set where dc keeps x's
-// (setOf), each name a copy; ok is false where it does not.
+// (setOf), each name a copy (copyPlaces); ok is false where it does not.
 func (dc *DriftCache) setPlaces(x Raw) (out []keyedPlace, ok bool) {
 	s := dc.setOf(x)
 	if s == nil {
@@ -617,10 +784,7 @@ func (dc *DriftCache) setPlaces(x Raw) (out []keyedPlace, ok bool) {
 	}
 	return heldPart(s, x, partPlaces, func(e *heldParts) []keyedPlace { return e.places }, func(bool) []keyedPlace {
 		out := dc.readPlaces(x)
-		for i := range out {
-			k := &out[i]
-			k.k.path, k.k.label, k.where = strings.Clone(k.k.path), strings.Clone(k.k.label), strings.Clone(k.where)
-		}
+		copyPlaces(out)
 		return out
 	}, func(e *heldParts, v []keyedPlace) { e.places = v }, placesBytes), true
 }
@@ -1087,6 +1251,171 @@ var warmed = func() chan struct{} {
 	return ch
 }()
 
+// warmReaders is how many readers a call's own warm reads the set's
+// recordings with: readersFor the CPUs Go runs on (GOMAXPROCS), as the
+// set's staging reads with (stageReaders). A var for the rows that hold a
+// reader's read.
+var warmReaders = func() int { return readersFor(runtime.GOMAXPROCS(0)) }
+
+// readInFlight is the bytes the set's readers (a call's warm, its staging's:
+// warmSet) have in flight at once, whatever the CPU count: each reserves
+// its read's cost (readWeight) before it reads and gives it back after
+// (reserve), so more readers never take the set past its budget by more
+// than one reader did. A read that costs more than readInFlight reserves
+// all of it and runs alone, as one reader's did; small payloads (a few
+// KiB each, api-server's) are read by several readers at once.
+const readInFlight = 8 << 20
+
+// A read of a payload costs in flight what it allocates (its load, bodyOf,
+// and the parts it reads), since a collection running through the read
+// keeps all it allocated until the next one: readBase whatever its size,
+// and for each byte of its recording what its reader reads of it. Measured
+// (TestAReadAllocatesNoMoreThanItsCost, its store keeping no payload, so
+// each read loads it, after a collection emptied the pools it takes state
+// from) on twelve shapes: nine from words to a list of dates, and the list
+// as recordings nest it: written as a JSON string (SQS and SNS bodies),
+// base64 of a JSON list (Kafka and Pulsar payloads), and comma-separated
+// values. The most is the JSON string's, each date a candidate read in
+// several layouts in each of its forms:
+//   - readBase, what a read allocates whatever its size: one of a payload
+//     of 15 to 61 bytes allocates 33-57 KB, measured with Go on one CPU.
+//     On more CPUs a read allocates more only through the pools it takes
+//     state from: a pool's first use after a collection allocates an
+//     entry for each CPU (about 290 bytes a CPU over those pools, 37 KB
+//     at 128 CPUs), but once a pool whatever the readers' count, so not
+//     counted to a read; and a read that moves to another CPU, whose entry
+//     is empty, allocates a pool's state again (up to 2.9 KB more in one
+//     run than in another at 128 CPUs), which readBase's margin covers;
+//   - readCost, a call's warm (warmOne: the parts every call's rules
+//     read): past readBase, 343 bytes for each byte of the JSON string at
+//     16 KiB and 353 at 31 KiB, 308 at 1 MiB; 326 of the comma-separated
+//     dates, 266 of the plain list, 110 of its base64, 10 of words (the
+//     HTTP bound row's answers), 41 of JSON items with an instant each;
+//   - stageCost, the staging's (warmSet: a call's parts and those the
+//     staging reads beyond them, stagedParts; or those alone, after a call
+//     read the rest, stageRest, which loads the payload again): 971 for
+//     each byte of the JSON string at 1 KiB and 1,066 at 31 KiB, 712 of the
+//     rest of it; 808 of the comma-separated dates, 666 of the plain list,
+//     438 of its base64.
+//
+// Each is an eighth or more past the most measured (readCost 18% past 353,
+// stageCost 20% past 1,066, readBase 73% past 57 KB: it was set when a
+// read of a text holding a "=" also took the 37 KB state of the soft line
+// breaks' pattern, which noSoftBreaks replaced). Deeper nesting can
+// cost more: an escaped JSON string holding comma-separated dates
+// allocates up to 1.18 times a call's cost and 1.01 times the staging's
+// under the sizes from which each runs alone, so readers running together
+// can hold about 1.2 times readInFlight, inside the 16 MiB the set's bound
+// leaves past its budget.
+//
+// So a call's read of 4 KiB reserves 1.7 MiB and four run at once, and one
+// of 19,929 bytes (19.5 KiB) or more reserves all of readInFlight, a read
+// alone; the staging's of 4 KiB reserves 5.1 MiB, one at a time, and one
+// of 6,477 bytes (6.3 KiB) or more reserves all of it.
+const (
+	readBase  = 96 << 10
+	readCost  = 416
+	stageCost = 1280
+)
+
+// readWeight is what x's read reserves of the set's readInFlight: readBase
+// and cost (readCost for a call's warm, stageCost for the staging's) for
+// each byte of its recording (recordingBytes), or all of readInFlight (a
+// read alone) where that is more or not known before its payload is read.
+func readWeight(x Raw, cost int64) int64 {
+	n := int64(len(x.rText))
+	if x.src != nil {
+		n = recordingBytes(x.src.mock)
+	}
+	if n < 0 {
+		return readInFlight
+	}
+	return min(readInFlight, readBase+cost*n)
+}
+
+// recordingBytes is the bytes of m's recording, known before its payload is
+// read: the agent's store's count (models.Mock.StoredSize), or, of one no
+// store read whose answer is in memory, the bytes of its spec's text
+// (specBytes); -1 (not known: a read alone) for one whose answer is parked
+// and no store counted, and for nil, which no Raw the set's readers read
+// holds (LazyRawOf keeps the recording it was made of).
+func recordingBytes(m *models.Mock) int64 {
+	if m == nil {
+		return -1
+	}
+	if n := m.StoredSize(); n > 0 {
+		return n
+	}
+	if m.HasSpilledResponse() {
+		return -1
+	}
+	return specBytes(reflect.ValueOf(m.Spec), 0)
+}
+
+// specBytes is the bytes of the text and bytes v holds (its strings' and
+// byte slices', through its fields, elements, map entries and pointers),
+// 8 more for each other value, no deeper than 32 levels: what a read of a
+// payload decodes, without encoding it. Times are their 8.
+func specBytes(v reflect.Value, depth int) int64 {
+	if depth > 32 {
+		return 0
+	}
+	switch v.Kind() {
+	case reflect.String:
+		return int64(v.Len())
+	case reflect.Pointer, reflect.Interface:
+		if v.IsNil() {
+			return 0
+		}
+		return specBytes(v.Elem(), depth+1)
+	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return int64(v.Len())
+		}
+		fallthrough
+	case reflect.Array:
+		var n int64
+		for i := range v.Len() {
+			n += specBytes(v.Index(i), depth+1)
+		}
+		return n
+	case reflect.Map:
+		var n int64
+		for it := v.MapRange(); it.Next(); {
+			n += specBytes(it.Key(), depth+1) + specBytes(it.Value(), depth+1)
+		}
+		return n
+	case reflect.Struct:
+		if v.Type() == timeType {
+			return 8
+		}
+		var n int64
+		for i := range v.NumField() {
+			n += specBytes(v.Field(i), depth+1)
+		}
+		return n
+	}
+	return 8
+}
+
+var timeType = reflect.TypeOf(time.Time{})
+
+// reserve waits for w bytes of the set's readInFlight, counted among the
+// readers waiting (inFlightWaiting) while it waits; the reader gives them
+// back with s.inFlight.Release.
+func (s *setDerived) reserve(w int64) {
+	if s.inFlight.TryAcquire(w) {
+		return
+	}
+	s.mu.Lock()
+	s.inFlightWaiting++
+	s.mu.Unlock()
+	_ = s.inFlight.Acquire(context.Background(), w)
+	s.mu.Lock()
+	s.inFlightWaiting--
+	s.mu.Unlock()
+}
+
 // warm reads, for each recording of raw the set keeps (setOf), what the
 // rules of every call read of its payload (warmOne), once for the set. A
 // handler reads, in raw's order, each recording no other handler has
@@ -1098,6 +1427,21 @@ var warmed = func() chan struct{} {
 // time: a call waits for it only on a recording of its own the staging is
 // reading, and a call after the staging read the set's takes none, finding
 // each read under one look at the set.
+//
+// A handler reads with warmReaders readers at once, as the staging does,
+// each taking the next recording of raw none has taken, so a set's first
+// drifted call on two CPUs or more reads the recordings before it on more
+// than one while its client waits (a payload's read is one core's work).
+// Each reserves its read's cost (readWeight) of the set's readInFlight
+// before it takes a recording, and gives it back once read, so the
+// readers' reads in flight stay within readInFlight with the staging's.
+// Each stops at the first recording the set keeps no more of (take: nil);
+// held, the tier take reads, never has room again once it is full, so the
+// others stop at their next. A reader's panic is the handler's own once
+// the readers end (the others read on: what they read is the set's, for
+// its later calls, as with no panic), so the parser's recover
+// (integrations.RecoverCtx) ends the one connection, as it did with the
+// read on the handler's goroutine, and the agent goes on.
 func (dc *DriftCache) warm(raw []Raw) {
 	if dc == nil || dc.set == nil {
 		return
@@ -1115,19 +1459,59 @@ func (dc *DriftCache) warm(raw []Raw) {
 		left = append(left, x)
 	}
 	s.mu.Unlock()
-	var others []chan struct{}
-	for _, x := range left {
-		ch, mine := s.take(x)
-		if ch == nil {
-			break
-		}
-		if !mine {
-			if ch != warmed {
-				others = append(others, ch)
+	var (
+		mu       sync.Mutex
+		next     int
+		others   []chan struct{}
+		panicked any
+		wg       sync.WaitGroup
+	)
+	for range min(warmReaders(), len(left)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					panicked = r
+					mu.Unlock()
+				}
+			}()
+			for {
+				mu.Lock()
+				if next == len(left) {
+					mu.Unlock()
+					return
+				}
+				x := left[next]
+				next++
+				mu.Unlock()
+				w := readWeight(x, readCost)
+				s.reserve(w)
+				ch, mine := s.take(x)
+				if ch == nil {
+					s.inFlight.Release(w)
+					return
+				}
+				if !mine {
+					s.inFlight.Release(w)
+					if ch != warmed {
+						mu.Lock()
+						others = append(others, ch)
+						mu.Unlock()
+					}
+					continue
+				}
+				func() {
+					defer s.inFlight.Release(w)
+					dc.warmOne(s, x, ch, false)
+				}()
 			}
-			continue
-		}
-		dc.warmOne(s, x, ch, false)
+		}()
+	}
+	wg.Wait()
+	if panicked != nil {
+		panic(panicked)
 	}
 	for _, ch := range others {
 		select {
@@ -1161,20 +1545,30 @@ func (s *setDerived) take(x Raw) (ch chan struct{}, mine bool) {
 
 // warmOne reads what the rules of every call read of x's payload: its
 // decoded forms and instants (payloadMoments), its words' filter
-// (searchWords) and its searched instants (searchedKeys), then lets the
-// handlers waiting for it go, whatever the reads do. staged says the set's
-// staging read it (WarmSet), not a call. The staging also reads what a
-// set's first drifted call reads of every recording before it, whatever
-// its drift: its keyed places (setPlaces, the offset rule's), its answer's
-// stamps (stampTexts), and its fields' instants as the echo reads them
-// (fieldMoments, fieldForms), so no call reads a part of every recording
-// on its answer path (api-server's round: 15 589 recordings, read by the
-// set's first drifted call while its client waited). A call's own warm
-// reads only the three the rules read of every payload of every call; it
-// reads the rest where its rules reach them, as with no staging, and the
-// staging reads them where it comes to a recording a call took first
-// (stageRest).
+// (searchWords), its searched instants (searchedKeys) and its answer's
+// stamps (stampTexts, which a drifted value's search reads of every
+// payload before it searches one: stampsEchoed), then lets the handlers
+// waiting for it go, whatever the reads do. staged says the set's staging
+// read it (WarmSet), not a call. The staging also reads what a set's first
+// drifted call reads of every recording before it, whatever its drift: its
+// keyed places (setPlaces, the offset rule's) and its fields' instants as
+// the echo reads them (fieldMoments, fieldForms), so no call reads a part
+// of every recording on its answer path (api-server's round: 15 589
+// recordings, read by the set's first drifted call while its client
+// waited). A call's own warm reads only the four the rules read of every
+// payload of every call; it reads the rest where its rules reach them, as
+// with no staging, and the staging reads them where it comes to a
+// recording a call took first (stageRest).
+//
+// The stamps are read here, with the payload in hand, and not first by the
+// search: a set's payloads past its budget are let go as they are read
+// (bodyStore), so the search read each of them back once more for its
+// stamps alone (the bound row's 256 recordings of 1 MiB: a tenth of its
+// call's CPU). Each part is read from one load of the payload, held until
+// the last part is read (Raw.holding), not from the store at each part,
+// which may have let it go to another reader's load in between.
 func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged bool) {
+	x = x.holding()
 	defer func() {
 		s.mu.Lock()
 		s.warming[x.id] = warmed
@@ -1189,31 +1583,32 @@ func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged boo
 	dc.payloadMoments(x)
 	dc.searchWords(x, false)
 	dc.searchedKeys(x)
+	dc.stampTexts(x)
 	if staged {
 		dc.stagedParts(x)
 	}
 }
 
 // stagedParts reads the parts of x's payload the staging reads beyond a
-// call's warm (warmOne): its keyed places, its answer's stamps and its
-// fields' instants as the echo reads them.
+// call's warm (warmOne): its keyed places and its fields' instants as the
+// echo reads them.
 func (dc *DriftCache) stagedParts(x Raw) {
 	dc.setPlaces(x)
-	dc.stampTexts(x)
 	dc.fieldMoments(x)
 	dc.fieldForms(x)
 }
 
 // stageRest is the staging's read (WarmSet) of a recording a call took
-// first (warm): the call read only the three parts every call's rules read
+// first (warm): the call read only the four parts every call's rules read
 // of it, and the staging reads the rest (stagedParts), so no later call
 // reads one of them on its answer path. Before, the staging passed over
-// such a recording, and the set's next drifted call read those four parts
-// of it while its client waited. It does not wait for the call's read to
+// such a recording, and the set's next drifted call read those parts of it
+// while its client waited. It does not wait for the call's read to
 // end: a part the call, or any other, is reading it waits for, and takes
-// what that read keeps (derive), so each part is read once.
+// what that read keeps (derive), so each part is read once. Its parts are
+// read from one load of the payload, as warmOne's are (Raw.holding).
 func (dc *DriftCache) stageRest(s *setDerived, x Raw) {
-	dc.stagedParts(x)
+	dc.stagedParts(x.holding())
 	s.mu.Lock()
 	s.finished++
 	s.mu.Unlock()

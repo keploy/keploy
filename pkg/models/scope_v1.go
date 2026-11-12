@@ -33,10 +33,20 @@ type InstanceReq struct {
 	// run (a Go package's directory). Kept on each test's window, so the
 	// recording's mapping names the folder each test runs in.
 	Dir string `json:"dir,omitempty"`
+	// Workers is how many test workers of the run its framework runs at
+	// once (Playwright's workers, go test's -p), each claiming for itself.
+	// 0, sent by an integration that predates it, is one. The agent refuses
+	// more than it runs at once (ScopeErrTooManyWorkers: more than its limit,
+	// or more than one in record's full round or in a replay that moves the
+	// run's one clock to each test's recorded begin), and a count other than
+	// a live worker's (ScopeErrWorkersMismatch), so whether a run is taken
+	// never depends on how its workers happen to overlap.
+	Workers int `json:"workers,omitempty"`
 }
 
 // InstanceResp answers POST /agent/instance. With one test process per run
-// the instance is the run itself. TimeFile is the clock file the test process
+// the instance is the run itself (InstanceRun); a worker of a run of more
+// gets its keploy instance's number. TimeFile is the clock file the test process
 // runs on, empty when the run is not frozen.
 type InstanceResp struct {
 	V        int    `json:"v"`
@@ -59,11 +69,12 @@ type ScopeEndResp struct {
 }
 
 // ScopeGateResp acknowledges POST /agent/replay/gate under the wire: the agent
-// applies Skips skip-list entries.
+// applies Skips skip-list entries and the Needs of Needs tests.
 type ScopeGateResp struct {
 	V      int    `json:"v"`
 	Status string `json:"status"`
 	Skips  int    `json:"skips"`
+	Needs  int    `json:"needs"`
 }
 
 // ScopeActionFail is the ScopeEndResp.Action telling a harness to fail the test.
@@ -115,7 +126,20 @@ const (
 	// ScopeErrOneTestProcess: a test process claimed the run while another
 	// live one held it; the first release runs one at a time.
 	ScopeErrOneTestProcess = "one_test_process_at_a_time"
-	// ScopeErrNotOpen: an end for a test that is not open.
+	// ScopeErrTooManyWorkers: a claim declared more test workers
+	// (InstanceReq.Workers) than this keploy runs at once, or more than one
+	// where the run runs one (record's full round, a replay that moves the
+	// run's one clock).
+	ScopeErrTooManyWorkers = "too_many_workers"
+	// ScopeErrWorkersMismatch: a claim declared another worker count than
+	// a live worker of the run did.
+	ScopeErrWorkersMismatch = "workers_mismatch"
+	// ScopeErrNotInInstance: a begin or end of a run of more than one worker
+	// came from a process that is no live worker's claimant, or keploy
+	// could not put a worker's processes in an instance of their own.
+	ScopeErrNotInInstance = "not_in_instance"
+	// ScopeErrNotOpen: an end for a test that is not open, or a given
+	// while no test is open.
 	ScopeErrNotOpen = "not_open"
 	// ScopeErrBadRequest: an unreadable or invalid body.
 	ScopeErrBadRequest = "bad_request"
@@ -123,12 +147,25 @@ const (
 	ScopeErrNoCaller = "caller_unknown"
 	// ScopeErrInternal: the agent failed to act on a valid call.
 	ScopeErrInternal = "internal"
+	// ScopeErrClockNotFrozen: the test process runs without keploy's clock
+	// on a run whose clock keploy froze (macOS: the shim is not in it), so
+	// its tests would read another clock than the recordings were made on.
+	ScopeErrClockNotFrozen = "clock_not_frozen"
 )
 
+// ScopeUpgradeRemedy is the remedy of each ScopeErrUpgradeIntegration
+// refusal of a harness that predates the wire. It names only the
+// integrations of the wire that exist, and how a framework that has none
+// makes the wire's calls itself.
+const ScopeUpgradeRemedy = "use an integration that speaks keploy's scope protocol v1 (go-sdk keploytest for go test, @keploy/playwright for Playwright) and run one test process at a time; " +
+	"keploy has none for other frameworks, whose test process makes the calls by hand: it claims the run (POST /agent/instance with its package folder, relative to the project, as key) before its first test, " +
+	"then sends each test's begin with canSkip true, skips the test when the begin answers action skip, and sends its end, never with pid, at, dir or suite"
+
 // ScopeEvidence is what keploy saw of one replayed test that fails it: the
-// calls no recorded answer matched while it was open, or since the previous
-// test ended (a miss outside every test is charged to the next test that
-// begins), and the recorded data-plane calls of its mapping it never made.
+// calls no recorded answer matched while it was open (a miss outside every
+// test, and one that repeats a spent recording of the set's background, is
+// charged to no test: UnmatchedCall.ChargedTo, WindowOf), and the recorded
+// data-plane calls of its mapping it never made.
 // Misses carry only the summary fields; never a recorded value.
 type ScopeEvidence struct {
 	Misses     []UnmatchedCall `json:"misses,omitempty" yaml:"misses,omitempty"`
@@ -150,6 +187,15 @@ type ScopeEvidence struct {
 	// or the mocks it consumed), so the test has no verdict of its own;
 	// keploy's verdict on the run is "not judged", never the test's fault.
 	Unread bool `json:"unread,omitempty" yaml:"unread,omitempty"`
+	// FailedOnItsOwn: in a replay, the test's harness ended it failed on
+	// its own (its own assertion, or an end with no verdict, which keploy
+	// counts failed) before this evidence failed it, and keploy answered
+	// every call it made (not Unanswered: the evidence is only the
+	// recordings it never made). Those may then be calls it never reached,
+	// so they say nothing of where the app makes them. A test that met
+	// keploy's error answer to a call (a miss) may have failed on that
+	// answer: it never has it. It is no evidence: Empty ignores it.
+	FailedOnItsOwn bool `json:"failedOnItsOwn,omitempty" yaml:"failedOnItsOwn,omitempty"`
 }
 
 // escapeTestName escapes a test's name for its ID (TestID), so that the ID
@@ -179,6 +225,56 @@ func IDPart(s string) bool {
 // Empty reports whether there is no evidence.
 func (e *ScopeEvidence) Empty() bool {
 	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0 && len(e.CaptureIncomplete) == 0 && len(e.Incomplete) == 0 && len(e.CannotCapture) == 0)
+}
+
+// Unanswered reports whether the evidence holds a call of the test keploy
+// did not answer from a recording, or could not tell it answered: any
+// evidence but the recordings the test did not make (a miss, a call keploy
+// could not capture), or keploy could not read all the test did (Unread).
+func (e *ScopeEvidence) Unanswered() bool {
+	if e == nil {
+		return false
+	}
+	rest := *e
+	rest.Unconsumed = nil
+	return e.Unread || !rest.Empty()
+}
+
+// ChargeNotJudged charges the test with losses that leave it without a
+// verdict (CaptureLosses.Split's notJudged), never failed: on CannotCapture,
+// and in the reason one sentence names all of CannotCapture with its summed
+// counts. The sentence the reason already holds for CannotCapture is written
+// again in its place; else the sentence goes after what the reason says.
+// What the agent charged (a worker's REAL use) and what the record charges
+// (a mock), or each late mock whose container keploy could not read, are one
+// count: a reader sees one number, and each What charged, once.
+func (e *ScopeEvidence) ChargeNotJudged(l CaptureLosses) {
+	was := e.CannotCapture.NotJudgedText()
+	sum := e.CannotCapture.Plus(l)
+	for i := range sum {
+		for _, c := range e.CannotCapture {
+			if c.Kind != sum[i].Kind || c.What == "" {
+				continue
+			}
+			// Plus keeps the What charged last: each What charged is named,
+			// once.
+			if !strings.Contains(c.What, sum[i].What) {
+				sum[i].What = c.What + "; " + sum[i].What
+			} else {
+				sum[i].What = c.What
+			}
+		}
+	}
+	e.CannotCapture = sum
+	text := sum.NotJudgedText()
+	switch {
+	case was != "" && strings.Contains(e.Reason, was):
+		e.Reason = strings.Replace(e.Reason, was, text, 1)
+	case e.Reason == "":
+		e.Reason = "keploy: " + text + "."
+	default:
+		e.Reason = strings.TrimSpace(e.Reason + " Also " + text + ".")
+	}
 }
 
 // TestID is a test's ID on the wire (design v14 §6.2):
