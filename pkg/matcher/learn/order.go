@@ -611,24 +611,28 @@ func stdGroups(rec, live string) bool {
 // both runs is (wordBy). A text that holds an instant is left to the
 // instant's rules, and one no such leaf holds to the refusals after this:
 // ok is false there.
+//
+// The leaves read are an exchange's (p.rec and p.live: a recording's place
+// keeps its Raw, never a text), so stateBefore alone places one before the
+// call in both runs: an exchange sent after the call, or one round F served
+// only after the call reached keploy, is not before (earlierState). The
+// call's answer reads back no whole text (readBack reads back a word inside
+// a longer value), so no echo is answered here, as none is for a whole word
+// wordBy binds.
 func (dc *decider) wholeCopy(path string, bare variables.Address, rec, live string, rd textReading) (Decision, bool) {
 	if len(rd.Instants) > 0 || !rd.ChangedShape && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 }) {
 		return Decision{}, false
 	}
 	var src []evPlace
 	for _, p := range dc.ps {
-		if p.state == stateBefore && !p.recAfter && !p.fUnstated && (dc.allScope || !p.otherTest) && p.rec == rec && p.live == live {
+		if p.state == stateBefore && (dc.allScope || !p.otherTest) && p.rec == rec && p.live == live {
 			src = append(src, p)
 		}
 	}
 	if len(src) == 0 {
 		return Decision{}, false
 	}
-	echo, no := dc.answered(path, bare, readWord{At: bare, Rec: rec, Live: live}, rec, live, false)
-	if no != nil {
-		return *no, true
-	}
-	return dc.bound(path, bare, -1, changedInstant{r: rec, l: live, valueEcho: echo, rec: rec}, src, ", the earliest place before the call that holds it whole in both runs"), true
+	return dc.bound(path, bare, -1, changedInstant{r: rec, l: live, rec: rec}, src, ", the earliest place before the call that holds it whole in both runs"), true
 }
 
 // unpaired decides a text where a word was added or dropped: refused whole
