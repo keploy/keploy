@@ -87,7 +87,14 @@ func DetectValue(field, value string) []Detection {
 	if isPIIFieldName(field) {
 		detections = append(detections, Detection{Field: field, PatternType: PatternFieldName})
 	}
+	detections = append(detections, detectValuePatterns(field, value)...)
+	return dedupeDetections(detections)
+}
 
+// detectValuePatterns reports the value patterns (email, phone, card, SSN)
+// found in value, under field. It skips the field-name check.
+func detectValuePatterns(field, value string) []Detection {
+	detections := make([]Detection, 0)
 	if emailRegex.FindString(value) != "" {
 		detections = append(detections, Detection{Field: field, PatternType: PatternEmail})
 	}
@@ -117,6 +124,10 @@ func detectJSON(value interface{}, path string) []Detection {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
+			// PII can sit in a key, as in {"user@example.com": {...}}. Report
+			// it at the object holding the key, so the key itself stays out
+			// of the detection's field.
+			detections = append(detections, detectValuePatterns(path, key)...)
 			nextPath := key
 			if path != "" {
 				nextPath = path + "." + key

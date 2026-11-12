@@ -147,3 +147,15 @@ func TestRedactField(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectBodyScansObjectKeys(t *testing.T) {
+	detections := DetectBody(`{"user@example.com":{"active":true}}`, "request.body")
+	if len(detections) != 1 || detections[0] != (Detection{Field: "request.body", PatternType: PatternEmail}) {
+		t.Fatalf("expected one email detection at request.body, got %+v", detections)
+	}
+
+	nested := DetectBody(`{"users":{"123-45-6789":{"active":true}}}`, "request.body")
+	if len(nested) != 1 || nested[0] != (Detection{Field: "request.body.users", PatternType: PatternSSN}) {
+		t.Fatalf("expected one SSN detection at request.body.users, got %+v", nested)
+	}
+}
