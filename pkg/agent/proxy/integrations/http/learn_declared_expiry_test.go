@@ -23,7 +23,7 @@ import (
 // clock does. keploy.yml's clock rules declare both stamps reads of the
 // clock (expiresAt one plus 365 days); the rule settles which source the
 // moment has, so the PUT is answered and both stamps are learned as clocks:
-// under the T2 time default checked by their form, with keploy.yml's times
+// under the time default checked by their form, with keploy.yml's times
 // strict by the rules' ranges. Without the rules it is refused as before,
 // and so is a value the rule's range does not hold where times are strict.
 func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
@@ -48,14 +48,17 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 	plain := &models.ClockOffset{Min: -time.Second, Res: time.Second}
 	yearOn := &models.ClockOffset{Min: ttl, Max: ttl + time.Second, Res: time.Second}
 	rules := []models.DeclaredSource{
-		{Rule: "workload-key-created-at", Kind: models.DeclaredSourceClock, Field: "body.data.createdAt", Clock: plain},
-		{Rule: "workload-key-expires-at", Kind: models.DeclaredSourceClock, Field: "body.data.expiresAt", Clock: yearOn},
+		{Rule: "pat-created-at", Kind: models.DeclaredSourceClock, Field: "body.data.createdAt", Clock: plain},
+		{Rule: "pat-expires-at", Kind: models.DeclaredSourceClock, Field: "body.data.expiresAt", Clock: yearOn},
 		{Rule: "pat-updated-at", Kind: models.DeclaredSourceClock, Field: "body.data.updatedAt", Clock: plain},
 	}
 	// shift moves round F's name and stamps off the run's clock: a test
 	// that sends an instant it did not read now, and an app that builds
 	// both stamps on it (0: the run's shape).
 	var shift time.Duration
+	// recShift moves the recording's name and stamps off its clock, and
+	// nameShift round F's name alone: F's stamps stay reads of its clock.
+	var recShift, nameShift time.Duration
 	// unread, where not "", is why keploy could not read the run's request
 	// (Tracker.Incoming), and the run PUTs the recorded id.
 	run := func(sources []models.DeclaredSource, timeForm bool, expiry time.Duration, unread string) (*models.Mock, *learnMiss, *learnDb) {
@@ -73,14 +76,14 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 		tr.BeginAt(began)
 		jsonType := map[string]string{"Content-Type": "application/json"}
 		recReq := &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/query", Timestamp: recBegin.Add(100 * time.Millisecond),
-			Header: jsonType, Body: name(recBegin.Add(100 * time.Millisecond))}
+			Header: jsonType, Body: name(recBegin.Add(100*time.Millisecond + recShift))}
 		tr.SetCases([]learn.ClientCase{{Name: "post-query-83", Req: recReq}})
 		liveReq := *recReq
-		liveReq.Body, liveReq.Timestamp = name(began.Add(100*time.Millisecond+shift)), began.Add(100*time.Millisecond)
+		liveReq.Body, liveReq.Timestamp = name(began.Add(100*time.Millisecond+shift+nameShift)), began.Add(100*time.Millisecond)
 		if !tr.Incoming(&liveReq, unread, began.Add(100*time.Millisecond)) {
 			t.Fatal("the run's request paired with none of the test's recorded requests")
 		}
-		put := learnRecorded("mock-0", 1130*time.Millisecond, "PUT", path(recID), body(recID, recBegin.Add(120*time.Millisecond), expiry), nil, `{"data":{"version":1}}`)
+		put := learnRecorded("mock-0", 1130*time.Millisecond, "PUT", path(recID), body(recID, recBegin.Add(120*time.Millisecond+recShift), expiry), nil, `{"data":{"version":1}}`)
 		db := &learnDb{perTest: []*models.Mock{put}}
 		id := liveID
 		if unread != "" {
@@ -172,6 +175,74 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 		served, miss, _ := run(rules, timeForm, ttl, unread)
 		if served != nil || miss == nil || !strings.Contains(miss.res.Why, "could not read the test case's own request ("+unread+")") {
 			t.Fatalf("request unread, every stamp declared a clock, time default %v: served %v, miss %+v; want the PUT refused for the request keploy could not read", timeForm, served != nil, miss)
+		}
+	}
+
+	// A recording whose app built its stamps on a name an hour off its
+	// clock, and a round F that stamps them with its clock while its name
+	// is an hour off: createdAt's recorded moment stands in the recorded
+	// name, and F's name gives F's by no rule. It may be a pick from the
+	// request by the clock, which a clock rule does not settle: the rule
+	// says how a read is checked, not that the value is no part of the
+	// request. The PUT stays refused, naming the name.
+	const holdsLine = "body.data.createdAt changed, and the moment it was recorded with stands in test case post-query-83 at body.variables.input.name"
+	for _, timeForm := range []bool{true, false} {
+		recShift, nameShift = -time.Hour, -time.Hour
+		served, miss, _ := run(rules, timeForm, ttl, "")
+		recShift, nameShift = 0, 0
+		if served != nil || miss == nil || !strings.Contains(miss.res.Why, holdsLine) {
+			t.Fatalf("createdAt's recorded moment in the recorded name alone, every stamp declared a clock, time default %v: served %v, miss %+v; want the PUT refused on createdAt, naming the name", timeForm, served != nil, miss)
+		}
+	}
+}
+
+// A keploy test's call sends a time that moved three days, no lead and no
+// read of the clock, which another test's answer F served holds: the value
+// may be a pick from that answer by the clock, which keploy cannot tell from
+// a read of the clock. A clock rule at the field settles what learning could not tell
+// of a time's source, never a refusal that names a place the value may have
+// come from: the call stays refused, naming the answer, under the time
+// default and with times strict. Without that answer the rule decides: under
+// the time default the moved time is checked by its form, and the call is
+// answered.
+func TestLearnMatchKeepsAnotherTestsAnswerARuledTimeMayCopy(t *testing.T) {
+	rule := models.DeclaredSource{Rule: "beat-at", Kind: models.DeclaredSourceClock, Field: "body.at",
+		Clock: &models.ClockOffset{Min: -time.Second, Res: time.Second}}
+	const rec, moved = "2026-10-14T10:00:00Z", "2026-10-17T10:00:00Z"
+	run := func(withAnswer, timeForm bool) (*models.Mock, *learnMiss) {
+		h, n, opts := learnOn(t)
+		n.sources = func(mock string) []models.DeclaredSource {
+			if mock == "mock-0" {
+				return []models.DeclaredSource{rule}
+			}
+			return nil
+		}
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 10*time.Millisecond, "POST", "/v1/beat", `{"at":"`+rec+`"}`, nil, `{}`)}}
+		tr := learn.NewTracker()
+		tr.Begin()
+		if withAnswer {
+			seen := learnRecorded("mock-1", 5*time.Millisecond, "GET", "/v1/seen", "", nil, `{"last":"`+moved+`"}`)
+			tr.ServedMock(seen)
+			tr.ServedMockAsRecorded(seen)
+		}
+		tr.Begin()
+		var store integrations.MockMemDb = db
+		if timeForm {
+			store = timeFormDb{db}
+		}
+		served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/beat", `{"at":"`+moved+`"}`, nil), store, n, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return served, miss
+	}
+	if served, miss := run(false, true); served == nil || miss != nil {
+		t.Fatalf("no answer holds the time, time default: served %v, miss %+v; want the call answered, the time checked by its form", served != nil, miss)
+	}
+	for _, timeForm := range []bool{true, false} {
+		served, miss := run(true, timeForm)
+		if served != nil || miss == nil || !strings.Contains(miss.res.Why, "body.at changed, and the moment record's full round saw in it stands in mock-1 at spec.resp.body") {
+			t.Fatalf("another test's answer holds the time, time default %v: served %v, miss %+v; want the call refused at body.at, naming mock-1", timeForm, served != nil, miss)
 		}
 	}
 }
