@@ -51,7 +51,7 @@ import (
 // "jwtsig", "jwt.<claim>" or "cookie.<name>", its name unescaped.
 type Step string
 
-// The steps with no argument, and the prefixes of the two with one.
+// The steps with no argument.
 const (
 	StepPct    Step = "pct"
 	StepJSON   Step = "json"
@@ -59,9 +59,13 @@ const (
 	StepB64URL Step = "b64url"
 	// StepJWTSig opens a JWT's signature. A claim's name follows "jwt.",
 	// so no claim step is ever written so.
-	StepJWTSig   Step = "jwtsig"
-	jwtPrefix         = "jwt."
-	cookiePrefix      = "cookie."
+	StepJWTSig Step = "jwtsig"
+)
+
+// The prefixes of the two steps with one: a JWT's claim and a cookie.
+const (
+	jwtPrefix    = "jwt."
+	cookiePrefix = "cookie."
 )
 
 // JWTClaim is the step to a JWT's claim.

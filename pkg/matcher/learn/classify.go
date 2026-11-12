@@ -4250,10 +4250,8 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded, live string, serv
 			}
 			whole := s.Leaf.Value == recorded
 			p, r := seenPlace(e, s, whole), 2*placeRank(e, s, whole)
-			if !whole {
-				if p.Word = wordBindAt(p, s.Leaf.Value, s.Live, recorded, live); p.Word != "" {
-					r = 2*clientWholeRank + 1
-				}
+			if p.Word = wordBindAt(p, s.Leaf.Value, s.Live, recorded, live); p.Word != "" {
+				r = 2*clientWholeRank + 1
 			}
 			if r < rank {
 				best, rank = p, r
