@@ -50,10 +50,16 @@ import (
 //
 // On a time field the time default settles the refusals the clock checks
 // give of which read, or which scope, a moment is (timeSettles); a two-sources
-// refusal only where both sources are reads of the clock. A Value, a Fresh
-// value and every other refusal stay as learned: a moment an earlier answer
-// or request also holds (pick, unknown, two sources that are no reads) is a
-// bound value, which variables decide, never the time default. A value
+// refusal only where both sources are reads of the clock; and a conflict on a
+// decoder-typed time only where every place its recorded value stood whole
+// at is a send of the application's that round F moved off that value, to
+// another than the call's (movedSend): two reads of the clock that met when
+// recorded (an insert's epoch in nanoseconds and a later BSON datetime in
+// the same millisecond), no copy. A Value, a Fresh value and every other
+// refusal stay as learned: a moment an earlier answer or request also holds
+// (pick, unknown, two sources that are no reads, a conflict at a place round
+// F repeated, at an answer or at a place of the test's) is a bound value,
+// which variables decide, never the time default. A value
 // whose two runs write it in two forms of an instant (a zone offset in one
 // run where the other wrote Z, an epoch in seconds in one and milliseconds
 // in the other) is checked by its forms alone too: a replay passes a value
@@ -119,6 +125,22 @@ func (dc *decider) heldRead(d Decision) Decision {
 	return d
 }
 
+// movedSend reports whether p, a place the changed instant c's recorded
+// value r stood whole at (a conflict), is a send the application made that
+// round F moved off r: a recording's request, no test case's request and no
+// value the test gave keploy, whose text in round F no longer holds r. The
+// conflict's place holds none of round F's call value either, so the place
+// and the call each moved on their own: two reads of the clock that met when
+// recorded. A place round F gave r again, an answer (a dependency's value)
+// and a place of the test's own are a source the call did not follow.
+func (dc *decider) movedSend(p evPlace, r string, c changedInstant) bool {
+	if p.side != Request || p.given {
+		return false
+	}
+	held, _, _ := dc.holds(p, p.t.live, r, c.rm, c.byText)
+	return !held
+}
+
 // timeDefault is d, the decision of the changed instant c at path (declared:
 // a clock rule names it), under the time default (see above); d itself
 // where Input.TimeForm is off.
@@ -156,6 +178,7 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	case atKey(path, declared):
 		return d
 	case k == RefusalTwoSources && dc.readClock:
+	case k == RefusalConflict && dc.twoReads && typed:
 	case timeSettles[k] && (typed || declared || dc.readClock):
 	default:
 		return d

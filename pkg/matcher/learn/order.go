@@ -137,6 +137,12 @@ type decider struct {
 	// read the value as the application's clock (heldRead), which the time
 	// default settles on any field (timeDefault).
 	readClock bool
+	// twoReads: the conflict instantLearned last gave is one where every
+	// place the recorded value stood whole at is a send the application
+	// made that round F moved off that value (movedSend): two reads of the
+	// clock that met when recorded, which the time default settles on a
+	// decoder-typed time (timeDefault).
+	twoReads bool
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
@@ -2358,7 +2364,7 @@ func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool)
 // (7), a client test's own value (8); else refused. A field keploy.yml
 // declares a read of the clock is then decided by its rule (declaredClock).
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
-	dc.readClock = false
+	dc.readClock, dc.twoReads = false, false
 	d := dc.instantLearned(path, at, n, c)
 	src, declared := dc.source(path)
 	declared = declared && src.Kind == SourceClock
@@ -2476,6 +2482,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	})
 	if len(conflict) > 0 {
 		p := conflict[0]
+		dc.twoReads = !slices.ContainsFunc(conflict, func(p evPlace) bool { return !dc.movedSend(p, r, c) })
 		return dc.refuse(path, at, n, r, l, RefusalConflict,
 			strconv.Quote(r)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, l)+" there and the value did not follow", names(conflict),
 			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: givenName(path)})
