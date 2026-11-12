@@ -200,10 +200,7 @@ const runCompletedReason = "replay completed successfully"
 // error setErr wraps), else the set's status and its error. Never "replay
 // completed successfully".
 func haltedRunReason(testSet string, status models.TestSetStatus, exit models.AppError, setErr error) string {
-	if exit == (models.AppError{}) {
-		// errors.As leaves exit as it is when setErr wraps no exit.
-		_ = errors.As(setErr, &exit)
-	}
+	exit = haltedExit(exit, setErr)
 	if exit == (models.AppError{}) {
 		if setErr != nil {
 			return fmt.Sprintf("test-set %s ended %s: %v", testSet, status, setErr)
@@ -215,6 +212,16 @@ func haltedRunReason(testSet string, status models.TestSetStatus, exit models.Ap
 		code = fmt.Sprintf(" with exit code %d", exit.ExitCode)
 	}
 	return fmt.Sprintf("the application exited during test-set %s%s: %v", testSet, code, exit)
+}
+
+// haltedExit is the application's exit haltedRunReason names: exit when
+// keploy saw one, else the exit the set's error setErr wraps, if any.
+func haltedExit(exit models.AppError, setErr error) models.AppError {
+	if exit == (models.AppError{}) {
+		// errors.As leaves exit as it is when setErr wraps no exit.
+		_ = errors.As(setErr, &exit)
+	}
+	return exit
 }
 
 // internalErrRunReason is the reason a set testSet that ended INTERNAL_ERR,
@@ -1271,6 +1278,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// run's stop names them (runStopReason), each set once (noteSetStop).
 	var setStops []string
 	setStopAt := map[string]int{}
+	// setStopLogs is, by set, the application's last log lines keploy took
+	// at the exit its entry of setStops names (haltedExit), noted with it:
+	// none for an internal error's.
+	setStopLogs := map[string]string{}
 	r.afterTestRunCalled = false
 	var flakyTestSets []string
 	// haltFlakyTestSets are the sets flaky for a halt: their application
@@ -1425,6 +1436,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 						zap.String("test-set", testSet),
 						zap.String("status", string(testSetStatus)))
 					setStops = noteSetStop(setStops, setStopAt, testSet, haltedRunReason(testSet, testSetStatus, r.setAppExit, err))
+					setStopLogs[testSet] = haltedExit(r.setAppExit, err).AppLogs
 					testSetResult = false
 					testRunResult = false
 					break
@@ -1447,6 +1459,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType) || keptAppExit(ctx) != (models.AppError{})
 				halted = setAttempt{n: attempt, status: testSetStatus, why: haltedRunReason(testSet, testSetStatus, r.setAppExit, nil)}
 				setStops = noteSetStop(setStops, setStopAt, testSet, halted.why)
+				setStopLogs[testSet] = r.setAppExit.AppLogs
 				halt = halt.orFirst(halted)
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
@@ -1455,6 +1468,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				// set only not judged does not stop it: its report says why.
 				if abortTestRun {
 					setStops = noteSetStop(setStops, setStopAt, testSet, internalErrRunReason(testSet, r.setInternalErr, r.setAppExit))
+					delete(setStopLogs, testSet)
 				}
 			case models.TestSetStatusUserAbort:
 				// A Ctrl+C does not un-fail the tests that already ran, nor
@@ -1628,7 +1642,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// a difference in the app's answers.
 		setEndCtx := ctx
 		if at, ok := setStopAt[testSet]; ok {
-			setEndCtx = WithSetHalt(ctx, setStops[at])
+			setEndCtx = WithSetHaltAppLogs(WithSetHalt(ctx, setStops[at]), setStopLogs[testSet])
 		}
 		if abortTestRun {
 			// The set ended the run, and no set runs after it. Its hooks are

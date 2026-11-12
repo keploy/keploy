@@ -15,12 +15,13 @@ import (
 )
 
 // setEnd is one AfterTestSetRun call: the set, its status, and what its
-// context said of a halt (SetHalt).
+// context said of a halt (SetHalt, SetHaltAppLogs).
 type setEnd struct {
-	set    string
-	status bool
-	halted bool
-	reason string
+	set     string
+	status  bool
+	halted  bool
+	reason  string
+	appLogs string
 }
 
 // setEndHooks records each AfterTestSetRun call, and returns err from it;
@@ -36,7 +37,7 @@ func (h *setEndHooks) AfterTestSetRun(ctx context.Context, testSetID string, sta
 	reason, halted := SetHalt(ctx)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.ends = append(h.ends, setEnd{set: testSetID, status: status, halted: halted, reason: reason})
+	h.ends = append(h.ends, setEnd{set: testSetID, status: status, halted: halted, reason: reason, appLogs: SetHaltAppLogs(ctx)})
 	return h.err
 }
 
@@ -78,15 +79,18 @@ func (h *setEndHooks) got() []setEnd {
 // reports each set (k8s-proxy's metric of an auto-replay round) reported the
 // set as nothing. The set after it never runs, so its hooks hear nothing. A
 // hook that fails on that end is logged, and the run still stops as it did.
+// An application's exit comes with the last lines it logged (SetHaltAppLogs);
+// an internal error of keploy's, which no line of the app's explains, without.
 func TestASetThatEndsItsRunTellsItsHooksItHaltedAndWhy(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		exit    models.AppErrorType
 		hookErr error
+		appLogs string
 	}{
-		{"the application exits", models.ErrAppStopped, nil},
-		{"the application's runner fails inside keploy", models.ErrInternal, nil},
-		{"the application exits and the hook fails", models.ErrAppStopped, errors.New("metric store is down")},
+		{"the application exits", models.ErrAppStopped, nil, prExitLogs},
+		{"the application's runner fails inside keploy", models.ErrInternal, nil, ""},
+		{"the application exits and the hook fails", models.ErrAppStopped, errors.New("metric store is down"), prExitLogs},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newPartialRunHarness(t, 4, 0)
@@ -100,7 +104,7 @@ func TestASetThatEndsItsRunTellsItsHooksItHaltedAndWhy(t *testing.T) {
 			if reason == runCompletedReason {
 				t.Fatalf("the run stops with the reason %q, want the set's halt", reason)
 			}
-			want := setEnd{set: "test-set-0", status: false, halted: true, reason: reason}
+			want := setEnd{set: "test-set-0", status: false, halted: true, reason: reason, appLogs: c.appLogs}
 			if got := hooks.got(); len(got) != 1 || got[0] != want {
 				t.Fatalf("AfterTestSetRun calls %+v, want [%+v] (the run stopped with %q)", got, want, reason)
 			}
@@ -149,6 +153,12 @@ func TestSetHaltReadsOnlyWhatWithSetHaltPut(t *testing.T) {
 	ctx := WithSetHalt(context.Background(), "the application exited during test-set s with exit code 4: boom")
 	if reason, halted := SetHalt(ctx); !halted || reason != "the application exited during test-set s with exit code 4: boom" {
 		t.Errorf("SetHalt = %q, %v; want the reason WithSetHalt put, halted", reason, halted)
+	}
+	if appLogs := SetHaltAppLogs(ctx); appLogs != "" {
+		t.Errorf("SetHaltAppLogs of a halt with no lines = %q, want none", appLogs)
+	}
+	if appLogs := SetHaltAppLogs(WithSetHaltAppLogs(ctx, prExitLogs)); appLogs != prExitLogs {
+		t.Errorf("SetHaltAppLogs = %q, want the lines WithSetHaltAppLogs put", appLogs)
 	}
 }
 
@@ -213,6 +223,7 @@ func TestAComposeSetThatHaltsWhileTheRunGoesOnTellsItsHooksItHalted(t *testing.T
 						t.Fatalf("the run stops with %q, want it to name each halted set", parts)
 					}
 					want.reason = parts[halts]
+					want.appLogs = prExitLogs
 					halts++
 					if !strings.Contains(want.reason, "exited during test-set "+want.set) {
 						t.Fatalf("the run's stop names %s with %q, want its exit", want.set, want.reason)
@@ -244,11 +255,42 @@ func TestASetThatHaltsThenRunsCleanIsToldItHaltedWithItsLastStatus(t *testing.T)
 	if len(parts) != 1 || !strings.Contains(parts[0], "exited during test-set test-set-0") {
 		t.Fatalf("the run stops with %q, the case needs it to name the first attempt's halt", parts)
 	}
-	want := setEnd{set: "test-set-0", status: true, halted: true, reason: parts[0]}
+	want := setEnd{set: "test-set-0", status: true, halted: true, reason: parts[0], appLogs: prExitLogs}
 	if got := hooks.got(); len(got) != 1 || got[0] != want {
 		t.Fatalf("AfterTestSetRun calls %+v, want [%+v]", got, want)
 	}
 	if utils.ErrCode != 1 {
 		t.Errorf("exit code %d, want 1: the halt fails the run", utils.ErrCode)
+	}
+}
+
+// A set whose application halts on its first attempt and whose next attempt
+// ends in an internal error of keploy's, which stops the run, is told it
+// halted for that error, and with none of the lines the first exit came
+// with: no line of the app's explains keploy's own error.
+func TestASetThatHaltsThenStopsTheRunOnAnInternalErrorHasNoAppLines(t *testing.T) {
+	h, logs := composeRetried(t, 2)
+	// The first attempt's application exits part-way through the set. As
+	// the next attempt's starts, test-1's result can no longer be written:
+	// that attempt ends INTERNAL_ERR.
+	h.instr.stopAppAfterNUpdates = 2
+	h.replayer.instrumentation = &haltOnceInstr{prInstr: h.instr, again: func() {
+		h.report.mu.Lock()
+		h.report.failInsertOf = map[string]error{"test-1": errors.New("report store is unwritable")}
+		h.report.mu.Unlock()
+	}}
+	hooks := &setEndHooks{}
+	h.replayer.hookImpl = hooks
+	startRetried(t, h)
+	if ran := setsRan(logs); len(ran) != 2 {
+		t.Fatalf("the run ran %v, the case needs test-set-0 run twice", ran)
+	}
+	parts := stopParts(t, logs)
+	if len(parts) != 1 || !strings.Contains(parts[0], string(models.TestSetStatusInternalErr)) {
+		t.Fatalf("the run stops with %q, the case needs it to name the second attempt's internal error", parts)
+	}
+	want := setEnd{set: "test-set-0", halted: true, reason: parts[0]}
+	if got := hooks.got(); len(got) != 1 || got[0] != want {
+		t.Fatalf("AfterTestSetRun calls %+v, want [%+v]", got, want)
 	}
 }
