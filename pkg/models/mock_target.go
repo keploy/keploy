@@ -1,7 +1,6 @@
 package models
 
 import (
-	"net/url"
 	"strings"
 )
 
@@ -91,7 +90,7 @@ func httpTargetFromReq(req *HTTPReq) string {
 	method := strings.TrimSpace(string(req.Method))
 	raw := strings.TrimSpace(req.URL)
 	target := raw
-	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+	if u, err := ParseRequestURL(raw); err == nil && u.Host != "" {
 		target = u.Host + u.EscapedPath()
 	}
 	switch {

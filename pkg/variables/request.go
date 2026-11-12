@@ -31,7 +31,7 @@ func InRequest(r *models.HTTPReq) func(Place) bool {
 			return ok
 		}
 		read = true
-		u, err := url.Parse(r.URL)
+		u, err := models.ParseRequestURL(r.URL)
 		if err != nil {
 			return false
 		}

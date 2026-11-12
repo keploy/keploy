@@ -3,7 +3,6 @@ package models
 import (
 	"encoding/gob"
 	"maps"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -433,7 +432,7 @@ func (m *Mock) RecordedDestination() (string, bool) {
 			return v, true
 		}
 	}
-	if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
+	if u, err := ParseRequestURL(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
 		return u.Host, true
 	}
 	return "", false

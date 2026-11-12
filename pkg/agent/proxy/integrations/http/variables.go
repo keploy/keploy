@@ -294,7 +294,7 @@ func liveView(input *req) reqView {
 }
 
 func recordedView(r *models.HTTPReq) (reqView, bool) {
-	u, err := url.Parse(r.URL)
+	u, err := parseRecordedURL(r.URL)
 	if err != nil {
 		return reqView{}, false
 	}
