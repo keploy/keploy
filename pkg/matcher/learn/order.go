@@ -1104,7 +1104,9 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// holds its own piece (oneRun), named on a fresh word's line.
 	// cut: why oneRun found no place holds the piece as chance would, set
 	// where a place it left took it.
-	var src, outside, conflict, unknown, aside, unserved, chance []evPlace
+	// inTurn: requests of another call of the test that sent the value
+	// too, in the other order in each run (sentInTurn).
+	var src, outside, conflict, unknown, aside, unserved, chance, inTurn []evPlace
 	cut := ""
 	lateHeld := map[string][2]int{}
 	for k, i32 := range asked {
@@ -1174,6 +1176,10 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 				aside = append(aside, p)
 			}
 		case evUnknown:
+			if dc.sentInTurn(p, w, rec, live) {
+				inTurn = append(inTurn, p)
+				break
+			}
 			if idChance(i) {
 				why := oneRun()
 				if why == "" {
@@ -1263,6 +1269,14 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalAnotherScope,
 			"the value "+p.name+" sent in "+scopeName(p)+"; keploy binds only within a test and the start-up", names(outside),
 			Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.fieldNoise(path))
+	case len(inTurn) > 0:
+		echo, no := dc.answered(path, bare, w, rec, live, false)
+		if no != nil {
+			return *no
+		}
+		d := dc.bound(path, at, n, changedInstant{r: w.Rec, l: w.Live, valueEcho: echo, rec: rec}, inTurn, sentInTurnRule)
+		d.EitherOrder = true
+		return d
 	}
 	if why, p := dc.encoded(); p != nil {
 		if p.otherTest && !dc.allScope {
@@ -2929,6 +2943,40 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	d.FromAt = fromAt
 	d.Echo = c.valueEcho
 	return d
+}
+
+// sentInTurnRule is the rule of a Value bound at another call's request
+// sent in the other order in each run (sentInTurn, Decision.EitherOrder).
+const sentInTurnRule = ", another call of the test that sent the value too: the recording sent it before this call, round F only after it, so the two are sends of one value the application held, in either order; bound at whichever comes first and checked at the other"
+
+// sentInTurn reports whether p, a place that leaves the word w unknown, is
+// the request of another call of the call's own test that sent the call's
+// whole value too (rec, live: the call's leaf in each run): a recording the
+// recorded application sent before the call, at a time keploy reads, and
+// that round F served only after the call reached keploy (Raw.servedAfter).
+// A request gives the application nothing, so neither call is the other's
+// source, and round F's serve after the call shows nothing it had before
+// it: the two are sends of one value the application held, which the runs
+// made in another order (Decision.EitherOrder). Only a recording whose
+// request alone holds the recorded word (its answer gave the application
+// none of it) and the recorded value whole, served by round F as recorded
+// or with a view whose request alone holds round F's word and value whole,
+// in the call's own test as its scope names it (Input.ScopeOf: not the
+// start-up, another test, a test the call trails, or a recording of a scope
+// keploy was not told): any other place stays unknown (fail closed).
+func (dc *decider) sentInTurn(p evPlace, w readWord, rec, live string) bool {
+	if p.raw == 0 || p.otherTest || p.startUp || p.trailed || dc.in.ScopeOf(p.mock) != ScopeTest(dc.in.Test) {
+		return false
+	}
+	r := dc.in.Raw[p.raw-1]
+	if r.noTime || !r.at.Before(dc.in.At) || !r.served || !r.servedAfter {
+		return false
+	}
+	sentOnly := func(t *readerText, word, whole string) bool {
+		at, ok := t.fieldsWith(word)
+		return ok && len(at) > 0 && !slices.ContainsFunc(at, func(f fieldAt) bool { return !requestPath(f.path) }) && holdsWhole(t, whole)
+	}
+	return sentOnly(p.t.rec, w.Rec, rec) && (p.same() || sentOnly(p.t.live, w.Live, live))
 }
 
 // earliest is the first of src to happen, src's first of those at one time.
