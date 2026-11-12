@@ -183,6 +183,44 @@ func TestAMintedValuesRunIsWeighedByItsRecordedWords(t *testing.T) {
 	}
 }
 
+// The mirror: a recorded run of 32 bits whose round-F words carry fewer.
+// Round F writes the hex key "9e8d-4821-5a41-3f2e", its group 1 all digits,
+// so the middle groups carry 16 + 16 bits as recorded ("cd34-ef56") and
+// 13.3 + 16 as round F writes them ("4821-5a41"). The recorded run shows the
+// key: round F's genuine copy is a use of the minted field's words 1 and 2,
+// and a copy round F changed ("1111-2222") is refused as two values, the copy
+// first and last.
+func TestAMintedValuesRunOfFewerRoundFBitsIsWeighedByItsRecordedWords(t *testing.T) {
+	const rec, live, run = "ab12-cd34-ef56-0789", "9e8d-4821-5a41-3f2e", "cd34-ef56"
+	if !strings.Contains(rec, "-"+run+"-") {
+		t.Fatalf("%s does not hold the run %s as its middle groups", rec, run)
+	}
+	for _, refFirst := range []bool{false, true} {
+		what := "a 4x4 hex key's middle groups, 32 bits as recorded and 29.3 as round F writes them, at another field (copy first " + strconv.FormatBool(refFirst) + ")"
+		in, ref := rIn(rec, live, "", "", refFirst, true)
+		in.Rec.Leaves[ref] = Leaf{Path: ref, Noise: ref, Type: String, Value: "code " + run + " here"}
+		in.Live.Leaves[ref] = Leaf{Path: ref, Noise: ref, Type: String, Value: "code 4821-5a41 here"}
+		mUsesOf(t, what+", round F's genuine copy", Decide(in), ref, 1, 2)
+
+		in, ref = rIn(rec, live, "", "", refFirst, true)
+		in.Rec.Leaves[ref] = Leaf{Path: ref, Noise: ref, Type: String, Value: "code " + run + " here"}
+		in.Live.Leaves[ref] = Leaf{Path: ref, Noise: ref, Type: String, Value: "code 1111-2222 here"}
+		n := 0
+		for _, d := range Decide(in) {
+			if mAtPath(d) != ref {
+				continue
+			}
+			n++
+			if d.Refusal == nil || d.Refusal.Kind != RefusalTwoSources || !strings.Contains(d.Line, mRule) {
+				t.Errorf("FALSE GREEN? %s, round F's copy another run: %s; want each word refused as two values, naming the rule", what, oDescribe([]Decision{d}))
+			}
+		}
+		if n != 2 {
+			t.Errorf("FALSE GREEN? %s, round F's copy another run: %d decisions at the copy; want its two words refused", what, n)
+		}
+	}
+}
+
 // A word of the minted value that round F kept (a tenant's) adds no bits:
 // another field that holds it beside a one-letter word of the value holds
 // nothing made anew of the value, so it keeps learning's decision.
