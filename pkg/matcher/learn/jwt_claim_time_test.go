@@ -173,3 +173,31 @@ func TestHoldsClaimByFormReadsTheClaimOfTheLiveToken(t *testing.T) {
 		t.Errorf("one claim's time met with itself as %+v; want it kept", m)
 	}
 }
+
+// A time in a claim gets a check by its form only where its leaf is a time
+// keploy reads near its call (timeFormOf): an epoch claim more than
+// epochNear from the call's span in both runs names no moment of the call,
+// so it is refused as before under the time default, while a near claim of
+// the same token is still checked by its form.
+func TestDecideAClaimEpochFarFromItsCallGetsNoCheckByForm(t *testing.T) {
+	rAt, fAt := oAt, oAt.Add(61*time.Second)
+	rRead, fRead := rAt.Add(-300*time.Millisecond), fAt.Add(-200*time.Millisecond)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	far := func(t time.Time) string { return strconv.FormatInt(t.Add(2*epochNear).Unix(), 10) }
+	tok := func(at time.Time, sig string) string {
+		return signedToken(`{"sub":"u-1","auth_time":`+secs(at)+`,"exp":`+far(at)+`}`, sig)
+	}
+	in := iCall("body.token", String, tok(rRead, "recorded-signature"), tok(fRead, "this-run-signature"), rAt, fAt, iWin(rAt, fAt, 900*time.Millisecond).ComparesOffsets(), nil, nil)
+	in.TimeForm, in.Caps.ClaimByForm = true, true
+	ds := Decide(in)
+	if d := oWord(t, ds, secs(rRead), secs(fRead)); d.Outcome != OutcomeClock || d.Clock == nil || d.Clock.Claim != "auth_time" {
+		t.Fatalf("the near auth_time claim: %s; want a Clock checked by form at the claim", oDescribe(ds))
+	}
+	d := oWord(t, ds, far(rRead), far(fRead))
+	if d.Clock != nil && d.Clock.Claim == "exp" {
+		t.Fatalf("FALSE GREEN? an exp claim %s from its call: %s; want no check by form", 2*epochNear, oDescribe(ds))
+	}
+	if d.Outcome == OutcomeClock {
+		t.Fatalf("FALSE GREEN? an exp claim %s from its call: %s; want it refused", 2*epochNear, oDescribe(ds))
+	}
+}
