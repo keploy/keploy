@@ -628,6 +628,19 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/clock-zone/proven-clock-zone-linux.sh"
 
+      # A request text one word of which the app makes fresh on every call
+      # (a UUID) is learned by its words under the proven switch: the UUID
+      # is left unchecked and the text's other words are still compared, so
+      # a replay that changed them fails naming the field, where the whole
+      # text learned as noise served it.
+      - name: Run proven word-drift e2e (a fresh word leaves the rest of its text checked)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/word-drift/proven-word-drift-linux.sh"
+
       # A response body of another kind than the recorded one fails its test,
       # with the switch on or off (O-K): an app that answers keploy's own
       # plain-text "no matching mock" with its 200, where the test recorded
