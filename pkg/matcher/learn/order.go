@@ -613,20 +613,40 @@ func readsWhole(a variables.Address, p evPlace, rec, live string) bool {
 // base64 alphabets taking in a path's '/' and an escape's '%' ending one. A
 // place's texts (as its address opens them) are read only where they hold
 // the longest word of each run's token, or an escape, which may hide a
-// letter of it: a call reads the places that may hold it, each once.
+// letter of it; a client test's request's, also where they hold a '.': a
+// JWT there (a Bearer token, a cookie pair's) may hold it in a claim
+// (fromAt's claimWord, cookieToken), base64url in the text. A call reads
+// the places that may hold it, each once.
 func (dc *decider) shownInText(rec, live string) []evPlace {
 	rw, lw := longestWord(rec), longestWord(live)
-	mayHold := func(text, w string) bool { return strings.Contains(text, w) || strings.Contains(text, "%") }
+	var client map[string]bool // Earlier.incoming by mock, as clientCase reads it: built once, where first asked
+	mayHold := func(p evPlace, text, w string) bool {
+		if strings.Contains(text, w) || strings.Contains(text, "%") {
+			return true
+		}
+		if !strings.Contains(text, ".") {
+			return false
+		}
+		if client == nil {
+			client = map[string]bool{}
+			for _, e := range dc.in.Earlier {
+				if _, ok := client[e.Mock]; !ok {
+					client[e.Mock] = e.incoming
+				}
+			}
+		}
+		return client[p.mock]
+	}
 	var out []evPlace
 	for _, p := range dc.ps {
 		if p.raw > 0 || p.leaf.Path == "" {
 			continue
 		}
 		a := dc.in.AddressOf(p.leaf, p.side == Response)
-		if r, _ := a.WordOf(p.leaf.Value); !mayHold(r, rw) {
+		if r, _ := a.WordOf(p.leaf.Value); !mayHold(p, r, rw) {
 			continue
 		}
-		if l, _ := a.WordOf(p.live); !mayHold(l, lw) {
+		if l, _ := a.WordOf(p.live); !mayHold(p, l, lw) {
 			continue
 		}
 		if q := placedFor(p, rec); q.state == stateBefore && !q.same() && readsWhole(dc.fromAt(q, rec, live), q, rec, live) {
@@ -3819,10 +3839,21 @@ func ClaimName(at variables.Address) string {
 // such claim by name (jwtSpan reads the claims that differ, in that order).
 // Where no claim holds them at a word, the first claim that is v in rec and
 // f in live whole (an id of several words, a UUID in a sub claim), at word
-// -1. ok is false where either is no JWT (jwtSpan then opens no claim), or
-// no claim holds them so: the leaf is then named whole, as before.
+// -1. A random token (randomToken) a claim is whole in both runs is read
+// there whole first, even where it is one word of it in both runs (an id of
+// letters and digits, whose next run may hold a '-' or '_', which a word
+// would cut), as fromAt reads one at its token. ok is false where either is
+// no JWT (jwtSpan then opens no claim), or no claim holds them so: the leaf
+// is then named whole, as before.
 func claimWord(rec, live, v, f string) (variables.Step, int, bool) {
 	span, _ := jwtSpan(rec, live)
+	if randomToken(v, f) {
+		for _, part := range span.Parts {
+			if part.Rec == v && part.Live == f {
+				return part.Step, -1, true
+			}
+		}
+	}
 	for _, part := range span.Parts {
 		for n, w := range variables.Words(part.Rec) {
 			if part.Rec[w[0]:w[1]] != v {

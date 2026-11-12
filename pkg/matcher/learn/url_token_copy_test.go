@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
@@ -206,14 +207,23 @@ func TestOutcomeATokenInAURLPathOrBehindEscapesBindsAtItsToken(t *testing.T) {
 	}
 
 	// The other way: round F's text holds the token at another token, or
-	// the place is another test's. No address reads it whole there in both
-	// runs, so nothing binds it whole, and no word of it is bound at the
-	// URL whole.
+	// the place is another test's, or sent or answered after the call. No
+	// address reads it whole there in both runs, or the place shows it to no
+	// call before this one, so nothing binds it whole, and no word of it is
+	// bound at the URL whole.
 	other := func(e []Earlier) []Earlier { e[0].Own, e[0].Run = false, true; return e }
 	after := func(e []Earlier) []Earlier {
 		e[0].At = oAt.Add(time.Second)
 		e[0].Payload = oPayload(e[0].Mock, e[0].At)
 		return e
+	}
+	// Asked before the call, its answer (a Location header) recorded after
+	// it: R's application got nothing there before the call, so the place
+	// shows the token to no call, whatever its text.
+	answeredAfter := func(r, f string) []Earlier {
+		at := oAt.Add(-time.Second)
+		return []Earlier{{Mock: "mock-0", At: at, Own: true, Seen: []Seen{seen(Response, "header.Location", r, f)},
+			Payload: RawOf(&models.Mock{Name: "mock-0", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: oAt.Add(time.Second)}}, true)}}
 	}
 	for _, tc := range []struct {
 		name, rec, live string
@@ -227,6 +237,8 @@ func TestOutcomeATokenInAURLPathOrBehindEscapesBindsAtItsToken(t *testing.T) {
 		{"a standard key escaped in another test's URL", kr, kf, other(oSent(cb+url.QueryEscape(kr), cb+url.QueryEscape(kf)))},
 		{"an unpaired token in the path of a URL sent after the call", ur, uf, after(oSent(path+ur, path+uf))},
 		{"a standard key escaped in a URL sent after the call", kr, kf, after(oSent(cb+url.QueryEscape(kr), cb+url.QueryEscape(kf)))},
+		{"a standard key escaped in a Location answered after the call", kr, kf, answeredAfter(cb+url.QueryEscape(kr), cb+url.QueryEscape(kf))},
+		{"an unpaired token in the path of a Location answered after the call", ur, uf, answeredAfter(loc+ur, loc+uf)},
 	} {
 		ds := Decide(oInput("body.cmd.query._id", tc.rec, tc.live, tc.earlier, nil))
 		if len(ds) == 0 {
@@ -575,5 +587,123 @@ func TestOutcomeAPairedURLSafeTokenNotShownIsDecidedOnce(t *testing.T) {
 	ds := Decide(oInput("body.docs.msgs.0._id", rec, live, nil, nil))
 	if n := wordPasses.Load() - before; n != int64(len(ds)) || len(ds) != 1 {
 		t.Errorf("a paired token no place shows: %d word passes for %s; want one, its changed word's", n, oDescribe(ds))
+	}
+}
+
+// A random token a client test sends inside a JWT's claim (a Bearer token's,
+// a cookie pair's), the claim the token whole in both runs, is shown there:
+// base64url in the header, the claim holds it whole. A later call that sends
+// it is one Value, the field whole, bound at the claim whole
+// (|jwt.<claim>), which a replay reads in the next run's token whole
+// wherever its '-' and '_' fall; an id of letters and digits too, one word
+// of the claim in both runs, whose next run may hold a '-'. Read word by
+// word, the paired token bound its random word at the claim's word, which
+// the next run's '-' would cut, and the unpaired one bound nowhere.
+func TestOutcomeATokenInAClientTestsJWTClaimBindsAtTheClaimWhole(t *testing.T) {
+	const (
+		pr = "kepreq_PnlPWeHYp6SxRRGMfFi0kUxyEdiumEmDVfOVZBrF68E"
+		pf = "kepreq_q4XtRm8LwZ2vNc7KbJ0sYh5GdP3fEa9TnU1oVi6WxQk"
+		ur = "kepreq_9fsSK78UnjdjTSFj51vJvm_CkQdnzdp6aRCUCH0PP5g"
+		uf = "kepreq_WWEEXXKJO_kzw3aZ8Wxfl5wsJUE3V7QGpBKzyTlYA_0"
+		ar = "V1StGXR8Z5jdHi6BmyTaQ2"
+		af = "Pq7LmZx4Rt9Wv1Bc3Df5Gh"
+		kr = "q3Zx+9Lk/2Wm8Np4Rt6Yv1Bc5Df7Gh0Jk3Lm6Np9QrA="
+		kf = "Hk2/Pq7Lm+Zx4Rt9Wv1Bc3Df5Gh8Jk0Lm2Np6Qr4StA="
+	)
+	rReq := time.Date(2026, 11, 11, 14, 24, 31, 630_000_000, time.UTC)
+	fReq := rReq.Add(67 * time.Second)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	token := func(id string, at time.Time, sig string) string {
+		return claimToken(t, map[string]any{"cid": "e2e-free-company", "request_id": id, "iat": at.Unix()}, sig)
+	}
+	tokens := func(r, f string) (string, string) {
+		return token(r, rReq, "recorded-signature-bytes-0001"), token(f, fReq, "round-f-signature-bytes-00002")
+	}
+	bearer := func(r, f string) ([]Earlier, string, string) {
+		rTok, fTok := tokens(r, f)
+		return clientPlaced(t, "post-cluster-status-3", heartbeatCase(rTok, rReq), heartbeatCase(fTok, fReq), fReq), "Bearer " + rTok, "Bearer " + fTok
+	}
+	cookie := func(r, f string) ([]Earlier, string, string) {
+		rTok, fTok := tokens(r, f)
+		return clientPlaced(t, "post-cluster-status-3", logoutCase(twoPairs(rTok), rReq), logoutCase(twoPairs(fTok), fReq), fReq), twoPairs(rTok), twoPairs(fTok)
+	}
+	// A later exchange that bears the client test's name is no client test's
+	// request: the place is the first of that name's, as clientCase reads it.
+	named := func(r, f string) ([]Earlier, string, string) {
+		e, rText, fText := bearer(r, f)
+		at := rCall.Add(-time.Millisecond)
+		return append(e, Earlier{Mock: e[0].Mock, At: at, Own: true, Payload: oPayload(e[0].Mock, at), Seen: []Seen{
+			{Side: Request, Leaf: oText("body.status", "active"), Live: "active", Place: "body.status"},
+		}}), rText, fText
+	}
+	call := func(r, f string, earlier []Earlier) []Decision {
+		in := iCall("body.cmd.filter._id", String, r, f, rCall, fCall, nil, earlier, nil)
+		in.Drifts = oClientDrifts()
+		return Decide(in)
+	}
+	for _, tc := range []struct {
+		name, rec, live string
+		place           func(r, f string) ([]Earlier, string, string)
+		from            string
+	}{
+		{"a paired token in a Bearer token's claim", pr, pf, bearer, "header.Authorization|jwt.request_id"},
+		{"an unpaired token in a Bearer token's claim", ur, uf, bearer, "header.Authorization|jwt.request_id"},
+		{"an id of letters and digits in a Bearer token's claim", ar, af, bearer, "header.Authorization|jwt.request_id"},
+		{"a standard key in a Bearer token's claim", kr, kf, bearer, "header.Authorization|jwt.request_id"},
+		{"an unpaired token in a Bearer token's claim, a later exchange of the test case's name", ur, uf, named, "header.Authorization|jwt.request_id"},
+		{"an unpaired token in a cookie pair's token's claim, the token under two names", ur, uf, cookie, "header.Cookie|cookie.refresh_token|jwt.request_id"},
+	} {
+		earlier, rText, fText := tc.place(tc.rec, tc.live)
+		ds := call(tc.rec, tc.live, earlier)
+		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].At.Word != -1 || ds[0].Recorded != tc.rec || ds[0].Full != tc.live {
+			t.Errorf("%s: %s; want one Value, the field whole", tc.name, oDescribe(ds))
+			continue
+		}
+		d := ds[0]
+		if d.From.Mock != "test case post-cluster-status-3" || !d.From.Client || d.From.Path+addrSuffix(d.FromAt) != tc.from {
+			t.Errorf("%s: bound at %s %s%s (client %v); want the client test's %s", tc.name, d.From.Mock, d.From.Path, addrSuffix(d.FromAt), d.From.Client, tc.from)
+			continue
+		}
+		if r, ok := d.FromAt.WordOf(rText); !ok || r != tc.rec {
+			t.Errorf("%s: the bind place reads %q (%v) in the recorded header; want the token whole", tc.name, r, ok)
+		}
+		if f, ok := d.FromAt.WordOf(fText); !ok || f != tc.live {
+			t.Errorf("%s: the bind place reads %q (%v) in round F's header; want round F's token whole", tc.name, f, ok)
+		}
+	}
+
+	// The other way: round F's claim holds another token than the call's,
+	// or the JWT is an earlier exchange's, no client test's request (keploy
+	// reads a claim only there). Nothing binds the field whole at a claim.
+	other := func(r, f string) ([]Earlier, string, string) {
+		rTok, fTok := tokens(r, "kepreq_ZZ9yXw8VuT7sRq6PoN5mLk4JiH3gFe2DcB1aZy0XwVu")
+		return clientPlaced(t, "post-cluster-status-3", heartbeatCase(rTok, rReq), heartbeatCase(fTok, fReq), fReq), "", ""
+	}
+	exchange := func(r, f string) ([]Earlier, string, string) {
+		rTok, fTok := tokens(r, f)
+		at := rCall.Add(-time.Second)
+		return []Earlier{{Mock: "mock-0", At: at, Own: true, Payload: oPayload("mock-0", at), Seen: []Seen{
+			{Side: Request, Leaf: oText("header.Authorization", "Bearer "+rTok), Live: "Bearer " + fTok, Place: "header.Authorization"},
+		}}}, "", ""
+	}
+	for _, tc := range []struct {
+		name, rec, live string
+		place           func(r, f string) ([]Earlier, string, string)
+	}{
+		{"an unpaired token, another token in round F's claim", ur, uf, other},
+		{"a paired token, another token in round F's claim", pr, pf, other},
+		{"an unpaired token in an earlier exchange's Bearer token's claim", ur, uf, exchange},
+		{"a paired token in an earlier exchange's Bearer token's claim", pr, pf, exchange},
+	} {
+		earlier, _, _ := tc.place(tc.rec, tc.live)
+		ds := call(tc.rec, tc.live, earlier)
+		if len(ds) == 0 {
+			t.Errorf("%s: no decision", tc.name)
+		}
+		for _, d := range ds {
+			if d.Outcome == OutcomeValue && (d.At.Word == -1 || ClaimName(d.FromAt) != "") {
+				t.Errorf("%s: %s bound at %s %s%s; want nothing bound whole or at a claim", tc.name, oDescribe([]Decision{d}), d.From.Mock, d.From.Path, addrSuffix(d.FromAt))
+			}
+		}
 	}
 }
