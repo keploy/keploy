@@ -141,6 +141,21 @@ func TestWithEvidence(t *testing.T) {
 	require.Len(t, got[0].Evidence.Misses, 1)
 	require.Equal(t, []string{"mock-3"}, got[0].Evidence.Unconsumed)
 	require.Nil(t, got[1].Evidence, "no evidence, nothing attached")
+	require.False(t, got[0].Evidence.FailedOnItsOwn, "no attempt's harness failed it")
+
+	// One attempt its harness failed on its own marks the test's evidence,
+	// whichever attempt it was.
+	own := ev("", "mock-4")
+	own.FailedOnItsOwn = true
+	for _, ws := range [][]models.ScopeWindow{
+		{{Name: "o::D", Evidence: own}, {Name: "o::D", Evidence: ev("", "mock-5")}},
+		{{Name: "o::D", Evidence: ev("", "mock-5")}, {Name: "o::D", Evidence: own}},
+	} {
+		got = withEvidence([]TestReceipt{{Name: "o::D", Outcome: "failed"}}, ws)
+		require.NotNil(t, got[0].Evidence)
+		require.True(t, got[0].Evidence.FailedOnItsOwn)
+		require.ElementsMatch(t, []string{"mock-4", "mock-5"}, got[0].Evidence.Unconsumed)
+	}
 
 	// Evidence with only keploy's reason (the test's process exited) is
 	// keploy's verdict too.
@@ -852,6 +867,30 @@ func TestTheReplayPushesTheTestEachWorkerRecordingTrails(t *testing.T) {
 	require.Equal(t, map[string][]string{models.PoolKeyNone: {"mock-3", "mock-2", "mock-4"}}, instr.worker)
 	require.Equal(t, map[string]string{"mock-3": "o::TestA"}, instr.trails,
 		"mock-2's trail names no test of the set, mock-0 is TestA's own, mock-4 trails none")
+}
+
+// Under the switch the replay hands the agent, with the worker scope, the
+// series of the recordings a rule declared in keploy.yml placed there
+// (mappings' worker: series:), in worker:'s order; an entry with none is in
+// no series. A series an entry of which says once (worker: once:) is pushed
+// as answering once in a run.
+func TestTheReplayPushesTheSeriesOfTheRecordingsARulePlaced(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\nworker:\n    - name: mock-3\n      rule: sweep@0123abcd\n      series: sweep/o::TestA/1\n    - name: mock-4\n    - name: mock-2\n      rule: sweep@0123abcd\n      series: sweep/o::TestA/1\n      once: true\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-2", "mock-3", "mock-4"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, map[string][]string{"sweep/o::TestA/1": {"mock-3", "mock-2"}}, instr.series)
+	require.Equal(t, []string{"sweep/o::TestA/1"}, instr.once, "mock-2 says its series answers once in a run")
 }
 
 // workerTrails reads a trail only off an entry that names one: a set whose

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -74,6 +75,10 @@ type strictNoise struct {
 	// url is keploy.yml's url noise: what a pattern matches in the path or
 	// a query value is not compared.
 	url []*regexp.Regexp
+	// declaredRules are what keploy mock replay's scope table declares of
+	// each recording (declaredIn): its clock rules are checked as reads of
+	// the clock (clocksWith). The zero value declares none.
+	declaredRules
 }
 
 // guardsPlace reports whether keploy.yml's entry with patterns names the
@@ -107,6 +112,47 @@ func (h *HTTP) newStrictNoise(headerNoise, bodyNoise map[string][]string, urlNoi
 	n := strictNoise{body: matcher.NewNoiseLookup(bodyNoise), url: compileURLNoise(h.Logger, urlNoise)}
 	n.header, n.headerPats = splitHeaderNoise(h.Logger, headerNoise)
 	return n
+}
+
+// withSources is n reading what db's scope table declares of each
+// recording (declaredIn).
+func (n strictNoise) withSources(db integrations.MockMemDb) strictNoise {
+	n.declaredRules = declaredIn(db)
+	return n
+}
+
+// declaredRules are what keploy mock replay's scope table declares of a
+// store's recordings, as a replay reads their clock rules (clocksWith).
+type declaredRules struct {
+	// sources is the declared sources the table gives a recording, by name
+	// (sourcesIn). nil reads none.
+	sources func(mock string) []models.DeclaredSource
+	// background reports whether a recording is one the background serves
+	// with no learn step deciding it for the open test
+	// (integrations.DeclaredBackground), onto which no test's drift is
+	// learned; nil: none is.
+	background func(m *models.Mock) bool
+	// timeForm is whether the replay turned the time default on
+	// (integrations.TimeFormOf).
+	timeForm bool
+}
+
+// declaredIn is what db's scope table declares of its recordings: their
+// sources (sourcesIn), which of them the background serves, and whether
+// the time default is on; none of it from a store that cannot tell.
+func declaredIn(db integrations.MockMemDb) declaredRules {
+	return declaredRules{
+		sources:    sourcesIn(db),
+		background: func(m *models.Mock) bool { return integrations.DeclaredBackground(db, m) },
+		timeForm:   integrations.TimeFormOf(db),
+	}
+}
+
+// sourcesIn is, by recording name, the declared sources db's scope table
+// gives it (integrations.SourcesOf): the rules of keploy.yml keploy mock
+// replay hands the agent; none from a store that cannot tell.
+func sourcesIn(db integrations.MockMemDb) func(mock string) []models.DeclaredSource {
+	return func(mock string) []models.DeclaredSource { return integrations.SourcesOf(db, mock) }
 }
 
 // splitHeaderNoise reads keploy.yml's header noise (name -> patterns) by
@@ -195,6 +241,10 @@ type strictKnown struct {
 	// application's clock (clocksOf): the walk lets their value change, and
 	// clockDiffs checks it.
 	clocks map[string]models.ClockOffset
+	// declared are the body fields a clock rule names in m
+	// (declaredClockFields): no noise learned on one, or on a container
+	// holding it, excuses its value (noiseBarred).
+	declared map[string]models.ClockOffset
 }
 
 // clocksOf is what the learn step learned of m as reads of the
@@ -207,6 +257,55 @@ func clocksOf(m *models.Mock) map[string]models.ClockOffset {
 	return m.Spec.Clocks
 }
 
+// clocksWith is clocksOf(m) with the check each clock rule d's sources
+// give m declares at a body field the learn step learned no clock at, in a
+// recording the background serves (learn.ReplayClocks): a worker: call, or
+// a once series a judge placed there, whose call the background answers
+// exactly with no test's drift learned onto it. Under the time default
+// such a field is checked by the form m's recorded value writes there
+// (where that value names a moment, an epoch near m's own call), never by
+// the rule's range; a test's own recording keeps what its learning decided
+// at each declared field (declaredClocksOf). clocksOf(m) alone without the
+// proven switch, sources or a reader of the background.
+func clocksWith(m *models.Mock, d declaredRules) map[string]models.ClockOffset {
+	clocks := clocksOf(m)
+	if m == nil || d.sources == nil || d.background == nil || !provenswitch.On() {
+		return clocks
+	}
+	var leaves map[string]learn.Leaf
+	recorded := func(leaf string) (learn.Leaf, bool) {
+		if leaves == nil {
+			leaves = learnNoise{}.shape(recordedParts(m), "").Leaves
+		}
+		l, ok := leaves[leaf]
+		return l, ok
+	}
+	return learn.ReplayClocks(d.sources(m.Name), clocks, d.background(m), d.timeForm, recorded, learn.Span{From: m.Spec.ReqTimestampMock, To: m.Spec.ResTimestampMock})
+}
+
+// declaredClockFields are the body fields, by leaf path, a clock rule d's
+// sources give m names (learn.DeclaredClocks of no learned clock), under
+// the proven switch; none without it or sources. A clock rule names a time
+// keploy.yml declares, which the rule decides wherever no learning decided
+// it as a read of the clock: noise learned there, before the rule or by an
+// older learner, excuses nothing, so the learn step reads the field again
+// and a replay compares it as recorded until it does.
+func declaredClockFields(m *models.Mock, d declaredRules) map[string]models.ClockOffset {
+	if m == nil || d.sources == nil || !provenswitch.On() {
+		return nil
+	}
+	return learn.DeclaredClocks(d.sources(m.Name), nil)
+}
+
+// noiseBarred reports whether exact is a field a clock rule names
+// (k.declared) at which nothing was learned as a read of the clock
+// (k.clocks): no learned noise excuses its value.
+func (k strictKnown) noiseBarred(exact string) bool {
+	_, declared := k.declared[exact]
+	_, clock := k.clocks[exact]
+	return declared && !clock
+}
+
 // learnedAt reports whether the mock learned the field at exact (the learn
 // step's dialect: that field or a container of it) or at legacy (the
 // request-body learner's dialect, by its exact key), or learned a read of the
@@ -214,6 +313,9 @@ func clocksOf(m *models.Mock) map[string]models.ClockOffset {
 func (k strictKnown) learnedAt(exact, legacy string) bool {
 	if _, clock := k.clocks[exact]; clock {
 		return true
+	}
+	if k.noiseBarred(exact) {
+		return false
 	}
 	return k.learnedNoiseAt(exact, legacy)
 }
@@ -300,7 +402,7 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 		return []strictField{field(models.MockFieldDiff{Path: "method", Kind: models.DiffKindMissingInMock, Actual: input.method})}
 	}
 	strictDiffs.Add(1)
-	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m)}
+	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.declaredRules), declared: declaredClockFields(m, n.declaredRules)}
 	var out []strictField
 	if string(r.Method) != input.method {
 		out = append(out, field(valueDiff("method", string(r.Method), input.method)))
@@ -324,8 +426,11 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 // clockDiffs are the places the learn step learned as reads of the
 // application's clock (k.clocks) at which the call carries no such read made
 // in its own window on the application's clock (learn.ClockSpanOf for the
-// recording m it is checked against, learn.CheckClockRead), each with the
-// reason it gives; none where keploy.yml's noise reaches the place, which
+// recording m it is checked against, learn.CheckClockReadForm), each with the
+// reason it gives. A place learned by its form passes by that form where the
+// store says the replay turned the time default on (k.n.timeForm); otherwise
+// the form is set aside, which fails closed. None where keploy.yml's noise
+// reaches the place, which
 // the user declared not compared. A url place is read as the learn step
 // read it (clockReads): a path segment in the path that url noise masked
 // whole, and a url pattern excuses only the read it covers. Every place is
@@ -368,7 +473,7 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 				f.why, f.clock = learn.ClockReadAbsent(f.shape, k.clocks[p]), true
 				break
 			}
-			if ok, why := learn.CheckClockRead(f.shape, k.clocks[p], r.live, span, known); !ok {
+			if ok, why := learn.CheckClockReadForm(f.shape, k.clocks[p], r.live, span, known, k.n.timeForm); !ok {
 				f.why, f.clock = why, true
 				break
 			}
@@ -1454,7 +1559,8 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	}
 	// keploy.yml's patterns decide a field they guard: no noise learned on
 	// it, or on a container holding it, excuses a value they refuse.
-	learned = !guarded && (learned || k.learnedAt(exact, name))
+	// Nor does any at a field a clock rule names (noiseBarred).
+	learned = !guarded && !k.noiseBarred(exact) && (learned || k.learnedAt(exact, name))
 	if jsonKind(r) != jsonKind(l) {
 		f := shaped(name, shape, models.DiffKindTypeChanged, jsonKind(r), jsonKind(l))
 		f.why = why

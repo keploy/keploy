@@ -19,6 +19,8 @@ func TestTheMissReadKeepsTheBackgroundMark(t *testing.T) {
 	p.BeginTestErrorCapture()
 	bg := mockMiss("findAndModify ptw_endpoints")
 	bg.MismatchReport.Background = true
+	bound := models.BackgroundBinding{Recording: "mock-2954", Place: "body.docs.msgs.0.q.app_id", Variable: "appId", BoundMock: "mock-226", BoundPlace: "body.docs.msgs.0.appId"}
+	bg.MismatchReport.BackgroundBound = []models.BackgroundBinding{bound}
 	p.errChannel <- bg
 	p.errChannel <- mockMiss("find users")
 	got, err := p.GetMockErrors(context.Background())
@@ -28,6 +30,9 @@ func TestTheMissReadKeepsTheBackgroundMark(t *testing.T) {
 	for _, c := range got {
 		if want := c.ActualSummary == "findAndModify ptw_endpoints"; c.Background != want || c.CountsAgainstTest() == want {
 			t.Errorf("%s: Background %v, counts against its test %v", c.ActualSummary, c.Background, c.CountsAgainstTest())
+		}
+		if want := c.Background; (len(c.BackgroundBound) == 1 && c.BackgroundBound[0] == bound) != want {
+			t.Errorf("%s: BackgroundBound %+v; want the parser's places only on the background miss", c.ActualSummary, c.BackgroundBound)
 		}
 	}
 }
@@ -87,5 +92,30 @@ func TestBackgroundRecordingsFollowTheSetsStaging(t *testing.T) {
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
 	if got := mm.BackgroundRecordings(models.Mongo); got != nil {
 		t.Fatalf("an aborted set's parked background recordings were installed for the next set: %v", bgNames(got))
+	}
+}
+
+// The agent's read of a test's misses keeps a parser's trail mark
+// (MockMismatchReport.TrailsOf): the call carries the named test's kept
+// value, and still counts against the tests. An unmarked miss names none.
+func TestTheMissReadKeepsTheTrailMark(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+	p.BeginTestErrorCapture()
+	tr := mockMiss("delete uiTestSetJoins")
+	tr.MismatchReport.TrailsOf = "o::TestA"
+	p.errChannel <- tr
+	p.errChannel <- mockMiss("find users")
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil || len(got) != 2 {
+		t.Fatalf("read %+v, %v; want both misses", got, err)
+	}
+	for _, c := range got {
+		want := ""
+		if c.ActualSummary == "delete uiTestSetJoins" {
+			want = "o::TestA"
+		}
+		if c.TrailsOf != want || !c.CountsAgainstTest() {
+			t.Errorf("%s: TrailsOf %q, counts against the tests %v; want %q, true", c.ActualSummary, c.TrailsOf, c.CountsAgainstTest(), want)
+		}
 	}
 }

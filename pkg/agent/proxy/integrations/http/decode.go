@@ -54,6 +54,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		defer close(errCh)
 		defer integrations.RecoverIntoCtx(ctx, h.Logger, clientConn, nil, errCh)
+		// chain is the once chain this connection began, if any: its next
+		// recording answers the connection's next call ahead of any other
+		// (chainNext).
+		var chain integrations.OnceChainOnConn
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
@@ -105,6 +109,15 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// 	return req, err
 			// }
 			request.Header.Set("Host", request.Host)
+
+			// The recording a once chain this connection began names next
+			// (integrations.OnceChainOnConn): this call's to be answered
+			// with, ahead of any other, when it is that call and is made
+			// in the view the chain was carried on in (chainNext). Taken,
+			// the chain ends here unless this call's answer carries it on
+			// (chain.Answered, after the match): a call passed through,
+			// answered by no recording or by another ends it.
+			follow := chain.Take()
 
 			// A bypassRule that names this call (its host, path and port)
 			// passes it to its server, and the server's answer back, unmocked.
@@ -338,6 +351,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// found it made (integrations.CallRound): a miss's lookup
 				// of a recording made elsewhere is asked of that round.
 				call integrations.CallRound
+				// followed is the recording the connection's once chain
+				// named for the call in its view (follow.For), "" for
+				// none: the chain goes on only when it answers the call.
+				followed string
 				// db is the store the request's matcher and its miss read:
 				// under the switch held to call's staging
 				// (integrations.HoldToRound), so a request is never answered
@@ -360,7 +377,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// (a retry cycle, integrations.LearnEnder) a request is
 				// served as a replay serves it, below: nothing is paired,
 				// nor learned.
-				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, integrations.CallRound{}, &call)
+				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(mockDb), opts, integrations.CallRound{}, &call)
 				ok = stub != nil
 				if !ok {
 					// The call's one hold: the variable pass, the
@@ -413,13 +430,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// whose test recorded none of its kind still pairs; one
 					// whose view moved (-1) pairs nothing.
 					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
-					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(mockDb)
 					if extra == 0 {
 						if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
 							// Its repeat note is asked as a miss's is
 							// (repeatNoteOf).
 							a, repeat := repeatNoteOf(reqCtx, input, db, strict, extra)
-							reportPairing(reqCtx, input, x, a, repeat)
+							reportPairing(reqCtx, input, x, a, repeat, call)
 							stub, ok, lmiss = answer, true, nil
 						}
 					}
@@ -441,20 +458,41 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// replay stages another set, the request finds nothing
 					// to be answered with, and misses saying so.
 					db, _ = integrations.HoldToRound(mockDb, call)
-					// A call one of the open test's own recordings is,
-					// answered or not (ownCall), is read with the set's
-					// background hidden once the background is about to
-					// answer it: no pool or worker recording answers a call
-					// one more than the test recorded, which then misses as
-					// such (extraCall), its background copy left unspent,
-					// even when two of them are made at once. A call the
-					// test's own recordings answer never asks.
-					held := db
-					db = integrations.OwnRepeatRead(db, call, func() bool {
-						return h.ownCall(reqCtx, input, held, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
-					})
-					stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
-					ok = stub != nil
+					// On a connection whose once chain is in progress, the
+					// chain's next recording answers the call first when the
+					// call is that recording, whatever the open test owns of
+					// it, and a line says the chain decided it (chainNext).
+					// A chain carried on in another view (a test began or
+					// ended since its last call) ends here, said: the call
+					// is answered as any call is, the open test's own first.
+					followed = follow.For(call)
+					if follow.Next != "" && followed == "" {
+						h.Logger.Info("a once series' chain ended: the replay's view moved since this connection's last call of the series (a test began or ended, or a test set was staged), so the series' next recording does not answer this call ahead of the open test's own; the call is answered as any call is",
+							zap.String("series", follow.Series), zap.String("next", follow.Next), zap.String("call", request.Method+" "+utils.URLPathShape(input.url)))
+					}
+					if followed != "" {
+						stub, err = h.chainNext(reqCtx, input, db, chainCall{next: followed, series: follow.Series, call: request.Method + " " + utils.URLPathShape(input.url)},
+							h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), func() bool {
+								return h.ownCall(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
+							})
+						ok = stub != nil
+					}
+					if !ok && err == nil {
+						// A call one of the open test's own recordings is,
+						// answered or not (ownCall), is read with the set's
+						// background hidden once the background is about to
+						// answer it: no pool or worker recording answers a
+						// call one more than the test recorded, which then
+						// misses as such (extraCall), its background copy left
+						// unspent, even when two of them are made at once. A
+						// call the test's own recordings answer never asks.
+						held := db
+						db = integrations.OwnRepeatRead(db, call, func() bool {
+							return h.ownCall(reqCtx, input, held, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
+						})
+						stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(mockDb), opts)
+						ok = stub != nil
+					}
 				}
 				if !ok && err == nil {
 					// Under the switch the learn step of record's full round
@@ -533,7 +571,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if lmiss == nil && provenswitch.On() {
 					// A call that came with an array in another order is
 					// unstable_order in every round, not only the full one.
-					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise))
+					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(db))
 				}
 				if lmiss != nil {
 					diag = lmiss.diag()
@@ -589,7 +627,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				var elsewhere *models.Mock
 				staged := false
 				if report != nil && provenswitch.On() && (n == 0 || !nAt.IsZero()) {
-					elsewhere, staged = notOwnedRecordingBefore(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call, nAt)
+					elsewhere, staged = notOwnedRecordingBefore(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), call, nAt)
 				} else if report != nil {
 					// A call no lookup is asked for (its view moved, or
 					// keploy cannot place the test's own recording of it)
@@ -616,7 +654,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				var earlier integrations.AnsweredCall
 				repeated := false
 				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
-					earlier, repeated = repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n)
+					earlier, repeated = repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), n)
 				}
 				// A call of the test's own that changed (it is no
 				// recording made elsewhere, nor one call more than the test
@@ -627,7 +665,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// likely follows. The miss stays the test's own.
 				var earlierRec *models.Mock
 				if elsewhere == nil && !staged && n == 0 && report != nil && provenswitch.On() {
-					earlierRec = earlierRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+					earlierRec = earlierRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), call)
 				}
 				// The call's view went after the call was decided: a
 				// test's begin or end replaced it before the miss was
@@ -763,6 +801,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- errors.New("matched mock is nil")
 				return
 			}
+
+			// A once series' first recording begins its chain on this
+			// connection, and the recording the chain named carries it on
+			// (integrations.OnceChainOnConn); any other answer, and a call
+			// that ended above, leave it ended.
+			chain.Answered(mockDb, stub.Name, followed, call)
 
 			// A mock whose call ended in a fault gets the fault, as the
 			// upstream gave it (serveFault), not its head as a whole answer.

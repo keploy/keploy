@@ -33,7 +33,9 @@ func init() { decideBy = decideOrder }
 func decideOrder(in Input) []Decision {
 	if in.Mode == ModeElsewhere {
 		ds, fields := decideBoth(in, true)
-		return elsewhere(in, ds, fields)
+		out := elsewhere(in, ds, fields)
+		(&decider{in: in}).ruled(out, fields)
+		return out
 	}
 	ds, _ := decideBoth(in, false)
 	return ds
@@ -50,7 +52,7 @@ func decideOrder(in Input) []Decision {
 // either reading refuses is refused, as is one the two readings learn
 // differently, naming both (bothWays).
 func decideBoth(in Input, allScope bool) ([]Decision, []string) {
-	in.Earlier, in.Raw = timedEarlier(in.Earlier, in.At), timedRaw(in.Raw, in.At)
+	in.Earlier, in.Raw = timedEarlier(arrivedBefore(ofOwnCall(in, in.Earlier), in.At, in.Arrived), in.At), timedRaw(in.Raw, in.At)
 	in.Earlier, in.Raw = leafedAfterCall(in.Earlier, in.Raw, in.At)
 	ds, fields := decideWords(in, allScope)
 	kept, late := leafedAtCall(in.Earlier, in.At)
@@ -113,6 +115,10 @@ type decider struct {
 	allScope bool
 	// unread names what of the call keploy could not read, "" where none.
 	unread string
+	// byWords are the client tests' requests keploy could not read that keep
+	// their words (placesOf): unread for a value whose change one may hold
+	// (unreadByWords).
+	byWords []Earlier
 	// noPayload is payloadless(in): an exchange before the call whose
 	// payload keploy has not read, and why; its mock "" where none.
 	noPayload struct{ mock, why string }
@@ -127,6 +133,10 @@ type decider struct {
 	// places' words (places), built at its first ask.
 	oh *outsideHeld
 	pi *placeIndex
+	// readClock: the refusal instantLearned last gave is one where learning
+	// read the value as the application's clock (heldRead), which the time
+	// default settles on any field (timeDefault).
+	readClock bool
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
@@ -154,6 +164,18 @@ type decider struct {
 	// answer is the call's answer index (answerIndex), built at its first
 	// ask.
 	answer *answerWords
+	// texts: each place's texts as shownInText reads them, by its index in
+	// ps, opened at the call's first read of the place and kept for the
+	// call (textsOf); clients: Earlier.incoming by mock, as clientCase
+	// reads it, built at the first place that holds a '.'. opened counts
+	// the places opened so, decoded the texts percent-decoded, clientMaps
+	// the builds of clients, and inText the places shownInText read for a
+	// bind (fromAt): what keeps its work for a call of many fields one open
+	// of each place and one build of clients, not one for each field or
+	// place.
+	texts                               map[int]*placeTexts
+	clients                             map[string]bool
+	opened, decoded, clientMaps, inText int
 }
 
 // decideWords decides every changed word of in, and the field each
@@ -168,9 +190,9 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 // newDecider is the decider of the call in, reading its texts through x;
 // allScope as decideWords takes it.
 func newDecider(in Input, allScope bool, x *readerIndex) *decider {
-	ps, unread := placesOf(in)
+	ps, unread, byWords := placesOf(in)
 	set, setNotRead := setUnread(in)
-	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead)}
+	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead), byWords: byWords}
 	dc.noPayload.mock, dc.noPayload.why = payloadless(in)
 	if dc.dr == nil {
 		dc.dr = NewDriftCache()
@@ -184,7 +206,13 @@ func (dc *decider) decide() ([]Decision, []string) {
 	var out []Decision
 	var fields []string // fields[i] is the field out[i] decides
 	for _, path := range dc.in.Drift {
-		out = append(out, dc.leaf(path, dc.unread)...)
+		ds := dc.leaf(path, dc.unread)
+		if src, ok := dc.source(path); ok && src.Kind == SourceMinted {
+			ds = dc.minted(path, src, ds)
+		} else if ok {
+			ds = dc.clockOnly(path, src, ds)
+		}
+		out = append(out, ds...)
 		for len(fields) < len(out) {
 			fields = append(fields, path)
 		}
@@ -201,6 +229,7 @@ func (dc *decider) decide() ([]Decision, []string) {
 			}
 		}
 	}
+	out, fields = dc.mintedUses(out, fields)
 	dc.oneValue(out, fields)
 	if dc.x.unread() {
 		// A recording keploy could not read again: every change of the
@@ -211,6 +240,7 @@ func (dc *decider) decide() ([]Decision, []string) {
 				Edit{Kind: EditReRecord}, dc.fieldNoise(fields[i]))
 		}
 	}
+	dc.ruled(out, fields)
 	return out, fields
 }
 
@@ -220,9 +250,16 @@ func (dc *decider) decide() ([]Decision, []string) {
 // the places apart misses. A value recorded at several places that round F
 // sent as two different new values is two reads keploy cannot tell apart:
 // each such place is refused, naming the first. Each keeps the recordings
-// it set aside as answered after the call.
+// it set aside as answered after the call. A place a minted rule decided
+// (Decision.Minted) is the first wherever it stands, so the rule's check
+// binds the value and the others use it.
 func (dc *decider) oneValue(out []Decision, fields []string) {
 	first := map[string]int{}
+	for i, d := range out {
+		if _, ok := first[d.Recorded]; !ok && d.Minted != nil {
+			first[d.Recorded] = i
+		}
+	}
 	name := func(i int) string {
 		if w := out[i].At.Word; w >= 0 {
 			return dc.in.Mock + " " + fields[i] + " word " + strconv.Itoa(w)
@@ -232,7 +269,7 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 	for i, d := range out {
 		j, ok := first[d.Recorded]
 		switch {
-		case d.Outcome != OutcomeFresh:
+		case d.Outcome != OutcomeFresh || ok && j == i:
 		case !ok:
 			first[d.Recorded] = i
 		case out[j].Outcome == OutcomeFresh && out[j].Full == d.Full:
@@ -261,10 +298,29 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 // its path spells, which the line says.
 const unnamedWhy = "no path names this field alone: its key holds '.', '[' or ']', or its document holds that key twice, so its noise in keploy.yml also names the other field its path spells"
 
+// unreadByWords names the first of dc.byWords that may hold the change of
+// a value from rec to live (mayHold), as placesOf names a place keploy
+// could not read; "" where none may.
+func (dc *decider) unreadByWords(rec, live Leaf) string {
+	var c valueChange
+	for i, e := range dc.byWords {
+		if i == 0 {
+			c = dc.dr.changeOf(rec, live)
+		}
+		if e.unreadWords.mayHold(c) {
+			return unreadName(e.Mock, e) + " (" + e.Unread + ")"
+		}
+	}
+	return ""
+}
+
 // leaf decides the changed words of the drifted leaf at path.
 func (dc *decider) leaf(path, unread string) []Decision {
 	rec, live := dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path]
 	at := dc.in.AddressOf(rec, false)
+	if unread == "" {
+		unread = dc.unreadByWords(rec, live)
+	}
 	switch {
 	case unread != "":
 		return []Decision{dc.refuse(path, at, -1, rec.Value, live.Value, RefusalUnread,
@@ -347,7 +403,13 @@ func betweenWords(rd textReading) string {
 // text decides the changed words of rd, one text the leaf at bare opens;
 // whole reports a refusal of the field whole, which ends the leaf.
 func (dc *decider) text(path string, bare variables.Address, rec, live string, rd textReading) ([]Decision, bool) {
+	if n := len(rd.At.Steps); n > 0 && rd.At.Steps[n-1] == variables.StepJWTSig {
+		return dc.signature(path, bare, rec, live, rd)
+	}
 	if d, ok := dc.oneToken(path, bare, rec, live, rd); ok {
+		return []Decision{d}, true
+	}
+	if d, ok := dc.wholeCopy(path, bare, rec, live, rd); ok {
 		return []Decision{d}, true
 	}
 	if rd.ChangedShape {
@@ -436,23 +498,252 @@ const tokenBits = 64
 // separators, so the runs' words do not pair and replay could never write
 // them: the token is one value, read as a word whole. A word of 32 bits or
 // more that an earlier place holds, where no place shows the whole token,
-// may be carried inside it, so it is left to the word rules. ok is false
-// where the field is no such token.
+// may be carried inside it, so it is left to the word rules.
+//
+// Where the runs' words happen to pair, the token is still one value when
+// it is a standard base64 encoder's output in both runs (whole groups of
+// four, the same '=' padding: a 256-bit key with no '+' or '/' in either
+// run, or one '+' in each at another spot) and every one of its words
+// changed: learned word by word, the next run's key, whose '+' and '/'
+// fall elsewhere, could never be written back. Unless a place shows the
+// whole token, no earlier place may hold any of its words, of any size: a
+// word handed to the call or sent before may be carried inside it. It is
+// one value too, of either alphabet and whatever stayed in it, where an
+// earlier place shows it whole in both runs and it binds whole at a place
+// whose text at the bind address is the token in both runs (boundWhole):
+// the call copied it whole, and bound
+// word by word ("kepreq_" and one random run in each run, no '-' or '_' in
+// it), the next run's random part, split by its own '-' and '_', could
+// never be written back (a replay puts the recorded word back and keeps
+// the rest of the new token). Bound whole, the replay holds the whole
+// token to the value bound at that place: a leaf that holds it whole, or a
+// longer text that holds it as one of its tokens (fromAt's |token.<n>, or
+// |urltoken.<n> in a URL's path, through |pct behind escapes: a consent
+// URL, a Location header). A place that shows it only so, whose base64 runs
+// hold no run of it (shownInText: "/requests/<id>", "code=<key>" escaped),
+// shows it too, and the token stands there only where it binds whole: where
+// the reader's words see no earlier place of it (an escaped key), it is
+// bound at the earliest such place of the call's scope, never fresh. Any
+// other paired text, one no earlier
+// place shows whole or one read whole that binds nowhere so (a refusal, a
+// text no address reads it whole in), with a word that stayed ("user-"
+// before an id) or of the URL-safe alphabet, whose '-' and '_' separate an
+// id's parts as often as they are letters of a token, is read word by word.
+// An unpaired token follows the same rule: a Value at an earlier leaf
+// stands only where its bind address reads the token whole in both runs
+// (never the whole URL that holds it, which no next run's token could
+// equal); else ok is false, and the refusals after this decide it. ok is
+// false where the field is no such token
+// (randomToken: two alphabets mixed, another length or padding, a run that
+// decodes to text).
 func (dc *decider) oneToken(path string, bare variables.Address, rec, live string, rd textReading) (Decision, bool) {
-	paired := !rd.ChangedShape && len(rd.Separators) == 0 && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 })
-	if paired || len(rd.Instants) > 0 || len(bare.Steps) > 0 || !randomToken(rec, live) {
+	if len(rd.Instants) > 0 || len(bare.Steps) > 0 || !randomToken(rec, live) {
 		return Decision{}, false
 	}
 	whole := readWord{At: bare, Rec: rec, Live: live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rec, Live: live}}}
 	shown := slices.ContainsFunc(dc.ps, func(p evPlace) bool { return tokenShown(placedFor(p, rec), whole) })
-	if !shown && slices.ContainsFunc(rd.Words, func(w readWord) bool {
-		return slices.ContainsFunc(dc.ps, func(p evPlace) bool {
-			return wordBits(w.Rec) >= chanceBits && evHolds(p.t.rec, w.Rec) || wordBits(w.Live) >= chanceBits && evHolds(p.t.live, w.Live)
+	// Shown only inside a longer text whose base64 runs hold it in no run of
+	// its own (a URL's path, an escaped query): it stands only where it
+	// binds whole there.
+	var inText []evPlace
+	if !shown {
+		inText = dc.shownInText(rec, live)
+		shown = len(inText) > 0
+	}
+	held := func(least float64) bool {
+		return slices.ContainsFunc(rd.Words, func(w readWord) bool {
+			return slices.ContainsFunc(dc.ps, func(p evPlace) bool {
+				return wordBits(w.Rec) >= least && evHolds(p.t.rec, w.Rec) || wordBits(w.Live) >= least && evHolds(p.t.live, w.Live)
+			})
 		})
-	}) {
+	}
+	paired := !rd.ChangedShape && len(rd.Separators) == 0 && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 })
+	copied := false
+	if paired && (!stdGroups(rec, live) || len(rd.Words) != len(rd.RecWords) || len(rd.Words) != len(rd.LiveWords) || !shown && held(0)) {
+		if !shown {
+			return Decision{}, false
+		}
+		copied = true
+	}
+	if !shown && held(chanceBits) {
 		return Decision{}, false
 	}
-	return dc.word(path, bare, rec, live, rec, whole, false, nil), true
+	d := dc.word(path, bare, rec, live, rec, whole, false, nil)
+	if d.Outcome == OutcomeFresh {
+		// The reader's words and runs see no earlier place of it (a standard
+		// key behind escapes, "%2B" and "%2F" for its '+' and '/'), but a
+		// place shows it whole: it is bound at the earliest such place of
+		// the call's scope, as a whole copy is (wholeCopy). With none, it
+		// is never fresh: the rules after this decide it.
+		if own := slices.DeleteFunc(inText, func(p evPlace) bool { return !dc.allScope && p.otherTest }); len(own) > 0 {
+			d = dc.bound(path, bare, -1, changedInstant{r: rec, l: live, rec: rec}, own, ", the earliest place before the call that shows it whole in both runs")
+		}
+	}
+	if (copied || len(inText) > 0 || d.Outcome == OutcomeValue) && !dc.boundWhole(d, rec, live) {
+		// Read whole, the token binds at no address that reads it whole
+		// in both runs: a paired one is left to its words, an unpaired
+		// one to the rules after this.
+		return Decision{}, false
+	}
+	return d, true
+}
+
+// boundWhole reports whether d binds the token rec (live in round F) whole
+// at a place whose text at d's bind address is the token in both runs: a
+// leaf that holds it whole, or a longer text whose token, jwtsig or cookie
+// step there reads it, never the longer text whole, which the next run's
+// token could never equal. A recording's place (p.raw: Decide names no
+// address of it) binds so too: its adapter names the place of the
+// recording that holds the value whole or as one word, or refuses it. Any
+// other place is held to what its address reads: one with no leaf reads an
+// empty text, which no token is. A token is read whole (oneToken) only
+// so: any other Value of it whole is no bind, and a paired token's other
+// verdicts leave it to its words.
+func (dc *decider) boundWhole(d Decision, rec, live string) bool {
+	return d.Outcome == OutcomeValue && slices.ContainsFunc(dc.ps, func(p evPlace) bool {
+		if p.mock != d.From.Mock || p.path != d.From.Path || p.side != d.From.Side {
+			return false
+		}
+		return p.raw > 0 || readsWhole(d.FromAt, p, rec, live)
+	})
+}
+
+// readsWhole reports whether a, an address of p, an exchange's place,
+// reads rec in its recorded text and live in round F's: a text the address
+// does not open reads "", which no token is.
+func readsWhole(a variables.Address, p evPlace, rec, live string) bool {
+	r, _ := a.WordOf(p.leaf.Value)
+	l, _ := a.WordOf(p.live)
+	return r == rec && l == live
+}
+
+// shownInText is the earlier exchanges' places, each one that changed
+// between the runs, placed for rec (placedFor), that show the token rec
+// (live in round F) whole inside a longer text in both runs, at the address
+// fromAt names for it there (a URL-safe token of a URL's path, a key read
+// through |pct): the shapes tokenShown's whole runs miss, a run of the
+// base64 alphabets taking in a path's '/' and an escape's '%' ending one. A
+// place's texts (as its address opens them) are read only where they hold
+// the longest word of each run's token, as written or percent-decoded (an
+// escape may hide a letter of it); a client test's request's, also where
+// they hold a '.': a JWT there (a Bearer token, a cookie pair's) may hold it
+// in a claim (fromAt's claimWord, cookieToken), base64url in the text. Each
+// place's texts are opened and decoded once for the call (textsOf), however
+// many fields it decides; a field reads a place for a bind (fromAt) only
+// where both its texts may show the token so.
+func (dc *decider) shownInText(rec, live string) []evPlace {
+	rw, lw := longestWord(rec), longestWord(live)
+	var out []evPlace
+	for i, p := range dc.ps {
+		if p.raw > 0 || p.leaf.Path == "" {
+			continue
+		}
+		if t := dc.textsOf(i, p); !t.rec.mayShow(rw, t.client) || !t.live.mayShow(lw, t.client) {
+			continue
+		}
+		dc.inText++
+		if q := placedFor(p, rec); q.state == stateBefore && !q.same() && readsWhole(dc.fromAt(q, rec, live), q, rec, live) {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// placeTexts is a place's two texts, as recorded and as round F saw them,
+// as its address opens them (decider.textsOf); client: the place is a
+// client test's request's (clientCase), read only where a text holds a '.'.
+type placeTexts struct {
+	rec, live openedText
+	client    bool
+}
+
+// openedText is a text a place's address opens: pct is the text
+// percent-decoded, once, where it holds an escape that decodes, and "" else
+// (where mayShow's w is "", a token with no word, the text as written holds
+// it already); dot, whether it holds a '.'.
+type openedText struct {
+	text, pct string
+	dot       bool
+}
+
+// mayShow reports whether o may show a token whose longest word is w at an
+// address fromAt names that reads it whole: o holds w as written (a word,
+// a token step, a JWT's signature), or decoded (|pct, an escape hiding a
+// letter of it), or, a client test's request's, o holds a '.' (a JWT whose
+// claim holds it: claimWord, cookieToken). Every such address reads the
+// token in one of those texts, so a text that shows none of them is never
+// read for it.
+func (o openedText) mayShow(w string, client bool) bool {
+	return strings.Contains(o.text, w) || strings.Contains(o.pct, w) || client && o.dot
+}
+
+// textsOf is p's texts as shownInText reads them, p the i-th of dc.ps:
+// opened at p's address, decoded where they hold an escape, at the call's
+// first read of p, and kept for the call.
+func (dc *decider) textsOf(i int, p evPlace) *placeTexts {
+	if t, ok := dc.texts[i]; ok {
+		return t
+	}
+	open := func(s string) openedText {
+		o := openedText{text: s, dot: strings.Contains(s, ".")}
+		if strings.Contains(s, "%") {
+			dc.decoded++
+			o.pct, _ = variables.Decode(variables.StepPct, s)
+		}
+		return o
+	}
+	a := dc.in.AddressOf(p.leaf, p.side == Response)
+	r, _ := a.WordOf(p.leaf.Value)
+	l, _ := a.WordOf(p.live)
+	t := &placeTexts{rec: open(r), live: open(l)}
+	if t.rec.dot || t.live.dot {
+		if dc.clients == nil {
+			dc.clientMaps++
+			dc.clients = map[string]bool{}
+			for _, e := range dc.in.Earlier {
+				if _, ok := dc.clients[e.Mock]; !ok {
+					dc.clients[e.Mock] = e.incoming
+				}
+			}
+		}
+		t.client = dc.clients[p.mock]
+	}
+	if dc.texts == nil {
+		dc.texts = map[int]*placeTexts{}
+	}
+	dc.texts[i] = t
+	dc.opened++
+	return t
+}
+
+// longestWord is s's longest word (variables.Words), the first of that
+// length: "" where s holds none.
+func longestWord(s string) string {
+	w := ""
+	for _, at := range variables.Words(s) {
+		if at[1]-at[0] > len(w) {
+			w = s[at[0]:at[1]]
+		}
+	}
+	return w
+}
+
+// signature decides rd, the signatures of two JWTs (the jwtsig step,
+// jwtSigSpan). A signature is checked by its form only (the founder's
+// 2026-10-31 ruling; variables.SignatureForm: base64url of one length), so
+// it is one value, read whole as oneToken reads a token: bound where an
+// earlier place shows it, else made anew at the call and bound there,
+// never word by word, whose count changes with its '-' and '_'. Nothing
+// is carried inside a signature, so no word of it is asked apart. Two of
+// another form (another length: the header's algorithm, compared exactly,
+// changed with it) are refused as a changed shape, the field whole.
+func (dc *decider) signature(path string, bare variables.Address, rec, live string, rd textReading) ([]Decision, bool) {
+	if !variables.SignatureForm(rd.Rec, rd.Live) {
+		return []Decision{dc.refuse(path, bare, -1, rec, live, RefusalChangedShape,
+			"its JWT's signature changed form (keploy checks a signature by its form: base64url of one length)", nil, dc.fieldNoise(path))}, true
+	}
+	whole := readWord{At: rd.At, Rec: rd.Rec, Live: rd.Live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rd.Rec, Live: rd.Live}}}
+	return []Decision{dc.word(path, bare, rec, live, rd.Rec, whole, false, nil)}, false
 }
 
 // randomToken reports whether rec and live are one value of one generator:
@@ -500,9 +791,52 @@ func tokenAlphabet(rec, live string) bool {
 	if strings.Trim(rec, "-_"+letters) == "" && strings.Trim(live, "-_"+letters) == "" {
 		return true
 	}
+	return stdGroups(rec, live)
+}
+
+// stdGroups reports whether rec and live are both of the standard base64
+// alphabet ('+' and '/'), whole groups of four characters with the same '='
+// padding in each run, at most two: what Go's base64.StdEncoding writes.
+func stdGroups(rec, live string) bool {
+	const letters = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	r, l := strings.TrimRight(rec, "="), strings.TrimRight(live, "=")
 	return len(rec)%4 == 0 && len(rec)-len(r) <= 2 && len(rec)-len(r) == len(live)-len(l) &&
 		strings.Trim(r, "+/"+letters) == "" && strings.Trim(l, "+/"+letters) == ""
+}
+
+// wholeCopy decides a text whose two runs' words do not pair (a word was
+// added or dropped, or the text between them changed, rd.ChangedShape) as
+// one value where an earlier leaf holds the field whole in both runs: the
+// recorded text whole in R and round F's whole in F (a client_id of
+// base64url parts, sent back as it was given, whose '-' and '_' fall
+// elsewhere in each run). Word by word replay could never write it back;
+// whole, it is that leaf's value in each run, bound at the earliest such
+// leaf of the call's scope placed before it, as a word one place shows in
+// both runs is (wordBy). A text that holds an instant is left to the
+// instant's rules, and one no such leaf holds to the refusals after this:
+// ok is false there.
+//
+// The leaves read are an exchange's (p.rec and p.live: a recording's place
+// keeps its Raw, never a text), so stateBefore alone places one before the
+// call in both runs: an exchange sent after the call, or one round F served
+// only after the call reached keploy, is not before (earlierState). The
+// call's answer reads back no whole text (readBack reads back a word inside
+// a longer value), so no echo is answered here, as none is for a whole word
+// wordBy binds.
+func (dc *decider) wholeCopy(path string, bare variables.Address, rec, live string, rd textReading) (Decision, bool) {
+	if len(rd.Instants) > 0 || !rd.ChangedShape && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 }) {
+		return Decision{}, false
+	}
+	var src []evPlace
+	for _, p := range dc.ps {
+		if p.state == stateBefore && (dc.allScope || !p.otherTest) && p.rec == rec && p.live == live {
+			src = append(src, p)
+		}
+	}
+	if len(src) == 0 {
+		return Decision{}, false
+	}
+	return dc.bound(path, bare, -1, changedInstant{r: rec, l: live, rec: rec}, src, ", the earliest place before the call that holds it whole in both runs"), true
 }
 
 // unpaired decides a text where a word was added or dropped: refused whole
@@ -1379,13 +1713,14 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 		return dc.cannotCheck(path, w.At, w.At.Word, c.r, c.l, "one run's value here is no instant")
 	}
 	c.word, c.noWord = clockWordOf(rec, live, rd, iw)
+	c.claim = claimWhole(rd, iw)
 	if iw.Rec != nil && iw.Live != nil && !iw.ByText {
 		c.rm, c.lm = iw.Rec, iw.Live
 		c.ri = typedInstant{at: time.Unix(0, iw.Rec.key.at).UTC(), res: iw.Rec.res, names: namesMoment}
 		c.li = typedInstant{at: time.Unix(0, iw.Live.key.at).UTC(), res: iw.Live.res, names: namesMoment}
 	}
 	c.echo, c.unnamed = dc.readBack(path, w.At, w, rec, true)
-	c.rec = rec
+	c.rec, c.live = rec, live
 	if w.Rec != rec {
 		c.valueEcho = c.echo
 	}
@@ -1463,15 +1798,28 @@ type changedInstant struct {
 	byText, text bool
 	word         models.ClockWord
 	noWord       string
+	// claim is the JWT claim whose value whole the instant is, where the
+	// text is one claim of a token keploy opened (claimWhole); "" otherwise.
+	claim string
 	// echo is where the call's answer reads the word back (readBack, whole
 	// values too), valueEcho the same for a Value (the text whole is the
 	// adapter's echo), unnamed the first such place keploy cannot name, rec
-	// the leaf's recorded text.
-	echo, valueEcho []variables.Address
-	unnamed, rec    string
+	// the leaf's recorded text and live its text in round F (an instant in a
+	// text's; leaf reads them).
+	echo, valueEcho    []variables.Address
+	unnamed, rec, live string
 	// aside names the earlier places that held R's value where F's does
 	// not stand: a Clock's line says it set them aside.
 	aside []string
+}
+
+// leaf is the changed leaf's whole text in each run: the instant's own,
+// where it is no instant in a text.
+func (c changedInstant) leaf() (rec, live string) {
+	if c.text {
+		return c.rec, c.live
+	}
+	return c.r, c.l
 }
 
 // clockWordOf is where iw, an instant rd reads, stands in rec, its leaf's
@@ -1493,6 +1841,21 @@ func clockWordOf(rec, live string, rd textReading, iw *instantWord) (word models
 		return word, "the text around it changed too"
 	}
 	return models.ClockWordOf(rec, rs, re), ""
+}
+
+// claimWhole is the claim of a JWT that rd, a reading of a leaf's text,
+// opened as its one step, where iw, an instant rd reads, is that claim's
+// value whole in both runs: "" otherwise (a word of a claim, a claim of a
+// token inside another decoded text, any other step).
+func claimWhole(rd textReading, iw *instantWord) string {
+	if len(rd.At.Steps) != 1 || iw.RecAt != [2]int{0, len(rd.Rec)} || iw.LiveAt != [2]int{0, len(rd.Live)} {
+		return ""
+	}
+	claim, ok := strings.CutPrefix(string(rd.At.Steps[0]), string(variables.JWTClaim("")))
+	if !ok {
+		return ""
+	}
+	return claim
 }
 
 // inZone is m, a wall clock of no zone, read in the application's zone, as
@@ -1992,11 +2355,32 @@ func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool)
 // a fine cut (0), a pick (1), a given's text, one templated slot of the
 // test case's request (2), an answer (3), a fine copy (4), a Clock its
 // call's window holds (5), a coarse copy (6), a read since its test began
-// (7), a client test's own value (8); else refused.
+// (7), a client test's own value (8); else refused. A field keploy.yml
+// declares a read of the clock is then decided by its rule (declaredClock).
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
+	dc.readClock = false
+	d := dc.instantLearned(path, at, n, c)
+	src, declared := dc.source(path)
+	declared = declared && src.Kind == SourceClock
+	if declared {
+		d = dc.declaredClock(path, at, n, c, src, d)
+	}
+	return dc.timeDefault(path, at, n, c, d, declared)
+}
+
+// instantLearned is instant as learning alone decides it.
+func (dc *decider) instantLearned(path string, at variables.Address, n int, c changedInstant) Decision {
 	defer dc.letGoHalves()
 	r, l := c.r, c.l
 	inScope := dc.inScope
+	// A read of the application's clock that the call's own window holds in
+	// both runs goes before a client test's request (readOverClients): no
+	// place of the request is read for the moment, as main reads the call.
+	earlier := dc.in.Earlier
+	if c.rm != nil && c.lm != nil {
+		earlier = readOverClients(earlier, dc.in.Window, []driftedInstant{{rec: *c.rm, live: *c.lm}}, dc.dr.zone)
+	}
+	overClients := len(earlier) < len(dc.in.Earlier)
 	// untold: answers of the scope before the call, whose view in round F
 	// keploy cannot tell, that hold F's moment and not R's.
 	var hs []instantHold
@@ -2018,6 +2402,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			ps = []evPlace{req, ans}
 		}
 		for _, p := range ps {
+			if overClients && dc.clientCase(p.mock) {
+				continue
+			}
 			hr, fr, okR := dc.holds(p, p.t.rec, r, c.rm, c.byText)
 			hl, fl, okL := dc.holds(p, p.t.live, l, c.lm, c.byText)
 			if !okR || !okL {
@@ -2140,7 +2527,30 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 	}
 	if c.rm != nil && c.lm != nil {
-		reqs := slices.DeleteFunc(slices.Clone(dc.in.Earlier), func(e Earlier) bool { return !e.Given || e.Gave || e.Unread != "" })
+		// A client test's request is the client's own in each run, never
+		// one keploy sent as recorded. A leaf of it that shows the value by
+		// its text in both runs moved with the value: a slot (2), whatever
+		// unit its digits end at (a UnixNano that ends in 0 beside one that
+		// does not). One that holds the recorded moment only as a cut of a
+		// finer instant (the UnixNano in a name the client made, beside the
+		// second the application read from its own clock a moment later)
+		// gave the application no value at that cut to pick, as in the loop
+		// above. Neither is a place the recorded moment stands at by a rule
+		// round F's does not follow: the later steps read the value, and
+		// one no window holds stays refused, naming the place.
+		followed := map[[2]string]bool{}
+		for _, h := range hs {
+			if p := h.p; h.hr && request(p) && dc.clientCase(p.mock) &&
+				(h.hl && asText(p.t.rec, r) && asText(p.t.live, l) || dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm)) {
+				followed[[2]string{p.mock, p.path}] = true
+			}
+		}
+		reqs := slices.DeleteFunc(slices.Clone(earlier), func(e Earlier) bool { return !e.Given || e.Gave || e.Unread != "" })
+		for i, e := range reqs {
+			if len(followed) > 0 && e.incoming {
+				reqs[i].Seen = slices.DeleteFunc(slices.Clone(e.Seen), func(s Seen) bool { return followed[[2]string{e.Mock, s.Leaf.Path}] })
+			}
+		}
 		if where, _ := dc.dr.requestHolds([]moment{*c.rm}, []moment{*c.lm}, reqs); where != "" {
 			return dc.refuse(path, at, n, r, l, RefusalPick,
 				"the recorded moment stands in the test case at "+where+", and no cut there gives round F's", []string{where}, dc.fieldNoise(path))
@@ -2149,15 +2559,31 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 
 	// A given's text, and 2. one templated slot of the test case's request
 	// that shows it in both runs: a Value bound there; two slots, refused.
+	// A client test's request that holds the moment in both runs only as a
+	// coarse cut of a finer instant (the UnixNano in a name, beside a
+	// second) is no slot keploy can bind: a variable holds one text. Where
+	// the call's own window holds the read, or the test's since its begin,
+	// the value is that read (5, 7), as an answer's is at step 3 and as main
+	// reads it; with no such read it stays a slot, which the adapter that
+	// cannot bind another form refuses.
+	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
+	windowRead := func() bool {
+		return c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	}
+	cutSlot := func(p evPlace) bool {
+		return c.rm != nil && c.lm != nil && dc.clientCase(p.mock) && dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm) && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && windowRead()
+	}
 	gave := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && h.p.gave })
-	slots := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() })
+	slots, again := oneSource(oneSlotEach(heldWhere(hs, func(h instantHold) bool {
+		return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() && !cutSlot(h.p)
+	})), c)
 	if len(gave) > 0 {
 		return dc.bound(path, at, n, c, gave, ": a value the test gave keploy, which the call sends as given in both runs")
 	}
 	switch len(slots) {
 	case 0:
 	case 1:
-		return dc.bound(path, at, n, c, slots, ": the test case's request holds it, templated, in both runs")
+		return dc.bound(path, at, n, c, slots, ": the test case's request holds it, templated, in both runs"+again)
 	default:
 		return dc.refuse(path, at, n, r, l, RefusalTwoSources,
 			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.fieldNoise(path))
@@ -2184,8 +2610,25 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	cutOnly := len(heldWhere(hs, func(h instantHold) bool {
 		return answer(h) && !h.fr && c.rm != nil && dc.cutOfFinerOnly(h.p.t.rec, h.p.t.live, r, *c.rm)
 	})) == len(answers)
-	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
-	ownRead := cutOnly && c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	ownRead := cutOnly && windowRead()
+	// An answer that only reads back what a send of the scope wrote, where
+	// that send holds the moment at a cut coarser than a millisecond in both
+	// runs and its own call learned it as its read of the clock (clockSrc,
+	// as step 6 reads a send), is no source either: every such answer comes
+	// after the send, so it holds the moment because the test wrote it there
+	// a few milliseconds before, and two reads of one coarse cut are no copy
+	// (step 6). Where the call's own window holds the read, or a client
+	// test's window since its begin does, the moment goes on to steps 5, 7
+	// and 6 as with no answer, each checked at replay; where neither does,
+	// the value is a copy and the answer still binds it. A send at a
+	// millisecond or finer still makes the answer a copy's (4), an answer no
+	// such send came before still binds, and another test's answer is never
+	// one of these.
+	if !ownRead && len(answers) > 0 && c.rm != nil && c.lm != nil && max(c.rm.res, c.lm.res) > time.Millisecond && windowRead() {
+		if coarse := copies(false); len(coarse) > 0 && earliest(coarse).clock && earliest(coarse).at.Before(earliest(answers).at) {
+			ownRead = true
+		}
+	}
 	if len(answers) > 0 && !ownRead {
 		// An answer recorded after the call that round F gave the
 		// application before it, holding F's moment, is a second source:
@@ -2237,7 +2680,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			gaveOutside, fine = append(gaveOutside, p.mock), fine || h.fr || h.fl
 		}
 	}
-	if mock, ok := dc.echoedOutside(c); ok {
+	if mock, ok := dc.echoedOutside(c, earlier); ok {
 		gaveOutside, fine = append(gaveOutside, mock), fine || fineCut(c.rm.res) || fineCut(c.lm.res)
 	}
 	if len(gaveOutside) > 0 {
@@ -2321,7 +2764,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				if gaveRefusal != nil {
 					return *gaveRefusal
 				}
-				return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
+				return dc.heldRead(dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path)))
 			case g != "":
 				off, cutWhy, guardWhy, inWindow = models.ClockOffset{}, "", g, false
 			}
@@ -2398,7 +2841,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			if ln, sok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &off}); sok && ln.Offset != nil {
 				switch g, uncompared := dc.offsetGuard(path, *ln.Offset, enc, wb); {
 				case uncompared:
-					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
+					return dc.heldRead(dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path)))
 				case g == "":
 					return dc.clock(path, at, n, c, *ln.Offset, "a read of the application's clock made since its test began in both runs, before its call's window", false)
 				}
@@ -2611,11 +3054,29 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 		return dc.noPayloadRefusal(path, at, n, r, l)
 	}
 	if echo := dc.instantEchoed(c); echo != "" {
-		return dc.cannotCheck(path, at, n, r, l, "keploy cannot check a clock read its own call's recorded answer holds ("+echo+"): it would serve that answer's recorded moment")
+		return dc.heldRead(dc.cannotCheck(path, at, n, r, l, "keploy cannot check a clock read its own call's recorded answer holds ("+echo+"): it would serve that answer's recorded moment"))
 	}
 	if c.text {
 		lay := models.ClockOffset{Layout: clockTextLayout(r)}.MeetLayout(clockTextLayout(l))
-		if lay == "" || lay == models.LayoutApart {
+		apart := lay == "" || lay == models.LayoutApart
+		if c.noWord != "" {
+			if form, formF := dc.claimForm(path, c); form != "" {
+				// The time default checks a time in a claim of a token the
+				// application signed by its form alone, at that claim: its
+				// claim's forms say how a run writes it, so one its two runs
+				// wrote in two layouts names none (a Layout of "" meets any).
+				if apart {
+					lay = ""
+				}
+				off.Layout, off.Form, off.FormF, off.Claim = lay, form, formF, c.claim
+				rule = "a time in the " + c.claim + " claim of a JWT, checked by its form alone (" + off.Forms() + ", keploy.yml's times setting at its default), the rest of the token checked as learned; learned as " + rule
+				d := dc.learned(path, at, n, r, l, OutcomeClock, rule, c.aside)
+				off.Why = d.Line
+				d.Clock = &off
+				return d
+			}
+		}
+		if apart {
 			return dc.cannotCheck(path, at, n, r, l, "its two runs write it in different layouts")
 		}
 		if c.noWord != "" {
@@ -2647,15 +3108,29 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 
 // bound is a Value bound at the earliest of src, rule following that
 // place's name; From says Run where it is the start-up's or an earlier
-// test's (the run's variable).
+// test's (the run's variable), Given (Client) where it is the test case's
+// request (a client test's), and Clock where its call's learn step learned
+// it as a plain read of the clock (valueByForm reads it).
 func (dc *decider) bound(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
 	if first.trailed {
 		rule += ", sent in " + dc.in.Trails.Test + ", which this call trails"
 	}
-	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+rule+answeredAt(c.valueEcho, c.rec), names(src))
-	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp}
-	d.FromAt = dc.fromAt(first, c.r)
+	fromAt, name, places := dc.fromAt(first, c.r, c.l), first.name, names(src)
+	if claim := ClaimName(fromAt); claim != "" {
+		// Bound inside a token, the line names the claim that holds it,
+		// and so does its place in the line's places.
+		name += ", its JWT's " + claim + " claim"
+		for i, p := range places {
+			if p == first.name {
+				places[i] += " (its JWT's " + claim + " claim)"
+			}
+		}
+	}
+	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), places)
+	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
+		Given: first.given, Client: dc.clientCase(first.mock), Clock: first.clock, Offset: first.offset}
+	d.FromAt = fromAt
 	d.Echo = c.valueEcho
 	return d
 }
@@ -2691,8 +3166,13 @@ func twoClockReads(src []evPlace) bool {
 func (dc *decider) copied(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
 	if i := slices.IndexFunc(src, func(p evPlace) bool { return p.clock && p.name != first.name }); i >= 0 {
-		return dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
+		d := dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
 			"the same moment was sent at "+first.name+" and "+src[i].name+", two separate reads", []string{first.name, src[i].name}, dc.fieldNoise(path))
+		if first.clock {
+			// Each source its own call's read of the clock: a copy of a read.
+			d = dc.heldRead(d)
+		}
+		return d
 	}
 	return dc.bound(path, at, n, c, src, rule)
 }
@@ -3185,22 +3665,452 @@ func addrList(as []variables.Address) string {
 	return strings.Join(s, ", ")
 }
 
-// fromAt is the address of the word v at p, a Value's bind place: the
-// earlier exchange's leaf as its adapter names it (an answer's as an
-// answer's), at v's word where v is one of its words, else the whole leaf;
-// no place (word -1) for a recording keploy read whole.
-func (dc *decider) fromAt(p evPlace, v string) variables.Address {
+// fromAt is the address of the word v (f in round F) at p, a Value's bind
+// place: the earlier exchange's leaf as its adapter names it (an answer's as
+// an answer's), at v's word where v is one of its words, else the whole
+// leaf; no place (word -1) for a recording keploy read whole. A client
+// test's request (clientCase) whose leaf's own words do not hold v but
+// whose JWT does, in a claim that holds v and f at one word in the two runs
+// (claimWord: a token the application minted with an id in it, sent back
+// to it), is addressed at that word of the claim (|jwt.<claim>#<n>): a
+// replay decodes the claim in the request that pairs with the test case,
+// binds the variable to it, and compares each later use with it. A call's
+// request is never addressed at a claim: its replay puts the recorded
+// values back at its places, and cannot write a claim into a signed token;
+// its leaf is named whole, as before. A value that is the JWT's signature
+// in both runs (sigAt) is addressed at the signature (|jwtsig), first: a
+// replay reads it there whole, whatever its count of words. A value of more
+// than one word that a longer text holds as one of its tokens in both runs,
+// at one index (tokenStepAt: an id in a consent URL, a key after "Bearer "), is
+// addressed at that token (|token.<n>): a replay reads it there whole,
+// wherever the next run's '-' and '_' fall, where the text whole would hold
+// the id equal to the whole URL; a random token (randomToken) so even where
+// it is one word of the text in both runs (an id of letters and digits,
+// whose next run may hold a '-'). A token step of the URL-safe cut
+// (|urltoken.<n>) reads an id in a URL's path, and one through |pct a value
+// behind escapes; a word the escapes hide from the text's own words is read
+// through |pct at its word (pctWord), never the text whole. A Cookie or
+// Set-Cookie header holds a token as one pair's value, beside other pairs
+// (refresh_token=<JWT>; refresh_token_staging=<JWT>), which no JWT step reads
+// whole: its signature and its claims are read in the first pair that holds
+// them (cookieToken), at that pair's step (|cookie.<name>|jwtsig,
+// |cookie.<name>|jwt.<claim>#<n>), each where the whole header's would be.
+// Words and claims are read in the text the address's own steps open (an
+// adapter's PlaceOf may name a decode step), so the claim's step follows
+// them; a leaf they do not open has no word or claim there: it is named
+// whole, as before.
+func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 	if p.leaf.Path == "" {
 		return variables.Address{Word: -1}
 	}
 	a := dc.in.AddressOf(p.leaf, p.side == Response)
-	for i, w := range variables.Words(p.leaf.Value) {
-		if p.leaf.Value[w[0]:w[1]] == v {
+	rec, _ := a.WordOf(p.leaf.Value)
+	live, _ := a.WordOf(p.live)
+	if sigAt(rec, live, v, f) {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), variables.StepJWTSig), -1
+		return a
+	}
+	if st, _, ok := cookieToken(a, rec, live, v, f, false); ok {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), st...), -1
+		return a
+	}
+	steps, byToken := tokenStepAt(rec, live, v, f)
+	if byToken && randomToken(v, f) {
+		// A random token that is one word in both runs (an id of letters
+		// and digits alone) is still read at its token: the next run's id
+		// may hold a '-' or '_', which a word would cut.
+		a.Steps, a.Word = append(slices.Clip(a.Steps), steps...), -1
+		return a
+	}
+	for i, w := range variables.Words(rec) {
+		if rec[w[0]:w[1]] == v {
 			a.Word = i
-			break
+			return a
 		}
 	}
+	if n, ok := pctWord(rec, v); ok {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), variables.StepPct), n
+		return a
+	}
+	if byToken {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), steps...), -1
+		return a
+	}
+	if !dc.clientCase(p.mock) {
+		return a
+	}
+	if st, n, ok := claimWord(rec, live, v, f); ok {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), st), n
+	} else if st, n, ok := cookieToken(a, rec, live, v, f, true); ok {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), st...), n
+	}
 	return a
+}
+
+// tokenStepAt is the steps to the token that v and f, a value as recorded
+// and as round F saw it, are in rec and live, two runs of a longer text: a
+// token of one index n in both, cut by the first of tokenCuts that holds
+// it so (|token.<n>, the base64 alphabets together; else |urltoken.<n>,
+// the URL-safe one alone, whose '/' ends a token of a URL's path:
+// "/v1/requests/<id>"), the first such token of rec that is v, where
+// live's token of that index is f. A text that holds escapes ("%2B" of a
+// standard key passed through url.QueryEscape) is read so too through
+// |pct, after its own text: |pct alone where the decoded texts are v and f
+// whole. ok is false where rec and live are v and f whole (the place is
+// named whole), or no cut holds such a token: past the last token of
+// either text, no token of that index is in both. Each cut reads rec and
+// live once each, their n-th tokens side by side, each from the end of the
+// one before, so a leaf of any length costs a pass for each cut (and one
+// to decode it), never a pass for each token.
+func tokenStepAt(rec, live, v, f string) ([]variables.Step, bool) {
+	if rec == v && live == f {
+		return nil, false
+	}
+	if st, ok := cutTokenAt(rec, live, v, f); ok {
+		return []variables.Step{st}, true
+	}
+	if !strings.Contains(rec, "%") && !strings.Contains(live, "%") {
+		return nil, false
+	}
+	r, rok := variables.Decode(variables.StepPct, rec)
+	l, lok := variables.Decode(variables.StepPct, live)
+	switch {
+	case !rok || !lok:
+		return nil, false
+	case r == v && l == f:
+		return []variables.Step{variables.StepPct}, true
+	}
+	if st, ok := cutTokenAt(r, l, v, f); ok {
+		return []variables.Step{variables.StepPct, st}, true
+	}
+	return nil, false
+}
+
+// pctWord is n where v is the n-th word of rec percent-decoded, rec a text
+// that holds escapes and whose own words do not hold v ("9Lk" of
+// "code=q3Zx%2B9Lk", whose own word there is "2B9Lk"): a replay reads that
+// word through |pct, where the text whole holds no word equal to v. ok is
+// false where rec holds no escape, does not decode, or its decoded words do
+// not hold v.
+func pctWord(rec, v string) (int, bool) {
+	if !strings.Contains(rec, "%") {
+		return 0, false
+	}
+	r, ok := variables.Decode(variables.StepPct, rec)
+	if !ok {
+		return 0, false
+	}
+	for i, w := range variables.Words(r) {
+		if r[w[0]:w[1]] == v {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// cutTokenAt is the token step of the first of tokenCuts at which v and f
+// are rec's and live's token of one index (tokenStepAt).
+func cutTokenAt(rec, live, v, f string) (variables.Step, bool) {
+	for _, c := range tokenCuts {
+		r, l := 0, 0
+		for n := 0; ; n++ {
+			rs, re, rok := c.next(rec, r, len(rec))
+			ls, le, lok := c.next(live, l, len(live))
+			if !rok || !lok {
+				break
+			}
+			if rec[rs:re] == v && live[ls:le] == f {
+				return c.step(n), true
+			}
+			r, l = re, le
+		}
+	}
+	return "", false
+}
+
+// tokenCuts are the cuts tokenStepAt reads a text's tokens by, in turn,
+// each the one a replay's step of it reads: the base64 alphabets together
+// (variables.NextToken, |token.<n>), then the URL-safe one alone
+// (variables.NextURLToken, |urltoken.<n>).
+var tokenCuts = []struct {
+	step func(int) variables.Step
+	next func(s string, from, to int) (int, int, bool)
+}{
+	{variables.Token, variables.NextToken},
+	{variables.URLToken, variables.NextURLToken},
+}
+
+// cookieToken is the steps from a, a Cookie or Set-Cookie header's own text
+// (rec and live, two runs of it), to the part of a JWT that holds v in rec
+// and f in live, where one of its pairs holds that token as its value: the
+// pair's step (cookie.<name>), then jwtsig where v and f are the token's
+// signatures (sigAt), at word -1; with claims, the claim's step instead
+// where a claim holds them (claimWord), at its word n. The pairs are
+// cookieSpans' (named once in both runs, in one order, whose values
+// differ), the first that holds them in rec's order: a replay reads that
+// pair by name. ok is false where a is no such header's text, or no pair
+// holds them so.
+func cookieToken(a variables.Address, rec, live, v, f string, claims bool) ([]variables.Step, int, bool) {
+	if !cookiePlace(a) {
+		return nil, 0, false
+	}
+	spans, _ := cookieSpans(rec, live)
+	for _, s := range spans {
+		pair := s.Parts[0]
+		if !claims {
+			if sigAt(pair.Rec, pair.Live, v, f) {
+				return []variables.Step{pair.Step, variables.StepJWTSig}, -1, true
+			}
+			continue
+		}
+		if st, n, ok := claimWord(pair.Rec, pair.Live, v, f); ok {
+			return []variables.Step{pair.Step, st}, n, true
+		}
+	}
+	return nil, 0, false
+}
+
+// sigAt reports whether v and f, a value as recorded and as round F saw
+// it, are the signatures of rec and live, two runs of one JWT
+// (variables.StepJWTSig): the place is then addressed at its signature,
+// whose words a replay could not count on (decider.signature), whatever
+// its words are.
+func sigAt(rec, live, v, f string) bool {
+	r, rok := variables.Decode(variables.StepJWTSig, rec)
+	l, lok := variables.Decode(variables.StepJWTSig, live)
+	return rok && lok && r == v && l == f
+}
+
+// ClaimName is the JWT claim a bind place reads (its last such step), for a
+// learned line: "" where it reads none. An adapter reads it to refuse a
+// claim place that is no client test's request (Place.Claim).
+func ClaimName(at variables.Address) string {
+	claim := ""
+	for _, st := range at.Steps {
+		if c, ok := strings.CutPrefix(string(st), string(variables.JWTClaim(""))); ok {
+			claim = c
+		}
+	}
+	return claim
+}
+
+// claimWord is the claim of the JWTs rec and live, two runs of one leaf,
+// that holds v in rec and f in live at one word n, as a step: the first
+// such claim by name (jwtSpan reads the claims that differ, in that order).
+// Where no claim holds them at a word, the first claim that is v in rec and
+// f in live whole (an id of several words, a UUID in a sub claim), at word
+// -1. A random token (randomToken) a claim is whole in both runs is read
+// there whole first, even where it is one word of it in both runs (an id of
+// letters and digits, whose next run may hold a '-' or '_', which a word
+// would cut), as fromAt reads one at its token. ok is false where either is
+// no JWT (jwtSpan then opens no claim), or no claim holds them so: the leaf
+// is then named whole, as before.
+func claimWord(rec, live, v, f string) (variables.Step, int, bool) {
+	span, _ := jwtSpan(rec, live)
+	if randomToken(v, f) {
+		for _, part := range span.Parts {
+			if part.Rec == v && part.Live == f {
+				return part.Step, -1, true
+			}
+		}
+	}
+	for _, part := range span.Parts {
+		for n, w := range variables.Words(part.Rec) {
+			if part.Rec[w[0]:w[1]] != v {
+				continue
+			}
+			if lw, ok := (variables.Address{Word: n}).WordOf(part.Live); ok && lw == f {
+				return part.Step, n, true
+			}
+		}
+	}
+	for _, part := range span.Parts {
+		if part.Rec == v && part.Live == f {
+			return part.Step, -1, true
+		}
+	}
+	return "", 0, false
+}
+
+// claimAt is Place.Claim of p, a leaf at the variable place p.Var, recorded
+// rec and seen live in record's full round, that holds the recorded value v
+// and the value f F saw inside a longer value: p.Var, at the word of the
+// claim that holds them (claimWord), or in a Cookie header at the claim of
+// the token a pair holds (cookieToken: |cookie.<name>|jwt.<claim>#<n>);
+// "" where none does, p.Var is no place (""), or p is no client test's
+// request (Client): a replay reads a claim
+// only in the request that pairs with a client test case, and cannot write
+// one into a call's signed token. A place that already names a step or a
+// word is none: its claim would stand in text it decodes.
+func claimAt(p Place, rec, live, v, f string) string {
+	if !p.Client {
+		return ""
+	}
+	a, err := variables.ParseAddress(p.Var)
+	if err != nil || !a.Whole() {
+		return ""
+	}
+	if st, n, ok := claimWord(rec, live, v, f); ok {
+		a.Steps, a.Word = []variables.Step{st}, n
+		return a.String()
+	}
+	st, n, ok := cookieToken(a, rec, live, v, f, true)
+	if !ok {
+		return ""
+	}
+	a.Steps, a.Word = st, n
+	return a.String()
+}
+
+// wordBindAt is Place.Word of p, a leaf at the variable place p.Var,
+// recorded rec and seen live in record's full round, that held the value
+// (v as recorded, f as F saw it) inside a longer value: p.Var at the one
+// word rec changed by (ChangedWord), where v changed by one word alone too,
+// and the leaf's word is v's, rec's recorded and live's F's (p.Var itself
+// where rec and live are that word whole). "" where rec is v whole (no
+// longer value: the place binds whole), either changed by more than one word
+// or by a byte between words, the words differ, p.Var is no place or names a
+// word or a step already, or p is no client test's request (Client): a
+// replay binds a variable at a word only of the request that pairs with a
+// client test case, and reads a call's request only to put its recorded
+// values back.
+func wordBindAt(p Place, rec, live, v, f string) string {
+	if !p.Client || rec == v {
+		return ""
+	}
+	a, err := variables.ParseAddress(p.Var)
+	if err != nil || !a.Whole() {
+		return ""
+	}
+	k, ok := ChangedWord(v, f)
+	if !ok {
+		return ""
+	}
+	n, ok := ChangedWord(rec, live)
+	if !ok {
+		return ""
+	}
+	vw, fw := wordOf(v, k), wordOf(f, k)
+	if wordOf(rec, n) != vw || wordOf(live, n) != fw {
+		return ""
+	}
+	// rec is the word whole only where live is F's word whole too:
+	// ChangedWord keeps every byte but the word's alike.
+	if rec != vw {
+		a.Word = n
+	}
+	return a.String()
+}
+
+// ChangedWord is the index of the one word (variables.Words) by which live
+// differs from rec: live is rec with that word written anew, every other
+// byte alike. ok is false where the two are alike, or differ in more than
+// one word, in their count of words, or in a byte between words.
+func ChangedWord(rec, live string) (n int, ok bool) {
+	rw, lw := variables.Words(rec), variables.Words(live)
+	if len(rw) != len(lw) {
+		return -1, false
+	}
+	n = -1
+	for i := range rw {
+		if rec[rw[i][0]:rw[i][1]] == live[lw[i][0]:lw[i][1]] {
+			continue
+		}
+		if n >= 0 {
+			return -1, false
+		}
+		n = i
+	}
+	if n < 0 || rec[:rw[n][0]] != live[:lw[n][0]] || rec[rw[n][1]:] != live[lw[n][1]:] {
+		return -1, false
+	}
+	return n, true
+}
+
+// wordOf is the n-th word of s (variables.Words), "" where s has none.
+func wordOf(s string, n int) string {
+	w, _ := variables.Address{Word: n}.WordOf(s)
+	return w
+}
+
+// ClaimHolding is the name of the claim of the JWT text holds (a token, or
+// "Bearer <token>") whose value holds v whole or at a word, the first such
+// claim by name: "" where text holds no JWT, v is "", or no claim holds v.
+// A refusal reads it to name the claim it found no place to bind at.
+func ClaimHolding(text, v string) string {
+	_, claims, ok := jwtClaims(text)
+	if !ok || v == "" {
+		return ""
+	}
+	for _, n := range slices.Sorted(maps.Keys(claims)) {
+		c, ok := variables.Decode(variables.StepJSON, string(claims[n]))
+		if !ok {
+			continue
+		}
+		if c == v {
+			return n
+		}
+		for _, w := range variables.Words(c) {
+			if c[w[0]:w[1]] == v {
+				return n
+			}
+		}
+	}
+	return ""
+}
+
+// ClaimRefused is why the value v, sent earlier by mock at path inside a
+// claim of the JWT there (rec as recorded, live in record's full round),
+// binds no variable there, the claim named (ClaimHolding): "" where rec
+// holds v in no claim. A call's request (client false) is no place to bind
+// a claim at: a replay reads a claim only in the request that pairs with a
+// client test case, and cannot write one into a token the call sends. A
+// client test's request is none where round F's text there holds no JWT,
+// or no claim of its token holds round F's value where the recording's
+// claim held v (at that word, or whole: claimWord).
+func ClaimRefused(mock, path, rec, live, v string, client bool) string {
+	claim := ClaimHolding(rec, v)
+	if claim == "" {
+		return ""
+	}
+	why := mock + " sent this value in the " + claim + " claim of the JWT at " + path
+	if !client {
+		return why + ", a call's request: keploy binds a variable at a JWT claim only in a client test's request, which a replay reads, never in a token a call sends, which a replay cannot write a claim into"
+	}
+	if _, _, ok := jwtClaims(live); !ok {
+		return why + ", and this run's text there holds no JWT: no variable can bind it there"
+	}
+	return why + ", and no claim of this run's token holds this run's value where the recording's claim held it, at that word or whole: no variable can bind it there"
+}
+
+// BindAt is where a variable binds at p, and the value F saw there: its
+// variable place (Var) and Live, where p held the value whole; the word of
+// its JWT claim (Claim) and that word of Live, where p is a client test's
+// request (Client) that held the value inside the claim; else the word of
+// it that held the value's one changed word (Word) and that word of Live.
+// ok is false where p has no variable place, held the value inside a
+// longer value otherwise (Claim and Word "", which name no place), or names
+// a claim or a word of a call's request, which a replay cannot write a
+// claim into, nor bind a word at: no place a replay can bind at.
+func (p Place) BindAt() (at, live string, ok bool) {
+	switch {
+	case p.Var == "":
+		return "", "", false
+	case p.Whole:
+		return p.Var, p.Live, true
+	case !p.Client:
+		return "", "", false
+	}
+	at = cmp.Or(p.Claim, p.Word)
+	a, err := variables.ParseAddress(at)
+	if err != nil {
+		return "", "", false
+	}
+	w, ok := a.WordOf(p.Live)
+	if !ok {
+		return "", "", false
+	}
+	return at, w, true
 }
 
 // learned is a decided word and its line.

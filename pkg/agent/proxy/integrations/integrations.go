@@ -767,7 +767,49 @@ type CallRound struct {
 	// view is the store's own token of the view the read was made in
 	// (InStoreView), nil where the read kept none.
 	view any
+	// test is the test whose view the read found (OfTest), "" for a pool
+	// view or a store that names none.
+	test string
+	// reads is how many reads of its misses window had begun when the read
+	// was made (AfterReads).
+	reads uint64
+	// scope is the number of the variable scope in force in the view the
+	// read was made in (InVariableScope), scoped whether the store keeps one.
+	scope  uint64
+	scoped bool
 }
+
+// InVariableScope is c, of a read made in a view served while the variable
+// scope numbered scope was in force (variables.Table.InScope): a test's
+// view, its test's scope; a pool view between tests, the scope of the test
+// that ended, which runs until the next test's begins. A store that keeps
+// one sets it as it marks the call, from the view it read, so a late
+// decision reads the bindings of that scope as the call's own test's
+// (BoundValues.Own, variables.Table.OwnIn), not those of a scope begun after
+// the mark: at zero latency the call read that scope's.
+func (c CallRound) InVariableScope(scope uint64) CallRound {
+	c.scope, c.scoped = scope, true
+	return c
+}
+
+// VariableScope is the number InVariableScope kept; known is false for a
+// store that keeps none.
+func (c CallRound) VariableScope() (scope uint64, known bool) { return c.scope, c.scoped }
+
+// AfterReads is c, of a read made when n reads of the misses window its
+// store files its misses in had begun (the proxy's GetMockErrors of the run,
+// or of the test worker the store serves): the proxy tells from it whether
+// the call was marked before its test set's last read of that window, which
+// no boundary count tells (nothing installs a view between a set's last
+// test's end and the set's end read).
+func (c CallRound) AfterReads(n uint64) CallRound {
+	c.reads = n
+	return c
+}
+
+// Reads is how many reads of its misses window had begun when c's read was
+// made (AfterReads): 0 from a store that counts none.
+func (c CallRound) Reads() uint64 { return c.reads }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
 // name, the recordings its view held as its own (nil: none).
@@ -965,6 +1007,21 @@ func (c CallRound) InTest() bool { return c.inTest }
 // (S12Background of the store then).
 func (c CallRound) Background() bool { return c.background }
 
+// OfTest is c, of a read whose view was test's view (InView's inTest): a store
+// sets it as it marks the call, from the view it read, so the call's miss
+// names the test it was made in (StampMark), wherever the replay is when the
+// miss is reported.
+func (c CallRound) OfTest(test string) CallRound {
+	c.test = test
+	return c
+}
+
+// Test is the test whose view c's read found (OfTest): "" for a pool view, for
+// a read made with the learn tracker ahead of the store
+// (RoundSnapshot.TrackerAhead: the call is no call of the view's test), and
+// for a store that names none.
+func (c CallRound) Test() string { return c.test }
+
 // S12BackgroundIn is S12Background as the call marked call found it: the
 // view its first read found (CallRound.Background), never the one serving
 // when the parser asks, which can be the next set's. A parser that says of a
@@ -987,9 +1044,13 @@ func S12BackgroundIn(call CallRound, db MockMemDb) bool {
 // the next staging's, the staged set's after the call's staging, or the pool
 // view after the call's test ended. The staging it was marked in too
 // (models.MockMismatchReport.MarkEpoch): a miss marked before a test set's
-// staging is not that set's, whenever its report arrives. Nothing for the
-// zero CallRound (a store that marks no round): the proxy reads the view
-// serving then.
+// staging is not that set's, whenever its report arrives. The round's
+// boundary count it was marked at too (models.MockMismatchReport.MarkBounds,
+// where the store keeps one), and the test whose view it found
+// (models.MockMismatchReport.MarkedTest): a test's end charges a miss marked
+// before that test's view was installed to no test it did not make, however
+// late keploy decided the call. Nothing for the zero CallRound (a store that
+// marks no round): the proxy reads the view serving then.
 func StampMark(r *models.MockMismatchReport, call CallRound) {
 	if r == nil || !call.Read() {
 		return
@@ -1000,6 +1061,11 @@ func StampMark(r *models.MockMismatchReport, call CallRound) {
 	}
 	r.MarkedInTest = call.InTest()
 	r.MarkEpoch = call.Epoch()
+	if at, known := call.Round(); known {
+		r.MarkBounds, r.MarkRound = at.Bounds, true
+	}
+	r.MarkedTest = call.Test()
+	r.MarkReads = call.Reads()
 }
 
 // MarkCallRound is mockDb's CallRound now (StagedFinder.MarkCallRound): the
@@ -1183,6 +1249,132 @@ func BackgroundRecordingsOf(db MockMemDb, kind models.Kind) []models.BackgroundR
 		return r.BackgroundRecordings(kind)
 	}
 	return nil
+}
+
+// TrailRecordingsOf is, of db's background recordings of kind
+// (BackgroundRecordingsOf: the set's worker: and startup: recordings), each
+// that trails a test of the replay's scope table (TrailOf), with that test,
+// in recorded order. For a parser to tell a miss carries a trailed test's
+// kept value (MockMismatchReport.TrailsOf). Nothing it returns is served,
+// consumed or to be changed. nil where none trails a test, or db tells
+// neither.
+func TrailRecordingsOf(db MockMemDb, kind models.Kind) []models.TrailRecording {
+	var out []models.TrailRecording
+	for _, r := range BackgroundRecordingsOf(db, kind) {
+		if r.Mock == nil {
+			continue
+		}
+		if tr := TrailOf(db, r.Mock.Name); tr.Test != "" {
+			out = append(out, models.TrailRecording{Mock: r.Mock, Trails: tr.Test})
+		}
+	}
+	return out
+}
+
+// RoundBackgroundReader is an optional MockMemDb capability: the background
+// recordings of kind (BackgroundRecordingReader) of the set the call was
+// marked in (call, from MarkCallRound), not of the set staged when its miss
+// is decided: the replay can stage the next set first, and the next set's
+// recordings tell nothing of a call of the set before it. nil when that set
+// has none, or when the call was marked in a staging older than the store
+// keeps (the call is then read as no background call, and counts); the
+// current set's for the zero CallRound (a store that marks no round).
+type RoundBackgroundReader interface {
+	BackgroundRecordingsIn(call CallRound, kind models.Kind) []models.BackgroundRecording
+}
+
+// BackgroundRecordingsAt is db's background recordings of kind of the set
+// call was marked in (RoundBackgroundReader); of a store that keeps no
+// earlier set's, those of the set staged now (BackgroundRecordingsOf).
+func BackgroundRecordingsAt(db MockMemDb, call CallRound, kind models.Kind) []models.BackgroundRecording {
+	if r, ok := db.(RoundBackgroundReader); ok {
+		return r.BackgroundRecordingsIn(call, kind)
+	}
+	return BackgroundRecordingsOf(db, kind)
+}
+
+// BoundValues is what a set's test variables had bound, as a background
+// miss reads them (Mongo's markBackground): the bindings the variable scope
+// the call was marked in made itself (variables.Table.OwnIn, of the mark's
+// CallRound.VariableScope: the running scope's while it is that scope, what
+// it bound as it ended once the replay began the set's next test, or the
+// same test's next run, first; a pool view's call between tests is the
+// ended test's, whose scope runs until the next begins; variables.Table.
+// OwnOf, by the mark's test, for a mark that keeps no scope), what each ended test of the set
+// bound itself (variables.Table.EndedOf), the binding of a name a test's own
+// scope made (variables.Table.LookupOf: the running scope's while it is that
+// test's, else the latest of its ended scopes'; Mongo's markTrails reads a
+// trailed test's values so), and the test each recording trails by the
+// set's scope table (TrailedTests).
+type BoundValues interface {
+	Own() []variables.Binding
+	EndedOf(test string) []variables.Binding
+	LookupOf(test, name string) (b variables.Binding, ended, ok bool)
+	TrailOf(mock string) learn.Trail
+}
+
+// RoundBoundReader is an optional MockMemDb capability: the bound values
+// (BoundValues) of the set the call was marked in (call, from
+// MarkCallRound), not of the set whose variables are in force when its
+// miss is decided: the replay can begin the next set first, which forgets
+// every binding of the set before (as RoundBackgroundReader is to the
+// background recordings). nil when the call was marked in a set older than
+// the store keeps (no value is bound for it, so a background miss counts);
+// the set's in force for the zero CallRound. Own is the scope's the call was
+// made in (CallRound.VariableScope), or of the test it names (CallRound.Test)
+// for a mark that keeps no scope.
+type RoundBoundReader interface {
+	BoundValuesIn(call CallRound) BoundValues
+}
+
+// BoundValuesAt is db's bound values of the set call was marked in
+// (RoundBoundReader); of a store that keeps no earlier set's, those in
+// force now (VariableStore, TrailedTests). nil where the store keeps no
+// variable table: no value is bound.
+func BoundValuesAt(db MockMemDb, call CallRound) BoundValues {
+	if r, ok := db.(RoundBoundReader); ok {
+		return r.BoundValuesIn(call)
+	}
+	vs, ok := db.(VariableStore)
+	if !ok {
+		return nil
+	}
+	table := vs.Variables()
+	if table == nil {
+		return nil
+	}
+	return BoundNow(table, db, call)
+}
+
+// BoundNow is the bound values in force in table, with the trails db tells
+// (TrailOf), as call reads them (Own: the scope's the call was made in,
+// variables.Table.OwnIn, for a mark that keeps its variable scope
+// (CallRound.VariableScope); the scope's of the test call names,
+// variables.Table.OwnOf, for one that keeps none): a store's current set's.
+func BoundNow(table *variables.Table, db MockMemDb, call CallRound) BoundValues {
+	scope, scoped := call.VariableScope()
+	return boundNow{table: table, db: db, test: call.Test(), scope: scope, scoped: scoped}
+}
+
+type boundNow struct {
+	table  *variables.Table
+	db     MockMemDb
+	test   string
+	scope  uint64
+	scoped bool
+}
+
+func (b boundNow) Own() []variables.Binding {
+	if b.scoped {
+		return b.table.OwnIn(b.scope)
+	}
+	return b.table.OwnOf(b.test)
+}
+
+func (b boundNow) EndedOf(test string) []variables.Binding { return b.table.EndedOf(test) }
+func (b boundNow) TrailOf(mock string) learn.Trail         { return TrailOf(b.db, mock) }
+func (b boundNow) LookupOf(test, name string) (variables.Binding, bool, bool) {
+	return b.table.LookupOf(test, name)
 }
 
 // LearnEnder is an optional MockMemDb capability: whether the test set's
@@ -1557,6 +1749,44 @@ func TrailOf(db MockMemDb, mock string) learn.Trail {
 		return learn.Trail{}
 	}
 	return t.TrailOf(mock)
+}
+
+// DeclaredSourcesOf is an optional MockMemDb capability under the proven
+// switch: by keploy mock replay's scope table, the sources rules the user
+// declared in keploy.yml give fields of a recording's request
+// (models.ScopeTableReq.Sources, from models.MockEntry.Sources). A learn
+// step decides the call that recording answers by them
+// (learn.DeclaredSources). None where no rule declares one, and from a
+// store that cannot tell.
+type DeclaredSourcesOf interface {
+	SourcesOf(mock string) []models.DeclaredSource
+}
+
+// SourcesOf is the sources rules declared give fields of the request of
+// the recording named mock by db (DeclaredSourcesOf); none for a db that
+// cannot tell.
+func SourcesOf(db MockMemDb, mock string) []models.DeclaredSource {
+	s, ok := db.(DeclaredSourcesOf)
+	if !ok {
+		return nil
+	}
+	return s.SourcesOf(mock)
+}
+
+// TimeFormReader is an optional MockMemDb capability under the proven
+// switch: whether keploy mock replay's scope table turned on the learn
+// step's time default (models.ScopeTableReq.TimeForm), which checks a
+// changed time by its type and form alone (learn.Input.TimeForm).
+type TimeFormReader interface {
+	TimeForm() bool
+}
+
+// TimeFormOf is whether db's replay turned the time default on
+// (TimeFormReader); off for a db that cannot tell, which decides times by
+// the clock checks alone: it refuses more, never passes more.
+func TimeFormOf(db MockMemDb) bool {
+	t, ok := db.(TimeFormReader)
+	return ok && t.TimeForm()
 }
 
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of

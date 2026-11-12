@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -663,6 +664,22 @@ func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.Teard
 		after = read.pids
 	}
 	return why, leftRunning(read, after)
+}
+
+// appRunsOn says whether a daemon the application left runs, one this
+// process adopted and may stop (adoptedRunning), or whether its children keep
+// changing so that it cannot tell, once the application's command has exited:
+// keploy's stop of them (stopAdopted) has not begun. False where it adopts
+// nothing, or cannot read its children: it then does not wait on them.
+func appRunsOn(logger *zap.Logger, _ *app.App) bool {
+	if !adopting.Load() {
+		return false
+	}
+	read, err := adoptedRunning(logger)
+	if err != nil {
+		return false
+	}
+	return len(read.pids) > 0 || !read.settled
 }
 
 // stopAll stops daemons as stopAdopted does, and says why it had to kill

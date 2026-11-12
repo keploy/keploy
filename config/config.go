@@ -422,6 +422,13 @@ type MockCmd struct {
 	// entries (container:redis). Read only under the proven switch
 	// (KEPLOY_PROVEN=1); without it the key is ignored.
 	Real []string `json:"real,omitempty" yaml:"real,omitempty" mapstructure:"real"`
+	// TimeForm turns on the learn step's time default under the proven
+	// switch (models.ScopeTableReq.TimeForm, learn.Input.TimeForm): a
+	// changed time passes at replay with any value of the type and form it
+	// was recorded in. keploy.yml does not set it: the command that runs
+	// the replay does (keploy's T2 commands, unless keploy.yml asks for
+	// strict times). Off, times are decided by the clock checks alone.
+	TimeForm bool `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Contract struct {

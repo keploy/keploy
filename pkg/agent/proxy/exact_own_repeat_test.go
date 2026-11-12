@@ -172,7 +172,7 @@ func httpMissCall(t *testing.T, mm *MockManager, path string) (string, *models.M
 }
 
 // httpMissSend is httpMissCall for the whole request raw.
-func httpMissSend(t *testing.T, mm *MockManager, raw string) (string, *models.MockMismatchReport) {
+func httpMissSend(t *testing.T, mm integrations.MockMemDb, raw string) (string, *models.MockMismatchReport) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), callDeadline)
 	defer cancel()

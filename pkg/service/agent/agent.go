@@ -199,6 +199,7 @@ type Agent struct {
 	testBegins   map[string]time.Time           // replay: test name -> when it began in its recording (SetTestBegins)
 	testReal     map[string][]string            // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
 	testSeeds    map[string]string              // replay: test name -> the seed its recording kept for its browser (SetTestSeeds)
+	testCases    map[string][]models.ClientCase // replay: test name -> the requests its client test sent in its recording (SetTestCases)
 	testGiven    map[string][]models.GivenValue // replay, proven switch: test ID -> the values it gave when recorded; replaced with the scope table (SetScopeGiven)
 	testRepeats  map[string][]models.RepeatRead // replay, proven switch: test ID -> its repeated reads; replaced with the scope table (SetScopeRepeatReads)
 	testPool     []string                       // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
@@ -701,6 +702,7 @@ func (a *Agent) resetScopeState() {
 	a.testBegins = nil
 	a.testReal = nil
 	a.testSeeds = nil
+	a.testCases = nil
 	// keploy test's pool belongs to the set that staged it.
 	a.testPool = nil
 	a.testWorker, a.testBg = nil, nil
@@ -2339,9 +2341,11 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	storage.mu.RUnlock()
 
 	// The staging call (recordedSetShape populated, as for the cursors'
-	// reset above) hands the proxy the set's background recordings, read
-	// from every mock held for the set, served or not.
-	if !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
+	// reset above), and keploy mock replay's own staging of a set
+	// (ExactStaging) whatever windows its table sent, hands the proxy the
+	// set's background recordings, read from every mock held for the set,
+	// served or not: a set that names none clears the previous set's.
+	if params.ExactStaging || !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
 		a.seedBackgroundRecordings(params, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk)
 	}
 

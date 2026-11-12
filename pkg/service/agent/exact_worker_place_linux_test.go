@@ -158,7 +158,7 @@ func TestAPassedOverPlaceTakesItsTurnInTheRunsOrder(t *testing.T) {
 	// set's start through the later openings.
 	worker := []models.MockEntry{{Name: "w-3", Place: "test-3"}, {Name: "w-2", Place: "test-2"}, {Name: "w-1", Place: "test-1"}, {Name: "w-0"}, {Name: "w-4", Place: "test-4"}}
 	a.scopeMu.Lock()
-	got := reachableWorker(worker, a.testReached, a.testReachAt, &testBackground{})
+	got := reachableWorker(worker, a.testReached, a.testReachAt, &testBackground{}, nil)
 	a.scopeMu.Unlock()
 	require.Equal(t, []string{"w-0", "w-1", "w-2", "w-3", "w-4"}, got, "the background rules' order of the reached places")
 }

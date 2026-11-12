@@ -1,6 +1,8 @@
 package variables
 
 import (
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -56,6 +58,52 @@ type Table struct {
 	// gen counts the scopes the table has begun (Reset): a call checked in
 	// one scope never binds in the next (BindAll).
 	gen uint64
+	// notes say, by name, why a variable of the scope is not bound (Note):
+	// the scope's alone, forgotten when the next begins.
+	notes map[string]string
+	// asRecorded are the run's variables the scope answers as recorded
+	// while they are not bound (AnsweredAsRecorded): the scope's alone,
+	// forgotten when the next begins.
+	asRecorded map[string]bool
+	// ended is what the set's ended scopes of a named test bound themselves
+	// (EndedOf): each such scope's own bindings with its test, appended as
+	// the next scope begins, until NewSet. Only a table that keeps them
+	// (KeepEnded) does.
+	ended []endedScope
+	// keepEnded: the table keeps its ended scopes' bindings (KeepEnded).
+	keepEnded bool
+	// test is the test whose scope is running (StartOpeningTest), "" for a
+	// scope begun with no test named, or before the first.
+	test string
+	// scope is the number of the scope in force (InScope): NewSet and each
+	// scope begun for a named test take the next, so a test run twice in a
+	// set has two. A scope begun with no test named (Start, Reset) keeps the
+	// number in force: none of its calls is read as a named test's, and a
+	// call made in it reads the running scope (OwnIn), as when keploy
+	// decides it at once.
+	scope uint64
+	// minted are the values bound at a minted variable's place
+	// (Binding.Minted) in the table's life, by value: each one's first
+	// binding. Neither a new scope nor a new set forgets them (MintedWhy:
+	// an id made anew is never one the run had already). A table that
+	// reads another's run's (ReadRunOf) keeps its in that one's, so the
+	// two hold one list, under that one's lock (mintedOf); one that turns
+	// to read a third's carries the list there. The list only grows, one
+	// entry per value bound at a minted place: a table lives for one keploy
+	// mock replay process, one run, so it holds at most one entry per call
+	// of the run that made an id.
+	minted map[string]Binding
+}
+
+// endedScope is an ended scope's own bindings (Own as it ended), by name,
+// the test it was the scope of, its number (InScope), and the run's
+// variables it answered as recorded while they were not bound
+// (AnsweredAsRecorded, AnsweredAsRecordedOf).
+type endedScope struct {
+	test       string
+	scope      uint64
+	bindings   []Binding
+	asRecorded map[string]bool
 }
 
 // lock takes t.mu, and before it the lock of the table whose run's t reads
@@ -206,8 +254,75 @@ func (t *Table) Bind(b Binding) (Binding, bool) {
 	if with, ok := collides(t.all(from), t.readersScopes(), b, nil); ok {
 		return with, false
 	}
+	if with, bad := mintedBeside(t.mintedOf(from), b, nil); bad {
+		return with, false
+	}
 	t.put(b)
+	t.keepMinted(from, b)
 	return b, true
+}
+
+// mintedOf is the run's minted values t reads (Table.minted): those of
+// from, the table whose run's t reads (ReadRunOf), else t's. t is locked
+// (lock), with from.
+func (t *Table) mintedOf(from *Table) map[string]Binding {
+	if from != nil {
+		return from.minted
+	}
+	return t.minted
+}
+
+// keepMinted adds b, bound now, to the run's minted values where it is a
+// minted variable's binding (Binding.Minted) whose value the run has not
+// bound at a minted place before: to from's, the table whose run's t
+// reads, else to t's. t is locked (lock), with from.
+func (t *Table) keepMinted(from *Table, b Binding) {
+	if b.Minted == nil {
+		return
+	}
+	keep := t
+	if from != nil {
+		keep = from
+	}
+	if _, had := keep.minted[b.Value]; had {
+		return
+	}
+	if keep.minted == nil {
+		keep.minted = make(map[string]Binding)
+	}
+	keep.minted[b.Value] = b
+}
+
+// MintedWhy is why BindAll would refuse b now, the binding a call is about
+// to make of a minted variable (Binding.Minted), beside the run's minted
+// values and earlier (bound with b, before it): the package's MintedWhy of
+// b and the binding whose value it reuses; "" where BindAll would not, or
+// where b is none. with is that binding, as BindAll's refusal names it, so
+// the call's miss names where the run bound the value (its Mock): none where
+// b's own value refuses it (its recorded one, or another shape), or where
+// nothing does. A call checks it before it takes the recording that binds
+// b. A name already bound binds nothing new (BindAll holds it to its value
+// by its name), and is not checked here, unless b is a binding of the call
+// alone (Binding.Call), which reads no name. A nil table checks b beside
+// earlier alone.
+func (t *Table) MintedWhy(b Binding, earlier []Binding) (why string, with Binding) {
+	if b.Minted == nil {
+		return "", Binding{}
+	}
+	var minted map[string]Binding
+	if t != nil {
+		from := t.lock()
+		defer t.unlock(from)
+		if _, ok := t.lookup(from, b.Name); ok && !b.Call {
+			return "", Binding{}
+		}
+		minted = t.mintedOf(from)
+	}
+	with, bad := mintedBeside(minted, b, earlier)
+	if !bad {
+		return "", Binding{}
+	}
+	return MintedWhy(b, with), with
 }
 
 // KeepRun makes what is bound before the first scope begins the run's, which
@@ -256,8 +371,11 @@ func (t *Table) AllowRun() {
 // ReadRunOf makes t read the run's bindings of from as its run's too, in
 // every scope: a table whose scope is a test's begun early (the next test's
 // calls in flight, answered in the gap before it) sees what the run's
-// start-up bound, as the test does once it begins. t keeps no run's of its
-// own from it: what t binds is its scope's. from never reads t's, but checks
+// start-up bound, as the test does once it begins. The run's minted values
+// (Table.minted) are one list for the two, kept in from's; where t read
+// another table's run before, that one's list is carried into from's too,
+// so a value made anew before the turn is still the run's. t keeps no
+// run's of its own from it: what t binds is its scope's. from never reads t's, but checks
 // a bind of its run's beside t's scope's (Beside): whichever of the two binds
 // a value first, the other is refused it for another variable.
 func (t *Table) ReadRunOf(from *Table) {
@@ -273,6 +391,12 @@ func (t *Table) ReadRunOf(from *Table) {
 		return
 	}
 	t.runOf.Store(from)
+	// The run's minted values t kept before are from's now too: the two
+	// hold one list (Table.minted).
+	for _, b := range t.minted {
+		t.keepMinted(from, b)
+	}
+	t.minted = nil
 	t.mu.Unlock()
 	from.readers = append(from.readers, t)
 	from.mu.Unlock()
@@ -284,7 +408,20 @@ func (t *Table) ReadRunOf(from *Table) {
 				break
 			}
 		}
+		// What t bound at a minted place while it read old's run is kept
+		// in old's list (keepMinted): carried into from's, so a reuse
+		// across the turn is still caught. Copied out first, so no two
+		// tables' locks are held here in another order than above.
+		carry := make([]Binding, 0, len(old.minted))
+		for _, b := range old.minted {
+			carry = append(carry, b)
+		}
 		old.mu.Unlock()
+		from.mu.Lock()
+		for _, b := range carry {
+			from.keepMinted(nil, b)
+		}
+		from.mu.Unlock()
 	}
 }
 
@@ -320,21 +457,66 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 	if gen != t.gen {
 		return Binding{}, Binding{}, true, false
 	}
-	inForce, beside := t.all(from), t.readersScopes()
+	inForce, beside, minted := t.all(from), t.readersScopes(), t.mintedOf(from)
 	for i, b := range bs {
-		if have, bound := inForce[b.Name]; bound && have.Value != b.Value {
+		if b.Call {
+			// A binding of this call alone binds no name: its minted
+			// value is checked against the run's and is kept below.
+			if with, bad := mintedBeside(minted, b, bs[:i]); bad {
+				return b, with, false, false
+			}
+			continue
+		}
+		have, bound := inForce[b.Name]
+		if bound && have.Value != b.Value {
 			return b, have, false, false
 		}
 		if with, bad := collides(inForce, beside, b, bs[:i]); bad {
 			return b, with, false, false
 		}
+		if with, bad := mintedBeside(minted, b, bs[:i]); !bound && bad {
+			return b, with, false, false
+		}
 	}
 	for _, b := range bs {
+		if b.Call {
+			t.keepMinted(from, b)
+			continue
+		}
 		if _, bound := t.lookup(from, b.Name); !bound {
 			t.put(b)
+			t.keepMinted(from, b)
 		}
 	}
 	return Binding{}, Binding{}, false, true
+}
+
+// mintedBeside reports whether b is a minted variable's binding that may
+// not be bound (MintedWhy) beside the run's minted values (minted) and
+// earlier (bound with it, before it), and the binding whose value it
+// reuses: none where its own value refuses it (its recorded one, or
+// another shape). MintedWhy(b, with) says why. A binding of earlier with
+// b's name and value is b's own, bound twice by the call, and so is one
+// at b's own place of b's recording where either is a binding of the call
+// alone (Binding.Call) beside a test's variable there: one value at one
+// place is no reuse.
+func mintedBeside(minted map[string]Binding, b Binding, earlier []Binding) (with Binding, bad bool) {
+	if b.Minted == nil {
+		return Binding{}, false
+	}
+	if had, ok := minted[b.Value]; ok {
+		return had, true
+	}
+	for _, e := range earlier {
+		if e.Minted == nil || e.Value != b.Value || e.Name == b.Name {
+			continue
+		}
+		if (e.Call || b.Call) && e.Mock == b.Mock && e.Place == b.Place {
+			continue
+		}
+		return e, true
+	}
+	return Binding{}, MintedWhy(b) != ""
 }
 
 // collides is the binding b cannot be bound beside, of those in force, beside
@@ -442,8 +624,12 @@ const wordRunSep = "-"
 // string, whole, at a place other than Text (a field, a segment, a header, a
 // value of its answer): the evidence that cuts a run into held stretches
 // (WordRuns). Of names the learned value Live is a word of: a held stretch
-// is one value only when each of its words names the same one. A WordBind
-// with none of them has no span but its own word.
+// is one value only when each of its words names the same one, and a
+// stretch that is one UUID by its form (WordRuns) is one value only when
+// each of its words names that UUID. A WordBind with none of them has no
+// span but its own word. The call's text there is RecordedText with its
+// live words in place of the words it binds: the adapter matched every
+// other byte as recorded.
 type WordBind struct {
 	Text         string
 	Word         int
@@ -485,12 +671,22 @@ const maxSpanRun = 64
 // values), when each of its words names the same learned value (Of). A held
 // stretch is not proof of one value by itself: "<B>/3" sent whole elsewhere
 // may be one id or a cid beside a count, and the recording does not say
-// which. Every other word is its own value, alone, checked word by word as
-// main checks it: a word no held stretch covers (never the words around it:
-// "<cid>/<appId>/7" with only the cid held leaves "7" alone, not with the
-// appId), a word of a held stretch whose words name no one value, a word
-// whose recorded text does not hold the run's recorded words where the run
-// says, and one with no Elsewhere. A binding of a value whole has none.
+// which. A stretch is one value by its form, held elsewhere or not, when its
+// recorded text and its live text are each one canonical UUID (8-4-4-4-12
+// hex digits: a minted id), the call binds every word of it, and each of
+// those words names that recorded UUID (Of): its words are the groups of one
+// id, never a count or a second value beside it. Every other word is its own
+// value, alone, checked word by word as main checks it: a word no held or
+// UUID stretch covers (never the words around it: "<cid>/<appId>/7" with
+// only the cid held leaves "7" alone, not with the appId), a word of a
+// stretch whose words name no one value, a word whose recorded text does not
+// hold the run's recorded words where the run says, and one with neither
+// Elsewhere nor a UUID's form. A binding of a value whole has none.
+//
+// Binds of one call at one word of one text, with one live and one recorded
+// word (a variable and its run twin, bound at one place), take one position
+// in the run and share its span; binds at one word that differ there cut the
+// run, each its own word.
 func WordRuns(ws []WordBind) []Run {
 	runs := make([]Run, len(ws))
 	byText := map[string][]int{}
@@ -507,19 +703,23 @@ func WordRuns(ws []WordBind) []Run {
 	for _, k := range texts {
 		idx := byText[k]
 		sort.SliceStable(idx, func(x, y int) bool { return ws[idx[x]].Word < ws[idx[y]].Word })
-		for lo := 0; lo < len(idx); {
+		pos := positionsOf(ws, idx)
+		for lo := 0; lo < len(pos); {
 			hi := lo + 1
-			for hi < len(idx) && ws[idx[hi]].Word == ws[idx[hi-1]].Word+1 {
+			for hi < len(pos) && ws[pos[hi][0]].Word == ws[pos[hi-1][0]].Word+1 {
 				hi++
 			}
-			run := idx[lo:hi]
+			run := pos[lo:hi]
 			for at, span := range spansOf(ws, run) {
 				from, to := span[0], span[1]
 				live, recorded := make([]string, 0, to-from+1), make([]string, 0, to-from+1)
-				for _, j := range run[from : to+1] {
-					live, recorded = append(live, ws[j].Live), append(recorded, ws[j].Recorded)
+				for _, p := range run[from : to+1] {
+					live, recorded = append(live, ws[p[0]].Live), append(recorded, ws[p[0]].Recorded)
 				}
-				runs[run[at]] = Run{Live: strings.Join(live, wordRunSep), Recorded: strings.Join(recorded, wordRunSep), At: at - from}
+				r := Run{Live: strings.Join(live, wordRunSep), Recorded: strings.Join(recorded, wordRunSep), At: at - from}
+				for _, j := range run[at] {
+					runs[j] = r
+				}
 			}
 			lo = hi
 		}
@@ -527,36 +727,73 @@ func WordRuns(ws []WordBind) []Run {
 	return runs
 }
 
-// spansOf is the value span (WordRuns) of each word of run (indexes of ws, at
-// consecutive words of one text), as the first and last index into run:
-// read once for the run from its recorded text and its mock (Elsewhere), the
-// same for every word of one text in one call.
-func spansOf(ws []WordBind, run []int) [][2]int {
+// positionsOf is idx (indexes of ws at one text, in word order) as the run's
+// positions: the binds at one word with one live and one recorded word (a
+// variable and its run twin) are one position; a bind at the same word that
+// differs from the one before it there is a position of its own, which cuts
+// the run (WordRuns: no word follows itself).
+func positionsOf(ws []WordBind, idx []int) [][]int {
+	var pos [][]int
+	for _, j := range idx {
+		if n := len(pos); n > 0 {
+			if prev := ws[pos[n-1][0]]; prev.Word == ws[j].Word && prev.Live == ws[j].Live && prev.Recorded == ws[j].Recorded {
+				pos[n-1] = append(pos[n-1], j)
+				continue
+			}
+		}
+		pos = append(pos, []int{j})
+	}
+	return pos
+}
+
+// spansOf is the value span (WordRuns) of each position of run (the binds of
+// ws at each of consecutive words of one text, positionsOf), as the first
+// and last index into run: read once for the run from its recorded text, its
+// mock (Elsewhere) and its words' form, the same for every word of one text
+// in one call.
+func spansOf(ws []WordBind, run [][]int) [][2]int {
 	n := len(run)
 	spans := make([][2]int, n)
 	for at := range spans {
 		spans[at] = [2]int{at, at}
 	}
-	first := ws[run[0]]
+	first := ws[run[0][0]]
 	words := Words(first.RecordedText)
-	if first.Elsewhere == nil || n > maxSpanRun || ws[run[n-1]].Word >= len(words) {
+	if n > maxSpanRun || ws[run[n-1][0]].Word >= len(words) {
 		return spans
 	}
-	for _, j := range run {
-		if x := words[ws[j].Word]; ws[j].RecordedText != first.RecordedText || first.RecordedText[x[0]:x[1]] != ws[j].Recorded {
-			return spans
+	for _, p := range run {
+		for _, j := range p {
+			if x := words[ws[j].Word]; ws[j].RecordedText != first.RecordedText || first.RecordedText[x[0]:x[1]] != ws[j].Recorded {
+				return spans
+			}
 		}
 	}
-	// value[a*n+b]: the stretch a..b of run is held whole elsewhere and holds
-	// no shorter stretch held whole (inner). A held stretch that holds another
-	// ("<B>/3" beside "<B>") is two values, never one.
+	// text is the stretch a..b of run as recorded, and live its live text:
+	// the recorded text with the live words in place of its words.
+	text := func(a, b int) string {
+		return first.RecordedText[words[ws[run[a][0]].Word][0]:words[ws[run[b][0]].Word][1]]
+	}
+	live := func(a, b int) string {
+		var s strings.Builder
+		s.WriteString(ws[run[a][0]].Live)
+		for p := a + 1; p <= b; p++ {
+			s.WriteString(first.RecordedText[words[ws[run[p-1][0]].Word][1]:words[ws[run[p][0]].Word][0]])
+			s.WriteString(ws[run[p][0]].Live)
+		}
+		return s.String()
+	}
+	// value[a*n+b]: the stretch a..b of run is held whole elsewhere, or is one
+	// UUID by its form (uuidStretch), and holds no shorter such stretch
+	// (inner). A held stretch that holds another ("<B>/3" beside "<B>") is two
+	// values, never one.
 	value, inner := make([]bool, n*n), make([]bool, n*n)
 	for a := n - 1; a >= 0; a-- {
 		for b := a; b < n; b++ {
 			if b > a {
 				inner[a*n+b] = value[(a+1)*n+b] || inner[(a+1)*n+b] || value[a*n+b-1] || inner[a*n+b-1]
 			}
-			value[a*n+b] = !inner[a*n+b] && first.Elsewhere(first.RecordedText[words[ws[run[a]].Word][0]:words[ws[run[b]].Word][1]])
+			value[a*n+b] = !inner[a*n+b] && (first.Elsewhere != nil && first.Elsewhere(text(a, b)) || uuidStretch(ws, run[a:b+1], text(a, b), func() string { return live(a, b) }))
 		}
 	}
 	for at := range spans {
@@ -575,13 +812,73 @@ func spansOf(ws []WordBind, run []int) [][2]int {
 	return spans
 }
 
-// oneValue reports whether the word binds of stretch (indexes of ws) each
-// name the same learned value (WordBind.Of).
-func oneValue(ws []WordBind, stretch []int) bool {
-	of := ws[stretch[0]].Of
-	for _, j := range stretch {
-		if ws[j].Of == "" || ws[j].Of != of {
+// NameUUIDs names each word bind of ws (the binds of one call) a word of its
+// recorded text (Of) where ws bind every word of that text and the text is
+// one canonical UUID: a minted id bound word by word, whose words WordRuns
+// then reads as one value by its form. A text bound at only some of its
+// words, and a text that is no UUID, is named nothing: each of its words
+// stays its own value, checked word by word. A bind already named keeps its
+// name.
+func NameUUIDs(ws []WordBind) {
+	bound := map[string]map[int]bool{}
+	for _, w := range ws {
+		if bound[w.Text] == nil {
+			bound[w.Text] = map[int]bool{}
+		}
+		bound[w.Text][w.Word] = true
+	}
+	for i, w := range ws {
+		if w.Word < 0 || w.Of != "" || !canonicalUUID(w.RecordedText) {
+			continue
+		}
+		every := true
+		for k := range Words(w.RecordedText) {
+			every = every && bound[w.Text][k]
+		}
+		if every {
+			ws[i].Of = w.RecordedText
+		}
+	}
+}
+
+// uuidStretch reports whether a stretch of a run (its positions), recorded
+// as text and live as live gives it, is one UUID by its form: both texts are
+// each one canonical UUID and its first bind names the recorded one (Of; a
+// span is taken only where every bind of it names one value, oneValue). The
+// stretch covers every word of it: a UUID is five words.
+func uuidStretch(ws []WordBind, stretch [][]int, text string, live func() string) bool {
+	return canonicalUUID(text) && ws[stretch[0][0]].Of == text && canonicalUUID(live())
+}
+
+// canonicalUUID reports whether s is one UUID in its canonical text: 32 hex
+// digits in groups of 8, 4, 4, 4 and 12, joined by "-".
+func canonicalUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if s[i] != '-' {
+				return false
+			}
+			continue
+		}
+		if !isHex(s[i]) {
 			return false
+		}
+	}
+	return true
+}
+
+// oneValue reports whether the word binds of stretch (the binds of ws at
+// each of its positions) each name the same learned value (WordBind.Of).
+func oneValue(ws []WordBind, stretch [][]int) bool {
+	of := ws[stretch[0][0]].Of
+	for _, p := range stretch {
+		for _, j := range p {
+			if ws[j].Of == "" || ws[j].Of != of {
+				return false
+			}
 		}
 	}
 	return true
@@ -604,7 +901,7 @@ func (t *Table) Start(given []Binding) {
 func (t *Table) StartCarrying(given, carried []Binding) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.start(given, carried)
+	t.start("", given, carried)
 }
 
 // StartOpening is StartCarrying in the step that opens the scope: open, what
@@ -620,16 +917,74 @@ func (t *Table) StartCarrying(given, carried []Binding) {
 //
 // open must call none of t's methods: it holds t's lock.
 func (t *Table) StartOpening(open func(), given, carried []Binding) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	open()
-	t.start(given, carried)
+	t.StartOpeningTest("", open, given, carried, nil)
 }
 
-// start begins a scope (StartCarrying). t.mu is held.
-func (t *Table) start(given, carried []Binding) {
+// StartOpeningTest is StartOpening for the scope of the test named test
+// ("" for none named): once the next scope begins, what this one bound
+// itself is that test's (EndedOf), on a table that keeps it (KeepEnded). The
+// name is the scope's from the step that begins it, so no binding of another
+// scope is ever kept as test's.
+//
+// notes, by variable name, are noted in the scope as it begins (Note), in
+// the same step: a call checked in the scope reads them from its first.
+func (t *Table) StartOpeningTest(test string, open func(), given, carried []Binding, notes map[string]string) {
+	t.StartOpeningScope(test, func(uint64) { open() }, given, carried, notes, nil)
+}
+
+// StartOpeningScope is StartOpeningTest, open told the number the scope it
+// begins has (InScope): what makes the scope's mocks live (a test's view)
+// carries it, so a call made there reads that scope's bindings as its own
+// test's (OwnIn), however late keploy decides it.
+//
+// asRecorded are the run's variables the test receives from earlier tests
+// only in answers, which this run did not make before it: the scope answers
+// each as recorded while it is not bound (AnsweredAsRecorded), from its
+// first call.
+//
+// open must call none of t's methods: it holds t's lock.
+func (t *Table) StartOpeningScope(test string, open func(scope uint64), given, carried []Binding, notes map[string]string, asRecorded []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	open(t.scopeOf(test))
+	t.start(test, given, carried)
+	t.notes = maps.Clone(notes)
+	t.asRecorded = make(map[string]bool, len(asRecorded))
+	for _, name := range asRecorded {
+		t.asRecorded[name] = true
+	}
+}
+
+// InScope runs f holding the table's lock, told the number of the scope in
+// force (StartOpeningScope): what makes mocks live while that scope runs (a
+// pool view between tests, whose calls are the ended test's at zero
+// latency: its scope runs until the next test's begins) carries it, and no
+// scope begins between the read and f's end.
+//
+// f must call none of t's methods: it holds t's lock.
+func (t *Table) InScope(f func(scope uint64)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	f(t.scope)
+}
+
+// scopeOf is the number a scope begun now for test has: the next for a
+// named test, the one in force for none named. t.mu is held.
+func (t *Table) scopeOf(test string) uint64 {
+	if test == "" {
+		return t.scope
+	}
+	return t.scope + 1
+}
+
+// start begins a scope (StartCarrying), of test ("" for none named). t.mu
+// is held.
+func (t *Table) start(test string, given, carried []Binding) {
+	t.end()
+	t.scope = t.scopeOf(test)
+	t.test = test
 	t.gen++
-	t.vals = nil
+	t.vals, t.notes, t.asRecorded = nil, nil, nil
 	t.began = true
 	if len(given)+len(carried) == 0 {
 		return
@@ -673,11 +1028,86 @@ func (t *Table) Give(b Binding) (Binding, bool) {
 	return b, true
 }
 
+// Note says why, in the open scope, the variable name is not bound: where
+// the test binds it in a place no call is (a client test case's request,
+// models.ClientCaseBind), why that place bound nothing, so a call that uses
+// it misses saying so (Unbound) rather than naming a call that binds it.
+// It refuses, noting nothing, when no scope has begun. A later Note of the
+// name replaces it; the next scope forgets it.
+func (t *Table) Note(name, why string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.began {
+		return false
+	}
+	if t.notes == nil {
+		t.notes = make(map[string]string)
+	}
+	t.notes[name] = why
+	return true
+}
+
+// Unbound is the scope's note on name (Note) while name is not bound: ""
+// where it is bound, or the scope noted nothing.
+func (t *Table) Unbound(name string) string {
+	from := t.lock()
+	defer t.unlock(from)
+	if _, ok := t.lookup(from, name); ok {
+		return ""
+	}
+	return t.notes[name]
+}
+
+// AnsweredAsRecorded reports whether the scope answers name with its recorded
+// value: it began naming name so (StartOpeningScope), and name is not bound.
+// Only an answer place is answered so: a call that sends name at a request
+// place is checked as when nothing names it, so it misses while name is not
+// bound. Once bound, name is answered with its bound value.
+func (t *Table) AnsweredAsRecorded(name string) bool {
+	from := t.lock()
+	defer t.unlock(from)
+	if _, ok := t.lookup(from, name); ok {
+		return false
+	}
+	return t.asRecorded[name]
+}
+
+// AnsweredAsRecordedOf reports whether test's own scope answers name with
+// its recorded value (AnsweredAsRecorded) while name is not bound: by the
+// names the running scope began with while it is test's (StartOpeningScope),
+// else by those test's latest ended scope began with (kept on a table that
+// keeps them: KeepEnded). A recording that trails test (a clean-up the
+// application runs for it once it answered it) reads them here, as it reads
+// test's bindings (LookupOf), whichever test's window its call lands in: the
+// running scope's names are another test's there, and say nothing of it.
+// False for test "", and for a test whose scope has not begun in the set.
+func (t *Table) AnsweredAsRecordedOf(test, name string) bool {
+	if test == "" {
+		return false
+	}
+	from := t.lock()
+	defer t.unlock(from)
+	if _, ok := t.lookup(from, name); ok {
+		return false
+	}
+	if t.began && t.test == test {
+		return t.asRecorded[name]
+	}
+	for i := len(t.ended) - 1; i >= 0; i-- {
+		if t.ended[i].test == test {
+			return t.ended[i].asRecorded[name]
+		}
+	}
+	return false
+}
+
 // Reset forgets every binding of the scope: a new scope begins. The run's
 // stay.
 func (t *Table) Reset() {
 	t.mu.Lock()
-	t.vals = nil
+	t.end()
+	t.test = ""
+	t.vals, t.notes, t.asRecorded = nil, nil, nil
 	t.began = true
 	t.gen++
 	t.mu.Unlock()
@@ -687,10 +1117,184 @@ func (t *Table) Reset() {
 // next test set's replay starts (as learn.Tracker.NewSet).
 func (t *Table) NewSet() {
 	t.mu.Lock()
-	t.vals, t.run = nil, nil
-	t.began = false
-	t.gen++
+	t.newSet()
 	t.mu.Unlock()
+}
+
+// newSet is NewSet's step. t.mu is held.
+func (t *Table) newSet() {
+	t.vals, t.run, t.ended, t.notes, t.asRecorded = nil, nil, nil, nil, nil
+	t.began, t.test = false, ""
+	t.gen++
+	t.scope++
+}
+
+// SetBound is what a table had bound as its set ended (NewSetKeeping), as
+// a background miss reads it: the running scope's own bindings, as Own gave
+// them then, and what the set's ended scopes of each named test bound, as
+// EndedOf gave them then. It changes no more. A nil SetBound holds none.
+type SetBound struct {
+	own   []Binding
+	ended []endedScope
+	// test is the test the running scope was begun for then ("" for none
+	// named, or before the first scope began), scope its number (InScope).
+	test  string
+	scope uint64
+}
+
+// NewSetKeeping is NewSet, returning what the ending set had bound
+// (SetBound), read in the same step: no binding is made after it is read
+// and before NewSet forgets it. A call of the ending set that keploy
+// decides once the next set began reads its set's bindings from it.
+// publish, unless nil, is given it in that step too, before NewSet forgets
+// it, under the table's lock: a reader that reads the table in force
+// (Bound) and then finds nothing new published read the set before NewSet
+// forgot it, never the next set's with the ending set's not yet published.
+func (t *Table) NewSetKeeping(publish func(*SetBound)) *SetBound {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	kept := t.bound()
+	if publish != nil {
+		publish(kept)
+	}
+	t.newSet()
+	return kept
+}
+
+// Bound is what the table has bound now, as NewSetKeeping would keep it
+// (SetBound), without forgetting it: a call keploy decides reads the
+// bindings of its set in force from it, all in one step.
+func (t *Table) Bound() *SetBound {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.bound()
+}
+
+// bound is Bound's step. t.mu is held.
+func (t *Table) bound() *SetBound {
+	kept := &SetBound{ended: t.ended[:len(t.ended):len(t.ended)], scope: t.scope}
+	if t.began {
+		kept.own, kept.test = sorted(t.vals), t.test
+	}
+	return kept
+}
+
+// Own is the bindings the set's running scope had made itself when it
+// ended (Table.Own then), by name.
+func (s *SetBound) Own() []Binding {
+	if s == nil {
+		return nil
+	}
+	return append([]Binding(nil), s.own...)
+}
+
+// OwnOf is what a call marked in test's view read as its own test's
+// bindings when the set ended (Table.OwnOf then).
+func (s *SetBound) OwnOf(test string) []Binding {
+	if s == nil {
+		return nil
+	}
+	if !ownScope(s.test, test) {
+		return endedOf(s.ended, test)
+	}
+	return append([]Binding(nil), s.own...)
+}
+
+// OwnIn is what a call made while scope was in force read as its own
+// test's bindings when the set ended (Table.OwnIn then).
+func (s *SetBound) OwnIn(scope uint64) []Binding {
+	if s == nil {
+		return nil
+	}
+	if scope != s.scope {
+		return endedIn(s.ended, scope)
+	}
+	return append([]Binding(nil), s.own...)
+}
+
+// EndedOf is what the set's ended scopes of test had bound themselves when
+// it ended (Table.EndedOf then): none for test "".
+func (s *SetBound) EndedOf(test string) []Binding {
+	if s == nil {
+		return nil
+	}
+	return endedOf(s.ended, test)
+}
+
+// LookupOf is the binding of name test's own scope had made when the set
+// ended (Table.LookupOf then): the running scope's own while it was test's,
+// else the latest of test's ended scopes that bound it, none where two of
+// them bound it with two values. ended says the binding is not the running
+// scope's. None for test "", and none of a nil SetBound.
+func (s *SetBound) LookupOf(test, name string) (b Binding, ended, ok bool) {
+	if s == nil || test == "" {
+		return Binding{}, false, false
+	}
+	if s.test == test {
+		b, ok = bindingNamed(s.own, name)
+		return b, false, ok
+	}
+	b, ok = endedLookup(s.ended, test, name)
+	return b, true, ok
+}
+
+// bindingNamed is the binding of name in bs, sorted by name (sorted).
+func bindingNamed(bs []Binding, name string) (Binding, bool) {
+	j, found := slices.BinarySearchFunc(bs, name, func(x Binding, n string) int { return strings.Compare(x.Name, n) })
+	if !found {
+		return Binding{}, false
+	}
+	return bs[j], true
+}
+
+// endedLookup is the binding of name the latest of test's scopes in ended
+// made, none where two of them made it with two values (no one value is
+// test's), or none made it.
+func endedLookup(ended []endedScope, test, name string) (b Binding, ok bool) {
+	for i := len(ended) - 1; i >= 0; i-- {
+		e := ended[i]
+		if e.test != test {
+			continue
+		}
+		got, found := bindingNamed(e.bindings, name)
+		if !found {
+			continue
+		}
+		if ok && got.Value != b.Value {
+			return Binding{}, false
+		}
+		if !ok {
+			b, ok = got, true
+		}
+	}
+	return b, ok
+}
+
+// endedOf is the bindings of the scopes of ended begun for test, scope by
+// scope in the order they ended: none for test "" (a scope begun with no
+// test named is kept as no test's).
+func endedOf(ended []endedScope, test string) []Binding {
+	if test == "" {
+		return nil
+	}
+	var out []Binding
+	for _, e := range ended {
+		if e.test == test {
+			out = append(out, e.bindings...)
+		}
+	}
+	return out
+}
+
+// endedIn is the bindings of the scope of ended numbered scope (InScope),
+// none where ended keeps none of that number.
+func endedIn(ended []endedScope, scope uint64) []Binding {
+	for _, e := range ended {
+		if e.scope == scope {
+			return append([]Binding(nil), e.bindings...)
+		}
+	}
+	return nil
 }
 
 // Clone is a table holding t's bindings in t's scope, the run's it reads
@@ -699,7 +1303,7 @@ func (t *Table) NewSet() {
 func (t *Table) Clone() *Table {
 	from := t.lock()
 	defer t.unlock(from)
-	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun}
+	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun, notes: maps.Clone(t.notes), asRecorded: maps.Clone(t.asRecorded)}
 	if t.vals != nil {
 		c.vals = make(map[string]Binding, len(t.vals))
 		for k, v := range t.vals {
@@ -708,6 +1312,134 @@ func (t *Table) Clone() *Table {
 	}
 	c.run = t.runInForce(from)
 	return c
+}
+
+// Own is the bindings the running scope made itself, sorted by name: each
+// value a call of the running test (or of the gap after it) bound, never one
+// of the run's (KeepRun), nor one of the table whose run's it reads
+// (ReadRunOf). Before the first scope began it is none: no test is running.
+// A background miss reads it: only a value the call's own test bound before
+// it may stand where its background recording holds the recorded value.
+func (t *Table) Own() []Binding {
+	from := t.lock()
+	defer t.unlock(from)
+	if !t.began {
+		return nil
+	}
+	return sorted(t.vals)
+}
+
+// KeepEnded makes the table keep what each ended scope of a named test
+// bound itself (EndedOf), from its next scope on, until NewSet; NewSet
+// does not undo it. Only the table a background miss reads keeps them (the
+// mock manager's test variables): any other table, such as the one the
+// next test's calls in flight bind in, keeps none.
+func (t *Table) KeepEnded() {
+	t.mu.Lock()
+	t.keepEnded = true
+	t.mu.Unlock()
+}
+
+// EndedOf is what the set's ended scopes of test bound themselves, scope
+// by scope in the order they ended, each scope's by name: every binding
+// Own gave in a scope begun for test (StartOpeningTest) until the next
+// began, never the run's (KeepRun), nor another test's scope's, nor one of
+// a scope begun with no test named, which is kept as no test's: none for
+// test "", and none on a table that does not keep them (KeepEnded). A
+// test's scope ends only when the next begins, so the running scope's are
+// Own's, not these; NewSet forgets them. A background miss reads them: a
+// call the application makes for a test that has ended (a clean-up it runs
+// once it answered the test) carries a value that test bound, which only
+// these still hold, and only test's scope can have bound it.
+func (t *Table) EndedOf(test string) []Binding {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return endedOf(t.ended, test)
+}
+
+// OwnOf is what a call marked in test's view reads as its own test's
+// bindings (Own), read in one step. keploy can decide a test's call after
+// the replay began the set's next test, whose scope's are not the call's:
+// once a scope begun for another named test is running, they are what
+// test's ended scopes bound (EndedOf), none where it bound none. The
+// running scope's own (Own) while it is test's, as when keploy decides the
+// call at once, and while it names no test (one begun with no test named,
+// or none begun), or for a mark that names none (test ""), which no scope
+// tells apart.
+func (t *Table) OwnOf(test string) []Binding {
+	from := t.lock()
+	defer t.unlock(from)
+	if !ownScope(t.test, test) {
+		return endedOf(t.ended, test)
+	}
+	if !t.began {
+		return nil
+	}
+	return sorted(t.vals)
+}
+
+// OwnIn is what a call made while scope was in force (InScope,
+// StartOpeningScope) reads as its own test's bindings (Own), read in one
+// step: the running scope's while it is scope, as when keploy decides the
+// call at once; once a later scope began (keploy decided the call after the
+// replay began the set's next test, or the same test's next run), what
+// scope bound itself as it ended (kept for a named test's scope, on a table
+// that keeps them: KeepEnded), never another scope's, nor the union of a
+// test's runs. None for a scope ended unkept, and for NewSet's before any
+// scope began (no test is running).
+func (t *Table) OwnIn(scope uint64) []Binding {
+	from := t.lock()
+	defer t.unlock(from)
+	if scope != t.scope {
+		return endedIn(t.ended, scope)
+	}
+	if !t.began {
+		return nil
+	}
+	return sorted(t.vals)
+}
+
+// ownScope reports whether a call marked in test's view reads the running
+// scope, begun for running ("" for none named), as its own test's (OwnOf).
+func ownScope(running, test string) bool {
+	return test == "" || running == "" || running == test
+}
+
+// LookupOf is the binding of name that test's own scope made: the running
+// scope's own (Own) while that scope is test's (StartOpeningTest), else what
+// test's ended scopes bound (EndedOf), the latest of them that bound it.
+// ended says the binding is not the running scope's: test's scope has ended,
+// or is not running. Never the run's (KeepRun), nor another test's scope's,
+// nor one of a scope begun with no test named: ok is false for test "", for
+// a name test's scopes never bound, and where two of test's ended scopes
+// bound name with two values (no one value is test's). A recording that
+// trails test (a clean-up the application runs for it once it answered
+// it) reads the variables the learn step wrote in test's scope here,
+// whichever test's window its call lands in.
+func (t *Table) LookupOf(test, name string) (b Binding, ended, ok bool) {
+	if test == "" {
+		return Binding{}, false, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.began && t.test == test {
+		b, ok = t.vals[name]
+		return b, false, ok
+	}
+	b, ok = endedLookup(t.ended, test, name)
+	return b, true, ok
+}
+
+// end keeps the running scope's own bindings as its test's ended scope's
+// (EndedOf), and the variables it answered as recorded
+// (AnsweredAsRecordedOf), as the next scope begins, on a table that keeps
+// them (KeepEnded): nothing of a scope begun with no test named, nor before
+// the first scope began (no test is named then: NewSet forgets the name),
+// which no test bound. t.mu is held.
+func (t *Table) end() {
+	if t.keepEnded && t.test != "" {
+		t.ended = append(t.ended, endedScope{test: t.test, scope: t.scope, bindings: sorted(t.vals), asRecorded: maps.Clone(t.asRecorded)})
+	}
 }
 
 // Snapshot returns the bindings in force, the run's included, by name.

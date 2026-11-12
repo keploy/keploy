@@ -116,6 +116,25 @@ type provenWire struct {
 	// SetScopePool hands the proxy with the table's tests. nil when the
 	// table had none.
 	trails map[string]string
+	// series is, in a replay, the series of the worker-scope recordings a
+	// declared rule placed, by series (the CLI's scope table,
+	// models.ScopeTableReq.Series), which SetScopePool hands the proxy.
+	// nil when the table had none.
+	series map[string][]string
+	// once is, in a replay, the series of series whose recordings each
+	// answer once in the run (the CLI's scope table,
+	// models.ScopeTableReq.Once), which SetScopePool hands the proxy before
+	// the series. nil when the table had none.
+	once []string
+	// sources is, in a replay, by recording name, the sources rules
+	// declared in keploy.yml give fields of its request (the CLI's scope
+	// table, models.ScopeTableReq.Sources), which SetScopePool hands the
+	// proxy. nil when the table had none.
+	sources map[string][]models.DeclaredSource
+	// timeForm is, in a replay, whether the learn step checks a changed
+	// time by its form alone (the CLI's scope table,
+	// models.ScopeTableReq.TimeForm), which SetScopePool hands the proxy.
+	timeForm bool
 	// notRequired is, in a replay, by test ID, the names of the test's own
 	// list keploy's judging marked served, not required (the CLI's scope table,
 	// models.ScopeTableReq.NotRequired): its end does not charge the test
@@ -127,6 +146,14 @@ type provenWire struct {
 	// SetScopeSkippedReads): a test's extra-call line names that test
 	// (evidenceReason). Empty when the table had none.
 	skippedReads map[string]string
+	// background is, in a replay, the names of the set's background
+	// recordings (the CLI's scope table, models.ScopeTableReq.Background):
+	// its worker: and startup: mocks, which the staging hands the proxy
+	// (stageForExactServing, models.MockFilterParams.BackgroundMocks).
+	// stagedBackground is the names the last staging handed it. nil when
+	// the table had none.
+	background       []string
+	stagedBackground []string
 	// staged: the replay's mocks are staged on the proxy, which serves them
 	// exactly (exact_proven.go). Once per session, and again when the CLI
 	// sends a pool slice naming a recording the staging did not read.
@@ -139,10 +166,11 @@ type provenWire struct {
 	// recorded before it, and the pool by name. Zero when the CLI sent no
 	// window.
 	firstRecorded time.Time
-	// servedSince is when exact serving began serving each open test, by
-	// its ID (serveTestExactly): a miss made before it is no call of the
+	// servedSince is where exact serving began serving each open test, by
+	// its ID (serveTestExactly): when, and the round its view was installed
+	// at. A miss marked, or with no mark made, before it is no call of the
 	// test's.
-	servedSince map[string]time.Time
+	servedSince map[string]testBegin
 	// realSaid names the recorded mocks already said to go to a mock.real
 	// destination (notReal).
 	realSaid map[string]bool
@@ -626,16 +654,65 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 			return err
 		}
 	}
-	// The test each worker recording trails, read with the tests above.
+	// The test each worker recording trails, read with the tests above,
+	// and the series of the recordings a declared rule placed.
 	a.provenMu.Lock()
 	trails := maps.Clone(a.proven.trails)
+	series := maps.Clone(a.proven.series)
+	once := slices.Clone(a.proven.once)
+	sources := maps.Clone(a.proven.sources)
+	timeForm := a.proven.timeForm
 	a.provenMu.Unlock()
 	if ts, ok := a.Proxy.(coreAgent.PoolTrailsSetter); ok {
 		if err := ts.SetPoolTrails(trails); err != nil {
 			return err
 		}
 	}
+	// The once series go first: the series index the proxy builds next
+	// reads them (MockManager.SetPoolOnce).
+	if os, ok := a.Proxy.(coreAgent.PoolOnceSetter); ok {
+		if err := os.SetPoolOnce(once); err != nil {
+			return err
+		}
+	} else if len(once) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a series of recordings once in a run")
+	}
+	if ss, ok := a.Proxy.(coreAgent.PoolSeriesSetter); ok {
+		if err := ss.SetPoolSeries(series); err != nil {
+			return err
+		}
+	}
+	if ss, ok := a.Proxy.(coreAgent.PoolSourcesSetter); ok {
+		if err := ss.SetPoolSources(sources); err != nil {
+			return err
+		}
+	}
+	if ts, ok := a.Proxy.(coreAgent.PoolTimeFormSetter); ok {
+		if err := ts.SetPoolTimeForm(timeForm); err != nil {
+			return err
+		}
+	}
 	return a.applyPool(ctx)
+}
+
+// withSeriesRepeats is stats with, from a proxy that serves declared rules'
+// series (coreAgent.SeriesRepeatReader), how many calls each answered past
+// its recorded count, and SeriesCounted set. A proxy that cannot say, or
+// whose read fails (it holds no mock manager yet), leaves stats as they are,
+// SeriesCounted false: no count, which the run's RULE USED line says, and
+// never a reason to fail the loaded count the compose bring-up checks.
+func (a *Agent) withSeriesRepeats(stats models.MockStats) (models.MockStats, error) {
+	r, ok := a.Proxy.(coreAgent.SeriesRepeatReader)
+	if !ok {
+		return stats, nil
+	}
+	repeats, err := r.SeriesRepeats()
+	if err != nil {
+		a.logger.Debug("could not read how many calls each declared rule's series answered past its recorded count", zap.Error(err))
+		return stats, nil
+	}
+	stats.SeriesCounted, stats.SeriesRepeats = true, repeats
+	return stats, nil
 }
 
 // SetScopeTrails installs the test each worker-scope recording trails for a
@@ -653,6 +730,99 @@ func (a *Agent) SetScopeTrails(ctx context.Context, trails map[string]string) er
 	defer a.wire.unlock()
 	a.provenMu.Lock()
 	a.proven.trails = maps.Clone(trails)
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeSources installs, by recording name, the sources rules declared
+// in keploy.yml give fields of its request for a replay
+// (models.ScopeTableReq.Sources), which the pool slices sent next hand the
+// proxy (SetScopePool): its learn step decides such a field by its source.
+// None leaves the set none, never the previous set's. Sources this keploy
+// cannot decide a field by (models.CheckSources: a kind a newer keploy
+// knows) are refused, and so are any for a proxy that cannot learn by
+// them: the CLI judged the recordings with them.
+func (a *Agent) SetScopeSources(ctx context.Context, sources map[string][]models.DeclaredSource) error {
+	if _, ok := a.Proxy.(coreAgent.PoolSourcesSetter); !ok && len(sources) > 0 {
+		return errors.New("this keploy agent's proxy cannot learn a field by the source a rule in keploy.yml declares")
+	}
+	for name, of := range sources {
+		if err := models.CheckSources(of); err != nil {
+			return fmt.Errorf("recording %s: %w", name, err)
+		}
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	cp := make(map[string][]models.DeclaredSource, len(sources))
+	for name, of := range sources {
+		cp[name] = slices.Clone(of)
+	}
+	a.provenMu.Lock()
+	a.proven.sources = cp
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeTimeForm installs whether a replay's learn step checks a changed
+// time by its form alone (models.ScopeTableReq.TimeForm), which the pool
+// slices sent next hand the proxy (SetScopePool). Every table says it, off
+// too: a set never keeps the previous set's. A proxy that cannot take it
+// is handed nothing and decides times by the clock checks alone, which
+// refuses more and never passes more.
+func (a *Agent) SetScopeTimeForm(ctx context.Context, on bool) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.timeForm = on
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeSeries installs the series of the worker-scope recordings a
+// declared rule placed for a replay (models.ScopeTableReq.Series), which the
+// pool slices sent next hand the proxy (SetScopePool): inside the windows a
+// series' last-placed recording answers its repeats once every recording of
+// it answered there. None leaves the set none, never the previous set's. A
+// proxy that cannot serve a series refuses one: the CLI refuses an agent
+// that does not acknowledge it.
+func (a *Agent) SetScopeSeries(ctx context.Context, series map[string][]string) error {
+	if _, ok := a.Proxy.(coreAgent.PoolSeriesSetter); !ok && len(series) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a series of recordings a declared rule placed")
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	cp := make(map[string][]string, len(series))
+	for id, names := range series {
+		cp[id] = append([]string(nil), names...)
+	}
+	a.provenMu.Lock()
+	a.proven.series = cp
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeOnce installs the series of a replay whose recordings each answer
+// once in the run (models.ScopeTableReq.Once), which the pool slices sent
+// next hand the proxy (SetScopePool): in a test's window or between tests,
+// and never again. None leaves the set none, never the previous set's. A
+// proxy that cannot serve them refuses some: the CLI refuses an agent that
+// does not acknowledge them.
+func (a *Agent) SetScopeOnce(ctx context.Context, once []string) error {
+	if _, ok := a.Proxy.(coreAgent.PoolOnceSetter); !ok && len(once) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a series of recordings once in a run")
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.once = slices.Clone(once)
 	a.provenMu.Unlock()
 	return nil
 }
@@ -696,6 +866,30 @@ func (a *Agent) SetScopeSkippedReads(ctx context.Context, reads map[string]strin
 	reads = maps.Clone(reads)
 	a.provenMu.Lock()
 	a.proven.skippedReads = reads
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeBackground installs, for a replay, the names of the set's
+// background recordings (models.ScopeTableReq.Background): its worker: and
+// startup: mocks. The set's staging hands them to the proxy read-only
+// (stageForExactServing), so a parser marks a miss that is one more run of
+// one of them (models.MockMismatchReport.Background), as keploy test's
+// staging does (models.MockFilterParams.BackgroundMocks). A set already
+// staged with other names is staged again before it is served, so the
+// proxy never keeps the previous names. None leaves the set none, never the
+// previous set's.
+func (a *Agent) SetScopeBackground(ctx context.Context, names []string) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	names = slices.Clone(names)
+	a.provenMu.Lock()
+	a.proven.background = names
+	if a.proven.staged && !slices.Equal(a.proven.stagedBackground, names) {
+		a.proven.staged = false
+	}
 	a.provenMu.Unlock()
 	return nil
 }
@@ -1040,6 +1234,85 @@ func (a *Agent) replaying() bool {
 	return a.config != nil && a.config.Agent.Mode == models.MODE_TEST
 }
 
+// giveClientCases gives the learn step, as test id begins in worker's
+// window and after its proxy opened the test, the requests its client test
+// sent the application in its recording (SetTestCases,
+// coreAgent.ClientCasesTaker): the learn step follows the run's window alone
+// (worker 0). The ingress cannot tell which test a request is of, so while
+// another worker's test is open (overlaps) no request pairs: a test begun
+// beside one gives none, and one begun in another worker stops the run's
+// window's test pairing from then (nil). The requests already paired stay
+// its places: each reached the application while its test alone was open.
+//
+// The agent then keeps the test's requests only where a variable is bound
+// at one: the test begun again binds it again. The rest it forgets at this
+// begin, so over a session it holds the requests of the tests still to
+// begin and of those that bind, not the recording's: the learn step reads
+// them in this run of the test alone, and a test begun again ends it
+// (keepRecordedOrder).
+func (a *Agent) giveClientCases(id string, worker uint32, overlaps bool) {
+	a.scopeMu.Lock()
+	cases := a.testCases[id]
+	if !slices.ContainsFunc(cases, func(c models.ClientCase) bool { return len(c.Binds) > 0 }) {
+		delete(a.testCases, id)
+	}
+	a.scopeMu.Unlock()
+	taker, ok := a.Proxy.(coreAgent.ClientCasesTaker)
+	if !ok {
+		return
+	}
+	if worker != 0 || overlaps {
+		taker.TakeClientCases(id, nil)
+		return
+	}
+	taker.TakeClientCases(id, cases)
+}
+
+// answerAsRecorded hands worker's proxy, before test id opens, the run's
+// variables the answer-only needs of id whose tests have not begun (asRecorded,
+// models.ScopeNeed.Answers) name, for id's scope to answer as recorded
+// (coreAgent.ExactTestAnswerer). With none, it hands none, so nothing left by
+// an earlier begin of id that did not open stays. It returns the first of
+// them when the proxy could not take them, which id then waits on, and nil
+// otherwise. ProvenBegin says each one handed (answeredAsRecordedLine) once
+// id has begun: a begin that fails after the hand opens no test to answer.
+func (a *Agent) answerAsRecorded(id string, worker uint32, asRecorded []models.ScopeNeed) *models.ScopeNeed {
+	var names []string
+	for _, n := range asRecorded {
+		names = append(names, n.Answers...)
+	}
+	slices.Sort(names)
+	names = slices.Compact(names)
+	// A worker keploy serves no mocks of its own to has no server (nil).
+	es, _ := a.exactServerOf(worker)
+	handed := false
+	if r, ok := es.(coreAgent.ExactTestAnswerer); ok {
+		handed = r.AnswerAsRecordedAtOpen(id, names) == nil
+	}
+	if !handed && len(asRecorded) > 0 {
+		return &asRecorded[0]
+	}
+	return nil
+}
+
+// answeredAsRecordedLine is the line ProvenBegin says, once test id has
+// begun, for id's answer-only need n: the values id receives from n.Test,
+// which has not run before it, or, for a need that names no test (no
+// recording in this run sends them), the values alone.
+func answeredAsRecordedLine(id string, n models.ScopeNeed) string {
+	values, they := fmt.Sprintf("%d values", len(n.Answers)), "they are"
+	if len(n.Answers) == 1 {
+		values, they = "1 value", "it is"
+	}
+	names := strings.Join(n.Answers, ", ")
+	if n.Test == "" {
+		return fmt.Sprintf("keploy: %s receives %s that no recording in this run sends (%s) only in answers, so %s answered as recorded",
+			id, values, names, they)
+	}
+	return fmt.Sprintf("keploy: %s receives %s %s makes (%s) only in answers; %s has not run before it in this replay, so %s answered as recorded",
+		id, values, n.Test, names, n.Test, they)
+}
+
 // ProvenBegin opens a test (design v14 §5.3). The run must be claimed; the
 // harness must say it can skip; a second test while one is open is refused;
 // in a replay a gated test is answered skip, and opens nothing.
@@ -1103,11 +1376,19 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	reason, gated := a.proven.skip[id]
 	outcome := models.ScopeOutcomeGated
 	// A test whose call holds a value an earlier test's call sends runs
-	// only after that test began in this replay.
+	// only after that test began in this replay. One that only receives
+	// the earlier test's values, in answers, runs without it: they are
+	// answered as recorded (answerAsRecorded).
+	var asRecorded []models.ScopeNeed
 	for _, n := range a.proven.needs[id] {
-		if !gated && !a.proven.began[n.Test] {
-			reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
+		if gated || a.proven.began[n.Test] {
+			continue
 		}
+		if len(n.Answers) > 0 {
+			asRecorded = append(asRecorded, n)
+			continue
+		}
+		reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
 	}
 	// The process whose hooks must carry the test is the one that claimed
 	// it: its worker's, or the run's.
@@ -1116,6 +1397,13 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		claimer = w.pid
 	}
 	a.provenMu.Unlock()
+	if a.replaying() && !gated {
+		// A proxy that cannot answer them as recorded would refuse each
+		// answer: the test waits on those tests, as each need says.
+		if n := a.answerAsRecorded(id, worker, asRecorded); n != nil {
+			reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
+		}
+	}
 	if a.replaying() && gated {
 		a.noteScopeNotRun(id, 0, at, outcome)
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
@@ -1228,6 +1516,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			// test.
 			capture.ContinueTestErrorCapture()
 			opened = true
+			a.giveClientCases(id, worker, overlaps)
 		}
 	}
 	if err := a.beginScopeAt(ctx, id, 0, at, open); err != nil {
@@ -1267,6 +1556,13 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// however the last open test closes.
 	a.reScope()
 	begun = true
+	// Only a test that began is answered as recorded: a begin that failed
+	// after the hand says nothing of it.
+	if a.replaying() {
+		for _, n := range asRecorded {
+			a.logger.Info(answeredAsRecordedLine(id, n))
+		}
+	}
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Seed: seed}, nil
 }
 
@@ -1509,6 +1805,8 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
+	// The harness failed the test before keploy's evidence did (below).
+	ownFailed := false
 	// The test's calls are settled before it is judged (settle_proven.go):
 	// a call it made that the proxy has not yet taken or answered is its
 	// own, whatever the load. One keploy cannot settle leaves the test
@@ -1522,9 +1820,10 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		real = t.EndTestOf(a.scopeInstance(id))
 	}
 	uses, incomplete := real.Uses, real.Incomplete
-	// When exact serving began serving the test: a miss made before it is
-	// no call of the test's (evidenceReason).
-	beganAt := a.servedSince(id)
+	// Where exact serving began serving the test: a miss made before it is
+	// no call of the test's (testEvidence, evidenceReason).
+	began := a.servedBegin(id)
+	beganAt := began.at
 	if a.replaying() {
 		// The test stops being served before what it did is read: a call
 		// that lands after the read cannot consume one of its mocks, so the
@@ -1535,7 +1834,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		if err := a.servePoolExactly(ctx, a.scopeInstance(id)); err != nil {
 			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), zap.Error(err))
 		}
-		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped, beganAt)
+		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped, began)
 	}
 	if len(incomplete) > 0 {
 		if ev == nil {
@@ -1553,6 +1852,9 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty() && a.replaying():
 		ev.Reason = a.evidenceText(id, ev, beganAt)
+		// The harness's own verdict, before keploy's evidence fails the
+		// test: a failure keploy imposes (why) is not the test's own.
+		ownFailed = why == "" && outcome == models.ScopeOutcomeFailed
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty():
 		// A record never fails a test: what keploy could not capture is
@@ -1610,6 +1912,15 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		}
 		ev.Reason = strings.TrimSpace("keploy: " + why + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
 		outcome = models.ScopeOutcomeFailed
+	}
+	// It failed on its own only when keploy answered every call it made:
+	// after the losses and the settle above (a settle keploy could not
+	// finish leaves it Unread), the evidence holds nothing but the
+	// recordings it did not make. A test that met keploy's error answer to
+	// a call (a miss), or made one keploy could not capture, may have failed
+	// on that: what it did not make stays evidence against it.
+	if ownFailed {
+		ev.FailedOnItsOwn = !ev.Unanswered()
 	}
 	a.NoteScopeOutcome(id, 0, outcome)
 	if ev != nil && (ev.Reason != "" || !ev.Empty()) {
@@ -1878,12 +2189,27 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // consume while it was open (exact serving tells which). A failed read is an
 // error. Every miss is still charged to the run, so its next step is said.
 //
-// beganAt is when exact serving began serving the test (zero when it is not
-// known). A miss made outside every test before it (outsideEveryTest) is no
-// call of the test's: the test framework set the test's window, and keploy
-// does not move a call into it. It is charged to no test, and the run's
-// receipt lists it (Receipt.UnchargedMisses), so a reader who finds it the
-// test's own call edits the set's mappings rather than keploy guessing.
+// began is where exact serving began serving the test (its time zero, and
+// its round not known, when it is not known). A miss made outside every test
+// before it (outsideEveryTest) is no call of the test's: the test framework
+// set the test's window, and keploy does not move a call into it. It is
+// charged to no test, and the run's receipt lists it
+// (Receipt.UnchargedMisses), so a reader who finds it the test's own call
+// edits the set's mappings rather than keploy guessing. Where its mark names
+// the test whose view it was made in, it is listed under that test
+// (models.UnmatchedCall.WindowOf). So is an earlier test set's test's own
+// call that keploy decided only after this set's mocks were staged, which the
+// proxy keeps for this set's first read naming that test
+// (models.UnmatchedCall.EarlierSetTest), even where the test that read it has
+// the same name.
+//
+// A miss marked in another test's view before this test's was installed
+// (markedInAnotherTest) is that test's own call, which keploy decided only
+// after that test's end was read: it is charged to no test, and names the
+// test it was made in (models.UnmatchedCall.WindowOf), never failing this
+// one, which did not make it. Each is placed by where its call was marked,
+// never by when keploy decided it, so how fast keploy answers never moves a
+// miss into another test.
 //
 // A miss that repeats a spent recording of the set's background
 // (backgroundRepeat) is no call of the test's either: the application made
@@ -1891,7 +2217,13 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // It is charged to no test the same way, and names the window it was made
 // in (missWindow), so a background call keploy cannot answer never fails
 // the test whose window it lands in.
-func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganAt time.Time) (*models.ScopeEvidence, error) {
+//
+// A miss that carries another test's kept value (trailsAnother: a trailing
+// clean-up of that test, models.UnmatchedCall.TrailsOf) is charged to no
+// test the same way, naming its window. It still counts against the tests,
+// so the run fails on it and judging fails the trailed test, not the one
+// whose window it landed in.
+func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began testBegin) (*models.ScopeEvidence, error) {
 	if a.Proxy == nil {
 		return nil, errors.New("no proxy")
 	}
@@ -1899,12 +2231,34 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	all, err := a.missesOf(ctx, a.scopeInstance(id))
 	var misses, outside []models.UnmatchedCall
 	for _, m := range all {
-		if outsideEveryTest(m, beganAt) {
+		if m.EarlierSetTest != "" || m.EarlierSet > 0 {
+			// An earlier set's call, which keploy decided only after this
+			// set's mocks were staged: listed under the test it was made
+			// in, where it names one, however its round and this test's
+			// install fall, and charged to none.
+			m.WindowOf = m.EarlierSetTest
+			outside = append(outside, m)
+			continue
+		}
+		if outsideEveryTest(m, began) {
+			// Listed under the test whose view it was marked in, where
+			// it names one.
+			m.WindowOf = m.Marked.Test
+			outside = append(outside, m)
+			continue
+		}
+		if test, ok := markedInAnotherTest(m, id, began); ok {
+			m.WindowOf = test
+			outside = append(outside, m)
+			continue
+		}
+		if trailsAnother(m, id) {
+			m.WindowOf = missWindow(m, id, began)
 			outside = append(outside, m)
 			continue
 		}
 		if backgroundRepeat(m) {
-			m.WindowOf = missWindow(m, id, beganAt)
+			m.WindowOf = missWindow(m, id, began)
 			outside = append(outside, m)
 			continue
 		}
@@ -1961,14 +2315,63 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	return ev, nil
 }
 
+// testBegin is where exact serving began serving a test (serveTestExactly):
+// at is when (zero when it is not known), and epoch and bounds the staging
+// and the round's boundary count its view was installed at
+// (agent.ExactTestInstallReader), round false when the proxy did not say.
+type testBegin struct {
+	at            time.Time
+	epoch, bounds uint64
+	round         bool
+}
+
+// markedBefore reports whether miss m's call was marked (models.MissMark) in
+// a round before the view of the test begun at b was installed; known is
+// false when the mark or the install's round is not known.
+func (b testBegin) markedBefore(m models.UnmatchedCall) (before, known bool) {
+	if !b.round || !m.Marked.Known {
+		return false, false
+	}
+	return m.Marked.Before(b.epoch, b.bounds), true
+}
+
 // outsideEveryTest reports whether miss m was made outside every test, before
-// the test that began being served at beganAt: filed while no test was open
-// (models.MissOutsideTest) at a time before beganAt. A miss without a time,
-// or read when beganAt is not known, is not told so: it stays the ending
-// test's, as a miss of another kind made before beganAt does (a call of the
-// previous test's still in flight as it ended), and fails it.
-func outsideEveryTest(m models.UnmatchedCall, beganAt time.Time) bool {
-	return m.Kind == models.MissOutsideTest && !beganAt.IsZero() && !m.At.IsZero() && m.At.Before(beganAt)
+// the test begun at b: filed while no test was open (models.MissOutsideTest)
+// and marked (models.MissMark) before that test's view was installed,
+// however late keploy decided it. One marked at or after the install was
+// made as the test ended, and is the test's. A miss with no known mark is
+// told by when it was filed, before b's time. A miss without a time, or read
+// when b is not known, is not told so: it stays the ending test's, as a miss
+// of another kind made before the begin does (a call of the previous test's
+// still in flight as it ended, unmarked or marked in no named test), and
+// fails it.
+func outsideEveryTest(m models.UnmatchedCall, b testBegin) bool {
+	if m.Kind != models.MissOutsideTest {
+		return false
+	}
+	if before, known := b.markedBefore(m); known {
+		return before
+	}
+	return !b.at.IsZero() && !m.At.IsZero() && m.At.Before(b.at)
+}
+
+// markedInAnotherTest is the test whose view miss m's call was marked in
+// (models.MissMark.Test), with ok, when that is another test than id, begun
+// at b, and the mark came before id's view was installed: that test's own
+// call, which keploy decided after that test's end was read (its report
+// reached keploy too late for it). It is no call of id's, so it never fails
+// id. ok is false for a mark that names no test, names id (a call of an
+// earlier opening of id's own: id's), or is not known, and when id's
+// install is not known: such a miss stays id's.
+func markedInAnotherTest(m models.UnmatchedCall, id string, b testBegin) (string, bool) {
+	if m.Marked.Test == "" || m.Marked.Test == id {
+		return "", false
+	}
+	// Not known, a mark is never before (markedBefore).
+	if before, _ := b.markedBefore(m); !before {
+		return "", false
+	}
+	return m.Marked.Test, true
 }
 
 // backgroundRepeat reports whether miss m repeats a spent recording of the
@@ -1986,13 +2389,26 @@ func backgroundRepeat(m models.UnmatchedCall) bool {
 	return m.Repeat != nil && m.Repeat.Background != "" && m.Kind != models.MissExtraCall && !m.NotOwned
 }
 
+// trailsAnother reports whether miss m, read at test id's end, carries the
+// kept value of another test it trails (models.UnmatchedCall.TrailsOf): that
+// test's clean-up, landed in id's window. One that trails id itself is id's
+// own call, and stays its miss.
+func trailsAnother(m models.UnmatchedCall, id string) bool {
+	return m.TrailsOf != "" && m.TrailsOf != id
+}
+
 // missWindow is the test whose window miss m was made in, for a miss read
-// at test id's end that began being served at beganAt: id when m was made
-// at or after it, "" when it was made before it (another test's window, or
-// none) or when either time is not known (a miss without a time is before
-// every begin).
-func missWindow(m models.UnmatchedCall, id string, beganAt time.Time) string {
-	if beganAt.IsZero() || m.At.Before(beganAt) {
+// at test id's end that began being served at b. A miss with a known mark
+// (models.MissMark) was made in the view its call was marked in: that view's
+// test, "" for a pool view. One with none: id when m was filed at or after
+// b's time, "" when it was filed before it (another test's window, or none)
+// or when either time is not known (a miss without a time is before every
+// begin).
+func missWindow(m models.UnmatchedCall, id string, b testBegin) string {
+	if m.Marked.Known {
+		return m.Marked.Test
+	}
+	if b.at.IsZero() || m.At.Before(b.at) {
 		return ""
 	}
 	return id
@@ -2058,7 +2474,11 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 
 // servedSince is when exact serving began serving open test id; zero when
 // it does not.
-func (a *Agent) servedSince(id string) time.Time {
+func (a *Agent) servedSince(id string) time.Time { return a.servedBegin(id).at }
+
+// servedBegin is where exact serving began serving open test id: the zero
+// testBegin when it does not.
+func (a *Agent) servedBegin(id string) testBegin {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
 	return a.proven.servedSince[id]
