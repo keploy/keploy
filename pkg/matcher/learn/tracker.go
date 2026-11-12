@@ -138,6 +138,10 @@ type Tracker struct {
 	// mock and place), and taken the names given.
 	names map[string]string
 	taken map[string]bool
+	// usedWords are the running test's variables its learn steps used at
+	// one word of a request place, by mock and "<place>#<word>"
+	// (ServedNamed, UsedWords).
+	usedWords map[string]string
 	// run are the exchanges the learn step served before the first test
 	// began (the start-up's) that carried a value the run made (one that
 	// drifted from its recording), and, under the proven switch, the calls
@@ -248,7 +252,7 @@ type Tracker struct {
 
 // NewTracker makes a tracker with no test open.
 func NewTracker() *Tracker {
-	t := &Tracker{places: newSetPlaces(), derived: newSetDerived()}
+	t := &Tracker{places: newSetPlaces(), derived: newSetDerived(), usedWords: map[string]string{}}
 	t.drifts = t.newDrifts()
 	return t
 }
@@ -284,7 +288,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.places, t.derived = newSetPlaces(), newSetDerived()
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
-	t.names, t.taken = nil, nil
+	t.names, t.taken, t.usedWords = nil, nil, map[string]string{}
 	t.answered, t.drifts = nil, t.newDrifts()
 	t.servedAt, t.serveAt = nil, nil
 	t.given, t.gave = nil, nil
@@ -602,7 +606,7 @@ func (t *Tracker) beginAt(at time.Time) func() {
 	t.before, t.mocks, t.kept = t.mocks, nil, nil
 	t.answered = nil
 	t.drifts = t.newDrifts()
-	t.names, t.taken = nil, nil
+	t.names, t.taken, t.usedWords = nil, nil, map[string]string{}
 	t.given, t.gave = nil, nil
 	t.cases, t.incoming, t.incomingWords = caseCursor{}, nil, 0
 	t.incomingGen++
