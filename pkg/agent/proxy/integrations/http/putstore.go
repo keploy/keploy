@@ -35,6 +35,12 @@ import (
 //     cannot read changes the resource in a way keploy does not follow), and
 //     a later PUT replaces what an earlier one stored.
 //
+// A stored field the PUT's learn step learned as a read of the application's
+// clock (a createdAt or an expiresAt the application stamps) is answered as
+// recorded (readBackPlan's clockWritten): the HTTP replay cannot hold one
+// place of a call to both a variable and a read of the clock, so a variable
+// bound there would refuse the PUT in every later replay.
+//
 // A stated limit: a call to another URL that changes the resource (a key
 // store's delete or destroy endpoint) is not seen; the GET's recorded answer
 // then holds what that call left there, which is linked only where it is

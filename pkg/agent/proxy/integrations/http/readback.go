@@ -35,7 +35,9 @@ import (
 // in earlier with the reader's marks of what each call stored, when the
 // test's own call made it. A leaf whose write holds a variable of the test
 // already (bound or used there) answers that variable; any other is a new
-// variable bound at the write (p.binds). p is returned as it was where no
+// variable bound at the write (p.binds), but where the write's leaf is a read
+// of the application's clock its call learned (clockWritten), which is
+// answered as recorded. p is returned as it was where no
 // reader reads m, or where the answer of a call the reader follows cannot be
 // read back. Only the answers of the calls the reader follows are loaded
 // (models.HTTPStoreFollows decides from the requests alone), so a read loads
@@ -156,6 +158,15 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 			}
 			continue
 		}
+		if clockWritten(marked, from) {
+			// The write's leaf is a read of the application's clock its
+			// call's learn step learned (MockSpec.Clocks: a stamp the store
+			// keeps). A variable bound there too is a place the HTTP replay
+			// refuses (it cannot hold one value to both), so the write's
+			// call would be refused in every later replay: the read is
+			// answered as recorded there.
+			continue
+		}
 		name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
 		if !ok {
 			continue
@@ -204,6 +215,24 @@ func markWritten(earlier []learn.Earlier, written map[string]map[string]string) 
 		out[i].Seen = seen
 	}
 	return out
+}
+
+// clockWritten reports whether from, a request leaf of a call served earlier
+// (learn.ReadBack's place), is one that call's learn step learned as a read
+// of the application's clock, plain or plus an offset (learn.Named's
+// Seen.Offset, as MockSpec.Clocks keys it).
+func clockWritten(earlier []learn.Earlier, from learn.Place) bool {
+	for _, e := range earlier {
+		if e.Mock != from.Mock || e.Given {
+			continue
+		}
+		for _, s := range e.Seen {
+			if s.Side == learn.Request && s.Leaf.Path == from.Path && s.Offset != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // wordUsedAt is the variable vars (a write's learned variables) uses at one

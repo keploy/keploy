@@ -211,6 +211,19 @@ func TestPutStoreReadsOnlyWhatNamesOneResource(t *testing.T) {
 		}
 	})
 
+	// A PUT's live URL is its own exchange's: not that of another mock
+	// served before it, which went to the read's URL, nor a given value's.
+	other := learn.Earlier{Mock: "mock-9", Seen: seen.Seen}
+	given := learn.Earlier{Mock: "mock-0", Given: true, Seen: seen.Seen}
+	elsewhere := learn.Earlier{Mock: "mock-0", Seen: []learn.Seen{{Side: learn.Request, Leaf: learn.Leaf{Path: "url.path.0", Value: "k"}, Live: "j"}}}
+	put := learnRecorded("mock-0", 0, "PUT", "/k", `{"a":"1"}`, nil, `{}`)
+	if a, ok := putAccess(read, []*models.Mock{put}, []learn.Earlier{other, given, elsewhere}, liveURL); !ok || a.Written[0] != nil {
+		t.Fatalf("a PUT that went to another URL in this run stored %v (%v)", a.Written, ok)
+	}
+	if a, ok := putAccess(read, []*models.Mock{put}, []learn.Earlier{other, given, seen}, liveURL); !ok || a.Written[0]["body.a"] == "" {
+		t.Fatalf("a PUT that went to the read's URL in this run stored %v (%v)", a.Written, ok)
+	}
+
 	shape := func(kv ...string) learn.Shape {
 		s := learn.Shape{Leaves: map[string]learn.Leaf{}}
 		for i := 0; i < len(kv); i += 2 {
