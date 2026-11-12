@@ -157,7 +157,7 @@ func parseRecordedParts(m *models.Mock) httpParts {
 	r := m.Spec.HTTPReq
 	p := httpParts{method: string(r.Method), path: r.URL, header: make(map[string]string, len(r.Header)), body: recordedBody(r),
 		dest: recordedDestination(m)}
-	u, err := url.Parse(r.URL)
+	u, err := parseRecordedURL(r.URL)
 	if err == nil {
 		p.path = u.Path
 	}

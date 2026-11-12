@@ -1404,7 +1404,10 @@ func (p *Proxy) recordMySQLOutgoing(
 // when it returns, and handleConnection's deferred close shuts it after this
 // returns: a returned miss is queued here (sendMockNotFoundErrorFrom) before the
 // application sees its connection fail, so a test that ends as soon as its
-// database call fails still has its miss.
+// database call fails still has its miss. A statement no mock matches does
+// not end the connection: the replayer reports it through the reporter
+// installed below before it answers the statement with an error, and serves
+// on.
 func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, dstAddr string, m integrations.MockMemDb, outgoingOpts models.OutgoingOptions) error {
 	// Same registration hazard as the record path: a probe verdict of IsMySQL
 	// does not imply the parser is registered (the configured-port and
@@ -1425,6 +1428,13 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	reportCtx := p.withClientTLS(parserCtx, dstAddr, srcProcess(outgoingOpts))
 	reportCtx = withNoiseEngine(reportCtx, mysqlMocker, outgoingOpts)
 	mysqlDst := &models.ConditionalDstCfg{Addr: dstAddr}
+	// The replayer answers a statement no mock matches with an error and
+	// serves on (replayer.answerMiss): it reports that miss here, before
+	// the application reads the error, as every other parser's replay
+	// reports through the reporter handleConnection installs.
+	reportCtx = models.WithMockMismatchReporter(reportCtx, func(err error) {
+		p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
+	})
 	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, mysqlDst, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
 	if errors.Is(err, util.ErrParserPanicked) {
@@ -1434,7 +1444,11 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	}
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
-		p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
+		// A miss the replayer reported before it ended the connection is
+		// queued already; queued again it would count twice.
+		if !models.IsMismatchReported(err) {
+			p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
+		}
 		if provenswitch.On() && isMockMiss(err) {
 			return reportedMiss{err}
 		}

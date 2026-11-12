@@ -100,7 +100,7 @@ func MockURLShape(m *Mock) string {
 	if m == nil || m.Spec.HTTPReq == nil {
 		return ""
 	}
-	u, err := url.Parse(strings.TrimSpace(m.Spec.HTTPReq.URL))
+	u, err := ParseRequestURL(strings.TrimSpace(m.Spec.HTTPReq.URL))
 	if err != nil {
 		return pathHole
 	}

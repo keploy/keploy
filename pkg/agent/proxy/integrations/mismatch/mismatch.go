@@ -819,7 +819,7 @@ func normalizeDestination(dest string) (host string, ok bool) {
 	// "http", which would make every scheme-carrying destination compare
 	// equal to every other and produce a confident, wrong verdict. No
 	// in-tree producer emits one today — models.RecordedDestination returns
-	// url.Parse's Host, and the live side reads request.Host /
+	// models.ParseRequestURL's Host, and the live side reads request.Host /
 	// request.URL.Host, all scheme-free — but this is the exact failure
 	// class the feature exists to prevent, so it is refused rather than
 	// guessed at.

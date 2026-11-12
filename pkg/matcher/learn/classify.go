@@ -2,7 +2,6 @@ package learn
 
 import (
 	"encoding/json"
-	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -4553,7 +4552,7 @@ func callOf(m *models.Mock) string {
 	call := string(m.Kind)
 	if r := m.Spec.HTTPReq; r != nil {
 		host, path := r.URL, ""
-		if u, err := url.Parse(r.URL); err == nil {
+		if u, err := models.ParseRequestURL(r.URL); err == nil {
 			host, path = u.Host, u.Path
 		}
 		call += " " + string(r.Method) + " " + host + " /" + strconv.Itoa(len(strings.Split(strings.TrimPrefix(path, "/"), "/")))
