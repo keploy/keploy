@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,4 +128,50 @@ func TestAClientIDNoEarlierLeafHoldsWholeInBothRunsStaysRefused(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestAClientIDIsBoundWholeOnlyAtAPlaceBeforeTheCallInBothRuns: an exchange
+// of the call's own test that sent the client_id whole in both runs, before
+// the call, is the value's source, bound there whole. One round F served only
+// after the call reached keploy is no place before the call (round F's
+// application gave it nothing by then): the field is not bound whole there.
+func TestAClientIDIsBoundWholeOnlyAtAPlaceBeforeTheCallInBothRuns(t *testing.T) {
+	rec, live := sealedPair(t, 1794446576090003375, "unpaired")
+	for _, tc := range []struct {
+		name  string
+		after bool
+	}{{"sent before the call", false}, {"round F served it only after the call", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := staffBlockCall(t, rec, live, rec, live)
+			e := iSent("mock-9", in.At.Add(-time.Millisecond), "url.query.client_id", String, rec, live)
+			e.Payload.servedAfter = tc.after
+			in.Earlier = []Earlier{e}
+			d := oWord(t, Decide(in), rec, live)
+			whole := d.Outcome == OutcomeValue && d.At.Word < 0
+			if tc.after && whole {
+				t.Fatalf("bound whole to %s %s: %s; want no whole bind at a place round F served after the call", d.From.Mock, d.From.Path, d.Line)
+			}
+			if !tc.after && (!whole || d.From.Mock != "mock-9" || d.From.Path != "url.query.client_id") {
+				t.Fatalf("outcome %v from %s %s at word %d: %s; want a Value of mock-9's client_id whole", d.Outcome, d.From.Mock, d.From.Path, d.At.Word, d.Line)
+			}
+		})
+	}
+}
+
+// TestAClientIDOfACallThatLandedElsewhereReadsEveryTestsPlace: a call round
+// F landed in another test (Mode Elsewhere) reads every earlier place of the
+// run as its scope, so another test's request that sent the client_id whole
+// in both runs is the value's source; the timer rule then refuses it (it
+// teaches clock reads only), naming that place.
+func TestAClientIDOfACallThatLandedElsewhereReadsEveryTestsPlace(t *testing.T) {
+	rec, live := sealedPair(t, 1794446576090003375, "unpaired")
+	in := staffBlockCall(t, rec, live, rec, live)
+	e := iSent("mock-9", in.At.Add(-time.Millisecond), "url.query.client_id", String, rec, live)
+	e.Own, e.Run = false, true
+	in.Earlier = []Earlier{e}
+	in.Mode, in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
+	d := oWord(t, Decide(in), rec, live)
+	if d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalLandedElsewhere || !strings.Contains(d.Line, "a value an earlier place sent (mock-9 url.query.client_id)") {
+		t.Fatalf("outcome %v: %s; want the timer rule's refusal of a value mock-9's client_id sent", d.Outcome, d.Line)
+	}
 }
