@@ -318,3 +318,41 @@ func TestAClockReadIsNoStaleNoiseOfAnOlderKeploy(t *testing.T) {
 		}
 	}
 }
+
+// A path segment the learn step learned as a read of the application's
+// clock is checked as one, though an older keploy also learned it as noise
+// whole and it is more than one word (a wall clock with a space before its
+// time): a read in the call's window is answered, and any other value is
+// refused with the clock read's reason alone, never with the one that says
+// an older keploy's whole noise no longer excuses it.
+func TestAClockSegmentAnOlderKeployLearnedAsNoiseWholeIsCheckedAsAClockRead(t *testing.T) {
+	seg := func(v string) string { return "/v1/u/" + url.PathEscape(v) }
+	m := recorded("mock-2", seg("2026-10-26 15:50:35"), urlNoiseJSON, `{}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": {Res: time.Second, Zone: models.ZoneApp, Layout: "iso-second-space", AppZone: "UTC"}}
+	m.Spec.ReqBodyNoise = map[string][]string{"url.path.2": {}}
+	for _, c := range []struct {
+		value, why string
+	}{
+		{"2026-10-26 15:50:36", ""},
+		{"2026-09-02 09:00:00", "not a read of the application's clock made in this call's window"},
+		{"lead r-1", "no instant keploy reads"},
+	} {
+		in := sent(seg(c.value), urlNoiseJSON, `{}`)
+		in.arrived = urlNoiseBase.Add(2 * time.Second)
+		got, diag := strictMatchIn(t, clockConn(true, urlNoiseBase), in, nil, nil, nil, m)
+		if c.why == "" {
+			if got == nil {
+				t.Errorf("%q, a read in the call's window, refused (differs %v); want answered", c.value, differs(diag))
+			}
+			continue
+		}
+		if got != nil || diag == nil {
+			t.Errorf("%q answered; want refused", c.value)
+			continue
+		}
+		r := reasonsOf(diag.differs)
+		if len(r) != 1 || r[0].Field != "path" || !strings.Contains(r[0].Why, "learned as clock") || !strings.Contains(r[0].Why, c.why) {
+			t.Errorf("%q: reasons %+v; want the clock read's (%s) alone", c.value, r, c.why)
+		}
+	}
+}
