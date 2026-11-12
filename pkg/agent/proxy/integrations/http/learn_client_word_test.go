@@ -189,7 +189,8 @@ func bindsAt(m models.Mock, at string) bool {
 // request's word as F sent it ("-" where ""), and nameLive the name's word
 // as F wrote it (the request's word where ""). label adds a request field
 // that holds the record's name whole (body.variables.label, after the
-// repository's field in the request's order), and respWord and respName
+// repository's field in the request's order), with the word labelLive in
+// place of the request's as F sent it, and respWord and respName
 // make the PUT's answer hold the repository's word whole (body.data.ref)
 // or the name whole (body.data.name), as recorded. suiteRules leaves out
 // the expiresAt rule, which api-server's keploy.yml does not declare.
@@ -200,6 +201,7 @@ type ciKeyCase struct {
 	key                string
 	liveSep, nameLive  string
 	label              bool
+	labelLive          string
 	respWord, respName bool
 	suiteRules         bool
 }
@@ -271,7 +273,11 @@ func ciKeyPut(t *testing.T, c ciKeyCase, timeForm bool) (*models.Mock, *learnMis
 	req := func(read time.Time, sa, seq string, live bool) string {
 		label := ""
 		if c.label {
-			label = `,"label":"` + name(read, live) + `"`
+			v := name(read, live)
+			if live && c.labelLive != "" {
+				v = "CI identity: github octo-org/repo-" + c.labelLive + tail(c.nameTail, live)
+			}
+			label = `,"label":"` + v + `"`
 		}
 		return `{"query":"mutation($sa: String!, $input: CreateWorkloadIdentityInput!) {\n  createServiceAccountWorkloadIdentity(serviceAccountId: $sa, input: $input) { id audience exchangeAudience issuer pinned { claim value } expiresAt }\n}","variables":{"input":{"conditions":[{"claim":"repository","` + key + `":"octo-org/repo` +
 			repoSep(live) + word(read, live) + tail(c.repoTail, live) + `"},{"claim":"ref","value":"refs/heads/run-` + seq + `"}],"issuer":"http://127.0.0.1:42833","provider":"github"}` + label + `,"sa":"` + sa + `"}}`

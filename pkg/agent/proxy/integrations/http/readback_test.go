@@ -737,3 +737,48 @@ func TestReadBackLeavesALeafNoPlaceNamesAsRecorded(t *testing.T) {
 		t.Fatalf("vars %+v binds %+v, want the text answered as recorded", p.vars, p.binds)
 	}
 }
+
+// readBackPlan of a write whose place holds a variable of the test at one
+// word (a client test's word, learn.Place.Word): the read answers that
+// variable at the same word of its field, with the word F's write holds. A
+// value the variable holds already (bound where the test first sent it)
+// stays that binding. Where F's write holds no such word (fewer words than
+// the recorded one), the field is answered as recorded.
+func TestReadBackPlanAnswersAWritesWord(t *testing.T) {
+	rbRegister(t, rbStore{})
+	const recName, liveName = "Lead 1700000000000", "Lead 1700000000417"
+	put := learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", recName), rbPut, `{}`)
+	put.Spec.SetLearned(models.MockVariables{"value3": {Recorded: "1700000000000", Use: []string{"body.Item.Name.S#1"}}}, nil)
+	get := learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", recName)+`}`)
+	exchange := func(name string) []learn.Earlier {
+		return []learn.Earlier{{Mock: "mock-0", At: put.Spec.ReqTimestampMock, Own: true, Seen: []learn.Seen{
+			{Side: learn.Request, Leaf: learn.Leaf{Path: "body.Item.Id.S", Noise: "body.Item.Id.S", Type: learn.String, Value: "c-1"}, Live: "c-1", Place: "body.Item.Id.S"},
+			{Side: learn.Request, Leaf: learn.Leaf{Path: "body.Item.Name.S", Noise: "body.Item.Name.S", Type: learn.String, Value: recName}, Live: name, Place: "body.Item.Name.S"},
+		}}}
+	}
+	h := newHTTP()
+	tr := clockedTracker()
+	tr.Begin()
+	test := tr.Placed().Test
+
+	p := h.readBackPlan(tr, test, get, learn.Shape{}, []*models.Mock{put}, exchange(liveName), nil, newPairing())
+	if want := (models.MockVariables{"value3": {Recorded: "1700000000000", Answer: []string{"body.Item.Name.S#1"}}}); !reflect.DeepEqual(p.vars, want) || len(p.binds) != 0 {
+		t.Fatalf("vars %+v binds %+v, want the write's variable answered at the read's word, bound nowhere new", p.vars, p.binds)
+	}
+	if b := p.values["value3"]; b.Value != "1700000000417" || b.Mock != "mock-0" || b.Place != "body.Item.Name.S#1" {
+		t.Fatalf("value %+v, want the word F's write holds", b)
+	}
+
+	first := variables.Binding{Name: "value3", Value: "1700000000417", Recorded: "1700000000000", Mock: "test case post-query-83", Place: "body.variables.repo#1"}
+	p = newPairing()
+	p.values["value3"] = first
+	if p = h.readBackPlan(tr, test, get, learn.Shape{}, []*models.Mock{put}, exchange(liveName), nil, p); !reflect.DeepEqual(p.values["value3"], first) || len(p.vars["value3"].Answer) != 1 {
+		t.Fatalf("value %+v vars %+v, want the read answered at the word and the binding where the variable was first sent, %+v", p.values["value3"], p.vars, first)
+	}
+
+	noPanic(t, "a write with fewer words than recorded", func() {
+		if p := h.readBackPlan(tr, test, get, learn.Shape{}, []*models.Mock{put}, exchange("Lead"), nil, newPairing()); len(p.vars) != 0 || len(p.binds) != 0 {
+			t.Errorf("F's write holds no such word: vars %+v binds %+v, want the read answered as recorded", p.vars, p.binds)
+		}
+	})
+}
