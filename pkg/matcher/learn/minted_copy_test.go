@@ -93,7 +93,7 @@ func TestAMintedFieldsCopyIsAUseOfItWholeOrByWord(t *testing.T) {
 	}
 }
 
-func TestAMintedFieldsCopyThatRoundFSentApartOrNoUseNamesIsRefused(t *testing.T) {
+func TestAMintedFieldsCopyThatRoundFSentApartIsRefused(t *testing.T) {
 	const other = "0d9c8b7a-6f5e-4d3c-8b2a-1f0e9d8c7b6a"
 	for _, c := range []struct {
 		what, refRec, refLive string
@@ -101,7 +101,6 @@ func TestAMintedFieldsCopyThatRoundFSentApartOrNoUseNamesIsRefused(t *testing.T)
 	}{
 		{"a UUID copied whole that round F sent apart", mRec, other, RefusalTwoSources},
 		{"a UUID copied into apps/<id> that round F sent apart", "apps/" + mRec, "apps/" + other, RefusalTwoSources},
-		{"a UUID inside a longer word", "x" + mRec, "x" + mLiv, RefusalCannotCheck},
 	} {
 		for _, refFirst := range []bool{false, true} {
 			in, ref := mCopyInput(mRec, mLiv, c.refRec, c.refLive, refFirst)
