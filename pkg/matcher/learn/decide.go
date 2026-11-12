@@ -303,7 +303,7 @@ type Decision struct {
 	ByForm *models.ClockOffset
 	// EitherOrder, of a Value, says From is the request of another call of
 	// the test that sent the value too, which the recording sent before
-	// this call and round F only after it (sentInTurn): two sends of one
+	// this call and round F not before it (sentInTurn): two sends of one
 	// value the application held, made in another order in each run. An
 	// adapter binds the variable at both calls, so a replay binds it at
 	// whichever comes first and checks the other holds it; one that cannot

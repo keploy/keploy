@@ -86,17 +86,84 @@ func TestAValueTwoCallsSentInTheOtherOrderInEachRunIsBoundAtEither(t *testing.T)
 		t.Errorf("the other call asked and answered before the call, round F's only after: %s; want bound in either order", oDescribe([]Decision{d}))
 	}
 
-	// Controls. Round F never served the other call: nothing shows round
-	// F's application sent it at all, and keploy cannot tell what it held.
+	// Round F had not served the other call by the call's read: it gave
+	// the application nothing there before the call, as one served after
+	// the call's arrival, so it is bound in either order too (the shape of
+	// the next row).
 	never := RawOf(sentInTurnMock("mock-1784", sentInTurnRec, oAt.Add(-8*us), oAt.Add(220*us)), false)
-	oRefused(t, "the recording sent the other call before, round F never", sentInTurnDecide(t, never), RefusalUnknown, "mock-1784")
-	// Both runs sent it after the call: it shows nothing, and the word is
+	if d := sentInTurnDecide(t, never); d.Outcome != OutcomeValue || d.From.Mock != "mock-1784" || !d.EitherOrder {
+		t.Errorf("FALSE RED: the recording sent the other call before, round F not by the call's read: %s (either order %v); want bound to mock-1784 in either order", oDescribe([]Decision{d}), d.EitherOrder)
+	}
+
+	// Controls. Both runs sent it after the call: it shows nothing, and the word is
 	// made at the call.
 	costFresh(t, "both runs sent the other call after the call", sentInTurnDecide(t, after(p(8*us, 220*us))))
 	// Round F served it before the call, as recorded: no case of two
 	// orders, decided as before.
 	if d := sentInTurnDecide(t, p(-8*us, 220*us)); d.EitherOrder {
 		t.Errorf("round F served the other call before the call too: %s; want no value in either order", oDescribe([]Decision{d}))
+	}
+}
+
+// runIDPath is where the call (an eventsV2 insert) carries the suite
+// run's id, runIDRec and runIDLive the id in each run.
+const (
+	runIDPath = "body.docs.msgs.0.eventDetails.test_run_id"
+	runIDRec  = "89f3de6b-155c-4386-83b9-f645004943d6"
+	runIDLive = "ffcf0510-2b7e-4c1a-9d3f-5e6a7b8c9d0e"
+)
+
+// runIDJobEvents is the jobEvents insert that carries id at
+// event.testsuitreport.test_suite_run_id, asked at req and answered at res:
+// its request alone holds the id (its answer is {n: 1}).
+func runIDJobEvents(name, id string, req, res time.Time) *models.Mock {
+	doc := `{ SectionSingle identifier: documents , msgs: [ {"_id":"958a9ba2-1e04-49cf-8ff5-63f9d6877825","kind":"TEST","event":{"status":"RUNNING","testsuitreport":{"_id":"7b10ad05-08ab-4c6e-925f-00297d50e5a9","test_suite_run_id":"` + id + `"}}} ] }`
+	return &models.Mock{Name: name, Kind: models.Mongo, Spec: models.MockSpec{
+		MongoRequests: []models.MongoRequest{{Header: &models.MongoHeader{Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: []string{
+			`{ SectionSingle msg: {"insert":"jobEvents","ordered":true,"$db":"api-server"} }`, doc}}}},
+		MongoResponses: []models.MongoResponse{{Header: &models.MongoHeader{Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: []string{
+			`{ SectionSingle msg: {"n":{"$numberInt":"1"},"ok":{"$numberDouble":"1.0"}} }`}}}},
+		ReqTimestampMock: req, ResTimestampMock: res,
+	}}
+}
+
+// api-server's TestSlowStepFailsOnlyItself, as a run recorded it: the
+// application sent the jobEvents insert 517 µs before the eventsV2 insert
+// (the call), and it was answered 401 µs after the call. In round F the
+// call reached keploy and its learn step read the round while the
+// jobEvents insert was still in its own learn step (it learned 63 fields
+// and was served 16 ms after the call was refused): round F had served
+// none of it by the call's read. Its request alone holds the run's id, so
+// round F gave the application nothing there before the call, as where
+// round F served it only after the call's arrival, and neither request is
+// the other's source: the id is bound in either order. Before, each word
+// was refused as unknown ("keploy cannot tell what round F gave at
+// mock-1785 before this call (both values hold it, or only part of a
+// word)"), and the test was set aside in every run.
+func TestAValueTheOtherCallSentFirstButRoundFHadNotServedIsBoundAtEither(t *testing.T) {
+	us := time.Microsecond
+	other := func(served bool) Raw {
+		return RawOf(runIDJobEvents("mock-1785", runIDRec, oAt.Add(-517*us), oAt.Add(401*us)), served)
+	}
+	decide := func(scope Scope, raw ...Raw) Decision {
+		in := oInput(runIDPath, runIDRec, runIDLive, nil, raw)
+		in.Mock = "mock-1780"
+		in.Scope = func(string) Scope { return scope }
+		return oWord(t, Decide(in), "89f3de6b", "ffcf0510")
+	}
+	d := decide(ScopeTest("test-2"), other(false))
+	if d.Outcome != OutcomeValue || d.From.Mock != "mock-1785" || !d.EitherOrder {
+		t.Fatalf("FALSE RED: the other call sent first in the recording, not served by round F at the call's read: %s (either order %v); want bound to mock-1785 in either order", oDescribe([]Decision{d}), d.EitherOrder)
+	}
+	// Controls. Of a scope keploy was not told, another test's or the
+	// start-up's, it stays unknown (fail closed).
+	for _, s := range []Scope{ScopeUnknown, ScopeTest("test-1"), ScopeStartup} {
+		oRefused(t, "the other call of scope "+string(s)+", not served by the call's read", decide(s, other(false)), RefusalUnknown, "mock-1785")
+	}
+	// Served by round F before the call reached keploy, stating no view of
+	// it: round F may have given the application the value there.
+	if d := decide(ScopeTest("test-2"), other(true).ServedAs(6)); d.EitherOrder || d.Outcome == OutcomeValue {
+		t.Errorf("FALSE GREEN? round F served the other call before the call, stating no view: %s; want no bind", oDescribe([]Decision{d}))
 	}
 }
 
@@ -127,7 +194,7 @@ func TestAValueSentInTheOtherOrderIsOnlyARequestOfTheCallsOwnTest(t *testing.T) 
 // Each place below leaves the word unknown, and stays so: the call is
 // bound in either order only where the other call's request alone holds
 // both runs' values whole, sent before the call in the recording at a time
-// keploy reads and served by round F only after it. A view round F stated
+// keploy reads and not served by round F before it. A view round F stated
 // that sent its own value there binds it so too.
 func TestAValueSentInTheOtherOrderNeedsEveryPartOfTheRule(t *testing.T) {
 	us := time.Microsecond
@@ -159,11 +226,11 @@ func TestAValueSentInTheOtherOrderNeedsEveryPartOfTheRule(t *testing.T) {
 		{"round F's view of the other call sent only round F's first group, of another id", []Raw{viewed("4fbd76ad-0000-4000-8000-000000000000", "")}},
 		{"round F's view of the other call holds round F's value glued inside a longer one", []Raw{viewed("x"+sentInTurnLive, "")}},
 		{"the recording's other call sent only the recorded first group, of another id", []Raw{after(raw(another, "", req).ServedAs(6).ServedAsRecorded())}},
-		{"beside the other call, a recording round F never served holds the recorded value", []Raw{twin, RawOf(sentInTurnMock("mock-1786", sentInTurnRec, req, res), false)}},
+		{"beside the other call, a recording round F served before the call, stating no view, holds the recorded value", []Raw{twin, RawOf(sentInTurnMock("mock-1786", sentInTurnRec, req, res), true).ServedAs(7)}},
 	} {
 		if d := sentInTurnDecide(t, c.raw...); d.EitherOrder || d.Outcome == OutcomeValue {
 			t.Errorf("FALSE GREEN? %s: %s; want no bind", c.name, oDescribe([]Decision{d}))
 		}
 	}
-	oRefused(t, "beside the other call, a recording round F never served", sentInTurnDecide(t, twin, RawOf(sentInTurnMock("mock-1786", sentInTurnRec, req, res), false)), RefusalUnknown, "mock-1786")
+	oRefused(t, "beside the other call, a recording round F served before the call, stating no view", sentInTurnDecide(t, twin, RawOf(sentInTurnMock("mock-1786", sentInTurnRec, req, res), true).ServedAs(7)), RefusalUnknown, "mock-1786")
 }

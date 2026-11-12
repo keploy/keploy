@@ -2983,29 +2983,35 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 
 // sentInTurnRule is the rule of a Value bound at another call's request
 // sent in the other order in each run (sentInTurn, Decision.EitherOrder).
-const sentInTurnRule = ", another call of the test that sent the value too: the recording sent it before this call, round F only after it, so the two are sends of one value the application held, in either order; bound at whichever comes first and checked at the other"
+const sentInTurnRule = ", another call of the test that sent the value too: the recording sent it before this call, round F not before it, so the two are sends of one value the application held, in either order; bound at whichever comes first and checked at the other"
 
 // sentInTurn reports whether p, a place that leaves the word w unknown, is
 // the request of another call of the call's own test that sent the call's
 // whole value too (rec, live: the call's leaf in each run): a recording the
-// recorded application sent before the call, at a time keploy reads, and
-// that round F served only after the call reached keploy (Raw.servedAfter).
-// A request gives the application nothing, so neither call is the other's
-// source, and round F's serve after the call shows nothing it had before
-// it: the two are sends of one value the application held, which the runs
-// made in another order (Decision.EitherOrder). Only a recording whose
-// request alone holds the recorded word (its answer gave the application
-// none of it) and the recorded value whole, served by round F as recorded
-// or with a view whose request alone holds round F's word and value whole,
-// in the call's own test as its scope names it (Input.ScopeOf: not the
-// start-up, another test, a test the call trails, or a recording of a scope
-// keploy was not told): any other place stays unknown (fail closed).
+// recorded application sent before the call, at a time keploy reads, that
+// round F had given the application none of before the call: served only
+// after the call reached keploy (Raw.servedAfter), or not served by the
+// call's read at all (a sibling still in its own learn step, or one round F
+// sends later). The two are one state: whether a sibling's serve lands
+// before the call's read or after it hangs on how long each waited for its
+// learn step, which grows with load (Order.ArrivedAt), so the rule reads
+// them alike. A request gives the application nothing, so neither call is
+// the other's source, and round F gave nothing there before the call: the
+// two are sends of one value the application held, which the runs made in
+// another order (Decision.EitherOrder). Only a recording whose request
+// alone holds the recorded word (its answer gave the application none of
+// it) and the recorded value whole, as recorded or, served, with a view
+// whose request alone holds round F's word and value whole, in the call's
+// own test as its scope names it (Input.ScopeOf: not the start-up, another
+// test, a test the call trails, or a recording of a scope keploy was not
+// told): any other place stays unknown (fail closed), and so does one round
+// F served before the call reached keploy, which shows what it gave there.
 func (dc *decider) sentInTurn(p evPlace, w readWord, rec, live string) bool {
 	if p.raw == 0 || p.otherTest || p.startUp || p.trailed || dc.in.ScopeOf(p.mock) != ScopeTest(dc.in.Test) {
 		return false
 	}
 	r := dc.in.Raw[p.raw-1]
-	if r.noTime || !r.at.Before(dc.in.At) || !r.served || !r.servedAfter {
+	if r.noTime || !r.at.Before(dc.in.At) || r.served && !r.servedAfter {
 		return false
 	}
 	sentOnly := func(t *readerText, word, whole string) bool {
