@@ -81,7 +81,7 @@ func TestASignedPollServedManyTimesIsOneViewOfItsRecording(t *testing.T) {
 			ctx := learn.WithTracker(context.Background(), tr)
 			tr.Begin()
 			for i := 0; i < polls; i++ {
-				reportPairing(ctx, live("POST", "/000000000000/q/", body, signed(i)), poll, integrations.AnsweredCall{}, false)
+				reportPairing(ctx, live("POST", "/000000000000/q/", body, signed(i)), poll, integrations.AnsweredCall{}, false, integrations.CallRound{})
 			}
 			tr.End()
 			if tc.parked && (poll.Spec.HTTPResp != nil || !poll.HasSpilledResponse()) {

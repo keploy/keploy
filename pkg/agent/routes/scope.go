@@ -232,8 +232,13 @@ func (a *Agent) HandleScopeWindows(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleScopeTable installs the replay-time per-test name→mock-names table.
+//
+// Its answer names the table's fields the agent applied that an older agent
+// ignores (models.ScopeTableResp.Served), so the CLI can refuse an agent
+// that would serve them otherwise.
 func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 	var req models.ScopeTableReq
+	var served []string
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid scope-table request: %v", err), http.StatusBadRequest)
 		return
@@ -362,6 +367,56 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot learn a worker: call that trails an earlier test", http.StatusNotImplemented)
 			return
 		}
+		// The series of the recordings a declared rule placed, with the
+		// worker scope. Every table says it, an empty one too. An agent
+		// that cannot serve one refuses a table that has one.
+		if ss, ok := a.svc.(scopeSeriesSetter); ok {
+			if err := ss.SetScopeSeries(r.Context(), req.Series); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedSeries)
+		} else if len(req.Series) > 0 {
+			http.Error(w, "this keploy agent cannot serve a series of recordings a declared rule placed", http.StatusNotImplemented)
+			return
+		}
+		// The series that answer once in a run. Every table says them, an
+		// empty one too. An agent that cannot serve them refuses a table
+		// that has one: it would answer such a series' request again.
+		if os, ok := a.svc.(scopeOnceSetter); ok {
+			if err := os.SetScopeOnce(r.Context(), req.Once); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedOnce)
+		} else if len(req.Once) > 0 {
+			http.Error(w, "this keploy agent cannot serve a series of recordings once in a run", http.StatusNotImplemented)
+			return
+		}
+		// The sources rules declared in keploy.yml give fields of the
+		// recordings' requests. Every table says them, an empty one too.
+		// An agent that cannot learn by them, or that does not know a
+		// source's kind, refuses a table that has one.
+		if ss, ok := a.svc.(scopeSourcesSetter); ok {
+			if err := ss.SetScopeSources(r.Context(), req.Sources); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			served = append(served, models.ScopeTableServedSources)
+		} else if len(req.Sources) > 0 {
+			http.Error(w, "this keploy agent cannot learn a field by the source a rule in keploy.yml declares", http.StatusNotImplemented)
+			return
+		}
+		// Whether the learn step checks a changed time by its form alone.
+		// Every table says it, off too: a set never keeps the previous
+		// set's. An agent that cannot take it decides times by the clock
+		// checks alone: it refuses more, never passes more.
+		if ts, ok := a.svc.(scopeTimeFormSetter); ok {
+			if err := ts.SetScopeTimeForm(r.Context(), req.TimeForm); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		// The recordings keploy's judging marked served, not required, by test, before
 		// the pool is served. Every table says it, an empty one too: a set
 		// never keeps the previous set's. An agent that cannot take them
@@ -375,13 +430,25 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a recording served, not required", http.StatusNotImplemented)
 			return
 		}
+		// The set's background recordings (its worker: and startup:
+		// mocks), before the pool is served, whose serving stages the set
+		// and hands them to the proxy with it. Every table says it, an
+		// empty one too: a set never keeps the previous set's. An agent
+		// that cannot take them marks no miss background: every miss stays
+		// its test's, failing closed.
+		if bs, ok := a.svc.(scopeBackgroundSetter); ok {
+			if err := bs.SetScopeBackground(r.Context(), req.Background); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		if err := s.SetScopePool(r.Context(), req.Pool); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
 	render.Status(r, http.StatusOK)
-	render.JSON(w, r, map[string]string{"status": "ok"})
+	render.JSON(w, r, models.ScopeTableResp{Status: "ok", Served: served})
 }
 
 // scopeRepeatReadsSetter installs each test's repeated reads
@@ -407,6 +474,12 @@ type scopeWorkerSetter interface {
 	SetScopeWorker(ctx context.Context, worker map[string][]string) error
 }
 
+// scopeBackgroundSetter installs a replay's background recordings by name
+// (models.ScopeTableReq.Background, proven wire).
+type scopeBackgroundSetter interface {
+	SetScopeBackground(ctx context.Context, names []string) error
+}
+
 // scopeSkippedReadsSetter installs which of a replay's worker scope are the
 // reads of tests its gate skips, each with the skipped test that lists it
 // (models.ScopeTableReq.SkippedReads, proven wire).
@@ -418,6 +491,33 @@ type scopeSkippedReadsSetter interface {
 // for a replay (models.ScopeTableReq.Trails, proven wire).
 type scopeTrailsSetter interface {
 	SetScopeTrails(ctx context.Context, trails map[string]string) error
+}
+
+// scopeSeriesSetter installs, by series, the worker-scope recordings a
+// declared rule placed for a replay, in placement order
+// (models.ScopeTableReq.Series, proven wire).
+type scopeSeriesSetter interface {
+	SetScopeSeries(ctx context.Context, series map[string][]string) error
+}
+
+// scopeOnceSetter installs the series of a replay whose recordings each
+// answer once in the run (models.ScopeTableReq.Once, proven wire).
+type scopeOnceSetter interface {
+	SetScopeOnce(ctx context.Context, once []string) error
+}
+
+// scopeSourcesSetter installs, by recording name, the sources rules
+// declared in keploy.yml give fields of its request for a replay
+// (models.ScopeTableReq.Sources, proven wire).
+type scopeSourcesSetter interface {
+	SetScopeSources(ctx context.Context, sources map[string][]models.DeclaredSource) error
+}
+
+// scopeTimeFormSetter installs whether a replay's learn step checks a
+// changed time by its form alone (models.ScopeTableReq.TimeForm, proven
+// wire).
+type scopeTimeFormSetter interface {
+	SetScopeTimeForm(ctx context.Context, on bool) error
 }
 
 // scopeNotRequiredSetter installs, by test, the recordings keploy's judging

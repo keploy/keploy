@@ -1255,7 +1255,7 @@ func (f *follows) lead() string {
 // why. Every other reading is ClassifyGiven's. It decides in F alone: nothing
 // is left for a later round.
 func ClassifyFollowing(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
-	return classifyGiven(dc, drift, live, rec, at, earlier, raw, resp, w, given, true)
+	return classifyGiven(dc, drift, live, rec, at, time.Time{}, earlier, raw, resp, w, given, true)
 }
 
 // alike is what each word of the value found at its candidate sources

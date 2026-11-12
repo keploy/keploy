@@ -79,6 +79,10 @@ type varDecl struct {
 	bind   *varPlace
 	use    []varPlace
 	answer []varPlace
+	// byForm: a use's check by form, by its raw place, where the call does
+	// not hold the variable's value there (models.MockVariable.ByForm). Read
+	// at a use alone, never at the bind.
+	byForm map[string]models.ClockOffset
 }
 
 // requestPlaces is the variable's bind place (first) and uses.
@@ -155,7 +159,13 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if mv.Recorded == "" {
 			return nil, fmt.Sprintf("variable %s has no recorded value", name)
 		}
-		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock}
+		if mv.Minted != nil {
+			// A minted value is checked new and of its shape where it is
+			// bound (variables.MintedWhy), which keploy does on MongoDB
+			// calls alone: unchecked here, it would pass as any value.
+			return nil, fmt.Sprintf("variable %s is declared minted by keploy.yml's rule %s, and keploy checks a minted value on MongoDB calls only: it cannot check this HTTP call's", name, mv.Minted.Rule)
+		}
+		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock, byForm: mv.ByForm}
 		if mv.Bind != "" {
 			p, why := parse(name, "bind", mv.Bind, false)
 			if why != "" {
@@ -523,6 +533,21 @@ type varProblem struct {
 	// this run's test did not give it before the call. The miss names it
 	// (MockMismatchReport.Given).
 	given string
+	// boundIn is where this run bound each variable the problem read (the
+	// variable the place holds another value than, or the other variable
+	// whose value the call carries), once, by the name its binding carries:
+	// the miss names them (MockMismatchReport.BoundIn). None for a given or
+	// a variable not bound yet.
+	boundIn []string
+}
+
+// boundAt is p with mock, the name the binding of a variable it read
+// carries (VariableBinding.Mock), in its boundIn; "" adds none.
+func (p *varProblem) boundAt(mock string) *varProblem {
+	if mock != "" && !slices.Contains(p.boundIn, mock) {
+		p.boundIn = append(p.boundIn, mock)
+	}
+	return p
 }
 
 func (p *varProblem) diff() string {
@@ -592,6 +617,11 @@ type varScope struct {
 	ahead    *variables.Table
 	aheadGen uint64
 	inAhead  func(*models.Mock) bool
+	// rules: what the store's scope table declares of its recordings, and
+	// whether the time default is on (declaredIn), which a call that fits
+	// a recording with variables is compared under, as the strict pass
+	// compares every other call.
+	rules declaredRules
 }
 
 // readVarScope reads the scopes of mockDb, before the pool is read: a scope
@@ -600,6 +630,7 @@ type varScope struct {
 func readVarScope(mockDb integrations.MockMemDb) varScope {
 	var s varScope
 	s.table = variableTable(mockDb)
+	s.rules = declaredIn(mockDb)
 	if s.table != nil {
 		s.gen = s.table.Gen()
 	}
@@ -641,7 +672,7 @@ func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock
 			return nil, nil, ctx.Err()
 		}
 		table, gen := scope.of(m)
-		hit, problem := h.fitVariables(ctx, input, live, m, table, headerNoise, userBodyNoise, urlNoise)
+		hit, problem := h.fitVariables(ctx, input, live, m, table, scope.rules, headerNoise, userBodyNoise, urlNoise)
 		switch {
 		case hit != nil:
 			hit.table, hit.gen = table, gen
@@ -661,7 +692,7 @@ func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock
 // fitVariables reads the live call against one mock. It returns a hit, or the
 // evidence why a mock the call fits cannot answer it, or neither when the call
 // is not this mock's.
-func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *models.Mock, table *variables.Table, headerNoise, userBodyNoise map[string][]string, urlNoise []string) (*varHit, *varProblem) {
+func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *models.Mock, table *variables.Table, rules declaredRules, headerNoise, userBodyNoise map[string][]string, urlNoise []string) (*varHit, *varProblem) {
 	if m.Spec.HTTPReq == nil {
 		return nil, nil
 	}
@@ -862,6 +893,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	// those patterns decide it in the comparison below, and no noise
 	// learned there excuses a value they refuse.
 	user := h.newStrictNoise(headerNoise, userBodyNoise, urlNoise)
+	user.declaredRules = rules
 	for k := range m.Spec.ReqBodyNoise {
 		raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody)
 		if !ok {
@@ -908,7 +940,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	if table == nil {
 		return nil, &varProblem{mock: m.Name, why: "this keploy's mock store keeps no variables, so it cannot follow them", next: "run the keploy agent of this keploy version"}
 	}
-	return holdVariables(m, decls, liveAt, table, refuse)
+	return holdVariables(m, decls, liveAt, table, user.timeForm, refuse)
 }
 
 // typeChanged is the evidence of a call that sent actual, a value of another
@@ -929,7 +961,7 @@ func typeChanged(mock, name string, vp varPlace, expected, actual string) *varPr
 // (liveAt holds the call's values at m's places): it returns the hit and what
 // it binds, or the evidence why they do not hold, or neither when the call is
 // another test's.
-func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
+func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, timeForm bool, refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
 	// 2. The variables hold.
 	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}, saw: map[string]string{}}
 	taken := map[string]variables.Binding{} // this call's new bindings, by name
@@ -941,7 +973,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			if v.empty() {
 				return nil, emptyBind(m.Name, d, v)
 			}
-			if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt); p != nil {
+			if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt, timeForm); p != nil {
 				return nil, p
 			}
 			hit.local[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw}
@@ -963,9 +995,16 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				// another test's too.
 				return nil, nil
 			}
-			if p := holdsAt(m.Name, d, places, bound.Value, bound.Mock, bound.Place, liveAt); p != nil {
+			if p := holdsAt(m.Name, d, places, bound.Value, bound.Mock, bound.Place, liveAt, timeForm); p != nil {
 				return nil, p
 			}
+			continue
+		}
+		if d.bind == nil && len(d.use) == 0 && table.AnsweredAsRecorded(d.name) {
+			// A run's variable the test only receives, from an earlier test
+			// this replay did not run before it: its answers hold the value
+			// recorded, which no check of this call reads.
+			hit.local[d.name] = variables.Binding{Name: d.name, Value: d.recorded, Recorded: d.recorded, Mock: m.Name}
 			continue
 		}
 		if d.bind == nil {
@@ -985,6 +1024,15 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				}
 			}
 			why := fmt.Sprintf("variable %s is used at %s before the call that binds it was made in this test", d.name, place)
+			if note := table.Unbound(d.name); note != "" {
+				// Bound at a client test case's request, which no call is:
+				// the request bound nothing this run, and the note says why.
+				return nil, &varProblem{
+					mock: m.Name, name: d.name, place: place, actual: sent,
+					why:  fmt.Sprintf("variable %s is used at %s, and %s", d.name, place, note),
+					next: fmt.Sprintf("the test's request that sends variable %s did not bind it: if the test now sends its requests in another order or shape, re-record the test", d.name),
+				}
+			}
 			if models.RunVariable(d.name) {
 				// The test set's variable: bound by the start-up's call or
 				// an earlier test's, which this replay did not make first.
@@ -1000,7 +1048,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 		if v.empty() {
 			return nil, emptyBind(m.Name, d, v)
 		}
-		if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt); p != nil {
+		if p := holdsAt(m.Name, d, places, v.value, m.Name, d.bind.raw, liveAt, timeForm); p != nil {
 			return nil, p
 		}
 		// Two variables are two values: a value the test bound already, as
@@ -1019,7 +1067,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				return nil, (&varProblem{
 					mock: m.Name, name: d.name, place: d.bind.raw, expected: "a value other than variable " + b.Name + "'s", actual: v.value,
 					next: fmt.Sprintf("the application sent %s's value where it sent %s's when the test was recorded: fix the application, or re-record the test if that is intended", b.Name, d.name),
-				}).say("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, said{v.value, d.bind.place}, b.Name, b.Mock, b.Place)
+				}).say("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, said{v.value, d.bind.place}, b.Name, b.Mock, b.Place).boundAt(b.Mock)
 			}
 		}
 		taken[d.name] = runOf[d.name].On(variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw, Clock: d.clock})
@@ -1048,9 +1096,11 @@ func wordRunsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) map[str
 // it (one place, one decode), live and as recorded, with the evidence that
 // cuts a run into held stretches, the places other than that text where m's
 // request holds a value whole (heldWhole). An echo is the call's own, never
-// bound in the table, so it has none. No learned value names a word here
-// (WordBind.Of), so each word's span is its own word (main's word by word
-// check).
+// bound in the table, so it has none. A text that is one UUID the call binds
+// at every word names its words that UUID (variables.NameUUIDs): its words
+// are one value by its form. No other learned value names a word here
+// (WordBind.Of), so every other word's span is its own word (main's word by
+// word check).
 func wordBindsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) ([]string, []variables.WordBind) {
 	rec, _ := recordedView(m.Spec.HTTPReq) // fitVariables refused a recording whose URL does not read
 	whole := heldWhole(rec)
@@ -1084,6 +1134,7 @@ func wordBindsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) ([]str
 		names = append(names, d.name)
 		ws = append(ws, w)
 	}
+	variables.NameUUIDs(ws)
 	return names, ws
 }
 
@@ -1123,10 +1174,13 @@ func placeKey(p variables.Place) string {
 
 // holdsAt checks that every request place of d holds want, the value the
 // variable has (taken at boundMock boundPlace).
-func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPlace string, liveAt map[string]held) *varProblem {
+func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPlace string, liveAt map[string]held, timeForm bool) *varProblem {
 	for _, vp := range places {
 		l := liveAt[vp.key()]
 		if variables.SameValue(want, l.value, l.number()) {
+			continue
+		}
+		if heldByForm(d, vp, l, timeForm) {
 			continue
 		}
 		verb := "sent"
@@ -1147,9 +1201,27 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 		return (&varProblem{
 			mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value,
 			next: fmt.Sprintf("the application sent another value at %s than the one it made in this test: if that is intended, re-record the test; otherwise fix the application", vp.raw),
-		}).say("variable %s is %q in this test (taken at %s %s), and this call %s %q at %s", d.name, said{want, vp.place}, boundMock, boundPlace, verb, said{l.value, vp.place}, vp.raw)
+		}).say("variable %s is %q in this test (taken at %s %s), and this call %s %q at %s", d.name, said{want, vp.place}, boundMock, boundPlace, verb, said{l.value, vp.place}, vp.raw).boundAt(boundMock)
 	}
 	return nil
+}
+
+// heldByForm reports whether l, what the call carries at vp, a use of d
+// that does not hold d's value, passes the use's check by form under the
+// time default (timeForm; models.MockVariable.ByForm, learn.HoldsByForm): a
+// time the application stamped there, two reads of its clock that fell in
+// one second when recorded and in two in this replay. Never at d's bind, at
+// an echo's place, or at a use the learn step gave no such check.
+func heldByForm(d varDecl, vp varPlace, l held, timeForm bool) bool {
+	o, ok := d.byForm[vp.raw]
+	if !ok || d.echo || d.bind != nil && vp.raw == d.bind.raw || !vp.whole() {
+		return false
+	}
+	t := learn.String
+	if l.number() {
+		t = learn.Number
+	}
+	return learn.HoldsByForm(o, learn.Leaf{Path: vp.raw, Type: t, Value: l.value}, timeForm)
 }
 
 func emptyBind(mock string, d varDecl, v held) *varProblem {
@@ -1380,7 +1452,7 @@ func (h *HTTP) variableMember(ctx context.Context, input *req, scope varScope, h
 			live = &v
 		}
 		table, _ := scope.of(m)
-		hit, problem := h.fitVariables(ctx, input, *live, m, table, headerNoise, userBodyNoise, urlNoise)
+		hit, problem := h.fitVariables(ctx, input, *live, m, table, scope.rules, headerNoise, userBodyNoise, urlNoise)
 		return hit != nil || problem != nil
 	}
 }
@@ -1440,7 +1512,7 @@ func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, cons
 			return nil, (&varProblem{
 				mock: hit.mock.Name, name: bad.Name, place: bad.Place, expected: "a value variable " + with.Name + " does not hold", actual: bad.Value,
 				next: "the check of the call and its bind disagree, which is a keploy bug: report it with this test set",
-			}).say("this call binds variable %s at %s to %q, which the test's variables refuse beside variable %s (bound at %s %s to %q), though the check of the call let it", bad.Name, bad.Place, said{bad.Value, at.Place}, with.Name, with.Mock, with.Place, said{with.Value, at.Place}), false, nil
+			}).say("this call binds variable %s at %s to %q, which the test's variables refuse beside variable %s (bound at %s %s to %q), though the check of the call let it", bad.Name, bad.Place, said{bad.Value, at.Place}, with.Name, with.Mock, with.Place, said{with.Value, at.Place}).boundAt(with.Mock), false, nil
 		}
 		return nil, nil, true, nil
 	}
@@ -1799,6 +1871,9 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest string,
 	}
 	r := b.Build()
 	r.Given = p.given
+	// The recordings the variables the refusal read were bound at: with
+	// the closest, every recording that shaped the refusal.
+	r.BoundIn = slices.Clone(p.boundIn)
 	// The problem's own place, the path places the closest mock and the
 	// mocks on this call's route declare, and the segments that hold a value
 	// the test bound (routePathPlaces) hold the application's values: the
@@ -1890,7 +1965,7 @@ func (h *HTTP) exactOnly(ctx context.Context, input *req, pool []*models.Mock, m
 	if len(pool) == 0 {
 		return nil, false, false, nil
 	}
-	served, _, retry, err := h.strictServe(ctx, input, pool, pool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise), statefulMocks)
+	served, _, retry, err := h.strictServe(ctx, input, pool, pool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise).withSources(mockDb), statefulMocks)
 	if err != nil || retry || served == nil {
 		return nil, false, retry, err
 	}

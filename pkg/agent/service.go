@@ -844,6 +844,21 @@ type RecordedBeginTaker interface {
 	TakeRecordedBegin(at time.Time)
 }
 
+// ClientCasesTaker is the optional extension implemented by proxies whose
+// learn step reads a client test's requests as places of its calls: the
+// agent gives it, as a keploy mock test begins in the run's own window and
+// after the proxy opened the test, the requests the test sent the
+// application in its recording (models.ClientCase), which the requests of
+// the test that reach the application this run pair with
+// (learn.Tracker.SetCases, Incoming), and from which each request of the
+// test that pairs with one binds the test's variables bound at it
+// (models.ClientCase.Binds) before the application is given it. nil gives
+// none: the requests that reach it from then give no place and bind
+// nothing. A proxy that lacks it reads no client test's request.
+type ClientCasesTaker interface {
+	TakeClientCases(test string, cases []models.ClientCase)
+}
+
 // VariableBinder is the optional extension implemented by proxies that keep
 // the test variables a replay binds: it begins a test's variables with the
 // values its own request gave (false when it holds no table), and reads back
@@ -1042,6 +1057,16 @@ type ExactTestServedReader interface {
 	ExactTestServed() string
 }
 
+// ExactTestInstallReader is an optional ExactServer capability of a proxy
+// whose parsers mark each call's round (models.MissMark): ExactTestInstalled
+// is the staging and the round's boundary count the view in force was
+// installed at, when it is test's view (ok false otherwise). A test's end
+// tells by them whether a miss was marked before that test's view was
+// installed, however late its call was decided.
+type ExactTestInstallReader interface {
+	ExactTestInstalled(test string) (epoch, bounds uint64, ok bool)
+}
+
 // ExactTestOpener is an optional ExactServer capability of a proxy that keeps
 // the test variables a replay binds (VariableBinder): OpenExactTest opens test
 // as ServeExactTest does, and begins its variables with given bound in the
@@ -1060,6 +1085,20 @@ type ExactTestOpener interface {
 // when b's name is bound already.
 type ExactTestGiver interface {
 	GiveExactTest(test string, b models.VariableBinding) error
+}
+
+// ExactTestAnswerer is an optional ExactServer capability of a proxy that
+// keeps the test variables a replay binds: AnswerAsRecordedAtOpen names, for
+// the scope of test's variables to begin with as test opens next, the run's
+// variables test receives from earlier tests only in answers
+// (models.ScopeNeed.Answers), which this replay did not run before it. While
+// one is not bound in that scope, its answer places are answered with its
+// recorded value; a call that sends it at a request place misses as when
+// nothing names it. The next call replaces them, and an open of another test
+// drops them. A proxy that lacks it cannot answer them so: the agent sets the
+// test aside instead.
+type ExactTestAnswerer interface {
+	AnswerAsRecordedAtOpen(test string, names []string) error
 }
 
 // AppClockSetter is an optional proxy capability: SetAppClock hands the
@@ -1111,6 +1150,48 @@ type PoolNamesSetter interface {
 // (PoolNamesSetter).
 type PoolTrailsSetter interface {
 	SetPoolTrails(trails map[string]string) error
+}
+
+// PoolSeriesSetter is implemented by a proxy that serves a series of
+// worker-scope recordings a declared rule placed: SetPoolSeries installs, of
+// keploy mock replay's scope table under the proven switch, each series'
+// recordings in placement order (models.ScopeTableReq.Series).
+type PoolSeriesSetter interface {
+	SetPoolSeries(series map[string][]string) error
+}
+
+// PoolOnceSetter is implemented by a proxy that serves a series of
+// worker-scope recordings once in a run: SetPoolOnce installs, of keploy
+// mock replay's scope table under the proven switch, the series whose
+// recordings each answer once, in a window or between tests, and never
+// again (models.ScopeTableReq.Once).
+type PoolOnceSetter interface {
+	SetPoolOnce(once []string) error
+}
+
+// PoolSourcesSetter is implemented by a proxy whose learn step decides a
+// field by the source a rule declared in keploy.yml gives it
+// (integrations.DeclaredSourcesOf): SetPoolSources installs, of keploy mock
+// replay's scope table under the proven switch, by recording name, the
+// sources of its request's fields (models.ScopeTableReq.Sources).
+type PoolSourcesSetter interface {
+	SetPoolSources(sources map[string][]models.DeclaredSource) error
+}
+
+// PoolTimeFormSetter is implemented by a proxy whose learn step can check a
+// changed time by its form alone (the time default, learn.Input.TimeForm):
+// SetPoolTimeForm installs, of keploy mock replay's scope table under the
+// proven switch, whether it does (models.ScopeTableReq.TimeForm).
+type PoolTimeFormSetter interface {
+	SetPoolTimeForm(on bool) error
+}
+
+// SeriesRepeatReader is implemented by a proxy that serves the series
+// SetPoolSeries installs: SeriesRepeats is, by series, how many calls in the
+// current staging's tests its last-placed recording answered past the
+// series' recorded count (models.MockStats.SeriesRepeats).
+type SeriesRepeatReader interface {
+	SeriesRepeats() (map[string]int64, error)
 }
 
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead

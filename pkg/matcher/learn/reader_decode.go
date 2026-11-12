@@ -27,9 +27,13 @@ import (
 //   - jwt.<claim> opens a JWT's claims where both runs are a JWT (three
 //     '.' parts, the second a base64url JSON object) and every claim that
 //     differs is a string or a number in both runs. The text before the
-//     payload ("Bearer " and the header) and the signature are read as
-//     they are, each apart, so the signature's words stand together and
-//     each lists the whole signature token, whatever the payload did.
+//     payload ("Bearer " and the header) is read as it is.
+//   - jwtsig opens a JWT's signature where both runs are a signed JWT and
+//     their signatures differ, whatever the payload did: it is read whole,
+//     one text that no step opens further, and decided as one value
+//     (decider.signature), never word by word: its '-' and '_' are letters
+//     of base64url there, so its count of keploy's words changes from run
+//     to run.
 //   - cookie.<name> opens, in a Cookie or Set-Cookie header, each pair
 //     named once in both runs whose value differs, where those names stand
 //     in one order in both; the text between them is read as it is. It is
@@ -103,8 +107,8 @@ func openText(dc *DriftCache, out *[]textReading, at variables.Address, rec, liv
 				return
 			}
 		}
-		if span, ok := jwtSpan(rec, live); ok {
-			readSpans(dc, out, at, rec, live, []openedSpan{span}, depth)
+		if spans, ok := jwtSpans(rec, live); ok {
+			readSpans(dc, out, at, rec, live, spans, depth)
 			return
 		}
 	}
@@ -145,7 +149,8 @@ func openWhole(st variables.Step, rec, live string) (string, string, bool) {
 }
 
 // readSpans reads (rec, live) opened at spans: the text between them as it
-// is, each part apart and the spans' texts each opened by its step.
+// is, each part apart and the spans' texts each opened by its step; a
+// JWT's signature is read as it is, whole, at its step.
 func readSpans(dc *DriftCache, out *[]textReading, at variables.Address, rec, live string, spans []openedSpan, depth int) {
 	pr, pl := 0, 0
 	raw := func(r, l int) {
@@ -155,6 +160,10 @@ func readSpans(dc *DriftCache, out *[]textReading, at variables.Address, rec, li
 	for _, sp := range spans {
 		raw(sp.RecAt[0], sp.LiveAt[0])
 		for _, p := range sp.Parts {
+			if p.Step == variables.StepJWTSig {
+				readRaw(dc, out, withStep(at, p.Step), p.Rec, p.Live, [2]int{})
+				continue
+			}
 			openText(dc, out, withStep(at, p.Step), p.Rec, p.Live, depth+1)
 		}
 		pr, pl = sp.RecAt[1], sp.LiveAt[1]
@@ -179,6 +188,35 @@ func readRaw(dc *DriftCache, out *[]textReading, at variables.Address, rec, live
 		}
 	}
 	*out = append(*out, rd)
+}
+
+// jwtSpans are where two JWTs are opened: their payloads' claims that
+// differ (jwtSpan), then their signatures where they differ (jwtSigSpan).
+// ok is false where neither opens: the text is read as it is.
+func jwtSpans(rec, live string) ([]openedSpan, bool) {
+	var spans []openedSpan
+	if sp, ok := jwtSpan(rec, live); ok {
+		spans = append(spans, sp)
+	}
+	if sp, ok := jwtSigSpan(rec, live); ok {
+		spans = append(spans, sp)
+	}
+	return spans, len(spans) > 0
+}
+
+// jwtSigSpan is where the signatures of two signed JWTs stand (the last
+// part of each, variables.StepJWTSig), opened whole; ok is false where
+// either is none, or they are alike.
+func jwtSigSpan(rec, live string) (openedSpan, bool) {
+	r, rok := variables.Decode(variables.StepJWTSig, rec)
+	l, lok := variables.Decode(variables.StepJWTSig, live)
+	if !rok || !lok || r == l {
+		return openedSpan{}, false
+	}
+	return openedSpan{
+		RecAt: [2]int{len(rec) - len(r), len(rec)}, LiveAt: [2]int{len(live) - len(l), len(live)},
+		Parts: []openedStep{{Step: variables.StepJWTSig, Rec: r, Live: l}},
+	}, true
 }
 
 // jwtSpan is where the payloads of two JWTs stand and the claims opened

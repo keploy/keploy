@@ -2266,7 +2266,7 @@ func boundedAgentRead[T any](ctx context.Context, what string, read func(context
 // (replay.AppProcessRunner).
 func (a *AgentClient) RunsAppProcess() bool { return true }
 
-func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
+func (a *AgentClient) Run(ctx context.Context, opts models.RunOptions) (ret models.AppError) {
 	// The agent's container this run is to create, under docker compose: a
 	// release that waits for it ends once the run is over without it
 	// (containerExited). Its end is noted last, once Run returns, whichever
@@ -2317,6 +2317,10 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		defer utils.Recover(a.logger)
 		appErr := app.Run(runAppCtx)
 		stopKilled = appErr.StopKilled
+		// The application's command exited on its own, and what it left runs
+		// on: the run's caller waits on it (models.RunOptions.BeforeStop)
+		// before keploy stops it. Not once keploy or the user stopped the run.
+		beforeStop(runAppCtx, opts.BeforeStop, func() bool { return appRunsOn(a.logger, app) })
 		// The daemons the app left are part of its run, and end with it
 		// (adopt_linux.go): none is judged in the next test set, and the app
 		// started again can bind their ports. An app whose shell died on
@@ -2354,6 +2358,15 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		}
 		return appErr
 	}
+}
+
+// beforeStop calls hook (models.RunOptions.BeforeStop) when it is set, the
+// run was not stopped (ctx), and something of the application runs on.
+func beforeStop(ctx context.Context, hook func(context.Context, func() bool), running func() bool) {
+	if hook == nil || ctx.Err() != nil || !running() {
+		return
+	}
+	hook(ctx, running)
 }
 
 func (a *AgentClient) GetRecentAppLogs(ctx context.Context) string {
@@ -5242,18 +5255,31 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // (models.ScopeTableReq.Trails). repeats are each test's repeated reads
 // (models.ScopeTableReq.RepeatReads). notRequired is, by test, the names of
 // its list keploy's judging marked served, not required
-// (models.ScopeTableReq.NotRequired).
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) (retErr error) {
+// (models.ScopeTableReq.NotRequired). background names the set's background
+// recordings, its worker: and startup: mocks (models.ScopeTableReq.Background).
+// series is, by series, the worker-scope recordings a declared rule placed
+// (models.ScopeTableReq.Series), and sources, by recording name, the
+// sources declared rules give fields of its request
+// (models.ScopeTableReq.Sources), and once the series of series that answer
+// once in a run (models.ScopeTableReq.Once): an agent whose answer does not
+// name each of them the table has (models.ScopeTableResp.Served) is refused
+// with ErrAgentIgnoresRules. timeForm turns on the learn step's time default
+// (models.ScopeTableReq.TimeForm); an agent that does not take it decides
+// times by the clock checks alone, which refuses more and never passes
+// more, so it is not refused.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm bool) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p, wk, sr, tr, w, g, r, nr := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr) })
+			t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired), slices.Clone(background), maps.Clone(series), maps.Clone(sources), slices.Clone(once)
+			a.session().record(stepScopeTable, func(c context.Context) error {
+				return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on, timeForm)
+			})
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, TimeForm: timeForm})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
@@ -5274,25 +5300,47 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("the agent refused the per-test table and pool slices (status %d): %s", res.StatusCode, strings.TrimSpace(string(b)))
 	}
+	if len(series) == 0 && len(sources) == 0 && len(once) == 0 {
+		return nil
+	}
+	// An older agent answers with no field named: it would serve a series'
+	// recordings once each, so a slower replay's repeat would miss, it
+	// would learn a declared field as if no rule declared it, and it would
+	// answer a once series' request again and again.
+	var ack models.ScopeTableResp
+	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&ack); err != nil {
+		return ErrAgentIgnoresRules
+	}
+	if len(series) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedSeries) || len(sources) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedSources) ||
+		len(once) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedOnce) {
+		return ErrAgentIgnoresRules
+	}
 	return nil
 }
+
+// ErrAgentIgnoresRules is PushProvenTable's refusal of an agent that does
+// not acknowledge a scope table's series or declared sources
+// (models.ScopeTableResp.Served).
+var ErrAgentIgnoresRules = errors.New("this keploy agent does not acknowledge the scope table's series, once series or declared sources (an older agent ignores them): keploy mock does not run a set with declared rules on it; update the agent")
 
 // PushTestBegins hands the agent when each test of the replayed recording
 // began, so it moves the run's clock per test, and the seed each test's
 // recording kept for its browser (models.TestBeginsReq). They are given again
 // to a restarted agent, like the scope table. An agent that cannot take them
 // is an error: the tests would run on another clock, or their browsers on
-// other numbers, than their recording's.
-func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string) (retErr error) {
+// other numbers, than their recording's. The requests each client test sent
+// in its recording (cases) go with them; an agent that does not read them
+// learns as it did before it could.
+func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string, cases map[string][]models.ClientCase) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded, recordedReal, recordedSeeds := maps.Clone(begins), maps.Clone(real), maps.Clone(seeds)
+			recorded, recordedReal, recordedSeeds, recordedCases := maps.Clone(begins), maps.Clone(real), maps.Clone(seeds), maps.Clone(cases)
 			a.session().record(stepTestBegins, func(c context.Context) error {
-				return a.PushTestBegins(c, recorded, recordedReal, recordedSeeds)
+				return a.PushTestBegins(c, recorded, recordedReal, recordedSeeds, recordedCases)
 			})
 		}
 	}()
-	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real, Seeds: seeds})
+	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real, Seeds: seeds, Cases: cases})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests' recorded begins: %w", err)
 	}

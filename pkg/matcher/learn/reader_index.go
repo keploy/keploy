@@ -16,6 +16,8 @@ import (
 	"time"
 	"unsafe"
 	"weak"
+
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // The reader's index: what the places before a call hold of its changed
@@ -1424,37 +1426,18 @@ func runsBytes(runs map[string]bool) int64 { return mapBytes(len(runs), slotOf[s
 // reader cuts a base64 token by (tokenSpans) and finds one in a text by
 // (holdsToken), so every token it cuts is held by its own text: a run a
 // byte of the alphabets follows past its padding (`tok=` of
-// `tok=ab+cd/ef==`) is none, and its words are judged one by one.
+// `tok=ab+cd/ef==`) is none, and its words are judged one by one. Between
+// instants it is variables.EachToken, the rule a replay's token step
+// (variables.Token) reads a text by.
 func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 	from := 0
-	gap := func(to int) bool {
-		for i := from; i < to; {
-			if !isB64Byte(s[i]) {
-				i++
-				continue
-			}
-			j := i
-			for j < to && isB64Byte(s[j]) {
-				j++
-			}
-			k := j
-			for k < to && s[k] == '=' {
-				k++
-			}
-			if (k == to || !isB64Byte(s[k])) && !yield(i, k) {
-				return false
-			}
-			i = k
-		}
-		return true
-	}
 	for _, in := range spans {
-		if in.start >= from && !gap(in.start) {
+		if in.start >= from && !variables.EachToken(s, from, in.start, yield) {
 			return
 		}
 		from = max(from, in.end)
 	}
-	gap(len(s))
+	variables.EachToken(s, from, len(s), yield)
 }
 
 // holdsMoment reports whether an instant of the text names m by moment
