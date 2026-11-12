@@ -84,6 +84,18 @@ func TestATestsScopeAnswersAsRecordedWhatItBeganWithAfterItEnded(t *testing.T) {
 	if tb.AnsweredAsRecordedOf("test-z", made) || !tb.AnsweredAsRecordedOf("test-z", other) {
 		t.Fatal("test-z's running scope does not answer as recorded what it began with, alone")
 	}
+	// A third test's window: test-y's ended scope is read, not test-z's,
+	// the latest ended one.
+	tb.StartOpeningScope("test-w", func(uint64) {}, nil, nil, nil, nil)
+	if !tb.AnsweredAsRecordedOf("test-y", made) || tb.AnsweredAsRecordedOf("test-y", other) {
+		t.Fatal("test-y's ended scope is not read by its test beside test-z's later one")
+	}
+	// A scope begun with no test named answers its names as recorded, and
+	// is no test's: by test it answers none.
+	tb.StartOpeningScope("", func(uint64) {}, nil, nil, nil, []string{other})
+	if !tb.AnsweredAsRecorded(other) || tb.AnsweredAsRecordedOf("", other) {
+		t.Fatal("a scope begun with no test named is read as a test's")
+	}
 	// test-y runs again with none named: its latest scope is read.
 	tb.StartOpeningScope("test-y", func(uint64) {}, nil, nil, nil, nil)
 	tb.StartOpeningScope("test-z", func(uint64) {}, nil, nil, nil, nil)
