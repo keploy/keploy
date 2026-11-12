@@ -2,6 +2,8 @@ package http
 
 import (
 	"sort"
+	"strconv"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -38,15 +40,32 @@ import (
 // read back. Only the answers of the calls the reader follows are loaded
 // (models.HTTPStoreFollows decides from the requests alone), so a read loads
 // no answer of another API's call.
-func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *models.Mock, served []*models.Mock, earlier []learn.Earlier, given []variables.Binding, p pairing) pairing {
-	if answered == nil || !models.HTTPStoreReads(answered.Spec.HTTPReq) {
+func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *models.Mock, live learn.Shape, served []*models.Mock, earlier []learn.Earlier, given []variables.Binding, p pairing) pairing {
+	if answered == nil {
 		return p
 	}
+	follows := func(read, call *models.Mock) bool {
+		return models.HTTPStoreFollows(read.Spec.HTTPReq, call.Spec.HTTPReq)
+	}
+	accessOf := models.HTTPStoreAccessOf
+	if !models.HTTPStoreReads(answered.Spec.HTTPReq) {
+		// No registered reader reads it: HTTP's own store does where it is
+		// a GET (putstore.go).
+		if !putReads(answered) {
+			return p
+		}
+		follows = putFollows
+		accessOf = func(read *models.Mock, calls []*models.Mock) (models.HTTPStoreAccess, bool) {
+			return putAccess(read, calls, earlier, live)
+		}
+	}
 	calls := make([]*models.Mock, 0, len(served))
+	learned := map[string]models.MockVariables{}
 	for _, s := range served {
-		if !models.HTTPStoreFollows(answered.Spec.HTTPReq, s.Spec.HTTPReq) {
+		if !follows(answered, s) {
 			continue
 		}
+		learned[s.Name] = s.Spec.Learned()
 		c, err := withResponse(s)
 		if err != nil {
 			h.Logger.Warn("keploy cannot read back the recorded answer of a call served earlier in the test, so it answers a later read of what the test stored as recorded",
@@ -55,7 +74,7 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		}
 		calls = append(calls, c)
 	}
-	access, ok := models.HTTPStoreAccessOf(answered, calls)
+	access, ok := accessOf(answered, calls)
 	if !ok {
 		return p
 	}
@@ -101,6 +120,27 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		}
 		from, ok := learn.ReadBack(a, record, marked)
 		if !ok || !from.Own {
+			continue
+		}
+		if name, k, ok := wordUsedAt(learned[from.Mock], from.Var, a.Value); ok {
+			// The write's place holds a variable of the test at one word
+			// (learn.Place.Word: a word a client test sent), the rest of it
+			// held to the recording: the read answers that variable at the
+			// same word of its place, never a second one bound at the
+			// whole write.
+			w := variables.Words(from.Live)
+			if k >= len(w) {
+				// wordUsedAt read the recorded write; F's holds no such
+				// word: the field is answered as recorded.
+				continue
+			}
+			v := p.vars[name]
+			v.Recorded, v.Answer = learned[from.Mock][name].Recorded, appendNew(v.Answer, place+"#"+strconv.Itoa(k))
+			p.vars[name] = v
+			taken[place] = true
+			if _, ok := p.values[name]; !ok {
+				p.values[name] = variables.Binding{Name: name, Value: from.Live[w[k][0]:w[k][1]], Recorded: v.Recorded, Mock: from.Mock, Place: from.Var + "#" + strconv.Itoa(k)}
+			}
 			continue
 		}
 		if from.Name != "" {
@@ -164,4 +204,28 @@ func markWritten(earlier []learn.Earlier, written map[string]map[string]string) 
 		out[i].Seen = seen
 	}
 	return out
+}
+
+// wordUsedAt is the variable vars (a write's learned variables) uses at one
+// word of place, the write's leaf, whose recorded value is that word of
+// value, the read's recorded field, and the word's index. place holds value
+// whole (learn.ReadBack), so the read is answered at that word. None, or
+// two: false.
+func wordUsedAt(vars models.MockVariables, place, value string) (string, int, bool) {
+	name, word, n := "", -1, 0
+	words := variables.Words(value)
+	for k, v := range vars {
+		for _, u := range v.Use {
+			path, at, ok := strings.Cut(u, "#")
+			if !ok || path != place {
+				continue
+			}
+			i, err := strconv.Atoi(at)
+			if err != nil || i < 0 || i >= len(words) || value[words[i][0]:words[i][1]] != v.Recorded {
+				continue
+			}
+			name, word, n = k, i, n+1
+		}
+	}
+	return name, word, n == 1
 }
