@@ -92,24 +92,19 @@ func TestLearnMatchBindsAClientTestsWholeValueBeforeAFieldThatHoldsItsWord(t *te
 }
 
 // A field of the client test's request that F sent as recorded, holding
-// the recorded name whole, after the field that holds the name's word: for
-// a random word the search for where the name came from passes over that
-// field, which did not drift, and binds the word at the repository's field.
-// A UnixNano word is found as the echo of its instant, which ranks each
-// place that held the recorded moment, as appearedIn ranks it: the whole
-// name ranks before the word there too, whatever the order of the request's
-// fields, and the PUT is refused naming the field, which cannot hold the
-// run's name. Under both time settings.
-func TestLearnMatchEchoRanksAClientTestsWholeValueBeforeItsWord(t *testing.T) {
-	const why = "body.data.name does not hold the value the test sent at body.variables.label of test case post-query-83, which it held when recorded"
-	for _, timeForm := range []bool{true, false} {
-		served, miss, db := ciKeyPut(t, ciKeyCase{hex: true, label: true, labelLive: ciWord(true, false)}, timeForm)
-		if served == nil || miss != nil || len(db.consumed) != 1 || !bindsAt(db.consumed[0], "body.variables.input.conditions[0].value#3") || bindsAt(db.consumed[0], "body.variables.label") {
-			t.Fatalf("a random word, the name sent as recorded (time default %v): served %v, miss %+v; want the PUT answered, the word bound at the repository's field", timeForm, served != nil, miss)
-		}
-		served, miss, db = ciKeyPut(t, ciKeyCase{label: true, labelLive: ciWord(false, false)}, timeForm)
-		if served != nil || miss == nil || len(db.consumed) != 0 || !strings.Contains(miss.res.Why, why) {
-			t.Fatalf("a UnixNano word, the name sent as recorded (time default %v): served %v, miss %+v; want it refused: %s", timeForm, served != nil, miss, why)
+// the recorded name whole, after the field that holds the name's word: the
+// search for where the name came from passes over that field, which did not
+// drift, and binds the word at the repository's field. For a random word
+// that is the direct search (appearedIn); a UnixNano word is found as the
+// echo of its instant (echoServed), which passes over it too. Under both
+// time settings.
+func TestLearnMatchPassesOverAClientFieldSentAsRecorded(t *testing.T) {
+	for _, hex := range []bool{true, false} {
+		for _, timeForm := range []bool{true, false} {
+			served, miss, db := ciKeyPut(t, ciKeyCase{hex: hex, label: true, labelLive: ciWord(hex, false)}, timeForm)
+			if served == nil || miss != nil || len(db.consumed) != 1 || !bindsAt(db.consumed[0], "body.variables.input.conditions[0].value#3") || bindsAt(db.consumed[0], "body.variables.label") {
+				t.Fatalf("random word %v, the name sent as recorded (time default %v): served %v, miss %+v; want the PUT answered, the word bound at the repository's field", hex, timeForm, served != nil, miss)
+			}
 		}
 	}
 }

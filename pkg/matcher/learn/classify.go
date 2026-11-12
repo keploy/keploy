@@ -4241,7 +4241,9 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 // value as recorded, and live, as F saw it, wordBindAt), and ranks as
 // appearedIn ranks it: after the test's request that sent the value whole
 // and before a call that sent it inside a longer value, which binds
-// nothing and never hides that word.
+// nothing and never hides that word. A client test's request field F saw
+// hold its recorded value did not drift, so the value did not come from
+// it, as appearedIn passes over such a place.
 func (dc *DriftCache) echoServed(echoed []echoMatch, recorded, live string, served []Earlier) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
@@ -4250,6 +4252,9 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded, live string, serv
 	rank := 2 * noPlaceRank
 	for _, e := range served {
 		for _, s := range e.Seen {
+			if e.incoming && s.Live == s.Leaf.Value {
+				continue
+			}
 			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
 				continue
 			}
