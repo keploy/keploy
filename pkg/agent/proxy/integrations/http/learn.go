@@ -512,6 +512,27 @@ func boundTimesOf(learned []learn.Learned, sources func(mock string) []models.De
 	return learned
 }
 
+// claimTimesOf is learned, the drifted leaves of a call, with each JWT at a
+// header or a body field whose claims that changed are all times learned as
+// those times, each checked by its form alone at its claim
+// (learn.ClaimTimesLearned: under the time default where timeForm is set,
+// in w, the call's window); a replay checks the rest of the token as
+// recorded (strictKnown.claimsHeld). Every other leaf as it is.
+func claimTimesOf(learned []learn.Learned, w *learn.Window, timeForm bool) []learn.Learned {
+	if !timeForm {
+		return learned
+	}
+	out := make([]learn.Learned, 0, len(learned))
+	for _, l := range learned {
+		if claims, ok := learn.ClaimTimesLearned(l, w, timeForm); ok {
+			out = append(out, claims...)
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 // knownAsRecorded is known without the noise learned onto m: the recording
 // as the learn step first compared it, for a spent mock (learn.Candidate).
 func (n learnNoise) knownAsRecorded(m *models.Mock) learn.Known {
@@ -1929,7 +1950,8 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				learned[i] = learn.OffsetReadUnder(l, timeForm)
 			}
 			learned = declaredClocksOf(learned, n.sources, m, w, timeForm, tracker.DriftsOf(ctx), answer)
-			return boundTimesOf(learned, n.sources, m, w, timeForm), answered, earlier, ""
+			learned = boundTimesOf(learned, n.sources, m, w, timeForm)
+			return claimTimesOf(learned, w, timeForm), answered, earlier, ""
 		}
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {

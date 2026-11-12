@@ -342,6 +342,36 @@ func (k strictKnown) learnedNoiseAt(exact, legacy string) bool {
 	return false
 }
 
+// claimsAt are the times the learn step learned in claims of the JWT the
+// field at exact holds (k.clocks, keyed learn.ClaimClockKey), by claim;
+// none where it learned none.
+func (k strictKnown) claimsAt(exact string) []models.ClockOffset {
+	var out []models.ClockOffset
+	for p, o := range k.clocks {
+		if field, ok := learn.ClaimClockField(p, o); ok && field == exact {
+			out = append(out, o)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Claim < out[j].Claim })
+	return out
+}
+
+// claimsHeld is, of the field at exact whose recorded value rec and whose
+// call's value live differ, whether the learn step learned times in claims
+// of the JWT it holds (claimsAt), and then whether live holds that check
+// (learn.HoldsClaimsByForm, under the time default the store says the
+// replay turned on) and why not: each such claim a time of its learned
+// form, the token's header and every other claim as recorded, its
+// signature of the recorded one's form.
+func (k strictKnown) claimsHeld(exact, rec, live string) (learned, held bool, why string) {
+	cs := k.claimsAt(exact)
+	if len(cs) == 0 {
+		return false, false, ""
+	}
+	held, why = learn.HoldsClaimsByForm(cs, rec, live, k.n.timeForm)
+	return true, held, why
+}
+
 // redacted reports whether a recorded value is one the obfuscator redacted.
 func (k strictKnown) redacted(recorded string) bool {
 	return recorded != "" && k.values != nil && k.values.IsNoisy(recorded)
@@ -455,7 +485,12 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 	read := k.pathReadings(rec)
 	span, known := learn.ClockSpanOf(ctx, input.arrived, m)
 	places := make([]string, 0, len(k.clocks))
-	for p := range k.clocks {
+	for p, o := range k.clocks {
+		if _, claim := learn.ClaimClockField(p, o); claim {
+			// A time in a claim of a JWT: the walk checks its token
+			// (claimsHeld), no leaf here.
+			continue
+		}
 		places = append(places, p)
 	}
 	sort.Strings(places)
@@ -1201,6 +1236,18 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 			out = append(out, patternField(field(valueDiff(path, rv, lv))))
 			continue
 		}
+		// A JWT whose claims hold times the learn step learned is held to
+		// that check: its times by form, the rest of it as recorded. One
+		// keploy.yml's patterns guard is decided by them alone.
+		if claims, held, why := k.claimsHeld(path, rv, lv); claims && !guarded && rv != lv {
+			if held {
+				continue
+			}
+			f := field(valueDiff(path, rv, lv))
+			f.why = path + " " + why
+			out = append(out, f)
+			continue
+		}
 		switch name {
 		case "x-amz-content-sha256":
 			if samePayloadHash(rv, lvs, sent) {
@@ -1610,8 +1657,23 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 		if learned || sameScalar(r, l) {
 			return
 		}
+		rs, okR := r.(string)
+		ls, okL := l.(string)
+		// A JWT whose claims hold times the learn step learned is held to
+		// that check (claimsHeld); keploy.yml's patterns and a clock rule
+		// decide a field they name alone.
+		claims, held, claimWhy := false, false, ""
+		if okR && okL && !guarded && !k.noiseBarred(exact) {
+			claims, held, claimWhy = k.claimsHeld(exact, rs, ls)
+		}
+		if held {
+			return
+		}
 		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l))
 		f.why = why
+		if claims {
+			f.why = shape + " " + claimWhy
+		}
 		if strings.Contains(risk, "[]") {
 			// Elements of an array share one name, so the values would not
 			// say which element changed: the field alone.
