@@ -383,16 +383,19 @@ func TestAOnceChainEndsWhenItsTestsWindowEnds(t *testing.T) {
 	}
 }
 
-// endedLines are, of the lines that say a once chain ended at a view
-// change, the recording each names next.
+// endedLines are the lines that say a once chain ended at a view change:
+// the recording each names next, and the series too where it is not the
+// touch's (a line of a call no chain was in progress on names none), so a
+// line no chain's end should have written shows.
 func endedLines(logs *observer.ObservedLogs) []string {
 	var out []string
 	for _, e := range logs.FilterMessageSnippet("a once series' chain ended: the replay's view moved").All() {
 		f := e.ContextMap()
-		if f["series"] != chainSeries {
-			continue
+		next, _ := f["next"].(string)
+		if series, _ := f["series"].(string); series != chainSeries {
+			next = "series=" + series + " next=" + next
 		}
-		out = append(out, f["next"].(string))
+		out = append(out, next)
 	}
 	return out
 }
