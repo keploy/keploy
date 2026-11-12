@@ -7,10 +7,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -162,10 +164,12 @@ func (d keyedDb) FindStagedNotOwnedByKeys(kind models.Kind, call integrations.Ca
 // A call that is a recording kept on disk is named from the recordings under
 // the keys it asks by (RequestKeysOf, recordedRequestKeys), whatever the
 // strict comparison tolerates: a path segment or X-Amz-Target the recording
-// learned as noise or the obfuscator redacted, keploy.yml's url or header
-// noise, the target header in another case. Only those are decoded: with no
-// keploy.yml noise on the path or target, a recording of another path,
-// method or target is never offered.
+// learned as noise, or learned by its words, or the obfuscator redacted,
+// keploy.yml's url or header noise, the target header in another case. Only
+// those are decoded: with no keploy.yml noise on the path or target, a
+// recording of another path, method or target is never offered. A recording
+// learned by its words is offered to a call whose other words changed too,
+// and the strict comparison refuses it there.
 func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 	const host = "localhost:50001"
 	post := func(m *models.Mock, target string) *models.Mock {
@@ -185,6 +189,18 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 		m.Spec.ReqBodyNoise = map[string][]string{field: {}}
 		return m
 	}
+	// byWords is m learned by its words at field, as record's full round
+	// learns it when the text there changed from rec to f.
+	byWords := func(m *models.Mock, field, rec, f string) *models.Mock {
+		m.Spec.ReqBodyNoise = map[string][]string{field: {learn.NoiseWordsPattern(changedWords(rec, f))}}
+		return m
+	}
+	segWords := func() *models.Mock {
+		return byWords(onHost("rec", "/v1/leads/r-1,v2", host), "url.path.2", "r-1,v2", "r-2,v2")
+	}
+	targetWords := func() *models.Mock {
+		return byWords(post(onHost("rec", "/", host), "Leads.Put;r-1"), "header.x-amz-target", "Leads.Put;r-1", "Leads.Put;r-2")
+	}
 	for _, tc := range []struct {
 		name          string
 		rec           *models.Mock
@@ -193,6 +209,8 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 		targetPattern string
 		want          bool
 		offeredOthers bool
+		// decoded: the recording is offered (decoded), named or not.
+		decoded bool
 	}{
 		{name: "the same path", rec: onHost("rec", "/orders", host), live: getTo("/orders", host), want: true},
 		{name: "another path", rec: onHost("rec", "/orders", host), live: getTo("/carts", host)},
@@ -202,6 +220,12 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 		{name: "the target in another case", rec: post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), live: postTo("/", "AmazonSQS.DeleteMessage"), want: true},
 		{name: "another target", rec: post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), live: postTo("/", "AmazonSQS.SendMessage")},
 		{name: "a target learned", rec: learned(post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), "header.x-amz-target"), live: postTo("/", "AmazonSQS.SendMessage"), want: true},
+		{name: "a path segment learned by its words, its learned word changed", rec: segWords(), live: getTo("/v1/leads/r-3,v2", host), want: true, decoded: true},
+		{name: "a path segment learned by its words, as recorded", rec: segWords(), live: getTo("/v1/leads/r-1,v2", host), want: true, decoded: true},
+		{name: "a path segment learned by its words, another word changed", rec: segWords(), live: getTo("/v1/leads/r-3,v9", host), decoded: true},
+		{name: "a path segment learned by its words, another count", rec: segWords(), live: getTo("/v1/leads/r-3,v2/items", host)},
+		{name: "a target learned by its words, its learned word changed", rec: targetWords(), live: postTo("/", "Leads.Put;r-3"), want: true, decoded: true},
+		{name: "a target learned by its words, another word changed", rec: targetWords(), live: postTo("/", "Leads.Drop;r-3"), decoded: true},
 		{name: "keploy.yml url noise", rec: onHost("rec", "/orders/123", host), live: getTo("/orders/456", host), url: []string{"[0-9]+"}, want: true, offeredOthers: true},
 		{name: "keploy.yml header noise on the target", rec: post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), live: postTo("/", "AmazonSQS.SendMessage"), header: []string{"x-amz-target"}, want: true, offeredOthers: true},
 		{name: "a keploy.yml pattern on the target both match", rec: post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), live: postTo("/", "AmazonSQS.SendMessage"), targetPattern: `^AmazonSQS\.`, want: true, offeredOthers: true},
@@ -234,6 +258,9 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 				if name == "other-method" || (name == "other-path" && !tc.offeredOthers) {
 					t.Fatalf("offered %v: a recording the call can never be was decoded", offered)
 				}
+			}
+			if tc.decoded && !slices.Contains(offered, "rec") {
+				t.Fatalf("offered %v: the recording was never decoded, so its comparison was never asked", offered)
 			}
 		})
 	}

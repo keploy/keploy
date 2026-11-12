@@ -63,7 +63,10 @@ func TestUncheckedWordsReadsOnlyAWordsPattern(t *testing.T) {
 }
 
 // WordsAdmit admits a text with the recording's skeleton whose other words
-// are the recording's, and nothing else.
+// are the recording's, and nothing else. An unchecked word is unchecked as a
+// one-word text learned whole is: at the text's edge it may be empty. A word
+// inside the text cannot be: the separators around it would merge into one
+// run, and the skeleton changes.
 func TestWordsAdmitChecksEveryWordButTheUncheckedOnes(t *testing.T) {
 	const rec = "lead r-1 created at s-1"
 	for _, c := range []struct {
@@ -79,6 +82,10 @@ func TestWordsAdmitChecksEveryWordButTheUncheckedOnes(t *testing.T) {
 		{"a separator changed", "lead r-9,created at s-9", []int{1, 4}, false},
 		{"a word past the last", "lead r-9 created at s-1", []int{1, 5}, false},
 		{"no words", rec, nil, false},
+		{"the unchecked first word empty", " r-1 created at s-1", []int{0}, true},
+		{"the unchecked last word empty", "lead r-1 created at ", []int{4}, true},
+		{"an unchecked middle word empty", "lead  created at s-1", []int{1}, false},
+		{"a checked first word empty", " r-9 created at s-1", []int{1}, false},
 	} {
 		if got := WordsAdmit(rec, c.live, c.words); got != c.want {
 			t.Errorf("%s: WordsAdmit(%q, %v) = %v; want %v", c.name, c.live, c.words, got, c.want)

@@ -161,14 +161,17 @@ func recordedRequestKeys(m *models.Mock) []string {
 		}
 	}
 	// A read of the application's clock learned in the path or the target
-	// is a value made anew each run there, filed as learned noise is.
+	// is a value made anew each run there, filed as learned noise is; so is
+	// a segment or target learned by its words: a call whose learned word
+	// changed asks by its exact key and the learned key, and the strict
+	// comparison then checks its other words (wordsAt).
 	k := strictKnown{learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m)}
-	learned := hasTarget && (k.learnedAt("header."+strings.ToLower(amzTargetHeader), "") || k.redacted(target))
+	learned := hasTarget && (k.changesAt("header."+strings.ToLower(amzTargetHeader)) || k.redacted(target))
 	for i := range segs {
 		if learned {
 			break
 		}
-		learned = k.learnedAt("url.path."+strconv.Itoa(i), "")
+		learned = k.changesAt("url.path." + strconv.Itoa(i))
 	}
 	if !learned && hasVariables(m) {
 		learned = variableKeyed(m, len(segs))

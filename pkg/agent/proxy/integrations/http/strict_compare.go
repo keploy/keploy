@@ -253,6 +253,14 @@ func (k strictKnown) wordsAt(exact, rec, live string) bool {
 	return learn.WordsAdmit(rec, live, words)
 }
 
+// changesAt reports whether the mock learned that its value at exact changes
+// from run to run: learned there (learnedAt), or learned there by its words
+// (learn.UncheckedWords), which a call's value may hold changed while its
+// other words are compared (wordsAt).
+func (k strictKnown) changesAt(exact string) bool {
+	return k.learnedAt(exact, "") || learn.IsNoiseWords(k.learned[exact])
+}
+
 // learnedExcuses reports whether noise the mock learned excuses the field at
 // exact (or at legacy, the request-body learner's dialect) whole
 // (learnedAt), its value recorded there; and, where that noise is an older
