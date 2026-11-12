@@ -302,6 +302,17 @@ type ScopeGateReq struct {
 type ScopeNeed struct {
 	Test   string `json:"test"`
 	Reason string `json:"reason"`
+	// Answers, when set, are the run's variables (RunVariable) Test makes
+	// that the replayed test only receives: every place of each in its
+	// recordings is in an answer, none in a request it sends. Such a need
+	// never skips the test: where Test has not begun before it, the agent
+	// answers each at its answer places with its recorded value, which no
+	// check of the test's requests reads. A proxy that cannot answer them
+	// so skips the test with Reason, as does an agent that predates the
+	// field. An answer-only need may name no Test: no recording in this
+	// run sends those values, so no test begins with them and the agent
+	// always answers them as recorded.
+	Answers []string `json:"answers,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during

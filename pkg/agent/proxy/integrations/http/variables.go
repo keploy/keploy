@@ -1000,6 +1000,13 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			}
 			continue
 		}
+		if d.bind == nil && len(d.use) == 0 && table.AnsweredAsRecorded(d.name) {
+			// A run's variable the test only receives, from an earlier test
+			// this replay did not run before it: its answers hold the value
+			// recorded, which no check of this call reads.
+			hit.local[d.name] = variables.Binding{Name: d.name, Value: d.recorded, Recorded: d.recorded, Mock: m.Name}
+			continue
+		}
 		if d.bind == nil {
 			place, sent := "", ""
 			if len(d.use) > 0 {

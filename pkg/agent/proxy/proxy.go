@@ -5007,6 +5007,19 @@ func (p *Proxy) OpenExactTest(test string, owned []*models.Mock, given []models.
 	return p.openExact(func(m *MockManager) { m.OpenExactTest(test, owned, given) })
 }
 
+// AnswerAsRecordedAtOpen implements agent.ExactTestAnswerer
+// (MockManager.AnswerAsRecordedAtOpen) on the run's manager.
+func (p *Proxy) AnswerAsRecordedAtOpen(test string, names []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.AnswerAsRecordedAtOpen(test, names)
+	return nil
+}
+
+var _ agent.ExactTestAnswerer = (*Proxy)(nil)
+
 // GiveExactTest implements agent.ExactTestGiver (MockManager.GiveExactTest).
 // Under the proven switch the learn step also holds the value as an earlier
 // place of the test's calls (learn.Tracker.GiveValue), so a value made from

@@ -61,6 +61,10 @@ type Table struct {
 	// notes say, by name, why a variable of the scope is not bound (Note):
 	// the scope's alone, forgotten when the next begins.
 	notes map[string]string
+	// asRecorded are the run's variables the scope answers as recorded
+	// while they are not bound (AnsweredAsRecorded): the scope's alone,
+	// forgotten when the next begins.
+	asRecorded map[string]bool
 	// ended is what the set's ended scopes of a named test bound themselves
 	// (EndedOf): each such scope's own bindings with its test, appended as
 	// the next scope begins, until NewSet. Only a table that keeps them
@@ -922,7 +926,7 @@ func (t *Table) StartOpening(open func(), given, carried []Binding) {
 // notes, by variable name, are noted in the scope as it begins (Note), in
 // the same step: a call checked in the scope reads them from its first.
 func (t *Table) StartOpeningTest(test string, open func(), given, carried []Binding, notes map[string]string) {
-	t.StartOpeningScope(test, func(uint64) { open() }, given, carried, notes)
+	t.StartOpeningScope(test, func(uint64) { open() }, given, carried, notes, nil)
 }
 
 // StartOpeningScope is StartOpeningTest, open told the number the scope it
@@ -930,13 +934,22 @@ func (t *Table) StartOpeningTest(test string, open func(), given, carried []Bind
 // carries it, so a call made there reads that scope's bindings as its own
 // test's (OwnIn), however late keploy decides it.
 //
+// asRecorded are the run's variables the test receives from earlier tests
+// only in answers, which this run did not make before it: the scope answers
+// each as recorded while it is not bound (AnsweredAsRecorded), from its
+// first call.
+//
 // open must call none of t's methods: it holds t's lock.
-func (t *Table) StartOpeningScope(test string, open func(scope uint64), given, carried []Binding, notes map[string]string) {
+func (t *Table) StartOpeningScope(test string, open func(scope uint64), given, carried []Binding, notes map[string]string, asRecorded []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	open(t.scopeOf(test))
 	t.start(test, given, carried)
 	t.notes = maps.Clone(notes)
+	t.asRecorded = make(map[string]bool, len(asRecorded))
+	for _, name := range asRecorded {
+		t.asRecorded[name] = true
+	}
 }
 
 // InScope runs f holding the table's lock, told the number of the scope in
@@ -968,7 +981,7 @@ func (t *Table) start(test string, given, carried []Binding) {
 	t.scope = t.scopeOf(test)
 	t.test = test
 	t.gen++
-	t.vals, t.notes = nil, nil
+	t.vals, t.notes, t.asRecorded = nil, nil, nil
 	t.began = true
 	if len(given)+len(carried) == 0 {
 		return
@@ -1042,13 +1055,27 @@ func (t *Table) Unbound(name string) string {
 	return t.notes[name]
 }
 
+// AnsweredAsRecorded reports whether the scope answers name with its recorded
+// value: it began naming name so (StartOpeningScope), and name is not bound.
+// Only an answer place is answered so: a call that sends name at a request
+// place is checked as when nothing names it, so it misses while name is not
+// bound. Once bound, name is answered with its bound value.
+func (t *Table) AnsweredAsRecorded(name string) bool {
+	from := t.lock()
+	defer t.unlock(from)
+	if _, ok := t.lookup(from, name); ok {
+		return false
+	}
+	return t.asRecorded[name]
+}
+
 // Reset forgets every binding of the scope: a new scope begins. The run's
 // stay.
 func (t *Table) Reset() {
 	t.mu.Lock()
 	t.end()
 	t.test = ""
-	t.vals, t.notes = nil, nil
+	t.vals, t.notes, t.asRecorded = nil, nil, nil
 	t.began = true
 	t.gen++
 	t.mu.Unlock()
@@ -1064,7 +1091,7 @@ func (t *Table) NewSet() {
 
 // newSet is NewSet's step. t.mu is held.
 func (t *Table) newSet() {
-	t.vals, t.run, t.ended, t.notes = nil, nil, nil, nil
+	t.vals, t.run, t.ended, t.notes, t.asRecorded = nil, nil, nil, nil, nil
 	t.began, t.test = false, ""
 	t.gen++
 	t.scope++
@@ -1244,7 +1271,7 @@ func endedIn(ended []endedScope, scope uint64) []Binding {
 func (t *Table) Clone() *Table {
 	from := t.lock()
 	defer t.unlock(from)
-	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun, notes: maps.Clone(t.notes)}
+	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun, notes: maps.Clone(t.notes), asRecorded: maps.Clone(t.asRecorded)}
 	if t.vals != nil {
 		c.vals = make(map[string]Binding, len(t.vals))
 		for k, v := range t.vals {

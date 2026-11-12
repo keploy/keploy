@@ -1087,6 +1087,20 @@ type ExactTestGiver interface {
 	GiveExactTest(test string, b models.VariableBinding) error
 }
 
+// ExactTestAnswerer is an optional ExactServer capability of a proxy that
+// keeps the test variables a replay binds: AnswerAsRecordedAtOpen names, for
+// the scope of test's variables to begin with as test opens next, the run's
+// variables test receives from earlier tests only in answers
+// (models.ScopeNeed.Answers), which this replay did not run before it. While
+// one is not bound in that scope, its answer places are answered with its
+// recorded value; a call that sends it at a request place misses as when
+// nothing names it. The next call replaces them, and an open of another test
+// drops them. A proxy that lacks it cannot answer them so: the agent sets the
+// test aside instead.
+type ExactTestAnswerer interface {
+	AnswerAsRecordedAtOpen(test string, names []string) error
+}
+
 // AppClockSetter is an optional proxy capability: SetAppClock hands the
 // proxy how to read the app's clock at a real instant, as the agent's hooks
 // move it (a time-freeze; false where they cannot tell), so that the
