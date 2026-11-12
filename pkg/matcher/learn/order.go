@@ -2574,9 +2574,15 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 		return c.rm != nil && c.lm != nil && dc.clientCase(p.mock) && dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm) && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && windowRead()
 	}
 	gave := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && h.p.gave })
+	fineAt := map[[2]string]bool{}
+	for _, h := range hs {
+		if h.fr && h.fl {
+			fineAt[[2]string{h.p.mock, h.p.path}] = true
+		}
+	}
 	slots, again := oneSource(oneSlotEach(heldWhere(hs, func(h instantHold) bool {
 		return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() && !cutSlot(h.p)
-	})), c)
+	})), c, func(p evPlace) bool { return fineAt[[2]string{p.mock, p.path}] })
 	if len(gave) > 0 {
 		return dc.bound(path, at, n, c, gave, ": a value the test gave keploy, which the call sends as given in both runs")
 	}

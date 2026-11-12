@@ -101,10 +101,35 @@ func TestASuiteRenamedIsBoundAtTheRequestThatSentItsWholeName(t *testing.T) {
 		t.Errorf("the line %q does not say %q", d[0].Line, want)
 	}
 
-	// A name that is neither request's whole text: two sources still.
+	// A name that is neither request's whole text: each request holds the
+	// nanos in another text, one read at a cut finer than a millisecond,
+	// bound at the first send. Names made of a millisecond stamp may hold
+	// two reads that met at it: two sources.
 	d = r.clientValue(p, String, name(r.rNanos)+"-copy", name(r.fNanos)+"-copy", earlier)
+	const other = "; one read at a cut finer than a millisecond, sent again in other texts: test case post-query-38 body.variables.testSuiteInput.name, first sent at test case post-query-36 body.variables.testSuiteInput.name"
+	if len(d) != 1 || d[0].Outcome != OutcomeValue || d[0].From.Mock != "test case post-query-36" || d[0].From.Path != "body.variables.testSuiteInput.name" || !strings.Contains(d[0].Line, other) {
+		t.Fatalf("a name each request holds only the nanos of, in two different texts: %s; want a Value of test case post-query-36's body.variables.testSuiteInput.name, the line saying %q", oDescribe(d), other)
+	}
+	ms := clientSent(t, []string{"post-query-36", "post-query-38"},
+		[]*models.HTTPReq{e2eQuery("InsertTestSuite", input(r.rMillis), r.rReq), e2eQuery("UpdateTestSuite", renamed(r.rMillis), r.rReq.Add(r.sendGap))},
+		[]*models.HTTPReq{e2eQuery("InsertTestSuite", input(r.fMillis), r.fReq), e2eQuery("UpdateTestSuite", renamed(r.fMillis), r.fReq.Add(r.sendGap))})
+	d = r.clientValue(p, String, name(r.rMillis)+"-copy", name(r.fMillis)+"-copy", ms)
 	if len(d) != 1 || d[0].Refusal == nil || d[0].Refusal.Kind != RefusalTwoSources {
-		t.Fatalf("a name each request holds only a word of, in two different texts: %s; want refused, two sources", oDescribe(d))
+		t.Fatalf("a name each request holds only a millisecond stamp of, in two different texts: %s; want refused, two sources", oDescribe(d))
+	}
+
+	// Names made of a date and time whose encoder leaves out a zero
+	// fraction: finer than a millisecond in one run, a millisecond in the
+	// other. One read only where both runs show it so: two sources.
+	fine, milli := time.Unix(0, r.rNanos).UTC().Format(time.RFC3339Nano), r.fSigned.Add(123*time.Millisecond).UTC().Format(time.RFC3339Nano)
+	for what, at := range map[string][2]string{"in the recording": {fine, milli}, "in round F": {milli, fine}} {
+		named := func(s string) string { return "e2e-vh-" + s }
+		earlier := clientSent(t, []string{"post-query-36", "post-query-38"},
+			[]*models.HTTPReq{e2eQuery("InsertTestSuite", `{"testSuiteInput":{"name":"`+named(at[0])+`"}}`, r.rReq), e2eQuery("UpdateTestSuite", `{"testSuiteInput":{"name":"`+named(at[0])+`-renamed"}}`, r.rReq.Add(r.sendGap))},
+			[]*models.HTTPReq{e2eQuery("InsertTestSuite", `{"testSuiteInput":{"name":"`+named(at[1])+`"}}`, r.fReq), e2eQuery("UpdateTestSuite", `{"testSuiteInput":{"name":"`+named(at[1])+`-renamed"}}`, r.fReq.Add(r.sendGap))})
+		if d := r.clientValue(p, String, named(at[0])+"-copy", named(at[1])+"-copy", earlier); len(d) != 1 || d[0].Refusal == nil || d[0].Refusal.Kind != RefusalTwoSources {
+			t.Errorf("a date and time finer than a millisecond %s only, in two different texts: %s; want refused, two sources", what, oDescribe(d))
+		}
 	}
 }
 
@@ -187,8 +212,10 @@ func TestAValueTheClientSentAgainIsBoundAtItsFirstSend(t *testing.T) {
 // in both runs. A request whose whole text is the field's in one run only is
 // not its source; requests that hold one text in one run only were not sent
 // one value again; a stamp of a second, bare in one run, may be two reads in
-// one second. Each stays two sources. A stamp of a second inside a longer
-// text sent again is one value.
+// one second. Each stays two sources where the requests hold a millisecond
+// stamp, at which two reads may meet; where they hold a UnixNano, the
+// requests hold one read in other texts, bound at the first. A stamp of a
+// second inside a longer text sent again is one value.
 func TestASlotIsTheValuesSourceOnlyByItsTextInBothRuns(t *testing.T) {
 	r := newSentAgainRun()
 	name := func(n int64) string { return "e2e-vh-" + nanos(n) }
@@ -199,15 +226,23 @@ func TestASlotIsTheValuesSourceOnlyByItsTextInBothRuns(t *testing.T) {
 			[]*models.HTTPReq{e2eQuery("InsertTestSuite", vars(live[0]), r.fReq), e2eQuery("UpdateTestSuite", vars(live[1]), r.fReq.Add(r.sendGap))})
 		return r.clientValue("body.docs.msgs.0.delta.name", String, field[0], field[1], earlier)
 	}
-	rn, fn := name(r.rNanos), name(r.fNanos)
-	for what, ds := range map[string][]Decision{
-		"the field's whole text at the second request in the recording only": suite([2]string{rn, rn + "-renamed"}, [2]string{fn, fn + "-renamed-2"}, [2]string{rn + "-renamed", fn + "-renamed"}),
-		"the field's whole text at the second request in round F only":       suite([2]string{rn, rn + "-renamed-2"}, [2]string{fn, fn + "-renamed"}, [2]string{rn + "-renamed", fn + "-renamed"}),
-		"one text at both requests in the recording only":                    suite([2]string{rn, rn}, [2]string{fn, fn + "-x"}, [2]string{"^" + rn + "$", "^" + fn + "$"}),
-		"one text at both requests in round F only":                          suite([2]string{rn, rn + "-x"}, [2]string{fn, fn}, [2]string{"^" + rn + "$", "^" + fn + "$"}),
-	} {
-		if len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
-			t.Errorf("%s: %s; want refused, two sources", what, oDescribe(ds))
+	for _, fine := range []bool{false, true} {
+		rn, fn := name(r.rMillis), name(r.fMillis)
+		if fine {
+			rn, fn = name(r.rNanos), name(r.fNanos)
+		}
+		for what, ds := range map[string][]Decision{
+			"the field's whole text at the second request in the recording only": suite([2]string{rn, rn + "-renamed"}, [2]string{fn, fn + "-renamed-2"}, [2]string{rn + "-renamed", fn + "-renamed"}),
+			"the field's whole text at the second request in round F only":       suite([2]string{rn, rn + "-renamed-2"}, [2]string{fn, fn + "-renamed"}, [2]string{rn + "-renamed", fn + "-renamed"}),
+			"one text at both requests in the recording only":                    suite([2]string{rn, rn}, [2]string{fn, fn + "-x"}, [2]string{"^" + rn + "$", "^" + fn + "$"}),
+			"one text at both requests in round F only":                          suite([2]string{rn, rn + "-x"}, [2]string{fn, fn}, [2]string{"^" + rn + "$", "^" + fn + "$"}),
+		} {
+			switch {
+			case !fine && (len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources):
+				t.Errorf("%s, a millisecond stamp: %s; want refused, two sources", what, oDescribe(ds))
+			case fine && (len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "test case post-query-36" || !strings.Contains(ds[0].Line, "; one read at a cut finer than a millisecond, sent again in other texts: test case post-query-38 body.variables.testSuiteInput.name, first sent at test case post-query-36")):
+				t.Errorf("%s, a UnixNano: %s; want a Value of test case post-query-36, one read sent again in other texts", what, oDescribe(ds))
+			}
 		}
 	}
 
@@ -298,25 +333,86 @@ func TestAValueSentAgainInAURLEncodedFormIsOneValue(t *testing.T) {
 	}
 
 	// The form sends another URI that names the same host, in one run or
-	// in both, or sends it twice: not the value sent again. A token request
-	// round F sent as no form holds no field there, and is refused too.
+	// in both, or sends it twice: not the value sent again. Where the host
+	// names a millisecond stamp, two reads may have met at it: two sources.
+	// Where it names a UnixNano, each text holds one read at a cut finer
+	// than a millisecond, bound at the registration all the same. A token
+	// request round F sent as no form holds no field there, and is refused.
 	uri := func(n int64) string { return "https://cb.e2e-" + nanos(n) + ".blocked.example/callback" }
 	other := func(n int64) string { return "https://cb.e2e-" + nanos(n) + ".blocked.example/other" }
-	for what, redirect := range map[string][2]string{
-		"in both runs":         {other(r.rNanos), other(r.fNanos)},
-		"in the recording":     {other(r.rNanos), ""},
-		"in round F":           {"", other(r.fNanos)},
-		"twice, in both runs":  {other(r.rNanos) + "&redirect_uri=" + other(r.rNanos), other(r.fNanos) + "&redirect_uri=" + other(r.fNanos)},
-		"twice, the URI first": {uri(r.rNanos) + "&redirect_uri=" + other(r.rNanos), uri(r.fNanos) + "&redirect_uri=" + other(r.fNanos)},
-		"twice, the URI last":  {other(r.rNanos) + "&redirect_uri=" + uri(r.rNanos), other(r.fNanos) + "&redirect_uri=" + uri(r.fNanos)},
-	} {
-		d := r.clientValue(p, String, domain(r.rNanos), domain(r.fNanos), r.hostBlockSignIn(t, redirect, ""))
-		if len(d) != 1 || d[0].Refusal == nil || d[0].Refusal.Kind != RefusalTwoSources {
-			t.Errorf("the form's redirect_uri another URI %s: %s; want refused, two sources", what, oDescribe(d))
+	ms := r
+	ms.rNanos, ms.fNanos = r.rMillis, r.fMillis
+	for _, x := range []sentAgainRun{ms, r} {
+		fine := x.rNanos == r.rNanos
+		for what, redirect := range map[string][2]string{
+			"in both runs":         {other(x.rNanos), other(x.fNanos)},
+			"in the recording":     {other(x.rNanos), ""},
+			"in round F":           {"", other(x.fNanos)},
+			"twice, in both runs":  {other(x.rNanos) + "&redirect_uri=" + other(x.rNanos), other(x.fNanos) + "&redirect_uri=" + other(x.fNanos)},
+			"twice, the URI first": {uri(x.rNanos) + "&redirect_uri=" + other(x.rNanos), uri(x.fNanos) + "&redirect_uri=" + other(x.fNanos)},
+			"twice, the URI last":  {other(x.rNanos) + "&redirect_uri=" + uri(x.rNanos), other(x.fNanos) + "&redirect_uri=" + uri(x.fNanos)},
+		} {
+			d := x.clientValue(p, String, domain(x.rNanos), domain(x.fNanos), x.hostBlockSignIn(t, redirect, ""))
+			switch {
+			case !fine && (len(d) != 1 || d[0].Refusal == nil || d[0].Refusal.Kind != RefusalTwoSources):
+				t.Errorf("the form's redirect_uri another URI %s, the host a millisecond stamp: %s; want refused, two sources", what, oDescribe(d))
+			case fine && (len(d) != 1 || d[0].Outcome != OutcomeValue || d[0].From.Mock != "test case post-oauth-register-4" || !strings.Contains(d[0].Line, "; one read at a cut finer than a millisecond, sent again in other texts: ")):
+				t.Errorf("the form's redirect_uri another URI %s, the host a UnixNano: %s; want a Value of test case post-oauth-register-4, one read sent again in other texts", what, oDescribe(d))
+			}
 		}
 	}
 	d = r.clientValue(p, String, domain(r.rNanos), domain(r.fNanos), r.hostBlockSignIn(t, [2]string{}, "text/plain"))
 	if len(d) != 1 || d[0].Refusal == nil {
 		t.Errorf("the token request sent as text in round F: %s; want refused", oDescribe(d))
+	}
+}
+
+// TestAMomentInOtherTextsAtAFineCutIsOneRead: api-server's host block reads
+// one UnixNano into a host and signs in two clients registered under it: a
+// hosted one (redirect URI "https://cb.<host>/callback", sent in the
+// registration, the authorize query and the token form) and a media player
+// ("com.example.player://media.<host>/callback", sent in its registration
+// and its authorize query). The media client's grant holds the host and the
+// player's domain (client_domains). The five places hold the nanos in two
+// texts, each at a cut finer than a millisecond in both runs: one read the
+// client wrote into each, bound at the first send, the hosted registration.
+// The same sign-ins under a host named by a millisecond stamp may hold two
+// reads that met at it, and stay two sources.
+func TestAMomentInOtherTextsAtAFineCutIsOneRead(t *testing.T) {
+	signIns := func(r sentAgainRun) []Earlier {
+		reqs := func(n int64, at time.Time) []*models.HTTPReq {
+			host := "e2e-" + nanos(n) + ".blocked.example"
+			hosted, media := "https://cb."+host+"/callback", "com.example.player://media."+host+"/callback"
+			authorize := func(client, uri string) string {
+				return "http://localhost:8083/oauth/authorize?" + url.Values{"response_type": {"code"}, "client_id": {client}, "redirect_uri": {uri}, "scope": {"read"},
+					"code_challenge": {"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"}, "code_challenge_method": {"S256"}}.Encode()
+			}
+			json := map[string]string{"Content-Type": "application/json", "Host": "localhost:8083"}
+			return []*models.HTTPReq{
+				{Method: "POST", URL: "http://localhost:8083/oauth/register", Timestamp: at, Header: json, Body: `{"client_name":"E2E Hosted Agent","redirect_uris":["` + hosted + `"]}`},
+				{Method: "GET", URL: authorize("mcp_hosted", hosted), Timestamp: at.Add(time.Millisecond), Header: map[string]string{"Host": "localhost:8083"}},
+				{Method: "POST", URL: "http://localhost:8083/oauth/token", Timestamp: at.Add(5 * time.Millisecond), Header: map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Host": "localhost:8083"},
+					Body: "client_id=mcp_hosted&code=GZQ3uX&code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk&grant_type=authorization_code&redirect_uri=" + hosted + "&resource=http://localhost:8083/client/v1/mcp"},
+				{Method: "POST", URL: "http://localhost:8083/oauth/register", Timestamp: at.Add(9 * time.Millisecond), Header: json, Body: `{"client_name":"E2E Media Agent","redirect_uris":["` + media + `"]}`},
+				{Method: "GET", URL: authorize("mcp_media", media), Timestamp: at.Add(10 * time.Millisecond), Header: map[string]string{"Host": "localhost:8083"}},
+			}
+		}
+		return clientSent(t, []string{"post-oauth-register-4", "get-oauth-authorize-5", "post-oauth-token-8", "post-oauth-register-5", "get-oauth-authorize-6"},
+			reqs(r.rNanos, r.rReq), reqs(r.fNanos, r.fReq))
+	}
+	r := newSentAgainRun()
+	domain := func(n int64) string { return "r:e2e-" + nanos(n) + ".blocked.example" }
+	const p = "body.docs.msgs.0.client_domains.1"
+	d := r.clientValue(p, String, domain(r.rNanos), domain(r.fNanos), signIns(r))
+	// The line names at most three of the other places (maxLinePlaces).
+	const line = "; one read at a cut finer than a millisecond, sent again in other texts: test case get-oauth-authorize-5 url.query.redirect_uri, test case post-oauth-token-8 body.redirect_uri, test case post-oauth-register-5 body.redirect_uris[0], first sent at test case post-oauth-register-4 body.redirect_uris[0]"
+	if len(d) != 1 || d[0].Outcome != OutcomeValue || d[0].From.Mock != "test case post-oauth-register-4" || d[0].From.Path != "body.redirect_uris[0]" || !d[0].From.Client || d[0].Clock != nil || !strings.Contains(d[0].Line, line) {
+		t.Fatalf("the media grant's host domain: %s; want a Value of test case post-oauth-register-4's body.redirect_uris[0], the first send, no clock, the line saying %q", oDescribe(d), line)
+	}
+
+	ms := r
+	ms.rNanos, ms.fNanos = r.rMillis, r.fMillis
+	if d := ms.clientValue(p, String, domain(ms.rNanos), domain(ms.fNanos), signIns(ms)); len(d) != 1 || d[0].Refusal == nil || d[0].Refusal.Kind != RefusalTwoSources {
+		t.Errorf("the media grant's host domain, the host a millisecond stamp: %s; want refused, two sources", oDescribe(d))
 	}
 }

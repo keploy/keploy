@@ -402,20 +402,30 @@ func TestAClientTestsUnixNanoNameIsBoundAtItsRequest(t *testing.T) {
 			t.Errorf("the app name sent again at %s: %s; want a Value of %s's %s, sent again at %s", what, oDescribe(ds), tc.mock, tc.at, tc.sentAgain)
 		}
 	}
-	// The name and a slug the client made of it: two different texts.
+	// The name and a slug the client made of it: two different texts, the
+	// field neither. Of a UnixNano, one read at a cut finer than a
+	// millisecond, bound at the first; of a millisecond stamp, two reads
+	// may have met at it: two sources.
 	withShortSlug := func(n int64, at time.Time) *models.HTTPReq {
 		r := appNameCase(n, at)
 		r.Body = `{"name":"` + name(n) + `","slug":"app-crud-` + strconv.FormatInt(n, 10) + `"}`
 		return r
 	}
-	tr := NewTracker()
-	tr.Begin()
-	tr.SetCases([]ClientCase{{Name: "case-0", Req: withShortSlug(rNanos, rReq)}})
-	tr.Incoming(withShortSlug(fNanos, fReq), "", fReq)
-	slugIn := iCall(p, String, "copy of "+name(rNanos), "copy of "+name(fNanos), rCall, fCall, nil, tr.Placed().Earlier, nil)
-	slugIn.Drifts = oClientDrifts()
-	if ds := Decide(slugIn); len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
-		t.Errorf("the app name held at two leaves in two different texts, neither the field's: %s; want refused, two sources", oDescribe(ds))
+	slug := func(rn, fn int64) []Decision {
+		tr := NewTracker()
+		tr.Begin()
+		tr.SetCases([]ClientCase{{Name: "case-0", Req: withShortSlug(rn, rReq)}})
+		tr.Incoming(withShortSlug(fn, fReq), "", fReq)
+		in := iCall(p, String, "copy of "+name(rn), "copy of "+name(fn), rCall, fCall, nil, tr.Placed().Earlier, nil)
+		in.Drifts = oClientDrifts()
+		return Decide(in)
+	}
+	if ds := slug(rNanos, fNanos); len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "test case case-0" || ds[0].From.Path != "body.name" ||
+		!strings.Contains(ds[0].Line, "; one read at a cut finer than a millisecond, sent again in other texts: test case case-0 body.slug, first sent at test case case-0 body.name") {
+		t.Errorf("the app name's UnixNano held at two leaves in two different texts, neither the field's: %s; want a Value of test case case-0's body.name, one read sent again", oDescribe(ds))
+	}
+	if ds := slug(rNanos/1e6, fNanos/1e6); len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
+		t.Errorf("the app name's millisecond stamp held at two leaves in two different texts, neither the field's: %s; want refused, two sources", oDescribe(ds))
 	}
 
 	// An id the call took from a recording's answer, beside a client

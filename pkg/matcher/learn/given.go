@@ -85,14 +85,22 @@ func oneSlotEach(slots []evPlace) []evPlace {
 // the client sent again (a name, a session cookie), its place the first
 // sent: only where that text is more than the moment, or shows it finer than
 // a second. A bare stamp of a second sent twice may be two reads of the
-// clock in one second, and stays two sources; so do two different texts that
-// each hold the word.
+// clock in one second, and stays two sources.
+//
+// (c) Slots that hold the moment in other texts are one read the client
+// sent again only where every one of them holds it at a cut finer than a
+// millisecond in both runs (fine): two reads of the clock never meet at such
+// a cut in one run, let alone in both, so the client read it once and wrote
+// it into each text (api-server's host block: one UnixNano in a host, sent
+// in the redirect URIs of two clients). Its place is the first sent. Texts
+// that hold it only at a millisecond or coarser may be two reads that met
+// at that cut, and stay two sources.
 //
 // Fail closed by construction: a replay binds the variable at the place's
 // live value and compares the call that sends the word with it, so where the
 // client sends the slots apart and the application read another, the call
 // misses.
-func oneSource(slots []evPlace, c changedInstant) ([]evPlace, string) {
+func oneSource(slots []evPlace, c changedInstant, fine func(evPlace) bool) ([]evPlace, string) {
 	if len(slots) < 2 {
 		return slots, ""
 	}
@@ -106,13 +114,18 @@ func oneSource(slots []evPlace, c changedInstant) ([]evPlace, string) {
 		src = slots
 	}
 	first := earliest(src)
-	for _, p := range src {
-		if p.rec != first.rec || p.live != first.live || bareStamp(p.t.rec) || bareStamp(p.t.live) {
-			return slots, ""
-		}
+	if !slices.ContainsFunc(src, func(p evPlace) bool {
+		return p.rec != first.rec || p.live != first.live || bareStamp(p.t.rec) || bareStamp(p.t.live)
+	}) {
+		again := slices.DeleteFunc(slices.Clone(src), func(p evPlace) bool { return p.name == first.name })
+		return []evPlace{first}, "; sent again: " + strings.Join(names(again), ", ") + ", first sent at " + first.name
 	}
-	again := slices.DeleteFunc(slices.Clone(src), func(p evPlace) bool { return p.name == first.name })
-	return []evPlace{first}, "; sent again: " + strings.Join(names(again), ", ") + ", first sent at " + first.name
+	if slices.ContainsFunc(slots, func(p evPlace) bool { return !fine(p) }) {
+		return slots, ""
+	}
+	first = earliest(slots)
+	again := slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool { return p.name == first.name })
+	return []evPlace{first}, "; one read at a cut finer than a millisecond, sent again in other texts: " + strings.Join(names(again), ", ") + ", first sent at " + first.name
 }
 
 // bareStamp reports whether t's text is, whole, one instant of a second or a
