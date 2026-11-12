@@ -163,3 +163,49 @@ func TestPIIWarningScansMultipartFormFields(t *testing.T) {
 		}
 	}
 }
+
+func TestPIIWarningScansURLEncodedFormFields(t *testing.T) {
+	for _, tc := range []struct {
+		contentType string
+		body        string
+	}{
+		// Capture has already unescaped this body.
+		{"application/x-www-form-urlencoded", "username=user&password=hunter2"},
+		// With a parameter, Capture leaves the body escaped.
+		{"application/x-www-form-urlencoded; charset=utf-8", "username=user&pass%77ord=hunter2"},
+	} {
+		got := piiWarnings(t, &models.TestCase{
+			HTTPReq: models.HTTPReq{
+				Method: models.Method("POST"),
+				URL:    "http://localhost:8080/login",
+				Header: map[string]string{"Content-Type": tc.contentType},
+				Body:   tc.body,
+			},
+		})
+		if len(got) != 1 {
+			t.Fatalf("%s: got %d warnings, want 1: %q", tc.contentType, len(got), got)
+		}
+		if !strings.Contains(got[0], "request.form.password (field_name)") {
+			t.Errorf("%s: warning %q does not report the password field", tc.contentType, got[0])
+		}
+		for _, leak := range []string{"hunter2", "request.form.username"} {
+			if strings.Contains(got[0], leak) {
+				t.Errorf("%s: warning %q should not contain %q", tc.contentType, got[0], leak)
+			}
+		}
+	}
+}
+
+func TestPIIWarningLeavesANonFormBodyAlone(t *testing.T) {
+	got := piiWarnings(t, &models.TestCase{
+		HTTPReq: models.HTTPReq{
+			Method: models.Method("POST"),
+			URL:    "http://localhost:8080/notes",
+			Header: map[string]string{"Content-Type": "text/plain"},
+			Body:   "password=hunter2",
+		},
+	})
+	if len(got) != 0 {
+		t.Fatalf("got warnings for a plain-text body: %q", got)
+	}
+}

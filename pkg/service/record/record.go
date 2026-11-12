@@ -3733,6 +3733,51 @@ func piiSafeLabel(testCase *models.TestCase) string {
 	return "unknown-test-case"
 }
 
+// urlEncodedFormFields splits an application/x-www-form-urlencoded request
+// body into name and value pairs. Capture already unescapes a body whose
+// Content-Type is exactly application/x-www-form-urlencoded, so those pairs
+// are split as they stand; a body sent with parameters (a charset, say) is
+// still escaped and each name and value is unescaped here.
+func urlEncodedFormFields(header map[string]string, body string) [][2]string {
+	if body == "" {
+		return nil
+	}
+	contentType := ""
+	for name, value := range header {
+		if strings.EqualFold(name, "Content-Type") {
+			contentType = strings.TrimSpace(value)
+			break
+		}
+	}
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	if !strings.EqualFold(strings.TrimSpace(mediaType), "application/x-www-form-urlencoded") {
+		return nil
+	}
+	decoded := contentType == "application/x-www-form-urlencoded"
+
+	fields := make([][2]string, 0, 4)
+	for _, pair := range strings.Split(body, "&") {
+		if pair == "" {
+			continue
+		}
+		name, value, _ := strings.Cut(pair, "=")
+		if !decoded {
+			if n, err := url.QueryUnescape(name); err == nil {
+				name = n
+			}
+			if v, err := url.QueryUnescape(value); err == nil {
+				value = v
+			}
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		fields = append(fields, [2]string{name, value})
+	}
+	return fields
+}
+
 func holdsPII(value string) bool {
 	if len(pii.DetectValue("label", value)) > 0 {
 		return true
@@ -3772,6 +3817,12 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string
 		))
 	}
 	detections = append(detections, pii.DetectBody(reqBody, "request.body")...)
+	// A URL-encoded form stays in Body as text, so the scan above sees only
+	// the name "request.body" and misses a field such as password. Scan each
+	// form field under its own name.
+	for _, field := range urlEncodedFormFields(testCase.HTTPReq.Header, reqBody) {
+		detections = append(detections, pii.DetectValue("request.form."+field[0], field[1])...)
+	}
 	// Capture moves multipart fields into Form and clears Body, so scan each
 	// form value under its field name as well.
 	for _, field := range testCase.HTTPReq.Form {
