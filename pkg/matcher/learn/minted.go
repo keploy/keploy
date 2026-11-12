@@ -3,6 +3,7 @@ package learn
 import (
 	"slices"
 	"strconv"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -148,16 +149,18 @@ func (dc *decider) minted(path string, src Source, ds []Decision) []Decision {
 //
 // Where round F sent another value there than the minted field's, the call
 // sent two values apart: refused, as oneValue refuses one. A word of a
-// minted value is a copy's evidence only where the copy's field holds, in
-// the recording, a word of that value that carries chanceBits (wordBits)
-// or more: a shorter word of the value (a base64url id's one-letter word,
-// a UUID's 4-hex group) stands at other places by chance, so a field that
-// holds only such words keeps learning's decisions. A word that holds the
-// minted value, or a word of it, inside a longer word (or a text learning
-// decided whole) is no place a use can name, and keeps learning's decision
-// too, as it has with no rule. Only a word made anew is re-decided here:
-// one learning bound to an earlier place, read as the clock, or refused
-// keeps its decision.
+// minted value is a copy's evidence only where the field shows the value:
+// a text of the field (its recorded value, or a text a step
+// opens in it) holds the value whole, or a run of its consecutive words
+// whose words made anew carry chanceBits (wordBits) or more between them.
+// A shorter piece of the value (a base64url id's one-letter word, a UUID's
+// 4-hex group) stands at other places by chance, so a field that holds
+// only such pieces keeps learning's decisions. A word that holds the minted
+// value, or a word of it, inside a longer word (or a text learning decided
+// whole) is no place a use can name, and keeps learning's decision too, as
+// it has with no rule. Only a word made anew is re-decided here: one
+// learning bound to an earlier place, read as the clock, or refused keeps
+// its decision.
 func (dc *decider) mintedUses(out []Decision, fields []string) ([]Decision, []string) {
 	var ms []mintedValue
 	minted := map[string]bool{}
@@ -235,9 +238,15 @@ func (dc *decider) mintedUses(out []Decision, fields []string) ([]Decision, []st
 			resFields = append(resFields, path)
 			continue
 		}
+		var texts []string // copyTexts, read at the first word that asks
 		for _, d := range group {
 			if d.Outcome == OutcomeFresh {
-				d = mintedCopy(d, group, ms, func(m mintedValue, word int) Decision {
+				d = mintedCopy(d, ms, func(m mintedValue) bool {
+					if texts == nil {
+						texts = copyTexts(rec.Value, group)
+					}
+					return slices.ContainsFunc(texts, m.shownIn)
+				}, func(m mintedValue, word int) Decision {
 					if word < 0 && m.live == d.Full || word >= 0 && m.lw[word] == d.Full {
 						return use(path, d.At, d.At.Word, d.Recorded, d.Full, m, word)
 					}
@@ -262,18 +271,18 @@ type mintedValue struct {
 	rw, lw    []string
 }
 
-// mintedCopy is d, a word made anew of a field whose decisions are group,
-// as mintedUses decides it against the minted values ms: decided(m, -1)
-// where it is m whole; decided(m, w) where it is word w of m, a value
-// whose words pair in round F, and the field shows m (shownIn: the first
-// such word round F's value pairs with, else the first); else d itself,
-// as learning decided it.
-func mintedCopy(d Decision, group []Decision, ms []mintedValue, decided func(m mintedValue, word int) Decision) Decision {
+// mintedCopy is d, a word made anew, as mintedUses decides it against the
+// minted values ms: decided(m, -1) where it is m whole; decided(m, w) where
+// it is word w of m, a value whose words pair in round F, and d's field
+// shows m (shows(m): a text of the field shows it, shownIn; w is the first
+// such word round F's value pairs with, else the first); else d itself, as
+// learning decided it.
+func mintedCopy(d Decision, ms []mintedValue, shows func(m mintedValue) bool, decided func(m mintedValue, word int) Decision) Decision {
 	for _, m := range ms {
 		if d.Recorded == m.rec {
 			return decided(m, -1)
 		}
-		if len(m.rw) != len(m.lw) || !slices.Contains(m.rw, d.Recorded) || !m.shownIn(group) {
+		if len(m.rw) != len(m.lw) || !slices.Contains(m.rw, d.Recorded) || !shows(m) {
 			continue
 		}
 		first := -1
@@ -293,14 +302,51 @@ func mintedCopy(d Decision, group []Decision, ms []mintedValue, decided func(m m
 	return d
 }
 
-// shownIn reports whether group, the decisions of one field, holds in the
-// recording a word of m that carries chanceBits or more: no chance puts
-// one there, so the field holds a copy of m, and its other words that are
-// words of m are pieces of that copy.
-func (m mintedValue) shownIn(group []Decision) bool {
-	return slices.ContainsFunc(group, func(g Decision) bool {
-		return wordBits(g.Recorded) >= chanceBits && slices.Contains(m.rw, g.Recorded)
-	})
+// copyTexts are the recorded texts of a field, whose value is leaf, that
+// hold the changed words learning decided as group: leaf opened by each
+// word's steps, each text once. A text no step decodes holds nothing.
+func copyTexts(leaf string, group []Decision) []string {
+	var out []string
+	var read [][]variables.Step
+	for _, g := range group {
+		if slices.ContainsFunc(read, func(s []variables.Step) bool { return slices.Equal(s, g.At.Steps) }) {
+			continue
+		}
+		read = append(read, g.At.Steps)
+		t, _ := variables.Address{Steps: g.At.Steps, Word: -1}.WordOf(leaf)
+		out = append(out, t)
+	}
+	return out
+}
+
+// shownIn reports whether t, a recorded text, shows m: it holds m's
+// recorded value whole, or a run of m's consecutive words, as m writes
+// them, whose words made anew (round F's word there differs) carry
+// chanceBits or more between them. No chance puts either there, so t holds
+// a copy of m, and its words that are words of m are pieces of that copy.
+// A word of m that round F kept (a tenant's) adds no bits: the call may
+// hold it beside other values by design. One word of chanceBits is the
+// shortest such run. m's words pair in round F (mintedCopy asks only then).
+func (m mintedValue) shownIn(t string) bool {
+	if strings.Contains(t, m.rec) {
+		return true
+	}
+	ws := variables.Words(m.rec)
+	for a := range ws {
+		bits := 0.0
+		for b := a; b < len(ws); b++ {
+			if m.rw[b] != m.lw[b] {
+				bits += wordBits(m.rw[b])
+			}
+			if bits >= chanceBits {
+				if strings.Contains(t, m.rec[ws[a][0]:ws[b][1]]) {
+					return true
+				}
+				break // every longer run from a holds this one
+			}
+		}
+	}
+	return false
 }
 
 // ruledBy is d, a refusal, naming rule in its line's tail
