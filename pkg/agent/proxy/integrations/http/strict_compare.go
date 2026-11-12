@@ -725,8 +725,16 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 			if r.segs[i] == l.segs[i] {
 				continue
 			}
-			if ok, stale := k.segmentMayDiffer(i, r, l, read); !ok {
-				same, why = false, stale
+			ok, stale := k.segmentMayDiffer(i, r, l, read)
+			if ok {
+				continue
+			}
+			// The path is refused for the reason of a segment an older
+			// keploy learned as noise whole only where every segment that
+			// may not differ is such a one: it is then of the call's route
+			// (routeMatches). Any other is of another route.
+			same, why = false, stale
+			if stale == "" {
 				break
 			}
 		}

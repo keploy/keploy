@@ -76,6 +76,38 @@ func TestReplayHonoursAnOlderKeploysWholeNoiseOnlyAtATextOfOneWord(t *testing.T)
 	}
 }
 
+// A path one segment of which an older keploy learned as noise whole, a
+// text of more than one word, is of the call's route: a change there is
+// refused with the reason that says to record the test again, and the
+// recording is the closest one named. A path another segment of which
+// changed too is of another route: refused, with no such reason.
+func TestReplayReadsAPathWithAnOlderKeploysWholeNoiseSegmentAsTheCallsRoute(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := learnRecorded("mock-0", 0, "GET", "/v1/leads/r-1,v2/notes", "", nil, `{"ok":true}`)
+	m.Spec.ReqBodyNoise = map[string][]string{"url.path.2": {}}
+	for _, c := range []struct {
+		path  string
+		route bool
+	}{
+		{"/v1/leads/r-3,v9/notes", true},
+		{"/v1/leads/r-3,v9/tags", false},
+		{"/v2/leads/r-3,v9/notes", false},
+	} {
+		ok, _, diag := matchVarIn(t, context.Background(), newHTTP(), &varDb{perTest: []*models.Mock{m}}, live("GET", c.path, "", nil))
+		if ok || diag == nil || !hasField(differs(diag), "path") {
+			t.Fatalf("%s answered %v (differs %v); want refused, naming path", c.path, ok, differs(diag))
+		}
+		var want []models.FieldReason
+		phase := models.MatchPhaseSchema
+		if c.route {
+			want, phase = []models.FieldReason{{Field: "path", Why: staleWholeWhy("path")}}, models.MatchPhaseStrict
+		}
+		if got := reasonsOf(diag.differs); !reflect.DeepEqual(got, want) || diag.phase != phase {
+			t.Fatalf("%s: reasons %+v in phase %s; want %+v in phase %s", c.path, got, diag.phase, want, phase)
+		}
+	}
+}
+
 // What the rule leaves as it was: noise whole an older keploy learned at a
 // container of a text (the container's every leaf unchecked), and at a value
 // that is no text. Noise whole named in the request matcher's dialect (the

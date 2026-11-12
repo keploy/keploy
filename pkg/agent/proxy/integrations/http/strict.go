@@ -460,10 +460,13 @@ func walkOnly(fields []strictField) []strictField {
 // and path. A refused read of the application's clock (strictField.clock)
 // is no part of the route, though one in a path segment is named "path":
 // the walk excused that segment, so it is of the call's route, and its
-// refusal keeps its reason.
+// refusal keeps its reason. So is a path whose segments that changed an
+// older keploy learned as noise whole (strictField.noise, pathDiffs): that
+// noise made the recording one of the call's route, and the refusal keeps
+// its reason, which says to record the test again.
 func routeMatches(diffs []strictField) bool {
 	for _, d := range diffs {
-		if d.clock {
+		if d.clock || d.noise {
 			continue
 		}
 		switch d.diff.Path {
