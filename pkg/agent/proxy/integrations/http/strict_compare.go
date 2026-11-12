@@ -224,20 +224,55 @@ func (k strictKnown) learnedNoiseAt(exact, legacy string) bool {
 	if len(k.learned) == 0 {
 		return false
 	}
-	if _, ok := k.learned[exact]; ok {
+	// A place learned by its words (learn.UncheckedWords) is no noise
+	// whole: wordsAt reads it.
+	if patterns, ok := k.learned[exact]; ok && !learn.IsNoiseWords(patterns) {
 		return true
 	}
 	if legacy != "" && legacy != exact {
-		if _, ok := k.learned[legacy]; ok {
+		if patterns, ok := k.learned[legacy]; ok && !learn.IsNoiseWords(patterns) {
 			return true
 		}
 	}
-	for p := range k.learned {
-		if strings.HasPrefix(exact, p+".") || strings.HasPrefix(exact, p+"[") {
+	for p, patterns := range k.learned {
+		if (strings.HasPrefix(exact, p+".") || strings.HasPrefix(exact, p+"[")) && !learn.IsNoiseWords(patterns) {
 			return true
 		}
 	}
 	return false
+}
+
+// wordsAt reports whether the mock learned the text at exact by its words
+// (learn.UncheckedWords) and live, the call's text there, is rec, the
+// recording's, but for those words (learn.WordsAdmit): only the words that
+// changed when it was learned go unchecked, and the rest is compared.
+func (k strictKnown) wordsAt(exact, rec, live string) bool {
+	words, ok := learn.UncheckedWords(k.learned[exact])
+	return ok && learn.WordsAdmit(rec, live, words)
+}
+
+// learnedExcuses reports whether noise the mock learned excuses the field at
+// exact (or at legacy, the request-body learner's dialect) whole
+// (learnedAt), its value recorded there; and, where that noise is an older
+// keploy's noise whole at a text of more than one word (staleWhole), which
+// no longer excuses it, why, naming the field shape. A read of the
+// application's clock learned there is checked apart (clockDiffs).
+func (k strictKnown) learnedExcuses(exact, legacy, shape, recorded string) (bool, string) {
+	if !k.learnedAt(exact, legacy) {
+		return false, ""
+	}
+	if _, clock := k.clocks[exact]; !clock && staleWhole(k.learned, exact, legacy, recorded) {
+		return false, staleWholeWhy(shape)
+	}
+	return true, ""
+}
+
+// staleNoise is f refused for why (learnedExcuses), "" for none.
+func (f strictField) staleNoise(why string) strictField {
+	if why != "" {
+		f.why, f.noise = why, true
+	}
+	return f
 }
 
 // redacted reports whether a recorded value is one the obfuscator redacted.
@@ -255,7 +290,8 @@ type strictField struct {
 	// why is, of a read of the application's clock a replay refused
 	// (clockDiffs), the reason learn.CheckClockRead gives; of a field
 	// keploy.yml's noise guards with patterns a side is outside of, that
-	// (matcher.PatternWhy).
+	// (matcher.PatternWhy); of a field whose learned noise no longer excuses
+	// it (noise), staleWholeWhy's.
 	why string
 	// clock: the field is a read of the application's clock a replay
 	// refused (clockDiffs), not a part the walk found differing. It says
@@ -264,6 +300,9 @@ type strictField struct {
 	// its recording is of the call's route whatever the read's check says.
 	// A recording of another route drops it (walkOnly).
 	clock bool
+	// noise: the field is a text an older keploy learned as noise whole that
+	// changed (staleWhole).
+	noise bool
 }
 
 // field is a strictField whose name holds no value (a fixed part, a header).
@@ -679,11 +718,23 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 		return nil
 	}
 	r, l := k.urlPathOf(rec), k.urlPathOf(live)
+	why := ""
 	if len(r.segs) == len(l.segs) {
 		same, read := true, k.pathReadings(r)
 		for i := range r.segs {
-			if r.segs[i] != l.segs[i] && !k.segmentMayDiffer(i, r, l, read) {
-				same = false
+			if r.segs[i] == l.segs[i] {
+				continue
+			}
+			ok, stale := k.segmentMayDiffer(i, r, l, read)
+			if ok {
+				continue
+			}
+			// The path is refused for the reason of a segment an older
+			// keploy learned as noise whole only where every segment that
+			// may not differ is such a one: it is then of the call's route
+			// (routeMatches). Any other is of another route.
+			same, why = false, stale
+			if stale == "" {
 				break
 			}
 		}
@@ -691,11 +742,13 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 			return nil
 		}
 	}
-	return []strictField{field(valueDiff("path", rec, live))}
+	return []strictField{field(valueDiff("path", rec, live)).staleNoise(why)}
 }
 
-// segmentMayDiffer reports whether the path segment at i may differ from its
-// recording's: the mock learned it as noise, or as a read of the
+// segmentMayDiffer reports whether the path segment at i, a segment of both
+// paths (pathDiffs reads only paths of as many segments), may differ from
+// its recording's: the mock learned it as noise, by its words and the call's
+// segment differs only in those words (wordsAt), or as a read of the
 // application's clock and, in the reading clockDiffs checks (rec and live
 // are the two paths, urlPath.at, clockReadAt), keploy.yml's url noise
 // covers the read in both, where clockDiffs checks none, or the call's
@@ -707,19 +760,29 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 // pathReadings), or i is no learned place, the masked segment i is another
 // segment than the place's: it may differ only where it is, whole, the own
 // segment of a place read as sent, which clockDiffs checks (ownClockAt).
-func (k strictKnown) segmentMayDiffer(i int, rec, live urlPath, read pathReadings) bool {
+// Where it may not, why is the reason a replay gives for it, if any.
+func (k strictKnown) segmentMayDiffer(i int, rec, live urlPath, read pathReadings) (bool, string) {
 	place := "url.path." + strconv.Itoa(i)
-	if k.learnedNoiseAt(place, "") {
-		return true
-	}
-	o, clock := k.clocks[place]
-	if !clock || read.of(i) == readOwn {
-		return k.ownClockAt(i, rec, live, read)
-	}
 	r, _ := rec.at(i)
 	l, _ := live.at(i)
+	o, clock := k.clocks[place]
+	// Noise an older keploy learned whole at a segment of more than one
+	// word (staleWhole) no longer excuses it: why, for the report.
+	stale := ""
+	if k.learnedNoiseAt(place, "") {
+		if clock || !staleWhole(k.learned, place, "", r.masked) {
+			return true, ""
+		}
+		stale = staleWholeWhy("path")
+	}
+	if k.wordsAt(place, r.masked, l.masked) {
+		return true, ""
+	}
+	if !clock || read.of(i) == readOwn {
+		return k.ownClockAt(i, rec, live, read), stale
+	}
 	text, excused := clockReadAt(o, r, l)
-	return excused || learn.ReadsAsClockRead(o, segmentLeaf(place, text))
+	return excused || learn.ReadsAsClockRead(o, segmentLeaf(place, text)), stale
 }
 
 // ownClockAt reports whether the masked segment i of a path a pattern that
@@ -984,10 +1047,15 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 		if sameMembers(maskValues(rv, k.n.url), maskValues(lv, k.n.url)) {
 			continue
 		}
-		if len(rv) == 1 && len(lv) == 1 && k.learnedAt("url.query."+name, "") {
-			continue
+		why := ""
+		if len(rv) == 1 && len(lv) == 1 {
+			learned, stale := k.learnedExcuses("url.query."+name, "", shape, rv[0])
+			if learned || k.wordsAt("url.query."+name, rv[0], lv[0]) {
+				continue
+			}
+			why = stale
 		}
-		out = append(out, shaped(path, shape, models.DiffKindValueChanged, strings.Join(rv, ", "), strings.Join(lv, ", ")))
+		out = append(out, shaped(path, shape, models.DiffKindValueChanged, strings.Join(rv, ", "), strings.Join(lv, ", ")).staleNoise(why))
 	}
 	return out
 }
@@ -1090,7 +1158,11 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 		// learned on it excuses a value they refuse, and where the
 		// obfuscator redacted the recorded value, the live one alone is
 		// held to them.
-		if !guarded && (k.learnedAt(path, "") || k.redacted(rv)) {
+		learned, stale := false, ""
+		if !guarded {
+			learned, stale = k.learnedExcuses(path, "", path, rv)
+		}
+		if !guarded && (learned || k.wordsAt(path, rv, lv) || k.redacted(rv)) {
 			continue
 		}
 		if k.redacted(rv) {
@@ -1110,7 +1182,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
-		out = append(out, patternField(field(valueDiff(path, rv, lv))))
+		out = append(out, patternField(field(valueDiff(path, rv, lv))).staleNoise(stale))
 	}
 	return out
 }
@@ -1245,7 +1317,13 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		// keploy.yml's patterns decide a key they guard (fieldCovers): no
 		// noise learned on it excuses a value they refuse.
 		guarded := k.guards(key)
-		if sameMembers(rv, lv) || !guarded && (k.learnedAt(path, "") || redacted[key]) {
+		// A repeated key is learned as one text, its values joined, so it
+		// is more than one word.
+		learned, stale := false, ""
+		if !guarded {
+			learned, stale = k.learnedExcuses(path, "", shape, strings.Join(rv, ","))
+		}
+		if sameMembers(rv, lv) || !guarded && (learned || len(rv) == 1 && len(lv) == 1 && k.wordsAt(path, rv[0], lv[0]) || redacted[key]) {
 			continue
 		}
 		// A recorded value the obfuscator redacted is not held to the
@@ -1256,7 +1334,7 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		}
 		f := shaped(path, shape, models.DiffKindValueChanged, "", "")
 		f.why = why
-		out = append(out, f)
+		out = append(out, f.staleNoise(stale))
 	}
 	return out
 }
@@ -1353,12 +1431,17 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 	for i := range rp {
 		path, shape := "body."+rp[i].name, "body."+shapeKey(rp[i].name)
 		var why string
+		// Learned noise excuses a text part only (the case below).
+		learned, stale := false, ""
+		if rp[i].file == "" && !k.guards(rp[i].name) {
+			learned, stale = k.learnedExcuses(path, "", shape, string(rp[i].data))
+		}
 		switch {
 		case rp[i].name != lp[i].name || rp[i].file != lp[i].file:
 			return append(out, bodyChanged())
 		case bytes.Equal(rp[i].data, lp[i].data):
 			continue
-		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || !k.guards(rp[i].name) && (k.learnedAt(path, "") || k.redacted(string(rp[i].data)))):
+		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || !k.guards(rp[i].name) && (learned || k.wordsAt(path, string(rp[i].data), string(lp[i].data)) || k.redacted(string(rp[i].data)))):
 			continue
 		case rp[i].file == "":
 			// A recorded value the obfuscator redacted is not held to the
@@ -1374,7 +1457,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 		}
 		f := shaped(path, shape, models.DiffKindValueChanged, "", "")
 		f.why = why
-		out = append(out, f)
+		out = append(out, f.staleNoise(stale))
 	}
 	return out
 }
@@ -1458,7 +1541,12 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	}
 	// keploy.yml's patterns decide a field they guard: no noise learned on
 	// it, or on a container holding it, excuses a value they refuse.
-	learned = !guarded && (learned || k.learnedAt(exact, name))
+	excused, stale := false, ""
+	if !guarded {
+		recorded, _ := r.(string)
+		excused, stale = k.learnedExcuses(exact, name, shape, recorded)
+	}
+	learned = !guarded && (learned || excused)
 	if jsonKind(r) != jsonKind(l) {
 		f := shaped(name, shape, models.DiffKindTypeChanged, jsonKind(r), jsonKind(l))
 		f.why = why
@@ -1508,8 +1596,14 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 		if learned || sameScalar(r, l) {
 			return
 		}
+		if rs, ok := r.(string); ok {
+			if ls, ok := l.(string); ok && !guarded && k.wordsAt(exact, rs, ls) {
+				return
+			}
+		}
 		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l))
 		f.why = why
+		f = f.staleNoise(stale)
 		if strings.Contains(risk, "[]") {
 			// Elements of an array share one name, so the values would not
 			// say which element changed: the field alone.

@@ -46,6 +46,12 @@ func exportSendRecording() *models.Mock {
 	return learnRecorded("mock-1", time.Second, "POST", "/", exportSendBody(exportRecID, exportAt), exportSend, `{"MD5OfMessageBody":"x","MessageId":"m-1"}`)
 }
 
+// exportSendLearned is what the learn step writes onto the send's recording
+// when its message drifted: the message's id and stamp, words 6 and 9 of
+// {"type":"lead.created","id":"<id>","at":"<stamp>"}, and no other word of
+// the message, which a replay still compares.
+var exportSendLearned = map[string][]string{"body.MessageBody": {"^keploy:words 6,9$"}}
+
 // A call of another parser that drifted from its recording in record's full
 // round is answered by the learn step, with what drifted learned onto the
 // recording it took, as the HTTP parser's own call is.
@@ -60,7 +66,7 @@ func TestLearnMatchAnswersAnotherParsersDriftedCall(t *testing.T) {
 	if err != nil || miss != nil || served == nil || served.Name != "mock-1" {
 		t.Fatalf("served %v miss %+v err %v, want mock-1 served", served, miss, err)
 	}
-	if len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.MessageBody": {}}) {
+	if len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, exportSendLearned) {
 		t.Fatalf("consumed %+v, want mock-1 taken with what drifted learned onto it", db.consumed)
 	}
 }
@@ -423,7 +429,7 @@ func TestLearnMatchNeverLearnsALeafItsCallerHolds(t *testing.T) {
 			}
 			if c.differs == "" {
 				if miss != nil || served == nil || served.Name != "mock-1" || len(db.consumed) != 1 ||
-					!reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.MessageBody": {}}) {
+					!reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, exportSendLearned) {
 					t.Fatalf("served %v miss %+v, took %+v; want mock-1 served with only its message body learned", served, miss, db.consumed)
 				}
 				return
@@ -472,8 +478,8 @@ func TestLearnMatchReadsAHeldNullLeafAsNullUnderAKeployYmlPattern(t *testing.T) 
 			}
 			if c.change == "" {
 				if miss != nil || served == nil || served.Name != "mock-1" || len(db.consumed) != 1 ||
-					!reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.MessageBody": {}}) {
-					t.Fatalf("served %v miss %+v, took %+v; want mock-1 served with only its message body learned", served, miss, db.consumed)
+					!reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, exportSendLearned) {
+					t.Fatalf("served %v miss %+v, took %+v; want mock-1 served with only its message's id and stamp learned, by their words", served, miss, db.consumed)
 				}
 				return
 			}

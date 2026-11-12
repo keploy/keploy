@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
@@ -102,5 +103,57 @@ func TestResolveReqBodyNoise(t *testing.T) {
 	}
 	if ResolveReqBodyNoise(&DocNoise{}) != nil {
 		t.Fatal("empty noise.req must resolve to nil")
+	}
+}
+
+// A place learned by its words (learn.NoiseWordsPattern) is written under
+// Words with the numbers of its unchecked words, never under Req; a words
+// pattern that names no word is not written, so the place is compared.
+// Every words place of a mock is written, not only one of them.
+func TestNewDocNoiseWritesATextsUncheckedWordsUnderWords(t *testing.T) {
+	got := NewDocNoise(nil, map[string][]string{
+		"body.note":            {learn.NoiseWordsPattern([]int{1, 3})},
+		"header.Authorization": {learn.NoiseWordsPattern([]int{1})},
+		"body.a":               {},
+		"body.bad":             {"^keploy:words x$"},
+	})
+	want := &DocNoise{Req: []string{"body.a"}, Words: map[string][]int{"body.note": {1, 3}, "header.Authorization": {1}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("NewDocNoise = %#v, want %#v", got, want)
+	}
+	if got := NewDocNoise(nil, map[string][]string{"body.bad": {"^keploy:words $"}}); got != nil {
+		t.Fatalf("a words pattern that names no word wrote %#v, want nothing", got)
+	}
+}
+
+// noise.words reads back as the words pattern of its words, over the same
+// path under req; a list that is no words pattern's reads back as one that
+// unchecks no word, so the place is compared, never left unchecked.
+func TestResolveReqBodyNoiseReadsWordsAsAWordsPattern(t *testing.T) {
+	for _, in := range []string{
+		"req:\n  - body.a\n  - body.note\nwords:\n  body.note: [1, 3]\n",
+		`{"req":["body.a","body.note"],"words":{"body.note":[1,3]}}`,
+	} {
+		var n DocNoise
+		if err := yamlLib.Unmarshal([]byte(in), &n); err != nil {
+			t.Fatalf("unmarshal %q: %v", in, err)
+		}
+		if in[0] == '{' {
+			n = DocNoise{}
+			if err := json.Unmarshal([]byte(in), &n); err != nil {
+				t.Fatalf("unmarshal %q: %v", in, err)
+			}
+		}
+		want := map[string][]string{"body.a": {}, "body.note": {"^keploy:words 1,3$"}}
+		if got := ResolveReqBodyNoise(&n); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%q read back %#v, want %#v", in, got, want)
+		}
+	}
+	for _, words := range [][]int{nil, {}, {3, 1}, {1, 1}, {-1}} {
+		got := ResolveReqBodyNoise(&DocNoise{Words: map[string][]int{"body.note": words}})
+		w, ok := learn.UncheckedWords(got["body.note"])
+		if !ok || len(w) != 0 {
+			t.Fatalf("words %v read back %q: unchecks %v (words pattern %v), want a words pattern that unchecks none", words, got["body.note"], w, ok)
+		}
 	}
 }

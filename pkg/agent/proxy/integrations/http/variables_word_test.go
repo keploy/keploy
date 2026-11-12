@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -966,9 +967,13 @@ func wantWorded(t *testing.T, diag *matchDiag, field, name string) *varProblem {
 // of the header moves: that value, its words put back, is compared with
 // the recording, and the rest of the header keeps the noise keploy.yml or
 // the learn step gives it. So another session cookie, one with more words,
-// or the cookies in another order still bind the word; a shift inside the
-// cookie's own value is a miss that names it. A word of the header itself
-// is placed by the whole header, which is compared whatever the noise.
+// or (under keploy.yml's noise) the cookies in another order still bind
+// the word; a shift inside the cookie's own value is a miss that names it.
+// The learn step learns the header by its words (the session cookie's
+// value), so under its noise the rest of the header is compared word by
+// word: cookies in another order are a miss (moved). A word of the header
+// itself is placed by the whole header, which is compared whatever the
+// noise.
 func TestVariables_ACookieReadByNameIsPlacedByItsOwnValue(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const rec = "sid=appRec7; uid=appRec8"
@@ -978,13 +983,15 @@ func TestVariables_ACookieReadByNameIsPlacedByItsOwnValue(t *testing.T) {
 		// a miss's evidence: the text that places the word, its recorded
 		// and sent values
 		field, expected, actual string
+		// moved: the header's skeleton moved, a miss under learned noise
+		moved bool
 	}{
-		{"header.Cookie|cookie.uid", rec, "sid=appLiveX; uid=appLiveB", "appLiveB", "", "", ""},
-		{"header.Cookie|cookie.uid", rec, "sid=app-LiveA; uid=appLiveB", "appLiveB", "", "", ""},
-		{"header.Cookie|cookie.uid", rec, "uid=appLiveB; sid=appRec7", "appLiveB", "", "", ""},
-		{"header.Cookie|cookie.uid#1", "sid=appRec7; uid=a.appRec8", "sid=appLiveX; uid=a.appLiveB", "appLiveB", "", "", ""},
-		{"header.Cookie|cookie.uid#1", "sid=appRec7; uid=a.appRec8", "sid=appRec7; uid=a-b.appLive", "", "header.Cookie|cookie.uid", "a.appRec8", "a-b.appLive"},
-		{"header.Cookie#3", rec, "sid=appLiveX; uid=appLiveB", "", "header.Cookie", rec, "sid=appLiveX; uid=appLiveB"},
+		{"header.Cookie|cookie.uid", rec, "sid=appLiveX; uid=appLiveB", "appLiveB", "", "", "", false},
+		{"header.Cookie|cookie.uid", rec, "sid=app-LiveA; uid=appLiveB", "appLiveB", "", "", "", false},
+		{"header.Cookie|cookie.uid", rec, "uid=appLiveB; sid=appRec7", "appLiveB", "", "", "", true},
+		{"header.Cookie|cookie.uid#1", "sid=appRec7; uid=a.appRec8", "sid=appLiveX; uid=a.appLiveB", "appLiveB", "", "", "", false},
+		{"header.Cookie|cookie.uid#1", "sid=appRec7; uid=a.appRec8", "sid=appRec7; uid=a-b.appLive", "", "header.Cookie|cookie.uid", "a.appRec8", "a-b.appLive", false},
+		{"header.Cookie#3", rec, "sid=appLiveX; uid=appLiveB", "", "header.Cookie", rec, "sid=appLiveX; uid=appLiveB", false},
 	} {
 		for _, learned := range []bool{false, true} {
 			h := newHTTP()
@@ -993,7 +1000,9 @@ func TestVariables_ACookieReadByNameIsPlacedByItsOwnValue(t *testing.T) {
 			m.Spec.HTTPReq.Header["Cookie"] = c.rec
 			headerNoise := map[string][]string{"cookie": {}}
 			if learned {
-				m.Spec.ReqBodyNoise = map[string][]string{"header.cookie": nil}
+				// The session cookie's value, word 1, as the learn step
+				// learns it.
+				m.Spec.ReqBodyNoise = map[string][]string{"header.cookie": {learn.NoiseWordsPattern([]int{1})}}
 				headerNoise = nil
 			}
 			db := &varDb{perTest: []*models.Mock{at(m, 1)}}
@@ -1004,6 +1013,12 @@ func TestVariables_ACookieReadByNameIsPlacedByItsOwnValue(t *testing.T) {
 				t.Fatalf("match: %v", err)
 			}
 			b, bound := db.table.Lookup("b")
+			if learned && c.moved {
+				if ok || bound {
+					t.Fatalf("%s, %q (learned noise): served (%v), b bound as %q; want a miss, the header's skeleton moved", c.place, c.live, ok, b.Value)
+				}
+				continue
+			}
 			if c.want == "" {
 				if ok || bound {
 					t.Fatalf("%s, %q (learned noise %v): served (%v), b bound as %q; want a miss", c.place, c.live, learned, ok, b.Value)
@@ -1038,18 +1053,22 @@ func TestVariables_ACookieReadByNameIsPlacedByItsOwnValue(t *testing.T) {
 // compared with the recording, its word put back, whatever the header's
 // noise: a shift inside either cookie's value is a miss that names that
 // cookie, its recorded and sent values, and a call that sends both in the
-// recorded shape, beside another cookie or in another order, binds both.
+// recorded shape binds both, and so does one that sends them beside another
+// cookie or in another order under keploy.yml's noise. Under the learn
+// step's, which reads the header by its words, that is a miss (moved).
 func TestVariables_TwoCookiesReadByNameInOneHeader(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, c := range []struct {
 		live string
 		// a miss's evidence, or "" where the call is served
 		name, field, expected, actual string
+		// moved: the header's skeleton moved, a miss under learned noise
+		moved bool
 	}{
-		{"sid=x.appLiveA; uid=a-b.appLive", "b", "header.Cookie|cookie.uid", "a.appRec8", "a-b.appLive"},
-		{"sid=x-y.appLiveA; uid=a.appLiveB", "a", "header.Cookie|cookie.sid", "x.appRec7", "x-y.appLiveA"},
-		{"sid=x.appLiveA; uid=a.appLiveB", "", "", "", ""},
-		{"z=1; uid=a.appLiveB; sid=x.appLiveA", "", "", "", ""},
+		{"sid=x.appLiveA; uid=a-b.appLive", "b", "header.Cookie|cookie.uid", "a.appRec8", "a-b.appLive", false},
+		{"sid=x-y.appLiveA; uid=a.appLiveB", "a", "header.Cookie|cookie.sid", "x.appRec7", "x-y.appLiveA", false},
+		{"sid=x.appLiveA; uid=a.appLiveB", "", "", "", "", false},
+		{"z=1; uid=a.appLiveB; sid=x.appLiveA", "", "", "", "", true},
 	} {
 		for _, learned := range []bool{false, true} {
 			h := newHTTP()
@@ -1060,7 +1079,9 @@ func TestVariables_TwoCookiesReadByNameInOneHeader(t *testing.T) {
 			m.Spec.HTTPReq.Header["Cookie"] = "sid=x.appRec7; uid=a.appRec8"
 			headerNoise := map[string][]string{"cookie": {}}
 			if learned {
-				m.Spec.ReqBodyNoise = map[string][]string{"header.cookie": nil}
+				// The session cookie's value, word 1, as the learn step
+				// learns it.
+				m.Spec.ReqBodyNoise = map[string][]string{"header.cookie": {learn.NoiseWordsPattern([]int{1})}}
 				headerNoise = nil
 			}
 			db := &varDb{perTest: []*models.Mock{at(m, 1)}}
@@ -1072,6 +1093,12 @@ func TestVariables_TwoCookiesReadByNameInOneHeader(t *testing.T) {
 			}
 			a, aBound := db.table.Lookup("a")
 			b, bBound := db.table.Lookup("b")
+			if learned && c.moved {
+				if ok || aBound || bBound {
+					t.Fatalf("%q (learned noise): served (%v), a bound as %q (%v), b as %q (%v); want a miss, the header's skeleton moved", c.live, ok, a.Value, aBound, b.Value, bBound)
+				}
+				continue
+			}
 			if c.name != "" {
 				if ok || aBound || bBound {
 					t.Fatalf("%q (learned noise %v): served (%v), a bound as %q (%v), b as %q (%v); want a miss", c.live, learned, ok, a.Value, aBound, b.Value, bBound)

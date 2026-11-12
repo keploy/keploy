@@ -482,6 +482,11 @@ func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
 // position included; noise learned before it (by the request-body learner
 // it replaces) names it in the request matcher's dialect. A place learned as
 // a read of the application's clock (clocks) is no learned noise's to excuse.
+// A text learned by its words (learn.NoiseWords) is not excused whole: Words
+// names its unchecked words, and the learn step compares the rest. Nor is a
+// text of more than one word an older keploy learned as noise whole
+// (staleWhole): the learn step reads it as any value, and learns the words
+// of it that changed.
 // keploy.yml's entry with patterns excuses a leaf only when the recorded and
 // the live value each match one: a live value outside them is a change, and
 // so is a leaf one side lacks. An obfuscated value is the recorded one.
@@ -494,7 +499,8 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	// noise learned there excuses a value its patterns refuse.
 	_, guarded := k.n.userPatterns(ref.Noise)
 	_, clock := k.clocks[ref.Path]
-	if !guarded && !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && hasKey(k.learned, ref.Noise)) {
+	if !guarded && !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && learnedWhole(k.learned, ref.Noise)) &&
+		!(ref.Type == learn.String && staleWhole(k.learned, ref.Path, ref.Noise, ref.Value)) {
 		return true, true
 	}
 	both := inRec && inLive
@@ -562,21 +568,68 @@ func (k httpKnown) Declares(l learn.Leaf) bool {
 	return !k.values.IsNoisy(l.Value) && k.n.declared(l)
 }
 
-func hasKey(m map[string][]string, k string) bool {
-	_, ok := m[k]
-	return ok
+// Words implements learn.WordsKnown: the words of the text at the leaf l its
+// learned noise leaves unchecked (learn.UncheckedWords), where it learned
+// that text by its words. A read of the application's clock is no learned
+// noise's to excuse, word or whole, and neither is a leaf keploy.yml's
+// patterns guard.
+func (k httpKnown) Words(l learn.Leaf) ([]int, bool) {
+	if _, clock := k.clocks[l.Path]; clock {
+		return nil, false
+	}
+	// keploy.yml's entry with patterns is the user's word on the leaf: no
+	// noise learned there excuses a value its patterns refuse, a word of it
+	// included (ExcusedPair).
+	if _, guarded := k.n.userPatterns(l.Noise); guarded {
+		return nil, false
+	}
+	return learn.UncheckedWords(k.learned[l.Path])
 }
 
-// learnedCovers reports whether learned noise names the leaf at path: the
-// leaf itself, or a container holding it. Unlike keploy.yml's noise, a
+// learnedWhole reports whether learned noise names the place k whole: noise
+// at k that is no words pattern (learn.IsNoiseWords).
+func learnedWhole(m map[string][]string, k string) bool {
+	v, ok := m[k]
+	return ok && !learn.IsNoiseWords(v)
+}
+
+// staleWhole reports whether the learned noise that names the text at exact
+// whole names it alone (at exact, or at legacy, the request-body learner's
+// dialect), not a container of it, and text, its recorded value, is more
+// than one word (learn.OneWord). Keploy learns such a text by its words, so
+// that noise is an older keploy's, and keploy honours noise whole only at a
+// text of one word (founder, 2026-11-03): the text is compared, and a change
+// in it asks for the test to be recorded again (staleWholeWhy). Noise at a
+// container of the text is honoured as before.
+func staleWhole(learned map[string][]string, exact, legacy, text string) bool {
+	if learn.OneWord(text) || !learnedWhole(learned, exact) && !learnedWhole(learned, legacy) {
+		return false
+	}
+	for p, v := range learned {
+		if (strings.HasPrefix(exact, p+".") || strings.HasPrefix(exact, p+"[")) && !learn.IsNoiseWords(v) {
+			return false
+		}
+	}
+	return true
+}
+
+// staleWholeWhy is why a replay refuses a change in the text named shape
+// that an older keploy learned as noise whole (staleWhole).
+func staleWholeWhy(shape string) string {
+	return shape + " was learned as noise whole by an older keploy, and it is a text of more than one word: keploy now leaves only the words of a text that changed unchecked, and compares the rest, so it compares this text, which changed. Record the test again, and keploy learns which of its words change"
+}
+
+// learnedCovers reports whether learned noise names the leaf at path whole:
+// the leaf itself, or a container holding it. Unlike keploy.yml's noise, a
 // learned entry names exactly the field that drifted, never a field whose
-// name it happens to contain, nor another element of its array.
+// name it happens to contain, nor another element of its array. A words
+// pattern names the words of its one text, and covers nothing whole.
 func learnedCovers(learned map[string][]string, path string) bool {
-	if _, ok := learned[path]; ok {
+	if learnedWhole(learned, path) {
 		return true
 	}
-	for p := range learned {
-		if strings.HasPrefix(path, p+".") || strings.HasPrefix(path, p+"[") {
+	for p, v := range learned {
+		if (strings.HasPrefix(path, p+".") || strings.HasPrefix(path, p+"[")) && !learn.IsNoiseWords(v) {
 			return true
 		}
 	}
@@ -2282,6 +2335,12 @@ func (k excusedAt) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	return learn.ExcusedLeaf(k.Known, rec, live, inRec, inLive)
 }
 
+// Words implements learn.WordsKnown: Known's words (a leaf at is excused
+// whole first).
+func (k excusedAt) Words(l learn.Leaf) ([]int, bool) {
+	return learn.WordsOf(k.Known, l)
+}
+
 // elsewhereWhy is what the learn step says of a call that is exactly x, a
 // recording its scope did not offer (exactlyElsewhere), where it would have
 // paired the call with m: read where (learnRound.where), and the recorded
@@ -2513,7 +2572,24 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		}
 		switch l.Kind {
 		case learn.KindNoise:
-			p.noise[r.Path] = []string{}
+			// A text whose words changed leaves those words alone
+			// unchecked, and the rest of it is still compared
+			// (learn.NoiseWords); a value that is one word, or no text,
+			// is noise whole. A text whose skeleton moved pins no word,
+			// and is refused rather than left unchecked whole.
+			if r.Type != learn.String {
+				p.noise[r.Path] = []string{}
+				break
+			}
+			words, whole, ok := learn.NoiseWords(r.Value, l.Live.Value)
+			switch {
+			case !ok:
+				return p, r.Path + " changed in more than its words (a separator moved, or a word came or went), so keploy cannot tell which words of it to leave unchecked, and does not leave the whole text unchecked"
+			case whole:
+				p.noise[r.Path] = []string{}
+			default:
+				p.noise[r.Path] = []string{learn.NoiseWordsPattern(words)}
+			}
 
 		case learn.KindVariable:
 			from := l.From
