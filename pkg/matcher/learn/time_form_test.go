@@ -76,10 +76,11 @@ func tStrictThenDefault(t *testing.T, what string, in Input, kind RefusalKind, k
 
 // A time field is a decoder-typed time, a field a clock rule declares, or a
 // value learning read as the application's clock; on one the time default
-// settles the refusals of which read or which scope a moment is. A text in
-// a clock layout that is none of them (a string that looks like a date) is
-// found by its shape alone: it stays as learned, word by word. A moment an
-// earlier answer holds is a bound value and stays refused on every field.
+// settles the refusals of which read or which scope a moment is. A whole
+// time the clock checks refuse as a pick (an answer gave round F's moment)
+// or a no-clock-read (a cached time) is one too, a text or typed: checked
+// by its form. A moment an answer served with no view stated holds stays
+// refused on every field.
 func TestTheTimeDefaultKeepsATimeTheClockChecksRefuse(t *testing.T) {
 	const typedForm = "typed 9999-99-99a99:99:99a"
 	stale := iMicro(cFAt.Add(-time.Minute))
@@ -94,9 +95,9 @@ func TestTheTimeDefaultKeepsATimeTheClockChecksRefuse(t *testing.T) {
 		keptText, keptTyp bool
 	}{
 		{"an answer outside the scope holds the moment", cCall(cR, cF, []Raw{cAns(cR, cF)}, true), RefusalAnotherScope, false, true},
-		{"round F's value a cached time, a minute old", cCall(cR, stale, nil, false), RefusalNoClockRead, false, true},
+		{"round F's value a cached time, a minute old", cCall(cR, stale, nil, false), RefusalNoClockRead, true, true},
 		{"an answer served with no view stated", cCall(cR, cF, []Raw{oAnswer("mock-7", 100*time.Millisecond, cF).ServedAs(1)}, false), RefusalUnknown, false, false},
-		{"an answer that gave round F's moment as recorded", cCall(cR, cF, []Raw{oAnswer("mock-7", 100*time.Millisecond, cF).ServedAs(1).ServedAsRecorded()}, false), RefusalPick, false, false},
+		{"an answer that gave round F's moment as recorded", cCall(cR, cF, []Raw{oAnswer("mock-7", 100*time.Millisecond, cF).ServedAs(1).ServedAsRecorded()}, false), RefusalPick, true, true},
 		{"the call's own answer holds the read", echo, RefusalCannotCheck, true, true},
 		{"a clock rule's range holds neither run", rule, RefusalNoClockRead, true, true},
 	} {
@@ -189,11 +190,12 @@ func TestTheTimeDefaultKeepsAMomentOfTwoClockReads(t *testing.T) {
 	tStrictThenDefault(t, "two reads of the clock", tTwoReads(true), RefusalTwoSources, true, "text 9999-99-99a99:99:99a")
 	tStrictThenDefault(t, "a carried value beside a read", tTwoReads(false), RefusalTwoSources, false, "")
 
-	// A read of two reads, then a text no read explains, in one call: the
-	// second is still no time.
+	// A read of two reads, then a time inside a text no read explains, in
+	// one call: the second is still no time (a word of a text, no whole
+	// time).
 	in := tTwoReads(true)
 	rAt, fAt := in.At, in.Arrived
-	rec, live := iMs(rAt.Add(-20*time.Millisecond)), iMs(fAt.Add(-time.Minute))
+	rec, live := "at "+iMs(rAt.Add(-20*time.Millisecond)), "at "+iMs(fAt.Add(-time.Minute))
 	for _, sh := range []struct {
 		s *Shape
 		v string
@@ -204,7 +206,7 @@ func TestTheTimeDefaultKeepsAMomentOfTwoClockReads(t *testing.T) {
 	in.TimeForm = true
 	ds := Decide(in)
 	if len(ds) != 2 || ds[0].Outcome != OutcomeClock || ds[1].Refusal == nil || ds[1].Refusal.Kind != RefusalNoClockRead {
-		t.Errorf("two reads, then a cached text: %s; want a time, then refused no-clock-read", oDescribe(ds))
+		t.Errorf("two reads, then a cached time inside a text: %s; want a time, then refused no-clock-read", oDescribe(ds))
 	}
 }
 
@@ -233,12 +235,14 @@ func TestTheTimeDefaultLeavesWhatIsNoTime(t *testing.T) {
 	num := func(r, f string, w *Window) Input {
 		return declare(iCall(cPath, Number, r, f, cRAt, cFAt, w, nil, nil))
 	}
-	// An epoch number found by its shape alone is no time.
+	// An epoch number whole that no rule declares and no read explains (a
+	// minute stale in round F) is refused no-clock-read by the clock
+	// checks: a whole time, checked by its form. Found by its shape alone
+	// inside a text, it is no time.
 	plain := iCall(cPath, Number, near, iEpochMs(cFAt.Add(-time.Minute)), cRAt, cFAt, win, nil, nil)
-	plain.TimeForm = true
-	if ds := Decide(plain); len(ds) != 1 || ds[0].Outcome == OutcomeClock {
-		t.Errorf("FALSE GREEN? an epoch number no rule declares and no read explains: %s; want refused", oDescribe(ds))
-	}
+	tStrictThenDefault(t, "an epoch number whole no rule declares and no read explains", plain, RefusalNoClockRead, true, "number 9999999999999")
+	inside := iCall(cPath, String, "n-"+near, "n-"+iEpochMs(cFAt.Add(-time.Minute)), cRAt, cFAt, win, nil, nil)
+	tStrictThenDefault(t, "an epoch number inside a text no rule declares and no read explains", inside, RefusalNoClockRead, false, "")
 	// A declared epoch number is checked by its form where its moment lies
 	// within a year of its call in both runs: ten days stale, or an hour
 	// ahead (an expiry). Not a 13-digit number far from its call in either

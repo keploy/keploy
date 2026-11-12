@@ -23,22 +23,38 @@ import (
 //     learned; a read it refused as one it cannot check (cannot-check: an
 //     offset the replay does not compare, or a read the call's own answer
 //     holds); or a moment sent at two places, each its own call's read of
-//     the clock (two-sources).
+//     the clock (two-sources);
+//   - a whole time learning read as a moment, for the two refusals that say
+//     only where its moment came from (wholeSettles): a pick (round F's
+//     moment, or the recorded one, stands at an earlier answer or at the
+//     test case's request) and a no-clock-read (no earlier place and no
+//     window of the call holds it). A time never blocks a test by default,
+//     so the default checks such a value by its type and form, as any other
+//     time field. Whole (wholeTime): the leaf's value whole, a typed instant
+//     or the leaf's text whole as written, its moment read in both runs.
+//     Never a time inside an id or a key: a word of a longer text (an epoch
+//     inside a lease's _id) and a field a minted rule declares stay as
+//     learned. So does an id learning reads no moment of: a time-ordered
+//     UUID, whose time is a part of the id (refused cannot-check before it
+//     reaches here), and an ObjectId, whose first four bytes are a time
+//     (a word, no instant).
 //
-// A field is never made a time by its name or its value's shape: a text
-// in a clock layout, or an epoch number, that is no decoder-typed time, no
-// declared clock and no read learning found stays as learned, word by word
-// (the founder's 10-23 guardrail). The layout and the epoch's nearness to
-// its call (epochNear) are checks on a time field only: its form must read
-// as an instant in both runs, and an epoch number's moment lie near its call
-// in both.
+// A field is never made a time by its name. Nor is it by its value's shape
+// alone: a text in a clock layout, or an epoch number, that is no
+// decoder-typed time, no declared clock, no read learning found and no whole
+// time of those two refusals stays as learned, word by word (the founder's
+// 10-23 guardrail). The layout and the epoch's nearness to its call
+// (epochNear) are checks on a time field only: its form must read as an
+// instant in both runs, and an epoch number's moment lie near its call in
+// both.
 //
 // On a time field the time default settles the refusals the clock checks
 // give of which read, or which scope, a moment is (timeSettles); a two-sources
-// refusal only where both sources are reads of the clock. A Value, a Fresh
-// value and every other refusal stay as learned: a moment an earlier answer
-// or request also holds (pick, unknown, two sources that are no reads) is a
-// bound value, which variables decide, never the time default. A value
+// refusal only where both sources are reads of the clock; a pick or a
+// no-clock-read of a whole time (wholeSettles). A Value, a Fresh value and
+// every other refusal stay as learned: a moment an earlier answer or request
+// also holds (unknown, two sources that are no reads, a pick of a word inside
+// a text) is a bound value, which variables decide, never the time default. A value
 // whose two runs write it in two forms of an instant (a zone offset in one
 // run where the other wrote Z, an epoch in seconds in one and milliseconds
 // in the other) is checked by its forms alone too: a replay passes a value
@@ -64,6 +80,21 @@ import (
 // timeSettles are the refusals the time default settles on a time field.
 var timeSettles = map[RefusalKind]bool{
 	RefusalAnotherScope: true, RefusalNoClockRead: true, RefusalCannotCheck: true,
+}
+
+// wholeSettles are the refusals the time default settles on a whole time
+// (wholeTime) that is no time field by its type, a rule or a read.
+var wholeSettles = map[RefusalKind]bool{RefusalPick: true, RefusalNoClockRead: true}
+
+// wholeTime reports whether c, the changed instant at path, is a whole time
+// learning read as a moment (see above): at the leaf whole (a typed instant,
+// whose word is none, or the leaf's text whole as written: no word of a
+// longer text; a part of a text keploy opened timeDefault leaves out
+// before), at no field a minted rule declares. timeFormOf then asks its
+// moment in both runs (no number matched by its text alone).
+func (dc *decider) wholeTime(path string, c changedInstant) bool {
+	src, _ := dc.source(path)
+	return c.word.IsZero() && src.Kind != SourceMinted
 }
 
 // epochNear is how near its call an epoch number's moment lies, in both
@@ -109,6 +140,7 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	switch k := d.Refusal.Kind; {
 	case k == RefusalTwoSources && dc.readClock:
 	case timeSettles[k] && (typed || declared || dc.readClock):
+	case wholeSettles[k] && dc.wholeTime(path, c):
 	default:
 		return d
 	}
