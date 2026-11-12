@@ -164,6 +164,18 @@ type decider struct {
 	// answer is the call's answer index (answerIndex), built at its first
 	// ask.
 	answer *answerWords
+	// texts: each place's texts as shownInText reads them, by its index in
+	// ps, opened at the call's first read of the place and kept for the
+	// call (textsOf); clients: Earlier.incoming by mock, as clientCase
+	// reads it, built at the first place that holds a '.'. opened counts
+	// the places opened so, decoded the texts percent-decoded, clientMaps
+	// the builds of clients, and inText the places shownInText read for a
+	// bind (fromAt): what keeps its work for a call of many fields one open
+	// of each place and one build of clients, not one for each field or
+	// place.
+	texts                               map[int]*placeTexts
+	clients                             map[string]bool
+	opened, decoded, clientMaps, inText int
 }
 
 // decideWords decides every changed word of in, and the field each
@@ -612,48 +624,96 @@ func readsWhole(a variables.Address, p evPlace, rec, live string) bool {
 // through |pct): the shapes tokenShown's whole runs miss, a run of the
 // base64 alphabets taking in a path's '/' and an escape's '%' ending one. A
 // place's texts (as its address opens them) are read only where they hold
-// the longest word of each run's token, or an escape, which may hide a
-// letter of it; a client test's request's, also where they hold a '.': a
-// JWT there (a Bearer token, a cookie pair's) may hold it in a claim
-// (fromAt's claimWord, cookieToken), base64url in the text. A call reads
-// the places that may hold it, each once.
+// the longest word of each run's token, as written or percent-decoded (an
+// escape may hide a letter of it); a client test's request's, also where
+// they hold a '.': a JWT there (a Bearer token, a cookie pair's) may hold it
+// in a claim (fromAt's claimWord, cookieToken), base64url in the text. Each
+// place's texts are opened and decoded once for the call (textsOf), however
+// many fields it decides; a field reads a place for a bind (fromAt) only
+// where both its texts may show the token so.
 func (dc *decider) shownInText(rec, live string) []evPlace {
 	rw, lw := longestWord(rec), longestWord(live)
-	var client map[string]bool // Earlier.incoming by mock, as clientCase reads it: built once, where first asked
-	mayHold := func(p evPlace, text, w string) bool {
-		if strings.Contains(text, w) || strings.Contains(text, "%") {
-			return true
-		}
-		if !strings.Contains(text, ".") {
-			return false
-		}
-		if client == nil {
-			client = map[string]bool{}
-			for _, e := range dc.in.Earlier {
-				if _, ok := client[e.Mock]; !ok {
-					client[e.Mock] = e.incoming
-				}
-			}
-		}
-		return client[p.mock]
-	}
 	var out []evPlace
-	for _, p := range dc.ps {
+	for i, p := range dc.ps {
 		if p.raw > 0 || p.leaf.Path == "" {
 			continue
 		}
-		a := dc.in.AddressOf(p.leaf, p.side == Response)
-		if r, _ := a.WordOf(p.leaf.Value); !mayHold(p, r, rw) {
+		if t := dc.textsOf(i, p); !t.rec.mayShow(rw, t.client) || !t.live.mayShow(lw, t.client) {
 			continue
 		}
-		if l, _ := a.WordOf(p.live); !mayHold(p, l, lw) {
-			continue
-		}
+		dc.inText++
 		if q := placedFor(p, rec); q.state == stateBefore && !q.same() && readsWhole(dc.fromAt(q, rec, live), q, rec, live) {
 			out = append(out, q)
 		}
 	}
 	return out
+}
+
+// placeTexts is a place's two texts, as recorded and as round F saw them,
+// as its address opens them (decider.textsOf); client: the place is a
+// client test's request's (clientCase), read only where a text holds a '.'.
+type placeTexts struct {
+	rec, live openedText
+	client    bool
+}
+
+// openedText is a text a place's address opens: pct is the text
+// percent-decoded, once, where it holds an escape that decodes, and "" else
+// (where mayShow's w is "", a token with no word, the text as written holds
+// it already); dot, whether it holds a '.'.
+type openedText struct {
+	text, pct string
+	dot       bool
+}
+
+// mayShow reports whether o may show a token whose longest word is w at an
+// address fromAt names that reads it whole: o holds w as written (a word,
+// a token step, a JWT's signature), or decoded (|pct, an escape hiding a
+// letter of it), or, a client test's request's, o holds a '.' (a JWT whose
+// claim holds it: claimWord, cookieToken). Every such address reads the
+// token in one of those texts, so a text that shows none of them is never
+// read for it.
+func (o openedText) mayShow(w string, client bool) bool {
+	return strings.Contains(o.text, w) || strings.Contains(o.pct, w) || client && o.dot
+}
+
+// textsOf is p's texts as shownInText reads them, p the i-th of dc.ps:
+// opened at p's address, decoded where they hold an escape, at the call's
+// first read of p, and kept for the call.
+func (dc *decider) textsOf(i int, p evPlace) *placeTexts {
+	if t, ok := dc.texts[i]; ok {
+		return t
+	}
+	open := func(s string) openedText {
+		o := openedText{text: s, dot: strings.Contains(s, ".")}
+		if strings.Contains(s, "%") {
+			dc.decoded++
+			o.pct, _ = variables.Decode(variables.StepPct, s)
+		}
+		return o
+	}
+	a := dc.in.AddressOf(p.leaf, p.side == Response)
+	r, _ := a.WordOf(p.leaf.Value)
+	l, _ := a.WordOf(p.live)
+	t := &placeTexts{rec: open(r), live: open(l)}
+	if t.rec.dot || t.live.dot {
+		if dc.clients == nil {
+			dc.clientMaps++
+			dc.clients = map[string]bool{}
+			for _, e := range dc.in.Earlier {
+				if _, ok := dc.clients[e.Mock]; !ok {
+					dc.clients[e.Mock] = e.incoming
+				}
+			}
+		}
+		t.client = dc.clients[p.mock]
+	}
+	if dc.texts == nil {
+		dc.texts = map[int]*placeTexts{}
+	}
+	dc.texts[i] = t
+	dc.opened++
+	return t
 }
 
 // longestWord is s's longest word (variables.Words), the first of that
