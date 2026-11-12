@@ -23,6 +23,7 @@ import (
 //	header.Cookie|cookie.sid#0      the first word of the cookie sid
 //	url.query.cursor|b64url|pct#2   the third word of a base64url cursor's
 //	                                percent-decoded text
+//	header.Location|token.5         the sixth token of a URL, whole
 //
 // A word is a run of ASCII letters and digits (Words), so "-", "_", "+",
 // "/", "=" and "." always split. #n counts them from 0 in the text the last
@@ -43,12 +44,19 @@ import (
 //	               keep its form, base64url of the length it replaces
 //	cookie.<name>  the value of the one pair named <name> in a Cookie or
 //	               Set-Cookie value
+//	token.<n>      the n-th token of the text, from 0 (EachToken): a run of
+//	               the base64 alphabets, '+', '/', '-' and '_' among its
+//	               letters, read whole, wherever its own '-' and '_' fall
+//	               (an id in a consent URL, a key after "Bearer "); a write
+//	               there keeps every other byte and must read back as that
+//	               token
 //
 // A claim or cookie name escapes '|', '#' and '\' as a query or header name
 // does (Parse).
 
 // Step is one decode step of a word address: "pct", "json", "b64", "b64url",
-// "jwtsig", "jwt.<claim>" or "cookie.<name>", its name unescaped.
+// "jwtsig", "jwt.<claim>", "cookie.<name>" or "token.<n>", its name
+// unescaped.
 type Step string
 
 // The steps with no argument.
@@ -62,10 +70,11 @@ const (
 	StepJWTSig Step = "jwtsig"
 )
 
-// The prefixes of the two steps with one: a JWT's claim and a cookie.
+// The prefixes of the steps with one: a JWT's claim, a cookie and a token.
 const (
 	jwtPrefix    = "jwt."
 	cookiePrefix = "cookie."
+	tokenPrefix  = "token."
 )
 
 // JWTClaim is the step to a JWT's claim.
@@ -73,6 +82,21 @@ func JWTClaim(claim string) Step { return Step(jwtPrefix + claim) }
 
 // Cookie is the step to the value of the cookie name.
 func Cookie(name string) Step { return Step(cookiePrefix + name) }
+
+// Token is the step to the n-th token of a text (EachToken), from 0.
+func Token(n int) Step { return Step(tokenPrefix + strconv.Itoa(n)) }
+
+// tokenIndex is the n of a token step; ok is false for any other step, and
+// for a token step whose n is not a number from 0 written as Token writes
+// it.
+func (st Step) tokenIndex() (int, bool) {
+	s, ok := strings.CutPrefix(string(st), tokenPrefix)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	return n, err == nil && n >= 0 && strconv.Itoa(n) == s
+}
 
 // Address is a word address: Word -1 names the text the steps give whole.
 type Address struct {
@@ -159,7 +183,7 @@ func parseAddress(s string) (Address, error) {
 		n := nameEnd(rest, 1)
 		st := Step(unescapeName(rest[1:n]))
 		if !st.valid() {
-			return Address{}, fmt.Errorf("not a word address: %q: step %q (want pct, json, b64, b64url, jwtsig, jwt.<claim> or cookie.<name>)", s, rest[1:n])
+			return Address{}, fmt.Errorf("not a word address: %q: step %q (want pct, json, b64, b64url, jwtsig, jwt.<claim>, cookie.<name> or token.<n>)", s, rest[1:n])
 		}
 		a.Steps = append(a.Steps, st)
 		rest = rest[n:]
@@ -224,6 +248,9 @@ func (st Step) valid() bool {
 		return len(st) > len(jwtPrefix)
 	case strings.HasPrefix(string(st), cookiePrefix):
 		return len(st) > len(cookiePrefix)
+	case strings.HasPrefix(string(st), tokenPrefix):
+		_, ok := st.tokenIndex()
+		return ok
 	}
 	return false
 }
@@ -357,9 +384,11 @@ func moves(steps []Step, n int, other []Step) bool {
 }
 
 // reencodes reports whether st writes its text anew (b64, b64url, a JSON
-// string or number, a JWT claim), not a word for a word.
+// string or number, a JWT claim), not a word for a word: pct, a cookie's
+// value and a token keep the bytes around what they write.
 func reencodes(st Step) bool {
-	return st != StepPct && !strings.HasPrefix(string(st), cookiePrefix)
+	_, token := st.tokenIndex()
+	return st != StepPct && !strings.HasPrefix(string(st), cookiePrefix) && !token
 }
 
 // holdsEscape reports whether [lo, hi) of text holds a byte of a "%XX"
@@ -427,6 +456,10 @@ func wordSpan(text string, steps []Step, n int) (lo, hi int, ok bool) {
 		return lo, hi, true // a number: its text is its value
 	case strings.HasPrefix(string(st), cookiePrefix):
 		at, _, _ := cookieValue(text, string(st[len(cookiePrefix):]))
+		return at + lo, at + hi, true
+	case strings.HasPrefix(string(st), tokenPrefix):
+		n, _ := st.tokenIndex()
+		at, _, _ := tokenSpan(text, n)
 		return at + lo, at + hi, true
 	case st == StepJWTSig:
 		// Written whole, in the token's last part: the bytes before it stay.
@@ -581,6 +614,14 @@ func splice(st Step, text, inner, next string) (string, bool) {
 		if ok && cookieSafe(next) {
 			return text[:lo] + next + text[hi:], true
 		}
+	case strings.HasPrefix(string(st), tokenPrefix):
+		// In place, every other byte kept: ReplaceWord reads the write
+		// back, so a value that is no token there, or that joins the
+		// bytes beside it, is refused.
+		n, _ := st.tokenIndex()
+		if lo, hi, ok := tokenSpan(text, n); ok {
+			return text[:lo] + next + text[hi:], true
+		}
 	case st == StepJWTSig:
 		// A signature is checked by its form only: the one written must be
 		// of the form of the one it replaces (SignatureForm), so the
@@ -652,8 +693,65 @@ func Decode(st Step, text string) (string, bool) {
 		if lo, hi, ok := cookieValue(text, string(st[len(cookiePrefix):])); ok {
 			return text[lo:hi], true
 		}
+	case strings.HasPrefix(string(st), tokenPrefix):
+		n, ok := st.tokenIndex()
+		if lo, hi, found := tokenSpan(text, n); ok && found {
+			return text[lo:hi], true
+		}
 	}
 	return "", false
+}
+
+// IsTokenByte reports whether c is a byte of the base64 alphabets, standard
+// or URL-safe: a letter, a digit, '+', '/', '-' or '_'.
+func IsTokenByte(c byte) bool {
+	return isWordByte(c) || c == '+' || c == '/' || c == '_' || c == '-'
+}
+
+// EachToken calls yield with [start, end) of each token of s[from:to], in
+// order, until it returns false, and reports whether it ran to the end: a
+// run of the base64 alphabets (IsTokenByte) with all the padding ('=')
+// after it, that no such byte comes right before (from stands as the
+// text's start) and none follows past its padding (to stands as its end).
+// A run such a byte follows past its padding ("tok" of "tok=ab+cd/ef==")
+// is none, and the bytes after it are cut anew ("ab+cd/ef==" is one). It
+// is the one rule a token step reads a text by, and the one learning cuts
+// a whole token by.
+func EachToken(s string, from, to int, yield func(start, end int) bool) bool {
+	for i := from; i < to; {
+		if !IsTokenByte(s[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < to && IsTokenByte(s[j]) {
+			j++
+		}
+		k := j
+		for k < to && s[k] == '=' {
+			k++
+		}
+		if (k == to || !IsTokenByte(s[k])) && !yield(i, k) {
+			return false
+		}
+		i = k
+	}
+	return true
+}
+
+// tokenSpan is [lo, hi) of the n-th token of text (EachToken); ok is false
+// where text has no such token.
+func tokenSpan(text string, n int) (lo, hi int, ok bool) {
+	k := 0
+	EachToken(text, 0, len(text), func(a, b int) bool {
+		if k == n {
+			lo, hi, ok = a, b, true
+			return false
+		}
+		k++
+		return true
+	})
+	return lo, hi, ok
 }
 
 // jwtSignature is where text's signature starts, text a JWT (three '.'

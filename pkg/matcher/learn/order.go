@@ -497,20 +497,27 @@ const tokenBits = 64
 // whole token, no earlier place may hold any of its words, of any size: a
 // word handed to the call or sent before may be carried inside it. It is
 // one value too, of either alphabet and whatever stayed in it, where an
-// earlier place shows it whole in both runs and it binds whole at a leaf
-// that holds it whole (boundWhole): the call copied it whole, and bound
+// earlier place shows it whole in both runs and it binds whole at a place
+// whose text at the bind address is the token in both runs (boundWhole):
+// the call copied it whole, and bound
 // word by word ("kepreq_" and one random run in each run, no '-' or '_' in
 // it), the next run's random part, split by its own '-' and '_', could
 // never be written back (a replay puts the recorded word back and keeps
 // the rest of the new token). Bound whole, the replay holds the whole
-// token to the value bound at that place. Any other paired text, one no
-// earlier place shows whole or one read whole that binds nowhere so (a
-// refusal, a source that holds it inside a longer text), with a word that
-// stayed ("user-" before an id) or of the URL-safe alphabet, whose '-' and
-// '_' separate an id's parts as often as they are letters of a token, is
-// read word by word as before. ok is false
-// where the field is no such token (randomToken: two alphabets mixed,
-// another length or padding, a run that decodes to text).
+// token to the value bound at that place: a leaf that holds it whole, or a
+// longer text that holds it as one of its tokens (fromAt's |token.<n>: a
+// consent URL, a Location header). Any other paired text, one no earlier
+// place shows whole or one read whole that binds nowhere so (a refusal, a
+// text no address reads it whole in), with a word that stayed ("user-"
+// before an id) or of the URL-safe alphabet, whose '-' and '_' separate an
+// id's parts as often as they are letters of a token, is read word by word.
+// An unpaired token follows the same rule: a Value at an earlier leaf
+// stands only where its bind address reads the token whole in both runs
+// (never the whole URL that holds it, which no next run's token could
+// equal); else ok is false, and the refusals after this decide it. ok is
+// false where the field is no such token
+// (randomToken: two alphabets mixed, another length or padding, a run that
+// decodes to text).
 func (dc *decider) oneToken(path string, bare variables.Address, rec, live string, rd textReading) (Decision, bool) {
 	if len(rd.Instants) > 0 || len(bare.Steps) > 0 || !randomToken(rec, live) {
 		return Decision{}, false
@@ -536,9 +543,10 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 		return Decision{}, false
 	}
 	d := dc.word(path, bare, rec, live, rec, whole, false, nil)
-	if copied && !dc.boundWhole(d, rec, live) {
-		// Read whole, the token is no copy keploy can bind whole: its
-		// words decide it, as before.
+	if (copied || d.Outcome == OutcomeValue) && !dc.boundWhole(d, rec, live) {
+		// Read whole, the token binds at no address that reads it whole
+		// in both runs: a paired one is left to its words, an unpaired
+		// one to the rules after this.
 		return Decision{}, false
 	}
 	return d, true
@@ -546,17 +554,25 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 
 // boundWhole reports whether d binds the token rec (live in round F) whole
 // at a place whose text at d's bind address is the token in both runs: a
-// leaf that holds it whole, not inside a longer text (an address names one
-// word of a text, or the text whole, never a token of several words in
-// it). A paired token is read whole (oneToken) only so: any other verdict
-// of it whole (a bind inside a longer text, a refusal) leaves it to its
-// words.
+// leaf that holds it whole, or a longer text whose token, jwtsig or cookie
+// step there reads it, never the longer text whole, which the next run's
+// token could never equal. A recording's place (no leaf: Decide names no
+// address of it) binds so too: its adapter names the place of the
+// recording that holds the value whole or as one word, or refuses it. A
+// token is read whole (oneToken) only so: any other Value of it whole is
+// no bind, and a paired token's other verdicts leave it to its words.
 func (dc *decider) boundWhole(d Decision, rec, live string) bool {
 	return d.Outcome == OutcomeValue && slices.ContainsFunc(dc.ps, func(p evPlace) bool {
+		if p.mock != d.From.Mock || p.path != d.From.Path || p.side != d.From.Side {
+			return false
+		}
+		if p.leaf.Path == "" {
+			return true
+		}
 		// A text the address does not open reads "", which no token is.
 		r, _ := d.FromAt.WordOf(p.leaf.Value)
 		l, _ := d.FromAt.WordOf(p.live)
-		return p.mock == d.From.Mock && p.path == d.From.Path && p.side == d.From.Side && r == rec && l == live
+		return r == rec && l == live
 	})
 }
 
@@ -3507,7 +3523,12 @@ func addrList(as []variables.Address) string {
 // values back at its places, and cannot write a claim into a signed token;
 // its leaf is named whole, as before. A value that is the JWT's signature
 // in both runs (sigAt) is addressed at the signature (|jwtsig), first: a
-// replay reads it there whole, whatever its count of words. A Cookie or
+// replay reads it there whole, whatever its count of words. A value of more
+// than one word that a longer text holds as one of its tokens in both runs,
+// at one index (tokenStepAt: an id in a consent URL, a key after "Bearer "), is
+// addressed at that token (|token.<n>): a replay reads it there whole,
+// wherever the next run's '-' and '_' fall, where the text whole would hold
+// the id equal to the whole URL. A Cookie or
 // Set-Cookie header holds a token as one pair's value, beside other pairs
 // (refresh_token=<JWT>; refresh_token_staging=<JWT>), which no JWT step reads
 // whole: its signature and its claims are read in the first pair that holds
@@ -3538,6 +3559,10 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 			return a
 		}
 	}
+	if n, ok := tokenStepAt(rec, live, v, f); ok {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), variables.Token(n)), -1
+		return a
+	}
 	if !dc.clientCase(p.mock) {
 		return a
 	}
@@ -3547,6 +3572,26 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 		a.Steps, a.Word = append(slices.Clip(a.Steps), st...), n
 	}
 	return a
+}
+
+// tokenStepAt is n where v and f, a value as recorded and as round F saw it,
+// are the n-th token (variables.EachToken) of rec and live, two runs of a
+// longer text: the first such token of rec that is v, where live's token
+// of that index is f. ok is false where rec and live are v and f whole (the
+// place is named whole), or no such token is.
+func tokenStepAt(rec, live, v, f string) (int, bool) {
+	if rec == v && live == f {
+		return 0, false
+	}
+	for n := 0; ; n++ {
+		r, ok := variables.Decode(variables.Token(n), rec)
+		if !ok {
+			return 0, false
+		}
+		if l, _ := variables.Decode(variables.Token(n), live); r == v && l == f {
+			return n, true
+		}
+	}
 }
 
 // cookieToken is the steps from a, a Cookie or Set-Cookie header's own text
