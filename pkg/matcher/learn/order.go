@@ -3505,6 +3505,74 @@ func claimAt(p Place, rec, live, v, f string) string {
 	return a.String()
 }
 
+// wordBindAt is Place.Word of p, a leaf at the variable place p.Var,
+// recorded rec and seen live in record's full round, that held the value
+// (v as recorded, f as F saw it) inside a longer value: p.Var at the one
+// word rec changed by (ChangedWord), where v changed by one word alone too,
+// and the leaf's word is v's, rec's recorded and live's F's (p.Var itself
+// where rec and live are that word whole). "" where either changed by more
+// than one word or by a byte between words, the words differ, p.Var is no
+// place or names a word or a step already, or p is no client test's request
+// (Client): a replay binds a variable at a word only of the request that
+// pairs with a client test case, and reads a call's request only to put its
+// recorded values back.
+func wordBindAt(p Place, rec, live, v, f string) string {
+	if !p.Client {
+		return ""
+	}
+	a, err := variables.ParseAddress(p.Var)
+	if err != nil || !a.Whole() {
+		return ""
+	}
+	k, ok := ChangedWord(v, f)
+	if !ok {
+		return ""
+	}
+	n, ok := ChangedWord(rec, live)
+	if !ok {
+		return ""
+	}
+	vw, fw := wordOf(v, k), wordOf(f, k)
+	if wordOf(rec, n) != vw || wordOf(live, n) != fw {
+		return ""
+	}
+	if rec != vw || live != fw {
+		a.Word = n
+	}
+	return a.String()
+}
+
+// ChangedWord is the index of the one word (variables.Words) by which live
+// differs from rec: live is rec with that word written anew, every other
+// byte alike. ok is false where the two are alike, or differ in more than
+// one word, in their count of words, or in a byte between words.
+func ChangedWord(rec, live string) (n int, ok bool) {
+	rw, lw := variables.Words(rec), variables.Words(live)
+	if len(rw) != len(lw) {
+		return -1, false
+	}
+	n = -1
+	for i := range rw {
+		if rec[rw[i][0]:rw[i][1]] == live[lw[i][0]:lw[i][1]] {
+			continue
+		}
+		if n >= 0 {
+			return -1, false
+		}
+		n = i
+	}
+	if n < 0 || rec[:rw[n][0]] != live[:lw[n][0]] || rec[rw[n][1]:] != live[lw[n][1]:] {
+		return -1, false
+	}
+	return n, true
+}
+
+// wordOf is the n-th word of s (variables.Words), "" where s has none.
+func wordOf(s string, n int) string {
+	w, _ := variables.Address{Word: n}.WordOf(s)
+	return w
+}
+
 // ClaimHolding is the name of the claim of the JWT text holds (a token, or
 // "Bearer <token>") whose value holds v whole or at a word, the first such
 // claim by name: "" where text holds no JWT, v is "", or no claim holds v.
@@ -3558,10 +3626,12 @@ func ClaimRefused(mock, path, rec, live, v string, client bool) string {
 // BindAt is where a variable binds at p, and the value F saw there: its
 // variable place (Var) and Live, where p held the value whole; the word of
 // its JWT claim (Claim) and that word of Live, where p is a client test's
-// request (Client) that held the value inside the claim. ok is false where
-// p has no variable place, held the value inside a longer value otherwise
-// (Claim "", which names no place), or names a claim of a call's request,
-// which a replay cannot write a claim into: no place a replay can bind at.
+// request (Client) that held the value inside the claim; else the word of
+// it that held the value's one changed word (Word) and that word of Live.
+// ok is false where p has no variable place, held the value inside a
+// longer value otherwise (Claim and Word "", which name no place), or names
+// a claim or a word of a call's request, which a replay cannot write a
+// claim into, nor bind a word at: no place a replay can bind at.
 func (p Place) BindAt() (at, live string, ok bool) {
 	switch {
 	case p.Var == "":
@@ -3571,7 +3641,8 @@ func (p Place) BindAt() (at, live string, ok bool) {
 	case !p.Client:
 		return "", "", false
 	}
-	a, err := variables.ParseAddress(p.Claim)
+	at = cmp.Or(p.Claim, p.Word)
+	a, err := variables.ParseAddress(at)
 	if err != nil {
 		return "", "", false
 	}
@@ -3579,7 +3650,7 @@ func (p Place) BindAt() (at, live string, ok bool) {
 	if !ok {
 		return "", "", false
 	}
-	return p.Claim, w, true
+	return at, w, true
 }
 
 // learned is a decided word and its line.
