@@ -20,6 +20,9 @@ const kpIDPath = "/v1/secret/data/keploy/personal-access-tokens/_id/" + kpRecKey
 // reads back; a DELETE after them that sent the recorded account answers
 // the account (createdBy, and its word of the email) as recorded, and the
 // name's word, which the DELETE did not hold, as this run's PUT stored it.
+// A later call that wrote what the PUT wrote does not undo an earlier
+// one that did not: a DELETE before the _user index write holds the
+// account as recorded too.
 func TestReadBackOfAPutChecksEveryLaterCallElsewhere(t *testing.T) {
 	const upd = "2026-11-12T01:24:51Z"
 	hdr := map[string]string{"X-Vault-Request": "true", "X-Vault-Token": "dev-root-token", "User-Agent": "Go-http-client/1.1", "Accept-Encoding": "gzip"}
@@ -63,6 +66,23 @@ func TestReadBackOfAPutChecksEveryLaterCallElsewhere(t *testing.T) {
 			})
 			if got, want := served[4].Spec.HTTPResp.Body, kpGetAnswer(kpRecKey, kpRecBy, kpLiveNano); got != want {
 				t.Fatalf("a GET after a DELETE, behind the two index writes, that named the recorded account answered\n%s\nwant\n%s", got, want)
+			}
+		})
+		t.Run("proven="+proven+"/a-delete-before-the-user-index-write", func(t *testing.T) {
+			mocks := []*models.Mock{
+				learnRecorded("mock-0", 1130*time.Millisecond, "PUT", kpPath(kpRecKey), kpPut(kpRecKey, kpRecBy, kpRecNano), kpVault, ok),
+				learnRecorded("mock-4", 1150*time.Millisecond, "DELETE", kpOwners(kpRecBy), "", kpVault, `{}`),
+				learnRecorded("mock-3", 1170*time.Millisecond, "PUT", kpIndex(kpRecBy), userBody(kpRecBy), kpVault, ok),
+				learnRecorded("mock-1", 1300*time.Millisecond, "GET", kpPath(kpRecKey), "", kpVault, kpGetAnswer(kpRecKey, kpRecBy, kpRecNano)),
+			}
+			_, served := kpRunWith(t, proven, nil, nil, mocks, []*req{
+				live("PUT", kpPath(kpRecKey), kpPut(kpRecKey, kpLiveBy, kpLiveNano), kpVault),
+				live("DELETE", kpOwners(kpRecBy), "", kpVault),
+				live("PUT", kpIndex(kpLiveBy), userBody(kpLiveBy), kpVault),
+				live("GET", kpPath(kpRecKey), "", kpVault),
+			})
+			if got, want := served[3].Spec.HTTPResp.Body, kpGetAnswer(kpRecKey, kpRecBy, kpLiveNano); got != want {
+				t.Fatalf("a GET after a DELETE that named the recorded account, then the _user index write, answered\n%s\nwant\n%s", got, want)
 			}
 		})
 	}
