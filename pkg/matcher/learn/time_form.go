@@ -37,7 +37,12 @@ import (
 //     learned. So does an id learning reads no moment of: a time-ordered
 //     UUID, whose time is a part of the id (refused cannot-check before it
 //     reaches here), and an ObjectId, whose first four bytes are a time
-//     (a word, no instant).
+//     (a word, no instant). Nor a time that is a key (keyPlace): a time at
+//     a URL path segment or under an _id key names what the call fetches or
+//     writes, so it keeps its learned check (refused, bound or minted). Its
+//     place in the call's structure says so, never its text; a time a call
+//     carries in a query parameter or another body field (since, from,
+//     expires_at, createdAt) is no key.
 //
 // A field is never made a time by its name. Nor is it by its value's shape
 // alone: a text in a clock layout, or an epoch number, that is no
@@ -93,11 +98,32 @@ var wholeSettles = map[RefusalKind]bool{RefusalPick: true, RefusalNoClockRead: t
 // learning read as a moment (see above): at the leaf whole (a typed instant,
 // whose word is none, or the leaf's text whole as written: no word of a
 // longer text; a part of a text keploy opened timeDefault leaves out
-// before), at no field a minted rule declares. timeFormOf then asks its
-// moment in both runs (no number matched by its text alone).
+// before), at no field a minted rule declares and at no key (keyPlace).
+// timeFormOf then asks its moment in both runs (no number matched by its
+// text alone).
 func (dc *decider) wholeTime(path string, c changedInstant) bool {
 	src, _ := dc.source(path)
-	return c.word.IsZero() && src.Kind != SourceMinted
+	return c.word.IsZero() && src.Kind != SourceMinted && !keyPlace(path)
+}
+
+// keyPlace reports whether path, a leaf's path in its call, is a place
+// whose value names what the call fetches or writes: a URL path segment
+// (url.path.<n>), or a leaf under an _id key, at any depth (_id,
+// filter._id, q._id, u.$set._id, docs.msgs.0._id, documents[0]._id,
+// filter._id.$in[0], filter._id[0]). By the leaf's place in its call's
+// structure alone: its keys, each after a '.' and before the next '.' or
+// '[' (an index's element, "0]", is never one), never its value (a key that
+// only holds the letters, last_idle_at, is no _id key).
+func keyPlace(path string) bool {
+	if strings.HasPrefix(path, "url.path.") {
+		return true
+	}
+	for _, e := range strings.FieldsFunc(path, func(r rune) bool { return r == '.' || r == '[' }) {
+		if e == "_id" {
+			return true
+		}
+	}
+	return false
 }
 
 // epochNear is how near its call an epoch number's moment lies, in both

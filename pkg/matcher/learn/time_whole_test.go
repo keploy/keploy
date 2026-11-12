@@ -36,6 +36,9 @@ const (
 func wSecs(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
 func wRFC(t time.Time) string  { return t.UTC().Format(time.RFC3339) }
 
+// wTypedSec is a decoder-typed instant (a BSON datetime) of t's second.
+func wTypedSec(t time.Time) string { return iMs(t.Truncate(time.Second)) }
+
 // wFind is the service account's find, answered at at, its createdAt rec as
 // recorded and live in round F, with its payload as a real exchange has it,
 // so a row reaches what learning reads of it (no unread refusal).
@@ -206,45 +209,51 @@ func wUUID7(at time.Time, rest string) string {
 // round F's second at the find's answer (a cluster's filter._id, a role
 // binding's principal and its key) stand as strict learns them.
 func TestATimeInsideAnIdOrAKeyStaysAsLearned(t *testing.T) {
-	const id = "body.documents[0]._id"
 	win := iWin(wRAt, wFAt, 10*time.Millisecond)
 	stale := func(v func(time.Time) string) (string, string) {
 		return v(wRAt.Add(-20 * time.Minute)), v(wFAt.Add(-7 * time.Minute))
 	}
-	r, f := stale(wSecs)
-	wAsStrict(t, "an epoch second inside a lease's _id, read from a cache", iCall(id, String, "ui-app-data-sweep:"+r, "ui-app-data-sweep:"+f, wRAt, wFAt, win, nil, nil), r, f, RefusalNoClockRead)
-	picked := iCall(id, String, "pat-janitor:"+wSecs(wRAt), "pat-janitor:"+wSecs(wFAt), wRAt, wFAt, win,
-		[]Earlier{wFind(wRAt.Add(-time.Millisecond), wRFC(wRAt.Add(-time.Second)), wRFC(wFAt))}, nil)
-	wAsStrict(t, "an epoch second inside a lease's _id, picked", picked, wSecs(wRAt), wSecs(wFAt), RefusalPick)
+	// At a lease's _id, and at a field that is no key (a lock's holder,
+	// the same text), so that the word, not the key (keyPlace), is what
+	// keeps it as learned.
+	for _, id := range []string{"body.documents[0]._id", "body.documents[0].holder"} {
+		t.Run(id, func(t *testing.T) {
+			r, f := stale(wSecs)
+			wAsStrict(t, "an epoch second inside a lease's _id, read from a cache", iCall(id, String, "ui-app-data-sweep:"+r, "ui-app-data-sweep:"+f, wRAt, wFAt, win, nil, nil), r, f, RefusalNoClockRead)
+			picked := iCall(id, String, "pat-janitor:"+wSecs(wRAt), "pat-janitor:"+wSecs(wFAt), wRAt, wFAt, win,
+				[]Earlier{wFind(wRAt.Add(-time.Millisecond), wRFC(wRAt.Add(-time.Second)), wRFC(wFAt))}, nil)
+			wAsStrict(t, "an epoch second inside a lease's _id, picked", picked, wSecs(wRAt), wSecs(wFAt), RefusalPick)
 
-	ur, uf := wUUID7(wRAt.Add(-20*time.Minute), "a1b-8c2d-0123456789ab"), wUUID7(wFAt.Add(-7*time.Minute), "f9e-9d3c-ba9876543210")
-	tr, tf := stale(wRFC)
-	for _, u := range [][2]string{{ur, uf}, {ur, wUUID7(wFAt.Add(-7*time.Minute), "a1b-8c2d-0123456789ab")}, {tr, uf}, {ur, tf}} {
-		wAsStrict(t, "a time-ordered UUID "+u[0]+" to "+u[1], iCall(id, String, u[0], u[1], wRAt, wFAt, win, nil, nil), "", "")
-		picked := iCall(id, String, u[0], u[1], wRAt, wFAt, win, []Earlier{wFind(wRAt.Add(-time.Millisecond), wRFC(wRAt.Add(-time.Second)), wRFC(wFAt))}, nil)
-		wAsStrict(t, "a time-ordered UUID "+u[0]+" to "+u[1]+" beside the find", picked, "", "")
-	}
+			ur, uf := wUUID7(wRAt.Add(-20*time.Minute), "a1b-8c2d-0123456789ab"), wUUID7(wFAt.Add(-7*time.Minute), "f9e-9d3c-ba9876543210")
+			tr, tf := stale(wRFC)
+			for _, u := range [][2]string{{ur, uf}, {ur, wUUID7(wFAt.Add(-7*time.Minute), "a1b-8c2d-0123456789ab")}, {tr, uf}, {ur, tf}} {
+				wAsStrict(t, "a time-ordered UUID "+u[0]+" to "+u[1], iCall(id, String, u[0], u[1], wRAt, wFAt, win, nil, nil), "", "")
+				picked := iCall(id, String, u[0], u[1], wRAt, wFAt, win, []Earlier{wFind(wRAt.Add(-time.Millisecond), wRFC(wRAt.Add(-time.Second)), wRFC(wFAt))}, nil)
+				wAsStrict(t, "a time-ordered UUID "+u[0]+" to "+u[1]+" beside the find", picked, "", "")
+			}
 
-	// The instant at the start of a longer text (an epoch second, then a
-	// suffix; an RFC 3339 time, then one), picked from the find's answer
-	// or read from a cache: a word of the text, as at its end.
-	cache := func(v func(time.Time) string, suffix string) Input {
-		r, f := stale(v)
-		return iCall(id, String, r+suffix, f+suffix, wRAt, wFAt, win, nil, nil)
-	}
-	pick := func(v func(time.Time) string, suffix string, ans func(time.Time) string) Input {
-		return iCall(id, String, v(wRAt)+suffix, v(wFAt)+suffix, wRAt, wFAt, win,
-			[]Earlier{wFind(wRAt.Add(-time.Millisecond), ans(wRAt.Add(-time.Second)), ans(wFAt))}, nil)
-	}
-	r, f = stale(wSecs)
-	wAsStrict(t, "an epoch second at the start of a lease's _id, read from a cache", cache(wSecs, "-pat-janitor"), r, f, RefusalNoClockRead)
-	wAsStrict(t, "an epoch second at the start of a lease's _id, picked", pick(wSecs, "-pat-janitor", wRFC), wSecs(wRAt), wSecs(wFAt), RefusalPick)
-	r, f = stale(wRFC)
-	wAsStrict(t, "an RFC 3339 time at the start of a text, read from a cache", cache(wRFC, "-x"), r, f, RefusalNoClockRead)
-	wAsStrict(t, "an RFC 3339 time at the start of a text, picked", pick(wRFC, "-x", wSecs), wRFC(wRAt), wRFC(wFAt), RefusalPick)
+			// The instant at the start of a longer text (an epoch second, then a
+			// suffix; an RFC 3339 time, then one), picked from the find's answer
+			// or read from a cache: a word of the text, as at its end.
+			cache := func(v func(time.Time) string, suffix string) Input {
+				r, f := stale(v)
+				return iCall(id, String, r+suffix, f+suffix, wRAt, wFAt, win, nil, nil)
+			}
+			pick := func(v func(time.Time) string, suffix string, ans func(time.Time) string) Input {
+				return iCall(id, String, v(wRAt)+suffix, v(wFAt)+suffix, wRAt, wFAt, win,
+					[]Earlier{wFind(wRAt.Add(-time.Millisecond), ans(wRAt.Add(-time.Second)), ans(wFAt))}, nil)
+			}
+			r, f = stale(wSecs)
+			wAsStrict(t, "an epoch second at the start of a lease's _id, read from a cache", cache(wSecs, "-pat-janitor"), r, f, RefusalNoClockRead)
+			wAsStrict(t, "an epoch second at the start of a lease's _id, picked", pick(wSecs, "-pat-janitor", wRFC), wSecs(wRAt), wSecs(wFAt), RefusalPick)
+			r, f = stale(wRFC)
+			wAsStrict(t, "an RFC 3339 time at the start of a text, read from a cache", cache(wRFC, "-x"), r, f, RefusalNoClockRead)
+			wAsStrict(t, "an RFC 3339 time at the start of a text, picked", pick(wRFC, "-x", wSecs), wRFC(wRAt), wRFC(wFAt), RefusalPick)
 
-	for _, l := range [][2]string{{"ui-app-data-sweep:29907035", "ui-app-data-sweep:29907037"}, {"pat-janitor:996901", "pat-janitor:996902"}} {
-		wAsStrict(t, "a lease's _id "+l[0], iCall(id, String, l[0], l[1], wRAt, wFAt, win, nil, nil), "", "")
+			for _, l := range [][2]string{{"ui-app-data-sweep:29907035", "ui-app-data-sweep:29907037"}, {"pat-janitor:996901", "pat-janitor:996902"}} {
+				wAsStrict(t, "a lease's _id "+l[0], iCall(id, String, l[0], l[1], wRAt, wFAt, win, nil, nil), "", "")
+			}
+		})
 	}
 
 	for _, c := range []struct{ what, path, prefix string }{
@@ -269,6 +278,67 @@ func TestATimeInsideAnIdOrAKeyStaysAsLearned(t *testing.T) {
 			t.Errorf("%s beside the test case's request, strict times: %s; want refused as a conflict", c.what, oDescribe(ds))
 		}
 		wAsStrict(t, c.what+" beside the test case's request", in, "", "")
+	}
+}
+
+// A whole time that is a key (keyPlace) names what its call fetches or
+// writes: the time default leaves it as the clock checks learn it. A whole
+// epoch second at a find's filter._id, in its $in list, or as an array's
+// element there; a whole RFC 3339 time at a URL path segment; a time, as
+// text or an epoch, at an insert's docs.msgs.0._id or an update's
+// u.$set._id: each picked from the find's answer, or read from a cache,
+// stands as strict learns it. So does a typed instant at an insert's _id,
+// picked. A time the call carries in a query parameter
+// (?since=), a filter's bound (filter.expires_at.$lte) or a field whose name
+// only holds the letters (last_idle_at) is no key: the time default checks
+// it by its form.
+func TestATimeThatIsAKeyStaysAsLearned(t *testing.T) {
+	win := iWin(wRAt, wFAt, 10*time.Millisecond)
+	// pick is a whole time at path, v's of the call's second in each run,
+	// after the find whose answer holds round F's second as ans writes it.
+	pick := func(path string, typ Type, v, ans func(time.Time) string) Input {
+		return iCall(path, typ, v(wRAt), v(wFAt), wRAt, wFAt, win,
+			[]Earlier{wFind(wRAt.Add(-time.Millisecond), ans(wRAt.Add(-time.Second)), ans(wFAt))}, nil)
+	}
+	// cache is a whole time at path, v's of a moment long before the call
+	// in each run (twenty minutes as recorded, seven in round F).
+	cache := func(path string, typ Type, v func(time.Time) string) Input {
+		return iCall(path, typ, v(wRAt.Add(-20*time.Minute)), v(wFAt.Add(-7*time.Minute)), wRAt, wFAt, win, nil, nil)
+	}
+	for _, c := range []struct {
+		what, path string
+		typ        Type
+		v, ans     func(time.Time) string
+	}{
+		{"an epoch second at a find's filter._id", "body.cmd.filter._id", String, wSecs, wRFC},
+		{"an epoch second in a find's filter._id.$in", "body.cmd.filter._id.$in[0]", String, wSecs, wRFC},
+		{"an epoch second in an array at a find's filter._id", "body.cmd.filter._id[0]", String, wSecs, wRFC},
+		{"an RFC 3339 time at a URL path segment", "url.path.3", String, wRFC, wSecs},
+		{"an RFC 3339 time at an insert's _id", "body.docs.msgs.0._id", String, wRFC, wSecs},
+		{"a typed instant at an insert's _id", "body.docs.msgs.0._id", Instant, wTypedSec, wSecs},
+		{"an epoch second at an update's u.$set._id", "body.updates.0.u.$set._id", String, wSecs, wRFC},
+	} {
+		in := pick(c.path, c.typ, c.v, c.ans)
+		wAsStrict(t, c.what+", picked", in, c.v(wRAt), c.v(wFAt), RefusalPick)
+		if c.typ == Instant {
+			// A typed instant refused no-clock-read is a time field by its
+			// type (timeSettles), no whole time of wholeSettles.
+			continue
+		}
+		in = cache(c.path, c.typ, c.v)
+		r, f := c.v(wRAt.Add(-20*time.Minute)), c.v(wFAt.Add(-7*time.Minute))
+		wAsStrict(t, c.what+", read from a cache", in, r, f, RefusalNoClockRead)
+	}
+	for _, c := range []struct {
+		what, path, form string
+		v, ans           func(time.Time) string
+	}{
+		{"a query's ?since=", "url.query.since", wSec, wRFC, wSecs},
+		{"a filter's expires_at.$lte", "body.cmd.filter.expires_at.$lte", "text 9999999999", wSecs, wRFC},
+		{"an update's last_idle_at", "body.updates.0.u.$set.last_idle_at", wSec, wRFC, wSecs},
+	} {
+		tStrictThenDefault(t, c.what+", picked", pick(c.path, String, c.v, c.ans), RefusalPick, true, c.form)
+		tStrictThenDefault(t, c.what+", read from a cache", cache(c.path, String, c.v), RefusalNoClockRead, true, c.form)
 	}
 }
 
