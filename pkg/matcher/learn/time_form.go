@@ -1,7 +1,6 @@
 package learn
 
 import (
-	"cmp"
 	"strings"
 	"time"
 
@@ -55,8 +54,8 @@ import (
 // to; the place holds the moment in another form, which a variable cannot
 // hold), two reads of the clock that fell in one second when recorded are
 // no copy, and the field falls back to the time default: checked by its form
-// alone (ByForm), as above, where both runs write it in one form (a bound
-// value written in two keeps its refusal). A time here is a decoder-typed
+// alone (ByForm), as above, where both runs write it as a time: in one form,
+// or in two, either of which a replay passes. A time here is a decoder-typed
 // time in both runs, a field a clock rule declares, or a value bound to a
 // place learning read as a plain read of the application's clock
 // (Place.Clock): never a value's name or shape. Every other refusal of the
@@ -132,38 +131,38 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 // earlier place), with its time default's check by form (Decision.ByForm)
 // where its field is a time (boundTime; declared: a clock rule names it),
 // read as a replay reads it (a word of a text where it stands in one), and
-// both runs write it in one form (timeFormOf). d's outcome stands: the
+// both runs write it as a time (timeFormOf): in one form, or in two, either
+// of which a replay passes (FormF, as a Clock's). d's outcome stands: the
 // adapter takes ByForm only where it cannot hold the bind.
 func (dc *decider) valueByForm(path string, at variables.Address, n int, c changedInstant, d Decision, declared bool) Decision {
-	why := boundTime(dc.in.Rec.Leaves[path], d.From, declared)
+	why := boundTime(dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path], d.From, declared)
 	if why == "" || c.text && c.noWord != "" {
 		return d
 	}
-	// One form in both runs only: a bound value its runs wrote in two forms
-	// keeps its refusal, failing closed.
 	form, formF := dc.timeFormOf(path, c)
-	if form == "" || formF != "" {
+	if form == "" {
 		return d
 	}
-	off := models.ClockOffset{Form: form}
+	off := models.ClockOffset{Form: form, FormF: formF}
 	if c.text {
 		off.Word = c.word
 	}
-	off.Why = dc.learned(path, at, n, c.r, c.l, OutcomeClock, byFormRule(form, why), nil).Line
+	off.Why = dc.learned(path, at, n, c.r, c.l, OutcomeClock, byFormRule(off.Forms(), why), nil).Line
 	d.ByForm = &off
 	return d
 }
 
 // boundTime is why a value learning bound to the earlier place from is a
 // time the time default checks by its form where the bind does not hold
-// (see above): a decoder-typed time (rec, its field's recorded leaf; the
-// form check holds round F's value to the same typed form), a field a clock
-// rule declares (declared), or a value bound to a place learning read as a
-// plain read of the application's clock (Place.Clock). "" for any other
-// value: never by its name or its shape.
-func boundTime(rec Leaf, from Place, declared bool) string {
+// (see above): a decoder-typed time (rec and live, its field's leaf as
+// recorded and in round F, both of type Instant; the form check holds a
+// replay's value to that typed form), a field a clock rule declares
+// (declared), or a value bound to a place learning read as a plain read of
+// the application's clock (Place.Clock). "" for any other value: never by
+// its name or its shape.
+func boundTime(rec, live Leaf, from Place, declared bool) string {
 	switch {
-	case rec.Type == Instant:
+	case rec.Type == Instant && live.Type == Instant:
 		return "a decoder-typed time"
 	case declared:
 		return "a field a clock rule in keploy.yml declares"
@@ -183,24 +182,26 @@ func byFormRule(form, why string) string {
 // adapter's learn step), with its time default's check by form
 // (Learned.ByForm) where it is a variable bound whole whose field is a time
 // (boundTime; declared: a clock rule keploy.yml declares names it), under
-// the time default (timeForm), and both runs write it as an instant of one
-// form, an epoch number near its call in both runs (w), as
-// DeclaredClockLearned checks a declared time by its form. ln as it is
-// otherwise: the caller takes ByForm only where round F's call does not carry
-// the bound place's value.
+// the time default (timeForm), and both runs write it as an instant
+// (timeForms: of one form, or of two, either of which a replay passes; an
+// epoch number near its call in its run, w), as Decide's valueByForm checks
+// one. ln as it is otherwise: the caller takes ByForm only where round F's
+// call does not carry the bound place's value.
 func BoundTimeLearned(ln Learned, declared bool, w *Window, timeForm bool) Learned {
 	if !timeForm || ln.Kind != KindVariable || !ln.From.Whole || ln.From.Echo {
 		return ln
 	}
-	why := boundTime(ln.Recorded, ln.From, declared)
-	if why == "" {
+	why := boundTime(ln.Recorded, ln.Live, ln.From, declared)
+	if why == "" || !isInstant(ln.Recorded) || !isInstant(ln.Live) {
 		return ln
 	}
-	form, no := formIn(ln.Recorded, ln.Live, w)
-	if no != "" {
+	form, formF := timeForms(TimeForm(ln.Recorded), TimeForm(ln.Live), ln.Recorded, ln.Live, w)
+	if form == "" {
 		return ln
 	}
-	ln.ByForm = &models.ClockOffset{Form: form, Why: byFormRule(form, why)}
+	off := models.ClockOffset{Form: form, FormF: formF}
+	off.Why = byFormRule(off.Forms(), why)
+	ln.ByForm = &off
 	return ln
 }
 
@@ -208,10 +209,11 @@ func BoundTimeLearned(ln Learned, declared bool, w *Window, timeForm bool) Learn
 // use place of a variable bound whole where it does not hold the variable's
 // value, passes that place's check by form (models.MockVariable.ByForm, o):
 // under the time default (timeForm) alone, a whole value (no word), and a
-// time of o's form (TimeForm). HTTP and MongoDB replays both check a use's
-// fallback with it, so the two agree.
+// time of a form o checks by (TimeForm: its Form, or FormF beside it,
+// WrittenAs). HTTP and MongoDB replays both check a use's fallback with it,
+// so the two agree.
 func HoldsByForm(o models.ClockOffset, live Leaf, timeForm bool) bool {
-	return timeForm && o.Form != "" && o.Word.IsZero() && TimeForm(live) == o.Form
+	return timeForm && o.Form != "" && o.Word.IsZero() && o.WrittenAs(TimeForm(live))
 }
 
 // AnsweredWhole reports whether mock, an earlier call of the test (one of
@@ -292,22 +294,6 @@ func ClaimTimeForm(text, claim string) string {
 // checked as its own learning says.
 func HoldsClaimByForm(o models.ClockOffset, live string, timeForm bool) bool {
 	return timeForm && o.Form != "" && o.Claim != "" && o.Word.IsZero() && o.WrittenAs(ClaimTimeForm(live, o.Claim))
-}
-
-// formIn is the form rec and live, a time field's leaf as recorded and in
-// round F, are both written in (TimeForm), as the time default checks it;
-// else "" and why not, after "; and": its runs write no one form of an
-// instant, or, an epoch number, it names no moment near its call in both
-// runs (nearSpan, in w's spans).
-func formIn(rec, live Leaf, w *Window) (form, no string) {
-	form = TimeForm(rec)
-	switch {
-	case TimeForm(live) != form || !isInstant(rec) || !isInstant(live):
-		return "", "; and its two runs write no one form of an instant (" + cmp.Or(form, "none") + " recorded, " + cmp.Or(TimeForm(live), "none") + " in round F)"
-	case strings.HasPrefix(leafLayout(rec), "epoch-") && (w == nil || !nearSpan(rec, w.Rec) || !nearSpan(live, w.F)):
-		return "", "; and, an epoch number, it names no moment near its call in both runs"
-	}
-	return form, ""
 }
 
 // timeFormOf is the form of the changed instant c, a time field at path,
