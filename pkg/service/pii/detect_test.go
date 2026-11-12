@@ -129,3 +129,21 @@ func hasPattern(detections []Detection, pattern string) bool {
 	}
 	return false
 }
+
+func TestRedactField(t *testing.T) {
+	tests := []struct{ field, want string }{
+		{"request.body.user@example.com.password", "request.body.[redacted].password"},
+		{"request.url_param.123-45-6789", "request.url_param.[redacted]"},
+		{"request.form.4111 1111 1111 1111", "request.form.[redacted]"},
+		{"request.body.+1 (415) 555-2671.note", "request.body.[redacted].note"},
+		{"request.body.items[3].password", "request.body.items[3].password"},
+		{"request.body.order1234567890123", "request.body.order1234567890123"},
+		{"request.body.jane.doe@example.com", "request.body.jane.[redacted]"},
+		{"request.url_param.415.555.2671", "request.url_param.[redacted]"},
+	}
+	for _, tt := range tests {
+		if got := RedactField(tt.field); got != tt.want {
+			t.Errorf("RedactField(%q) = %q, want %q", tt.field, got, tt.want)
+		}
+	}
+}

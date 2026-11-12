@@ -209,3 +209,22 @@ func TestPIIWarningLeavesANonFormBodyAlone(t *testing.T) {
 		t.Fatalf("got warnings for a plain-text body: %q", got)
 	}
 }
+
+func TestPIIWarningRedactsPIIInFieldPaths(t *testing.T) {
+	got := piiWarnings(t, &models.TestCase{
+		HTTPReq: models.HTTPReq{
+			Method: models.Method("POST"),
+			URL:    "http://localhost:8080/users",
+			Body:   `{"user@example.com":{"password":"hunter2"}}`,
+		},
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d warnings, want 1: %q", len(got), got)
+	}
+	if strings.Contains(got[0], "user@example.com") {
+		t.Errorf("warning %q copies the email from a JSON key", got[0])
+	}
+	if !strings.Contains(got[0], "request.body.[redacted].password (field_name)") {
+		t.Errorf("warning %q does not name the redacted path", got[0])
+	}
+}

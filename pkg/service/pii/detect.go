@@ -191,6 +191,67 @@ func splitFieldName(field string) []string {
 	return parts
 }
 
+// Redacted stands in for PII that RedactField removes from a field path.
+const Redacted = "[redacted]"
+
+// RedactField removes PII from a detection's field path. The path is built
+// from untrusted names (JSON keys, query parameter and form field names), so
+// a key such as "user@example.com" would otherwise reach the log as written.
+// The path is read as dot-separated segments, since a key can itself contain
+// dots: each run of segments that holds an email, SSN, Luhn-valid card number
+// or phone number becomes Redacted, and the rest of the path is kept so the
+// warning still says where the value was.
+func RedactField(field string) string {
+	segments := strings.Split(field, ".")
+	out := make([]string, 0, len(segments))
+	for i := 0; i < len(segments); {
+		end := -1
+		for j := i; j < len(segments) && j < i+maxRedactSegments; j++ {
+			if segmentsHoldPII(segments[i : j+1]) {
+				end = j
+				break
+			}
+		}
+		if end < 0 {
+			out = append(out, segments[i])
+			i++
+			continue
+		}
+		out = append(out, Redacted)
+		i = end + 1
+	}
+	return strings.Join(out, ".")
+}
+
+// maxRedactSegments bounds how many dot-separated segments one PII value in a
+// path may span, such as the three of "jane.doe@example.com".
+const maxRedactSegments = 6
+
+// segmentsHoldPII reports whether the joined segments are PII. One segment
+// counts when PII appears anywhere in it; a run of several counts only when
+// the whole run is one value, and an email must start in the first segment,
+// so "request.body.user@example.com" redacts "user@example.com" alone.
+func segmentsHoldPII(segments []string) bool {
+	text := strings.Join(segments, ".")
+	if len(segments) == 1 {
+		return emailRegex.MatchString(text) || ssnRegex.MatchString(text) ||
+			hasCreditCard(text) || hasPhone(text)
+	}
+	if strings.Contains(segments[0], "@") && emailWhole.MatchString(text) {
+		return true
+	}
+	return ssnWhole.MatchString(text) ||
+		(cardWhole.MatchString(text) && hasCreditCard(text)) ||
+		(phoneWhole.MatchString(text) && hasPhone(text))
+}
+
+var (
+	emailWhole = regexp.MustCompile(`(?i)^[a-z0-9_%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$`)
+	ssnWhole   = regexp.MustCompile(`^\d{3}-\d{2}-\d{4}$`)
+	cardWhole  = regexp.MustCompile(`^[\d -]+$`)
+	phoneWhole = regexp.MustCompile(`^` + phoneRegex.String() + `$`)
+)
+
 func hasPhone(value string) bool {
 	matches := phoneRegex.FindAllString(value, -1)
 	for _, match := range matches {
