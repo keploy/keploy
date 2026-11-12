@@ -301,16 +301,16 @@ func TestTheTimeDefaultLeavesWhatIsNoTime(t *testing.T) {
 	// keploy reads an epoch number's moment only where it knows a span of
 	// both runs: a span with no start is none.
 	w := &Window{Rec: Span{To: cRAt}, F: Span{From: cFAt.Add(-time.Second), To: cFAt}}
-	if f, _ := timeForms(TimeForm(Leaf{Type: Number, Value: near}), TimeForm(Leaf{Type: Number, Value: nearF}), Leaf{Type: Number, Value: near}, Leaf{Type: Number, Value: nearF}, w); f != "" {
+	if f, _ := timeForms(TimeForm(Leaf{Type: Number, Value: near}), TimeForm(Leaf{Type: Number, Value: nearF}), Leaf{Type: Number, Value: near}, Leaf{Type: Number, Value: nearF}, w, nil); f != "" {
 		t.Errorf("FALSE GREEN? an epoch number near a span with no start: read as near (%q)", f)
 	}
 	// Each run's epoch number is read against its own run's span: one near
 	// the recorded span but in a round F span with no start is not near.
 	wF := &Window{Rec: Span{From: cRAt.Add(-time.Second), To: cRAt}, F: Span{To: cFAt}}
-	if f, _ := timeForms(TimeForm(Leaf{Type: Number, Value: near}), TimeForm(Leaf{Type: Number, Value: nearF}), Leaf{Type: Number, Value: near}, Leaf{Type: Number, Value: nearF}, wF); f != "" {
+	if f, _ := timeForms(TimeForm(Leaf{Type: Number, Value: near}), TimeForm(Leaf{Type: Number, Value: nearF}), Leaf{Type: Number, Value: near}, Leaf{Type: Number, Value: nearF}, wF, nil); f != "" {
 		t.Errorf("FALSE GREEN? round F's epoch number with no round F span: read as near (%q)", f)
 	}
-	if f, _ := timeForms(TimeForm(Leaf{Type: Number, Value: near}), TimeForm(Leaf{Type: Number, Value: near}), Leaf{Type: Number, Value: near}, Leaf{Type: Number, Value: near}, &Window{Rec: wF.Rec, F: wF.Rec}); f == "" {
+	if f, _ := timeForms(TimeForm(Leaf{Type: Number, Value: near}), TimeForm(Leaf{Type: Number, Value: near}), Leaf{Type: Number, Value: near}, Leaf{Type: Number, Value: near}, &Window{Rec: wF.Rec, F: wF.Rec}, nil); f == "" {
 		t.Errorf("precondition: an epoch number near both runs' spans has no form")
 	}
 	// Two runs two years apart: each epoch number is near its own run's
@@ -318,14 +318,14 @@ func TestTheTimeDefaultLeavesWhatIsNoTime(t *testing.T) {
 	later := cRAt.AddDate(2, 0, 0)
 	nearLater := iEpochMs(later.Add(-50 * time.Millisecond))
 	w2 := &Window{Rec: Span{From: cRAt.Add(-time.Second), To: cRAt}, F: Span{From: later.Add(-time.Second), To: later}}
-	if f, _ := timeForms(TimeForm(Leaf{Type: Number, Value: near}), TimeForm(Leaf{Type: Number, Value: nearLater}), Leaf{Type: Number, Value: near}, Leaf{Type: Number, Value: nearLater}, w2); f == "" {
+	if f, _ := timeForms(TimeForm(Leaf{Type: Number, Value: near}), TimeForm(Leaf{Type: Number, Value: nearLater}), Leaf{Type: Number, Value: near}, Leaf{Type: Number, Value: nearLater}, w2, nil); f == "" {
 		t.Errorf("runs two years apart, each epoch number near its own run's span: no form; want one")
 	}
 	// A run whose value has no form gives the time no form.
-	if f, g := timeForms(tForm, "", Leaf{Type: String, Value: cR}, Leaf{Type: String, Value: "me"}, nil); f != "" || g != "" {
+	if f, g := timeForms(tForm, "", Leaf{Type: String, Value: cR}, Leaf{Type: String, Value: "me"}, nil, nil); f != "" || g != "" {
 		t.Errorf("FALSE GREEN? round F's value of no form: forms %q, %q; want none", f, g)
 	}
-	if f, g := timeForms("", tForm, Leaf{Type: String, Value: "me"}, Leaf{Type: String, Value: cF}, nil); f != "" || g != "" {
+	if f, g := timeForms("", tForm, Leaf{Type: String, Value: "me"}, Leaf{Type: String, Value: cF}, nil, nil); f != "" || g != "" {
 		t.Errorf("FALSE GREEN? a recorded value of no form: forms %q, %q; want none", f, g)
 	}
 }
@@ -781,6 +781,79 @@ func TestABoundEpochFarFromItsCallGetsNoCheckByForm(t *testing.T) {
 			t.Errorf("FALSE GREEN? %s: checked by form %+v; want none", c.what, *d.ByForm)
 		case c.form && (d.ByForm == nil || d.ByForm.Form != "number 9999999999999"):
 			t.Errorf("%s: by form %+v; want the epoch millisecond's form", c.what, d.ByForm)
+		}
+	}
+}
+
+// A value bound whole to an earlier call's leaf learning read as a read of
+// the clock plus an offset (Seen.Offset, an expiry: Place.Offset) is a time
+// the time default checks by its form, as one bound to a plain read is; an
+// epoch number is near its call where it is near the call moved by that
+// offset (an expiry two years on). One bound to a leaf learning read no
+// clock at gets no check by form, nor does one far from its call and from
+// its call moved by the offset.
+func TestABoundEpochOfAnOffsetReadGetsItsCheckByForm(t *testing.T) {
+	const p = "body.expiresAt"
+	const year = 365 * 24 * time.Hour
+	rAt := oAt.Add(900 * time.Millisecond)
+	fAt := oAt.Add(time.Hour + 950*time.Millisecond)
+	read := func(d time.Duration) *models.ClockOffset {
+		return &models.ClockOffset{Min: d, Max: d + time.Second, Res: time.Second}
+	}
+	for _, c := range []struct {
+		what string
+		ttl  time.Duration
+		read *models.ClockOffset
+		form bool
+	}{
+		{"a year on, an offset read", year, read(year), true},
+		{"a year on, no read", year, nil, false},
+		{"two years on, an offset read of two years", 2 * year, read(2 * year), true},
+		{"three years on, an offset read of a year", 3 * year, read(year), false},
+	} {
+		rec, live := iEpochMs(rAt.Add(-600*time.Millisecond).Add(c.ttl)), iEpochMs(fAt.Add(-610*time.Millisecond).Add(c.ttl))
+		e := iSent("mock-1", rAt.Add(-500*time.Millisecond), "body.expiresAt", Number, rec, live)
+		e.Seen[0].Offset = c.read
+		in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 800*time.Millisecond), []Earlier{e}, nil)
+		in.TimeForm = true
+		ds := Decide(in)
+		if len(ds) != 1 {
+			t.Fatalf("%s: %s; want one decision", c.what, oDescribe(ds))
+		}
+		d := ds[0]
+		iValue(t, c.what, d, "mock-1")
+		switch {
+		case !c.form && d.ByForm != nil:
+			t.Errorf("FALSE GREEN? %s: checked by form %+v; want none", c.what, *d.ByForm)
+		case c.form && (d.ByForm == nil || d.ByForm.Form != "number 9999999999999" || !strings.Contains(d.ByForm.Why, "plus an offset")):
+			t.Errorf("%s: by form %+v; want the epoch millisecond's form, bound to a read of the clock plus an offset", c.what, d.ByForm)
+		}
+	}
+}
+
+// An earlier call's request leaf the learn step read as the clock plus an
+// offset (MockSpec.Clocks, as Named marks it) is a place that carries that
+// offset (seenPlace), which makes a value bound to it whole a time
+// (boundTime); a plain read is the clock's (Place.Clock), and a leaf with no
+// read makes none.
+func TestAPlaceCarriesTheOffsetReadItsCallLearned(t *testing.T) {
+	const f = "body.data.expiresAt"
+	year := 365 * 24 * time.Hour
+	at := Leaf{Path: f, Type: Number, Value: "1825985612"}
+	for _, c := range []struct {
+		what   string
+		clocks map[string]models.ClockOffset
+		why    string
+	}{
+		{"a read plus a year", map[string]models.ClockOffset{f: {Min: year, Max: year + time.Second, Res: time.Second}}, "where keploy learned a read of the application's clock plus an offset"},
+		{"a plain read", map[string]models.ClockOffset{f: {Res: time.Second}}, "where keploy learned a read of the application's clock"},
+		{"no read", nil, ""},
+	} {
+		e := Named(Earlier{Mock: "mock-1", Own: true, Seen: []Seen{{Side: Request, Leaf: at, Live: "1825985613"}}}, nil, c.clocks)
+		p := seenPlace(e, e.Seen[0], true)
+		why := boundTime(at, at, p, false)
+		if c.why == "" && why != "" || c.why != "" && !strings.HasSuffix(why, c.why) {
+			t.Errorf("%s: a value bound to the place is a time %q (place offset %+v); want %q", c.what, why, p.Offset, c.why)
 		}
 	}
 }

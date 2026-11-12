@@ -907,6 +907,11 @@ type Place struct {
 	// Clock: the learn step learned the leaf as a plain read of the
 	// application's clock (Seen.Clock).
 	Clock bool
+	// Offset is the read of the application's clock the learn step learned
+	// the leaf, a request's, as (Seen.Offset): one plus a constant offset
+	// (an expiry a year after its call), or a plain read, which Clock marks
+	// too. nil where it learned none.
+	Offset *models.ClockOffset
 	// InStartUp: the mock was served in the test set's start-up, before its
 	// first test began (Earlier.StartUp). Only the wording reads it.
 	InStartUp bool
@@ -4536,7 +4541,7 @@ func withoutGave(earlier []Earlier) []Earlier {
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
 		Var: seenVar(e, s), Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Client: e.incoming, Name: s.Name, Clock: s.Clock,
-		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
+		Offset: s.Offset, InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
 }
 
 // seenVar is the variable place of s, a leaf of e (Seen.Place). A client
