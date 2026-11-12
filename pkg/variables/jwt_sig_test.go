@@ -68,8 +68,8 @@ func TestJWTSigStepWritesASignatureOfItsForm(t *testing.T) {
 	if out, ok := at.ReplaceWord("order.v1."+sigA, sigB); ok {
 		t.Errorf("ReplaceWord on no JWT = %q; want refused", out)
 	}
-	if !SignatureForm(sigA, sigB) || SignatureForm(sigA, sigB[:42]) || SignatureForm("ab+d"+sigB[4:], sigB) || SignatureForm("", "") {
-		t.Error("SignatureForm: want one length of base64url text, non-empty")
+	if !SignatureForm(sigA, sigB) || SignatureForm(sigA, sigB[:42]) || SignatureForm("ab+d"+sigB[4:], sigB) || SignatureForm(sigB, "ab+d"+sigB[4:]) || SignatureForm("", "") {
+		t.Error("SignatureForm: want one length of base64url text, non-empty, in both")
 	}
 }
 

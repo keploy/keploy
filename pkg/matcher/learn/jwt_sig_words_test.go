@@ -46,8 +46,13 @@ const (
 // default, which checks a time in a claim by its form (Caps.ClaimByForm, as
 // Mongo's adapter reads one).
 func sigCall(p, fHeader, fSig string, earlier []Earlier) (Input, time.Time, time.Time) {
+	return sigCallFrom(p, sigRec, fHeader, fSig, earlier)
+}
+
+// sigCallFrom is sigCall with the recorded signature rSig.
+func sigCallFrom(p, rSig, fHeader, fSig string, earlier []Earlier) (Input, time.Time, time.Time) {
 	rAt, fAt := oAt.Add(500*time.Millisecond), oAt.Add(10*time.Hour+500*time.Millisecond)
-	rec := sigJWT(rAt, sigSidR, sigJtiR, sigRec)
+	rec := sigJWT(rAt, sigSidR, sigJtiR, rSig)
 	live := sigJWTWith(fHeader, fAt, sigSidF, sigJtiF, fSig)
 	w := iWin(rAt, fAt, 30*time.Millisecond)
 	w.offsets = true
@@ -94,6 +99,37 @@ func TestAJWTSignatureIsDecidedWholeAtItsStep(t *testing.T) {
 	}
 }
 
+// TestAJWTSignatureIsNeverOpenedFurther: a signature is read as it is,
+// whole. One whose bytes are text (a stand-in signer's, base64url of
+// words) is still one value at the token's |jwtsig, made anew at the call;
+// no decision reads a word of the text its bytes spell.
+func TestAJWTSignatureIsNeverOpenedFurther(t *testing.T) {
+	const p = "body.docs.msgs.0.token"
+	enc := base64.RawURLEncoding
+	rSig, fSig := enc.EncodeToString([]byte("recorded-signature-bytes")), enc.EncodeToString([]byte("this-run-signature-bytes"))
+	in, _, _ := sigCallFrom(p, rSig, hs256, fSig, nil)
+	ds := Decide(in)
+	var sig *Decision
+	for i, d := range ds {
+		if d.Refusal != nil {
+			t.Errorf("refused: %s", d.Refusal.Why)
+		}
+		if strings.Contains(d.At.String(), "jwtsig|") {
+			t.Errorf("a decision reads inside the signature: %s", oDescribe(ds[i:i+1]))
+		}
+		if d.Recorded == rSig {
+			sig = &ds[i]
+		}
+	}
+	if sig == nil {
+		t.Fatalf("no decision on the signature in %s", oDescribe(ds))
+	}
+	want := variables.Address{Place: sig.At.Place, Steps: []variables.Step{variables.StepJWTSig}, Word: -1}
+	if sig.At.String() != want.String() || sig.Full != fSig || sig.Outcome != OutcomeFresh {
+		t.Errorf("signature decided %s, want %s made anew to %s", oDescribe([]Decision{*sig}), want, fSig)
+	}
+}
+
 // TestAJWTSignatureAnEarlierCallSentIsBoundAtItsStep: a call stores a
 // token's signature alone (a session key), after the call before it sent
 // the token as its bearer (a header: this Input names a body leaf no
@@ -114,6 +150,34 @@ func TestAJWTSignatureAnEarlierCallSentIsBoundAtItsStep(t *testing.T) {
 			}
 			if got, want := d.FromAt.String(), from+"|jwtsig"; got != want {
 				t.Errorf("bound at %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+// TestAPieceOfAJWTSignatureIsNotBoundAtItsStep: false-green guard. A
+// value is bound at a token's |jwtsig only where it is the token's
+// signature in both runs: a value that is the whole signature in one run
+// and one word of it in the other is never bound there (a replay would
+// write the whole signature where the call holds a piece of it): it is
+// bound at the token's word, as before.
+func TestAPieceOfAJWTSignatureIsNotBoundAtItsStep(t *testing.T) {
+	const p, from, piece = "body.docs.msgs.0.key", "header.Authorization", "AWt1hpQzYRxPg"
+	for _, tc := range []struct{ what, rSig, fSig, v, f string }{
+		{what: "the signature recorded, a piece of it in round F", rSig: sigRec, fSig: sigFive, v: sigRec, f: piece},
+		{what: "a piece of it recorded, the signature in round F", rSig: sigFive, fSig: sigOneWord, v: piece, f: sigOneWord},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			tok, rAt, fAt := sigCallFrom(from, tc.rSig, hs256, tc.fSig, nil)
+			rec, live := tok.Rec.Leaves[from].Value, tok.Live.Leaves[from].Value
+			sent := iSent("mock-870", rAt.Add(-5*time.Millisecond), from, String, "Bearer "+rec, "Bearer "+live)
+			in := iCall(p, String, tc.v, tc.f, rAt, fAt, iWin(rAt, fAt, 30*time.Millisecond), []Earlier{sent}, nil)
+			d := oWord(t, Decide(in), tc.v, tc.f)
+			if d.Outcome != OutcomeValue || d.From.Mock != "mock-870" {
+				t.Fatalf("decided %s, want bound to mock-870", oDescribe([]Decision{d}))
+			}
+			if strings.Contains(d.FromAt.String(), "jwtsig") || d.FromAt.Word < 0 {
+				t.Errorf("bound at %s, want at a word of the token", d.FromAt)
 			}
 		})
 	}
