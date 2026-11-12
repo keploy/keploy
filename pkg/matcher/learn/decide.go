@@ -301,15 +301,6 @@ type Decision struct {
 	// moment in another form, and a variable holds one text); nil
 	// otherwise, and where the time default is off (Input.TimeForm).
 	ByForm *models.ClockOffset
-	// EitherOrder, of a Value, says From is the request of another call of
-	// the test that sent the value too, which the recording sent before
-	// this call and round F only after it (sentInTurn): two sends of one
-	// value the application held, made in another order in each run. An
-	// adapter binds the variable at both calls, so a replay binds it at
-	// whichever comes first and checks the other holds it; one that cannot
-	// refuses the word, as a use there would miss whenever the calls
-	// change places again.
-	EitherOrder bool
 }
 
 // Decide is every changed word of in, decided (see above).
