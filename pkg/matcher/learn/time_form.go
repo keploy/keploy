@@ -25,6 +25,21 @@ import (
 //     holds); or a moment sent at two places, each its own call's read of
 //     the clock (two-sources).
 //
+// Two of those are ids, not times, and keep the check learning gave them
+// (refused, bound, or a read of the clock checked by its range), as under
+// strict times:
+//   - a time at a key (keyPlace): at a URL path segment or under an _id
+//     key, it names what the call fetches or writes, and checked by its
+//     form alone a replay would serve the recorded answer to a query for
+//     another id. Its place in the call's structure says so, never its
+//     text; a time a call carries in a query parameter or another body
+//     field (since, expires_at, createdAt) is no key. A field a clock rule
+//     declares is checked as the rule says, at a key too;
+//   - a time-ordered UUID (a uuid* layout): its time is one part of the id,
+//     and its form would pass any id of its version (another node's, or
+//     another clock sequence's), so it has no form the default checks
+//     (timeForms).
+//
 // A field is never made a time by its name or its value's shape: a text
 // in a clock layout, or an epoch number, that is no decoder-typed time, no
 // declared clock and no read learning found stays as learned, word by word
@@ -70,6 +85,33 @@ var timeSettles = map[RefusalKind]bool{
 // runs, for the time default to check it by its form.
 const epochNear = 366 * 24 * time.Hour
 
+// keyPlace reports whether path, a leaf's path in its call, is a place
+// whose value names what the call fetches or writes: a URL path segment
+// (url.path.<n>), or a leaf under an _id key, at any depth (_id,
+// filter._id, q._id, u.$set._id, docs.msgs.0._id, documents[0]._id,
+// filter._id.$in[0], filter._id[0]). By the leaf's place in its call's
+// structure alone: its keys, each after a '.' and before the next '.' or
+// '[' (an index's element, "0]", is never one), never its value (a key that
+// only holds the letters, last_idle_at, is no _id key).
+func keyPlace(path string) bool {
+	if strings.HasPrefix(path, "url.path.") {
+		return true
+	}
+	for _, e := range strings.FieldsFunc(path, func(r rune) bool { return r == '.' || r == '[' }) {
+		if e == "_id" {
+			return true
+		}
+	}
+	return false
+}
+
+// atKey reports whether path is a key (keyPlace) at which no clock rule
+// keploy.yml declares (declared) names the field: a time there keeps the
+// check learning gave it, never the time default's by form.
+func atKey(path string, declared bool) bool {
+	return keyPlace(path) && !declared
+}
+
 // heldRead is d, a refusal of a value learning read as the application's
 // clock (see above), marked so for timeDefault.
 func (dc *decider) heldRead(d Decision) Decision {
@@ -87,6 +129,10 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	if d.Outcome == OutcomeClock && d.Clock != nil {
 		if d.Clock.Claim != "" {
 			// Its form is its claim's (claimForm).
+			return d
+		}
+		if atKey(path, declared) {
+			// A key's read keeps its range (see above).
 			return d
 		}
 		if form, formF := dc.timeFormOf(path, c, nil); form != "" {
@@ -107,6 +153,8 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	// and only where both runs' values read as instants (leaf).
 	typed := dc.in.Rec.Leaves[path].Type == Instant
 	switch k := d.Refusal.Kind; {
+	case atKey(path, declared):
+		return d
 	case k == RefusalTwoSources && dc.readClock:
 	case timeSettles[k] && (typed || declared || dc.readClock):
 	default:
@@ -135,7 +183,7 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 // of which a replay passes (FormF, as a Clock's). d's outcome stands: the
 // adapter takes ByForm only where it cannot hold the bind.
 func (dc *decider) valueByForm(path string, at variables.Address, n int, c changedInstant, d Decision, declared bool) Decision {
-	why := boundTime(dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path], d.From, declared)
+	why := boundTime(path, dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path], d.From, declared)
 	if why == "" || c.text && c.noWord != "" {
 		return d
 	}
@@ -161,9 +209,12 @@ func (dc *decider) valueByForm(path string, at variables.Address, n int, c chang
 // application's clock: a plain one (Place.Clock), or one plus a constant
 // offset (Place.Offset: another test's key expiry, a year after its call,
 // stamped in the second this call's was when recorded). "" for any other
-// value: never by its name or its shape.
-func boundTime(rec, live Leaf, from Place, declared bool) string {
+// value: never by its name or its shape; and at a key (path, keyPlace) no
+// clock rule declares, which keeps its bind.
+func boundTime(path string, rec, live Leaf, from Place, declared bool) string {
 	switch {
+	case atKey(path, declared):
+		return ""
 	case rec.Type == Instant && live.Type == Instant:
 		return "a decoder-typed time"
 	case declared:
@@ -195,7 +246,7 @@ func BoundTimeLearned(ln Learned, declared bool, w *Window, timeForm bool) Learn
 	if !timeForm || ln.Kind != KindVariable || !ln.From.Whole || ln.From.Echo {
 		return ln
 	}
-	why := boundTime(ln.Recorded, ln.Live, ln.From, declared)
+	why := boundTime(ln.Recorded.Path, ln.Recorded, ln.Live, ln.From, declared)
 	if why == "" || !isInstant(ln.Recorded) || !isInstant(ln.Live) {
 		return ln
 	}
@@ -332,11 +383,19 @@ func timeForms(recForm, liveForm string, rec, live Leaf, w *Window, by *models.C
 	switch {
 	case recForm == "" || liveForm == "":
 		return "", ""
+	case uuidLeaf(rec) || uuidLeaf(live):
+		// A time-ordered UUID is an id (see above): no form of it is
+		// checked alone.
+		return "", ""
 	case !epochNearIn(rec, w, false, by) || !epochNearIn(live, w, true, by):
 		return "", ""
 	}
 	return models.FormsOf(recForm, liveForm)
 }
+
+// uuidLeaf reports whether l, a run's leaf (or a word of one), is a
+// time-ordered UUID (a uuid* layout: clockTextLayout).
+func uuidLeaf(l Leaf) bool { return strings.HasPrefix(leafLayout(l), "uuid") }
 
 // epochNearIn reports whether l, a run's leaf (round F's: f), is no epoch
 // number, or one that names a moment near that run's span of the call in w
@@ -379,8 +438,9 @@ func nearSpan(l Leaf, s Span, by *models.ClockOffset) bool {
 // whole fraction where every digit is 0, so one application writes a time
 // with a fraction or without as its moment falls (a time read at the
 // millisecond is whole one time in a thousand). A UUID's time is its
-// layout ("uuid1"). "" for a leaf keploy reads as no instant and no time of
-// day.
+// layout ("uuid1"), which no learning checks a value by alone (timeForms:
+// a UUID is an id). "" for a leaf keploy reads as no instant and no time
+// of day.
 func TimeForm(l Leaf) string { return timeFormAs(l.Type, l) }
 
 // timeFormAs is TimeForm of l, a word of a leaf of type t, read as t.

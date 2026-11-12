@@ -854,7 +854,7 @@ func TestAPlaceCarriesTheOffsetReadItsCallLearned(t *testing.T) {
 	} {
 		e := Named(Earlier{Mock: "mock-1", Own: true, Seen: []Seen{{Side: Request, Leaf: at, Live: "1825985613"}}}, nil, c.clocks)
 		p := seenPlace(e, e.Seen[0], true)
-		why := boundTime(at, at, p, false)
+		why := boundTime(at.Path, at, at, p, false)
 		if c.why == "" && why != "" || c.why != "" && !strings.HasSuffix(why, c.why) {
 			t.Errorf("%s: a value bound to the place is a time %q (place offset %+v); want %q", c.what, why, p.Offset, c.why)
 		}
