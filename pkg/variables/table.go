@@ -96,11 +96,14 @@ type Table struct {
 }
 
 // endedScope is an ended scope's own bindings (Own as it ended), by name,
-// the test it was the scope of, and its number (InScope).
+// the test it was the scope of, its number (InScope), and the run's
+// variables it answered as recorded while they were not bound
+// (AnsweredAsRecorded, AnsweredAsRecordedOf).
 type endedScope struct {
-	test     string
-	scope    uint64
-	bindings []Binding
+	test       string
+	scope      uint64
+	bindings   []Binding
+	asRecorded map[string]bool
 }
 
 // lock takes t.mu, and before it the lock of the table whose run's t reads
@@ -1069,6 +1072,35 @@ func (t *Table) AnsweredAsRecorded(name string) bool {
 	return t.asRecorded[name]
 }
 
+// AnsweredAsRecordedOf reports whether test's own scope answers name with
+// its recorded value (AnsweredAsRecorded) while name is not bound: by the
+// names the running scope began with while it is test's (StartOpeningScope),
+// else by those test's latest ended scope began with (kept on a table that
+// keeps them: KeepEnded). A recording that trails test (a clean-up the
+// application runs for it once it answered it) reads them here, as it reads
+// test's bindings (LookupOf), whichever test's window its call lands in: the
+// running scope's names are another test's there, and say nothing of it.
+// False for test "", and for a test whose scope has not begun in the set.
+func (t *Table) AnsweredAsRecordedOf(test, name string) bool {
+	if test == "" {
+		return false
+	}
+	from := t.lock()
+	defer t.unlock(from)
+	if _, ok := t.lookup(from, name); ok {
+		return false
+	}
+	if t.began && t.test == test {
+		return t.asRecorded[name]
+	}
+	for i := len(t.ended) - 1; i >= 0; i-- {
+		if t.ended[i].test == test {
+			return t.ended[i].asRecorded[name]
+		}
+	}
+	return false
+}
+
 // Reset forgets every binding of the scope: a new scope begins. The run's
 // stay.
 func (t *Table) Reset() {
@@ -1399,13 +1431,14 @@ func (t *Table) LookupOf(test, name string) (b Binding, ended, ok bool) {
 }
 
 // end keeps the running scope's own bindings as its test's ended scope's
-// (EndedOf), as the next scope begins, on a table that keeps them
-// (KeepEnded): nothing of a scope begun with no test named, nor before the
-// first scope began (no test is named then: NewSet forgets the name), which
-// no test bound. t.mu is held.
+// (EndedOf), and the variables it answered as recorded
+// (AnsweredAsRecordedOf), as the next scope begins, on a table that keeps
+// them (KeepEnded): nothing of a scope begun with no test named, nor before
+// the first scope began (no test is named then: NewSet forgets the name),
+// which no test bound. t.mu is held.
 func (t *Table) end() {
 	if t.keepEnded && t.test != "" {
-		t.ended = append(t.ended, endedScope{test: t.test, scope: t.scope, bindings: sorted(t.vals)})
+		t.ended = append(t.ended, endedScope{test: t.test, scope: t.scope, bindings: sorted(t.vals), asRecorded: maps.Clone(t.asRecorded)})
 	}
 }
 
