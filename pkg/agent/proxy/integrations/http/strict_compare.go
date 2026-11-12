@@ -1010,7 +1010,8 @@ func marksAt(marks [][]bool, i int) []bool {
 // values (keploy.yml's url noise masked in both), a repeated parameter's in
 // any order, as the request matcher and the learn step read them (an app may
 // build them from a set); one value the mock learned (url.query.<name>) may
-// differ. Parameters keploy itself adds (keploy*) are not compared. A SigV4
+// differ, and of a repeated parameter sent as many times, the words the mock
+// learned of its values, value by value in the order sent. Parameters keploy itself adds (keploy*) are not compared. A SigV4
 // presigned URL's signing parameters are read by their grammar
 // (presignedDiffs).
 func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
@@ -1048,9 +1049,12 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 			continue
 		}
 		why := ""
-		if len(rv) == 1 && len(lv) == 1 {
-			learned, stale := k.learnedExcuses("url.query."+name, "", shape, rv[0])
-			if learned || k.wordsAt("url.query."+name, rv[0], lv[0]) {
+		if len(rv) == len(lv) {
+			// A repeated parameter is one text, its values in the order
+			// sent (learn.ValuesText), read value by value by its words.
+			rt := learn.ValuesText(rv)
+			learned, stale := k.learnedExcuses("url.query."+name, "", shape, rt)
+			if learned || k.wordsAt("url.query."+name, rt, learn.ValuesText(lv)) {
 				continue
 			}
 			why = stale
@@ -1283,7 +1287,9 @@ func bodyChanged() strictField {
 }
 
 // formDiffs compares two form bodies key by key: the same keys, each with the
-// same values, a repeated key's in any order, as the learn step reads them.
+// same values, a repeated key's in any order, as the learn step reads them;
+// of a key sent as many times, the words the mock learned of its values may
+// differ, value by value in the order sent.
 func (k strictKnown) formDiffs(rec, live string) []strictField {
 	rf, rerr := url.ParseQuery(rec)
 	lf, lerr := url.ParseQuery(live)
@@ -1317,13 +1323,15 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		// keploy.yml's patterns decide a key they guard (fieldCovers): no
 		// noise learned on it excuses a value they refuse.
 		guarded := k.guards(key)
-		// A repeated key is learned as one text, its values joined, so it
-		// is more than one word.
+		// A repeated key is learned as one text, its values in the order
+		// sent (learn.ValuesText), so it is more than one word, and read
+		// value by value by its words.
+		rt := learn.ValuesText(rv)
 		learned, stale := false, ""
 		if !guarded {
-			learned, stale = k.learnedExcuses(path, "", shape, strings.Join(rv, ","))
+			learned, stale = k.learnedExcuses(path, "", shape, rt)
 		}
-		if sameMembers(rv, lv) || !guarded && (learned || len(rv) == 1 && len(lv) == 1 && k.wordsAt(path, rv[0], lv[0]) || redacted[key]) {
+		if sameMembers(rv, lv) || !guarded && (learned || len(rv) == len(lv) && k.wordsAt(path, rt, learn.ValuesText(lv)) || redacted[key]) {
 			continue
 		}
 		// A recorded value the obfuscator redacted is not held to the

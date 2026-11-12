@@ -39,9 +39,11 @@ import (
 // than the scheme's is in the Host. Container keys are not compared yet:
 // their first-use numbering can swap two containers of one image used at
 // once, and learning across a swapped key would pair the wrong recording. The learnable leaves are the path
-// segments (url.path.<i>), the query values (url.query.<name>, a repeated
-// parameter's values in any order), the header values (header.<name>) and
-// the body's scalars (body.<path>, or body.<key> of a form). What must be
+// segments (url.path.<i>), the query values (url.query.<name>: a repeated
+// parameter's values as one text, in the order sent, the same values in
+// any order being the same), the header values (header.<name>) and the
+// body's scalars (body.<path>, or body.<key> of a form, a repeated key's as
+// a repeated parameter's). What must be
 // equal and is never learned: the media type, which headers are sent, and a
 // body that is neither JSON nor a form. Host, Content-Type and Content-Length
 // are not leaves: the first is in the key, the second is compared by its
@@ -247,14 +249,7 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		for i, v := range vs {
 			masked[i] = maskURLNoise(v, n.url)
 		}
-		if len(masked) > 1 {
-			// A repeated parameter's values come in any order, so no one of
-			// them has a place a learned entry could name: compared whole.
-			sort.Strings(masked)
-			s.Fixed["url.query."+k] = strings.Join(masked, "\x00")
-			continue
-		}
-		add("url.query."+k, masked[0], strings.ContainsAny(k, ".[]"))
+		addValues(s, "url.query."+k, masked, strings.ContainsAny(k, ".[]"))
 	}
 	for k, v := range p.header {
 		switch {
@@ -279,9 +274,7 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		}
 		s.Fixed["body"] = "form"
 		for k, vs := range form {
-			vs = append([]string(nil), vs...)
-			sort.Strings(vs)
-			add("body."+k, strings.Join(vs, ", "), strings.ContainsAny(k, ".[]"))
+			addValues(s, "body."+k, vs, strings.ContainsAny(k, ".[]"))
 		}
 	case p.mediaType == "multipart/form-data":
 		if !multipartLeaves(p, s.Leaves, s.Fixed) {
@@ -313,6 +306,26 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		}
 	}
 	return s
+}
+
+// addValues adds to s the leaf name of a query parameter or form field sent
+// with the values vs: a key sent once is a leaf of its value; a key sent more
+// than once is one leaf of its values in the order sent (learn.ValuesText,
+// Values), and how many it sends is a fixed part (valuesCount), so a run
+// that sends another number of values is refused there, by name.
+func addValues(s learn.Shape, name string, vs []string, unnamed bool) {
+	l := learn.Leaf{Path: name, Noise: name, Type: learn.String, Value: learn.ValuesText(vs), Unnamed: unnamed}
+	if len(vs) > 1 {
+		l.Values = true
+		s.Fixed[valuesCount(name)] = strconv.Itoa(len(vs))
+	}
+	s.Leaves[name] = l
+}
+
+// valuesCount names the fixed part that holds how many values the key at
+// the leaf name sends, where it sends more than one (addValues).
+func valuesCount(name string) string {
+	return "the number of values of " + name
 }
 
 // declared reports whether keploy.yml's noise may excuse the leaf l as one
@@ -2583,6 +2596,8 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			}
 			words, whole, ok := learn.NoiseWords(r.Value, l.Live.Value)
 			switch {
+			case r.Values && learn.ValuesMoved(r.Value, l.Live.Value):
+				return p, r.Path + " sent its values in another order as well as changing one, so keploy cannot pair each value with the one it changed from, and does not leave a value unchecked that did not change"
 			case !ok:
 				return p, r.Path + " changed in more than its words (a separator moved, or a word came or went), so keploy cannot tell which words of it to leave unchecked, and does not leave the whole text unchecked"
 			case whole:
@@ -3048,8 +3063,8 @@ func earlierOf(dc *learn.DriftCache, m, recorded *models.Mock, rec, live learn.S
 		place, _ := learn.VarPlace(r, jsonReq)
 		e.Seen = append(e.Seen, learn.Seen{Side: learn.Request, Leaf: r, Live: live.Leaves[p].Value, Place: place})
 	}
-	// The parts of the request compared whole (a text or XML body, a
-	// repeated query parameter, a file part), and its JSON body's object
+	// The parts of the request compared whole (a text or XML body, a file
+	// part), and its JSON body's object
 	// keys, are no leaves, and no place a variable binds at: a later value
 	// holding a word of one is accounted against it all the same.
 	if k, ok := learn.KeysLeaf("body", rec.Body); ok {
@@ -3170,8 +3185,8 @@ func sortedFixed(fixed map[string]string) []string {
 
 // fixedText is the text a fixed part of a request's shape (shape) carries,
 // and whether it carries one the app may have made: a body read as text, a
-// repeated query parameter's values, a file part's name and bytes; not the
-// media type or how the body was read.
+// file part's name and bytes; not the media type, how the body was read, or
+// how many values a key sends.
 func fixedText(name, v string) (string, bool) {
 	switch {
 	case name == "body":
@@ -3179,8 +3194,6 @@ func fixedText(name, v string) (string, bool) {
 			return t, true
 		}
 		return "", false
-	case strings.HasPrefix(name, "url.query."):
-		return strings.ReplaceAll(v, "\x00", "\n"), true
 	case strings.HasPrefix(name, "body."):
 		if t, ok := strings.CutPrefix(v, "file "); ok {
 			return strings.Replace(t, "\x00", "\n", 1), true

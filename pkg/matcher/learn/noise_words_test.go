@@ -207,3 +207,111 @@ func TestOneWordIsATextWithNoSeparator(t *testing.T) {
 		}
 	}
 }
+
+// A key sent more than once is one text of its values in the order sent,
+// each value's '%' and '&' escaped, so the text says each value apart: its
+// skeleton holds one '&' between each two values, and its words are each
+// value's words, value by value. A key sent once is its value.
+func TestValuesTextSaysEachValueApart(t *testing.T) {
+	for _, c := range []struct {
+		vs   []string
+		want string
+	}{
+		{[]string{"lead r-1"}, "lead r-1"},
+		{[]string{"a&b"}, "a&b"},
+		{[]string{"lead r-1", "x"}, "lead r-1&x"},
+		{[]string{"a&b", "c"}, "a%26b&c"},
+		{[]string{"a", "b&c"}, "a&b%26c"},
+		{[]string{"50%", "%26"}, "50%25&%2526"},
+		{[]string{"", "x", ""}, "&x&"},
+	} {
+		got := ValuesText(c.vs)
+		if got != c.want {
+			t.Fatalf("ValuesText(%q) = %q; want %q", c.vs, got, c.want)
+		}
+		if len(c.vs) > 1 && !reflect.DeepEqual(valuesOf(got), c.vs) {
+			t.Fatalf("valuesOf(%q) = %q; want %q", got, valuesOf(got), c.vs)
+		}
+	}
+	// Two lists the joined text alone would not tell apart.
+	if ValuesText([]string{"a&b", "c"}) == ValuesText([]string{"a", "b&c"}) {
+		t.Fatal("two lists of other values read as one text")
+	}
+}
+
+// Two runs of a key sent more than once hold the same values when they send
+// the same values in any order, as many times each.
+func TestSameValuesIsTheSameValuesInAnyOrder(t *testing.T) {
+	for _, c := range []struct {
+		a, b []string
+		want bool
+	}{
+		{[]string{"a", "b"}, []string{"b", "a"}, true},
+		{[]string{"a", "b", "a"}, []string{"a", "a", "b"}, true},
+		{[]string{"a", "b"}, []string{"a", "c"}, false},
+		{[]string{"a", "a", "b"}, []string{"a", "b", "b"}, false},
+		{[]string{"a", "b"}, []string{"a", "b", "b"}, false},
+		{[]string{"a&b", "c"}, []string{"c", "a&b"}, true},
+		{[]string{"a&b", "c"}, []string{"a", "b&c"}, false},
+	} {
+		if got := SameValues(ValuesText(c.a), ValuesText(c.b)); got != c.want {
+			t.Fatalf("SameValues(%q, %q) = %v; want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// A value that changed at its place is one the other run sends at another
+// place that changed: the values moved, and no value pairs with the one it
+// changed from. A value changed in place, beside values that kept theirs, did
+// not move.
+func TestValuesMovedIsAChangedValueSentAtAnotherChangedPlace(t *testing.T) {
+	for _, c := range []struct {
+		rec, live []string
+		want      bool
+	}{
+		{[]string{"a1", "b"}, []string{"a2", "b"}, false},
+		{[]string{"a1", "b"}, []string{"b", "a2"}, true},
+		{[]string{"a1", "b", "c"}, []string{"a1", "c", "x"}, true},
+		{[]string{"a1", "b", "c"}, []string{"x", "y", "c"}, false},
+		{[]string{"b", "a1"}, []string{"a2", "b"}, true},
+		{[]string{"a", "a"}, []string{"a", "b"}, false},
+		{[]string{"b", "a1"}, []string{"b", "b"}, false},
+		{[]string{"a1", "b"}, []string{"a1", "b", "c"}, false},
+	} {
+		if got := ValuesMoved(ValuesText(c.rec), ValuesText(c.live)); got != c.want {
+			t.Fatalf("ValuesMoved(%q, %q) = %v; want %v", c.rec, c.live, got, c.want)
+		}
+	}
+}
+
+// Compare reads a key's values sent in another order as the same leaf, and
+// any other change of them as a drift; a leaf of one value, or one side's
+// leaf alone of values, is read by its text. No variable binds at such a
+// leaf.
+func TestCompareReadsAKeysValuesInAnyOrderAsTheSame(t *testing.T) {
+	shape := func(l Leaf) Shape { return Shape{Key: "k", Leaves: map[string]Leaf{l.Path: l}} }
+	values := func(values bool, vs ...string) Leaf {
+		return Leaf{Path: "url.query.id", Noise: "url.query.id", Type: String, Value: ValuesText(vs), Values: values}
+	}
+	for _, c := range []struct {
+		name      string
+		rec, live Leaf
+		drift     bool
+	}{
+		{"the same values in another order", values(true, "a", "b"), values(true, "b", "a"), false},
+		{"a value changed", values(true, "a", "b"), values(true, "a", "c"), true},
+		{"the recording's leaf is no values", values(false, "a", "b"), values(true, "b", "a"), true},
+		{"the call's leaf is no values", values(true, "a", "b"), values(false, "b", "a"), true},
+	} {
+		d := Compare(shape(c.live), shape(c.rec), None)
+		if d.Structural != "" || (len(d.Drift) == 1) != c.drift {
+			t.Fatalf("%s: drift %v, structural %q; want drift %v", c.name, d.Drift, d.Structural, c.drift)
+		}
+	}
+	if _, ok := VarPlace(values(true, "a", "b"), false); ok {
+		t.Fatal("a key's values are a variable's place")
+	}
+	if _, ok := VarPlace(values(false, "a"), false); !ok {
+		t.Fatal("a query value is no variable's place")
+	}
+}

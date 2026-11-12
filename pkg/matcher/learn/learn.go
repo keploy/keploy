@@ -81,6 +81,12 @@ type Leaf struct {
 	// ']'), so nothing can be learned about it, and a drift there is a change
 	// L refuses.
 	Unnamed bool
+	// Values: the leaf is the values of a key sent more than once (a query
+	// parameter, a form field), as one text (ValuesText). Two runs that send
+	// the same values in another order hold the same leaf (SameValues); a
+	// changed one is read value by value, in the order sent. No variable
+	// binds at it (VarPlace): a variable's place holds one value.
+	Values bool
 }
 
 // Shape is one request as L compares it.
@@ -313,7 +319,7 @@ func leafChange(p string, live, rec Shape, known Known) (c leafDiff, l, r Leaf) 
 			return leafSame, l, r
 		}
 		return leafRetyped, l, r
-	case l.Value == r.Value:
+	case l.Value == r.Value || l.Values && r.Values && SameValues(r.Value, l.Value):
 		return leafSame, l, r
 	case excused:
 		// Declared on both sides: a noise entry with patterns constrains

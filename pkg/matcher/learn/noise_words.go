@@ -184,6 +184,74 @@ func WordsAdmit(rec, live string, words []int) bool {
 	return true
 }
 
+// A key sent more than once (a query parameter, a form field) is one place:
+// its values, in the order sent, as one text (ValuesText). Each value's '%'
+// and '&' are escaped (%25, %26) and the values are joined by '&', a
+// separator, so the text says each value apart and its skeleton holds one
+// '&' between each two values. Two runs of the key have one skeleton only
+// where they send as many values, each with its own skeleton: a words
+// pattern learned there names the changed words of each value, value by
+// value in order, and a replay reads it so (WordsAdmit). A value holding '&'
+// reads it inside a word.
+
+// ValuesText is the values vs of one key as one text: a key sent once is its
+// value; a key sent more than once is its values, each escaped, joined by
+// '&', in the order sent.
+func ValuesText(vs []string) string {
+	if len(vs) == 1 {
+		return vs[0]
+	}
+	esc := make([]string, len(vs))
+	for i, v := range vs {
+		esc[i] = strings.ReplaceAll(strings.ReplaceAll(v, "%", "%25"), "&", "%26")
+	}
+	return strings.Join(esc, "&")
+}
+
+// valuesOf is the values a ValuesText of more than one value holds.
+func valuesOf(text string) []string {
+	vs := strings.Split(text, "&")
+	for i, v := range vs {
+		vs[i] = strings.ReplaceAll(strings.ReplaceAll(v, "%26", "&"), "%25", "%")
+	}
+	return vs
+}
+
+// SameValues reports whether two ValuesTexts of a key sent more than once
+// hold the same values, in any order: an application may send a set's
+// values in another order each run, as the request matcher reads them.
+func SameValues(a, b string) bool {
+	av, bv := valuesOf(a), valuesOf(b)
+	slices.Sort(av)
+	slices.Sort(bv)
+	return slices.Equal(av, bv)
+}
+
+// ValuesMoved reports whether, of two ValuesTexts of a key sent more than
+// once (rec as recorded, live as record's full round sent it), a value that
+// changed at its place is a value the other run sends at another place that
+// changed: the values came in another order as well as changing, so no value
+// can be paired with the one it changed from, and keploy checks them rather
+// than leave a value that did not change unchecked.
+func ValuesMoved(rec, live string) bool {
+	rv, lv := valuesOf(rec), valuesOf(live)
+	if len(rv) != len(lv) {
+		return false
+	}
+	changed := map[string]bool{}
+	for i := range rv {
+		if rv[i] != lv[i] {
+			changed[lv[i]] = true
+		}
+	}
+	for i := range rv {
+		if rv[i] != lv[i] && changed[rv[i]] {
+			return true
+		}
+	}
+	return false
+}
+
 // MergeNoise is the learned noise of one place two learnings each learned
 // noise at: existing, and detected. Two words patterns leave unchecked the
 // words either does, their union: both name words of the place's one

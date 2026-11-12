@@ -13,10 +13,10 @@ import (
 // in (variables.Parse): body.<json path>, url.path[<n>], url.query.<name>,
 // header.<name>. ok is false for a leaf no variable place can name: a field
 // of a form or multipart body, a JSON key no path names alone (Unnamed), a
-// whole body that is not JSON. jsonBody says whether the leaf's request (or
+// key's values sent more than once (Values), a whole body that is not JSON. jsonBody says whether the leaf's request (or
 // answer) has a JSON body.
 func VarPlace(l Leaf, jsonBody bool) (string, bool) {
-	if l.Unnamed {
+	if l.Unnamed || l.Values {
 		return "", false
 	}
 	switch {

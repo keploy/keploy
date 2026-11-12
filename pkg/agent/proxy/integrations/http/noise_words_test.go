@@ -116,9 +116,9 @@ func TestLearnMatchATextWhoseSkeletonMovedIsRefusedNotNoise(t *testing.T) {
 // A words pattern names the words of the one text at its key, in the learn
 // step's dialect. It excuses nothing else: not that text whole, named in the
 // request matcher's dialect (body.items[].note), no leaf of a container at
-// its key, and no value of a repeated query parameter or form field (its
-// values are learned as one text, never read so at a replay). Each is
-// compared as it came.
+// its key, and no word of a repeated query parameter's or form field's values
+// but its own (their values are one text, in the order sent: a word of the
+// second value is not the first value's). Each is compared as it came.
 func TestStrictCompareAWordsPatternExcusesNoOtherPlace(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const form = "application/x-www-form-urlencoded"
