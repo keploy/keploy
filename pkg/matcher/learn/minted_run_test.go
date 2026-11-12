@@ -162,6 +162,27 @@ func TestAMintedValuesWordOfUnder32BitsAtAnotherFieldIsChance(t *testing.T) {
 	}
 }
 
+// A run of the minted value's words is weighed by its recorded words, not
+// round F's: the evidence is the recorded text, so a recorded run stands
+// there by chance with the chance its own bits give. The hex key's last two
+// groups "ef56-0789" carry 16 + 13.3 bits as recorded (the last group all
+// digits) and 32 as round F writes them ("5a41-3f2e"). At another field by
+// chance (round F writes "1111-2222" there), the run shows no copy of the
+// key, and the field keeps learning's decision.
+func TestAMintedValuesRunIsWeighedByItsRecordedWords(t *testing.T) {
+	k := rKeys[1]
+	const run = "ef56-0789"
+	if !strings.HasSuffix(k.rec, "-"+run) {
+		t.Fatalf("%s does not end in the run %s", k.rec, run)
+	}
+	for _, refFirst := range []bool{false, true} {
+		in, ref := rIn(k.rec, k.live, "", "", refFirst, true)
+		in.Rec.Leaves[ref] = Leaf{Path: ref, Noise: ref, Type: String, Value: "code " + run + " here"}
+		in.Live.Leaves[ref] = Leaf{Path: ref, Noise: ref, Type: String, Value: "code 1111-2222 here"}
+		mKeptApart(t, k.what+"'s last two groups, 29.3 bits as recorded, at another field (copy first "+strconv.FormatBool(refFirst)+")", Decide(in), ref)
+	}
+}
+
 // A word of the minted value that round F kept (a tenant's) adds no bits:
 // another field that holds it beside a one-letter word of the value holds
 // nothing made anew of the value, so it keeps learning's decision.
