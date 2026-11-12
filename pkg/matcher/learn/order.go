@@ -495,10 +495,20 @@ const tokenBits = 64
 // changed: learned word by word, the next run's key, whose '+' and '/'
 // fall elsewhere, could never be written back. Unless a place shows the
 // whole token, no earlier place may hold any of its words, of any size: a
-// word handed to the call or sent before may be carried inside it. A
-// paired text with a word that stayed ("user-" before an id), or of the
-// URL-safe alphabet, whose '-' and '_' separate an id's parts as often as
-// they are letters of a token, is read word by word as before. ok is false
+// word handed to the call or sent before may be carried inside it. It is
+// one value too, of either alphabet and whatever stayed in it, where an
+// earlier place shows it whole in both runs and it binds whole at a leaf
+// that holds it whole (boundWhole): the call copied it whole, and bound
+// word by word ("kepreq_" and one random run in each run, no '-' or '_' in
+// it), the next run's random part, split by its own '-' and '_', could
+// never be written back (a replay puts the recorded word back and keeps
+// the rest of the new token). Bound whole, the replay holds the whole
+// token to the value bound at that place. Any other paired text, one no
+// earlier place shows whole or one read whole that binds nowhere so (a
+// refusal, a source that holds it inside a longer text), with a word that
+// stayed ("user-" before an id) or of the URL-safe alphabet, whose '-' and
+// '_' separate an id's parts as often as they are letters of a token, is
+// read word by word as before. ok is false
 // where the field is no such token (randomToken: two alphabets mixed,
 // another length or padding, a run that decodes to text).
 func (dc *decider) oneToken(path string, bare variables.Address, rec, live string, rd textReading) (Decision, bool) {
@@ -515,13 +525,39 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 		})
 	}
 	paired := !rd.ChangedShape && len(rd.Separators) == 0 && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 })
+	copied := false
 	if paired && (!stdGroups(rec, live) || len(rd.Words) != len(rd.RecWords) || len(rd.Words) != len(rd.LiveWords) || !shown && held(0)) {
-		return Decision{}, false
+		if !shown {
+			return Decision{}, false
+		}
+		copied = true
 	}
 	if !shown && held(chanceBits) {
 		return Decision{}, false
 	}
-	return dc.word(path, bare, rec, live, rec, whole, false, nil), true
+	d := dc.word(path, bare, rec, live, rec, whole, false, nil)
+	if copied && !dc.boundWhole(d, rec, live) {
+		// Read whole, the token is no copy keploy can bind whole: its
+		// words decide it, as before.
+		return Decision{}, false
+	}
+	return d, true
+}
+
+// boundWhole reports whether d binds the token rec (live in round F) whole
+// at a place whose text at d's bind address is the token in both runs: a
+// leaf that holds it whole, not inside a longer text (an address names one
+// word of a text, or the text whole, never a token of several words in
+// it). A paired token is read whole (oneToken) only so: any other verdict
+// of it whole (a bind inside a longer text, a refusal) leaves it to its
+// words.
+func (dc *decider) boundWhole(d Decision, rec, live string) bool {
+	return d.Outcome == OutcomeValue && slices.ContainsFunc(dc.ps, func(p evPlace) bool {
+		// A text the address does not open reads "", which no token is.
+		r, _ := d.FromAt.WordOf(p.leaf.Value)
+		l, _ := d.FromAt.WordOf(p.live)
+		return p.mock == d.From.Mock && p.path == d.From.Path && p.side == d.From.Side && r == rec && l == live
+	})
 }
 
 // signature decides rd, the signatures of two JWTs (the jwtsig step,
