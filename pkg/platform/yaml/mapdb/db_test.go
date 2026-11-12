@@ -2,7 +2,6 @@ package mapdb
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -10,11 +9,7 @@ import (
 )
 
 func TestMappingDb_DeleteClearsStaleMappings(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "mapdb-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
+	tempDir := t.TempDir()
 
 	logger := zap.NewNop()
 	db := New(logger, tempDir, "mappings")
@@ -29,7 +24,7 @@ func TestMappingDb_DeleteClearsStaleMappings(t *testing.T) {
 			{Name: "mock-2"},
 		},
 	}
-	err = db.UpsertBatch(ctx, testSetID, entries)
+	err := db.UpsertBatch(ctx, testSetID, entries)
 	if err != nil {
 		t.Fatalf("failed to upsert batch: %v", err)
 	}
