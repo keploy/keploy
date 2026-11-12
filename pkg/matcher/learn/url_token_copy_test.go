@@ -178,6 +178,10 @@ func TestOutcomeATokenInAURLPathOrBehindEscapesBindsAtItsToken(t *testing.T) {
 		{"an unpaired token in an answer's Location path, then whole", ur, uf, locThenWhole(ur, uf), "header.Location|urltoken.3"},
 		{"an id of letters and digits in a Location path, then whole", ar, af, locThenWhole(ar, af), "header.Location|urltoken.3"},
 		{"a standard key escaped in a URL's query", kr, kf, oSent(cb+url.QueryEscape(kr), cb+url.QueryEscape(kf)), "body.user|pct|token.4"},
+		// A client may escape any byte (RFC 3986 2.1): a letter of the id's
+		// longest word escaped ("%55" for 'U') hides that word from the
+		// text, which still shows the id behind |pct.
+		{"an unpaired id with a letter of its longest word escaped", ur, uf, oSent(cb+strings.Replace(ur, "U", "%55", 1), cb+strings.Replace(uf, "Z", "%5A", 1)), "body.user|pct|token.4"},
 	} {
 		ds := Decide(oInput("body.cmd.query._id", tc.rec, tc.live, tc.earlier, nil))
 		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].At.Word != -1 || ds[0].Recorded != tc.rec || ds[0].Full != tc.live {
@@ -187,6 +191,18 @@ func TestOutcomeATokenInAURLPathOrBehindEscapesBindsAtItsToken(t *testing.T) {
 		if d := ds[0]; d.From.Mock != "mock-0" || d.From.Path+addrSuffix(d.FromAt) != tc.from {
 			t.Errorf("%s: bound at %s %s%s; want mock-0 %s", tc.name, d.From.Mock, d.From.Path, addrSuffix(d.FromAt), tc.from)
 		}
+	}
+
+	// An earlier place that holds the escaped key at another token in
+	// round F reads it whole at no address: the key binds whole at the
+	// later place that does, never at the earlier one's words.
+	twoPlaces := []Earlier{
+		sent("mock-0", 2*time.Second, seen(Request, "body.user", cb+url.QueryEscape(kr), "https://app.keploy.io/cb?state=1&code="+url.QueryEscape(kf))),
+		sent("mock-1", time.Second, seen(Request, "body.user", cb+url.QueryEscape(kr), cb+url.QueryEscape(kf))),
+	}
+	ds := Decide(oInput("body.cmd.query._id", kr, kf, twoPlaces, nil))
+	if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].At.Word != -1 || ds[0].From.Mock != "mock-1" || ds[0].From.Path+addrSuffix(ds[0].FromAt) != "body.user|pct|token.4" {
+		t.Errorf("an escaped key at another token of an earlier place in round F, then readable: %s; want one Value, the field whole, bound at mock-1 body.user|pct|token.4", oDescribe(ds))
 	}
 
 	// The other way: round F's text holds the token at another token, or
@@ -230,7 +246,7 @@ func TestOutcomeATokenInAURLPathOrBehindEscapesBindsAtItsToken(t *testing.T) {
 	// characters) is read word by word: a word the escapes hide from the
 	// text's own words ("9Lk" of "%2B9Lk") is bound through |pct, never at
 	// the URL whole, which no word of the next run could equal.
-	ds := Decide(oInput("body.cmd.query._id", kr[:42]+"=", kf[:42]+"=", oSent(cb+url.QueryEscape(kr[:42]+"="), cb+url.QueryEscape(kf[:42]+"=")), nil))
+	ds = Decide(oInput("body.cmd.query._id", kr[:42]+"=", kf[:42]+"=", oSent(cb+url.QueryEscape(kr[:42]+"="), cb+url.QueryEscape(kf[:42]+"=")), nil))
 	got := map[string]string{}
 	for _, d := range ds {
 		if d.Outcome == OutcomeValue {
@@ -321,6 +337,8 @@ func TestTokenStepAtNamesATokenOnlyWhereBothRunsHoldTheValue(t *testing.T) {
 		{"an escaped key whole", "q3Zx%2B9Lk%2F2W%3D", "Hk2%2FPq7L%2Bm0%3D", "|pct"},
 		{"an escape in one run alone", "code=q3Zx%2B9Lk%2F2W%3D", "code=Hk2/Pq7L+m0=", "|pct|token.0"},
 		{"a bad escape", "code=q3Zx%2B9Lk%2F2W%3D%", "code=Hk2%2FPq7L%2Bm0%3D", ""},
+		{"an escaped key whole in one run, the first token of a longer text in the other", "q3Zx%2B9Lk%2F2W%3D", "Hk2%2FPq7L%2Bm0%3D&x=1", "|pct|token.0"},
+		{"an escaped key the first token of a longer text in one run, whole in the other", "q3Zx%2B9Lk%2F2W%3D&x=1", "Hk2%2FPq7L%2Bm0%3D", "|pct|token.0"},
 	} {
 		key, kf := v, f
 		if strings.Contains(tc.rec, "%2B") || strings.Contains(tc.live, "+") {
@@ -338,6 +356,7 @@ func TestTokenStepAtNamesATokenOnlyWhereBothRunsHoldTheValue(t *testing.T) {
 	for _, tc := range []struct{ name, rec, live, v, f string }{
 		{"round F's text has no token of that index", "a " + v, "a", v, ""},
 		{"the recording's text has no token of that index", "a", "a " + f, "", f},
+		{"a bad escape in the recording, whose value is empty", "q%zz", "x%2Fy", "", "x/y"},
 	} {
 		if st, ok := tokenStepAt(tc.rec, tc.live, tc.v, tc.f); ok {
 			t.Errorf("%s: tokenStepAt = %v, true; want none", tc.name, st)

@@ -150,7 +150,7 @@ func TestURLTokenStepReadsAndWritesAnIdInAPath(t *testing.T) {
 	}
 	const loc = "/v1/oauth/requests/"
 	a, _ := ParseAddress("header.Location|urltoken.3")
-	if a.Steps[0] != URLToken(3) {
+	if len(a.Steps) != 1 || a.Steps[0] != URLToken(3) {
 		t.Fatalf("header.Location|urltoken.3: steps %v; want urltoken.3", a.Steps)
 	}
 	text := loc + tokRec + "?state=on"
