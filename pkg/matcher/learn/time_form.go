@@ -238,21 +238,23 @@ func AnsweredWhole(earlier []Earlier, mock string, r Leaf) bool {
 // value whole of one claim of the JWT at path (changedInstant.claim), that a
 // replay checks it by (ClaimTimeForm) where the time default is on and the
 // call's adapter checks a claim at replay (Caps.ClaimByForm): its claim's
-// form in both runs, where c is a time of one form (timeFormOf). "" where
-// any of that does not hold: the read is refused as before.
-func (dc *decider) claimForm(path string, c changedInstant) string {
+// form in both runs, and formF the second where the two runs wrote the claim
+// in two (models.FormsOf: a replay passes either), where c is a time
+// (timeFormOf). "" where any of that does not hold: the read is refused as
+// before.
+func (dc *decider) claimForm(path string, c changedInstant) (form, formF string) {
 	if !dc.in.TimeForm || !dc.in.Caps.ClaimByForm || c.claim == "" {
-		return ""
+		return "", ""
 	}
-	if form, _ := dc.timeFormOf(path, c); form == "" {
-		return ""
+	if f, _ := dc.timeFormOf(path, c); f == "" {
+		return "", ""
 	}
 	rec, live := c.leaf()
-	form := ClaimTimeForm(rec, c.claim)
-	if form == "" || ClaimTimeForm(live, c.claim) != form {
-		return ""
+	r, l := ClaimTimeForm(rec, c.claim), ClaimTimeForm(live, c.claim)
+	if r == "" || l == "" {
+		return "", ""
 	}
-	return form
+	return models.FormsOf(r, l)
 }
 
 // ClaimTimeForm is the form (TimeForm) of the value of claim in the JWT
@@ -283,12 +285,13 @@ func ClaimTimeForm(text, claim string) string {
 // HoldsClaimByForm reports whether live, the value a replay's call carries
 // at a place learned as a time in one claim of a JWT (o, with
 // models.ClockOffset.Claim), passes that check: under the time default
-// (timeForm) alone, the claim's value in live's JWT a time of o's form, of
-// its JSON type (ClaimTimeForm). HTTP and MongoDB replays both check such a
+// (timeForm) alone, the claim's value in live's JWT a time of a form o
+// checks by (its Form, or FormF beside it: WrittenAs), of its JSON type
+// (ClaimTimeForm). HTTP and MongoDB replays both check such a
 // place with it, so the two agree; every other part of the token is
 // checked as its own learning says.
 func HoldsClaimByForm(o models.ClockOffset, live string, timeForm bool) bool {
-	return timeForm && o.Form != "" && o.Claim != "" && o.Word.IsZero() && ClaimTimeForm(live, o.Claim) == o.Form
+	return timeForm && o.Form != "" && o.Claim != "" && o.Word.IsZero() && o.WrittenAs(ClaimTimeForm(live, o.Claim))
 }
 
 // formIn is the form rec and live, a time field's leaf as recorded and in

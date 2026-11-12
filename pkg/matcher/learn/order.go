@@ -2794,20 +2794,28 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 	}
 	if c.text {
 		lay := models.ClockOffset{Layout: clockTextLayout(r)}.MeetLayout(clockTextLayout(l))
-		if lay == "" || lay == models.LayoutApart {
-			return dc.cannotCheck(path, at, n, r, l, "its two runs write it in different layouts")
-		}
+		apart := lay == "" || lay == models.LayoutApart
 		if c.noWord != "" {
-			if form := dc.claimForm(path, c); form != "" {
+			if form, formF := dc.claimForm(path, c); form != "" {
 				// The time default checks a time in a claim of a token the
-				// application signed by its form alone, at that claim.
-				off.Layout, off.Form, off.Claim = lay, form, c.claim
-				rule = "a time in the " + c.claim + " claim of a JWT, checked by its form alone (" + form + ", keploy.yml's times setting at its default), the rest of the token checked as learned; learned as " + rule
+				// application signed by its form alone, at that claim: its
+				// claim's forms say how a run writes it, so one its two runs
+				// wrote in two layouts names none (a Layout of "" meets any).
+				if apart {
+					lay = ""
+				}
+				off.Layout, off.Form, off.FormF, off.Claim = lay, form, formF, c.claim
+				rule = "a time in the " + c.claim + " claim of a JWT, checked by its form alone (" + off.Forms() + ", keploy.yml's times setting at its default), the rest of the token checked as learned; learned as " + rule
 				d := dc.learned(path, at, n, r, l, OutcomeClock, rule, c.aside)
 				off.Why = d.Line
 				d.Clock = &off
 				return d
 			}
+		}
+		if apart {
+			return dc.cannotCheck(path, at, n, r, l, "its two runs write it in different layouts")
+		}
+		if c.noWord != "" {
 			return dc.cannotCheck(path, at, n, r, l, "a replay checks a clock read inside a text only as one word of the text as recorded, and "+c.noWord)
 		}
 		off.Layout, off.Word = lay, c.word
