@@ -62,12 +62,19 @@ func kpRun(t *testing.T, proven string, mocks []*models.Mock, calls []*req) (*le
 // kpRunNoise is kpRun under keploy.yml's url noise urlNoise.
 func kpRunNoise(t *testing.T, proven string, urlNoise []string, mocks []*models.Mock, calls []*req) (*learnDb, []*models.Mock) {
 	t.Helper()
+	return kpRunWith(t, proven, nil, urlNoise, mocks, calls)
+}
+
+// kpRunWith is kpRun under keploy.yml's body noise bodyNoise and url noise
+// urlNoise.
+func kpRunWith(t *testing.T, proven string, bodyNoise map[string][]string, urlNoise []string, mocks []*models.Mock, calls []*req) (*learnDb, []*models.Mock) {
+	t.Helper()
 	h, _, opts := learnOn(t)
 	t.Setenv(provenswitch.Env, proven)
 	if provenswitch.On() != (proven == "1") {
 		t.Fatalf("the proven switch reads %v under %s=%q", provenswitch.On(), provenswitch.Env, proven)
 	}
-	n := h.newLearnNoise(opts, nil, urlNoise)
+	n := h.newLearnNoise(opts, bodyNoise, urlNoise)
 	recBegin := learnAt.Add(time.Second)
 	began := learnAt.Add(10 * time.Minute)
 	tr := learn.NewTracker()
@@ -164,7 +171,10 @@ func TestReadBackAnswersAGetWithWhatTheTestPut(t *testing.T) {
 // Read back only where the two calls name one resource, and the GET's
 // recorded answer is what the PUT stored: a GET of another key, a GET whose
 // recorded answer was not 200, and a write after the PUT that keploy does
-// not follow (a DELETE) each leave the GET's answer as recorded.
+// not follow (a DELETE) each leave the GET's answer as recorded. A call to
+// the URL that is no GET is no read: a POST answered 200 with the record's
+// envelope, whose body sent the repository the client test sent (so its
+// learn step pairs it, as a call that drifted), is answered as recorded.
 func TestReadBackOfAPutFailsClosed(t *testing.T) {
 	const other = "8d2cc73e-0b5d-46b0-b576-fb5967f22915"
 	recordedAnswer := kpGetAnswer(kpRecKey, kpRecBy, kpRecNano)
@@ -189,6 +199,18 @@ func TestReadBackOfAPutFailsClosed(t *testing.T) {
 			})
 			if got := served[1].Spec.HTTPResp.Body; got != recordedAnswer {
 				t.Fatalf("a GET answered 203 answered %s, want its recording", got)
+			}
+		})
+		t.Run("proven="+proven+"/post-is-no-read", func(t *testing.T) {
+			mocks := kpMocks(recordedAnswer)
+			repo := func(nano string) string { return `{"repo":"octo-org/repo-` + nano + `"}` }
+			mocks[1] = learnRecorded("mock-1", 1300*time.Millisecond, "POST", kpPath(kpRecKey), repo(kpRecNano), kpVault, recordedAnswer)
+			_, served := kpRun(t, proven, mocks, []*req{
+				live("PUT", kpPath(kpRecKey), kpPut(kpRecKey, kpLiveBy, kpLiveNano), kpVault),
+				live("POST", kpPath(kpRecKey), repo(kpLiveNano), kpVault),
+			})
+			if got := served[1].Spec.HTTPResp.Body; got != recordedAnswer {
+				t.Fatalf("a POST after the PUT answered %s, want its recording", got)
 			}
 		})
 		t.Run("proven="+proven+"/deleted-after", func(t *testing.T) {
