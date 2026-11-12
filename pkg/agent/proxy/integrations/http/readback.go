@@ -216,8 +216,10 @@ func wordUsedAt(vars models.MockVariables, place, value string) (string, int, bo
 	words := variables.Words(value)
 	for k, v := range vars {
 		for _, u := range v.Use {
-			path, at, ok := strings.Cut(u, "#")
-			if !ok || path != place {
+			// A use at a whole place has no "#", and its word "" reads
+			// no index.
+			path, at, _ := strings.Cut(u, "#")
+			if path != place {
 				continue
 			}
 			i, err := strconv.Atoi(at)

@@ -56,12 +56,18 @@ var kpVault = map[string]string{"X-Vault-Request": "true"}
 // each call consumed, and the answers served.
 func kpRun(t *testing.T, proven string, mocks []*models.Mock, calls []*req) (*learnDb, []*models.Mock) {
 	t.Helper()
+	return kpRunNoise(t, proven, nil, mocks, calls)
+}
+
+// kpRunNoise is kpRun under keploy.yml's url noise urlNoise.
+func kpRunNoise(t *testing.T, proven string, urlNoise []string, mocks []*models.Mock, calls []*req) (*learnDb, []*models.Mock) {
+	t.Helper()
 	h, n, opts := learnOn(t)
 	t.Setenv(provenswitch.Env, proven)
 	if provenswitch.On() != (proven == "1") {
 		t.Fatalf("the proven switch reads %v under %s=%q", provenswitch.On(), provenswitch.Env, proven)
 	}
-	n = h.newLearnNoise(opts, nil, nil)
+	n = h.newLearnNoise(opts, nil, urlNoise)
 	recBegin := learnAt.Add(time.Second)
 	began := learnAt.Add(10 * time.Minute)
 	tr := learn.NewTracker()

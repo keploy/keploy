@@ -86,14 +86,17 @@ func putFollows(read, call *models.Mock) bool {
 }
 
 // putAccess is what HTTP's own store reads of read, a GET (putReads), and
-// calls, the test's calls to its URL before it in the order served
-// (putFollows), each with its recorded answer. earlier holds the exchanges
+// calls, the test's calls to its URL before it in the order served, each
+// with its recorded answer: readBackPlan passes only the calls putFollows
+// names, so each call names read's resource. earlier holds the exchanges
 // the test served, which hold each call's live request; live is read's live
 // request as the learn step reads it. ok is false where read was not
 // answered 200.
 func putAccess(read *models.Mock, calls []*models.Mock, earlier []learn.Earlier, live learn.Shape) (models.HTTPStoreAccess, bool) {
-	target, ok := putTarget(read)
-	if !ok || read.Spec.HTTPResp == nil || read.Spec.HTTPResp.StatusCode != http.StatusOK {
+	// readBackPlan passes only a read putReads names, whose resource
+	// putTarget names.
+	target, _ := putTarget(read)
+	if read.Spec.HTTPResp == nil || read.Spec.HTTPResp.StatusCode != http.StatusOK {
 		return models.HTTPStoreAccess{}, false
 	}
 	a := models.HTTPStoreAccess{Written: make([]map[string]string, len(calls)), Read: map[string]string{}}
@@ -103,9 +106,6 @@ func putAccess(read *models.Mock, calls []*models.Mock, earlier []learn.Earlier,
 		}
 	}
 	for i, c := range calls {
-		if t, ok := putTarget(c); !ok || t != target {
-			continue
-		}
 		switch c.Spec.HTTPReq.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 			continue
@@ -141,10 +141,8 @@ func putAccess(read *models.Mock, calls []*models.Mock, earlier []learn.Earlier,
 // body's, by the learn step's paths. ok is false for a body that is no JSON
 // object or array.
 func putStored(c *models.Mock) ([]string, bool) {
-	v, ok := learn.DecodeJSON([]byte(c.Spec.HTTPReq.Body))
-	if !ok {
-		return nil, false
-	}
+	// A body that is no JSON decodes to nil, which is neither.
+	v, _ := learn.DecodeJSON([]byte(c.Spec.HTTPReq.Body))
 	switch v.(type) {
 	case map[string]interface{}, []interface{}:
 	default:
@@ -179,15 +177,16 @@ func urlLeaf(path string) bool {
 // sameLiveURL reports whether e, an exchange served earlier, went in this
 // run to the URL live went to: each leaf of its URL holds the live value
 // live holds there, and live has no other. e with no URL leaf (none served)
-// went to none.
+// went to none. Only a request's leaves are a URL's (an answer's are its
+// status, its headers' and its body's).
 func sameLiveURL(e learn.Earlier, live learn.Shape) bool {
 	n := 0
 	for _, s := range e.Seen {
-		if s.Side != learn.Request || !urlLeaf(s.Leaf.Path) {
+		if !urlLeaf(s.Leaf.Path) {
 			continue
 		}
-		l, ok := live.Leaves[s.Leaf.Path]
-		if !ok || l.Value != s.Live {
+		// A leaf live lacks reads "" here, and is counted below.
+		if live.Leaves[s.Leaf.Path].Value != s.Live {
 			return false
 		}
 		n++
