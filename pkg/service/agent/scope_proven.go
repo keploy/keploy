@@ -1292,10 +1292,27 @@ func (a *Agent) answerAsRecorded(id string, worker uint32, asRecorded []models.S
 		if !handed {
 			return &asRecorded[i]
 		}
-		a.logger.Info(fmt.Sprintf("keploy: %s receives %d values %s makes (%s) only in answers; %s has not run before it in this replay, so they are answered as recorded",
-			id, len(n.Answers), n.Test, strings.Join(n.Answers, ", "), n.Test))
+		a.logger.Info(answeredAsRecordedLine(id, n))
 	}
 	return nil
+}
+
+// answeredAsRecordedLine is the line answerAsRecorded says for test id's
+// answer-only need n: the values id receives from n.Test, which has not run
+// before it, or, for a need that names no test (no recording in this run
+// sends them), the values alone.
+func answeredAsRecordedLine(id string, n models.ScopeNeed) string {
+	values, they := fmt.Sprintf("%d values", len(n.Answers)), "they are"
+	if len(n.Answers) == 1 {
+		values, they = "1 value", "it is"
+	}
+	names := strings.Join(n.Answers, ", ")
+	if n.Test == "" {
+		return fmt.Sprintf("keploy: %s receives %s that no recording in this run sends (%s) only in answers, so %s answered as recorded",
+			id, values, names, they)
+	}
+	return fmt.Sprintf("keploy: %s receives %s %s makes (%s) only in answers; %s has not run before it in this replay, so %s answered as recorded",
+		id, values, n.Test, names, n.Test, they)
 }
 
 // ProvenBegin opens a test (design v14 §5.3). The run must be claimed; the

@@ -48,7 +48,7 @@ func (p *answeringProxy) hands() []string {
 // begin of it left.
 func TestAnAnswerOnlyNeedRunsTheTestAndAnswersAsRecorded(t *testing.T) {
 	ctx := context.Background()
-	const slow, made = "run-appId0-13", "run-appId0-7"
+	const slow, made, gone, gone2 = "run-appId0-13", "run-appId0-7", "run-appId0-9", "run-appId0-11"
 	whySlow := "keploy: set aside: o::TestCI uses a value o::TestSlow sends (run-appId0-13, 8 characters), and o::TestSlow has not run before it in this replay"
 	whySends := "keploy: set aside: o::TestSends uses a value o::TestSlow sends (run-appId0-13, 8 characters), and o::TestSlow has not run before it in this replay"
 	needs := map[string][]models.ScopeNeed{
@@ -56,9 +56,11 @@ func TestAnAnswerOnlyNeedRunsTheTestAndAnswersAsRecorded(t *testing.T) {
 			{Test: "o::TestMake", Reason: "make", Answers: []string{made}},
 			{Test: "o::TestSlow", Reason: whySlow, Answers: []string{slow}},
 		},
-		"o::TestSends": {{Test: "o::TestSlow", Reason: whySends}},
-		"o::TestBoth":  {{Test: "o::TestSlow", Reason: "receives", Answers: []string{slow}}, {Test: "o::TestSlow", Reason: "sends"}},
-		"o::TestGated": {{Test: "o::TestSlow", Reason: "receives", Answers: []string{slow}}},
+		"o::TestSends":    {{Test: "o::TestSlow", Reason: whySends}},
+		"o::TestBoth":     {{Test: "o::TestSlow", Reason: "receives", Answers: []string{slow}}, {Test: "o::TestSlow", Reason: "sends"}},
+		"o::TestGated":    {{Test: "o::TestSlow", Reason: "receives", Answers: []string{slow}}},
+		"o::TestNoSender": {{Reason: "nosender", Answers: []string{gone2, gone}}},
+		"o::TestOneGone":  {{Reason: "nosender", Answers: []string{gone}}},
 	}
 	setup := func(t *testing.T, mode models.Mode, answers bool) (*Agent, *answeringProxy, *observer.ObservedLogs) {
 		t.Helper()
@@ -97,13 +99,21 @@ func TestAnAnswerOnlyNeedRunsTheTestAndAnswersAsRecorded(t *testing.T) {
 		require.Equal(t, []string{"o::TestMake: "}, ap.hands(), "a test with no such need hands none")
 		require.Empty(t, run(t, a, "TestCI").Action, "a test that only receives the values of a test not run runs")
 		require.Equal(t, []string{"o::TestCI: " + slow}, ap.hands(), "only the values of the test that has not run are handed")
-		require.Equal(t, []string{"keploy: o::TestCI receives 1 values o::TestSlow makes (" + slow + ") only in answers; o::TestSlow has not run before it in this replay, so they are answered as recorded"},
+		require.Equal(t, []string{"keploy: o::TestCI receives 1 value o::TestSlow makes (" + slow + ") only in answers; o::TestSlow has not run before it in this replay, so it is answered as recorded"},
 			answered(logs))
+		require.Empty(t, run(t, a, "TestNoSender").Action, "a test that only receives values no recording sends runs")
+		require.Equal(t, []string{"o::TestNoSender: " + gone2 + "," + gone}, ap.hands())
+		require.Empty(t, run(t, a, "TestOneGone").Action)
+		require.Equal(t, []string{"o::TestOneGone: " + gone}, ap.hands())
+		require.Equal(t, []string{
+			"keploy: o::TestNoSender receives 2 values that no recording in this run sends (" + gone2 + ", " + gone + ") only in answers, so they are answered as recorded",
+			"keploy: o::TestOneGone receives 1 value that no recording in this run sends (" + gone + ") only in answers, so it is answered as recorded",
+		}, answered(logs)[1:], "a need that names no test reads as values no recording sends")
 		require.Equal(t, models.ScopeBeginResp{V: 1, Status: "ok", Action: models.ScopeActionSkip, Reason: whySends}, run(t, a, "TestSends"), "a test that sends the value is set aside")
 		require.Equal(t, "sends", run(t, a, "TestBoth").Reason, "a test that sends the value beside receiving it is set aside")
 		require.Equal(t, "listed", run(t, a, "TestGated").Reason)
 		require.Empty(t, ap.hands(), "a test set aside hands nothing")
-		require.Len(t, answered(logs), 1, "a test set aside says it is answered as recorded")
+		require.Len(t, answered(logs), 3, "a test set aside does not say it is answered as recorded")
 		require.Equal(t, models.ScopeOutcomeUnmet, windowOf(t, a, "o::TestSends").Outcome)
 	})
 
@@ -111,6 +121,7 @@ func TestAnAnswerOnlyNeedRunsTheTestAndAnswersAsRecorded(t *testing.T) {
 		a, _, logs := setup(t, models.MODE_TEST, false)
 		require.Empty(t, run(t, a, "TestMake").Action, "a test with no such need runs")
 		require.Equal(t, models.ScopeBeginResp{V: 1, Status: "ok", Action: models.ScopeActionSkip, Reason: whySlow}, run(t, a, "TestCI"), "fail closed: the test waits on the test not run")
+		require.Equal(t, "nosender", run(t, a, "TestNoSender").Reason, "fail closed: a test that only receives values no recording sends is set aside")
 		require.Empty(t, answered(logs))
 		require.Equal(t, models.ScopeOutcomeUnmet, windowOf(t, a, "o::TestCI").Outcome)
 	})

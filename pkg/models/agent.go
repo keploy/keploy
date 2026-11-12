@@ -309,7 +309,9 @@ type ScopeNeed struct {
 	// answers each at its answer places with its recorded value, which no
 	// check of the test's requests reads. A proxy that cannot answer them
 	// so skips the test with Reason, as does an agent that predates the
-	// field.
+	// field. An answer-only need may name no Test: no recording in this
+	// run sends those values, so no test begins with them and the agent
+	// always answers them as recorded.
 	Answers []string `json:"answers,omitempty"`
 }
 
