@@ -64,7 +64,7 @@ func TestBoundValuesAtReadsTheBindingsOfTheTestTheCallWasMarkedIn(t *testing.T) 
 	// not the scope's of its test's next run (a retry cycle), which a mark
 	// by the test's name alone reads while it runs.
 	var first uint64
-	tb.StartOpeningScope("test-1", func(scope uint64) { first = scope }, nil, nil, nil)
+	tb.StartOpeningScope("test-1", func(scope uint64) { first = scope }, nil, nil, nil, nil)
 	tb.Bind(variables.Binding{Name: "key", Value: "first", Recorded: "rec-1", Mock: "own-1", Place: "body.key"})
 	tb.StartOpeningTest("test-1", func() {}, nil, nil, nil)
 	tb.Bind(variables.Binding{Name: "key", Value: "again", Recorded: "rec-1", Mock: "own-1", Place: "body.key"})

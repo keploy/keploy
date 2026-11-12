@@ -251,6 +251,15 @@ func (s instanceExact) OpenExactTestConcurrent(test string, owned, cands []*mode
 	return s.open(func(m *MockManager) { m.OpenExactTestConcurrent(test, owned, cands, given) })
 }
 
+func (s instanceExact) AnswerAsRecordedAtOpen(test string, names []string) error {
+	m, err := s.mgr()
+	if err != nil {
+		return err
+	}
+	m.AnswerAsRecordedAtOpen(test, names)
+	return nil
+}
+
 func (s instanceExact) GiveExactTest(test string, b models.VariableBinding) error {
 	m, err := s.mgr()
 	if err != nil {
@@ -320,6 +329,7 @@ func (s instanceExact) ExactTestSkippedReads() (string, []string) {
 }
 
 var _ agent.ExactSkippedReadsReader = instanceExact{}
+var _ agent.ExactTestAnswerer = instanceExact{}
 
 var (
 	_ agent.ExactServer           = instanceExact{}

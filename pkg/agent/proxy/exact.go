@@ -1689,6 +1689,42 @@ type pendingNotes struct {
 	notes map[string]string
 }
 
+// AnswerAsRecordedAtOpen leaves, for the scope of test's variables to begin
+// with as its variables begin (OpenExactTest, OpenExactTestConcurrent), the
+// run's variables test receives from earlier tests only in answers, which
+// this replay did not run before it: while one is not bound in that scope,
+// its answer places are answered with its recorded value
+// (variables.Table.AnsweredAsRecorded). The agent gives them before it opens
+// the test's view (the agent's ProvenBegin), as it gives a client test's
+// cases (NoteExactTestAtOpen), which set notes apart from these. The next
+// call replaces them, and the next open of any test's variables takes them:
+// another test's drops them.
+func (m *MockManager) AnswerAsRecordedAtOpen(test string, names []string) {
+	m.caseNotesMu.Lock()
+	defer m.caseNotesMu.Unlock()
+	m.asRecorded = pendingAnswers{test: test, names: slices.Clone(names)}
+}
+
+// takeAsRecorded returns the variables left for test's scope to answer as
+// recorded (AnswerAsRecordedAtOpen), and leaves none for any.
+func (m *MockManager) takeAsRecorded(test string) []string {
+	m.caseNotesMu.Lock()
+	defer m.caseNotesMu.Unlock()
+	a := m.asRecorded
+	m.asRecorded = pendingAnswers{}
+	if a.test != test {
+		return nil
+	}
+	return a.names
+}
+
+// pendingAnswers are the variables the scope of test's variables answers as
+// recorded (AnswerAsRecordedAtOpen).
+type pendingAnswers struct {
+	test  string
+	names []string
+}
+
 // ServeExactTestConcurrent is ServeExactTest for a test that shares
 // recordings with the tests whose requests were open beside its own at
 // record time (keploy record's full round, models.ExactServing.Concurrent):
@@ -1794,8 +1830,9 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		// of vars, and so locks vars first (variables.Table.ReadRunOf).
 		// The scope is test's: what it binds itself is test's once the next
 		// begins (variables.Table.EndedOf). It begins with the notes left
-		// for it (NoteExactTestAtOpen).
-		m.vars.StartOpeningScope(test, install, given, m.carriedInto(v), m.takeCaseNotes(test))
+		// for it (NoteExactTestAtOpen), and the variables it answers as
+		// recorded (AnswerAsRecordedAtOpen).
+		m.vars.StartOpeningScope(test, install, given, m.carriedInto(v), m.takeCaseNotes(test), m.takeAsRecorded(test))
 		m.aheadVars.Reset()
 	} else {
 		m.vars.InScope(install)

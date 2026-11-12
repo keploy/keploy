@@ -1277,7 +1277,7 @@ func TestTableOwnInIsTheScopeTheCallWasMadeIn(t *testing.T) {
 	}
 	open := func(test string) uint64 {
 		var n uint64
-		tb.StartOpeningScope(test, func(scope uint64) { n = scope }, nil, nil, nil)
+		tb.StartOpeningScope(test, func(scope uint64) { n = scope }, nil, nil, nil, nil)
 		if got := inScope(); got != n {
 			t.Fatalf("premise: open told scope %d, InScope after the begin says %d", n, got)
 		}

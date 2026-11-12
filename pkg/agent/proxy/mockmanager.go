@@ -287,6 +287,10 @@ type MockManager struct {
 	// with (NoteExactTestAtOpen), under caseNotesMu.
 	caseNotesMu sync.Mutex
 	caseNotes   pendingNotes
+	// asRecorded are the run's variables the next scope of a test's
+	// variables answers as recorded (AnswerAsRecordedAtOpen), under
+	// caseNotesMu.
+	asRecorded pendingAnswers
 
 	// exact is exact serving, under the proven switch (exact.go): when on,
 	// it decides what every read shows and which consume succeeds.

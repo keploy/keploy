@@ -1268,6 +1268,36 @@ func (a *Agent) giveClientCases(id string, worker uint32, overlaps bool) {
 	taker.TakeClientCases(id, cases)
 }
 
+// answerAsRecorded hands worker's proxy, before test id opens, the run's
+// variables the answer-only needs of id whose tests have not begun (asRecorded,
+// models.ScopeNeed.Answers) name, for id's scope to answer as recorded
+// (coreAgent.ExactTestAnswerer), and says so in one line per such test. With
+// none, it hands none, so nothing left by an earlier begin of id that did not
+// open stays. It returns the first of them when the proxy could not take
+// them, which id then waits on, and nil otherwise.
+func (a *Agent) answerAsRecorded(id string, worker uint32, asRecorded []models.ScopeNeed) *models.ScopeNeed {
+	var names []string
+	for _, n := range asRecorded {
+		names = append(names, n.Answers...)
+	}
+	slices.Sort(names)
+	names = slices.Compact(names)
+	// A worker keploy serves no mocks of its own to has no server (nil).
+	es, _ := a.exactServerOf(worker)
+	handed := false
+	if r, ok := es.(coreAgent.ExactTestAnswerer); ok {
+		handed = r.AnswerAsRecordedAtOpen(id, names) == nil
+	}
+	for i, n := range asRecorded {
+		if !handed {
+			return &asRecorded[i]
+		}
+		a.logger.Info(fmt.Sprintf("keploy: %s receives %d values %s makes (%s) only in answers; %s has not run before it in this replay, so they are answered as recorded",
+			id, len(n.Answers), n.Test, strings.Join(n.Answers, ", "), n.Test))
+	}
+	return nil
+}
+
 // ProvenBegin opens a test (design v14 §5.3). The run must be claimed; the
 // harness must say it can skip; a second test while one is open is refused;
 // in a replay a gated test is answered skip, and opens nothing.
@@ -1331,11 +1361,19 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	reason, gated := a.proven.skip[id]
 	outcome := models.ScopeOutcomeGated
 	// A test whose call holds a value an earlier test's call sends runs
-	// only after that test began in this replay.
+	// only after that test began in this replay. One that only receives
+	// the earlier test's values, in answers, runs without it: they are
+	// answered as recorded (answerAsRecorded).
+	var asRecorded []models.ScopeNeed
 	for _, n := range a.proven.needs[id] {
-		if !gated && !a.proven.began[n.Test] {
-			reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
+		if gated || a.proven.began[n.Test] {
+			continue
 		}
+		if len(n.Answers) > 0 {
+			asRecorded = append(asRecorded, n)
+			continue
+		}
+		reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
 	}
 	// The process whose hooks must carry the test is the one that claimed
 	// it: its worker's, or the run's.
@@ -1344,6 +1382,13 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		claimer = w.pid
 	}
 	a.provenMu.Unlock()
+	if a.replaying() && !gated {
+		// A proxy that cannot answer them as recorded would refuse each
+		// answer: the test waits on those tests, as each need says.
+		if n := a.answerAsRecorded(id, worker, asRecorded); n != nil {
+			reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
+		}
+	}
 	if a.replaying() && gated {
 		a.noteScopeNotRun(id, 0, at, outcome)
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
