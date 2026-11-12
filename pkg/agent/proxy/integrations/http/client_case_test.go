@@ -40,6 +40,17 @@ func TestAClientTestCasesRequestIsReadAtItsVariablesPlace(t *testing.T) {
 	}
 	beatRec := beat(bearer(`{"cid":"e2e-free-company","cluster_id":"6af47add8a9351dfdb7c457a","iat":1794407071}`, "recorded-signature"))
 	beatLive := beat(bearer(`{"cid":"e2e-free-company","cluster_id":"6af47b1e0c22d4e8a91b03f6","iat":1794407138}`, "this-run-signature"))
+	// api-server's TestStaffBlockAnOAuthClient: the token request's
+	// URL-encoded form, kept decoded, sends the redirect URI the client
+	// registered under a host named by a UnixNano (test case
+	// post-oauth-token-8).
+	token := func(ct, nanos, more string) *models.HTTPReq {
+		return &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/token", Header: map[string]string{"Content-Type": ct},
+			Body: "client_id=mcp_1c2a&grant_type=authorization_code&redirect_uri=https://cb.e2e-" + nanos + ".blocked.example/callback" + more}
+	}
+	const form = "application/x-www-form-urlencoded"
+	tokenRec := token(form, "1794313743296254249", "")
+	tokenURI := "https://cb.e2e-1794313812299254249.blocked.example/callback"
 	for _, tc := range []struct {
 		name            string
 		rec, live       *models.HTTPReq
@@ -71,6 +82,17 @@ func TestAClientTestCasesRequestIsReadAtItsVariablesPlace(t *testing.T) {
 		{name: "a JWT claim the live token does not hold", rec: beatRec, live: beat(bearer(`{"cid":"e2e-free-company","iat":1794407138}`, "this-run-signature")), place: "header.Authorization|jwt.cluster_id#0", recorded: "6af47add8a9351dfdb7c457a", why: "it holds no value at header.Authorization|jwt.cluster_id#0 this run"},
 		{name: "a live header that is no JWT", rec: beatRec, live: beat(map[string]string{"Authorization": "Bearer opaque-token"}), place: "header.Authorization|jwt.cluster_id#0", recorded: "6af47add8a9351dfdb7c457a", why: "it holds no value at header.Authorization|jwt.cluster_id#0 this run"},
 		{name: "a number the live request does not send", rec: slowRec, live: live(slowRec.URL, "", `{"req_id":"a20b6921-24c6-4a03-bcf9-b409842a88d0","status":200}`), place: "body.response_time", recorded: "42597640", why: "it holds no value at body.response_time this run"},
+		{name: "a form's field", rec: tokenRec, live: token(form, "1794313812299254249", ""), place: "body.redirect_uri", recorded: "https://cb.e2e-1794313743296254249.blocked.example/callback", value: tokenURI},
+		{name: "a word of a form's field", rec: tokenRec, live: token(form+"; charset=utf-8", "1794313812299254249", ""), place: "body.redirect_uri#3", recorded: "1794313743296254249", value: "1794313812299254249"},
+		{name: "a form's field recorded with another value", rec: tokenRec, live: token(form, "1794313812299254249", ""), place: "body.client_id", recorded: "mcp_9", why: `its recording does not hold the variable's recorded value "mcp_9" at body.client_id`},
+		{name: "a form's field sent twice this run", rec: tokenRec, live: token(form, "1794313812299254249", "&redirect_uri=https://x"), place: "body.redirect_uri", recorded: "https://cb.e2e-1794313743296254249.blocked.example/callback", why: "it holds no value at body.redirect_uri this run"},
+		{name: "a form's field recorded twice", rec: token(form, "1794313743296254249", "&redirect_uri=https://x"), live: token(form, "1794313812299254249", ""), place: "body.redirect_uri", recorded: "https://cb.e2e-1794313743296254249.blocked.example/callback", why: "its recording does not hold"},
+		{name: "a form's field, sent as no form this run", rec: tokenRec, live: token("text/plain", "1794313812299254249", ""), place: "body.redirect_uri", recorded: "https://cb.e2e-1794313743296254249.blocked.example/callback", why: "it holds no value at body.redirect_uri this run"},
+		{name: "a form's field, recorded as no form", rec: token("text/plain", "1794313743296254249", ""), live: token(form, "1794313812299254249", ""), place: "body.redirect_uri", recorded: "https://cb.e2e-1794313743296254249.blocked.example/callback", why: "its recording does not hold"},
+		{name: "a form holds no element", rec: tokenRec, live: token(form, "1794313812299254249", ""), place: "body[0]", recorded: "client_id=mcp_1c2a", why: "its recording does not hold"},
+		{name: "a form's header", rec: tokenRec, live: token(form, "1794313812299254249", ""), place: "header.Content-Type", recorded: form, value: form},
+		{name: "a form's unnamed field is no element", rec: token(form, "1794313743296254249", "&=0"), live: token(form, "1794313812299254249", "&=1"), place: "body[0]", recorded: "0", why: "its recording does not hold"},
+		{name: "a form holds no nested field", rec: tokenRec, live: token(form, "1794313812299254249", ""), place: "body.redirect_uri.x", recorded: "https://cb.e2e-1794313743296254249.blocked.example/callback", why: "its recording does not hold"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			value, why := RequestPlace(tc.rec, tc.live, tc.place, tc.recorded)

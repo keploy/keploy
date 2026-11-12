@@ -2,6 +2,7 @@ package learn
 
 import (
 	"encoding/base64"
+	"maps"
 	"mime"
 	"net/url"
 	"slices"
@@ -145,7 +146,7 @@ const strayRequest = "the test case's request reached the agent while no test wa
 // query's values (url.path.<i>, url.query.<key>), never its scheme, host or
 // port, where the application is reached; a JSON body's leaves too, ahead of
 // the body whole, so a reason names the leaf, and its object keys
-// (KeysLeaf); the text a body kept as the base64 of its bytes holds
+// (KeysLeaf); a URL-encoded form's fields so too (formSeen); the text a body kept as the base64 of its bytes holds
 // (binaryText), beside the base64; the names of its query
 // parameters, headers and form fields (request{names}); and none of what
 // addresses or frames it (a Host, an :authority or a :scheme header, a
@@ -213,6 +214,8 @@ func GivenRequest(req *models.TestRequest) Earlier {
 				}
 				continue
 			}
+		case part.Name == "body" && FormMedia(recMedia):
+			e.Seen = append(e.Seen, formSeen(part.Recorded, part.Sent, FormMedia(sentMedia))...)
 		case part.Name == "body":
 			e.Seen = append(e.Seen, jsonSeen(part.Recorded, part.Sent)...)
 		case part.Name == "binary":
@@ -527,6 +530,60 @@ func jsonSeen(recorded, sent string) []Seen {
 			lk, _ = KeysLeaf("body", lv)
 		}
 		out = append(out, Seen{Side: Request, Leaf: k, Live: lk.Value})
+	}
+	return out
+}
+
+// FormMedia reports whether ct, a Content-Type, declares a URL-encoded form
+// (application/x-www-form-urlencoded, any parameters after it).
+func FormMedia(ct string) bool {
+	mt, _, err := mime.ParseMediaType(ct)
+	return err == nil && mt == "application/x-www-form-urlencoded"
+}
+
+// FormFields are the fields of body, a URL-encoded form as keploy keeps a
+// test case's: decoded (its capture unescapes the whole body), so each
+// "&" ends a field and the first "=" in it its name. A field sent more than
+// once is left out: no one of its values is the field's. The split is the
+// same in every run, the learn step's and the replay's, so a value whose
+// encoded "&" or "=" the decoding exposed reads split at it alike in both,
+// and a variable bound at such a part binds that part.
+func FormFields(body string) map[string]string {
+	out, seen := map[string]string{}, map[string]bool{}
+	for _, field := range strings.Split(body, "&") {
+		if field == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(field, "=")
+		if seen[k] {
+			delete(out, k)
+			continue
+		}
+		seen[k] = true
+		out[k] = v
+	}
+	return out
+}
+
+// formSeen are the fields of a URL-encoded form body (FormFields), recorded
+// and as sent, as leaves "body.<name>" ahead of the body whole, as a JSON
+// body's are (jsonSeen): a value the client sent in a field reads there, so
+// a field that sends again the text another request sent is that one value
+// (oneSource), not a second text that holds its word. sentForm says whether
+// the request as sent declares a form too; where it does not, no field of it
+// is read as sent ("" on that side, as a part one side alone holds is). A
+// name no place can name alone (a "." or a bracket in it) is Unnamed, as a
+// JSON key is.
+func formSeen(recorded, sent string, sentForm bool) []Seen {
+	rec := FormFields(recorded)
+	live := map[string]string{}
+	if sentForm {
+		live = FormFields(sent)
+	}
+	out := make([]Seen, 0, len(rec))
+	for _, k := range slices.Sorted(maps.Keys(rec)) {
+		p := "body." + k
+		out = append(out, Seen{Side: Request, Leaf: Leaf{Path: p, Noise: p, Type: String, Value: rec[k], Unnamed: strings.ContainsAny(k, ".[]")}, Live: live[k]})
 	}
 	return out
 }

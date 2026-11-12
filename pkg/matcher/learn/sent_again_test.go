@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -239,5 +240,83 @@ func TestASlotIsTheValuesSourceOnlyByItsTextInBothRuns(t *testing.T) {
 		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "test case post-auth-temp-code-1" || ds[0].From.Path != "header.X-Signed" {
 			t.Errorf("authTime %d -> %d, a stamp of a second in the longer text %q sent twice: %s; want a Value of test case post-auth-temp-code-1's header.X-Signed, the first send", r.rSecond, r.fSecond, rec, oDescribe(ds))
 		}
+	}
+}
+
+// hostBlockSignIn is a client test's sign-in of a client registered under a
+// host named by a UnixNano it read once (api-server's e2e host block): the
+// redirect URI "https://cb.e2e-<nanos>.blocked.example/callback" sent in the
+// registration's JSON body, the authorize request's query and the token
+// request's URL-encoded form, in that order; redirect is the form's
+// redirect_uri where it is not the URI the client registered, and liveCT the
+// token request's Content-Type in round F where it is not the form's.
+func (r sentAgainRun) hostBlockSignIn(t *testing.T, redirect [2]string, liveCT string) []Earlier {
+	t.Helper()
+	uri := func(n int64) string { return "https://cb.e2e-" + nanos(n) + ".blocked.example/callback" }
+	reqs := func(n int64, form, ct string, at time.Time) []*models.HTTPReq {
+		q := url.Values{"response_type": {"code"}, "client_id": {"mcp_1c2a"}, "redirect_uri": {uri(n)}, "scope": {"read"},
+			"code_challenge": {"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"}, "code_challenge_method": {"S256"}}
+		if form == "" {
+			form = uri(n)
+		}
+		if ct == "" {
+			ct = "application/x-www-form-urlencoded"
+		}
+		return []*models.HTTPReq{
+			{Method: "POST", URL: "http://localhost:8083/oauth/register", Timestamp: at, Header: map[string]string{"Content-Type": "application/json", "Host": "localhost:8083"},
+				Body: `{"client_name":"E2E Hosted Agent","redirect_uris":["` + uri(n) + `"]}`},
+			{Method: "GET", URL: "http://localhost:8083/oauth/authorize?" + q.Encode(), Timestamp: at.Add(10 * time.Millisecond), Header: map[string]string{"Host": "localhost:8083"}},
+			// keploy keeps a URL-encoded body decoded, as its capture does.
+			{Method: "POST", URL: "http://localhost:8083/oauth/token", Timestamp: at.Add(20 * time.Millisecond), Header: map[string]string{"Content-Type": ct, "Host": "localhost:8083"},
+				Body: "client_id=mcp_1c2a&code=GZQ3uX&code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk&grant_type=authorization_code&redirect_uri=" + form + "&resource=http://localhost:8083/client/v1/mcp"},
+		}
+	}
+	return clientSent(t, []string{"post-oauth-register-4", "get-oauth-authorize-5", "post-oauth-token-8"},
+		reqs(r.rNanos, redirect[0], "", r.rReq), reqs(r.fNanos, redirect[1], liveCT, r.fReq))
+}
+
+// TestAValueSentAgainInAURLEncodedFormIsOneValue: a client test reads one
+// UnixNano into a host, registers a client whose redirect URI names it, and
+// sends that URI again in its authorize request's query and its token
+// request's URL-encoded form (api-server's e2e host block); the application
+// writes the host's domains into the grant it inserts (client_domains). The
+// form's redirect_uri is a leaf of its body, as a JSON body's are, so the
+// three slots hold one whole text in both runs: one value sent again, bound
+// at the registration, never two reads. A form field that holds another
+// text in a run is not the value sent again, and stays two sources.
+func TestAValueSentAgainInAURLEncodedFormIsOneValue(t *testing.T) {
+	r := newSentAgainRun()
+	domain := func(n int64) string { return "r:cb.e2e-" + nanos(n) + ".blocked.example" }
+	const p = "body.docs.msgs.0.client_domains.1"
+	d := r.clientValue(p, String, domain(r.rNanos), domain(r.fNanos), r.hostBlockSignIn(t, [2]string{}, ""))
+	if len(d) != 1 || d[0].Outcome != OutcomeValue || d[0].From.Mock != "test case post-oauth-register-4" || d[0].From.Path != "body.redirect_uris[0]" || !d[0].From.Client || d[0].Clock != nil {
+		t.Fatalf("the grant's client domain: %s; want a Value of test case post-oauth-register-4's body.redirect_uris[0], the first send, no clock", oDescribe(d))
+	}
+	const again = "; sent again: test case get-oauth-authorize-5 url.query.redirect_uri, test case post-oauth-token-8 body.redirect_uri, first sent at test case post-oauth-register-4 body.redirect_uris[0]"
+	if !strings.Contains(d[0].Line, again) {
+		t.Errorf("the line %q does not say %q", d[0].Line, again)
+	}
+
+	// The form sends another URI that names the same host, in one run or
+	// in both, or sends it twice: not the value sent again. A token request
+	// round F sent as no form holds no field there, and is refused too.
+	uri := func(n int64) string { return "https://cb.e2e-" + nanos(n) + ".blocked.example/callback" }
+	other := func(n int64) string { return "https://cb.e2e-" + nanos(n) + ".blocked.example/other" }
+	for what, redirect := range map[string][2]string{
+		"in both runs":         {other(r.rNanos), other(r.fNanos)},
+		"in the recording":     {other(r.rNanos), ""},
+		"in round F":           {"", other(r.fNanos)},
+		"twice, in both runs":  {other(r.rNanos) + "&redirect_uri=" + other(r.rNanos), other(r.fNanos) + "&redirect_uri=" + other(r.fNanos)},
+		"twice, the URI first": {uri(r.rNanos) + "&redirect_uri=" + other(r.rNanos), uri(r.fNanos) + "&redirect_uri=" + other(r.fNanos)},
+		"twice, the URI last":  {other(r.rNanos) + "&redirect_uri=" + uri(r.rNanos), other(r.fNanos) + "&redirect_uri=" + uri(r.fNanos)},
+	} {
+		d := r.clientValue(p, String, domain(r.rNanos), domain(r.fNanos), r.hostBlockSignIn(t, redirect, ""))
+		if len(d) != 1 || d[0].Refusal == nil || d[0].Refusal.Kind != RefusalTwoSources {
+			t.Errorf("the form's redirect_uri another URI %s: %s; want refused, two sources", what, oDescribe(d))
+		}
+	}
+	d = r.clientValue(p, String, domain(r.rNanos), domain(r.fNanos), r.hostBlockSignIn(t, [2]string{}, "text/plain"))
+	if len(d) != 1 || d[0].Refusal == nil {
+		t.Errorf("the token request sent as text in round F: %s; want refused", oDescribe(d))
 	}
 }

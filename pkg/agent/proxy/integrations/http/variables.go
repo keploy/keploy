@@ -292,6 +292,9 @@ type reqView struct {
 	query    url.Values
 	header   http.Header
 	body     string
+	// form, where not nil, is the body read as a URL-encoded form's fields
+	// (learn.FormFields): a body place names one of them, by its name.
+	form map[string]string
 }
 
 func liveView(input *req) reqView {
@@ -373,8 +376,16 @@ func (v reqView) read(vp varPlace) (held, bool) {
 }
 
 // leaf returns the value at p, or false when the request has none there (or
-// more than one: a repeated query parameter or header is no place).
+// more than one: a repeated query parameter or header is no place). A view
+// read as a form (form) holds a body place at a field named by its one key.
 func (v reqView) leaf(p variables.Place) (held, bool) {
+	if p.Part == variables.PartBody && v.form != nil {
+		if len(p.Path) != 1 || p.Path[0].IsIndex {
+			return held{}, false
+		}
+		s, ok := v.form[p.Path[0].Key]
+		return held{value: s, kind: templates.LeafString, body: true}, ok
+	}
 	switch p.Part {
 	case variables.PartBody:
 		l, ok := variables.JSONLeafAt(v.body, p.Path)
