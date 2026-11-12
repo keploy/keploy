@@ -54,7 +54,10 @@ import (
 // no-clock-read of a whole time (wholeSettles). A Value, a Fresh value and
 // every other refusal stay as learned: a moment an earlier answer or request
 // also holds (unknown, two sources that are no reads, a pick of a word inside
-// a text) is a bound value, which variables decide, never the time default. A value
+// a text, an answer outside the scope that holds it in both runs: a copy of
+// a dependency's value, no read of the clock) is a bound value, which
+// variables decide, never the time default; so is a time the test gave keploy
+// that the value did not follow (conflict). A value
 // whose two runs write it in two forms of an instant (a zone offset in one
 // run where the other wrote Z, an epoch in seconds in one and milliseconds
 // in the other) is checked by its forms alone too: a replay passes a value
