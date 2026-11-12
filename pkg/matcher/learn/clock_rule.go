@@ -170,7 +170,7 @@ func DeclaredClockLearned(ln Learned, src Source, w *Window, timeForm bool) Lear
 		// rule's range holds too (timeDefault), and one its two runs wrote
 		// in two forms by either (timeForms), never by the range.
 		recForm, liveForm := TimeForm(rec), TimeForm(live)
-		form, formF := timeForms(recForm, liveForm, rec, live, w)
+		form, formF := timeForms(recForm, liveForm, rec, live, w, nil)
 		forms := models.ClockOffset{Form: form, FormF: formF}.Forms()
 		switch {
 		case !isInstant(rec) || !isInstant(live): // an instant has a form

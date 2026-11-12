@@ -2887,7 +2887,7 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	}
 	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), places)
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
-		Given: first.given, Client: dc.clientCase(first.mock), Clock: first.clock}
+		Given: first.given, Client: dc.clientCase(first.mock), Clock: first.clock, Offset: first.offset}
 	d.FromAt = fromAt
 	d.Echo = c.valueEcho
 	return d

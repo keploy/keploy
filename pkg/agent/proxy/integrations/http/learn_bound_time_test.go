@@ -17,9 +17,9 @@ import (
 // the bind does not hold, and the field is a time, so the time default
 // checks it by its form alone instead of refusing the call. Every other
 // case keeps the refusal: a value that is no time, the time default off
-// (keploy.yml's times: strict), a value written in another form in round
-// F, and an epoch number far from its call. A bind that holds stays the
-// variable.
+// (keploy.yml's times: strict), and an epoch number far from its call. A
+// value round F wrote in another form is checked by either of its two
+// forms. A bind that holds stays the variable.
 func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 	const field, sourceVar = "body.data.createdAt", "body.docs.msgs.{}.app.createdAt.{}"
 	recAt := time.Date(2026, 11, 11, 18, 35, 46, 351_000_000, time.UTC)
@@ -52,6 +52,9 @@ func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 		// the bind does not hold (models.MockVariable.ByForm).
 		answered bool
 		byForm   bool
+		// formF: round F wrote the time in a second form, which a replay
+		// passes beside the recorded one (models.ClockOffset.FormF).
+		formF string
 	}{
 		{what: "bound to a read of the clock, two seconds apart in round F", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), clock: true, timeForm: true, w: window},
 		{what: "a field a clock rule declares", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), rules: clockRule(field), timeForm: true, w: window},
@@ -61,7 +64,7 @@ func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 		{what: "a value that is no time", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), timeForm: true, w: window, refused: refusal},
 		{what: "a clock rule on another field", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), rules: clockRule("body.data.updatedAt"), timeForm: true, w: window, refused: refusal},
 		{what: "the time default off", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), clock: true, w: window, refused: refusal},
-		{what: "milliseconds in round F", live: strconv.FormatInt(liveAt.UnixMilli(), 10), sourceLive: secs(liveAt.Add(-time.Second)), clock: true, timeForm: true, w: window, refused: refusal},
+		{what: "milliseconds in round F, checked by either form", live: strconv.FormatInt(liveAt.UnixMilli(), 10), sourceLive: secs(liveAt.Add(-time.Second)), clock: true, timeForm: true, w: window, formF: "number 9999999999999"},
 		{what: "an epoch far from its call", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), clock: true, timeForm: true, w: &learn.Window{Rec: window.Rec, F: learn.Span{From: liveAt.AddDate(2, 0, 0), To: liveAt.AddDate(2, 0, 0)}}, refused: refusal},
 		{what: "no window", live: secs(liveAt), sourceLive: secs(liveAt.Add(-time.Second)), clock: true, timeForm: true, refused: refusal},
 		{what: "a bind that holds", live: secs(liveAt), sourceLive: secs(liveAt), clock: true, timeForm: true, w: window, bound: true, byForm: true},
@@ -117,7 +120,7 @@ func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 				if _, kept := p.clocks["body.data.updatedAt"]; !kept {
 					t.Errorf("clocks %+v; want the call's read of the clock at body.data.updatedAt kept", p.clocks)
 				}
-				if why != "" || !ok || o.Form != "number 9999999999" || !o.Plain() || o.Res != 0 || len(p.vars) != 0 {
+				if why != "" || !ok || o.Form != "number 9999999999" || o.FormF != tc.formF || !o.Plain() || o.Res != 0 || len(p.vars) != 0 {
 					t.Fatalf("why %q, clocks %+v, variables %v; want %s checked by its form alone, no variable", why, p.clocks, p.vars, field)
 				}
 				if !strings.Contains(o.Why, "checked by its form alone") || !strings.HasSuffix(o.Why, ": "+refusal) {
@@ -131,8 +134,11 @@ func TestATimeWhoseWholeBindDoesNotHoldIsCheckedByItsForm(t *testing.T) {
 				if held, no := learn.CheckClockReadForm(field, o, later, learn.Span{}, true, true); !held {
 					t.Errorf("a later replay's createdAt of the same form is refused: %s", no)
 				}
-				if held, _ := learn.CheckClockReadForm(field, o, learn.Leaf{Path: field, Value: strconv.FormatInt(liveAt.UnixMilli(), 10), Type: learn.Number}, learn.Span{}, true, true); held {
-					t.Error("a later replay's createdAt in milliseconds passes; want it refused by its form")
+				if held, _ := learn.CheckClockReadForm(field, o, learn.Leaf{Path: field, Value: strconv.FormatInt(liveAt.UnixMilli(), 10), Type: learn.Number}, learn.Span{}, true, true); held != (tc.formF != "") {
+					t.Errorf("a later replay's createdAt in milliseconds passes %v; want it to pass only where round F wrote that form (%q)", held, tc.formF)
+				}
+				if held, _ := learn.CheckClockReadForm(field, o, learn.Leaf{Path: field, Value: "2026-11-11T18:37:05Z", Type: learn.String}, learn.Span{}, true, true); held {
+					t.Error("a later replay's createdAt as text passes; want a third form refused")
 				}
 				if held, no := learn.CheckClockReadForm(field, o, later, learn.Span{}, true, false); held || !strings.Contains(no, "re-record with mock.times: strict") {
 					t.Errorf("a later replay under strict times: held %v (%q); want it refused, saying to re-record under strict", held, no)

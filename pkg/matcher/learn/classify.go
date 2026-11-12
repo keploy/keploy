@@ -907,6 +907,11 @@ type Place struct {
 	// Clock: the learn step learned the leaf as a plain read of the
 	// application's clock (Seen.Clock).
 	Clock bool
+	// Offset is the read of the application's clock the learn step learned
+	// the leaf, a request's, as (Seen.Offset): one plus a constant offset
+	// (an expiry a year after its call), or a plain read, which Clock marks
+	// too. nil where it learned none.
+	Offset *models.ClockOffset
 	// InStartUp: the mock was served in the test set's start-up, before its
 	// first test began (Earlier.StartUp). Only the wording reads it.
 	InStartUp bool
@@ -1073,6 +1078,18 @@ type Learned struct {
 	// field is checked by; and mock.times: strict keeps the refusal
 	// (OffsetReadUnder). nil for every other leaf.
 	offsetRefused *Learned
+	// unreadWhy: the refusal of a changed instant its call's window shows
+	// no read of the clock in, nor of the clock plus an offset
+	// (clientTestUnread, textClockOffset; no cut keploy cannot tell), in
+	// keploy mock's client tests, which the HTTP learn step's re-read since
+	// the test began reads again (classifyRead); stale (not Why) once a
+	// later step refuses it for another reason (unreadHeld).
+	unreadWhy string
+	// strictRefusal: the refusal the HTTP learn step's re-read since the
+	// test began learned instead as this read (the offset rule's own,
+	// offsetRefused, or one of no clock read, unreadWhy), which
+	// mock.times: strict keeps (OffsetReadUnder). nil for every other leaf.
+	strictRefusal *Learned
 	// Bindable, of a KindUnaccounted leaf of keploy mock's client test
 	// (DriftCache.ClientTests), says the value is one its test gave the
 	// application, first sent at this call: keploy found no source of it
@@ -1808,7 +1825,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// echo is answered, never asserted against a source.
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			v := dc.ofIn(r.Value, l.Value, w, at)
-			why, sourced, offWhy := "", false, ""
+			why, sourced, offWhy, unreadWhy := "", false, "", ""
 			// A client test's request is no place of the moments where the
 			// call's own window holds each changed instant as a read of the
 			// clock (readOverClients), and each moment the value lost is one
@@ -1889,6 +1906,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					}
 					if cutWhy != "" {
 						why = clientCutAmbiguousWhy(cutWhy)
+					} else {
+						unreadWhy = why
 					}
 					// The test's value, first sent here (Learned.Bindable):
 					// no source, no echo, no word of it at an earlier place
@@ -1906,6 +1925,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 				ln.Bindable = bindable
 				ln.byOffset = why == offWhy
+				ln.unreadWhy = unreadWhy
 				if ln.byOffset {
 					// Which source its moment has is all the offset rule
 					// cannot tell: a read of the clock plus that offset
@@ -2362,30 +2382,53 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		//
 		// Read without the rule a copy follows its source (the HTTP
 		// adapter's learn step: ClassifyArrived), only the offset rule's own
-		// refusal is read so, while it is still the leaf's refusal
-		// (offsetHeld): a value the offset rule refused that is a time the
-		// windows above hold is a time all the same (the 2026-11-11 ruling:
-		// a time never blocks a test by default), and a replay holds it to
-		// its test's span. Any other refusal there stays, and so does a value
-		// neither run's own window holds. The read keeps the refusal it
-		// stands in for (Learned.offsetRefused), which a clock rule
-		// keploy.yml declares at the field decides instead
-		// (DeclaredClockLearned), and which keploy.yml's mock.times: strict
-		// keeps (OffsetReadUnder).
-		if wb := w.sinceBegin(); (follow || offsetHeld(ln)) && ln.Kind == KindUnaccounted && wb != nil {
+		// refusal (offsetHeld) and the refusal of an instant its call's
+		// window shows no read of the clock in (unreadHeld) are read so,
+		// while each is still the leaf's refusal: a value the windows above
+		// hold as a read of the clock, or of the clock plus one constant
+		// offset, is a time all the same (the 2026-11-11 ruling: a time
+		// never blocks a test by default), and a replay holds it to its
+		// test's span. One run's own window and the other's since its test
+		// began (Window.oneRunSinceBegin) take a read plus an offset here
+		// too, read as a replay that compares one reads it
+		// (Window.ComparesOffsets): an application that stamps a record at
+		// the start of its handler and builds its expiry on the stamp
+		// (api-server's key records, a year or a day on), whose full round
+		// ran the calls before the PUT across a second boundary, so that
+		// only the window since the test began holds the stamp's second.
+		// A read plus an offset there is learned with the offsets both
+		// windows hold, which the true one lies in, and a replay checks it
+		// from its test's begin. Any other refusal there stays, and so does
+		// a value neither run's own window holds. The read keeps the
+		// refusal it stands in for: the offset rule's (Learned.offsetRefused),
+		// which a clock rule keploy.yml declares at the field decides instead
+		// (DeclaredClockLearned), and either (Learned.strictRefusal), which
+		// keploy.yml's mock.times: strict keeps (OffsetReadUnder).
+		unread := !follow && unreadHeld(ln)
+		if wb := w.sinceBegin(); (follow || offsetHeld(ln) || unread) && ln.Kind == KindUnaccounted && wb != nil {
 			refused := ln
 			if own, ok := sinceTestBegin(leaf(r, l, sinceRereadWindow(w, follow), skipOffset)); ok {
 				ln = own
-			} else if ln.byOffset {
+			} else if ln.byOffset || unread {
 				for _, ow := range w.oneRunSinceBegin() {
 					if own, ok := sinceTestBegin(leaf(r, l, ow, skipOffset)); ok && own.Kind == KindClockRead {
+						ln = own
+						break
+					}
+					if follow {
+						continue
+					}
+					if own, ok := sinceTestBegin(leaf(r, l, ow.ComparesOffsets(), skipOffset)); ok && own.Kind == KindClockOffset {
 						ln = own
 						break
 					}
 				}
 			}
 			if !follow && ln.Kind != KindUnaccounted {
-				ln.offsetRefused = &refused
+				if refused.byOffset {
+					ln.offsetRefused = &refused
+				}
+				ln.strictRefusal = &refused
 			}
 		}
 		// A client test's read of an instant whose zone after a space is
@@ -2436,15 +2479,23 @@ func sinceRereadWindow(w *Window, follow bool) *Window {
 // OffsetReadUnder is ln as a learn step whose store says timeForm
 // (integrations.TimeFormOf: the time default on) takes it: ln itself under
 // the time default; with it off (keploy.yml's mock.times: strict), a read
-// since its test began that the HTTP learn step learned in place of the
-// offset rule's refusal (Learned.offsetRefused) is that refusal again, as
-// before the default was: strict checks a time by its range and provenance,
-// and the read keeps the range alone. Every other leaf is ln.
+// since its test began that the HTTP learn step learned in place of a
+// refusal (Learned.strictRefusal: the offset rule's own, or one of no clock
+// read in its call's window) is that refusal again, as before the default
+// was: strict checks a time by its range and provenance, and the read keeps
+// the range alone. Every other leaf is ln.
 func OffsetReadUnder(ln Learned, timeForm bool) Learned {
-	if timeForm || ln.offsetRefused == nil {
+	if timeForm || ln.strictRefusal == nil {
 		return ln
 	}
-	return *ln.offsetRefused
+	return *ln.strictRefusal
+}
+
+// unreadHeld reports whether ln's refusal is still that of an instant its
+// call's window shows no read of the clock in (Learned.unreadWhy): no later
+// step refused it for another reason.
+func unreadHeld(ln Learned) bool {
+	return ln.unreadWhy != "" && ln.unreadWhy == ln.Why
 }
 
 // offsetHeld reports whether ln's refusal is still the offset rule's own
@@ -4541,7 +4592,7 @@ func withoutGave(earlier []Earlier) []Earlier {
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
 		Var: seenVar(e, s), Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Client: e.incoming, Name: s.Name, Clock: s.Clock,
-		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
+		Offset: s.Offset, InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
 }
 
 // seenVar is the variable place of s, a leaf of e (Seen.Place). A client
