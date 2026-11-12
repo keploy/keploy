@@ -213,9 +213,10 @@ func putWrittenElsewhere(read *models.Mock, served []*models.Mock, earlier []lea
 // of e does. e holds a leaf for each part keploy read of the call (its path
 // segments unmasked, its query, its body whole or by leaf and its keys, its
 // headers, an excused one where the call sent it); a part it read nothing
-// of (an excused header the call did not send this time, a keploy header,
-// the Host), and every part where e is the zero Earlier (no exchange of c's
-// mock), is one keploy cannot tell what the call sent in, so it is false.
+// of (an excused header the call did not send this time, a keploy header, a
+// query parameter whose name begins with keploy, the Host), and every part
+// where e is the zero Earlier (no exchange of c's mock), is one keploy
+// cannot tell what the call sent in, so it is false.
 func sentAsWritten(e learn.Earlier, c *models.Mock, recorded, live string) bool {
 	at := map[string]bool{}
 	for _, s := range e.Seen {

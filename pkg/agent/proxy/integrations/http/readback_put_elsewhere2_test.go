@@ -77,24 +77,32 @@ func TestReadBackOfAPutHoldsOverAnAnswerElsewhereThatHoldsTheValue(t *testing.T)
 	}
 }
 
-// A path segment keploy.yml's url noise masks held the recorded account: a
-// DELETE to another URL that named it there, as recorded, answers the
-// account as recorded.
-func TestReadBackOfAPutStopsAtAMaskedSegmentThatHoldsTheValue(t *testing.T) {
-	want := kpGetAnswer(kpRecKey, kpRecBy, kpLiveNano)
+// keploy reads what a call to another URL sent in a path segment
+// keploy.yml's url noise masks as the call sent it (the served exchange is
+// read unmasked): a DELETE that sent this run's account there wrote what
+// the PUT wrote, so the GET reads back; one that sent the recorded account
+// there answers the account as recorded, as it does with no noise.
+func TestReadBackOfAPutReadsAMaskedSegmentAsTheCallSentIt(t *testing.T) {
 	for _, proven := range []string{"1", "0"} {
-		t.Run("proven="+proven, func(t *testing.T) {
-			m := kpMocks(kpGetAnswer(kpRecKey, kpRecBy, kpRecNano))
-			rec := learnRecorded("mock-2", 1200*time.Millisecond, "DELETE", kpOwners(kpRecBy), "", kpVault, `{}`)
-			calls := []*req{
-				live("PUT", kpPath(kpRecKey), kpPut(kpRecKey, kpLiveBy, kpLiveNano), kpVault),
-				live("DELETE", kpOwners(kpRecBy), "", kpVault),
-				live("GET", kpPath(kpRecKey), "", kpVault),
-			}
-			_, served := kpRunWith(t, proven, nil, []string{`[0-9a-f]{24}`}, []*models.Mock{m[0], rec, m[1]}, calls)
-			if got := served[2].Spec.HTTPResp.Body; got != want {
-				t.Fatalf("a GET after a DELETE whose masked segment held the recorded account answered\n%s\nwant\n%s", got, want)
-			}
-		})
+		for _, c := range []struct {
+			name, sent, want string
+		}{
+			{"sent-live", kpLiveBy, kpLiveRecord},
+			{"sent-as-recorded", kpRecBy, kpGetAnswer(kpRecKey, kpRecBy, kpLiveNano)},
+		} {
+			t.Run("proven="+proven+"/"+c.name, func(t *testing.T) {
+				m := kpMocks(kpGetAnswer(kpRecKey, kpRecBy, kpRecNano))
+				rec := learnRecorded("mock-2", 1200*time.Millisecond, "DELETE", kpOwners(kpRecBy), "", kpVault, `{}`)
+				calls := []*req{
+					live("PUT", kpPath(kpRecKey), kpPut(kpRecKey, kpLiveBy, kpLiveNano), kpVault),
+					live("DELETE", kpOwners(c.sent), "", kpVault),
+					live("GET", kpPath(kpRecKey), "", kpVault),
+				}
+				_, served := kpRunWith(t, proven, nil, []string{`[0-9a-f]{24}`}, []*models.Mock{m[0], rec, m[1]}, calls)
+				if got := served[2].Spec.HTTPResp.Body; got != c.want {
+					t.Fatalf("a GET after a DELETE that sent %s in a masked segment answered\n%s\nwant\n%s", c.sent, got, c.want)
+				}
+			})
+		}
 	}
 }
