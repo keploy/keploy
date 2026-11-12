@@ -431,9 +431,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//    only once the app is fully down (its errgroup Wait is deferred), and
 	//    the sender is the goroutine running exactly that Run.
 	var appErr models.AppError
-	// lived is the test command's run (replayDetail.lived): measured only
-	// where keploy starts the command itself.
-	var lived time.Duration
+	// run is the test command's run (replayDetail.run): measured only where
+	// keploy starts the command itself.
+	var run commandRun
 	if composeAppExit != nil {
 		appErr = <-composeAppExit
 	} else {
@@ -443,11 +443,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			// command leaves running may still make once it exited.
 			opts.BeforeStop = m.awaitRequiredSeries
 		}
-		began := commandClock()
+		run.began = commandClock()
 		appErr = m.instrumentation.Run(ctx, opts)
 		// Run returns once what the command started is down: no
 		// application it started lived longer (models.MockEntry.Due).
-		lived = commandClock().Sub(began)
+		run.ended = commandClock()
 	}
 
 	if parent.Err() != nil { // user Ctrl+C / a signal interrupted the replay
@@ -616,7 +616,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		set:      name,
 		windows:  testWindows(all),
 		starts:   appStarts(all),
-		lived:    lived,
+		run:      run,
 		expected: m.expectedMocks(ctx, name),
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),
@@ -684,7 +684,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// test is left unread, a background one is named, and the run fails. A
 	// failure already named keeps its name.
 	for _, n := range counts.requiredNotDue {
-		m.logger.Info(RuleNotDueLine(n, detail.lived), zap.String("mock-set", name))
+		m.logger.Info(RuleNotDueLine(n, counts.life), zap.String("mock-set", name))
 	}
 	if len(counts.requiredNotMade) > 0 || len(counts.seriesUnread) > 0 || len(counts.trailsUnread) > 0 {
 		for _, n := range counts.requiredNotMade {
@@ -2699,6 +2699,10 @@ type replayCounts struct {
 	// not require: the application exited before the bound (notYetDue).
 	// nil for none.
 	requiredNotDue []RequiredNotMade
+	// life is, under the proven switch, the application's life in the run
+	// that requiredNotDue was read against (lifeOf); its RULE NOT DUE lines
+	// say it.
+	life appLife
 	// seriesUnread names each background series that was due when what the
 	// run consumed could not be read: whether the run made it is not known,
 	// and the run fails. nil for none.
@@ -2972,8 +2976,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		// as it was.
 		counts.tests = withBegan(counts.tests, detail.windows)
 		// A once series with a timer bound is due only when the
-		// application's run reached the bound (markEarly).
-		series, placed := markEarly(m.series, detail.lived), markEarly(m.placed, detail.lived)
+		// application's life, from its first call keploy saw, reached the
+		// bound (lifeOf, markEarly).
+		counts.life = lifeOf(detail.run, consumed, consumedErr == nil, misses, missesErr == nil)
+		series, placed := markEarly(m.series, counts.life), markEarly(m.placed, counts.life)
 		counts.requiredNotMade, counts.trailsUnread, counts.seriesUnread = requiredNotMade(series, counts.tests, consumed, consumedErr == nil)
 		counts.requiredNotDue = notYetDue(series, counts.tests, consumed, consumedErr == nil)
 		counts.tests = failUnmadeTrails(counts.tests, notMadeByName(counts.requiredNotMade), counts.trailsUnread)
