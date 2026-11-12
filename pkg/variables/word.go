@@ -19,6 +19,7 @@ import (
 //
 //	body.resourceKey[0]#1           the second word of a JSON scalar
 //	header.Authorization|jwt.sub    the sub claim of a JWT, whole
+//	header.Authorization|jwtsig     the signature of a JWT, whole
 //	header.Cookie|cookie.sid#0      the first word of the cookie sid
 //	url.query.cursor|b64url|pct#2   the third word of a base64url cursor's
 //	                                percent-decoded text
@@ -36,6 +37,10 @@ import (
 //	json           one JSON string literal or number, read as its value
 //	b64, b64url    base64 in the standard or the URL alphabet, padded or not
 //	jwt.<claim>    the claim of a JWT's payload (a string, or a number's text)
+//	jwtsig         the signature of a JWT: its third part, base64url text,
+//	               read whole (its '-' and '_' are letters of the
+//	               alphabet there, not separators); a write there must
+//	               keep its form, base64url of the length it replaces
 //	cookie.<name>  the value of the one pair named <name> in a Cookie or
 //	               Set-Cookie value
 //
@@ -43,15 +48,18 @@ import (
 // does (Parse).
 
 // Step is one decode step of a word address: "pct", "json", "b64", "b64url",
-// "jwt.<claim>" or "cookie.<name>", its name unescaped.
+// "jwtsig", "jwt.<claim>" or "cookie.<name>", its name unescaped.
 type Step string
 
 // The steps with no argument, and the prefixes of the two with one.
 const (
-	StepPct      Step = "pct"
-	StepJSON     Step = "json"
-	StepB64      Step = "b64"
-	StepB64URL   Step = "b64url"
+	StepPct    Step = "pct"
+	StepJSON   Step = "json"
+	StepB64    Step = "b64"
+	StepB64URL Step = "b64url"
+	// StepJWTSig opens a JWT's signature. A claim's name follows "jwt.",
+	// so no claim step is ever written so.
+	StepJWTSig   Step = "jwtsig"
 	jwtPrefix         = "jwt."
 	cookiePrefix      = "cookie."
 )
@@ -147,7 +155,7 @@ func parseAddress(s string) (Address, error) {
 		n := nameEnd(rest, 1)
 		st := Step(unescapeName(rest[1:n]))
 		if !st.valid() {
-			return Address{}, fmt.Errorf("not a word address: %q: step %q (want pct, json, b64, b64url, jwt.<claim> or cookie.<name>)", s, rest[1:n])
+			return Address{}, fmt.Errorf("not a word address: %q: step %q (want pct, json, b64, b64url, jwtsig, jwt.<claim> or cookie.<name>)", s, rest[1:n])
 		}
 		a.Steps = append(a.Steps, st)
 		rest = rest[n:]
@@ -206,7 +214,7 @@ func nameEnd(s string, i int) int {
 
 func (st Step) valid() bool {
 	switch {
-	case st == StepPct || st == StepJSON || st == StepB64 || st == StepB64URL:
+	case st == StepPct || st == StepJSON || st == StepB64 || st == StepB64URL || st == StepJWTSig:
 		return true
 	case strings.HasPrefix(string(st), jwtPrefix):
 		return len(st) > len(jwtPrefix)
@@ -416,6 +424,10 @@ func wordSpan(text string, steps []Step, n int) (lo, hi int, ok bool) {
 	case strings.HasPrefix(string(st), cookiePrefix):
 		at, _, _ := cookieValue(text, string(st[len(cookiePrefix):]))
 		return at + lo, at + hi, true
+	case st == StepJWTSig:
+		// Written whole, in the token's last part: the bytes before it stay.
+		at, _ := jwtSignature(text)
+		return at + lo, at + hi, true
 	}
 	return 0, len(text), true
 }
@@ -427,9 +439,10 @@ func wordSpan(text string, steps []Step, n int) (lo, hi int, ok bool) {
 // where leaf does not show which (its text needs no '=') and the padded
 // and raw forms of the new text differ, it refuses. ok is false where it
 // cannot: a step leaf does not decode by, a JWT claim (its signature would
-// break), a word a does not find, a re-encoding that is not leaf's own, a
-// padding leaf does not show, a cookie value v cannot be, or a v that a
-// reads back otherwise (one that joins the words beside it).
+// break), a JWT signature of another form than the one it replaces
+// (SignatureForm), a word a does not find, a re-encoding that is not
+// leaf's own, a padding leaf does not show, a cookie value v cannot be, or
+// a v that a reads back otherwise (one that joins the words beside it).
 func (a Address) ReplaceWord(leaf, v string) (string, bool) {
 	out, ok := replaceIn(leaf, a.Steps, a.Word, v)
 	if !ok {
@@ -564,6 +577,14 @@ func splice(st Step, text, inner, next string) (string, bool) {
 		if ok && cookieSafe(next) {
 			return text[:lo] + next + text[hi:], true
 		}
+	case st == StepJWTSig:
+		// A signature is checked by its form only: the one written must be
+		// of the form of the one it replaces (SignatureForm), so the
+		// token's header, which names the algorithm, holds for it.
+		at, ok := jwtSignature(text)
+		if ok && SignatureForm(inner, next) {
+			return text[:at] + next, true
+		}
 	}
 	return "", false
 }
@@ -606,6 +627,10 @@ func Decode(st Step, text string) (string, bool) {
 				return string(b), true
 			}
 		}
+	case st == StepJWTSig:
+		if at, ok := jwtSignature(text); ok {
+			return text[at:], true
+		}
 	case strings.HasPrefix(string(st), jwtPrefix):
 		parts := strings.Split(text, ".")
 		if len(parts) != 3 {
@@ -625,6 +650,42 @@ func Decode(st Step, text string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// jwtSignature is where text's signature starts, text a JWT (three '.'
+// parts, the second a base64url JSON object, as the jwt.<claim> step reads
+// one) that is signed (its third part base64url text, non-empty and
+// unpadded, as RFC 7515 writes it); ok is false otherwise.
+func jwtSignature(text string) (at int, ok bool) {
+	parts := strings.Split(text, ".")
+	if len(parts) != 3 || !b64url(parts[2]) {
+		return 0, false
+	}
+	payload, ok := Decode(StepB64URL, parts[1])
+	var claims map[string]json.RawMessage
+	if !ok || json.Unmarshal([]byte(payload), &claims) != nil || claims == nil {
+		return 0, false
+	}
+	return len(text) - len(parts[2]), true
+}
+
+// SignatureForm reports whether a and b, two JWT signatures, are of one
+// form: base64url text, unpadded, of one length. The signature is all a
+// replay checks of it (the founder's 2026-10-31 ruling): it is the
+// signer's random-looking output, and its length is the algorithm's, which
+// the token's header names.
+func SignatureForm(a, b string) bool {
+	return len(a) == len(b) && b64url(a) && b64url(b)
+}
+
+// b64url reports whether s is non-empty unpadded base64url text, as a JWT
+// writes each part.
+func b64url(s string) bool {
+	if s == "" {
+		return false
+	}
+	_, err := base64.RawURLEncoding.Strict().DecodeString(s)
+	return err == nil
 }
 
 // b64Encodings are the encodings a b64 or b64url text may be written in:
