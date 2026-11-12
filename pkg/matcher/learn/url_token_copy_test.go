@@ -45,6 +45,9 @@ func TestOutcomeAPairedURLSafeTokenShownWholeIsOneUse(t *testing.T) {
 	}
 	for _, d := range ds {
 		oRefused(t, "a token shown whole in another test only", d, RefusalAnotherScope, "mock-0")
+		if d.At.Word < 0 {
+			t.Errorf("a token shown whole in another test only: %s refused whole; want its words to decide it", oDescribe([]Decision{d}))
+		}
 	}
 
 	// A token shown whole only inside a longer text (a consent URL that
@@ -119,6 +122,60 @@ func TestOutcomeATokenShownOnlyInsideALongerTextIsBoundAtItsToken(t *testing.T) 
 	for _, d := range ds {
 		if d.Outcome == OutcomeValue {
 			t.Errorf("an unpaired token at another token in each run: %s bound at %s %s; want it refused", oDescribe(ds), d.From.Mock, d.FromAt.String())
+		}
+	}
+}
+
+// A token a recording's place shows whole in both runs (a row an earlier
+// query answered, which round F served with its own token there) binds
+// there whole, paired or not: the adapter names the place of that
+// recording that holds it, so the whole token is held to it. Read word by
+// word, the paired token's next run, whose '-' and '_' fall elsewhere,
+// could not be written back; dropped, the unpaired one bound nowhere.
+func TestOutcomeATokenShownWholeAtARecordingBindsThere(t *testing.T) {
+	const (
+		pr = "kepreq_PnlPWeHYp6SxRRGMfFi0kUxyEdiumEmDVfOVZBrF68E"
+		pf = "kepreq_q4XtRm8LwZ2vNc7KbJ0sYh5GdP3fEa9TnU1oVi6WxQk"
+		ur = "kepreq_9fsSK78UnjdjTSFj51vJvm_CkQdnzdp6aRCUCH0PP5g"
+		uf = "kepreq_WWEEXXKJO_kzw3aZ8Wxfl5wsJUE3V7QGpBKzyTlYA_0"
+	)
+	for _, tc := range []struct{ name, rec, live string }{
+		{"a paired token", pr, pf},
+		{"an unpaired token", ur, uf},
+	} {
+		raw := oAnswer("mock-5", time.Second, tc.rec).ServedAs(1).ServedLive(oAnswer("mock-5", time.Second, tc.live))
+		ds := Decide(oInput("body.cmd.query._id", tc.rec, tc.live, nil, []Raw{raw}))
+		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].At.Word != -1 || ds[0].Recorded != tc.rec || ds[0].Full != tc.live {
+			t.Errorf("%s a recording shows whole: %s; want one Value, the field whole", tc.name, oDescribe(ds))
+			continue
+		}
+		if d := ds[0]; d.From.Mock != "mock-5" || d.FromAt.Word != -1 || len(d.FromAt.Steps) != 0 {
+			t.Errorf("%s a recording shows whole: bound at %s %s; want mock-5's recording", tc.name, d.From.Mock, d.FromAt.String())
+		}
+	}
+}
+
+// tokenStepAt names a token of a longer text only where that token is the
+// value in both runs, at one index: never one only the recording's text
+// holds there, nor one only round F's does, nor a text that is the value
+// whole (named whole).
+func TestTokenStepAtNamesATokenOnlyWhereBothRunsHoldTheValue(t *testing.T) {
+	const url = "https://app.keploy.io/oauth/consent?request="
+	const v, f = "kepreq_9fsSK78UnjdjTSFj51vJvm_CkQdnzdp6aRCUCH0PP5g", "kepreq_WWEEXXKJO_kzw3aZ8Wxfl5wsJUE3V7QGpBKzyTlYA_0"
+	for _, tc := range []struct {
+		name, rec, live string
+		n               int
+		ok              bool
+	}{
+		{"one index in both runs", url + v, url + f, 4, true},
+		{"the first index that holds it in both", "a " + v + " " + v, "a " + f + " " + f, 1, true},
+		{"the value whole", v, f, 0, false},
+		{"round F's token there is another", url + v, url + "x." + f, 0, false},
+		{"the recording's token there is another", url + "x." + v, url + f, 0, false},
+		{"round F's text lacks the token", url + v, url, 0, false},
+	} {
+		if n, ok := tokenStepAt(tc.rec, tc.live, v, f); ok != tc.ok || ok && n != tc.n {
+			t.Errorf("%s: tokenStepAt = %d, %v; want %d, %v", tc.name, n, ok, tc.n, tc.ok)
 		}
 	}
 }

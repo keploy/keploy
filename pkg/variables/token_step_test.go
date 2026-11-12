@@ -56,6 +56,12 @@ func TestTokenStepReadsAndWritesTheTokenWhole(t *testing.T) {
 	if got, ok := (Address{Steps: []Step{Token(7)}, Word: -1}).WordOf(url); ok {
 		t.Errorf("WordOf at a token the text lacks = %q; want none", got)
 	}
+	// A write at a token the text lacks is refused, even where the value
+	// put before the text would read back there (" a b" has two tokens:
+	// "b" before it is the third token of "b a b").
+	if got, ok := (Address{Steps: []Step{Token(2)}, Word: -1}).ReplaceWord(" a b", "b"); ok {
+		t.Errorf("ReplaceWord at a token the text lacks = %q; want it refused", got)
+	}
 }
 
 // A token step's span is the token's own bytes: a word before it, or a
