@@ -1923,6 +1923,12 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			answer := classifiedAnswer(answered)
 			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
 			timeForm := integrations.TimeFormOf(mockDb)
+			// A time the offset rule refused that learning read as the
+			// clock since its test began stays refused under mock.times:
+			// strict (learn.OffsetReadUnder).
+			for i, l := range learned {
+				learned[i] = learn.OffsetReadUnder(l, timeForm)
+			}
 			learned = declaredClocksOf(learned, n.sources, m, w, timeForm, tracker.DriftsOf(ctx), answer)
 			return boundTimesOf(learned, n.sources, m, w, timeForm), answered, earlier, ""
 		}

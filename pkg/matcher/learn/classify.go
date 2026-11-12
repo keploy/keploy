@@ -1052,6 +1052,14 @@ type Learned struct {
 	// it), which the rule's rescue in keploy mock's client tests reads
 	// again without it (classifyRead).
 	byOffset bool
+	// offsetRefused: the offset rule's own refusal (offsetHeld) that the
+	// HTTP learn step's re-read since the test began learned instead as
+	// this read (sinceTestBegin, sinceRereadWindow). A clock rule keploy.yml
+	// declares at the field decides that refusal, never this read
+	// (DeclaredClockLearned): the rule's range, or its form, is what the
+	// field is checked by; and mock.times: strict keeps the refusal
+	// (OffsetReadUnder). nil for every other leaf.
+	offsetRefused *Learned
 	// Bindable, of a KindUnaccounted leaf of keploy mock's client test
 	// (DriftCache.ClientTests), says the value is one its test gave the
 	// application, first sent at this call: keploy found no source of it
@@ -2338,8 +2346,22 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// explains it), and so does anything else the value reads as
 		// without the rule (noise, another refusal, the clock plus an
 		// offset in one run's own window alone).
-		if wb := w.sinceBegin(); follow && ln.Kind == KindUnaccounted && wb != nil {
-			if own, ok := sinceTestBegin(leaf(r, l, w, skipOffset)); ok {
+		//
+		// Read without the rule a copy follows its source (the HTTP
+		// adapter's learn step: ClassifyArrived), only the offset rule's own
+		// refusal is read so, while it is still the leaf's refusal
+		// (offsetHeld): a value the offset rule refused that is a time the
+		// windows above hold is a time all the same (the 2026-11-11 ruling:
+		// a time never blocks a test by default), and a replay holds it to
+		// its test's span. Any other refusal there stays, and so does a value
+		// neither run's own window holds. The read keeps the refusal it
+		// stands in for (Learned.offsetRefused), which a clock rule
+		// keploy.yml declares at the field decides instead
+		// (DeclaredClockLearned), and which keploy.yml's mock.times: strict
+		// keeps (OffsetReadUnder).
+		if wb := w.sinceBegin(); (follow || offsetHeld(ln)) && ln.Kind == KindUnaccounted && wb != nil {
+			refused := ln
+			if own, ok := sinceTestBegin(leaf(r, l, sinceRereadWindow(w, follow), skipOffset)); ok {
 				ln = own
 			} else if ln.byOffset {
 				for _, ow := range w.oneRunSinceBegin() {
@@ -2348,6 +2370,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 						break
 					}
 				}
+			}
+			if !follow && ln.Kind != KindUnaccounted {
+				ln.offsetRefused = &refused
 			}
 		}
 		// A client test's read of an instant whose zone after a space is
@@ -2374,6 +2399,41 @@ func clockSourceWhy(from Place) string {
 		whose = "the test set's start-up's call"
 	}
 	return "its recorded value was sent in " + placeAt(from) + ", " + whose + ", where keploy learned it as a read of the application's clock, and this call does not hold it as its own read of the clock. keploy cannot tell a copy of that read from a read of the clock made in the same second where keploy does not see it (a token the test's client holds, minted at that second, or a value this call made that second, which its answer echoes), so it follows neither. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+}
+
+// sinceRereadWindow is the window the offset rule's refusal is read again
+// in without that rule: w under the rule a copy follows its source
+// (follow), as before; otherwise w for a replay that compares a read of the
+// clock plus a constant offset (Window.ComparesOffsets), which it does for
+// a read checked from its test's begin (CheckClockRead, spanOf: the span
+// from the running test's begin to the call), the only reading that re-read
+// takes (sinceTestBegin).
+func sinceRereadWindow(w *Window, follow bool) *Window {
+	if follow {
+		return w
+	}
+	return w.ComparesOffsets()
+}
+
+// OffsetReadUnder is ln as a learn step whose store says timeForm
+// (integrations.TimeFormOf: the time default on) takes it: ln itself under
+// the time default; with it off (keploy.yml's mock.times: strict), a read
+// since its test began that the HTTP learn step learned in place of the
+// offset rule's refusal (Learned.offsetRefused) is that refusal again, as
+// before the default was: strict checks a time by its range and provenance,
+// and the read keeps the range alone. Every other leaf is ln.
+func OffsetReadUnder(ln Learned, timeForm bool) Learned {
+	if timeForm || ln.offsetRefused == nil {
+		return ln
+	}
+	return *ln.offsetRefused
+}
+
+// offsetHeld reports whether ln's refusal is still the offset rule's own
+// (Learned.byOffset): the rule refused it, and no later step refused it for
+// another reason, which makes its sourceWhy stale (not Why).
+func offsetHeld(ln Learned) bool {
+	return ln.byOffset && ln.sourceWhy != "" && ln.sourceWhy == ln.Why
 }
 
 // sinceTestBegin is ln, a value its own call's window holds as a read of the
