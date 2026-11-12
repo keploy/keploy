@@ -78,7 +78,11 @@ func oneSlotEach(slots []evPlace) []evPlace {
 // (a) A slot whose whole text is the field's in both runs is its source: one
 // that holds only the moment's word in another text does not compete (a
 // suite renamed from "e2e-vh-<nanos>" to "e2e-vh-<nanos>-renamed", the name
-// written the second's).
+// written the second's). So is a Cookie header one of whose pairs holds the
+// field's whole text in both runs (pairWhole): a token the call sends whole
+// (api-server's CLI logout, its find by the refresh token the redemption
+// minted, sent under two names), beside session tokens that hold only the
+// moment it carries (the browser's sign-in time).
 //
 // (b) Slots that hold one and the same whole text in both runs are one value
 // the client sent again (a name, a session cookie), its place the first
@@ -96,7 +100,7 @@ func oneSource(slots []evPlace, c changedInstant) ([]evPlace, string) {
 		return slots, ""
 	}
 	rec, live := c.leaf()
-	src := slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool { return p.rec != rec || p.live != live })
+	src := slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool { return (p.rec != rec || p.live != live) && !pairWhole(p, rec, live) })
 	if len(src) == 1 {
 		word := slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool { return p.name == src[0].name })
 		return src, "; " + strings.Join(names(word), ", ") + " held only its word"

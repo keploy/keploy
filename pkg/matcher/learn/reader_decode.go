@@ -3,6 +3,7 @@ package learn
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 
@@ -297,6 +298,23 @@ func sameJSON(a, b json.RawMessage) bool {
 func cookiePlace(at variables.Address) bool {
 	return len(at.Steps) == 0 && at.Place.Part == variables.PartHeader &&
 		(strings.EqualFold(at.Place.Name, "Cookie") || strings.EqualFold(at.Place.Name, "Set-Cookie"))
+}
+
+// pairWhole reports whether p is a Cookie or Set-Cookie header (cookiePlace,
+// at the place its leaf names) one of whose pairs (cookieSpans: named once in
+// both runs) is rec in R and live in F: the header holds that text whole as
+// one pair's value, which a replay reads by the pair's name.
+func pairWhole(p evPlace, rec, live string) bool {
+	s, ok := VarPlace(p.leaf, false)
+	if !ok {
+		return false
+	}
+	a, err := variables.ParseAddress(s)
+	if err != nil || !cookiePlace(a) {
+		return false
+	}
+	spans, _ := cookieSpans(p.rec, p.live)
+	return slices.ContainsFunc(spans, func(s openedSpan) bool { return s.Parts[0].Rec == rec && s.Parts[0].Live == live })
 }
 
 // cookiePair is one "name=value" pair of a cookie text: its name, and
