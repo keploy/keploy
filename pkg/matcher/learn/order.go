@@ -3437,8 +3437,13 @@ func addrList(as []variables.Address) string {
 // values back at its places, and cannot write a claim into a signed token;
 // its leaf is named whole, as before. A value that is the JWT's signature
 // in both runs (sigAt) is addressed at the signature (|jwtsig), first: a
-// replay reads it there whole, whatever its count of words. Words
-// and claims are read in the text the address's own steps open (an
+// replay reads it there whole, whatever its count of words. A Cookie or
+// Set-Cookie header holds a token as one pair's value, beside other pairs
+// (refresh_token=<JWT>; refresh_token_staging=<JWT>), which no JWT step reads
+// whole: its signature and its claims are read in the first pair that holds
+// them (cookieToken), at that pair's step (|cookie.<name>|jwtsig,
+// |cookie.<name>|jwt.<claim>#<n>), each where the whole header's would be.
+// Words and claims are read in the text the address's own steps open (an
 // adapter's PlaceOf may name a decode step), so the claim's step follows
 // them; a leaf they do not open has no word or claim there: it is named
 // whole, as before.
@@ -3453,6 +3458,10 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 		a.Steps, a.Word = append(slices.Clip(a.Steps), variables.StepJWTSig), -1
 		return a
 	}
+	if st, _, ok := cookieToken(a, rec, live, v, f, false); ok {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), st...), -1
+		return a
+	}
 	for i, w := range variables.Words(rec) {
 		if rec[w[0]:w[1]] == v {
 			a.Word = i
@@ -3464,8 +3473,40 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 	}
 	if st, n, ok := claimWord(rec, live, v, f); ok {
 		a.Steps, a.Word = append(slices.Clip(a.Steps), st), n
+	} else if st, n, ok := cookieToken(a, rec, live, v, f, true); ok {
+		a.Steps, a.Word = append(slices.Clip(a.Steps), st...), n
 	}
 	return a
+}
+
+// cookieToken is the steps from a, a Cookie or Set-Cookie header's own text
+// (rec and live, two runs of it), to the part of a JWT that holds v in rec
+// and f in live, where one of its pairs holds that token as its value: the
+// pair's step (cookie.<name>), then jwtsig where v and f are the token's
+// signatures (sigAt), at word -1; with claims, the claim's step instead
+// where a claim holds them (claimWord), at its word n. The pairs are
+// cookieSpans' (named once in both runs, in one order, whose values
+// differ), the first that holds them in rec's order: a replay reads that
+// pair by name. ok is false where a is no such header's text, or no pair
+// holds them so.
+func cookieToken(a variables.Address, rec, live, v, f string, claims bool) ([]variables.Step, int, bool) {
+	if !cookiePlace(a) {
+		return nil, 0, false
+	}
+	spans, _ := cookieSpans(rec, live)
+	for _, s := range spans {
+		pair := s.Parts[0]
+		if !claims {
+			if sigAt(pair.Rec, pair.Live, v, f) {
+				return []variables.Step{pair.Step, variables.StepJWTSig}, -1, true
+			}
+			continue
+		}
+		if st, n, ok := claimWord(pair.Rec, pair.Live, v, f); ok {
+			return []variables.Step{pair.Step, st}, n, true
+		}
+	}
+	return nil, 0, false
 }
 
 // sigAt reports whether v and f, a value as recorded and as round F saw
@@ -3522,8 +3563,10 @@ func claimWord(rec, live, v, f string) (variables.Step, int, bool) {
 // claimAt is Place.Claim of p, a leaf at the variable place p.Var, recorded
 // rec and seen live in record's full round, that holds the recorded value v
 // and the value f F saw inside a longer value: p.Var, at the word of the
-// claim that holds them (claimWord), "" where none does, p.Var is no place
-// (""), or p is no client test's request (Client): a replay reads a claim
+// claim that holds them (claimWord), or in a Cookie header at the claim of
+// the token a pair holds (cookieToken: |cookie.<name>|jwt.<claim>#<n>);
+// "" where none does, p.Var is no place (""), or p is no client test's
+// request (Client): a replay reads a claim
 // only in the request that pairs with a client test case, and cannot write
 // one into a call's signed token. A place that already names a step or a
 // word is none: its claim would stand in text it decodes.
@@ -3535,11 +3578,15 @@ func claimAt(p Place, rec, live, v, f string) string {
 	if err != nil || !a.Whole() {
 		return ""
 	}
-	st, n, ok := claimWord(rec, live, v, f)
+	if st, n, ok := claimWord(rec, live, v, f); ok {
+		a.Steps, a.Word = []variables.Step{st}, n
+		return a.String()
+	}
+	st, n, ok := cookieToken(a, rec, live, v, f, true)
 	if !ok {
 		return ""
 	}
-	a.Steps, a.Word = []variables.Step{st}, n
+	a.Steps, a.Word = st, n
 	return a.String()
 }
 
