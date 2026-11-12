@@ -50,13 +50,14 @@ type replayDetail struct {
 	set     string // the set replayed
 	windows []models.ScopeWindow
 	starts  []models.ScopeWindow
-	// lived is how long the test command's run took, from keploy starting
-	// it to the exit of what it started: no application it started lived
-	// longer. A series whose rule's timer bound it did not reach is not
-	// due (markEarly). 0 when not measured (a compose run, whose
-	// application keploy started apart from the command): every series is
-	// due as with no bound.
-	lived    time.Duration
+	// run is when keploy started the test command and when what it started
+	// was down: no application it started lived past its end, and none
+	// began before the first call keploy saw of it (lifeOf). A series whose
+	// rule's timer bound that life did not reach is not due (markEarly).
+	// Zero when not measured (a compose run, whose application keploy
+	// started apart from the command): every series is due as with no
+	// bound.
+	run      commandRun
 	expected map[string][]models.MockEntry
 	recorded map[string][]*models.TestCase
 	actual   []*models.TestCase

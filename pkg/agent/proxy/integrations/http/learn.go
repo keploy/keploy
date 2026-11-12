@@ -24,7 +24,6 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -2648,27 +2647,27 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				}
 				return p, why
 			case !bindable:
-				why := r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+				why := r.Path + " carries a value " + from.Mock + " sent " + learn.SentWhere(from) + " at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
 				// Inside a JWT claim, the refusal names the claim, and why
 				// it is no place: a call's request, or a client test's whose
 				// token in this run holds the value at no place of it.
 				if claim := learn.ClaimRefused(from.Mock, from.Path, sentText(earlier, from.Mock, from.Path), from.Live, r.Value, from.Client); claim != "" {
-					why = r.Path + " carries a value " + from.Mock + " sent earlier in the test " + strings.TrimPrefix(claim, from.Mock+" sent this value ")
+					why = r.Path + " carries a value " + from.Mock + " sent " + learn.SentWhere(from) + " " + strings.TrimPrefix(claim, from.Mock+" sent this value ")
 				}
 				if l.Why != "" {
 					why += "; " + l.Why
 				}
 				return p, why
-			case !own || !from.Own && !from.Client && (!from.Run || !provenswitch.On()):
+			case !own || !from.Client && !from.CallBinds():
 				// A value the run made, sent by the set's start-up or an
 				// earlier test's own call (from.Run), is the run's variable:
 				// bound there, used here, under the proven switch; without
 				// it only a test's own calls carry its variables.
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
+				return p, r.Path + " carries a value " + from.Mock + " sent " + learn.SentWhere(from) + ", and only a test's own calls carry its variables"
 			}
 			use, ok := learn.VarPlace(r, jsonReq)
 			if !ok {
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
+				return p, r.Path + " carries a value " + from.Mock + " sent " + learn.SentWhere(from) + ", at a place keploy cannot follow a variable to (a form or multipart field)"
 			}
 			// u is what the variable is at r, recorded and as F saw it: r
 			// whole, or, bound at a word of a client test's request
@@ -2684,7 +2683,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				uLive, _ = at.WordOf(l.Live.Value)
 				if u.Value != r.Value {
 					if r.Type != learn.String {
-						return p, r.Path + " carries a word " + from.Mock + " sent earlier in the test at " + bindAt + ", inside a value that is no string, which a replay reads no word of"
+						return p, r.Path + " carries a word " + from.Mock + " sent " + learn.SentWhere(from) + " at " + bindAt + ", inside a value that is no string, which a replay reads no word of"
 					}
 					use = at.String()
 				}

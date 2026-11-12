@@ -1,6 +1,8 @@
 package learn
 
 import (
+	"encoding/base64"
+	"math/rand"
 	"net/url"
 	"slices"
 	"strconv"
@@ -178,6 +180,10 @@ func TestOutcomeATokenInAURLPathOrBehindEscapesBindsAtItsToken(t *testing.T) {
 		{"a paired token in an answer's Location path, then whole", pr, pf, locThenWhole(pr, pf), "header.Location|urltoken.3"},
 		{"an unpaired token in an answer's Location path, then whole", ur, uf, locThenWhole(ur, uf), "header.Location|urltoken.3"},
 		{"an id of letters and digits in a Location path, then whole", ar, af, locThenWhole(ar, af), "header.Location|urltoken.3"},
+		// Each run's token before the id is of another length: each run's
+		// text is cut on its own, so the id is token 4 of both.
+		{"an unpaired token in a URL's path after an org id of another length in each run", ur, uf, oSent("/v1/orgs/12/requests/"+ur, "/v1/orgs/12345/requests/"+uf), "body.user|urltoken.4"},
+		{"a paired token in a URL's path after an org id of another length in each run", pr, pf, oSent("/v1/orgs/12/requests/"+pr, "/v1/orgs/12345/requests/"+pf), "body.user|urltoken.4"},
 		{"a standard key escaped in a URL's query", kr, kf, oSent(cb+url.QueryEscape(kr), cb+url.QueryEscape(kf)), "body.user|pct|token.4"},
 		// A client may escape any byte (RFC 3986 2.1): a letter of the id's
 		// longest word escaped ("%55" for 'U') hides that word from the
@@ -444,6 +450,110 @@ func TestTokenStepAtReadsALongTextOnce(t *testing.T) {
 	}
 	if scanned == 0 || scanned > passes*(len(rec)+len(live)) {
 		t.Errorf("a token at the end of a 1 MB leaf: Decide scanned %d bytes of texts of %d; want each read once for each cut", scanned, len(rec)+len(live))
+	}
+}
+
+// shownInText opens each earlier place's texts once for a call, however many
+// fields it decides. A call of 50 random tokens beside one earlier leaf of
+// 256 KB or 1 MB, escaped ("%20") or plain, and a client test's short note,
+// opens each place once, decodes the leaf's two texts once where they hold
+// escapes (never where they hold none), and reads the leaf for a bind
+// (fromAt) only for the one token both its texts show: at the leaf's end, in
+// a URL's path, bound at its token. A token its recorded text shows alone,
+// and the 48 it does not show, are never read there; nor is the note, which
+// shows none. Both places hold a '.', and the call builds its map of client
+// tests' requests once. The row counts the opens, decodes, map builds, reads
+// and the bytes the token cuts scan, so it holds on a slow machine as on a
+// fast one: read for every field, the leaf's cuts and decodes cost 50
+// passes of it.
+func TestShownInTextOpensEachPlaceOnceForACall(t *testing.T) {
+	cuts := tokenCuts
+	t.Cleanup(func() { tokenCuts = cuts })
+	var scanned int
+	tokenCuts = slices.Clone(cuts)
+	for i := range tokenCuts {
+		cut := cuts[i].next
+		tokenCuts[i].next = func(s string, from, to int) (int, int, bool) {
+			start, end, ok := cut(s, from, to)
+			if !ok {
+				end = to
+			}
+			scanned += end - from
+			return start, end, ok
+		}
+	}
+	r := rand.New(rand.NewSource(7))
+	token := func() string {
+		b := make([]byte, 32)
+		r.Read(b)
+		return "kepreq_" + base64.RawURLEncoding.EncodeToString(b)
+	}
+	const fields, loc = 50, "/v1/oauth/requests/"
+	recs, lives := make([]string, fields), make([]string, fields)
+	for i := range fields {
+		recs[i], lives[i] = token(), token()
+	}
+	for _, size := range []int{256 << 10, 1 << 20} {
+		for _, sep := range []string{"%20", " "} {
+			var b strings.Builder
+			for b.Len() < size {
+				b.WriteString("lorem" + sep + "ipsum" + sep + "dolor" + sep + "sit" + sep + "amet." + sep)
+			}
+			// The last field's token ends the leaf's path in both runs; the
+			// one before it is in the recorded text alone, round F's holding
+			// another token there.
+			rec := b.String() + "/" + recs[fields-2] + loc + recs[fields-1]
+			live := b.String() + "/" + token() + loc + lives[fields-1]
+			// A second place, a short plain note of a client test's request,
+			// is opened once too. The leaf's '.' is no client test's request's,
+			// and the note holds one in its recorded text alone, which no JWT
+			// of both runs is: neither is read for a claim.
+			at := oAt.Add(-2 * time.Second)
+			note := Earlier{Mock: "mock-1", At: at, Own: true, incoming: true, Payload: oPayload("mock-1", at), Seen: []Seen{
+				{Side: Request, Leaf: oText("body.note", "hello. world"), Live: "hello there", Place: "body.note"},
+			}}
+			in := Input{
+				Drifts: oDrifts(), At: oAt, Arrived: oAt, Earlier: append(oSent(rec, live), note), Test: "test-2", Mock: "mock-300",
+				Rec: Shape{Leaves: map[string]Leaf{}}, Live: Shape{Leaves: map[string]Leaf{}},
+				Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
+			}
+			for i := range fields {
+				p := "body.docs." + strconv.Itoa(i) + "._id"
+				in.Drift = append(in.Drift, p)
+				in.Rec.Leaves[p], in.Live.Leaves[p] = oText(p, recs[i]), oText(p, lives[i])
+			}
+			name := strconv.Itoa(size>>10) + " KB, escaped " + strconv.FormatBool(sep != " ")
+			scanned = 0
+			x := newReaderIndex(in.Drifts)
+			dc := newDecider(in, false, x)
+			ds, of := dc.decide()
+			x.release()
+			bound := 0
+			for i, d := range ds {
+				if d.Outcome != OutcomeValue {
+					continue
+				}
+				bound++
+				if of[i] != in.Drift[fields-1] || d.At.Word != -1 || d.From.Mock != "mock-0" || !strings.HasPrefix(addrSuffix(d.FromAt), "|urltoken.") {
+					t.Errorf("%s: %s bound at %s %s%s; want only the last token bound, whole, at mock-0 body.user|urltoken.<n>", name, of[i], d.From.Mock, d.From.Path, addrSuffix(d.FromAt))
+				}
+			}
+			decoded := 0
+			if sep != " " {
+				decoded = 2
+			}
+			if bound != 1 || dc.opened != 2 || dc.decoded != decoded || dc.inText != 1 {
+				t.Errorf("%s: %d bound, the two places opened %d times, their texts decoded %d times, read for a bind %d times; want 1 bound, each place opened once, the leaf's texts decoded %d times, read once", name, bound, dc.opened, dc.decoded, dc.inText, decoded)
+			}
+			// Both places hold a '.', so each asks which mock is a client
+			// test's request: the call builds that map once, not once a place.
+			if dc.clientMaps != 1 {
+				t.Errorf("%s: the call built its map of client tests' requests %d times; want once", name, dc.clientMaps)
+			}
+			if limit := 2 * len(cuts) * (len(rec) + len(live)); scanned > limit {
+				t.Errorf("%s: the token cuts scanned %d bytes of texts of %d; want at most %d, a pass of each cut to place the one token and one to bind it, never one for each field", name, scanned, len(rec)+len(live), limit)
+			}
+		}
 	}
 }
 

@@ -200,8 +200,95 @@ func (s seriesDue) dueIn(ran map[string]bool) bool {
 }
 
 // commandClock reads the time the test command's run is measured by
-// (mockService.lived). A test replaces it.
+// (commandRun). A test replaces it.
 var commandClock = time.Now
+
+// commandRun is when the test command keploy started began, and when what
+// it started was down (Run returned): zero where keploy did not start the
+// command itself (a compose run).
+type commandRun struct{ began, ended time.Time }
+
+// appLife is how long the application ran in a replay, as keploy reads it
+// (lifeOf): a once series whose rule's timer bound it did not reach is not
+// due (markEarly).
+type appLife struct {
+	// timed is that keploy read the life; false, every series stays due as
+	// with no bound.
+	timed bool
+	// lived is the life read, to the exit of what the test command started:
+	// from the application's first call keploy served or missed in the run
+	// (lifeFirstCall), 0 when it made none (lifeNoCall), or from the test
+	// command's start (lifeCommand), which no application it started began
+	// before.
+	lived time.Duration
+	// from is what lived is read from: lifeFirstCall, lifeNoCall or
+	// lifeCommand.
+	from string
+}
+
+const (
+	// lifeFirstCall reads the application's life from the earliest call of
+	// the run keploy served or missed: the application ran by then.
+	lifeFirstCall = "first-call"
+	// lifeNoCall is a run in which keploy served and missed no call: the
+	// application never ran past a bound.
+	lifeNoCall = "no-call"
+	// lifeCommand reads the application's life from the test command's
+	// start, the longest it can be, where the run's first call is not
+	// known: a call keploy saw carries no time or one outside the command's
+	// run, or what the run served or missed could not be read.
+	lifeCommand = "command"
+)
+
+// lifeOf is the application's life in run (appLife), read from what the
+// agent served (consumed, each stamped with when it first answered) and
+// missed (misses, each with when it missed): the application ran from the
+// first of those calls, which keploy sees, to the exit of what the test
+// command started. A run keploy did not time (run zero) is not read. Where
+// the first call is not known (lifeCommand) the life is the command's whole
+// run, so a series is let off only when even that is shorter than its bound.
+func lifeOf(run commandRun, consumed []models.MockState, consumedKnown bool, misses []models.UnmatchedCall, missesKnown bool) appLife {
+	// Replay sets the run's end with its start.
+	if run.began.IsZero() {
+		return appLife{}
+	}
+	whole := appLife{timed: true, lived: run.ended.Sub(run.began), from: lifeCommand}
+	if !consumedKnown || !missesKnown {
+		return whole
+	}
+	first, called := run.ended, false
+	for _, at := range callTimes(consumed, misses) {
+		// A call keploy saw outside the command's run, or one that carries
+		// no time (which reads as long before it), leaves when the
+		// application began unknown.
+		if at.Before(run.began) || at.After(run.ended) {
+			return whole
+		}
+		called = true
+		if at.Before(first) {
+			first = at
+		}
+	}
+	if !called {
+		return appLife{timed: true, from: lifeNoCall}
+	}
+	return appLife{timed: true, lived: run.ended.Sub(first), from: lifeFirstCall}
+}
+
+// callTimes are the times of the run's calls keploy saw: when each consumed
+// recording first answered (models.MockState.Timestamp, Unix nanoseconds;
+// 0, no time, reads as 1970) and when each miss missed
+// (models.UnmatchedCall.At; no time is the zero time).
+func callTimes(consumed []models.MockState, misses []models.UnmatchedCall) []time.Time {
+	out := make([]time.Time, 0, len(consumed)+len(misses))
+	for _, c := range consumed {
+		out = append(out, time.Unix(0, c.Timestamp))
+	}
+	for _, m := range misses {
+		out = append(out, m.At)
+	}
+	return out
+}
 
 // entryDue is e's timer bound (models.MockEntry.Due) as written: 0 when it
 // has none or it does not parse, and possibly not positive. placedSeries
@@ -213,18 +300,19 @@ func entryDue(e models.MockEntry) time.Duration {
 }
 
 // markEarly is series with each series whose timer bound (seriesDue.due)
-// the application's run did not reach marked early: lived, the test
-// command's run from its start to its exit, is shorter than the bound. A
-// run of unknown length (lived 0 or less) marks none: every series stays
-// due as it would be with no bound. series itself is left as it is.
-func markEarly(series map[string]seriesDue, lived time.Duration) map[string]seriesDue {
-	if lived <= 0 {
+// the application's life (lifeOf) did not reach marked early: it lived
+// shorter than the bound. A life keploy did not read (a compose run) marks
+// none: every series stays due as it would be with no bound. series itself
+// is left as it is.
+func markEarly(series map[string]seriesDue, life appLife) map[string]seriesDue {
+	if !life.timed {
 		return series
 	}
 	out := make(map[string]seriesDue, len(series))
 	for id, s := range series {
-		// A series with no bound (due 0) is never early: lived is positive.
-		s.early = lived < s.due
+		// A series with no bound (due 0) is never early: no life read is
+		// negative.
+		s.early = life.lived < s.due
 		out[id] = s
 	}
 	return out
@@ -253,20 +341,29 @@ func notYetDue(req map[string]seriesDue, tests []TestReceipt, consumed []models.
 }
 
 // RuleNotDueLine is the run's RULE NOT DUE line for n, a series of a once
-// rule whose timer bound the application's run did not reach: lived is
-// that run's length, from keploy starting the test command to its exit.
-// The line's fields end it as JSON, as keploy's other RULE lines.
-func RuleNotDueLine(n RequiredNotMade, lived time.Duration) string {
+// rule whose timer bound the application's life (lifeOf) did not reach. It
+// says what the life was read from. The line's fields end it as JSON, as
+// keploy's other RULE lines.
+func RuleNotDueLine(n RequiredNotMade, life appLife) string {
 	id, _, _ := strings.Cut(n.Rule, "@")
 	num := n.Series[strings.LastIndex(n.Series, "/")+1:]
-	ran := lived.Round(100 * time.Millisecond)
-	fields := map[string]string{"event": "not-due", "id": id, "series": n.Series, "due": n.Due, "lived": ran.String()}
+	ran := life.lived.Round(100 * time.Millisecond)
+	fields := map[string]string{"event": "not-due", "id": id, "series": n.Series, "due": n.Due, "lived": ran.String(), "from": life.from}
 	b, err := json.Marshal(fields)
 	if err != nil {
 		b = []byte(`{"event":"unwritable"}`)
 	}
-	return fmt.Sprintf("RULE NOT DUE %s: %s not due: the app exited at most %s after it started (the test command's whole run), before its %s timer (due: %s), and made no call of its background series %s (%s); keploy requires the series only in a run the app outlives that bound, so the set does not fail on it. rule=%s",
-		n.Rule, id, ran, n.Due, n.Due, num, strings.Join(n.Names, ", "), b)
+	var lived string
+	switch life.from {
+	case lifeFirstCall:
+		lived = fmt.Sprintf("the app exited %s after its first call keploy saw in the run, before its", ran)
+	case lifeNoCall:
+		lived = "the app made no call keploy saw in the run, so it never ran to its"
+	default:
+		lived = fmt.Sprintf("the app exited at most %s after it started (the test command's whole run), before its", ran)
+	}
+	return fmt.Sprintf("RULE NOT DUE %s: %s not due: %s %s timer (due: %s), and made no call of its background series %s (%s); keploy requires the series only in a run the app outlives that bound, so the set does not fail on it. rule=%s",
+		n.Rule, id, lived, n.Due, n.Due, num, strings.Join(n.Names, ", "), b)
 }
 
 // madeIn is whether used holds a recording of s that makes it (makers):

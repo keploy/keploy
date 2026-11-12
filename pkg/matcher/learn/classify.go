@@ -4010,14 +4010,18 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// The place is where the value was sent whole, not where it was answered
 	// or sent inside a longer value (a variable is bound where the
 	// application sent it, whole): the test's own call that sent it first,
-	// else the run's, else another's; then a client test's request that sent
-	// it whole; then a call inside a longer value, in the same order; an
-	// answer that gave it only when no call sent it. Earliest within each.
+	// else the run's where a plan binds it (callBinds); then a client test's
+	// request that sent it whole; then a call that sent it whole where no
+	// plan binds it (the pool's; the run's without the proven switch); then
+	// a call inside a longer value, the test's own first, else the run's,
+	// else another's; an answer that gave it only when no call sent it.
+	// Earliest within each.
 	// A client test's request whose JWT claim holds the value (Place.Claim)
-	// is a place to bind it, ranked after a call that sent it whole and
-	// before the test's request that sent it whole (clientWholeRank), so
-	// before a call that sent it inside a longer value, which binds nothing:
-	// such a call (an auth check, a forwarded token) never hides the claim.
+	// is a place to bind it, ranked after a call that sent it whole where a
+	// plan binds it and before the test's request that sent it whole
+	// (clientWholeRank), so before a call no plan binds at (one that sent it
+	// whole where none binds it, or inside a longer value: an auth check, a
+	// forwarded token): such a call never hides the claim.
 	// A client test's request that held the one word the value changed by
 	// (Place.Word) is a place to bind that word, ranked after the test's
 	// request that sent the value whole and before such a call, for the
@@ -4523,15 +4527,17 @@ func partOf(value, part string) string {
 	return "its characters " + strconv.Itoa(a) + " to " + strconv.Itoa(a+utf8.RuneCountInString(part)-1)
 }
 
-// placeRank orders the places a value may have come from (appearedIn): the
-// request that sent it whole first, the test's own call before the run's,
-// the run's before another's; then a client test's request that sent it
+// placeRank orders the places a value may have come from (appearedIn): a
+// call that sent it whole where a plan binds it (callBinds) first, the
+// test's own before the run's; then a client test's request that sent it
 // whole, where its test case binds it (clientWholeRank); then a call that
-// sent it inside a longer value, in the same order; then an answer, or the
-// test case's own request, the earlier first. A place that uses the run's
-// variable (Seen.Name) is none (noPlaceRank): its value came from the run's
-// place that binds it, which a later call uses too, never a second variable
-// bound at the use.
+// sent it whole where no plan binds it (the run's without the proven
+// switch before the pool's); then a call that sent it inside a longer
+// value, the test's own before the run's, the run's before another's; then
+// an answer, or the test case's own request, the earlier first. A place
+// that uses the run's variable (Seen.Name) is none (noPlaceRank): its value
+// came from the run's place that binds it, which a later call uses too,
+// never a second variable bound at the use.
 func placeRank(e Earlier, s Seen, whole bool) int {
 	if models.RunVariable(s.Name) {
 		return noPlaceRank
@@ -4557,21 +4563,54 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 	case e.Run:
 		r = 1
 	}
-	if !whole {
-		r += clientWholeRank + 1
+	switch {
+	case !whole:
+		r += clientWholeRank + 3
+	case !callBinds(e.Own, e.Run):
+		// A call that sent the value whole where no plan binds it (the
+		// run's without the proven switch, then the pool's) never hides a
+		// client test's request that binds it, whole, at a claim or at a
+		// word: the plan would refuse the find at the call.
+		r += clientWholeRank
 	}
 	return r
 }
 
 // clientWholeRank is placeRank's of a client test's request that sent the
 // value whole where its test case binds it: after every call that sent it
-// whole (0 to 2), before every call that sent it inside a longer value.
+// whole where a plan binds it (0 and 1), before every call that sent it
+// whole where none does (3 and 4) or inside a longer value (5 to 7).
 // noPlaceRank is placeRank's of a place that uses the run's variable, which
 // is no place: a search starts at it and names a place only below it.
 const (
-	clientWholeRank = 3
-	noPlaceRank     = 8
+	clientWholeRank = 2
+	noPlaceRank     = 9
 )
+
+// CallBinds says whether a plan binds a variable at the call p names, which
+// sent the value whole: the test's own call (Own), or, under the proven
+// switch, the run's (Run: the set's start-up's, or an earlier test's own
+// call). Without the switch only a test's own calls carry its variables,
+// and a mock of the pool (neither) carries none. A client test's request
+// (Client) is no call: its test case binds there (BindAt).
+func (p Place) CallBinds() bool { return callBinds(p.Own, p.Run) }
+
+func callBinds(own, run bool) bool { return own || run && provenswitch.On() }
+
+// SentWhere says where in the run from's place was sent, as a reason names
+// it: in the test set's start-up (InStartUp), in an earlier test of the set
+// (Run), else earlier in the test (the test's own call, a mock of the pool
+// F served in it, or its client test's request). A reason never says
+// "earlier in the test" of a place the running test did not send.
+func SentWhere(from Place) string {
+	switch {
+	case from.InStartUp:
+		return "in the test set's start-up"
+	case from.Run:
+		return "in an earlier test of the set"
+	}
+	return "earlier in the test"
+}
 
 // withoutGave is earlier without the values the test gave keploy
 // (Earlier.Gave), earlier itself where it holds none: what every rule but
