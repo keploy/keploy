@@ -397,6 +397,9 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 	if d, ok := dc.oneToken(path, bare, rec, live, rd); ok {
 		return []Decision{d}, true
 	}
+	if d, ok := dc.wholeCopy(path, bare, rec, live, rd); ok {
+		return []Decision{d}, true
+	}
 	if rd.ChangedShape {
 		why := "a word was added or dropped"
 		if slices.ContainsFunc(rd.Separators, func(sc sepChange) bool { return len(sc.Tokens) == 0 }) {
@@ -631,6 +634,37 @@ func stdGroups(rec, live string) bool {
 	r, l := strings.TrimRight(rec, "="), strings.TrimRight(live, "=")
 	return len(rec)%4 == 0 && len(rec)-len(r) <= 2 && len(rec)-len(r) == len(live)-len(l) &&
 		strings.Trim(r, "+/"+letters) == "" && strings.Trim(l, "+/"+letters) == ""
+}
+
+// wholeCopy decides a text whose two runs' words do not pair (a word was
+// added or dropped, or the text between them changed, rd.ChangedShape) as
+// one value where an earlier leaf holds the field whole in both runs: the
+// recorded text whole in R and round F's whole in F (a client_id of
+// base64url parts, sent back as it was given, whose '-' and '_' fall
+// elsewhere in each run). Word by word replay could never write it back;
+// whole, it is that leaf's value in each run, bound at the earliest such
+// leaf of the call's scope placed before it, as a word one place shows in
+// both runs is (wordBy). A text that holds an instant is left to the
+// instant's rules, and one no such leaf holds to the refusals after this:
+// ok is false there.
+func (dc *decider) wholeCopy(path string, bare variables.Address, rec, live string, rd textReading) (Decision, bool) {
+	if len(rd.Instants) > 0 || !rd.ChangedShape && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 }) {
+		return Decision{}, false
+	}
+	var src []evPlace
+	for _, p := range dc.ps {
+		if p.state == stateBefore && !p.recAfter && !p.fUnstated && (dc.allScope || !p.otherTest) && p.rec == rec && p.live == live {
+			src = append(src, p)
+		}
+	}
+	if len(src) == 0 {
+		return Decision{}, false
+	}
+	echo, no := dc.answered(path, bare, readWord{At: bare, Rec: rec, Live: live}, rec, live, false)
+	if no != nil {
+		return *no, true
+	}
+	return dc.bound(path, bare, -1, changedInstant{r: rec, l: live, valueEcho: echo, rec: rec}, src, ", the earliest place before the call that holds it whole in both runs"), true
 }
 
 // unpaired decides a text where a word was added or dropped: refused whole
@@ -2923,7 +2957,7 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	}
 	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), places)
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
-		Given: first.given, Client: dc.clientCase(first.mock), Clock: first.clock}
+		Given: first.given, Client: dc.clientCase(first.mock), Clock: first.clock, Offset: first.offset}
 	d.FromAt = fromAt
 	d.Echo = c.valueEcho
 	return d

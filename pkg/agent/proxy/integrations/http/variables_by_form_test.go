@@ -21,8 +21,10 @@ func (d timedVarDb) TimeForm() bool { return d.timeForm }
 // a later one, that the learn step gave a check by form at its use
 // (models.MockVariable.ByForm): two reads of the clock that fell in one
 // second when recorded and in two in this replay pass by form under the time
-// default, and only there. A use with no such check, an ObjectId, a value of
-// another form, and a replay under strict times still need the bound value.
+// default, and only there, in the form it was recorded in or, where its
+// record runs wrote two, in either. A use with no such check, an ObjectId, a
+// value of another form, and a replay under strict times still need the
+// bound value.
 func TestVariables_ATimeWhoseBindDoesNotHoldInAReplayIsCheckedByItsForm(t *testing.T) {
 	const (
 		recCreated  = "2026-11-11T18:35:46Z"
@@ -32,6 +34,14 @@ func TestVariables_ATimeWhoseBindDoesNotHoldInAReplayIsCheckedByItsForm(t *testi
 	)
 	form := learn.TimeForm(learn.Leaf{Type: learn.String, Value: recCreated})
 	byForm := map[string]models.ClockOffset{"body.createdAt": {Form: form, Why: "a time, checked by its form alone where the value it was bound to does not hold"}}
+	// A time its record runs wrote in two forms, Z in one and a zone offset
+	// in the other: a replay passes either (FormF), and no third.
+	zoned := "2026-11-12T06:30:01+05:30"
+	f1, f2 := models.FormsOf(form, learn.TimeForm(learn.Leaf{Type: learn.String, Value: zoned}))
+	if f2 == "" {
+		t.Fatalf("%q and %q are of one form; the rows need two", recCreated, zoned)
+	}
+	byTwo := map[string]models.ClockOffset{"body.createdAt": {Form: f1, FormF: f2, Why: "a time, checked by its forms alone where the value it was bound to does not hold"}}
 	pool := func(useByForm map[string]models.ClockOffset, clocks map[string]models.ClockOffset) []*models.Mock {
 		create := varMock("mock-1", "POST", "http://store/apps", `{"createdAt":"`+recCreated+`","id":"`+recID+`"}`, 201, `{}`,
 			models.MockVariables{"appCreated": bindV(recCreated, "body.createdAt"), "appId": bindV(recID, "body.id")})
@@ -66,6 +76,11 @@ func TestVariables_ATimeWhoseBindDoesNotHoldInAReplayIsCheckedByItsForm(t *testi
 		{what: "another form at a use checked by form", byForm: byForm, timeForm: true, body: putBody("2026-11-12 01:00:01Z", liveID, recCreated), miss: "this call sent"},
 		{what: "another ObjectId at a use with no check by form", byForm: byForm, timeForm: true, body: putBody(liveCreated, "6732f0f0c3d4e5f60123aaaa", recCreated), miss: "this call sent"},
 		{what: "another ObjectId at a use a check by form names", byForm: map[string]models.ClockOffset{"body.appId": {Form: form}}, timeForm: true, body: putBody(liveCreated, "6732f0f0c3d4e5f60123aaaa", recCreated), miss: "this call sent"},
+		{what: "the next second, of the recorded one of two forms", byForm: byTwo, timeForm: true, body: putBody("2026-11-12T01:00:01Z", liveID, recCreated), served: true},
+		{what: "the next second, of round F's one of two forms", byForm: byTwo, timeForm: true, body: putBody(zoned, liveID, recCreated), served: true},
+		{what: "round F's one of two forms at a use checked by one form", byForm: byForm, timeForm: true, body: putBody(zoned, liveID, recCreated), miss: "this call sent"},
+		{what: "a third form at a use checked by two", byForm: byTwo, timeForm: true, body: putBody("2026-11-12 01:00:01Z", liveID, recCreated), miss: "this call sent"},
+		{what: "round F's one of two forms under strict times", byForm: byTwo, body: putBody(zoned, liveID, recCreated), miss: "this call sent"},
 		{what: "a time a clock rule checks by form beside the variables, under the time default", clocks: map[string]models.ClockOffset{"body.updatedAt": {Form: form}}, timeForm: true, body: putBody(liveCreated, liveID, "2026-11-12T01:00:07Z"), served: true},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
