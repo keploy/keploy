@@ -3,10 +3,13 @@ package replay
 import (
 	"context"
 	"errors"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -292,5 +295,99 @@ func TestASetThatHaltsThenStopsTheRunOnAnInternalErrorHasNoAppLines(t *testing.T
 	want := setEnd{set: "test-set-0", halted: true, reason: parts[0]}
 	if got := hooks.got(); len(got) != 1 || got[0] != want {
 		t.Fatalf("AfterTestSetRun calls %+v, want [%+v]", got, want)
+	}
+}
+
+// An application --keep-app-alive keeps across the run's sets (the stack
+// docker compose keeps for an in-Pod replay) that exits before it accepts a
+// connection ends the run as the first set waits for it: that set halted,
+// and its hooks are told so, once, failed, for the very reason the run's
+// stop names, with the last lines the application logged. Before, the run
+// returned before its AfterTestSetRun, and a hook that reports each set
+// (k8s-proxy's metric of an auto-replay round) reported the set as nothing
+// and ran it again in its verifying pass. A user's stop as the set waits is
+// not a halt: its hooks are told none. A hook that fails on that end is
+// logged, and the run still stops as it did.
+func TestAKeptAppThatExitsBeforeItAcceptsTellsTheSetsHooksItHalted(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		exits   bool
+		halted  bool
+		hookErr error
+	}{
+		{"the application exits", true, true, nil},
+		{"the application exits and the hook fails", true, true, errors.New("metric store is down")},
+		{"the user stops keploy", false, false, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			refusing := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
+			h := newPartialRunHarness(t, 2, 0)
+			for _, tc := range h.cases {
+				tc.HTTPReq.URL = "http://" + refusing + "/x"
+			}
+			h.replayer.config.Command = "./app"
+			h.replayer.config.CommandType = string(utils.Native)
+			h.replayer.config.Test.KeepAppAlive = true
+			h.replayer.config.Test.MaxFlakyChecks = 1
+			hooks := &setEndHooks{err: c.hookErr}
+			h.replayer.hookImpl = hooks
+			ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+			defer cancel()
+			// The application exits, or its user stops keploy, once the
+			// first set waits for it to accept a connection.
+			var once sync.Once
+			core, logs := observer.New(zapcore.DebugLevel)
+			h.replayer.logger = zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
+				if strings.Contains(e.Message, "waiting for the application to accept a connection on "+refusing) {
+					once.Do(func() {
+						if c.exits {
+							close(h.instr.appStopped)
+							return
+						}
+						cancel()
+					})
+				}
+				return nil
+			}))
+			saved := utils.ErrCode
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = saved })
+			if err := h.replayer.Start(ctx); err == nil {
+				t.Fatal("Start returned nil, the case needs the run stopped as its first set waits")
+			}
+			if n := len(h.report.results); n != 0 {
+				t.Fatalf("%d tests were sent, the case needs none", n)
+			}
+			got := hooks.got()
+			if !c.halted {
+				for _, end := range got {
+					if end.halted {
+						t.Fatalf("AfterTestSetRun calls %+v, want none told it halted on a user's stop", got)
+					}
+				}
+				return
+			}
+			stops := logs.FilterMessage("stopping Keploy").All()
+			if len(stops) != 1 {
+				t.Fatalf("%d \"stopping Keploy\" lines, want 1", len(stops))
+			}
+			reason, _ := stops[0].ContextMap()["reason"].(string)
+			if !strings.Contains(reason, "exited before it accepted a connection") {
+				t.Fatalf("the run stops with %q, the case needs it to name the application's exit", reason)
+			}
+			want := setEnd{set: "test-set-0", status: false, halted: true, reason: reason, appLogs: prExitLogs}
+			if len(got) != 1 || got[0] != want {
+				t.Fatalf("AfterTestSetRun calls %+v, want [%+v]", got, want)
+			}
+			failed := logs.FilterMessage(hookFailed).All()
+			switch {
+			case c.hookErr == nil && len(failed) != 0:
+				t.Errorf("%d %q lines for a hook that did not fail, want none", len(failed), hookFailed)
+			case c.hookErr != nil && len(failed) != 1:
+				t.Errorf("%d %q lines for a hook that failed, want 1", len(failed), hookFailed)
+			case c.hookErr != nil && failed[0].ContextMap()["testSet"] != "test-set-0":
+				t.Errorf("the %q line names the set %v, want test-set-0", hookFailed, failed[0].ContextMap()["testSet"])
+			}
+		})
 	}
 }

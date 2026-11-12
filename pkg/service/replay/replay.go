@@ -1415,6 +1415,16 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 					// errgroup ended ctx (the exit of the application
 					// --keep-app-alive keeps), and the reason names it.
 					stopReason = cancelledRunReason(testSet, err, context.Cause(ctx))
+					// The application's exit is what ended ctx: the set
+					// halted (before its application accepted a
+					// connection, or as its tests ran), and its hooks are
+					// told so, and why, as those of a set that ends the
+					// run on its status are. A user's stop is no halt.
+					if exit := keptAppExit(ctx); exit != (models.AppError{}) {
+						if hookErr := r.hookImpl.AfterTestSetRun(WithSetHaltAppLogs(WithSetHalt(ctx, stopReason), exit.AppLogs), testSet, false); hookErr != nil {
+							utils.LogError(r.logger, hookErr, "failed to execute after test set run hook", zap.String("testSet", testSet))
+						}
+					}
 					return err
 				}
 				// DockerCompose: when the user-app container exits,
