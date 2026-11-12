@@ -217,6 +217,7 @@ func (dc *decider) decide() ([]Decision, []string) {
 			}
 		}
 	}
+	out, fields = dc.mintedUses(out, fields)
 	dc.oneValue(out, fields)
 	if dc.x.unread() {
 		// A recording keploy could not read again: every change of the
