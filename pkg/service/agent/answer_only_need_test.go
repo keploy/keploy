@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -132,6 +133,34 @@ func TestAnAnswerOnlyNeedRunsTheTestAndAnswersAsRecorded(t *testing.T) {
 		require.Empty(t, run(t, a, "TestMake").Action)
 		require.Equal(t, whySlow, run(t, a, "TestCI").Reason, "fail closed: the test waits on the test not run")
 		require.Empty(t, answered(logs))
+	})
+
+	// The line is said only once the test began: a begin refused after the
+	// hand (the test process does not carry keploy's shim, or the proxy
+	// refuses to serve the test) says nothing, and the next begin that
+	// opens the test says it once. Mutation: say it at the hand.
+	t.Run("a begin that fails after the hand", func(t *testing.T) {
+		a, ap, logs := setup(t, models.MODE_TEST, true)
+		h := &shimHooks{armed: map[int]bool{}}
+		a.Hooks = h
+		_, serr := a.ProvenBegin(ctx, begin("TestCI"))
+		require.NotNil(t, serr, "the unshimmed begin is refused")
+		require.Equal(t, models.ScopeErrNotInRun, serr.Code)
+		require.Equal(t, []string{"o::TestCI: " + slow + "," + made}, ap.hands(), "the hand comes before the refusal")
+		require.Empty(t, answered(logs), "a refused begin says it is answered as recorded")
+		h.armed[os.Getpid()] = true
+		ap.mu.Lock()
+		ap.setErr = errors.New("the proxy refused the test's mocks")
+		ap.mu.Unlock()
+		_, serr = a.ProvenBegin(ctx, begin("TestCI"))
+		require.NotNil(t, serr, "the begin the proxy refuses fails")
+		require.Contains(t, serr.Message, "the proxy refused the test's mocks")
+		require.Empty(t, answered(logs), "a begin that failed to open says it is answered as recorded")
+		ap.mu.Lock()
+		ap.setErr = nil
+		ap.mu.Unlock()
+		require.Empty(t, run(t, a, "TestCI").Action)
+		require.Len(t, answered(logs), 2, "the begin that opens the test says each test it does not wait on, once")
 	})
 
 	t.Run("a record", func(t *testing.T) {

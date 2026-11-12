@@ -1271,10 +1271,11 @@ func (a *Agent) giveClientCases(id string, worker uint32, overlaps bool) {
 // answerAsRecorded hands worker's proxy, before test id opens, the run's
 // variables the answer-only needs of id whose tests have not begun (asRecorded,
 // models.ScopeNeed.Answers) name, for id's scope to answer as recorded
-// (coreAgent.ExactTestAnswerer), and says so in one line per such test. With
-// none, it hands none, so nothing left by an earlier begin of id that did not
-// open stays. It returns the first of them when the proxy could not take
-// them, which id then waits on, and nil otherwise.
+// (coreAgent.ExactTestAnswerer). With none, it hands none, so nothing left by
+// an earlier begin of id that did not open stays. It returns the first of
+// them when the proxy could not take them, which id then waits on, and nil
+// otherwise. ProvenBegin says each one handed (answeredAsRecordedLine) once
+// id has begun: a begin that fails after the hand opens no test to answer.
 func (a *Agent) answerAsRecorded(id string, worker uint32, asRecorded []models.ScopeNeed) *models.ScopeNeed {
 	var names []string
 	for _, n := range asRecorded {
@@ -1288,19 +1289,16 @@ func (a *Agent) answerAsRecorded(id string, worker uint32, asRecorded []models.S
 	if r, ok := es.(coreAgent.ExactTestAnswerer); ok {
 		handed = r.AnswerAsRecordedAtOpen(id, names) == nil
 	}
-	for i, n := range asRecorded {
-		if !handed {
-			return &asRecorded[i]
-		}
-		a.logger.Info(answeredAsRecordedLine(id, n))
+	if !handed && len(asRecorded) > 0 {
+		return &asRecorded[0]
 	}
 	return nil
 }
 
-// answeredAsRecordedLine is the line answerAsRecorded says for test id's
-// answer-only need n: the values id receives from n.Test, which has not run
-// before it, or, for a need that names no test (no recording in this run
-// sends them), the values alone.
+// answeredAsRecordedLine is the line ProvenBegin says, once test id has
+// begun, for id's answer-only need n: the values id receives from n.Test,
+// which has not run before it, or, for a need that names no test (no
+// recording in this run sends them), the values alone.
 func answeredAsRecordedLine(id string, n models.ScopeNeed) string {
 	values, they := fmt.Sprintf("%d values", len(n.Answers)), "they are"
 	if len(n.Answers) == 1 {
@@ -1558,6 +1556,13 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// however the last open test closes.
 	a.reScope()
 	begun = true
+	// Only a test that began is answered as recorded: a begin that failed
+	// after the hand says nothing of it.
+	if a.replaying() {
+		for _, n := range asRecorded {
+			a.logger.Info(answeredAsRecordedLine(id, n))
+		}
+	}
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Seed: seed}, nil
 }
 
