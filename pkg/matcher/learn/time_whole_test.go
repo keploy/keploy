@@ -117,6 +117,34 @@ func TestTheTimeDefaultLeavesAWholeTimeRefusedAsAConflict(t *testing.T) {
 	}
 }
 
+// A whole time its call's window holds, beside an exchange keploy holds
+// no payload of (the value may have been built on its answer), is refused
+// unread under the clock checks: keploy could not read the evidence. And
+// one whose two runs write it in two layouts no replay passes as one form
+// (RFC 3339 as recorded, RFC 1123 or a space for the T in round F) is
+// refused cannot-check. The time default settles neither on a whole time:
+// both stay refused, as under strict times.
+func TestTheTimeDefaultLeavesAWholeTimeUnreadOrInTwoLayouts(t *testing.T) {
+	win := iWin(wRAt, wFAt, 10*time.Millisecond)
+	bare := Earlier{Mock: "mock-3271", At: wRAt.Add(-time.Millisecond), Own: true, Seen: []Seen{{Side: Response, Leaf: oText(wAnswer, "abc"), Live: "abd"}}}
+	for _, c := range []struct {
+		what string
+		typ  Type
+		v    func(time.Time) string
+	}{
+		{"an RFC 3339 text", String, wRFC},
+		{"a typed instant", Instant, iMs},
+		{"an epoch number", String, wSecs},
+	} {
+		in := iCall(wPath, c.typ, c.v(wRAt), c.v(wFAt), wRAt, wFAt, win, []Earlier{bare}, nil)
+		tStrictThenDefault(t, c.what+" beside an exchange with no payload", in, RefusalUnread, false, "")
+	}
+	for _, f := range []string{time.RFC1123, "2006-01-02 15:04:05"} {
+		in := iCall(wPath, String, wRFC(wRAt), wFAt.Format(f), wRAt, wFAt, win, nil, nil)
+		tStrictThenDefault(t, "an RFC 3339 time written "+f+" in round F", in, RefusalCannotCheck, false, "")
+	}
+}
+
 // wAsStrict checks the decisions of in under the time default are the
 // clock checks' (strict times): the same outcome and refusal of each word,
 // none a time checked by its form; and that strict refuses the word of r
