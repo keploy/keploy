@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -186,6 +187,11 @@ func start(ctx context.Context) {
 			}
 		}()
 	}
+
+	// Reach the docker daemon the docker CLI reaches (its current context, such
+	// as Rancher Desktop's), before the sudo re-exec: root's docker
+	// configuration does not name the user's context.
+	engine.UseDockerContext(logger)
 
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
