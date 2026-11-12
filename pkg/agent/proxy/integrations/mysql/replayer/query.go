@@ -215,37 +215,37 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 						zap.String("hint", "check mappings.yaml: this test set has no MySQL data mock for the command phase — either the query was never recorded, or its mock was dropped at record time (teardown lag or memory pressure)"),
 					)
 				}
+				baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)
+				missErr := models.NewMockMismatchError(baseErr, report)
 				// next_step reuses the strict-aware guidance computed for the
 				// mismatch report above — under schemaNoiseStrict the accurate
 				// advice is "mark/learn the drifted fields", not "re-record".
-				logger.Error("Connection closing due to no matching mock found.",
+				missFields := []zap.Field{
 					zap.Int("commands_processed", commandCount),
 					zap.String("request_type", req.Header.Type),
 					zap.String("closest_mock", miss.closestMock),
 					zap.Int("candidates", miss.candidateCount),
 					zap.String("match_phase", miss.matchPhase),
 					zap.Int("strict_rejected_candidates", miss.strictRejected),
-					zap.String("next_step", nextSteps))
-				baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)
-				return models.NewMockMismatchError(baseErr, report)
+					zap.String("next_step", nextSteps),
+				}
+				// The connection serves on after a miss: a statement the
+				// client closed is forgotten whether or not its close matched.
+				forgetClosedStatement(logger, commandPkt, decodeCtx)
+				answered, err := answerMiss(ctx, logger, clientConn, req, decodeCtx, missErr)
+				if !answered {
+					logger.Error("Connection closing due to no matching mock found.", missFields...)
+					return err
+				}
+				logger.Warn("No matching mock found for the command; answered it with a MySQL error and kept the connection open.", missFields...)
+				continue
 			}
 
 			if ce := logger.Check(zap.DebugLevel, "Matched the command with the mock"); ce != nil {
 				ce.Write(zap.Any("mock", resp))
 			}
 
-			// Handle prepared statement cleanup for COM_STMT_CLOSE
-			if commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {
-				if closePacket, ok := commandPkt.Message.(*mysql.StmtClosePacket); ok {
-					delete(decodeCtx.PreparedStatements, closePacket.StatementID)
-					if decodeCtx.StmtIDToQuery != nil {
-						delete(decodeCtx.StmtIDToQuery, closePacket.StatementID)
-					}
-					if ce := logger.Check(zap.DebugLevel, "Cleaned up prepared statement"); ce != nil {
-						ce.Write(zap.Uint32("StatementID", closePacket.StatementID))
-					}
-				}
-			}
+			forgetClosedStatement(logger, commandPkt, decodeCtx)
 
 			// We could have just returned before matching the command for no response commands.
 			// But we need to remove the corresponding mock from the mockDb for no response commands.
@@ -330,4 +330,91 @@ func requestBodyNoise(cfg map[string]map[string][]string) map[string][]string {
 		out[strings.TrimPrefix(strings.ToLower(k), "body.")] = append([]string{}, v...)
 	}
 	return out
+}
+
+// forgetClosedStatement drops the prepared statement a COM_STMT_CLOSE closes
+// from the connection's decode state. It runs once the close has been
+// matched, or has missed: the matcher reads the statement's query to match
+// the close.
+func forgetClosedStatement(logger *zap.Logger, commandPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) {
+	if commandPkt.Header.Type != mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {
+		return
+	}
+	closePacket, ok := commandPkt.Message.(*mysql.StmtClosePacket)
+	if !ok {
+		return
+	}
+	delete(decodeCtx.PreparedStatements, closePacket.StatementID)
+	if decodeCtx.StmtIDToQuery != nil {
+		delete(decodeCtx.StmtIDToQuery, closePacket.StatementID)
+	}
+	if ce := logger.Check(zap.DebugLevel, "Cleaned up prepared statement"); ce != nil {
+		ce.Write(zap.Uint32("StatementID", closePacket.StatementID))
+	}
+}
+
+// The error a command with no matching mock is answered with:
+// ER_UNKNOWN_ERROR, SQLSTATE HY000, the server's generic failure of one
+// statement. A client library raises it as that statement's error and keeps
+// its connection.
+const (
+	missErrCode    uint16 = 1105
+	missErrState          = "HY000"
+	missErrMessage        = "keploy: no recorded mock matches this command"
+)
+
+// answerMiss answers a command that matched no mock as a server answers a
+// statement it cannot run: with an ERR packet, on a connection that stays
+// open. It reports the miss first (models.ReportMockMismatch), so the miss is
+// queued for the test that made it before the app can read the answer and
+// end that test.
+//
+// Closing the connection instead, as the replay did, made one unmatched
+// statement cost the app its connection. Inside a transaction the client may
+// not reconnect, so every later statement of the request failed with it: a
+// Rails request whose best-effort UPDATE drifted from its recording returned
+// 500 (keploy/api-server#2514), and a pool such as Makara then blacklisted
+// the connection for the requests after it.
+//
+// It returns answered false, and the miss as err, when the miss cannot be
+// reported without returning it (no reporter on ctx): the connection ends as
+// before, so no miss goes unreported. A command the client expects no answer
+// to (COM_STMT_CLOSE, COM_STMT_SEND_LONG_DATA) is reported and left
+// unanswered: an ERR packet there would be read as the answer to the client's
+// next command. (COM_QUIT never misses: matchCommand ends the connection on
+// it.)
+// When the ERR packet cannot be written the connection ends: answered is
+// false, and err is the miss marked reported (models.MismatchReported), so the
+// proxy logs it and does not queue it a second time.
+func answerMiss(ctx context.Context, logger *zap.Logger, clientConn net.Conn, req mysql.Request, decodeCtx *wire.DecodeContext, missErr error) (answered bool, err error) {
+	if !models.ReportMockMismatch(ctx, missErr) {
+		return false, missErr
+	}
+	if wire.IsNoResponseCommand(req.Header.Type) {
+		return true, nil
+	}
+	// The answer's sequence id is one past the command's, as every answer's.
+	var seq uint8 = 1
+	if req.Header != nil && req.Header.Header != nil {
+		seq = req.Header.Header.SequenceID + 1
+	}
+	errPkt := &mysql.PacketBundle{
+		Header: &mysql.PacketInfo{Type: mysql.StatusToString(mysql.ERR), Header: &mysql.Header{SequenceID: seq}},
+		Message: &mysql.ERRPacket{
+			Header:         mysql.ERR,
+			ErrorCode:      missErrCode,
+			SQLStateMarker: "#",
+			SQLState:       missErrState,
+			ErrorMessage:   missErrMessage,
+		},
+	}
+	buf, err := wire.EncodeToBinary(ctx, logger, errPkt, clientConn, decodeCtx)
+	if err == nil {
+		_, err = clientConn.Write(buf)
+	}
+	if err != nil {
+		logger.Debug("could not answer a command with no matching mock with an error", zap.Error(err))
+		return false, models.MismatchReported{Err: missErr}
+	}
+	return true, nil
 }
