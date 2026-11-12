@@ -23,8 +23,8 @@ const (
 
 // A claim's recorded value written back is the token as it was, byte for
 // byte, in either base64url encoding of its payload, whatever the claim's
-// JSON is; a payload that holds the claim twice, or none, has no place for
-// it.
+// JSON is; a payload that holds the claim twice, or none, or is no
+// base64url, and a text of other than three parts, has no place for it.
 func TestAClaimWrittenBackIsTheTokenAsItWas(t *testing.T) {
 	for _, c := range []struct {
 		claims string
@@ -56,6 +56,27 @@ func TestAClaimWrittenBackIsTheTokenAsItWas(t *testing.T) {
 				t.Fatalf("%s: written back %q (%v), want the token as it was", c.claims, back, ok)
 			}
 		}
+	}
+	// A text of two or four '.' parts is no JWT: no claim to read or write.
+	tok := claimsToken(base64.RawURLEncoding, `{"iat":1762900000}`, claimSigA)
+	for _, bad := range []string{tok[:strings.LastIndex(tok, ".")], tok + "." + claimSigB} {
+		if raw, ok := claimRawOf(bad, "iat"); ok {
+			t.Fatalf("%s: read the claim %s from a text of %d parts", bad, raw, strings.Count(bad, ".")+1)
+		}
+		if _, ok := claimPutBack(bad, "iat", "1"); ok {
+			t.Fatalf("%s: wrote a claim back into a text of %d parts", bad, strings.Count(bad, ".")+1)
+		}
+	}
+	// A payload that is base64url but for a byte after its last whole
+	// quantum is no JWT either, though the bytes before that one decode to
+	// a whole claims object.
+	parts := strings.Split(tok, ".")
+	bad := parts[0] + "." + parts[1] + "!." + parts[2]
+	if raw, ok := claimRawOf(bad, "iat"); ok {
+		t.Fatalf("%s: read the claim %s from a payload that is no base64url", bad, raw)
+	}
+	if _, ok := claimPutBack(bad, "iat", "1"); ok {
+		t.Fatalf("%s: wrote a claim back into a payload that is no base64url", bad)
 	}
 }
 
