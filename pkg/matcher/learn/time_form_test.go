@@ -810,6 +810,9 @@ func TestABoundEpochOfAnOffsetReadGetsItsCheckByForm(t *testing.T) {
 		{"a year on, no read", year, nil, false},
 		{"two years on, an offset read of two years", 2 * year, read(2 * year), true},
 		{"three years on, an offset read of a year", 3 * year, read(year), false},
+		// The span moved by the offset reaches as far as its widest offset
+		// does: an offset read of a year to a year and thirty days (Max).
+		{"two years and twenty days on, an offset read of a year to a year and thirty days", year + 386*24*time.Hour, &models.ClockOffset{Min: year, Max: year + 30*24*time.Hour, Res: time.Second}, true},
 	} {
 		rec, live := iEpochMs(rAt.Add(-600*time.Millisecond).Add(c.ttl)), iEpochMs(fAt.Add(-610*time.Millisecond).Add(c.ttl))
 		e := iSent("mock-1", rAt.Add(-500*time.Millisecond), "body.expiresAt", Number, rec, live)
