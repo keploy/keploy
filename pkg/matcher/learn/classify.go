@@ -889,6 +889,19 @@ type Place struct {
 	// request only to put its recorded values back, and cannot write a
 	// claim into a signed token (claimAt).
 	Claim string
+	// Word, of a client test's request (Client) that held the value inside
+	// a longer value (Whole false) and no JWT claim held it (Claim ""), is
+	// the word of the leaf that held the one word the value changed by
+	// (ChangedWord: every other word and byte of it alike in both runs),
+	// recorded and as F saw it, the leaf having changed by that word alone
+	// too, addressed at the place Var names ("body.input.repo#3"; Var itself
+	// where the leaf is that word whole): a key the application named after
+	// a value the test sent ("CI identity: github <repo>"). A replay binds
+	// a variable to that word of the request that pairs with the test case
+	// (BindAt) and compares the value's changed word with it. "" where no
+	// such word is, or the place is a call's, whose request a replay reads
+	// only to put its recorded values back (wordBindAt).
+	Word string
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
 	// Clock: the learn step learned the leaf as a plain read of the
@@ -3950,7 +3963,10 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// before the test's request that sent it whole (clientWholeRank), so
 	// before a call that sent it inside a longer value, which binds nothing:
 	// such a call (an auth check, a forwarded token) never hides the claim.
-	// rank is twice placeRank's, so the claim's rank lies between the two.
+	// A client test's request that held the one word the value changed by
+	// (Place.Word) is a place to bind that word, ranked after the test's
+	// request that sent the value whole and before such a call, for the
+	// same reason. rank is twice placeRank's, so these ranks lie between.
 	var best Place
 	rank := 2 * noPlaceRank
 	for _, e := range served {
@@ -3980,6 +3996,8 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			if !whole {
 				if p.Claim = claimAt(p, s.Leaf.Value, s.Live, recorded, v.live); p.Claim != "" {
 					r = 2*clientWholeRank - 1
+				} else if p.Word = wordBindAt(p, s.Leaf.Value, s.Live, recorded, v.live); p.Word != "" {
+					r = 2*clientWholeRank + 1
 				}
 			}
 			if r < rank {
@@ -4007,7 +4025,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// window excuses a word of it. An exchange F served leaf by leaf first,
 	// then a raw mock (below).
 	echoed := dc.echoedIn(v, at, served, raw, eh)
-	if from, ok := dc.echoServed(echoed, recorded, served); ok {
+	if from, ok := dc.echoServed(echoed, recorded, v.live, served); ok {
 		from.liveAt = dc.heldAt(echoed, at, served, raw)
 		return from, true
 	}
@@ -4213,8 +4231,10 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 // day as the echo reads it, seenHoldsRecorded), the moment a drifted value
 // (recorded) was recorded with, by the rule the echo found it a copy by
 // (echoedIn, holdsRecorded): the first by placeRank. ok is false when none
-// does.
-func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []Earlier) (Place, bool) {
+// does. A client test's request that held it inside a longer value names
+// the word the value changed by where it held that word (Place.Word: the
+// value as recorded, and live, as F saw it, wordBindAt).
+func (dc *DriftCache) echoServed(echoed []echoMatch, recorded, live string, served []Earlier) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
 	}
@@ -4229,6 +4249,9 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 			if r := placeRank(e, s, whole); r < rank {
 				best, rank = seenPlace(e, s, whole), r
 				best.Echo, best.givenWhole = true, s.Side == Response
+				if !whole {
+					best.Word = wordBindAt(best, s.Leaf.Value, s.Live, recorded, live)
+				}
 			}
 		}
 	}

@@ -2670,7 +2670,26 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			if !ok {
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
 			}
-			if !variables.SameValue(bindLive, l.Live.Value, r.Type == learn.Number) {
+			// u is what the variable is at r, recorded and as F saw it: r
+			// whole, or, bound at a word of a client test's request
+			// (learn.Place.Word), r's one changed word (learn.ChangedWord),
+			// used at that word where r is longer than it. A replay reads a
+			// word only of a string.
+			u, uLive := r, l.Live.Value
+			if from.Word != "" {
+				pl, _ := variables.Parse(use)
+				k, _ := learn.ChangedWord(r.Value, l.Live.Value)
+				at := variables.Address{Place: pl, Word: k}
+				u.Value, _ = at.WordOf(r.Value)
+				uLive, _ = at.WordOf(l.Live.Value)
+				if u.Value != r.Value {
+					if r.Type != learn.String {
+						return p, r.Path + " carries a word " + from.Mock + " sent earlier in the test at " + bindAt + ", inside a value that is no string, which a replay reads no word of"
+					}
+					use = at.String()
+				}
+			}
+			if !variables.SameValue(bindLive, uLive, u.Type == learn.Number) {
 				held := r.Path + " does not hold the value the test sent at " + bindAt + " of " + from.Mock + ", which it held when recorded"
 				if l.ByForm != nil {
 					// A time whose bind does not hold in round F: two reads
@@ -2687,8 +2706,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				}
 				return p, held
 			}
-			// A claim's word is its own variable: named by the place it
-			// binds at, never as the leaf whole.
+			// A claim's word, or a word of a client test's request, is its
+			// own variable: named by the place it binds at, never as the
+			// leaf whole.
 			named := from
 			named.Var = bindAt
 			name, ok := tracker.PlaceName(test, named, reserved)
@@ -2696,8 +2716,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, "the test ended before " + r.Path + " was learned"
 			}
 			v := p.vars[name]
-			v.Recorded, v.Use = r.Value, appendNew(v.Use, use)
-			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			lu := l
+			lu.Recorded = u
+			v.Recorded, v.Use = u.Value, appendNew(v.Use, use)
+			v.Answer = appendNew(v.Answer, answers(lu, respLeavesOf(m))...)
 			if l.ByForm != nil && !learn.AnsweredWhole(earlier, from.Mock, r) {
 				// A time the application stamped, whose bind holds in round
 				// F: a replay checks the bind, and where it does not hold
@@ -2718,17 +2740,17 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				p.binds[from.Mock] = b
 			}
 			bv := b[name]
-			bv.Recorded, bv.Bind = r.Value, bindAt
+			bv.Recorded, bv.Bind = u.Value, bindAt
 			// F's clock evidence, read where the variable is bound: a clock
 			// read that moved by the lead there may share its live value with
 			// another one read in the same second in a replay
 			// (models.MockVariable.Clock). None in keploy mock's client
 			// tests, where the lead shows no read of the app's clock
 			// (learn.DriftCache.ClockReads).
-			bv.Clock = tracker.Drifts().ClockReads(r.Value, bindLive)
-			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
+			bv.Clock = tracker.Drifts().ClockReads(u.Value, bindLive)
+			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, u)...)
 			b[name] = bv
-			p.values[name] = variables.Binding{Name: name, Value: bindLive, Recorded: r.Value, Mock: from.Mock, Place: bindAt}
+			p.values[name] = variables.Binding{Name: name, Value: bindLive, Recorded: u.Value, Mock: from.Mock, Place: bindAt}
 
 		case learn.KindUnaccounted:
 			return p, r.Path + " changed, and " + l.Why

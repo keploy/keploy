@@ -2106,7 +2106,7 @@ func TestAClientTestLearnsItsAuditReadAnEarlierAnswersClockNameRoundsToAsARead(t
 		// application was given, from the app's createdAt, which in F held
 		// another second than the audit where the insert crossed one.
 		v := dc.ofIn(rec, live, w, r0.Add(254*ms))
-		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil, nil), rec, earlier)
+		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil, nil), rec, live, earlier)
 		// The call's earlier places read once (earlierHeld) are what the
 		// echo reads of them each time it reads them anew.
 		var eh earlierHeld
