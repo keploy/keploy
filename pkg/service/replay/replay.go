@@ -1596,9 +1596,16 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				continue
 			}
 
+			// No backup, no deletion: a test case removed from a set whose
+			// backup failed is a test case the user cannot get back, and every
+			// rerun of the set makes that loss likelier. The set keeps its
+			// failing test cases and stays failing, so the run says what
+			// happened instead of leaving an emptied set behind.
 			if !backupCreated {
 				if err := r.createBackup(testSet); err != nil {
-					utils.LogError(r.logger, err, "failed to create backup, proceeding with test case deletion", zap.String("testSet", testSet))
+					utils.LogError(r.logger, err, "--must-pass deletes no test case of a test set it could not back up", zap.String("testSet", testSet),
+						zap.String("next_step", "make the backup possible again (a readable test-set directory and a writable .backup under it) and run keploy test again: the failing test cases are kept as they are"))
+					break
 				}
 				backupCreated = true
 			}
@@ -9610,19 +9617,7 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 			}
 		} else {
 			// It's a file, copy it.
-			srcFile, err := os.Open(srcPath)
-			if err != nil {
-				return err
-			}
-			defer srcFile.Close()
-
-			dstFile, err := os.Create(dstPath)
-			if err != nil {
-				return err
-			}
-			defer dstFile.Close()
-
-			if _, err := io.Copy(dstFile, srcFile); err != nil {
+			if err := copyFile(srcPath, dstPath); err != nil {
 				return err
 			}
 
@@ -9632,6 +9627,37 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 		}
 	}
 	return nil
+}
+
+// copyFile copies one file, closing both handles before it returns: a backup of
+// a large test set holds one source and one destination open at a time, not one
+// pair per file. The handles used to be deferred to the end of the walk, so a
+// test set of a few hundred files could exceed the process's open file limit
+// and fail the copy with "too many open files".
+func copyFile(srcPath, dstPath string) error {
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+
+	dstFile, err := os.Create(dstPath)
+	if err != nil {
+		_ = srcFile.Close()
+		return err
+	}
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		_ = srcFile.Close()
+		_ = dstFile.Close()
+		return err
+	}
+	// Closed rather than deferred, so a write that only fails at close (a full
+	// disk flushing the last block) fails the copy instead of passing silently.
+	if err := dstFile.Close(); err != nil {
+		_ = srcFile.Close()
+		return err
+	}
+	return srcFile.Close()
 }
 
 // maxResetResends bounds how many times a transport-reset test request is
