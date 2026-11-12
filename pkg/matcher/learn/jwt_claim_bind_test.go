@@ -553,6 +553,53 @@ func TestAForwardedTokenNeverHidesAWholeClientBody(t *testing.T) {
 	}
 }
 
+// TestAStampAClientTestSentWholeBindsBeforeACallsLongerValue: the client
+// test sent a stamp whole in its request body, a moment the echo names too,
+// and a call before the find sent it inside a longer value (an audit line):
+// the test's own call, the run's or another test's. The call binds nothing
+// there and never hides the client test's body, where the test case binds
+// the stamp whole, through ClassifyArrived (the HTTP adapter's classify) and
+// Decide alike. The search that names the client test's body is read before
+// the echo (appearedIn), which orders its places as placeRank does.
+func TestAStampAClientTestSentWholeBindsBeforeACallsLongerValue(t *testing.T) {
+	const rStamp, fStamp = "2026-11-11T14:20:05Z", "2026-11-11T14:21:12Z"
+	rReq := time.Date(2026, 11, 11, 14, 24, 31, 630_000_000, time.UTC)
+	fReq := rReq.Add(67 * time.Second)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	const p = "body.cmd.filter.since"
+	sh := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	clientCase := func(stamp string, at time.Time) *models.HTTPReq {
+		return &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/cluster/status", Timestamp: at,
+			Header: map[string]string{"Content-Type": "application/json", "Host": "localhost:8083"}, Body: `{"at":"` + stamp + `","status":"active"}`}
+	}
+	audit := func(stamp string) string { return "status set at " + stamp + " by e2e" }
+	for _, sw := range []string{"1", ""} {
+		t.Setenv(provenswitch.Env, sw)
+		for _, c := range []struct {
+			name     string
+			own, run bool
+		}{{"the test's own call", true, false}, {"the run's call", false, true}, {"another test's call", false, false}} {
+			t.Run(c.name+" switch "+sw, func(t *testing.T) {
+				sent := iSent("mock-0", rReq.Add(time.Millisecond), "body.event", String, audit(rStamp), audit(fStamp))
+				sent.Own, sent.Run = c.own, c.run
+				earlier := append([]Earlier{sent}, clientPlaced(t, "post-cluster-status-3", clientCase(rStamp, rReq), clientCase(fStamp, fReq), fReq)...)
+				ln := ClassifyArrived(oClientDrifts(), []string{p}, sh(fStamp), sh(rStamp), rCall, fCall, earlier, nil, nil, nil, nil)[0]
+				at, live, ok := ln.From.BindAt()
+				if ln.Kind != KindVariable || ln.From.Mock != "test case post-cluster-status-3" || ln.From.Path != "body.at" || !ln.From.Whole || !ln.From.Client || !ok || at != "body.at" || live != fStamp {
+					t.Fatalf("ClassifyArrived: %s (%s) from %s %s (whole %v, client %v, echo %v), bound at %q to %q (%v); want a variable of the test case bound at body.at to %s, not mock-0's audit line", ln.Kind, ln.Why, ln.From.Mock, ln.From.Path, ln.From.Whole, ln.From.Client, ln.From.Echo, at, live, ok, fStamp)
+				}
+				in := iCall(p, String, rStamp, fStamp, rCall, fCall, nil, earlier, nil)
+				in.Drifts = oClientDrifts()
+				if d := oWord(t, Decide(in), rStamp, fStamp); d.Outcome != OutcomeValue || d.From.Mock != "test case post-cluster-status-3" || !d.From.Client || d.From.Path != "body.at" || d.FromAt.String() != "" {
+					t.Fatalf("Decide: %s bound at %s %q; want a Value of the test case's body.at, whole", oDescribe([]Decision{d}), d.From.Path, d.FromAt.String())
+				}
+			})
+		}
+	}
+}
+
 // TestPlaceRankNamesAClientTestsWholeRequestBeforeALongerValue: a client
 // test's request that sent the value whole, where its test case binds it,
 // ranks after every call that sent it whole, as before, and before every

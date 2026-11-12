@@ -172,3 +172,72 @@ func TestLearnMatchARefusalNamesWhereTheRunSentTheValue(t *testing.T) {
 		}
 	})
 }
+
+// clientThenOwnCallThenFind runs one test, with the proven switch at sw:
+// its client test sent clientBody (by value) to /cluster/status, the
+// test's own call (mock-a) then sent ownBody, and the test's find sends
+// findBody. Each runs recorded with rec and with full in this run. It
+// returns what the find served and missed, and the test's recordings.
+func clientThenOwnCallThenFind(t *testing.T, sw, rec, full string, clientBody, ownBody, findBody func(string) string) (*models.Mock, *learnMiss, []models.Mock) {
+	t.Helper()
+	h, n, opts := learnOn(t)
+	t.Setenv(provenswitch.Env, sw)
+	tr := learn.NewTracker()
+	tr.NewSet()
+	tr.SetClientTests(true)
+	ctx := learn.WithTracker(context.Background(), tr)
+	tr.Begin()
+	sent := time.Now()
+	recReq := &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/cluster/status", Timestamp: learnAt.Add(500 * time.Millisecond),
+		Header: map[string]string{"Content-Type": "application/json"}, Body: clientBody(rec)}
+	liveReq := *recReq
+	liveReq.Body, liveReq.Timestamp = clientBody(full), sent
+	tr.SetCases([]learn.ClientCase{{Name: "post-cluster-status-3", Req: recReq}})
+	if !tr.Incoming(&liveReq, "", sent) {
+		t.Fatal("the run's request paired with none of the test's recorded requests")
+	}
+	a := &learnDb{perTest: []*models.Mock{learnRecorded("mock-a", 700*time.Millisecond, "POST", "/v1/audit", ownBody(rec), nil, `{"ok":true}`)}}
+	in0 := live("POST", "/v1/audit", ownBody(full), nil)
+	in0.arrived = sent.Add(time.Millisecond)
+	if s, m, err := h.learnMatch(ctx, in0, a, n, opts); err != nil || s == nil || m != nil {
+		t.Fatalf("the test's own call: served %v, miss %+v, err %v", s != nil, m, err)
+	}
+	b := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", time.Second, "POST", "/v1/clusters/find", findBody(rec), nil, `{"found":1}`)}}
+	in1 := live("POST", "/v1/clusters/find", findBody(full), nil)
+	in1.arrived = sent.Add(2 * time.Millisecond)
+	served, miss, err := h.learnMatch(ctx, in1, b, n, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return served, miss, b.consumed
+}
+
+// TestLearnMatchATestsOwnWholeCallBindsBeforeAClientTestsWholeBody: the
+// client test sent the id whole in its body, and the test's own call then
+// sent it whole too; the find carries it. Both places bind it, and the
+// test's own call, where the application sent it, is named first (its
+// rank is below a client test's whole request), though the client test's
+// request came first: the find binds at mock-a's body.id. Under both
+// switches.
+func TestLearnMatchATestsOwnWholeCallBindsBeforeAClientTestsWholeBody(t *testing.T) {
+	body := func(k string) func(string) string {
+		return func(id string) string { return `{"` + k + `":"` + id + `"}` }
+	}
+	for _, sw := range []string{"1", ""} {
+		t.Run("switch "+sw, func(t *testing.T) {
+			served, miss, consumed := clientThenOwnCallThenFind(t, sw, unboundRecID, unboundFullID, body("cluster_id"), body("id"), func(id string) string { return `{"filter":{"_id":"` + id + `"}}` })
+			if served == nil || miss != nil || len(consumed) != 1 {
+				t.Fatalf("the find: served %v, miss %+v; want it served", served != nil, miss)
+			}
+			binds := consumed[0].Spec.LearnedBinds()
+			if vs := binds["mock-a"]; len(vs) != 1 || len(binds["test case post-cluster-status-3"]) != 0 {
+				t.Fatalf("the find binds %+v; want one variable at mock-a, the test's own call that sent the id whole, none at the test case", binds)
+			}
+			for _, v := range binds["mock-a"] {
+				if v.Bind != "body.id" || v.Recorded != unboundRecID {
+					t.Fatalf("the find binds %s at mock-a's %s; want %s at body.id", v.Recorded, v.Bind, unboundRecID)
+				}
+			}
+		})
+	}
+}
