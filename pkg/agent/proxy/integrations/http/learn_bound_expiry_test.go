@@ -35,7 +35,9 @@ func TestAnExpiryBoundToAnotherTestsExpiryIsCheckedByItsForm(t *testing.T) {
 		F:   learn.Span{From: liveAt.Add(-200 * time.Millisecond), To: liveAt},
 	}
 	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
-	refusal := field + " does not hold the value the test sent at " + bound + " of mock-3272, which it held when recorded"
+	// mock-3272 is the run's place (Place.Run), so the refusal names whose
+	// call it is (learn.RunCallWhose).
+	refusal := field + " does not hold the value mock-3272, an earlier test's call, sent at " + bound + ", which it held when recorded"
 	m := &models.Mock{Name: "mock-3521"}
 	jsonReq := learn.Shape{Fixed: map[string]string{"body": "json"}}
 	offset := func(d time.Duration) *models.ClockOffset {
