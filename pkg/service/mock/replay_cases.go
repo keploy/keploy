@@ -47,9 +47,16 @@ type CaseReader interface {
 
 // replayDetail is everything the outcome needs to say what each test did this run.
 type replayDetail struct {
-	set      string // the set replayed
-	windows  []models.ScopeWindow
-	starts   []models.ScopeWindow
+	set     string // the set replayed
+	windows []models.ScopeWindow
+	starts  []models.ScopeWindow
+	// lived is how long the test command's run took, from keploy starting
+	// it to the exit of what it started: no application it started lived
+	// longer. A series whose rule's timer bound it did not reach is not
+	// due (markEarly). 0 when not measured (a compose run, whose
+	// application keploy started apart from the command): every series is
+	// due as with no bound.
+	lived    time.Duration
 	expected map[string][]models.MockEntry
 	recorded map[string][]*models.TestCase
 	actual   []*models.TestCase

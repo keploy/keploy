@@ -164,6 +164,23 @@ type MockEntry struct {
 	// the default an entry without the key reads as, keeps a write's series
 	// required. Kept as Series is.
 	Optional bool `json:"optional,omitempty" yaml:"optional,omitempty" bson:"optional,omitempty"`
+	// Due is, on an entry of a once Series, the bound of the application's
+	// timer that makes the series' call (keploy.yml mock.rules due on a
+	// background rule with once: true), as a Go duration ("10s"): the
+	// application makes the call at most Due after it starts. keploy mock
+	// replay requires such a series once per run only when the application
+	// outlived the bound: in a run whose test command ended sooner, the
+	// series is not due, and the run says so (RULE NOT DUE). It reads the
+	// application's life as the test command's run, from keploy starting
+	// the command to the command's exit: an application the command starts
+	// lives no longer, so the read is never shorter than the application's
+	// life, and a series that was due is never let off. A run keploy does
+	// not time that way (a compose run) bounds nothing, and neither does a
+	// Due that does not parse as a positive duration: the series is
+	// required as one with none. Empty, the default, keeps a series required
+	// once its place is reached. A series' bound is the longest one its
+	// entries say. Kept as Series is.
+	Due string `json:"due,omitempty" yaml:"due,omitempty" bson:"due,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy's
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's

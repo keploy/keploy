@@ -173,6 +173,12 @@ type Receipt struct {
 	// the run reached its place. Each fails the run; a trailing one fails
 	// the test it trails too. nil for none, and with the switch off.
 	RequiredNotMade []RequiredNotMade `yaml:"requiredNotMade,omitempty" json:"requiredNotMade,omitempty"`
+	// RequiredNotDue are, under the proven switch, the series of once rules
+	// with a timer bound (models.MockEntry.Due) that the run reached and
+	// never answered, and did not require: the application exited before
+	// the bound (each with its RequiredNotMade.Due). None fails the run.
+	// nil for none, and with the switch off.
+	RequiredNotDue []RequiredNotMade `yaml:"requiredNotDue,omitempty" json:"requiredNotDue,omitempty"`
 	// ProcessTrackingUnread and CallCaptureUnread each say, when keploy
 	// asked for one of the agent's counts at the run's end and could not
 	// read it, what that leaves unproven and why it could not be read: the

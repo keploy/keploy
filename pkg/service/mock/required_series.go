@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -35,6 +36,13 @@ type seriesDue struct {
 	// connection (keploy.yml mock.rules chain), whose answers do not make a
 	// write the application stopped making.
 	served []string
+	// due is the bound of the application's timer that makes a once
+	// series' call (models.MockEntry.Due): the longest of its entries'; 0
+	// for none.
+	due time.Duration
+	// early is, at the run's end, that the application's run ended before
+	// due (markEarly): the series is not due, whatever its place.
+	early bool
 }
 
 // RequiredNotMade is a series a declared rule placed in the worker scope that
@@ -51,6 +59,10 @@ type RequiredNotMade struct {
 	// that changed data: all of them, but for a once series' chain reads),
 	// none of which the run used.
 	Names []string `yaml:"names" json:"names"`
+	// Due is, of a series the run did not require because the application's
+	// run ended before its rule's timer bound (Receipt.RequiredNotDue), that
+	// bound ("10s"); empty on a series required and not made.
+	Due string `yaml:"due,omitempty" json:"due,omitempty"`
 }
 
 // requiredSeries is, by series, each series a declared rule placed in mp's
@@ -107,6 +119,9 @@ func placedSeries(mp *models.Mapping, table map[string][]string) map[string]seri
 			s.served = append(s.served, e.Name)
 		} else {
 			s.write = true
+		}
+		if d := entryDue(e); d > s.due {
+			s.due = d
 		}
 		out[e.Series] = s
 	}
@@ -166,7 +181,7 @@ func owedSeries(req map[string]seriesDue, ran, used map[string]bool) []string {
 	var owed []string
 	for _, id := range slices.Sorted(maps.Keys(req)) {
 		s := req[id]
-		if !s.dueIn(ran) || s.madeIn(used) {
+		if !s.dueIn(ran) || s.early || s.madeIn(used) {
 			continue
 		}
 		owed = append(owed, id)
@@ -182,6 +197,76 @@ func (s seriesDue) dueIn(ran map[string]bool) bool {
 		return s.Place == "" || ran[s.Place]
 	}
 	return ran[s.Trails]
+}
+
+// commandClock reads the time the test command's run is measured by
+// (mockService.lived). A test replaces it.
+var commandClock = time.Now
+
+// entryDue is e's timer bound (models.MockEntry.Due) as written: 0 when it
+// has none or it does not parse, and possibly not positive. placedSeries
+// keeps a series' longest positive one, so a bound that is not positive
+// bounds nothing.
+func entryDue(e models.MockEntry) time.Duration {
+	d, _ := time.ParseDuration(e.Due)
+	return d
+}
+
+// markEarly is series with each series whose timer bound (seriesDue.due)
+// the application's run did not reach marked early: lived, the test
+// command's run from its start to its exit, is shorter than the bound. A
+// run of unknown length (lived 0 or less) marks none: every series stays
+// due as it would be with no bound. series itself is left as it is.
+func markEarly(series map[string]seriesDue, lived time.Duration) map[string]seriesDue {
+	if lived <= 0 {
+		return series
+	}
+	out := make(map[string]seriesDue, len(series))
+	for id, s := range series {
+		// A series with no bound (due 0) is never early: lived is positive.
+		s.early = lived < s.due
+		out[id] = s
+	}
+	return out
+}
+
+// notYetDue is, in series order, each series of req the run reached (dueIn)
+// that it would require but for the application's run ending before its
+// timer bound (seriesDue.early), and none of whose recordings consumed
+// holds: the run says each (RuleNotDueLine) and does not fail on it. None
+// when what the run consumed could not be read (known false): the run's
+// end names those series as unread.
+func notYetDue(req map[string]seriesDue, tests []TestReceipt, consumed []models.MockState, known bool) []RequiredNotMade {
+	if !known {
+		return nil
+	}
+	ran, used := ranTests(tests), usedNames(consumed)
+	var out []RequiredNotMade
+	for _, id := range slices.Sorted(maps.Keys(req)) {
+		s := req[id]
+		if !s.early || !s.dueIn(ran) || s.madeIn(used) {
+			continue
+		}
+		out = append(out, RequiredNotMade{Series: id, Rule: s.Rule, Trails: s.Trails, Names: s.makers(), Due: s.due.String()})
+	}
+	return out
+}
+
+// RuleNotDueLine is the run's RULE NOT DUE line for n, a series of a once
+// rule whose timer bound the application's run did not reach: lived is
+// that run's length, from keploy starting the test command to its exit.
+// The line's fields end it as JSON, as keploy's other RULE lines.
+func RuleNotDueLine(n RequiredNotMade, lived time.Duration) string {
+	id, _, _ := strings.Cut(n.Rule, "@")
+	num := n.Series[strings.LastIndex(n.Series, "/")+1:]
+	ran := lived.Round(100 * time.Millisecond)
+	fields := map[string]string{"event": "not-due", "id": id, "series": n.Series, "due": n.Due, "lived": ran.String()}
+	b, err := json.Marshal(fields)
+	if err != nil {
+		b = []byte(`{"event":"unwritable"}`)
+	}
+	return fmt.Sprintf("RULE NOT DUE %s: %s not due: the app exited at most %s after it started (the test command's whole run), before its %s timer (due: %s), and made no call of its background series %s (%s); keploy requires the series only in a run the app outlives that bound, so the set does not fail on it. rule=%s",
+		n.Rule, id, ran, n.Due, n.Due, num, strings.Join(n.Names, ", "), b)
 }
 
 // madeIn is whether used holds a recording of s that makes it (makers):

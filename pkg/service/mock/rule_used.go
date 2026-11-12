@@ -78,8 +78,11 @@ type ruleUse struct {
 	// Required, Made, NotMade and NotDue count the series required once per
 	// run (seriesDue.write): made, due and not made (RULE NOT MADE), or not
 	// due (their test did not run). ServedOnly counts the rest: series of
-	// reads, or of writes that changed nothing when recorded.
-	Required, Made, NotMade, NotDue, ServedOnly int
+	// reads, or of writes that changed nothing when recorded. NotYetDue
+	// counts, of Required, the series not made that the run did not require
+	// because the application exited before their rule's timer bound
+	// (seriesDue.early, RULE NOT DUE).
+	Required, Made, NotMade, NotDue, ServedOnly, NotYetDue int
 }
 
 // ruleUses is, by rule in rule order (keploy record's own trail moves
@@ -128,6 +131,9 @@ func ruleUses(placed map[string]seriesDue, tests []TestReceipt, consumed []model
 		case s.madeIn(used):
 			u.Required++
 			u.Made++
+		case s.early:
+			u.Required++
+			u.NotYetDue++
 		default:
 			u.Required++
 			u.NotMade++
@@ -205,8 +211,12 @@ func RuleUsedLine(u ruleUse) string {
 		fmt.Fprintf(&b, "; %s carried the value of a test it trails", plural(int64(u.Misses), "miss"))
 	}
 	fields["misses"] = u.Misses
-	fmt.Fprintf(&b, "; required %d: made %d, not made %d, not due %d (their test did not run); served, not required %d (reads, or writes that changed nothing when recorded)",
-		u.Required, u.Made, u.NotMade, u.NotDue, u.ServedOnly)
+	fmt.Fprintf(&b, "; required %d: made %d, not made %d, not due %d (their test did not run)", u.Required, u.Made, u.NotMade, u.NotDue)
+	if u.NotYetDue > 0 {
+		fmt.Fprintf(&b, ", not yet due %d (the app exited before their timer bound)", u.NotYetDue)
+		fields["not_yet_due"] = u.NotYetDue
+	}
+	fmt.Fprintf(&b, "; served, not required %d (reads, or writes that changed nothing when recorded)", u.ServedOnly)
 	fields["required"], fields["made"], fields["not_made"], fields["not_due"], fields["served_only"] = u.Required, u.Made, u.NotMade, u.NotDue, u.ServedOnly
 	return finishRuleLine(b.String(), fields)
 }

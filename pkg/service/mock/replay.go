@@ -431,6 +431,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//    only once the app is fully down (its errgroup Wait is deferred), and
 	//    the sender is the goroutine running exactly that Run.
 	var appErr models.AppError
+	// lived is the test command's run (replayDetail.lived): measured only
+	// where keploy starts the command itself.
+	var lived time.Duration
 	if composeAppExit != nil {
 		appErr = <-composeAppExit
 	} else {
@@ -440,7 +443,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			// command leaves running may still make once it exited.
 			opts.BeforeStop = m.awaitRequiredSeries
 		}
+		began := commandClock()
 		appErr = m.instrumentation.Run(ctx, opts)
+		// Run returns once what the command started is down: no
+		// application it started lived longer (models.MockEntry.Due).
+		lived = commandClock().Sub(began)
 	}
 
 	if parent.Err() != nil { // user Ctrl+C / a signal interrupted the replay
@@ -609,6 +616,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		set:      name,
 		windows:  testWindows(all),
 		starts:   appStarts(all),
+		lived:    lived,
 		expected: m.expectedMocks(ctx, name),
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),
@@ -675,6 +683,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// it. Whether a due series was answered could not be read: its trailed
 	// test is left unread, a background one is named, and the run fails. A
 	// failure already named keeps its name.
+	for _, n := range counts.requiredNotDue {
+		m.logger.Info(RuleNotDueLine(n, detail.lived), zap.String("mock-set", name))
+	}
 	if len(counts.requiredNotMade) > 0 || len(counts.seriesUnread) > 0 || len(counts.trailsUnread) > 0 {
 		for _, n := range counts.requiredNotMade {
 			m.logger.Error(RuleNotMadeLine(n), zap.String("mock-set", name),
@@ -1021,6 +1032,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		CannotCapture:   lostNotJudged,
 		UnchargedMisses: counts.uncharged,
 		RequiredNotMade: counts.requiredNotMade,
+		RequiredNotDue:  counts.requiredNotDue,
 
 		CaptureIncomplete: incompleteLosses,
 
@@ -2682,6 +2694,11 @@ type replayCounts struct {
 	// never answered (requiredNotMade): a trailing one failed its test, and
 	// each fails the run. nil for none.
 	requiredNotMade []RequiredNotMade
+	// requiredNotDue are, under the proven switch, the series of once rules
+	// with a timer bound that the run reached and never answered, and did
+	// not require: the application exited before the bound (notYetDue).
+	// nil for none.
+	requiredNotDue []RequiredNotMade
 	// seriesUnread names each background series that was due when what the
 	// run consumed could not be read: whether the run made it is not known,
 	// and the run fails. nil for none.
@@ -2954,9 +2971,13 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		// round (the last test begun): without the switch the receipt stays
 		// as it was.
 		counts.tests = withBegan(counts.tests, detail.windows)
-		counts.requiredNotMade, counts.trailsUnread, counts.seriesUnread = requiredNotMade(m.series, counts.tests, consumed, consumedErr == nil)
+		// A once series with a timer bound is due only when the
+		// application's run reached the bound (markEarly).
+		series, placed := markEarly(m.series, detail.lived), markEarly(m.placed, detail.lived)
+		counts.requiredNotMade, counts.trailsUnread, counts.seriesUnread = requiredNotMade(series, counts.tests, consumed, consumedErr == nil)
+		counts.requiredNotDue = notYetDue(series, counts.tests, consumed, consumedErr == nil)
 		counts.tests = failUnmadeTrails(counts.tests, notMadeByName(counts.requiredNotMade), counts.trailsUnread)
-		counts.ruleUses = ruleUses(m.placed, counts.tests, consumed, consumedErr == nil, m.repeats, misses, missesErr == nil)
+		counts.ruleUses = ruleUses(placed, counts.tests, consumed, consumedErr == nil, m.repeats, misses, missesErr == nil)
 	}
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned.byTest[counts.tests[i].Name]
