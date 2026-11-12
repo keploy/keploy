@@ -5,10 +5,7 @@ package routes
 import (
 	"bufio"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -20,29 +17,8 @@ import (
 // a test can point it at a fixture tree.
 var procRoot = "/proc"
 
-// callerPID is the process (thread-group ID in the agent's PID namespace) that
-// owns the client end of the request's TCP connection: the socket whose local
-// address is the request's remote address and whose remote address is the
-// server's own. It is read from the kernel's socket tables, never from what
-// the caller says.
-func callerPID(r *http.Request) (int, error) {
-	remote, err := netip.ParseAddrPort(r.RemoteAddr)
-	if err != nil {
-		return 0, fmt.Errorf("the connection's remote address %q: %w", r.RemoteAddr, err)
-	}
-	la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
-	if !ok || la == nil {
-		return 0, errors.New("the connection's local address is unknown")
-	}
-	local, err := netip.ParseAddrPort(la.String())
-	if err != nil {
-		return 0, fmt.Errorf("the connection's local address %q: %w", la.String(), err)
-	}
-	return tcpOwner(remote, local)
-}
-
-// tcpOwner finds the process owning the TCP socket bound to self and
-// connected to peer.
+// tcpOwner finds the process (thread-group ID in the agent's PID namespace)
+// owning the TCP socket bound to self and connected to peer.
 func tcpOwner(self, peer netip.AddrPort) (int, error) {
 	inode, err := tcpInode(self, peer)
 	if err != nil {
