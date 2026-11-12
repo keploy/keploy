@@ -1,7 +1,6 @@
 package learn
 
 import (
-	"cmp"
 	"strings"
 	"time"
 
@@ -55,8 +54,8 @@ import (
 // to; the place holds the moment in another form, which a variable cannot
 // hold), two reads of the clock that fell in one second when recorded are
 // no copy, and the field falls back to the time default: checked by its form
-// alone (ByForm), as above, where both runs write it in one form (a bound
-// value written in two keeps its refusal). A time here is a decoder-typed
+// alone (ByForm), as above, where both runs write it as a time: in one form,
+// or in two, either of which a replay passes. A time here is a decoder-typed
 // time in both runs, a field a clock rule declares, or a value bound to a
 // place learning read as a plain read of the application's clock
 // (Place.Clock): never a value's name or shape. Every other refusal of the
@@ -90,7 +89,7 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 			// Its form is its claim's (claimForm).
 			return d
 		}
-		if form, formF := dc.timeFormOf(path, c); form != "" {
+		if form, formF := dc.timeFormOf(path, c, nil); form != "" {
 			off := *d.Clock
 			off.Form, off.FormF = form, formF
 			d.Clock = &off
@@ -113,7 +112,7 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	default:
 		return d
 	}
-	form, formF := dc.timeFormOf(path, c)
+	form, formF := dc.timeFormOf(path, c, nil)
 	if form == "" {
 		return d
 	}
@@ -132,43 +131,47 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 // earlier place), with its time default's check by form (Decision.ByForm)
 // where its field is a time (boundTime; declared: a clock rule names it),
 // read as a replay reads it (a word of a text where it stands in one), and
-// both runs write it in one form (timeFormOf). d's outcome stands: the
+// both runs write it as a time (timeFormOf): in one form, or in two, either
+// of which a replay passes (FormF, as a Clock's). d's outcome stands: the
 // adapter takes ByForm only where it cannot hold the bind.
 func (dc *decider) valueByForm(path string, at variables.Address, n int, c changedInstant, d Decision, declared bool) Decision {
-	why := boundTime(dc.in.Rec.Leaves[path], d.From, declared)
+	why := boundTime(dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path], d.From, declared)
 	if why == "" || c.text && c.noWord != "" {
 		return d
 	}
-	// One form in both runs only: a bound value its runs wrote in two forms
-	// keeps its refusal, failing closed.
-	form, formF := dc.timeFormOf(path, c)
-	if form == "" || formF != "" {
+	form, formF := dc.timeFormOf(path, c, d.From.Offset)
+	if form == "" {
 		return d
 	}
-	off := models.ClockOffset{Form: form}
+	off := models.ClockOffset{Form: form, FormF: formF}
 	if c.text {
 		off.Word = c.word
 	}
-	off.Why = dc.learned(path, at, n, c.r, c.l, OutcomeClock, byFormRule(form, why), nil).Line
+	off.Why = dc.learned(path, at, n, c.r, c.l, OutcomeClock, byFormRule(off.Forms(), why), nil).Line
 	d.ByForm = &off
 	return d
 }
 
 // boundTime is why a value learning bound to the earlier place from is a
 // time the time default checks by its form where the bind does not hold
-// (see above): a decoder-typed time (rec, its field's recorded leaf; the
-// form check holds round F's value to the same typed form), a field a clock
-// rule declares (declared), or a value bound to a place learning read as a
-// plain read of the application's clock (Place.Clock). "" for any other
+// (see above): a decoder-typed time (rec and live, its field's leaf as
+// recorded and in round F, both of type Instant; the form check holds a
+// replay's value to that typed form), a field a clock rule declares
+// (declared), or a value bound to a place learning read as a read of the
+// application's clock: a plain one (Place.Clock), or one plus a constant
+// offset (Place.Offset: another test's key expiry, a year after its call,
+// stamped in the second this call's was when recorded). "" for any other
 // value: never by its name or its shape.
-func boundTime(rec Leaf, from Place, declared bool) string {
+func boundTime(rec, live Leaf, from Place, declared bool) string {
 	switch {
-	case rec.Type == Instant:
+	case rec.Type == Instant && live.Type == Instant:
 		return "a decoder-typed time"
 	case declared:
 		return "a field a clock rule in keploy.yml declares"
 	case from.Clock:
 		return "bound to " + placeAt(from) + ", where keploy learned a read of the application's clock"
+	case from.Offset != nil:
+		return "bound to " + placeAt(from) + ", where keploy learned a read of the application's clock plus an offset"
 	}
 	return ""
 }
@@ -183,24 +186,26 @@ func byFormRule(form, why string) string {
 // adapter's learn step), with its time default's check by form
 // (Learned.ByForm) where it is a variable bound whole whose field is a time
 // (boundTime; declared: a clock rule keploy.yml declares names it), under
-// the time default (timeForm), and both runs write it as an instant of one
-// form, an epoch number near its call in both runs (w), as
-// DeclaredClockLearned checks a declared time by its form. ln as it is
-// otherwise: the caller takes ByForm only where round F's call does not carry
-// the bound place's value.
+// the time default (timeForm), and both runs write it as an instant
+// (timeForms: of one form, or of two, either of which a replay passes; an
+// epoch number near its call in its run, w), as Decide's valueByForm checks
+// one. ln as it is otherwise: the caller takes ByForm only where round F's
+// call does not carry the bound place's value.
 func BoundTimeLearned(ln Learned, declared bool, w *Window, timeForm bool) Learned {
 	if !timeForm || ln.Kind != KindVariable || !ln.From.Whole || ln.From.Echo {
 		return ln
 	}
-	why := boundTime(ln.Recorded, ln.From, declared)
-	if why == "" {
+	why := boundTime(ln.Recorded, ln.Live, ln.From, declared)
+	if why == "" || !isInstant(ln.Recorded) || !isInstant(ln.Live) {
 		return ln
 	}
-	form, no := formIn(ln.Recorded, ln.Live, w)
-	if no != "" {
+	form, formF := timeForms(TimeForm(ln.Recorded), TimeForm(ln.Live), ln.Recorded, ln.Live, w, ln.From.Offset)
+	if form == "" {
 		return ln
 	}
-	ln.ByForm = &models.ClockOffset{Form: form, Why: byFormRule(form, why)}
+	off := models.ClockOffset{Form: form, FormF: formF}
+	off.Why = byFormRule(off.Forms(), why)
+	ln.ByForm = &off
 	return ln
 }
 
@@ -208,10 +213,11 @@ func BoundTimeLearned(ln Learned, declared bool, w *Window, timeForm bool) Learn
 // use place of a variable bound whole where it does not hold the variable's
 // value, passes that place's check by form (models.MockVariable.ByForm, o):
 // under the time default (timeForm) alone, a whole value (no word), and a
-// time of o's form (TimeForm). HTTP and MongoDB replays both check a use's
-// fallback with it, so the two agree.
+// time of a form o checks by (TimeForm: its Form, or FormF beside it,
+// WrittenAs). HTTP and MongoDB replays both check a use's fallback with it,
+// so the two agree.
 func HoldsByForm(o models.ClockOffset, live Leaf, timeForm bool) bool {
-	return timeForm && o.Form != "" && o.Word.IsZero() && TimeForm(live) == o.Form
+	return timeForm && o.Form != "" && o.Word.IsZero() && o.WrittenAs(TimeForm(live))
 }
 
 // AnsweredWhole reports whether mock, an earlier call of the test (one of
@@ -246,7 +252,7 @@ func (dc *decider) claimForm(path string, c changedInstant) (form, formF string)
 	if !dc.in.TimeForm || !dc.in.Caps.ClaimByForm || c.claim == "" {
 		return "", ""
 	}
-	if f, _ := dc.timeFormOf(path, c); f == "" {
+	if f, _ := dc.timeFormOf(path, c, nil); f == "" {
 		return "", ""
 	}
 	rec, live := c.leaf()
@@ -294,28 +300,13 @@ func HoldsClaimByForm(o models.ClockOffset, live string, timeForm bool) bool {
 	return timeForm && o.Form != "" && o.Claim != "" && o.Word.IsZero() && o.WrittenAs(ClaimTimeForm(live, o.Claim))
 }
 
-// formIn is the form rec and live, a time field's leaf as recorded and in
-// round F, are both written in (TimeForm), as the time default checks it;
-// else "" and why not, after "; and": its runs write no one form of an
-// instant, or, an epoch number, it names no moment near its call in both
-// runs (nearSpan, in w's spans).
-func formIn(rec, live Leaf, w *Window) (form, no string) {
-	form = TimeForm(rec)
-	switch {
-	case TimeForm(live) != form || !isInstant(rec) || !isInstant(live):
-		return "", "; and its two runs write no one form of an instant (" + cmp.Or(form, "none") + " recorded, " + cmp.Or(TimeForm(live), "none") + " in round F)"
-	case strings.HasPrefix(leafLayout(rec), "epoch-") && (w == nil || !nearSpan(rec, w.Rec) || !nearSpan(live, w.F)):
-		return "", "; and, an epoch number, it names no moment near its call in both runs"
-	}
-	return form, ""
-}
-
 // timeFormOf is the form of the changed instant c, a time field at path,
 // and formF the second where its two runs write two (timeForms): "" where
 // a run's value is in no form keploy reads as an instant or names no
 // moment, and where an epoch number's moment lies far from its call in a
-// run.
-func (dc *decider) timeFormOf(path string, c changedInstant) (form, formF string) {
+// run (or, by: the offset a bound place's read of the clock stands at, far
+// from both its call and its call moved by that offset: timeForms).
+func (dc *decider) timeFormOf(path string, c changedInstant, by *models.ClockOffset) (form, formF string) {
 	rl, ll := dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path]
 	rec, live := rl, ll
 	if c.text {
@@ -325,7 +316,7 @@ func (dc *decider) timeFormOf(path string, c changedInstant) (form, formF string
 	if c.rm == nil || c.lm == nil {
 		return "", ""
 	}
-	return timeForms(timeFormAs(rl.Type, rec), timeFormAs(ll.Type, live), rec, live, dc.in.Window)
+	return timeForms(timeFormAs(rl.Type, rec), timeFormAs(ll.Type, live), rec, live, dc.in.Window, by)
 }
 
 // timeForms is the forms the time default checks a time by, of rec and live,
@@ -334,21 +325,23 @@ func (dc *decider) timeFormOf(path string, c changedInstant) (form, formF string
 // (models.FormsOf: a replay passes a value of either, FormF). "" where a
 // run's leaf has no form (no time keploy reads), and where a run's epoch
 // number names no moment within epochNear of its run's span of the call
-// (w: Rec and F; nil knows no span).
-func timeForms(recForm, liveForm string, rec, live Leaf, w *Window) (form, formF string) {
+// (w: Rec and F; nil knows no span), nor, where the value is bound whole to
+// a place learning read as the clock plus an offset (by, Place.Offset; nil
+// for none), of that span moved by the offset (nearSpan).
+func timeForms(recForm, liveForm string, rec, live Leaf, w *Window, by *models.ClockOffset) (form, formF string) {
 	switch {
 	case recForm == "" || liveForm == "":
 		return "", ""
-	case !epochNearIn(rec, w, false) || !epochNearIn(live, w, true):
+	case !epochNearIn(rec, w, false, by) || !epochNearIn(live, w, true, by):
 		return "", ""
 	}
 	return models.FormsOf(recForm, liveForm)
 }
 
 // epochNearIn reports whether l, a run's leaf (round F's: f), is no epoch
-// number, or one that names a moment within epochNear of that run's span of
-// the call in w; false for an epoch number where w is nil.
-func epochNearIn(l Leaf, w *Window, f bool) bool {
+// number, or one that names a moment near that run's span of the call in w
+// (nearSpan, by its offset by); false for an epoch number where w is nil.
+func epochNearIn(l Leaf, w *Window, f bool, by *models.ClockOffset) bool {
 	if !strings.HasPrefix(leafLayout(l), "epoch-") {
 		return true
 	}
@@ -356,16 +349,25 @@ func epochNearIn(l Leaf, w *Window, f bool) bool {
 		return false
 	}
 	if f {
-		return nearSpan(l, w.F)
+		return nearSpan(l, w.F, by)
 	}
-	return nearSpan(l, w.Rec)
+	return nearSpan(l, w.Rec, by)
 }
 
 // nearSpan reports whether l, an epoch number, names a moment within
-// epochNear of s, its run's span of the call; false where s is unknown.
-func nearSpan(l Leaf, s Span) bool {
+// epochNear of s, its run's span of the call, or of s moved by by, the
+// offset learning read a bound place's value at from the clock
+// (Place.Offset: an expiry two years after its call lies near that call
+// moved by two years, not near the call); false where s is unknown. by is
+// nil for no such place. The offset is the learn step's own, never one
+// read from the field's name.
+func nearSpan(l Leaf, s Span, by *models.ClockOffset) bool {
 	at, _, _, ok := clockReadOf(l)
-	return ok && !s.From.IsZero() && !at.Before(s.From.Add(-epochNear)) && !at.After(s.To.Add(epochNear))
+	if !ok || s.From.IsZero() {
+		return false
+	}
+	near := func(from, to time.Time) bool { return !at.Before(from.Add(-epochNear)) && !at.After(to.Add(epochNear)) }
+	return near(s.From, s.To) || by != nil && near(s.From.Add(by.Min), s.To.Add(by.Max))
 }
 
 // TimeForm is the form the time default checks a time by

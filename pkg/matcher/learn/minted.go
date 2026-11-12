@@ -3,7 +3,6 @@ package learn
 import (
 	"slices"
 	"strconv"
-	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -148,12 +147,17 @@ func (dc *decider) minted(path string, src Source, ds []Decision) []Decision {
 //     value the rule binds.
 //
 // Where round F sent another value there than the minted field's, the call
-// sent two values apart: refused, as oneValue refuses one. A word made
-// anew whose text holds the minted value, or a word of it, that no use can
-// name (inside a longer word, or a text learning decided whole) is
-// refused: keploy cannot hold it to the minted value. Only a word made
-// anew is re-decided here: one learning bound to an earlier place, read
-// as the clock, or refused keeps its decision.
+// sent two values apart: refused, as oneValue refuses one. A word of a
+// minted value is a copy's evidence only where the copy's field holds, in
+// the recording, a word of that value that carries chanceBits (wordBits)
+// or more: a shorter word of the value (a base64url id's one-letter word,
+// a UUID's 4-hex group) stands at other places by chance, so a field that
+// holds only such words keeps learning's decisions. A word that holds the
+// minted value, or a word of it, inside a longer word (or a text learning
+// decided whole) is no place a use can name, and keeps learning's decision
+// too, as it has with no rule. Only a word made anew is re-decided here:
+// one learning bound to an earlier place, read as the clock, or refused
+// keeps its decision.
 func (dc *decider) mintedUses(out []Decision, fields []string) ([]Decision, []string) {
 	var ms []mintedValue
 	minted := map[string]bool{}
@@ -233,7 +237,7 @@ func (dc *decider) mintedUses(out []Decision, fields []string) ([]Decision, []st
 		}
 		for _, d := range group {
 			if d.Outcome == OutcomeFresh {
-				d = dc.mintedCopy(path, d, ms, func(m mintedValue, word int) Decision {
+				d = mintedCopy(d, group, ms, func(m mintedValue, word int) Decision {
 					if word < 0 && m.live == d.Full || word >= 0 && m.lw[word] == d.Full {
 						return use(path, d.At, d.At.Word, d.Recorded, d.Full, m, word)
 					}
@@ -258,41 +262,45 @@ type mintedValue struct {
 	rw, lw    []string
 }
 
-// mintedCopy is d, a word made anew at path, as mintedUses decides it
-// against the minted values ms: d itself where it holds none of them;
-// decided(m, -1) where it is m whole; decided(m, w) where it is word w of
-// m, a value whose words pair in round F (the first such
-// word round F's value pairs with, else the first); refused where its
-// text holds one, or a word of one, that no use names (inside a longer
-// word, or a text learning decided whole).
-func (dc *decider) mintedCopy(path string, d Decision, ms []mintedValue, decided func(m mintedValue, word int) Decision) Decision {
+// mintedCopy is d, a word made anew of a field whose decisions are group,
+// as mintedUses decides it against the minted values ms: decided(m, -1)
+// where it is m whole; decided(m, w) where it is word w of m, a value
+// whose words pair in round F, and the field shows m (shownIn: the first
+// such word round F's value pairs with, else the first); else d itself,
+// as learning decided it.
+func mintedCopy(d Decision, group []Decision, ms []mintedValue, decided func(m mintedValue, word int) Decision) Decision {
 	for _, m := range ms {
 		if d.Recorded == m.rec {
 			return decided(m, -1)
 		}
-		if len(m.rw) == len(m.lw) {
-			first := -1
-			for w, t := range m.rw {
-				if t != d.Recorded {
-					continue
-				}
-				if m.lw[w] == d.Full {
-					return decided(m, w)
-				}
-				if first < 0 {
-					first = w
-				}
+		if len(m.rw) != len(m.lw) || !slices.Contains(m.rw, d.Recorded) || !m.shownIn(group) {
+			continue
+		}
+		first := -1
+		for w, t := range m.rw {
+			if t != d.Recorded {
+				continue
 			}
-			if first >= 0 {
-				return decided(m, first)
+			if m.lw[w] == d.Full {
+				return decided(m, w)
+			}
+			if first < 0 {
+				first = w
 			}
 		}
-		if slices.ContainsFunc(m.rw, func(w string) bool { return strings.Contains(d.Recorded, w) }) {
-			return ruledBy(dc.cannotCheck(path, d.At, d.At.Word, d.Recorded, d.Full,
-				"its text holds "+dc.in.Mock+" "+m.field+"'s value, which keploy.yml's rule "+m.rule+" declares minted, or a word of it, in a way no use of that value names here (inside a longer word or text, or the minted value's words did not pair in round F), so keploy cannot hold it to the value the rule binds"), m.rule)
-		}
+		return decided(m, first)
 	}
 	return d
+}
+
+// shownIn reports whether group, the decisions of one field, holds in the
+// recording a word of m that carries chanceBits or more: no chance puts
+// one there, so the field holds a copy of m, and its other words that are
+// words of m are pieces of that copy.
+func (m mintedValue) shownIn(group []Decision) bool {
+	return slices.ContainsFunc(group, func(g Decision) bool {
+		return wordBits(g.Recorded) >= chanceBits && slices.Contains(m.rw, g.Recorded)
+	})
 }
 
 // ruledBy is d, a refusal, naming rule in its line's tail

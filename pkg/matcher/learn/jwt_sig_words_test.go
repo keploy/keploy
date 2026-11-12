@@ -221,3 +221,35 @@ func oRefusedShape(ds []Decision, why string) bool {
 	}
 	return false
 }
+
+// TestAJWTWhoseSignatureStayedIsReadAsItIs: where two runs' JWTs share
+// their signature and keploy opens none of their claims (one that changed
+// is a list, or is missing from a run), the token is read as it is, whole:
+// one reading of the field's own texts at the field, as for any text, so
+// a place that gave the token whole holds it whole (heldWhole), and a
+// clock read in it is one of the field's words as written (clockWordOf);
+// never a reading cut at the signature, which nothing opened.
+func TestAJWTWhoseSignatureStayedIsReadAsItIs(t *testing.T) {
+	enc := base64.RawURLEncoding
+	tok := func(payload string) string {
+		return enc.EncodeToString([]byte(hs256)) + "." + enc.EncodeToString([]byte(payload)) + "." + sigRec
+	}
+	at := variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: "X-Session"}, Word: -1}
+	for _, c := range []struct{ what, rec, live string }{
+		{"a claim that changed is a list", tok(`{"sub":"u1","roles":["read"]}`), tok(`{"sub":"u1","roles":["read","write"]}`)},
+		{"a claim one run lacks", tok(`{"sub":"u1","org":"o-17"}`), tok(`{"sub":"u1"}`)},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			if _, ok := jwtSpan(c.rec, c.live); ok {
+				t.Fatalf("keploy opens a claim of %q and %q; the row needs one it does not", c.rec, c.live)
+			}
+			rds := readLeaf(NewDriftCache(), at, c.rec, c.live)
+			if len(rds) != 1 || rds[0].Rec != c.rec || rds[0].Live != c.live || len(rds[0].At.Steps) != 0 || rds[0].Off != [2]int{} {
+				for _, rd := range rds {
+					t.Logf("read %q -> %q at %s, off %v", rd.Rec, rd.Live, rd.At, rd.Off)
+				}
+				t.Fatalf("%d readings; want one of the whole tokens at %s", len(rds), at)
+			}
+		})
+	}
+}

@@ -97,8 +97,9 @@ type MockVariable struct {
 	// check of a time the application stamped there (keploy.yml's times
 	// setting at its default; ClockOffset.Form, learned by the learn step's
 	// BoundTimeLearned): a replay whose call does not hold the variable's
-	// value at that place passes it where its value is a time of that form,
-	// and refuses it otherwise, as at a use with no entry. Two reads of the
+	// value at that place passes it where its value is a time of that form
+	// (or of FormF beside it, where the record runs wrote two), and refuses
+	// it otherwise, as at a use with no entry. Two reads of the
 	// application's clock that fell in one second when recorded may fall in
 	// two in a replay: one is no copy of the other. The learn step sets it
 	// only for a field that is a time (a decoder-typed time, a field a clock
@@ -2108,9 +2109,9 @@ func (v MockVariables) Clone() MockVariables {
 // MergeByForm is the check by form (MockVariable.ByForm) of a variable
 // whose uses are aUse, with a's checks aBy, and bUse, with bBy, as one: a
 // use only one of them names keeps its check; one both name keeps it only
-// where both learned it, in one form, and is checked exactly otherwise. A
-// learning that checks a use exactly is never loosened by another's. nil
-// where none is left.
+// where both learned it, the stricter of the two (byFormMeet), and is
+// checked exactly otherwise. A learning that checks a use exactly, or by
+// fewer forms, is never loosened by another's. nil where none is left.
 func MergeByForm(aUse []string, aBy map[string]ClockOffset, bUse []string, bBy map[string]ClockOffset) map[string]ClockOffset {
 	in := func(uses []string, place string) bool { return slices.Contains(uses, place) }
 	var out map[string]ClockOffset
@@ -2125,8 +2126,10 @@ func MergeByForm(aUse []string, aBy map[string]ClockOffset, bUse []string, bBy m
 			keep(place, o)
 			continue
 		}
-		if p, ok := bBy[place]; ok && p.Form == o.Form {
-			keep(place, o)
+		if p, ok := bBy[place]; ok {
+			if m, ok := byFormMeet(o, p); ok {
+				keep(place, m)
+			}
 		}
 	}
 	for place, o := range bBy {
@@ -2135,6 +2138,24 @@ func MergeByForm(aUse []string, aBy map[string]ClockOffset, bUse []string, bBy m
 		}
 	}
 	return out
+}
+
+// byFormMeet is the one of a and b, two learnings' checks by form of one
+// use, that passes only forms the other passes too (its Form, and FormF
+// beside it: WrittenAs), a where both pass the same; ok is false where
+// neither does (two forms against two others, one shared): the use is then
+// checked exactly.
+func byFormMeet(a, b ClockOffset) (ClockOffset, bool) {
+	within := func(x, y ClockOffset) bool {
+		return y.WrittenAs(x.Form) && (x.FormF == "" || y.WrittenAs(x.FormF))
+	}
+	switch {
+	case within(a, b):
+		return a, true
+	case within(b, a):
+		return b, true
+	}
+	return ClockOffset{}, false
 }
 
 // MergeVariables is a and b as one block (neither is changed): a variable in

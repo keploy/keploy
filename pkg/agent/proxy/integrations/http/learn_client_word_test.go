@@ -23,11 +23,12 @@ import (
 // field (body.variables.input.conditions[0].value#3) and uses it at the
 // name's word (body.data.name#6), and binds the account's id at the field
 // that held it whole, used at the email's word (body.data.email#1). The
-// key's createdAt, expiresAt and updatedAt are declared clock reads
-// (keploy.yml's pat-created-at, pat-expires-at and pat-updated-at): here
-// each falls in the second the repository's stamp names, in both runs,
-// which learning alone reads as a copy of the request's stamp. Under both
-// time settings.
+// key's createdAt and updatedAt are declared clock reads (api-server's
+// keploy.yml rules pat-created-at and pat-updated-at), and expiresAt one a
+// year on (a rule the suite does not declare; the PUT under the suite's
+// two alone is TestLearnMatchKeysPutUnderTheSuitesRulesAlone): each falls
+// in the second the repository's stamp names, in both runs, which learning
+// alone reads as a copy of the request's stamp. Under both time settings.
 func TestLearnMatchBindsTheWordAClientTestSentInsideALongerValue(t *testing.T) {
 	served, miss, db := ciKeyPut(t, ciKeyCase{}, true)
 	if served == nil || miss != nil || len(db.consumed) != 1 {
@@ -186,13 +187,21 @@ func bindsAt(m models.Mock, at string) bool {
 // word a random one in place of the UnixNano, a word that is no instant, and
 // leaves the record's stamps as recorded. liveSep is the byte before the
 // request's word as F sent it ("-" where ""), and nameLive the name's word
-// as F wrote it (the request's word where "").
+// as F wrote it (the request's word where ""). label adds a request field
+// that holds the record's name whole (body.variables.label, after the
+// repository's field in the request's order), and respWord and respName
+// make the PUT's answer hold the repository's word whole (body.data.ref)
+// or the name whole (body.data.name), as recorded. suiteRules leaves out
+// the expiresAt rule, which api-server's keploy.yml does not declare.
 type ciKeyCase struct {
 	nameTail, repoTail func(live bool) string
 	seq, seqWhole      bool
 	audit, hex         bool
 	key                string
 	liveSep, nameLive  string
+	label              bool
+	respWord, respName bool
+	suiteRules         bool
 }
 
 const (
@@ -256,9 +265,16 @@ func ciKeyPut(t *testing.T, c ciKeyCase, timeForm bool) (*models.Mock, *learnMis
 			`,"sessionPerms":"","status":"active","token":"","updatedAt":"` + at.UTC().Format(time.RFC3339) + `"}}`
 	}
 	key := cmp.Or(c.key, "value")
+	name := func(read time.Time, live bool) string {
+		return "CI identity: github octo-org/repo-" + nameWord(read, live) + tail(c.nameTail, live)
+	}
 	req := func(read time.Time, sa, seq string, live bool) string {
+		label := ""
+		if c.label {
+			label = `,"label":"` + name(read, live) + `"`
+		}
 		return `{"query":"mutation($sa: String!, $input: CreateWorkloadIdentityInput!) {\n  createServiceAccountWorkloadIdentity(serviceAccountId: $sa, input: $input) { id audience exchangeAudience issuer pinned { claim value } expiresAt }\n}","variables":{"input":{"conditions":[{"claim":"repository","` + key + `":"octo-org/repo` +
-			repoSep(live) + word(read, live) + tail(c.repoTail, live) + `"},{"claim":"ref","value":"refs/heads/run-` + seq + `"}],"issuer":"http://127.0.0.1:42833","provider":"github"},"sa":"` + sa + `"}}`
+			repoSep(live) + word(read, live) + tail(c.repoTail, live) + `"},{"claim":"ref","value":"refs/heads/run-` + seq + `"}],"issuer":"http://127.0.0.1:42833","provider":"github"}` + label + `,"sa":"` + sa + `"}}`
 	}
 	recBegin := ciRecBegin()
 	began := learnAt.Add(10 * time.Minute)
@@ -267,11 +283,14 @@ func ciKeyPut(t *testing.T, c ciKeyCase, timeForm bool) (*models.Mock, *learnMis
 		if mock != "mock-0" {
 			return nil
 		}
-		return []models.DeclaredSource{
+		rules := []models.DeclaredSource{
 			{Rule: "pat-created-at", Kind: models.DeclaredSourceClock, Field: "body.data.createdAt", Clock: &models.ClockOffset{Min: -time.Second, Res: time.Second}},
-			{Rule: "pat-expires-at", Kind: models.DeclaredSourceClock, Field: "body.data.expiresAt", Clock: &models.ClockOffset{Min: ttl, Max: ttl + time.Second, Res: time.Second}},
 			{Rule: "pat-updated-at", Kind: models.DeclaredSourceClock, Field: "body.data.updatedAt", Clock: &models.ClockOffset{Min: -time.Second, Res: time.Second}},
 		}
+		if c.suiteRules {
+			return rules
+		}
+		return append(rules, models.DeclaredSource{Rule: "key-expires-at", Kind: models.DeclaredSourceClock, Field: "body.data.expiresAt", Clock: &models.ClockOffset{Min: ttl, Max: ttl + time.Second, Res: time.Second}})
 	}
 	tr := learn.NewTracker()
 	tr.SetClientTests(true)
@@ -287,8 +306,15 @@ func ciKeyPut(t *testing.T, c ciKeyCase, timeForm bool) (*models.Mock, *learnMis
 	if !tr.Incoming(&liveReq, "", sent) {
 		t.Fatal("the run's request paired with none of the test's recorded requests")
 	}
+	answer := `{"data":{"version":1}}`
+	switch {
+	case c.respWord:
+		answer = `{"data":{"ref":"` + word(recBegin.Add(100*time.Millisecond), false) + `","version":1}}`
+	case c.respName:
+		answer = `{"data":{"name":"` + name(recBegin.Add(100*time.Millisecond), false) + `","version":1}}`
+	}
 	put := learnRecorded("mock-0", 1130*time.Millisecond, "PUT", path(ciRecID),
-		body(ciRecID, ciRecBy, ciRecSeq, recBegin.Add(120*time.Millisecond), recBegin.Add(100*time.Millisecond), false), nil, `{"data":{"version":1}}`)
+		body(ciRecID, ciRecBy, ciRecSeq, recBegin.Add(120*time.Millisecond), recBegin.Add(100*time.Millisecond), false), nil, answer)
 	db := &learnDb{perTest: []*models.Mock{put}}
 	if c.audit {
 		event := func(read time.Time, live bool) string {

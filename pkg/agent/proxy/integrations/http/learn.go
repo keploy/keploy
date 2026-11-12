@@ -1963,7 +1963,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			if stuck(picked, read.at) {
 				return refused(picked, res, sc)
 			}
-			if own && models.HTTPStoreReads(picked.Spec.HTTPReq) {
+			if own && (models.HTTPStoreReads(picked.Spec.HTTPReq) || putReads(picked)) {
 				// A read of a record the test wrote (a store's API:
 				// readBackPlan) is answered with what this run wrote, though
 				// its request is exactly the recorded one (a Scan of a
@@ -1972,7 +1972,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				if err != nil {
 					return nil, nil, err
 				}
-				plan := h.readBackPlan(tracker, test, answered, served, earlierThan(earlier, picked), givenBindings(mockDb), newPairing())
+				plan := h.readBackPlan(tracker, test, answered, n.unmaskedShape(live), served, earlierThan(earlier, picked), givenBindings(mockDb), newPairing())
 				if len(plan.vars) > 0 {
 					if !tracker.Answer(test, picked) {
 						retake = true
@@ -2140,7 +2140,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if own {
-				plan = h.readBackPlan(tracker, test, answered, served, earlier, givenVars, plan)
+				plan = h.readBackPlan(tracker, test, answered, n.unmaskedShape(live), served, earlier, givenVars, plan)
 			}
 			if own && !tracker.Answer(test, m) {
 				retake = true
@@ -2690,7 +2690,13 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				}
 			}
 			if !variables.SameValue(bindLive, uLive, u.Type == learn.Number) {
+				// The run's place (from.Run) is an earlier test's call or
+				// the set's start-up's, never this test's: the refusal
+				// names whose it is.
 				held := r.Path + " does not hold the value the test sent at " + bindAt + " of " + from.Mock + ", which it held when recorded"
+				if from.Run {
+					held = r.Path + " does not hold the value " + from.Mock + ", " + learn.RunCallWhose(from) + ", sent at " + bindAt + ", which it held when recorded"
+				}
 				if l.ByForm != nil {
 					// A time whose bind does not hold in round F: two reads
 					// of the clock that fell in one second when recorded,
@@ -3116,6 +3122,13 @@ func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Moc
 		e.View, e.ViewKey = servedView(m, in, av, served.Spec.HTTPResp)
 	}
 	return e, true
+}
+
+// unmaskedShape is live as an exchange served keeps it (servedExchange):
+// with no url noise masked, so its URL leaves read as an earlier exchange's.
+func (n learnNoise) unmaskedShape(live httpParts) learn.Shape {
+	n.url = nil
+	return n.shape(live, sameDest)
 }
 
 // earlierOf is the exchange F just served from m (own: one of the test's own
