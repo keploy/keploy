@@ -2,6 +2,8 @@ package mapdb
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 )
 
 // The worker scope (models.Mapping.Worker) is written whole by UpsertWorker,
@@ -114,4 +117,95 @@ func TestMoveToWorkerBakesRecordingsIntoTheWorkerScope(t *testing.T) {
 	if moved, err := db.MoveToWorker(ctx, "test-set-none", []models.MockEntry{{Name: "own-1"}}); err != nil || moved != nil {
 		t.Fatalf("a set with no mapping moved %v, %v", moved, err)
 	}
+}
+
+// AddToWorker adds entries to the worker scope in recorded order and leaves
+// every test's list, the set's other sections, and a worker entry it already
+// holds as they were; a set with no mapping file gets none, and no file.
+func TestAddToWorkerAddsWithoutTakingFromTheTests(t *testing.T) {
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(format.FileExtension(), func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			db := NewWithFormat(zap.NewNop(), dir, "mappings", format)
+			before := goldenMapping()
+			if err := db.Insert(ctx, before); err != nil {
+				t.Fatal(err)
+			}
+			listed := before.TestCases[1].Mocks[0] // mock-6, listed by post-url-1
+			listed.Reason = models.PerProcessWarmupReason
+			held := before.Worker[0] // mock-2, in the worker scope already
+			held.Reason = models.PerProcessWarmupReason
+			late := listed
+			late.Name = "mock-9"
+			late.ReqTimestampMock = models.FormatMockTimestamp(listed.RecordedAt().Add(time.Hour))
+
+			added, err := db.AddToWorker(ctx, "test-set-0", []models.MockEntry{late, held, listed, {Name: ""}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(added, []string{"mock-9", "mock-6"}) {
+				t.Fatalf("added %v; want [mock-9 mock-6]", added)
+			}
+			after, err := db.GetMapping(ctx, "test-set-0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var worker []string
+			for _, e := range after.Worker {
+				worker = append(worker, e.Name)
+				if e.Name == "mock-2" && e.Reason != "" {
+					t.Fatalf("the entry held already was rewritten: %+v", e)
+				}
+			}
+			// mock-2 (10ms), mock-6 (2010ms), mock-5 (2050ms), mock-9 (an hour on).
+			if !reflect.DeepEqual(worker, []string{"mock-2", "mock-6", "mock-5", "mock-9"}) {
+				t.Fatalf("worker scope %v; want [mock-2 mock-6 mock-5 mock-9]", worker)
+			}
+			if !reflect.DeepEqual(names(after.TestCases), names(before.TestCases)) || !reflect.DeepEqual(entryNames(after.Startup), entryNames(before.Startup)) {
+				t.Fatalf("tests %v startup %v; want them as they were", names(after.TestCases), entryNames(after.Startup))
+			}
+
+			// A scope out of recorded order keeps its entries' order: an added
+			// entry goes before the first entry recorded after it.
+			t0 := listed.RecordedAt()
+			ent := func(name string, sec int) models.MockEntry {
+				e := listed
+				e.Name, e.ReqTimestampMock = name, models.FormatMockTimestamp(t0.Add(time.Duration(sec)*time.Second))
+				return e
+			}
+			if err := db.UpsertWorker(ctx, "test-set-0", []models.MockEntry{ent("w-late", 10), ent("w-early", 1)}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.AddToWorker(ctx, "test-set-0", []models.MockEntry{ent("w-mid", 5)}); err != nil {
+				t.Fatal(err)
+			}
+			if m, _ := db.GetMapping(ctx, "test-set-0"); !reflect.DeepEqual(entryNames(m.Worker), []string{"w-mid", "w-late", "w-early"}) {
+				t.Fatalf("worker scope %v; want [w-mid w-late w-early]", entryNames(m.Worker))
+			}
+
+			if added, err := db.AddToWorker(ctx, "test-set-1", []models.MockEntry{listed}); err != nil || added != nil {
+				t.Fatalf("a set with no mapping file: added %v, %v; want none", added, err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "test-set-1")); !os.IsNotExist(err) {
+				t.Fatalf("a set with no mapping file got one (stat: %v)", err)
+			}
+		})
+	}
+}
+
+func names(tcs []models.MappedTestCase) map[string][]string {
+	out := map[string][]string{}
+	for _, tc := range tcs {
+		out[tc.ID] = entryNames(tc.Mocks)
+	}
+	return out
+}
+
+func entryNames(es []models.MockEntry) []string {
+	var out []string
+	for _, e := range es {
+		out = append(out, e.Name)
+	}
+	return out
 }

@@ -127,3 +127,28 @@ func TestAReplayTriesAStalledStartAgain(t *testing.T) {
 		})
 	}
 }
+
+// warmupMappingReader reads one mapping, or fails.
+type warmupMappingReader struct {
+	m   *models.Mapping
+	err error
+}
+
+func (r warmupMappingReader) GetMapping(context.Context, string) (*models.Mapping, error) {
+	return r.m, r.err
+}
+
+// keploy mock replay reads a set's worker scope without the per-process
+// warm-ups keploy record adds for keploy test's default rules: each is a copy
+// of a mock its test still lists, and the proven tables read it as recorded.
+func TestMockSetMappingLeavesOutThePerProcessWarmups(t *testing.T) {
+	m, err := mockSetMapping(context.Background(), warmupMappingReader{m: &models.Mapping{Worker: []models.MockEntry{
+		{Name: "poll-1"}, {Name: "jwks-1", Reason: models.PerProcessWarmupReason},
+	}}}, "set")
+	if err != nil || len(m.Worker) != 1 || m.Worker[0].Name != "poll-1" {
+		t.Fatalf("worker scope %+v, %v; want only poll-1", m, err)
+	}
+	if m, err := mockSetMapping(context.Background(), warmupMappingReader{}, "set"); err != nil || m != nil {
+		t.Fatalf("no mapping: %+v, %v", m, err)
+	}
+}

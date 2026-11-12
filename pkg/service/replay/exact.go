@@ -363,7 +363,10 @@ func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[
 			for _, tc := range m.TestCases {
 				mappings[tc.ID] = tc.Mocks
 			}
-			worker = m.Worker
+			// The per-process warm-ups record added for the default
+			// rules are no part of the scope the switch serves: their
+			// tests still list them (models.WithoutWarmups).
+			worker = models.WithoutWarmups(m.Worker)
 			conc = concurrencyOf(m.Groups, mappings, m.Shared)
 			recordedWith = m.RecordedWith
 		}

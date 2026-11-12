@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 type fake struct {
@@ -424,5 +425,49 @@ func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
 	f.spawn(7, 1, at(5), "/tmp/other")
 	if got := r.Live(); !slices.Equal(got, []string{"b"}) {
 		t.Fatalf("a new process with the dead runner's pid holds its set: %v", got)
+	}
+}
+
+// A mock its parser handed over without the process it came from (SourcePID
+// 0, as the V2 recorders hand theirs) gets the process of its connection,
+// with the switch off as on, so keploy record can tell an application's
+// processes apart; a mock that carries one keeps it, and one whose
+// connection was never noted stays 0.
+func TestStampGivesAMockItsConnectionsProcess(t *testing.T) {
+	for _, sw := range []string{"", "1"} {
+		t.Run("switch="+sw, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, sw)
+			r := New(newFake(), 0)
+			r.NoteOriginIn("7", 42, 0)
+			r.NoteOriginIn("8", 43, 0)
+
+			byID := &models.Mock{ConnectionID: "7"}
+			r.Stamp(byID)
+			if byID.SourcePID != 42 {
+				t.Fatalf("a mock of connection 7 got SourcePID %d; want 42", byID.SourcePID)
+			}
+			byMeta := &models.Mock{Spec: models.MockSpec{Metadata: map[string]string{"connID": "8"}}}
+			r.Stamp(byMeta)
+			if byMeta.SourcePID != 43 {
+				t.Fatalf("a mock naming connection 8 in its metadata got SourcePID %d; want 43", byMeta.SourcePID)
+			}
+			own := &models.Mock{ConnectionID: "7", SourcePID: 99}
+			r.Stamp(own)
+			if own.SourcePID != 99 {
+				t.Fatalf("a mock that carried SourcePID 99 got %d", own.SourcePID)
+			}
+			unknown := &models.Mock{ConnectionID: "9"}
+			r.Stamp(unknown)
+			if unknown.SourcePID != 0 {
+				t.Fatalf("a mock of a connection never noted got SourcePID %d; want 0", unknown.SourcePID)
+			}
+			// Closed, its process is still known to a mock stamped after.
+			r.ForgetOrigin("7")
+			late := &models.Mock{ConnectionID: "7"}
+			r.Stamp(late)
+			if late.SourcePID != 42 {
+				t.Fatalf("a mock of closed connection 7 got SourcePID %d; want 42", late.SourcePID)
+			}
+		})
 	}
 }

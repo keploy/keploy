@@ -1705,6 +1705,13 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
 	windowMaps := r.newWindowMappings()
+	// The recording's per-process warm-ups, moved to the worker scope once the
+	// set's mappings are final (warmups). The proven switch places the worker
+	// scope by its own rules (windowMappings), so it is left to them there.
+	var warm *warmups
+	if !provenswitch.On() {
+		warm = newWarmups()
+	}
 	// The moment the recording is stopped (a stop signal, the record timer,
 	// a caller's cancel each end ctx first) is when the application's
 	// shutdown begins: what it records from then on is the shutdown's
@@ -1948,6 +1955,27 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			if err := r.closeMockStore(r.mockDB, drainProgressEvery); err != nil {
 				r.mocksNotWritten(err)
 				storeWrote = false
+			}
+		}
+
+		// Per-process warm-ups go to the set's worker scope before the
+		// end-of-recording hook, so a pass it runs over the mappings reads
+		// them. Only once the drain joined the mapping stream's consumer: its
+		// writes and this one each rewrite the whole mapping file.
+		// And only when the mock store wrote every mock: a worker entry must
+		// name a mock that is on disk.
+		if recordingStarted && newTestSetID != "" && warm != nil {
+			switch {
+			case !recordDrainedCleanly:
+				r.logger.Warn("per-process warm-ups were not looked for: the record drain timed out, so the mapping file may still be being written; a test that reaches a cold worker at replay may miss a call its worker made once",
+					zap.String("testSetID", newTestSetID),
+					zap.String("next_step", "re-record this test set if its replay misses such a call"))
+			case !storeWrote:
+				r.logger.Warn("per-process warm-ups were not looked for: the mock store could not write every mock, so a warm-up may not be on disk; a test that reaches a cold worker at replay may miss a call its worker made once",
+					zap.String("testSetID", newTestSetID),
+					zap.String("next_step", "fix the mock store's error above and re-record this test set"))
+			default:
+				warm.write(persistCtx, r.logger, r.mappingDb, newTestSetID)
 			}
 		}
 
@@ -2725,6 +2753,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				insertedNames[testCase.Name] = struct{}{}
 				insertedMu.Unlock()
 				windowMaps.addTest(testCase)
+				warm.addTest(testCase)
 				capWatch.afterTestCase(ctx, testCase.Name)
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
@@ -2928,6 +2957,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					mappingHolds.arrived(tempID)
 				}
 				windowMaps.addMock(mock)
+				warm.addMock(mock)
 				mockCountMapMu.Lock()
 				mockCountMap[mock.GetKind()]++
 				mockCountMapMu.Unlock()

@@ -2533,3 +2533,30 @@ func TestARecordSessionStartsBeforeItsFirstRequest(t *testing.T) {
 		t.Fatalf("the new session starts %d test cases into its startup window, want 0", n)
 	}
 }
+
+// A mock its parser hands over without the process its call came from (the
+// V2 recorders' SourcePID 0) gets its connection's, in every mode, as it is
+// handed over (starts.Registry.StampPID): the connection is open then, where
+// by the time the mock is streamed it may be among the closed ones the
+// registry no longer keeps.
+func TestAddMockStampsTheProcessItsCallCameFrom(t *testing.T) {
+	for _, sw := range []string{"", "1"} {
+		t.Run("switch="+sw, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", sw)
+			conn := "addmock-pid-" + sw
+			starts.Default.NoteOriginIn(conn, 4242, 0)
+			t.Cleanup(func() { starts.Default.ForgetOrigin(conn) })
+			m := New(zap.NewNop())
+			mock := &models.Mock{Name: "m", Kind: models.HTTP, ConnectionID: conn}
+			m.AddMock(mock)
+			if mock.SourcePID != 4242 {
+				t.Fatalf("SourcePID %d; want 4242, its connection's process", mock.SourcePID)
+			}
+			own := &models.Mock{Name: "own", Kind: models.HTTP, ConnectionID: conn, SourcePID: 7}
+			m.AddMock(own)
+			if own.SourcePID != 7 {
+				t.Fatalf("a mock that carried SourcePID 7 got %d", own.SourcePID)
+			}
+		})
+	}
+}

@@ -2,6 +2,7 @@ package starts
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -684,5 +685,58 @@ func TestACallIsAnEndedWorkersByWhenItsRequestWasRead(t *testing.T) {
 		if m.Instance != tc.instance || m.EndedInstance != tc.wantEnded {
 			t.Fatalf("a call %s got instance %d, ended %d; want %d, %d", tc.what, m.Instance, m.EndedInstance, tc.instance, tc.wantEnded)
 		}
+	}
+}
+
+// originPID is the process a connection was noted with while it is open and
+// among the last keptClosedOrigins closed; past that, and for a connection
+// never noted or no connection, it is 0.
+func TestOriginPIDIsTheConnectionsProcessWhileKept(t *testing.T) {
+	r := New(newFake(), 0)
+	if got := r.originPID(""); got != 0 {
+		t.Fatalf("no connection: got %d", got)
+	}
+	r.NoteOriginIn("first", 42, 0)
+	if got := r.originPID("first"); got != 42 {
+		t.Fatalf("open connection: got %d; want 42", got)
+	}
+	r.ForgetOrigin("first")
+	if got := r.originPID("first"); got != 42 {
+		t.Fatalf("just closed: got %d; want 42", got)
+	}
+	for i := 0; i < keptClosedOrigins; i++ {
+		id := "c" + strconv.Itoa(i)
+		r.NoteOriginIn(id, 7, 0)
+		r.ForgetOrigin(id)
+	}
+	if got := r.originPID("first"); got != 0 {
+		t.Fatalf("closed past the kept ones: got %d; want 0", got)
+	}
+	if got := r.originPID("never"); got != 0 {
+		t.Fatalf("never noted: got %d; want 0", got)
+	}
+}
+
+// StampPID gives a mock with no process its connection's while the registry
+// keeps the connection, and leaves a mock that carries one, or one of a
+// connection never noted, as it is.
+func TestStampPIDGivesAMockItsConnectionsProcess(t *testing.T) {
+	r := New(newFake(), 0)
+	r.NoteOriginIn("c1", 42, 0)
+	m := &models.Mock{Spec: models.MockSpec{Metadata: map[string]string{"connID": "c1"}}}
+	r.StampPID(m)
+	if m.SourcePID != 42 {
+		t.Fatalf("SourcePID %d; want 42", m.SourcePID)
+	}
+	own := &models.Mock{ConnectionID: "c1", SourcePID: 9}
+	r.StampPID(own)
+	if own.SourcePID != 9 {
+		t.Fatalf("a mock that carried 9 got %d", own.SourcePID)
+	}
+	unknown := &models.Mock{ConnectionID: "never"}
+	r.StampPID(unknown)
+	r.StampPID(nil)
+	if unknown.SourcePID != 0 {
+		t.Fatalf("a mock of a connection never noted got %d", unknown.SourcePID)
 	}
 }

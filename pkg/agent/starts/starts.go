@@ -277,12 +277,16 @@ func (r *Registry) Stamp(m *models.Mock) {
 	// The address its connection reached, for a mock no parser handed the
 	// sync manager, which stamps it as it is handed over (StampDest).
 	r.StampDest(m)
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	id := m.ConnectionID
 	if id == "" && m.Spec.Metadata != nil {
 		id = m.Spec.Metadata["connID"]
 	}
+	// The process of its connection (StampPID), for a mock no parser
+	// handed the sync manager, which stamps it as it is handed over: read
+	// before r.mu, which the origins' lock is never taken under.
+	r.StampPID(m)
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.child[id] {
 		if m.Spec.Metadata == nil {
 			m.Spec.Metadata = map[string]string{}

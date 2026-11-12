@@ -2625,7 +2625,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if _, ok := r.hookImpl.(wholeSetMockMutator); ok {
 			return nil, nil, errWholeSetMockMutator
 		}
-		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		// The set's per-process warm-ups, read once: the mapping-based
+		// loader names them for every test, and every path serves them as
+		// session mocks (models.ServeAsSession).
+		warmups := r.defaultWorkerScope(ctx, testSetID)
+		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategyWith(ctx, testSetID, isMappingEnabled, warmups)
 		// fromWindows: under the proven switch, a set with no mappings.yaml,
 		// whose test windows say what each test case owns once its mocks are
 		// read (windowOwnership).
@@ -2726,6 +2730,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return nil, nil, err
 		}
+		filtered, unfiltered = models.ServeAsSession(filtered, unfiltered, warmups)
 		if fromWindows {
 			expectedTestMockMappings, workerScope, conc = r.windowOwnershipOf(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
@@ -7210,6 +7215,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				passingTotalConsumedMocks[name] = models.MockState{Name: name}
 			}
 		}
+		// And its per-process warm-ups: a run answers every cold process with
+		// whichever copy it reaches first, so the others go unconsumed, yet the
+		// next run's cold processes need them.
+		for _, name := range r.warmupMockNames(runTestSetCtx, testSetID) {
+			if _, exists := passingTotalConsumedMocks[name]; !exists {
+				passingTotalConsumedMocks[name] = models.MockState{Name: name}
+			}
+		}
 
 		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
 		if len(noisyTestCases) > 0 {
@@ -8094,7 +8107,7 @@ func (r *Replayer) backgroundMockNames(ctx context.Context, testSetID string) []
 			return nil
 		}
 		if m != nil {
-			worker, startup = m.Worker, m.Startup
+			worker, startup = models.WithoutWarmups(m.Worker), m.Startup
 		}
 	} else {
 		var err error
@@ -8108,6 +8121,21 @@ func (r *Replayer) backgroundMockNames(ctx context.Context, testSetID string) []
 		worker = r.exact.worker
 	}
 	return (&models.Mapping{Worker: worker, Startup: startup}).BackgroundMockNames()
+}
+
+// warmupMockNames is the names of testSetID's per-process warm-ups
+// (models.Mapping.WarmupMockNames): nil with no mapping store, no file, or a
+// file that cannot be read.
+func (r *Replayer) warmupMockNames(ctx context.Context, testSetID string) []string {
+	mr, ok := r.mappingDB.(mappingReader)
+	if !ok {
+		return nil
+	}
+	m, err := mr.GetMapping(ctx, testSetID)
+	if err != nil || m == nil {
+		return nil
+	}
+	return m.WarmupMockNames()
 }
 
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of
@@ -10080,8 +10108,60 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 	}
 }
 
+// defaultWorkerScope is the names of the set's per-process warm-ups when
+// this run serves them on the default rules: the worker-scope entries
+// (models.Mapping.Worker) keploy record marked as one
+// (models.PerProcessWarmupReason), a read each process of the application
+// made once and kept the answer of (a JWKS fetch, a table's column list, a
+// cached key). Which test makes one at replay depends on which process is
+// cold, not on the test's request, so each is served to every test.
+//
+// Every other worker entry is left to the proven switch's rules
+// (provenMappings, newExactPlan), which serve a repeated call in its order: on
+// the default rules two such entries answering one request differently would
+// be served in no order. Under the switch, with mapping disabled, for a store
+// that cannot read the whole mapping (mappingReader), and for a read that
+// fails (which costs the warm-ups, not the run) it is nil. Unnamed entries are
+// dropped, and a name is given once.
+func (r *Replayer) defaultWorkerScope(ctx context.Context, testSetID string) []string {
+	if r.mappingDB == nil || r.exactServing() || (r.config != nil && r.config.DisableMapping) {
+		return nil
+	}
+	mr, ok := r.mappingDB.(mappingReader)
+	if !ok {
+		return nil
+	}
+	m, err := mr.GetMapping(ctx, testSetID)
+	if err != nil {
+		r.logger.Debug("Failed to read the worker scope from mappings; continuing without it",
+			zap.String("testSetID", testSetID),
+			zap.Error(err))
+		return nil
+	}
+	return m.WarmupMockNames()
+}
+
+// withNames is names with more appended, less those names holds already.
+func withNames(names, more []string) []string {
+	if len(more) == 0 {
+		return names
+	}
+	seen := make(map[string]bool, len(names)+len(more))
+	for _, n := range names {
+		seen[n] = true
+	}
+	for _, n := range more {
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
 // The third return is the test-set's startup mock names — boot traffic that
-// belongs to no test case. On the mapping-based path the agent loads strictly
+// belongs to no test case — and, without the proven switch, its worker scope
+// (defaultWorkerScope). On the mapping-based path the agent loads strictly
 // by name (Agent.loadPerTestMocks -> disk.LoadByNames), so these must be merged
 // into every per-test name list or the app's boot mocks are absent from the
 // pool. The timestamp path does not need them: it reloads the same mocks via
@@ -10091,6 +10171,12 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 // back to timestamp filtering still sees them; harmless there, since that path
 // ignores names entirely.
 func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID string, isMappingEnabled bool) (bool, map[string][]models.MockEntry, []string) {
+	return r.determineMockingStrategyWith(ctx, testSetID, isMappingEnabled, r.defaultWorkerScope(ctx, testSetID))
+}
+
+// determineMockingStrategyWith is determineMockingStrategy with the set's
+// per-process warm-ups (defaultWorkerScope) read already.
+func (r *Replayer) determineMockingStrategyWith(ctx context.Context, testSetID string, isMappingEnabled bool, warmups []string) (bool, map[string][]models.MockEntry, []string) {
 	// Default to timestamp-based strategy with empty mappings.
 	defaultMappings := make(map[string][]models.MockEntry)
 
@@ -10115,6 +10201,7 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 	} else {
 		startupNames = (&models.Mapping{Startup: startup}).StartupMockNames()
 	}
+	startupNames = withNames(startupNames, warmups)
 
 	// Try to get mappings from the database.
 	expectedTestMockMappings, hasMeaningfulMappings, err := r.mappingDB.Get(ctx, testSetID)
@@ -10125,6 +10212,9 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 		return false, defaultMappings, startupNames
 	}
 
+	// A set's warm-ups alone do not make it mapped: they are session mocks
+	// on either path (models.ServeAsSession), and a set whose tests list
+	// nothing keeps the timestamp path, which reads each test's own mocks.
 	if hasMeaningfulMappings {
 		// Meaningful mappings were found, so use the mapping-based strategy.
 		r.logger.Debug("Using mapping-based mock filtering strategy",

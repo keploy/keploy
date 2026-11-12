@@ -61,7 +61,8 @@ type MockEntry struct {
 	Unresolved string `json:"unresolved,omitempty" yaml:"unresolved,omitempty" bson:"unresolved,omitempty"`
 	// Reason says why keploy placed this entry where it is (a routing at
 	// record, a move by record's judging), in words with its undo; written
-	// under the proven switch only. Like every field of an
+	// under the proven switch, and, without it, on the worker-scope entry of
+	// a per-process warm-up (PerProcessWarmupReason). Like every field of an
 	// entry, it is read and kept by each rewrite of mappings.yaml, whatever
 	// the switch.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty" bson:"reason,omitempty"`
@@ -385,6 +386,93 @@ func (m *Mapping) BackgroundMockNames() []string {
 				seen[e.Name] = true
 				out = append(out, e.Name)
 			}
+		}
+	}
+	return out
+}
+
+// PerProcessWarmupReason is the Reason of a worker-scope entry keploy record
+// adds, without the proven switch, for a per-process warm-up: a read-only call
+// with one answer that each of several processes of the application made once
+// and then kept the answer of (a signing-key fetch, a table's schema read).
+// Which test makes it at replay depends on which test first reaches a cold
+// process, so a replay without the switch serves the mocks of entries carrying
+// it to every test (ServeAsSession). The mock stays in the list of the test
+// that recorded it as well, so a keploy that does not read it replays the set
+// as before. It is a stable token, the marker replays read: it must never
+// change, or sets recorded with the old one are no longer served so.
+const PerProcessWarmupReason = "per-process-warmup"
+
+// WarmupMockNames is the names of m's per-process warm-ups (worker-scope
+// entries marked PerProcessWarmupReason), each once, in the scope's order;
+// nil for none.
+func (m *Mapping) WarmupMockNames() []string {
+	if m == nil {
+		return nil
+	}
+	var names []string
+	seen := map[string]bool{}
+	for _, e := range m.Worker {
+		if e.Name == "" || seen[e.Name] || e.Reason != PerProcessWarmupReason {
+			continue
+		}
+		seen[e.Name] = true
+		names = append(names, e.Name)
+	}
+	return names
+}
+
+// ServeAsSession moves the mocks named in names out of filtered, the per-test
+// pool, into unfiltered, the session pool, as copies stated and derived
+// session lifetime (TestModeInfo.Lifetime, LifetimeDerived), so every test of
+// the run can be answered by them, again and again, and none is charged with
+// them; a loader that derives lifetimes again leaves them so. The stored
+// mocks are not written (models.Mock.ShallowCopy). With no names the pools
+// are handed back as they are.
+func ServeAsSession(filtered, unfiltered []*Mock, names []string) ([]*Mock, []*Mock) {
+	if len(names) == 0 {
+		return filtered, unfiltered
+	}
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	kept := make([]*Mock, 0, len(filtered))
+	for _, m := range filtered {
+		if m == nil || !want[m.Name] {
+			kept = append(kept, m)
+			continue
+		}
+		c := m.ShallowCopy()
+		c.TestModeInfo.Lifetime = LifetimeSession
+		c.TestModeInfo.LifetimeDerived = true
+		c.TestModeInfo.IsFiltered = false
+		unfiltered = append(unfiltered, c)
+	}
+	return kept, unfiltered
+}
+
+// WithoutWarmups is entries less the per-process warm-ups keploy record added
+// (PerProcessWarmupReason): each is a copy of a mock its test still lists,
+// served to every test by a replay without the proven switch only. Every
+// other reader of the worker scope (the proven switch's serving, the
+// background recordings a miss is told apart by) reads the scope without
+// them, as it was before keploy added them. It returns entries itself when it
+// holds none.
+func WithoutWarmups(entries []MockEntry) []MockEntry {
+	n := 0
+	for _, e := range entries {
+		if e.Reason == PerProcessWarmupReason {
+			n++
+		}
+	}
+	if n == 0 {
+		return entries
+	}
+	out := make([]MockEntry, 0, len(entries)-n)
+	for _, e := range entries {
+		if e.Reason != PerProcessWarmupReason {
+			out = append(out, e)
 		}
 	}
 	return out

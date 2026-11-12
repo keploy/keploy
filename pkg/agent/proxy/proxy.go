@@ -2918,14 +2918,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// image repository of the container it reaches, which a mock.real
 	// container: entry names (realdeps.go).
 	var ctrKey, containerRepo string
+	// The process the connection came from, kept until its parsers are done:
+	// each mock they record carries it (models.Mock.SourcePID, by
+	// starts.Registry.Stamp), whatever the switch, so keploy record can tell
+	// the processes an application's calls came from, which a parser that
+	// does not stamp it itself (the V2 recorders) cannot. Under the switch
+	// its mocks also name it (StampOrigin), with the test worker's instance
+	// the kernel stamped it with (StampInstance).
+	connID := fmt.Sprint(clientConnID)
+	starts.Default.NoteOriginIn(connID, destInfo.KernelPid, destInfo.Instance)
+	defer starts.Default.ForgetOrigin(connID)
 	if proven {
-		connID := fmt.Sprint(clientConnID)
-		// The process the connection came from, which each mock its parsers
-		// record names (starts.Registry.StampOrigin), and the test worker's
-		// instance the kernel stamped it with (StampInstance): kept
-		// until they are done, as the container key is.
-		starts.Default.NoteOriginIn(connID, destInfo.KernelPid, destInfo.Instance)
-		defer starts.Default.ForgetOrigin(connID)
 		if c, _, isContainer := containerkey.Default.Name(p.logger, connID, dstAddr); isContainer {
 			// Its key, or, while its configuration is unread, its
 			// repository and port: a container either way, never a host

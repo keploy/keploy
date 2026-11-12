@@ -21,6 +21,11 @@ name: Startup Mock Capture Regression (Linux)
 # agent said it moved to. With one run started once the other's agent
 # listens, its agent must move both; with UDP 26789 held, both agents must
 # move their DNS servers, naming its holder.
+#
+# Also here: a per-process warm-up (python/per-process-warmup). Two worker
+# processes each make a read on their first request (a JWKS fetch; a MySQL
+# schema read); the recording must put the reads in the set's worker scope,
+# and every replay must serve them to whichever test reaches a cold worker.
 on:
   workflow_call:
     inputs:
@@ -40,7 +45,10 @@ jobs:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     name: startup-mock-capture (record_with_build)
-    timeout-minutes: 15
+    # The per-process warm-up step pulls mysql:8 and replays each of its two
+    # legs up to twenty times (a control and the set, ten runs each at most,
+    # some 35 s a run); both loops end at their first telling run.
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -72,6 +80,13 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/concurrent-records/python-linux.sh"
 
+      - name: Per-process warm-up served to every test
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/per-process-warmup/python-linux.sh"
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -85,5 +100,10 @@ jobs:
             .github/workflows/test_workflow_scripts/python/concurrent-records/record_logs_*.txt
             .github/workflows/test_workflow_scripts/python/concurrent-records/A/keploy/
             .github/workflows/test_workflow_scripts/python/concurrent-records/B/keploy/
+            .github/workflows/test_workflow_scripts/python/per-process-warmup/*_logs*.txt
+            .github/workflows/test_workflow_scripts/python/per-process-warmup/jwks/keploy/
+            .github/workflows/test_workflow_scripts/python/per-process-warmup/mysql/keploy/
+            .github/workflows/test_workflow_scripts/python/per-process-warmup/jwks-control/keploy/
+            .github/workflows/test_workflow_scripts/python/per-process-warmup/mysql-control/keploy/
           if-no-files-found: warn
           retention-days: 7

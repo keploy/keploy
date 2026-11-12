@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -445,6 +446,71 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 		return err
 	}
 	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// AddToWorker adds entries to the set's worker scope (models.Mapping.Worker)
+// without taking them out of any test's list, as keploy record does for a
+// per-process warm-up (models.PerProcessWarmupReason): a keploy that does not
+// read the scope still finds each mock with the test that recorded it. An
+// entry whose name the scope holds already is left as it is there; the scope
+// stays in recorded order, and every other section is kept as it is. It
+// returns the names it added, in entries' order. A set with no mapping file
+// gets none: a file holding only a worker scope would make a replay take the
+// set for mapped, with no test owning anything.
+func (db *MappingDb) AddToWorker(ctx context.Context, testSetID string, entries []models.MockEntry) ([]string, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil || !exists {
+		return nil, err
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return nil, err
+	}
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
+	if err != nil {
+		return nil, err
+	}
+	held := make(map[string]bool, len(mapping.Worker)+len(entries))
+	for _, e := range mapping.Worker {
+		held[e.Name] = true
+	}
+	var added []string
+	for _, e := range entries {
+		if e.Name == "" || held[e.Name] {
+			continue
+		}
+		held[e.Name] = true
+		// In recorded order, before the first entry recorded after it;
+		// the entries the scope held keep their order.
+		at := len(mapping.Worker)
+		for i, w := range mapping.Worker {
+			if workerAt(e).Before(workerAt(w)) {
+				at = i
+				break
+			}
+		}
+		mapping.Worker = slices.Insert(mapping.Worker, at, e)
+		added = append(added, e.Name)
+	}
+	if len(added) == 0 {
+		return nil, nil
+	}
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
+	if err != nil {
+		return nil, err
+	}
+	if err := yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat); err != nil {
+		return nil, err
+	}
+	return added, nil
 }
 
 // MoveToWorker bakes recordings into the set's worker scope

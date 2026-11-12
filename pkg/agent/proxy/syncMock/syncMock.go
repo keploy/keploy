@@ -1810,9 +1810,11 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 			starts.Default.StampOrigin(mock)
 			starts.Default.StampInstance(mock)
 		}
-		// The address its connection reached, in every mode, stamped while
-		// its connection is open (starts.Registry.StampDest).
+		// The address its connection reached, and the process its call came
+		// from, in every mode, stamped while its connection is open
+		// (starts.Registry.StampDest, StampPID).
 		starts.Default.StampDest(mock)
+		starts.Default.StampPID(mock)
 	}
 	m.mu.Lock()
 	if m.lostToPressureLocked(mock) {

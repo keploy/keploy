@@ -192,6 +192,38 @@ func (r *Registry) NoteOriginIn(conn string, pid, instance uint32) {
 	}
 }
 
+// StampPID gives m, a recorded mock its parser handed over without the
+// process its call came from (models.Mock.SourcePID 0, as the V2 recorders
+// hand theirs), the process of its connection (NoteOriginIn), in every mode:
+// so keploy record can tell an application's processes apart. Stamped as the
+// parser hands the mock over, while its connection is open; a mock that
+// carries a process already keeps it.
+func (r *Registry) StampPID(m *models.Mock) {
+	if m == nil || m.SourcePID != 0 {
+		return
+	}
+	id := m.ConnectionID
+	if id == "" && m.Spec.Metadata != nil {
+		id = m.Spec.Metadata["connID"]
+	}
+	m.SourcePID = r.originPID(id)
+}
+
+// originPID is the process connection conn came from (NoteOriginIn),
+// while it is open or among the last keptClosedOrigins closed, else 0.
+func (r *Registry) originPID(conn string) uint32 {
+	if conn == "" {
+		return 0
+	}
+	o := &r.origin
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if c := o.conns[conn]; c != nil {
+		return c.pid
+	}
+	return 0
+}
+
 // ForgetOrigin closes connection conn: its process is kept for a mock stamped
 // after, among the last keptClosedOrigins connections closed.
 func (r *Registry) ForgetOrigin(conn string) {

@@ -66,11 +66,13 @@ func TestTheMismatchStoreKeepsTheBackgroundMark(t *testing.T) {
 }
 
 // The set's staging call names its background recordings, its mappings.yaml
-// worker: and startup: mocks, and no per-test call does.
+// worker: and startup: mocks, and no per-test call does. A per-process
+// warm-up record added to the worker scope (models.PerProcessWarmupReason) is
+// not one: its test still lists it.
 func TestTheStagingCallNamesTheSetsBackgroundRecordings(t *testing.T) {
 	h := newPartialRunHarness(t, 2, 0)
 	h.replayer.mappingDB = &shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{
-		Worker:  []models.MockEntry{{Name: "poll-1"}, {Name: "poll-2"}},
+		Worker:  []models.MockEntry{{Name: "poll-1"}, {Name: "jwks-1", Reason: models.PerProcessWarmupReason}, {Name: "poll-2"}},
 		Startup: []models.MockEntry{{Name: "boot-1"}},
 	}}
 	if status := h.run(t); status != models.TestSetStatusPassed {

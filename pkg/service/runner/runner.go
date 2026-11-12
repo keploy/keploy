@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -457,6 +458,15 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	if err != nil {
 		return nil, err
 	}
+	// The set's per-process warm-ups, served to every step as keploy test
+	// serves them (models.ServeAsSession): named for each step, as the
+	// startup traffic is, and session mocks whatever the loading path.
+	warmups := r.warmupNames(gCtx, testSetID)
+	for _, n := range warmups {
+		if !slices.Contains(startupMockNames, n) {
+			startupMockNames = append(startupMockNames, n)
+		}
+	}
 
 	// Disk fetch uses the widest window; per-test containment is
 	// enforced by the agent via UpdateMockParams at step time.
@@ -464,6 +474,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	if err != nil {
 		return nil, err
 	}
+	filtered, unfiltered = models.ServeAsSession(filtered, unfiltered, warmups)
 
 	// mockKindByName lets the mismatch-reporting path filter DNS
 	// entries even when the mapping-entry Kind is empty
@@ -594,6 +605,32 @@ func (r *Runner) loadMocksPerPool(ctx context.Context, testSetID string, mocksTh
 		return nil, nil, nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
 	}
 	return filtered, unfiltered, nil, nil
+}
+
+// warmupNames is the names of the set's per-process warm-ups
+// (models.Mapping.WarmupMockNames), as keploy test reads them: none under
+// the proven switch, which serves the worker scope on its own rules (the
+// runner always serves through an agent, so the switch alone is keploy
+// test's exact serving, Replayer.exactServing), none
+// with mapping disabled, and none from a store that cannot read the whole
+// mapping or a read that fails (which costs the warm-ups, not the run).
+func (r *Runner) warmupNames(ctx context.Context, testSetID string) []string {
+	if r.mappingDB == nil || provenswitch.On() || (r.config != nil && r.config.DisableMapping) {
+		return nil
+	}
+	mr, ok := r.mappingDB.(interface {
+		GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error)
+	})
+	if !ok {
+		return nil
+	}
+	m, err := mr.GetMapping(ctx, testSetID)
+	if err != nil {
+		r.logger.Debug("failed to read the per-process warm-ups from mappings; continuing without them",
+			zap.String("testSetID", testSetID), zap.Error(err))
+		return nil
+	}
+	return m.WarmupMockNames()
 }
 
 // loadMappingsForSet returns the full per-test-case mapping and the

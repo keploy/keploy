@@ -15,9 +15,11 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.uber.org/zap"
@@ -374,5 +376,87 @@ func TestASkippedConnectionFailureIsLeftOutOfTheStepReportByName(t *testing.T) {
 	setup.mappings = map[string][]models.MockEntry{"step-1": {{Name: "mock-acme"}}}
 	if entries := expectedEntriesForTest(setup, "step-1"); len(entries) != 1 || entries[0].Kind != "" {
 		t.Fatalf("expected entries = %+v; the skipped mock-acme must keep no kind", entries)
+	}
+}
+
+// wholeMappingDB is stubMappingDB that also reads the whole mapping.
+type wholeMappingDB struct {
+	*stubMappingDB
+	mapping *models.Mapping
+	err     error
+}
+
+func (w *wholeMappingDB) GetMapping(context.Context, string) (*models.Mapping, error) {
+	return w.mapping, w.err
+}
+
+// The runner serves a set's per-process warm-ups as keploy test does: the
+// marked worker entries only, none under the proven switch or with mapping
+// disabled, and none, without failing the run, when the mapping cannot be
+// read whole.
+func TestWarmupNamesAreTheMarkedWorkerEntries(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	db := &wholeMappingDB{stubMappingDB: &stubMappingDB{}, mapping: &models.Mapping{Worker: []models.MockEntry{
+		{Name: "jwks-1", Reason: models.PerProcessWarmupReason},
+		{Name: "poll-1"},
+		{Name: "jwks-2", Reason: models.PerProcessWarmupReason},
+	}}}
+	r := &Runner{logger: zap.NewNop(), mappingDB: db}
+	if got := r.warmupNames(context.Background(), "set"); !reflect.DeepEqual(got, []string{"jwks-1", "jwks-2"}) {
+		t.Fatalf("warm-ups %v; want [jwks-1 jwks-2]", got)
+	}
+	if got := (&Runner{logger: zap.NewNop(), mappingDB: &stubMappingDB{}}).warmupNames(context.Background(), "set"); got != nil {
+		t.Fatalf("a store that cannot read the whole mapping gave %v", got)
+	}
+	db.err = errors.New("boom")
+	if got := r.warmupNames(context.Background(), "set"); got != nil {
+		t.Fatalf("a failed read gave %v", got)
+	}
+	db.err = nil
+	disabled := &Runner{logger: zap.NewNop(), mappingDB: db, config: &config.Config{DisableMapping: true}}
+	if got := disabled.warmupNames(context.Background(), "set"); got != nil {
+		t.Fatalf("with mapping disabled: %v", got)
+	}
+	t.Setenv("KEPLOY_PROVEN", "1")
+	if got := r.warmupNames(context.Background(), "set"); got != nil {
+		t.Fatalf("under the proven switch: %v", got)
+	}
+}
+
+// The runner stores a set's per-process warm-ups on the agent as session
+// mocks, once each, and names them for every step: whichever step reaches a
+// cold process is answered by them.
+func TestTheRunnerStoresTheWarmupsAsSessionMocks(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	instr := &setupInstr{}
+	perTest := func(name string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP,
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true, IsFiltered: true}}
+	}
+	r := &Runner{
+		logger:          zap.NewNop(),
+		instrumentation: instr,
+		mappingDB: &wholeMappingDB{
+			stubMappingDB: &stubMappingDB{mappings: map[string][]models.MockEntry{"step-1": {{Name: "jwks-1"}, {Name: "own-1"}}}, hasMeaningful: true},
+			mapping:       &models.Mapping{Worker: []models.MockEntry{{Name: "jwks-1", Reason: models.PerProcessWarmupReason}}},
+		},
+		mockDB: &skippingMockDB{filtered: []*models.Mock{perTest("jwks-1"), perTest("own-1")}},
+	}
+	setup, err := r.setupTestSet(context.Background(), "test-set-0", time.Time{})
+	if err != nil {
+		t.Fatalf("setupTestSet: %v", err)
+	}
+	defer setup.cleanup()
+	var jwks []*models.Mock
+	for _, m := range instr.stored {
+		if m.Name == "jwks-1" {
+			jwks = append(jwks, m)
+		}
+	}
+	if len(jwks) != 1 || jwks[0].TestModeInfo.Lifetime != models.LifetimeSession || jwks[0].TestModeInfo.IsFiltered {
+		t.Fatalf("stored jwks-1 %d times (%+v); want once, a session mock", len(jwks), jwks)
+	}
+	if !slices.Contains(setup.startupMockNames, "jwks-1") {
+		t.Fatalf("names for every step %v; want jwks-1 among them", setup.startupMockNames)
 	}
 }

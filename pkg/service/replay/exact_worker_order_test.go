@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -255,5 +257,26 @@ func TestTheEndOfEachPassTellsTheAgentWhatTheRunPassed(t *testing.T) {
 					pool, passEnd, tc.poolSaid, tc.passEndSaid)
 			}
 		})
+	}
+}
+
+// The proven switch serves the worker scope without the per-process warm-ups
+// keploy record added for the default rules (models.WithoutWarmups): each is
+// a copy of a mock a test still lists, and that test owns it under the switch
+// as it did before record added it.
+func TestProvenMappingsLeaveOutThePerProcessWarmups(t *testing.T) {
+	r := &Replayer{logger: zap.NewNop(), mappingDB: &shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{
+		TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: []models.MockEntry{{Name: "jwks-1"}}}},
+		Worker:    []models.MockEntry{{Name: "poll-1"}, {Name: "jwks-1", Reason: models.PerProcessWarmupReason}},
+	}}}
+	mappings, worker, _, err := r.provenMappings(context.Background(), "test-set-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(worker) != 1 || worker[0].Name != "poll-1" {
+		t.Fatalf("worker scope %+v; want only poll-1", worker)
+	}
+	if got := mappings["test-1"]; len(got) != 1 || got[0].Name != "jwks-1" {
+		t.Fatalf("test-1 owns %+v; want jwks-1", got)
 	}
 }
