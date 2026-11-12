@@ -513,7 +513,7 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	_, guarded := k.n.userPatterns(ref.Noise)
 	_, clock := k.clocks[ref.Path]
 	if !guarded && !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && learnedWhole(k.learned, ref.Noise)) &&
-		!(ref.Type == learn.String && staleWhole(k.learned, ref.Path, ref.Noise, ref.Value)) {
+		(ref.Type != learn.String || !staleWhole(k.learned, ref.Path, ref.Noise, ref.Value)) {
 		return true, true
 	}
 	both := inRec && inLive

@@ -179,7 +179,7 @@ func fileNoise(t *testing.T, file string, f yaml.Format) *yaml.DocNoise {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	for {
 		doc, err := reader.ReadNextDoc()
 		if err != nil {

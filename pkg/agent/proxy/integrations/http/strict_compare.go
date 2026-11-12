@@ -247,8 +247,10 @@ func (k strictKnown) learnedNoiseAt(exact, legacy string) bool {
 // recording's, but for those words (learn.WordsAdmit): only the words that
 // changed when it was learned go unchecked, and the rest is compared.
 func (k strictKnown) wordsAt(exact, rec, live string) bool {
-	words, ok := learn.UncheckedWords(k.learned[exact])
-	return ok && learn.WordsAdmit(rec, live, words)
+	// A place with no words pattern gives no words, and WordsAdmit admits
+	// no change by none.
+	words, _ := learn.UncheckedWords(k.learned[exact])
+	return learn.WordsAdmit(rec, live, words)
 }
 
 // learnedExcuses reports whether noise the mock learned excuses the field at
